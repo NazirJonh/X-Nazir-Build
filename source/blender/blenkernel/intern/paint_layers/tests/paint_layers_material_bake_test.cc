@@ -230,6 +230,8 @@ TEST_F(PaintLayersMaterialBakeTest, a_material_row_carries_its_mapping_into_the_
   ASSERT_NE(row, nullptr);
   EXPECT_TRUE(BKE_paint_layers_mapping_supported(*ma, *row));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  const float offset[2] = {0.25f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, row, offset));
   EXPECT_TRUE(BKE_paint_layers_mapping_applies(*ma, *row));
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
@@ -1267,6 +1269,8 @@ TEST_F(PaintLayersMaterialBakeTest, a_mapped_wrapper_feeds_its_open_texture_thro
   MaterialPaintLayer *row = add_material_row(*source, MA_PAINT_LAYER_BAKE_AUTO);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  const float offset[2] = {0.25f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, row, offset));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   bNodeTree *wrapper = source_group_of(*row);

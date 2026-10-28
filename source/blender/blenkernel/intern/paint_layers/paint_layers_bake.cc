@@ -850,7 +850,7 @@ static uint64_t bake_hash_layer(uint64_t h,
    * parent folder's hash either; the folder is kept live by the same block while the mapping is
    * on. */
   if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
-    h = bake_hash_mix(h, BKE_paint_layers_mapping_applies(ma, layer) ? 1 : 0);
+    h = bake_hash_mix(h, BKE_paint_layers_mapping_remaps(ma, layer) ? 1 : 0);
   }
   for (int i = 0; i < layer.channels_num; i++) {
     const MaterialPaintLayerChannel &record = layer.channels[i];
@@ -1017,7 +1017,7 @@ void BKE_paint_layers_bake_finalize(Material &ma, MaterialPaintLayer &layer)
 /** Whether \a layer or anything under it applies a UV mapping: a mapped row stays live. */
 static bool bake_mapping_blocks(const Material &ma, const MaterialPaintLayer &layer)
 {
-  if (BKE_paint_layers_mapping_applies(ma, layer)) {
+  if (BKE_paint_layers_mapping_remaps(ma, layer)) {
     return true;
   }
   for (const MaterialPaintLayer &effect : layer.effects) {

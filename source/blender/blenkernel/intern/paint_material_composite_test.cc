@@ -2437,8 +2437,13 @@ TEST_F(PaintLayersCompositeTest, mapping_values_move_the_stack_hash)
     return BKE_paint_material_composite_stack_hash(layers);
   };
 
+  /* A Fill correction is made with its mapping on: the plain stack is the row with it switched
+   * off. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, false));
   const uint64_t hash_plain = stack_hash();
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
+  const float first_offset[2] = {0.1f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, correction, first_offset));
   const uint64_t hash_mapped = stack_hash();
   EXPECT_NE(hash_mapped, hash_plain);
 
@@ -2709,7 +2714,8 @@ TEST_F(PaintLayersCompositeTest, the_wrap_moves_the_stack_hash_only_while_the_ma
         *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
     return BKE_paint_material_composite_stack_hash(layers);
   };
-  /* A wrap without an enabled mapping reads nothing: the map is as it is. */
+  /* A wrap on a mapping switched off reads nothing: the map is as it is. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, false));
   const uint64_t plain = stack_hash();
   ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, correction, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
   EXPECT_EQ(stack_hash(), plain);

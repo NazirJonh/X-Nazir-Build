@@ -871,7 +871,20 @@ enum eMaterialPaintLayerMappingSpace : int16_t {
 
 /** #MaterialPaintLayerMapping::flag */
 enum eMaterialPaintLayerMappingFlag : int16_t {
-  MA_PAINT_LAYER_MAPPING_ENABLED = 1 << 0,
+  /**
+   * Formerly "mapping enabled". Files written before the inverted flag store it in bit 0, so that
+   * bit is left unused: a row saved with its mapping on keeps its settings, while the flag below
+   * decides whether it is off now. Kept out of the way rather than reused, so an old file's set bit
+   * cannot turn the new meaning on.
+   */
+  MA_PAINT_LAYER_MAPPING_ENABLED_DEPRECATED = 1 << 0, /* DNA_DEPRECATED */
+  /**
+   * The row's mapping is switched off. Stored inverted, like #MA_PAINT_LAYER_MAPPING_SCALE_UNLOCKED:
+   * zeroed rows -- every new one, and every row read from a file before this flag existed -- come
+   * out enabled, so a Fill shows its Mapping panel and gizmo before the first texture is slotted;
+   * a row with nothing to map keeps it inert.
+   */
+  MA_PAINT_LAYER_MAPPING_DISABLED = 1 << 2,
   /**
    * The scale axes move independently. Stored inverted so that zeroed (new) rows start with the
    * axes locked together: editing one sets the other to the same value.
@@ -898,8 +911,9 @@ enum eMaterialPaintLayerMappingWrap : int16_t {
 /**
  * UV mapping of one paint layer row, stored by value.
  *
- * Zeroes mean "disabled": old files read back as disabled, and a zero scale axis reads back as one
- * (see `BKE_paint_layers_mapping_scale_normalize`).
+ * The enabled flag is stored inverted (#MA_PAINT_LAYER_MAPPING_DISABLED), so a zeroed block -- a
+ * new row, or one from a file written before the flag -- reads as enabled. A zero scale axis reads
+ * back as one (see `BKE_paint_layers_mapping_scale_normalize`).
  */
 struct MaterialPaintLayerMapping {
   DNA_DEFINE_CXX_METHODS(MaterialPaintLayerMapping)

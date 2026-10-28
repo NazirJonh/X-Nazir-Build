@@ -612,8 +612,10 @@ TEST_F(PaintLayersMappingEvalTest, a_mapped_fill_normal_follows_rotation_and_mir
 TEST_F(PaintLayersMappingEvalTest, an_unmapped_row_still_reads_the_pixel_directly)
 {
   add_layer("Bottom", add_solid_image("Bottom", 10, 20, 30, 255));
-  /* Support without the toggle: no Mapping, and both sides read the map where it is. */
+  /* Support without the toggle: a Fill is made with its mapping on, so switching it off is what
+   * leaves no Mapping, and both sides read the map where it is. */
   MaterialPaintLayer *fill = add_fill("Fill", add_solid_image("Solid", 200, 100, 50, 255));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, false));
   EXPECT_FALSE(BKE_paint_layers_mapping_applies(*ma, *fill));
   expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
 }

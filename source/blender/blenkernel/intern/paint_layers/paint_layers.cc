@@ -14,6 +14,7 @@
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_gradient.hh"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -435,6 +436,9 @@ static MaterialPaintLayer *paint_layer_alloc(const Material &ma, const char *nam
   MaterialPaintLayer *layer = MEM_new<MaterialPaintLayer>(__func__);
   layer->flag = MA_PAINT_LAYER_ENABLED;
   layer->opacity = 1.0f;
+  /* NOTE: The zeroed `mapping.flag` reads as enabled: #MA_PAINT_LAYER_MAPPING_DISABLED is clear, so
+   * the Mapping panel and gizmo are there before the first texture is slotted. A row that owns no
+   * map keeps the switch inert until it has one (#BKE_paint_layers_mapping_available). */
   STRNCPY(layer->name, name != nullptr ? name : "");
   layer->marker = paint_layer_unique_marker(ma);
   return layer;
@@ -2536,8 +2540,9 @@ bool BKE_paint_layers_set_color_tag(Material &ma, MaterialPaintLayer *layer, con
 
 float BKE_paint_layers_mapping_scale_normalize(const float scale)
 {
-  /* Old files read back as zeroes; a zero axis would collapse UVs, so it means one. */
-  if (scale == 0.0f) {
+  /* Old files read back as zeroes; a zero axis would collapse UVs, so it means one. A NaN or an
+   * infinity cannot place the tile either, and dividing by it would poison the tile centre. */
+  if (scale == 0.0f || !std::isfinite(scale)) {
     return 1.0f;
   }
   if (fabsf(scale) < PAINT_LAYER_MAPPING_SCALE_MIN) {
@@ -2606,7 +2611,7 @@ bool BKE_paint_layers_row_is_paintable(const MaterialPaintLayer &row)
 
 bool BKE_paint_layers_mapping_enabled_get(const MaterialPaintLayer &layer)
 {
-  return (layer.mapping.flag & MA_PAINT_LAYER_MAPPING_ENABLED) != 0;
+  return (layer.mapping.flag & MA_PAINT_LAYER_MAPPING_DISABLED) == 0;
 }
 
 bool BKE_paint_layers_mapping_applies(const Material &ma, const MaterialPaintLayer &layer)
@@ -2615,16 +2620,70 @@ bool BKE_paint_layers_mapping_applies(const Material &ma, const MaterialPaintLay
          BKE_paint_layers_mapping_supported(ma, layer);
 }
 
+bool BKE_paint_layers_mapping_available(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if (BKE_paint_layers_mapping_supported(ma, layer)) {
+    return true;
+  }
+  /* A Fill keeps its mapping before it has a map to move: the values are part of the row, and the
+   * panel and the gizmo edit them from the start. Only a Fill can wait that way -- a painted map
+   * is addressed at the raw UV, and a filter, a folder or a generator owns nothing to remap. */
+  return paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_FLAT_VALUE);
+}
+
+bool BKE_paint_layers_mapping_is_identity(const MaterialPaintLayer &layer)
+{
+  /* The values the Mapping panel shows as "no change"; a zeroed scale reads as one. Leave a small
+   * tolerance so an edit that returns to the default does not keep a remap alive. */
+  constexpr float epsilon = 1e-6f;
+  return fabsf(layer.mapping.offset[0]) <= epsilon &&
+         fabsf(layer.mapping.offset[1]) <= epsilon &&
+         fabsf(BKE_paint_layers_mapping_scale_normalize(layer.mapping.scale[0]) - 1.0f) <=
+             epsilon &&
+         fabsf(BKE_paint_layers_mapping_scale_normalize(layer.mapping.scale[1]) - 1.0f) <=
+             epsilon &&
+         fabsf(layer.mapping.rotation) <= epsilon;
+}
+
+bool BKE_paint_layers_mapping_remaps(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if (!BKE_paint_layers_mapping_applies(ma, layer)) {
+    return false;
+  }
+  /* An identity transform with Repeat reads the map exactly as the unmapped path does. Clip still
+   * needs the mapping to test the unit square. */
+  return !BKE_paint_layers_mapping_is_identity(layer) ||
+         BKE_paint_layers_mapping_wrap_get(layer) != MA_PAINT_LAYER_MAPPING_WRAP_REPEAT;
+}
+
+/**
+ * Tag a value edit, rebuilding the row's shape when it crosses the identity boundary: the graph
+ * has no Mapping chain at identity with Repeat, so moving off it adds nodes that a value-only sync
+ * cannot create.
+ */
+static void mapping_tag_value_edit(Material &ma,
+                                   const MaterialPaintLayer &layer,
+                                   const bool remapped_before)
+{
+  if (remapped_before != BKE_paint_layers_mapping_remaps(ma, layer)) {
+    BKE_paint_layers_tag_edited(ma);
+  }
+  else {
+    BKE_paint_layers_tag_value_edited(ma);
+  }
+}
+
 bool BKE_paint_layers_mapping_set_enabled(Material &ma,
                                           MaterialPaintLayer *layer,
                                           const bool enabled)
 {
-  if (!paint_layer_owned(ma, layer) || (enabled && !BKE_paint_layers_mapping_supported(ma, *layer)))
+  if (!paint_layer_owned(ma, layer) ||
+      (enabled && !BKE_paint_layers_mapping_available(ma, *layer)))
   {
     return false;
   }
   const bool changed = BKE_paint_layers_mapping_enabled_get(*layer) != enabled;
-  SET_FLAG_FROM_TEST(layer->mapping.flag, enabled, MA_PAINT_LAYER_MAPPING_ENABLED);
+  SET_FLAG_FROM_TEST(layer->mapping.flag, !enabled, MA_PAINT_LAYER_MAPPING_DISABLED);
   if (changed) {
     /* The row gains or loses its remap, which is a different shape of stack. */
     BKE_paint_layers_tag_edited(ma);
@@ -2639,8 +2698,9 @@ bool BKE_paint_layers_mapping_set_offset(Material &ma,
   if (!paint_layer_owned(ma, layer)) {
     return false;
   }
+  const bool remapped_before = BKE_paint_layers_mapping_remaps(ma, *layer);
   copy_v2_v2(layer->mapping.offset, offset);
-  BKE_paint_layers_tag_value_edited(ma);
+  mapping_tag_value_edit(ma, *layer, remapped_before);
   return true;
 }
 
@@ -2651,6 +2711,7 @@ bool BKE_paint_layers_mapping_set_scale(Material &ma,
   if (!paint_layer_owned(ma, layer)) {
     return false;
   }
+  const bool remapped_before = BKE_paint_layers_mapping_remaps(ma, *layer);
   /* Normalize through the one helper every consumer shares, so zeroes from old files and tiny
    * values behave the same everywhere. */
   float next[2] = {BKE_paint_layers_mapping_scale_normalize(scale[0]),
@@ -2664,7 +2725,7 @@ bool BKE_paint_layers_mapping_set_scale(Material &ma,
     next[1] = lead;
   }
   copy_v2_v2(layer->mapping.scale, next);
-  BKE_paint_layers_tag_value_edited(ma);
+  mapping_tag_value_edit(ma, *layer, remapped_before);
   return true;
 }
 
@@ -2677,6 +2738,7 @@ bool BKE_paint_layers_mapping_set_values(Material &ma,
   if (!paint_layer_owned(ma, layer)) {
     return false;
   }
+  const bool remapped_before = BKE_paint_layers_mapping_remaps(ma, *layer);
   float next[2] = {BKE_paint_layers_mapping_scale_normalize(scale[0]),
                    BKE_paint_layers_mapping_scale_normalize(scale[1])};
   if (BKE_paint_layers_mapping_scale_lock_get(*layer)) {
@@ -2686,7 +2748,7 @@ bool BKE_paint_layers_mapping_set_values(Material &ma,
   copy_v2_v2(layer->mapping.offset, offset);
   copy_v2_v2(layer->mapping.scale, next);
   layer->mapping.rotation = rotation;
-  BKE_paint_layers_tag_value_edited(ma);
+  mapping_tag_value_edit(ma, *layer, remapped_before);
   return true;
 }
 
@@ -2702,6 +2764,7 @@ bool BKE_paint_layers_mapping_set_scale_lock(Material &ma,
   if (!paint_layer_owned(ma, layer)) {
     return false;
   }
+  const bool remapped_before = BKE_paint_layers_mapping_remaps(ma, *layer);
   SET_FLAG_FROM_TEST(layer->mapping.flag, !locked, MA_PAINT_LAYER_MAPPING_SCALE_UNLOCKED);
   if (locked) {
     /* Locking joins the axes at the first one, so what the row shows stays where the user left
@@ -2709,7 +2772,7 @@ bool BKE_paint_layers_mapping_set_scale_lock(Material &ma,
     const float joined = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]);
     layer->mapping.scale[0] = joined;
     layer->mapping.scale[1] = joined;
-    BKE_paint_layers_tag_value_edited(ma);
+    mapping_tag_value_edit(ma, *layer, remapped_before);
   }
   return true;
 }
@@ -2721,9 +2784,113 @@ bool BKE_paint_layers_mapping_set_rotation(Material &ma,
   if (!paint_layer_owned(ma, layer)) {
     return false;
   }
+  const bool remapped_before = BKE_paint_layers_mapping_remaps(ma, *layer);
   layer->mapping.rotation = rotation;
-  BKE_paint_layers_tag_value_edited(ma);
+  mapping_tag_value_edit(ma, *layer, remapped_before);
   return true;
+}
+
+/**
+ * Where the middle of the map lands on the canvas: the inverse of `sample = S * R * uv + offset`
+ * read at the middle of the map. It is the tile's position as the user sees it -- the gizmo's
+ * anchor ring -- and what a scale or rotation edit has to hold still. The public read for the UI
+ * is #BKE_paint_layers_mapping_tile_center.
+ */
+static void mapping_tile_center(const MaterialPaintLayerMapping &mapping, float r_center[2])
+{
+  const float scale_x = BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]);
+  const float scale_y = BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]);
+  BLI_assert(scale_x != 0.0f && scale_y != 0.0f && std::isfinite(scale_x) &&
+             std::isfinite(scale_y));
+  const float cos_rot = cosf(mapping.rotation);
+  const float sin_rot = sinf(mapping.rotation);
+  const float u = (0.5f - mapping.offset[0]) / scale_x;
+  const float v = (0.5f - mapping.offset[1]) / scale_y;
+  /* S^-1, then R^-1: the transform inverted back to the canvas. */
+  r_center[0] = cos_rot * u + sin_rot * v;
+  r_center[1] = -sin_rot * u + cos_rot * v;
+}
+
+/** The offset that centres the tile on \a center for \a mapping's scale and rotation. */
+static void mapping_offset_for_tile_center(const MaterialPaintLayerMapping &mapping,
+                                           const float center[2],
+                                           float r_offset[2])
+{
+  const float scale_x = BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]);
+  const float scale_y = BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]);
+  const float cos_rot = cosf(mapping.rotation);
+  const float sin_rot = sinf(mapping.rotation);
+  /* The map coordinate read at \a center is 0.5: offset = 0.5 - S * R * center. */
+  r_offset[0] = 0.5f - scale_x * (cos_rot * center[0] - sin_rot * center[1]);
+  r_offset[1] = 0.5f - scale_y * (sin_rot * center[0] + cos_rot * center[1]);
+}
+
+/**
+ * Offset the row's tile back onto \a center after its scale or rotation moved. The edit has
+ * already tagged the row, so write the offset without a second tag: two would sync the same values
+ * twice for one operator step.
+ */
+static void mapping_hold_tile_center(MaterialPaintLayer *layer, const float center[2])
+{
+  mapping_offset_for_tile_center(layer->mapping, center, layer->mapping.offset);
+}
+
+/**
+ * Apply \a edit to the row's mapping and offset the tile back onto the centre it held before the
+ * edit: the one shape every tile-holding edit shares, so a new one is a one-line wrapper below.
+ * \a edit returning false refuses the whole thing, and nothing is moved.
+ */
+template<typename Edit>
+static bool mapping_edit_holding_tile(Material &ma, MaterialPaintLayer *layer, Edit &&edit)
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  float center[2];
+  mapping_tile_center(layer->mapping, center);
+  const bool remapped_before = BKE_paint_layers_mapping_remaps(ma, *layer);
+  if (!edit()) {
+    return false;
+  }
+  mapping_hold_tile_center(layer, center);
+  /* The edit tagged against the offset it found; the held offset may land the row on the other side
+   * of the identity boundary, which only a rebuild can follow. */
+  if (remapped_before != BKE_paint_layers_mapping_remaps(ma, *layer)) {
+    BKE_paint_layers_tag_edited(ma);
+  }
+  return true;
+}
+
+void BKE_paint_layers_mapping_tile_center(const MaterialPaintLayer &layer, float r_center[2])
+{
+  mapping_tile_center(layer.mapping, r_center);
+}
+
+bool BKE_paint_layers_mapping_set_scale_holding_tile(Material &ma,
+                                                     MaterialPaintLayer *layer,
+                                                     const float scale[2])
+{
+  return mapping_edit_holding_tile(ma, layer, [&] {
+    return BKE_paint_layers_mapping_set_scale(ma, layer, scale);
+  });
+}
+
+bool BKE_paint_layers_mapping_set_rotation_holding_tile(Material &ma,
+                                                        MaterialPaintLayer *layer,
+                                                        const float rotation)
+{
+  return mapping_edit_holding_tile(ma, layer, [&] {
+    return BKE_paint_layers_mapping_set_rotation(ma, layer, rotation);
+  });
+}
+
+bool BKE_paint_layers_mapping_set_scale_lock_holding_tile(Material &ma,
+                                                          MaterialPaintLayer *layer,
+                                                          const bool locked)
+{
+  return mapping_edit_holding_tile(ma, layer, [&] {
+    return BKE_paint_layers_mapping_set_scale_lock(ma, layer, locked);
+  });
 }
 
 void BKE_paint_layers_mapping_wrap_axes(const int16_t wrap, bool &r_repeat_u, bool &r_repeat_v)

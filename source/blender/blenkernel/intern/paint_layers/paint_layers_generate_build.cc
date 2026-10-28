@@ -198,7 +198,7 @@ void PaintLayersTreeBuilder::mapping_inputs_create(LayerGroup &group,
                                                    const char *label)
 {
   /* The one predicate the topology hash builds by, so the interface and the hash agree. */
-  if (!BKE_paint_layers_mapping_applies(ma_, row)) {
+  if (!BKE_paint_layers_mapping_remaps(ma_, row)) {
     return;
   }
   struct MappingInput {
@@ -284,7 +284,7 @@ bNode *PaintLayersTreeBuilder::mapping_node_ensure(bNodeTree &tree,
                                                    const MaterialPaintLayer &row,
                                                    Vector<bNode *> &r_nodes)
 {
-  if (!BKE_paint_layers_mapping_applies(ma_, row)) {
+  if (!BKE_paint_layers_mapping_remaps(ma_, row)) {
     return nullptr;
   }
   if (bNode **found = mapping_nodes_.lookup_ptr(&row)) {
@@ -332,7 +332,7 @@ bool PaintLayersTreeBuilder::mapping_apply(bNodeTree &tree,
                                            bNode &map,
                                            Vector<bNode *> &r_nodes)
 {
-  if (!BKE_paint_layers_mapping_applies(ma_, row)) {
+  if (!BKE_paint_layers_mapping_remaps(ma_, row)) {
     return false;
   }
   bNodeSocket *vector = socket_in(map, "Vector");
@@ -373,7 +373,7 @@ NodeOutput PaintLayersTreeBuilder::mapping_clip_factor(bNodeTree &tree,
   bool repeat_u = true;
   bool repeat_v = true;
   BKE_paint_layers_mapping_wrap_axes(BKE_paint_layers_mapping_wrap_get(row), repeat_u, repeat_v);
-  if ((repeat_u && repeat_v) || !BKE_paint_layers_mapping_applies(ma_, row)) {
+  if ((repeat_u && repeat_v) || !BKE_paint_layers_mapping_remaps(ma_, row)) {
     return {};
   }
   if (const NodeOutput *cached = mapping_clip_masks_.lookup_ptr(&row)) {
@@ -479,7 +479,7 @@ NodeOutput PaintLayersTreeBuilder::mapping_clip_alpha(bNodeTree &tree,
                                                       Vector<bNode *> &r_nodes)
 {
   if (alpha.node == nullptr || alpha.socket == nullptr ||
-      !BKE_paint_layers_mapping_applies(ma_, row))
+      !BKE_paint_layers_mapping_remaps(ma_, row))
   {
     return alpha;
   }

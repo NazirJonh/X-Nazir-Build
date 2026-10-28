@@ -1471,17 +1471,17 @@ static void rna_MaterialPaintLayer_color_tag_set(PointerRNA *ptr, int value)
 }
 
 /**
- * Whether the row may carry UV mapping: a Fill that reads a repeatable map, or a Material row
- * whose source reads the active UVs where the source group can move them. A Material row remaps
- * the UV at which its source is read: its live textures, its rendered channel maps and its
- * source-group wrapper all use the same transform. The one predicate UI, RNA, the generator and
- * the CPU share; the panel shows the Mapping block only while this is true.
+ * Whether the row keeps a UV mapping at all for the UI to edit: everything the row may carry --
+ * a Fill with a map in at least one channel or through its mask, a Material row whose source reads
+ * the active UVs -- plus a Fill that has no map yet, whose mapping belongs to the row and not to
+ * the map it happens to read. The panel shows the Mapping block and the gizmo resolves a row only
+ * while this is true; the graph and the CPU ask #BKE_paint_layers_mapping_remaps instead.
  */
-static bool rna_MaterialPaintLayer_mapping_supported_get(PointerRNA *ptr)
+static bool rna_MaterialPaintLayer_mapping_available_get(PointerRNA *ptr)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   Material *ma = rna_paint_layer_material(ptr, layer);
-  return ma != nullptr && BKE_paint_layers_mapping_supported(*ma, *layer);
+  return ma != nullptr && BKE_paint_layers_mapping_available(*ma, *layer);
 }
 
 static bool rna_MaterialPaintLayer_mapping_applies_get(PointerRNA *ptr)
@@ -1501,6 +1501,8 @@ static void rna_MaterialPaintLayer_mapping_scale_lock_set(PointerRNA *ptr, bool 
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    /* The raw toggle: locking joins the axes, which is a scale change and may slide the tile. The
+     * UI's Lock (``tile_scale_lock``) keeps the tile in place. */
     BKE_paint_layers_mapping_set_scale_lock(*ma, layer, value);
   }
 }
@@ -1515,7 +1517,7 @@ static void rna_MaterialPaintLayer_mapping_enabled_set(PointerRNA *ptr, bool val
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
-    /* Refused while the row reads no repeatable map; the editable callback explains why. */
+    /* Refused while the row can carry no mapping at all; the editable callback explains why. */
     BKE_paint_layers_mapping_set_enabled(*ma, layer, value);
   }
 }
@@ -1531,12 +1533,12 @@ static int rna_MaterialPaintLayer_mapping_enabled_editable(const PointerRNA *ptr
   }
   /* An enabled mapping stays switchable off even after its map is gone. */
   if (BKE_paint_layers_mapping_enabled_get(*layer) ||
-      BKE_paint_layers_mapping_supported(*ma, *layer))
+      BKE_paint_layers_mapping_available(*ma, *layer))
   {
     return PROP_EDITABLE;
   }
   if (r_info != nullptr) {
-    *r_info = N_("Row reads no repeatable map; assign an image to a Fill first");
+    *r_info = N_("This row's source takes no UV mapping");
   }
   return 0;
 }
@@ -1573,6 +1575,9 @@ static void rna_MaterialPaintLayer_mapping_scale_set(PointerRNA *ptr, const floa
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    /* The raw value: the stored offset is applied after the scale, so writing it alone slides the
+     * tile across the canvas. This is the data's own meaning, for scripts and drivers; the UI
+     * edits the tile the gizmo draws through ``tile_scale``, which follows the offset itself. */
     BKE_paint_layers_mapping_set_scale(*ma, layer, value);
   }
 }
@@ -1587,7 +1592,58 @@ static void rna_MaterialPaintLayer_mapping_rotation_set(PointerRNA *ptr, float v
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    /* The raw value: writing it alone turns the tile around the canvas origin. The UI turns it
+     * around its centre through ``tile_rotation``. */
     BKE_paint_layers_mapping_set_rotation(*ma, layer, value);
+  }
+}
+
+static void rna_MaterialPaintLayer_mapping_tile_center_get(PointerRNA *ptr, float *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  BKE_paint_layers_mapping_tile_center(*layer, value);
+}
+
+static void rna_MaterialPaintLayer_mapping_tile_scale_get(PointerRNA *ptr, float *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  value[0] = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]);
+  value[1] = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[1]);
+}
+
+static void rna_MaterialPaintLayer_mapping_tile_scale_set(PointerRNA *ptr, const float *value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_mapping_set_scale_holding_tile(*ma, layer, value);
+  }
+}
+
+static float rna_MaterialPaintLayer_mapping_tile_rotation_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->mapping.rotation;
+}
+
+static void rna_MaterialPaintLayer_mapping_tile_rotation_set(PointerRNA *ptr, float value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_mapping_set_rotation_holding_tile(*ma, layer, value);
+  }
+}
+
+static bool rna_MaterialPaintLayer_mapping_tile_scale_lock_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_mapping_scale_lock_get(*layer);
+}
+
+static void rna_MaterialPaintLayer_mapping_tile_scale_lock_set(PointerRNA *ptr, bool value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_mapping_set_scale_lock_holding_tile(*ma, layer, value);
   }
 }
 
@@ -4401,13 +4457,14 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
    * sibling #SculptLayerGroup.color_tag documents against. */
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
 
-  /* Read-only: the one predicate UI, RNA and the CPU share. The panel shows the Mapping block only
-   * while this is true, instead of inspecting channel records itself. */
-  prop = RNA_def_property(srna, "mapping_supported", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_mapping_supported_get", nullptr);
+  /* Read-only: the one predicate the UI asks. The panel shows the Mapping block only while this
+   * is true, instead of inspecting channel records itself. Named after
+   * #BKE_paint_layers_mapping_available, whose answer it is. */
+  prop = RNA_def_property(srna, "mapping_available", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_mapping_available_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
-      prop, "Mapping Supported", "Whether the row reads a repeatable map it can remap");
+      prop, "Mapping Available", "Whether the row keeps a UV mapping the UI can edit");
 
   /* Read-only: whether the mapping is applied right now (enabled and supported). */
   prop = RNA_def_property(srna, "mapping_applies", PROP_BOOLEAN, PROP_NONE);
@@ -4428,7 +4485,7 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_boolean_funcs(prop,
                                  "rna_MaterialPaintLayer_mapping_scale_lock_get",
                                  "rna_MaterialPaintLayer_mapping_scale_lock_set");
-  RNA_def_property_ui_text(prop, "Lock Scale", "Edit both scale axes together, keeping them equal");
+  RNA_def_property_ui_text(prop, "Lock Scale", "Edit both scale axes together");
   RNA_def_property_ui_icon(prop, ICON_UNLOCKED, 1);
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
@@ -4473,8 +4530,60 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                                nullptr);
   RNA_def_property_ui_text(prop,
                            "Mapping Rotation",
-                           "Rotation of the row's maps around Z in UV space; the vectors of a "
-                           "Normal map are rotated with it");
+                           "Rotation of the row's maps around Z in UV space; a Normal map's "
+                           "vectors follow it");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* Read-only: where the tile's middle sits on the canvas. The Mapping panel's fields read it to
+   * keep the tile in place while the scale and the rotation change; the offset is the one stored
+   * value that moves the tile. */
+  prop = RNA_def_property(srna, "mapping_tile_center", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_float_funcs(
+      prop, "rna_MaterialPaintLayer_mapping_tile_center_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Tile Center",
+                           "Position of the tile's middle on the canvas, which the scale and the "
+                           "rotation edits of the UI keep still");
+
+  /* The panel's edits: they change the scale, rotation or lock and follow the offset so the tile
+   * keeps its place. The raw properties above stay the data's own meaning for scripts and
+   * drivers. */
+  prop = RNA_def_property(srna, "tile_scale", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_mapping_tile_scale_get",
+                               "rna_MaterialPaintLayer_mapping_tile_scale_set",
+                               nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
+  {
+    static const float mapping_scale_default[2] = {1.0f, 1.0f};
+    RNA_def_property_float_array_default(prop, mapping_scale_default);
+  }
+  RNA_def_property_ui_text(
+      prop, "Scale", "Scale of the row's maps, keeping the tile's centre on the canvas");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "tile_rotation", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_mapping_tile_rotation_get",
+                               "rna_MaterialPaintLayer_mapping_tile_rotation_set",
+                               nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Rotation", "Rotate the row's maps around the tile's centre on the canvas");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "tile_scale_lock", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_mapping_tile_scale_lock_get",
+                                 "rna_MaterialPaintLayer_mapping_tile_scale_lock_set");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Lock Scale", "Edit both scale axes together, keeping the tile in place");
+  RNA_def_property_ui_icon(prop, ICON_UNLOCKED, 1);
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "mapping_wrap", PROP_ENUM, PROP_NONE);

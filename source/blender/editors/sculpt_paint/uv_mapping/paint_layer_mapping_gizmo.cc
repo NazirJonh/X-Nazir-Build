@@ -7,7 +7,9 @@
  *
  * Image Editor gizmo for the UV mapping of the shown layer row: a cage2d over the map's visible
  * footprint plus a move_3d anchor for the pivot. Move, scale and rotate write the row's mapping
- * value-only while dragging, with one undo step per gesture.
+ * value-only while dragging, with one undo step per gesture. A Fill is made with its mapping on, so
+ * the cage is there before the first texture, over the identity footprint; the values take effect
+ * when a map is slotted.
  */
 
 #include <algorithm>

@@ -128,7 +128,7 @@ static void composite_mapping_describe(const Material &ma,
                                        const int channel,
                                        PaintMaterialCompositeMapping &out)
 {
-  if (!BKE_paint_layers_mapping_applies(ma, row)) {
+  if (!BKE_paint_layers_mapping_remaps(ma, row)) {
     return;
   }
   out.enabled = true;

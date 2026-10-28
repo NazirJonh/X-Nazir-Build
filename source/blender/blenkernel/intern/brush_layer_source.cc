@@ -63,7 +63,7 @@ uint64_t mapping_hash(const Material &owner, const MaterialPaintLayer &row, uint
     hash = get_default_hash(
         hash, BKE_paint_layers_source_material_tree_hash_cached(*row.material));
   }
-  if (BKE_paint_layers_mapping_applies(owner, row)) {
+  if (BKE_paint_layers_mapping_remaps(owner, row)) {
     hash = get_default_hash(hash,
                             row.mapping.offset[0],
                             row.mapping.offset[1],

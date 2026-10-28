@@ -124,7 +124,7 @@
 #include "mesh/paint_material_attribute.hh"
 #include "mesh/sculpt_expand.hh"
 #include "mesh/sculpt_intern.hh"
-#include "uv_mapping/uv_mapping_target.hh"
+#include "uv_mapping/paint_layer_mapping_ops.hh"
 
 namespace blender {
 
@@ -1149,36 +1149,6 @@ void PAINT_OT_layer_source_make_local(wmOperatorType *ot)
   ot->exec = paint_layer_source_make_local_exec;
   ot->poll = paint_layer_source_make_local_poll;
 
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-}
-
-/** Toggle the scale lock of the row the Mapping panel and the gizmo edit. */
-static bool layer_mapping_scale_lock_toggle_poll(bContext *C)
-{
-  ed::sculpt_paint::uv_mapping::PaintLayerRowMappingTarget target;
-  return target.resolve(*C);
-}
-
-static wmOperatorStatus layer_mapping_scale_lock_toggle_exec(bContext *C, wmOperator * /*op*/)
-{
-  ed::sculpt_paint::uv_mapping::PaintLayerRowMappingTarget target;
-  if (!target.resolve(*C)) {
-    return OPERATOR_CANCELLED;
-  }
-  if (!target.set_scale_locked(!target.scale_locked())) {
-    return OPERATOR_CANCELLED;
-  }
-  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, target.material());
-  return OPERATOR_FINISHED;
-}
-
-void PAINT_OT_layer_mapping_scale_lock_toggle(wmOperatorType *ot)
-{
-  ot->name = "Toggle Layer Mapping Scale Lock";
-  ot->idname = "PAINT_OT_layer_mapping_scale_lock_toggle";
-  ot->description = "Lock or unlock the scale axes of the shown layer row's UV mapping";
-  ot->exec = layer_mapping_scale_lock_toggle_exec;
-  ot->poll = layer_mapping_scale_lock_toggle_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
@@ -3505,6 +3475,7 @@ void ED_operatortypes_paint()
 
   /* palette */
   using namespace blender::ed::sculpt_paint;
+  using namespace blender::ed::sculpt_paint::uv_mapping;
   WM_operatortype_append(PALETTE_OT_new);
   WM_operatortype_append(PALETTE_OT_color_add);
   WM_operatortype_append(PALETTE_OT_color_delete);
@@ -3596,6 +3567,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_layer_target_mode_set);
   WM_operatortype_append(PAINT_OT_layer_source_make_local);
   WM_operatortype_append(PAINT_OT_layer_mapping_scale_lock_toggle);
+  WM_operatortype_append(PAINT_OT_layer_mapping_reset);
   WM_operatortype_append(PAINT_OT_stack_layer_copy);
   WM_operatortype_append(PAINT_OT_stack_layer_paste);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);

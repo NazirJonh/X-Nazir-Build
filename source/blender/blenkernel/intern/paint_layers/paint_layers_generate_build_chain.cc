@@ -1872,7 +1872,7 @@ void PaintLayersTreeBuilder::source_group_mapping_wire(bNodeTree &tree,
                                                        const MaterialPaintLayer &layer,
                                                        bNode &instance)
 {
-  if (!BKE_paint_layers_mapping_applies(ma_, layer)) {
+  if (!BKE_paint_layers_mapping_remaps(ma_, layer)) {
     return;
   }
   bNode *group_input = nullptr;
@@ -2124,7 +2124,7 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
    * hide the row. The same factor clips the content alpha, so a channel that tracks it agrees.
    * The mapping applies only to a source that reads the UVs, and the CPU clips on that same
    * condition (#composite_row_source_describe), so the two never disagree on the row. */
-  if (BKE_paint_layers_mapping_applies(ma_, ctx.layer)) {
+  if (BKE_paint_layers_mapping_remaps(ma_, ctx.layer)) {
     const NodeOutput clip = this->mapping_clip_factor(tree, ctx.layer, source_nodes);
     if (clip.node != nullptr && clip.socket != nullptr) {
       const auto multiply = [&](const NodeOutput value) -> NodeOutput {

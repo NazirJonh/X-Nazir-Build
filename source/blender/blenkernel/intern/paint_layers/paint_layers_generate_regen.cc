@@ -171,7 +171,7 @@ class LayerTreeFactory {
       }
     }
     bool current = false;
-    const bool mapped = BKE_paint_layers_mapping_applies(ma_, layer);
+    const bool mapped = BKE_paint_layers_mapping_remaps(ma_, layer);
     if (group == nullptr) {
       group = bke::node_tree_add_tree(&bmain_, name, "ShaderNodeTree");
       if (group == nullptr) {
@@ -454,7 +454,7 @@ static void source_groups_refresh(Main &bmain, Material &ma)
         if (layer.material == nullptr) {
           return true;
         }
-        const bool mapped = BKE_paint_layers_mapping_applies(ma, layer);
+        const bool mapped = BKE_paint_layers_mapping_remaps(ma, layer);
         for (bNodeTree &group : bmain.nodetrees) {
           bUUID marker = BLI_uuid_nil();
           if (!source_group_row_get(group, marker) || !BLI_uuid_equal(marker, layer.marker) ||
@@ -657,6 +657,9 @@ static bNodeTreeInterfaceSocket *tree_output_interface_find(bNodeTree &tree, con
 /** The Group Output input socket of \a tree fed by the interface output \a name. */
 static bNodeSocket *tree_group_output_socket_find(bNodeTree &tree, const char *name)
 {
+  /* `group_output_node()` reads the topology cache; a root the node system has not touched since
+   * it was built has none yet, and asking it would assert. */
+  tree.ensure_topology_cache();
   bNode *output = tree.group_output_node();
   bNodeTreeInterfaceSocket *iface = tree_output_interface_find(tree, name);
   if (output == nullptr || iface == nullptr) {
@@ -838,8 +841,8 @@ static bool view_pass_mask_root_link(Main *bmain, Material &ma)
   bNodeTree *group = id_cast<bNodeTree *>(instance->id);
   bNodeSocket *mask_out = (group != nullptr) ? instance_output_find(*group, *instance, "Mask") :
                                                nullptr;
-  bNode *root_output = root.group_output_node();
   bNodeSocket *root_out = tree_group_output_socket_find(root, "Result Mask");
+  bNode *root_output = (root_out != nullptr) ? &root_out->owner_node() : nullptr;
   if (mask_out == nullptr || root_output == nullptr || root_out == nullptr) {
     return false;
   }

@@ -34,15 +34,24 @@ struct MaterialPaintLayer;
 
 namespace blender::ed::sculpt_paint::uv_mapping {
 
+/**
+ * The row the Mapping panel shows: the shown mask item, else the active row (its base mask while
+ * the brush targets masks). The C++ mirror of `LAYER_MATERIAL_PT_mapping::_shown_row`; the caller
+ * resolves the material. Null when there is none.
+ */
+MaterialPaintLayer *mapping_shown_row_get(const bContext &C, Material &ma);
+
 class PaintLayerRowMappingTarget {
  public:
   /**
    * Resolve the row the Mapping panel shows and check that the Image Editor edits the same
-   * material. Returns false when there is nothing to edit right now.
+   * material. Returns false when there is nothing to edit right now: no row, no mapping, or one
+   * the user switched off. A Fill answers yes before it has a map, its mapping being a property
+   * of the row.
    */
   bool resolve(const bContext &C);
 
-  /** Read the row's mapping. False when the row is gone or no longer mapping a map. */
+  /** Read the row's mapping. False when the row is gone or no longer carries a mapping. */
   bool read(UvMappingXform &r_xform) const;
 
   /** Write the row's mapping through the value-only BKE setters. */

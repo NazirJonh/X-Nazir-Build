@@ -45,6 +45,8 @@
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 
+#include <cmath>
+#include <limits>
 #include <string>
 
 namespace blender::bke::tests {
@@ -2941,49 +2943,55 @@ static MaterialPaintLayer *mapping_fill_with_map(Main &bmain, Material &ma, cons
   return fill;
 }
 
-TEST_F(PaintLayersDescription, mapping_is_supported_only_by_a_fill_that_reads_a_map)
+TEST_F(PaintLayersDescription, mapping_is_carried_by_a_fill_before_it_has_a_map)
 {
   Material &ma = *BKE_material_add(bmain, "MappingSupportMat");
 
-  /* A Fill with only its flat colour has no map to remap. */
+  /* A Fill keeps its mapping from the start: the Mapping panel and the gizmo are there before the
+   * first texture, and nothing is remapped until a map arrives. */
   MaterialPaintLayer *bare = BKE_paint_layers_add(ma, "Bare", nullptr, PaintLayerPlace::Above);
   ASSERT_TRUE(BKE_paint_layers_set_source(ma, bare, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(*bare)) << "a new row is made mapped";
+  EXPECT_TRUE(BKE_paint_layers_mapping_available(ma, *bare));
   EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *bare));
-  EXPECT_FALSE(BKE_paint_layers_mapping_set_enabled(ma, bare, true));
-  EXPECT_FALSE(BKE_paint_layers_mapping_enabled_get(*bare));
+  EXPECT_FALSE(BKE_paint_layers_mapping_applies(ma, *bare)) << "no map to move yet";
 
+  /* Slotting a map makes the mapping that is already on apply. */
   MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
   EXPECT_TRUE(BKE_paint_layers_fill_reads_map(ma, *fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
   EXPECT_FALSE(BKE_paint_layers_fill_reads_map(ma, *fill, PAINT_MATERIAL_CHANNEL_NORMAL));
   EXPECT_TRUE(BKE_paint_layers_mapping_supported(ma, *fill));
-  EXPECT_FALSE(BKE_paint_layers_mapping_applies(ma, *fill)) << "supported is not enabled";
-  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, fill, true));
   EXPECT_TRUE(BKE_paint_layers_mapping_applies(ma, *fill));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, fill, false));
+  EXPECT_FALSE(BKE_paint_layers_mapping_applies(ma, *fill)) << "the switch still turns it off";
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, fill, true));
 
-  /* A painted map is written by strokes at the raw UV: a Paint row never remaps. */
+  /* A painted map is written by strokes at the raw UV: a Paint row never maps. */
   MaterialPaintLayer *paint = BKE_paint_layers_add(ma, "Paint", nullptr, PaintLayerPlace::Above);
   Image *paint_map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "PaintMap"));
   ASSERT_TRUE(BKE_paint_layers_channel_set_image(
       ma, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR, paint_map));
   EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *paint));
+  EXPECT_FALSE(BKE_paint_layers_mapping_available(ma, *paint));
   EXPECT_FALSE(BKE_paint_layers_mapping_set_enabled(ma, paint, true));
 
-  /* A folder and a filter lay no map of their own. */
+  /* A folder and a filter lay no map of their own and keep no mapping either. */
   PaintLayerAddParams folder_params;
   folder_params.kind = PaintLayerAddKind::Folder;
   MaterialPaintLayer *folder = BKE_paint_layers_add_with_policy(ma, folder_params);
   ASSERT_NE(folder, nullptr);
-  EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *folder));
+  EXPECT_FALSE(BKE_paint_layers_mapping_available(ma, *folder));
   MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
       ma, fill, MA_PAINT_LAYER_FILTER_INVERT);
   ASSERT_NE(filter, nullptr);
-  EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *filter));
+  EXPECT_FALSE(BKE_paint_layers_mapping_available(ma, *filter));
 
-  /* Taking the map away switches the mapping off for the readers, and the toggle can still be
-   * cleared. */
+  /* Taking the map away stops the remap but keeps the setting: the Fill waits for the next map,
+   * and the toggle can still be cleared. */
   ASSERT_TRUE(
       BKE_paint_layers_channel_set_image(ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr));
   EXPECT_FALSE(BKE_paint_layers_mapping_applies(ma, *fill));
+  EXPECT_TRUE(BKE_paint_layers_mapping_available(ma, *fill));
   EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(*fill));
   EXPECT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, fill, false));
 }
@@ -3031,6 +3039,8 @@ TEST_F(PaintLayersDescription, mapping_enable_is_structural_and_values_are_norma
   Material &ma = *BKE_material_add(bmain, "MappingValuesMat");
   MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
 
+  /* A new row is mapped already: switching it off and on again is what changes the shape. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, fill, false));
   ma.paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, fill, true));
   EXPECT_NE(ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0)
@@ -3042,6 +3052,10 @@ TEST_F(PaintLayersDescription, mapping_enable_is_structural_and_values_are_norma
   EXPECT_FLOAT_EQ(BKE_paint_layers_mapping_scale_normalize(-1e-6f),
                   -PAINT_LAYER_MAPPING_SCALE_MIN);
   EXPECT_FLOAT_EQ(BKE_paint_layers_mapping_scale_normalize(-2.0f), -2.0f);
+  EXPECT_FLOAT_EQ(
+      BKE_paint_layers_mapping_scale_normalize(std::numeric_limits<float>::quiet_NaN()), 1.0f);
+  EXPECT_FLOAT_EQ(
+      BKE_paint_layers_mapping_scale_normalize(std::numeric_limits<float>::infinity()), 1.0f);
 
   const float zero_scale[2] = {0.0f, -3.0f};
   ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(ma, fill, false));
@@ -3130,6 +3144,177 @@ TEST_F(PaintLayersDescription, mapping_block_copies_with_the_row)
   MaterialPaintLayer *duplicate = BKE_paint_layers_duplicate(*bmain, *ma, fill);
   ASSERT_NE(duplicate, nullptr);
   expect_mapping(*duplicate);
+}
+
+TEST_F(PaintLayersDescription, a_scale_or_rotation_edit_keeps_the_tile_on_the_canvas)
+{
+  Material &ma = *BKE_material_add(bmain, "MappingTileMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
+
+  /* Where the middle of the map lands on the canvas: the inverse of the sample transform, the one
+   * the gizmo draws its cage from. */
+  const auto canvas_center = [](const MaterialPaintLayer &layer, float r_center[2]) {
+    const float scale_x = BKE_paint_layers_mapping_scale_normalize(layer.mapping.scale[0]);
+    const float scale_y = BKE_paint_layers_mapping_scale_normalize(layer.mapping.scale[1]);
+    const float cos_rot = std::cos(layer.mapping.rotation);
+    const float sin_rot = std::sin(layer.mapping.rotation);
+    const float u = (0.5f - layer.mapping.offset[0]) / scale_x;
+    const float v = (0.5f - layer.mapping.offset[1]) / scale_y;
+    r_center[0] = cos_rot * u + sin_rot * v;
+    r_center[1] = -sin_rot * u + cos_rot * v;
+  };
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(ma, fill, false));
+  const float offset[2] = {0.2f, -0.1f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(ma, fill, offset));
+  float center[2];
+  canvas_center(*fill, center);
+  EXPECT_NEAR(center[0], 0.3f, 1e-5f);
+  EXPECT_NEAR(center[1], 0.6f, 1e-5f);
+  /* The public read answers the same, which is what the panel's fields ask through RNA. */
+  float center_api[2];
+  BKE_paint_layers_mapping_tile_center(*fill, center_api);
+  EXPECT_NEAR(center_api[0], center[0], 1e-6f);
+  EXPECT_NEAR(center_api[1], center[1], 1e-6f);
+
+  /* The scale field edits the tile as the canvas shows it: it grows around its centre, so the
+   * gizmo's rectangle does not jump while the offset reads a value that follows the scale. */
+  const float scale[2] = {2.0f, 3.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_holding_tile(ma, fill, scale));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[0], 2.0f);
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], 3.0f);
+  float after_scale[2];
+  canvas_center(*fill, after_scale);
+  EXPECT_NEAR(after_scale[0], center[0], 1e-5f);
+  EXPECT_NEAR(after_scale[1], center[1], 1e-5f);
+
+  /* The same for the rotation, and for locking the axes (which joins them at the X value). */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation_holding_tile(ma, fill, 0.7f));
+  float after_rotation[2];
+  canvas_center(*fill, after_rotation);
+  EXPECT_NEAR(after_rotation[0], center[0], 1e-5f);
+  EXPECT_NEAR(after_rotation[1], center[1], 1e-5f);
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock_holding_tile(ma, fill, true));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], fill->mapping.scale[0]);
+  float after_lock[2];
+  canvas_center(*fill, after_lock);
+  EXPECT_NEAR(after_lock[0], center[0], 1e-5f);
+  EXPECT_NEAR(after_lock[1], center[1], 1e-5f);
+
+  /* The raw setter still writes what it is told: the gizmo computes its own offset for a drag. */
+  const float offset_before[2] = {fill->mapping.offset[0], fill->mapping.offset[1]};
+  const float other_scale[2] = {0.5f, 0.5f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(ma, fill, other_scale));
+  EXPECT_FLOAT_EQ(fill->mapping.offset[0], offset_before[0]);
+  EXPECT_FLOAT_EQ(fill->mapping.offset[1], offset_before[1]);
+  float after_raw[2];
+  canvas_center(*fill, after_raw);
+  EXPECT_GT(std::fabs(after_raw[0] - center[0]) + std::fabs(after_raw[1] - center[1]), 1e-3f)
+      << "a raw scale change is what moves the tile; the panel's fields do not do it";
+}
+
+TEST_F(PaintLayersDescription, tile_center_roundtrips_for_an_arbitrary_mapping)
+{
+  Material &ma = *BKE_material_add(bmain, "MappingRoundtripMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(ma, fill, false));
+  const float offset[2] = {0.17f, -0.23f};
+  const float scale[2] = {2.5f, 0.75f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(ma, fill, offset));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(ma, fill, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(ma, fill, 1.1f));
+
+  float center[2];
+  BKE_paint_layers_mapping_tile_center(*fill, center);
+  EXPECT_TRUE(std::isfinite(center[0]));
+  EXPECT_TRUE(std::isfinite(center[1]));
+
+  /* Re-applying the same scale and rotation asks the inverse to put the centre back exactly where
+   * it already is: centre -> offset_for_tile_center -> centre. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_holding_tile(ma, fill, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation_holding_tile(ma, fill, 1.1f));
+  float after[2];
+  BKE_paint_layers_mapping_tile_center(*fill, after);
+  EXPECT_NEAR(after[0], center[0], 1e-5f);
+  EXPECT_NEAR(after[1], center[1], 1e-5f);
+
+  /* A non-finite scale cannot poison the centre: normalize reads it as one. */
+  fill->mapping.scale[0] = std::numeric_limits<float>::quiet_NaN();
+  float finite_center[2];
+  BKE_paint_layers_mapping_tile_center(*fill, finite_center);
+  EXPECT_TRUE(std::isfinite(finite_center[0]));
+  EXPECT_TRUE(std::isfinite(finite_center[1]));
+}
+
+TEST_F(PaintLayersDescription, mapping_remaps_only_a_transform_or_a_clip)
+{
+  Material &ma = *BKE_material_add(bmain, "MappingRemapsMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
+  EXPECT_TRUE(BKE_paint_layers_mapping_applies(ma, *fill));
+  EXPECT_FALSE(BKE_paint_layers_mapping_remaps(ma, *fill))
+      << "a new row is enabled but still at the identity transform";
+
+  const float offset[2] = {0.25f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(ma, fill, offset));
+  EXPECT_TRUE(BKE_paint_layers_mapping_remaps(ma, *fill));
+
+  const float zero[2] = {0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(ma, fill, zero));
+  EXPECT_FALSE(BKE_paint_layers_mapping_remaps(ma, *fill));
+
+  /* An identity transform still clips: the unit-square test needs the mapping's output. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(ma, fill, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  EXPECT_TRUE(BKE_paint_layers_mapping_remaps(ma, *fill));
+}
+
+TEST_F(PaintLayersDescription, a_zeroed_mapping_block_reads_as_enabled)
+{
+  /* The enabled flag is stored inverted, so a block written before the flag existed -- a row the
+   * fixture links in the way a file read leaves it -- reads as enabled, exactly like a row made
+   * now. Old and new files answer the panel, the gizmo and the graph alike. */
+  Material &ma = *BKE_material_add(bmain, "MappingLegacyMat");
+  MaterialPaintLayer *legacy = paint_layer_add(ma, "Legacy");
+  EXPECT_EQ(legacy->mapping.flag, 0);
+  EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(*legacy))
+      << "a zeroed block reads as enabled, as a new row's does";
+
+  /* The old "enabled" bit is reserved: a file that stored it must not read as disabled now. */
+  legacy->mapping.flag = MA_PAINT_LAYER_MAPPING_ENABLED_DEPRECATED;
+  EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(*legacy));
+  legacy->mapping.flag = 0;
+
+  /* Switching it off stores the inverted bit, whatever the row's kind. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, legacy, false));
+  EXPECT_FALSE(BKE_paint_layers_mapping_enabled_get(*legacy));
+  EXPECT_TRUE((legacy->mapping.flag & MA_PAINT_LAYER_MAPPING_DISABLED) != 0);
+
+  /* Switching it back on is refused on a row that may carry no mapping, and works on a Fill. */
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_enabled(ma, legacy, true));
+  ASSERT_TRUE(BKE_paint_layers_set_source(ma, legacy, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, legacy, true));
+  EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(*legacy));
+  EXPECT_EQ(legacy->mapping.flag & MA_PAINT_LAYER_MAPPING_DISABLED, 0);
+}
+
+TEST_F(PaintLayersDescription, the_raw_setters_touch_only_their_own_value)
+{
+  /* The raw setters are the data's own meaning: a scale, a rotation or a lock written through
+   * them changes nothing else, so a script's assignment order cannot matter. Keeping the tile in
+   * place is the UI's job (properties_material.py) and the reset's and the gizmo's, through the
+   * *_holding_tile calls. */
+  Material &ma = *BKE_material_add(bmain, "MappingRawMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
+  const float offset[2] = {0.3f, -0.2f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(ma, fill, offset));
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(ma, fill, false));
+  const float scale[2] = {2.0f, 3.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(ma, fill, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(ma, fill, 0.9f));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(ma, fill, true));
+  EXPECT_FLOAT_EQ(fill->mapping.offset[0], 0.3f);
+  EXPECT_FLOAT_EQ(fill->mapping.offset[1], -0.2f);
 }
 
 TEST_F(PaintLayersDescription, mapping_wrap_defaults_to_repeat_and_refuses_unknown_modes)

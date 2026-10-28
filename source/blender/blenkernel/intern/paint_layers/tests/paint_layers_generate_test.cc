@@ -1013,7 +1013,8 @@ TEST_F(PaintLayersGenerateTest, mapping_builds_one_node_fed_by_one_coordinate_so
   MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
   /* A second map in another channel of the same row shares the one Mapping. */
   add_channel(*fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("FillRough"));
-  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  const float offset[2] = {0.25f, 0.5f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, fill, offset));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   bNodeTree *group = layer_tree_find(*bmain, "Fill");
@@ -1030,9 +1031,43 @@ TEST_F(PaintLayersGenerateTest, mapping_builds_one_node_fed_by_one_coordinate_so
   EXPECT_TRUE(interface_has_socket(*group, "Fill Mapping Rotation", false));
 }
 
+TEST_F(PaintLayersGenerateTest, an_identity_mapping_builds_no_mapping_and_crossing_it_rebuilds)
+{
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 0)
+      << "an identity mapping with Repeat reads the map as the unmapped path does";
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_COORD), 0);
+  EXPECT_FALSE(interface_has_socket(*group, "Fill Mapping Offset", false));
+
+  /* Moving off identity adds the chain, which is a shape change and not a value-only sync. */
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  const float offset[2] = {0.25f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, fill, offset));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 1);
+
+  /* Returning to identity takes it away again. */
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  const float zero[2] = {0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, fill, zero));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 0);
+}
+
 TEST_F(PaintLayersGenerateTest, an_unmapped_row_builds_no_mapping_and_no_coordinate)
 {
-  mapping_fill_add(*this, "Fill");
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  /* A new row is made with its mapping on: switching it off is what makes the row unmapped. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, false));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   bNodeTree *group = layer_tree_find(*bmain, "Fill");
   ASSERT_NE(group, nullptr);
@@ -1049,6 +1084,8 @@ TEST_F(PaintLayersGenerateTest, an_unmapped_row_builds_no_mapping_and_no_coordin
 TEST_F(PaintLayersGenerateTest, toggling_the_mapping_changes_the_shape_and_dragging_does_not)
 {
   MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  /* The row is made with its mapping on; the unmapped shape is the row with it switched off. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, false));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   bNodeTree *group = layer_tree_find(*bmain, "Fill");
   ASSERT_NE(group, nullptr);
@@ -1056,6 +1093,8 @@ TEST_F(PaintLayersGenerateTest, toggling_the_mapping_changes_the_shape_and_dragg
   const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
   const uint64_t plain = paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms);
 
+  const float offset[2] = {0.25f, 0.5f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, fill, offset));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
   const uint64_t mapped = paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms);
   EXPECT_NE(mapped, plain);
@@ -1066,7 +1105,6 @@ TEST_F(PaintLayersGenerateTest, toggling_the_mapping_changes_the_shape_and_dragg
   ASSERT_NE(group, nullptr);
   const int mapping_nodes = count_type(*group, SH_NODE_MAPPING);
   EXPECT_EQ(mapping_nodes, 1);
-  const float offset[2] = {0.25f, 0.5f};
   const float scale[2] = {2.0f, 3.0f};
   ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, fill, offset));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, fill, false));
@@ -1197,6 +1235,9 @@ TEST_F(PaintLayersGenerateTest, a_mapped_correction_and_mask_item_build_their_ow
       *ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("ItemMap")));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, item, true));
+  const float offset[2] = {0.25f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, correction, offset));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, item, offset));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   bNodeTree *group = layer_tree_find(*bmain, "Row");
@@ -1229,7 +1270,8 @@ TEST_F(PaintLayersGenerateTest, a_clipping_wrap_builds_one_factor_per_clipped_ax
   MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
   /* A second map in another channel shares the row's one factor. */
   add_channel(*fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("FillRough"));
-  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  const float offset[2] = {0.25f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, fill, offset));
 
   struct WrapCase {
     int16_t wrap;
@@ -1253,7 +1295,7 @@ TEST_F(PaintLayersGenerateTest, a_clipping_wrap_builds_one_factor_per_clipped_ax
   }
 }
 
-TEST_F(PaintLayersGenerateTest, the_wrap_is_topology_only_while_the_mapping_applies)
+TEST_F(PaintLayersGenerateTest, the_wrap_is_topology_only_while_the_mapping_remaps)
 {
   MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
   const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
@@ -1262,7 +1304,8 @@ TEST_F(PaintLayersGenerateTest, the_wrap_is_topology_only_while_the_mapping_appl
     return paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms);
   };
 
-  /* A wrap on a row whose mapping is off builds nothing: the hash is the one of Repeat. */
+  /* A wrap on a row whose mapping is switched off builds nothing: the hash is the one of Repeat. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, false));
   const uint64_t plain = row_hash();
   ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, fill, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
   EXPECT_EQ(row_hash(), plain);

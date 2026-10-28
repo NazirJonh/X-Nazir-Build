@@ -882,7 +882,7 @@ Image *BKE_paint_layers_mask_stack_merge(Main &bmain,
     }
     /* A mapped item is resampled to the size the merge writes, so its own size never conflicts.
      * An item read at its own size has to be square and to agree with the other such maps. */
-    if (!BKE_paint_layers_mapping_applies(ma, item)) {
+    if (!BKE_paint_layers_mapping_remaps(ma, item)) {
       if (width <= 0 || height <= 0) {
         BKE_report(reports, RPT_ERROR, "A mask map's size cannot be read; merging is refused");
         return nullptr;
@@ -1397,7 +1397,7 @@ MaterialPaintLayer *BKE_paint_layers_corrections_bake(Main &bmain,
       else if (!tiles.contains(1001)) {
         tiles.append(1001);
       }
-      if (BKE_paint_layers_mapping_applies(ma, *effect)) {
+      if (BKE_paint_layers_mapping_remaps(ma, *effect)) {
         continue;
       }
       int width = 0;

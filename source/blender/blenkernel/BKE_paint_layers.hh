@@ -1053,7 +1053,17 @@ bool BKE_paint_layers_fill_reads_map(const Material &ma,
  * (#BKE_paint_layers_source_reads_uv). A Material row moves the UV at which its source is read --
  * its live textures, its rendered channel maps and its source-group wrapper. A map written by
  * strokes (Paint) is addressed at the raw UV and never supports it; neither does a filter, which
- * owns no map. The one predicate UI, RNA, the generator and the CPU share.
+ * owns no map.
+ *
+ * The mapping predicates, and who asks each (each name is a suffix of
+ * #BKE_paint_layers_mapping_*):
+ *
+ * | Predicate | Question | Callers |
+ * | --- | --- | --- |
+ * | `supported` | Carries a mapping with its content? | The other three |
+ * | `available` | May the UI edit one, even before a map? | Panel, gizmo, enable |
+ * | `applies` | Is it switched on and supported? | Values, UI |
+ * | `remaps` | Does generation need a transform? | Graph, CPU, hashes |
  */
 bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintLayer &layer);
 
@@ -1064,17 +1074,38 @@ bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintL
 bool BKE_paint_layers_mapping_applies(const Material &ma, const MaterialPaintLayer &layer);
 
 /**
+ * Whether \a layer keeps a UV mapping at all: everything #BKE_paint_layers_mapping_supported
+ * accepts, plus a Fill row that has no map yet. A Fill's mapping belongs to the row, not to the
+ * map it happens to read: the row is made with its mapping enabled, so the Mapping panel and the
+ * Image Editor's mapping gizmo are there before the first texture is slotted, and the values take
+ * effect the moment one is. The graph and the CPU ask #BKE_paint_layers_mapping_remaps, so a row
+ * with no map builds nothing.
+ */
+bool BKE_paint_layers_mapping_available(const Material &ma, const MaterialPaintLayer &layer);
+
+/** Whether \a layer's offset, scale and rotation are the identity transform. */
+bool BKE_paint_layers_mapping_is_identity(const MaterialPaintLayer &layer);
+
+/**
+ * Whether generation needs to remap \a layer: #BKE_paint_layers_mapping_applies, and the transform
+ * either moves the UVs or clips them (#BKE_paint_layers_mapping_wrap_get is not Repeat). An
+ * identity mapping with Repeat is skipped, so a row whose mapping was switched on before it had a
+ * value builds the same graph as an unmapped one.
+ */
+bool BKE_paint_layers_mapping_remaps(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
  * Whether strokes may write into \a row's own channels. A Fill row lays a flat value (with an
  * optional map read through its mapping); painting it would turn that map into a stroke target.
  * Its content is edited by corrections instead. A row's mask is still paintable.
  */
 bool BKE_paint_layers_row_is_paintable(const MaterialPaintLayer &row);
 
-/** Whether \a layer's mapping is enabled. */
+/** Whether \a layer's mapping is enabled. Every new row starts enabled. */
 bool BKE_paint_layers_mapping_enabled_get(const MaterialPaintLayer &layer);
 
 /**
- * Set whether \a layer's mapping is enabled. Refused when #BKE_paint_layers_mapping_supported
+ * Set whether \a layer's mapping is enabled. Refused when #BKE_paint_layers_mapping_available
  * reports false. Structural: the row gains or loses its remap.
  */
 bool BKE_paint_layers_mapping_set_enabled(Material &ma, MaterialPaintLayer *layer, bool enabled);
@@ -1119,6 +1150,43 @@ bool BKE_paint_layers_mapping_set_scale_lock(Material &ma, MaterialPaintLayer *l
  * rotated by it too (and flipped by the sign of the scale), so the lighting follows the pattern.
  */
 bool BKE_paint_layers_mapping_set_rotation(Material &ma, MaterialPaintLayer *layer, float rotation);
+
+/**
+ * Where the middle of \a layer's tile lands on the canvas: the inverse of the sample transform
+ * read at the middle of the map. It is the tile's position as the user sees it -- the gizmo's
+ * anchor ring -- and the one point the tile-holding edits keep still. Read-only: the offset is
+ * the one stored value that places the tile. RNA exposes this as ``mapping_tile_center``, which
+ * the Mapping panel's fields read to follow the offset themselves.
+ */
+void BKE_paint_layers_mapping_tile_center(const MaterialPaintLayer &layer, float r_center[2]);
+
+/**
+ * Set the mapping scale of \a layer the way the canvas shows it: the tile of the map stays
+ * where it is, its offset following the new scale.
+ *
+ * The stored offset is added after the scale and the rotation, so changing the scale alone moves
+ * the tile across the canvas -- the gizmo's rectangle jumps while the offset reads the same.
+ * These calls hold the tile on the canvas point its centre already occupies (the gizmo's anchor
+ * ring): the reset operator's Scale and Rotation and the gizmo's lock button answer to them.
+ * #BKE_paint_layers_mapping_set_scale is the raw value, for callers that place the tile
+ * themselves: the gizmo computes its own offset for a drag, and the Mapping panel's fields keep
+ * the centre through #BKE_paint_layers_mapping_tile_center. Value-only.
+ */
+bool BKE_paint_layers_mapping_set_scale_holding_tile(Material &ma,
+                                                     MaterialPaintLayer *layer,
+                                                     const float scale[2]);
+
+/** As #BKE_paint_layers_mapping_set_scale_holding_tile, for the rotation: the tile turns around
+ * its centre without leaving it. Value-only. */
+bool BKE_paint_layers_mapping_set_rotation_holding_tile(Material &ma,
+                                                        MaterialPaintLayer *layer,
+                                                        float rotation);
+
+/** As #BKE_paint_layers_mapping_set_scale_holding_tile, for the scale lock: locking joins the axes
+ * at the X value, which is a scale change. Value-only. */
+bool BKE_paint_layers_mapping_set_scale_lock_holding_tile(Material &ma,
+                                                          MaterialPaintLayer *layer,
+                                                          bool locked);
 
 /**
  * Which axes of a UV \a wrap repeat: \a r_repeat_u / \a r_repeat_v are true for an axis that tiles

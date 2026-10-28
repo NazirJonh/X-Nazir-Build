@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import bpy
+
 from bpy.types import Menu, Panel, UIList
 from bpy.app.translations import contexts as i18n_contexts
 from rna_prop_ui import PropertyPanel
@@ -830,14 +831,30 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             draw_material_layer_channels(layout, context, owner, layer)
 
 
+class LAYER_MT_mapping_reset(Menu):
+    """Reset the shown row's UV mapping: all of its values, or one part at a time."""
+
+    bl_label = "Reset Mapping"
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.operator("paint.layer_mapping_reset", text="Reset All").mode = 'ALL'
+        layout.operator("paint.layer_mapping_reset", text="Reset Offset").mode = 'OFFSET'
+        layout.operator("paint.layer_mapping_reset", text="Reset Scale").mode = 'SCALE'
+        layout.operator("paint.layer_mapping_reset", text="Reset Rotation").mode = 'ROTATION'
+
+
 class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
     """UV mapping of the maps and sources the shown row reads: a layer, a correction or a mask item.
 
-    Shown only while the row reads something the mapping can move (RNA ``mapping_supported``, the
-    one BKE predicate the graph and the CPU share): a Fill with a map, or a Material row with a
-    source material. The rotation turns the lookup around Z; the tangent-space vectors of a Normal
-    map are rotated (and flipped by the scale sign) to follow it. A Material row moves the UV at
-    which its whole source is read, including its live source graph.
+    Shown while the row can carry a mapping (RNA ``mapping_available``): a Fill -- with a map or
+    not, since its mapping is a property of the row and is on from the start -- or a Material row
+    with a source material. The rotation turns the lookup around Z; the tangent-space vectors of a
+    Normal map are rotated (and flipped by the scale sign) to follow it. A Material row moves the
+    UV at which its whole source is read, including its live source graph. Scale, Rotation and Lock
+    edit the tile the gizmo draws: they turn it around its centre, the gizmo's anchor ring, so it
+    keeps its place on the canvas; only Offset moves it. The row's raw ``mapping_scale`` and
+    ``mapping_rotation`` keep the data's own meaning for scripts and drivers.
     """
 
     bl_idname = "LAYER_MATERIAL_PT_mapping"
@@ -846,7 +863,11 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
 
     @classmethod
     def _shown_row(cls, context):
-        """The row the Layer tab edits: the shown mask item, or else the active row."""
+        """The row the Layer tab edits: the shown mask item, or else the active row.
+
+        This is the Python mirror of ``mapping_shown_row_get`` (uv_mapping_target.cc), which the
+        mapping gizmo and the mapping reset resolve through; keep both in sync.
+        """
         owner, layer = cls._active_layer(context)
         if owner is None or layer is None:
             return None
@@ -856,7 +877,13 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         row = cls._shown_row(context)
-        return row is not None and row.mapping_supported
+        return row is not None and row.mapping_available
+
+    def draw_header_preset(self, _context):
+        # Drawn while the panel's poll passed, so a row that carries a mapping is shown; the menu's
+        # operators poll the same way and grey out with it. The preset hook is the header's
+        # right-aligned slot, which puts the button at the header's far edge.
+        self.layout.menu("LAYER_MT_mapping_reset", text="", icon='RECOVER_LAST')
 
     def draw(self, context):
         layout = self.layout
@@ -871,9 +898,14 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         col.enabled = row.mapping_enabled
         col.prop(row, "mapping_offset", text="Offset")
         sub = col.row(align=True)
-        sub.prop(row, "mapping_scale", text="Scale")
-        sub.prop(row, "mapping_scale_lock", text="", icon_only=True)
-        col.prop(row, "mapping_rotation", text="Rotation")
+        # The tile-holding RNA properties follow the offset so the tile stays put.
+        sub.prop(row, "tile_scale", text="Scale")
+        sub.prop(row,
+                 "tile_scale_lock",
+                 text="",
+                 icon='LOCKED' if row.tile_scale_lock else 'UNLOCKED',
+                 icon_only=True)
+        col.prop(row, "tile_rotation", text="Rotation")
         col.prop(row, "mapping_wrap", text="UV Wrap")
 
         if row.mapping_enabled and row.source == 'MATERIAL':
@@ -1345,6 +1377,7 @@ classes = (
     BRUSH_MATERIAL_PT_custom_props,
     LAYER_MATERIAL_PT_layers,
     LAYER_MATERIAL_PT_mapping,
+    LAYER_MT_mapping_reset,
     LAYER_MATERIAL_PT_source_surface,
     LAYER_MATERIAL_PT_anchor_point,
     LAYER_MATERIAL_PT_bake,

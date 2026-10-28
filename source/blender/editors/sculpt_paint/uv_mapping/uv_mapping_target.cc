@@ -26,9 +26,20 @@ namespace blender::ed::sculpt_paint::uv_mapping {
 
 namespace {
 
-/** Mirror of `LAYER_MATERIAL_PT_mapping::_shown_row`: the shown mask item, else the active row
- * (its base mask while the brush targets masks). */
-MaterialPaintLayer *resolve_shown_row(const bContext &C, Material &ma)
+/**
+ * Whether the row's mapping is edited right now: on, on a row that keeps a mapping. A Fill answers
+ * yes before it has a map, so the gizmo is there as soon as the row is made, exactly like the
+ * Mapping panel -- the values it writes take effect when a texture is slotted.
+ */
+bool mapping_is_edited(const Material &ma, const MaterialPaintLayer &layer)
+{
+  return BKE_paint_layers_mapping_enabled_get(layer) &&
+         BKE_paint_layers_mapping_available(ma, layer);
+}
+
+}  // namespace
+
+MaterialPaintLayer *mapping_shown_row_get(const bContext &C, Material &ma)
 {
   if (MaterialPaintLayer *item = BKE_paint_layers_active_mask_item_get(ma)) {
     return item;
@@ -50,15 +61,13 @@ MaterialPaintLayer *resolve_shown_row(const bContext &C, Material &ma)
   return layer;
 }
 
-}  // namespace
-
 MaterialPaintLayer *PaintLayerRowMappingTarget::row() const
 {
   if (material_ == nullptr || BLI_uuid_is_nil(marker_)) {
     return nullptr;
   }
   MaterialPaintLayer *layer = BKE_paint_layers_find(*material_, marker_);
-  if (layer == nullptr || !BKE_paint_layers_mapping_applies(*material_, *layer)) {
+  if (layer == nullptr || !mapping_is_edited(*material_, *layer)) {
     return nullptr;
   }
   return layer;
@@ -86,8 +95,8 @@ bool PaintLayerRowMappingTarget::resolve(const bContext &C)
     return false;
   }
 
-  MaterialPaintLayer *layer = resolve_shown_row(C, *ma);
-  if (layer == nullptr || !BKE_paint_layers_mapping_applies(*ma, *layer)) {
+  MaterialPaintLayer *layer = mapping_shown_row_get(C, *ma);
+  if (layer == nullptr || !mapping_is_edited(*ma, *layer)) {
     return false;
   }
 
@@ -141,7 +150,9 @@ bool PaintLayerRowMappingTarget::set_scale_locked(const bool locked)
   if (layer == nullptr) {
     return false;
   }
-  return BKE_paint_layers_mapping_set_scale_lock(*material_, layer, locked);
+  /* Locking joins the axes at the X value, which is a scale change: like the panel's toggle, it
+   * keeps the tile where the cage draws it. */
+  return BKE_paint_layers_mapping_set_scale_lock_holding_tile(*material_, layer, locked);
 }
 
 const char *PaintLayerRowMappingTarget::undo_name() const

@@ -2486,6 +2486,11 @@ void UI_OT_id_browser_open_target(wmOperatorType *ot);
 void UI_OT_id_browser_random_asset(wmOperatorType *ot);
 void UI_OT_id_browser_refresh(wmOperatorType *ot);
 
+/* `interface_paint_slot_clipboard.cc` */
+
+void UI_OT_paint_slot_copy(wmOperatorType *ot);
+void UI_OT_paint_slot_paste(wmOperatorType *ot);
+
 /* interface_ops_color.cc */
 
 MenuType *UI_MT_color_space_select();

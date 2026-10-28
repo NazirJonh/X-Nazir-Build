@@ -69,6 +69,7 @@ set(SRC
   ../include/ED_object_vgroup.hh
   ../include/ED_outliner.hh
   ../include/ED_paint.hh
+  ../include/ED_paint_slot_clipboard.hh
   ../include/ED_particle.hh
   ../include/ED_physics.hh
   ../include/ED_pointcloud.hh

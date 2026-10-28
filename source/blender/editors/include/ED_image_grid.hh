@@ -38,11 +38,12 @@ struct PointerRNA;
 struct Main;
 struct ARegion;
 struct ARegionType;
-struct wmDrag;
-struct wmEvent;
 struct wmOperatorType;
 
 namespace blender {
+/* Declared in #blender (see WM_types.hh): a global declaration would name a different type. */
+struct wmDrag;
+struct wmEvent;
 struct BlendDataReader;
 struct BlendWriter;
 namespace asset_system {

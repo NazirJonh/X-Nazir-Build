@@ -43,6 +43,23 @@ using wmNotifierQueueSet = Set<const wmNotifier *,
                                wmNotifierHashForQueue,
                                wmNotifierEqForQueue>;
 
+/**
+ * The paint slot assignment the user copied last ("Copy Image" / "Copy Material" in a slot's
+ * context menu): the copied data-block's kind and session UID. A paste re-assigns it into another
+ * slot, whatever editor or panel draws that slot, so the clipboard is shared like
+ * #id_browser_search and deliberately session-only.
+ */
+struct PaintSlotClipboard {
+  /** The copied data-block's #ID_Type, as a short, or 0 when nothing was copied. */
+  short idcode = 0;
+  /** The copied data-block's `session_uid`: it names the exact copy and survives undo. */
+  uint32_t uid = 0;
+
+  bool is_empty() const;
+  void clear();
+  void store(const ID &id);
+};
+
 struct WindowManagerRuntime {
   /** Separate active from drawable. */
   wmWindow *windrawable = nullptr;
@@ -75,6 +92,9 @@ struct WindowManagerRuntime {
    * selects a layer; nil means "follow the assigned image".
    */
   bUUID id_browser_filter_layer_id = {};
+
+  /** The paint slot assignment the user copied last, to paste into another slot. */
+  PaintSlotClipboard paint_slot_clipboard;
 
   /**
    * Indicates the main loop (#WM_main()) to stop processing the event queue and move to the next

@@ -10,6 +10,8 @@
 #include "BKE_undo_system.hh"
 #include "BKE_wm_runtime.hh"
 
+#include "DNA_ID.h"
+
 #include "BLI_ghash.h"
 #include "BLI_listbase.h"
 
@@ -18,6 +20,23 @@
 #include "WM_message.hh"
 
 namespace blender::bke {
+
+bool PaintSlotClipboard::is_empty() const
+{
+  return this->idcode == 0;
+}
+
+void PaintSlotClipboard::clear()
+{
+  this->idcode = 0;
+  this->uid = 0;
+}
+
+void PaintSlotClipboard::store(const ID &id)
+{
+  this->idcode = short(GS(id.name));
+  this->uid = id.session_uid;
+}
 
 WindowManagerRuntime::WindowManagerRuntime()
 {

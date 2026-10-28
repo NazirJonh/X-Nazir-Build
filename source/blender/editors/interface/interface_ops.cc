@@ -3470,6 +3470,8 @@ void operatortypes_ui()
   WM_operatortype_append(UI_OT_drop_color);
   WM_operatortype_append(UI_OT_drop_name);
   WM_operatortype_append(UI_OT_drop_material);
+  WM_operatortype_append(UI_OT_paint_slot_copy);
+  WM_operatortype_append(UI_OT_paint_slot_paste);
 #ifdef WITH_PYTHON
   WM_operatortype_append(UI_OT_editsource);
 #endif

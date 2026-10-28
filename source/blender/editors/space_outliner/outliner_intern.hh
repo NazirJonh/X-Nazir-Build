@@ -631,6 +631,10 @@ void OUTLINER_OT_datastack_drop(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_drop(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_id_drop(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_channel_image_assign(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_image_copy(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_image_paste(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_material_copy(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_material_paste(wmOperatorType *ot);
 void OUTLINER_OT_collection_drop(wmOperatorType *ot);
 
 /* ...................................................... */

@@ -364,7 +364,6 @@ void paint_issue_slots_append(const Span<PaintLayersIssue> issues,
 }
 
 /**
-/**
  * Point the value column at the per-channel opacity of \a layer for \a channel, so the header's
  * channel cursor edits that channel alone. Every row has one, a folder and a correction included,
  * whether or not it has a record for the channel.
@@ -3399,7 +3398,7 @@ std::unique_ptr<StackSource> stack_source_paint_layers_create()
  * when it named none).
  * \{ */
 
-static int paint_channel_icon(const int channel)
+int paint_channel_icon(const int channel)
 {
   switch (eMaterialPaintChannel(channel)) {
     case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
@@ -3426,10 +3425,10 @@ static int paint_channel_icon(const int channel)
   return ICON_IMAGE_DATA;
 }
 
-static const EnumPropertyItem *stack_channel_image_assign_channel_itemf(bContext * /*C*/,
-                                                                        PointerRNA * /*ptr*/,
-                                                                        PropertyRNA * /*prop*/,
-                                                                        bool *r_free)
+const EnumPropertyItem *stack_channel_image_assign_channel_itemf(bContext * /*C*/,
+                                                                 PointerRNA * /*ptr*/,
+                                                                 PropertyRNA * /*prop*/,
+                                                                 bool *r_free)
 {
   EnumPropertyItem *items = nullptr;
   int items_num = 0;
@@ -3500,8 +3499,7 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
     return OPERATOR_CANCELLED;
   }
   Material &material = layers_owner(*owner);
-  if (!ID_IS_EDITABLE(&material.id) || ID_IS_OVERRIDE_LIBRARY(&material.id)) {
-    BKE_report(op->reports, RPT_ERROR, "The layered material is linked or overridden");
+  if (!stack_clipboard_material_editable_check(material, op->reports)) {
     return OPERATOR_CANCELLED;
   }
 
@@ -3512,10 +3510,7 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
     return OPERATOR_CANCELLED;
   }
   const eMaterialPaintChannel channel = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
-  /* An image cannot be assigned to a channel outside the material's set: the record would take
-   * part nowhere. */
-  if (!BKE_paint_layers_channel_in_set(material, channel)) {
-    BKE_report(op->reports, RPT_ERROR, "The channel is not part of the material's channel set");
+  if (!stack_image_assign_check(material, nullptr, channel, op->reports)) {
     return OPERATOR_CANCELLED;
   }
 
@@ -3528,17 +3523,8 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
       BKE_report(op->reports, RPT_ERROR, "The layer the image was dropped on is gone");
       return OPERATOR_CANCELLED;
     }
-    /* The same BKE rule the drop gate applies: only a Fill row takes a map; a painted row's maps
-     * belong to its brush. */
-    switch (BKE_paint_layers_row_image_map_issue(*layer)) {
-      case PaintLayerImageMapIssue::None:
-        break;
-      case PaintLayerImageMapIssue::PaintRowOwnsMaps:
-        BKE_report(op->reports, RPT_ERROR, "The maps of a Paint layer cannot be replaced");
-        return OPERATOR_CANCELLED;
-      case PaintLayerImageMapIssue::TakesNoImage:
-        BKE_report(op->reports, RPT_ERROR, "Only a Fill row takes an image");
-        return OPERATOR_CANCELLED;
+    if (!stack_image_assign_check(material, layer, channel, op->reports)) {
+      return OPERATOR_CANCELLED;
     }
   }
   else {

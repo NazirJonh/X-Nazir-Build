@@ -60,7 +60,6 @@
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_texture.h"
-#include "BKE_wm_runtime.hh"
 
 #include "AS_asset_library.hh"
 #include "AS_asset_representation.hh"
@@ -100,6 +99,7 @@
 
 #include "interface_drop_image.hh"
 #include "interface_intern.hh"
+#include "interface_paint_slot_clipboard.hh"
 
 namespace blender {
 
@@ -151,12 +151,6 @@ static int drag_asset_list_count_of(const wmDrag &drag, const ID_Type idtype)
   return count;
 }
 
-/** True when \a id can be edited in place (a local ID, or an asset-editable linked one). */
-static bool paint_texture_target_owner_editable(const ID *id)
-{
-  return id != nullptr && ID_IS_EDITABLE(id) && !ID_IS_OVERRIDE_LIBRARY(id);
-}
-
 /** True when \a owner (linked data) cannot reference the local \a tex at all. */
 static bool paint_texture_linked_owner_refuses_local_tex(const ID *owner, const Tex &tex)
 {
@@ -168,31 +162,6 @@ static const Tex *drag_local_texture(const wmDrag &drag)
 {
   const ID *id = WM_drag_get_local_ID(const_cast<wmDrag *>(&drag), ID_TE);
   return id ? id_cast<const Tex *>(id) : nullptr;
-}
-
-/**
- * Assign \a id to \a owner_prop on \a owner_ptr and push the matching undo step. All ID-slot
- * targets need exactly this, so they share the undo bookkeeping instead of repeating it.
- * Returns false when the property is missing (its name is looked up by string, so stay runtime
- * safe in release builds too).
- */
-static bool assign_id_to_owner_prop(bContext &C,
-                                    PointerRNA &owner_ptr,
-                                    PropertyRNA *owner_prop,
-                                    ID &id,
-                                    const char *undo_name)
-{
-  BLI_assert(owner_prop != nullptr);
-  if (owner_prop == nullptr) {
-    return false;
-  }
-  RNA_property_pointer_set(&owner_ptr, owner_prop, RNA_id_pointer_create(&id), nullptr);
-  RNA_property_update(&C, &owner_ptr, owner_prop);
-  /* Linked data cannot participate in global (memfile) undo. */
-  if (!owner_ptr.owner_id || (!ID_IS_LINKED(owner_ptr.owner_id) && !ID_IS_LINKED(&id))) {
-    ED_undo_memfile_push(&C, undo_name);
-  }
-  return true;
 }
 
 /** Resolve the dragged #Tex: a local #WM_DRAG_ID, an imported #WM_DRAG_ASSET, or the first
@@ -382,88 +351,25 @@ static const ui::Button *find_texture_slot_button_at(const ARegion *region,
   });
 }
 
-/** Which owner a material slot belongs to. */
-enum class MaterialSlotOwner {
-  /** A #BrushMaterialPaint property: the drop assigns the active brush's PBR paint source. */
-  Brush,
-  /** A #PaintShapeTexture property: the drop assigns the Shape part's own source. */
-  Shape,
-};
-
 /**
- * One material source slot a button draws: the RNA property it edits and the owner it belongs to.
- * The property itself is authoritative: the Shape tools draw their MATERIAL row from their own
+ * The material source slot the button under the cursor draws, when it draws one. The property
+ * itself is authoritative: the Shape tools draw their MATERIAL row from their own
  * #PaintShapeTexture, while the Brush Material tab draws #BrushMaterialPaint, so the drop target
  * follows the button instead of guessing from the active paint.
  */
-struct MaterialSlotTarget {
-  PointerRNA ptr = {};
-  /** "material" / "layer_owner" for a Shape, "source_material" for a brush. */
-  std::string propname;
-  MaterialSlotOwner owner = MaterialSlotOwner::Brush;
-};
-
-static bool material_slot_button_target(const ui::Button &but, MaterialSlotTarget *r_target)
-{
-  if (but.context == nullptr) {
-    return false;
-  }
-  /* The empty slot's labelled drop button carries the browser context; the assigned row's name
-   * button carries the standard template-ID one. Same two-step lookup as
-   * #image_id_browser_button_target, for the same reason. */
-  const PointerRNA *slot_ptr = CTX_store_ptr_lookup(but.context, "id_browser_ptr");
-  std::optional<StringRefNull> prop_name = CTX_store_string_lookup(but.context,
-                                                                   "id_browser_prop");
-  if (!slot_ptr || !prop_name) {
-    slot_ptr = CTX_store_ptr_lookup(but.context, "template_id_ptr");
-    prop_name = CTX_store_string_lookup(but.context, "template_id_prop");
-  }
-  if (!slot_ptr || !prop_name) {
-    return false;
-  }
-  if (!slot_ptr->type) {
-    return false;
-  }
-
-  if (RNA_struct_is_a(slot_ptr->type, RNA_BrushMaterialPaint)) {
-    /* The brush property only. source_layer_owner has no drop target on this tab: it is the
-     * Layer kind's owner and can be picked in the panel, but the operator targets the active
-     * brush's Default source. */
-    if (*prop_name != "source_material") {
-      return false;
-    }
-    r_target->owner = MaterialSlotOwner::Brush;
-  }
-  else if (RNA_struct_is_a(slot_ptr->type, RNA_PaintShapeTexture)) {
-    /* A Shape part keeps its own material, independent of the brush (Default kind) or a layered
-     * material / one of its rows (Layer kind). */
-    if (*prop_name != "material" && *prop_name != "layer_owner") {
-      return false;
-    }
-    r_target->owner = MaterialSlotOwner::Shape;
-  }
-  else {
-    return false;
-  }
-
-  r_target->ptr = *slot_ptr;
-  r_target->propname = prop_name->c_str();
-  return true;
-}
-
 static const ui::Button *find_material_slot_button_at(const ARegion *region,
                                                       const wmEvent *event,
-                                                      MaterialSlotTarget *r_target)
+                                                      PaintSlotTarget *r_target)
 {
   return find_button_at(region, event, [&](const ui::Button &but) {
     if (but.type == ui::ButtonType::ViewItem) {
       return false;
     }
-    MaterialSlotTarget target;
-    if (!material_slot_button_target(but, &target)) {
+    PaintSlotTarget target;
+    if (!paint_slot_button_target_get(but, &target) || target.idcode != ID_MA) {
       return false;
     }
-    *r_target = std::move(target);
+    *r_target = target;
     return true;
   });
 }
@@ -656,7 +562,7 @@ class BrushTextureSlotDropTarget : public ui::DropTargetInterface {
   bool assign_dragged_texture(bContext &C, Tex &tex) const
   {
     Brush *brush = BKE_paint_brush(BKE_paint_get_active_from_context(&C));
-    if (brush == nullptr || !paint_texture_target_owner_editable(&brush->id)) {
+    if (brush == nullptr || !paint_slot_owner_editable(&brush->id)) {
       return false;
     }
     /* A linked brush can never reference a local texture, same as the browser slot targets. */
@@ -666,7 +572,7 @@ class BrushTextureSlotDropTarget : public ui::DropTargetInterface {
     PointerRNA brush_ptr = RNA_id_pointer_create(&brush->id);
     PropertyRNA *slot_prop = RNA_struct_find_property(
         &brush_ptr, use_mask_slot_ ? "mask_texture" : "texture");
-    if (!assign_id_to_owner_prop(C, brush_ptr, slot_prop, tex.id, "Assign Texture")) {
+    if (!paint_slot_assign_id_to_prop(C, brush_ptr, slot_prop, tex.id, "Assign Texture")) {
       return false;
     }
     ED_paint_texture_assignment_finalize(&C, brush_ptr.owner_id, &tex, false);
@@ -683,7 +589,7 @@ class BrushTextureSlotDropTarget : public ui::DropTargetInterface {
     if (brush == nullptr) {
       return false;
     }
-    if (!paint_texture_target_owner_editable(&brush->id)) {
+    if (!paint_slot_owner_editable(&brush->id)) {
       *r_disabled_hint = TIP_("Cannot edit linked brush data");
       return false;
     }
@@ -890,29 +796,15 @@ static Material *resolve_drag_material(bContext *C, const wmDrag &drag)
 
 /**
  * Drop target for material source slots: the Brush Material tab's source and the Shape tools'
- * own MATERIAL rows. Brush slots keep going through
- * #PAINT_OT_material_paint_source_material_set (so the brush is made local and its preset
- * snapshot follows); Shape slots are written directly to their #PaintShapeTexture property, as
- * the Shape keeps its own source and has no brush to touch.
+ * own MATERIAL rows. Brush slots go through #paint_slot_assign_material_to_brush (so the brush is
+ * made local and its preset snapshot follows); Shape slots are written directly to their
+ * #PaintShapeTexture property, as the Shape keeps its own source and has no brush to touch.
  */
 class MaterialSlotDropTarget : public ui::DropTargetInterface {
-  MaterialSlotTarget target_;
-
-  /** A Shape Layer owner must be a layered material: a plain material has no stack or row to
-   * bake. Local drags can be checked before the drop; asset drags are validated after import. */
-  bool material_is_acceptable(const Material &ma, const char **r_disabled_hint) const
-  {
-    if (target_.owner == MaterialSlotOwner::Shape && target_.propname == "layer_owner" &&
-        !BKE_paint_layers_is_layered(ma))
-    {
-      *r_disabled_hint = TIP_("Layer Material must be a layered material");
-      return false;
-    }
-    return true;
-  }
+  PaintSlotTarget target_;
 
  public:
-  explicit MaterialSlotDropTarget(MaterialSlotTarget target) : target_(std::move(target)) {}
+  explicit MaterialSlotDropTarget(PaintSlotTarget target) : target_(std::move(target)) {}
 
   bool can_drop(bContext & /*C*/,
                 const wmDrag &drag,
@@ -920,7 +812,8 @@ class MaterialSlotDropTarget : public ui::DropTargetInterface {
   {
     if (WM_drag_is_ID_type(&drag, ID_MA)) {
       const Material *ma = id_cast<const Material *>(WM_drag_get_local_ID(&drag, ID_MA));
-      return ma == nullptr || material_is_acceptable(*ma, r_disabled_hint);
+      /* A local drag carries its material, so it can be checked before the drop. */
+      return ma == nullptr || paint_slot_material_acceptable(target_, *ma, r_disabled_hint);
     }
     if (drag.type == WM_DRAG_ASSET_LIST) {
       const wmDragAssetListItem *item = first_material_item_in_list(drag);
@@ -930,8 +823,8 @@ class MaterialSlotDropTarget : public ui::DropTargetInterface {
       /* The list may only carry external assets, which are not imported yet. Their layered check
        * runs in #on_drop, after the import. */
       if (!item->is_external && item->asset_data.local_id != nullptr) {
-        return material_is_acceptable(*id_cast<const Material *>(item->asset_data.local_id),
-                                      r_disabled_hint);
+        return paint_slot_material_acceptable(
+            target_, *id_cast<const Material *>(item->asset_data.local_id), r_disabled_hint);
       }
       return true;
     }
@@ -942,8 +835,8 @@ class MaterialSlotDropTarget : public ui::DropTargetInterface {
   {
     const std::string material_name = WM_drag_get_item_name(
         const_cast<wmDrag *>(&drag_info.drag_data));
-    if (target_.owner == MaterialSlotOwner::Shape) {
-      if (target_.propname == "layer_owner") {
+    if (target_.owner == PaintSlotOwner::Shape) {
+      if (paint_slot_is_layer_owner(target_)) {
         return fmt::format(fmt::runtime(TIP_("Assign layered material \"{}\" to shape")),
                            material_name);
       }
@@ -964,36 +857,21 @@ class MaterialSlotDropTarget : public ui::DropTargetInterface {
       return false;
     }
 
-    if (target_.owner == MaterialSlotOwner::Shape) {
+    if (C == nullptr) {
+      return false;
+    }
+    if (target_.owner == PaintSlotOwner::Shape) {
       const char *disabled_hint = nullptr;
-      if (!material_is_acceptable(*ma, &disabled_hint)) {
-        BKE_report(C ? CTX_wm_reports(C) : nullptr, RPT_ERROR, disabled_hint);
+      if (!paint_slot_material_acceptable(target_, *ma, &disabled_hint)) {
+        BKE_report(CTX_wm_reports(C), RPT_ERROR, disabled_hint);
         return false;
       }
       PointerRNA ptr = target_.ptr;
-      PropertyRNA *prop = RNA_struct_find_property(&ptr, target_.propname.c_str());
-      if (prop == nullptr) {
-        return false;
-      }
-      if (C == nullptr) {
-        return false;
-      }
-      return assign_id_to_owner_prop(
-          *C, ptr, prop, ma->id, "Assign Material to Shape");
+      return paint_slot_assign_id_to_prop(
+          *C, ptr, target_.prop, ma->id, "Assign Material to Shape");
     }
 
-    PointerRNA props = WM_operator_properties_create("PAINT_OT_material_paint_source_material_set");
-    RNA_int_set(&props, "session_uid", int(ma->id.session_uid));
-    RNA_string_set(&props, "name", ma->id.name + 2);
-
-    const wmOperatorStatus status = WM_operator_name_call(
-        C,
-        "PAINT_OT_material_paint_source_material_set",
-        wm::OpCallContext::ExecDefault,
-        &props,
-        nullptr);
-    WM_operator_properties_free(&props);
-    return (status & OPERATOR_FINISHED) != 0;
+    return paint_slot_assign_material_to_brush(*C, *ma);
   }
 };
 
@@ -1003,7 +881,7 @@ std::unique_ptr<ui::DropTargetInterface> material_slot_drop_target_get(
   if (!C || !region || !event) {
     return nullptr;
   }
-  MaterialSlotTarget target;
+  PaintSlotTarget target;
   if (!find_material_slot_button_at(region, event, &target)) {
     return nullptr;
   }
@@ -1093,7 +971,7 @@ Tex *ED_paint_texture_property_assign_image(bContext *C,
   /* The wrapping path takes real refcount side effects before the assignment; a non-editable
    * (linked / library-override) owner can never take them (the generated setter refuses it
    * silently), so don't leave them dangling. */
-  if (ptr.owner_id && !paint_texture_target_owner_editable(ptr.owner_id)) {
+  if (ptr.owner_id && !paint_slot_owner_editable(ptr.owner_id)) {
     return nullptr;
   }
 
@@ -1356,7 +1234,7 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
     if (wrap_in_texture_) {
       /* A texture target belongs to a brush (Curve Patch slots, Face Set color map); the
        * assignment edits that brush, so linked data must not take it. */
-      if (target_ptr_.owner_id && !paint_texture_target_owner_editable(target_ptr_.owner_id)) {
+      if (target_ptr_.owner_id && !paint_slot_owner_editable(target_ptr_.owner_id)) {
         *r_disabled_hint = TIP_("Cannot edit linked brush data");
         return false;
       }
@@ -1435,7 +1313,7 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
       return false;
     }
     PointerRNA target_ptr = target_ptr_;
-    if (!assign_id_to_owner_prop(*C, target_ptr, target_prop_, tex->id, "Assign Texture")) {
+    if (!paint_slot_assign_id_to_prop(*C, target_ptr, target_prop_, tex->id, "Assign Texture")) {
       return false;
     }
     ED_paint_texture_assignment_finalize(C, target_ptr.owner_id, tex, false);
@@ -1798,7 +1676,7 @@ class CurvePatchTextureListDropTarget : public ui::DropTargetInterface {
   {
     /* Asset-editable linked brushes (the Essentials brushes, for instance) are editable the same
      * way the slot add/remove operators allow; other linked data is not. */
-    if (target_.brush == nullptr || !paint_texture_target_owner_editable(&target_.brush->id)) {
+    if (target_.brush == nullptr || !paint_slot_owner_editable(&target_.brush->id)) {
       *r_disabled_hint = TIP_("Cannot edit linked brush data");
       return false;
     }
@@ -1849,7 +1727,7 @@ class CurvePatchTextureListDropTarget : public ui::DropTargetInterface {
   {
     const wmDrag &drag = effective_drag(drag_info.drag_data);
     Brush *brush = target_.brush;
-    if (brush == nullptr || !paint_texture_target_owner_editable(&brush->id)) {
+    if (brush == nullptr || !paint_slot_owner_editable(&brush->id)) {
       return false;
     }
     Main *bmain = CTX_data_main(C);
@@ -2012,4 +1890,6 @@ void DROP_IMAGE_register_dropboxes()
   }
 }
 
-}
+/** \} */
+
+}  // namespace blender

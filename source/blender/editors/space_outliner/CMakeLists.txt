@@ -41,6 +41,7 @@ set(SRC
   stack_layer/outliner_stack_drop_actions.cc
   stack_layer/outliner_stack_source.cc
   stack_layer/outliner_stack_source_paint_layers.cc
+  stack_layer/outliner_stack_slot_clipboard.cc
   stack_layer/outliner_stack_source_shape_keys.cc
   stack_layer/tree_display_stack_layers.cc
   stack_layer/tree_element_stack_layer.cc

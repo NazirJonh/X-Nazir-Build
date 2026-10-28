@@ -37,6 +37,7 @@
 #include "UI_interface_layout.hh"
 
 #include "interface_intern.hh"
+#include "interface_paint_slot_clipboard.hh"
 
 #include "RNA_access.hh"
 #include "RNA_path.hh"
@@ -589,6 +590,12 @@ bool popup_context_menu_for_button(bContext *C, Button *but, const wmEvent *even
   layout.operator_context_set(wm::OpCallContext::InvokeDefault);
 
   const bool is_disabled = but->flag & BUT_DISABLED;
+
+  /* Paint slot copy/paste: the paint panels' specialized image and material browsers offer
+   * carrying their assignment to another slot through the context menu. */
+  if (!is_disabled && paint_slot_context_menu_add(C, *but, layout)) {
+    layout.separator();
+  }
 
   if (is_disabled) {
     /* Suppress editing commands. */

@@ -65,6 +65,7 @@ set(SRC
   interface_layout.cc
   interface_ops.cc
   interface_ops_color.cc
+  interface_paint_slot_clipboard.cc
   interface_panel.cc
   interface_query.cc
   regions/interface_region_color_picker.cc

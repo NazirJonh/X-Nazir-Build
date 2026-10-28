@@ -327,6 +327,35 @@ class OUTLINER_MT_context_menu(Menu):
                 if bpy.ops.outliner.stack_layer_mask_paste.poll():
                     layout.operator(
                         "outliner.stack_layer_mask_paste", text="Paste Mask", icon='PASTEDOWN')
+                # Carry a slot's assigned data-block to another slot: the channels of the row (an
+                # image) or a Material row's source. The clipboard is the paint slots' own, so a
+                # copy from a panel paste onto a row and the other way around both work.
+                if bpy.ops.outliner.stack_layer_image_copy.poll():
+                    layout.operator_menu_enum(
+                        "outliner.stack_layer_image_copy",
+                        "channel",
+                        text="Copy Image",
+                        icon='COPYDOWN',
+                    )
+                if bpy.ops.outliner.stack_layer_image_paste.poll():
+                    layout.operator_menu_enum(
+                        "outliner.stack_layer_image_paste",
+                        "channel",
+                        text="Paste Image",
+                        icon='PASTEDOWN',
+                    )
+                if bpy.ops.outliner.stack_layer_material_copy.poll():
+                    layout.operator(
+                        "outliner.stack_layer_material_copy",
+                        text="Copy Material",
+                        icon='COPYDOWN',
+                    )
+                if bpy.ops.outliner.stack_layer_material_paste.poll():
+                    layout.operator(
+                        "outliner.stack_layer_material_paste",
+                        text="Paste Material",
+                        icon='PASTEDOWN',
+                    )
                 layout.separator()
                 # The verbs below bake and cannot be undone; each poll answers for the rows the
                 # menu would act on, so only the one that fits is listed.

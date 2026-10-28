@@ -23,9 +23,18 @@
 
 namespace blender {
 
+struct bContext;
+struct EnumPropertyItem;
+struct ID;
 struct Main;
 struct Material;
 struct MaterialPaintLayer;
+struct PointerRNA;
+struct PropertyRNA;
+struct ReportList;
+
+/** The channel a paint record belongs to; defined in `DNA_scene_types.h`. */
+enum eMaterialPaintChannel : int8_t;
 
 namespace ed::outliner {
 
@@ -59,6 +68,31 @@ bool paint_layers_edit_target_clear(Material &material);
  * plus the FileHandler fallback for files no built-in action takes.
  */
 std::unique_ptr<StackDropHandler> paint_layers_drop_handler_create();
+
+/** The icon the channel menu shows for \a channel, the one its enum item uses. */
+int paint_channel_icon(int channel);
+
+/**
+ * The channel enum items the image-assign popup offers: the material's channel set, minus the
+ * custom slot, each with #paint_channel_icon.
+ */
+const EnumPropertyItem *stack_channel_image_assign_channel_itemf(bContext *C,
+                                                                 PointerRNA *ptr,
+                                                                 PropertyRNA *prop,
+                                                                 bool *r_free);
+
+/**
+ * Why an image cannot land on \a layer's \a channel, reported to \a reports, or true when it can:
+ * the one answer the drop popup and a clipboard paste give. \a layer may be null when the image
+ * would create a row of its own, in which case only the material's channel set is checked.
+ */
+bool stack_image_assign_check(const Material &material,
+                              const MaterialPaintLayer *layer,
+                              eMaterialPaintChannel channel,
+                              ReportList *reports);
+
+/** True when \a material takes a paste; reports why it does not otherwise. */
+bool stack_clipboard_material_editable_check(const Material &material, ReportList *reports);
 
 /**
  * The Material Symbols codepoints `space_outliner.py` repeats by hand for its header buttons.

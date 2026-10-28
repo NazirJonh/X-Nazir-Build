@@ -79,6 +79,10 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_drop);
   WM_operatortype_append(OUTLINER_OT_stack_layer_id_drop);
   WM_operatortype_append(OUTLINER_OT_stack_layer_channel_image_assign);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_image_copy);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_image_paste);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_material_copy);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_material_paste);
 
   WM_operatortype_append(OUTLINER_OT_show_one_level);
   WM_operatortype_append(OUTLINER_OT_show_active);

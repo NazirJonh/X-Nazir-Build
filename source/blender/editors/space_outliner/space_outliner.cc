@@ -582,7 +582,7 @@ void outliner_tool_header_visibility_sync(bContext * /*C*/,
      * re-initializing the area's regions -- freeing UI blocks and re-laying them out -- leaves the
      * strip without its rectangle until some later resize. `AREA_FLAG_REGION_SIZE_UPDATE` is what
      * `wm_draw_window_offscreen` -> `ED_area_update_region_sizes` processes, giving the region its
-     * rectangle on the very next draw. */
+     * rectangle, and the handlers a live change otherwise never grants it, on the very next draw. */
     ED_area_tag_region_size_update(area, &region);
     ED_region_tag_redraw(&region);
   }

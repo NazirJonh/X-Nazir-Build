@@ -599,11 +599,10 @@ void OUTLINER_OT_stack_layer_mask_image(wmOperatorType *ot)
    * next click must offer the browser again, not re-add the image of the last one. A script names
    * one, and the redo panel keeps the value of its own run.
    *
-   * The runtime variant of the definition: an operator type is registered at startup, after RNA is
-   * up, and the build only links the runtime half of the definition API (see RNA_def_pointer's
-   * #ifndef RNA_RUNTIME in rna_define.cc). */
-  PropertyRNA *image_prop = RNA_def_pointer_runtime(
-      ot->srna, "image", RNA_Image, "Image", "Image the mask reads its coverage from");
+   * A name, not an ID pointer: operator properties refuse ID pointers
+   * (#STRUCT_NO_DATABLOCK_IDPROPERTIES), so the exec looks the image up by name. */
+  PropertyRNA *image_prop = RNA_def_string(
+      ot->srna, "image", nullptr, MAX_ID_NAME - 2, "Image", "Name of the image the mask reads");
   RNA_def_property_flag(image_prop, PROP_SKIP_SAVE);
 }
 

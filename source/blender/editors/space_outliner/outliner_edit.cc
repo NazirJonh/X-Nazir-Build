@@ -325,6 +325,7 @@ void OUTLINER_OT_item_openclose(wmOperatorType *ot)
  * \{ */
 
 static void do_item_rename(ARegion *region,
+                           const SpaceOutliner &space_outliner,
                            TreeElement *te,
                            TreeStoreElem *tselem,
                            ReportList *reports)
@@ -357,12 +358,27 @@ static void do_item_rename(ARegion *region,
            TSE_GENERIC_LABEL,
            TSE_GPENCIL_EFFECT_BASE,
            TSE_SHAPE_KEY_BASE,
-           /* Stack rows rename through #OUTLINER_OT_stack_layer_rename: their `te->name` is a
-            * copy of the row name, so an in-row text field would write into a too-small buffer. */
-           TSE_STACK_LAYER,
+           /* A stack sub-row is named by the data-block or section it stands for; only a stack
+            * layer row carries a name of its own. */
            TSE_STACK_ITEM))
   {
     BKE_report(reports, RPT_INFO, "Not an editable name");
+  }
+  else if (tselem->type == TSE_STACK_LAYER) {
+    /* The rename field types into the row's own storage (#StackRow::name_buffer); the display
+     * copy `te->name` is exactly as long as the current name, and a longer one typed over it
+     * would run off the allocation. The row's `tselem->id` is the stack's owner, so the same
+     * editability question the ID rows answer below answers for it; a row without name storage
+     * has no name of its own. */
+    if (tselem->id != nullptr && ID_IS_EDITABLE(tselem->id) &&
+        !ID_IS_OVERRIDE_LIBRARY(tselem->id) &&
+        outliner_stack_row_name_buffer(space_outliner, tselem->nr) != nullptr)
+    {
+      add_textbut = true;
+    }
+    else {
+      BKE_report(reports, RPT_INFO, "Not an editable name");
+    }
   }
   else if (ELEM(tselem->type, TSE_STRIP, TSE_STRIP_DATA, TSE_STRIP_DUP)) {
     BKE_report(reports, RPT_INFO, "Strip names are not editable from the Outliner");
@@ -404,7 +420,11 @@ void item_rename_fn(bContext *C,
                     TreeStoreElem *tselem)
 {
   ARegion *region = CTX_wm_region(C);
-  do_item_rename(region, te, tselem, reports);
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return;
+  }
+  do_item_rename(region, *space_outliner, te, tselem, reports);
 }
 
 static TreeElement *outliner_item_rename_find_active(const SpaceOutliner *space_outliner,
@@ -466,7 +486,7 @@ static wmOperatorStatus outliner_item_rename_invoke(bContext *C,
     outliner_scroll_view(space_outliner, region, delta_y);
   }
 
-  do_item_rename(region, te, TREESTORE(te), op->reports);
+  do_item_rename(region, *space_outliner, te, TREESTORE(te), op->reports);
 
   return OPERATOR_FINISHED;
 }

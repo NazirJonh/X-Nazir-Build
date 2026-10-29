@@ -21,6 +21,10 @@ from bl_ui.properties_material_paint_layers import (
     draw_material_mask_coverage_item,
     draw_material_mask_item,
 )
+# The brush glyph of the New Layered Material button: the same Material Symbols codepoint the Stack
+# Layers rows and Add menu use (`GLYPH_BRUSH` there, pinned by
+# `glyph_constants_stay_in_step_with_space_outliner`).
+from bl_ui.space_outliner import GLYPH_BRUSH
 
 
 class MATERIAL_MT_context_menu(Menu):
@@ -132,6 +136,15 @@ class EEVEE_MATERIAL_PT_context_material(MaterialButtonsPanel, Panel):
 
             col.separator()
 
+            # A glyph icon where the font provides one, the built-in icon otherwise (background
+            # mode), like the Stack Layers Add buttons in the Outliner.
+            if glyph := bpy.app.icons.glyph(GLYPH_BRUSH):
+                col.operator("material.new_layered", text="", icon_value=glyph)
+            else:
+                col.operator("material.new_layered", text="", icon='ADD')
+
+            col.separator()
+
             col.menu("MATERIAL_MT_context_menu", icon='DOWNARROW_HLT', text="")
 
             if is_sortable:
@@ -144,7 +157,6 @@ class EEVEE_MATERIAL_PT_context_material(MaterialButtonsPanel, Panel):
 
         if ob:
             row.template_ID(ob, "active_material", new="material.new")
-            row.operator("material.new_layered", text="", icon='ADD')
 
             if slot:
                 row.prop(slot, "link", icon_only=True)

@@ -422,7 +422,10 @@ wmOperatorStatus stack_row_mask_image_exec(bContext *C, wmOperator *op)
   if (ordinal < 0) {
     return OPERATOR_CANCELLED;
   }
-  Image *image = static_cast<Image *>(RNA_pointer_get(op->ptr, "image").data);
+  char image_name[MAX_ID_NAME - 2];
+  RNA_string_get(op->ptr, "image", image_name);
+  Image *image = id_cast<Image *>(
+      BKE_libblock_find_name(CTX_data_main(C), ID_IM, image_name));
   if (image == nullptr) {
     BKE_report(op->reports, RPT_ERROR, "No image picked");
     return OPERATOR_CANCELLED;

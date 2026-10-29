@@ -2378,7 +2378,17 @@ void ED_area_update_region_sizes(wmWindowManager *wm, wmWindow *win, ScrArea *ar
     if (region.flag & RGN_FLAG_POLL_FAILED) {
       continue;
     }
+    const bool was_visible = region.runtime->visible;
     region_evaluate_visibility(&region);
+
+    /* A region that just became visible here gets its rectangle but no handlers: #ED_area_init
+     * only adds those to regions already visible, so a live change (the Outliner's tool header)
+     * would draw with every event dropped. Adding them twice is harmless, see
+     * #ed_default_handlers. */
+    if (region.runtime->visible && !was_visible && region.runtime->handlers.is_empty()) {
+      ed_default_handlers(
+          wm, area, &region, &region.runtime->handlers, region.runtime->type->keymapflag);
+    }
 
     /* region size may have changed, init does necessary adjustments */
     if (region.runtime->type->init) {

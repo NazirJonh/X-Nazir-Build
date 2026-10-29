@@ -1182,6 +1182,14 @@ static wmOperatorStatus sculpt_cursor_button_exec_exec(bContext *C, wmOperator *
     return OPERATOR_CANCELLED;
   }
 
+  /* Redraw the region the button gizmo lives in, so the row shows the state the target operator
+   * just wrote: the notifier a plain RNA write sends (`NC_SCENE | ND_TOOLSETTINGS`) does not reach
+   * the 3D Viewport window-region listener, and the buttons re-evaluate their active state only in
+   * the region's draw. A broadcast notifier would repaint every region of every window instead. */
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+
   /* Forward the target's status unchanged, including #OPERATOR_RUNNING_MODAL (the target may have
    * gone modal; the window manager keeps tracking it on its own). */
   return result;

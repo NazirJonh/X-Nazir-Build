@@ -38,6 +38,7 @@
 
 #include "BKE_context.hh"
 #include "BKE_editmesh.hh"
+#include "BKE_icons.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
@@ -1876,6 +1877,18 @@ class PaintLayersStackSource final : public StackSource,
   {
     Material *material = BKE_object_material_get(&object, object.actcol);
     return (material != nullptr) ? &material->id : nullptr;
+  }
+
+  /** The brush glyph of the New Layered Material button (`GLYPH_BRUSH` imported from
+   * `space_outliner.py` by `properties_material.py`), so the button reads as "this object has a
+   * layered material" the way the rest of Blender names one; the built-in icon stays as the
+   * headless fallback. */
+  int focus_button_icon() const override
+  {
+    if (const int icon_id = BKE_icon_glyph_ensure(paint_glyph::BRUSH)) {
+      return icon_id;
+    }
+    return StackSource::focus_button_icon();
   }
 
   ID *owner_get(const StackReadContext &ctx, const StackFocus &focus) const override

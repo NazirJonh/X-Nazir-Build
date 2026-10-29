@@ -606,10 +606,10 @@ static void sculpt_cursor_buttons_refresh(const bContext *C, wmGizmoGroup *gzgro
 }
 
 /* Rebuild the pool when the button row changes: the #UserDef collection itself (add/remove/move/
- * clear) or any of its items (name, icon, operator, enabled, ...). The active state of a built-in
- * button (pin and such) is a ToolSettings change: it sends an NC_SCENE notifier and a regular
- * redraw, and #sculpt_cursor_buttons_draw_prepare re-evaluates it on every redraw, so it needs no
- * subscription here. */
+ * clear) or any of its items (name, icon, operator, enabled, ...). The active state of a button
+ * (pin and such) is deliberately not subscribed to here: #sculpt_cursor_buttons_draw_prepare
+ * re-evaluates it on every redraw, and #SCULPT_OT_cursor_button_exec - the only path that changes
+ * it - tags that redraw itself. */
 static void sculpt_cursor_buttons_message_subscribe(const bContext *C,
                                                     wmGizmoGroup *gzgroup,
                                                     wmMsgBus *mbus)

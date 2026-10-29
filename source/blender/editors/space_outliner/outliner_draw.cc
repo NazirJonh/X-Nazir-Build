@@ -748,6 +748,16 @@ static void scenes__collection_set_flag_recursive_fn(bContext *C, void *poin, vo
   outliner_collection_set_flag_recursive_fn(C, nullptr, collection, propname);
 }
 
+/* The storage a Stack Layers row's rename field types into, shared by the button that opens the
+ * field and the callback that applies it; null for any other row and for a row that lost it. */
+static char *stack_row_name_buffer(const SpaceOutliner &space_outliner,
+                                   const TreeStoreElem &tselem)
+{
+  return (tselem.type == TSE_STACK_LAYER) ?
+             outliner_stack_row_name_buffer(space_outliner, tselem.nr) :
+             nullptr;
+}
+
 static void namebutton_fn(bContext *C, TreeStoreElem *tselem, const char *oldname)
 {
   Main *bmain = CTX_data_main(C);
@@ -998,6 +1008,19 @@ static void namebutton_fn(bContext *C, TreeStoreElem *tselem, const char *oldnam
         case TSE_ACTION_SLOT: {
           WM_event_add_notifier(C, NC_ID | NA_RENAME, nullptr);
           undo_str = CTX_N_(BLT_I18NCONTEXT_OPERATOR_DEFAULT, "Rename Action Slot");
+          break;
+        }
+        case TSE_STACK_LAYER: {
+          /* The rename field typed into the row's own storage, not into `te->name`; hand the new
+           * name to the stack, which applies it and rebuilds the rows around the changed one. */
+          const int ordinal = tselem->nr;
+          if (const char *typed = stack_row_name_buffer(*space_outliner, *tselem)) {
+            char newname[MAX_NAME];
+            STRNCPY_UTF8(newname, typed);
+            if (outliner_stack_row_rename(C, *space_outliner, ordinal, newname)) {
+              undo_str = CTX_N_(BLT_I18NCONTEXT_OPERATOR_DEFAULT, "Rename Stack Layer");
+            }
+          }
           break;
         }
         case TSE_SHAPE_KEY_BLOCK: {
@@ -2312,11 +2335,30 @@ static void outliner_buttons(const bContext *C,
   BLI_assert(tselem->flag & TSE_TEXTBUT);
   /* If we add support to rename Sequence, need change this. */
 
+  /* A Stack Layers row indents its name by the hierarchy and the preview, which `te->xs` lacks. */
+  const bool stack_row = (tselem->type == TSE_STACK_LAYER);
+  /* The stack row types into its own storage, not into the display copy `te->name`, which is
+   * exactly as long as the current name and would overflow on a longer one. The pointer only has
+   * to outlive this draw pass; the callback re-reads the buffer instead of keeping it. */
+  const char *edit_name = te->name;
+  if (stack_row) {
+    const SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+    edit_name = space_outliner ? stack_row_name_buffer(*space_outliner, *tselem) : nullptr;
+    if (edit_name == nullptr) {
+      /* The row lost its storage since the rename began; give up rather than type into nothing. */
+      tselem->flag &= ~TSE_TEXTBUT;
+      return;
+    }
+  }
+
   if (tselem->type == TSE_EBONE) {
     len = sizeof(EditBone::name);
   }
   else if (tselem->type == TSE_MODIFIER) {
     len = sizeof(ModifierData::name);
+  }
+  else if (stack_row) {
+    len = MAX_NAME;
   }
   else if (tselem->id && GS(tselem->id->name) == ID_LI) {
     len = sizeof(Library::filepath);
@@ -2325,8 +2367,6 @@ static void outliner_buttons(const bContext *C,
     len = MAX_ID_NAME - 2;
   }
 
-  /* A Stack Layers row indents its name by the hierarchy and the preview, which `te->xs` lacks. */
-  const bool stack_row = (tselem->type == TSE_STACK_LAYER);
   spx = stack_row ? te->name_xs : int(te->xs + 1.8f * UI_UNIT_X);
   dx = region->v2d.cur.xmax - (spx + restrict_column_width + 0.2f * UI_UNIT_X);
 
@@ -2337,7 +2377,7 @@ static void outliner_buttons(const bContext *C,
                 stack_row ? te->name_ys : te->ys,
                 dx,
                 UI_UNIT_Y - 1,
-                (void *)te->name,
+                (void *)edit_name,
                 1.0,
                 float(len),
                 "");

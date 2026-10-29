@@ -23,7 +23,7 @@ def has_selected_ids_in_context(context):
 # `outliner_stack_source_paint_layers.cc` (the Add menu and the rows use the same glyphs).
 # `glyph_constants_stay_in_step_with_space_outliner` in that file's test pins the C++ values, so a
 # change there fails the test and sends the reader here.
-_GLYPH_BRUSH = 0xE3AE
+GLYPH_BRUSH = 0xE3AE
 _GLYPH_FILL = 0xE997
 _GLYPH_GRADIENT = 0xE3E9
 
@@ -78,7 +78,7 @@ class OUTLINER_HT_tool_header(Header):
             row = layout.row(align=True)
             # The brush glyph, shared with the Paint rows and the Add menu; the built-in fallback is
             # the same icon those name, so a background-mode button reads as they do.
-            _stack_add_button(row, bpy.app.icons.glyph(_GLYPH_BRUSH), 'BRUSH_DATA',
+            _stack_add_button(row, bpy.app.icons.glyph(GLYPH_BRUSH), 'BRUSH_DATA',
                               'PAINT', "Add Paint Layer")
             # The Fill glyph (Material Symbols "colors"), the one the Fill rows and the Add menu
             # use; the built-in icon stands in where no glyph icon exists (background mode).
@@ -105,11 +105,10 @@ class OUTLINER_HT_tool_header(Header):
             # The shared menu rather than an enum of one operator: it carries the image mask too,
             # whose entry opens the ID Browser instead of running an add.
             row = layout.row(align=True)
-            # The dropdown arrow is drawn only when a menu button is wider than it is tall, and an
-            # icon on its own is square: the button is scaled wide enough to carry the mask glyph
-            # and the arrow beside it (widget_menubut keeps 0.6 of the height for the arrow).
-            row.scale_x = 1.8
-            row.menu("OUTLINER_MT_stack_layer_mask_add", text="", icon='MOD_MASK')
+            # An enum menu button, like the corrections above: a header only widens the button
+            # enough for the dropdown arrow on that path, and a plain `layout.menu` stays square.
+            row.operator_menu_enum("outliner.stack_layer_mask_add", "type", text="",
+                                   icon='MOD_MASK')
 
             # An empty folder to put layers into; layers join one by dropping them onto it.
             layout.separator()
@@ -146,6 +145,41 @@ class OUTLINER_MT_stack_layer_mask_add(Menu):
         # the mask (see Material.paint_layer_add_image_mask). Nothing is created before a pick.
         layout.operator(
             "outliner.stack_layer_mask_image", text="Add Image Mask", icon='IMAGE_DATA')
+
+
+class OUTLINER_OT_stack_layer_mask_add(bpy.types.Operator):
+    """Add a mask to the active layer"""
+    bl_idname = "outliner.stack_layer_mask_add"
+    bl_label = "Add Mask"
+    # The nested operators run without their own undo step, so this one carries it. The image
+    # entry only opens the ID Browser and finishes nothing, so it records none.
+    bl_options = {'UNDO', 'INTERNAL'}
+
+    type: bpy.props.EnumProperty(
+        name="Mask",
+        items=(
+            ('BLACK', "Add Black Mask", "Add a mask that hides the layer until it is painted in",
+             'MOD_MASK', 0),
+            ('WHITE', "Add White Mask", "Add a mask that shows the layer everywhere",
+             'CLIPUV_HLT', 1),
+            ('IMAGE', "Add Image Mask", "Give the layer a mask that reads an image",
+             'IMAGE_DATA', 2),
+        ),
+        # Never remembered: the entry picked last time must not be what a script gets by default.
+        options={'SKIP_SAVE'},
+    )
+
+    @classmethod
+    def poll(cls, _context):
+        return bpy.ops.outliner.stack_layer_mask.poll()
+
+    def execute(self, _context):
+        if self.type == 'IMAGE':
+            # Opens the ID Browser; the pick makes the mask (see Material.paint_layer_add_image_mask).
+            bpy.ops.outliner.stack_layer_mask_image('INVOKE_DEFAULT')
+            return {'CANCELLED'}
+        # `add` is always passed: see OUTLINER_MT_stack_layer_mask_add.
+        return bpy.ops.outliner.stack_layer_mask(add=True, initial_color=self.type)
 
 
 class OUTLINER_MT_stack_layer_advanced(Menu):
@@ -871,6 +905,7 @@ classes = (
     OUTLINER_HT_header,
     OUTLINER_HT_tool_header,
     OUTLINER_MT_stack_layer_mask_add,
+    OUTLINER_OT_stack_layer_mask_add,
     OUTLINER_MT_stack_layer_advanced,
     OUTLINER_MT_editor_menus,
     OUTLINER_MT_edit_datablocks,

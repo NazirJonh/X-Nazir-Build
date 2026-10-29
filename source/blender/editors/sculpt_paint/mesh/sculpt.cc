@@ -1042,6 +1042,10 @@ static int sculpt_brush_needs_normal(const SculptSession &ss, const Brush &brush
           (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_SCENE_PROJECT &&
            brush.project_ray_direction_type == BRUSH_PROJECT_RAY_DIRECTION_PLANE_NORMAL) ||
           (mask_tex->tex && mask_tex->brush_map_mode == MTEX_MAP_MODE_AREA) ||
+          /* The PBR stroke samples #mask_mtex through the same #StrokeCache.brush_local_mat frame;
+           * without this gate an Area-mapped mask collapses the matrix and paints nothing, like
+           * #material_paint_uses_area_mapping below. */
+          (brush.mask_mtex.tex && brush.mask_mtex.brush_map_mode == MTEX_MAP_MODE_AREA) ||
           brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE ||
           material_paint_uses_area_mapping(brush) || brush_uses_topology_rake(ss, brush) ||
           BKE_brush_has_cube_tip(&brush, PaintMode::Sculpt));

@@ -4532,13 +4532,14 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
                            "for secondary (inverted) strokes");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
 
-  /* Inverts the texture itself, so it applies wherever the Alpha texture is sampled. */
+  /* Inverts the texture itself, so it applies wherever the Alpha or Height texture is sampled. */
   prop = RNA_def_property(srna, "use_source_invert", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "source_invert", 1);
   RNA_def_property_ui_text(prop,
                            "Invert Source",
-                           "Invert the sampled source texture value (only used by the Alpha "
-                           "channel's entry in BrushMaterialPaint.channels)");
+                           "Invert the sampled source texture value (only used by the Alpha and "
+                           "Height channels' entries in BrushMaterialPaint.channels; Height "
+                           "mirrors the relief around its flat neutral)");
   RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
 
   prop = RNA_def_property(srna, "normal_color", PROP_FLOAT, PROP_COLOR);

@@ -659,8 +659,10 @@ static float3 curve_patch_channel_flat_color(const paint::image::ImagePaintTarge
    * both paint engines share (#material::scalar_as_color). Erasing pulls it to the channel
    * default instead of the slider, the same rule `do_paint_material_brush()` follows. */
   const float value = invert ? BKE_paint_material_channel_default_value(target.channel) :
-                               BKE_paint_material_channel_value(
-                                   brush_paint, settings, target.channel);
+                               BKE_paint_material_channel_value_encode(
+                                   target.channel,
+                                   BKE_paint_material_channel_value(
+                                       brush_paint, settings, target.channel));
   return float3(value);
 }
 

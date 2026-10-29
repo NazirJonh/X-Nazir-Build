@@ -224,6 +224,23 @@ class PaintLayersCorrectionBakeTest : public PaintLayersTestBase {
     copy_v4_v4(r_rgba, pixel);
   }
 
+  /** The float texel of \a image's buffer, the format a Height map is baked and painted in. */
+  static void map_pixel_float(Image &image, const int x, const int y, float r_rgba[4])
+  {
+    ImageUser iuser;
+    BKE_imageuser_default(&iuser);
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(&image, &iuser, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    ASSERT_NE(ibuf->float_data(), nullptr);
+    const int channels = ibuf->channels == 0 ? 4 : ibuf->channels;
+    const float *p = ibuf->float_data() + (int64_t(y) * ibuf->x + x) * channels;
+    float pixel[4] = {p[0], channels > 1 ? p[1] : p[0], channels > 2 ? p[2] : p[0],
+                      channels > 3 ? p[3] : 1.0f};
+    BKE_image_release_ibuf(&image, ibuf, lock);
+    copy_v4_v4(r_rgba, pixel);
+  }
+
   /**
    * What \a corrections lay together over nothing at the canvas \a size: the pre-merge reference
    * the merged map is compared against. \a surface is the context a 3D Gradient reads.
@@ -679,6 +696,42 @@ TEST_F(PaintLayersCorrectionBakeTest, a_scalar_channel_gradient_merges_its_value
     EXPECT_NEAR(pixel[1], expected, 2.0f / 255.0f);
     EXPECT_NEAR(pixel[2], expected, 2.0f / 255.0f);
     EXPECT_NEAR(pixel[3], 1.0f, 2.0f / 255.0f);
+  }
+}
+
+TEST_F(PaintLayersCorrectionBakeTest, a_height_gradient_correction_stays_in_the_merge)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = add_paint_layer("Row", add_solid_image("RowMap"));
+  const float start[3] = {0.0f, 0.5f, 0.0f};
+  const float end[3] = {1.0f, 0.5f, 0.0f};
+  MaterialPaintLayer *gradient = add_gradient_correction(
+      *row, "Gradient", MA_PAINT_LAYER_GRADIENT_SPACE_UV, start, end);
+  /* Height has to be in the material's set and laid by the correction, or the merge would drop the
+   * Height write silently (the bug the bake of a layer-paint channel closes). */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_HEIGHT, true));
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, gradient, PAINT_MATERIAL_CHANNEL_HEIGHT), nullptr);
+  /* Relief ends -0.5..0.5, stored as 0.25..0.75. */
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_channel_scalars(
+      *ma, *gradient, PAINT_MATERIAL_CHANNEL_HEIGHT, -0.5f, 0.5f));
+
+  const Vector<MaterialPaintLayer *> run = {gradient};
+  MaterialPaintLayer *merged = BKE_paint_layers_corrections_bake(*bmain, *ma, run, nullptr);
+  ASSERT_NE(merged, nullptr);
+
+  Image *map = merged_map(*merged, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_NE(map, nullptr);
+  /* Height is baked as a float map - the continuous field, not the byte factor every other scalar
+   * channel gets - and ramps between the correction's own ends along the line. */
+  for (const int x : {1, 4, 7}) {
+    float pixel[4];
+    map_pixel_float(*map, x, 2, pixel);
+    const float t = (float(x) + 0.5f) / 8.0f;
+    const float expected = 0.25f + (0.75f - 0.25f) * t;
+    EXPECT_NEAR(pixel[0], expected, 1e-4f);
+    EXPECT_NEAR(pixel[1], expected, 1e-4f);
+    EXPECT_NEAR(pixel[2], expected, 1e-4f);
+    EXPECT_GT(pixel[3], 0.5f);
   }
 }
 

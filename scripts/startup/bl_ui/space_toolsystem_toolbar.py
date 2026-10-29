@@ -3399,10 +3399,14 @@ class _defs_sculpt_paint_shape:
         if (not region_is_header and
                 settings is not None and
                 canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}):
-            from bl_ui.properties_paint_common import draw_material_paint_channel_toggles
+            from bl_ui.properties_paint_common import (
+                material_paint_layered_active,
+                draw_material_paint_channel_toggles,
+            )
             draw_material_paint_channel_toggles(
                 layout, settings.brush, settings,
                 show_custom=(canvas_source == 'MATERIAL_PAINT'),
+                layered=material_paint_layered_active(context),
             )
 
         # Last, so the collapsible Shape Options sits below the channel toggles instead of

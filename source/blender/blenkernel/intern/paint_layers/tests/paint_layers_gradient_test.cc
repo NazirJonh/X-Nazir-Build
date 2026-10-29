@@ -167,6 +167,24 @@ TEST_F(PaintLayersGradient, a_scalar_channel_gets_a_black_to_white_value_ramp)
   EXPECT_FLOAT_EQ(rough->gradient_ramp->data[1].a, 1.0f);
 }
 
+TEST_F(PaintLayersGradient, a_height_channel_value_ramp_spans_the_signed_relief)
+{
+  MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
+      *ma, nullptr, nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  MaterialPaintLayerChannel *height = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_NE(height, nullptr);
+  /* The generator authors relief, not storage: a fresh Height ramp spans -1..1 (the ramp's stops
+   * hold the normalized 0..1 parameter of that range), and the composite encodes the sampled
+   * relief to the map's 0..1 around the neutral (see the CPU/graph parity test). */
+  EXPECT_FLOAT_EQ(height->value[0], -1.0f);
+  EXPECT_FLOAT_EQ(height->value[1], 1.0f);
+  ASSERT_NE(height->gradient_ramp, nullptr);
+  EXPECT_FLOAT_EQ(height->gradient_ramp->data[0].r, 0.0f);
+  EXPECT_FLOAT_EQ(height->gradient_ramp->data[1].r, 1.0f);
+}
+
 TEST_F(PaintLayersGradient, sync_copies_the_base_color_stop_layout)
 {
   MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(

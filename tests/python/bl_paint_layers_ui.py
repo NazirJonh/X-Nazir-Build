@@ -145,6 +145,20 @@ class PaintLayersUiTest(unittest.TestCase):
         record = self.channel_record(layer, 'SPECULAR')
         self.assertEqual(record.state, 'ENABLED')
 
+    def test_channel_toggle_creates_a_height_record_at_the_neutral_mid(self):
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.material.paint_layers.active = layer
+        self.material.paint_layers_channels = {'BASE_COLOR', 'HEIGHT'}
+        self.assertNotIn('HEIGHT', {record.channel for record in layer.channels})
+        with bpy.context.temp_override(material=self.material):
+            result = bpy.ops.material.paint_layer_channel_toggle(
+                marker=layer.marker, channel='HEIGHT', enable=True)
+        self.assertEqual(result, {'FINISHED'})
+        record = self.channel_record(layer, 'HEIGHT')
+        self.assertEqual(record.state, 'ENABLED')
+        # The neutral the stack blends around: turning Height on lays flat, it does not dent.
+        self.assertAlmostEqual(record.value[0], 0.5, places=5)
+
     def test_channel_toggle_disable_keeps_the_record_and_map(self):
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
         self.material.paint_layers.active = layer
@@ -181,6 +195,43 @@ class PaintLayersUiTest(unittest.TestCase):
         for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
             self.assertIn(channel_id, offered, channel_id)
 
+    def test_height_joins_the_brush_only_for_a_layered_material_canvas(self):
+        from bl_ui.properties_paint_common import (
+            _material_paint_canvas_channels,
+            _material_paint_toggle_ids,
+        )
+
+        # The vertex canvas has no per-vertex Height, layered material or not.
+        self.assertNotIn('HEIGHT', _material_paint_canvas_channels(show_custom=True, layered=True))
+        # A plain Material canvas has no Principled socket to hold Height.
+        self.assertNotIn('HEIGHT', _material_paint_canvas_channels(show_custom=False, layered=False))
+        # A layered Material canvas paints it: its row owns the channel map.
+        self.assertIn('HEIGHT', _material_paint_canvas_channels(show_custom=False, layered=True))
+
+        paint = SimpleNamespace(visible_material_channels={'BASE_COLOR', 'METALLIC', 'HEIGHT'})
+        _visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom=False, layered=True)
+        self.assertIn('HEIGHT', toggle_ids)
+        _visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom=False, layered=False)
+        self.assertNotIn('HEIGHT', toggle_ids)
+
+        # The same rule reaches the writable set the sync check compares: a layered material
+        # writes Height through its row, a plain one has no map to write.
+        from bl_ui.properties_paint_common import material_paint_writable_channels
+
+        channels = [
+            SimpleNamespace(channel=channel_id, use=True)
+            for channel_id in ('BASE_COLOR', 'HEIGHT')
+        ]
+        brush = SimpleNamespace(
+            material_paint=SimpleNamespace(channels=channels, use_alpha_map=True))
+        mode_settings = SimpleNamespace(canvas_source='MATERIAL')
+        writable = material_paint_writable_channels(
+            brush, paint, mode_settings, layered=True)
+        self.assertIn('HEIGHT', writable)
+        writable = material_paint_writable_channels(
+            brush, paint, mode_settings, layered=False)
+        self.assertNotIn('HEIGHT', writable)
+
     def test_add_channel_menu_offers_only_set_channels_without_a_record(self):
         from bl_operators.material_paint_layers import _paint_layer_addable_channel_items
 
@@ -198,19 +249,25 @@ class PaintLayersUiTest(unittest.TestCase):
         self.material.paint_layers_channels = {'METALLIC'}
         self.assertEqual(set(self.material.paint_layers_channels), {'BASE_COLOR', 'METALLIC'})
 
-    def test_heavy_hint_counts_set_records_including_disabled(self):
-        from bl_ui.properties_material_paint_layers import material_layer_weight_record_count
+    def test_heavy_hint_weighs_channels_the_row_wires(self):
+        from bl_ui.properties_material_paint_layers import material_layer_channel_weight
 
-        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
-        self.assertEqual(material_layer_weight_record_count(self.material, layer), 5)
+        # A fresh six-channel material: the row carries a record per set channel, but none has a map
+        # or any alpha, so the row wires nothing and the hint stays off.
         self.material.paint_layers_channels = {
-            'BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'NORMAL', 'AO', 'SPECULAR'}
-        layer.channel_add(channel='SPECULAR')
-        layer.channel_set_enabled(channel='SPECULAR', enabled=False)
-        self.assertEqual(material_layer_weight_record_count(self.material, layer), 6)
-        # Dropping the set to one channel leaves the records on the row but counts only that channel.
+            'BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'NORMAL', 'HEIGHT', 'AO'}
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.assertEqual(len(layer.channels), 6)
+        self.assertEqual(material_layer_channel_weight(layer), 0)
+
+        # Every record that takes part -- a map here -- adds one; six of them raise the hint.
+        for record in layer.channels:
+            record.image = bpy.data.images.new("Map_{:s}".format(record.channel), 4, 4)
+        self.assertEqual(material_layer_channel_weight(layer), 6)
+
+        # Dropping the set to one channel leaves the records and their maps in place but weighs one.
         self.material.paint_layers_channels = {'BASE_COLOR'}
-        self.assertEqual(material_layer_weight_record_count(self.material, layer), 1)
+        self.assertEqual(material_layer_channel_weight(layer), 1)
 
     def test_layer_widget_draws_a_toggle_per_visible_channel(self):
         from bl_ui.properties_material_paint_layers import draw_material_layer_channels
@@ -241,8 +298,8 @@ class PaintLayersUiTest(unittest.TestCase):
         layout = _MockLayout()
         draw_material_channel_set(layout, self.material)
         drawn = [call[1][2] for call in layout.calls if call[0] == "prop_enum"]
-        self.assertEqual(drawn, ['BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'NORMAL', 'ALPHA',
-                                 'AO', 'EMISSION', 'SPECULAR'])
+        self.assertEqual(drawn, ['BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'NORMAL', 'HEIGHT',
+                                 'ALPHA', 'AO', 'EMISSION', 'SPECULAR'])
 
 
 class PaintLayersMaskUiTest(unittest.TestCase):

@@ -1787,21 +1787,23 @@ def brush_settings(layout, context, brush, popover=False):
 # range callback and by the Custom channel's user-defined range.
 
 # Display order for Material Paint toggles and channel panels (independent of DNA enum indices).
-# Height has no write backend yet (no Principled socket, no vertex storage) and is omitted until
-# one exists; leaving it here would offer a toggle that silently no-ops.
+# One order serves the material's channel set, a layer row's channel switches and the brush panel.
+# Height is listed after Normal, the place the layer stack offers it.
 _MATERIAL_PAINT_CHANNEL_UI_ORDER = (
     'BASE_COLOR',
     'METALLIC',
     'ROUGHNESS',
     'NORMAL',
+    'HEIGHT',
     'ALPHA',
     'AO',
     'EMISSION',
     'SPECULAR',
 )
-# Channels that can own a Principled paint map on the Material canvas. Height, AO and Custom have
-# no Principled socket, so they cannot be created as maps and are excluded (see
-# #material_paint_missing_map_channels).
+# Channels that can own a Principled paint map on the Material (image) canvas. Height, AO and
+# Custom have no Principled socket, so they cannot be created as maps and are excluded (see
+# #material_paint_missing_map_channels); the brush panel filters them out of that canvas with this
+# same set, mirroring #MaterialPaintChannelInfo.supports_image_paint.
 _MATERIAL_PAINT_MAP_CHANNELS = (
     'BASE_COLOR',
     'METALLIC',
@@ -1858,17 +1860,46 @@ _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS = {
 }
 
 
-def _material_paint_toggle_ids(paint, show_custom):
+def _material_paint_canvas_channels(show_custom, *, layered=False):
+    """The channels a PBR Paint canvas can store, in display order.
+
+    ``show_custom`` selects the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color) canvas, whose
+    per-vertex storage cannot hold a texture-map-only channel; the Material (image) canvas is
+    limited to #_MATERIAL_PAINT_MAP_CHANNELS, the channels with a Principled paint map. Height is
+    in neither: it has no per-vertex storage and no Principled socket, so a plain material's brush
+    never paints it (a layer row's Height record is edited through the layer panel).
+
+    ``layered`` adds Height for the Material (image) canvas when the active material is a Stack
+    Layers material: its row owns the channel maps, so a brush stroke paints Height there
+    (mirrors #MaterialPaintChannelInfo.supports_layer_paint). It never applies to the vertex
+    canvas.
+    """
+    supported = _MATERIAL_PAINT_VERTEX_CHANNELS if show_custom else _MATERIAL_PAINT_MAP_CHANNELS
+    return [
+        channel_id for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER
+        if channel_id in supported or (layered and not show_custom and channel_id == 'HEIGHT')
+        ]
+
+
+def material_paint_layered_active(context):
+    """Whether the context's active object has a Stack Layers material.
+
+    Its Material (image) canvas paints Height as well as the Principled channels, because the
+    row owns the channel maps (mirrors #MaterialPaintChannelInfo.supports_layer_paint).
+    """
+    ob = getattr(context, "active_object", None)
+    material = getattr(ob, "active_material", None) if ob is not None else None
+    return bool(material is not None and material.is_layered)
+
+
+def _material_paint_toggle_ids(paint, show_custom, *, layered=False):
     """Return ``(visible, toggle_ids)``: the visible channel set and the channels offered as toggles.
 
-    ``show_custom`` is only True for the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color) canvas,
-    so it also selects the vertex-storable channel subset.
+    The offered channels are the ones the canvas can store (#_material_paint_canvas_channels).
+    ``show_custom`` also draws the vertex-only Custom channel, which has no entry in the display
+    order. ``layered`` adds Height for a Stack Layers Material canvas.
     """
-    channel_ids = _MATERIAL_PAINT_CHANNEL_UI_ORDER
-    if show_custom:
-        channel_ids = [
-            channel_id for channel_id in channel_ids if channel_id in _MATERIAL_PAINT_VERTEX_CHANNELS
-        ]
+    channel_ids = _material_paint_canvas_channels(show_custom, layered=layered)
     # Falling back to every channel keeps the list usable if the panel is drawn for a mode without
     # its own visibility set; the paint helpers still gate what a stroke writes.
     visible = set(paint.visible_material_channels) if paint is not None else set(channel_ids)
@@ -1878,17 +1909,18 @@ def _material_paint_toggle_ids(paint, show_custom):
     return visible, toggle_ids
 
 
-def draw_material_paint_channel_toggles(layout, brush, paint, *, show_custom):
+def draw_material_paint_channel_toggles(layout, brush, paint, *, show_custom, layered=False):
     """Draw only the channel enable toggles of the PBR Paint UI (one or more channels).
 
     For tools that write into the brush's material channels without being a brush themselves,
-    such as the Sculpt Color Gradient tool.
+    such as the Sculpt Color Gradient tool. ``layered`` marks a Stack Layers active material, whose
+    Material canvas also paints Height.
     """
     material_paint = brush.material_paint if brush is not None else None
     if material_paint is None:
         return
     channels = {channel.channel: channel for channel in material_paint.channels}
-    _visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom)
+    _visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom, layered=layered)
     _draw_material_paint_channel_toggles(
         layout, channels, toggle_ids, _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS,
     )
@@ -1993,7 +2025,8 @@ def draw_gradient_tool_channels(layout, context, brush, paint, *, show_custom,
     if material_paint is None:
         return
     channels = {channel.channel: channel for channel in material_paint.channels}
-    _visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom)
+    _visible, toggle_ids = _material_paint_toggle_ids(
+        paint, show_custom, layered=material_paint_layered_active(context))
     ramps = {record.channel: record for record in paint_mode.gradient_value_ramps}
 
     _gradient_tool_channel_rows(layout, channels, toggle_ids, ramps, paint_mode)
@@ -2588,8 +2621,8 @@ def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True
             "paint.material_channel_source_clear", text="", icon='X',
         ).channel = channel.channel
 
-    # Layer channels share this drawer but have no inversion; only a brush's Alpha does.
-    if (channel.channel == 'ALPHA' and texture is not None and
+    # Layer channels share this drawer but have no inversion; only a brush's Alpha and Height do.
+    if (channel.channel in {'ALPHA', 'HEIGHT'} and texture is not None and
             "use_source_invert" in channel.bl_rna.properties):
         # Inverts the texture itself, so it holds for every read of Alpha (stroke mask and Mask
         # value alike). Matched to the browser's two-unit row height like the buttons above.
@@ -2691,12 +2724,8 @@ def draw_material_paint_visibility_popover(_context, layout, paint, paint_mode_s
         return
 
     is_vertex_paint = paint_mode_settings.canvas_source == 'MATERIAL_PAINT'
-    channel_ids = _MATERIAL_PAINT_CHANNEL_UI_ORDER
-    if is_vertex_paint:
-        channel_ids = [
-            identifier for identifier in channel_ids
-            if identifier in _MATERIAL_PAINT_VERTEX_CHANNELS
-        ]
+    channel_ids = _material_paint_canvas_channels(
+        is_vertex_paint, layered=material_paint_layered_active(_context))
 
     col = layout.column()
     for identifier in channel_ids:
@@ -2781,15 +2810,16 @@ def material_paint_missing_map_channels(ob, brush, paint, paint_mode_settings):
     return missing
 
 
-def material_paint_writable_channels(brush, paint, paint_mode_settings):
+def material_paint_writable_channels(brush, paint, paint_mode_settings, *, layered=False):
     """Channel identifiers \a brush actually writes to for the Material (image) canvas.
 
-    Mirrors #BKE_paint_material_channel_writes_to_target combined with the
-    `MaterialPaintChannelInfo.socket_name` gate that excludes Custom for the image canvas (see
-    `paint.cc`'s `BKE_paint_material_image_targets_get`): enabled, listed in
-    `visible_material_channels`, and - for Alpha only - `use_alpha_map`. Custom and Height have
-    no Principled socket for this canvas: Custom is omitted from
-    `_MATERIAL_PAINT_CHANNEL_UI_ORDER`; Height is omitted until a displacement backend exists.
+    Mirrors #BKE_paint_material_channel_writes_to_target: enabled, listed in
+    `visible_material_channels`, and - for Alpha only - `use_alpha_map`, restricted to the channels
+    the canvas can store (#_material_paint_canvas_channels, the ones with a Principled paint map).
+    Height, AO and Custom have no Principled socket, so `supports_image_paint` is clear for them and
+    a plain material's canvas never writes them; ``layered`` marks a Stack Layers active material,
+    whose row owns the maps so Height joins the writable set (mirrors
+    #MaterialPaintChannelInfo.supports_layer_paint).
     If the C++ conditions above change, update this function to match.
 
     Returns ``None`` when there is no usable brush/channel configuration (distinct from an empty
@@ -2801,7 +2831,7 @@ def material_paint_writable_channels(brush, paint, paint_mode_settings):
     channels = {channel.channel: channel for channel in material_paint.channels}
     visible = set(paint.visible_material_channels)
     writable = set()
-    for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
+    for channel_id in _material_paint_canvas_channels(show_custom=False, layered=layered):
         channel = channels.get(channel_id)
         if channel is None or not channel.use or channel_id not in visible:
             continue
@@ -3081,7 +3111,8 @@ def draw_material_paint_channels(
     # Labels may be clipped in very tight cells; the short labels below keep controls readable.
     # `show_custom` is only passed True for the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color)
     # canvas, so it also selects the vertex-storable channel subset here.
-    visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom)
+    visible, toggle_ids = _material_paint_toggle_ids(
+        paint, show_custom, layered=material_paint_layered_active(context))
     toggle_labels = _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS
     if is_mask_target:
         # A Mask stroke reads one channel at most (see #BrushMaterialPaint.mask_source), the
@@ -3199,9 +3230,13 @@ def draw_material_paint_channels(
     # them for Material Paint; their `use`/visibility bits can still be set from a prior Material
     # (image) canvas session, so this is an explicit `not show_custom` guard, not just membership in
     # `visible`.
-    for channel_id in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'AO', 'ALPHA', 'NORMAL', 'EMISSION',
-                       'SPECULAR'):
+    for channel_id in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'AO', 'ALPHA', 'NORMAL', 'HEIGHT',
+                       'EMISSION', 'SPECULAR'):
         if show_custom and channel_id in ('NORMAL', 'EMISSION'):
+            continue
+        if channel_id == 'HEIGHT' and channel_id not in toggle_ids:
+            # Height is offered only on a layered material (see #_material_paint_canvas_channels);
+            # its `use` and visibility bits can outlive that canvas, so they alone do not decide.
             continue
         channel = channels[channel_id]
         if is_mask_target:

@@ -62,8 +62,10 @@ def _mask_item_ui_state(context, item):
 def material_layer_visible_channels(material):
     """The channels of the material's global set the layer widget can draw, in display order.
 
-    Height and Custom have no channel widget and are absent from the display order, so a set that
-    names them still offers them nowhere in a layer; the records themselves are never dropped.
+    A layer row offers a switch for every channel of the material's set, Height included: its record
+    is edited through the row's own channel panel. Custom has no channel widget and is absent from
+    the display order, so a set that names it still offers it nowhere in a layer; the records
+    themselves are never dropped.
     """
     if material is None:
         return []
@@ -73,15 +75,16 @@ def material_layer_visible_channels(material):
     ]
 
 
-def material_layer_weight_record_count(material, layer):
-    """How many of the layer's channel records take part in the material's set.
+def material_layer_channel_weight(layer):
+    """How many channels the row takes part in, so how many it wires in the generated tree.
 
-    Every record whose channel is in the set costs generated nodes, DISABLED or not; above
+    The row's generated nodes follow the channels it takes part in, not the records it carries: a
+    record with neither a map nor any alpha wires nothing and costs no node, so a fresh row of a
+    six-channel material is not heavy. The measure is C++'s
+    (#BKE_paint_layers_layer_channel_weight, the generator's own participation rule); above
     #_MATERIAL_PAINT_LAYER_HEAVY_CHANNEL_COUNT the row is heavy enough to bake in AUTO mode.
     """
-    return sum(
-        1 for record in layer.channels
-        if material.paint_layers_channel_in_set(channel=record.channel))
+    return layer.channel_weight
 
 
 def draw_material_channel_set(layout, material):
@@ -574,8 +577,7 @@ def draw_material_layer_channels(layout, context, material, layer):
             layout.label(text="No enabled channels", icon='INFO')
         return
 
-    if material_layer_weight_record_count(
-            material, layer) >= _MATERIAL_PAINT_LAYER_HEAVY_CHANNEL_COUNT:
+    if material_layer_channel_weight(layer) >= _MATERIAL_PAINT_LAYER_HEAVY_CHANNEL_COUNT:
         layout.label(
             text="Six or more channels: the row becomes heavy and bakes in AUTO mode",
             icon='ERROR',

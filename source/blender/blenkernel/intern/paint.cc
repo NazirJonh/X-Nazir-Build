@@ -3872,7 +3872,9 @@ int BKE_paint_face_set_find_by_custom_color(const Mesh *mesh, const float color[
  * presence of these attributes.
  */
 /* Fields in order: channel, ui_name, attribute_name, socket_name, value_min, value_max, is_color,
- * supports_vertex_paint, supports_image_paint, slot_type, bake_float. */
+ * supports_vertex_paint, supports_image_paint, slot_type, bake_float, supports_layer_paint (the
+ * last three defaulted, set only for Height), stored_bias, stored_scale (identity by default,
+ * Height alone offsets and halves its relief on storage). */
 static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
     {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
      "Base Color",
@@ -3951,7 +3953,9 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      /* An arbitrary float attribute, whose range the user decides. */
      true},
     /* Height has no per-vertex display and no Principled input to resolve a map through; it needs
-     * a displacement/bump target before either canvas can take it. */
+     * a displacement/bump target before either canvas can take it. Its authored value is a signed
+     * relief around 0; storage (maps, graph, composite) is 0..1 around #PAINT_HEIGHT_NEUTRAL, and
+     * the encode/decode pair is the one seam between the two. */
     {PAINT_MATERIAL_CHANNEL_HEIGHT,
      "Height",
      "material_height",
@@ -3963,6 +3967,14 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      NODE_TEX_IMAGE_SLOT_NONE,
      /* A height field: 256 levels of it are the terraces displacement is known for. */
+     true,
+     /* No Principled socket to resolve a map through, but a layered material's row owns its own
+      * Height map, so a stroke can paint it there. */
+     true,
+     /* Stored = neutral + half the signed relief, so relief -1..1 fills the 0..1 map. */
+     PAINT_HEIGHT_NEUTRAL,
+     0.5f,
+     /* A continuous field: its row map is a float buffer. */
      true},
     {PAINT_MATERIAL_CHANNEL_ALPHA,
      "Alpha",
@@ -4034,6 +4046,33 @@ const MaterialPaintChannelInfo &BKE_paint_material_channel_info(
   return info;
 }
 
+float BKE_paint_material_channel_value_encode(const eMaterialPaintChannel channel,
+                                              const float relief)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  /* An encoded channel (Height) owns the authored range here: a typed value above 1 or a stale
+   * file value is clamped once, at the seam. An identity channel is already in the caller's
+   * domain; Custom's range is per scene (#PaintModeSettings.channel_custom_range) and cannot be
+   * re-clamped from the descriptor without narrowing it. */
+  const bool encoded = info.stored_bias != 0.0f || info.stored_scale != 1.0f;
+  const float authored = encoded ? math::clamp(relief, info.value_min, info.value_max) : relief;
+  return info.stored_bias + info.stored_scale * authored;
+}
+
+float BKE_paint_material_channel_value_decode(const eMaterialPaintChannel channel,
+                                              const float stored)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  BLI_assert(info.stored_scale != 0.0f);
+  return (stored - info.stored_bias) / info.stored_scale;
+}
+
+float BKE_paint_material_channel_delta_encode(const eMaterialPaintChannel channel,
+                                              const float relief_delta)
+{
+  return BKE_paint_material_channel_info(channel).stored_scale * relief_delta;
+}
+
 bool BKE_paint_material_channel_is_enabled(const BrushMaterialPaint &brush_paint,
                                            const PaintModeSettings &mode_settings,
                                            const int visible_material_channels,
@@ -4086,7 +4125,11 @@ bool BKE_paint_material_channel_writes_to_target(const BrushMaterialPaint &brush
    * the descriptor table, not to this rule. */
   const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
   if (mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) {
-    return info.supports_image_paint;
+    /* The Material (image) canvas. A layered material's row owns its channel maps, so
+     * #supports_layer_paint (Height) counts here even without a Principled backend. This asks only
+     * what the canvas can store; whether a target actually exists is decided where the stroke
+     * gathers its images, which honours #supports_layer_paint only for a layered material. */
+    return info.stores_image();
   }
   if (mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT) {
     return info.supports_vertex_paint;
@@ -4106,7 +4149,12 @@ uint32_t BKE_paint_shape_target_channels(const Paint &paint,
 
   uint32_t mask = 0;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    const bool supported = (kind == eShapeTargetKind::ImageMaps) ? info.supports_image_paint :
+    /* Image maps also carry the channels a layered material paints without a Principled backend
+     * (#supports_layer_paint, Height). The mask only names the channels a shape may write; whether
+     * a target exists is decided when the shape gathers its maps, which honours the flag only for
+     * a layered material. Vertex attributes keep the per-vertex set alone. */
+    const bool supported = (kind == eShapeTargetKind::ImageMaps) ?
+                               info.stores_image() :
                                                                    info.supports_vertex_paint;
     if (!supported) {
       continue;
@@ -4142,8 +4190,8 @@ float2 BKE_paint_material_channel_range(const PaintModeSettings &settings,
 MaterialPaintValueGradientMode BKE_paint_material_value_gradient_mode(const float value_min,
                                                                       const float value_max)
 {
-  /* A range that straddles zero has a meaningful "neutral" value to call out (e.g. a
-   * height/displacement channel); a range on one side of zero (e.g. [0,1] factors) does not. */
+  /* A range that straddles zero has a meaningful "neutral" value to call out (e.g. Height's
+   * signed relief); a range on one side of zero (e.g. the [0,1] factors) does not. */
   if (value_min < 0.0f && value_max > 0.0f) {
     return MaterialPaintValueGradientMode::Bipolar;
   }
@@ -4325,7 +4373,10 @@ float BKE_paint_material_channel_default_value(const eMaterialPaintChannel chann
     case PAINT_MATERIAL_CHANNEL_CUSTOM:
       return 0.5f;
     case PAINT_MATERIAL_CHANNEL_HEIGHT:
-      return 0.0f;
+      /* Stored-space neutral (relief 0), which is what maps, the composite and the eraser use:
+       * a fresh map starts flat and the eraser flattens back to it instead of carving down to
+       * zero. Matches #BKE_paint_layers_channel_bottom_color. */
+      return PAINT_HEIGHT_NEUTRAL;
     case PAINT_MATERIAL_CHANNEL_ALPHA:
       /* Neutral = fully opaque / no masking. */
       return 1.0f;
@@ -5225,7 +5276,9 @@ static PaintMaterialImagesEnsureResult paint_layers_images_ensure_writable_for_m
   const PaintLayersTargetMode mode = BKE_paint_layers_target_mode(&mode_settings);
   Vector<int> channels;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    if (!info.supports_image_paint || (channel_mask & (1u << int(info.channel))) == 0) {
+    if (!info.stores_image() ||
+        (channel_mask & (1u << int(info.channel))) == 0)
+    {
       continue;
     }
     PaintLayersTarget target;
@@ -5440,8 +5493,12 @@ static Vector<PaintMaterialImageTarget> paint_material_image_targets_get_for_mas
 
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (!info.supports_image_paint) {
-      /* No image backend for this channel yet, so there is no map to paint into. */
-      continue;
+      /* No Principled image backend for this channel. A layered material's row owns its maps, so a
+       * channel declared #supports_layer_paint (Height) resolves through the layer target below; a
+       * plain material has no map for it at all, so it is skipped here. */
+      if (!info.supports_layer_paint || BKE_paint_layers_active_material_get(&ob) == nullptr) {
+        continue;
+      }
     }
     if ((channel_mask & (1u << int(info.channel))) == 0) {
       continue;
@@ -5485,7 +5542,13 @@ static Vector<PaintMaterialImageTarget> paint_material_image_targets_get_for_mas
       target.value = 0.0f;
     }
     else {
-      target.value = BKE_paint_material_channel_value(*value_source, mode_settings, info.channel);
+      /* The target lives in storage (for Height, the encoded 0..1 map domain), while the brush
+       * holds the authored relief. This is the one seam: every writer below receives a stored
+       * value and needs no knowledge of the channel's encoding. */
+      const float relief = BKE_paint_material_channel_value(*value_source,
+                                                            mode_settings,
+                                                            info.channel);
+      target.value = BKE_paint_material_channel_value_encode(info.channel, relief);
     }
     targets.append(target);
   }

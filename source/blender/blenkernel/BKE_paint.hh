@@ -1295,6 +1295,15 @@ const PaintShapeSettings &BKE_paint_shape_settings_get(const ToolSettings &tool_
  * \{ */
 
 /**
+ * The stored value a Height map holds where its relief is flat (relief 0).
+ *
+ * Height is authored on a signed relief range (#MaterialPaintChannelInfo::value_min/value_max) but
+ * stored in a map around this neutral, like Normal's tangent is stored packed. The conversion is
+ * the channel's encode/decode pair, never a literal at the call sites.
+ */
+constexpr float PAINT_HEIGHT_NEUTRAL = 0.5f;
+
+/**
  * Static description of one material paint channel.
  *
  * \note The scalar range applies to the fixed channels only. #PAINT_MATERIAL_CHANNEL_CUSTOM
@@ -1360,6 +1369,44 @@ struct MaterialPaintChannelInfo {
    * rather than a painted map; every other row's bake is a byte texture like the maps it holds.
    */
   bool bake_float;
+  /**
+   * True when the channel can be painted into a Stack Layers material's own channel map even
+   * though it has no Principled image backend (#supports_image_paint clear). Height is the one
+   * such channel: a layered material's row owns its maps, so a stroke can write a Height map the
+   * Principled graph has no socket for.
+   *
+   * A capability of the layered (stack) canvas alone. Callers that resolve an actual stroke target
+   * honour it only when the object's active material is layered
+   * (#BKE_paint_layers_active_material_get); it never enables the channel on a plain material or
+   * the vertex canvas. False for every other channel.
+   */
+  bool supports_layer_paint = false;
+  /**
+   * Storage encoding of the channel: `stored = stored_bias + stored_scale * relief`.
+   *
+   * The user-facing value is a relief, while maps, graph and composite work in storage. The pair
+   * #BKE_paint_material_channel_value_encode / _decode is the only place this is applied; a channel
+   * whose storage equals its relief leaves both fields at their identity defaults. Height sets
+   * bias #PAINT_HEIGHT_NEUTRAL and scale 0.5, so relief -1..1 maps to stored 0..1 around 0.5.
+   */
+  float stored_bias = 0.0f;
+  float stored_scale = 1.0f;
+  /**
+   * True when a layered material's row keeps this channel's map as a float buffer rather than the
+   * byte map the factor channels use: the stored value is a continuous field (Height) that bytes
+   * would show as terraces, and may leave 0..1 where a byte map would clamp it.
+   */
+  bool map_float = false;
+
+  /**
+   * Whether the channel has a map a stroke can be stored in: a Principled image backend, or a
+   * layered material's own row map (#supports_layer_paint). The one predicate for "can this canvas
+   * hold the channel"; callers still decide per object whether a layered material exists.
+   */
+  constexpr bool stores_image() const
+  {
+    return supports_image_paint || supports_layer_paint;
+  }
 };
 
 /**
@@ -1370,6 +1417,25 @@ Span<MaterialPaintChannelInfo> BKE_paint_material_channels();
 
 /** The single descriptor for \a channel. */
 const MaterialPaintChannelInfo &BKE_paint_material_channel_info(eMaterialPaintChannel channel);
+
+/**
+ * Convert a channel value between its authored relief and its stored form.
+ *
+ * The authority is the channel's #MaterialPaintChannelInfo::stored_bias / stored_scale; for every
+ * channel but Height the two are the identity. Encode clamps relief to the channel's authored range,
+ * so out-of-range input (a typed value, an old file) is caught once here rather than in every
+ * consumer. Decode does not clamp: a float map may legally hold values a byte map cannot.
+ */
+float BKE_paint_material_channel_value_encode(eMaterialPaintChannel channel, float relief);
+float BKE_paint_material_channel_value_decode(eMaterialPaintChannel channel, float stored);
+
+/**
+ * Convert a relief difference (a stroke's amplitude, a shape's depth) into the same difference in
+ * storage. Only the scale applies, not the bias, and nothing is clamped: a delta is added to a
+ * level that is already stored, so one relief unit moves a Height map by the same amount whether a
+ * brush, a Fill or a shape lays it.
+ */
+float BKE_paint_material_channel_delta_encode(eMaterialPaintChannel channel, float relief_delta);
 
 /**
  * Returns whether \a channel is active for painting: `use` is set, the channel is listed in
@@ -1461,7 +1527,8 @@ short BKE_paint_material_channel_blend_mode(const BrushMaterialPaint &brush_pain
  * attribute is filled with, and what the eraser blends toward instead of an arbitrary brush
  * value. Base Color has no scalar default (0.0f); use #BrushMaterialPaint.base_color
  * for its reset value instead. For Normal, returns the Z of a flat tangent (1.0f); the full
- * flat tangent is `(0, 0, 1)`.
+ * flat tangent is `(0, 0, 1)`. For Height, returns the stored neutral (#PAINT_HEIGHT_NEUTRAL)
+ * the layered stack blends around, matching #BKE_paint_layers_channel_bottom_color.
  */
 float BKE_paint_material_channel_default_value(eMaterialPaintChannel channel);
 

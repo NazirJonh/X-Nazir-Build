@@ -181,9 +181,17 @@ float paint_mask_texture_coverage(const Brush &brush,
                                   const bke::BrushMaskLut *lut = nullptr);
 
 /**
+ * Whether \a channel's sampled texture can be inverted by #BrushMaterialPaintChannel.source_invert:
+ * Alpha (a mask) and Height (a relief mirrored around its neutral).
+ */
+bool channel_source_invertible(eMaterialPaintChannel channel);
+
+/**
  * Final value of a sampled scalar \a channel: clamped to \a range, and mirrored inside it first
- * when \a channel is Alpha with #BrushMaterialPaintChannel.source_invert set. The single place the
- * Alpha texture inversion happens, shared by every Sculpt and Image 2D scalar read.
+ * when \a channel is invertible (#channel_source_invertible) with
+ * #BrushMaterialPaintChannel.source_invert set. \a range is in storage, so for Height the mirror
+ * is around the stored neutral. The single place the texture inversion happens, shared by every
+ * Sculpt and Image 2D scalar read.
  */
 float scalar_source_finish(const BrushMaterialPaint &brush_paint,
                            eMaterialPaintChannel channel,

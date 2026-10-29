@@ -92,9 +92,79 @@ TEST(ShapeBlend, HeightAddAccumulatesDelta)
 
   float4 dst(0.0f, 0.0f, 0.0f, 1.0f);
   shape_blend_pixel(dst, ctx, ShapeSample{.stroke = 1.0f}, 1.0f, float2(0.0f));
-  EXPECT_NEAR(dst.x, 2.0f, 1e-5f);
-  EXPECT_NEAR(dst.y, 2.0f, 1e-5f);
-  EXPECT_NEAR(dst.z, 2.0f, 1e-5f);
+  EXPECT_NEAR(dst.x, 1.0f, 1e-5f);
+  EXPECT_NEAR(dst.y, 1.0f, 1e-5f);
+  EXPECT_NEAR(dst.z, 1.0f, 1e-5f);
+}
+
+TEST(ShapeBlend, HeightOnAFreshTexelRaisesCoverageFromTheNeutral)
+{
+  ShapeStyle style = flat_style();
+  style.flag = PAINT_SHAPE_USE_STROKE;
+  style.height_blend = PAINT_SHAPE_HEIGHT_ADD;
+  style.height_depth = 2.0f;
+  style.stroke_channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = true;
+  style.stroke_channels[PAINT_MATERIAL_CHANNEL_HEIGHT].strength = 1.0f;
+
+  ShapeBlendContext ctx;
+  ctx.style = &style;
+  ctx.channel = int(PAINT_MATERIAL_CHANNEL_HEIGHT);
+
+  /* A fresh float Height texel is premultiplied-transparent. The shape has to raise its coverage or
+   * the composite would display nothing, and add its relief to the neutral mid rather than to
+   * zero. */
+  float4 dst(0.0f, 0.0f, 0.0f, 0.0f);
+  shape_blend_pixel(dst, ctx, ShapeSample{.stroke = 1.0f}, 1.0f, float2(0.0f));
+  EXPECT_NEAR(dst.w, 1.0f, 1e-5f);
+  /* The relief delta 2.0 is 1.0 in storage (scale 0.5); neutral 0.5 plus it = 1.5, premultiplied (coverage 1). */
+  EXPECT_NEAR(dst.x, 1.5f, 1e-5f);
+  EXPECT_NEAR(dst.y, 1.5f, 1e-5f);
+  EXPECT_NEAR(dst.z, 1.5f, 1e-5f);
+}
+
+TEST(ShapeBlend, HeightMaxAndReplaceTargetTheNeutralPlusTheRelief)
+{
+  for (const ePaintShapeHeightBlend mode :
+       {PAINT_SHAPE_HEIGHT_MAX, PAINT_SHAPE_HEIGHT_REPLACE})
+  {
+    ShapeStyle style = flat_style();
+    style.flag = PAINT_SHAPE_USE_STROKE;
+    style.height_blend = mode;
+    style.height_depth = 2.0f;
+    style.stroke_channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = true;
+    style.stroke_channels[PAINT_MATERIAL_CHANNEL_HEIGHT].strength = 1.0f;
+
+    ShapeBlendContext ctx;
+    ctx.style = &style;
+    ctx.channel = int(PAINT_MATERIAL_CHANNEL_HEIGHT);
+
+    /* Max and Replace converge to the stored neutral plus the stored relief, not to the relief around zero. */
+    float4 dst(0.0f, 0.0f, 0.0f, 0.0f);
+    shape_blend_pixel(dst, ctx, ShapeSample{.stroke = 1.0f}, 1.0f, float2(0.0f));
+    EXPECT_NEAR(dst.w, 1.0f, 1e-5f) << "mode=" << int(mode);
+    EXPECT_NEAR(dst.x, 1.5f, 1e-5f) << "mode=" << int(mode);
+  }
+}
+
+TEST(ShapeBlend, HeightNegativeDepthDepressesBelowTheNeutral)
+{
+  ShapeStyle style = flat_style();
+  style.flag = PAINT_SHAPE_USE_STROKE;
+  style.height_blend = PAINT_SHAPE_HEIGHT_ADD;
+  style.height_depth = -0.5f;
+  style.stroke_channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = true;
+  style.stroke_channels[PAINT_MATERIAL_CHANNEL_HEIGHT].strength = 1.0f;
+
+  ShapeBlendContext ctx;
+  ctx.style = &style;
+  ctx.channel = int(PAINT_MATERIAL_CHANNEL_HEIGHT);
+
+  /* A flat opaque texel at the neutral: a relief of -0.5 is -0.25 in storage, so the shape digs
+   * the map below the neutral instead of only ever raising it. */
+  float4 dst(0.5f, 0.5f, 0.5f, 1.0f);
+  shape_blend_pixel(dst, ctx, ShapeSample{.stroke = 1.0f}, 1.0f, float2(0.0f));
+  EXPECT_NEAR(dst.x, 0.25f, 1e-5f);
+  EXPECT_NEAR(dst.w, 1.0f, 1e-5f);
 }
 
 TEST(ShapeBlend, FlatNormalKeepsEncodedFlat)

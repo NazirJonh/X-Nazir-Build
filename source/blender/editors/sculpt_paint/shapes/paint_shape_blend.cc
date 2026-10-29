@@ -19,6 +19,8 @@
 #include "BLI_math_vector.hh"
 #include "BLI_utildefines.h"
 
+#include "BKE_paint.hh"
+
 #include "../mesh/paint_material_blend.hh"
 
 namespace blender::ed::sculpt_paint::shape {
@@ -183,22 +185,31 @@ void shape_blend_pixel(float4 &dst,
   }
 
   if (pbr_channel == PAINT_MATERIAL_CHANNEL_HEIGHT) {
+    /* The shade step yields a signed relief delta; the map holds a stored level around the
+     * channel's neutral, so the delta crosses the channel's encode seam and the shape knows no
+     * literal of its own. In blend space the pixel is premultiplied (see #read_image_pixels), so
+     * the stored level is recovered by dividing the colour by the coverage; an empty texel starts
+     * from the neutral. ADD/SUB shift that level, MAX/REPLACE converge to the neutral plus the
+     * relief. The channel's `value` is not a base here: Height has no such control, and an
+     * untouched 0.0 must not carve the map down. The coverage accumulates like every other
+     * channel, or a first shape on a fresh row lays a height nothing displays. */
+    const float neutral = BKE_paint_material_channel_default_value(pbr_channel);
+    float map_alpha = math::clamp(dst.w, 0.0f, 1.0f);
+    float height = map_alpha > 0.0f ? dst.x / map_alpha : neutral;
     for (const ShapePart part : {ShapePart::Fill, ShapePart::Stroke}) {
       const ChannelWrite write = shade_channel(style, sample, part, pbr_channel, p_shape, ctx.tex_frame);
       const float alpha = write.alpha * shape_part_opacity(style, part) * factor * alpha_cov;
       if (alpha <= 0.0f) {
         continue;
       }
-      const PaintShapeChannelValue &entry = (part == ShapePart::Stroke) ?
-                                                style.stroke_channels[pbr_channel] :
-                                                style.fill_channels[pbr_channel];
-      float3 rgb(dst.x, dst.y, dst.z);
-      height_blend_apply(rgb, write.value.x * alpha, entry.value + write.value.x, alpha,
-                         style.height_blend);
-      dst.x = rgb.x;
-      dst.y = rgb.y;
-      dst.z = rgb.z;
+      const float delta = BKE_paint_material_channel_delta_encode(pbr_channel, write.value.x);
+      float3 rgb(height, height, height);
+      height_blend_apply(rgb, delta * alpha, neutral + delta, alpha, style.height_blend);
+      height = rgb.x;
+      map_alpha += alpha * (1.0f - map_alpha);
     }
+    const float stored = height * map_alpha;
+    dst = float4(stored, stored, stored, map_alpha);
     return;
   }
 

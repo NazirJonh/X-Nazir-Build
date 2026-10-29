@@ -284,10 +284,19 @@ bool BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask);
 
 /**
  * The channel set a fresh stack offers before any set is authored: the build default (Base Color,
- * Metallic, Roughness, Normal, AO). The default #MATERIAL_OT_new_layered proposes in its dialog,
- * and what a zero #Material::paint_layers_channels field derives.
+ * Metallic, Roughness, Normal, AO). What a zero #Material::paint_layers_channels field derives. The
+ * New Layered Material dialog proposes #BKE_paint_layers_new_material_channel_set instead, which
+ * adds Height.
  */
 uint16_t BKE_paint_layers_default_channel_set();
+
+/**
+ * The channel set a brand-new layered material starts from: the build default plus Height. Only the
+ * authoring path (#MATERIAL_OT_new_layered) uses it, so a stack that opens from a file without an
+ * authored set keeps #BKE_paint_layers_channel_set_mask_get's build default and never gains Height
+ * on its own. The extra channel is stored on creation, so a set read back is an authored one.
+ */
+uint16_t BKE_paint_layers_new_material_channel_set();
 
 /**
  * Freeze the derived channel set into #Material::paint_layers_channels when the field is still zero.
@@ -301,6 +310,16 @@ uint16_t BKE_paint_layers_default_channel_set();
  * A no-op when the field is already nonzero, so it is idempotent and never touches a layer record.
  */
 void BKE_paint_layers_channels_materialize(Material &ma);
+
+/**
+ * How many channels \a layer takes part in, the measure of the nodes it adds to the generated tree.
+ *
+ * Follows the same participation rule the generator uses (#paint_layer_row_participates), so a
+ * record that carries neither a map nor any alpha counts for nothing: it wires no channel and costs
+ * no node. The UI reads this to warn about a row heavy enough to bake in AUTO mode; a fresh row
+ * whose records are all empty weighs zero, however wide the material's channel set is.
+ */
+int BKE_paint_layers_layer_channel_weight(const Material &ma, const MaterialPaintLayer &layer);
 
 /**
  * Remove \a layer from \a ma, freeing it and, for a folder, everything it holds.

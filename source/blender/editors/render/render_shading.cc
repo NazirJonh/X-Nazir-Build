@@ -907,8 +907,8 @@ void MATERIAL_OT_new(wmOperatorType *ot)
 
 /**
  * The channels the dialog offers, one checkbox each, in the order the panels list them. CUSTOM is a
- * vertex-painting attribute and HEIGHT has no write backend yet, so a toggle for either would
- * silently no-op -- the same reason the channel panels never offer them.
+ * vertex-painting attribute, so a toggle for it would silently no-op -- the same reason the channel
+ * panels never offer it.
  *
  * Why booleans rather than one flag enum: an expanded flag enum is a row of exclusive buttons, and
  * adding a second one takes Shift; a checkbox per channel needs no key at all.
@@ -925,6 +925,7 @@ static const NewLayeredChannel new_layered_channels[] = {
     {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "channel_roughness", N_("Roughness")},
     {PAINT_MATERIAL_CHANNEL_SPECULAR, "channel_specular", N_("Specular")},
     {PAINT_MATERIAL_CHANNEL_NORMAL, "channel_normal", N_("Normal")},
+    {PAINT_MATERIAL_CHANNEL_HEIGHT, "channel_height", N_("Height")},
     {PAINT_MATERIAL_CHANNEL_ALPHA, "channel_alpha", N_("Alpha")},
     {PAINT_MATERIAL_CHANNEL_AO, "channel_ao", N_("AO")},
     {PAINT_MATERIAL_CHANNEL_EMISSION, "channel_emission", N_("Emission")},
@@ -1055,8 +1056,10 @@ void MATERIAL_OT_new_layered(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
   /* The channels the stack works with; the base layer takes part in the ticked ones only. Every
-   * checkbox is independent, Base Color included, but at least one must stay ticked. */
-  const uint16_t default_set = BKE_paint_layers_default_channel_set();
+   * checkbox is independent, Base Color included, but at least one must stay ticked. Height is on
+   * by default here only because a new material can be given it; a stack opened from a file keeps
+   * its own set (#BKE_paint_layers_channel_set_mask_get). */
+  const uint16_t default_set = BKE_paint_layers_new_material_channel_set();
   for (const NewLayeredChannel &entry : new_layered_channels) {
     RNA_def_boolean(ot->srna,
                     entry.prop_name,

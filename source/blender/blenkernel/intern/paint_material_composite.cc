@@ -2670,7 +2670,11 @@ bool BKE_paint_material_channel_tracks_content_alpha(const eMaterialPaintChannel
   if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
     return false;
   }
-  return BKE_paint_material_channel_info(channel).supports_image_paint;
+  /* A layered material paints a channel its row owns even without a Principled backend
+   * (#supports_layer_paint, Height): its map's alpha is the row's coverage, so the CPU composite
+   * and the generated graph must read it the same way. */
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  return info.stores_image();
 }
 
 bool BKE_paint_material_composite_stack_dimensions(

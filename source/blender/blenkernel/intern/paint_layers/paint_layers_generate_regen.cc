@@ -635,6 +635,10 @@ static void view_pass_empty_color(const int pass, float r_color[4])
       value[0] = value[1] = 0.5f;
       value[2] = 1.0f;
       break;
+    case PAINT_MATERIAL_CHANNEL_HEIGHT:
+      /* A flat relief, not the black a map at its deepest would show. */
+      value[0] = value[1] = value[2] = PAINT_HEIGHT_NEUTRAL;
+      break;
     default:
       break;
   }

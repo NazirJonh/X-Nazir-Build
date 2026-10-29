@@ -913,11 +913,22 @@ constexpr uint16_t PAINT_LAYERS_DEFAULT_CHANNEL_SET =
     (uint16_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL) |
     (uint16_t(1) << PAINT_MATERIAL_CHANNEL_AO);
 
+/** The build default plus Height, the set a stack created through the New Layered Material dialog
+ * starts from. Kept apart from #PAINT_LAYERS_DEFAULT_CHANNEL_SET so a file with no authored set
+ * (and therefore reading the build default) never gains Height by opening. */
+constexpr uint16_t PAINT_LAYERS_NEW_MATERIAL_CHANNEL_SET =
+    PAINT_LAYERS_DEFAULT_CHANNEL_SET | (uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT);
+
 }  // namespace
 
 uint16_t BKE_paint_layers_default_channel_set()
 {
   return PAINT_LAYERS_DEFAULT_CHANNEL_SET;
+}
+
+uint16_t BKE_paint_layers_new_material_channel_set()
+{
+  return PAINT_LAYERS_NEW_MATERIAL_CHANNEL_SET;
 }
 
 uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma)
@@ -976,6 +987,21 @@ int BKE_paint_layers_channel_clamp_to_set(const Material &ma, const int channel)
     }
   }
   return channel;
+}
+
+int BKE_paint_layers_layer_channel_weight(const Material &ma, const MaterialPaintLayer &layer)
+{
+  /* The generated node count of a row follows the channels it takes part in, not the records it
+   * carries: an unpainted record (no map, no alpha) contributes nothing to #wired_channels and so
+   * costs no node. Counting through #paint_layer_row_participates keeps this measure and the
+   * generator's own test in step, so the two cannot drift. */
+  int weight = 0;
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (paint_layer_row_participates(ma, layer, channel)) {
+      weight++;
+    }
+  }
+  return weight;
 }
 
 bool BKE_paint_layers_channel_set_enable(Material &ma,
@@ -2316,6 +2342,14 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
     record.value[1] = 0.5f;
     record.value[2] = 1.0f;
   }
+  if (channel == PAINT_MATERIAL_CHANNEL_HEIGHT) {
+    /* The stored neutral height the stack blends around, so a Fill that turns Height on lays flat
+     * instead of carving a dent to zero (#BKE_paint_layers_channel_bottom_color). A Paint row stays
+     * transparent either way (alpha stays zero). */
+    record.value[0] = PAINT_HEIGHT_NEUTRAL;
+    record.value[1] = PAINT_HEIGHT_NEUTRAL;
+    record.value[2] = PAINT_HEIGHT_NEUTRAL;
+  }
   if (paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_GENERATES)) {
     /* A generator's scalar channel ramps between these two ends; a fresh one spans the channel's
      * whole range. Base Color and the other colour channels read the gradient's ramp instead. */
@@ -2328,10 +2362,14 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
     }
   }
   /* A Fill correction's other channel starts at the colour it already lays, so switching one on
-   * changes nothing until its own value is edited. Normal keeps the flat tangent above: a Fill lays
-   * nothing there, and a map it grows later starts from that. */
+   * changes nothing until its own value is edited. Normal keeps the flat tangent and Height the
+   * neutral mid height above: a Fill lays nothing there, and the copied Base Color would read as a
+   * bent normal or a dent in the relief. */
   if (layer->role == MA_PAINT_LAYER_ROLE_EFFECT && layer->source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
-      !ELEM(channel, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_NORMAL))
+      !ELEM(channel,
+            PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+            PAINT_MATERIAL_CHANNEL_NORMAL,
+            PAINT_MATERIAL_CHANNEL_HEIGHT))
   {
     if (const MaterialPaintLayerChannel *base = paint_layer_channel_find(
             *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
@@ -3704,10 +3742,14 @@ void BKE_paint_layers_channel_bottom_color(const eMaterialPaintChannel channel, 
   switch (channel) {
     case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
     case PAINT_MATERIAL_CHANNEL_SPECULAR:
-    case PAINT_MATERIAL_CHANNEL_HEIGHT:
       /* A neutral mid value, so a partially covered scalar row fades towards the Principled
        * default rather than towards zero. */
       r_color[0] = r_color[1] = r_color[2] = 0.5f;
+      break;
+    case PAINT_MATERIAL_CHANNEL_HEIGHT:
+      /* The stored neutral that encodes relief 0, never a literal: an empty texel and a flat
+       * relief must agree. */
+      r_color[0] = r_color[1] = r_color[2] = PAINT_HEIGHT_NEUTRAL;
       break;
     case PAINT_MATERIAL_CHANNEL_NORMAL:
       /* Flat tangent-space: straight out of the surface. */

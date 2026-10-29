@@ -2045,6 +2045,17 @@ static bool rna_MaterialPaintLayer_is_anchor_point_reader_get(PointerRNA *ptr)
   return BKE_paint_layers_reads_anchor_point(*static_cast<const MaterialPaintLayer *>(ptr->data));
 }
 
+/** How many channels the row takes part in; the generator's node-cost measure for the row. */
+static int rna_MaterialPaintLayer_channel_weight_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  const Material *ma = rna_paint_layer_material(ptr, layer);
+  if (ma == nullptr) {
+    return 0;
+  }
+  return BKE_paint_layers_layer_channel_weight(*ma, *layer);
+}
+
 /**
  * The path of \a layer below \a prefix, searching \a list and every folder under it: a row is
  * `<prefix>[i]`, a folder's rows `<prefix>[i].children[j]` and a mask item
@@ -3249,10 +3260,14 @@ static float rna_MaterialPaintLayerChannel_value_scalar_get(PointerRNA *ptr)
 {
   const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
       ptr->data);
-  return record->value[0];
+  /* The record stores the map's domain; the UI edits the authored relief (identity for every
+   * channel but Height). */
+  return BKE_paint_material_channel_value_decode(
+      eMaterialPaintChannel(rna_MaterialPaintLayerChannel_channel_get(ptr)), record->value[0]);
 }
 
-/** The channel's own range (0..1, Height -1..1), the same one the brush channel's value uses. */
+/** The channel's own authored range (0..1 for the factor channels, -1..1 relief for Height), the
+ * same one the brush channel's value uses. */
 static void rna_MaterialPaintLayerChannel_value_scalar_range(
     PointerRNA *ptr, float *min, float *max, float *softmin, float *softmax)
 {
@@ -3273,7 +3288,8 @@ static void rna_MaterialPaintLayerChannel_value_scalar_set(PointerRNA *ptr, floa
     const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
         ptr->data);
     copy_v4_v4(rgba, record->value);
-    rgba[0] = std::clamp(value, info.value_min, info.value_max);
+    rgba[0] = BKE_paint_material_channel_value_encode(
+        channel, std::clamp(value, info.value_min, info.value_max));
     BKE_paint_layers_channel_set_value(*ma, layer, channel, rgba);
   }
 }
@@ -3501,7 +3517,10 @@ static void rna_MaterialPaintLayerChannel_value_color_get(PointerRNA *ptr, float
     return;
   }
   const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
-  const float t = BKE_paint_material_t_from_value(info.value_min, info.value_max, record->value[0]);
+  const float t = BKE_paint_material_t_from_value(
+      info.value_min,
+      info.value_max,
+      BKE_paint_material_channel_value_decode(channel, record->value[0]));
   BKE_paint_material_value_gradient_color(info.value_min, info.value_max, t, values);
 }
 
@@ -3521,7 +3540,8 @@ static void rna_MaterialPaintLayerChannel_value_color_set(PointerRNA *ptr, const
     const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
         ptr->data);
     copy_v4_v4(rgba, record->value);
-    rgba[0] = BKE_paint_material_value_from_t(info.value_min, info.value_max, t);
+    rgba[0] = BKE_paint_material_channel_value_encode(
+        channel, BKE_paint_material_value_from_t(info.value_min, info.value_max, t));
     BKE_paint_layers_channel_set_value(*ma, layer, channel, rgba);
   }
 }
@@ -4316,6 +4336,14 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       prop, "rna_MaterialPaintLayer_is_anchor_point_reader_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Is Anchor Point Reader", "Whether this row reads a slice");
+
+  /* Read-only: how many channels the row takes part in, the generated node-cost measure the UI
+   * reads to warn about a row heavy enough to bake in AUTO mode. */
+  prop = RNA_def_property(srna, "channel_weight", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop, "rna_MaterialPaintLayer_channel_weight_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Channel Weight", "How many channels this row takes part in, so how many it wires");
 
   prop = RNA_def_property(srna, "opacity", PROP_FLOAT, PROP_PERCENTAGE);
   RNA_def_property_float_funcs(

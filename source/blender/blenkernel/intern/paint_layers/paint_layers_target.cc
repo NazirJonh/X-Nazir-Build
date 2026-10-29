@@ -65,7 +65,22 @@ static void paint_layers_image_encode(const Image &image, float rgba[4])
   IMB_colormanagement_scene_linear_to_colorspace(rgba, 1, 1, 4, colorspace);
 }
 
-/** Write one solid colour into \a image's byte buffer, encoded into the image's colorspace. */
+/** Multiply \a rgba's colour by its alpha: the association a float map is stored in, which the
+ * composite (see #composite_decode_tile) and the paint pipelines both read. A byte map stays
+ * straight, so this is only applied on the float paths. */
+static void paint_layers_color_premultiply(float rgba[4])
+{
+  rgba[0] *= rgba[3];
+  rgba[1] *= rgba[3];
+  rgba[2] *= rgba[3];
+}
+
+/** Write one solid colour into \a image's buffer, encoded into the image's colorspace.
+ *
+ * A byte map is written through its byte buffer, straight; a float map (Height) through its float
+ * buffer, premultiplied, the association float storage uses. Whichever buffer the image was
+ * created with is the one written, so the call never allocates the other and never turns a float
+ * map into a byte one for the readers. */
 static void paint_layers_image_fill(Image &image, const bool is_color, const float rgba[4])
 {
   void *lock = nullptr;
@@ -73,14 +88,27 @@ static void paint_layers_image_fill(Image &image, const bool is_color, const flo
   if (ibuf == nullptr) {
     return;
   }
-  uchar *pixels = ibuf->byte_data_for_write();
-  if (pixels != nullptr) {
-    float encoded[4];
-    copy_v4_v4(encoded, rgba);
-    if (is_color) {
-      /* The constant is scene linear; the byte buffer stores the map's colorspace. */
-      paint_layers_image_encode(image, encoded);
+  float encoded[4];
+  copy_v4_v4(encoded, rgba);
+  if (is_color) {
+    /* The constant is scene linear; the buffer stores the map's colorspace. */
+    paint_layers_image_encode(image, encoded);
+  }
+  if (ibuf->float_data() != nullptr) {
+    float *pixels = ibuf->float_data_for_write();
+    if (pixels != nullptr) {
+      float premultiplied[4];
+      copy_v4_v4(premultiplied, encoded);
+      paint_layers_color_premultiply(premultiplied);
+      for (const int64_t i : IndexRange(int64_t(ibuf->x) * ibuf->y)) {
+        pixels[i * 4 + 0] = premultiplied[0];
+        pixels[i * 4 + 1] = premultiplied[1];
+        pixels[i * 4 + 2] = premultiplied[2];
+        pixels[i * 4 + 3] = premultiplied[3];
+      }
     }
+  }
+  else if (uchar *pixels = ibuf->byte_data_for_write()) {
     const uchar r = uchar(clamp_f(encoded[0], 0.0f, 1.0f) * 255.0f + 0.5f);
     const uchar g = uchar(clamp_f(encoded[1], 0.0f, 1.0f) * 255.0f + 0.5f);
     const uchar b = uchar(clamp_f(encoded[2], 0.0f, 1.0f) * 255.0f + 0.5f);
@@ -100,12 +128,22 @@ static Image *paint_layers_map_create(Main &bmain,
                                       const int size,
                                       const bool is_color,
                                       const float rgba[4],
-                                      const bool tiled = false)
+                                      const bool tiled = false,
+                                      const bool is_float = false)
 {
   /* 32 planes, not 24: the buffer's color mode decides how many channels a PNG pack writes, and a
-   * map's alpha is its coverage, so a 24-plane map would reopen fully opaque. */
+   * map's alpha is its coverage, so a 24-plane map would reopen fully opaque. Each scalar map
+   * stays a byte image except a Height map, whose continuous values a float buffer holds without
+   * the terraces 8 bits show. */
+  float gen_color[4];
+  copy_v4_v4(gen_color, rgba);
+  if (is_float) {
+    /* A float buffer is premultiplied: a fresh transparent map is (0,0,0,0), not the straight
+     * neutral, or a first soft stroke over it would decode to value/alpha. */
+    paint_layers_color_premultiply(gen_color);
+  }
   Image *image = BKE_image_add_generated(
-      &bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, rgba, false, !is_color, tiled);
+      &bmain, size, size, name, 32, is_float, IMA_GENTYPE_BLANK, gen_color, false, !is_color, tiled);
   if (image == nullptr) {
     return nullptr;
   }
@@ -116,7 +154,12 @@ static Image *paint_layers_map_create(Main &bmain,
   /* The map the stack made is the stack's own: the image browsers hide it unless Developer Extras
    * is on, so it is reached through the layer UI alone. */
   BKE_paint_layers_image_mark_internal(*image);
-  paint_layers_image_fill(*image, is_color, rgba);
+  if (!is_float) {
+    /* A byte map needs the colorspace encoding this helper applies; a float map was already
+     * filled from `rgba` through its generation colour, and writing the byte buffer here would
+     * also make one exist beside the float one, steering the composite down the byte path. */
+    paint_layers_image_fill(*image, is_color, rgba);
+  }
   return image;
 }
 
@@ -610,7 +653,11 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
                "%s %s",
                target.layer->name[0] != '\0' ? target.layer->name : "Layer",
                info.ui_name);
-  Image *image = paint_layers_map_create(bmain, name, map_size, info.is_color, fill);
+  /* A Height map is a continuous field, so its map is a float buffer where every other scalar
+   * channel keeps the byte map a factor is stored in. */
+  const bool is_float_map = info.map_float;
+  Image *image = paint_layers_map_create(
+      bmain, name, map_size, info.is_color, fill, /*tiled=*/false, is_float_map);
   if (image == nullptr) {
     return nullptr;
   }
@@ -639,13 +686,14 @@ bool BKE_paint_layers_target_content_reset(PaintLayersTarget &target)
     return false;
   }
   Image &image = *record->image;
-  /* A linked map cannot be rewritten, and only the byte buffer of a paint-layer map is filled. */
+  /* A linked map cannot be rewritten; a map with neither a byte nor a float buffer has nothing to
+   * fill. A Height map holds a float buffer instead of the byte one every other map uses. */
   if (ID_IS_LINKED(&image.id)) {
     return false;
   }
   void *lock = nullptr;
   ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
-  if (ibuf == nullptr || ibuf->byte_data() == nullptr) {
+  if (ibuf == nullptr || (ibuf->byte_data() == nullptr && ibuf->float_data() == nullptr)) {
     BKE_image_release_ibuf(&image, ibuf, lock);
     return false;
   }
@@ -1175,7 +1223,9 @@ static bool corrections_bake_channels(Material &ma,
 {
   r_channels.clear();
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    if (!info.supports_image_paint) {
+    /* A correction can lay Height, which a layered material holds as a float map with no Principled
+     * backend (#supports_layer_paint); leaving it out would drop Height corrections silently. */
+    if (!info.stores_image()) {
       continue;
     }
     const int channel = int(info.channel);
@@ -1239,7 +1289,9 @@ static const MaterialPaintLayer *corrections_bake_surface_gradient(
       continue;
     }
     for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-      if (info.supports_image_paint && paint_layer_effect_lays(ma, *effect, int(info.channel))) {
+      if (info.stores_image() &&
+          paint_layer_effect_lays(ma, *effect, int(info.channel)))
+      {
         return effect;
       }
     }
@@ -1261,7 +1313,9 @@ static bool corrections_bake_needs_generated(Material &ma, const Span<MaterialPa
       continue;
     }
     for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-      if (info.supports_image_paint && paint_layer_effect_lays(ma, *effect, int(info.channel))) {
+      if (info.stores_image() &&
+          paint_layer_effect_lays(ma, *effect, int(info.channel)))
+      {
         return true;
       }
     }

@@ -665,20 +665,22 @@ static float paint_2d_alpha_source_invert(const BrushPainter *painter,
                                           const eMaterialPaintChannel channel,
                                           const float sampled)
 {
-  if (channel != PAINT_MATERIAL_CHANNEL_ALPHA || painter->brush == nullptr ||
-      painter->brush->material_paint == nullptr ||
-      painter->brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_ALPHA].source_invert == 0)
+  if (!ed::sculpt_paint::material::channel_source_invertible(channel) ||
+      painter->brush == nullptr || painter->brush->material_paint == nullptr ||
+      painter->brush->material_paint->channels[channel].source_invert == 0)
   {
     /* Untouched, not clamped: this engine has always used the raw intensity. */
     return sampled;
   }
-  /* Alpha's range is fixed, so no #PaintModeSettings is needed; the Sculpt engine reaches the same
-   * result through #ed::sculpt_paint::material::scalar_source_finish. */
+  /* The invertible channels' ranges are fixed, so no #PaintModeSettings is needed; the Sculpt
+   * engine reaches the same result through #ed::sculpt_paint::material::scalar_source_finish. The
+   * texture is a storage level, so the range is the stored one (Height mirrors around 0.5). */
   const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
   return ed::sculpt_paint::material::scalar_source_finish(
       *painter->brush->material_paint,
       channel,
-      float2(info.value_min, info.value_max),
+      float2(BKE_paint_material_channel_value_encode(channel, info.value_min),
+             BKE_paint_material_channel_value_encode(channel, info.value_max)),
       sampled);
 }
 

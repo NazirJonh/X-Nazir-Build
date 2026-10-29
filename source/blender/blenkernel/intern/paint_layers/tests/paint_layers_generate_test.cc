@@ -11,6 +11,7 @@
 
 #include "paint_layers_generate_test_fixture.hh"
 
+#include "BKE_idprop.hh"
 #include "BKE_node_tree_interface.hh"
 
 #include "BKE_paint_layers_composite.hh"
@@ -907,6 +908,110 @@ TEST_F(PaintLayersGenerateTest, height_regenerate_does_not_link_bump_to_itself)
   for (bNodeLink *link : bump_normal->directly_linked_links()) {
     EXPECT_NE(link->fromnode, bump);
   }
+}
+
+TEST_F(PaintLayersGenerateTest, height_record_starts_at_the_neutral_mid)
+{
+  /* A fresh record is transparent (alpha zero), but its flat value is the neutral the stack blends
+   * around, so a Fill that turns Height on lays flat instead of carving a dent. */
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  const MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_NE(record, nullptr);
+  EXPECT_FLOAT_EQ(record->value[0], 0.5f);
+  EXPECT_FLOAT_EQ(record->value[1], 0.5f);
+  EXPECT_FLOAT_EQ(record->value[2], 0.5f);
+  EXPECT_FLOAT_EQ(record->value[3], 0.0f);
+
+  /* A Fill correction copies its Base Color to a channel switched on later; Height keeps the
+   * neutral instead, so turning it on never dents the relief. */
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, layer, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(effect, nullptr);
+  const MaterialPaintLayerChannel *effect_height = BKE_paint_layers_channel_add(
+      *ma, effect, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_NE(effect_height, nullptr);
+  EXPECT_FLOAT_EQ(effect_height->value[0], 0.5f);
+  EXPECT_FLOAT_EQ(effect_height->value[1], 0.5f);
+  EXPECT_FLOAT_EQ(effect_height->value[2], 0.5f);
+}
+
+TEST_F(PaintLayersGenerateTest, layer_channel_weight_counts_only_participating_channels)
+{
+  /* The row wires Base Color through its map; an empty record beside it wires nothing. */
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  EXPECT_EQ(BKE_paint_layers_layer_channel_weight(*ma, *layer), 1);
+
+  BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  EXPECT_EQ(BKE_paint_layers_layer_channel_weight(*ma, *layer), 1);
+
+  /* A flat value with alpha makes the record take part, so the row weighs one more. */
+  const float grey[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_value(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS, grey));
+  EXPECT_EQ(BKE_paint_layers_layer_channel_weight(*ma, *layer), 2);
+}
+
+TEST_F(PaintLayersGenerateTest, adding_height_to_the_set_creates_no_record_and_no_bump)
+{
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
+      *ma, uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_FALSE(BKE_paint_layers_has_bump(*ma));
+
+  /* Switching the channel on changes the set only: no row is given a record, so nothing is wired
+   * and the material looks as it did. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_HEIGHT, true));
+  for (const int i : IndexRange(layer->channels_num)) {
+    EXPECT_NE(layer->channels[i].channel, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  }
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_FALSE(BKE_paint_layers_has_bump(*ma));
+  EXPECT_FALSE(interface_has_socket(*ma->paint_layers_tree, "Result Height", true));
+}
+
+/** The one link feeding \a input, or null when it has none or more than one. */
+static const bNodeLink *fed_by_one(const bNodeTree &tree, const bNodeSocket &input)
+{
+  tree.ensure_topology_cache();
+  const Span<const bNodeLink *> links = input.directly_linked_links();
+  return links.size() == 1 ? links.first() : nullptr;
+}
+
+/** How many nodes of \a type \a tree holds itself, without descending into its groups. */
+static int direct_type_count(const bNodeTree &tree, const int type)
+{
+  int count = 0;
+  for (const bNode &node : tree.nodes) {
+    if (node.type_legacy == type) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/** A Principled BSDF into a Material Output, for the tests that generate into a material the
+ * author already wired. */
+static bNode *principled_with_output_add(bNodeTree &tree)
+{
+  bNode *principled = bke::node_add_static_node(nullptr, tree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, tree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(tree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  return principled;
+}
+
+/** The channel set of the Normal and Height tests: Base Color, Normal and Height. */
+static uint16_t normal_and_height_set()
+{
+  return uint16_t(uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR |
+                 uint16_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL |
+                 uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT);
 }
 
 /** \} */

@@ -1184,13 +1184,19 @@ static bool bake_image_is_float(Image &image)
 /**
  * Whether a bake map of \a layer in \a info's channel is kept as float.
  *
- * Only a generated row qualifies: its pixels are a formula the shader evaluates in float, so a
- * scalar channel stored as bytes reads back as terraces. Every other row bakes a map it already
- * holds (or a flat value), which is a byte texture like the maps around it.
+ * A generated row qualifies: its pixels are a formula the shader evaluates in float, so a scalar
+ * channel stored as bytes reads back as terraces. Height qualifies everywhere: it is a continuous
+ * field, and its painted map is a float buffer too (see
+ * #BKE_paint_layers_target_ensure_writable), so a byte bake would leave the merged correction in a
+ * different format from the row it replaces. Every other row bakes a map it already holds (or a
+ * flat value), which is a byte texture like the maps around it.
  */
 static bool bake_channel_needs_float(const MaterialPaintLayer &layer,
                                      const MaterialPaintChannelInfo &info)
 {
+  if (info.map_float) {
+    return true;
+  }
   return info.bake_float && paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES);
 }
 

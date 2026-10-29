@@ -732,4 +732,27 @@ TEST_F(PaintLayersWrapEvalTest, a_clipped_fill_normal_matches_the_cpu)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Height blend modes
+ * \{ */
+
+/** A Height map with a soft edge over a neutral row: the graph and the CPU must read the same
+ * straight value from the premultiplied float storage, or a partly-covered texel would decode to
+ * value/alpha on one side and the two would disagree exactly where a stroke is softest. */
+TEST_F(PaintLayersGraphEvalTest, a_partial_alpha_height_map_matches_the_cpu)
+{
+  Image *bottom = add_solid_image("Bottom", 128, 128, 128, 255);
+  make_image_data(bottom);
+  add_layer("Bottom", bottom, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  Image *soft = add_solid_float_image("Soft", 0.8f, 0.8f, 0.8f, 0.25f);
+  add_layer("Top", soft, PAINT_MATERIAL_CHANNEL_HEIGHT);
+
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT, 5e-3f);
+  const RGBA cpu = cpu_pixel(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  /* 0.8 over the neutral 0.5 at 25% coverage. A decode of 0.8/0.25 = 3.2 would read ~1.2. */
+  EXPECT_NEAR(cpu.r, 0.5f * 0.75f + 0.8f * 0.25f, 0.02f);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

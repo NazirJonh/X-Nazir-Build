@@ -207,16 +207,48 @@ float paint_mask_texture_coverage(const Brush &brush,
                                           lut);
 }
 
+/* The scalar samplers hand the stroke writers values in storage, the domain the maps are painted
+ * in: a texture's intensity already is a storage level, while the brush value and a constant are
+ * authored reliefs and cross the channel's encode seam here. Identity channels pass through. */
+static float2 stored_scalar_range(const PaintModeSettings &settings,
+                                  const eMaterialPaintChannel channel)
+{
+  const float2 range = BKE_paint_material_channel_range(settings, channel);
+  return float2(BKE_paint_material_channel_value_encode(channel, range.x),
+                BKE_paint_material_channel_value_encode(channel, range.y));
+}
+
+static float stored_scalar_brush_value(const BrushMaterialPaint &brush_paint,
+                                       const PaintModeSettings &settings,
+                                       const eMaterialPaintChannel channel)
+{
+  return BKE_paint_material_channel_value_encode(
+      channel, BKE_paint_material_channel_value(brush_paint, settings, channel));
+}
+
+static float stored_scalar_constant(const PaintModeSettings &settings,
+                                    const eMaterialPaintChannel channel,
+                                    const float constant)
+{
+  const float2 range = BKE_paint_material_channel_range(settings, channel);
+  return BKE_paint_material_channel_value_encode(channel,
+                                                 math::clamp(constant, range.x, range.y));
+}
+
+bool channel_source_invertible(const eMaterialPaintChannel channel)
+{
+  return ELEM(channel, PAINT_MATERIAL_CHANNEL_ALPHA, PAINT_MATERIAL_CHANNEL_HEIGHT);
+}
+
 float scalar_source_finish(const BrushMaterialPaint &brush_paint,
                            const eMaterialPaintChannel channel,
                            const float2 &range,
                            const float sampled)
 {
-  /* Inversion belongs to the Alpha texture itself, so every Alpha read goes through here and the
-   * Sculpt and Image 2D engines cannot disagree. Off by default, which leaves the plain clamp. */
-  if (channel == PAINT_MATERIAL_CHANNEL_ALPHA &&
-      brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].source_invert != 0)
-  {
+  /* Inversion belongs to the texture itself, so every read of an invertible channel goes through
+   * here and the Sculpt and Image 2D engines cannot disagree. Off by default, which leaves the
+   * plain clamp. */
+  if (channel_source_invertible(channel) && brush_paint.channels[channel].source_invert != 0) {
     return BKE_paint_material_value_invert(range.x, range.y, sampled);
   }
   return math::clamp(sampled, range.x, range.y);
@@ -1351,12 +1383,12 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
                                    const float3 &position,
                                    const int thread) const
 {
-  const float2 range = BKE_paint_material_channel_range(settings_, channel);
-  const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
+  const float2 range = stored_scalar_range(settings_, channel);
+  const float fallback = stored_scalar_brush_value(brush_paint_, settings_, channel);
 
   const ChannelSource &source = sources_.source(channel);
   if (source.kind == ChannelSourceKind::Constant) {
-    return math::clamp(source.constant_value.x, range.x, range.y);
+    return stored_scalar_constant(settings_, channel, source.constant_value.x);
   }
   if (!source.usable) {
     return fallback;
@@ -1383,12 +1415,12 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
                                    const TexelSampleContext &ctx,
                                    const int thread) const
 {
-  const float2 range = BKE_paint_material_channel_range(settings_, channel);
-  const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
+  const float2 range = stored_scalar_range(settings_, channel);
+  const float fallback = stored_scalar_brush_value(brush_paint_, settings_, channel);
 
   const ChannelSource &source = sources_.source(channel);
   if (source.kind == ChannelSourceKind::Constant) {
-    return math::clamp(source.constant_value.x, range.x, range.y);
+    return stored_scalar_constant(settings_, channel, source.constant_value.x);
   }
   if (!source.usable) {
     return fallback;
@@ -1557,11 +1589,11 @@ float ChannelUvSampler::scalar_at_uv(const eMaterialPaintChannel channel,
 {
   const ChannelSourceSet::ChannelSource &source = sources_.source(channel);
   if (source.kind == ChannelSourceKind::Constant) {
-    return source.constant_value.x;
+    return BKE_paint_material_channel_value_encode(channel, source.constant_value.x);
   }
   /* Resolved only on the paths that need it: this runs once per pixel on the flat canvas, and the
    * common sampled path uses neither the fallback nor the unclamped brush value. */
-  const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
+  const float fallback = stored_scalar_brush_value(brush_paint_, settings_, channel);
   if (!source.usable) {
     return fallback;
   }
@@ -1570,7 +1602,7 @@ float ChannelUvSampler::scalar_at_uv(const eMaterialPaintChannel channel,
   if (!sample_channel_source_at_uv(sources_, source, uv, thread, &value, rgba, unit_uv_space_)) {
     return fallback;
   }
-  const float2 range = BKE_paint_material_channel_range(settings_, channel);
+  const float2 range = stored_scalar_range(settings_, channel);
   return scalar_source_finish(brush_paint_, channel, range, value);
 }
 
@@ -1800,13 +1832,13 @@ void ChannelSourceSampler::gather_scalars(const eMaterialPaintChannel channel,
   BLI_assert(contexts.size() == factors.size());
   BLI_assert(r_values.size() == contexts.size());
 
-  const float2 range = BKE_paint_material_channel_range(settings_, channel);
-  const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
+  const float2 range = stored_scalar_range(settings_, channel);
+  const float fallback = stored_scalar_brush_value(brush_paint_, settings_, channel);
   const ChannelSource &source = sources_.source(channel);
   if (source.kind == ChannelSourceKind::Constant) {
+    const float constant = stored_scalar_constant(settings_, channel, source.constant_value.x);
     for (const int i : contexts.index_range()) {
-      r_values[i] = factors[i] == 0.0f ? 0.0f :
-                    math::clamp(source.constant_value.x, range.x, range.y);
+      r_values[i] = factors[i] == 0.0f ? 0.0f : constant;
     }
     return;
   }

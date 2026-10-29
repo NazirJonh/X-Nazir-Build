@@ -326,6 +326,16 @@ class GraphInterpreter {
       }
       case SH_NODE_ATTRIBUTE:
         return {object_mask_value, object_mask_value, object_mask_value, object_mask_value};
+      case SH_NODE_SEPARATE_COLOR: {
+        /* The height modes' colour-to-scalar read: the red, the value every component of a grey
+         * height map carries. */
+        const RGBA color = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Color"_ustr));
+        const float value = STREQ(out_identifier, "Green") ? color.g :
+                            (STREQ(out_identifier, "Blue") ? color.b :
+                             (STREQ(out_identifier, "Alpha") ? color.a : color.r));
+        return {value, value, value, value};
+      }
       case SH_NODE_RGB:
       case SH_NODE_VALUE:
         if (const bNodeSocket *out = bke::node_find_socket(
@@ -658,11 +668,9 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
     G_MAIN = nullptr;
   }
 
-  /** A solid 4x4 byte image. */
-  Image *add_solid_image(
-      const char *name, const uchar r, const uchar g, const uchar b, const uchar a)
+  /** A byte image of \a size x \a size filled with \a rgba. */
+  Image *add_image(const char *name, const int size, const uchar rgba[4])
   {
-    const int size = 4;
     const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     Image *image = BKE_image_add_generated(
         bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
@@ -671,9 +679,92 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
     ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
     uchar *pixels = ibuf->byte_data_for_write();
     for (const int64_t i : IndexRange(int64_t(size) * size)) {
-      pixels[i * 4 + 0] = r;
-      pixels[i * 4 + 1] = g;
-      pixels[i * 4 + 2] = b;
+      for (const int c : IndexRange(4)) {
+        pixels[i * 4 + c] = rgba[c];
+      }
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return image;
+  }
+
+  /** A byte image of \a size x \a size whose left half is \a left and its right half \a right: a
+   * map with two levels in one image, which a comparison needs to pick a side by. */
+  Image *add_split_image(const char *name,
+                         const int size,
+                         const uchar left[4],
+                         const uchar right[4])
+  {
+    const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    Image *image = BKE_image_add_generated(
+        bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+    image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int y : IndexRange(size)) {
+      for (const int x : IndexRange(size)) {
+        const uchar *rgba = x < size / 2 ? left : right;
+        for (const int c : IndexRange(4)) {
+          pixels[(int64_t(y) * size + x) * 4 + c] = rgba[c];
+        }
+      }
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return image;
+  }
+
+  /** A byte image of \a size x \a size whose first rows (y < size / 2) are \a upper and the rest
+   * \a lower: the row-wise counterpart of #add_split_image, which a comparison that varies by row
+   * needs. */
+  Image *add_row_split_image(const char *name,
+                             const int size,
+                             const uchar upper[4],
+                             const uchar lower[4])
+  {
+    const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    Image *image = BKE_image_add_generated(
+        bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+    image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int y : IndexRange(size)) {
+      for (const int x : IndexRange(size)) {
+        const uchar *rgba = y < size / 2 ? upper : lower;
+        for (const int c : IndexRange(4)) {
+          pixels[(int64_t(y) * size + x) * 4 + c] = rgba[c];
+        }
+      }
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return image;
+  }
+
+  /** A solid 4x4 byte image. */
+  Image *add_solid_image(
+      const char *name, const uchar r, const uchar g, const uchar b, const uchar a)
+  {
+    const uchar rgba[4] = {r, g, b, a};
+    return add_image(name, 4, rgba);
+  }
+
+  /** A solid 4x4 float data image, stored premultiplied: \a rgb is the straight value and is
+   * multiplied by \a a on the way in, the association a float map holds (see
+   * #composite_decode_tile). Height is the channel such a map belongs to. */
+  Image *add_solid_float_image(
+      const char *name, const float r, const float g, const float b, const float a)
+  {
+    const float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    Image *image = BKE_image_add_generated(
+        bmain, 4, 4, name, 32, true, IMA_GENTYPE_BLANK, color, false, /*is_data=*/true, false);
+    image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    float *pixels = ibuf->float_data_for_write();
+    for (const int64_t i : IndexRange(16)) {
+      pixels[i * 4 + 0] = r * a;
+      pixels[i * 4 + 1] = g * a;
+      pixels[i * 4 + 2] = b * a;
       pixels[i * 4 + 3] = a;
     }
     BKE_image_release_ibuf(image, ibuf, lock);

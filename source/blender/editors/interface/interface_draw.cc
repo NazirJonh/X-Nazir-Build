@@ -1592,8 +1592,8 @@ void draw_but_MATERIAL_PAINT_VALUE(Button *but, const uiWidgetColors *wcol, cons
   /* Tick marks every 0.1 across the value range on the same track as the handle, so mid-range
    * values are readable while dragging:
    * - All ticks are half-height and colored for contrast against the local gradient.
-   * - Bipolar (range straddles zero, e.g. [-1,1] height): the tick at value 0 keeps full height
-   *   and white color so the neutral position stays prominent. */
+   * - Bipolar (range straddles zero, e.g. Height's [-1,1] relief): the tick at value 0 keeps full
+   *   height and white color so the neutral position stays prominent. */
   {
     const MaterialPaintValueGradientMode mode = BKE_paint_material_value_gradient_mode(value_min,
                                                                                        value_max);

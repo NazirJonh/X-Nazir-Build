@@ -24,7 +24,9 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_target.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
@@ -36,6 +38,7 @@
 #include "BLI_math_constants.h"
 #include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
+#include "BLI_rect.h"
 #include "BLI_string.h"
 #include "BLI_uuid.h"
 
@@ -53,7 +56,9 @@
 #include "DNA_texture_types.h"
 
 /* For #IMB_BlendMode, which #BKE_paint_material_channel_blend_mode returns as a `short`. */
+#include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
+#include "IMB_imbuf_types.hh"
 
 namespace blender {
 
@@ -1001,18 +1006,349 @@ TEST_F(PaintMaterialChannelTest, alpha_write_follows_alpha_map)
       brush_paint, mode_settings, visible_channels, PAINT_MATERIAL_CHANNEL_ALPHA));
 }
 
-TEST_F(PaintMaterialChannelTest, HeightDoesNotWriteToTarget)
+TEST_F(PaintMaterialChannelTest, height_writes_to_the_material_canvas_through_a_layer_paint)
 {
   PaintModeSettings mode_settings{};
   const int visible_channels = paint_material_channel_test_default_visibility();
   BrushMaterialPaint brush_paint{};
   brush_paint.channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 1;
 
+  mode_settings.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
   EXPECT_TRUE(BKE_paint_material_channel_is_enabled(
       brush_paint, mode_settings, visible_channels, PAINT_MATERIAL_CHANNEL_HEIGHT))
-      << "visibility/use still describe the channel; writes_to_target is the backend gate";
+      << "visibility/use still describe the channel";
+  /* The Material (image) canvas can store Height: a layered row owns its map, so the canvas gate is
+   * open. Which material actually has such a row is decided when the stroke resolves its targets
+   * (see plain_material_never_paints_or_creates_height). */
+  EXPECT_TRUE(BKE_paint_material_channel_writes_to_target(
+      brush_paint, mode_settings, visible_channels, PAINT_MATERIAL_CHANNEL_HEIGHT));
+
+  /* The vertex canvas has no per-vertex Height, so it still refuses the channel. */
+  mode_settings.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL_PAINT;
   EXPECT_FALSE(BKE_paint_material_channel_writes_to_target(
       brush_paint, mode_settings, visible_channels, PAINT_MATERIAL_CHANNEL_HEIGHT));
+}
+
+TEST_F(PaintMaterialChannelTest, height_is_a_layer_paint_channel)
+{
+  const MaterialPaintChannelInfo &height = BKE_paint_material_channel_info(
+      PAINT_MATERIAL_CHANNEL_HEIGHT);
+  EXPECT_FALSE(height.supports_image_paint);
+  EXPECT_FALSE(height.supports_vertex_paint);
+  EXPECT_TRUE(height.supports_layer_paint);
+
+  /* Height is the only channel a layered material may paint without a Principled backend. */
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.channel == PAINT_MATERIAL_CHANNEL_HEIGHT) {
+      continue;
+    }
+    EXPECT_FALSE(info.supports_layer_paint) << info.ui_name;
+  }
+}
+
+/** A layered material whose channel set names Height, with one Paint row that takes it. */
+static MaterialPaintLayer *paint_material_channel_test_add_layered_row(Main *bmain,
+                                                                      Object &ob,
+                                                                      Material &ma)
+{
+  BKE_object_material_assign(bmain, &ob, &ma, 1, BKE_MAT_ASSIGN_OBJECT);
+  ob.actcol = 1;
+  ma.paint_layers_channels = BKE_paint_layers_new_material_channel_set();
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "Row", nullptr, PaintLayerPlace::Above);
+  if (row == nullptr) {
+    return nullptr;
+  }
+  BKE_paint_layers_default_channels_apply(ma, *row);
+  BKE_paint_layers_active_set(ma, row->marker);
+  return row;
+}
+
+static Image *paint_material_channel_test_row_map(const MaterialPaintLayer &row,
+                                                  const eMaterialPaintChannel channel)
+{
+  for (const int i : IndexRange(row.channels_num)) {
+    if (row.channels[i].channel == channel) {
+      return row.channels[i].image;
+    }
+  }
+  return nullptr;
+}
+
+TEST_F(PaintMaterialChannelTest, layered_height_map_is_a_float_data_map)
+{
+  Object *ob = add_mesh_object("HeightMapOb");
+  Material *ma = BKE_material_add(bmain, "HeightMapMat");
+  MaterialPaintLayer *row = paint_material_channel_test_add_layered_row(bmain, *ob, *ma);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_get(*ma) &
+              (uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT));
+
+  PaintModeSettings mode_settings{};
+  mode_settings.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
+  mode_settings.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
+  const int visible_channels = paint_material_channel_test_default_visibility();
+
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 1;
+
+  const PaintMaterialImagesEnsureResult res = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, visible_channels);
+  EXPECT_EQ(res.created, 1);
+
+  Image *height_map = paint_material_channel_test_row_map(*row, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_NE(height_map, nullptr);
+
+  /* A float buffer and no byte one: the map is the continuous field the channel holds, not the
+   * byte factor every other scalar channel is stored in. */
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(height_map, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  ASSERT_NE(ibuf->float_data(), nullptr);
+  EXPECT_EQ(ibuf->byte_data(), nullptr);
+  const float *p = ibuf->float_data();
+  /* A fresh float map is premultiplied-transparent: (0,0,0,0), not the straight neutral, or a
+   * first soft stroke over it would decode to value/alpha in the composite. The neutral the stack
+   * blends around is the channel bottom, which stands in wherever the coverage is zero. */
+  EXPECT_NEAR(p[0], 0.0f, 1e-4f);
+  EXPECT_NEAR(p[1], 0.0f, 1e-4f);
+  EXPECT_NEAR(p[2], 0.0f, 1e-4f);
+  EXPECT_NEAR(p[3], 0.0f, 1e-4f);
+  BKE_image_release_ibuf(height_map, ibuf, lock);
+
+  float bottom[4];
+  BKE_paint_layers_channel_bottom_color(PAINT_MATERIAL_CHANNEL_HEIGHT, bottom);
+  EXPECT_FLOAT_EQ(bottom[0], 0.5f);
+
+  /* A data colorspace: the height is a number, not a colour. */
+  const char *data_space = IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA);
+  EXPECT_STREQ(height_map->colorspace_settings.name, data_space);
+}
+
+TEST_F(PaintMaterialChannelTest, a_partial_alpha_height_texel_decodes_to_its_straight_value)
+{
+  Object *ob = add_mesh_object("HeightAlphaOb");
+  Material *ma = BKE_material_add(bmain, "HeightAlphaMat");
+  MaterialPaintLayer *row = paint_material_channel_test_add_layered_row(bmain, *ob, *ma);
+  ASSERT_NE(row, nullptr);
+
+  PaintModeSettings mode_settings{};
+  mode_settings.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
+  mode_settings.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
+  const int visible_channels = paint_material_channel_test_default_visibility();
+
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 1;
+  ASSERT_EQ(BKE_paint_material_images_ensure_writable(
+                *bmain, *ob, brush_paint, mode_settings, visible_channels)
+                .created,
+            1);
+
+  Image *height_map = paint_material_channel_test_row_map(*row, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_NE(height_map, nullptr);
+
+  /* A soft stroke edge over a fresh map: value 0.8 at coverage 0.25, blended the way the brush
+   * blends, which is premultiplied ("over"). On the premultiplied-transparent fill this leaves
+   * (0.2, 0.2, 0.2, 0.25); on a straight fill it would leave (0.575, ..., 0.25). */
+  constexpr float value = 0.8f;
+  constexpr float coverage = 0.25f;
+  const int tx = 10;
+  const int ty = 10;
+  int size = 0;
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(height_map, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    float *pixels = ibuf->float_data_for_write();
+    ASSERT_NE(pixels, nullptr);
+    size = ibuf->x;
+    float *p = pixels + (int64_t(ty) * ibuf->x + tx) * 4;
+    for (const int c : IndexRange(3)) {
+      p[c] = p[c] * (1.0f - coverage) + value * coverage;
+    }
+    p[3] = p[3] * (1.0f - coverage) + coverage;
+    BKE_image_release_ibuf(height_map, ibuf, lock);
+  }
+  ASSERT_GT(size, tx + 1);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_HEIGHT, layers));
+  ASSERT_FALSE(layers.is_empty());
+  rcti area;
+  BLI_rcti_init(&area, 0, size, 0, size);
+
+  /* The row's own content, before it blends with anything below: the soft texel straightens to its
+   * straight value 0.8 (a straight fill would read 0.8 / 0.25 = 3.2 there). */
+  Vector<float> content(int64_t(size) * size * 4);
+  Vector<float> coverage(int64_t(size) * size);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_row_content(
+      layers.first(), content.data(), coverage.data(), &area, int(PAINT_MATERIAL_CHANNEL_HEIGHT)));
+  const float *cp = content.data() + (int64_t(ty) * size + tx) * 4;
+  EXPECT_NEAR(cp[0], 0.8f, 0.02f);
+  EXPECT_NEAR(cp[3], 0.25f, 0.02f);
+
+  Vector<float> linear(int64_t(size) * size * 4);
+  float bottom[4];
+  BKE_paint_layers_channel_bottom_color(PAINT_MATERIAL_CHANNEL_HEIGHT, bottom);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers, PaintMaterialCompositeLinearTarget::packed(linear, area), nullptr, nullptr, bottom));
+
+  /* Composited over the neutral 0.5 at 25% coverage: 0.5 * 0.75 + 0.8 * 0.25 = 0.575. A decode of
+   * 2.3 would give 0.95 instead. */
+  const float *px = linear.data() + (int64_t(ty) * size + tx) * 4;
+  EXPECT_NEAR(px[0], 0.5f * 0.75f + 0.8f * 0.25f, 0.02f);
+}
+
+TEST_F(PaintMaterialChannelTest, layered_height_is_a_stroke_target_beside_the_other_channels)
+{
+  Object *ob = add_mesh_object("HeightTargetOb");
+  Material *ma = BKE_material_add(bmain, "HeightTargetMat");
+  MaterialPaintLayer *row = paint_material_channel_test_add_layered_row(bmain, *ob, *ma);
+  ASSERT_NE(row, nullptr);
+
+  PaintModeSettings mode_settings{};
+  mode_settings.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
+  mode_settings.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
+  const int visible_channels = paint_material_channel_test_default_visibility();
+
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 1;
+  /* A depressed relief: the target must carry the stored form, not the signed value. */
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_HEIGHT].value[0] = -0.4f;
+
+  const PaintMaterialImagesEnsureResult res = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, visible_channels);
+  EXPECT_EQ(res.created, 2);
+
+  Image *height_map = paint_material_channel_test_row_map(*row, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  Image *metallic_map = paint_material_channel_test_row_map(*row, PAINT_MATERIAL_CHANNEL_METALLIC);
+  ASSERT_NE(height_map, nullptr);
+  ASSERT_NE(metallic_map, nullptr);
+
+  const Vector<PaintMaterialImageTarget> targets = BKE_paint_material_image_targets_get(
+      *ob, mode_settings, &brush_paint, visible_channels);
+  ASSERT_EQ(targets.size(), 2);
+
+  const PaintMaterialImageTarget *height_target = nullptr;
+  const PaintMaterialImageTarget *metallic_target = nullptr;
+  for (const PaintMaterialImageTarget &target : targets) {
+    if (target.channel == PAINT_MATERIAL_CHANNEL_HEIGHT) {
+      height_target = &target;
+    }
+    else if (target.channel == PAINT_MATERIAL_CHANNEL_METALLIC) {
+      metallic_target = &target;
+    }
+  }
+  /* Height is a target beside the others, pointing at the row's own Height map; the channels the
+   * brush did not enable stay out. */
+  ASSERT_NE(height_target, nullptr);
+  EXPECT_EQ(height_target->image, height_map);
+  /* Relief -0.4 is stored 0.3: the seam converted on the way into the target, so the writers
+   * below it never see a signed value. */
+  EXPECT_NEAR(height_target->value, 0.3f, 1e-6f);
+  ASSERT_NE(metallic_target, nullptr);
+  EXPECT_EQ(metallic_target->image, metallic_map);
+
+  /* The other channel keeps the byte map its factor is stored in; only Height is float. */
+  void *lock = nullptr;
+  ImBuf *metallic_ibuf = BKE_image_acquire_ibuf(metallic_map, nullptr, &lock);
+  ASSERT_NE(metallic_ibuf, nullptr);
+  EXPECT_NE(metallic_ibuf->byte_data(), nullptr);
+  EXPECT_EQ(metallic_ibuf->float_data(), nullptr);
+  BKE_image_release_ibuf(metallic_map, metallic_ibuf, lock);
+}
+
+TEST_F(PaintMaterialChannelTest, plain_material_never_paints_or_creates_height)
+{
+  Object *ob = add_mesh_object("PlainHeightOb");
+  Material *ma = add_material_with_principled(*ob, "PlainHeightMat");
+  ASSERT_FALSE(BKE_paint_layers_is_layered(*ma));
+
+  PaintModeSettings mode_settings{};
+  mode_settings.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
+  mode_settings.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
+  const int visible_channels = paint_material_channel_test_default_visibility();
+
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 1;
+
+  /* Height is the only enabled channel: the stroke has nothing else to fall back to. */
+  const auto count_image_nodes = [&]() {
+    int count = 0;
+    for (const bNode &node : ma->nodetree->nodes) {
+      count += (node.type_legacy == SH_NODE_TEX_IMAGE) ? 1 : 0;
+    }
+    return count;
+  };
+  const int images_before = count_image_nodes();
+
+  /* No Principled socket resolves a Height map, and a plain material has no row to own one, so the
+   * stroke neither creates a map nor resolves a target. */
+  const PaintMaterialImagesEnsureResult res = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, visible_channels);
+  EXPECT_EQ(res.created, 0);
+  EXPECT_EQ(count_image_nodes(), images_before);
+
+  const Vector<PaintMaterialImageTarget> targets = BKE_paint_material_image_targets_get(
+      *ob, mode_settings, &brush_paint, visible_channels);
+  EXPECT_TRUE(targets.is_empty());
+}
+
+TEST_F(PaintMaterialChannelTest, height_eraser_returns_to_the_neutral_mid)
+{
+  /* The 2D and 3D engines erase a scalar channel by mixing toward its default value, and force Mix
+   * for the erase so no other blend mode can fight it. Height's default is the neutral mid, so an
+   * erase flattens the relief back to 0.5 instead of carving to zero. */
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_HEIGHT].blend = IMB_BLEND_ADD;
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_default_value(PAINT_MATERIAL_CHANNEL_HEIGHT), 0.5f);
+  EXPECT_EQ(BKE_paint_material_channel_blend_mode(
+                brush_paint, PAINT_MATERIAL_CHANNEL_HEIGHT, /*invert=*/true),
+            IMB_BLEND_MIX);
+}
+
+TEST_F(PaintMaterialChannelTest, fresh_brush_height_value_is_the_relief_neutral)
+{
+  Brush *brush = BKE_brush_add(bmain, "FreshHeightBrush", OB_MODE_SCULPT);
+  ASSERT_NE(brush, nullptr);
+  BKE_brush_material_paint_ensure(brush);
+  ASSERT_NE(brush->material_paint, nullptr);
+  /* The channel is opt-in, and its authored value is a signed relief whose 0 is flat: enabling it
+   * neither raises nor carves until the user moves the value. */
+  EXPECT_FALSE(brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use);
+  EXPECT_FLOAT_EQ(brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].value[0], 0.0f);
+}
+
+TEST_F(PaintMaterialChannelTest, enabling_height_keeps_the_saved_value_unchanged)
+{
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "HeightEnableScene"));
+  Sculpt *sculpt_data = MEM_new<Sculpt>(__func__);
+  scene->toolsettings->sculpt = sculpt_data;
+  sculpt_data->paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
+  Brush *brush = BKE_brush_add(bmain, "HeightEnableBrush", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+  sculpt_data->paint.brush = brush;
+
+  /* A brush saved with the signed range keeps its value: 0.0 is the relief neutral, not a legacy
+   * encoding to migrate, and a deliberately depressed value must not be raised. */
+  brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 0;
+  brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].value[0] = 0.0f;
+  BKE_paint_material_enable_added_visible_channels(
+      sculpt_data->paint, 1 << PAINT_MATERIAL_CHANNEL_HEIGHT);
+  EXPECT_TRUE(brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use);
+  EXPECT_FLOAT_EQ(brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].value[0], 0.0f);
+
+  /* Any other saved value is left as it is too, including a deep dent. */
+  brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 0;
+  brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].value[0] = -0.8f;
+  BKE_paint_material_enable_added_visible_channels(
+      sculpt_data->paint, 1 << PAINT_MATERIAL_CHANNEL_HEIGHT);
+  EXPECT_TRUE(brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use);
+  EXPECT_FLOAT_EQ(brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].value[0], -0.8f);
+
+  BKE_id_free(bmain, scene);
 }
 
 TEST_F(PaintMaterialChannelTest, BaseColorEnabledAndName)
@@ -1398,10 +1734,54 @@ TEST(material_paint_channel, height_descriptor)
   EXPECT_STREQ(info.ui_name, "Height");
   EXPECT_STREQ(info.attribute_name, "material_height");
   EXPECT_EQ(info.socket_name, nullptr);
+  /* Authored relief is signed; storage is the encode/decode pair's business. */
   EXPECT_FLOAT_EQ(info.value_min, -1.0f);
   EXPECT_FLOAT_EQ(info.value_max, 1.0f);
+  EXPECT_FLOAT_EQ(info.stored_bias, PAINT_HEIGHT_NEUTRAL);
+  EXPECT_FLOAT_EQ(info.stored_scale, 0.5f);
+  EXPECT_EQ(BKE_paint_material_value_gradient_mode(info.value_min, info.value_max),
+            MaterialPaintValueGradientMode::Bipolar);
   EXPECT_FALSE(info.is_color);
   EXPECT_EQ(BKE_paint_material_channels().size(), PAINT_MATERIAL_CHANNEL_NUM);
+}
+
+TEST(material_paint_channel, height_encode_decode_round_trip)
+{
+  /* relief -1..1 maps to stored 0..1 around the neutral. */
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_value_encode(PAINT_MATERIAL_CHANNEL_HEIGHT, -1.0f),
+                  0.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_value_encode(PAINT_MATERIAL_CHANNEL_HEIGHT, 0.0f),
+                  PAINT_HEIGHT_NEUTRAL);
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_value_encode(PAINT_MATERIAL_CHANNEL_HEIGHT, 1.0f),
+                  1.0f);
+  for (const float relief : {-1.0f, -0.5f, -0.1f, 0.0f, 0.25f, 0.9f, 1.0f}) {
+    EXPECT_NEAR(BKE_paint_material_channel_value_decode(
+                    PAINT_MATERIAL_CHANNEL_HEIGHT,
+                    BKE_paint_material_channel_value_encode(PAINT_MATERIAL_CHANNEL_HEIGHT, relief)),
+                relief,
+                1e-6f);
+  }
+}
+
+TEST(material_paint_channel, height_encode_clamps_to_the_authored_range)
+{
+  /* Out-of-range input is stopped at the single encode seam, not in each consumer. */
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_value_encode(PAINT_MATERIAL_CHANNEL_HEIGHT, -3.0f),
+                  0.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_value_encode(PAINT_MATERIAL_CHANNEL_HEIGHT, 4.0f),
+                  1.0f);
+}
+
+TEST(material_paint_channel, unsigned_channels_encode_as_the_identity)
+{
+  /* An identity channel passes through untouched: its caller already clamped to the right range
+   * (Custom's range lives per scene, so the descriptor range must not narrow it). */
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_value_encode(PAINT_MATERIAL_CHANNEL_ROUGHNESS, 0.3f),
+                  0.3f);
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_value_encode(PAINT_MATERIAL_CHANNEL_ROUGHNESS, 3.0f),
+                  3.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_value_decode(PAINT_MATERIAL_CHANNEL_ROUGHNESS, 0.3f),
+                  0.3f);
 }
 
 TEST(material_paint_channel, height_from_attribute_name)
@@ -1412,7 +1792,9 @@ TEST(material_paint_channel, height_from_attribute_name)
 
 TEST(material_paint_channel, height_default_value)
 {
-  EXPECT_FLOAT_EQ(BKE_paint_material_channel_default_value(PAINT_MATERIAL_CHANNEL_HEIGHT), 0.0f);
+  /* The neutral the layered stack blends around, so a fresh map starts flat and the eraser
+   * flattens back to it rather than carving down to zero. */
+  EXPECT_FLOAT_EQ(BKE_paint_material_channel_default_value(PAINT_MATERIAL_CHANNEL_HEIGHT), 0.5f);
 }
 
 TEST(material_paint_channel, alpha_descriptor)
@@ -2473,6 +2855,35 @@ TEST_F(PaintMaterialChannelTest, LocalBrushChannelDataSurvivesSaveReload)
   BLI_delete(filepath, false, false);
 
   BKE_id_free(bmain, scene);
+}
+
+TEST(material_paint_channel, height_delta_encode_scales_without_bias_or_clamp)
+{
+  /* A relief difference is added to a level already stored, so only the scale applies and a delta
+   * beyond the authored range is not clamped. */
+  EXPECT_FLOAT_EQ(
+      BKE_paint_material_channel_delta_encode(PAINT_MATERIAL_CHANNEL_HEIGHT, 0.0f), 0.0f);
+  EXPECT_FLOAT_EQ(
+      BKE_paint_material_channel_delta_encode(PAINT_MATERIAL_CHANNEL_HEIGHT, 2.0f), 1.0f);
+  EXPECT_FLOAT_EQ(
+      BKE_paint_material_channel_delta_encode(PAINT_MATERIAL_CHANNEL_HEIGHT, -0.5f), -0.25f);
+  /* A channel whose storage is its relief is untouched. */
+  EXPECT_FLOAT_EQ(
+      BKE_paint_material_channel_delta_encode(PAINT_MATERIAL_CHANNEL_ROUGHNESS, 0.3f), 0.3f);
+}
+
+TEST(material_paint_channel, height_is_a_float_layer_map_and_the_other_scalars_stay_bytes)
+{
+  const MaterialPaintChannelInfo &height = BKE_paint_material_channel_info(
+      PAINT_MATERIAL_CHANNEL_HEIGHT);
+  EXPECT_TRUE(height.map_float);
+  EXPECT_TRUE(height.stores_image());
+  EXPECT_FALSE(height.supports_image_paint);
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.channel != PAINT_MATERIAL_CHANNEL_HEIGHT) {
+      EXPECT_FALSE(info.map_float) << info.ui_name;
+    }
+  }
 }
 
 }  // namespace blender

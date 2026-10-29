@@ -36,6 +36,7 @@ from bl_ui.properties_paint_common import (
     draw_material_paint_visibility_chevron,
     draw_material_paint_sync_toggle,
     material_paint_writable_channels,
+    material_paint_layered_active,
     material_paint_has_any_map,
     paint_mask_target_erase_brush,
 )
@@ -756,9 +757,11 @@ class SelectPaintSlotHelper:
         """
         sculpt_channels = material_paint_writable_channels(
             context.tool_settings.sculpt.brush, context.tool_settings.sculpt, mode_settings,
+            layered=material_paint_layered_active(context),
         )
         image_paint_channels = material_paint_writable_channels(
             context.tool_settings.image_paint.brush, context.tool_settings.image_paint, mode_settings,
+            layered=material_paint_layered_active(context),
         )
         if sculpt_channels is None or image_paint_channels is None:
             # Nothing to compare without a brush on both sides; "Sync Brush" needs one to copy

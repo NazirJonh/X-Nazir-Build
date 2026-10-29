@@ -2341,7 +2341,7 @@ int BKE_paint_layers_texpaint_slot_channel(const int slot_index)
   }
   int index = 0;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    if (!info.supports_image_paint) {
+    if (!info.stores_image()) {
       continue;
     }
     if (index == slot_index) {
@@ -2361,7 +2361,7 @@ static void paint_layers_texpaint_slots_fill(Material &ma, const PaintModeSettin
   const PaintLayersTargetMode mode = BKE_paint_layers_target_mode(&mode_settings);
   Vector<const MaterialPaintChannelInfo *> infos;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    if (info.supports_image_paint) {
+    if (info.stores_image()) {
       infos.append(&info);
     }
   }

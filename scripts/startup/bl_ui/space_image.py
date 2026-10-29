@@ -23,6 +23,7 @@ from bl_ui.properties_paint_common import (
     draw_material_paint_visibility_chevron,
     draw_material_paint_sync_toggle,
     material_paint_writable_channels,
+    material_paint_layered_active,
     material_paint_has_any_map,
     draw_material_paint_visibility_popover,
     ClonePanel,
@@ -1784,12 +1785,14 @@ class IMAGE_PT_paint_canvas(Panel, ImagePaintPanel):
 
         image_paint_channels = material_paint_writable_channels(
             getattr(settings, "brush", None), settings, mode_settings,
+            layered=material_paint_layered_active(context),
         )
         sculpt_settings = context.tool_settings.sculpt
         sculpt_channels = material_paint_writable_channels(
             getattr(sculpt_settings, "brush", None) if sculpt_settings else None,
             sculpt_settings,
             mode_settings,
+            layered=material_paint_layered_active(context),
         )
 
         def _names(channels):

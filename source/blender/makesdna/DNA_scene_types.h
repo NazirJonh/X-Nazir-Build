@@ -1739,7 +1739,8 @@ struct PaintShapeChannelValue {
   char _pad[1] = {};
   /** #eBlendMode (IMB_BlendMode). */
   short blend = 0;
-  /** Value for scalar channels (Metallic, Roughness, Specular, AO, Height base). */
+  /** Value for scalar channels (Metallic, Roughness, Specular, AO). Height has no base value:
+   * its shape relief is always laid around the neutral mid height. */
   float value = 0.0f;
   /** Color for color channels (Base Color, Emission). */
   float color[3] = {1.0f, 1.0f, 1.0f};

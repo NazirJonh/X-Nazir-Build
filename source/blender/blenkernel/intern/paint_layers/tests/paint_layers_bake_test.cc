@@ -243,11 +243,16 @@ TEST_F(PaintLayersBakeTest, a_gradient_row_bake_keeps_the_precision_its_channel_
   ASSERT_TRUE(BKE_paint_layers_gradient_set_line(*ma, *layer, line_start, line_end));
 
   /* Every channel a generated row can lay in. A tangent normal is not a colour a ramp produces,
-   * so the row refuses a Normal record outright instead of baking one. */
+   * so the row refuses a Normal record outright instead of baking one. Height is left out: a
+   * generated row keeps it as a value pair rather than a map, so this map-based measurement has
+   * nothing to read back for it (its float map and precision are covered by the layered Height
+   * tests in paint_material_channel_test.cc). */
   EXPECT_EQ(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
   Vector<int> channels;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL ||
+        info.channel == PAINT_MATERIAL_CHANNEL_HEIGHT)
+    {
       continue;
     }
     ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, info.channel), nullptr) << info.ui_name;
@@ -282,8 +287,9 @@ TEST_F(PaintLayersBakeTest, a_gradient_row_bake_keeps_the_precision_its_channel_
         eMaterialPaintChannel(channel));
     Vector<float> pixels(pixel_num * 4);
     if (!evaluate(channel, pixels.as_mutable_span())) {
-      /* A channel with an image-paint target always resolves; one without (Custom, Height, AO) has
-       * no map to bake yet, so it is reported and left out instead of failing the measurement. */
+      /* A channel with an image-paint target always resolves; one without (Custom, AO) has no map
+       * to bake yet, so it is reported and left out instead of failing the measurement. Height is
+       * not measured here at all (see above). */
       ASSERT_FALSE(info.supports_image_paint) << info.ui_name;
       printf("[paint-layers gradient row bake] precision %s: no stack in this channel\n",
              info.ui_name);
@@ -308,7 +314,6 @@ TEST_F(PaintLayersBakeTest, a_gradient_row_bake_keeps_the_precision_its_channel_
           << info.ui_name << ": a channel with an image map must stay readable after its bake";
       continue;
     }
-
     const Span<float> live_pixels = live[index];
     double max_error = 0.0;
     double sum_error = 0.0;

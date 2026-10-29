@@ -576,6 +576,10 @@ void input_link_restore(Material &ma,
   /* Every link added or removed below dirties the topology cache, and the next call (the following
    * channel, or the second link of one) reads `directly_linked_links` through it. */
   ma.nodetree->ensure_topology_cache();
+  /* The owner is read while the cache is still valid: removing the links below dirties it, and
+   * #bNodeSocket::owner_node asserts without it (a Height Bump taking over a Normal Map's link to
+   * the Principled Normal is the case that reaches it). */
+  bNode &input_node = input.owner_node();
   const Span<bNodeLink *> links = input.directly_linked_links();
   if (!links.is_empty()) {
     if (links[0]->fromnode == &from_node && links[0]->fromsock == &from_socket) {
@@ -584,7 +588,7 @@ void input_link_restore(Material &ma,
     r_report.restored_inputs = true;
   }
   bke::node_remove_socket_links(*ma.nodetree, input);
-  bke::node_add_link(*ma.nodetree, from_node, from_socket, input.owner_node(), input);
+  bke::node_add_link(*ma.nodetree, from_node, from_socket, input_node, input);
 }
 
 bNodeSocket *instance_output_find(bNodeTree &tree, bNode &instance, const char *result_name)

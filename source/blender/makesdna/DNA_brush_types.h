@@ -268,8 +268,9 @@ struct BrushMaterialPaintChannel {
   char show_source_grid = 1;
   /**
    * Inverts the sampled #source_mtex value (`1 - v` over the channel range). Only read for the
-   * Alpha channel: the inversion is a property of the texture, so it applies wherever Alpha is
-   * sampled, not only for a Mask stroke.
+   * Alpha and Height channels: the inversion is a property of the texture, so it applies wherever
+   * the channel is sampled, not only for a Mask stroke. For Height, `1 - v` over the stored range
+   * mirrors the relief around its neutral (a bump becomes a dent).
    */
   char source_invert = 0;
   char _pad1 = 0;

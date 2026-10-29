@@ -201,8 +201,13 @@ static bool composite_gradient_describe(
     if (record == nullptr) {
       return false;
     }
-    out.scalar_start = record->value[0];
-    out.scalar_end = record->value[1];
+    /* A generator authors its two ends as relief (for Height, -1..1), while the composite works in
+     * storage. The value ramp path needs no conversion: its grey stops are the normalized
+     * parameter of the channel's range, which for Height is the stored value itself. */
+    out.scalar_start = BKE_paint_material_channel_value_encode(eMaterialPaintChannel(channel),
+                                                               record->value[0]);
+    out.scalar_end = BKE_paint_material_channel_value_encode(eMaterialPaintChannel(channel),
+                                                             record->value[1]);
     if (record->gradient_ramp != nullptr) {
       out.scalar_ramp = *record->gradient_ramp;
       out.scalar_ramp_valid = true;

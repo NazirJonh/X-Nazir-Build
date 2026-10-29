@@ -924,6 +924,9 @@ BrushMaterialPaint *BKE_brush_material_paint_create_default()
   settings->channels[PAINT_MATERIAL_CHANNEL_NORMAL].value[1] = 0.0f;
   settings->channels[PAINT_MATERIAL_CHANNEL_NORMAL].value[2] = 1.0f;
   settings->channels[PAINT_MATERIAL_CHANNEL_CUSTOM].value[0] = 0.5f;
+  /* Height's authored value is a signed relief: 0 leaves the surface flat. Storage adds the
+   * neutral offset at the paint seam, so an enabled Height brush neither raises nor carves until
+   * the user moves the value. */
   settings->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].value[0] = 0.0f;
   settings->channels[PAINT_MATERIAL_CHANNEL_HEIGHT].use = 0;
   /* Neutral = fully opaque / no masking; masking only activates once the user opts in via use. */

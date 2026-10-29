@@ -443,6 +443,17 @@ def _draw_editor_menus_collapsible(context, layout):
 # Patch draw_asset_browser_buttons in place so our row lands at a specific
 # position in the header, instead of after the whole header (which is all
 # .append() can do).
+#
+# The patched implementations don't call the original: this add-on deliberately
+# moves the search field and Import Settings to the main header line (they must
+# not drop to the tool header row when the area narrows), so a plain wrap would
+# draw both twice. The price is that every button the native implementations
+# draw has to be mirrored here -- new native buttons would silently disappear.
+# Buttons that ship as shared helpers (draw_asset_updates_popover() in
+# bl_ui.space_filebrowser) are called through that helper in both places, so
+# they can't get lost; anything else added natively later must be added here
+# too. The "Library" menu entry for the updates popover
+# (ASSETBROWSER_MT_library) is the layout-independent fallback either way.
 # -------------------------------------------------------------------------
 
 _original_draw_asset_browser_buttons = None
@@ -457,12 +468,12 @@ def _draw_asset_browser_buttons_tool_header(self, context):
     Optimized layout for the tool header (second line) with better alignment:
     - ID Type Filter + Name Match Filter centered (equal spacers on both sides -- a single
       trailing spacer only pushes the group left, it doesn't center it).
-    - Display Mode + Filter + Toggle Region pushed to the right edge.
+    - Automatic Updates + Display Mode + Filter + Toggle Region pushed to the right edge.
 
     Search field is NOT drawn here -- it's already drawn once in the main header
     (_patched_header_draw), which stays on that line regardless of TOOL_HEADER state;
     drawing it again here would duplicate it."""
-    from bl_ui.space_filebrowser import is_option_region_visible
+    from bl_ui.space_filebrowser import is_option_region_visible, draw_asset_updates_popover
 
     layout = self.layout
     space_data = context.space_data
@@ -487,9 +498,11 @@ def _draw_asset_browser_buttons_tool_header(self, context):
 
     layout.separator_spacer()
 
-    # Right side: Display Mode, Filter, Toggle Region (pinned to the right edge since nothing
-    # follows them and the spacer above already claimed the leftover space).
+    # Right side: Automatic Updates, Display Mode, Filter, Toggle Region (pinned to the right
+    # edge since nothing follows them and the spacer above already claimed the leftover space).
     right_group = layout.row(align=False)
+
+    draw_asset_updates_popover(right_group)
 
     right_group.prop_with_popover(
         params,
@@ -510,7 +523,7 @@ def _draw_asset_browser_buttons_tool_header(self, context):
 
 
 def _patched_draw_asset_browser_buttons(self, context):
-    from bl_ui.space_filebrowser import is_option_region_visible
+    from bl_ui.space_filebrowser import is_option_region_visible, draw_asset_updates_popover
 
     layout = self.layout
     space_data = context.space_data
@@ -524,6 +537,10 @@ def _patched_draw_asset_browser_buttons(self, context):
     # separator() right before invoking this, right after Search, so that Search and this
     # buttons row sit pinned together at the right edge. Adding another spacer here (elastic
     # or otherwise) would reopen a gap between Search and these buttons.
+
+    # Native entry of the automatic updates feature, first in the row like on the unpatched
+    # header (see the comment at the top of the patch section for the helper-based pattern).
+    draw_asset_updates_popover(layout)
 
     draw_id_type_filter_row(layout, context)
 

@@ -677,7 +677,7 @@ class BrushTextureSlotDropTarget : public ui::DropTargetInterface {
         /* Image assets from an on-disk Asset Browser library are dragged as paths rather than
          * WM_DRAG_ASSET. Load the image here so it can be kept in the current file as an asset and
          * assigned through the same ID-based path as blend-library assets. */
-        Image *image = BKE_image_load_exists(CTX_data_main(C), path, nullptr);
+        Image *image = ed::asset::image_load_for_import(*CTX_data_main(C), path, nullptr, false);
         if (image) {
           id_us_min(&image->id);
           if (!image->id.asset_data) {
@@ -1379,12 +1379,13 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
          * Single-image drops keep using #WM_drag_get_single_path below. */
         const Vector<std::string> image_paths = drag_image_paths(drag);
         if (!image_paths.is_empty()) {
-          image = BKE_image_load_exists_unedited(bmain, image_paths[0].c_str(), nullptr);
+          image = ed::asset::image_load_for_import(
+              *bmain, image_paths[0].c_str(), nullptr, true);
           image_has_extra_user = image != nullptr;
         }
       }
       else if (const char *path = WM_drag_get_single_path(&drag)) {
-        image = BKE_image_load_exists_unedited(bmain, path, nullptr);
+        image = ed::asset::image_load_for_import(*bmain, path, nullptr, true);
         image_has_extra_user = image != nullptr;
       }
     }

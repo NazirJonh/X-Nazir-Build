@@ -74,6 +74,14 @@ void clear(const AssetLibraryReference *library_reference, const bContext *C);
 /** Clear a library from a file-list job or other code that only has a window manager. */
 void clear(const AssetLibraryReference *library_reference, wmWindowManager *wm);
 /**
+ * Re-read \a library_reference from disk: for custom on-disk libraries update the image index
+ * first, then clear the asset list storage (global and visible asset browsers) so the next read
+ * job picks up files added, moved or deleted since the last scan. Shared by the asset browser
+ * refresh operator and the automatic updates. Does not send notifiers.
+ */
+void library_refresh_from_disk(const AssetLibraryReference &library_reference,
+                               wmWindowManager *wm);
+/**
  * Tag all visible asset browser areas showing \a library_reference for refresh so #file_refresh()
  * runs (starts a new read job when the filelist was force-reset).
  */

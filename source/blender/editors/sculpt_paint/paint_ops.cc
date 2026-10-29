@@ -1914,7 +1914,7 @@ static Image *material_paint_channels_assign_images_entry_image(bContext *C,
     return nullptr;
   }
   bool exists = false;
-  Image *image = BKE_image_load_exists_unedited(bmain, filepath, &exists);
+  Image *image = ed::asset::image_load_for_import(*bmain, filepath, &exists, true);
   if (image == nullptr) {
     BKE_reportf(op->reports, RPT_WARNING, "Could not load image \"%s\"", filepath);
     return nullptr;

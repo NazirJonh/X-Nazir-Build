@@ -39,6 +39,7 @@
 #include "../space_file/filelist.hh"
 
 #include "ED_asset_indexer.hh"
+#include "ED_asset_image_library.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_fileselect.hh"
@@ -589,6 +590,23 @@ void clear(const AssetLibraryReference *library_reference, wmWindowManager *wm)
 void clear(const AssetLibraryReference *library_reference, const bContext *C)
 {
   clear(library_reference, CTX_wm_manager(C));
+}
+
+void library_refresh_from_disk(const AssetLibraryReference &library_reference,
+                               wmWindowManager *wm)
+{
+  /* For custom on-disk libraries, update the image index before clearing the list so the next
+   * read job picks up files added, moved or deleted since the last scan. The index write is
+   * atomic and fast for unchanged libraries. */
+  if (library_reference.type == ASSET_LIBRARY_CUSTOM) {
+    const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_from_ref(
+        &U, &library_reference);
+    if (user_lib && !(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) && user_lib->dirpath[0]) {
+      asset::image_library_scan_and_index(user_lib->dirpath);
+      asset::image_library_invalidate_cached_previews(user_lib->dirpath);
+    }
+  }
+  clear(&library_reference, wm);
 }
 
 void clear_all_library(const bContext *C)

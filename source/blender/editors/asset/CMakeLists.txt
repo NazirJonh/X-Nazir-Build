@@ -48,6 +48,11 @@ set(SRC
   intern/asset_temp_id_consumer.cc
   intern/asset_type.cc
   intern/asset_ui_utils.cc
+  intern/asset_updates_image.cc
+  intern/asset_updates_scan.cc
+  intern/asset_updates_state.cc
+  intern/asset_updates_timer.cc
+  intern/asset_updates_ui.cc
 
   ED_asset_image_library.hh
   ED_asset_image_utils.hh
@@ -68,6 +73,7 @@ set(SRC
   intern/asset_library_reference.hh
   intern/asset_shelf.hh
   intern/asset_shelf_asset_lists.hh
+  intern/asset_updates_intern.hh
 )
 
 set(LIB
@@ -76,7 +82,9 @@ set(LIB
   PRIVATE bf::blenlib
   PRIVATE bf::blenloader
   PRIVATE bf::blentranslation
+  PRIVATE bf::depsgraph
   PRIVATE bf::dna
+  PRIVATE bf::imbuf
   PRIVATE bf::intern::clog
   PRIVATE bf::intern::guardedalloc
   PRIVATE bf::windowmanager

@@ -91,6 +91,7 @@
 
 #include "ED_anim_api.hh"
 #include "ED_asset.hh"
+#include "ED_asset_updates.hh"
 #include "ED_curve_patch.hh"
 #include "ED_gpencil_legacy.hh"
 #include "ED_grease_pencil.hh"
@@ -320,6 +321,10 @@ void WM_init(bContext *C, int argc, const char **argv)
    * the first asset list read job runs.  No UI notifications needed here since no
    * windows are open yet; the fresh index will be picked up automatically. */
   blender::ed::asset::image_library_on_startup();
+
+  /* Arm the automatic asset updates timer (a no-op while the feature is disabled in the
+   * preferences that were just read). */
+  ed::asset_updates::timer_sync();
 
   if (!G.background) {
     wmWindowManager *wm = CTX_wm_manager(C);
@@ -665,6 +670,7 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
   ED_outliner_rendered_previews_free();
   ED_preview_free_dbase(); /* Frees a Main dbase, before #BKE_blender_free! */
   ed::asset::list::storage_exit();
+  ed::asset_updates::storage_exit();
   /* Write out any brush recent/favorite lists change that was only kept in memory this session. */
   ed::asset::shelf::shelf_asset_lists_flush();
 

@@ -1944,6 +1944,14 @@ void blo_do_versions_userdef(UserDef *userdef)
     }
   }
 
+  if (!USER_VERSION_ATLEAST(502, 88)) {
+    /* Asset Browser automatic updates default to a 1 minute interval and to skipping resources
+     * whose file parameters changed. The enable flags default to off (loaded as zero), automatic
+     * background updates must never turn on by themselves. */
+    userdef->asset_updates_interval_min = 1;
+    userdef->asset_updates_skip_mismatch = 1;
+  }
+
   /* Seed core Principled BSDF map types when the list is empty.
    * Call unconditionally (not version-gated): #BKE_name_matching_userdef_ensure_defaults is
    * idempotent, and prefs may already be at the current subversion with an empty list

@@ -1005,7 +1005,7 @@ ID *StackDropHandler::drop_resolve(bContext &C, wmDrag &drag, StackDropPayload &
      * An image edited in Blender is taken once more rather than shared: the row the drop makes
      * paints into it, and a stroke on one user must not change what another one shows. */
     if (is_image_file(payload) && BLI_exists(path)) {
-      Image *image = BKE_image_load_exists_unedited(&bmain, path, nullptr);
+      Image *image = ed::asset::image_load_for_import(bmain, path, nullptr, true);
       if (image == nullptr) {
         return nullptr;
       }

@@ -2033,6 +2033,11 @@ enum eWM_JobType {
    * separate from the paint-layer planner whose jobs are keyed on the material.
    */
   WM_JOB_TYPE_BRUSH_LAYER_SOURCE,
+  /**
+   * Background scan of the external source files of project resources (images) for the asset
+   * automatic update system, keyed globally on the #Main.
+   */
+  WM_JOB_TYPE_ASSET_UPDATES_SCAN,
   /* Add as needed, bake, seq proxy build
    * if having hard coded values is a problem. */
 };

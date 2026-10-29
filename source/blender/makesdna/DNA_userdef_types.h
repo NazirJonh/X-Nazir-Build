@@ -1417,6 +1417,25 @@ struct UserDef {
   char standard_catalog_brush_texture[64] = "Brush Texture";
   char standard_catalog_fill_layer[64] = "Source Texture";
 
+  /**
+   * Asset Browser → Automatic Updates: interval between update checks, in minutes. Zero (files
+   * saved before this field existed) behaves like the default of 1.
+   */
+  int asset_updates_interval_min = 1;
+  /** Asset Browser → Automatic Updates: refresh the Assets panel listing on every interval. */
+  char asset_updates_assets_panel = 0;
+  /**
+   * Asset Browser → Automatic Updates: check external files of resources used in the project for
+   * changes and reload the ones that changed (layer stack included).
+   */
+  char asset_updates_project_resources = 0;
+  /**
+   * Asset Browser → Advanced Settings: skip resources whose file parameters (e.g. image
+   * dimensions) changed, instead of updating them in place.
+   */
+  char asset_updates_skip_mismatch = 1;
+  char _pad_asset_updates[1] = {};
+
   /** Last official Blender version selected for preferences synchronization. */
   char sync_source_version[16] = "";
 

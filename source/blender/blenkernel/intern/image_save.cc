@@ -221,6 +221,10 @@ static void image_save_update_filepath(Image *ima,
                                        const ImageSaveOptions *opts)
 {
   if (opts->do_newpath) {
+    /* Saving to a new path makes the recorded external source baseline describe a file the image
+     * no longer references: drop it so the next automatic update scan re-records it from the new
+     * file instead of matching the old one. */
+    BKE_image_source_baseline_clear(*ima);
     STRNCPY(ima->filepath, filepath);
 
     /* only image path, never ibuf */

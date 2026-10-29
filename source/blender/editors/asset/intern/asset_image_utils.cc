@@ -28,6 +28,7 @@
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_mark_clear.hh"
+#include "ED_asset_updates.hh"
 
 namespace blender::ed::asset {
 
@@ -111,6 +112,16 @@ static Image *find_image_by_filepath_any_library(Main &bmain, const char *filepa
     }
   }
   return linked_match;
+}
+
+Image *image_load_for_import(Main &bmain, const char *filepath, bool *r_exists, bool unedited)
+{
+  Image *image = unedited ? BKE_image_load_exists_unedited(&bmain, filepath, r_exists) :
+                            BKE_image_load_exists(&bmain, filepath, r_exists);
+  /* Records the baseline of a freshly loaded external file; re-loads of an image that already has
+   * a baseline (or no external file at all) are no-ops inside. */
+  asset_updates::image_import_record_baseline(image);
+  return image;
 }
 
 Image *resolve_image_from_asset(Main &bmain,

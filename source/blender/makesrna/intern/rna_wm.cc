@@ -58,6 +58,7 @@
 #  include "BKE_workspace.hh"
 
 #  include "ED_asset_library.hh"
+#  include "ED_asset_updates.hh"
 
 #  include "wm_event_system.hh"
 
@@ -1581,6 +1582,44 @@ static PointerRNA rna_WindowManager_user_keyconfig_get(PointerRNA *ptr)
 {
   wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
   return RNA_pointer_create_with_parent(*ptr, RNA_KeyConfig, wm->runtime->userconf);
+}
+
+static PointerRNA rna_WindowManager_asset_updates_get(PointerRNA *ptr)
+{
+  /* The status has no storage of its own: every property is computed by
+   * #blender::ed::asset_updates on access, so the owner's data pointer is carried through
+   * unused. */
+  return RNA_pointer_create_with_parent(*ptr, RNA_AssetUpdatesStatus, ptr->data);
+}
+
+static void rna_AssetUpdatesStatus_last_check_ago_get(PointerRNA * /*ptr*/, char *value)
+{
+  char text[64];
+  ed::asset_updates::last_check_ago_get(text, sizeof(text));
+  /* #blender::STRNCPY needs an array destination; the RNA callback passes the buffer as a
+   * pointer, so bound the copy to the size of the filled source. */
+  BLI_strncpy(value, text, sizeof(text));
+}
+
+static int rna_AssetUpdatesStatus_last_check_ago_length(PointerRNA * /*ptr*/)
+{
+  char text[64];
+  ed::asset_updates::last_check_ago_get(text, sizeof(text));
+  return int(strlen(text));
+}
+
+static void rna_AssetUpdatesStatus_last_check_summary_get(PointerRNA * /*ptr*/, char *value)
+{
+  char text[160];
+  ed::asset_updates::last_check_summary_get(text, sizeof(text));
+  BLI_strncpy(value, text, sizeof(text));
+}
+
+static int rna_AssetUpdatesStatus_last_check_summary_length(PointerRNA * /*ptr*/)
+{
+  char text[160];
+  ed::asset_updates::last_check_summary_get(text, sizeof(text));
+  return int(strlen(text));
 }
 
 static void rna_WindowManager_extensions_statusbar_update(Main * /*bmain*/,
@@ -3905,6 +3944,41 @@ static void rna_def_report(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Message", "Report message text");
 }
 
+static void rna_def_asset_updates_status(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  /* Runtime status of the automatic asset updates, computed by #blender::ed::asset_updates.
+   * Deliberately not part of #UserDef: it describes a running check, not a setting that is saved
+   * with the preferences. */
+  srna = RNA_def_struct(brna, "AssetUpdatesStatus", nullptr);
+  RNA_def_struct_ui_text(
+      srna, "Automatic Updates Status", "Status of the automatic asset updates");
+
+  prop = RNA_def_property(srna, "last_check_ago", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_AssetUpdatesStatus_last_check_ago_get",
+                                "rna_AssetUpdatesStatus_last_check_ago_length",
+                                nullptr);
+  RNA_def_property_string_maxlength(prop, 64);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Last Check Ago",
+      "How long ago the last update check finished (\"Not checked yet\" when it never ran)");
+
+  prop = RNA_def_property(srna, "last_check_summary", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_AssetUpdatesStatus_last_check_summary_get",
+                                "rna_AssetUpdatesStatus_last_check_summary_length",
+                                nullptr);
+  RNA_def_property_string_maxlength(prop, 160);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Last Check Summary", "Counters of the last update check, empty when it never ran");
+}
+
 static void rna_def_windowmanager(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3917,6 +3991,14 @@ static void rna_def_windowmanager(BlenderRNA *brna)
       "Window manager data-block defining open windows and other user interface data");
   RNA_def_struct_clear_flag(srna, STRUCT_ID_REFCOUNT);
   RNA_def_struct_sdna(srna, "wmWindowManager");
+
+  prop = RNA_def_property(srna, "asset_updates", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "AssetUpdatesStatus");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_WindowManager_asset_updates_get", nullptr, nullptr, nullptr);
+  RNA_def_property_flag(prop, PROP_NEVER_NULL);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Automatic Updates", "Status of the automatic asset updates");
 
   prop = RNA_def_property(srna, "operators", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_struct_type(prop, "Operator");
@@ -4572,6 +4654,7 @@ void RNA_def_wm(BlenderRNA *brna)
   rna_def_piemenu(brna);
   rna_def_window(brna);
   rna_def_report(brna);
+  rna_def_asset_updates_status(brna);
   rna_def_category_glyph_item(brna);
   rna_def_category_tag_def(brna);
   rna_def_windowmanager(brna);

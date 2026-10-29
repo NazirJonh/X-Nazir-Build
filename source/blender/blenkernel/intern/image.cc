@@ -3611,6 +3611,48 @@ static void image_remove_all_tiles(Image *ima)
   }
 }
 
+/* The states are stored explicitly in DNA; these keep the two enums from drifting apart. */
+static_assert(int(ImageSourceBaselineState::None) == IMA_SOURCE_BASELINE_NONE);
+static_assert(int(ImageSourceBaselineState::StatOnly) == IMA_SOURCE_BASELINE_STAT_ONLY);
+static_assert(int(ImageSourceBaselineState::Adopted) == IMA_SOURCE_BASELINE_ADOPTED);
+static_assert(int(ImageSourceBaselineState::Full) == IMA_SOURCE_BASELINE_FULL);
+
+ImageSourceBaselineState BKE_image_source_baseline_state(const Image &image)
+{
+  return static_cast<ImageSourceBaselineState>(image.source_state);
+}
+
+void BKE_image_source_baseline_get(
+    const Image &image, int64_t *r_mtime, int64_t *r_size, char r_hash[33])
+{
+  *r_mtime = image.source_mtime;
+  *r_size = image.source_size;
+  /* #blender::STRNCPY needs an array destination, the array parameter decays to a pointer. */
+  BLI_strncpy(r_hash, image.source_hash, 33);
+}
+
+void BKE_image_source_baseline_set(Image &image,
+                                   int64_t mtime,
+                                   int64_t size,
+                                   const char *hash_or_empty,
+                                   ImageSourceBaselineState state)
+{
+  /* A state claiming the content was verified needs the hash that proves it. */
+  BLI_assert(state != ImageSourceBaselineState::Full || hash_or_empty[0] != '\0');
+  image.source_mtime = mtime;
+  image.source_size = size;
+  STRNCPY(image.source_hash, hash_or_empty);
+  image.source_state = char(state);
+}
+
+void BKE_image_source_baseline_clear(Image &image)
+{
+  image.source_mtime = 0;
+  image.source_size = 0;
+  image.source_hash[0] = '\0';
+  image.source_state = IMA_SOURCE_BASELINE_NONE;
+}
+
 void BKE_image_signal(Main *bmain, Image *ima, ImageUser *iuser, int signal)
 {
   if (ima == nullptr) {
@@ -3706,6 +3748,11 @@ void BKE_image_signal(Main *bmain, Image *ima, ImageUser *iuser, int signal)
       break;
 
     case IMA_SIGNAL_RELOAD:
+      /* The reload makes the recorded external source baseline stale (a path change through the
+       * RNA property reloads the same way): drop it so the next automatic update scan re-records
+       * it from disk instead of mismatching against the old file. The automatic update's own
+       * reload re-records the baseline right after this signal. */
+      BKE_image_source_baseline_clear(*ima);
       /* try to repack file */
       if (BKE_image_has_packedfile(ima)) {
         const int tot_viewfiles = image_num_viewfiles(ima);

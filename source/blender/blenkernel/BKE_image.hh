@@ -533,6 +533,46 @@ void BKE_imageuser_default(ImageUser *iuser);
 void BKE_image_init_imageuser(Image *ima, ImageUser *iuser);
 void BKE_image_signal(Main *bmain, Image *ima, ImageUser *iuser, int signal);
 
+/**
+ * How much of the external source file baseline (#Image::source_mtime, #Image::source_size,
+ * #Image::source_hash) was recorded, as stored in #Image::source_state.
+ *
+ * This is the only description of the states: the DNA only stores them explicitly (see
+ * #eImageSourceBaselineState in DNA_image_types.h), so a file that legitimately has a zero mtime
+ * & size cannot be mistaken for "no baseline".
+ */
+enum class ImageSourceBaselineState : char {
+  /** Nothing recorded yet: the next update scan records the stat data without hashing or reloading,
+   * the image content is never compared against the file. */
+  None = 0,
+  /** Only mtime & size were recorded (at import time, where hashing would block the drop
+   * handler). A stat mismatch has no hash to compare against, so it reloads the image. */
+  StatOnly = 1,
+  /** Stat data inferred from the file on disk for an image that had none, without comparing it to
+   * the image content. Automatic scans only stat it, a manual update run reloads it once. */
+  Adopted = 2,
+  /** Full baseline including the content hash: a stat mismatch is confirmed by hashing first. */
+  Full = 3,
+};
+
+/** \return how much of the external source file baseline was recorded for \a image. */
+ImageSourceBaselineState BKE_image_source_baseline_state(const Image &image);
+/** Copy the recorded external source file baseline of \a image (see #Image::source_mtime). */
+void BKE_image_source_baseline_get(
+    const Image &image, int64_t *r_mtime, int64_t *r_size, char r_hash[33]);
+/**
+ * Record the external source file baseline of \a image and its \a state. An empty \a
+ * hash_or_empty records the baseline without a content hash, which is what
+ * #ImageSourceBaselineState::StatOnly and #ImageSourceBaselineState::Adopted stand for.
+ */
+void BKE_image_source_baseline_set(Image &image,
+                                   int64_t mtime,
+                                   int64_t size,
+                                   const char *hash_or_empty,
+                                   ImageSourceBaselineState state);
+/** Forget the baseline, so the next update scan records a new one from disk. */
+void BKE_image_source_baseline_clear(Image &image);
+
 void BKE_image_walk_all_users(
     const Main *mainp,
     void *customdata,

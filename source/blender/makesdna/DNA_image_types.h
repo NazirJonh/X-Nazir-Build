@@ -140,6 +140,22 @@ enum eImageAlphaMode : char {
 };
 
 /**
+ * #Image.source_state: how much of the external source file baseline the automatic asset update
+ * system recorded (see #blender::ed::asset_updates).
+ *
+ * The values are the on-disk representation of #ImageSourceBaselineState (BKE_image.hh), which is
+ * the one place documenting what each of them means; they are kept in sync there by
+ * `static_assert`s. The state is stored explicitly rather than derived from the baseline fields,
+ * so a file that legitimately has a zero mtime & size cannot be mistaken for "no baseline".
+ */
+enum eImageSourceBaselineState : char {
+  IMA_SOURCE_BASELINE_NONE = 0,
+  IMA_SOURCE_BASELINE_STAT_ONLY = 1,
+  IMA_SOURCE_BASELINE_ADOPTED = 2,
+  IMA_SOURCE_BASELINE_FULL = 3,
+};
+
+/**
  * ImageUser is in Texture, in Nodes, Background Image, Image Window, ...
  * should be used in conjunction with an ID * to Image.
  */
@@ -318,6 +334,26 @@ struct Image {
   char _pad_paint_layer[4] = {};
 
   bke::ImageRuntime *runtime = nullptr;
+
+  /**
+   * External source file baseline recorded by the automatic asset update system (see
+   * #blender::ed::asset_updates): which of these fields carries data is described by
+   * #source_state, see #ImageSourceBaselineState (BKE_image.hh) for the states themselves.
+   *
+   * The 64-bit fields must be preceded by this padding pointer: after the odd number of pointers
+   * above, the 32- and 64-bit struct layouts are offset by 4 bytes from each other, and an
+   * #int64_t member has to be 8-byte aligned in both at once (checked by makesdna). Same trick as
+   * the `void *_pad1` in #BFileGlobal.
+   */
+  void *_pad_source_model = nullptr;
+  int64_t source_mtime = 0;
+  int64_t source_size = 0;
+  /** MD5 hex digest (32 characters + terminator) of the source file contents at the last check. */
+  char source_hash[33] = "";
+  /** Baseline state, as #eImageSourceBaselineState. */
+  char source_state = IMA_SOURCE_BASELINE_NONE;
+  /** Keep the struct size 8-byte aligned in both pointer models after the 33-byte hash. */
+  char _pad_source_state[6] = {};
 };
 
 }  // namespace blender

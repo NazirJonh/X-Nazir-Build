@@ -42,6 +42,7 @@
 #include "WM_types.hh"
 
 #include "ED_asset_shelf.hh"
+#include "ED_asset_updates.hh"
 
 namespace blender {
 
@@ -402,6 +403,14 @@ static void rna_userdef_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *
 {
   WM_main_add_notifier(NC_WINDOW, nullptr);
   USERDEF_TAG_DIRTY;
+}
+
+/* Asset Browser -> Automatic Updates: the periodic timer follows the preferences directly, no
+ * file-space listener or draw call has to bootstrap it anymore. */
+static void rna_userdef_asset_updates_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  ed::asset_updates::timer_sync();
+  rna_userdef_update(bmain, scene, ptr);
 }
 
 static void rna_UserDef_asset_shelf_recent_brushes_max_update(Main * /*bmain*/,
@@ -9172,6 +9181,40 @@ void RNA_def_userdef(BlenderRNA *brna)
   RNA_def_property_pointer_funcs(prop, "rna_UserDef_name_matching_get", nullptr, nullptr, nullptr);
   RNA_def_property_ui_text(
       prop, "Name Matching", "Map types and filter tags for asset shelf name matching");
+
+  /* Asset Browser -> Automatic Updates popover (see ED_asset_updates.hh). */
+  prop = RNA_def_property(srna, "asset_updates_assets_panel", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "asset_updates_assets_panel", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Assets Panel",
+      "If selected, checks asset files for changes and updates them in the Assets panel. "
+      "Doesn't affect resources used in the project");
+  RNA_def_property_update(prop, 0, "rna_userdef_asset_updates_update");
+
+  prop = RNA_def_property(srna, "asset_updates_project_resources", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "asset_updates_project_resources", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Resources Used in Project",
+      "If selected, checks all resources currently used in the project for changes, and updates "
+      "anything occurring both in the Assets panel and in the project, layer stack included");
+  RNA_def_property_update(prop, 0, "rna_userdef_asset_updates_update");
+
+  prop = RNA_def_property(srna, "asset_updates_interval_min", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "asset_updates_interval_min");
+  RNA_def_property_range(prop, 1, 1440);
+  RNA_def_property_ui_text(
+      prop, "Update Every", "Interval between automatic update checks, in minutes");
+  RNA_def_property_update(prop, 0, "rna_userdef_asset_updates_update");
+
+  prop = RNA_def_property(srna, "asset_updates_skip_mismatch", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "asset_updates_skip_mismatch", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Skip Mismatch",
+      "Skip assets when their parameters mismatch, e.g. an image file whose dimensions changed");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
 
   prop = RNA_def_property(srna, "extensions", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_NEVER_NULL);

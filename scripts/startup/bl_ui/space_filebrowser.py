@@ -13,6 +13,60 @@ from bpy_extras import (
 from bpy.app.translations import contexts as i18n_contexts
 
 
+def draw_asset_updates_popover(layout):
+    """Entry button for the automatic updates feature (FILE_PT_asset_updates panel below).
+
+    Kept in a shared helper so both native header variants *and* add-ons that replace the
+    header buttons can draw the same entry. A second, layout-independent entry lives in the
+    "Library" menu (ASSETBROWSER_MT_library), so the feature stays reachable even when a custom
+    header layout leaves no room for the button."""
+    layout.popover(
+        panel="FILE_PT_asset_updates",
+        text="",
+        icon='FILE_REFRESH',
+    )
+
+
+class FILE_PT_asset_updates(Panel):
+    bl_space_type = 'FILE_BROWSER'
+    bl_region_type = 'HEADER'
+    bl_idname = "FILE_PT_asset_updates"
+    bl_label = "Automatic Updates"
+    bl_options = {'HIDE_HEADER'}
+    # 1.5x the default popover width (UI_POPOVER_WIDTH_UNITS, currently 10).
+    bl_ui_units_x = 15
+
+    @classmethod
+    def poll(cls, context):
+        return panel_poll_is_asset_browsing(context)
+
+    def draw(self, context):
+        prefs = context.preferences
+        layout = self.layout
+
+        automatic = layout.column(heading="Automatic Updates")
+        automatic.prop(prefs, "asset_updates_assets_panel")
+        automatic.prop(prefs, "asset_updates_project_resources")
+        interval_row = automatic.row(align=True)
+        interval_row.label(text="Update Every")
+        interval_row.prop(prefs, "asset_updates_interval_min", text="")
+        interval_row.label(text="Minutes")
+
+        advanced = layout.column(heading="Advanced Settings")
+        advanced.prop(prefs, "asset_updates_skip_mismatch")
+
+        manual = layout.column(heading="Manual")
+        manual.operator("ASSET_OT_updates_panel_refresh", icon='FILE_REFRESH')
+        manual.operator("ASSET_OT_updates_resources_refresh", icon='FILE_REFRESH')
+
+        status = layout.column(heading="Last Check")
+        updates = context.window_manager.asset_updates
+        status.label(text=updates.last_check_ago)
+        summary = updates.last_check_summary
+        if summary:
+            status.label(text=summary)
+
+
 class FILEBROWSER_HT_header(Header):
     bl_space_type = 'FILE_BROWSER'
 
@@ -23,6 +77,10 @@ class FILEBROWSER_HT_header(Header):
         params = space_data.params
 
         layout.separator_spacer()
+
+        # Automatic updates for external resources used in the project (layer stack included),
+        # drawn right after the menu bar ("Asset" menu is the last entry of it).
+        draw_asset_updates_popover(layout)
 
         if params.asset_library_reference not in {'LOCAL', 'ESSENTIALS'}:
             layout.popover("ASSETBROWSER_PT_import_settings", text="Import Settings")
@@ -781,6 +839,15 @@ class ASSETBROWSER_MT_library(AssetBrowserMenu, Menu):
         layout.operator("asset.library_refresh", text="Refresh")
         layout.operator("asset.library_reload_listing", text="Refresh Remote Listing")
 
+        # Layout-independent entry to the automatic updates settings, so the feature stays
+        # reachable no matter how the header row is laid out (see draw_asset_updates_popover).
+        layout.separator()
+        layout.operator(
+            "wm.call_panel",
+            text="Automatic Updates",
+            icon='FILE_REFRESH',
+        ).name = "FILE_PT_asset_updates"
+
 
 class ASSETBROWSER_MT_catalog(AssetBrowserMenu, Menu):
     bl_label = "Catalog"
@@ -1043,6 +1110,7 @@ classes = (
     ASSETBROWSER_UL_metadata_tags,
     ASSETBROWSER_PT_import,
     ASSETBROWSER_MT_context_menu,
+    FILE_PT_asset_updates,
 )
 
 

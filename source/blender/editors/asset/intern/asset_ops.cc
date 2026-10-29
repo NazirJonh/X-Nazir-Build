@@ -48,6 +48,7 @@
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
+#include "ED_asset_updates.hh"
 #include "ED_screen.hh"
 #include "asset_shelf.hh"
 /* XXX needs access to the file list, should all be done via the asset system in future. */
@@ -1012,19 +1013,9 @@ static void do_asset_library_refresh(bContext *C)
     return;
   }
 
-  /* For custom on-disk libraries, update the image index before clearing the list so
-   * that the next read job picks up any files added, moved or deleted since the last
-   * scan.  The index write is atomic and fast for unchanged libraries. */
-  if (library->type == ASSET_LIBRARY_CUSTOM) {
-    const bUserAssetLibrary *user_lib = BKE_preferences_asset_library_find_from_ref(&U, library);
-    if (user_lib && !(user_lib->flag & ASSET_LIBRARY_USE_REMOTE_URL) && user_lib->dirpath[0]) {
-      image_library_scan_and_index(user_lib->dirpath);
-      image_library_invalidate_cached_previews(user_lib->dirpath);
-    }
-  }
-
-  /* Handles both global asset list storage and asset browsers. */
-  list::clear(library, C);
+  /* Updates the on-disk image index of custom libraries and clears the asset list storage, same
+   * as the automatic updates do. */
+  list::library_refresh_from_disk(*library, CTX_wm_manager(C));
   WM_event_add_notifier(C, NC_ASSET | ND_ASSET_LIST_READING, nullptr);
   list::tag_refresh_visible_asset_browsers(*library, C);
 }
@@ -2509,6 +2500,8 @@ static void ASSET_OT_browser_name_match_clear(wmOperatorType *ot)
 
 void operatortypes_asset()
 {
+  asset_updates::operatortypes();
+
   WM_operatortype_append(ASSET_OT_shelf_popup_set_default_size);
   WM_operatortype_append(ASSET_OT_mark);
   WM_operatortype_append(ASSET_OT_mark_single);

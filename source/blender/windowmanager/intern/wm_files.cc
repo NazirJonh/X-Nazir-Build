@@ -114,6 +114,7 @@
 #include "IMB_thumbs.hh"
 
 #include "ED_asset.hh"
+#include "ED_asset_updates.hh"
 #include "ED_curve_patch.hh"
 #include "ED_datafiles.h"
 #include "ED_fileselect.hh"
@@ -2858,6 +2859,9 @@ static void wm_userpref_update_when_changed(bContext *C,
 
   WM_reinit_gizmomap_all(bmain);
   WM_keyconfig_reload(C);
+  /* Loading/reverting preferences replaces #U wholesale, so the RNA update callbacks of the
+   * automatic-updates settings never run: re-arm (or drop) the timer explicitly here. */
+  ed::asset_updates::timer_sync();
 
   userdef_curr->runtime.is_dirty = is_dirty;
 }

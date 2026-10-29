@@ -6,7 +6,8 @@
  * \ingroup bke
  *
  * The Height channel's own blend: the delta-space chain of static nodes a row's Height record
- * builds instead of a Mix.
+ * builds instead of a Mix, and the won mask a Compare record publishes to the row's other
+ * channels.
  */
 
 #include "BKE_paint_layers_generate.hh"
@@ -172,6 +173,23 @@ NodeOutput PaintLayersTreeBuilder::height_blend_chain_add(bNodeTree &tree,
                             d_below_out,
                             weighted,
                             0.0f);
+  }
+  else if (height_blend == MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE) {
+    NodeOutput won = math_node_add(
+        tree, grid_, nodes, NODE_MATH_LESS_THAN, d_below_out, d_layer_out, 0.0f);
+    if (won.socket == nullptr) {
+      return fail();
+    }
+    NodeOutput fac = won;
+    if (factor.socket != nullptr) {
+      fac = math_node_add(tree, grid_, nodes, NODE_MATH_MULTIPLY, won, factor, 0.0f);
+      if (fac.socket == nullptr) {
+        return fail();
+      }
+    }
+    stepped = float_mix(fac);
+    /* The mask gates every other channel of the row; the Height pass runs first (see #build). */
+    height_won_.add(&row, won);
   }
   if (stepped.socket == nullptr) {
     return fail();

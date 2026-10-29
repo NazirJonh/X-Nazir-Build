@@ -278,6 +278,22 @@ bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &gr
                                         float r_rgba[4]);
 
 /**
+ * The Compare mode's gate: whether a record's height at a texel beats the height the rows below it
+ * accumulated. Both are given as distances from the neutral level, the space every height mode
+ * works in.
+ *
+ * The one statement of the rule on the CPU side: the row blend (#blend_row_height) and the won
+ * mask the description renders for the row's other channels both call this, so the composite and
+ * the mask cannot disagree about which layer a texel belongs to. The generated graph states the
+ * same comparison as a LESS_THAN node (see the Height chain of the generator); the parity tests
+ * hold the two together.
+ */
+inline bool height_compare_won(const float d_below, const float d_layer)
+{
+  return d_below < d_layer;
+}
+
+/**
  * One height mode's step, in the delta space of the neutral level: the whole formula of the Height
  * channel, and the only statement of it on the CPU side.
  *
@@ -325,6 +341,13 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
   int16_t height_blend = 0;
   /** The Height record's own scale (`1 + delta`), applied by the height modes alone. */
   float height_scale = 1.0f;
+  /**
+   * The row's Height record compares (#MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE): its win or loss gates
+   * every other channel of the row. Described on every channel, unlike #height_blend which only the
+   * Height lane reads back, so a consumer that never evaluates the Height lane -- the GPU preview's
+   * descriptor -- can still tell that this row's other channels depend on the comparison.
+   */
+  bool height_compare = false;
   /** How much of the mask applies; 0 ignores the mask entirely. */
   float mask_influence = 1.0f;
   bool enabled = true;
@@ -569,6 +592,22 @@ struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
   /** A Gradient generator's payload; #enabled false for every row with a map or constant. */
   PaintMaterialCompositeGradient gradient;
   /**
+   * The Compare mask of the row's Height record: 1 where the row's height is greater than the
+   * height the rows below it accumulated, 0 where it lost -- the factor every other channel of
+   * the row is laid by is multiplied with. Rendered by the description (the Height channel is
+   * described for the prefix below the row and the row's own content), owned by it like an Anchor
+   * Point slice, and borrowed by the evaluator's layer. One channel, since a gate has no colour.
+   * Null for every row that does not Compare.
+   *
+   * The mask is channel-independent but a description is per channel: a pass that describes
+   * several channels of one material shares the rendered mask between them (#
+   * PaintLayersHeightWonCache in `BKE_paint_layers_composite.hh`), which is why it is rendered
+   * here, when the caller rebuilds, and not at evaluation time. What that cache still leaves is a
+   * re-render per pass; a memo keyed on the description's hash would remove it, and is not needed
+   * while the pass is the only unit that rebuilds.
+   */
+  std::shared_ptr<ImBuf> height_won;
+  /**
    * A folder's own stack, bottom to top. A std::vector rather than a #Vector: the element type is
    * the one being defined here, and #Vector needs its size.
    */
@@ -622,6 +661,8 @@ struct PaintMaterialCompositeLayer : PaintMaterialCompositeRowParams {
   Vector<PaintMaterialCompositeCorrectionBuffer> content_corrections;
   /** A Gradient generator's payload, copied from the image layer. */
   PaintMaterialCompositeGradient gradient;
+  /** Borrowed from #PaintMaterialCompositeImageLayer::height_won, which keeps it alive. */
+  ImBuf *height_won_ibuf = nullptr;
   /** A folder's own stack, bottom to top; see #PaintMaterialCompositeImageLayer::children. */
   std::vector<PaintMaterialCompositeLayer> children;
 };
@@ -766,6 +807,100 @@ struct PaintMaterialCompositeLinearTarget {
   static PaintMaterialCompositeLinearTarget in_frame(MutableSpan<float> storage,
                                                      int width,
                                                      const rcti &area);
+};
+
+/**
+ * One buffer an evaluation holds: an acquired image, or a resample the evaluation made and owns
+ * (#image null tells the two apart).
+ *
+ * The holder is the session below, which keeps them for the whole life of a stack rather than for
+ * one evaluation; nothing outside a session reads or releases one.
+ */
+struct CompositeImageLock {
+  Image *image = nullptr;
+  ImBuf *ibuf = nullptr;
+  void *lock = nullptr;
+};
+
+/**
+ * A stack whose buffers are already acquired, ready to be evaluated region by region.
+ *
+ * Opening a session does what one whole-frame evaluation does before it writes a texel: the stack
+ * is sized, every layer's map is acquired and every mapped one is resampled onto the evaluation
+ * grid (#composite_resample_mapped). Every #eval after that only evaluates a region of that grid,
+ * so a caller that renders many regions of one stack -- a mask rendered a strip of rows at a time
+ * -- pays the acquisition and the resample once instead of once per region.
+ *
+ * The images stay locked, and the resamples alive, until the session is destroyed: the same span an
+ * evaluation holds them for on its own. A session is move-only, since it owns the locks; the caller
+ * keeps the #PaintMaterialCompositeImageLayer descriptions it was opened over alive for as long as
+ * it lives, as those own the slices the layers borrow.
+ *
+ * \param bottom_color: the value the stack starts from, or null to start transparent.
+ * \param eval_width, eval_height: the grid to evaluate at rather than the stack's own dimensions,
+ *                                 exactly as #BKE_paint_material_composite_eval_images_linear
+ *                                 reads them; zero keeps the stack's.
+ */
+class PaintMaterialCompositeLinearSession {
+  Vector<CompositeImageLock> locks_;
+  PaintMaterialCompositeStack stack_;
+  /** The Gradient payloads of the stack, which #eval reports through the stats. */
+  int gradient_items_ = 0;
+  /** Whether the stack could be built and acquired at all. */
+  bool ok_ = false;
+
+ public:
+  /** An empty session: nothing is held and #ok reports false. */
+  PaintMaterialCompositeLinearSession() = default;
+  PaintMaterialCompositeLinearSession(PaintMaterialCompositeLinearSession &&other);
+  PaintMaterialCompositeLinearSession &operator=(PaintMaterialCompositeLinearSession &&other);
+  PaintMaterialCompositeLinearSession(const PaintMaterialCompositeLinearSession &) = delete;
+  PaintMaterialCompositeLinearSession &operator=(const PaintMaterialCompositeLinearSession &) =
+      delete;
+  ~PaintMaterialCompositeLinearSession();
+
+  /** Open a session over \a image_layers, the whole-frame path of the linear evaluation. */
+  static PaintMaterialCompositeLinearSession session_open(
+      Span<PaintMaterialCompositeImageLayer> image_layers,
+      const float bottom_color[4] = nullptr,
+      int eval_width = 0,
+      int eval_height = 0);
+
+  /**
+   * Open a session over the single row \a row, at the row's own size: what
+   * #BKE_paint_material_composite_eval_row_content renders. The row has to outlive the session.
+   */
+  static PaintMaterialCompositeLinearSession session_open_row(
+      const PaintMaterialCompositeImageLayer &row);
+
+  /** Whether the stack was built: false leaves nothing to evaluate. */
+  bool ok() const
+  {
+    return ok_;
+  }
+
+  /**
+   * Evaluate the held stack into \a target, or the \a region of it.
+   *
+   * \param r_stats: filled exactly as #BKE_paint_material_composite_eval_images_linear fills it,
+   *                 the Gradient counts included, so a caller can keep reporting the cost of the
+   *                 whole stack while evaluating a part of it.
+   * \return false when the stack was not built, or as #BKE_paint_material_composite_eval_linear
+   *         refuses \a target.
+   */
+  bool eval(const PaintMaterialCompositeLinearTarget &target,
+            const rcti *region = nullptr,
+            PaintMaterialCompositeEvalStats *r_stats = nullptr);
+
+  /**
+   * Render the held single row's content into straight scene-linear colour and the coverage it
+   * lays by, exactly as #BKE_paint_material_composite_eval_row_content does. False for a stack
+   * that is not one row, or a region the row's size leaves empty.
+   */
+  bool eval_row_content(const rcti *region,
+                        int channel,
+                        float *r_color_rgba,
+                        float *r_coverage_gray);
 };
 
 /**

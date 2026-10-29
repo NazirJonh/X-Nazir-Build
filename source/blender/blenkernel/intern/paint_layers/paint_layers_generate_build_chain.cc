@@ -3163,6 +3163,27 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     }
   }
 
+  /* A Compare Height record decides the row's visibility everywhere else: where its height lost,
+   * nothing of the row shows in any channel. The won mask was built by the Height pass, which the
+   * build runs before every other channel (see #build), so it is already there. */
+  if (channel != PAINT_MATERIAL_CHANNEL_HEIGHT) {
+    if (const NodeOutput *won = height_won_.lookup_ptr(&layer)) {
+      if (won->socket != nullptr) {
+        if (factor == nullptr) {
+          factor_node = won->node;
+          factor = won->socket;
+        }
+        else {
+          const NodeOutput product = this->multiply_nodes_add(tree, {factor_node, factor}, *won);
+          if (product.node != nullptr) {
+            factor_node = product.node;
+            factor = product.socket;
+          }
+        }
+      }
+    }
+  }
+
   /* The blend over Below. Normal combines two tangent-space maps rather than interpolating their
    * encoded values, which would flatten the relief; everything else uses the channel's blend. A
    * Height record whose effective mode is not Inherit takes the delta-space chain instead of a

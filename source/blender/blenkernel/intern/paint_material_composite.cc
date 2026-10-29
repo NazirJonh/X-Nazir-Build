@@ -41,6 +41,8 @@
 
 #include "BLT_translation.hh"
 
+#include "CLG_log.h"
+
 #include "paint_layers/paint_layers_kind.hh"
 
 #include "paint_material_composite_internal.hh"
@@ -58,6 +60,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <memory>
@@ -65,6 +68,8 @@
 #include "paint_material_cache_common.hh"
 
 namespace blender {
+
+static CLG_LogRef LOG_HEIGHT_COMPARE = {"bke.paint_layers"};
 
 /* -------------------------------------------------------------------- */
 /** \name Node group markers
@@ -893,7 +898,12 @@ static void blend_row_linear(float dst[4],
  *   Mix:       d_out = d_below * (1 - f) + d_layer * f
  *   Add:       d_out = d_below + f * d_layer
  *   Subtract:  d_out = d_below - f * d_layer
- * Nothing clamps: the encode step is where a byte output is finally clamped, and a float buffer
+ *   Compare:   won = d_below < d_layer;  d_out = d_below + (d_layer - d_below) * won * f
+ *
+ * Compare is the Ucupaint `~yPL Height Compare` group node for node (`won` a LESS_THAN over the
+ * two heights, the step a mix by `won * f`); the row's other channels take the mask as a factor
+ * of their own, which the description renders (see the won mask of an image layer). Nothing
+ * clamps: the encode step is where a byte output is finally clamped, and a float buffer
  * keeps the overshoot.
  *
  * The fourth component is not the height's: the generated chain writes only the scalar and the
@@ -939,6 +949,11 @@ float height_blend_step(const int height_blend,
     case MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT:
       d_out = d_below - fac * d_layer;
       break;
+    case MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE: {
+      const float won = height_compare_won(d_below, d_layer) ? 1.0f : 0.0f;
+      d_out = d_below + (d_layer - d_below) * won * fac;
+      break;
+    }
     default:
       /* The caller picks the ordinary blend for an unset mode (#composite_row_blend); anything
        * else is a corrupt description, and a plain mix keeps the buffer sane rather than laying
@@ -1399,6 +1414,20 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
           layer.mask_items.as_span(), item_samples, coverage_samples, i, texel);
     }
   }
+
+  /* A Compare Height record decides the row's visibility everywhere else: where its height lost,
+   * the row lays nothing in any channel. The description rendered the mask once (the Height
+   * channel of the rows below against the row's own record); here it only clips the factor, the
+   * same factor the generated graph multiplies the won node into. The Height channel itself
+   * describes no mask: its own blend already carries the comparison. */
+  if (layer.height_won_ibuf != nullptr) {
+    Vector<float> won_storage;
+    won_storage.resize(count * 4);
+    composite_decode_tile(layer.height_won_ibuf, nullptr, tile, won_storage.data());
+    for (int64_t i = 0; i < count; i++) {
+      r_factor[i] *= clamp_f(won_storage[i * 4], 0.0f, 1.0f);
+    }
+  }
 }
 
 /**
@@ -1806,11 +1835,32 @@ void BKE_paint_material_composite_linear_to_byte(MutableSpan<float> linear,
 /** \name Image Layer Acquisition
  * \{ */
 
-struct CompositeImageLock {
-  Image *image = nullptr;
-  ImBuf *ibuf = nullptr;
-  void *lock = nullptr;
-};
+/* Test-only hooks: how often a stack acquired its buffers, and how often a Compare mask had to be
+ * resampled onto another grid. Both count work that a caller can all too easily pay once per
+ * region instead of once per stack, so the tests assert the counts rather than guess them from a
+ * timer. */
+static std::atomic<int> composite_acquire_calls = 0;
+static std::atomic<int> composite_height_won_resamples = 0;
+
+int paint_material_composite_acquire_call_count()
+{
+  return composite_acquire_calls;
+}
+
+void paint_material_composite_acquire_call_count_reset()
+{
+  composite_acquire_calls = 0;
+}
+
+int paint_material_composite_height_won_resample_count()
+{
+  return composite_height_won_resamples;
+}
+
+void paint_material_composite_height_won_resample_count_reset()
+{
+  composite_height_won_resamples = 0;
+}
 
 static ImBuf *composite_image_acquire(Image *image,
                                       const ImageUser *iuser,
@@ -2100,6 +2150,57 @@ static void composite_mapped_remap(ImBuf *&r_ibuf,
   }
 }
 
+/**
+ * Bring a one-channel float Compare mask onto a \a dst_width x \a dst_height grid by nearest texel
+ * with an edge clamp, as a float mask the caller owns.
+ *
+ * The mask is binary and was rendered at the Height stack's own size, which a stack whose bottom
+ * map decided a smaller one can leave below the frame's. Nearest keeps every value 0/1 -- the
+ * bilinear #composite_resample_mapped would turn the seam's texels into fractions -- and the clamp
+ * holds the last column and row on the source edge, where the mapping's wrap filter would read past
+ * it and bleed the opposite edge into the frame. The seam of the two halves therefore lands on the
+ * source texel boundary rather than on the filter's ramp.
+ */
+static ImBuf *composite_mask_resample_nearest(const ImBuf *src,
+                                              const int dst_width,
+                                              const int dst_height)
+{
+  if (src == nullptr || dst_width <= 0 || dst_height <= 0 || src->x <= 0 || src->y <= 0) {
+    return nullptr;
+  }
+  /* The mask is a one-channel float buffer; anything else is not this code's to read. */
+  if (src->float_buffer.data == nullptr || src->byte_buffer.data != nullptr) {
+    return nullptr;
+  }
+  const int src_channels = src->channels == 0 ? 4 : src->channels;
+  ImBuf *dst = IMB_allocImBuf(uint(dst_width), uint(dst_height), ImBufFlags::FloatData);
+  if (dst == nullptr) {
+    return nullptr;
+  }
+  /* A gate is one number per texel, like the buffer the description rendered it into. */
+  dst->channels = 1;
+  if (!IMB_alloc_float_pixels(dst, 1, false)) {
+    IMB_freeImBuf(dst);
+    return nullptr;
+  }
+  const float *in = src->float_buffer.data;
+  float *out = dst->float_data_for_write();
+  threading::parallel_for(IndexRange(dst_height), 8, [&](const IndexRange rows) {
+    for (const int y : rows) {
+      /* Integer division maps the target texel's whole span onto one source texel; the clamp keeps
+       * the last column and row on the edge instead of sampling past it. */
+      const int sy = min_ii((y * src->y) / dst_height, src->y - 1);
+      for (int x = 0; x < dst_width; x++) {
+        const int sx = min_ii((x * src->x) / dst_width, src->x - 1);
+        out[int64_t(y) * dst_width + x] = in[(int64_t(sy) * src->x + sx) * src_channels];
+      }
+    }
+  });
+  /* The mask is data, not colour: no scene-linear role is assigned, matching the buffer the
+   * description rendered it into and the decode the evaluator reads it by. */
+  return dst;
+}
+
 ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
                                            const int tile_number,
                                            const PaintMaterialCompositeMapping *mapping,
@@ -2280,6 +2381,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
                                      Vector<CompositeImageLock> &r_locks,
                                      Vector<PaintMaterialCompositeLayer> &r_layers)
 {
+  composite_acquire_calls++;
   for (const PaintMaterialCompositeImageLayer &image_layer : image_layers) {
     if (!image_layer.enabled) {
       continue;
@@ -2462,6 +2564,34 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       layer.content_corrections.append(buffer);
     }
     static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer;
+    if (image_layer.height_won != nullptr) {
+      /* The won mask was rendered by the description at the prefix stack's own size; the one time
+       * that is not the canvas (a stack whose bottom map decided a smaller one), a nearest-texel
+       * read lines it up. The mask is binary, so nearest keeps every value 0/1 and puts the seam on
+       * the source texel boundary; the identity-mapping filter would turn the seam into fractions
+       * and, wrapping at the edges, leak the opposite side of the mask into the frame. */
+      ImBuf *won = image_layer.height_won.get();
+      if (won->x != ref_width || won->y != ref_height) {
+        if (ImBuf *resampled = composite_mask_resample_nearest(won, ref_width, ref_height)) {
+          composite_height_won_resamples++;
+          composite_image_own(resampled, r_locks);
+          won = resampled;
+        }
+        else {
+          /* A resample that cannot be made (out of memory) must not fall back to the smaller
+           * buffer: decoded at the frame's coordinates it would read past its rows. The row then
+           * lays without its Compare mask, said out loud like the size mismatch next door. */
+          CLOG_WARN(&LOG_HEIGHT_COMPARE,
+                    "Compare mask %dx%d could not be resampled to %dx%d: the row lays without it",
+                    won->x,
+                    won->y,
+                    ref_width,
+                    ref_height);
+          won = nullptr;
+        }
+      }
+      layer.height_won_ibuf = won;
+    }
     layer.gradient = image_layer.gradient;
     if (layer.gradient.enabled) {
       /* The gradient has no map of its own: its UV grid is the composite's, not the size the
@@ -2584,6 +2714,116 @@ bool BKE_paint_material_composite_eval_images(Span<PaintMaterialCompositeImageLa
   return ok;
 }
 
+PaintMaterialCompositeLinearSession::PaintMaterialCompositeLinearSession(
+    PaintMaterialCompositeLinearSession &&other)
+    : locks_(std::move(other.locks_)), stack_(std::move(other.stack_)),
+      gradient_items_(other.gradient_items_), ok_(other.ok_)
+{
+  /* The buffers are this session's to release now, and nothing is left in the one handed over. */
+  other.ok_ = false;
+}
+
+PaintMaterialCompositeLinearSession &PaintMaterialCompositeLinearSession::operator=(
+    PaintMaterialCompositeLinearSession &&other)
+{
+  if (this != &other) {
+    composite_images_release(locks_);
+    locks_ = std::move(other.locks_);
+    stack_ = std::move(other.stack_);
+    gradient_items_ = other.gradient_items_;
+    ok_ = other.ok_;
+    other.ok_ = false;
+  }
+  return *this;
+}
+
+PaintMaterialCompositeLinearSession::~PaintMaterialCompositeLinearSession()
+{
+  composite_images_release(locks_);
+}
+
+PaintMaterialCompositeLinearSession PaintMaterialCompositeLinearSession::session_open(
+    Span<PaintMaterialCompositeImageLayer> image_layers,
+    const float bottom_color[4],
+    const int eval_width,
+    const int eval_height)
+{
+  PaintMaterialCompositeLinearSession session;
+  session.gradient_items_ = composite_stack_gradient_count(image_layers);
+  session.ok_ = composite_stack_build_linear(
+      image_layers, session.locks_, session.stack_, eval_width, eval_height);
+  if (session.ok_ && bottom_color != nullptr) {
+    copy_v4_v4(session.stack_.bottom_color, bottom_color);
+    session.stack_.has_bottom_color = true;
+  }
+  return session;
+}
+
+PaintMaterialCompositeLinearSession PaintMaterialCompositeLinearSession::session_open_row(
+    const PaintMaterialCompositeImageLayer &row)
+{
+  PaintMaterialCompositeLinearSession session;
+  session.gradient_items_ = composite_stack_gradient_count(
+      Span<PaintMaterialCompositeImageLayer>(&row, 1));
+  /* Always the stack's own size: a bake renders at the canvas, never at a preview octave. */
+  session.ok_ = composite_stack_build_linear(
+      Span<PaintMaterialCompositeImageLayer>(&row, 1), session.locks_, session.stack_, 0, 0);
+  return session;
+}
+
+bool PaintMaterialCompositeLinearSession::eval(const PaintMaterialCompositeLinearTarget &target,
+                                              const rcti *region,
+                                              PaintMaterialCompositeEvalStats *r_stats)
+{
+  bool ok = ok_ && BKE_paint_material_composite_eval_linear(stack_, target, region, r_stats);
+  if (r_stats != nullptr) {
+    r_stats->gradient_items = gradient_items_;
+    if (ok) {
+      rcti area;
+      if (BKE_paint_material_composite_area_get(stack_.width, stack_.height, region, area)) {
+        r_stats->gradient_samples = int64_t(gradient_items_) *
+                                    int64_t(BLI_rcti_size_x(&area)) * BLI_rcti_size_y(&area);
+      }
+    }
+  }
+  return ok;
+}
+
+bool PaintMaterialCompositeLinearSession::eval_row_content(const rcti *region,
+                                                           const int channel,
+                                                           float *r_color_rgba,
+                                                           float *r_coverage_gray)
+{
+  if (r_color_rgba == nullptr || r_coverage_gray == nullptr) {
+    return false;
+  }
+  rcti area;
+  if (!ok_ || stack_.layers.size() != 1 || !composite_stack_validate_linear(stack_) ||
+      !BKE_paint_material_composite_area_get(stack_.width, stack_.height, region, area))
+  {
+    return false;
+  }
+  const PaintMaterialCompositeLayer &layer = stack_.layers.first();
+  const int64_t count = int64_t(BLI_rcti_size_x(&area)) * BLI_rcti_size_y(&area);
+  Vector<float> color(count * 4);
+  Vector<float> factor(count);
+  composite_layer_apply(layer, area, color.data(), factor.data());
+  /* Normal keeps its own map alpha: its content coverage has nowhere else to live, and a
+   * substituted row reads it back as `common x content`. */
+  const bool keep_alpha = layer.tracks_content_alpha || channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+  for (int64_t i = 0; i < count; i++) {
+    r_color_rgba[i * 4 + 0] = color[i * 4 + 0];
+    r_color_rgba[i * 4 + 1] = color[i * 4 + 1];
+    r_color_rgba[i * 4 + 2] = color[i * 4 + 2];
+    /* The colour's alpha is the row's content alpha, so the generated chain can read it back after
+     * substitution. A channel that tracks none stays opaque; its transparency is the coverage
+     * alone. */
+    r_color_rgba[i * 4 + 3] = keep_alpha ? color[i * 4 + 3] : 1.0f;
+    r_coverage_gray[i] = clamp_f(layer.opacity * factor[i], 0.0f, 1.0f);
+  }
+  return true;
+}
+
 bool BKE_paint_material_composite_eval_images_linear(
     Span<PaintMaterialCompositeImageLayer> image_layers,
     const PaintMaterialCompositeLinearTarget &target,
@@ -2593,28 +2833,9 @@ bool BKE_paint_material_composite_eval_images_linear(
     const int eval_width,
     const int eval_height)
 {
-  Vector<CompositeImageLock> locks;
-  PaintMaterialCompositeStack stack;
-  bool ok = composite_stack_build_linear(image_layers, locks, stack, eval_width, eval_height);
-  if (ok && bottom_color != nullptr) {
-    copy_v4_v4(stack.bottom_color, bottom_color);
-    stack.has_bottom_color = true;
-  }
-  if (ok) {
-    ok = BKE_paint_material_composite_eval_linear(stack, target, region, r_stats);
-  }
-  if (r_stats != nullptr) {
-    r_stats->gradient_items = composite_stack_gradient_count(image_layers);
-    if (ok) {
-      rcti area;
-      if (BKE_paint_material_composite_area_get(stack.width, stack.height, region, area)) {
-        r_stats->gradient_samples = int64_t(r_stats->gradient_items) *
-                                    int64_t(BLI_rcti_size_x(&area)) * BLI_rcti_size_y(&area);
-      }
-    }
-  }
-  composite_images_release(locks);
-  return ok;
+  PaintMaterialCompositeLinearSession session = PaintMaterialCompositeLinearSession::session_open(
+      image_layers, bottom_color, eval_width, eval_height);
+  return session.eval(target, region, r_stats);
 }
 
 bool BKE_paint_material_composite_eval_row_content(const PaintMaterialCompositeImageLayer &row,
@@ -2623,41 +2844,9 @@ bool BKE_paint_material_composite_eval_row_content(const PaintMaterialCompositeI
                                                    const rcti *region,
                                                    const int channel)
 {
-  if (r_color_rgba == nullptr || r_coverage_gray == nullptr) {
-    return false;
-  }
-  Vector<CompositeImageLock> locks;
-  PaintMaterialCompositeStack stack;
-  /* Always the stack's own size: a bake renders at the canvas, never at a preview octave. */
-  const bool built = composite_stack_build_linear(
-      Span<PaintMaterialCompositeImageLayer>(&row, 1), locks, stack, 0, 0);
-  bool ok = false;
-  rcti area;
-  if (built && stack.layers.size() == 1 && composite_stack_validate_linear(stack) &&
-      BKE_paint_material_composite_area_get(stack.width, stack.height, region, area))
-  {
-    const PaintMaterialCompositeLayer &layer = stack.layers.first();
-    const int64_t count = int64_t(BLI_rcti_size_x(&area)) * BLI_rcti_size_y(&area);
-    Vector<float> color(count * 4);
-    Vector<float> factor(count);
-    composite_layer_apply(layer, area, color.data(), factor.data());
-    /* Normal keeps its own map alpha: its content coverage has nowhere else to live, and a
-     * substituted row reads it back as `common x content`. */
-    const bool keep_alpha = layer.tracks_content_alpha || channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-    for (int64_t i = 0; i < count; i++) {
-      r_color_rgba[i * 4 + 0] = color[i * 4 + 0];
-      r_color_rgba[i * 4 + 1] = color[i * 4 + 1];
-      r_color_rgba[i * 4 + 2] = color[i * 4 + 2];
-      /* The colour's alpha is the row's content alpha, so the generated chain can read it back after
-       * substitution. A channel that tracks none stays opaque; its transparency is the coverage
-       * alone. */
-      r_color_rgba[i * 4 + 3] = keep_alpha ? color[i * 4 + 3] : 1.0f;
-      r_coverage_gray[i] = clamp_f(layer.opacity * factor[i], 0.0f, 1.0f);
-    }
-    ok = true;
-  }
-  composite_images_release(locks);
-  return ok;
+  PaintMaterialCompositeLinearSession session =
+      PaintMaterialCompositeLinearSession::session_open_row(row);
+  return session.eval_row_content(region, channel, r_color_rgba, r_coverage_gray);
 }
 
 /**
@@ -2851,9 +3040,13 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.mask_from_alpha,
                             layer.opacity,
                             layer.mask_influence);
-    /* The height modes are another formula: they have to move the hash or an edit would keep
-     * serving the cached composite. */
+    /* The height modes are another formula, and the Compare mask is another factor in every other
+     * channel: both have to move the hash or an edit would keep serving the cached composite. The
+     * rendered mask itself is deliberately left out: it is derived from the row and the rows
+     * below, which are hashed here, and a describe-only description (which renders no mask) has to
+     * hash like the full one -- the cache is keyed on this hash by both kinds of caller. */
     hash = get_default_hash(hash, int(layer.height_blend), layer.height_scale);
+    hash = get_default_hash(hash, layer.height_compare);
     /* A flat colour is not backed by an image, so its value has to be hashed explicitly or the
      * cached composite would not follow an edit of it. Split rather than appended:
      * #get_default_hash mixes a fixed number of values at once. */

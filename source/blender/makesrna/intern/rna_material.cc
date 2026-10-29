@@ -185,6 +185,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_height_blend_items[]
      0,
      "Subtract",
      "Subtract the record's distance from the neutral level from the height below"},
+    {MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE,
+     "COMPARE",
+     0,
+     "Compare",
+     "The greater height wins; where the row won, its alpha covers its other channels"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

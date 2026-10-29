@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <iterator>
@@ -531,17 +532,32 @@ static void composite_mask_items_describe(
   }
 }
 
-static void composite_image_layers_collect(const Material &ma,
-                                           const ListBaseT<MaterialPaintLayer> &list,
-                                           int channel,
-                                           float pass_through_scale,
-                                           const std::shared_ptr<const PaintMaterialCompositeSurface>
-                                               &context_surface,
-                                           Vector<PaintMaterialCompositeImageLayer> &r_layers,
-                                           bool isolating = false,
-                                           const int *slice_rect = nullptr,
-                                           const bool dimensions_only = false,
-                                           const bool describe_only = false);
+/**
+ * The mask of \a row, rendered once per build pass when \a cache says it is shared.
+ *
+ * A null mask is cached as well: "this row cannot be compared" is as stable an answer as a
+ * rendered one, and re-deriving it for every channel would pay the description walk each time.
+ */
+static std::shared_ptr<ImBuf> composite_height_won_get(
+    const Material &ma,
+    const ListBaseT<MaterialPaintLayer> &prefix,
+    const MaterialPaintLayer &row,
+    const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface,
+    const bool isolating,
+    PaintLayersHeightWonCache *cache)
+{
+  if (cache == nullptr) {
+    return composite_height_won_render(ma, prefix, row, context_surface, isolating, nullptr);
+  }
+  const std::pair<const MaterialPaintLayer *, bool> key(&row, isolating);
+  if (const std::shared_ptr<ImBuf> *found = cache->masks.lookup_ptr(key)) {
+    return *found;
+  }
+  std::shared_ptr<ImBuf> mask = composite_height_won_render(
+      ma, prefix, row, context_surface, isolating, cache);
+  cache->masks.add_new(key, mask);
+  return mask;
+}
 
 /**
  * Append the content correction \a effect to \a out as the evaluator reads it in \a channel: a filter,
@@ -667,28 +683,20 @@ static void composite_effect_append(
   out.content_corrections.append(correction);
 }
 
-/**
- * Describe the row \a layer (not a Pass Through folder) in \a channel to the evaluator. False when
- * the row takes no part, which the generator leaves out as well.
- *
- * A row whose bake stands in (#paint_layer_row_substituted) is one plain layer of its baked colour
- * and coverage maps: the bake already holds the row's corrections, mask and opacity, so nothing of
- * them is described again. \a ignore_own_bake describes the live row instead, which is what the
- * bake itself renders from.
- */
-static bool composite_image_layer_build(const Material &ma,
+bool composite_image_layer_build(const Material &ma,
                                         const MaterialPaintLayer &layer,
                                         const int channel,
                                         const float pass_through_scale,
                                         const bool isolating,
                                         const bool ignore_own_bake,
                                         PaintMaterialCompositeImageLayer &out,
-                                        const bUUID *stop_before = nullptr,
-                                        const int *slice_rect = nullptr,
-                                        const bool dimensions_only = false,
-                                        const bool describe_only = false,
+                                 const bUUID *stop_before,
+                                 const int *slice_rect,
+                                 const bool dimensions_only,
+                                 const bool describe_only,
                                         const std::shared_ptr<const PaintMaterialCompositeSurface>
-                                            &context_surface = nullptr)
+                                     &context_surface,
+                                 PaintLayersHeightWonCache *height_won_cache)
 {
   /* A reader lays the slice its point publishes, described as a substituted row: the slice's
    * colour, its coverage and its content alpha, with the reader's own blend. Its own mapping does
@@ -789,7 +797,8 @@ static bool composite_image_layer_build(const Material &ma,
                                      true,
                                      slice_rect,
                                      dimensions_only,
-                                     describe_only);
+                                     describe_only,
+                                     height_won_cache);
       /* An emptied folder is left out, as the generator leaves it; one with a correction that lays
        * here is not: the correction brings the coverage in over nothing. */
       if (children.is_empty() && !paint_layer_effects_lay(ma, layer, channel)) {
@@ -863,12 +872,7 @@ static bool composite_image_layer_build(const Material &ma,
   return true;
 }
 
-/**
- * Append the rows of \a list that take part in \a channel to \a r_layers, bottom to top. A folder is
- * one entry carrying its children, which the evaluator composites in isolation; a folder nothing of
- * which takes part is left out, as it is on the generator's side.
- */
-static void composite_image_layers_collect(const Material &ma,
+void composite_image_layers_collect(const Material &ma,
                                            const ListBaseT<MaterialPaintLayer> &list,
                                            const int channel,
                                            const float pass_through_scale,
@@ -878,7 +882,8 @@ static void composite_image_layers_collect(const Material &ma,
                                            const bool isolating,
                                            const int *slice_rect,
                                            const bool dimensions_only,
-                                           const bool describe_only)
+                                    const bool describe_only,
+                                    PaintLayersHeightWonCache *height_won_cache)
 {
   for (const MaterialPaintLayer &layer : list) {
     /* A Pass Through folder is flattened into this list, the way the generator expands it in the
@@ -895,7 +900,8 @@ static void composite_image_layers_collect(const Material &ma,
                                      isolating,
                                      slice_rect,
                                      dimensions_only,
-                                     describe_only);
+                                     describe_only,
+                                     height_won_cache);
       continue;
     }
     PaintMaterialCompositeImageLayer out;
@@ -910,8 +916,22 @@ static void composite_image_layers_collect(const Material &ma,
                                    slice_rect,
                                    dimensions_only,
                                    describe_only,
-                                   context_surface))
+                                   context_surface,
+                                   height_won_cache))
     {
+      /* Where the row's Height record Compares, its win or loss gates every other channel of the
+       * row; the mask is rendered once here, from the Height description of the rows below it in
+       * this very list (pass-through folders flattened, isolation boundaries respected by the
+       * recursion that got here). The Height channel itself never reads it back. */
+      if (channel != PAINT_MATERIAL_CHANNEL_HEIGHT && !dimensions_only && !describe_only &&
+          out.height_compare)
+      {
+        ListBaseT<MaterialPaintLayer> prefix;
+        prefix.first = (list.first == &layer) ? nullptr : list.first;
+        prefix.last = layer.prev;
+        out.height_won = composite_height_won_get(
+            ma, prefix, layer, context_surface, isolating, height_won_cache);
+      }
       r_layers.append(std::move(out));
     }
   }
@@ -922,14 +942,24 @@ bool BKE_paint_layers_composite_image_layers(
     const int channel,
     Vector<PaintMaterialCompositeImageLayer> &r_layers,
     const bool describe_only,
-    std::shared_ptr<const PaintMaterialCompositeSurface> surface)
+    std::shared_ptr<const PaintMaterialCompositeSurface> surface,
+    PaintLayersHeightWonCache *height_won_cache)
 {
   r_layers.clear();
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
-  composite_image_layers_collect(
-      ma, ma.paint_layers, channel, 1.0f, surface, r_layers, false, nullptr, false, describe_only);
+  composite_image_layers_collect(ma,
+                                 ma.paint_layers,
+                                 channel,
+                                 1.0f,
+                                 surface,
+                                 r_layers,
+                                 false,
+                                 nullptr,
+                                 false,
+                                 describe_only,
+                                 height_won_cache);
   return !r_layers.is_empty();
 }
 
@@ -2071,12 +2101,13 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
   if (layer.gradient.enabled) {
     return "a Gradient generator row is not laid by the GPU path";
   }
-  /* The height modes are a delta-space step no shader branch reproduces. The description carries
-   * the effective mode, so an Inherit row over Add, Subtract or a non-Mix colour blend is refused
-   * here too. Until the preview shader grows it, a material using one falls back to the CPU
+  /* The height modes are a delta-space step no shader branch reproduces, and a Compare row's win
+   * or loss gates every channel of the row through a rendered mask. The description carries the
+   * effective mode, so an Inherit row over Add, Subtract or a non-Mix colour blend is refused
+   * here too. Until the preview shader grows both, a material using either falls back to the CPU
    * composite instead of shading a different layer than the one the bake and the Image Editor
    * show. */
-  if (layer.height_blend != MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT) {
+  if (layer.height_blend != MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT || layer.height_compare) {
     return "a row blends Height with a mode of its own";
   }
   if (!layer.is_folder && layer.adjustment_filter == 0 && layer.color_image == nullptr &&

@@ -750,7 +750,7 @@ TEST_F(PaintLayersGraphEvalTest, a_partial_alpha_height_map_matches_the_cpu)
   expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT, 5e-3f);
   const RGBA cpu = cpu_pixel(PAINT_MATERIAL_CHANNEL_HEIGHT);
   /* 0.8 over the neutral 0.5 at 25% coverage. A decode of 0.8/0.25 = 3.2 would read ~1.2. */
-  EXPECT_NEAR(cpu.r, 0.5f * 0.75f + 0.8f * 0.25f, 0.02f);
+  EXPECT_NEAR(cpu.r, PAINT_HEIGHT_NEUTRAL * 0.75f + 0.8f * 0.25f, 0.02f);
 }
 
 /** Two height rows whose records sit either side of the neutral level, every mode of the Height
@@ -768,7 +768,8 @@ TEST_F(PaintLayersGraphEvalTest, height_blend_modes_match_the_cpu)
 
   const int modes[] = {MA_PAINT_LAYER_HEIGHT_BLEND_MIX,
                        MA_PAINT_LAYER_HEIGHT_BLEND_ADD,
-                       MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT};
+                       MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT,
+                       MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE};
   for (const int mode : modes) {
     SCOPED_TRACE(::testing::Message() << "mode=" << mode);
     ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
@@ -791,7 +792,8 @@ TEST_F(PaintLayersGraphEvalTest, height_neutral_layers_are_no_ops_in_every_mode)
 
   const int modes[] = {MA_PAINT_LAYER_HEIGHT_BLEND_MIX,
                        MA_PAINT_LAYER_HEIGHT_BLEND_ADD,
-                       MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT};
+                       MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT,
+                       MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE};
   for (const int mode : modes) {
     SCOPED_TRACE(::testing::Message() << "mode=" << mode);
     ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
@@ -844,12 +846,408 @@ TEST_F(PaintLayersGraphEvalTest, height_masked_row_matches_the_cpu)
   ASSERT_TRUE(BKE_paint_layers_channel_opacity_set(*ma, *top_layer,
                                                    PAINT_MATERIAL_CHANNEL_HEIGHT, 0.35f));
 
-  const int modes[] = {MA_PAINT_LAYER_HEIGHT_BLEND_ADD};
+  const int modes[] = {MA_PAINT_LAYER_HEIGHT_BLEND_ADD, MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE};
   for (const int mode : modes) {
     SCOPED_TRACE(::testing::Message() << "mode=" << mode);
     ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
         *ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, mode));
     expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  }
+}
+
+/** The Compare mask gates the row's other channels: where its height lost, the row's Base Color
+ * lays nothing; where it won, it covers by its own factors. The CPU renders the mask from the
+ * Height prefix, the graph multiplies the won node into the factor -- the two must land together. */
+TEST_F(PaintLayersGraphEvalTest, height_compare_masks_the_rows_other_channels)
+{
+  Image *base = add_solid_image("Base", 200, 100, 50, 255);
+  Image *below_height = add_solid_image("BelowHeight", 230, 230, 230, 255);
+  Image *losing = add_solid_image("Losing", 60, 60, 60, 255);
+  Image *winning = add_solid_image("Winning", 250, 250, 250, 255);
+  Image *row_color = add_solid_image("RowColor", 30, 160, 220, 255);
+  for (Image *image : {base, below_height, losing, winning, row_color}) {
+    make_image_data(image);
+  }
+  add_layer("Base", base);
+  add_layer("BelowHeight", below_height, PAINT_MATERIAL_CHANNEL_HEIGHT);
+
+  /* A row that loses the comparison: its colour must not show over the base. */
+  MaterialPaintLayer *loser = add_layer("Loser", row_color);
+  EXPECT_NE(BKE_paint_layers_channel_add(*ma, loser, PAINT_MATERIAL_CHANNEL_HEIGHT), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, loser, PAINT_MATERIAL_CHANNEL_HEIGHT, losing));
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *loser, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const RGBA hidden = cpu_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_NEAR(hidden.r, 200.0f / 255.0f, 2e-3f);
+
+  /* A row that wins: its colour covers the base by its full factor. */
+  BKE_paint_layers_channel_set_image(
+      *ma, loser, PAINT_MATERIAL_CHANNEL_HEIGHT, winning);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const RGBA shown = cpu_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_NEAR(shown.r, 30.0f / 255.0f, 2e-3f);
+}
+
+/** A Compare row inside a folder reads the folder's own straightened accumulation below it (the
+ * divide node), which the CPU's won render mirrors through the synthetic folder evaluation. */
+TEST_F(PaintLayersGraphEvalTest, height_compare_inside_a_folder_matches_the_cpu)
+{
+  Image *base = add_solid_image("Base", 200, 100, 50, 255);
+  Image *inner_height = add_solid_image("InnerHeight", 90, 90, 90, 255);
+  Image *compare_height = add_solid_image("CompareHeight", 120, 120, 120, 255);
+  Image *row_color = add_solid_image("RowColor", 30, 160, 220, 255);
+  for (Image *image : {base, inner_height, compare_height, row_color}) {
+    make_image_data(image);
+  }
+  add_layer("Base", base);
+
+  MaterialPaintLayer *first = BKE_paint_layers_add(*ma, "Inner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(first, nullptr);
+  EXPECT_NE(BKE_paint_layers_channel_add(*ma, first, PAINT_MATERIAL_CHANNEL_HEIGHT), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, first, PAINT_MATERIAL_CHANNEL_HEIGHT, inner_height));
+  MaterialPaintLayer *second = BKE_paint_layers_add(
+      *ma, "Comparer", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(second, nullptr);
+  EXPECT_NE(BKE_paint_layers_channel_add(*ma, second, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, second, PAINT_MATERIAL_CHANNEL_BASE_COLOR, row_color));
+  EXPECT_NE(BKE_paint_layers_channel_add(*ma, second, PAINT_MATERIAL_CHANNEL_HEIGHT), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, second, PAINT_MATERIAL_CHANNEL_HEIGHT, compare_height));
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *second, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE));
+
+  /* A folder over the base row: the comparer's height (120) wins over the inner row's (90) inside
+   * the folder, so its colour covers within the folder -- and the folder, covering fully, shows it
+   * over the base. Both sides must land on that one answer. */
+  MaterialPaintLayer *members[2] = {first, second};
+  ASSERT_NE(BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 2)), nullptr);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  const RGBA shown = cpu_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_NEAR(shown.r, 30.0f / 255.0f, 2e-3f);
+}
+
+/**
+ * The first rows of an isolating folder have nothing below them, so the folder's divide node reads
+ * `0 / 0` and a Vector Math Divide answers zero for it. The CPU's empty accumulation is that same
+ * zero, and the boundary case proves it on both sides: a black record sits exactly on the `-0.5`
+ * the comparison is made against and must lose, anything above it must win.
+ */
+TEST_F(PaintLayersGraphEvalTest, height_compare_first_row_of_a_folder_matches_the_cpu)
+{
+  Image *base = add_solid_image("Base", 200, 100, 50, 255);
+  Image *black_height = add_solid_image("BlackHeight", 0, 0, 0, 255);
+  Image *grey_height = add_solid_image("GreyHeight", 120, 120, 120, 255);
+  Image *row_color = add_solid_image("RowColor", 30, 160, 220, 255);
+  for (Image *image : {base, black_height, grey_height, row_color}) {
+    make_image_data(image);
+  }
+  add_layer("Base", base);
+
+  MaterialPaintLayer *comparer = BKE_paint_layers_add(
+      *ma, "Comparer", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(comparer, nullptr);
+  EXPECT_NE(BKE_paint_layers_channel_add(*ma, comparer, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, comparer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, row_color));
+  EXPECT_NE(BKE_paint_layers_channel_add(*ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, black_height));
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE));
+
+  /* The comparer is the first row of its own folder, so it compares against the empty
+   * accumulation rather than against anything the stack holds below it. */
+  ASSERT_NE(BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(&comparer, 1)), nullptr);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const RGBA hidden = cpu_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_NEAR(hidden.r, 200.0f / 255.0f, 2e-3f);
+
+  /* Above black the record wins, so its colour covers inside the folder. */
+  BKE_paint_layers_channel_set_image(
+      *ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, grey_height);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const RGBA shown = cpu_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_NEAR(shown.r, 30.0f / 255.0f, 2e-3f);
+}
+
+/** The three factors the acceptance bar names together: the Compare gate, a row mask and a channel
+ * opacity. All three multiply into the one factor the row's other channels are laid by, on the
+ * CPU and in the graph alike. */
+TEST_F(PaintLayersGraphEvalTest, height_compare_with_mask_and_opacity_matches_the_cpu)
+{
+  Image *base = add_solid_image("Base", 200, 100, 50, 255);
+  Image *below_height = add_solid_image("BelowHeight", 60, 60, 60, 255);
+  Image *winning = add_solid_image("Winning", 250, 250, 250, 255);
+  Image *row_color = add_solid_image("RowColor", 30, 160, 220, 255);
+  for (Image *image : {base, below_height, winning, row_color}) {
+    make_image_data(image);
+  }
+  add_layer("Base", base);
+  add_layer("BelowHeight", below_height, PAINT_MATERIAL_CHANNEL_HEIGHT);
+
+  MaterialPaintLayer *comparer = add_layer("Comparer", row_color);
+  EXPECT_NE(BKE_paint_layers_channel_add(*ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, winning));
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, comparer, 0.5f), nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_opacity_set(*ma, *comparer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0.5f));
+
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  /* The row won the comparison, so what is left of its factor is the mask times the opacity. */
+  const float factor = 0.5f * 0.5f;
+  const RGBA pixel = cpu_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_NEAR(pixel.r, (200.0f / 255.0f) * (1.0f - factor) + (30.0f / 255.0f) * factor, 2e-3f);
+}
+
+/**
+ * The Compare mask costs the same on any canvas: its prefix and the row's own content are acquired
+ * once for the whole mask, and the strips it is rendered in only evaluate them. The picture here
+ * is 192 rows, three strips of #COMPOSITE_HEIGHT_WON_STRIP_ROWS, so an acquisition per strip would
+ * show up as six instead of two.
+ */
+TEST_F(PaintLayersGraphEvalTest, height_compare_mask_acquires_its_stacks_once)
+{
+  const int size = 192;
+  const uchar high[4] = {230, 230, 230, 255};
+  const uchar low[4] = {60, 60, 60, 255};
+  Image *below_height = add_split_image("BelowHeight", size, high, low);
+  const uchar row_grey[4] = {191, 191, 191, 255};
+  Image *row_height = add_image("RowHeight", size, row_grey);
+  const uchar row_color[4] = {30, 160, 220, 255};
+  Image *color = add_image("RowColor", size, row_color);
+  for (Image *image : {below_height, row_height, color}) {
+    make_image_data(image);
+  }
+  add_layer("BelowHeight", below_height, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  MaterialPaintLayer *comparer = add_layer("Comparer", color);
+  EXPECT_NE(BKE_paint_layers_channel_add(*ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, row_height));
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE));
+  /* A mapped row: the resample of a mapped layer is the other half of what a strip repeats. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, comparer, true));
+  const float offset[2] = {0.3f, 0.1f};
+  const float scale[2] = {1.7f, 1.7f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_values(*ma, comparer, offset, scale, 0.0f));
+
+  paint_material_composite_acquire_call_count_reset();
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  /* The prefix and the row's content: one acquisition each, whatever the height of the canvas. */
+  EXPECT_EQ(paint_material_composite_acquire_call_count(), 2);
+
+  ASSERT_EQ(layers.size(), 1);
+  const PaintMaterialCompositeImageLayer &top = layers.first();
+  ASSERT_TRUE(top.height_won != nullptr);
+  const ImBuf &mask_ref = *top.height_won;
+  ASSERT_EQ(mask_ref.x, size);
+  ASSERT_EQ(mask_ref.y, size);
+  ASSERT_EQ(mask_ref.channels, 1);
+  const float *mask = mask_ref.float_buffer.data;
+  ASSERT_TRUE(mask != nullptr);
+
+  /* The comparison written out rather than read back from the code under test. The rows below are
+   * 230 on the left half and 60 on the right, the row's own record is 191 and its scale is one:
+   * `d_below = 230/255 - 0.5 = +0.402` is not below `d_layer = 191/255 - 0.5 = +0.249`, so the row
+   * lost there; `60/255 - 0.5 = -0.265` is, so it won there. The row's map is a flat grey, so the
+   * mapping it reads through moves no value. */
+  for (const int y : {0, 63, 64, 127, 128, 191}) {
+    for (const int x : {0, 95, 96, 191}) {
+      const float expected = (x < size / 2) ? 0.0f : 1.0f;
+      EXPECT_NEAR(mask[int64_t(y) * size + x], expected, 1e-6f) << "x=" << x << " y=" << y;
+    }
+  }
+}
+
+/**
+ * A Compare mask is rendered at the size of the Height stack, which the Height maps decide, while
+ * the channel it gates is as big as that channel's own bottom map. The mask is one number per
+ * texel and reaches the wider grid through a nearest-texel read with an edge clamp, which has to
+ * read the one-channel float buffer it was rendered into as a grey: read at a four-channel stride
+ * it would walk past every texel it means.
+ */
+TEST_F(PaintLayersGraphEvalTest, height_compare_mask_smaller_than_the_frame_reaches_it)
+{
+  const uchar neutral[4] = {128, 128, 128, 255};
+  Image *below_height = add_image("BelowHeight", 4, neutral);
+  const uchar white[4] = {255, 255, 255, 255};
+  const uchar black[4] = {0, 0, 0, 255};
+  Image *row_height = add_split_image("RowHeight", 4, white, black);
+  const uchar row_rgba[4] = {200, 100, 50, 255};
+  Image *color = add_image("RowColor", 8, row_rgba);
+  for (Image *image : {below_height, row_height, color}) {
+    make_image_data(image);
+  }
+  add_layer("BelowHeight", below_height, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  MaterialPaintLayer *comparer = add_layer("Comparer", color);
+  EXPECT_NE(BKE_paint_layers_channel_add(*ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, row_height));
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE));
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  ASSERT_TRUE(layers.first().height_won != nullptr);
+  /* The Height maps are 4x4 and the colour map is 8x8: the mask has to be resampled. */
+  ASSERT_EQ(layers.first().height_won->x, 4);
+
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+  ASSERT_EQ(width, 8);
+  ASSERT_EQ(height, 8);
+
+  paint_material_composite_height_won_resample_count_reset();
+  Vector<float> linear(int64_t(width) * height * 4);
+  float bottom[4];
+  BKE_paint_layers_channel_bottom_color(PAINT_MATERIAL_CHANNEL_BASE_COLOR, bottom);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers, PaintMaterialCompositeLinearTarget::frame(linear, width), nullptr, nullptr, bottom));
+  EXPECT_EQ(paint_material_composite_height_won_resample_count(), 1);
+
+  /* The four-by-four mask is white on its left half and black on its right, so the row won on the
+   * left and lost on the right. Resampled onto eight texels by nearest with an edge clamp, the
+   * target column x reads source texel floor(x / 2): columns 0-3 carry the row's own colour, the
+   * empty bottom the seam never mixes into them the rest. The colours are the map's bytes over
+   * 255, the image being a data map. */
+  const float red = 200.0f / 255.0f;
+  const float green = 100.0f / 255.0f;
+  const float blue = 50.0f / 255.0f;
+  const float factor[8] = {1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  for (int y = 0; y < height; y++) {
+    for (const int x : IndexRange(width)) {
+      const float *p = linear.data() + (int64_t(y) * width + x) * 4;
+      EXPECT_NEAR(p[0], red * factor[x], 1e-4f) << "x=" << x << " y=" << y;
+      EXPECT_NEAR(p[1], green * factor[x], 1e-4f) << "x=" << x << " y=" << y;
+      EXPECT_NEAR(p[2], blue * factor[x], 1e-4f) << "x=" << x << " y=" << y;
+    }
+  }
+  /* No leak through the frame's edges: the first column is wholly the row's half, the last wholly
+   * the empty one, with nothing of the opposite edge bled in by a wrap. */
+  EXPECT_NEAR(linear[0], red, 1e-6f);
+  EXPECT_NEAR(linear[int64_t(height - 1) * width * 4 + (width - 1) * 4], 0.0f, 1e-6f);
+}
+
+/** The nearest read has no leak along the vertical seam either: a mask that won on the first rows
+ * of its stack keeps whole rows on the wider frame, with no fractional row between the halves. */
+TEST_F(PaintLayersGraphEvalTest, height_compare_mask_smaller_than_the_frame_leaks_not_vertically)
+{
+  const uchar neutral[4] = {128, 128, 128, 255};
+  Image *below_height = add_image("BelowHeight", 4, neutral);
+  const uchar white[4] = {255, 255, 255, 255};
+  const uchar black[4] = {0, 0, 0, 255};
+  Image *row_height = add_row_split_image("RowHeight", 4, white, black);
+  const uchar row_rgba[4] = {200, 100, 50, 255};
+  Image *color = add_image("RowColor", 8, row_rgba);
+  for (Image *image : {below_height, row_height, color}) {
+    make_image_data(image);
+  }
+  add_layer("BelowHeight", below_height, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  MaterialPaintLayer *comparer = add_layer("Comparer", color);
+  EXPECT_NE(BKE_paint_layers_channel_add(*ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, row_height));
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE));
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  ASSERT_TRUE(layers.first().height_won != nullptr);
+  ASSERT_EQ(layers.first().height_won->x, 4);
+
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+  ASSERT_EQ(width, 8);
+  ASSERT_EQ(height, 8);
+
+  paint_material_composite_height_won_resample_count_reset();
+  Vector<float> linear(int64_t(width) * height * 4);
+  float bottom[4];
+  BKE_paint_layers_channel_bottom_color(PAINT_MATERIAL_CHANNEL_BASE_COLOR, bottom);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers, PaintMaterialCompositeLinearTarget::frame(linear, width), nullptr, nullptr, bottom));
+  EXPECT_EQ(paint_material_composite_height_won_resample_count(), 1);
+
+  /* The mask won on its first two source rows and lost on the last two. Target row y reads source
+   * row floor(y / 2): the first four rows carry the row's colour and the last four the empty
+   * bottom, with no fractional row at the seam. The colours are the map's bytes over 255. */
+  const float red = 200.0f / 255.0f;
+  const float row_factor[8] = {1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  for (int y = 0; y < height; y++) {
+    for (const int x : IndexRange(width)) {
+      const float *p = linear.data() + (int64_t(y) * width + x) * 4;
+      EXPECT_NEAR(p[0], red * row_factor[y], 1e-4f) << "x=" << x << " y=" << y;
+      EXPECT_NEAR(p[1], (100.0f / 255.0f) * row_factor[y], 1e-4f) << "x=" << x << " y=" << y;
+      EXPECT_NEAR(p[2], (50.0f / 255.0f) * row_factor[y], 1e-4f) << "x=" << x << " y=" << y;
+    }
+  }
+  /* No leak through the frame's edges: the first row is wholly the row's half, the last wholly the
+   * empty one, with nothing of the opposite edge bled in by a wrap. */
+  EXPECT_NEAR(linear[0], red, 1e-6f);
+  EXPECT_NEAR(linear[int64_t(height - 1) * width * 4], 0.0f, 1e-6f);
+}
+
+/** A mask of exactly the frame's size reaches the evaluator as it was rendered: no resample. */
+TEST_F(PaintLayersGraphEvalTest, height_compare_mask_of_the_frame_size_is_not_resampled)
+{
+  const uchar neutral[4] = {128, 128, 128, 255};
+  Image *below_height = add_image("BelowHeight", 4, neutral);
+  const uchar white[4] = {255, 255, 255, 255};
+  const uchar black[4] = {0, 0, 0, 255};
+  Image *row_height = add_split_image("RowHeight", 4, white, black);
+  const uchar row_rgba[4] = {200, 100, 50, 255};
+  Image *color = add_image("RowColor", 4, row_rgba);
+  for (Image *image : {below_height, row_height, color}) {
+    make_image_data(image);
+  }
+  add_layer("BelowHeight", below_height, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  MaterialPaintLayer *comparer = add_layer("Comparer", color);
+  EXPECT_NE(BKE_paint_layers_channel_add(*ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, row_height));
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE));
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  ASSERT_TRUE(layers.first().height_won != nullptr);
+  ASSERT_EQ(layers.first().height_won->x, 4);
+
+  paint_material_composite_height_won_resample_count_reset();
+  Vector<float> linear(4 * 4 * 4);
+  float bottom[4];
+  BKE_paint_layers_channel_bottom_color(PAINT_MATERIAL_CHANNEL_BASE_COLOR, bottom);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers, PaintMaterialCompositeLinearTarget::frame(linear, 4), nullptr, nullptr, bottom));
+  EXPECT_EQ(paint_material_composite_height_won_resample_count(), 0);
+
+  /* The mask reached the evaluator as rendered: the row's colour on the left half, the empty
+   * bottom on the right. */
+  for (int y = 0; y < 4; y++) {
+    for (const int x : IndexRange(4)) {
+      const float expected = (x < 2) ? 200.0f / 255.0f : 0.0f;
+      const float *p = linear.data() + (int64_t(y) * 4 + x) * 4;
+      EXPECT_NEAR(p[0], expected, 1e-4f) << "x=" << x << " y=" << y;
+    }
   }
 }
 
@@ -937,7 +1335,7 @@ TEST_F(PaintLayersGraphEvalTest, height_inherit_neutral_rows_are_no_ops_for_ever
  * only decides the direction. */
 TEST_F(PaintLayersGraphEvalTest, height_negative_relief_adds_down_and_subtracts_up)
 {
-  Image *bottom = add_solid_float_image("Bottom", 0.5f, 0.5f, 0.5f, 1.0f);
+  Image *bottom = add_solid_float_image("Bottom", PAINT_HEIGHT_NEUTRAL, PAINT_HEIGHT_NEUTRAL, PAINT_HEIGHT_NEUTRAL, 1.0f);
   Image *top = add_solid_float_image("Top", 0.0f, 0.0f, 0.0f, 1.0f);
   make_image_data(bottom);
   make_image_data(top);
@@ -962,7 +1360,7 @@ TEST_F(PaintLayersGraphEvalTest, height_negative_relief_adds_down_and_subtracts_
  * raise a record above the neutral and push one below it by the same factor. */
 TEST_F(PaintLayersGraphEvalTest, height_scale_applies_to_both_signs)
 {
-  Image *bottom = add_solid_float_image("Bottom", 0.5f, 0.5f, 0.5f, 1.0f);
+  Image *bottom = add_solid_float_image("Bottom", PAINT_HEIGHT_NEUTRAL, PAINT_HEIGHT_NEUTRAL, PAINT_HEIGHT_NEUTRAL, 1.0f);
   Image *high = add_solid_float_image("High", 0.9f, 0.9f, 0.9f, 1.0f);
   Image *low = add_solid_float_image("Low", 0.1f, 0.1f, 0.1f, 1.0f);
   make_image_data(bottom);

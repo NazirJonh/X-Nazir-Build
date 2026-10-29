@@ -61,4 +61,17 @@ constexpr const char *GRADIENT_GROUP_ID_TYPE = "Socket_4";
 constexpr const char *GRADIENT_GROUP_ID_REPEAT = "Socket_5";
 constexpr const char *GRADIENT_GROUP_ID_FACTOR = "Socket_6";
 
+/**
+ * Test hooks. Both count work a caller can pay once per stack or, by mistake, once per region of
+ * one, which no assertion on pixels can tell apart.
+ */
+
+/** How many times a linear composite acquired its layer buffers since the last reset. */
+int paint_material_composite_acquire_call_count();
+void paint_material_composite_acquire_call_count_reset();
+
+/** How many Compare masks were resampled onto another grid since the last reset. */
+int paint_material_composite_height_won_resample_count();
+void paint_material_composite_height_won_resample_count_reset();
+
 }  // namespace blender

@@ -66,13 +66,17 @@ TEST(PaintMaterialCompositeHeightStep, every_mode_has_its_own_step)
       height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_ADD, below, layer, 1.0f, half), 0.7f);
   EXPECT_FLOAT_EQ(
       height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT, below, layer, 1.0f, half), 0.3f);
+  /* The record is above, so it wins and the step is the whole delta by the factor. */
+  EXPECT_FLOAT_EQ(
+      height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE, below, layer, 1.0f, half), 0.7f);
 }
 
-TEST(PaintMaterialCompositeHeightStep, a_neutral_record_changes_nothing)
+TEST(PaintMaterialCompositeHeightStep, a_neutral_record_changes_nothing_and_a_lost_comparison_too)
 {
   for (const int mode : {MA_PAINT_LAYER_HEIGHT_BLEND_MIX,
                          MA_PAINT_LAYER_HEIGHT_BLEND_ADD,
-                         MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT})
+                         MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT,
+                         MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE})
   {
     SCOPED_TRACE(::testing::Message() << "mode=" << mode);
     /* Both records on the neutral level: no pit, no peak, whatever the mode. */
@@ -89,6 +93,9 @@ TEST(PaintMaterialCompositeHeightStep, a_neutral_record_changes_nothing)
                                       1.0f),
                     PAINT_HEIGHT_NEUTRAL);
   }
+  /* A record that lost the comparison leaves the height below exactly as it was. */
+  EXPECT_FLOAT_EQ(height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE, 0.8f, 0.6f, 1.0f, 1.0f),
+                  0.8f);
 }
 
 TEST(PaintMaterialCompositeHeightStep, scale_and_factor_edges)

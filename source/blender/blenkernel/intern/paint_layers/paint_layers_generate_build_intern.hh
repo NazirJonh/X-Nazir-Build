@@ -397,7 +397,8 @@ class PaintLayersTreeBuilder {
    * a Separate Color), the mode's step is taken, and the result is encoded back. The scale comes
    * from the row's Height scale input when there is one, a Value constant otherwise (a degraded
    * build the value sync still feeds through the input once it exists). \return the encoded
-   * result, or empty when a node cannot be made.
+   * result, or empty when a node cannot be made. For Compare the won mask is recorded in
+   * #height_won_ for the other channels' factors.
    */
   NodeOutput height_blend_chain_add(bNodeTree &tree,
                                     LayerGroup &group,
@@ -709,6 +710,12 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, NodeOutput> object_mask_visible_;
   /** A row's Height scale input (the Height record's own), keyed by the row. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> height_scale_inputs_;
+  /**
+   * The won mask of a row's Compare Height record: one where the row's height is greater than what
+   * is below. Built by the Height pass -- which runs before every other channel of the row (see
+   * #build) -- and multiplied into each other channel's factor, the Ucupaint extra alpha.
+   */
+  Map<const MaterialPaintLayer *, NodeOutput> height_won_;
   Map<int, bNodeTreeInterfaceSocket *> result_outputs_;
   /** The root's mask output, fed by the active row's group after the channels are built. */
   bNodeTreeInterfaceSocket *mask_output_ = nullptr;

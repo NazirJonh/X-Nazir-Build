@@ -488,6 +488,10 @@ ImBuf *combined_preview_ensure(Main &bmain,
    * nothing at all. */
   std::array<Vector<PaintMaterialCompositeImageLayer>, combined_shading_channels.size()> stacks;
   std::array<bool, combined_shading_channels.size()> has_stack;
+  /* A row's Compare Height mask gates every channel of the row and is the same picture in each,
+   * so one pass renders it once: two canvas-sized evaluations per Compare row per channel
+   * otherwise. Good for this gather only -- the description can change between them. */
+  PaintLayersHeightWonCache height_won_cache;
   {
     bke::paint_perf::ScopedTimer perf_stacks("gather.stacks");
     int stacks_found = 0;
@@ -503,7 +507,8 @@ ImBuf *combined_preview_ensure(Main &bmain,
                              combined_shading_channels[i],
                              stacks[i],
                              /*describe_only=*/true,
-                             surface) :
+                             surface,
+                             &height_won_cache) :
                          BKE_paint_material_composite_stack_from_material(
                              bmain, ma, combined_shading_channels[i], stacks[i]);
       stacks_found += has_stack[i] ? 1 : 0;
@@ -622,7 +627,7 @@ ImBuf *combined_preview_ensure(Main &bmain,
            * the exact one: approximate pixels behind an exact identity, and no edit of the surface
            * would ever invalidate them. */
           return BKE_paint_layers_composite_image_layers(
-              ma, channel, r_full, /*describe_only=*/false, surface);
+              ma, channel, r_full, /*describe_only=*/false, surface, &height_won_cache);
         };
         /* The octave the gather decided for every channel, or zero for the canvas. Passed as a size
          * rather than as a display cap: the hysteresis is the preview's, not each channel's, or two

@@ -2658,7 +2658,7 @@ bool BKE_paint_layers_channel_height_blend_set(Material &ma,
     return false;
   }
   if (height_blend < MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT ||
-      height_blend > MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT)
+      height_blend > MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE)
   {
     return false;
   }

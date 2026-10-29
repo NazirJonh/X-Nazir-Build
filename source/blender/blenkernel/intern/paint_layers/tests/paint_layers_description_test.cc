@@ -3645,7 +3645,7 @@ TEST_F(PaintLayersDescription, height_channel_settings_default_to_neutral)
   EXPECT_EQ(BKE_paint_layers_channel_height_blend(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT),
             MA_PAINT_LAYER_HEIGHT_BLEND_ADD);
   EXPECT_FALSE(BKE_paint_layers_channel_height_blend_set(
-      *ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT + 1));
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE + 1));
 
   ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
   EXPECT_TRUE(BKE_paint_layers_channel_height_scale_set(
@@ -3743,7 +3743,7 @@ TEST_F(PaintLayersDescription, duplicate_and_paste_keep_channel_settings)
   ASSERT_NE(effect, nullptr);
 
   row->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_blend =
-      MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT;
+      MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE;
   row->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_scale_delta = 0.5f;
   row->channel_settings[PAINT_MATERIAL_CHANNEL_ROUGHNESS].opacity = 0.3f;
   effect->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_blend =
@@ -3754,7 +3754,7 @@ TEST_F(PaintLayersDescription, duplicate_and_paste_keep_channel_settings)
   MaterialPaintLayer *row_copy = BKE_paint_layers_duplicate(*bmain, ma, row);
   ASSERT_NE(row_copy, nullptr);
   EXPECT_EQ(row_copy->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_blend,
-            MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT);
+            MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE);
   EXPECT_FLOAT_EQ(
       row_copy->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_scale_delta, 0.5f);
   EXPECT_FLOAT_EQ(row_copy->channel_settings[PAINT_MATERIAL_CHANNEL_ROUGHNESS].opacity, 0.3f);

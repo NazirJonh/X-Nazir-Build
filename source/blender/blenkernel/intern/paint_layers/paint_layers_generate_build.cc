@@ -1645,12 +1645,24 @@ void PaintLayersTreeBuilder::build()
     return;
   }
 
+  /* The build order puts Height first: a Compare record's won mask is built by the Height pass
+   * and multiplied into every other channel's factor of the same row, so those channels have to be
+   * built after it. The root's interface and every hash stay in the canonical channel order; only
+   * the order the lanes are laid out in changes. */
+  Vector<int> build_order(wired_channels_.begin(), wired_channels_.end());
+  const int64_t height_index = build_order.first_index_of_try(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  if (height_index > 0) {
+    build_order.remove(height_index);
+    build_order.insert(0, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  }
+
   float location_y = 0.0f;
-  for (const int lane : wired_channels_.index_range()) {
-    const int channel = wired_channels_[lane];
+  int lane = 0;
+  for (const int channel : build_order) {
     /* Why one lane per channel: every channel's chain is built into the same row groups, so its
      * nodes must not share the grid cells of the channel before it. */
     layout::LayoutGrid::LaneScope lane_scope(grid_, lane);
+    lane++;
     bNodeTreeInterfaceSocket *const *result_iface = result_outputs_.lookup_ptr(channel);
     if (result_iface == nullptr || (*result_iface)->identifier == nullptr) {
       continue;

@@ -17,6 +17,10 @@
  */
 
 #include <memory>
+#include <utility>
+
+#include "BLI_map.hh"
+#include "BLI_set.hh"
 
 #include "BKE_paint_material_composite.hh"
 
@@ -28,6 +32,31 @@ struct Material;
 struct MaterialPaintLayer;
 struct ReportList;
 struct rcti;
+
+/**
+ * The Compare masks one build pass renders, shared by the channels that read them.
+ *
+ * A row's Compare Height record gates every channel of the row, so a pass that describes all of
+ * them -- the Combined preview gathers eight -- would otherwise render the same mask once per
+ * channel: a full evaluation of the rows below plus the row's own content each time, and the
+ * mask is channel-independent by construction.
+ *
+ * An entry is good for the pass that filled it and no longer: the description it was rendered from
+ * (opacities, masks, the rows below) can change between passes and nothing here is keyed on it. The
+ * key is the row and whether the build was isolating, the two things the mask depends on besides
+ * the pass. A caller that describes a single channel has nothing to share and leaves it out.
+ */
+struct PaintLayersHeightWonCache {
+  /** The rendered mask of a row of an isolating or a top-level build; a null entry is "no mask". */
+  Map<std::pair<const MaterialPaintLayer *, bool>, std::shared_ptr<ImBuf>> masks;
+  /**
+   * The rows of this pass whose mask could not be rendered for a size mismatch and which have been
+   * said out loud already, keyed like #masks. The mask is rendered once per row and pass, but the
+   * diagnostic is worth exactly one line per pass: a stack that compares through a resample the
+   * graph has no node for is worth knowing about once, not once per channel.
+   */
+  Set<std::pair<const MaterialPaintLayer *, bool>> size_mismatch_reported;
+};
 
 /**
  * The layer stack \a channel of \a ma's description resolves to, bottom to top.
@@ -62,6 +91,9 @@ struct rcti;
  *        and its geometry, not on the line, so a drag cannot make it stale. A UV Gradient never
  *        uses a surface. The layer holds the shared pointer, so its lifetime is extended even if
  *        the caller's cache replaces its own entry.
+ * \param height_won_cache: where the Compare masks of this pass are shared with the pass's other
+ *        channels (#PaintLayersHeightWonCache); null renders each mask this call needs and keeps
+ *        it nowhere, which is what a single-channel caller wants.
  * \return false when the channel has no participating row at all.
  */
 bool BKE_paint_layers_composite_image_layers(
@@ -69,7 +101,8 @@ bool BKE_paint_layers_composite_image_layers(
     int channel,
     Vector<PaintMaterialCompositeImageLayer> &r_layers,
     bool describe_only = false,
-    std::shared_ptr<const PaintMaterialCompositeSurface> surface = nullptr);
+    std::shared_ptr<const PaintMaterialCompositeSurface> surface = nullptr,
+    PaintLayersHeightWonCache *height_won_cache = nullptr);
 
 /**
  * Drop every cached Anchor Point slice. The cache owns float canvases of its own (about 0.5 GiB per

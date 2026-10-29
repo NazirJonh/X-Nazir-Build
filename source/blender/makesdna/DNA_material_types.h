@@ -590,6 +590,8 @@ enum eMaterialPaintLayerHeightBlend : int8_t {
   MA_PAINT_LAYER_HEIGHT_BLEND_MIX = 1,
   MA_PAINT_LAYER_HEIGHT_BLEND_ADD = 2,
   MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT = 3,
+  /** The greater height wins; the layer's alpha covers the other channels where it won. */
+  MA_PAINT_LAYER_HEIGHT_BLEND_COMPARE = 4,
 };
 
 /** #MaterialPaintLayer::source -- what the row paints with. */

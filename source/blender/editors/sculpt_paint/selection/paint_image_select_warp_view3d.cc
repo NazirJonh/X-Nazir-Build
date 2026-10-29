@@ -1185,6 +1185,7 @@ static wmOperatorStatus warp3d_invoke(bContext *C, wmOperator *op, const wmEvent
   if (region == nullptr) {
     return OPERATOR_PASS_THROUGH;
   }
+  image_paint_selection_mask_map_ensure(C);
 
   /* Drag path: pick a grid point of a live warp session of this Viewport. */
   if (ImageSelectWarp3DState *floating = warp3d_state_get()) {

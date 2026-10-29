@@ -811,6 +811,7 @@ static wmOperatorStatus image_select_quick_invoke(bContext *C,
   const float2 press_uv = quick_region_to_uv(region, press_mval);
 
   auto *stroke = MEM_new<QuickStroke>(__func__);
+  image_paint_selection_mask_map_ensure(C);
   stroke->targets = image_paint_selection_targets_get(C, sima);
   if (stroke->targets.is_empty()) {
     BKE_report(op->reports, RPT_WARNING, "Quick Select: no target images to select on");

@@ -10,6 +10,7 @@
 #include "BKE_context.hh"
 #include "DEG_depsgraph_query.hh"
 
+#include "ED_paint_curve_draw.hh"
 #include "ED_view3d.hh"
 
 #include "BKE_paint.hh"
@@ -78,6 +79,8 @@ void Instance::init()
         state.active_tool_idname = area->runtime.tool->idname;
       }
     }
+    state.sculpt_tool_display_paint = blender::ed::sculpt_paint::
+        ED_paint_curve_sculpt_tool_display_is_paint(C);
   }
   /* Resolve the Sculpt Mode face-selection overlay policy here, in the engine, so the per-pass
    * overlay code only reads the result off the state. */

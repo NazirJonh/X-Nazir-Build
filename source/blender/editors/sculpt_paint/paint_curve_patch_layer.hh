@@ -17,6 +17,7 @@
  * editing session is what this file enters and commits.
  */
 
+#include <cstdint>
 #include <memory>
 
 #include "BLI_math_vector_types.hh"
@@ -27,6 +28,7 @@ namespace blender {
 
 struct bContext;
 struct Brush;
+enum ePaintLayerTargetMode : int8_t;
 struct Material;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerCurvePatch;
@@ -165,6 +167,37 @@ bool curve_patch_layer_session_blocks_row(const Object &ob, const MaterialPaintL
  * the confirm dialog, for a switch the user can undo (another row of the stack becoming active).
  */
 void curve_patch_layer_commit_live_session(bContext &C, Object &ob);
+
+/**
+ * The data-level activation of a stack row, shared by the Outliner's row click and the viewport
+ * pick: a live Curve Patch session the switch would leave half-edited commits first, the row
+ * becomes the active one, a Curve Patch effect enters its tool, the target mode follows the row's
+ * masks, and the texture-paint slots resolve through the new active row. The material must be
+ * editable. Returns false (with nothing changed) when it is not.
+ *
+ * \param curve_item_index: when non-negative and still valid, the Curve Patch effect's container
+ * makes that item active before the session opens, so the clicked curve is the one it starts on.
+ * The check happens before any mutation, so a refused activation leaves `active_item` untouched.
+ *
+ * UI that follows the activation (Outliner row selection, reveal) observes the
+ * `NC_MATERIAL | ND_SHADING` notifier sent here.
+ */
+bool paint_stack_row_activate(bContext &C,
+                              Material &material,
+                              const bUUID &row_marker,
+                              int curve_item_index = -1);
+
+/** Rebuild the active object's paint slots after the active row or target mode changed. */
+void paint_stack_texpaint_slots_refresh(bContext &C);
+
+/** Set the target a layered material's stroke paints; true when it changed. */
+bool paint_stack_target_mode_set(bContext &C, ePaintLayerTargetMode mode);
+
+/**
+ * Make a Gradient row active in Sculpt Mode, remembering the user's tool, and restore that tool
+ * when a row that is not a Gradient becomes active.
+ */
+void paint_stack_gradient_tool_activate(bContext &C, const MaterialPaintLayer *layer);
 
 /** The dedicated `PaintVector <-> CurvePatchDocument` converter (the shapes converter produces a
  * `VectorDocument`, not this document). Only `PAINT_VECTOR_ITEM_CURVE_PATCH` items are read;

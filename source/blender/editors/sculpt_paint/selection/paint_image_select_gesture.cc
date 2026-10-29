@@ -74,6 +74,7 @@ bool image_select_gesture_invoke_begin(bContext *C, wmOperator *op, const wmEven
   if (image_select_move_delegate_to_move_operator(C, event)) {
     return true;
   }
+  image_paint_selection_mask_map_ensure(C);
   RNA_int_set(op->ptr, "click_x", event->xy[0]);
   RNA_int_set(op->ptr, "click_y", event->xy[1]);
   RNA_boolean_set(op->ptr, "is_simple_click", true);
@@ -381,6 +382,7 @@ wmOperatorStatus image_select_gesture_exec_generic(bContext *C,
   if (!image) {
     return OPERATOR_CANCELLED;
   }
+  image_paint_selection_mask_map_ensure(C);
   const Vector<ImagePaintSelectionTarget> targets = image_paint_selection_targets_get(C, sima);
 
   /* A press-release without travel means "clear the selection", never "select nothing". */

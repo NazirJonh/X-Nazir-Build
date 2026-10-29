@@ -1948,6 +1948,7 @@ static wmOperatorStatus image_select_transform_exec(bContext *C, wmOperator *op)
   if (!sima || !sima->image || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
+  image_paint_selection_mask_map_ensure(C);
 
   /* Re-running the operator (redo panel, F9) discards the session the previous run left floating;
    * only this tool's own session is handled here, the takeover below covers the rest. */
@@ -2023,6 +2024,7 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
+  image_paint_selection_mask_map_ensure(C);
   if (ImageSelectTransformState *floating = image_select_transform_state_get(sima)) {
     ARegion *region = CTX_wm_region(C);
     if (region) {

@@ -19,6 +19,7 @@
 #include "DNA_brush_types.h"
 #include "DNA_curve_types.h"
 #include "DNA_curves_types.h"
+#include "DNA_material_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
@@ -45,11 +46,13 @@
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
+#include "BKE_material.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_paint_vector.hh"
 
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_query.hh"
@@ -75,6 +78,7 @@
 
 #include "mesh/sculpt_intern.hh"
 #include "paint_curve_intern.hh"
+#include "paint_curve_patch_layer.hh"
 #include "paint_intern.hh"
 
 namespace blender {
@@ -2227,6 +2231,65 @@ static bool paintcurve_sculpt_pick_poll(bContext *C)
   return paintcurve_edit_tool_is_active(C);
 }
 
+/**
+ * Curve Patch effect curve under the cursor switches the stack to its row. Curve Edit tool in the
+ * Paint display group only: there the tool picks a Curve Patch effect of the SELECTED objects'
+ * layered materials, and the switch runs the same activation a row click in the Outliner's Stack
+ * Layers does (the effect's session opens; the poll guarantees the tool is already the Curve Edit
+ * one). This runs before the control-point check because the effect curves take the overlay's pass
+ * while they are shown -- the paint curve is not drawn then, and an invisible paint-curve point
+ * must not steal the click from a visible effect curve.
+ *
+ * Returns #OPERATOR_PASS_THROUGH when the click is not on such a curve.
+ */
+static wmOperatorStatus paintcurve_pick_stack_curve_patch(bContext *C, const wmEvent *event)
+{
+  if (!blender::ed::sculpt_paint::ED_paint_curve_sculpt_tool_display_is_paint(C)) {
+    return OPERATOR_PASS_THROUGH;
+  }
+
+  Depsgraph *pick_depsgraph = CTX_data_depsgraph_pointer(C);
+  ViewContext pick_vc = ED_view3d_viewcontext_init(C, pick_depsgraph);
+  Object *picked_object = nullptr;
+  int picked_item_index = -1;
+  MaterialPaintLayer *effect = paintcurve_nearest_stack_curve_patch(
+      pick_vc,
+      float2(float(event->mval[0]), float(event->mval[1])),
+      PAINT_CURVE_HOVER_THRESHOLD,
+      &picked_object,
+      &picked_item_index);
+  if (effect == nullptr) {
+    return OPERATOR_PASS_THROUGH;
+  }
+
+  /* The switch runs on the curve's own object: its material owns the row, and the session opens
+   * on the active object. Another selected object is made active first -- it is already in Sculpt
+   * Mode, so the mode carries. The user-initiated activation goes through #base_activate_user:
+   * refused (and re-issued by its confirm) while a Paint Shape session owns the current active
+   * object, in which case the pick is dropped for now. */
+  if (picked_object != nullptr && picked_object != CTX_data_active_object(C)) {
+    BKE_view_layer_synced_ensure(*pick_vc.bmain, pick_vc.scene, pick_vc.view_layer);
+    Base *base = BKE_view_layer_base_find(pick_vc.view_layer, picked_object);
+    if (base == nullptr || !blender::ed::object::base_activate_user(C, base)) {
+      return OPERATOR_PASS_THROUGH;
+    }
+  }
+  Object *ob = (picked_object != nullptr) ? picked_object : CTX_data_active_object(C);
+  Material *ma = (ob != nullptr) ? BKE_object_material_get(ob, ob->actcol) : nullptr;
+  if (ma == nullptr) {
+    return OPERATOR_PASS_THROUGH;
+  }
+  /* The activation checks editability before it changes the row or the clicked item, so a refusal
+   * leaves both alone; the clicked curve becomes the effect's active item inside. */
+  if (!blender::ed::sculpt_paint::paint_stack_row_activate(
+          *C, *ma, effect->marker, picked_item_index))
+  {
+    return OPERATOR_PASS_THROUGH;
+  }
+  paintcurve_tag_redraw_all(C);
+  return OPERATOR_FINISHED;
+}
+
 static wmOperatorStatus paintcurve_sculpt_pick_invoke(bContext *C,
                                                       wmOperator *op,
                                                       const wmEvent *event)
@@ -2235,6 +2298,11 @@ static wmOperatorStatus paintcurve_sculpt_pick_invoke(bContext *C,
    * (#PAINTCURVE_OT_insert_or_add_point). */
   if (event->modifier & KM_CTRL) {
     return OPERATOR_PASS_THROUGH;
+  }
+
+  const wmOperatorStatus stack_status = paintcurve_pick_stack_curve_patch(C, event);
+  if (stack_status != OPERATOR_PASS_THROUGH) {
+    return stack_status;
   }
 
   const float loc_fl[2] = {float(event->mval[0]), float(event->mval[1])};

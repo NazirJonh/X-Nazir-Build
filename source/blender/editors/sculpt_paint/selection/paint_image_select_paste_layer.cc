@@ -110,6 +110,7 @@ bool image_select_paste_clipboard(bContext *C,
     return false;
   }
   PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  image_paint_selection_mask_map_ensure(C);
 
   /* Only a Material canvas painting layer content has a stack to paste into; a mask edit and any
    * other canvas paste into the current image(s). */

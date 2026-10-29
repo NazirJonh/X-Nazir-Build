@@ -1412,6 +1412,7 @@ bool image_select_view3d_gesture_apply(bContext *C,
                                        const char *undo_name,
                                        const eSelectOp sel_op)
 {
+  image_paint_selection_mask_map_ensure(C);
   Vector<ImagePaintSelectionTarget> targets = image_paint_selection_view3d_targets_get(C, ob);
   if (targets.is_empty()) {
     return false;
@@ -1473,6 +1474,7 @@ bool image_select_view3d_gesture_apply(bContext *C,
 /** Simple click on a selection gesture: deselect everything (2D parity). */
 static void view3d_apply_deselect(bContext *C, Object &ob)
 {
+  image_paint_selection_mask_map_ensure(C);
   Vector<ImagePaintSelectionTarget> targets = image_paint_selection_view3d_targets_get(C, ob);
   bool any = false;
   for (const ImagePaintSelectionTarget &target : targets) {
@@ -1506,6 +1508,7 @@ static wmOperatorStatus view3d_select_all_exec(bContext *C, wmOperator * /*op*/)
   if (ob == nullptr || !image_paint_selection_view3d_poll(C)) {
     return OPERATOR_CANCELLED;
   }
+  image_paint_selection_mask_map_ensure(C);
   Vector<ImagePaintSelectionTarget> targets = image_paint_selection_view3d_targets_get(C, *ob);
   if (targets.is_empty()) {
     return OPERATOR_CANCELLED;
@@ -1541,6 +1544,7 @@ static wmOperatorStatus view3d_select_none_exec(bContext *C, wmOperator * /*op*/
   if (ob == nullptr || !image_paint_selection_view3d_poll(C)) {
     return OPERATOR_CANCELLED;
   }
+  image_paint_selection_mask_map_ensure(C);
   Vector<ImagePaintSelectionTarget> targets = image_paint_selection_view3d_targets_get(C, *ob);
   bool any = false;
   for (const ImagePaintSelectionTarget &target : targets) {
@@ -1564,6 +1568,7 @@ static wmOperatorStatus view3d_select_invert_exec(bContext *C, wmOperator * /*op
   if (ob == nullptr || !image_paint_selection_view3d_poll(C)) {
     return OPERATOR_CANCELLED;
   }
+  image_paint_selection_mask_map_ensure(C);
   Vector<ImagePaintSelectionTarget> targets = image_paint_selection_view3d_targets_get(C, *ob);
   if (targets.is_empty()) {
     return OPERATOR_CANCELLED;
@@ -2052,6 +2057,7 @@ static wmOperatorStatus gesture_invoke_common(bContext *C,
                                               const wmEvent *event,
                                               const GestureKind kind)
 {
+  image_paint_selection_mask_map_ensure(C);
   /* A floating fragment under the cursor is moved, not re-selected (2D parity). Checked BEFORE
    * the general poll, which refuses while a session is live. */
   if (PaintSelectView3DFloatingSession *floating = image_select_view3d_session_active()) {

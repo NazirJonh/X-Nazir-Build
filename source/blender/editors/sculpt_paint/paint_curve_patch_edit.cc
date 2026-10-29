@@ -1105,9 +1105,70 @@ static wmOperatorStatus curve_patch_edit_hand_to_confirm(bContext *C,
   return OPERATOR_CANCELLED;
 }
 
+/**
+ * End a superseded session without asking when the takeover is lossless and the commit would
+ * still re-stamp with the brush the patch was built from.
+ *
+ * Switching to the Curve Edit tool is that case: the tool carries no brush, so the session's
+ * snapshot is still the active one and the commit reads the brush the patch was built from -- the
+ * reason the generic path must ask. An effect of the Stack Layers keeps its curves in its
+ * container, so the commit is lossless and undoable. The brush identity check is what makes the
+ * commit safe: the final re-stamp reads the live brush, and an incoming one has never been through
+ * a paint stroke, so its pressure CurveMappings are uninitialized.
+ *
+ * Returns true when it committed and tore the operator down; the caller then ends the modal.
+ */
+static bool curve_patch_edit_try_safe_supersede(bContext *C,
+                                                 wmOperator *op,
+                                                 const CurvePatchEditOpData &data)
+{
+  const ScrArea *area = CTX_wm_area(C);
+  const bToolRef *tool = area ? area->runtime.tool : nullptr;
+  const ToolSettings *tool_settings = CTX_data_tool_settings(C);
+  if (tool == nullptr || !ED_paint_curve_is_curves_edit_tool(tool->idname) ||
+      (data.brush_at_invoke &&
+       (tool_settings == nullptr || tool_settings->sculpt == nullptr ||
+        BKE_paint_brush_for_read(&tool_settings->sculpt->paint) != data.brush_at_invoke)))
+  {
+    return false;
+  }
+
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr || ob->runtime == nullptr || ob->runtime->sculpt_session == nullptr) {
+    return false;
+  }
+  const CurvePatchSession *live = ob->runtime->sculpt_session->curve_patch_session;
+  if (live == nullptr || live->layer_material == nullptr) {
+    return false;
+  }
+
+  curve_patch_commit_on_session_end(*C, *ob);
+  curve_patch_edit_teardown(C, op);
+  /* Entering this session activated the effect's brush, whose tool is exclusive to the Sculpt
+   * display group, so the toolbar has been reading 'SCULPT' since. Switching to the Curve Edit
+   * tool is the selection mode's own door: put the group back to 'PAINT' so the overlay lands in
+   * it, and let the toolbar re-render the switch. */
+  ED_paint_curve_sculpt_tool_display_set(C, true);
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+  ED_workspace_status_text(C, nullptr);
+  return true;
+}
+
 static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
   CurvePatchEditOpData &data = *static_cast<CurvePatchEditOpData *>(op->customdata);
+
+  /* A session entered from a stack row activation starts while the toolsystem is still rebuilding
+   * after the effect's brush was picked, so the area has no tool ref at invoke and the snapshot
+   * stays empty -- which disables the tool-switch check in #curve_patch_edit_session_superseded
+   * and leaves this modal swallowing every click. Take the snapshot at the first event instead. */
+  if (data.tool_idname_at_invoke[0] == '\0') {
+    if (const ScrArea *area = CTX_wm_area(C)) {
+      if (const bToolRef *tref = area->runtime.tool) {
+        STRNCPY(data.tool_idname_at_invoke, tref->idname);
+      }
+    }
+  }
 
   /* The live patch's backing data can vanish out from under this modal operator without an
    * explicit Enter/Esc: unhandled keys (see the `default:` case below) deliberately pass through
@@ -1169,6 +1230,9 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
    * Deliberately ABOVE the live-sync block below, which would otherwise read an incoming brush's
    * parameters and re-stamp with them before the switch is ever noticed. */
   if (curve_patch_edit_session_superseded(C, data)) {
+    if (curve_patch_edit_try_safe_supersede(C, op, data)) {
+      return OPERATOR_CANCELLED;
+    }
     /* The decision is the USER's, not this modal's. A supersede is not an instruction to keep the
      * patch: switching workspace is the clearest case -- the patch would be stamped into the image
      * (or the mesh) by the mere act of looking at another tab, with the interactive session that

@@ -77,6 +77,7 @@
 #include "ED_asset_import.hh"
 #include "ED_curve_patch.hh"
 #include "ED_material_bake.hh"
+#include "ED_outliner_stack.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_undo.hh"
@@ -173,98 +174,6 @@ int paint_stack_selected_channel(const StackReadContext &ctx, const Material &ma
   return clamped;
 }
 
-/**
- * Rebuild the paint slots of the active object. The projection canvas paints the slots, and which
- * map each holds depends on the mode and on the active row, so a change of either has to reach them.
- */
-void layers_texpaint_slots_refresh(bContext &C)
-{
-  Scene *scene = CTX_data_scene(&C);
-  Object *object = CTX_data_active_object(&C);
-  if (scene != nullptr && object != nullptr) {
-    BKE_texpaint_slots_refresh_object(scene, object);
-  }
-  /* Every change of the active row, added row or mode passes here, so the PBR Paint tab never
-   * waits for a separate opt-in button while a layer is active. */
-  if (Paint *paint = BKE_paint_get_active_from_context(&C)) {
-    if (BKE_paint_material_brush_auto_ensure(scene, paint, object)) {
-      WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, BKE_paint_brush(paint));
-    }
-  }
-}
-
-/**
- * A Gradient layer, correction or mask item is edited with the Color Gradient tool, so making one
- * active switches to it. Only in Sculpt Mode, where that tool lives; anywhere else the tool is not
- * on offer and the row is still edited through its panel and gizmo.
- *
- * The tool the user had is remembered on the way in and put back when a row that is not a Gradient
- * becomes active. Moving between Gradient rows keeps the Gradient tool and the remembered tool.
- */
-void gradient_tool_activate(bContext &C, const MaterialPaintLayer *layer)
-{
-  Object *object = CTX_data_active_object(&C);
-  if (object == nullptr || (object->mode & OB_MODE_SCULPT) == 0 ||
-      object->runtime->sculpt_session == nullptr)
-  {
-    return;
-  }
-  std::string &saved_tool_id = object->runtime->sculpt_session->layers.gradient_saved_tool_id;
-  constexpr const char *gradient_tool_id = "builtin.color_gradient";
-
-  if (layer != nullptr && BKE_paint_layers_gradient_supported(*layer)) {
-    const std::string current_tool_id = ED_paint_view3d_tool_id_get(&C);
-    if (current_tool_id != gradient_tool_id) {
-      saved_tool_id = current_tool_id;
-    }
-    ED_paint_view3d_tool_id_set(&C, gradient_tool_id);
-    return;
-  }
-
-  /* Only restored while the Gradient tool is still active: a tool the user picked during the Gradient
-   * row is a choice that the row change should not overrule. */
-  if (!saved_tool_id.empty() && ED_paint_view3d_tool_id_get(&C) == gradient_tool_id) {
-    ED_paint_view3d_tool_id_set(&C, saved_tool_id.c_str());
-  }
-  saved_tool_id.clear();
-}
-
-/** Set the target a layered material's stroke paints; true when it changed. */
-bool layers_target_mode_set(bContext &C, const ePaintLayerTargetMode mode)
-{
-  Scene *scene = CTX_data_scene(&C);
-  if (scene == nullptr || scene->toolsettings == nullptr) {
-    return false;
-  }
-  PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
-  /* Choosing a paint target (Mask or content) ends object-mask editing, even when the target is
-   * already the one asked for. */
-  if (paint_mode.layer_object_mask_edit != 0) {
-    paint_mode.layer_object_mask_edit = 0;
-    WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
-  }
-  if (paint_mode.layer_target_mode == mode) {
-    return false;
-  }
-  const bool leaving_mask = paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK &&
-                            mode != PAINT_LAYER_TARGET_MASK;
-  if (Paint *paint = BKE_paint_get_active_from_context(&C)) {
-    /* Puts the Mask brush in hand on the way in and the remembered content brush on the way out. */
-    BKE_paint_material_layer_target_mode_set(
-        *CTX_data_main(&C), *scene, *paint, paint_mode, mode);
-    if (leaving_mask && paint->brush != nullptr) {
-      /* The restored content brush may belong to another tool, so that tool becomes active too. */
-      WM_toolsystem_activate_brush_and_tool(&C, paint, paint->brush);
-    }
-  }
-  else {
-    paint_mode.layer_target_mode = int8_t(mode);
-  }
-  layers_texpaint_slots_refresh(C);
-  WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, scene);
-  return true;
-}
-
 /** Leave Mask mode when the layer being edited in it is the one \a layer is: its mask is going
  * away or off, and a stroke into nothing must not be what the mode means. */
 void layers_mask_edit_end_if_active(bContext &C,
@@ -279,7 +188,7 @@ void layers_mask_edit_end_if_active(bContext &C,
   }
   /* The row, or a folder it holds the edited row in: removing the folder takes the mask along. */
   if (BKE_paint_layers_subtree_contains(layer, material.active_layer_marker)) {
-    layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
+    sculpt_paint::paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
   }
 }
 
@@ -339,6 +248,47 @@ StackRowPreview paint_mask_slot_build(const MaterialPaintLayer &item)
 }
 
 }  // namespace
+
+void outliner_stack_paint_row_ui_sync(Main &bmain,
+                                      Scene &scene,
+                                      ViewLayer &view_layer,
+                                      SpaceOutliner &space_outliner,
+                                      Material &material)
+{
+  if (space_outliner.outlinevis != SO_STACK_LAYERS || space_outliner.runtime == nullptr) {
+    return;
+  }
+  const StackReadContext ctx{&bmain, &scene, &view_layer};
+  if (outliner_stack_owner_get(ctx, space_outliner) != &material.id) {
+    return;
+  }
+  /* The active marker itself, not #BKE_paint_layers_active_layer_get: a mask correction (a Curve
+   * Patch mask item) would resolve to the row it hangs on, and that is not the row to select. */
+  const bUUID active_marker = BKE_paint_layers_active_get(material);
+  const MaterialPaintLayer *active = BKE_paint_layers_find(material, active_marker);
+  if (active == nullptr) {
+    return;
+  }
+
+  outliner_stack_rows_ensure(ctx, space_outliner, material.id);
+  int ordinal = -1;
+  for (const StackRow &row : space_outliner.runtime->stack_rows) {
+    if (BLI_uuid_equal(row.stable_id, active->marker)) {
+      ordinal = row.ordinal;
+      break;
+    }
+  }
+  if (ordinal < 0) {
+    return;
+  }
+  /* No "already active" shortcut: the Outliner reads a row as active from the material's active
+   * marker, which the activation has already set, so it would always bail out here while the UI
+   * selection still sits on the previous row. */
+  /* The identity-keyed UI state map carries the flags across the next tree build, and revealing
+   * the attached section brings a correction row out from under its owner's content section. */
+  stack_row_reveal_attached(space_outliner, ordinal);
+  stack_row_ui_state_edit_select(ctx, space_outliner, material.id, ordinal);
+}
 
 namespace {
 
@@ -2138,54 +2088,7 @@ class PaintLayersStackSource final : public StackSource,
       BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Unsupported layer cannot be activated");
       return false;
     }
-    /* A live Curve Patch session owns the tool while it runs. Switching the active row away from
-     * its effect is a deliberate step the user can undo, so the session just commits its curves
-     * into the effect and the switch goes on, with no question and no warning. */
-    if (Object *ob = CTX_data_active_object(&C)) {
-      const MaterialPaintLayer *target = BKE_paint_layers_find(material, row.stable_id);
-      if (target != nullptr &&
-          blender::ed::sculpt_paint::curve_patch_layer_session_blocks_row(*ob, *target))
-      {
-        blender::ed::sculpt_paint::curve_patch_layer_commit_live_session(C, *ob);
-      }
-    }
-    BKE_paint_layers_active_set(material, row.stable_id);
-    gradient_tool_activate(C, BKE_paint_layers_find(material, row.stable_id));
-    if (MaterialPaintLayer *active = BKE_paint_layers_find(material, row.stable_id);
-        active != nullptr && active->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH)
-    {
-      /* Selecting a Curve Patch effect in Sculpt Mode puts its brush snapshot in the user's hand
-       * and opens its curves, like the Gradient tool follows its rows. A refusal is reported by
-       * the entry itself and leaves the effect merely selected. */
-      blender::ed::sculpt_paint::curve_patch_layer_enter_if_sculpting(C, material, *active);
-    }
-    /* Mask editing only makes sense on a Layer row; leaving it for a correction or mask item ends
-     * it. */
-    if (Scene *scene = CTX_data_scene(&C)) {
-      const MaterialPaintLayer *active = BKE_paint_layers_find(material, row.stable_id);
-      if (scene->toolsettings != nullptr && active != nullptr &&
-          active->role != MA_PAINT_LAYER_ROLE_LAYER &&
-          scene->toolsettings->paint_mode.layer_object_mask_edit != 0)
-      {
-        scene->toolsettings->paint_mode.layer_object_mask_edit = 0;
-        WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
-      }
-    }
-    /* The mode is global: a layer with no mask is painted on its content, not left as a stroke
-     * into nothing, and a mask correction is only ever worked on in the mask. */
-    const MaterialPaintLayer *activated = BKE_paint_layers_active_layer_get(material);
-    if (BKE_paint_layers_active_mask_item_get(material) != nullptr) {
-      layers_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
-    }
-    else if (activated != nullptr && BKE_paint_layers_mask_base(*activated) == nullptr) {
-      layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
-    }
-    /* The mode may have stayed Mask while the row changed: the slots hold the new row's mask map,
-     * and a change of mode above already refreshed them once more, which is cheap. */
-    layers_texpaint_slots_refresh(C);
-    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
-    WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
-    return true;
+    return sculpt_paint::paint_stack_row_activate(C, material, row.stable_id);
   }
 
   bool preview_activate(bContext &C,
@@ -2202,10 +2105,10 @@ class PaintLayersStackSource final : public StackSource,
     }
     /* A click on a slot switches what the brush paints: the mask, or the content. */
     if (section_id == "MASK") {
-      return layers_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+      return sculpt_paint::paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
     }
     if (section_id == "CHANNELS") {
-      return layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
+      return sculpt_paint::paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
     }
     return false;
   }
@@ -2331,9 +2234,9 @@ class PaintLayersStackSource final : public StackSource,
     /* Back to the neutral target: #row_activate may have put the mode in Mask, and an armed
      * object-mask edit belongs to the row that is no longer the target. This also ends Mask mode
      * and restores the content brush when it does. */
-    layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
+    sculpt_paint::paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
     /* Even when the mode already was Content, the slots held the dropped row's maps. */
-    layers_texpaint_slots_refresh(C);
+    sculpt_paint::paint_stack_texpaint_slots_refresh(C);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return true;
   }
@@ -2674,19 +2577,19 @@ class PaintLayersStackSource final : public StackSource,
      * correction is the mask the user means to paint. */
     const bool anchor_in_mask = (is_anchor_point || is_anchor_point_reader) &&
                                 params.anchor_point_list == PaintLayerAnchorPointList::MaskStack;
-    layers_target_mode_set(C, (is_mask_correction || anchor_in_mask) ? PAINT_LAYER_TARGET_MASK :
+    sculpt_paint::paint_stack_target_mode_set(C, (is_mask_correction || anchor_in_mask) ? PAINT_LAYER_TARGET_MASK :
                                                                        PAINT_LAYER_TARGET_CONTENT);
     if (is_anchor_point || is_anchor_point_reader) {
       /* The point or reader the user just added is the one they mean to work on. */
       BKE_paint_layers_active_set(material, created->marker);
-      layers_texpaint_slots_refresh(C);
+      sculpt_paint::paint_stack_texpaint_slots_refresh(C);
     }
     else if (is_correction) {
       /* The correction the user just added is the one they mean to work on: paint into, or for a
        * filter set the parameters and channels of. A filter has no map, so a stroke on it lands
        * nowhere. */
       BKE_paint_layers_active_set(material, created->marker);
-      layers_texpaint_slots_refresh(C);
+      sculpt_paint::paint_stack_texpaint_slots_refresh(C);
     }
     else if (params.kind == PaintLayerAddKind::Paint || params.kind == PaintLayerAddKind::Gradient ||
              is_adjustment || is_material)
@@ -2703,7 +2606,7 @@ class PaintLayersStackSource final : public StackSource,
       /* A fresh effect is the one being worked on: in Sculpt Mode its tool opens right away. */
       blender::ed::sculpt_paint::curve_patch_layer_enter_if_sculpting(C, material, *created);
     }
-    gradient_tool_activate(C, created);
+    sculpt_paint::paint_stack_gradient_tool_activate(C, created);
     /* A row with no map makes the first stroke create it and regenerate the graph before it can
      * write, which loses that stroke. The active slot's map is made together with the row, so the
      * first stroke already lands in it; the other channels still get theirs when they are used. */
@@ -2727,7 +2630,7 @@ class PaintLayersStackSource final : public StackSource,
         {
           BKE_paint_layers_target_ensure_writable(
               *CTX_data_main(&C), target, paint_mode.new_channel_image_size);
-          layers_texpaint_slots_refresh(C);
+          sculpt_paint::paint_stack_texpaint_slots_refresh(C);
         }
       }
     }
@@ -2754,7 +2657,7 @@ class PaintLayersStackSource final : public StackSource,
       if (!BKE_paint_layers_correction_remove(material, layer)) {
         return false;
       }
-      layers_texpaint_slots_refresh(C);
+      sculpt_paint::paint_stack_texpaint_slots_refresh(C);
       WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
       return true;
     }
@@ -2763,7 +2666,7 @@ class PaintLayersStackSource final : public StackSource,
       if (!BKE_paint_layers_mask_item_remove(material, layer)) {
         return false;
       }
-      layers_texpaint_slots_refresh(C);
+      sculpt_paint::paint_stack_texpaint_slots_refresh(C);
       WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
       return true;
     }
@@ -2857,7 +2760,7 @@ class PaintLayersStackSource final : public StackSource,
     }
     /* A mask the user just added is the one they mean to work on. */
     BKE_paint_layers_active_set(material, layer->marker);
-    layers_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+    sculpt_paint::paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return true;
   }
@@ -2883,7 +2786,7 @@ class PaintLayersStackSource final : public StackSource,
     {
       return false;
     }
-    layers_texpaint_slots_refresh(C);
+    sculpt_paint::paint_stack_texpaint_slots_refresh(C);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return true;
   }
@@ -3140,7 +3043,7 @@ class PaintLayersStackSource final : public StackSource,
        * another user of the material shades its own Object or Generated line. */
       corrections_bake_report_other_users(C, *bmain, material, surface, active_object);
     }
-    layers_texpaint_slots_refresh(C);
+    sculpt_paint::paint_stack_texpaint_slots_refresh(C);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return paint_layers_ordinal_of(material, merged);
   }
@@ -3370,10 +3273,10 @@ class PaintLayersStackSource final : public StackSource,
     }
     /* What was pasted is what the user works on next, in the mode it belongs to. */
     BKE_paint_layers_active_set(material, copy->marker);
-    layers_target_mode_set(C,
+    sculpt_paint::paint_stack_target_mode_set(C,
                            copy->role == MA_PAINT_LAYER_ROLE_MASK_ITEM ? PAINT_LAYER_TARGET_MASK :
                                                                          PAINT_LAYER_TARGET_CONTENT);
-    layers_texpaint_slots_refresh(C);
+    sculpt_paint::paint_stack_texpaint_slots_refresh(C);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return paint_layers_ordinal_of(material, copy);
   }

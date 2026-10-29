@@ -48,12 +48,14 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_blender.hh"
+#include "BKE_context.hh"
 #include "BKE_customdata.hh"
 #include "BKE_editmesh.hh"
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
 #include "BKE_layer.hh"
 #include "BKE_library.hh"
+#include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_node.hh"
@@ -61,6 +63,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_screen.hh"
@@ -111,6 +114,8 @@
 /* #ED_image_paint_select_transform_state_free only. */
 #include "paint_image_select_transform_intern.hh"
 #include "../mesh/paint_image_uv_geom.hh"
+/* #mask_target_image_create_if_missing only. */
+#include "../mesh/paint_material_source.hh"
 
 namespace blender {
 
@@ -204,6 +209,32 @@ Vector<ImagePaintSelectionTarget> image_paint_selection_material_targets_get(
         ob, paint_mode, all_image_channels, /*mask_stroke_value=*/1.0f));
   }
   return targets;
+}
+
+void image_paint_selection_mask_map_ensure(bContext *C)
+{
+  if (C == nullptr) {
+    return;
+  }
+  Scene *scene = CTX_data_scene(C);
+  Main *bmain = CTX_data_main(C);
+  Object *ob = CTX_data_active_object(C);
+  if (scene == nullptr || scene->toolsettings == nullptr || bmain == nullptr || ob == nullptr) {
+    return;
+  }
+  PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  if (BKE_paint_layers_target_mode(&paint_mode) != PaintLayersTargetMode::Mask) {
+    return;
+  }
+  /* The base mask's map is born with the first stroke into it; the select tools never stroke, so
+   * without this a fresh mask resolves zero targets and the gestures pass through silently. The
+   * same entry the stroke start takes: a switched-off or object-masked mask refuses inside and
+   * the select tools stay unavailable. */
+  if (ed::sculpt_paint::material::mask_target_image_create_if_missing(bmain, *ob, paint_mode)) {
+    /* The map is a main-database change, while these operators use image undo for the selection
+     * itself; give the creation its own undo step. */
+    ED_undo_push(C, "Add Mask Map");
+  }
 }
 
 void image_paint_selection_undo_begin(const char *name,
@@ -1441,6 +1472,7 @@ static wmOperatorStatus image_select_all_exec(bContext *C, wmOperator * /*op*/)
     return OPERATOR_CANCELLED;
   }
 
+  image_paint_selection_mask_map_ensure(C);
   const Vector<ImagePaintSelectionTarget> targets = image_paint_selection_targets_get(C, sima);
 
   /* Resolve the image editor's active UDIM once, then apply that same UV tile to every PBR target.
@@ -1517,6 +1549,7 @@ static wmOperatorStatus image_select_none_exec(bContext *C, wmOperator * /*op*/)
    * before "Select None" opens its own. See #image_select_all_exec. */
   image_select_floating_sessions_end_all(C, sima);
 
+  image_paint_selection_mask_map_ensure(C);
   const Vector<ImagePaintSelectionTarget> targets = image_paint_selection_targets_get(C, sima);
   image_paint_selection_undo_begin("Select None", targets);
   for (const ImagePaintSelectionTarget &target : targets) {
@@ -1553,6 +1586,7 @@ static wmOperatorStatus image_select_invert_exec(bContext *C, wmOperator * /*op*
    * before "Invert Selection" opens its own. See #image_select_all_exec. */
   image_select_floating_sessions_end_all(C, sima);
 
+  image_paint_selection_mask_map_ensure(C);
   const Vector<ImagePaintSelectionTarget> targets = image_paint_selection_targets_get(C, sima);
   image_paint_selection_undo_begin("Invert Selection", targets);
 

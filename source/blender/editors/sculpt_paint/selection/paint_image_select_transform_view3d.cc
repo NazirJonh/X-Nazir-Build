@@ -1285,6 +1285,7 @@ static wmOperatorStatus transform3d_invoke(bContext *C, wmOperator *op, const wm
   if (ob == nullptr) {
     return OPERATOR_PASS_THROUGH;
   }
+  image_paint_selection_mask_map_ensure(C);
   /* Re-drag path: pick a handle of a live transform session of this Viewport. */
   if (ImageSelectTransform3DState *floating = transform3d_state_get()) {
     if (floating->owner_v3d != CTX_wm_view3d(C) || floating->owner_region != CTX_wm_region(C)) {

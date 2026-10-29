@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <cstdint>
+#include <optional>
+
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -169,7 +172,36 @@ constexpr float PAINT_CURVE_INSERT_PREVIEW_ARROW_WING = 4.0f;
 /** Distance from the curve to the arrow tip along the perpendicular (pixels). */
 constexpr float PAINT_CURVE_INSERT_PREVIEW_ARROW_INSET = 2.0f;
 
+/** The silhouette passes' palette, shared by the scene-curve and Curve Patch effect silhouettes.
+ * Blue reads against grey scenes where the theme's wire color disappears; white marks the
+ * hovered one so the thing the user can act on stands out. Both are deliberate, not theme colors. */
+constexpr float4 PAINT_CURVE_SILHOUETTE_COLOR = {0.25f, 0.60f, 1.0f, 1.0f};
+constexpr float PAINT_CURVE_SILHOUETTE_WIDTH = 2.0f;
+constexpr float4 PAINT_CURVE_SILHOUETTE_HOVER_COLOR = {1.0f, 1.0f, 1.0f, 1.0f};
+constexpr float PAINT_CURVE_SILHOUETTE_HOVER_WIDTH = 3.0f;
+
 bool ED_paint_curve_is_curves_edit_tool(const char *active_tool_idname);
+
+/**
+ * Whether the Sculpt Mode toolbar shows the Paint display group.
+ *
+ * The Curve Edit tool belongs to both display groups; the group selects its behavior: Paint reads
+ * the selected objects' layered materials' Curve Patch effects as line-only silhouettes (see
+ * #ED_paint_curve_stack_silhouettes_build_cached), Sculpt keeps the brush paint-curve editing.
+ * Backed by #bke::WorkSpaceRuntime::sculpt_paint_tool_display, the same state the toolbar reads.
+ */
+bool ED_paint_curve_sculpt_tool_display_is_paint(const bContext *C);
+
+/**
+ * Write the Sculpt Mode toolbar display group.
+ * \a is_paint selects 'PAINT', false restores 'SCULPT'.
+ *
+ * Entering a Curve Patch effect's session activates the effect's brush, whose tool is exclusive
+ * to the Sculpt display group -- the toolbar follows it and the group reads 'SCULPT' from then
+ * on. Switching to the Curve Edit tool while such a session is live must land in the curve
+ * selection mode, which lives in the Paint group, so the safe switch writes the group back.
+ */
+void ED_paint_curve_sculpt_tool_display_set(bContext *C, bool is_paint);
 
 bool ED_paint_curve_overlay_is_relevant(const Brush *brush,
                                         const char *active_tool_idname,
@@ -360,5 +392,37 @@ void ED_paint_curve_screen_silhouettes_build_cached(
     blender::Vector<PaintCurveCachedObjectSilhouette> &r_cache_store,
     uint64_t &r_cache_store_key,
     PaintCurveScreenSilhouettes &r_out);
+
+/**
+ * The line-only silhouette of ONE Curve Patch effect: the screen polylines of every curve the
+ * effect's container shows (Solo honored), merged into one strip per curve. No control points or
+ * handles -- the Curve Edit tool in the Paint display group draws the effects this way, because
+ * there it picks an effect rather than editing points; the handles come back once the picked
+ * effect's session opens.
+ */
+struct PaintCurveStackSilhouette {
+  blender::Vector<blender::Vector<blender::float2>> polylines;
+};
+
+/** What #ED_paint_curve_stack_silhouettes_build_cached caches on: the projection, the region size
+ * and the curve content of every SELECTED sculpt-mode object's layered material. */
+uint64_t ED_paint_curve_stack_silhouette_cache_key_hash(const ViewContext &vc);
+
+/**
+ * The stack-silhouette counterpart of #ED_paint_curve_screen_silhouettes_build_cached: fill (or
+ * reuse) \a r_cache_store with every selected object's effects' silhouettes, then report this
+ * sync's passes as indices into it -- \a r_faint_indices for everything but the hovered effect,
+ * \a r_hover_index for the nearest one within the hover threshold, or -1. The cache is keyed on
+ * #ED_paint_curve_stack_silhouette_cache_key_hash, so plain mouse-moves reuse the store and only
+ * the hover is recomputed. \a hover_mval is empty when there is no valid cursor to test.
+ */
+void ED_paint_curve_stack_silhouettes_build_cached(
+    const ViewContext &vc,
+    std::optional<float2> hover_mval,
+    uint64_t cache_key,
+    blender::Vector<PaintCurveStackSilhouette> &r_cache_store,
+    uint64_t &r_cache_store_key,
+    blender::Vector<int> &r_faint_indices,
+    int &r_hover_index);
 
 }  // namespace blender::ed::sculpt_paint

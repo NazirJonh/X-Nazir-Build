@@ -20,6 +20,7 @@
 #include "BLI_utildefines.h"
 
 #include "BKE_context.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
 #include "BKE_lib_remap.hh"
 #include "BKE_outliner_treehash.hh"
@@ -410,6 +411,19 @@ static void outliner_space_listener(const wmSpaceTypeListenerParams *params)
   const StackReadContext ctx{const_cast<Main *>(params->bmain),
                              WM_window_get_active_scene(params->window),
                              WM_window_get_active_view_layer(params->window)};
+  ID *notified_id = (wmn->category == NC_MATERIAL) ? static_cast<ID *>(wmn->reference) : nullptr;
+  if (notified_id != nullptr && wmn->data == ND_SHADING && GS(notified_id->name) == ID_MA &&
+      ctx.bmain != nullptr && ctx.scene != nullptr && ctx.view_layer != nullptr)
+  {
+    /* A paint-stack row was activated outside this editor (the viewport pick): follow its active
+     * row in this Outliner instead of making every such editor find and drive every screen. */
+    outliner_stack_paint_row_ui_sync(*ctx.bmain,
+                                     *ctx.scene,
+                                     *ctx.view_layer,
+                                     *space_outliner,
+                                     *id_cast<Material *>(notified_id));
+    ED_area_tag_redraw(params->area);
+  }
   if (outliner_stack_view_follow_active(*space_outliner, ctx)) {
     /* The display mode may have changed under the header, and the tool header exists only in
      * Stack Layers. */

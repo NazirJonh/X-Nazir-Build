@@ -659,6 +659,7 @@ static wmOperatorStatus image_select_wand_exec(bContext *C, wmOperator *op)
                         RNA_float_get(op->ptr, "location_v"));
   const WandParams params = wand_params_from_op(op, scene);
 
+  image_paint_selection_mask_map_ensure(C);
   image_select::SelectSource source;
   if (!image_select::select_source_resolve_or_report(C, op->reports, click_uv, source)) {
     return OPERATOR_CANCELLED;
@@ -817,6 +818,7 @@ static wmOperatorStatus image_select_wand_drag_invoke(bContext *C,
 
   auto *drag = MEM_new<WandDrag>(__func__);
   drag->params = params;
+  image_paint_selection_mask_map_ensure(C);
   image_select::SelectSource source;
   bool outside_uv = false;
   if (!image_select::select_source_resolve_or_report(C, op->reports, click_uv, source) ||
@@ -957,6 +959,7 @@ static wmOperatorStatus image_select_wand_invoke(bContext *C, wmOperator *op, co
   }
   /* Any other floating session must be settled before this tool edits the selection. */
   image_select_floating_sessions_end_all(C, sima);
+  image_paint_selection_mask_map_ensure(C);
 
   float uv[2];
   ui::view2d_region_to_view(
@@ -1023,6 +1026,7 @@ static wmOperatorStatus image_select_refine_exec(bContext *C, wmOperator * /*op*
   }
   const ImagePaintSettings &imapaint = scene->toolsettings->imapaint;
 
+  image_paint_selection_mask_map_ensure(C);
   const Vector<ImagePaintSelectionTarget> targets = image_paint_selection_targets_get(C, sima);
   if (targets.is_empty()) {
     return OPERATOR_CANCELLED;

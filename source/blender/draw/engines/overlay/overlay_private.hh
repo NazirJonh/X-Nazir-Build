@@ -166,6 +166,10 @@ struct State {
   bool cursor_mval_valid = false;
   bool cursor_ctrl_pressed = false;
   const char *active_tool_idname = nullptr;
+  /* Whether the Sculpt Mode toolbar shows the Paint display group
+   * (`WorkSpace.sculpt_paint_tool_display`). Resolved by the engine through the editor-side helper,
+   * so the per-pass code does not read the workspace's runtime state itself. */
+  bool sculpt_tool_display_paint = false;
   /* Sculpt Mode only: the active tool consumes the face selection mask (a painting tool). Resolved
    * by the engine through #BKE_paint_sculpt_face_selection_mask_supported, so the per-pass code
    * does not need to depend on the editor-side tool policy. */

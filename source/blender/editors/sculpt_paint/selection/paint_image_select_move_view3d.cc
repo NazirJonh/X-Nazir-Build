@@ -616,6 +616,7 @@ static wmOperatorStatus move3d_copy_exec(bContext *C, wmOperator *op)
   if (ob == nullptr) {
     return OPERATOR_CANCELLED;
   }
+  image_paint_selection_mask_map_ensure(C);
   Vector<ImageSelectClipboardGroup> groups;
   bool has_content = false;
   for (const ImagePaintSelectionTarget &target :
@@ -660,6 +661,7 @@ static wmOperatorStatus move3d_paste_exec(bContext *C, wmOperator *op)
   if (ob == nullptr || !image_paint_selection_view3d_poll(C)) {
     return OPERATOR_CANCELLED;
   }
+  image_paint_selection_mask_map_ensure(C);
   const ImageSelectClipboard *clipboard = image_select_clipboard_get();
   if (clipboard->groups.is_empty()) {
     BKE_report(op->reports, RPT_WARNING, "Clipboard is empty");

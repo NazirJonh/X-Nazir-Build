@@ -16,11 +16,19 @@
 
 #include "BLI_uuid.h"
 
+#include "DNA_material_types.h"
+
 struct bContext;
 struct EnumPropertyItem;
 struct ID;
 struct ScrArea;
 struct SpaceOutliner;
+
+namespace blender {
+struct Main;
+struct Scene;
+struct ViewLayer;
+}  // namespace blender
 
 namespace blender::ed::outliner {
 
@@ -87,5 +95,21 @@ void outliner_stack_focus_normalize(bContext &C, SpaceOutliner &space_outliner);
  * active, selected row, which is what #outliner_stack_row_add leaves behind for a row it made.
  */
 void outliner_stack_row_added_sync(bContext &C, ID &owner, const bUUID &row_id);
+
+/**
+ * Update this Outliner's Stack Layers state after a paint-stack row became active outside its own
+ * operators -- a viewport pick of a Curve Patch effect's curve, or another editor's activation.
+ *
+ * The data-level activation belongs to the paint stack itself (see
+ * #blender::ed::sculpt_paint::paint_stack_row_activate); this only makes the Outliner follow it:
+ * the material's active row becomes the selected one and an attached section is revealed. Driven
+ * by the `NC_MATERIAL | ND_SHADING` notifier the activation sends, not by a call from the editor
+ * that changed the row.
+ */
+void outliner_stack_paint_row_ui_sync(Main &bmain,
+                                      Scene &scene,
+                                      ViewLayer &view_layer,
+                                      SpaceOutliner &space_outliner,
+                                      Material &material);
 
 }  // namespace blender::ed::outliner

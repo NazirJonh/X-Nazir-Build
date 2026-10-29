@@ -44,7 +44,10 @@ enum class SetHandleType : uint8_t;
 struct Brush;
 struct Curve;
 struct Main;
+struct Material;
+struct MaterialPaintLayer;
 struct Paint;
+struct PaintVectorItem;
 struct ViewContext;
 struct bContext;
 struct PaintCurveSnapContext;
@@ -370,6 +373,46 @@ Object *paintcurve_nearest_scene_curve(
     float threshold,
     const Object *exclude,
     blender::Vector<blender::Vector<blender::float2>> *r_polylines);
+
+/**
+ * Return the original stack row (#MA_PAINT_LAYER_SOURCE_CURVE_PATCH) whose Curve Patch curves pass
+ * closest to screen-space \a mval, within \a threshold pixels, or nullptr. Every SELECTED
+ * sculpt-mode object's active material takes part (the same set
+ * #ED_paint_curve_stack_silhouettes_build_cached draws), honoring each effect's Solo.
+ *
+ * The row is resolved from the ORIGINAL material, so the caller can activate it; the projection
+ * goes through each object's own transform. When non-null, \a r_object receives the picked
+ * curve's object (it may not be the active one) and \a r_item_index the index of its
+ * #PaintVectorItem in the effect's container, so the caller can make that object active and the
+ * item the effect's active curve.
+ */
+MaterialPaintLayer *paintcurve_nearest_stack_curve_patch(const ViewContext &vc,
+                                                         blender::float2 mval,
+                                                         float threshold,
+                                                         Object **r_object,
+                                                         int *r_item_index);
+
+/** One visible Curve Patch item of a selected sculpt-mode object's layered material. */
+using PaintCurveStackItemFn = FunctionRef<void(Object &ob,
+                                               Material &material,
+                                               MaterialPaintLayer &effect,
+                                               int item_index,
+                                               const bke::CurvesGeometry &geom,
+                                               const ViewContext &ob_vc)>;
+
+/**
+ * Visit every Curve Patch item the Curve Edit tool offers in the Paint display group: the
+ * selected sculpt-mode objects' active material, every row of its stack (a Layer row, its
+ * effects, its mask items), every enabled effect, honoring Solo. \a ob_vc is a copy of \a vc with
+ * `obact` set to the item's own object, because the projection helpers read the transform from
+ * `ViewContext::obact`; this is the one place that substitution is made.
+ *
+ * \a geom is the curve as the user currently sees it: the live Curve Patch session's own curve
+ * for the effect being edited (its edits reach the container only on commit), the container's
+ * stored curve otherwise.
+ */
+void paintcurve_stack_foreach_curve_patch_item(const ViewContext &vc,
+                                               const PaintCurveStackItemFn &fn);
 
 /**
  * Distance-test `mval` against pre-projected cached polylines; returns the nearest object within

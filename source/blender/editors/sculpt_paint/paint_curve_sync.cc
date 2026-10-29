@@ -13,6 +13,7 @@
 #include "DNA_brush_types.h"
 #include "DNA_curve_types.h"
 #include "DNA_layer_types.h"
+#include "DNA_material_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
@@ -24,9 +25,12 @@
 #include "BKE_curves.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_material.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_vector.hh"
 
 #include "BLI_array.hh"
 #include "BLI_index_range.hh"
@@ -35,12 +39,17 @@
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
+#include "BLI_uuid.h"
 
+#include "DEG_depsgraph_query.hh"
+
+#include "ED_curve_patch.hh"
 #include "ED_paint_curve_draw.hh"
 #include "ED_view3d.hh"
 
 #include "mesh/sculpt_intern.hh"
 #include "paint_curve_intern.hh"
+#include "paint_curve_patch_session.hh"
 #include "paint_intern.hh"
 
 #include <optional>
@@ -1108,6 +1117,164 @@ Object *paintcurve_nearest_scene_curve(const ViewContext *vc,
     *r_polylines = std::move(best_polylines);
   }
   return best_ob;
+}
+
+void paintcurve_stack_foreach_curve_patch_item(const ViewContext &vc,
+                                               const PaintCurveStackItemFn &fn)
+{
+  if (vc.view_layer == nullptr) {
+    return;
+  }
+
+  for (const Base &base : vc.view_layer->object_bases) {
+    Object *ob = base.object;
+    if (ob == nullptr || (base.flag & BASE_SELECTED) == 0 || ob->type != OB_MESH ||
+        (ob->mode & OB_MODE_SCULPT) == 0)
+    {
+      continue;
+    }
+    Material *ma = BKE_object_material_get(ob, ob->actcol);
+    if (ma == nullptr) {
+      continue;
+    }
+    /* Each object's curves project through its own transform, not the active object's; the
+     * projection helpers read it from `ViewContext::obact`. Use the evaluated object for the
+     * matrix so animation and deformation match what the viewport shows; the curve data itself
+     * stays the ORIGINAL material's. */
+    Object *ob_projected = ob;
+    if (vc.depsgraph != nullptr) {
+      if (Object *ob_eval = DEG_get_evaluated(vc.depsgraph, ob)) {
+        ob_projected = ob_eval;
+      }
+    }
+    ViewContext ob_vc = vc;
+    ob_vc.obact = ob_projected;
+    const ed::sculpt_paint::CurvePatchSession *live_session = ED_curve_patch_session_get(*ob);
+    /* The overlay walks the evaluated view layer, whose materials are copies; the session names
+     * the original one. */
+    const Material *ma_original = (vc.depsgraph != nullptr) ? DEG_get_original(ma) : ma;
+
+    const auto visit_effect = [&](MaterialPaintLayer &effect) {
+      if (effect.source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH || effect.curve_patch == nullptr ||
+          effect.curve_patch->vectors == nullptr ||
+          (effect.flag & MA_PAINT_LAYER_ENABLED) == 0)
+      {
+        return;
+      }
+      PaintVector &pv = *effect.curve_patch->vectors;
+      const bool solo = (pv.flag & PAINT_VECTOR_SHOW_ALL_CURVES) == 0;
+      for (const int i : IndexRange(pv.items_num)) {
+        if (pv.items[i].type != PAINT_VECTOR_ITEM_CURVE_PATCH ||
+            (solo && i != pv.active_item))
+        {
+          continue;
+        }
+        const bke::CurvesGeometry *geom = &pv.items[i].curve_patch_geometry.wrap();
+        if (live_session != nullptr && live_session->layer_material == ma_original &&
+            BLI_uuid_equal(live_session->layer_row_marker, effect.marker))
+        {
+          for (const ed::sculpt_paint::CurvePatchItem &patch : live_session->doc.patches) {
+            if (patch.source_curve_index == i) {
+              geom = &patch.control_curve;
+              break;
+            }
+          }
+        }
+        fn(*ob, *ma, effect, i, *geom, ob_vc);
+      }
+    };
+
+    BKE_paint_layers_foreach(
+        *ma,
+        [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) {
+          visit_effect(row);
+          for (MaterialPaintLayer &effect : row.effects) {
+            visit_effect(effect);
+          }
+          for (MaterialPaintLayer &mask_item : row.mask_stack) {
+            visit_effect(mask_item);
+          }
+          return true;
+        });
+  }
+}
+
+MaterialPaintLayer *paintcurve_nearest_stack_curve_patch(const ViewContext &vc,
+                                                         const float2 mval,
+                                                         const float threshold,
+                                                         Object **r_object,
+                                                         int *r_item_index)
+{
+  if (r_object != nullptr) {
+    *r_object = nullptr;
+  }
+  if (r_item_index != nullptr) {
+    *r_item_index = -1;
+  }
+  if (vc.view_layer == nullptr) {
+    return nullptr;
+  }
+
+  /* The original rows are what the pick switches to; the projection goes through each object's
+   * own transform, so what is clicked is what was seen. Every SELECTED sculpt-mode object takes
+   * part -- the same set the overlay draws. */
+  BKE_view_layer_synced_ensure(*vc.bmain, vc.scene, vc.view_layer);
+
+  MaterialPaintLayer *best_row = nullptr;
+  Object *best_object = nullptr;
+  int best_item_index = -1;
+  float best_dist = threshold;
+  Vector<PaintCurvePoint> screen_points;
+  Vector<float2> polyline;
+
+  paintcurve_stack_foreach_curve_patch_item(
+      vc,
+      [&](Object &ob,
+          Material & /*material*/,
+          MaterialPaintLayer &effect,
+          const int item_index,
+          const bke::CurvesGeometry &geom,
+          const ViewContext &ob_vc) {
+        if (!paintcurve_geometry_is_valid(geom)) {
+          return;
+        }
+        paintcurve_build_screen_points_from_geometry(geom, true, &ob_vc, screen_points);
+        if (screen_points.size() < 2) {
+          return;
+        }
+        for (const int point_a : IndexRange(screen_points.size() - 1)) {
+          paintcurve_build_screen_segment_polyline_from_geometry(geom,
+                                                                 true,
+                                                                 &ob_vc,
+                                                                 point_a,
+                                                                 point_a + 1,
+                                                                 screen_points.as_span(),
+                                                                 polyline);
+          /* Projection can refuse a segment (behind the camera, invalid geometry). */
+          if (polyline.size() < 2) {
+            continue;
+          }
+          for (const int j : IndexRange(polyline.size() - 1)) {
+            const float dist = paintcurve_dist_point_segment(mval, polyline[j], polyline[j + 1]);
+            if (dist < best_dist) {
+              best_dist = dist;
+              best_row = &effect;
+              best_object = &ob;
+              best_item_index = item_index;
+            }
+          }
+        }
+      });
+
+  if (best_row != nullptr) {
+    if (r_object != nullptr) {
+      *r_object = best_object;
+    }
+    if (r_item_index != nullptr) {
+      *r_item_index = best_item_index;
+    }
+  }
+  return best_row;
 }
 
 /** \} */

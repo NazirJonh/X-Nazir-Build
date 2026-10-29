@@ -1672,6 +1672,7 @@ static wmOperatorStatus image_select_warp_invoke(bContext *C, wmOperator *op, co
   if (!sima || !sima->runtime) {
     return OPERATOR_CANCELLED;
   }
+  image_paint_selection_mask_map_ensure(C);
   /* Already floating in this space: hit-test a point and start a re-drag. */
   if (ImageSelectWarpState *floating = image_select_warp_state_get(sima)) {
     ARegion *region = CTX_wm_region(C);

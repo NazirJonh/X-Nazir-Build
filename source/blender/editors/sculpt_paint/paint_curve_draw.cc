@@ -10,6 +10,8 @@
  */
 
 #include <array>
+#include <cstring>
+#include <optional>
 
 #include "ED_paint_curve_draw.hh"
 
@@ -17,10 +19,12 @@
 #include "DNA_curve_types.h"
 #include "DNA_curves_types.h"
 #include "DNA_layer_types.h"
+#include "DNA_material_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
+#include "DNA_windowmanager_types.h"
 #include "DNA_workspace_types.h"
 
 #include "BKE_brush.hh"
@@ -29,8 +33,12 @@
 #include "BKE_curves.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_material.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_vector.hh"
+#include "BKE_workspace.hh"
 
 #include "BLI_listbase.h"
 #include "BLI_math_geom.h"
@@ -38,6 +46,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_offset_indices.hh"
 #include "BLI_utildefines.h"
+#include "BLI_uuid.h"
 
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_query.hh"
@@ -246,6 +255,26 @@ bool ED_paint_curve_polyline_param_at_closest_point(const Span<float2> polyline,
 bool ED_paint_curve_is_curves_edit_tool(const char *active_tool_idname)
 {
   return active_tool_idname && STREQ(active_tool_idname, PAINT_CURVE_EDIT_TOOL_IDNAME);
+}
+
+bool ED_paint_curve_sculpt_tool_display_is_paint(const bContext *C)
+{
+  const WorkSpace *workspace = CTX_wm_workspace(C);
+  return workspace != nullptr && workspace->runtime != nullptr &&
+         workspace->runtime->sculpt_paint_tool_display == bke::eSculptPaintToolDisplay::Paint;
+}
+
+void ED_paint_curve_sculpt_tool_display_set(bContext *C, const bool is_paint)
+{
+  WorkSpace *workspace = CTX_wm_workspace(C);
+  if (workspace == nullptr || workspace->runtime == nullptr) {
+    return;
+  }
+  workspace->runtime->sculpt_paint_tool_display =
+      is_paint ? bke::eSculptPaintToolDisplay::Paint : bke::eSculptPaintToolDisplay::Sculpt;
+  /* The workspace property's RNA setter sends the same notifier; the toolbar and the asset shelf
+   * redraw the switched group from it. */
+  WM_event_add_notifier(C, NC_WINDOW, nullptr);
 }
 
 bool ED_paint_curve_overlay_is_relevant(const Brush *brush,
@@ -774,28 +803,39 @@ void ED_paint_curve_screen_silhouettes_build(const ViewContext &vc,
 /** \name Silhouettes provider (cached)
  * \{ */
 
-uint64_t ED_paint_curve_silhouette_cache_key_hash(const ViewContext &vc)
-{
-  /* FNV-1a 64-bit. */
-  uint64_t h = 14695981039346656037ULL;
-  const uint64_t prime = 1099511628211ULL;
+/** Small FNV-1a 64-bit mixer shared by the silhouette cache keys. */
+struct PaintCurveCacheHasher {
+  uint64_t value = 14695981039346656037ULL;
 
-  auto mix_u32 = [&](uint32_t v) {
-    h ^= uint64_t(v);
-    h *= prime;
-  };
-
-  if (vc.rv3d) {
-    const float *m = &vc.rv3d->persmat[0][0];
-    for (int i = 0; i < 16; i++) {
-      uint32_t bits;
-      memcpy(&bits, &m[i], sizeof(bits));
-      mix_u32(bits);
+  void mix_u32(const uint32_t v)
+  {
+    value ^= uint64_t(v);
+    value *= 1099511628211ULL;
+  }
+  void mix_float(const float v)
+  {
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    mix_u32(bits);
+  }
+  void mix_floats(const Span<float> values)
+  {
+    for (const float v : values) {
+      mix_float(v);
     }
   }
+};
+
+uint64_t ED_paint_curve_silhouette_cache_key_hash(const ViewContext &vc)
+{
+  PaintCurveCacheHasher hash;
+
+  if (vc.rv3d) {
+    hash.mix_floats(Span<float>(&vc.rv3d->persmat[0][0], 16));
+  }
   if (vc.region) {
-    mix_u32(uint32_t(vc.region->winx));
-    mix_u32(uint32_t(vc.region->winy));
+    hash.mix_u32(uint32_t(vc.region->winx));
+    hash.mix_u32(uint32_t(vc.region->winy));
   }
   if (vc.view_layer && vc.bmain && vc.scene) {
     BKE_view_layer_synced_ensure(*vc.bmain, vc.scene, vc.view_layer);
@@ -804,26 +844,20 @@ uint64_t ED_paint_curve_silhouette_cache_key_hash(const ViewContext &vc)
       if (!ELEM(ob->type, OB_CURVES, OB_CURVES_LEGACY)) {
         continue;
       }
-      mix_u32(ob->id.session_uid);
+      hash.mix_u32(ob->id.session_uid);
       /* Hash geometry so edits (position changes, point add/remove) are detected.
        * Without this the silhouette cache returns stale polylines after a sync. */
       if (ob->type == OB_CURVES) {
         const Curves *curves_id = id_cast<const Curves *>(ob->data);
         const bke::CurvesGeometry &geom = curves_id->geometry.wrap();
         const int point_num = geom.points_num();
-        mix_u32(uint32_t(point_num));
+        hash.mix_u32(uint32_t(point_num));
         /* Sample positions to detect moves. Cap at 128 to stay cheap for hair. */
         if (point_num > 0) {
           const Span<float3> positions = geom.positions();
           const int sample = min_ii(point_num, 128);
           for (const int i : IndexRange(sample)) {
-            uint32_t bits;
-            memcpy(&bits, &positions[i].x, sizeof(bits));
-            mix_u32(bits);
-            memcpy(&bits, &positions[i].y, sizeof(bits));
-            mix_u32(bits);
-            memcpy(&bits, &positions[i].z, sizeof(bits));
-            mix_u32(bits);
+            hash.mix_floats(Span<float>(&positions[i].x, 3));
           }
         }
       }
@@ -832,16 +866,16 @@ uint64_t ED_paint_curve_silhouette_cache_key_hash(const ViewContext &vc)
         const ListBaseT<Nurb> *nurb_lb = BKE_curve_nurbs_get_for_read(cu);
         int nurb_count = 0;
         for (const Nurb &nu : *nurb_lb) {
-          mix_u32(uint32_t(nu.pntsu));
-          mix_u32(uint32_t(nu.pntsv));
+          hash.mix_u32(uint32_t(nu.pntsu));
+          hash.mix_u32(uint32_t(nu.pntsv));
           nurb_count++;
         }
-        mix_u32(uint32_t(nurb_count));
+        hash.mix_u32(uint32_t(nurb_count));
       }
     }
   }
 
-  return h;
+  return hash.value;
 }
 
 void ED_paint_curve_screen_silhouettes_build_cached(
@@ -908,7 +942,215 @@ void ED_paint_curve_screen_silhouettes_build_cached(
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Redraw poll (Unit D)
+/** \name Curve Patch stack silhouettes (Curve Edit tool, Paint display group)
+ * \{ */
+
+/** The screen polylines of one control curve, one merged strip per curve: every Bezier segment
+ * tessellated exactly the way the handle overlay and the pick draw it, consecutive segments
+ * joined so a line strip per curve suffices. */
+static void paintcurve_stack_curve_screen_polylines(const ViewContext &vc,
+                                                    const bke::CurvesGeometry &geom,
+                                                    Vector<Vector<float2>> &r_polylines)
+{
+  r_polylines.clear();
+  if (!paintcurve_geometry_is_valid(geom)) {
+    return;
+  }
+  Vector<PaintCurvePoint> screen_points;
+  paintcurve_build_screen_points_from_geometry(geom, true, &vc, screen_points);
+  if (screen_points.size() < 2) {
+    return;
+  }
+  Vector<float2> strip;
+  for (const int point_a : IndexRange(screen_points.size() - 1)) {
+    Vector<float2> segment;
+    paintcurve_build_screen_segment_polyline_from_geometry(
+        geom, true, &vc, point_a, point_a + 1, screen_points.as_span(), segment);
+    if (segment.size() < 2) {
+      continue;
+    }
+    if (!strip.is_empty() && strip.last() == segment[0]) {
+      strip.extend(segment.as_span().drop_front(1));
+    }
+    else {
+      if (!strip.is_empty()) {
+        r_polylines.append(std::move(strip));
+        strip = {};
+      }
+      strip = segment;
+    }
+  }
+  if (!strip.is_empty()) {
+    r_polylines.append(std::move(strip));
+  }
+}
+
+/** The Curve Patch effects of every SELECTED sculpt-mode object's active material, in view-layer
+ * order, each as its screen polylines projected through its own object's transform. Solo
+ * (`PAINT_VECTOR_SHOW_ALL_CURVES`) is honored per effect, and a switched-off effect is skipped --
+ * the same set the pick offers. */
+static void paintcurve_stack_silhouettes_collect(const ViewContext &vc,
+                                                 Vector<PaintCurveStackSilhouette> &r_out)
+{
+  r_out.clear();
+
+  const MaterialPaintLayer *current_effect = nullptr;
+  PaintCurveStackSilhouette entry;
+  const auto flush_effect = [&]() {
+    if (!entry.polylines.is_empty()) {
+      r_out.append(std::move(entry));
+    }
+    entry = {};
+  };
+
+  paintcurve_stack_foreach_curve_patch_item(
+      vc,
+      [&](Object & /*ob*/,
+          Material & /*material*/,
+          MaterialPaintLayer &effect,
+          const int /*item_index*/,
+          const bke::CurvesGeometry &geom,
+          const ViewContext &ob_vc) {
+        if (&effect != current_effect) {
+          flush_effect();
+          current_effect = &effect;
+        }
+        Vector<Vector<float2>> polylines;
+        paintcurve_stack_curve_screen_polylines(ob_vc, geom, polylines);
+        for (Vector<float2> &polyline : polylines) {
+          entry.polylines.append(std::move(polyline));
+        }
+      });
+  flush_effect();
+}
+
+uint64_t ED_paint_curve_stack_silhouette_cache_key_hash(const ViewContext &vc)
+{
+  PaintCurveCacheHasher hash;
+
+  if (vc.rv3d) {
+    hash.mix_floats(Span<float>(&vc.rv3d->persmat[0][0], 16));
+  }
+  if (vc.region) {
+    hash.mix_u32(uint32_t(vc.region->winx));
+    hash.mix_u32(uint32_t(vc.region->winy));
+  }
+
+  paintcurve_stack_foreach_curve_patch_item(
+      vc,
+      [&](Object &ob,
+          Material &material,
+          MaterialPaintLayer &effect,
+          const int item_index,
+          const bke::CurvesGeometry &geom,
+          const ViewContext &ob_vc) {
+        /* The selection itself reaches the key: selecting another object changes what is drawn. */
+        hash.mix_u32(uint32_t(ob.id.session_uid));
+        const float4x4 ob_to_world = ob_vc.obact->object_to_world();
+        hash.mix_floats(Span<float>(ob_to_world.ptr()[0], 16));
+        hash.mix_u32(uint32_t(material.id.session_uid));
+        hash.mix_u32(uint32_t(ob.actcol));
+
+        /* Solo and the active item decide WHICH curves are drawn, the row flag WHETHER they are:
+         * a visibility toggle has to reach the key or the cache would keep drawing a switched-off
+         * effect. */
+        hash.mix_u32(UUID(effect.marker).hash());
+        hash.mix_u32(uint32_t(effect.flag));
+        const PaintVector &pv = *effect.curve_patch->vectors;
+        hash.mix_u32(uint32_t(pv.flag));
+        hash.mix_u32(uint32_t(pv.active_item));
+        hash.mix_u32(uint32_t(item_index));
+
+        if (!paintcurve_geometry_is_valid(geom)) {
+          hash.mix_u32(0);
+          return;
+        }
+        hash.mix_u32(uint32_t(geom.curves_num()));
+        const Span<float3> positions = geom.positions();
+        hash.mix_u32(uint32_t(positions.size()));
+        /* Every position and handle: editing any control point has to invalidate the cache, and
+         * a fixed-size sample would miss edits past it. */
+        for (const float3 &position : positions) {
+          hash.mix_floats(Span<float>(&position.x, 3));
+        }
+        const std::optional<Span<float3>> handles_left = geom.handle_positions_left();
+        const std::optional<Span<float3>> handles_right = geom.handle_positions_right();
+        if (handles_left.has_value()) {
+          for (const float3 &handle : *handles_left) {
+            hash.mix_floats(Span<float>(&handle.x, 3));
+          }
+        }
+        if (handles_right.has_value()) {
+          for (const float3 &handle : *handles_right) {
+            hash.mix_floats(Span<float>(&handle.x, 3));
+          }
+        }
+        /* Handle types pick the tessellation (vector segments draw as one edge), and the
+         * cyclic/resolution arrays decide how many evaluated points a segment has. */
+        const VArray<int8_t> handle_types_left = geom.handle_types_left();
+        const VArray<int8_t> handle_types_right = geom.handle_types_right();
+        const VArray<bool> cyclic = geom.cyclic();
+        const VArray<int> resolution = geom.resolution();
+        for (const int i : IndexRange(geom.points_num())) {
+          hash.mix_u32(uint32_t(handle_types_left[i]));
+          hash.mix_u32(uint32_t(handle_types_right[i]));
+        }
+        for (const int i : geom.curves_range()) {
+          hash.mix_u32(uint32_t(cyclic[i]));
+          hash.mix_u32(uint32_t(resolution[i]));
+        }
+      });
+
+  return hash.value;
+}
+
+void ED_paint_curve_stack_silhouettes_build_cached(
+    const ViewContext &vc,
+    const std::optional<float2> hover_mval,
+    const uint64_t cache_key,
+    Vector<PaintCurveStackSilhouette> &r_cache_store,
+    uint64_t &r_cache_store_key,
+    Vector<int> &r_faint_indices,
+    int &r_hover_index)
+{
+  r_faint_indices.clear();
+  r_hover_index = -1;
+
+  /* Rebuild the projection cache when the selection's effects or the view have changed. */
+  if (cache_key != r_cache_store_key) {
+    paintcurve_stack_silhouettes_collect(vc, r_cache_store);
+    r_cache_store_key = cache_key;
+  }
+
+  /* Hover detection: the effect holding the nearest polyline within the threshold. */
+  if (hover_mval.has_value() && !paintcurve_slide_is_active() && !r_cache_store.is_empty()) {
+    int best_entry = -1;
+    float best_dist_sq = square_f(PAINT_CURVE_HOVER_THRESHOLD);
+    for (const int entry_i : r_cache_store.index_range()) {
+      for (const Vector<float2> &polyline : r_cache_store[entry_i].polylines) {
+        PaintCurvePolylineHit hit;
+        if (ED_paint_curve_polyline_closest(polyline, *hover_mval, hit) &&
+            hit.dist_sq < best_dist_sq)
+        {
+          best_dist_sq = hit.dist_sq;
+          best_entry = entry_i;
+        }
+      }
+    }
+    r_hover_index = best_entry;
+  }
+
+  for (const int entry_i : r_cache_store.index_range()) {
+    if (entry_i != r_hover_index) {
+      r_faint_indices.append(entry_i);
+    }
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Redraw poll
  * \{ */
 
 bool ED_paint_curve_overlay_wants_redraw(const bContext *C)

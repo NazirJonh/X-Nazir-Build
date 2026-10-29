@@ -43,6 +43,7 @@
 #include "overlay_base.hh"
 
 #include <cmath>
+#include <optional>
 
 /* Opt-in measurement for the per-frame batch churn. Handle/point/radius GPU batches are reused
  * across redraws while screen-space geometry is unchanged (hover/selection only retints them);
@@ -88,6 +89,22 @@ class PaintCurveCursor : Overlay {
 
   Vector<ed::sculpt_paint::PaintCurveCachedObjectSilhouette> silhouette_cache_;
   uint64_t silhouette_cache_key_ = 0;
+
+  /** Line-only silhouettes of the material's Curve Patch effects (the Curve Edit tool in the
+   * Paint display group), cached the way the scene-curve silhouettes above are: the polylines
+   * per effect live in #stack_silhouette_cache_ and the persistent GPU batches parallel it, so
+   * plain mouse-moves only re-resolve the hover. The faint and hover passes address both arrays
+   * by index. */
+  Vector<ed::sculpt_paint::PaintCurveStackSilhouette> stack_silhouette_cache_;
+  uint64_t stack_silhouette_cache_key_ = 0;
+  /* TODO: this mirrors the scene-curve cache + #CachedSilhouetteBatches pair above. They hold
+   * different entry types (object vs effect) and are freed/indexed differently, so a shared
+   * template would hide more than it saves until a third user appears. */
+  Vector<Vector<gpu::Batch *>> stack_silhouette_batches_;
+  uint64_t stack_silhouette_batches_key_ = 0;
+  /** This sync's passes: the cache indices drawn faint, and the hovered effect (-1 when none). */
+  Vector<int> stack_silhouette_faint_;
+  int stack_hover_index_ = -1;
 
   /** Ephemeral GPU batches (insert preview, snap marker). Freed at the start of the next
    * begin_sync. Handle/segment/radius batches live in #handle_gpu_ instead. */
@@ -153,6 +170,7 @@ class PaintCurveCursor : Overlay {
   {
     free_batches();
     free_silhouette_batches();
+    free_stack_silhouette_batches();
     free_handle_gpu();
     free_dash_batches();
   }
@@ -165,6 +183,8 @@ class PaintCurveCursor : Overlay {
     free_batches();
     handles_ = {};
     silhouettes_ = {};
+    stack_silhouette_faint_.clear();
+    stack_hover_index_ = -1;
     enabled_ = false;
     snap_marker_active_ = false;
     /* Drop last-frame spline pointers before any early return. The only reader is later in
@@ -258,12 +278,8 @@ class PaintCurveCursor : Overlay {
       }
     }
 
-    ED_curve_patch_overlay_data_get(vc.obact, patch_overlay_);
-    if (patch_overlay_.splines.is_empty()) {
-      /* No live session on the object: the passive preview of the active Curve Patch stack row
-       * (if the object's active material has one) is what the overlay shows. */
-      ED_curve_patch_overlay_data_get_stack(vc.obact, patch_overlay_);
-    }
+    const bool effects_silhouettes = this->sync_stack_silhouettes(
+        state, vc, mval_region, is_curves_edit);
     /* Non-empty overlay, not "session has an active item". A half-built session
      * (`active_patch` out of range with patches still present) still draws every spline;
      * hover and insert preview stay off because `active_index` is -1. The previous gate
@@ -319,6 +335,10 @@ class PaintCurveCursor : Overlay {
 
     if (image_patch_drawn) {
       /* Nothing further: the session curve is the only paint curve that matters right now. */
+    }
+    else if (effects_silhouettes) {
+      /* Already built above, before the affordance gate: the effect silhouettes are this state's
+       * whole overlay, and neither the handle pass nor the brush curve may run over them. */
     }
     else if (is_curve_patch_active && state.is_space_v3d()) {
       drawing_curve_patch = true;
@@ -403,7 +423,10 @@ class PaintCurveCursor : Overlay {
       }
     }
 
-    if (is_curves_edit && state.is_space_v3d()) {
+    if (is_curves_edit && !state.sculpt_tool_display_paint && state.is_space_v3d()) {
+      /* Sculpt display group only: the scene's curve objects are what this tool picks into the
+       * brush there. In the Paint display group the stack silhouettes above are the whole story,
+       * and the scene curves would be noise around them. */
       const uint64_t key = ed::sculpt_paint::ED_paint_curve_silhouette_cache_key_hash(vc);
       ed::sculpt_paint::ED_paint_curve_screen_silhouettes_build_cached(vc,
                                                                        mval_region,
@@ -525,6 +548,88 @@ class PaintCurveCursor : Overlay {
     }
     silhouette_batches_.clear();
     silhouette_batches_key_ = 0;
+  }
+
+  /**
+   * Build (or reuse) the Curve Patch effect silhouettes for the Curve Edit tool in the Paint
+   * display group, and fill #patch_overlay_ with the passive stack preview when they are off.
+   * Returns whether the effect silhouettes are this state's whole overlay.
+   */
+  bool sync_stack_silhouettes(const State &state,
+                              const ViewContext &vc,
+                              const float2 mval_region,
+                              const bool is_curves_edit)
+  {
+    ED_curve_patch_overlay_data_get(vc.obact, patch_overlay_);
+    bool effects_silhouettes = false;
+    /* A live Curve Patch session does not gate this: with the Curve Edit tool in the Paint display
+     * group the user is choosing among ALL effects, also while one of them is being edited. The
+     * session ends (and commits) on the tool switch, so its container data is current by the time
+     * the pick runs. */
+    if (is_curves_edit && state.sculpt_tool_display_paint && state.is_space_v3d()) {
+      /* The silhouettes ARE the overlay in this state -- lines only, drawn for every SELECTED
+       * object's layered material (multi-select included) and never for the scene's curve
+       * objects, which belong to the Sculpt display group's workflow below. Their being
+       * non-empty is the gate: no handle pass runs then, and the brush-curve branch is blocked
+       * in the chain below. Built here rather than in the chain, because the gate has to be
+       * known before the affordance modes are asked. */
+      const uint64_t key = ed::sculpt_paint::ED_paint_curve_stack_silhouette_cache_key_hash(vc);
+      const std::optional<float2> hover_mval = state.cursor_mval_valid ?
+                                                  std::optional<float2>(mval_region) :
+                                                  std::nullopt;
+      ed::sculpt_paint::ED_paint_curve_stack_silhouettes_build_cached(vc,
+                                                                      hover_mval,
+                                                                      key,
+                                                                      stack_silhouette_cache_,
+                                                                      stack_silhouette_cache_key_,
+                                                                      stack_silhouette_faint_,
+                                                                      stack_hover_index_);
+      effects_silhouettes = !stack_silhouette_cache_.is_empty();
+      if (effects_silhouettes) {
+        /* The silhouettes are the whole overlay: no handle pass over the session's own curves. */
+        patch_overlay_.splines.clear();
+        patch_overlay_.active_index = -1;
+      }
+
+      /* Rebuild the persistent GPU batches only when the projection cache changed (view rotation,
+       * region resize, selection or effect edit). On plain mouse-moves the key is unchanged, so
+       * the batches are reused instead of being uploaded again every frame. */
+      if (effects_silhouettes && stack_silhouette_cache_key_ != stack_silhouette_batches_key_) {
+        free_stack_silhouette_batches();
+        stack_silhouette_batches_.reserve(stack_silhouette_cache_.size());
+        for (const ed::sculpt_paint::PaintCurveStackSilhouette &entry : stack_silhouette_cache_) {
+          Vector<gpu::Batch *> batches;
+          for (const Vector<float2> &polyline : entry.polylines) {
+            make_line_strip_owned(batches, polyline);
+          }
+          stack_silhouette_batches_.append(std::move(batches));
+        }
+        stack_silhouette_batches_key_ = stack_silhouette_cache_key_;
+      }
+    }
+    if (!effects_silhouettes && patch_overlay_.splines.is_empty() &&
+        state.sculpt_tool_display_paint)
+    {
+      /* No live session on the object: the passive preview of the active Curve Patch stack row
+       * (if the object's active material has one) is what the overlay shows. Paint display group
+       * only: in the Sculpt group the effect's curves are neither this tool's subject nor
+       * pickable, so drawing them there would invite interaction the tool cannot deliver. */
+      ED_curve_patch_overlay_data_get_stack(vc.obact, patch_overlay_);
+    }
+    return effects_silhouettes;
+  }
+
+  void free_stack_silhouette_batches()
+  {
+    for (Vector<gpu::Batch *> &batches : stack_silhouette_batches_) {
+      for (gpu::Batch *batch : batches) {
+        if (batch != nullptr) {
+          GPU_batch_discard(batch);
+        }
+      }
+    }
+    stack_silhouette_batches_.clear();
+    stack_silhouette_batches_key_ = 0;
   }
 
   void free_dash_batches()
@@ -1029,11 +1134,8 @@ class PaintCurveCursor : Overlay {
 
     /* --- 1. Faint silhouettes --- */
     {
-      float faint_col[4];
-      ui::theme::get_color_type_4fv(TH_WIRE, SPACE_VIEW3D, faint_col);
-      faint_col[3] = 0.5f;
-      ps_.push_constant("lineWidth", 1.0f);
-      ps_.push_constant("color", float4(faint_col[0], faint_col[1], faint_col[2], faint_col[3]));
+      ps_.push_constant("lineWidth", ed::sculpt_paint::PAINT_CURVE_SILHOUETTE_WIDTH);
+      ps_.push_constant("color", ed::sculpt_paint::PAINT_CURVE_SILHOUETTE_COLOR);
       for (const ed::sculpt_paint::PaintCurveCachedObjectSilhouette &entry :
            silhouettes_.faint_objects)
       {
@@ -1050,14 +1152,37 @@ class PaintCurveCursor : Overlay {
       if (const Vector<gpu::Batch *> *batches = cached_silhouette_batches(
               silhouettes_.hover_object))
       {
-        float hover_col[4];
-        ui::theme::get_color_type_4fv(TH_VERTEX_SELECT, SPACE_VIEW3D, hover_col);
-        hover_col[3] = 1.0f;
-        ps_.push_constant("lineWidth", 3.0f);
-        ps_.push_constant("color", float4(hover_col[0], hover_col[1], hover_col[2], hover_col[3]));
+        ps_.push_constant("lineWidth", ed::sculpt_paint::PAINT_CURVE_SILHOUETTE_HOVER_WIDTH);
+        ps_.push_constant("color", ed::sculpt_paint::PAINT_CURVE_SILHOUETTE_HOVER_COLOR);
         for (gpu::Batch *b : *batches) {
           draw_strip(b);
         }
+      }
+    }
+
+    /* --- 2b. Curve Patch effect silhouettes (Curve Edit tool, Paint display group): the same
+     * blue and white-hover look as the scene-curve silhouettes above, one entry per effect of
+     * the stack. */
+    if (!stack_silhouette_faint_.is_empty() || stack_hover_index_ >= 0) {
+      ps_.push_constant("lineWidth", ed::sculpt_paint::PAINT_CURVE_SILHOUETTE_WIDTH);
+      ps_.push_constant("color", ed::sculpt_paint::PAINT_CURVE_SILHOUETTE_COLOR);
+      const auto draw_stack_entry = [&](const int entry_i) {
+        if (entry_i < 0 || entry_i >= stack_silhouette_batches_.size()) {
+          return;
+        }
+        for (gpu::Batch *b : stack_silhouette_batches_[entry_i]) {
+          if (b != nullptr) {
+            draw_strip(b);
+          }
+        }
+      };
+      for (const int entry_i : stack_silhouette_faint_) {
+        draw_stack_entry(entry_i);
+      }
+      if (stack_hover_index_ >= 0) {
+        ps_.push_constant("lineWidth", ed::sculpt_paint::PAINT_CURVE_SILHOUETTE_HOVER_WIDTH);
+        ps_.push_constant("color", ed::sculpt_paint::PAINT_CURVE_SILHOUETTE_HOVER_COLOR);
+        draw_stack_entry(stack_hover_index_);
       }
     }
 

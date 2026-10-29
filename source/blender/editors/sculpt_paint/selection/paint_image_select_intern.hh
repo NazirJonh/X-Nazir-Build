@@ -128,6 +128,18 @@ Vector<ImagePaintSelectionTarget> image_paint_selection_material_targets_get(
     int visible_material_channels,
     const ImageUser &fallback_iuser);
 
+/**
+ * In Mask target mode, give the active row's base mask its map when it has none yet.
+ *
+ * A fresh mask is a constant: the stroke entry creates its map lazily when the first stroke lands,
+ * but the select tools never stroke, so they would resolve zero targets and pass through silently.
+ * Call this from a selection operator's invoke/exec before its first target resolution; the
+ * getters stay free of side effects. A switched-off or object-masked mask refuses inside, and the
+ * select tools stay unavailable like for any other unreachable target. A created map is pushed as
+ * an undo step.
+ */
+void image_paint_selection_mask_map_ensure(bContext *C);
+
 /** Begin one image undo step and snapshot the masks of every target image. */
 void image_paint_selection_undo_begin(const char *name,
                                       Span<ImagePaintSelectionTarget> targets);

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 
 #include "MEM_guardedalloc.h"
@@ -48,6 +49,7 @@
 #include "BKE_curves.hh"
 #include "BKE_customdata.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
@@ -56,13 +58,16 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_target.hh"
+#include "BKE_paint_material_sync.hh"
 #include "BKE_paint_vector.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 
 #include "ED_curve_patch.hh"
 #include "ED_object.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_undo.hh"
 #include "ED_view3d.hh"
@@ -1129,6 +1134,162 @@ bool curve_patch_layer_session_blocks_row(const Object &ob, const MaterialPaintL
   const CurvePatchSession *session = ED_curve_patch_session_get(ob);
   return session != nullptr && session->layer_material != nullptr &&
          curve_patch_layer_session_blocks_row(*session, row);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Stack row activation
+ * \{ */
+
+void paint_stack_texpaint_slots_refresh(bContext &C)
+{
+  Scene *scene = CTX_data_scene(&C);
+  Object *object = CTX_data_active_object(&C);
+  if (scene != nullptr && object != nullptr) {
+    BKE_texpaint_slots_refresh_object(scene, object);
+  }
+  /* Every change of the active row, added row or mode passes here, so the PBR Paint tab never
+   * waits for a separate opt-in button while a layer is active. */
+  if (Paint *paint = BKE_paint_get_active_from_context(&C)) {
+    if (BKE_paint_material_brush_auto_ensure(scene, paint, object)) {
+      WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, BKE_paint_brush(paint));
+    }
+  }
+}
+
+void paint_stack_gradient_tool_activate(bContext &C, const MaterialPaintLayer *layer)
+{
+  Object *object = CTX_data_active_object(&C);
+  if (object == nullptr || (object->mode & OB_MODE_SCULPT) == 0 ||
+      object->runtime->sculpt_session == nullptr)
+  {
+    return;
+  }
+  std::string &saved_tool_id = object->runtime->sculpt_session->layers.gradient_saved_tool_id;
+  constexpr const char *gradient_tool_id = "builtin.color_gradient";
+
+  if (layer != nullptr && BKE_paint_layers_gradient_supported(*layer)) {
+    const std::string current_tool_id = ED_paint_view3d_tool_id_get(&C);
+    if (current_tool_id != gradient_tool_id) {
+      saved_tool_id = current_tool_id;
+    }
+    ED_paint_view3d_tool_id_set(&C, gradient_tool_id);
+    return;
+  }
+
+  /* Only restored while the Gradient tool is still active: a tool the user picked during the
+   * Gradient row is a choice that the row change should not overrule. */
+  if (!saved_tool_id.empty() && ED_paint_view3d_tool_id_get(&C) == gradient_tool_id) {
+    ED_paint_view3d_tool_id_set(&C, saved_tool_id.c_str());
+  }
+  saved_tool_id.clear();
+}
+
+bool paint_stack_target_mode_set(bContext &C, const ePaintLayerTargetMode mode)
+{
+  Scene *scene = CTX_data_scene(&C);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return false;
+  }
+  PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  /* Choosing a paint target (Mask or content) ends object-mask editing, even when the target is
+   * already the one asked for. */
+  if (paint_mode.layer_object_mask_edit != 0) {
+    paint_mode.layer_object_mask_edit = 0;
+    WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+  }
+  if (paint_mode.layer_target_mode == mode) {
+    return false;
+  }
+  const bool leaving_mask = paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK &&
+                            mode != PAINT_LAYER_TARGET_MASK;
+  if (Paint *paint = BKE_paint_get_active_from_context(&C)) {
+    /* Puts the Mask brush in hand on the way in and the remembered content brush on the way out. */
+    BKE_paint_material_layer_target_mode_set(
+        *CTX_data_main(&C), *scene, *paint, paint_mode, mode);
+    if (leaving_mask && paint->brush != nullptr) {
+      /* The restored content brush may belong to another tool, so that tool becomes active too. */
+      WM_toolsystem_activate_brush_and_tool(&C, paint, paint->brush);
+    }
+  }
+  else {
+    paint_mode.layer_target_mode = int8_t(mode);
+  }
+  paint_stack_texpaint_slots_refresh(C);
+  WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, scene);
+  return true;
+}
+
+bool paint_stack_row_activate(bContext &C,
+                              Material &material,
+                              const bUUID &row_marker,
+                              const int curve_item_index)
+{
+  if (!ID_IS_EDITABLE(&material.id) || ID_IS_OVERRIDE_LIBRARY(&material.id)) {
+    BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Layered material is not editable");
+    return false;
+  }
+  if (BKE_paint_layers_find(material, row_marker) == nullptr) {
+    return false;
+  }
+  /* A live Curve Patch session owns the tool while it runs. Switching the active row away from
+   * its effect is a deliberate step the user can undo, so the session just commits its curves
+   * into the effect and the switch goes on, with no question and no warning. */
+  if (Object *ob = CTX_data_active_object(&C)) {
+    const MaterialPaintLayer *target = BKE_paint_layers_find(material, row_marker);
+    if (target != nullptr && curve_patch_layer_session_blocks_row(*ob, *target)) {
+      curve_patch_layer_commit_live_session(C, *ob);
+    }
+  }
+  BKE_paint_layers_active_set(material, row_marker);
+  if (curve_item_index >= 0) {
+    /* The session builds its document from the container's active item, so the clicked curve is
+     * the one it starts on. Done after the editability check above, so a refusal left it alone. */
+    if (MaterialPaintLayer *effect = BKE_paint_layers_find(material, row_marker);
+        effect != nullptr && effect->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH &&
+        effect->curve_patch != nullptr && effect->curve_patch->vectors != nullptr &&
+        curve_item_index < effect->curve_patch->vectors->items_num)
+    {
+      effect->curve_patch->vectors->active_item = curve_item_index;
+    }
+  }
+  paint_stack_gradient_tool_activate(C, BKE_paint_layers_find(material, row_marker));
+  if (MaterialPaintLayer *active = BKE_paint_layers_find(material, row_marker);
+      active != nullptr && active->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH)
+  {
+    /* Selecting a Curve Patch effect in Sculpt Mode puts its brush snapshot in the user's hand
+     * and opens its curves, like the Gradient tool follows its rows. A refusal is reported by
+     * the entry itself and leaves the effect merely selected. */
+    curve_patch_layer_enter_if_sculpting(C, material, *active);
+  }
+  /* Mask editing only makes sense on a Layer row; leaving it for a correction or mask item ends
+   * it. */
+  if (Scene *scene = CTX_data_scene(&C)) {
+    const MaterialPaintLayer *active = BKE_paint_layers_find(material, row_marker);
+    if (scene->toolsettings != nullptr && active != nullptr &&
+        active->role != MA_PAINT_LAYER_ROLE_LAYER &&
+        scene->toolsettings->paint_mode.layer_object_mask_edit != 0)
+    {
+      scene->toolsettings->paint_mode.layer_object_mask_edit = 0;
+      WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+    }
+  }
+  /* The mode is global: a layer with no mask is painted on its content, not left as a stroke
+   * into nothing, and a mask correction is only ever worked on in the mask. */
+  const MaterialPaintLayer *activated = BKE_paint_layers_active_layer_get(material);
+  if (BKE_paint_layers_active_mask_item_get(material) != nullptr) {
+    paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+  }
+  else if (activated != nullptr && BKE_paint_layers_mask_base(*activated) == nullptr) {
+    paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
+  }
+  /* The mode may have stayed Mask while the row changed: the slots hold the new row's mask map,
+   * and a change of mode above already refreshed them once more, which is cheap. */
+  paint_stack_texpaint_slots_refresh(C);
+  WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+  WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  return true;
 }
 
 /** \} */

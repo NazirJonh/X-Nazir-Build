@@ -47,6 +47,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_rand.hh"
 #include "BLI_time.h"
+#include "BLI_uuid.h"
 
 #include "MEM_guardedalloc.h"
 
@@ -1417,6 +1418,11 @@ void ED_curve_patch_overlay_data_get_stack(const Object *ob, CurvePatchOverlayDa
   if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
       row->curve_patch == nullptr || row->curve_patch->vectors == nullptr)
   {
+    return;
+  }
+  /* A switched-off effect is not a paint target and hides nothing: its curves (and the handles
+   * over them) stay off, the same rule #BKE_paint_layers_target_is_live gives the stroke. */
+  if ((row->flag & MA_PAINT_LAYER_ENABLED) == 0) {
     return;
   }
   const PaintVector &pv = *row->curve_patch->vectors;

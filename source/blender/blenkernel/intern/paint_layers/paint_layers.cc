@@ -45,6 +45,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.h"
+#include "BLI_path_utils.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
@@ -1510,6 +1511,37 @@ MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma,
   return item;
 }
 
+MaterialPaintLayer *BKE_paint_layers_mask_add_image(Material &ma,
+                                                   MaterialPaintLayer &layer,
+                                                   Image &image)
+{
+  if (!paint_layer_in_stack(ma, &layer) || BKE_paint_layers_mask_base(layer) != nullptr) {
+    return nullptr;
+  }
+  /* Add White Mask first: the base shows the row everywhere, and the correction over it is what
+   * lays the texture's coverage -- the same pair the Outliner's drop of an image makes. */
+  if (BKE_paint_layers_mask_add(ma, &layer, 1.0f) == nullptr) {
+    return nullptr;
+  }
+  /* Named after the image, without its file extension, so the row says which texture it reads. */
+  char name[MAX_NAME];
+  STRNCPY(name, image.id.name + 2);
+  BLI_path_extension_strip(name);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      ma, &layer, MA_PAINT_LAYER_SOURCE_CONSTANT, name);
+  if (item == nullptr ||
+      !BKE_paint_layers_channel_set_image(ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &image))
+  {
+    /* A mask left behind by a refused assignment would read as a silent add. */
+    if (item != nullptr) {
+      BKE_paint_layers_mask_item_remove(ma, item);
+    }
+    BKE_paint_layers_mask_remove(ma, &layer);
+    return nullptr;
+  }
+  return item;
+}
+
 MaterialPaintLayer *BKE_paint_layers_mask_item_owner(Material &ma, const MaterialPaintLayer &item)
 {
   /* The read answers a row of this same mutable stack, so aliasing it back is safe. */
@@ -2602,6 +2634,12 @@ bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintL
     return false;
   }
   if (layer.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    /* The base mask is the layer's own mask: the Mask brush paints it and it takes no map of its
+     * own, so there is nothing for a remap to move. A correction above it reads the map it was
+     * given and keeps its Mapping. */
+    if ((layer.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+      return false;
+    }
     /* A mask is scalar over its owner; its map lives in the Base Color record of the item itself,
      * which the global channel set never filters. */
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(

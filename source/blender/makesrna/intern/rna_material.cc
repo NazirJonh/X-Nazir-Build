@@ -930,16 +930,25 @@ static PointerRNA rna_Material_paint_layer_add_material_get(PointerRNA * /*ptr*/
   return RNA_id_pointer_create(nullptr);
 }
 
-/* The material picked by the last assignment, consumed by the update callback that follows it.
- * The row is not added in the setter: RNA's debug check requires a setter whose getter reads none
- * to leave the user count of the assigned ID untouched, and a new row takes a user. */
-static Material *rna_paint_layer_add_material_pending = nullptr;
+/* The data-block the write-only "add" properties record between their setter and their update. The
+ * row is not added in the setter: RNA's debug check requires a setter whose getter reads none to
+ * leave the user count of the assigned ID untouched, and a new row or mask takes a user. One store
+ * for the whole family, so one reset point; a setter and its update run back to back, so the slots
+ * never interleave. */
+struct PaintLayerAddPending {
+  Material *material = nullptr;
+  Image *image = nullptr;
+};
+static PaintLayerAddPending rna_paint_layer_add_pending;
 
 static void rna_Material_paint_layer_add_material_set(PointerRNA * /*ptr*/,
                                                       PointerRNA value,
                                                       ReportList * /*reports*/)
 {
-  rna_paint_layer_add_material_pending = static_cast<Material *>(value.data);
+  /* One store serves the whole family: clear it before writing, so a setter whose update never
+   * runs (a `bpy` write with no context, say) cannot leave its value for the next update. */
+  rna_paint_layer_add_pending = {};
+  rna_paint_layer_add_pending.material = static_cast<Material *>(value.data);
 }
 
 static bool rna_Material_paint_layer_add_material_poll(PointerRNA *ptr, PointerRNA value)
@@ -955,8 +964,8 @@ static void rna_Material_paint_layer_add_material_do(bContext *C,
                                                      PointerRNA *ptr,
                                                      const PaintLayerAddKind kind)
 {
-  Material *source = rna_paint_layer_add_material_pending;
-  rna_paint_layer_add_material_pending = nullptr;
+  Material *source = rna_paint_layer_add_pending.material;
+  rna_paint_layer_add_pending = {};
   Material *ma = id_cast<Material *>(ptr->owner_id);
   if (source == nullptr || ma == nullptr) {
     return;
@@ -1008,6 +1017,55 @@ static void rna_Material_paint_layer_add_material_mask_correction_update(bContex
                                                                         PointerRNA *ptr)
 {
   rna_Material_paint_layer_add_material_do(C, ptr, PaintLayerAddKind::MaskCorrectionMaterial);
+}
+
+/* The same write-only assignment for a mask that reads an image: the ID Browser of the Add Mask
+ * menu assigns the image here, and the update makes the mask that reads it. */
+static PointerRNA rna_Material_paint_layer_add_image_mask_get(PointerRNA * /*ptr*/)
+{
+  return RNA_id_pointer_create(nullptr);
+}
+
+/* The image picked by the last assignment, consumed by the update that follows it. Kept out of the
+ * setter for the reason #rna_paint_layer_add_pending is: the mask takes a user. */
+static void rna_Material_paint_layer_add_image_mask_set(PointerRNA * /*ptr*/,
+                                                        PointerRNA value,
+                                                        ReportList * /*reports*/)
+{
+  /* See #rna_Material_paint_layer_add_material_set for the reset. */
+  rna_paint_layer_add_pending = {};
+  rna_paint_layer_add_pending.image = static_cast<Image *>(value.data);
+}
+
+static bool rna_Material_paint_layer_add_image_mask_poll(PointerRNA * /*ptr*/, PointerRNA value)
+{
+  return value.data != nullptr;
+}
+
+/* Gives the active layer a mask that reads the image the setter recorded. The popover assignment
+ * pushes no undo step of its own. */
+static void rna_Material_paint_layer_add_image_mask_update(bContext *C, PointerRNA *ptr)
+{
+  Image *image = rna_paint_layer_add_pending.image;
+  rna_paint_layer_add_pending = {};
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (image == nullptr || ma == nullptr) {
+    return;
+  }
+  MaterialPaintLayer *layer = BKE_paint_layers_active_layer_get(*ma);
+  if (layer == nullptr) {
+    BKE_report(CTX_wm_reports(C), RPT_WARNING, "Select a layer to give an image mask to");
+    return;
+  }
+  /* The mask, its activation, the paint target and the Outliner sync are all
+   * #ed::outliner::outliner_stack_row_mask_add_image's. */
+  MaterialPaintLayer *mask = ed::outliner::outliner_stack_row_mask_add_image(
+      *C, *ma, *layer, *image);
+  if (mask == nullptr) {
+    return;
+  }
+  ED_undo_push(C, "Add Image Mask");
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, ptr->owner_id);
 }
 
 static void rna_Material_paint_layers_remove(Material *ma,
@@ -6323,6 +6381,25 @@ void RNA_def_material(BlenderRNA *brna)
   RNA_def_property_update(prop,
                           NC_MATERIAL | ND_SHADING,
                           "rna_Material_paint_layer_add_material_mask_correction_update");
+
+  /* And for a mask backed by an image: the ID Browser of the Add Mask menu picks it through this
+   * write-only property, and its update makes the mask. */
+  prop = RNA_def_property(srna, "paint_layer_add_image_mask", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Image");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_Material_paint_layer_add_image_mask_get",
+                                 "rna_Material_paint_layer_add_image_mask_set",
+                                 nullptr,
+                                 "rna_Material_paint_layer_add_image_mask_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_HIDDEN);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_NO_COMPARISON);
+  RNA_def_property_ui_text(prop,
+                           "Add Image Mask",
+                           "Write-only: assigning an image gives the active layer a mask that reads "
+                           "it, and makes the mask the paint target; reads as none");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layer_add_image_mask_update");
 
   prop = RNA_def_property(srna, "paint_layers_is_stale", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_Material_paint_layers_is_stale_get", nullptr);

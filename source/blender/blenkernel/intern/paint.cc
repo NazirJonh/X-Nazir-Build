@@ -4813,6 +4813,12 @@ void BKE_paint_material_layer_target_mode_set(Main &bmain,
     mode_settings.mask_saved_brush = nullptr;
   }
   mode_settings.layer_target_mode = mode;
+
+  /* The target is scene-wide while the brush is per paint: the paired editor has to put the same
+   * brush in hand too, or the Image Editor would keep stroking the mask with the content brush on
+   * the way in and the content with the Mask brush on the way out.
+   * #BKE_paint_material_mask_brush_set makes the same single call for the tool-driven path. */
+  BKE_paint_material_brush_sync(&scene, &paint);
 }
 
 bool BKE_paint_material_mask_brush_set(Scene &scene,

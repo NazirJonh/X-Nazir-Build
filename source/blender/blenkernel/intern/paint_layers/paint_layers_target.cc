@@ -423,6 +423,26 @@ static Image *paint_layers_mask_ensure_writable(Main &bmain,
   return record->image;
 }
 
+Image *BKE_paint_layers_mask_base_map_ensure(Main &bmain,
+                                             Material &ma,
+                                             MaterialPaintLayer &row,
+                                             const int image_size)
+{
+  MaterialPaintLayer *base = BKE_paint_layers_mask_base(row);
+  if (base == nullptr) {
+    return nullptr;
+  }
+  /* The same description edit a stroke would make on its first dab, made ahead of it: the map is
+   * filled with the mask's constant, so the coverage reads the same before and after. */
+  PaintLayersTarget target;
+  target.material = &ma;
+  target.layer = &row;
+  target.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  target.mode = PaintLayersTargetMode::Mask;
+  target.mask_item = base;
+  return paint_layers_mask_ensure_writable(bmain, target, image_size);
+}
+
 Image *BKE_paint_layers_map_coverage_map_ensure(Main &bmain,
                                                 Material &ma,
                                                 MaterialPaintLayer &item,

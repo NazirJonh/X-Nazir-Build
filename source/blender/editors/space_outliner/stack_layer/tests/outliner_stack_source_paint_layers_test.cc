@@ -143,7 +143,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_EQ(kinds[5].identifier, "MASK_CORRECTION");
   EXPECT_FALSE(kinds[5].takes_color);
   EXPECT_EQ(kinds[6].identifier, "MASK_CORRECTION_FILL");
-  EXPECT_TRUE(kinds[6].takes_color);
+  EXPECT_FALSE(kinds[6].takes_color) << "a mask lays one grey: the Add makes it and asks nothing";
   EXPECT_EQ(kinds[7].identifier, "FILTER_INVERT");
   EXPECT_FALSE(kinds[7].takes_color);
   EXPECT_TRUE(kinds[7].is_effect);

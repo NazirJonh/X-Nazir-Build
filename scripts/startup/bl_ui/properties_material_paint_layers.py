@@ -10,6 +10,8 @@ one place. The panels that call these functions are drawn from `properties_mater
 the Layer Material tab context), so this module only supplies functions.
 """
 
+from collections import namedtuple
+
 from bl_ui.properties_paint_common import (
     _LAYER_VALUE_PANEL_BY_CHANNEL,
     _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS,
@@ -22,6 +24,39 @@ from bl_ui.properties_paint_common import (
 # Channel count at which a row is considered heavy: five records weigh 34 generated nodes, six
 # weigh 40, over the AUTO-bake threshold of 36. A row this wide bakes instead of evaluating live.
 _MATERIAL_PAINT_LAYER_HEAVY_CHANNEL_COUNT = 6
+
+
+# The draw state of one mask item (see #_mask_item_ui_state).
+_MaskItemUIState = namedtuple(
+    "_MaskItemUIState", ("record", "base", "flat_value", "assignable", "show_map", "has_map")
+)
+
+
+def _mask_item_ui_state(context, item):
+    """The draw state of one mask item, computed once so the branches below read by state.
+
+    `record` is the item's structural Base Color record (its constant and its map). `flat_value` is
+    the grey the base mask and a Fill correction lay while they have no map. `assignable` is
+    whether the map slot is the user's to assign (only a Fill correction's; the base mask owns no
+    assignable slot). `show_map` is whether the stack's own map is drawn at all (read-only, and
+    only while Developer Extras is on). `has_map` is whether the record carries one.
+
+    `assignable` and `show_map` ask the RNA view of #BKE_paint_layers_mapping_available rather than
+    re-encoding which sources take a mapping: only a Fill correction may carry one, and a Paint
+    correction or a filter may not. The base mask is excluded explicitly: its map the Mask brush
+    paints is never the user's to assign, and it is a debug view.
+    """
+    record = item.channels[0] if len(item.channels) else None
+    base = item.is_mask_base
+    assignable = not base and item.mapping_available
+    return _MaskItemUIState(
+        record=record,
+        base=base,
+        flat_value=base or item.source == 'CONSTANT',
+        assignable=assignable,
+        show_map=assignable or _developer_ui_enabled(context),
+        has_map=record is not None and record.image is not None,
+    )
 
 
 def material_layer_visible_channels(material):
@@ -211,26 +246,43 @@ def _mask_item_eyedropper_path(item):
 
 def draw_material_mask_item(layout, context, item):
     """The controls of one mask item, the base mask or a mask correction: its own settings and one
-    coverage channel drawn like a scalar channel of a layer (panel header with the value, body with
-    the map slot and the gradient).
+    coverage channel drawn like a scalar channel of a layer -- the header carries its value as the
+    swatch that opens the value popover, the body the map slot it reads once it has one, and the
+    gradient slider while it lays a flat grey.
 
-    The base mask and a Fill correction lay a flat grey while they have no map and take a map the
-    user assigns; a Paint correction owns its map (the first stroke creates it), so it is shown
-    read-only -- and only while Developer Extras is on. Invert reads the grey as `1 - value`, the
-    map's or the flat one.
+    A Fill correction lays a flat grey while it has no map and takes a map the user assigns. The
+    base mask and a Paint correction own their map instead -- the Mask brush writes it -- so their
+    slot is a debug view that Developer Extras reveals, and only a Fill correction is offered a
+    Mapping panel (see #BKE_paint_layers_mapping_available). The base mask has no subpanel of its
+    own either, unless it still holds a flat grey: everything inside it is that debug view. Invert
+    reads the grey as `1 - value`, the map's or the flat one.
     """
-    record = item.channels[0] if len(item.channels) else None
-    base = item.is_mask_base
-    assignable = base or item.source == 'CONSTANT'
+    # The state every branch below reads; what each field means is #_mask_item_ui_state's.
+    state = _mask_item_ui_state(context, item)
+    record = state.record
+    base = state.base
+    flat_value = state.flat_value
+    assignable = state.assignable
+    show_map = state.show_map
+    has_map = state.has_map
 
     col = layout.column()
     if not base:
         # The base is the Multiply item of the row's own mask: it has no blend to choose.
         col.prop(item, "blend_type", text="Blend")
     col.prop(item, "opacity", text="Opacity")
+    if base and record is not None:
+        # The base mask's slot is a debug view (see below), so its Invert is offered here, where it
+        # stays reachable with Developer Extras off.
+        col.prop(record, "invert", text="Invert", toggle=True)
     if record is None:
         return
-    has_map = record.image is not None
+
+    # The base mask's subpanel holds the stack's own map, so it is a debug view like its slot: with
+    # Developer Extras off it is drawn only while the mask has no map at all, where the flat grey
+    # is the mask's whole content.
+    if base and has_map and not _developer_ui_enabled(context):
+        return
 
     header, panel = layout.panel("material_paint_mask_item", default_closed=False)
     header.use_property_split = True
@@ -240,17 +292,19 @@ def draw_material_mask_item(layout, context, item):
     split.label(text="Mask")
     value_row = split.row(align=True)
     if has_map:
-        # The map the stack generated is not drawn while Developer Extras is off; a map the user
-        # assigned (an assignable item's own) always is.
-        hidden = not assignable and _map_is_internal_hidden(context, record)
-        if not hidden:
+        if show_map:
             sub = value_row.row(align=True)
             sub.enabled = assignable
             sub.template_ID_browser(record, "image", compact=True, image_filter='PAINT_SOURCE')
-    elif assignable:
+    elif flat_value:
         controls = value_row.row(align=True)
-        controls.prop(item, "mask_color", text="")
-        controls.prop(item, "mask_value", text="", slider=True)
+        # The value is the swatch alone: it shows the grey the item lays and opens the value
+        # popover, where the gradient slider and the palette are -- the same widget a scalar
+        # channel's value wears. `mask_value` is the scalar, so the swatch takes its colour from
+        # the value itself.
+        controls.context_pointer_set("material_paint_layer_mask_item", item)
+        controls.template_material_paint_value_swatch(
+            item, "mask_value", index=0, panel="PAINT_PT_material_mask_item_value")
         path = _mask_item_eyedropper_path(item)
         if path:
             eye = controls.operator("ui.eyedropper_color", text="", icon='EYEDROPPER')
@@ -278,22 +332,26 @@ def draw_material_mask_item(layout, context, item):
             invert.scale_y = 2.0
             invert.prop(record, "invert", text="", icon='ARROW_LEFTRIGHT', toggle=True)
     elif has_map:
-        # A Paint correction owns its map, so the browser is read-only. The map the stack generated
-        # is not drawn at all while Developer Extras is off; the invert toggle stays either way.
+        # The base mask and a Paint correction own their map: it is shown read-only, and only while
+        # Developer Extras is on. The base mask's Invert sits with its own settings, above.
         row = panel.row(align=True)
-        if not _map_is_internal_hidden(context, record):
+        if show_map:
             sub = row.row(align=True)
             sub.enabled = False
             sub.template_ID_browser(record, "image", compact=True, image_filter='PAINT_SOURCE')
-        row.prop(record, "invert", text="", icon='ARROW_LEFTRIGHT', toggle=True)
-    else:
+        if not base:
+            row.prop(record, "invert", text="", icon='ARROW_LEFTRIGHT', toggle=True)
+    elif not base:
         panel.label(text="The first stroke creates the map", icon='INFO')
 
-    if not has_map and assignable:
+    # A mask that lays a flat grey edits it where the map will be once it has one: the gradient
+    # value slider sits in the body, with the item's own invert beside it.
+    if not has_map and flat_value:
         panel.separator()
         row = panel.row(align=True)
         row.template_material_paint_value_slider(item, "mask_value", index=0)
-        row.prop(record, "invert", text="", icon='ARROW_LEFTRIGHT', toggle=True)
+        if not base:
+            row.prop(record, "invert", text="", icon='ARROW_LEFTRIGHT', toggle=True)
     panel.separator()
 
 

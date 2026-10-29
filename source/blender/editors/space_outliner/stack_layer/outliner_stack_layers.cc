@@ -20,6 +20,7 @@
 
 #include "DNA_ID.h"
 #include "DNA_defs.h"
+#include "DNA_image_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
@@ -375,6 +376,73 @@ bool stack_row_mask_section_poll(bContext *C)
     has_section |= section.identifier == aux_section;
   }
   return has_section && outliner_stack_row_active_section_get(*space_outliner, *row) == aux_section;
+}
+
+wmOperatorStatus stack_row_mask_image_invoke(bContext *C,
+                                             wmOperator *op,
+                                             const wmEvent * /*event*/)
+{
+  if (RNA_struct_property_is_set(op->ptr, "image")) {
+    return stack_row_mask_image_exec(C, op);
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const StackSource &source = *stack_source_for_space(*space_outliner);
+  const StackEditor *editor = source.editor();
+  const StackGroupingEditor *grouping = (editor != nullptr) ? editor->grouping() : nullptr;
+  const char *browse_prop = (grouping != nullptr) ? grouping->aux_image_browse_prop() : nullptr;
+  if (browse_prop == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The image is picked in the ID Browser, as a Material layer's source is: the browser can only
+   * assign a property of an ID, and that assignment is what makes the mask -- nothing is created
+   * until the user picks one. */
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  if (owner == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The assignment lands on the material's active row, so the row this call is about is made the
+   * active one first: a pick then masks the row the Black and White entries would have. */
+  outliner_stack_row_activate(C, *space_outliner, ordinal);
+  ui::id_browser_popover_invoke(C, RNA_id_pointer_create(owner), browse_prop, false);
+  /* Nothing was decided here, so there is nothing for #OPTYPE_UNDO to record: the undo step is the
+   * pick's, pushed by the RNA update (or this operator's exec, when a script names the image). The
+   * row activation above is not an undo either. */
+  return OPERATOR_CANCELLED;
+}
+
+wmOperatorStatus stack_row_mask_image_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  Image *image = static_cast<Image *>(RNA_pointer_get(op->ptr, "image").data);
+  if (image == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No image picked");
+    return OPERATOR_CANCELLED;
+  }
+  const bool ok = stack_mutate(
+      *C,
+      *space_outliner,
+      false,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int & /*r_select_ordinal*/) {
+        const StackGroupingEditor *grouping = editor.grouping();
+        return grouping != nullptr &&
+               grouping->row_aux_image_set(*C, focus, owner, ordinal, *image);
+      });
+  /* The source leaves the new correction as the active row and brings its section up (see
+   * #outliner_stack_row_added_sync): there is nothing left for this layer to do. */
+  return ok ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
 }
 
 wmOperatorStatus stack_row_mask_toggle_exec(bContext *C, wmOperator *op)

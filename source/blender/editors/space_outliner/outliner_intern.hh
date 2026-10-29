@@ -894,6 +894,8 @@ wmOperatorStatus stack_row_visibility_toggle_exec(bContext *C, wmOperator *op);
 bool stack_row_visibility_toggle_poll(bContext *C);
 wmOperatorStatus stack_row_lock_toggle_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_mask_image_invoke(bContext *C, wmOperator *op, const wmEvent *event);
+wmOperatorStatus stack_row_mask_image_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_mask_toggle_exec(bContext *C, wmOperator *op);
 bool stack_row_mask_poll(bContext *C);
 /** As #stack_row_mask_poll, and the row's mask slot is the one showing: what Toggle and Remove Mask
@@ -1094,6 +1096,7 @@ void OUTLINER_OT_stack_layer_move(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_lock_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_mask_image(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_mask_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add(wmOperatorType *ot);

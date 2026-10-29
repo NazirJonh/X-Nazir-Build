@@ -21,6 +21,9 @@
 struct bContext;
 struct EnumPropertyItem;
 struct ID;
+struct Image;
+struct Material;
+struct MaterialPaintLayer;
 struct ScrArea;
 struct SpaceOutliner;
 
@@ -111,5 +114,22 @@ void outliner_stack_paint_row_ui_sync(Main &bmain,
                                       ViewLayer &view_layer,
                                       SpaceOutliner &space_outliner,
                                       Material &material);
+
+/**
+ * Give \a layer a mask that reads \a image: the white base mask an Add White Mask makes, and a
+ * Fill correction over it whose Base Color record carries the image. The paint half is
+ * #blender::ed::sculpt_paint::paint_layers_mask_add_image's; this adds the Outliner sync, so the
+ * Outliners showing the material read the new correction as the active row.
+ *
+ * Shared so a mask made from the Stack Layers Add and one made by the ID Browser assignment are
+ * the same mask. The undo step is the caller's: an operator pushes one, the RNA assignment pushes
+ * its own.
+ *
+ * \return the new correction, or null when \a layer is not a row of \a material or has a mask.
+ */
+MaterialPaintLayer *outliner_stack_row_mask_add_image(bContext &C,
+                                                     Material &material,
+                                                     MaterialPaintLayer &layer,
+                                                     Image &image);
 
 }  // namespace blender::ed::outliner

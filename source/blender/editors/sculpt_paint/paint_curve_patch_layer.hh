@@ -187,12 +187,6 @@ bool paint_stack_row_activate(bContext &C,
                               const bUUID &row_marker,
                               int curve_item_index = -1);
 
-/** Rebuild the active object's paint slots after the active row or target mode changed. */
-void paint_stack_texpaint_slots_refresh(bContext &C);
-
-/** Set the target a layered material's stroke paints; true when it changed. */
-bool paint_stack_target_mode_set(bContext &C, ePaintLayerTargetMode mode);
-
 /**
  * Make a Gradient row active in Sculpt Mode, remembering the user's tool, and restore that tool
  * when a row that is not a Gradient becomes active.

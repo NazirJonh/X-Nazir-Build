@@ -51,6 +51,7 @@
 
 struct bContext;
 struct ID;
+struct Image;
 struct Main;
 struct Object;
 struct Scene;
@@ -896,6 +897,37 @@ class StackGroupingEditor {
                            const float /*initial_color*/[4]) const
   {
     return false;
+  }
+
+  /**
+   * Give the row at \a ordinal a mask that reads \a image: a white base mask, as #row_aux_set with
+   * \a add makes, and a Fill correction over it whose map is the image -- its grey and its alpha --
+   * before any stroke touches it.
+   *
+   * The image is an existing data-block, picked by the user (see #aux_image_browse_prop), never a
+   * file this editor loads: what a file's texels mean is the image's own reading, and the mask
+   * shares the data-block rather than a copy of it.
+   *
+   * Refused (false) for a row that has a mask already, like #row_aux_set with \a add, and for
+   * sources that have no mask notion.
+   */
+  virtual bool row_aux_image_set(bContext & /*C*/,
+                                 const StackFocus & /*focus*/,
+                                 ID & /*owner*/,
+                                 int /*ordinal*/,
+                                 Image & /*image*/) const
+  {
+    return false;
+  }
+
+  /**
+   * The owner property an ID Browser assigns a mask image to, or null when this editor's masks take
+   * no image. Assigning it makes the mask (see the property's own description): the browser can
+   * only write a property of an ID, and that assignment is what a pick means.
+   */
+  virtual const char *aux_image_browse_prop() const
+  {
+    return nullptr;
   }
 
   /**

@@ -2383,6 +2383,50 @@ TEST_F(PaintMaterialChannelTest, BrushSyncAfterLoadIsNoOpWhenSyncDisabled)
   BKE_id_free(bmain, scene);
 }
 
+TEST_F(PaintMaterialChannelTest, LayerTargetModeSetSharesTheMaskBrushWithImagePaint)
+{
+  Scene *scene = id_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "TargetModePairScene"));
+  Sculpt *sculpt_data = MEM_new<Sculpt>(__func__);
+  scene->toolsettings->sculpt = sculpt_data;
+  Paint &sculpt_paint = sculpt_data->paint;
+  sculpt_paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
+  sculpt_paint.runtime->ob_mode = OB_MODE_SCULPT;
+  sculpt_paint.runtime->paint_mode = PaintMode::Sculpt;
+
+  /* Image Paint reports Texture3D for this shared struct, and the pair is resolved by identity. */
+  Paint &image_paint = scene->toolsettings->imapaint.paint;
+  image_paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
+  image_paint.runtime->ob_mode = OB_MODE_TEXTURE_PAINT;
+  image_paint.runtime->paint_mode = PaintMode::Texture3D;
+
+  PaintModeSettings &mode_settings = scene->toolsettings->paint_mode;
+  mode_settings.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
+  mode_settings.material_paint_flag = PAINT_MATERIAL_BRUSH_SYNC;
+
+  Brush *content_brush = BKE_brush_add(
+      bmain, "PairContent", OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT);
+  BKE_brush_material_paint_ensure(content_brush);
+  sculpt_paint.brush = content_brush;
+  image_paint.brush = content_brush;
+
+  BKE_paint_material_layer_target_mode_set(
+      *bmain, *scene, sculpt_paint, mode_settings, PAINT_LAYER_TARGET_MASK);
+
+  ASSERT_NE(mode_settings.mask_active_brush, nullptr);
+  EXPECT_EQ(sculpt_paint.brush, mode_settings.mask_active_brush);
+  EXPECT_EQ(image_paint.brush, mode_settings.mask_active_brush)
+      << "the Image Editor must not keep stroking the mask with the content brush";
+
+  BKE_paint_material_layer_target_mode_set(
+      *bmain, *scene, sculpt_paint, mode_settings, PAINT_LAYER_TARGET_CONTENT);
+
+  EXPECT_EQ(sculpt_paint.brush, content_brush);
+  EXPECT_EQ(image_paint.brush, content_brush)
+      << "leaving the mask must put the content brush back in both editors";
+
+  BKE_id_free(bmain, scene);
+}
+
 TEST_F(PaintMaterialChannelTest, LocalBrushChannelDataSurvivesSaveReload)
 {
   Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "PersistScene"));

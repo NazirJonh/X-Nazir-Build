@@ -100,14 +100,16 @@ class OUTLINER_HT_tool_header(Header):
             row.operator_menu_enum("outliner.stack_layer_effect_add", "type", text="",
                                    icon='SHADERFX')
 
-            # Only the add is here, as a menu of the two starting masks; switching a mask off and
+            # Only the add is here, as a menu of the starting masks; switching a mask off and
             # taking it away live in the row's context menu, while its slot is the one showing.
+            # The shared menu rather than an enum of one operator: it carries the image mask too,
+            # whose entry opens the ID Browser instead of running an add.
             row = layout.row(align=True)
-            # An enum menu button, like the Effects one, so it shows the dropdown arrow. `add` is
-            # set explicitly: Remove Mask stores `add = False` as the operator's last-used value.
-            props = row.operator_menu_enum("outliner.stack_layer_mask", "initial_color", text="",
-                                           icon='MOD_MASK')
-            props.add = True
+            # The dropdown arrow is drawn only when a menu button is wider than it is tall, and an
+            # icon on its own is square: the button is scaled wide enough to carry the mask glyph
+            # and the arrow beside it (widget_menubut keeps 0.6 of the height for the arrow).
+            row.scale_x = 1.8
+            row.menu("OUTLINER_MT_stack_layer_mask_add", text="", icon='MOD_MASK')
 
             # An empty folder to put layers into; layers join one by dropping them onto it.
             layout.separator()
@@ -140,6 +142,10 @@ class OUTLINER_MT_stack_layer_mask_add(Menu):
             props = layout.operator("outliner.stack_layer_mask", text=text, icon=icon)
             props.add = True
             props.initial_color = color
+        # A mask filled by an image: the entry opens the ID Browser, and picking one there makes
+        # the mask (see Material.paint_layer_add_image_mask). Nothing is created before a pick.
+        layout.operator(
+            "outliner.stack_layer_mask_image", text="Add Image Mask", icon='IMAGE_DATA')
 
 
 class OUTLINER_MT_stack_layer_advanced(Menu):

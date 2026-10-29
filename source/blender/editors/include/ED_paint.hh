@@ -38,6 +38,7 @@ struct ImageUser;
 struct ImBuf;
 struct Main;
 struct Material;
+struct MaterialPaintLayer;
 struct Object;
 struct Paint;
 struct PaintModeSettings;
@@ -745,6 +746,39 @@ bool ED_paint_shape_handles_edit_active(const Object &ob);
 void ED_paint_shape_handles_edit_set(Object &ob, bool enabled);
 /** True when the active shape has spline points the handle editor can show. */
 bool ED_paint_shape_handles_edit_available(const Object &ob);
+
+/* `paint_layers_sync.cc` — the paint side of the material layer edits made outside a stroke */
+
+namespace ed::sculpt_paint {
+
+/** Rebuild the paint slots of the active object, and put the matching brush in hand. The slots are
+ * what a projection stroke paints, so a change of the active row, the target mode or the maps has
+ * to reach them. */
+void paint_stack_texpaint_slots_refresh(bContext &C);
+
+/** Set the target a layered material's stroke paints (content or mask); true when it changed. */
+bool paint_stack_target_mode_set(bContext &C, ePaintLayerTargetMode mode);
+
+/** The map of \a row's base mask, created when it has none, with the slots refreshed to hold it.
+ * Nothing to create means nothing to refresh, so a call on a mask that already has its map is a
+ * no-op. */
+void paint_layers_mask_base_map_prepare(bContext &C,
+                                        Material &material,
+                                        MaterialPaintLayer &row);
+
+/**
+ * Give \a layer a mask that reads \a image (see #BKE_paint_layers_mask_add_image) and put it in
+ * hand: the new correction becomes the active mask item, the target switches to Mask, and the base
+ * mask's map and the slots follow. The Outliner sync and the undo step stay the caller's.
+ *
+ * \return the new correction, or null when \a layer already has a mask or the add was refused.
+ */
+MaterialPaintLayer *paint_layers_mask_add_image(bContext &C,
+                                                Material &material,
+                                                MaterialPaintLayer &layer,
+                                                Image &image);
+
+}  // namespace ed::sculpt_paint
 
 /* `paint_image_select_view3d.cc` — 3D Viewport overlay for image selection mask */
 

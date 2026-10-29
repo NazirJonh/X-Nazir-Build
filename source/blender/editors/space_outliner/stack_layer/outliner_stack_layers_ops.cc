@@ -33,6 +33,7 @@
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
+#include "RNA_prototypes.hh"
 
 #include "UI_resources.hh"
 
@@ -572,6 +573,38 @@ void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot)
                0,
                "Initial Color",
                "Initial fill of a newly added mask");
+}
+
+void OUTLINER_OT_stack_layer_mask_image(wmOperatorType *ot)
+{
+  ot->name = "Add Image Mask";
+  ot->idname = "OUTLINER_OT_stack_layer_mask_image";
+  ot->description = "Give the layer a mask that reads an image";
+  ot->invoke = stack_row_mask_image_invoke;
+  ot->exec = stack_row_mask_image_exec;
+  ot->poll = stack_row_mask_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna,
+              "ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Ordinal",
+              "Layer to mask; -1 uses the active one",
+              -1,
+              SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+  /* The image the mask reads, picked in the ID Browser the invoke opens. Never remembered: the
+   * next click must offer the browser again, not re-add the image of the last one. A script names
+   * one, and the redo panel keeps the value of its own run.
+   *
+   * The runtime variant of the definition: an operator type is registered at startup, after RNA is
+   * up, and the build only links the runtime half of the definition API (see RNA_def_pointer's
+   * #ifndef RNA_RUNTIME in rna_define.cc). */
+  PropertyRNA *image_prop = RNA_def_pointer_runtime(
+      ot->srna, "image", RNA_Image, "Image", "Image the mask reads its coverage from");
+  RNA_def_property_flag(image_prop, PROP_SKIP_SAVE);
 }
 
 void OUTLINER_OT_stack_layer_mask_toggle(wmOperatorType *ot)

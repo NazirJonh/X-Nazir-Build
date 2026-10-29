@@ -1044,6 +1044,13 @@ static wmOperatorStatus layer_target_mode_set_exec(bContext *C, wmOperator *op)
       BKE_report(op->reports, RPT_ERROR, "Cannot add a mask to the active paint layer");
       return OPERATOR_CANCELLED;
     }
+    /* The mask's map is made together with the mask: a first stroke into a mapless mask would
+     * create it and regenerate the graph before it can write. Filled with the constant, so the
+     * coverage reads the same before and after. The slots pick it up in the refresh below. The
+     * paint-side `paint_layers_mask_base_map_prepare` is not used here: its own refresh would
+     * resolve the slots against the target this operator is about to leave. */
+    BKE_paint_layers_mask_base_map_ensure(
+        *CTX_data_main(C), *ma, *layer, mode_settings.new_channel_image_size);
   }
   const bool leaving_mask = mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK &&
                             mode != PAINT_LAYER_TARGET_MASK;

@@ -287,6 +287,24 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
                                                const float *new_channel_fill_linear = nullptr);
 
 /**
+ * The map of \a row's base mask, created (filled with the mask's constant) when it has none.
+ *
+ * The same description edit a stroke makes on its first dab, made ahead of it: a mask made together
+ * with its row -- by an add, or by the correction that made the base -- gets its map right away, so
+ * the first stroke into it never has to grow the description and regenerate the graph before it can
+ * write, which loses that stroke. Same ID-creation rules as
+ * #BKE_paint_layers_target_ensure_writable, and it never opens undo itself.
+ *
+ * \param image_size: the fallback width and height, used only when the material has no size of its
+ * own (#Material::paint_layers_image_size is zero).
+ * \return the map, or null when \a row carries no mask or the description edit failed.
+ */
+Image *BKE_paint_layers_mask_base_map_ensure(Main &bmain,
+                                             Material &ma,
+                                             MaterialPaintLayer &row,
+                                             int image_size);
+
+/**
  * Put the map of \a target's channel back to the state a fresh map starts from: the record's flat
  * value, with the flat tangent in a Normal map's empty texels. For content that is rendered from
  * its own source (the Curve Patch effect), so a re-render does not land on its previous result.

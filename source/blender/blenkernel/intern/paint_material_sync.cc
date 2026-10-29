@@ -127,8 +127,12 @@ static void paint_material_brush_sync_apply(Scene *scene, Paint *source, Paint *
   /* Most brushes are restricted (#Brush.ob_mode) to the paint mode they were authored for, so
    * #BKE_paint_brush_set would refuse a Sculpt brush in Image Paint. Sync is exactly a request to
    * use this brush in both modes, so opt it in rather than making the user find the matching
-   * checkbox in Brush Settings first. */
-  BLI_assert(dst_paint->runtime != nullptr);
+   * checkbox in Brush Settings first. The receiving mode's runtime is what the brush is opted
+   * into; a scene a script built without ever entering that mode can leave it uninitialized, and
+   * there is nothing to opt in then. */
+  if (dst_paint->runtime == nullptr) {
+    return;
+  }
   if (!BKE_paint_can_use_brush(dst_paint, src_brush)) {
     if (dst_paint->runtime->ob_mode == OB_MODE_SCULPT) {
       BKE_brush_enable_sculpt_mode_from_image_paint(src_brush);

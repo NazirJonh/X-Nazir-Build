@@ -1334,6 +1334,33 @@ TEST_F(PaintLayersTargetTest, merge_folds_the_stack_into_one_base_map)
   EXPECT_EQ(pixel[3], 255);
 }
 
+TEST_F(PaintLayersTargetTest, mask_base_map_ensure_makes_the_base_map_once)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, layer, 0.25f);
+  ASSERT_NE(base, nullptr);
+  ASSERT_EQ(paint_layer_channel_find(*base, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image, nullptr);
+
+  Image *map = BKE_paint_layers_mask_base_map_ensure(*bmain, *ma, *layer, 8);
+  ASSERT_NE(map, nullptr);
+  EXPECT_EQ(paint_layer_channel_find(*base, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image, map);
+  EXPECT_TRUE(BKE_paint_layers_image_is_internal(*map))
+      << "the map the stack made is reached through the layer UI, like the mask it belongs to";
+
+  /* The map starts as the grey the constant laid, so the row looks the same before and after. */
+  uchar pixel[4];
+  first_byte_pixel(*map, pixel);
+  EXPECT_EQ(pixel[0], 64);
+  EXPECT_EQ(pixel[3], 255);
+
+  /* Made once: a second call answers the map that is already there. */
+  EXPECT_EQ(BKE_paint_layers_mask_base_map_ensure(*bmain, *ma, *layer, 8), map);
+
+  /* A row without a mask has no base mask, so no map either. */
+  MaterialPaintLayer *bare = add_active_row("Bare");
+  EXPECT_EQ(BKE_paint_layers_mask_base_map_ensure(*bmain, *ma, *bare, 8), nullptr);
+}
+
 TEST_F(PaintLayersTargetTest, merge_reads_back_what_the_sampler_read)
 {
   MaterialPaintLayer *layer = add_active_row("L");

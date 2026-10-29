@@ -83,6 +83,16 @@ Material *paint_layer_gradient_target(const bContext *C, MaterialPaintLayer **r_
    * gradient at all. */
   MaterialPaintLayer *layer = BKE_paint_layers_active_mask_item_get(*ma);
   if (layer == nullptr) {
+    /* While the Mask is what a stroke paints, only a correction's own line is editable: the base
+     * mask has none, so the row's gradient must offer neither its line nor its gizmo for it. */
+    const Scene *scene = CTX_data_scene(C);
+    const PaintModeSettings *paint_mode = nullptr;
+    if (scene != nullptr && scene->toolsettings != nullptr) {
+      paint_mode = &scene->toolsettings->paint_mode;
+    }
+    if (BKE_paint_layers_target_mode(paint_mode) == PaintLayersTargetMode::Mask) {
+      return nullptr;
+    }
     layer = BKE_paint_layers_active_layer_get(*ma);
   }
   if (layer == nullptr || !BKE_paint_layers_gradient_supported(*layer) ||

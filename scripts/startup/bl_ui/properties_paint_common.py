@@ -4898,6 +4898,58 @@ class PAINT_PT_material_mask_value_secondary(_MaterialMaskValuePopover, bpy.type
     _color_prop = "value_secondary_color"
 
 
+def _mask_item_value_item_resolve(context):
+    """The mask item a Mask panel's value popover edits, or None.
+
+    The swatch publishes the item on the layout context (see `draw_material_mask_item`), which the
+    popover inherits through the button: that is how a correction, or a mask of a row that is not
+    the active one, is reached. This is a layout-context pointer, not a `bpy.context` screen member
+    and not registered anywhere; nothing outside that button hierarchy may rely on it. Without the
+    pointer, the active layer's base mask stands in.
+    """
+    item = getattr(context, "material_paint_layer_mask_item", None)
+    if item is not None:
+        return item
+    material = context.material
+    if material is None:
+        ob = context.object
+        material = ob.active_material if ob is not None else None
+    if material is None or not material.is_layered:
+        return None
+    layer = material.paint_layers.active
+    if layer is None:
+        return None
+    for base in layer.mask_items:
+        if base.is_mask_base:
+            return base
+    return None
+
+
+class PAINT_PT_material_mask_item_value(bpy.types.Panel):
+    """The value popover of one mask item: the gradient slider its flat grey is set with, and the
+    palette.
+
+    The pair a scalar channel's value popover offers, for the one coverage a mask item has. The
+    swatch in the Mask panel's header opens it; the palette writes the item's grey `mask_color`,
+    whose setter keeps the mean the mask reads.
+    """
+
+    bl_label = "Mask Value"
+    # TOPBAR/HEADER is the space popover-only panels use so they resolve from every editor.
+    bl_space_type = 'TOPBAR'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    def draw(self, context):
+        item = _mask_item_value_item_resolve(context)
+        if item is None:
+            return
+        layout = self.layout
+        layout.template_material_paint_value_slider(item, "mask_value", index=0)
+        layout.separator()
+        _value_palette_section_draw(layout, context, item, "mask_color")
+
+
 def _material_value_popover_class(owner, channel_id, label, value_prop):
     """Build one value popover panel from a #_MATERIAL_VALUE_POPOVER_TABLE row.
 
@@ -5127,6 +5179,7 @@ classes = (
     PAINT_GT_mp_source,
     PAINT_PT_material_mask_value_primary,
     PAINT_PT_material_mask_value_secondary,
+    PAINT_PT_material_mask_item_value,
     # The eleven value popovers, generated from #_MATERIAL_VALUE_POPOVER_TABLE.
     *_MATERIAL_VALUE_POPOVER_CLASSES,
     PAINT_PT_shape_texture_preview,

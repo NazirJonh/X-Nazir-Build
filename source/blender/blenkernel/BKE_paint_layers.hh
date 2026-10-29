@@ -341,6 +341,20 @@ float BKE_paint_layers_mask_constant(const MaterialPaintLayer &item);
 MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma, MaterialPaintLayer *layer, float value);
 
 /**
+ * Give \a layer a mask that reads \a image: the white base mask an Add White Mask makes, and a
+ * Fill correction over it whose Base Color record carries the image -- its grey and its alpha -- as
+ * the coverage it lays, the same pair the Outliner's drop of an image makes. A Mask-mode stroke
+ * paints the map the correction holds.
+ *
+ * The caller keeps its own user for \a image; the correction's record takes one of its own.
+ *
+ * \return the new correction, or null when \a layer is not part of \a ma or already has a mask.
+ */
+MaterialPaintLayer *BKE_paint_layers_mask_add_image(Material &ma,
+                                                   MaterialPaintLayer &layer,
+                                                   Image &image);
+
+/**
  * Remove the whole mask of \a layer (the base item and any item over it), letting go of their maps.
  *
  * \return false when \a layer is not part of \a ma or has no mask.
@@ -1050,12 +1064,12 @@ bool BKE_paint_layers_fill_reads_map(const Material &ma,
 
 /**
  * Whether \a layer may carry UV mapping: a Fill that reads a map in at least one channel (Layer,
- * correction) or through its mask image (mask item), or a Material row whose source reads the
+ * correction) or through a mask correction's own image, or a Material row whose source reads the
  * object's active UVs in its root tree or in a group on the path to its Principled BSDF
  * (#BKE_paint_layers_source_reads_uv). A Material row moves the UV at which its source is read --
  * its live textures, its rendered channel maps and its source-group wrapper. A map written by
  * strokes (Paint) is addressed at the raw UV and never supports it; neither does a filter, which
- * owns no map.
+ * owns no map, nor the base mask, whose map the Mask brush paints.
  *
  * The mapping predicates, and who asks each (each name is a suffix of
  * #BKE_paint_layers_mapping_*):

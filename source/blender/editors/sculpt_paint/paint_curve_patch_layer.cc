@@ -1142,22 +1142,6 @@ bool curve_patch_layer_session_blocks_row(const Object &ob, const MaterialPaintL
 /** \name Stack row activation
  * \{ */
 
-void paint_stack_texpaint_slots_refresh(bContext &C)
-{
-  Scene *scene = CTX_data_scene(&C);
-  Object *object = CTX_data_active_object(&C);
-  if (scene != nullptr && object != nullptr) {
-    BKE_texpaint_slots_refresh_object(scene, object);
-  }
-  /* Every change of the active row, added row or mode passes here, so the PBR Paint tab never
-   * waits for a separate opt-in button while a layer is active. */
-  if (Paint *paint = BKE_paint_get_active_from_context(&C)) {
-    if (BKE_paint_material_brush_auto_ensure(scene, paint, object)) {
-      WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, BKE_paint_brush(paint));
-    }
-  }
-}
-
 void paint_stack_gradient_tool_activate(bContext &C, const MaterialPaintLayer *layer)
 {
   Object *object = CTX_data_active_object(&C);
@@ -1184,41 +1168,6 @@ void paint_stack_gradient_tool_activate(bContext &C, const MaterialPaintLayer *l
     ED_paint_view3d_tool_id_set(&C, saved_tool_id.c_str());
   }
   saved_tool_id.clear();
-}
-
-bool paint_stack_target_mode_set(bContext &C, const ePaintLayerTargetMode mode)
-{
-  Scene *scene = CTX_data_scene(&C);
-  if (scene == nullptr || scene->toolsettings == nullptr) {
-    return false;
-  }
-  PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
-  /* Choosing a paint target (Mask or content) ends object-mask editing, even when the target is
-   * already the one asked for. */
-  if (paint_mode.layer_object_mask_edit != 0) {
-    paint_mode.layer_object_mask_edit = 0;
-    WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
-  }
-  if (paint_mode.layer_target_mode == mode) {
-    return false;
-  }
-  const bool leaving_mask = paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK &&
-                            mode != PAINT_LAYER_TARGET_MASK;
-  if (Paint *paint = BKE_paint_get_active_from_context(&C)) {
-    /* Puts the Mask brush in hand on the way in and the remembered content brush on the way out. */
-    BKE_paint_material_layer_target_mode_set(
-        *CTX_data_main(&C), *scene, *paint, paint_mode, mode);
-    if (leaving_mask && paint->brush != nullptr) {
-      /* The restored content brush may belong to another tool, so that tool becomes active too. */
-      WM_toolsystem_activate_brush_and_tool(&C, paint, paint->brush);
-    }
-  }
-  else {
-    paint_mode.layer_target_mode = int8_t(mode);
-  }
-  paint_stack_texpaint_slots_refresh(C);
-  WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, scene);
-  return true;
 }
 
 bool paint_stack_row_activate(bContext &C,

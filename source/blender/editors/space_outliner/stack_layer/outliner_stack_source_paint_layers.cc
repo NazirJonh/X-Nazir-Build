@@ -92,7 +92,6 @@
 #include "UI_resources.hh"
 
 #include "WM_api.hh"
-#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "../../sculpt_paint/paint_curve_patch_layer.hh"
@@ -1410,9 +1409,11 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                           "A grey map painted over the active layer's mask, in Mask mode"}),
                   paint_look_for_source(MA_PAINT_LAYER_SOURCE_IMAGE, PaintLookRole::MaskItem)),
         PaintLayerAddKind::MaskCorrection);
-    add(with_look(effect(with_color({"MASK_CORRECTION_FILL",
-                                     N_("Mask Fill Correction"),
-                                     "A flat grey laid over the active layer's mask"})),
+    /* No colour to ask for: a mask lays one grey, and the row's own value is where it is picked.
+     * The Add makes the correction white and lets the user lay it in the panel. */
+    add(with_look(effect({"MASK_CORRECTION_FILL",
+                          N_("Mask Fill Correction"),
+                          "A flat grey laid over the active layer's mask"}),
                   paint_look_for_source(MA_PAINT_LAYER_SOURCE_CONSTANT, PaintLookRole::MaskItem)),
         PaintLayerAddKind::MaskCorrectionFill);
 
@@ -1831,6 +1832,25 @@ void OUTLINER_OT_stack_layer_use_as_brush_source(wmOperatorType *ot)
 /* -------------------------------------------------------------------- */
 /** \name The source
  * \{ */
+
+MaterialPaintLayer *outliner_stack_row_mask_add_image(bContext &C,
+                                                     Material &material,
+                                                     MaterialPaintLayer &layer,
+                                                     Image &image)
+{
+  /* The mask, its activation and the paint target are
+   * #sculpt_paint::paint_layers_mask_add_image's: this is only the Outliner half, which tells the
+   * Outliners showing the material about the row. */
+  MaterialPaintLayer *mask = sculpt_paint::paint_layers_mask_add_image(C, material, layer, image);
+  if (mask == nullptr) {
+    return nullptr;
+  }
+  /* The correction is a row under the layer's mask section, made outside this editor's own
+   * operators whichever entry point called: the Outliners showing the material read it as the
+   * active row and bring the section up. */
+  outliner_stack_row_added_sync(C, material.id, mask->marker);
+  return mask;
+}
 
 class PaintLayersStackSource final : public StackSource,
                                      public StackEditor,
@@ -2350,6 +2370,10 @@ class PaintLayersStackSource final : public StackSource,
         menu.info.description = twin.info.description;
         menu.info.icon = twin.info.icon;
         menu.info.glyph = twin.info.glyph;
+        /* What the role asks the Add for is the role's, not the line's: a mask Fill lays one grey,
+         * so the resolved kind carries no colour question while the content Fill keeps its own. */
+        menu.info.takes_color = twin.info.takes_color;
+        menu.info.color_optional = twin.info.color_optional;
       }
       r_kinds.append(std::move(menu));
     }
@@ -2608,8 +2632,10 @@ class PaintLayersStackSource final : public StackSource,
     }
     sculpt_paint::paint_stack_gradient_tool_activate(C, created);
     /* A row with no map makes the first stroke create it and regenerate the graph before it can
-     * write, which loses that stroke. The active slot's map is made together with the row, so the
-     * first stroke already lands in it; the other channels still get theirs when they are used. */
+     * write, which loses that stroke. The map the user is about to paint -- the active slot's, or
+     * the Paint mask correction's -- is made together with the row, so the first stroke already
+     * lands in it; the other channels still get theirs when they are used. A Fill mask correction
+     * keeps no map of its own until it is painted, so its flat grey stays editable. */
     if (ELEM(params.kind,
              PaintLayerAddKind::Paint,
              PaintLayerAddKind::Correction,
@@ -2632,6 +2658,13 @@ class PaintLayersStackSource final : public StackSource,
               *CTX_data_main(&C), target, paint_mode.new_channel_image_size);
           sculpt_paint::paint_stack_texpaint_slots_refresh(C);
         }
+      }
+    }
+    /* A mask correction made the row's base mask when it had none, and the base's own map is made
+     * with it: a stroke on that base later would lose its first dab otherwise. */
+    if (is_mask_correction) {
+      if (MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(material, *created)) {
+        sculpt_paint::paint_layers_mask_base_map_prepare(C, material, *owner);
       }
     }
     /* The other channels of a Paint layer are not made here: every paint entry point makes the
@@ -2729,6 +2762,13 @@ class PaintLayersStackSource final : public StackSource,
     return "MASK";
   }
 
+  const char *aux_image_browse_prop() const override
+  {
+    /* A write-only Image property of the material: the browser assigns the picked image to it and
+     * its update makes the mask, the way the Material layer's own browse property does. */
+    return "paint_layer_add_image_mask";
+  }
+
   bool row_aux_set(bContext &C,
                    const StackFocus & /*focus*/,
                    ID &owner,
@@ -2761,8 +2801,26 @@ class PaintLayersStackSource final : public StackSource,
     /* A mask the user just added is the one they mean to work on. */
     BKE_paint_layers_active_set(material, layer->marker);
     sculpt_paint::paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+    /* The mask's map is made together with the mask: a first stroke into a mapless mask would
+     * create it and regenerate the graph before it can write (see #row_add). The map is filled
+     * with the constant, so the coverage reads the same before and after. */
+    sculpt_paint::paint_layers_mask_base_map_prepare(C, material, *layer);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return true;
+  }
+
+  bool row_aux_image_set(bContext &C,
+                         const StackFocus & /*focus*/,
+                         ID &owner,
+                         const int ordinal,
+                         Image &image) const override
+  {
+    Material &material = layers_owner(owner);
+    MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
+    if (layer == nullptr) {
+      return false;
+    }
+    return outliner_stack_row_mask_add_image(C, material, *layer, image) != nullptr;
   }
 
   bool row_aux_copy(bContext &C,

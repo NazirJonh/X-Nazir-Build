@@ -2734,6 +2734,44 @@ TEST_F(PaintLayersDescription, mask_correction_add_policy_makes_the_base_and_num
   EXPECT_EQ(BLI_listbase_count(&row->mask_stack), 3);
 }
 
+TEST_F(PaintLayersDescription, mask_add_image_makes_a_white_mask_and_a_fill_correction_that_reads_it)
+{
+  Material &ma = *BKE_material_add(bmain, "MaskImageMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image &image = *BKE_image_add_generated(
+      bmain, 4, 4, "MaskImage.png", 32, false, IMA_GENTYPE_BLANK, black, false, true, false);
+  const int users_before = image.id.us;
+
+  MaterialPaintLayer *correction = BKE_paint_layers_mask_add_image(ma, *row, image);
+  ASSERT_NE(correction, nullptr);
+
+  /* Add White Mask first: the base is the layer's own mask slot, white until a correction says
+   * otherwise, and it carries no map of its own. */
+  const MaterialPaintLayer *base = BKE_paint_layers_mask_base(*row);
+  ASSERT_NE(base, nullptr);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_mask_constant(*base), 1.0f);
+  ASSERT_EQ(base->channels_num, 1);
+  EXPECT_EQ(base->channels[0].image, nullptr);
+
+  /* The correction reads the image, and is named after it without the file extension. */
+  EXPECT_NE(correction, base);
+  EXPECT_EQ(correction->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ((correction->flag & MA_PAINT_LAYER_MASK_BASE), 0);
+  EXPECT_EQ(correction->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_STREQ(correction->name, "MaskImage");
+  ASSERT_EQ(correction->channels_num, 1);
+  EXPECT_EQ(correction->channels[0].image, &image);
+  EXPECT_EQ(BKE_paint_layers_mask_item_owner(ma, *correction), row);
+  /* The record took its own user, as any channel's map does. */
+  EXPECT_EQ(image.id.us, users_before + 1);
+
+  /* One mask per row: a second add leaves the first as it was. */
+  EXPECT_EQ(BKE_paint_layers_mask_add_image(ma, *row, image), nullptr);
+  EXPECT_EQ(BLI_listbase_count(&row->mask_stack), 2);
+  EXPECT_EQ(image.id.us, users_before + 1);
+}
+
 TEST_F(PaintLayersDescription, mask_correction_is_copied_reordered_and_carried_with_the_mask)
 {
   Material &ma = *BKE_material_add(bmain, "MaskCorrectionEditMat");
@@ -3013,7 +3051,15 @@ TEST_F(PaintLayersDescription, mapping_is_supported_by_a_fill_correction_and_a_f
   EXPECT_TRUE(BKE_paint_layers_mapping_supported(ma, *correction));
   EXPECT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, correction, true));
 
-  ASSERT_NE(BKE_paint_layers_mask_add(ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *mask_base = BKE_paint_layers_mask_add(ma, row, 1.0f);
+  ASSERT_NE(mask_base, nullptr);
+  /* The base mask is painted by the Mask brush and takes no map of its own: there is nothing for a
+   * remap to move, even when a map is on it. */
+  Image *base_map = id_cast<Image *>(BKE_id_new(bmain, ID_IM, "BaseMaskMap"));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      ma, mask_base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_map));
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *mask_base));
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_enabled(ma, mask_base, true));
   MaterialPaintLayer *mask_fill = BKE_paint_layers_mask_item_add(
       ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT, "F", 0.5f);
   ASSERT_NE(mask_fill, nullptr);

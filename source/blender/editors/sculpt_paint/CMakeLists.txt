@@ -65,6 +65,7 @@ set(SRC
   paint_gradient_tool_ops.cc
   paint_layers_gradient.cc
   paint_layers_gradient_gizmo.cc
+  paint_layers_sync.cc
   paint_ops.cc
   shapes/paint_bezier_input.cc
   shapes/paint_shape_blend.cc

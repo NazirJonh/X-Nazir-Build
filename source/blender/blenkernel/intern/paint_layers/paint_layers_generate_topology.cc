@@ -253,6 +253,18 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, 0x200 + uint64_t(uint8_t(layer.object_mask_type)));
     topology_hash_uid(hash, ma.paint_layers_owner_uid);
   }
+  /* The Height record's effective mode is nodes of its own: the delta-space chain for a mode, and
+   * for Compare the won mask multiplied into every other channel's factor. The scale is an input,
+   * not structure. A row built from its bake takes the same chain over its baked map, so both
+   * shapes are hashed on the one rule. */
+  if (wired_channels.contains(PAINT_MATERIAL_CHANNEL_HEIGHT) &&
+      (row_participates(ma, layer, PAINT_MATERIAL_CHANNEL_HEIGHT) ||
+       paint_layer_row_baked_channel(ma, layer, PAINT_MATERIAL_CHANNEL_HEIGHT, nullptr)))
+  {
+    const int height_blend = BKE_paint_layers_channel_height_blend_effective(
+        layer, PAINT_MATERIAL_CHANNEL_HEIGHT);
+    hash = topology_hash_mix(hash, 0x800 + uint64_t(uint8_t(height_blend)));
+  }
   if (paint_layer_row_substituted(ma, layer)) {
     /* A baked row is built from its bake's maps alone: which channels have one, which maps, and
      * whether the live row had a map of its own (its alpha then covers) is structure; the

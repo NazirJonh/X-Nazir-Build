@@ -451,6 +451,30 @@ def draw_material_mask_coverage_item(layout, _context, item):
     _draw_mask_output(layout, record, item)
 
 
+def draw_material_layer_height(layout, material, layer):
+    """Draw a layer's Height record controls, on the channel they belong to.
+
+    Offered only while the material's channel set carries Height at all, and only for a row that has
+    a Height entry to write: Inherit follows the row's blend (Mix, Add and Subtract keep their
+    meaning, any other blend reads as Mix), and every mode works on the distance from the neutral
+    level, so a neutral record changes nothing whatever the mode. The
+    write switch suppresses a record the row already holds -- on a row with none it would be a flag
+    waiting to silence a map added later -- so it is drawn only where it acts.
+    """
+    if not material.paint_layers_channel_in_set(channel='HEIGHT'):
+        return
+    settings = next((entry for entry in layer.channel_settings if entry.channel == 'HEIGHT'), None)
+    if settings is None:
+        return
+    layout.separator()
+    col = layout.column(align=True)
+    col.prop(settings, "height_blend_type", text="Height Blend")
+    if settings.height_blend_type != 'INHERIT':
+        col.prop(settings, "height_scale", text="Height Scale")
+    if any(record.channel == 'HEIGHT' for record in layer.channels):
+        col.prop(settings, "height_write", text="Write Height")
+
+
 def draw_material_layer_channels(layout, context, material, layer):
     """Draw a stack layer's channels with the shared PBR Paint channel widget.
 

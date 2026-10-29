@@ -33,6 +33,7 @@
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_report.hh"
 
+#include "paint_layers_composite_intern.hh"
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
 
@@ -717,6 +718,7 @@ static bool composite_image_layer_build(const Material &ma,
       out.mask_influence = 1.0f;
       out.color_alpha_coverage = record != nullptr && record->image != nullptr;
       out.blend = layer_channel_blend(layer, channel);
+      composite_height_settings_describe(layer, channel, out);
       out.opacity = ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) *
                     pass_through_scale;
       out.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, layer, channel);
@@ -765,6 +767,7 @@ static bool composite_image_layer_build(const Material &ma,
     out.color_alpha_coverage = BKE_paint_layers_is_folder(layer) ||
                                (record != nullptr && record->image != nullptr);
     out.blend = layer_channel_blend(layer, channel);
+    composite_height_settings_describe(layer, channel, out);
     /* The coverage map already holds the row's opacity and mask; only visibility stays live, the
      * same 0/1 the generated graph multiplies in. */
     out.opacity = ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) * pass_through_scale;
@@ -803,6 +806,7 @@ static bool composite_image_layer_build(const Material &ma,
     }
   }
   out.blend = layer_channel_blend(layer, channel);
+  composite_height_settings_describe(layer, channel, out);
   out.opacity = BKE_paint_layers_channel_opacity_effective(layer, channel) * pass_through_scale;
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
@@ -2066,6 +2070,14 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
    * approximation than the CPU exact preview. The caller falls back to the CPU display override. */
   if (layer.gradient.enabled) {
     return "a Gradient generator row is not laid by the GPU path";
+  }
+  /* The height modes are a delta-space step no shader branch reproduces. The description carries
+   * the effective mode, so an Inherit row over Add, Subtract or a non-Mix colour blend is refused
+   * here too. Until the preview shader grows it, a material using one falls back to the CPU
+   * composite instead of shading a different layer than the one the bake and the Image Editor
+   * show. */
+  if (layer.height_blend != MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT) {
+    return "a row blends Height with a mode of its own";
   }
   if (!layer.is_folder && layer.adjustment_filter == 0 && layer.color_image == nullptr &&
       layer.anchor_point_color == nullptr && !layer.has_constant_color && !reader &&

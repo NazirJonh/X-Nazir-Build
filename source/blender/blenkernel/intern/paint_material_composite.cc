@@ -884,6 +884,92 @@ static void blend_row_linear(float dst[4],
 }
 
 /**
+ * The Height record's own blend: the delta-space formula every height mode works in. The red
+ * component is the height (the graph reads the same channel through a Separate Color), the
+ * distance from the neutral level of the record is scaled by \a scale and the whole step is
+ * weighted by \a factor exactly the way #blend_row_linear weights its modes:
+ *
+ *   d_below = below - neutral,  d_layer = (c - neutral) * scale
+ *   Mix:       d_out = d_below * (1 - f) + d_layer * f
+ *   Add:       d_out = d_below + f * d_layer
+ *   Subtract:  d_out = d_below - f * d_layer
+ * Nothing clamps: the encode step is where a byte output is finally clamped, and a float buffer
+ * keeps the overshoot.
+ *
+ * The fourth component is not the height's: the generated chain writes only the scalar and the
+ * row's content alpha is accumulated apart, by the channel's own blend (#blend_row_linear's Mix
+ * rule). \a channel_is_mix carries that answer, so the alpha cannot start following the height
+ * mode instead of the channel's blend.
+ */
+static void blend_row_height(float dst[4],
+                             const float top[4],
+                             const int16_t height_blend,
+                             const float scale,
+                             const float factor,
+                             const bool channel_is_mix)
+{
+  const float fac = clamp_f(factor, 0.0f, 1.0f);
+  const float out = height_blend_step(height_blend, dst[0], top[0], scale, fac);
+  /* The height is a scalar the whole colour carries; the fourth component follows the Mix model
+   * the ordinary blends read (a Mix row lays its alpha by its factor, the rest keeps what is
+   * below), indexed by the channel's blend rather than by the height mode. */
+  dst[0] = dst[1] = dst[2] = out;
+  if (channel_is_mix) {
+    dst[3] = dst[3] * (1.0f - fac) + top[3] * fac;
+  }
+}
+
+float height_blend_step(const int height_blend,
+                        const float below,
+                        const float layer,
+                        const float scale,
+                        const float factor)
+{
+  const float fac = clamp_f(factor, 0.0f, 1.0f);
+  const float d_below = below - PAINT_HEIGHT_NEUTRAL;
+  const float d_layer = (layer - PAINT_HEIGHT_NEUTRAL) * scale;
+  float d_out;
+  switch (height_blend) {
+    case MA_PAINT_LAYER_HEIGHT_BLEND_MIX:
+      d_out = d_below * (1.0f - fac) + d_layer * fac;
+      break;
+    case MA_PAINT_LAYER_HEIGHT_BLEND_ADD:
+      d_out = d_below + fac * d_layer;
+      break;
+    case MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT:
+      d_out = d_below - fac * d_layer;
+      break;
+    default:
+      /* The caller picks the ordinary blend for an unset mode (#composite_row_blend); anything
+       * else is a corrupt description, and a plain mix keeps the buffer sane rather than laying
+       * garbage. */
+      d_out = d_below * (1.0f - fac) + d_layer * fac;
+      break;
+  }
+  return d_out + PAINT_HEIGHT_NEUTRAL;
+}
+
+/**
+ * Lay \a top over \a dst by what the row describes: the Height record's own delta-space step when
+ * it has a mode (#blend_row_height), the ordinary blend otherwise (#blend_row_linear). The one
+ * place the choice is made, so the top-level stack and a folder's isolated accumulation cannot
+ * pick differently for the same row.
+ */
+static void composite_row_blend(float dst[4],
+                                const float top[4],
+                                const CompositeBlend blend,
+                                const int16_t height_blend,
+                                const float height_scale,
+                                const float factor)
+{
+  if (height_blend != MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT) {
+    blend_row_height(dst, top, height_blend, height_scale, factor, blend == CompositeBlend::Mix);
+    return;
+  }
+  blend_row_linear(dst, top, blend, factor);
+}
+
+/**
  * Render one layer onto tile-sized buffers: its straight colour in \a r_color and the coverage it
  * blends by in \a r_factor, before the layer's own opacity.
  *
@@ -1392,7 +1478,12 @@ static void composite_folder_accumulate(const PaintMaterialCompositeLayer &folde
       }
       /* The row's blend at full factor, then the mix towards its own colour by what is there. */
       float blended[4] = {straight[0], straight[1], straight[2], straight[3]};
-      blend_row_linear(blended, child_color.data() + i * 4, child.blend, 1.0f);
+      composite_row_blend(blended,
+                          child_color.data() + i * 4,
+                          child.blend,
+                          child.height_blend,
+                          child.height_scale,
+                          1.0f);
       const float *c = child_color.data() + i * 4;
       for (const int k : IndexRange(4)) {
         const float c_eff = c[k] + (blended[k] - c[k]) * a;
@@ -1647,10 +1738,12 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
         }
         composite_layer_apply(layer, tile, color_storage.data(), factor_storage.data());
         for (int64_t i = 0; i < count; i++) {
-          blend_row_linear(tile_dst + i * 4,
-                           color_storage.data() + i * 4,
-                           layer.blend,
-                           layer.opacity * factor_storage[i]);
+          composite_row_blend(tile_dst + i * 4,
+                              color_storage.data() + i * 4,
+                              layer.blend,
+                              layer.height_blend,
+                              layer.height_scale,
+                              layer.opacity * factor_storage[i]);
         }
         tile_layers_evaluated++;
       }
@@ -2758,6 +2851,9 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.mask_from_alpha,
                             layer.opacity,
                             layer.mask_influence);
+    /* The height modes are another formula: they have to move the hash or an edit would keep
+     * serving the cached composite. */
+    hash = get_default_hash(hash, int(layer.height_blend), layer.height_scale);
     /* A flat colour is not backed by an image, so its value has to be hashed explicitly or the
      * cached composite would not follow an edit of it. Split rather than appended:
      * #get_default_hash mixes a fixed number of values at once. */

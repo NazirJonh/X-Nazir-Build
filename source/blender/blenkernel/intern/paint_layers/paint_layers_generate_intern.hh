@@ -115,6 +115,12 @@ inline constexpr const char *INPUT_SUBSTITUTED_PROP = "pbr_paint_layers_baked";
  * opacity input carries the same role with the correction's own marker. */
 inline constexpr const char *ROLE_OPACITY = "opacity";
 /**
+ * #INPUT_ROLE_PROP value of the scale of a row's Height record (`1 + delta`): the height modes'
+ * delta-space step multiplies the record's distance from the neutral level by it. A value, so a
+ * scale edit never rebuilds the chain.
+ */
+inline constexpr const char *ROLE_HEIGHT_SCALE = "height_scale";
+/**
  * #INPUT_ROLE_PROP value of the float input that picks the content alpha model of a (row, channel):
  * 1 for a Mix row, whose alpha is mixed by the row's factor, and 0 for every other mode, which
  * keeps the alpha below. A value, so changing the blend never rewires the alpha chain.

@@ -645,6 +645,31 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
                                                  const MaterialPaintLayer &layer)
 {
   const char *layer_name = layer.name[0] != '\0' ? layer.name : "Layer";
+  /* The Height record's own scale, one input for the whole row: the height modes' chain multiplies
+   * the record's distance from the neutral level by it, and a scale edit is then a value. A row
+   * built from its bake lays the same chain over its baked map, so the input follows the bake. */
+  if (BKE_paint_layers_channel_height_blend_effective(layer, PAINT_MATERIAL_CHANNEL_HEIGHT) !=
+          MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT &&
+      (row_participates(ma_, layer, PAINT_MATERIAL_CHANNEL_HEIGHT) ||
+       paint_layer_row_baked_channel(ma_, layer, PAINT_MATERIAL_CHANNEL_HEIGHT, nullptr)))
+  {
+    char base[200];
+    SNPRINTF(base, "%s Height Scale", layer_name);
+    bNodeTreeInterfaceSocket *scale = layer_group_value_input(
+        group,
+        base,
+        "NodeSocketFloat",
+        ROLE_HEIGHT_SCALE,
+        layer.marker,
+        PAINT_MATERIAL_CHANNEL_HEIGHT);
+    if (scale != nullptr) {
+      group_input_default_set(
+          group,
+          *scale,
+          BKE_paint_layers_channel_height_scale(layer, PAINT_MATERIAL_CHANNEL_HEIGHT));
+      height_scale_inputs_.add(&layer, scale);
+    }
+  }
   if (paint_layer_row_substituted(ma_, layer)) {
     /* A row built from its bake has one input per channel it has a map in: its visibility. The
      * opacity, the mask and the corrections are inside the bake, and its own object mask is applied

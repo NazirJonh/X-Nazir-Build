@@ -30,7 +30,9 @@
 #include "BKE_customdata.hh"
 #include "BKE_library.hh"
 #include "BKE_paint.hh"
-/* Outside #RNA_RUNTIME: the tile range constants are used by the RNA definitions too. */
+/* Outside #RNA_RUNTIME: the tile range and Height scale constants are used by the RNA definitions
+ * too. */
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_object_mask.hh"
 
 #include "RNA_define.hh"
@@ -151,6 +153,38 @@ static const EnumPropertyItem rna_enum_material_paint_layer_channel_blend_items[
     {MA_PAINT_LAYER_BLEND_SATURATION, "SATURATION", 0, "Saturation", "Saturation blend"},
     {MA_PAINT_LAYER_BLEND_COLOR, "COLOR", 0, "Color", "Color blend"},
     {MA_PAINT_LAYER_BLEND_VALUE, "VALUE", 0, "Value", "Value blend"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/**
+ * The Height channel's own blend: how a row's Height record is laid over the height below it. Every
+ * mode works on the distance from the neutral level, so a neutral record changes nothing whatever
+ * the mode; the values are not the colour blends' codes. Inherit follows the row's blend: Mix, Add
+ * and Subtract keep their meaning, any other blend reads as Mix. Only the Height channel offers
+ * them.
+ */
+static const EnumPropertyItem rna_enum_material_paint_layer_height_blend_items[] = {
+    {MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT,
+     "INHERIT",
+     0,
+     "Inherit",
+     "Follows the row's blend; Mix, Add and Subtract keep their meaning around the neutral level, "
+     "any other blend reads as Mix"},
+    {MA_PAINT_LAYER_HEIGHT_BLEND_MIX,
+     "MIX",
+     0,
+     "Mix",
+     "Blend between the height below and the record, by the row's factor"},
+    {MA_PAINT_LAYER_HEIGHT_BLEND_ADD,
+     "ADD",
+     0,
+     "Add",
+     "Add the record's distance from the neutral level to the height below"},
+    {MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT,
+     "SUBTRACT",
+     0,
+     "Subtract",
+     "Subtract the record's distance from the neutral level from the height below"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -3467,6 +3501,68 @@ static const EnumPropertyItem *rna_MaterialPaintLayerChannelSettings_blend_itemf
   return normal_blend_items;
 }
 
+static int rna_MaterialPaintLayerChannelSettings_height_blend_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  return settings->height_blend;
+}
+
+static void rna_MaterialPaintLayerChannelSettings_height_blend_set(PointerRNA *ptr, int value)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (ma == nullptr) {
+    return;
+  }
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  if (MaterialPaintLayer *row = rna_paint_layer_by_settings(*ma, settings)) {
+    BKE_paint_layers_channel_height_blend_set(
+        *ma, *row, int(settings - row->channel_settings), value);
+  }
+}
+
+static float rna_MaterialPaintLayerChannelSettings_height_scale_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  return 1.0f + settings->height_scale_delta;
+}
+
+static void rna_MaterialPaintLayerChannelSettings_height_scale_set(PointerRNA *ptr, float value)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (ma == nullptr) {
+    return;
+  }
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  if (MaterialPaintLayer *row = rna_paint_layer_by_settings(*ma, settings)) {
+    BKE_paint_layers_channel_height_scale_set(
+        *ma, *row, int(settings - row->channel_settings), value);
+  }
+}
+
+static bool rna_MaterialPaintLayerChannelSettings_height_write_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  return (settings->height_flag & MA_PAINT_LAYER_CHANNEL_HEIGHT_WRITE_SKIP) == 0;
+}
+
+static void rna_MaterialPaintLayerChannelSettings_height_write_set(PointerRNA *ptr, bool value)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (ma == nullptr) {
+    return;
+  }
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  if (MaterialPaintLayer *row = rna_paint_layer_by_settings(*ma, settings)) {
+    BKE_paint_layers_channel_height_write_set(*ma, *row, value);
+  }
+}
+
 /** Path of one (row, channel) entry below its material, so a property of it can be addressed. */
 static std::optional<std::string> rna_MaterialPaintLayerChannelSettings_path(const PointerRNA *ptr)
 {
@@ -5190,6 +5286,48 @@ static void rna_def_material_paint_layer_channel_settings(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.0f, 100.0f);
   RNA_def_property_ui_text(
       prop, "Opacity", "Opacity of the row in this channel, applied over the row's own");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "height_blend_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(
+      prop,
+      "rna_MaterialPaintLayerChannelSettings_height_blend_get",
+      "rna_MaterialPaintLayerChannelSettings_height_blend_set",
+      nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_height_blend_items);
+  RNA_def_property_enum_default(prop, MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT);
+  RNA_def_property_ui_text(
+      prop,
+      "Height Blend Mode",
+      "The Height record's own blend over the height below it, relative to the neutral level; "
+      "Inherit follows the row's blend (Mix, Add and Subtract keep their meaning, any other blend "
+      "reads as Mix). The Height channel alone honours it");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "height_scale", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(
+      prop,
+      "rna_MaterialPaintLayerChannelSettings_height_scale_get",
+      "rna_MaterialPaintLayerChannelSettings_height_scale_set",
+      nullptr);
+  RNA_def_property_range(prop, PAINT_HEIGHT_SCALE_MIN, PAINT_HEIGHT_SCALE_MAX);
+  RNA_def_property_ui_text(
+      prop,
+      "Height Scale",
+      "The scale of the record's distance from the neutral level; one is neutral and negative "
+      "scales are not offered (Subtract inverts). The Height channel alone honours it");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "height_write", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop,
+      "rna_MaterialPaintLayerChannelSettings_height_write_get",
+      "rna_MaterialPaintLayerChannelSettings_height_write_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Write Height",
+      "Whether the row's Height record reaches the relief; off keeps the record and its map, and "
+      "leaves the row's other channels untouched");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 }
 

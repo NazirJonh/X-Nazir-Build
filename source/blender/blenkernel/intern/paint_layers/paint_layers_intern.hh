@@ -362,6 +362,14 @@ inline bool paint_layer_channel_contributes(const Material &ma,
   if (record == nullptr || paint_layer_channel_filtered(ma, record->channel)) {
     return false;
   }
+  /* The Height record a row was told to stop writing takes part nowhere, whatever its map or flat
+   * value says: the row leaves the Height chain of the graph and of the CPU stack alike. */
+  if (record->channel == PAINT_MATERIAL_CHANNEL_HEIGHT &&
+      (layer.channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_flag &
+       MA_PAINT_LAYER_CHANNEL_HEIGHT_WRITE_SKIP) != 0)
+  {
+    return false;
+  }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_FLAT_VALUE)) {
     return paint_layer_channel_live(record);
   }

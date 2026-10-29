@@ -577,6 +577,21 @@ enum eMaterialPaintLayerBlend : int8_t {
   MA_PAINT_LAYER_BLEND_NORMAL_REPLACE = 20,
 };
 
+/**
+ * #MaterialPaintLayerChannelSettings::height_blend -- how a row's Height record is laid over the
+ * height below it. Unlike the colour blends, every mode works on the distance from the neutral
+ * level, so a neutral record is a no-op whatever the mode. Inherit follows the row's ordinary
+ * blend; Mix, Add and Subtract keep their meaning there, and every other blend reads as Mix. The
+ * Height channel alone reads it; the values are not #eMaterialPaintLayerBlend codes.
+ */
+enum eMaterialPaintLayerHeightBlend : int8_t {
+  /** Follow the row's own colour blend, the way a row written before the height modes reads. */
+  MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT = 0,
+  MA_PAINT_LAYER_HEIGHT_BLEND_MIX = 1,
+  MA_PAINT_LAYER_HEIGHT_BLEND_ADD = 2,
+  MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT = 3,
+};
+
 /** #MaterialPaintLayer::source -- what the row paints with. */
 enum eMaterialPaintLayerSource : int8_t {
   /** A painted map per channel. */
@@ -844,6 +859,24 @@ struct MaterialPaintLayerChannel {
 };
 
 /**
+ * #MaterialPaintLayerChannelSettings::height_flag. Zeroed fields read as the behaviour every file
+ * written before the height model had, so a flag is opt-in and old files need no versioning.
+ */
+enum eMaterialPaintLayerHeightFlag : int8_t {
+  /**
+   * The row lays nothing in #PAINT_MATERIAL_CHANNEL_HEIGHT: its Height record (a map or a flat
+   * value) is kept and shown, but the height it carries stops contributing to the stack, the way
+   * Ucupaint's `write_height = False` keeps a layer's height out of the displacement. The row's
+   * other channels are untouched.
+   *
+   * Known limitation: any Height mode or a Compare record takes the material off the GPU preview
+   * and onto the CPU composite (see #BKE_paint_layers_gpu_unsupported_reason), so a row that sets
+   * one paints slower until the mode is cleared.
+   */
+  MA_PAINT_LAYER_CHANNEL_HEIGHT_WRITE_SKIP = 1 << 0,
+};
+
+/**
  * The overrides of one (row, channel) pair, kept in #MaterialPaintLayer::channel_settings.
  *
  * A fixed array on the row rather than a field of the sparse #MaterialPaintLayerChannel record: the
@@ -862,6 +895,22 @@ struct MaterialPaintLayerChannelSettings {
   char _pad[3] = {};
   /** Multiplied by the row's opacity; 1.0 when the channel has no override. */
   float opacity = 1.0f;
+  /**
+   * A per-Height-channel #eMaterialPaintLayerHeightBlend override. Zero inherits the channel's
+   * ordinary blend (#blend), which is what files written before the height modes and rows that take
+   * no part in Height read as; only #PAINT_MATERIAL_CHANNEL_HEIGHT honours it.
+   */
+  int8_t height_blend = MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT;
+  /** #eMaterialPaintLayerHeightFlag. Zero reads as the behaviour every older file had. */
+  int8_t height_flag = 0;
+  /** Keeps #height_scale_delta on its float boundary. */
+  char _pad_height[2] = {};
+  /**
+   * The Height record's own scale, stored as the distance from one: the scale is `1 + delta`, so
+   * zero (what a file written before the field carries) reads as one and no versioning is needed.
+   * Applied to the distance from the neutral level; only #PAINT_MATERIAL_CHANNEL_HEIGHT honours it.
+   */
+  float height_scale_delta = 0.0f;
 };
 
 /** #MaterialPaintLayerMapping::space */

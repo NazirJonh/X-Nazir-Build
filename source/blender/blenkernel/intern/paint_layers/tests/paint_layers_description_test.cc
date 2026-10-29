@@ -18,7 +18,9 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_report.hh"
 
 #include "../paint_layers_intern.hh"
@@ -34,6 +36,8 @@
 #include "BLI_string.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
+
+#include <cstring>
 
 #include "BLO_readfile.hh"
 #include "BLO_writefile.hh"
@@ -56,6 +60,8 @@ class PaintLayersDescription : public bke::BlenderGTestBase {
   Main *bmain = nullptr;
   /** The cache budget the test found, restored on teardown. */
   size_t slice_cache_budget_before_ = 0;
+  /** Scratch for the composite descriptions the height tests read. */
+  Vector<PaintMaterialCompositeImageLayer> layers_;
 
   void SetUp() override
   {
@@ -3603,6 +3609,222 @@ TEST_F(PaintLayersDescription, reader_count_matches_resolve)
   const int expected = paint_layer_anchor_point_readers(*ma, point->marker).size();
   EXPECT_EQ(RNA_property_int_get(&point_ptr, count), expected);
   EXPECT_EQ(expected, 2);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Height model and Normal & Height response
+ * \{ */
+
+TEST_F(PaintLayersDescription, height_channel_settings_default_to_neutral)
+{
+  Material *ma = BKE_material_add(bmain, "HeightDefaultMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "Layer");
+
+  /* A row written before the height fields (and every fresh one) reads as: inherit the channel's
+   * ordinary blend, scale one. */
+  EXPECT_EQ(BKE_paint_layers_channel_height_blend(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT),
+            MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT);
+  EXPECT_FLOAT_EQ(
+      BKE_paint_layers_channel_height_scale(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT), 1.0f);
+
+  /* The two settings are the Height channel's alone. */
+  EXPECT_FALSE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_HEIGHT_BLEND_ADD));
+  EXPECT_FALSE(BKE_paint_layers_channel_height_scale_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 2.0f));
+
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
+  EXPECT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_ADD));
+  /* The height modes are different nodes of the generated chain, like the colour blends are types
+   * of the Mix node: a structural edit. */
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_EQ(BKE_paint_layers_channel_height_blend(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT),
+            MA_PAINT_LAYER_HEIGHT_BLEND_ADD);
+  EXPECT_FALSE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT + 1));
+
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
+  EXPECT_TRUE(BKE_paint_layers_channel_height_scale_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, 3.0f));
+  /* The scale is an input of the chain, like the row's opacity: a value edit, no rebuild. */
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_FLOAT_EQ(
+      BKE_paint_layers_channel_height_scale(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT), 3.0f);
+  /* An out-of-range scale clamps to the stored range rather than being refused. */
+  EXPECT_TRUE(BKE_paint_layers_channel_height_scale_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, 9.0f));
+  EXPECT_FLOAT_EQ(
+      BKE_paint_layers_channel_height_scale(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT), 4.0f);
+  EXPECT_TRUE(BKE_paint_layers_channel_height_scale_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, -1.0f));
+  EXPECT_FLOAT_EQ(
+      BKE_paint_layers_channel_height_scale(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT), 0.0f);
+
+  /* A folder lays a Height blend of its own through its own row, so it stops inlining: even the
+   * height Mix is another operation than the colour Mix the inline lays. */
+  MaterialPaintLayer *folder = paint_layer_add(*ma, "Folder");
+  folder->source = MA_PAINT_LAYER_SOURCE_STACK;
+  EXPECT_TRUE(BKE_paint_layers_folder_is_pass_through(*folder));
+  EXPECT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *folder, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_MIX));
+  EXPECT_FALSE(BKE_paint_layers_folder_is_pass_through(*folder));
+}
+
+/** The one rule every Height reader uses: an explicit mode wins, otherwise the row's ordinary
+ * blend maps Mix to Inherit (the same step, GPU preview kept), Add and Subtract to themselves, and
+ * everything else to Mix. */
+TEST_F(PaintLayersDescription, height_effective_blend_follows_the_row)
+{
+  Material *ma = BKE_material_add(bmain, "HeightEffectiveMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "Layer");
+
+  for (const int mode : {MA_PAINT_LAYER_HEIGHT_BLEND_MIX,
+                         MA_PAINT_LAYER_HEIGHT_BLEND_ADD,
+                         MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT})
+  {
+    SCOPED_TRACE(::testing::Message() << "explicit mode=" << mode);
+    ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+        *ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, mode));
+    EXPECT_EQ(BKE_paint_layers_channel_height_blend_effective(*layer,
+                                                              PAINT_MATERIAL_CHANNEL_HEIGHT),
+              mode);
+  }
+
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT));
+  struct Case {
+    int row_blend;
+    int effective;
+  };
+  const Case cases[] = {
+      {MA_PAINT_LAYER_BLEND_MIX, MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT},
+      {MA_PAINT_LAYER_BLEND_ADD, MA_PAINT_LAYER_HEIGHT_BLEND_ADD},
+      {MA_PAINT_LAYER_BLEND_SUBTRACT, MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT},
+      {MA_PAINT_LAYER_BLEND_MULTIPLY, MA_PAINT_LAYER_HEIGHT_BLEND_MIX},
+      {MA_PAINT_LAYER_BLEND_OVERLAY, MA_PAINT_LAYER_HEIGHT_BLEND_MIX},
+      {MA_PAINT_LAYER_BLEND_SCREEN, MA_PAINT_LAYER_HEIGHT_BLEND_MIX},
+  };
+  for (const Case &test_case : cases) {
+    SCOPED_TRACE(::testing::Message() << "row blend=" << test_case.row_blend);
+    ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, layer, test_case.row_blend));
+    EXPECT_EQ(BKE_paint_layers_channel_height_blend_effective(*layer,
+                                                              PAINT_MATERIAL_CHANNEL_HEIGHT),
+              test_case.effective);
+  }
+
+  /* An explicit mode is the record's own choice and does not follow the row's blend. */
+  ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, layer, MA_PAINT_LAYER_BLEND_MULTIPLY));
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT));
+  EXPECT_EQ(BKE_paint_layers_channel_height_blend_effective(*layer,
+                                                            PAINT_MATERIAL_CHANNEL_HEIGHT),
+            MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT);
+
+  /* No other channel has an effective Height mode. */
+  EXPECT_EQ(BKE_paint_layers_channel_height_blend_effective(*layer,
+                                                            PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT);
+}
+
+TEST_F(PaintLayersDescription, duplicate_and_paste_keep_channel_settings)
+{
+  Material &ma = *BKE_material_add(bmain, "HeightCopyMat");
+  ma.paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "Row", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *target = BKE_paint_layers_add(ma, "Target", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(ma, row, "Corr");
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(target, nullptr);
+  ASSERT_NE(effect, nullptr);
+
+  row->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_blend =
+      MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT;
+  row->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_scale_delta = 0.5f;
+  row->channel_settings[PAINT_MATERIAL_CHANNEL_ROUGHNESS].opacity = 0.3f;
+  effect->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_blend =
+      MA_PAINT_LAYER_HEIGHT_BLEND_ADD;
+  effect->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_scale_delta = -0.75f;
+
+  /* A duplicated row keeps its per (row, channel) overrides, the way the copy of a material does. */
+  MaterialPaintLayer *row_copy = BKE_paint_layers_duplicate(*bmain, ma, row);
+  ASSERT_NE(row_copy, nullptr);
+  EXPECT_EQ(row_copy->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_blend,
+            MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT);
+  EXPECT_FLOAT_EQ(
+      row_copy->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_scale_delta, 0.5f);
+  EXPECT_FLOAT_EQ(row_copy->channel_settings[PAINT_MATERIAL_CHANNEL_ROUGHNESS].opacity, 0.3f);
+
+  /* A pasted correction keeps its own: its blend and scale travel with it onto the other row. */
+  MaterialPaintLayer *effect_copy = BKE_paint_layers_correction_paste(*bmain, ma, *effect, target);
+  ASSERT_NE(effect_copy, nullptr);
+  EXPECT_EQ(effect_copy->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_blend,
+            MA_PAINT_LAYER_HEIGHT_BLEND_ADD);
+  EXPECT_FLOAT_EQ(
+      effect_copy->channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_scale_delta, -0.75f);
+}
+
+TEST_F(PaintLayersDescription, height_write_skip_takes_the_row_out_of_height_alone)
+{
+  Material *ma = BKE_material_add(bmain, "HeightSkipMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  Image *image = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "HeightSkipImage"));
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "Layer");
+  paint_layer_channel_add(*layer, *image);
+  /* A Height record of the row's own: a flat value, so the row lays height without a map. DNA
+   * structs delete their copy assignment, so the record lands with a memcpy like a file read. */
+  MaterialPaintLayerChannel *height_record = MEM_new<MaterialPaintLayerChannel>(__func__);
+  height_record->channel = PAINT_MATERIAL_CHANNEL_HEIGHT;
+  height_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  height_record->value[0] = 0.8f;
+  height_record->value[3] = 1.0f;
+  layer->channels = static_cast<MaterialPaintLayerChannel *>(
+      MEM_reallocN(layer->channels, sizeof(MaterialPaintLayerChannel) * 2));
+  memcpy(&layer->channels[1], height_record, sizeof(MaterialPaintLayerChannel));
+  MEM_freeN(height_record);
+  layer->channels_num = 2;
+
+  /* By default the row writes its height. */
+  EXPECT_TRUE(BKE_paint_layers_channel_height_write(*layer));
+  EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_HEIGHT, layers_));
+  EXPECT_EQ(layers_.size(), 1);
+
+  /* Skipping keeps the record and the Base Color channel, and takes only the height out. */
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
+  EXPECT_TRUE(BKE_paint_layers_channel_height_write_set(*ma, *layer, false));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_FALSE(BKE_paint_layers_channel_height_write(*layer));
+  ASSERT_EQ(layer->channels_num, 2);
+  EXPECT_EQ(layer->channels[1].channel, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  EXPECT_EQ(layer->channels[1].state, MA_PAINT_LAYER_CHANNEL_ENABLED);
+
+  layers_.clear();
+  EXPECT_FALSE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_HEIGHT, layers_));
+  layers_.clear();
+  EXPECT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers_));
+  ASSERT_EQ(layers_.size(), 1);
+
+  /* Writing again puts the row back. */
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
+  EXPECT_TRUE(BKE_paint_layers_channel_height_write_set(*ma, *layer, true));
+  EXPECT_TRUE(BKE_paint_layers_channel_height_write(*layer));
+  layers_.clear();
+  EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_HEIGHT, layers_));
+  EXPECT_EQ(layers_.size(), 1);
+
+  /* The other channels' records stay untouched by the toggle, and the bake hash sees the flag. */
+  MaterialPaintLayer *other = paint_layer_add(*ma, "Other");
+  paint_layer_channel_add(*other, *image);
+  EXPECT_TRUE(BKE_paint_layers_channel_height_write_set(*ma, *other, false));
+  EXPECT_TRUE(BKE_paint_layers_channel_height_write(*layer));
 }
 
 /** \} */

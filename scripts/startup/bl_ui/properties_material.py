@@ -18,6 +18,7 @@ from bl_ui.properties_paint_common import (
 from bl_ui.properties_material_paint_layers import (
     draw_material_channel_set,
     draw_material_layer_channels,
+    draw_material_layer_height,
     draw_material_mask_coverage_item,
     draw_material_mask_item,
 )
@@ -841,6 +842,10 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         if layer.source != 'STACK':
             layout.separator()
             draw_material_layer_channels(layout, context, owner, layer)
+
+        # The Height record's own blend, on the channel it belongs to. Drawn last, after the
+        # channels, and through its own helper so the panel body stays a list of what it shows.
+        draw_material_layer_height(layout, owner, layer)
 
 
 class LAYER_MT_mapping_reset(Menu):

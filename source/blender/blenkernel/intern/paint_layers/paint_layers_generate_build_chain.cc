@@ -53,27 +53,6 @@
 namespace blender {
 namespace bke::paint_layers {
 
-/* Defined with the correction code below, which also builds Math nodes; the mask code needs it
- * first. The default of the last argument is given at the definition. */
-static NodeOutput math_node_add(bNodeTree &tree,
-                                layout::LayoutGrid &grid,
-                                Vector<bNode *> &r_nodes,
-                                int operation,
-                                NodeOutput a,
-                                NodeOutput b,
-                                float a_default = 0.0f);
-
-/** A Math node of \a operation over \a a and the constant \a b; defined with the mask code below. */
-static bNode *math_constant_node_add(bNodeTree &tree,
-                                     layout::LayoutGrid &grid,
-                                     Vector<bNode *> &r_nodes,
-                                     int operation,
-                                     NodeOutput a,
-                                     float b);
-
-/** A Mix node in float mode, `mix(A, B, factor)`; defined with the isolated-fold code below. */
-static bNode *mix_float_node_add(bNodeTree &tree);
-
 NodeOutput PaintLayersTreeBuilder::multiply_nodes_add(bNodeTree &tree,
                                                       const NodeOutput a,
                                                       const NodeOutput b)
@@ -705,12 +684,12 @@ void PaintLayersTreeBuilder::mask_output_ensure(LayerGroup &group, const Materia
 }
 
 /** A Math node of \a operation over \a a and the constant \a b; null when it cannot be made. */
-static bNode *math_constant_node_add(bNodeTree &tree,
-                                     layout::LayoutGrid &grid,
-                                     Vector<bNode *> &r_nodes,
-                                     const int operation,
-                                     const NodeOutput a,
-                                     const float b)
+bNode *math_constant_node_add(bNodeTree &tree,
+                              layout::LayoutGrid &grid,
+                              Vector<bNode *> &r_nodes,
+                              const int operation,
+                              const NodeOutput a,
+                              const float b)
 {
   bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
   if (node == nullptr) {
@@ -731,10 +710,10 @@ static bNode *math_constant_node_add(bNodeTree &tree,
 }
 
 /** A Value node holding \a value; the null output when it cannot be made. */
-static NodeOutput value_node_add(bNodeTree &tree,
-                                 layout::LayoutGrid &grid,
-                                 Vector<bNode *> &r_nodes,
-                                 const float value)
+NodeOutput value_node_add(bNodeTree &tree,
+                          layout::LayoutGrid &grid,
+                          Vector<bNode *> &r_nodes,
+                          const float value)
 {
   bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
   bNodeSocket *out = (node != nullptr) ? socket_out(*node, "Value") : nullptr;
@@ -1269,7 +1248,7 @@ void blend_inputs_link(bNodeTree &tree,
 }
 
 /** A Mix node in float mode: `mix(A, B, factor)`, the coverage fold of an isolated row. */
-static bNode *mix_float_node_add(bNodeTree &tree)
+bNode *mix_float_node_add(bNodeTree &tree)
 {
   bNode *mix = bke::node_add_static_node(nullptr, tree, SH_NODE_MIX);
   if (mix == nullptr) {
@@ -1287,13 +1266,13 @@ static bNode *mix_float_node_add(bNodeTree &tree)
  * A Math node of \a operation over \a a and \a b: a null socket of \a a reads \a a_default instead.
  * Empty when the node cannot be made, in which case nothing is left behind.
  */
-static NodeOutput math_node_add(bNodeTree &tree,
-                                layout::LayoutGrid &grid,
-                                Vector<bNode *> &r_nodes,
-                                const int operation,
-                                const NodeOutput a,
-                                const NodeOutput b,
-                                const float a_default)
+NodeOutput math_node_add(bNodeTree &tree,
+                         layout::LayoutGrid &grid,
+                         Vector<bNode *> &r_nodes,
+                         const int operation,
+                         const NodeOutput a,
+                         const NodeOutput b,
+                         const float a_default)
 {
   bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
   if (node == nullptr) {
@@ -3185,26 +3164,53 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   }
 
   /* The blend over Below. Normal combines two tangent-space maps rather than interpolating their
-   * encoded values, which would flatten the relief; everything else uses the channel's blend. */
-  const BlendNode blend = this->blend_node_add(
-      tree,
-      layer,
-      channel,
-      BKE_paint_layers_blend_to_ramp(
-          eMaterialPaintLayerBlend(BKE_paint_layers_channel_blend_effective(layer, channel))));
-  if (blend.node == nullptr) {
+   * encoded values, which would flatten the relief; everything else uses the channel's blend. A
+   * Height record whose effective mode is not Inherit takes the delta-space chain instead of a
+   * Mix. */
+  const int height_blend =
+      (channel == PAINT_MATERIAL_CHANNEL_HEIGHT) ?
+          BKE_paint_layers_channel_height_blend_effective(layer, channel) :
+          int(MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT);
+  const BlendNode blend =
+      (height_blend == MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT) ?
+          this->blend_node_add(
+              tree,
+              layer,
+              channel,
+              BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(
+                  BKE_paint_layers_channel_blend_effective(layer, channel)))) :
+          BlendNode{};
+  if (height_blend == MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT && blend.node == nullptr) {
     return {};
   }
   if (!isolated) {
-    blend_inputs_link(tree,
-                      blend,
-                      {group_input, below},
-                      {source_node, source},
-                      {factor_node, factor});
-    bke::node_add_link(tree, *blend.node, *blend.result, *group.group_output, *result_out);
-    Vector<bNode *> blend_nodes;
-    blend_nodes.append(blend.node);
-    layout::frame_add(tree, "Blend", blend_nodes);
+    NodeOutput laid;
+    if (height_blend != MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT) {
+      laid = this->height_blend_chain_add(tree,
+                                          group,
+                                          layer,
+                                          {group_input, below},
+                                          {source_node, source},
+                                          {factor_node, factor},
+                                          height_blend);
+      if (laid.socket == nullptr) {
+        return {};
+      }
+    }
+    else {
+      blend_inputs_link(tree,
+                        blend,
+                        {group_input, below},
+                        {source_node, source},
+                        {factor_node, factor});
+      laid = {blend.node, blend.result};
+    }
+    bke::node_add_link(tree, *laid.node, *laid.socket, *group.group_output, *result_out);
+    if (height_blend == MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT) {
+      Vector<bNode *> blend_nodes;
+      blend_nodes.append(blend.node);
+      layout::frame_add(tree, "Blend", blend_nodes);
+    }
   }
   else {
     /* Inside a folder `below` is the pre-multiplied accumulation `P` and `below_coverage` its
@@ -3264,10 +3270,26 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     bke::node_add_link(tree, *group_input, *below, *divide, *divide_a);
     bke::node_add_link(tree, *group_input, *below_coverage, *divide, *divide_b);
     /* The row blends over the straightened accumulation at full factor; the factor is applied
-     * after, to the whole colour. */
-    blend_inputs_link(tree, blend, {divide, divide_out}, {source_node, source}, {});
+     * after, to the whole colour. A Height chain takes the same straightened below. */
+    NodeOutput blended = {};
+    if (height_blend != MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT) {
+      blended = this->height_blend_chain_add(tree,
+                                             group,
+                                             layer,
+                                             {divide, divide_out},
+                                             {source_node, source},
+                                             {},
+                                             height_blend);
+      if (blended.socket == nullptr) {
+        return {};
+      }
+    }
+    else {
+      blend_inputs_link(tree, blend, {divide, divide_out}, {source_node, source}, {});
+      blended = {blend.node, blend.result};
+    }
     bke::node_add_link(tree, *source_node, *source, *c_eff, *eff_a);
-    bke::node_add_link(tree, *blend.node, *blend.result, *c_eff, *eff_b);
+    bke::node_add_link(tree, *blended.node, *blended.socket, *c_eff, *eff_b);
     bke::node_add_link(tree, *group_input, *below_coverage, *c_eff, *eff_fac);
 
     bke::node_add_link(tree, *group_input, *below, *premul, *premul_a);
@@ -3288,6 +3310,11 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
         tree, *coverage, *cover_out, *group.group_output, *result_coverage_out);
 
     Vector<bNode *> blend_nodes = {blend.node, divide, c_eff, premul, coverage};
+    if (height_blend != MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT) {
+      /* The height chain adds its own frame; the Mix it stands in for is not there. Order of the
+       * rest does not matter to the frame, so the cheap removal is fine. */
+      blend_nodes.remove_and_reorder(0);
+    }
     layout::frame_add(tree, "Isolated Blend", blend_nodes);
   }
 

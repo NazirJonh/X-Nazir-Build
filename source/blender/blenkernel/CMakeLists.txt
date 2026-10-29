@@ -270,11 +270,14 @@ set(SRC
   intern/paint_layers/paint_layers_kind.cc
   intern/paint_layers/paint_layers_material_live.cc
   intern/paint_layers/paint_layers_composite.cc
+  intern/paint_layers/paint_layers_composite_height.cc
+  intern/paint_layers/paint_layers_composite_intern.hh
   intern/paint_layers/paint_layers_edit.cc
   intern/paint_layers/paint_layers_gradient.cc
   intern/paint_layers/paint_layers_gradient_surface.cc
   intern/paint_layers/paint_layers_generate_build.cc
   intern/paint_layers/paint_layers_generate_build_chain.cc
+  intern/paint_layers/paint_layers_generate_build_height.cc
   intern/paint_layers/paint_layers_generate_build_intern.hh
   intern/paint_layers/paint_layers_generate_common.cc
   intern/paint_layers/paint_layers_generate_intern.hh

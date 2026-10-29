@@ -14,6 +14,7 @@
 #include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
@@ -43,6 +44,104 @@
 #include "IMB_imbuf_types.hh"
 
 namespace blender::bke::tests {
+
+/* -------------------------------------------------------------------- */
+/** \name Height formula
+ * \{ */
+
+/**
+ * The Height channel's one formula, mode by mode. The graph states the same steps as nodes and the
+ * parity tests hold the two together; this pins the CPU's own numbers, so a change to the formula
+ * fails here before it reaches either side.
+ */
+TEST(PaintMaterialCompositeHeightStep, every_mode_has_its_own_step)
+{
+  /* Below the neutral level, the record above it: the two deltas are 0 and +0.4. */
+  const float below = PAINT_HEIGHT_NEUTRAL;
+  const float layer = 0.9f;
+  const float half = 0.5f;
+  EXPECT_FLOAT_EQ(
+      height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_MIX, below, layer, 1.0f, half), 0.7f);
+  EXPECT_FLOAT_EQ(
+      height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_ADD, below, layer, 1.0f, half), 0.7f);
+  EXPECT_FLOAT_EQ(
+      height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT, below, layer, 1.0f, half), 0.3f);
+}
+
+TEST(PaintMaterialCompositeHeightStep, a_neutral_record_changes_nothing)
+{
+  for (const int mode : {MA_PAINT_LAYER_HEIGHT_BLEND_MIX,
+                         MA_PAINT_LAYER_HEIGHT_BLEND_ADD,
+                         MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT})
+  {
+    SCOPED_TRACE(::testing::Message() << "mode=" << mode);
+    /* Both records on the neutral level: no pit, no peak, whatever the mode. */
+    EXPECT_FLOAT_EQ(height_blend_step(mode,
+                                      PAINT_HEIGHT_NEUTRAL,
+                                      PAINT_HEIGHT_NEUTRAL,
+                                      1.0f,
+                                      0.35f),
+                    PAINT_HEIGHT_NEUTRAL);
+    EXPECT_FLOAT_EQ(height_blend_step(mode,
+                                      PAINT_HEIGHT_NEUTRAL,
+                                      PAINT_HEIGHT_NEUTRAL,
+                                      PAINT_HEIGHT_SCALE_MAX,
+                                      1.0f),
+                    PAINT_HEIGHT_NEUTRAL);
+  }
+}
+
+TEST(PaintMaterialCompositeHeightStep, scale_and_factor_edges)
+{
+  /* The scale multiplies the distance from the neutral level, not the height itself. */
+  EXPECT_FLOAT_EQ(
+      height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_ADD, PAINT_HEIGHT_NEUTRAL, 0.9f, 2.0f, 1.0f),
+      1.3f);
+  EXPECT_FLOAT_EQ(
+      height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_ADD, PAINT_HEIGHT_NEUTRAL, 0.9f, 0.0f, 1.0f),
+      PAINT_HEIGHT_NEUTRAL);
+  /* A factor outside [0, 1] is clamped, as the colour blends clamp theirs: nothing lays more than
+   * the whole step, nothing lays a negative one. */
+  EXPECT_FLOAT_EQ(
+      height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_ADD, PAINT_HEIGHT_NEUTRAL, 0.9f, 1.0f, 2.0f),
+      0.9f);
+  EXPECT_FLOAT_EQ(
+      height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_ADD, PAINT_HEIGHT_NEUTRAL, 0.9f, 1.0f, -1.0f),
+      PAINT_HEIGHT_NEUTRAL);
+  /* A float buffer keeps the overshoot: only the encode of a byte map clamps it. */
+  EXPECT_FLOAT_EQ(
+      height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_ADD, 0.9f, 0.9f, 1.0f, 1.0f), 1.3f);
+  /* The inherit value takes the Mix step, which is what a corrupt mode reads as well. */
+  EXPECT_FLOAT_EQ(
+      height_blend_step(
+          MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT, PAINT_HEIGHT_NEUTRAL, 0.9f, 1.0f, 0.5f),
+      0.7f);
+}
+
+/** The scale works on both sides of the neutral level: a record above it is raised further, one
+ * below it is pushed further down, and a scale below one brings both back towards the neutral. */
+TEST(PaintMaterialCompositeHeightStep, scale_applies_to_both_signs)
+{
+  for (const float scale : {0.5f, 2.0f}) {
+    SCOPED_TRACE(::testing::Message() << "scale=" << scale);
+    EXPECT_NEAR(height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_ADD,
+                                  PAINT_HEIGHT_NEUTRAL,
+                                  0.9f,
+                                  scale,
+                                  1.0f),
+                PAINT_HEIGHT_NEUTRAL + 0.4f * scale,
+                1e-6f);
+    EXPECT_NEAR(height_blend_step(MA_PAINT_LAYER_HEIGHT_BLEND_ADD,
+                                  PAINT_HEIGHT_NEUTRAL,
+                                  0.1f,
+                                  scale,
+                                  1.0f),
+                PAINT_HEIGHT_NEUTRAL - 0.4f * scale,
+                1e-6f);
+  }
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Evaluator

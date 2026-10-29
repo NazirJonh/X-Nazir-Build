@@ -97,7 +97,8 @@ void BKE_paint_layers_tag_value_edited(Material &ma)
  * place. Never MA_PAINT_LAYERS_REGEN -- the regeneration point syncs the nodes
  * (#paint_layers_blend_sync) and falls back to a rebuild only when the tree no longer matches the
  * description. A parent folder's bake holds its children's blends, so the bake planner is asked to
- * check as well; the row's own cache does not depend on its own blend. */
+ * check as well; a row's own cache normally does not depend on its own blend, but an Inherit Height
+ * step does, and a caller that sees its effective mode change takes the regeneration path. */
 static void paint_layers_tag_blend_edited(Material &ma)
 {
   ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_CANCELLED;
@@ -159,6 +160,14 @@ bool BKE_paint_layers_folder_is_pass_through(const MaterialPaintLayer &folder)
     {
       return false;
     }
+  }
+  /* A Height blend of its own works on the distance from the neutral level, so even its Mix is
+   * another operation than the colour Mix the inline lays: the folder needs its own row. The
+   * effective mode covers Inherit over Add, Subtract and the colour blends that read as Mix. */
+  if (BKE_paint_layers_channel_height_blend_effective(
+          folder, PAINT_MATERIAL_CHANNEL_HEIGHT) != MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT)
+  {
+    return false;
   }
   return true;
 }
@@ -775,6 +784,9 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   /* The row's UV mapping is part of its state, not of its kind: a pasted fill or fill
    * correction has to keep the offset, scale, rotation, lock and wrap the gizmo edits. */
   item_copy->mapping = dna::shallow_copy(item.mapping);
+  /* The per (row, channel) overrides are state too: a pasted correction keeps the blend and
+   * opacity it was given in each channel, the way the branch copy below keeps a row's. */
+  memcpy(item_copy->channel_settings, item.channel_settings, sizeof(item_copy->channel_settings));
   paint_layer_material_duplicate(bmain, *item_copy, item);
   /* A Curve Patch effect carries its payload (its own curve container and brush snapshot) like a
    * Curve Patch row does: the copy owns duplicates of both, never shared. */
@@ -2532,6 +2544,12 @@ bool BKE_paint_layers_channel_blend_set(Material &ma,
   const uint64_t shape_before = bke::paint_layers::paint_layer_blend_shape(layer);
   const uint64_t mask_before = bke::paint_layers::paint_layer_blend_dynamic_mask(ma, layer);
   const int effective_before = BKE_paint_layers_channel_blend_effective(layer, channel);
+  const bool height_builds =
+      channel == PAINT_MATERIAL_CHANNEL_HEIGHT &&
+      (paint_layer_row_participates(ma, layer, PAINT_MATERIAL_CHANNEL_HEIGHT) ||
+       paint_layer_row_baked_channel(ma, layer, PAINT_MATERIAL_CHANNEL_HEIGHT, nullptr));
+  const int height_blend_before = BKE_paint_layers_channel_height_blend_effective(
+      layer, PAINT_MATERIAL_CHANNEL_HEIGHT);
   layer.channel_settings[channel].blend = int8_t(blend);
   /* A scrubbed channel is built with the dynamic group; an override does not change the effective
    * blend, so re-noting it would only keep a stale record alive. An ineligible channel has no
@@ -2550,17 +2568,133 @@ bool BKE_paint_layers_channel_blend_set(Material &ma,
     bke::paint_layers::paint_layers_blend_tier_forget_row(ma, layer.marker);
   }
   /* Replace swaps the Normal node and a folder's blend can move it across Pass Through; a moved
-   * runtime tier rebuilds the participating channels too. Every other mode is the same Mix node
-   * with another type, or the same group with another Mode value. */
+   * runtime tier rebuilds the participating channels too, and an Inherit Height record can change
+   * its effective mode. Every other mode is the same Mix node with another type, or the same group
+   * with another Mode value. */
   const bool shape_changed = bke::paint_layers::paint_layer_blend_shape(layer) != shape_before;
   const bool dynamic_changed =
       bke::paint_layers::paint_layer_blend_dynamic_mask(ma, layer) != mask_before;
-  if (shape_changed || dynamic_changed) {
+  /* An Inherit Height record follows this channel's blend, so the edit can move its effective mode
+   * between the ordinary Mix path and the delta-space chain: structure, not a value. */
+  const bool height_changed =
+      height_builds && BKE_paint_layers_channel_height_blend_effective(
+                           layer, PAINT_MATERIAL_CHANNEL_HEIGHT) != height_blend_before;
+  if (shape_changed || dynamic_changed || height_changed) {
     BKE_paint_layers_tag_edited(ma);
   }
   else {
     paint_layers_tag_blend_edited(ma);
   }
+  return true;
+}
+
+float BKE_paint_layers_channel_height_scale(const MaterialPaintLayer &layer, const int channel)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return 1.0f;
+  }
+  return 1.0f + layer.channel_settings[channel].height_scale_delta;
+}
+
+bool BKE_paint_layers_channel_height_scale_set(Material &ma,
+                                               MaterialPaintLayer &layer,
+                                               const int channel,
+                                               const float scale)
+{
+  /* The scale is the Height channel's own: everywhere else the request names a channel the field
+   * was never meant for. */
+  if (channel != PAINT_MATERIAL_CHANNEL_HEIGHT || !paint_layer_owned(ma, &layer)) {
+    return false;
+  }
+  const float delta = clamp_f(scale, PAINT_HEIGHT_SCALE_MIN, PAINT_HEIGHT_SCALE_MAX) - 1.0f;
+  if (layer.channel_settings[channel].height_scale_delta == delta) {
+    return true;
+  }
+  layer.channel_settings[channel].height_scale_delta = delta;
+  /* The scale is an input of the generated height chain, like the row's opacity: a value edit. */
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+int BKE_paint_layers_channel_height_blend(const MaterialPaintLayer &layer, const int channel)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT;
+  }
+  return layer.channel_settings[channel].height_blend;
+}
+
+int BKE_paint_layers_channel_height_blend_effective(const MaterialPaintLayer &layer,
+                                                    const int channel)
+{
+  if (channel != PAINT_MATERIAL_CHANNEL_HEIGHT) {
+    return MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT;
+  }
+  const int height_blend = BKE_paint_layers_channel_height_blend(layer, channel);
+  if (height_blend != MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT) {
+    return height_blend;
+  }
+  /* An Inherit row follows its ordinary blend, but only Mix, Add and Subtract keep their meaning in
+   * the delta space. The ordinary Mix is the same step and keeps the GPU preview, so it stays
+   * Inherit; anything else is a colour operation with no height analogue and reads as Mix. */
+  switch (eMaterialPaintLayerBlend(BKE_paint_layers_channel_blend_effective(layer, channel))) {
+    case MA_PAINT_LAYER_BLEND_MIX:
+      return MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT;
+    case MA_PAINT_LAYER_BLEND_ADD:
+      return MA_PAINT_LAYER_HEIGHT_BLEND_ADD;
+    case MA_PAINT_LAYER_BLEND_SUBTRACT:
+      return MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT;
+    default:
+      return MA_PAINT_LAYER_HEIGHT_BLEND_MIX;
+  }
+}
+
+bool BKE_paint_layers_channel_height_blend_set(Material &ma,
+                                               MaterialPaintLayer &layer,
+                                               const int channel,
+                                               const int height_blend)
+{
+  if (channel != PAINT_MATERIAL_CHANNEL_HEIGHT || !paint_layer_owned(ma, &layer)) {
+    return false;
+  }
+  if (height_blend < MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT ||
+      height_blend > MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT)
+  {
+    return false;
+  }
+  if (layer.channel_settings[channel].height_blend == height_blend) {
+    return true;
+  }
+  layer.channel_settings[channel].height_blend = int8_t(height_blend);
+  /* The height modes are different nodes of the generated chain, the way the colour blends are
+   * types of the Mix node: a structural edit. */
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_channel_height_write(const MaterialPaintLayer &layer)
+{
+  return (layer.channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_flag &
+          MA_PAINT_LAYER_CHANNEL_HEIGHT_WRITE_SKIP) == 0;
+}
+
+bool BKE_paint_layers_channel_height_write_set(Material &ma,
+                                               MaterialPaintLayer &layer,
+                                               const bool write)
+{
+  if (!paint_layer_owned(ma, &layer)) {
+    return false;
+  }
+  const bool writes = BKE_paint_layers_channel_height_write(layer);
+  if (writes == write) {
+    return true;
+  }
+  SET_FLAG_FROM_TEST(layer.channel_settings[PAINT_MATERIAL_CHANNEL_HEIGHT].height_flag,
+                     !write,
+                     MA_PAINT_LAYER_CHANNEL_HEIGHT_WRITE_SKIP);
+  /* The row leaves the Height chain of the graph and of the CPU stack, the way a row that stops
+   * participating does: a structural edit. The bake hash reads the flag, so the caches follow. */
+  BKE_paint_layers_tag_edited(ma);
   return true;
 }
 
@@ -3094,6 +3228,11 @@ bool BKE_paint_layers_set_blend(Material &ma,
   }
   const uint64_t shape_before = bke::paint_layers::paint_layer_blend_shape(*layer);
   const uint64_t mask_before = bke::paint_layers::paint_layer_blend_dynamic_mask(ma, *layer);
+  const bool height_builds =
+      paint_layer_row_participates(ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT) ||
+      paint_layer_row_baked_channel(ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, nullptr);
+  const int height_blend_before = BKE_paint_layers_channel_height_blend_effective(
+      *layer, PAINT_MATERIAL_CHANNEL_HEIGHT);
   layer->blend = blend;
   /* Every channel that inherits the row's blend is being scrubbed by this edit, so it enters the
    * runtime tier; an override keeps its own blend and is left as it was. A channel the row no
@@ -3113,12 +3252,18 @@ bool BKE_paint_layers_set_blend(Material &ma,
   if (BKE_paint_layers_folder_is_pass_through(*layer)) {
     bke::paint_layers::paint_layers_blend_tier_forget_row(ma, layer->marker);
   }
-  /* A tier move rebuilds the participating channels' nodes, exactly like Replace or a folder
-   * crossing the Pass Through boundary. Inside one tier the mode is a value, synced in place. */
+  /* A tier move rebuilds the participating channels' nodes, exactly like Replace, a folder
+   * crossing the Pass Through boundary or an Inherit Height record changing its effective mode.
+   * Inside one tier the mode is a value, synced in place. */
   const bool shape_changed = bke::paint_layers::paint_layer_blend_shape(*layer) != shape_before;
   const bool dynamic_changed =
       bke::paint_layers::paint_layer_blend_dynamic_mask(ma, *layer) != mask_before;
-  if (shape_changed || dynamic_changed) {
+  /* An Inherit Height record follows this row's blend, so the edit can move its effective mode
+   * between the ordinary Mix path and the delta-space chain: structure, not a value. */
+  const bool height_changed =
+      height_builds && BKE_paint_layers_channel_height_blend_effective(
+                           *layer, PAINT_MATERIAL_CHANNEL_HEIGHT) != height_blend_before;
+  if (shape_changed || dynamic_changed || height_changed) {
     BKE_paint_layers_tag_edited(ma);
   }
   else {

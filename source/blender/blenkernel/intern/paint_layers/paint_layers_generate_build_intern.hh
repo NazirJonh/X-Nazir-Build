@@ -90,6 +90,45 @@ struct NodeOutput {
   bNodeSocket *socket = nullptr;
 };
 
+/* -------------------------------------------------------------------- */
+/** \name Math and Mix nodes
+ *
+ * The few nodes every chain of the generator is made of. They are free functions rather than
+ * builder methods because more than one build translation unit needs them, and they append what
+ * they make to \a r_nodes so the caller can frame it.
+ * \{ */
+
+/**
+ * A Math node of \a operation over \a a and \a b; a null socket of \a a reads \a a_default
+ * instead. Empty, with nothing left in the tree, when the node cannot be made.
+ */
+NodeOutput math_node_add(bNodeTree &tree,
+                         layout::LayoutGrid &grid,
+                         Vector<bNode *> &r_nodes,
+                         int operation,
+                         NodeOutput a,
+                         NodeOutput b,
+                         float a_default = 0.0f);
+
+/** A Math node of \a operation over \a a and the constant \a b; null when it cannot be made. */
+bNode *math_constant_node_add(bNodeTree &tree,
+                              layout::LayoutGrid &grid,
+                              Vector<bNode *> &r_nodes,
+                              int operation,
+                              NodeOutput a,
+                              float b);
+
+/** A Mix node in float mode, `mix(A, B, factor)`; null when it cannot be made. */
+bNode *mix_float_node_add(bNodeTree &tree);
+
+/** A Value node holding \a value; the null output when it cannot be made. */
+NodeOutput value_node_add(bNodeTree &tree,
+                          layout::LayoutGrid &grid,
+                          Vector<bNode *> &r_nodes,
+                          float value);
+
+/** \} */
+
 /**
  * One Anchor Point tap: the outputs the marker was given in its row's group. The marker publishes
  * the content of its row up to its position (channel >= 0) or the mask up to its position
@@ -351,6 +390,29 @@ class PaintLayersTreeBuilder {
                            const MaterialPaintLayer &row,
                            int channel,
                            int ramp_blend);
+
+  /**
+   * The Height channel's own blend, as the static nodes of the delta-space formula instead of a
+   * Mix: both inputs and the factor are decoded to the distance from the neutral level (the red of
+   * a Separate Color), the mode's step is taken, and the result is encoded back. The scale comes
+   * from the row's Height scale input when there is one, a Value constant otherwise (a degraded
+   * build the value sync still feeds through the input once it exists). \return the encoded
+   * result, or empty when a node cannot be made.
+   */
+  NodeOutput height_blend_chain_add(bNodeTree &tree,
+                                    LayerGroup &group,
+                                    const MaterialPaintLayer &row,
+                                    const NodeOutput below,
+                                    const NodeOutput source,
+                                    const NodeOutput factor,
+                                    int height_blend);
+
+  /**
+   * The scalar a height travels on: \a color's red channel, or \a color itself when it is a float
+   * socket already. A Separate Color is made, placed and appended to \a r_nodes when one is
+   * needed; empty when it cannot be made.
+   */
+  NodeOutput height_scalar_decode(bNodeTree &tree, Vector<bNode *> &r_nodes, NodeOutput color);
 
   /** `a * b` as a Math node in \a tree; empty when it cannot be built. */
   NodeOutput multiply_nodes_add(bNodeTree &tree, NodeOutput a, NodeOutput b);
@@ -645,6 +707,8 @@ class PaintLayersTreeBuilder {
   Set<const MaterialPaintLayer *> mask_outputs_;
   /** A row's built object-mask visibility, shared the same way. */
   Map<const MaterialPaintLayer *, NodeOutput> object_mask_visible_;
+  /** A row's Height scale input (the Height record's own), keyed by the row. */
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> height_scale_inputs_;
   Map<int, bNodeTreeInterfaceSocket *> result_outputs_;
   /** The root's mask output, fed by the active row's group after the channels are built. */
   bNodeTreeInterfaceSocket *mask_output_ = nullptr;

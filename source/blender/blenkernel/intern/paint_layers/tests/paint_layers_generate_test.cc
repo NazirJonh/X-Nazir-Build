@@ -1014,6 +1014,36 @@ static uint16_t normal_and_height_set()
                  uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT);
 }
 
+/**
+ * Height rides over the Normal stack: the Bump the Height channel owns sits between the Normal Map
+ * and the Principled Normal, so the relief reaches the shader through the map the stack made. The
+ * second regeneration finds that Bump already in the chain and has to keep it, linking a node to
+ * its own output would be a cycle.
+ */
+/**
+ * Height turned off after a Normal + Height pass: the next pass puts the Normal Map straight back
+ * on the Principled Normal. The marked Bump stays in the tree -- it is the response panel's node,
+ * not the channel's -- but off the channel: its output feeds nothing, its Height input lost the
+ * stack output it read, and its Normal input keeps the Normal Map the earlier pass put there.
+ */
+/**
+ * A Normal Map the author wired into the Principled Normal before the stack was generated: Height
+ * takes that whole chain as the Bump's Normal input instead of replacing it, so the author's relief
+ * still reaches the shader, only through the stack's own node.
+ */
+/** The same as above with a Bump the author built: the stack's Bump takes the author's Bump as its
+ * Normal input, so a hand-built relief is not dropped when Height is added. */
+/**
+ * A response edit never claims a node the stack did not mark. The marker is what makes a Bump or
+ * Normal Map the stack's own, so a tree without it is the user's; a slider stores its value and
+ * leaves the node alone until a regeneration adopts it (the compatibility path for a tree written
+ * before the marker).
+ */
+/**
+ * A Bump the stack did not wire is the material's author's own. Adoption is what makes a node the
+ * stack's own, and it only takes a node the generator itself fed -- the first node of the type is
+ * what the old search took, which claimed a Bump driven by anything the author built.
+ */
 /** \} */
 
 /* -------------------------------------------------------------------- */

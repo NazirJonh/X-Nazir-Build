@@ -289,6 +289,14 @@ bool paint_layer_blend_dynamic_eligible(const Material &ma,
   if (BKE_paint_layers_folder_is_pass_through(layer)) {
     return false;
   }
+  /* A Height record on a delta-space mode is laid by the static height chain, which has no blend
+   * group to scrub; only the Inherit-over-Mix path builds the ordinary blend node. */
+  if (channel == PAINT_MATERIAL_CHANNEL_HEIGHT &&
+      BKE_paint_layers_channel_height_blend_effective(layer, channel) !=
+          MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT)
+  {
+    return false;
+  }
   /* A content correction may lay in fewer channels than its owner: only the channels it really
    * builds blend nodes in are eligible. */
   if (layer.role == MA_PAINT_LAYER_ROLE_EFFECT) {

@@ -873,11 +873,21 @@ static uint64_t bake_hash_layer(uint64_t h,
   /* The per (row, channel) opacity overrides are baked into the row's result too, and exist whether
    * or not the pair has a record. The blend follows the same rule as the row's own: a child's is
    * inside the parent's result, the row's own is applied over its cache. */
-  for (const MaterialPaintLayerChannelSettings &settings : layer.channel_settings) {
+  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+    const MaterialPaintLayerChannelSettings &settings = layer.channel_settings[channel];
     if (is_child) {
       h = bake_hash_mix(h, uint8_t(settings.blend));
     }
     h = bake_hash_float(h, settings.opacity);
+    /* The Height record's own mode and scale are baked into the row's Height result the same way,
+     * and the Compare mask reaches every other channel of the row through the stack that renders
+     * one -- the whole row's cache is stale without them. The effective mode includes the row's
+     * ordinary blend: with Inherit, that blend decides the Height step itself, inside the cache, so
+     * the row's own blend moves the cache even though the colour blend does not. */
+    h = bake_hash_mix(h,
+                      uint8_t(BKE_paint_layers_channel_height_blend_effective(layer, channel)));
+    h = bake_hash_float(h, settings.height_scale_delta);
+    h = bake_hash_mix(h, uint8_t(settings.height_flag));
   }
   /* The Color ID colours of a map-coverage item decide its match. */
   for (const MaterialPaintLayerIdColor &color : layer.id_colors) {

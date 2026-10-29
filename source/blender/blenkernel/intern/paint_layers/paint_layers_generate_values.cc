@@ -115,6 +115,20 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
+  if (STREQ(role, ROLE_HEIGHT_SCALE)) {
+    if (socket.default_value == nullptr) {
+      return false;
+    }
+    /* The Height record's scale is the one value the height modes read; the channel is Height by
+     * the role's own contract. */
+    const float value = BKE_paint_layers_channel_height_scale(*layer,
+                                                               PAINT_MATERIAL_CHANNEL_HEIGHT);
+    static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
+    if (iface.socket_data != nullptr) {
+      static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
+    }
+    return true;
+  }
   if (STREQ(role, ROLE_PARAM)) {
     /* The position names the parameter in the row's kind schema; a row whose kind lost it (a
      * hand-edited tree) cannot be trusted, so the caller rebuilds. */

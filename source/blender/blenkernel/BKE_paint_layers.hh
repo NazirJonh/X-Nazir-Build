@@ -1019,6 +1019,80 @@ bool BKE_paint_layers_channel_blend_set(Material &ma,
                                         int channel,
                                         int blend);
 
+/** The range #BKE_paint_layers_channel_height_scale_set accepts and the RNA slider offers. */
+constexpr float PAINT_HEIGHT_SCALE_MIN = 0.0f;
+constexpr float PAINT_HEIGHT_SCALE_MAX = 4.0f;
+
+/**
+ * The Height record's own scale of \a layer's \a channel: `1 + height_scale_delta`, so the default
+ * (and the value files written before the field read) is one. Only the Height channel honours it.
+ */
+float BKE_paint_layers_channel_height_scale(const MaterialPaintLayer &layer, int channel);
+
+/**
+ * Set the Height record's own scale of \a layer's \a channel; only the Height channel accepts one,
+ * every other channel refuses it. The scale scales the record's distance from the neutral level,
+ * so one is neutral. The scale is clamped to #PAINT_HEIGHT_SCALE_MIN..#PAINT_HEIGHT_SCALE_MAX:
+ * a negative scale is not offered, because the inversion is the Subtract mode and the Invert
+ * action rather than a negative distance.
+ *
+ * Value-only: the scale is an input of the generated chain, so the edit never rebuilds the
+ * topology.
+ *
+ * \return false when \a layer is not part of \a ma, \a channel is out of range or is not Height.
+ */
+bool BKE_paint_layers_channel_height_scale_set(Material &ma,
+                                               MaterialPaintLayer &layer,
+                                               int channel,
+                                               float scale);
+
+/**
+ * The Height record's own blend of \a layer's \a channel, a #eMaterialPaintLayerHeightBlend; zero
+ * inherits the channel's ordinary blend. Only the Height channel honours it.
+ */
+int BKE_paint_layers_channel_height_blend(const MaterialPaintLayer &layer, int channel);
+
+/**
+ * The Height mode \a layer's \a channel really lays: its own mode when one is set, otherwise what
+ * the row's ordinary blend maps to. Inherit reads Mix as Inherit (the ordinary Mix is the same step
+ * at scale one, and it keeps the GPU preview), Add and Subtract keep their meaning, and every other
+ * blend reads as Mix. The one place the rule lives; every reader of the effective mode calls this.
+ */
+int BKE_paint_layers_channel_height_blend_effective(const MaterialPaintLayer &layer, int channel);
+
+/**
+ * Set the Height record's own blend of \a layer's \a channel, a
+ * #eMaterialPaintLayerHeightBlend value (0 to inherit the channel's ordinary blend); only the
+ * Height channel accepts one, every other channel refuses it.
+ *
+ * A structural edit: the height modes are different nodes of the generated chain, so the tree is
+ * marked stale.
+ *
+ * \return false when \a layer is not part of \a ma, \a channel is out of range or is not Height.
+ */
+bool BKE_paint_layers_channel_height_blend_set(Material &ma,
+                                               MaterialPaintLayer &layer,
+                                               int channel,
+                                               int height_blend);
+
+/**
+ * Set whether \a layer lays anything in the Height channel. Skipping keeps the row's Height record
+ * (its map or flat value stay, the panel keeps showing them) while the height it carries stops
+ * contributing to the stack -- the Ucupaint `write_height = False` -- and leaves the row's other
+ * channels alone.
+ *
+ * A structural edit: the row leaves the Height chain of the generated graph, the way a row that
+ * stops participating does.
+ *
+ * \return false when \a layer is not part of \a ma.
+ */
+bool BKE_paint_layers_channel_height_write_set(Material &ma,
+                                               MaterialPaintLayer &layer,
+                                               bool write);
+
+/** Whether \a layer lays anything in the Height channel (its records can outlive the choice). */
+bool BKE_paint_layers_channel_height_write(const MaterialPaintLayer &layer);
+
 /**
  * The next time, in `BLI_time_now_seconds()` units, at which a scrubbing blend channel is due to
  * be simplified back to a static Mix node, or -1 when nothing is waiting.

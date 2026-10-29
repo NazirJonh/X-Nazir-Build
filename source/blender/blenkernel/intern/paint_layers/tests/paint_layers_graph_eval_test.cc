@@ -753,6 +753,238 @@ TEST_F(PaintLayersGraphEvalTest, a_partial_alpha_height_map_matches_the_cpu)
   EXPECT_NEAR(cpu.r, 0.5f * 0.75f + 0.8f * 0.25f, 0.02f);
 }
 
+/** Two height rows whose records sit either side of the neutral level, every mode of the Height
+ * channel's own blend. The graph's Separate Color, Math and float Mix chain against the CPU's
+ * `blend_row_height`, one mode at a time. */
+TEST_F(PaintLayersGraphEvalTest, height_blend_modes_match_the_cpu)
+{
+  Image *bottom = add_solid_image("Bottom", 77, 77, 77, 255);
+  Image *top = add_solid_image("Top", 204, 204, 204, 255);
+  make_image_data(bottom);
+  make_image_data(top);
+  add_layer("Bottom", bottom, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  MaterialPaintLayer *top_layer = add_layer("Top", top, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, top_layer, 0.6f));
+
+  const int modes[] = {MA_PAINT_LAYER_HEIGHT_BLEND_MIX,
+                       MA_PAINT_LAYER_HEIGHT_BLEND_ADD,
+                       MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT};
+  for (const int mode : modes) {
+    SCOPED_TRACE(::testing::Message() << "mode=" << mode);
+    ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+        *ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, mode));
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  }
+}
+
+/** The acceptance bar of the whole height model: two neutral records (grey 128 is the closest a
+ * byte map comes to 0.5) must not dig a pit or raise a peak in any mode -- the ordinary colour
+ * blends would give Multiply 0.25 and Add 1.0, the delta-space step stays at the neutral level. */
+TEST_F(PaintLayersGraphEvalTest, height_neutral_layers_are_no_ops_in_every_mode)
+{
+  Image *bottom = add_solid_image("Bottom", 128, 128, 128, 255);
+  Image *top = add_solid_image("Top", 128, 128, 128, 255);
+  make_image_data(bottom);
+  make_image_data(top);
+  add_layer("Bottom", bottom, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  MaterialPaintLayer *top_layer = add_layer("Top", top, PAINT_MATERIAL_CHANNEL_HEIGHT);
+
+  const int modes[] = {MA_PAINT_LAYER_HEIGHT_BLEND_MIX,
+                       MA_PAINT_LAYER_HEIGHT_BLEND_ADD,
+                       MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT};
+  for (const int mode : modes) {
+    SCOPED_TRACE(::testing::Message() << "mode=" << mode);
+    ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+        *ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, mode));
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+    const RGBA cpu = cpu_pixel(PAINT_MATERIAL_CHANNEL_HEIGHT);
+    EXPECT_NEAR(cpu.r, PAINT_HEIGHT_NEUTRAL, 0.02f);
+  }
+}
+
+/** The Height record's own scale doubles the distance from the neutral level; the input the chain
+ * reads and the CPU's `1 + delta` agree. */
+TEST_F(PaintLayersGraphEvalTest, height_scale_matches_the_cpu)
+{
+  Image *bottom = add_solid_image("Bottom", 128, 128, 128, 255);
+  Image *top = add_solid_image("Top", 204, 204, 204, 255);
+  make_image_data(bottom);
+  make_image_data(top);
+  add_layer("Bottom", bottom, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  MaterialPaintLayer *top_layer = add_layer("Top", top, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_ADD));
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_height_scale_set(*ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT,
+                                                2.0f));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+
+  /* And a scale edit reaches the built chain as a value: no rebuild needed, the same pixels. */
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_height_scale_set(*ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT,
+                                                0.25f));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+}
+
+/** A row's mask and channel opacity weigh the height step exactly as they weigh its colour: the
+ * row's factor chain feeds the height nodes the same sockets. */
+TEST_F(PaintLayersGraphEvalTest, height_masked_row_matches_the_cpu)
+{
+  Image *bottom = add_solid_image("Bottom", 77, 77, 77, 255);
+  Image *top = add_solid_image("Top", 30, 160, 220, 255);
+  make_image_data(bottom);
+  make_image_data(top);
+  add_layer("Bottom", bottom, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  MaterialPaintLayer *top_layer = add_layer("Top", top, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  /* A half-transparent map alpha weighs the record by the row's coverage. */
+  Image *half = add_solid_image("Half", 204, 204, 204, 128);
+  make_image_data(half);
+  BKE_paint_layers_channel_set_image(
+      *ma, top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, half);
+  ASSERT_TRUE(BKE_paint_layers_channel_opacity_set(*ma, *top_layer,
+                                                   PAINT_MATERIAL_CHANNEL_HEIGHT, 0.35f));
+
+  const int modes[] = {MA_PAINT_LAYER_HEIGHT_BLEND_ADD};
+  for (const int mode : modes) {
+    SCOPED_TRACE(::testing::Message() << "mode=" << mode);
+    ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+        *ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, mode));
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  }
+}
+
+/** Inherit follows the row's ordinary blend through the effective-mode rule: Mix stays the ordinary
+ * Mix (the same step and the GPU preview), Add and Subtract keep their meaning in the delta space,
+ * and every other colour blend reads as Mix instead of digging a pit. */
+TEST_F(PaintLayersGraphEvalTest, height_inherit_follows_the_rows_own_blend)
+{
+  Image *bottom = add_solid_image("Bottom", 77, 77, 77, 255);
+  Image *top = add_solid_image("Top", 204, 204, 204, 255);
+  make_image_data(bottom);
+  make_image_data(top);
+  add_layer("Bottom", bottom, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  MaterialPaintLayer *top_layer = add_layer("Top", top, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, top_layer, 0.7f));
+  /* Explicit Inherit is the same as the mode never being set. */
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT));
+
+  const float below = 77.0f / 255.0f;
+  const float layer = 204.0f / 255.0f;
+  /* The row's blend, the effective mode it must report, and the step that mode takes. */
+  struct Case {
+    int row_blend;
+    int effective;
+    int step;
+  };
+  const Case cases[] = {
+      {MA_PAINT_LAYER_BLEND_MIX, MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT,
+       MA_PAINT_LAYER_HEIGHT_BLEND_MIX},
+      {MA_PAINT_LAYER_BLEND_ADD, MA_PAINT_LAYER_HEIGHT_BLEND_ADD,
+       MA_PAINT_LAYER_HEIGHT_BLEND_ADD},
+      {MA_PAINT_LAYER_BLEND_SUBTRACT, MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT,
+       MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT},
+      {MA_PAINT_LAYER_BLEND_MULTIPLY, MA_PAINT_LAYER_HEIGHT_BLEND_MIX,
+       MA_PAINT_LAYER_HEIGHT_BLEND_MIX},
+      {MA_PAINT_LAYER_BLEND_OVERLAY, MA_PAINT_LAYER_HEIGHT_BLEND_MIX,
+       MA_PAINT_LAYER_HEIGHT_BLEND_MIX},
+  };
+  for (const Case &test_case : cases) {
+    SCOPED_TRACE(::testing::Message() << "row blend=" << test_case.row_blend);
+    ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, top_layer, test_case.row_blend));
+    EXPECT_EQ(
+        BKE_paint_layers_channel_height_blend_effective(*top_layer,
+                                                        PAINT_MATERIAL_CHANNEL_HEIGHT),
+        test_case.effective);
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+    const RGBA cpu = cpu_pixel(PAINT_MATERIAL_CHANNEL_HEIGHT);
+    EXPECT_NEAR(cpu.r,
+                height_blend_step(test_case.step, below, layer, 1.0f, 0.7f),
+                2e-3f);
+  }
+}
+
+/** Two neutral records must not dig a pit through Inherit either, whatever the row's ordinary
+ * blend: the effective mode maps Multiply and Overlay to the delta-space Mix, which is flat at the
+ * neutral level. */
+TEST_F(PaintLayersGraphEvalTest, height_inherit_neutral_rows_are_no_ops_for_every_row_blend)
+{
+  Image *bottom = add_solid_image("Bottom", 128, 128, 128, 255);
+  Image *top = add_solid_image("Top", 128, 128, 128, 255);
+  make_image_data(bottom);
+  make_image_data(top);
+  add_layer("Bottom", bottom, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  MaterialPaintLayer *top_layer = add_layer("Top", top, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT));
+
+  for (const int row_blend : {MA_PAINT_LAYER_BLEND_MIX,
+                              MA_PAINT_LAYER_BLEND_ADD,
+                              MA_PAINT_LAYER_BLEND_SUBTRACT,
+                              MA_PAINT_LAYER_BLEND_MULTIPLY,
+                              MA_PAINT_LAYER_BLEND_OVERLAY})
+  {
+    SCOPED_TRACE(::testing::Message() << "row blend=" << row_blend);
+    ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, top_layer, row_blend));
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+    const RGBA cpu = cpu_pixel(PAINT_MATERIAL_CHANNEL_HEIGHT);
+    EXPECT_NEAR(cpu.r, PAINT_HEIGHT_NEUTRAL, 0.02f);
+  }
+}
+
+/** A record authored at relief -1 is stored at the bottom of the map (0.0). Add lowers the stack by
+ * its distance and Subtract raises it by the same: the sign lives in the stored value, the mode
+ * only decides the direction. */
+TEST_F(PaintLayersGraphEvalTest, height_negative_relief_adds_down_and_subtracts_up)
+{
+  Image *bottom = add_solid_float_image("Bottom", 0.5f, 0.5f, 0.5f, 1.0f);
+  Image *top = add_solid_float_image("Top", 0.0f, 0.0f, 0.0f, 1.0f);
+  make_image_data(bottom);
+  make_image_data(top);
+  add_layer("Bottom", bottom, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  MaterialPaintLayer *top_layer = add_layer("Top", top, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, top_layer, 0.5f));
+
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_ADD));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  const RGBA lowered = cpu_pixel(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  EXPECT_NEAR(lowered.r, PAINT_HEIGHT_NEUTRAL - 0.5f * 0.5f, 2e-3f);
+
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  const RGBA raised = cpu_pixel(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  EXPECT_NEAR(raised.r, PAINT_HEIGHT_NEUTRAL + 0.5f * 0.5f, 2e-3f);
+}
+
+/** The scale is applied to the distance from the neutral level on both sides: the graph and the CPU
+ * raise a record above the neutral and push one below it by the same factor. */
+TEST_F(PaintLayersGraphEvalTest, height_scale_applies_to_both_signs)
+{
+  Image *bottom = add_solid_float_image("Bottom", 0.5f, 0.5f, 0.5f, 1.0f);
+  Image *high = add_solid_float_image("High", 0.9f, 0.9f, 0.9f, 1.0f);
+  Image *low = add_solid_float_image("Low", 0.1f, 0.1f, 0.1f, 1.0f);
+  make_image_data(bottom);
+  make_image_data(high);
+  make_image_data(low);
+  add_layer("Bottom", bottom, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  MaterialPaintLayer *top_layer = add_layer("Top", high, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_ADD));
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_height_scale_set(*ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT,
+                                                2.0f));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  const RGBA up = cpu_pixel(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  EXPECT_NEAR(up.r, PAINT_HEIGHT_NEUTRAL + 2.0f * (0.9f - PAINT_HEIGHT_NEUTRAL), 5e-3f);
+
+  BKE_paint_layers_channel_set_image(*ma, top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, low);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  const RGBA down = cpu_pixel(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  EXPECT_NEAR(down.r, PAINT_HEIGHT_NEUTRAL + 2.0f * (0.1f - PAINT_HEIGHT_NEUTRAL), 5e-3f);
+}
+
 /** \} */
 
 }  // namespace blender::bke::tests

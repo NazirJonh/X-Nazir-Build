@@ -278,6 +278,21 @@ bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &gr
                                         float r_rgba[4]);
 
 /**
+ * One height mode's step, in the delta space of the neutral level: the whole formula of the Height
+ * channel, and the only statement of it on the CPU side.
+ *
+ * `d_below = below - neutral`, `d_layer = (layer - neutral) * scale`, the step of \a height_blend
+ * over them, encoded back as `+ neutral`. \a factor is clamped to [0, 1] here, as the colour
+ * blends clamp theirs; nothing else clamps, so a float buffer keeps the overshoot a mode can
+ * produce.
+ *
+ * \param height_blend: a #eMaterialPaintLayerHeightBlend; the inherit value and anything unknown
+ *                      take the Mix step, which is what a corrupt description reads as.
+ * \return the encoded height.
+ */
+float height_blend_step(int height_blend, float below, float layer, float scale, float factor);
+
+/**
  * What an image layer and its buffer twin share verbatim. The stack builders copy it as one value
  * (`static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer`), so a field added here
  * can never be forgotten in one of the copies. The values are plain data or owning pointers; the
@@ -302,6 +317,14 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
   bool mask_from_alpha = false;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
+  /**
+   * The row's Height record's own mode, a #eMaterialPaintLayerHeightBlend; only the Height
+   * channel's description carries it (every other channel describes zero, the ordinary blend), so
+   * the evaluator needs no channel of its own to tell the two apart. Zero keeps #blend.
+   */
+  int16_t height_blend = 0;
+  /** The Height record's own scale (`1 + delta`), applied by the height modes alone. */
+  float height_scale = 1.0f;
   /** How much of the mask applies; 0 ignores the mask entirely. */
   float mask_influence = 1.0f;
   bool enabled = true;

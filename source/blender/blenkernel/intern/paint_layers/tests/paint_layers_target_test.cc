@@ -806,6 +806,42 @@ TEST_F(PaintLayersTargetTest, mask_mode_gives_the_active_slot_back_on_leaving)
   EXPECT_EQ(ma->paint_content_slot, 0);
 }
 
+TEST_F(PaintLayersTargetTest, hidden_row_keeps_its_texpaint_slots)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  Object *ob = add_object_with({ma});
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "HiddenSlotScene"));
+  ASSERT_NE(scene, nullptr);
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+  Image *map = BKE_paint_layers_target_ensure_writable(*bmain, target, 8);
+  ASSERT_NE(map, nullptr);
+
+  const auto base_color_slot = [&]() {
+    for (const int slot : IndexRange(ma->tot_slots)) {
+      if (BKE_paint_layers_texpaint_slot_channel(slot) == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+        return slot;
+      }
+    }
+    return -1;
+  };
+
+  BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+  const int slot = base_color_slot();
+  ASSERT_NE(slot, -1);
+  ASSERT_TRUE(ma->texpaintslot[slot].valid);
+  ASSERT_EQ(ma->texpaintslot[slot].ima, map);
+
+  /* Hiding a row stops strokes but does not empty its maps: the slot cache outlives a visibility
+   * toggle, so showing the row again needs no refresh. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, layer, false));
+  BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+  EXPECT_EQ(base_color_slot(), slot);
+  EXPECT_TRUE(ma->texpaintslot[slot].valid);
+  EXPECT_EQ(ma->texpaintslot[slot].ima, map);
+}
+
 TEST_F(PaintLayersTargetTest, mask_mode_does_not_touch_the_content_maps_of_the_row)
 {
   MaterialPaintLayer *layer = add_active_row("L");
@@ -1098,6 +1134,171 @@ TEST_F(PaintLayersTargetTest, lock_of_a_folder_or_a_mask_item_protects_what_it_h
   BKE_paint_layers_active_set(*ma, paint->marker);
   EXPECT_TRUE(BKE_paint_layers_target_get(
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Painting visibility
+ * \{ */
+
+TEST_F(PaintLayersTargetTest, hidden_refuses_the_target_of_the_row)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+
+  /* A switched-off row resolves no target, and showing it gives the target back. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, layer, false));
+  EXPECT_EQ(BKE_paint_layers_hidden_blocker(*ma, *layer), layer);
+  EXPECT_EQ(BKE_paint_layers_target_resolve(
+                *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, target),
+            PaintLayersTargetStatus::Hidden);
+  EXPECT_FALSE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, layer, true));
+  EXPECT_EQ(BKE_paint_layers_hidden_blocker(*ma, *layer), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+}
+
+TEST_F(PaintLayersTargetTest, hidden_folder_or_owner_mutes_what_it_holds)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(*ma, "F", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  folder->source = MA_PAINT_LAYER_SOURCE_STACK;
+  MaterialPaintLayer *child = BKE_paint_layers_add(*ma, "C", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  BKE_paint_layers_active_set(*ma, child->marker);
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+
+  /* A hidden folder mutes its whole subtree, and says so as the blocker. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, folder, false));
+  EXPECT_EQ(BKE_paint_layers_hidden_blocker(*ma, *child), folder);
+  EXPECT_FALSE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, folder, true));
+  EXPECT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+
+  /* A hidden row mutes the mask corrections it holds as well. */
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, child, 1.0f);
+  MaterialPaintLayer *paint = BKE_paint_layers_mask_item_add(
+      *ma, child, MA_PAINT_LAYER_SOURCE_IMAGE, "Corr");
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(paint, nullptr);
+  BKE_paint_layers_active_set(*ma, paint->marker);
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  EXPECT_EQ(target.mask_item, paint);
+
+  /* The row a mask item hangs on hides its mask too. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, child, false));
+  EXPECT_EQ(BKE_paint_layers_hidden_blocker(*ma, *paint), child);
+  EXPECT_FALSE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, child, true));
+
+  /* The mask item's own switch is not a hidden refusal, unlike the row's: the item stays the
+   * target and only its map stops being writable, the soft refusal
+   * #BKE_paint_layers_target_is_live answers (see mask_off_is_refused_not_switched_back_on). */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, paint, false));
+  EXPECT_EQ(BKE_paint_layers_hidden_blocker(*ma, *paint), paint);
+  EXPECT_EQ(BKE_paint_layers_target_resolve(
+                *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target),
+            PaintLayersTargetStatus::Ok);
+  EXPECT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  EXPECT_FALSE(BKE_paint_layers_target_is_live(target));
+}
+
+TEST_F(PaintLayersTargetTest, lock_blocker_reason_names_where_the_lock_sits)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(*ma, "F", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  folder->source = MA_PAINT_LAYER_SOURCE_STACK;
+  MaterialPaintLayer *child = BKE_paint_layers_add(*ma, "C", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  BKE_paint_layers_active_set(*ma, child->marker);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(*ma, child, "Corr");
+  ASSERT_NE(correction, nullptr);
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, child, 1.0f);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, child, MA_PAINT_LAYER_SOURCE_IMAGE, "Item");
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(item, nullptr);
+
+  PaintLayersBlockerPlace reason = PaintLayersBlockerPlace::Folder;
+
+  /* The row itself. */
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, child, true));
+  EXPECT_EQ(BKE_paint_layers_lock_blocker(*ma, *child, &reason), child);
+  EXPECT_EQ(reason, PaintLayersBlockerPlace::Self);
+
+  /* A correction and a mask item hang on the row, so its lock sits at Owner. */
+  EXPECT_EQ(BKE_paint_layers_lock_blocker(*ma, *correction, &reason), child);
+  EXPECT_EQ(reason, PaintLayersBlockerPlace::Owner);
+  EXPECT_EQ(BKE_paint_layers_lock_blocker(*ma, *item, &reason), child);
+  EXPECT_EQ(reason, PaintLayersBlockerPlace::Owner);
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, child, false));
+
+  /* A lock over the chain sits at Folder. */
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, folder, true));
+  EXPECT_EQ(BKE_paint_layers_lock_blocker(*ma, *child, &reason), folder);
+  EXPECT_EQ(reason, PaintLayersBlockerPlace::Folder);
+  EXPECT_EQ(BKE_paint_layers_lock_blocker(*ma, *correction, &reason), folder);
+  EXPECT_EQ(reason, PaintLayersBlockerPlace::Folder);
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, folder, false));
+}
+
+TEST_F(PaintLayersTargetTest, hidden_blocker_reason_names_where_the_switch_sits)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(*ma, "F", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  folder->source = MA_PAINT_LAYER_SOURCE_STACK;
+  MaterialPaintLayer *child = BKE_paint_layers_add(*ma, "C", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  BKE_paint_layers_active_set(*ma, child->marker);
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(*ma, child, "Corr");
+  ASSERT_NE(correction, nullptr);
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, child, 1.0f);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, child, MA_PAINT_LAYER_SOURCE_IMAGE, "Item");
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(item, nullptr);
+
+  PaintLayersBlockerPlace reason = PaintLayersBlockerPlace::Folder;
+
+  /* The row itself, and the correction that hangs on it. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, child, false));
+  EXPECT_EQ(BKE_paint_layers_hidden_blocker(*ma, *child, &reason), child);
+  EXPECT_EQ(reason, PaintLayersBlockerPlace::Self);
+  EXPECT_EQ(BKE_paint_layers_hidden_blocker(*ma, *correction, &reason), child);
+  EXPECT_EQ(reason, PaintLayersBlockerPlace::Owner);
+  EXPECT_EQ(BKE_paint_layers_hidden_blocker(*ma, *item, &reason), child);
+  EXPECT_EQ(reason, PaintLayersBlockerPlace::Owner);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, child, true));
+
+  /* A switched-off folder mutes the chain below it. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, folder, false));
+  EXPECT_EQ(BKE_paint_layers_hidden_blocker(*ma, *child, &reason), folder);
+  EXPECT_EQ(reason, PaintLayersBlockerPlace::Folder);
+  EXPECT_EQ(BKE_paint_layers_hidden_blocker(*ma, *correction, &reason), folder);
+  EXPECT_EQ(reason, PaintLayersBlockerPlace::Folder);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, folder, true));
+}
+
+TEST_F(PaintLayersTargetTest, locked_wins_over_hidden)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, layer, false));
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, layer, true));
+
+  /* Both refuse the target, but the lock is reported: it comes first in the resolve. */
+  EXPECT_EQ(BKE_paint_layers_hidden_blocker(*ma, *layer), layer);
+  PaintLayersTarget target;
+  EXPECT_EQ(BKE_paint_layers_target_resolve(
+                *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, target),
+            PaintLayersTargetStatus::Locked);
 }
 
 /** \} */

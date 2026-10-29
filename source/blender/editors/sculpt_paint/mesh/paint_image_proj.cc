@@ -6986,12 +6986,7 @@ static bool proj_paint_add_layered_slot(bContext *C, wmOperator *op, Object &ob,
     BKE_report(op->reports, RPT_ERROR, "The channel is not part of the material's channel set");
     return false;
   }
-  if (status == PaintLayersTargetStatus::Locked) {
-    const MaterialPaintLayer *layer = BKE_paint_layers_active_layer_get(ma);
-    if (layer != nullptr) {
-      ed::sculpt_paint::material::paint_layer_locked_report(
-          ma, *layer, BKE_paint_layers_lock_blocker(ma, *layer), op->reports);
-    }
+  if (ed::sculpt_paint::material::paint_layers_status_report(ma, status, op->reports)) {
     return false;
   }
   if (status != PaintLayersTargetStatus::Ok) {

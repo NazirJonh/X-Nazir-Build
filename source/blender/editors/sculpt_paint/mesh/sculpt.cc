@@ -8332,10 +8332,10 @@ static bool brush_layer_source_stroke_ready(bContext *C, wmOperator *op)
 }
 
 /**
- * One gate per stroke: a locked pane row refuses a brush that paints into the material and says
- * why, once. A geometry brush never writes the layers, so the lock must not stop it.
+ * One gate per stroke: a locked or hidden pane row refuses a brush that paints into the material
+ * and says why, once. A geometry brush never writes the layers, so neither must stop it.
  */
-static bool paint_layers_lock_stroke_ready(bContext *C, wmOperator *op)
+static bool paint_layers_stroke_ready(bContext *C, wmOperator *op)
 {
   Scene *scene = CTX_data_scene(C);
   Object *ob = CTX_data_active_object(C);
@@ -8347,7 +8347,7 @@ static bool paint_layers_lock_stroke_ready(bContext *C, wmOperator *op)
   if (brush == nullptr || !brush_type_is_paint(brush->sculpt_brush_type)) {
     return true;
   }
-  return !ed::sculpt_paint::material::paint_layers_lock_report(
+  return !ed::sculpt_paint::material::paint_layers_stroke_gate_report(
       *ob, scene->toolsettings->paint_mode, op->reports);
 }
 
@@ -11020,7 +11020,7 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     }
   }
 
-  if (!brush_layer_source_stroke_ready(C, op) || !paint_layers_lock_stroke_ready(C, op)) {
+  if (!brush_layer_source_stroke_ready(C, op) || !paint_layers_stroke_ready(C, op)) {
     return OPERATOR_CANCELLED;
   }
 
@@ -11178,7 +11178,7 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
 
 static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
 {
-  if (!brush_layer_source_stroke_ready(C, op) || !paint_layers_lock_stroke_ready(C, op)) {
+  if (!brush_layer_source_stroke_ready(C, op) || !paint_layers_stroke_ready(C, op)) {
     return OPERATOR_CANCELLED;
   }
   brush_stroke_init(C, op);

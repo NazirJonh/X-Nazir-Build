@@ -297,45 +297,115 @@ Image *mask_target_image_get(Object &ob)
   return mask_target_get(ob, target) ? BKE_paint_layers_target_image(target) : nullptr;
 }
 
-void paint_layer_locked_report(const Material &ma,
-                               const MaterialPaintLayer &row,
-                               const MaterialPaintLayer *blocker,
-                               ReportList *reports)
+/**
+ * Tell the user why a stroke into \a row writes nothing visible: the row itself, the row a mask
+ * item or correction hangs on, or one of its folders is \a kind (locked, hidden). \a blocker and
+ * \a reason are #BKE_paint_layers_lock_blocker's or #BKE_paint_layers_hidden_blocker's answer; this
+ * only formats it. The texts stay literals so the translation catalog can find them.
+ */
+static void paint_layer_block_report(const PaintLayersBlockKind kind,
+                                     const MaterialPaintLayer &row,
+                                     const MaterialPaintLayer *blocker,
+                                     const PaintLayersBlockerPlace reason,
+                                     ReportList *reports)
 {
   if (blocker == nullptr || reports == nullptr) {
     return;
   }
-  if (blocker == &row) {
-    BKE_reportf(reports, RPT_WARNING, TIP_("Layer \"%s\" is locked"), row.name);
-    return;
+  switch (kind) {
+    case PaintLayersBlockKind::Locked:
+      switch (reason) {
+        case PaintLayersBlockerPlace::Self:
+          BKE_reportf(reports, RPT_WARNING, TIP_("Layer \"%s\" is locked"), row.name);
+          return;
+        case PaintLayersBlockerPlace::Owner:
+          BKE_reportf(reports,
+                      RPT_WARNING,
+                      TIP_("Layer \"%s\" is locked because its layer \"%s\" is locked"),
+                      row.name,
+                      blocker->name);
+          return;
+        case PaintLayersBlockerPlace::Folder:
+          BKE_reportf(reports,
+                      RPT_WARNING,
+                      TIP_("Layer \"%s\" is locked because its folder \"%s\" is locked"),
+                      row.name,
+                      blocker->name);
+          return;
+      }
+      break;
+    case PaintLayersBlockKind::Hidden:
+      switch (reason) {
+        case PaintLayersBlockerPlace::Self:
+          BKE_reportf(reports, RPT_WARNING, TIP_("Layer \"%s\" is hidden"), row.name);
+          return;
+        case PaintLayersBlockerPlace::Owner:
+          BKE_reportf(reports,
+                      RPT_WARNING,
+                      TIP_("Layer \"%s\" is hidden because its layer \"%s\" is hidden"),
+                      row.name,
+                      blocker->name);
+          return;
+        case PaintLayersBlockerPlace::Folder:
+          BKE_reportf(reports,
+                      RPT_WARNING,
+                      TIP_("Layer \"%s\" is hidden because its folder \"%s\" is hidden"),
+                      row.name,
+                      blocker->name);
+          return;
+      }
+      break;
   }
-  /* The owner and parent lookups only read the stack, but share its mutable iterator. */
-  Material &ma_mut = const_cast<Material &>(ma);
-  const MaterialPaintLayer *owner = nullptr;
-  if (row.role == MA_PAINT_LAYER_ROLE_EFFECT) {
-    owner = BKE_paint_layers_correction_owner(ma_mut, row);
-  }
-  else if (row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
-    owner = BKE_paint_layers_mask_item_owner(ma_mut, row);
-  }
-  if (owner != nullptr && blocker == owner) {
-    BKE_reportf(reports,
-                RPT_WARNING,
-                TIP_("Layer \"%s\" is locked because its layer \"%s\" is locked"),
-                row.name,
-                owner->name);
-    return;
-  }
-  BKE_reportf(reports,
-              RPT_WARNING,
-              TIP_("Layer \"%s\" is locked because its folder \"%s\" is locked"),
-              row.name,
-              blocker->name);
+  BLI_assert_unreachable();
 }
 
-bool paint_layers_lock_report(Object &ob,
-                              const PaintModeSettings &settings,
-                              ReportList *reports)
+bool paint_layers_status_report(Material &ma,
+                                const PaintLayersTargetStatus status,
+                                ReportList *reports)
+{
+  if (status != PaintLayersTargetStatus::Locked && status != PaintLayersTargetStatus::Hidden) {
+    return false;
+  }
+  const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(ma);
+  if (row == nullptr) {
+    return false;
+  }
+  PaintLayersBlockerPlace reason = PaintLayersBlockerPlace::Self;
+  const MaterialPaintLayer *blocker = nullptr;
+  if (status == PaintLayersTargetStatus::Locked) {
+    blocker = BKE_paint_layers_lock_blocker(ma, *row, &reason);
+    if (blocker == nullptr) {
+      /* The row is not locked, so in Mask mode the resolve must have refused on the mask item the
+       * stroke would paint. Name that item instead of the row. */
+      const MaterialPaintLayer *item = BKE_paint_layers_active_mask_item_get(ma);
+      if (item == nullptr) {
+        item = BKE_paint_layers_mask_base(*row);
+      }
+      if (item != nullptr) {
+        const MaterialPaintLayer *item_blocker = BKE_paint_layers_lock_blocker(ma, *item, &reason);
+        if (item_blocker != nullptr) {
+          row = item;
+          blocker = item_blocker;
+        }
+      }
+    }
+  }
+  else {
+    blocker = BKE_paint_layers_hidden_blocker(ma, *row, &reason);
+  }
+  if (blocker == nullptr) {
+    return false;
+  }
+  const PaintLayersBlockKind kind = status == PaintLayersTargetStatus::Locked ?
+                                        PaintLayersBlockKind::Locked :
+                                        PaintLayersBlockKind::Hidden;
+  paint_layer_block_report(kind, *row, blocker, reason, reports);
+  return true;
+}
+
+bool paint_layers_stroke_gate_report(Object &ob,
+                                     const PaintModeSettings &settings,
+                                     ReportList *reports)
 {
   if (settings.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL) {
     return false;
@@ -344,31 +414,17 @@ bool paint_layers_lock_report(Object &ob,
   if (ma == nullptr) {
     return false;
   }
-  const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(*ma);
-  if (row == nullptr) {
-    return false;
-  }
-  const MaterialPaintLayer *blocker = BKE_paint_layers_lock_blocker(*ma, *row);
-  if (blocker == nullptr && BKE_paint_layers_target_mode(&settings) == PaintLayersTargetMode::Mask)
-  {
-    /* A mask item can be locked on its own while the row it hangs on is not. */
-    const MaterialPaintLayer *item = BKE_paint_layers_active_mask_item_get(*ma);
-    if (item == nullptr) {
-      item = BKE_paint_layers_mask_base(*row);
-    }
-    if (item != nullptr) {
-      const MaterialPaintLayer *item_blocker = BKE_paint_layers_lock_blocker(*ma, *item);
-      if (item_blocker != nullptr) {
-        row = item;
-        blocker = item_blocker;
-      }
-    }
-  }
-  if (blocker == nullptr) {
-    return false;
-  }
-  paint_layer_locked_report(*ma, *row, blocker, reports);
-  return true;
+  /* Base Color is enough to ask whether the stroke is refused: resolve answers Locked and Hidden
+   * before any channel or mode logic (only NotLayered, InvalidChannel and NoActiveRow come first,
+   * and the gate reports none of those), so the channel and the mode decide which row a later
+   * stroke would paint, not whether it is refused. */
+  PaintLayersTarget target;
+  const PaintLayersTargetStatus status = BKE_paint_layers_target_resolve(
+      *ma,
+      int(PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+      BKE_paint_layers_target_mode(&settings),
+      target);
+  return paint_layers_status_report(*ma, status, reports);
 }
 
 Image *mask_target_image_ensure(Main *bmain, Object &ob, const PaintModeSettings &settings)

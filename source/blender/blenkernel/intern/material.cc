@@ -2377,9 +2377,13 @@ static void paint_layers_texpaint_slots_fill(Material &ma, const PaintModeSettin
     const MaterialPaintChannelInfo &info = *infos[index];
     TexPaintSlot &slot = ma.texpaintslot[index];
     PaintLayersTarget target;
-    if (BKE_paint_layers_target_get(ma, int(info.channel), mode, target)) {
-      /* A switched-off record keeps its map in the file but is not a paint target, so it reads as
-       * an empty slot. In Mask mode only Base Color's slot holds anything: the row's mask map. */
+    const PaintLayersTargetStatus status = BKE_paint_layers_target_resolve(
+        ma, int(info.channel), mode, target);
+    /* A hidden row keeps its maps in the slot list: hide unblocks (or blocks) strokes, it does not
+     * empty the maps, and the slot cache outlives a visibility toggle. A switched-off channel
+     * record still keeps its map in the file but is not a paint target, so it reads as an empty
+     * slot. In Mask mode only Base Color's slot holds anything: the row's mask map. */
+    if (status == PaintLayersTargetStatus::Ok || status == PaintLayersTargetStatus::Hidden) {
       slot.ima = BKE_paint_layers_target_image(target);
     }
     slot.valid = slot.ima != nullptr;

@@ -725,7 +725,7 @@ void SculptImageBackend::target_images(Vector<const Image *> &r_images) const
 bool SculptImageBackend::begin(bContext &C, ReportList *reports)
 {
   if (ctx_.ob != nullptr && ctx_.toolsettings != nullptr &&
-      material::paint_layers_lock_report(*ctx_.ob, ctx_.toolsettings->paint_mode, reports))
+      material::paint_layers_stroke_gate_report(*ctx_.ob, ctx_.toolsettings->paint_mode, reports))
   {
     return false;
   }

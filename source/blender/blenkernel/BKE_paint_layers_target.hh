@@ -104,6 +104,35 @@ enum class PaintLayersTargetStatus : int8_t {
   NoMask,
   /** The row, the stack row a mask item or correction hangs on, or one of its folders is locked. */
   Locked,
+  /**
+   * The row, the stack row a mask item or correction hangs on, or one of its folders has its
+   * visibility switched off: a stroke into it would paint a muted row, so the stroke gate refuses
+   * it the way it refuses a lock.
+   *
+   * Only a stroke is refused. The target is filled in as for Ok, and the texture-paint slot cache
+   * relies on that: it resolves and takes Ok or Hidden, so hiding and showing a row never empties
+   * its slots. Hidden stands in for Ok and for OutsideChannelSet; a row that takes no stroke
+   * anyway keeps its more specific answer. Paths that create maps (stroke map creation, paste, Add) still treat Hidden as no
+   * target, because a map grown for a muted row would be invisible and the gate refuses the
+   * stroke anyway.
+   */
+  Hidden,
+};
+
+/** Where the blocker sits along a row's chain, as the lock and hidden blockers answer it. */
+enum class PaintLayersBlockerPlace {
+  /** The row itself. */
+  Self,
+  /** The stack row a mask item or correction hangs on. */
+  Owner,
+  /** One of the parent folders. */
+  Folder,
+};
+
+/** Which state blocks a row: it is locked, or its visibility is switched off. */
+enum class PaintLayersBlockKind {
+  Locked,
+  Hidden,
 };
 
 /** The resolved description row and channel a stroke paints into. */

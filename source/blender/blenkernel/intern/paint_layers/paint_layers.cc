@@ -263,19 +263,54 @@ void BKE_paint_layers_foreach_source_row(Material &ma,
                                       });
 }
 
-MaterialPaintLayer *BKE_paint_layers_parent(Material &ma, const MaterialPaintLayer &layer)
+/**
+ * The const read behind #BKE_paint_layers_parent: only walks the stack, so a lookup can answer from
+ * a const material. The mutable overload aliases the answer back.
+ */
+static const MaterialPaintLayer *paint_layers_parent_read(const Material &ma,
+                                                          const MaterialPaintLayer &layer)
 {
   const MaterialPaintLayer *parent = nullptr;
   BKE_paint_layers_foreach(
-      static_cast<const Material &>(ma),
-      [&](const MaterialPaintLayer &row, const MaterialPaintLayer *row_parent) -> bool {
+      ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer *row_parent) -> bool {
         if (&row == &layer) {
           parent = row_parent;
           return false;
         }
         return true;
       });
-  return const_cast<MaterialPaintLayer *>(parent);
+  return parent;
+}
+
+/**
+ * The const read behind the owner lookups: the stack row whose corrections (\a row with
+ * #MA_PAINT_LAYER_ROLE_EFFECT) or mask items (#MA_PAINT_LAYER_ROLE_MASK_ITEM) hold \a row. Any
+ * other role is a row of the stack itself and has no owner. The mutable overloads alias the answer
+ * back.
+ */
+static const MaterialPaintLayer *paint_layers_content_owner_read(const Material &ma,
+                                                                 const MaterialPaintLayer &row)
+{
+  if (row.role != MA_PAINT_LAYER_ROLE_EFFECT && row.role != MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return nullptr;
+  }
+  const bool is_effect = row.role == MA_PAINT_LAYER_ROLE_EFFECT;
+  const MaterialPaintLayer *owner = nullptr;
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &candidate, const MaterialPaintLayer * /*parent*/) -> bool {
+        const ListBase *content = is_effect ? &candidate.effects : &candidate.mask_stack;
+        if (BLI_findindex(content, &row) != -1) {
+          owner = &candidate;
+        }
+        return owner == nullptr;
+      });
+  return owner;
+}
+
+MaterialPaintLayer *BKE_paint_layers_parent(Material &ma, const MaterialPaintLayer &layer)
+{
+  /* The read answers a row of this same mutable stack, so aliasing it back is safe. */
+  return const_cast<MaterialPaintLayer *>(paint_layers_parent_read(ma, layer));
 }
 
 bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &root, const bUUID &marker)
@@ -325,18 +360,8 @@ static bool paint_layer_owned(const Material &ma, const MaterialPaintLayer *laye
 
 MaterialPaintLayer *BKE_paint_layers_correction_owner(Material &ma, const MaterialPaintLayer &effect)
 {
-  if (effect.role != MA_PAINT_LAYER_ROLE_EFFECT) {
-    return nullptr;
-  }
-  MaterialPaintLayer *owner = nullptr;
-  BKE_paint_layers_foreach(
-      ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) -> bool {
-        if (BLI_findindex(&row.effects, &effect) != -1) {
-          owner = &row;
-        }
-        return owner == nullptr;
-      });
-  return owner;
+  /* The read answers a row of this same mutable stack, so aliasing it back is safe. */
+  return const_cast<MaterialPaintLayer *>(paint_layers_content_owner_read(ma, effect));
 }
 
 /** Whether \a layer is a row of \a ma's stack or one of a row's content corrections. */
@@ -1487,18 +1512,8 @@ MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma,
 
 MaterialPaintLayer *BKE_paint_layers_mask_item_owner(Material &ma, const MaterialPaintLayer &item)
 {
-  if (item.role != MA_PAINT_LAYER_ROLE_MASK_ITEM) {
-    return nullptr;
-  }
-  MaterialPaintLayer *owner = nullptr;
-  BKE_paint_layers_foreach(
-      ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) -> bool {
-        if (BLI_findindex(&row.mask_stack, &item) != -1) {
-          owner = &row;
-        }
-        return owner == nullptr;
-      });
-  return owner;
+  /* The read answers a row of this same mutable stack, so aliasing it back is safe. */
+  return const_cast<MaterialPaintLayer *>(paint_layers_content_owner_read(ma, item));
 }
 
 MaterialPaintLayer *BKE_paint_layers_mask_item_add(Material &ma,
@@ -3559,36 +3574,74 @@ bool BKE_paint_layers_set_locked(Material &ma, MaterialPaintLayer *layer, const 
   return true;
 }
 
-const MaterialPaintLayer *BKE_paint_layers_lock_blocker(const Material &ma,
-                                                        const MaterialPaintLayer &row)
+/**
+ * The first row along \a row's chain -- the row itself, the stack row a mask item or correction
+ * hangs on, one of its parent folders -- whose state \a holds, together with where it sits. The
+ * one walk #BKE_paint_layers_lock_blocker and #BKE_paint_layers_hidden_blocker answer from, so the
+ * "who blocks" decision exists once and its reports only name it.
+ *
+ * The parent walk repeats the linear stack walk once per level, so asking for both the lock and the
+ * hidden blocker costs two walks. They stay separate: returning both from one walk would need a
+ * second BKE entry for the resolve, which lives in another translation unit, and the resolve
+ * already skips the hidden walk whenever a row is locked. The chain is shallow enough that this
+ * keeps the decision in one readable place.
+ */
+static const MaterialPaintLayer *paint_layers_chain_blocker(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    FunctionRef<bool(const MaterialPaintLayer &)> holds,
+    PaintLayersBlockerPlace *r_reason)
 {
-  if (BKE_paint_layers_is_locked(row)) {
-    return &row;
+  const auto answer = [&](const MaterialPaintLayer *blocker,
+                          const PaintLayersBlockerPlace reason) -> const MaterialPaintLayer * {
+    if (blocker != nullptr && r_reason != nullptr) {
+      *r_reason = reason;
+    }
+    return blocker;
+  };
+
+  if (holds(row)) {
+    return answer(&row, PaintLayersBlockerPlace::Self);
   }
-  /* The owner and parent lookups take a mutable material although they only read it: the stack is
-   * a list, and every walk over it shares the one iterator. */
-  Material &ma_mut = const_cast<Material &>(ma);
-  const MaterialPaintLayer *owner = &row;
-  if (row.role == MA_PAINT_LAYER_ROLE_EFFECT) {
-    owner = BKE_paint_layers_correction_owner(ma_mut, row);
-  }
-  else if (row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
-    owner = BKE_paint_layers_mask_item_owner(ma_mut, row);
-  }
+  /* A row of the stack is its own owner; a mask item or correction is held by the row it hangs
+   * on. */
+  const MaterialPaintLayer *owner = paint_layers_content_owner_read(ma, row);
   if (owner == nullptr) {
-    return nullptr;
+    owner = &row;
   }
-  if (owner != &row && BKE_paint_layers_is_locked(*owner)) {
-    return owner;
+  if (owner != &row && holds(*owner)) {
+    return answer(owner, PaintLayersBlockerPlace::Owner);
   }
-  for (const MaterialPaintLayer *parent = BKE_paint_layers_parent(ma_mut, *owner); parent != nullptr;
-       parent = BKE_paint_layers_parent(ma_mut, *parent))
+  /* A blocker over the owner takes everything it holds down with it, the same way the composite
+   * and the generator read the chain. */
+  for (const MaterialPaintLayer *parent = paint_layers_parent_read(ma, *owner); parent != nullptr;
+       parent = paint_layers_parent_read(ma, *parent))
   {
-    if (BKE_paint_layers_is_locked(*parent)) {
-      return parent;
+    if (holds(*parent)) {
+      return answer(parent, PaintLayersBlockerPlace::Folder);
     }
   }
   return nullptr;
+}
+
+const MaterialPaintLayer *BKE_paint_layers_lock_blocker(const Material &ma,
+                                                        const MaterialPaintLayer &row,
+                                                        PaintLayersBlockerPlace *r_reason)
+{
+  return paint_layers_chain_blocker(
+      ma, row, [](const MaterialPaintLayer &layer) { return BKE_paint_layers_is_locked(layer); },
+      r_reason);
+}
+
+const MaterialPaintLayer *BKE_paint_layers_hidden_blocker(const Material &ma,
+                                                          const MaterialPaintLayer &row,
+                                                          PaintLayersBlockerPlace *r_reason)
+{
+  return paint_layers_chain_blocker(
+      ma,
+      row,
+      [](const MaterialPaintLayer &layer) { return (layer.flag & MA_PAINT_LAYER_ENABLED) == 0; },
+      r_reason);
 }
 
 int BKE_paint_layers_channel_blend_effective(const MaterialPaintLayer &layer, const int channel)

@@ -182,12 +182,12 @@ ImageCurvePatchSession *image_curve_patch_session_begin(bContext *C,
     return nullptr;
   }
 
-  /* One gate per session: a locked row takes no target, and the user hears why before the patch
-   * starts rather than on every restamp. */
+  /* One gate per session: a locked or hidden row takes no target, and the user hears why before
+   * the patch starts rather than on every restamp. */
   if (Scene *scene = CTX_data_scene(C)) {
     Object *ob = CTX_data_active_object(C);
     if (ob != nullptr && scene->toolsettings != nullptr &&
-        ed::sculpt_paint::material::paint_layers_lock_report(
+        ed::sculpt_paint::material::paint_layers_stroke_gate_report(
             *ob, scene->toolsettings->paint_mode, reports))
     {
       return nullptr;

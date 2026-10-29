@@ -26,6 +26,8 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_paint_layers_target.hh"
+
 #include "DNA_listBase.h"
 #include "DNA_uuid_types.h"
 
@@ -1688,9 +1690,34 @@ bool BKE_paint_layers_set_locked(Material &ma, MaterialPaintLayer *layer, bool l
 /**
  * The row that keeps \a row from being painted because it is locked: \a row itself, the stack row a
  * mask item or correction hangs on, or one of that row's parent folders. Null when nothing locks it.
+ * \a r_reason, when given, names where the lock sits, so a report never re-walks the chain.
  */
-const MaterialPaintLayer *BKE_paint_layers_lock_blocker(const Material &ma,
-                                                        const MaterialPaintLayer &row);
+const MaterialPaintLayer *BKE_paint_layers_lock_blocker(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    PaintLayersBlockerPlace *r_reason = nullptr);
+
+/**
+ * The row that silences \a row because its visibility is switched off (#MA_PAINT_LAYER_ENABLED):
+ * \a row itself, the stack row a mask item or correction hangs on, or one of that row's parent
+ * folders. Null when the whole chain shows. \a r_reason, when given, names where the switch sits,
+ * so a report never re-walks the chain.
+ *
+ * A stroke into a hidden row paints a map the render never sees, so the paint tools refuse it the
+ * way they refuse a locked one (see #BKE_paint_layers_lock_blocker).
+ *
+ * A mask item's own switch is the exception: for the item itself this still answers Self, but
+ * #BKE_paint_layers_target_resolve does not refuse it; the item stays the stroke target and only
+ * refuses softly through #BKE_paint_layers_target_is_live. A caller deciding whether a stroke may
+ * start reads the target status, not this answer alone.
+ *
+ * A correction (role #MA_PAINT_LAYER_ROLE_EFFECT) carries its own switch like a row. A row that
+ * takes no stroke anyway (a filter) keeps its RowTakesNoStrokes answer from the target resolve.
+ */
+const MaterialPaintLayer *BKE_paint_layers_hidden_blocker(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    PaintLayersBlockerPlace *r_reason = nullptr);
 
 /** \} */
 

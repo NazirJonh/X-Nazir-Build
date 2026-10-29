@@ -18,6 +18,7 @@
 #include "BLI_span.hh"
 
 #include "BKE_brush.hh"
+#include "BKE_paint_layers_target.hh"
 
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
@@ -251,24 +252,24 @@ Image *mask_target_image_ensure(Main *bmain, Object &ob, const PaintModeSettings
 bool mask_target_image_create_if_missing(Main *bmain, Object &ob, const PaintModeSettings &settings);
 
 /**
- * Tell the user why a stroke into \a row writes nothing: the row itself, the row a mask item or
- * correction hangs on, or one of its folders is locked. \a blocker is
- * #BKE_paint_layers_lock_blocker's answer.
+ * The one place a resolve status becomes a message: report the active row as locked or hidden when
+ * \a status says so. The blocker is looked up the same way the status was decided, so the message
+ * names what actually blocked. False for any other status.
  */
-void paint_layer_locked_report(const Material &ma,
-                               const MaterialPaintLayer &row,
-                               const MaterialPaintLayer *blocker,
-                               ReportList *reports);
+bool paint_layers_status_report(Material &ma,
+                                PaintLayersTargetStatus status,
+                                ReportList *reports);
 
 /**
- * Report the active row of \a ob as locked when it is, for the canvas \a settings selects. The
- * entry point every stroke start shares, so the message appears once per stroke and not per dab.
+ * The one gate a stroke start answers to: the paint target is locked or hidden. The decision comes
+ * from #BKE_paint_layers_target_resolve alone, so the gate and the stroke cannot disagree, and the
+ * message appears once per stroke and not per dab.
  *
- * \return true when a lock was reported and the caller should not start the stroke.
+ * \return true when a refusal was reported and the caller should not start the stroke.
  */
-bool paint_layers_lock_report(Object &ob,
-                              const PaintModeSettings &settings,
-                              ReportList *reports);
+bool paint_layers_stroke_gate_report(Object &ob,
+                                     const PaintModeSettings &settings,
+                                     ReportList *reports);
 
 /**
  * Map creation is deliberately not part of any stroke's undo step, so nothing else marks the file

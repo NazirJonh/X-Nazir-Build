@@ -166,6 +166,14 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
   if (BKE_paint_layers_lock_blocker(ma, *layer) != nullptr) {
     return PaintLayersTargetStatus::Locked;
   }
+  /* A hidden row refuses a stroke too (the paint would land on a muted row and never show), but
+   * only in place of Ok: the target is filled in as usual, so the texture-paint slot cache still
+   * reads the row's maps from it and a visibility toggle never empties them. A row that takes no
+   * stroke anyway keeps its own, more specific answer. The mask item's own switch stays a soft
+   * refusal (#BKE_paint_layers_target_is_live): the row it belongs to is the one checked here. */
+  const PaintLayersTargetStatus ok_status = BKE_paint_layers_hidden_blocker(ma, *layer) != nullptr ?
+                                                PaintLayersTargetStatus::Hidden :
+                                                PaintLayersTargetStatus::Ok;
   if (mode == PaintLayersTargetMode::Content) {
     /* A filter's records only say which channels it works in: there is no map to write into, and
      * a stroke must not make one. The mask of its row is still paintable. */
@@ -185,10 +193,13 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
     }
     /* Cannot paint into a channel that is not in the material's channel set. */
     if (!BKE_paint_layers_channel_in_set(ma, eMaterialPaintChannel(channel))) {
-      return PaintLayersTargetStatus::OutsideChannelSet;
+      /* The stroke gate asks with Base Color whatever the material's set holds, so a hidden row
+       * must still be named here or the gate would let the stroke through. */
+      return ok_status == PaintLayersTargetStatus::Hidden ? PaintLayersTargetStatus::Hidden :
+                                                            PaintLayersTargetStatus::OutsideChannelSet;
     }
     r_target.channel_record = paint_layer_channel_find(*layer, channel);
-    return PaintLayersTargetStatus::Ok;
+    return ok_status;
   }
   /* A mask is one grey map in the item's Base Color record: a stroke's other channels have nothing
    * to write into, and a row without a mask has nothing to paint (the mode switch adds one). */
@@ -221,7 +232,7 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
     return PaintLayersTargetStatus::NoMask;
   }
   r_target.channel_record = paint_layer_channel_find(*r_target.mask_item, channel);
-  return PaintLayersTargetStatus::Ok;
+  return ok_status;
 }
 
 Material *BKE_paint_layers_active_material_get(Object *ob)

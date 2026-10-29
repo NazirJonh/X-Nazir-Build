@@ -624,7 +624,7 @@ static bool texture_fill_click(bContext *C, wmOperator *op, const float mouse[2]
   Object *ob = CTX_data_active_object(C);
   Scene *scene = CTX_data_scene(C);
   if (ob != nullptr && scene != nullptr && scene->toolsettings != nullptr &&
-      ed::sculpt_paint::material::paint_layers_lock_report(
+      ed::sculpt_paint::material::paint_layers_stroke_gate_report(
           *ob, scene->toolsettings->paint_mode, op->reports))
   {
     return false;
@@ -706,7 +706,7 @@ static bool texture_fill_line(bContext *C,
   Object *ob = CTX_data_active_object(C);
   Scene *scene = CTX_data_scene(C);
   if (ob != nullptr && scene != nullptr && scene->toolsettings != nullptr &&
-      ed::sculpt_paint::material::paint_layers_lock_report(
+      ed::sculpt_paint::material::paint_layers_stroke_gate_report(
           *ob, scene->toolsettings->paint_mode, op->reports))
   {
     return false;
@@ -1502,11 +1502,13 @@ static void texture_paint_prepare_layered_maps(bContext *C,
   Scene *scene = CTX_data_scene(C);
   PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
 
-  /* Projection paint writes every layered material of the object: a locked active row proves the
-   * stroke has nothing to write before any map is grown. The 2D path checks the same gate itself,
-   * so this one is limited to projection to report once per stroke. */
+  /* Projection paint writes every layered material of the object: a locked or hidden active row
+   * proves the stroke has nothing to write before any map is grown. The 2D path checks the same
+   * gate itself, so this one is limited to projection to report once per stroke. */
   if (is_projection &&
-      ed::sculpt_paint::material::paint_layers_lock_report(*ob, paint_mode, CTX_wm_reports(C)))
+      ed::sculpt_paint::material::paint_layers_stroke_gate_report(*ob,
+                                                                  paint_mode,
+                                                                  CTX_wm_reports(C)))
   {
     return;
   }

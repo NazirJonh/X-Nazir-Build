@@ -29,6 +29,8 @@
 #include "ED_material_bake.hh"
 #include "ED_paint_layers_bake.hh"
 
+#include "render_material_bake_intern.hh" /* own include */
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -56,6 +58,7 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_scene.hh"
 
@@ -551,6 +554,10 @@ static bool route_socket_to_root(Main &bmain,
                                  bNodeSocket &dest_socket,
                                  const StringRefNull route_name)
 {
+  /* The caller adds the AOV node, and the encoding chain in front of it, to this tree before
+   * routing into it, which leaves its topology cache dirty; #bNodeSocket::owner_node asserts
+   * without a fresh one. Only this tree is edited: a socket in a group on the path is unaffected. */
+  root_tree.ensure_topology_cache();
   bNode *current_node = const_cast<bNode *>(&source_socket.owner_node());
   bNodeSocket *current_socket = const_cast<bNodeSocket *>(&source_socket);
 
@@ -695,33 +702,12 @@ static Mesh *bake_quad_mesh(Main *bmain)
  * the material compositing path, say -- would have to write for itself.
  * \{ */
 
-/** One socket to bake, and the AOV it is delivered under. */
-struct BakeSocketRequest {
-  /** The socket to read. May live in a group nested anywhere inside the material's own tree. */
-  const bNodeSocket *source = nullptr;
-  /**
-   * The group instance nodes leading to #source, outermost first; empty when it is in the root
-   * tree. Must come from the same walk that found #source -- see #route_socket_to_root.
-   */
-  Vector<const bNode *> group_path;
-  /** Unique within one bake: names the AOV, and the group output routed for it at every level. */
-  char name[64] = "";
-  /** Delivered as an #AOV_TYPE_COLOR pass rather than an #AOV_TYPE_VALUE one. */
-  bool is_color = false;
-  /** Encode the signed vector the socket produces into the [0, 1] range a normal map stores. */
-  bool encode_vector = false;
-};
-
 /**
  * Attach an AOV output for every request, routing each source socket up to \a tree.
- *
- * \return false when any of them could not be routed. Reported rather than partially baked: a
- *         stroke that silently paints only some of the requested sockets is harder to diagnose
- *         than one that reports the material as unusable.
  */
-static bool bake_requests_attach(Main &bmain,
-                                 bNodeTree &tree,
-                                 const Span<BakeSocketRequest> requests)
+bool bake_requests_attach(Main &bmain,
+                          bNodeTree &tree,
+                          const Span<BakeSocketRequest> requests)
 {
   for (const BakeSocketRequest &request : requests) {
     bNode *aov = bke::node_add_static_node(nullptr, tree, SH_NODE_OUTPUT_AOV);
@@ -998,22 +984,69 @@ static const bNodeSocket *channel_bake_source_socket(const bNode &principled,
 }
 
 /**
- * Describe every channel \a resolve marks as #ChannelResolution::Baked as a socket to bake.
+ * The Height channel's bake source: the Height input of the Bump node the paint layer stack owns,
+ * walked to the map that drives it the way any other channel is. The stack carries no Principled
+ * input for Height, so this is where the map lives -- and marking the node as the stack's own is
+ * what keeps a user's hand-built Bump out of the export.
  *
- * Reads \a bake_material but never edits it: attaching the AOVs is #bake_requests_attach's job, so
- * a caller that only wants to know whether the material can be baked at all can stop here.
- *
- * \param r_request_channels: the #eMaterialPaintChannel each request in \a r_requests stands for,
- *                            which is what maps the rendered buffers back onto channels.
- * \return false when any of them has no resolvable source, which is reported rather than partially
- *         baked: a stroke that silently paints only some of the channels the material describes is
- *         harder to diagnose than one that reports the material as unusable.
+ * \param r_group_path: the group instance nodes the walk descended through, outermost first, like
+ *                      #BKE_paint_material_source_socket reports. Null when the material has no
+ *                      owned Bump, or its Height input has no source to print.
  */
-static bool bake_channel_requests_build(const Material &bake_material,
-                                        const MaterialSourceResolve &resolve,
-                                        const bool include_image_resolution,
-                                        Vector<BakeSocketRequest> &r_requests,
-                                        Vector<int> &r_request_channels)
+static const bNodeSocket *height_bake_source_socket(const Material &bake_material,
+                                                    Vector<const bNode *> &r_group_path)
+{
+  r_group_path.clear();
+  const bNode *bump = BKE_paint_layers_bump_owned_find(bake_material);
+  if (bump == nullptr) {
+    return nullptr;
+  }
+  const bNodeSocket *height = bke::node_find_socket(*bump, SOCK_IN, "Height"_ustr);
+  if (height == nullptr) {
+    return nullptr;
+  }
+  return BKE_paint_material_source_socket(*height, &r_group_path);
+}
+
+/**
+ * Disconnect the Height input of the stack's own Bump in \a bake_material -- a localized copy the
+ * job owns, so the user's tree is never touched. A Bump without a Height input passes its Normal
+ * input through, which is exactly the "Normal without relief" map: the normal layers alone, the
+ * height's derivatives gone. The resolve has to have run before this call, so the Normal channel
+ * still reads as #ChannelResolution::Baked and gets rendered from the disconnected graph.
+ */
+static void bake_material_height_disconnect(Main &bake_main, Material &bake_material)
+{
+  if (bake_material.nodetree == nullptr) {
+    return;
+  }
+  const bNode *bump = BKE_paint_layers_bump_owned_find(bake_material);
+  if (bump == nullptr) {
+    return;
+  }
+  /* The node belongs to the localized copy this job owns, so un-consting it to unlink one input
+   * never reaches the user's tree. */
+  bNodeSocket *height = bke::node_find_socket(*const_cast<bNode *>(bump), SOCK_IN, "Height"_ustr);
+  if (height == nullptr) {
+    return;
+  }
+  bake_material.nodetree->ensure_topology_cache();
+  if (height->directly_linked_links().is_empty()) {
+    return;
+  }
+  bke::node_remove_socket_links(*bake_material.nodetree, *height);
+  BKE_ntree_update_after_single_tree_change(bake_main, *bake_material.nodetree);
+}
+
+/**
+ * Describe every channel \a resolve marks as #ChannelResolution::Baked as a socket to bake.
+ */
+bool bake_channel_requests_build(const Material &bake_material,
+                                 const MaterialSourceResolve &resolve,
+                                 const bool include_image_resolution,
+                                 Vector<BakeSocketRequest> &r_requests,
+                                 Vector<int> &r_request_channels,
+                                 const bool include_height)
 {
   ChannelUnavailableReason reason = ChannelUnavailableReason::None;
   /* The Surface input is resolved like any other socket, so the Principled itself may sit inside a
@@ -1058,6 +1091,29 @@ static bool bake_channel_requests_build(const Material &bake_material,
 
     r_requests.append(request);
     r_request_channels.append(channel);
+  }
+
+  /* The Height map is not a Principled input: it is what drives the stack's own Bump, so its
+   * source is looked up on the Bump and fails softly -- a material with no owned Bump, or with an
+   * unlinked Height, simply prints no Height map instead of refusing the whole bake. */
+  if (include_height) {
+    Vector<const bNode *> height_group_path;
+    const bNodeSocket *height_source = height_bake_source_socket(bake_material, height_group_path);
+    if (height_source != nullptr) {
+      BakeSocketRequest request;
+      request.source = height_source;
+      /* The Bump sits in the material's own tree, so the walk from its Height input already ends at
+       * the root: unlike a Principled input, its path has no #principled_group_path stretch in front
+       * of it -- the two are siblings below the same output, not nested. */
+      request.group_path = height_group_path;
+      /* The height is a scalar, but an AOV delivers it in the four channels every buffer leaves
+       * with; a color pass carries the value on all of them, so the read-back stays uniform. */
+      request.is_color = true;
+      request.encode_vector = false;
+      SNPRINTF(request.name, "__PBR_PAINT_BAKE_%d", PAINT_MATERIAL_CHANNEL_HEIGHT);
+      r_requests.append(request);
+      r_request_channels.append(PAINT_MATERIAL_CHANNEL_HEIGHT);
+    }
   }
   return !r_requests.is_empty();
 }
@@ -1147,7 +1203,8 @@ static void material_bake_startjob(void *customdata, wmJobWorkerStatus *worker_s
                                              resolve,
                                              /*include_image_resolution=*/false,
                                              requests,
-                                             request_channels);
+                                             request_channels,
+                                             /*include_height=*/false);
     /* The render itself cannot be interrupted once it is under way, so the stop flag is honored at
      * the boundary before it. That covers the case it is actually raised in: the job system sets
      * stop when a newer bake supersedes this one, which happens while the user is still dragging
@@ -1334,6 +1391,10 @@ struct MaterialBakeImagesJob {
   MaterialBakeRowLink row;
   /** The owner the `wmJob` of this render is keyed on, excluded when its free callback settles. */
   const void *wm_owner = nullptr;
+  /** Print the Height map beside the channels (#bake_channel_requests_build's include_height). */
+  bool include_height = false;
+  /** Disconnect the owned Bump's Height input in the copy, so Normal bakes without the relief. */
+  bool normal_excludes_height = false;
 };
 
 /**
@@ -1641,7 +1702,8 @@ static void material_bake_images_startjob(void *customdata, wmJobWorkerStatus *w
                                            resolve,
                                            /*include_image_resolution=*/true,
                                            requests,
-                                           request_channels);
+                                           request_channels,
+                                           job.include_height);
   /* The builder answers for every renderable channel of the material; this job asked for a subset,
    * and rendering the rest would only cost time. */
   for (int64_t request_index = requests.size() - 1; request_index >= 0; request_index--) {
@@ -1649,6 +1711,14 @@ static void material_bake_images_startjob(void *customdata, wmJobWorkerStatus *w
       requests.remove(request_index);
       request_channels.remove(request_index);
     }
+  }
+  /* The "Normal without relief" option is applied after the resolve (which must still see the
+   * linked Bump to answer Baked) and after the requests are built (the Height map is printed from
+   * the Bump's Height input, so unlinking it earlier would silently drop that target). Only the
+   * render sees the disconnected graph, and the copy is the job's own: the user's tree is never
+   * touched. */
+  if (job.normal_excludes_height) {
+    bake_material_height_disconnect(*bake_main, bake_material);
   }
   if (requests.is_empty()) {
     baked = false;
@@ -1861,8 +1931,17 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
       continue;
     }
     if (resolve.channels[target.channel] == ChannelResolution::Unavailable) {
+      /* The Height map is not a Principled input, so the resolver always leaves it Unavailable:
+       * the Height input of the stack's own Bump is what says whether a map can be printed. */
+      bool printable = false;
+      if (target.channel == PAINT_MATERIAL_CHANNEL_HEIGHT) {
+        Vector<const bNode *> height_group_path;
+        printable = height_bake_source_socket(*params.material, height_group_path) != nullptr;
+      }
+      if (!printable) {
       result.skipped_unavailable.append_non_duplicates(target.channel);
       continue;
+    }
     }
     const bool duplicate = std::any_of(
         to_create.begin(), to_create.end(), [&](const BakeTargetSpec *other) {
@@ -1984,6 +2063,10 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
   job->baked_hash = current_hash;
   job->material_session_uid = params.material->id.session_uid;
   job->row = params.row;
+  /* The Height request is built only when a map of it was asked for; the "Normal without relief"
+   * disconnect runs in the worker, on the localized copy. */
+  job->include_height = job->channels.contains(PAINT_MATERIAL_CHANNEL_HEIGHT);
+  job->normal_excludes_height = params.normal_excludes_height;
 
   for (const uint32_t session_uid : job->target_session_uids) {
     material_bake_images_pending_add(session_uid);

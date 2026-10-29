@@ -943,6 +943,14 @@ uint16_t BKE_paint_layers_new_material_channel_set()
   return PAINT_LAYERS_NEW_MATERIAL_CHANNEL_SET;
 }
 
+void BKE_paint_layers_new_material_response_apply(Material &ma)
+{
+  /* The fields are deltas from one: Bump Strength five, Distance and Normal Strength one. */
+  ma.paint_layers_bump_strength_delta = 4.0f;
+  ma.paint_layers_bump_distance_delta = 0.0f;
+  ma.paint_layers_normal_strength_delta = 0.0f;
+}
+
 uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma)
 {
   uint16_t mask = ma.paint_layers_channels;

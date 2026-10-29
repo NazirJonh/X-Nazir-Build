@@ -825,6 +825,7 @@ static bool view_pass_mask_root_link(Main *bmain, Material &ma)
   if (tree_output_interface_find(root, "Result Mask") == nullptr) {
     /* Only a tree with channel outputs can gain the mask output; one with nothing wired is left
      * alone, so the pass cannot schedule itself for rebuild forever. */
+    /* #tree_output_interface_find above brought the interface cache current. */
     if (!root.interface_outputs().is_empty() &&
         (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) == 0)
     {

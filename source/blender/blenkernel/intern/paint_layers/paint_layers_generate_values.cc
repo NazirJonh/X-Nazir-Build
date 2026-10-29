@@ -22,6 +22,7 @@
 #include <cstring>
 
 #include "BLI_listbase_iterator.hh"
+#include "BLI_math_base.h"
 #include "BLI_math_vector.h"
 #include "BLI_ustring.hh"
 #include "BLI_uuid.h"
@@ -344,6 +345,10 @@ bool values_sync_socket(Material &ma,
 
 bool BKE_paint_layers_values_sync(Material &ma)
 {
+  /* The owned response nodes of the material's own tree follow the description the same way, and
+   * they outlive the generated root (a material whose tree was pruned keeps its Bump), so this runs
+   * before the root is asked for. */
+  paint_layers_response_nodes_sync(ma);
   bNodeTree *root = ma.paint_layers_tree;
   if (root == nullptr) {
     return true;
@@ -604,5 +609,81 @@ void BKE_paint_layers_values_tag_trees(Material &ma)
   }
   DEG_id_tag_update(&root->id, ID_RECALC_SYNC_TO_EVAL);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Normal & Height response
+ * \{ */
+
+bool BKE_paint_layers_has_bump(const Material &ma)
+{
+  return response_node_find(ma, RESPONSE_NODE_BUMP) != nullptr;
+}
+
+const bNode *BKE_paint_layers_bump_owned_find(const Material &ma)
+{
+  return response_node_find(ma, RESPONSE_NODE_BUMP);
+}
+
+bool BKE_paint_layers_has_normal_map(const Material &ma)
+{
+  return response_node_find(ma, RESPONSE_NODE_NORMAL_MAP) != nullptr;
+}
+
+float BKE_paint_layers_bump_strength(const Material &ma)
+{
+  return response_field(ma, PAINT_LAYERS_RESPONSE_BUMP_STRENGTH);
+}
+
+float BKE_paint_layers_bump_distance(const Material &ma)
+{
+  return response_field(ma, PAINT_LAYERS_RESPONSE_BUMP_DISTANCE);
+}
+
+float BKE_paint_layers_normal_strength(const Material &ma)
+{
+  return response_field(ma, PAINT_LAYERS_RESPONSE_NORMAL_STRENGTH);
+}
+
+/**
+ * Store \a new_value as the response value \a value names, clamped to its range, and pass it on
+ * to the owned nodes.
+ *
+ * The value is stored whether or not the tree already carries the node: a material whose stack has
+ * not been generated yet keeps the value for the sync to write once the node exists. Adopting a
+ * node here instead would let a slider claim a Bump that is the user's own.
+ */
+static bool paint_layers_response_value_set(Material &ma,
+                                            const ePaintLayersResponseValue value,
+                                            const float new_value)
+{
+  if (!BKE_paint_layers_is_layered(ma)) {
+    return false;
+  }
+  const PaintLayersResponseValueInfo *info = paint_layers_response_info(value);
+  if (info == nullptr) {
+    return false;
+  }
+  response_field_delta(ma, value) = clamp_f(new_value, 0.0f, info->maximum) - 1.0f;
+  paint_layers_response_nodes_sync(ma);
+  DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+  return true;
+}
+
+bool BKE_paint_layers_bump_strength_set(Material &ma, const float strength)
+{
+  return paint_layers_response_value_set(ma, PAINT_LAYERS_RESPONSE_BUMP_STRENGTH, strength);
+}
+
+bool BKE_paint_layers_bump_distance_set(Material &ma, const float distance)
+{
+  return paint_layers_response_value_set(ma, PAINT_LAYERS_RESPONSE_BUMP_DISTANCE, distance);
+}
+
+bool BKE_paint_layers_normal_strength_set(Material &ma, const float strength)
+{
+  return paint_layers_response_value_set(ma, PAINT_LAYERS_RESPONSE_NORMAL_STRENGTH, strength);
+}
+
+/** \} */
 
 }  // namespace blender

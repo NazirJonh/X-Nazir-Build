@@ -299,6 +299,15 @@ uint16_t BKE_paint_layers_default_channel_set();
 uint16_t BKE_paint_layers_new_material_channel_set();
 
 /**
+ * Give a brand-new layered material the response values a freshly created stack starts from: Bump
+ * Strength five and Bump Distance one (the fields store the distance from one, so Strength is four
+ * and the other two are zero). Only the authoring path (#MATERIAL_OT_new_layered) calls it; a file
+ * written before the fields existed keeps its zeroes, which read as one, and Normal Strength stays
+ * one.
+ */
+void BKE_paint_layers_new_material_response_apply(Material &ma);
+
+/**
  * Freeze the derived channel set into #Material::paint_layers_channels when the field is still zero.
  *
  * While the field is zero #BKE_paint_layers_channel_set_mask_get recomputes the union of every
@@ -1022,6 +1031,14 @@ bool BKE_paint_layers_channel_blend_set(Material &ma,
 /** The range #BKE_paint_layers_channel_height_scale_set accepts and the RNA slider offers. */
 constexpr float PAINT_HEIGHT_SCALE_MIN = 0.0f;
 constexpr float PAINT_HEIGHT_SCALE_MAX = 4.0f;
+
+/**
+ * The highest response value a material stores, for Bump Strength and Normal Strength; the setters
+ * clamp to it and the RNA range offers the same bound.
+ */
+constexpr float PAINT_LAYERS_RESPONSE_STRENGTH_MAX = 100.0f;
+/** The highest Bump Distance, in Blender metres, a material stores. */
+constexpr float PAINT_LAYERS_RESPONSE_DISTANCE_MAX = 1000.0f;
 
 /**
  * The Height record's own scale of \a layer's \a channel: `1 + height_scale_delta`, so the default

@@ -282,6 +282,13 @@ struct MaterialBakeToImagesParams {
    */
   MaterialBakeRowLink row;
   /**
+   * Print the Normal map without the relief: the Height input of the stack's own Bump node is
+   * disconnected in the job's localized copy (never in the user's tree), so the baked Normal is
+   * the normal layers alone -- the overlay a target material applies on top of its own height.
+   * The Height map, when one is asked for, still prints with the full relief.
+   */
+  bool normal_excludes_height = false;
+  /**
    * Called on the main thread once the targets exist and the source has been copied, before the
    * render starts: where a caller wires the created maps into what shows them. Returning false
    * cancels the bake.

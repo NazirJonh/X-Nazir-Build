@@ -232,6 +232,10 @@ class PaintLayersUiTest(unittest.TestCase):
             brush, paint, mode_settings, layered=False)
         self.assertNotIn('HEIGHT', writable)
 
+    def test_normal_height_panel_is_registered(self):
+        # The panel class alone is not enough: a class missing from `classes` is never drawn.
+        self.assertIn('LAYER_MATERIAL_PT_normal_height', dir(bpy.types))
+
     def test_add_channel_menu_offers_only_set_channels_without_a_record(self):
         from bl_operators.material_paint_layers import _paint_layer_addable_channel_items
 

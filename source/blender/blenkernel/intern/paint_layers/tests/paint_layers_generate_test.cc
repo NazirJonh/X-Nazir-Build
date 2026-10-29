@@ -910,6 +910,44 @@ TEST_F(PaintLayersGenerateTest, height_regenerate_does_not_link_bump_to_itself)
   }
 }
 
+TEST_F(PaintLayersGenerateTest, height_in_set_wires_the_stack_bump)
+{
+  /* The set the New Layered Material dialog proposes: {Base Color, Height}, no Normal. A row with a
+   * Height map reaches the stack's Bump; its Normal input stays unlinked because no Normal chain
+   * feeds the row. */
+  const uint16_t set = uint16_t(uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR |
+                                uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(*ma, set));
+
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  ASSERT_TRUE(BKE_paint_layers_has_bump(*ma));
+  const bNode *bump = BKE_paint_layers_bump_owned_find(*ma);
+  ASSERT_NE(bump, nullptr);
+  ma->nodetree->ensure_topology_cache();
+  bNodeSocket *height_in = bke::node_find_socket(
+      const_cast<bNode &>(*bump), SOCK_IN, UString::from_ptr_noinline("Height"));
+  ASSERT_NE(height_in, nullptr);
+  EXPECT_FALSE(height_in->directly_linked_links().is_empty());
+  bNodeSocket *normal_in = bke::node_find_socket(
+      const_cast<bNode &>(*bump), SOCK_IN, UString::from_ptr_noinline("Normal"));
+  ASSERT_NE(normal_in, nullptr);
+  EXPECT_TRUE(normal_in->directly_linked_links().is_empty());
+}
+
+TEST_F(PaintLayersGenerateTest, a_set_without_height_wires_no_bump)
+{
+  const uint16_t set = uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(*ma, set));
+  add_paint_layer("Paint", add_image("Paint"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_FALSE(BKE_paint_layers_has_bump(*ma));
+  EXPECT_EQ(count_type(*ma->nodetree, SH_NODE_BUMP), 0);
+}
+
 TEST_F(PaintLayersGenerateTest, height_record_starts_at_the_neutral_mid)
 {
   /* A fresh record is transparent (alpha zero), but its flat value is the neutral the stack blends
@@ -972,6 +1010,40 @@ TEST_F(PaintLayersGenerateTest, adding_height_to_the_set_creates_no_record_and_n
   EXPECT_FALSE(interface_has_socket(*ma->paint_layers_tree, "Result Height", true));
 }
 
+TEST_F(PaintLayersGenerateTest, disabling_height_leaves_the_marked_bump_off_the_channel)
+{
+  const uint16_t set = uint16_t(uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR |
+                                uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(*ma, set));
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_has_bump(*ma));
+
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_HEIGHT, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* The Bump the stack made stays (it is a marked node) but is no longer fed by Height: the channel
+   * left the set, so the graph drops it and the row keeps its record and map untouched. */
+  const bNode *bump = BKE_paint_layers_bump_owned_find(*ma);
+  ASSERT_NE(bump, nullptr);
+  ma->nodetree->ensure_topology_cache();
+  bNodeSocket *height_in = bke::node_find_socket(
+      const_cast<bNode &>(*bump), SOCK_IN, UString::from_ptr_noinline("Height"));
+  ASSERT_NE(height_in, nullptr);
+  EXPECT_TRUE(height_in->directly_linked_links().is_empty());
+  EXPECT_FALSE(interface_has_socket(*ma->paint_layers_tree, "Result Height", true));
+
+  const MaterialPaintLayerChannel *record = nullptr;
+  for (const int i : IndexRange(layer->channels_num)) {
+    if (layer->channels[i].channel == PAINT_MATERIAL_CHANNEL_HEIGHT) {
+      record = &layer->channels[i];
+    }
+  }
+  ASSERT_NE(record, nullptr);
+  EXPECT_NE(record->image, nullptr);
+}
+
 /** The one link feeding \a input, or null when it has none or more than one. */
 static const bNodeLink *fed_by_one(const bNodeTree &tree, const bNodeSocket &input)
 {
@@ -1020,30 +1092,406 @@ static uint16_t normal_and_height_set()
  * second regeneration finds that Bump already in the chain and has to keep it, linking a node to
  * its own output would be a cycle.
  */
+TEST_F(PaintLayersGenerateTest, height_rides_over_the_normal_map_and_the_second_pass_keeps_it)
+{
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(*ma, normal_and_height_set()));
+
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_NORMAL, add_image("Normal"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeSocket *principled_normal = principled_input("Normal");
+  ASSERT_NE(principled_normal, nullptr);
+  const bNodeLink *to_principled = fed_by_one(*ma->nodetree, *principled_normal);
+  ASSERT_NE(to_principled, nullptr);
+  ASSERT_EQ(to_principled->fromnode->type_legacy, SH_NODE_BUMP);
+  bNode *bump = const_cast<bNode *>(to_principled->fromnode);
+  bNodeSocket *bump_normal = bke::node_find_socket(*bump, SOCK_IN, "Normal"_ustr);
+  ASSERT_NE(bump_normal, nullptr);
+  const bNodeLink *to_bump = fed_by_one(*ma->nodetree, *bump_normal);
+  ASSERT_NE(to_bump, nullptr);
+  ASSERT_EQ(to_bump->fromnode->type_legacy, SH_NODE_NORMAL_MAP);
+  bNode *normal_map = const_cast<bNode *>(to_bump->fromnode);
+  EXPECT_STREQ(to_bump->fromsock->identifier, "Normal");
+  /* Both ends of the chain are fed: the map by the row's own channel, the Bump's Height by the
+   * row's Height map through the stack. */
+  bNodeSocket *map_color = bke::node_find_socket(*normal_map, SOCK_IN, "Color"_ustr);
+  ASSERT_NE(map_color, nullptr);
+  EXPECT_FALSE(map_color->directly_linked_links().is_empty());
+  bNodeSocket *bump_height = bke::node_find_socket(*bump, SOCK_IN, "Height"_ustr);
+  ASSERT_NE(bump_height, nullptr);
+  EXPECT_FALSE(bump_height->directly_linked_links().is_empty());
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ma->nodetree->ensure_topology_cache();
+  bNodeSocket *normal_again = principled_input("Normal");
+  ASSERT_NE(normal_again, nullptr);
+  const bNodeLink *to_principled_again = fed_by_one(*ma->nodetree, *normal_again);
+  ASSERT_NE(to_principled_again, nullptr);
+  EXPECT_EQ(to_principled_again->fromnode, bump);
+  EXPECT_EQ(direct_type_count(*ma->nodetree, SH_NODE_BUMP), 1);
+  EXPECT_EQ(direct_type_count(*ma->nodetree, SH_NODE_NORMAL_MAP), 1);
+}
+
 /**
  * Height turned off after a Normal + Height pass: the next pass puts the Normal Map straight back
  * on the Principled Normal. The marked Bump stays in the tree -- it is the response panel's node,
  * not the channel's -- but off the channel: its output feeds nothing, its Height input lost the
  * stack output it read, and its Normal input keeps the Normal Map the earlier pass put there.
  */
+TEST_F(PaintLayersGenerateTest, disabling_height_after_normal_puts_the_normal_map_back_in_front)
+{
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(*ma, normal_and_height_set()));
+
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_NORMAL, add_image("Normal"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeSocket *principled_normal = principled_input("Normal");
+  ASSERT_NE(principled_normal, nullptr);
+  const bNodeLink *to_principled = fed_by_one(*ma->nodetree, *principled_normal);
+  ASSERT_NE(to_principled, nullptr);
+  ASSERT_EQ(to_principled->fromnode->type_legacy, SH_NODE_BUMP);
+  bNode *bump = const_cast<bNode *>(to_principled->fromnode);
+  bNodeSocket *bump_normal = bke::node_find_socket(*bump, SOCK_IN, "Normal"_ustr);
+  ASSERT_NE(bump_normal, nullptr);
+  const bNodeLink *to_bump = fed_by_one(*ma->nodetree, *bump_normal);
+  ASSERT_NE(to_bump, nullptr);
+  ASSERT_EQ(to_bump->fromnode->type_legacy, SH_NODE_NORMAL_MAP);
+  bNode *normal_map = const_cast<bNode *>(to_bump->fromnode);
+
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_HEIGHT, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ma->nodetree->ensure_topology_cache();
+
+  bNodeSocket *normal_after = principled_input("Normal");
+  ASSERT_NE(normal_after, nullptr);
+  const bNodeLink *to_principled_after = fed_by_one(*ma->nodetree, *normal_after);
+  ASSERT_NE(to_principled_after, nullptr);
+  EXPECT_EQ(to_principled_after->fromnode, normal_map);
+  EXPECT_STREQ(to_principled_after->fromsock->identifier, "Normal");
+
+  const bNode *bump_left = BKE_paint_layers_bump_owned_find(*ma);
+  ASSERT_NE(bump_left, nullptr);
+  EXPECT_EQ(bump_left, bump) << "the marked Bump is kept, never rebuilt";
+  bNodeSocket *bump_out = bke::node_find_socket(
+      const_cast<bNode &>(*bump_left), SOCK_OUT, "Normal"_ustr);
+  ASSERT_NE(bump_out, nullptr);
+  EXPECT_TRUE(bump_out->directly_linked_links().is_empty());
+  bNodeSocket *bump_normal_left = bke::node_find_socket(
+      const_cast<bNode &>(*bump_left), SOCK_IN, "Normal"_ustr);
+  ASSERT_NE(bump_normal_left, nullptr);
+  const bNodeLink *still_fed = fed_by_one(*ma->nodetree, *bump_normal_left);
+  ASSERT_NE(still_fed, nullptr);
+  EXPECT_EQ(still_fed->fromnode, normal_map);
+  bNodeSocket *bump_height_left = bke::node_find_socket(
+      const_cast<bNode &>(*bump_left), SOCK_IN, "Height"_ustr);
+  ASSERT_NE(bump_height_left, nullptr);
+  EXPECT_TRUE(bump_height_left->directly_linked_links().is_empty());
+  EXPECT_FALSE(interface_has_socket(*ma->paint_layers_tree, "Result Height", true));
+}
+
 /**
  * A Normal Map the author wired into the Principled Normal before the stack was generated: Height
  * takes that whole chain as the Bump's Normal input instead of replacing it, so the author's relief
  * still reaches the shader, only through the stack's own node.
  */
+TEST_F(PaintLayersGenerateTest, height_rides_over_a_users_normal_map)
+{
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
+      *ma, uint16_t(uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR |
+                   uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT)));
+
+  bNode *principled = principled_with_output_add(*ma->nodetree);
+  ASSERT_NE(principled, nullptr);
+  Image *user_image = add_image("UserNormal");
+  bNode *user_tex = bke::node_add_static_node(nullptr, *ma->nodetree, SH_NODE_TEX_IMAGE);
+  ASSERT_NE(user_tex, nullptr);
+  user_tex->id = &user_image->id;
+  bNode *user_map = bke::node_add_static_node(nullptr, *ma->nodetree, SH_NODE_NORMAL_MAP);
+  ASSERT_NE(user_map, nullptr);
+  bNodeSocket *user_map_color = bke::node_find_socket(*user_map, SOCK_IN, "Color"_ustr);
+  ASSERT_NE(user_map_color, nullptr);
+  bke::node_add_link(*ma->nodetree,
+                     *user_tex,
+                     *bke::node_find_socket(*user_tex, SOCK_OUT, "Color"_ustr),
+                     *user_map,
+                     *user_map_color);
+  bNodeSocket *principled_normal = bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr);
+  ASSERT_NE(principled_normal, nullptr);
+  bke::node_add_link(*ma->nodetree,
+                     *user_map,
+                     *bke::node_find_socket(*user_map, SOCK_OUT, "Normal"_ustr),
+                     *principled,
+                     *principled_normal);
+
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  const bNode *bump_const = BKE_paint_layers_bump_owned_find(*ma);
+  ASSERT_NE(bump_const, nullptr);
+  bNode *bump = const_cast<bNode *>(bump_const);
+  const bNodeLink *to_principled = fed_by_one(*ma->nodetree, *principled_normal);
+  ASSERT_NE(to_principled, nullptr);
+  EXPECT_EQ(to_principled->fromnode, bump);
+  bNodeSocket *bump_normal = bke::node_find_socket(*bump, SOCK_IN, "Normal"_ustr);
+  ASSERT_NE(bump_normal, nullptr);
+  const bNodeLink *to_bump = fed_by_one(*ma->nodetree, *bump_normal);
+  ASSERT_NE(to_bump, nullptr);
+  EXPECT_EQ(to_bump->fromnode, user_map);
+  /* The author's own chain is untouched: their map still reads their texture. */
+  const bNodeLink *user_color = fed_by_one(*ma->nodetree, *user_map_color);
+  ASSERT_NE(user_color, nullptr);
+  EXPECT_EQ(user_color->fromnode, user_tex);
+}
+
 /** The same as above with a Bump the author built: the stack's Bump takes the author's Bump as its
  * Normal input, so a hand-built relief is not dropped when Height is added. */
+TEST_F(PaintLayersGenerateTest, height_rides_over_a_users_bump)
+{
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
+      *ma, uint16_t(uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR |
+                   uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT)));
+
+  bNode *principled = principled_with_output_add(*ma->nodetree);
+  ASSERT_NE(principled, nullptr);
+  bNode *user_bump = bke::node_add_static_node(nullptr, *ma->nodetree, SH_NODE_BUMP);
+  ASSERT_NE(user_bump, nullptr);
+  bNode *user_noise = bke::node_add_static_node(nullptr, *ma->nodetree, SH_NODE_TEX_NOISE);
+  ASSERT_NE(user_noise, nullptr);
+  bke::node_add_link(*ma->nodetree,
+                     *user_noise,
+                     *bke::node_find_socket(*user_noise, SOCK_OUT, "Fac"_ustr),
+                     *user_bump,
+                     *bke::node_find_socket(*user_bump, SOCK_IN, "Height"_ustr));
+  bNodeSocket *principled_normal = bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr);
+  ASSERT_NE(principled_normal, nullptr);
+  bke::node_add_link(*ma->nodetree,
+                     *user_bump,
+                     *bke::node_find_socket(*user_bump, SOCK_OUT, "Normal"_ustr),
+                     *principled,
+                     *principled_normal);
+
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  const bNode *bump_const = BKE_paint_layers_bump_owned_find(*ma);
+  ASSERT_NE(bump_const, nullptr);
+  EXPECT_NE(bump_const, user_bump) << "the author's Bump is never claimed";
+  bNode *bump = const_cast<bNode *>(bump_const);
+  const bNodeLink *to_principled = fed_by_one(*ma->nodetree, *principled_normal);
+  ASSERT_NE(to_principled, nullptr);
+  EXPECT_EQ(to_principled->fromnode, bump);
+  bNodeSocket *bump_normal = bke::node_find_socket(*bump, SOCK_IN, "Normal"_ustr);
+  ASSERT_NE(bump_normal, nullptr);
+  const bNodeLink *to_bump = fed_by_one(*ma->nodetree, *bump_normal);
+  ASSERT_NE(to_bump, nullptr);
+  EXPECT_EQ(to_bump->fromnode, user_bump);
+  /* The author's Bump keeps its own Height. */
+  bNodeSocket *user_height = bke::node_find_socket(*user_bump, SOCK_IN, "Height"_ustr);
+  ASSERT_NE(user_height, nullptr);
+  const bNodeLink *user_fed = fed_by_one(*ma->nodetree, *user_height);
+  ASSERT_NE(user_fed, nullptr);
+  EXPECT_EQ(user_fed->fromnode, user_noise);
+}
+
+TEST_F(PaintLayersGenerateTest, response_edit_reaches_the_owned_nodes_without_a_rebuild)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_NORMAL, add_image("Normal"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* The regeneration created and marked the nodes; the response panel's read-only flags agree. */
+  ASSERT_TRUE(BKE_paint_layers_has_bump(*ma));
+  ASSERT_TRUE(BKE_paint_layers_has_normal_map(*ma));
+  bNode *bump = nullptr;
+  bNode *normal_map = nullptr;
+  for (bNode &node : ma->nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_BUMP) {
+      bump = &node;
+    }
+    else if (node.type_legacy == SH_NODE_NORMAL_MAP) {
+      normal_map = &node;
+    }
+  }
+  ASSERT_NE(bump, nullptr);
+  ASSERT_NE(normal_map, nullptr);
+  const bNodeSocket *distance_socket = bke::node_find_socket(*bump, SOCK_IN, "Distance");
+  ASSERT_NE(distance_socket, nullptr);
+  const float distance_before = static_cast<const bNodeSocketValueFloat *>(
+                                    distance_socket->default_value)
+                                    ->value;
+
+  /* A response edit is a value: the owned nodes' sockets take it in place, and no rebuild is
+   * asked for. */
+  paint_layers_kept_group_rebuild_count_reset();
+  ASSERT_TRUE(BKE_paint_layers_bump_strength_set(*ma, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_bump_distance_set(*ma, 4.0f));
+  ASSERT_TRUE(BKE_paint_layers_normal_strength_set(*ma, 0.25f));
+  EXPECT_EQ(BKE_paint_layers_bump_strength(*ma), 0.5f);
+  EXPECT_EQ(BKE_paint_layers_bump_distance(*ma), 4.0f);
+  EXPECT_EQ(BKE_paint_layers_normal_strength(*ma), 0.25f);
+  EXPECT_EQ(static_cast<const bNodeSocketValueFloat *>(
+                bke::node_find_socket(*bump, SOCK_IN, "Strength")->default_value)
+                ->value,
+            0.5f);
+  EXPECT_EQ(static_cast<const bNodeSocketValueFloat *>(
+                bke::node_find_socket(*bump, SOCK_IN, "Distance")->default_value)
+                ->value,
+            4.0f);
+  EXPECT_EQ(static_cast<const bNodeSocketValueFloat *>(
+                bke::node_find_socket(*normal_map, SOCK_IN, "Strength")->default_value)
+                ->value,
+            0.25f);
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  /* A regenerate after the edits keeps the groups (no rebuild was needed) and the values: the
+   * description carries them now, the sync writes them back. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(paint_layers_kept_group_rebuild_count(), 0);
+  EXPECT_EQ(static_cast<const bNodeSocketValueFloat *>(
+                bke::node_find_socket(*bump, SOCK_IN, "Distance")->default_value)
+                ->value,
+            4.0f);
+  EXPECT_NE(4.0f, distance_before);
+}
+
 /**
  * A response edit never claims a node the stack did not mark. The marker is what makes a Bump or
  * Normal Map the stack's own, so a tree without it is the user's; a slider stores its value and
  * leaves the node alone until a regeneration adopts it (the compatibility path for a tree written
  * before the marker).
  */
+TEST_F(PaintLayersGenerateTest, response_edit_leaves_an_unmarked_bump_alone)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNode *bump = nullptr;
+  for (bNode &node : ma->nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_BUMP) {
+      bump = &node;
+    }
+  }
+  ASSERT_NE(bump, nullptr);
+  IDProperty *marker = IDP_GetPropertyFromGroup(bump->system_properties,
+                                                RESPONSE_NODE_KEY_PROP);
+  ASSERT_NE(marker, nullptr);
+  IDP_FreeFromGroup(bump->system_properties, marker);
+  const bNodeSocket *strength_socket = bke::node_find_socket(*bump, SOCK_IN, "Strength");
+  ASSERT_NE(strength_socket, nullptr);
+  const float strength_before =
+      static_cast<const bNodeSocketValueFloat *>(strength_socket->default_value)->value;
+
+  ASSERT_TRUE(BKE_paint_layers_bump_strength_set(*ma, 0.25f));
+  /* The user's node kept its value, was not marked, and is still not what the panel reads. */
+  EXPECT_EQ(static_cast<const bNodeSocketValueFloat *>(strength_socket->default_value)->value,
+            strength_before);
+  EXPECT_FALSE(BKE_paint_layers_has_bump(*ma));
+  /* The edit is stored, not dropped: the next regeneration adopts the node and writes it. */
+  EXPECT_EQ(BKE_paint_layers_bump_strength(*ma), 0.25f);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_has_bump(*ma));
+  EXPECT_EQ(BKE_paint_layers_bump_strength(*ma), 0.25f);
+  const bNode *owned = BKE_paint_layers_bump_owned_find(*ma);
+  ASSERT_NE(owned, nullptr);
+  const bNodeSocket *owned_strength = bke::node_find_socket(*owned, SOCK_IN, "Strength");
+  ASSERT_NE(owned_strength, nullptr);
+  EXPECT_EQ(static_cast<const bNodeSocketValueFloat *>(owned_strength->default_value)->value,
+            0.25f);
+}
+
+/**
+ * Adoption reads a hand-tuned node's values once, when the stack first claims it. After that the
+ * material's field is the authority: a later regeneration must not overwrite a slider edit with
+ * what the socket happened to hold when the marker was removed.
+ */
+TEST_F(PaintLayersGenerateTest, response_adoption_reads_a_hand_tuned_node_once)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNode *bump = nullptr;
+  for (bNode &node : ma->nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_BUMP) {
+      bump = &node;
+    }
+  }
+  ASSERT_NE(bump, nullptr);
+  IDProperty *marker = IDP_GetPropertyFromGroup(bump->system_properties,
+                                                RESPONSE_NODE_KEY_PROP);
+  ASSERT_NE(marker, nullptr);
+  IDP_FreeFromGroup(bump->system_properties, marker);
+  static_cast<bNodeSocketValueFloat *>(
+      bke::node_find_socket(*bump, SOCK_IN, "Strength"_ustr)->default_value)
+      ->value = 3.0f;
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_strength(*ma), 3.0f);
+
+  /* The node is the stack's own now, so the next regeneration keeps the slider's value. */
+  ASSERT_TRUE(BKE_paint_layers_bump_strength_set(*ma, 5.0f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_strength(*ma), 5.0f);
+  const bNode *owned = BKE_paint_layers_bump_owned_find(*ma);
+  ASSERT_NE(owned, nullptr);
+  EXPECT_FLOAT_EQ(
+      static_cast<const bNodeSocketValueFloat *>(
+          bke::node_find_socket(*owned, SOCK_IN, "Strength"_ustr)->default_value)
+          ->value,
+      5.0f);
+}
+
 /**
  * A Bump the stack did not wire is the material's author's own. Adoption is what makes a node the
  * stack's own, and it only takes a node the generator itself fed -- the first node of the type is
  * what the old search took, which claimed a Bump driven by anything the author built.
  */
+TEST_F(PaintLayersGenerateTest, response_never_adopts_a_users_own_bump)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
+
+  /* The author's Bump, driven by a Noise texture rather than the stack's Height. */
+  bNode *user_bump = bke::node_add_static_node(nullptr, *ma->nodetree, SH_NODE_BUMP);
+  ASSERT_NE(user_bump, nullptr);
+  bNode *noise = bke::node_add_static_node(nullptr, *ma->nodetree, SH_NODE_TEX_NOISE);
+  ASSERT_NE(noise, nullptr);
+  bke::node_add_link(*ma->nodetree,
+                     *noise,
+                     *bke::node_find_socket(*noise, SOCK_OUT, "Fac"),
+                     *user_bump,
+                     *bke::node_find_socket(*user_bump, SOCK_IN, "Height"));
+  const bNodeSocket *user_strength = bke::node_find_socket(*user_bump, SOCK_IN, "Strength");
+  ASSERT_NE(user_strength, nullptr);
+  static_cast<bNodeSocketValueFloat *>(user_strength->default_value)->value = 0.75f;
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* The marker went to a node the stack built beside it, never to the author's. */
+  EXPECT_EQ(paint_layers::prop_string_get(user_bump->system_properties, RESPONSE_NODE_KEY_PROP),
+            nullptr);
+  const bNode *owned = BKE_paint_layers_bump_owned_find(*ma);
+  ASSERT_NE(owned, nullptr);
+  EXPECT_NE(owned, user_bump);
+
+  /* And a slider leaves the author's Strength exactly where it was. */
+  ASSERT_TRUE(BKE_paint_layers_bump_strength_set(*ma, 0.25f));
+  EXPECT_FLOAT_EQ(
+      static_cast<const bNodeSocketValueFloat *>(user_strength->default_value)->value, 0.75f);
+  EXPECT_NE(static_cast<const bNodeSocketValueFloat *>(
+                bke::node_find_socket(*owned, SOCK_IN, "Strength")->default_value)
+                ->value,
+            0.75f);
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

@@ -28,6 +28,7 @@ set(SRC
   render_view.cc
 
   render_intern.hh
+  render_material_bake_intern.hh
 )
 
 set(LIB

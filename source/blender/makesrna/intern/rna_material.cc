@@ -30,8 +30,8 @@
 #include "BKE_customdata.hh"
 #include "BKE_library.hh"
 #include "BKE_paint.hh"
-/* Outside #RNA_RUNTIME: the tile range and Height scale constants are used by the RNA definitions
- * too. */
+/* Outside #RNA_RUNTIME: the tile range, Height scale and response limit constants are used by the
+ * RNA definitions too. */
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_object_mask.hh"
 
@@ -1451,6 +1451,57 @@ static void rna_Material_paint_layers_view_pass_update(Main *bmain,
     /* The selector belongs to the active material, but a Sculpt Mode stroke can span several
      * selected objects: the editor gives every one of them the same pass and notifies. */
     ED_paint_material_view_pass_apply(*bmain_resolved, *ma);
+  }
+}
+
+static float rna_Material_paint_layers_bump_strength_get(PointerRNA *ptr)
+{
+  const Material *ma = id_cast<Material *>(ptr->owner_id);
+  return (ma != nullptr) ? BKE_paint_layers_bump_strength(*ma) : 1.0f;
+}
+
+static bool rna_Material_paint_layers_has_bump_get(PointerRNA *ptr)
+{
+  const Material *ma = id_cast<Material *>(ptr->owner_id);
+  return (ma != nullptr) && BKE_paint_layers_has_bump(*ma);
+}
+
+static bool rna_Material_paint_layers_has_normal_map_get(PointerRNA *ptr)
+{
+  const Material *ma = id_cast<Material *>(ptr->owner_id);
+  return (ma != nullptr) && BKE_paint_layers_has_normal_map(*ma);
+}
+
+static void rna_Material_paint_layers_bump_strength_set(PointerRNA *ptr, float value)
+{
+  if (Material *ma = id_cast<Material *>(ptr->owner_id)) {
+    BKE_paint_layers_bump_strength_set(*ma, value);
+  }
+}
+
+static float rna_Material_paint_layers_bump_distance_get(PointerRNA *ptr)
+{
+  const Material *ma = id_cast<Material *>(ptr->owner_id);
+  return (ma != nullptr) ? BKE_paint_layers_bump_distance(*ma) : 1.0f;
+}
+
+static void rna_Material_paint_layers_bump_distance_set(PointerRNA *ptr, float value)
+{
+  if (Material *ma = id_cast<Material *>(ptr->owner_id)) {
+    BKE_paint_layers_bump_distance_set(*ma, value);
+  }
+}
+
+static float rna_Material_paint_layers_normal_strength_get(PointerRNA *ptr)
+{
+  const Material *ma = id_cast<Material *>(ptr->owner_id);
+  return (ma != nullptr) ? BKE_paint_layers_normal_strength(*ma) : 1.0f;
+}
+
+static void rna_Material_paint_layers_normal_strength_set(PointerRNA *ptr, float value)
+{
+  if (Material *ma = id_cast<Material *>(ptr->owner_id)) {
+    BKE_paint_layers_normal_strength_set(*ma, value);
   }
 }
 
@@ -6658,6 +6709,68 @@ void RNA_def_material(BlenderRNA *brna)
       "final renders show it too until Combined is selected");
   RNA_def_property_update(
       prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layers_view_pass_update");
+
+  prop = RNA_def_property(srna, "paint_layers_bump_strength", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_Material_paint_layers_bump_strength_get",
+                               "rna_Material_paint_layers_bump_strength_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, PAINT_LAYERS_RESPONSE_STRENGTH_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 20.0f, 1.0, 3);
+  RNA_def_property_ui_text(
+      prop,
+      "Bump Strength",
+      "The strength of the relief the material's paint Height channel gives; reaches the stack's "
+      "own Bump node without regenerating the stack");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "paint_layers_bump_distance", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_Material_paint_layers_bump_distance_get",
+                               "rna_Material_paint_layers_bump_distance_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, PAINT_LAYERS_RESPONSE_DISTANCE_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 10.0f, 1.0, 3);
+  RNA_def_property_ui_text(
+      prop,
+      "Bump Distance",
+      "The distance, in metres, the material's paint Height channel spans; the stack's own Bump "
+      "node takes it without regenerating the stack");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "paint_layers_normal_strength", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_Material_paint_layers_normal_strength_get",
+                               "rna_Material_paint_layers_normal_strength_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, PAINT_LAYERS_RESPONSE_STRENGTH_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 4.0f, 1.0, 3);
+  RNA_def_property_ui_text(
+      prop,
+      "Normal Strength",
+      "The strength of the normal maps the material's paint Normal channel lays; reaches the "
+      "stack's own Normal Map node without regenerating the stack");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* Read-only: the nodes come and go with the regeneration, never with an edit here; the response
+   * panel polls them to show only the sliders the owned nodes answer. */
+  prop = RNA_def_property(srna, "paint_layers_has_bump", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Material_paint_layers_has_bump_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Has Bump",
+      "The material's own tree carries the Bump node the paint layer stack owns; it appears "
+      "when a Height channel is wired into the stack");
+
+  prop = RNA_def_property(srna, "paint_layers_has_normal_map", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Material_paint_layers_has_normal_map_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Has Normal Map",
+      "The material's own tree carries the Normal Map node the paint layer stack owns; it appears "
+      "when a Normal channel is wired into the stack");
 
   {
     FunctionRNA *func = RNA_def_function(

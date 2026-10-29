@@ -861,6 +861,42 @@ class LAYER_MT_mapping_reset(Menu):
         layout.operator("paint.layer_mapping_reset", text="Reset Rotation").mode = 'ROTATION'
 
 
+class LAYER_MATERIAL_PT_normal_height(LayerMaterialButtonsPanel, Panel):
+    """The response of the generated Normal Map and Bump nodes.
+
+    The nodes are the stack's own, marked as such in the material's tree: this panel edits their
+    Strength and Distance in place (a value the owned node takes through the sync), without going
+    to the Shader Editor and without regenerating the stack. A user's own Bump or Normal Map is
+    never touched.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_normal_height"
+    bl_label = "Normal & Height"
+    bl_parent_id = "LAYER_MATERIAL_PT_layers"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        if cls._object_mask_editing(context):
+            return False
+        owner = cls._owner_material(context)
+        return owner is not None and (owner.paint_layers_has_bump or
+                                      owner.paint_layers_has_normal_map)
+
+    def draw(self, context):
+        owner = self._owner_material(context)
+        if owner is None:
+            return
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        if owner.paint_layers_has_bump:
+            layout.prop(owner, "paint_layers_bump_strength", text="Bump Strength")
+            layout.prop(owner, "paint_layers_bump_distance", text="Bump Distance")
+        if owner.paint_layers_has_normal_map:
+            layout.prop(owner, "paint_layers_normal_strength", text="Normal Strength")
+
+
 class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
     """UV mapping of the maps and sources the shown row reads: a layer, a correction or a mask item.
 
@@ -1393,6 +1429,7 @@ classes = (
     BRUSH_MATERIAL_PT_viewport,
     BRUSH_MATERIAL_PT_custom_props,
     LAYER_MATERIAL_PT_layers,
+    LAYER_MATERIAL_PT_normal_height,
     LAYER_MATERIAL_PT_mapping,
     LAYER_MT_mapping_reset,
     LAYER_MATERIAL_PT_source_surface,

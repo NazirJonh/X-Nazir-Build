@@ -189,6 +189,74 @@ bool BKE_paint_layers_is_view_pass_mix(const bNode &node);
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Normal & Height response
+ *
+ * The stack's generated Height result drives a Bump node of the material's own tree, laid over the
+ * Normal Map node the stack's Normal result drives. The nodes are the stack's own -- each marked as
+ * such, so a user's Bump or Normal Map is never mistaken for them -- and their response values
+ * (the Bump's Strength and Distance, the Normal Map's Strength) live in the material, stored as a
+ * distance from one so a file written before them reads as the node's own defaults. A slider move
+ * reaches the owned node's socket in place: no regeneration, no user node touched.
+ * \{ */
+
+/**
+ * Whether \a ma's own tree carries the Bump node the stack owns: it exists once a regeneration
+ * wired a Height result into the material (or adopted a tree's own Bump), and never before. The
+ * read-only RNA the response panel polls.
+ */
+bool BKE_paint_layers_has_bump(const Material &ma);
+
+/**
+ * The Bump node of \a ma's own tree the stack owns (the one #RESPONSE marked), or null. Never
+ * creates and never adopts; the read-only consumers (the bake asks its Height input for the map to
+ * print, the "Normal without relief" option disconnects it) go through this and never touch a
+ * user's own Bump.
+ */
+const bNode *BKE_paint_layers_bump_owned_find(const Material &ma);
+
+/** Whether \a ma's own tree carries the Normal Map node the stack owns; see
+ * #BKE_paint_layers_has_bump. */
+bool BKE_paint_layers_has_normal_map(const Material &ma);
+
+/** The Strength of the Bump node \a ma's stack owns; the default is one. */
+float BKE_paint_layers_bump_strength(const Material &ma);
+
+/** The Distance, in Blender metres, of the Bump node \a ma's stack owns; the default is one. */
+float BKE_paint_layers_bump_distance(const Material &ma);
+
+/** The Strength of the Normal Map node \a ma's stack owns; the default is one. */
+float BKE_paint_layers_normal_strength(const Material &ma);
+
+/**
+ * Set the Strength of the Bump node \a ma's stack owns, clamped to
+ * [0, #PAINT_LAYERS_RESPONSE_STRENGTH_MAX]. Value-only: the owned node's socket takes it in place,
+ * so nothing is regenerated.
+ *
+ * \return false when \a ma carries no layer stack.
+ */
+bool BKE_paint_layers_bump_strength_set(Material &ma, float strength);
+
+/**
+ * Set the Distance, in Blender metres, of the Bump node \a ma's stack owns, clamped to
+ * [0, #PAINT_LAYERS_RESPONSE_DISTANCE_MAX]. Value-only, like
+ * #BKE_paint_layers_bump_strength_set.
+ *
+ * \return false when \a ma carries no layer stack.
+ */
+bool BKE_paint_layers_bump_distance_set(Material &ma, float distance);
+
+/**
+ * Set the Strength of the Normal Map node \a ma's stack owns, clamped to
+ * [0, #PAINT_LAYERS_RESPONSE_STRENGTH_MAX]. Value-only, like
+ * #BKE_paint_layers_bump_strength_set.
+ *
+ * \return false when \a ma carries no layer stack.
+ */
+bool BKE_paint_layers_normal_strength_set(Material &ma, float strength);
+
+/** \} */
+
 /**
  * Copy the description's animatable values (each row's opacity, a Fill row's constant) into the
  * layer groups' input sockets of \a ma's generated tree, without touching any topology.

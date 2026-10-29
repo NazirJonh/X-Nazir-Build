@@ -51,8 +51,12 @@ using ed::material_bake::MaterialBakeToImagesResult;
 /**
  * A flag enum's item value is its mask, so each item is `1 << channel`.
  *
- * Height, ambient occlusion and Custom are absent on purpose: the resolver has no Principled input
- * to bake them from, so offering them would only produce empty maps.
+ * Ambient occlusion and Custom are absent on purpose: the resolver has no Principled input to bake
+ * them from, so offering them would only produce empty maps. Height is offered since the stack's
+ * own Bump names its map; a material without one skips it as unavailable.
+ *
+ * Height is printed as the stored field, not as the signed relief the slider shows: flat relief is
+ * 0.5, the map is float and non-color, and the values are the same 0..1 the stack's own maps hold.
  */
 static const EnumPropertyItem bake_paint_channel_items[] = {
     {1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
@@ -60,6 +64,11 @@ static const EnumPropertyItem bake_paint_channel_items[] = {
     {1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
     {1 << PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
     {1 << PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_HEIGHT,
+     "HEIGHT",
+     0,
+     "Height",
+     "Stored height field: 0.5 is flat, values are float data, not a signed relief"},
     {1 << PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
     {1 << PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
     {0, nullptr, 0, nullptr, nullptr},
@@ -101,6 +110,7 @@ static wmOperatorStatus material_bake_from_material_exec(bContext *C, wmOperator
   params.targets = targets;
   params.size = RNA_int_get(op->ptr, "size");
   params.blocking = RNA_boolean_get(op->ptr, "blocking");
+  params.normal_excludes_height = RNA_boolean_get(op->ptr, "normal_excludes_height");
   RNA_string_get(op->ptr, "layer_id", params.layer_id);
 
   const MaterialBakeToImagesResult result = ed::material_bake::material_bake_to_images(
@@ -140,6 +150,12 @@ void IMAGE_OT_bake_from_material(wmOperatorType *ot)
                     "Channels",
                     "Which Principled channels to bake");
   RNA_def_int(ot->srna, "size", 2048, 16, 8192, "Size", "Square map side", 16, 8192);
+  RNA_def_boolean(ot->srna,
+                  "normal_excludes_height",
+                  false,
+                  "Normal Without Relief",
+                  "Bake the Normal map without the height's relief: the stack's own Bump loses "
+                  "its Height input for this bake, so the map holds the normal layers alone");
   RNA_def_string(ot->srna,
                  "layer_id",
                  nullptr,

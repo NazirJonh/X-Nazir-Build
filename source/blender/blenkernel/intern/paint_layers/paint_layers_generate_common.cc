@@ -16,9 +16,11 @@
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_ustring.hh"
+#include "BLI_utildefines.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
@@ -502,21 +504,218 @@ bNodeSocket *principled_channel_socket(Material &ma, const int channel)
       const_cast<bNode &>(*principled), SOCK_IN, UString::from_ptr_noinline(info.socket_name));
 }
 
-/** The first node of \a type in \a ma's embedded tree, or a new one at (\a x, \a y). */
-static bNode *node_of_type_ensure(Material &ma, const int type, const float x, const float y)
+bNode *response_node_find(Material &ma, const char *key)
 {
   if (ma.nodetree == nullptr) {
     return nullptr;
   }
   for (bNode &node : ma.nodetree->nodes) {
-    if (node.type_legacy == type) {
+    const char *found = prop_string_get(node.system_properties, RESPONSE_NODE_KEY_PROP);
+    if (found != nullptr && STREQ(found, key)) {
       return &node;
     }
+  }
+  return nullptr;
+}
+
+const bNode *response_node_find(const Material &ma, const char *key)
+{
+  /* The tree itself is not const (a material owns a mutable pointer), so the mutable search is the
+   * one walk; the const overload only narrows the answer back to what a reader may do with it. */
+  return response_node_find(const_cast<Material &>(ma), key);
+}
+
+/** The float an input socket of \a node carries, or \a fallback when it has no such socket. */
+static float response_socket_value_get(const bNode &node, const char *name, const float fallback)
+{
+  const bNodeSocket *socket = socket_in(const_cast<bNode &>(node), name);
+  if (socket == nullptr || socket->type != SOCK_FLOAT || socket->default_value == nullptr) {
+    return fallback;
+  }
+  return static_cast<const bNodeSocketValueFloat *>(socket->default_value)->value;
+}
+
+/**
+ * The name of the stack's \a channel result output, as #wire_instance_to_material makes it.
+ *
+ * \param r_name: the caller's buffer. Taken as an array rather than as a pointer: #SNPRINTF sizes
+ *                the destination from the array itself.
+ */
+static void response_result_name(char (&r_name)[64], const int channel)
+{
+  SNPRINTF(r_name,
+           "Result %s",
+           BKE_paint_material_channel_info(eMaterialPaintChannel(channel)).ui_name);
+}
+
+/**
+ * The socket of the generated root group node that publishes \a result_name, or null.
+ *
+ * That node is the single place the stack is wired into the material through (#instance_find), so
+ * a socket of it is the only thing a row's channel and the response nodes can be fed from.
+ */
+static bNodeSocket *response_instance_output(Material &ma, const char *result_name)
+{
+  bNode *instance = instance_find(ma, ma.paint_layers_owner_uid);
+  if (instance == nullptr || instance->id == nullptr || GS(instance->id->name) != ID_NT) {
+    return nullptr;
+  }
+  bNodeTree *group = id_cast<bNodeTree *>(instance->id);
+  if (group == nullptr) {
+    return nullptr;
+  }
+  return instance_output_find(*group, *instance, result_name);
+}
+
+/**
+ * Whether \a node reads \a result_name of the generated stack into its \a input_name input.
+ *
+ * The links are read from the tree's own list rather than through a socket: an adoption runs while
+ * the tree is being updated, and the topology cache is not to be asked (see the file comment of
+ * `paint_layers_generate_intern.hh`).
+ */
+static bool response_input_reads_stack(Material &ma,
+                                       const bNode &node,
+                                       const char *input_name,
+                                       const char *result_name)
+{
+  if (ma.nodetree == nullptr) {
+    return false;
+  }
+  bNodeSocket *output = response_instance_output(ma, result_name);
+  bNodeSocket *input = socket_in(const_cast<bNode &>(node), input_name);
+  if (output == nullptr || input == nullptr) {
+    return false;
+  }
+  for (const bNodeLink &link : ma.nodetree->links) {
+    if (link.fromsock == output && link.tosock == input) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether \a bump rides over the stack's own Normal Map: the second way the generator wires a Bump
+ * into the stack, its Normal input taking the Normal Map's output while that node reads
+ * `Result Normal` (see #wire_instance_to_material).
+ */
+static bool response_bump_reads_stack_normal_map(Material &ma, const bNode &bump)
+{
+  if (ma.nodetree == nullptr) {
+    return false;
+  }
+  bNodeSocket *input = socket_in(const_cast<bNode &>(bump), "Normal");
+  if (input == nullptr) {
+    return false;
+  }
+  char result_name[64];
+  response_result_name(result_name, PAINT_MATERIAL_CHANNEL_NORMAL);
+  for (const bNodeLink &link : ma.nodetree->links) {
+    const bNode &from = *link.fromnode;
+    if (link.tosock == input && from.type_legacy == SH_NODE_NORMAL_MAP &&
+        response_input_reads_stack(ma, from, "Color", result_name))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether \a node is one the stack itself wired, and so may be adopted as its own. A Bump or Normal
+ * Map the material's author put in the tree is not: its inputs come from their own graph, never
+ * from the generated stack, and the response panel writes nothing into it.
+ */
+static bool response_node_is_stack_wired(Material &ma, const bNode &node, const char *key)
+{
+  char result_name[64];
+  if (STREQ(key, RESPONSE_NODE_BUMP)) {
+    response_result_name(result_name, PAINT_MATERIAL_CHANNEL_HEIGHT);
+    return response_input_reads_stack(ma, node, "Height", result_name) ||
+           response_bump_reads_stack_normal_map(ma, node);
+  }
+  if (STREQ(key, RESPONSE_NODE_NORMAL_MAP)) {
+    response_result_name(result_name, PAINT_MATERIAL_CHANNEL_NORMAL);
+    return response_input_reads_stack(ma, node, "Color", result_name);
+  }
+  return false;
+}
+
+/**
+ * Read an adopted node's response values into the material's fields: the marker just made the node
+ * the stack's own, and this keeps the look a hand-tuned node from a file written before the fields
+ * existed had.
+ *
+ * Every value is taken, not only those still at zero. Adoption happens once, right before the sync
+ * starts writing the node, so its sockets hold whatever the file left there; a guard on the field
+ * would confuse "never edited" with "the user set exactly one".
+ */
+static void response_node_values_adopt(Material &ma, const bNode &node, const char *key)
+{
+  for (const PaintLayersResponseValueInfo &info : paint_layers_response_values()) {
+    if (!STREQ(info.node_key, key)) {
+      continue;
+    }
+    const float value = clamp_f(response_socket_value_get(node, info.socket, 1.0f),
+                                0.0f,
+                                info.maximum);
+    response_field_delta(ma, info.value) = value - 1.0f;
+  }
+}
+
+/**
+ * The stack's own Bump (or Normal Map) node, keyed by #RESPONSE_NODE_KEY_PROP so a user's node of
+ * the type is never mistaken for it: the marked one when the tree has it, one the stack itself
+ * wired (and is marked then) when a tree written before the marker has one. An adopted node hands
+ * its response values to the material's fields first (#response_node_values_adopt), so a file
+ * written before the fields keeps the look its node had. Never creates a node.
+ *
+ * Adoption is a regeneration-time compatibility step and nothing else: an edit to a response value
+ * must never reach into a tree that was never marked, or a material whose stack has not been
+ * generated yet would see its own Bump claimed by a slider. A node the stack did not wire belongs
+ * to the material's author: it keeps no marker and gets no response value, and the generator builds
+ * its own node next to it.
+ */
+static bNode *response_node_adopt(Material &ma, const int type, const char *key)
+{
+  if (ma.nodetree == nullptr) {
+    return nullptr;
+  }
+  if (bNode *marked = response_node_find(ma, key)) {
+    return marked;
+  }
+  for (bNode &node : ma.nodetree->nodes) {
+    if (node.type_legacy != type || !response_node_is_stack_wired(ma, node, key)) {
+      continue;
+    }
+    prop_string_set(node.system_properties, RESPONSE_NODE_KEY_PROP, key);
+    response_node_values_adopt(ma, node, key);
+    return &node;
+  }
+  return nullptr;
+}
+
+/**
+ * #response_node_adopt, and a new node at (\a x, \a y) when the tree holds none the stack wired.
+ */
+static bNode *response_node_ensure(Material &ma,
+                                   const int type,
+                                   const char *key,
+                                   const float x,
+                                   const float y)
+{
+  if (bNode *node = response_node_adopt(ma, type, key)) {
+    return node;
+  }
+  if (ma.nodetree == nullptr) {
+    return nullptr;
   }
   bNode *node = bke::node_add_static_node(nullptr, *ma.nodetree, type);
   if (node != nullptr) {
     node->location[0] = x;
     node->location[1] = y;
+    prop_string_set(node->system_properties, RESPONSE_NODE_KEY_PROP, key);
   }
   return node;
 }
@@ -524,13 +723,94 @@ static bNode *node_of_type_ensure(Material &ma, const int type, const float x, c
 /** A Normal Map node in \a ma, created when missing. */
 bNode *normal_map_ensure(Material &ma)
 {
-  return node_of_type_ensure(ma, SH_NODE_NORMAL_MAP, 400.0f, -400.0f);
+  return response_node_ensure(ma, SH_NODE_NORMAL_MAP, RESPONSE_NODE_NORMAL_MAP, 400.0f, -400.0f);
 }
 
 /** A Bump node in \a ma, created when missing. */
 bNode *bump_ensure(Material &ma)
 {
-  return node_of_type_ensure(ma, SH_NODE_BUMP, 400.0f, -560.0f);
+  return response_node_ensure(ma, SH_NODE_BUMP, RESPONSE_NODE_BUMP, 400.0f, -560.0f);
+}
+
+/** Write one float input socket of \a node when the value differs; tags nothing (see the sync). */
+static void response_socket_value_set(bNode &node, const char *name, const float value)
+{
+  bNodeSocket *socket = socket_in(node, name);
+  if (socket == nullptr || socket->type != SOCK_FLOAT || socket->default_value == nullptr) {
+    return;
+  }
+  bNodeSocketValueFloat &current = *static_cast<bNodeSocketValueFloat *>(socket->default_value);
+  if (current.value == value) {
+    return;
+  }
+  current.value = value;
+}
+
+float &response_field_delta(Material &ma, const ePaintLayersResponseValue value)
+{
+  switch (value) {
+    case PAINT_LAYERS_RESPONSE_BUMP_STRENGTH:
+      return ma.paint_layers_bump_strength_delta;
+    case PAINT_LAYERS_RESPONSE_BUMP_DISTANCE:
+      return ma.paint_layers_bump_distance_delta;
+    case PAINT_LAYERS_RESPONSE_NORMAL_STRENGTH:
+      return ma.paint_layers_normal_strength_delta;
+  }
+  BLI_assert_unreachable();
+  return ma.paint_layers_bump_strength_delta;
+}
+
+float response_field(const Material &ma, const ePaintLayersResponseValue value)
+{
+  return 1.0f + response_field_delta(const_cast<Material &>(ma), value);
+}
+
+Span<const PaintLayersResponseValueInfo> paint_layers_response_values()
+{
+  /* The panel's order, and the only place the socket names and the limits live: the adoption, the
+   * sync and the setters all walk this table. */
+  static const PaintLayersResponseValueInfo values[] = {
+      {PAINT_LAYERS_RESPONSE_BUMP_STRENGTH,
+       RESPONSE_NODE_BUMP,
+       "Strength",
+       PAINT_LAYERS_RESPONSE_STRENGTH_MAX},
+      {PAINT_LAYERS_RESPONSE_BUMP_DISTANCE,
+       RESPONSE_NODE_BUMP,
+       "Distance",
+       PAINT_LAYERS_RESPONSE_DISTANCE_MAX},
+      {PAINT_LAYERS_RESPONSE_NORMAL_STRENGTH,
+       RESPONSE_NODE_NORMAL_MAP,
+       "Strength",
+       PAINT_LAYERS_RESPONSE_STRENGTH_MAX},
+  };
+  return Span<const PaintLayersResponseValueInfo>(values, ARRAY_SIZE(values));
+}
+
+const PaintLayersResponseValueInfo *paint_layers_response_info(const ePaintLayersResponseValue value)
+{
+  for (const PaintLayersResponseValueInfo &info : paint_layers_response_values()) {
+    if (info.value == value) {
+      return &info;
+    }
+  }
+  return nullptr;
+}
+
+void paint_layers_response_nodes_sync(Material &ma)
+{
+  if (ma.nodetree == nullptr) {
+    return;
+  }
+  /* A pure socket write: the evaluation calls this on an evaluated copy, where nothing may be
+   * tagged (see #BKE_paint_layers_values_sync); the callers refresh the shading themselves. A node
+   * without the marker is a user's own and is left alone. */
+  for (const PaintLayersResponseValueInfo &info : paint_layers_response_values()) {
+    bNode *node = response_node_find(ma, info.node_key);
+    if (node == nullptr) {
+      continue;
+    }
+    response_socket_value_set(*node, info.socket, response_field(ma, info.value));
+  }
 }
 
 void principled_ensure(Material &ma, PaintLayersRegenerateReport &r_report)

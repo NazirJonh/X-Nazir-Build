@@ -1319,6 +1319,8 @@ struct Material {
    * the preview existed read as Combined instead of as the first channel.
    */
   int16_t paint_layers_view_pass = 0;
+  /* The four chars and the int16 above leave the pointer below off its 8-byte boundary; this is
+   * the single pad the pair needs. */
   char _pad_paint_layers[4] = {};
   /**
    * Stand-in image for the Image Editor's composite when the stack holds no map at all: the
@@ -1327,6 +1329,26 @@ struct Material {
    * the composite itself is shaded from the stack. Owned by the material (one user).
    */
   struct Image *paint_layers_canvas_image = nullptr;
+  /**
+   * The Strength of the Bump node the stack owns, stored as the distance from one: the value is
+   * `1 + delta`, so zero (what a file written before the field carries) reads as the node's own
+   * default and no versioning is needed.
+   */
+  float paint_layers_bump_strength_delta = 0.0f;
+  /**
+   * The Distance of the Bump node the stack owns, in Blender metres, stored as the distance from
+   * one and read back the same way as #paint_layers_bump_strength_delta.
+   */
+  float paint_layers_bump_distance_delta = 0.0f;
+  /**
+   * The Strength of the Normal Map node the stack owns, stored as the distance from one and read
+   * back the same way as #paint_layers_bump_strength_delta.
+   */
+  float paint_layers_normal_strength_delta = 0.0f;
+  /* The pointer plus three floats above are 8 + 12 bytes, so the tail is four bytes short of the
+   * pointer-size multiple the file format wants. The two pads are not one: this one closes the
+   * tail, #_pad_paint_layers aligns the pointer. */
+  char _pad_paint_layers_tail[4] = {};
 };
 
 }  // namespace blender

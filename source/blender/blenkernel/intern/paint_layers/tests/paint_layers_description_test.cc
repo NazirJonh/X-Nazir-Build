@@ -3731,6 +3731,104 @@ TEST_F(PaintLayersDescription, height_effective_blend_follows_the_row)
             MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT);
 }
 
+TEST_F(PaintLayersDescription, response_values_default_to_one_and_clamp)
+{
+  Material *ma = BKE_material_add(bmain, "ResponseDefaultMat");
+  /* A material written before the response fields carries zeroes, which read as the node's own
+   * defaults: one. */
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_strength(*ma), 1.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_distance(*ma), 1.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_normal_strength(*ma), 1.0f);
+
+  /* The response belongs to a layered material; a plain one refuses the edit. */
+  EXPECT_FALSE(BKE_paint_layers_bump_strength_set(*ma, 0.5f));
+  EXPECT_FALSE(BKE_paint_layers_bump_distance_set(*ma, 2.0f));
+  EXPECT_FALSE(BKE_paint_layers_normal_strength_set(*ma, 0.5f));
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_strength(*ma), 1.0f);
+
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  EXPECT_TRUE(BKE_paint_layers_bump_strength_set(*ma, 0.25f));
+  EXPECT_TRUE(BKE_paint_layers_bump_distance_set(*ma, 4.0f));
+  EXPECT_TRUE(BKE_paint_layers_normal_strength_set(*ma, 2.0f));
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_strength(*ma), 0.25f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_distance(*ma), 4.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_normal_strength(*ma), 2.0f);
+  /* No node was created and nothing was regenerated: the edit waits for the owned node. */
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_EQ(ma->nodetree, nullptr);
+
+  /* Out-of-range values clamp to the stored range rather than being refused. */
+  EXPECT_TRUE(BKE_paint_layers_bump_strength_set(*ma, 500.0f));
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_strength(*ma), 100.0f);
+  EXPECT_TRUE(BKE_paint_layers_bump_distance_set(*ma, -5.0f));
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_distance(*ma), 0.0f);
+}
+
+TEST_F(PaintLayersDescription, new_material_response_defaults_are_visible)
+{
+  Material *fresh = BKE_material_add(bmain, "FreshResponseMat");
+  BKE_paint_layers_new_material_response_apply(*fresh);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_strength(*fresh), 5.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_distance(*fresh), 1.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_normal_strength(*fresh), 1.0f);
+
+  /* A material written before the fields existed keeps zeroes, which still read as one. */
+  Material *legacy = BKE_material_add(bmain, "LegacyResponseMat");
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_strength(*legacy), 1.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_distance(*legacy), 1.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_normal_strength(*legacy), 1.0f);
+}
+
+TEST_F(PaintLayersDescription, height_settings_and_response_round_trip)
+{
+  Material *ma = BKE_material_add(bmain, "HeightRoundTripMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  id_us_plus(&ma->id);
+
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "Layer");
+  const bUUID layer_marker = layer->marker;
+  ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT));
+  ASSERT_TRUE(BKE_paint_layers_channel_height_scale_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_HEIGHT, 2.5f));
+  ASSERT_TRUE(BKE_paint_layers_bump_strength_set(*ma, 0.25f));
+  ASSERT_TRUE(BKE_paint_layers_bump_distance_set(*ma, 4.0f));
+  ASSERT_TRUE(BKE_paint_layers_normal_strength_set(*ma, 2.0f));
+
+  char filepath[FILE_MAX];
+  BLI_path_join(filepath,
+                sizeof(filepath),
+                BKE_tempdir_session(),
+                "paint_layers_height_round_trip.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+
+  Material *reloaded = nullptr;
+  for (Material &candidate : bfd->main->materials) {
+    if (STREQ(candidate.id.name + 2, "HeightRoundTripMat")) {
+      reloaded = &candidate;
+      break;
+    }
+  }
+  ASSERT_NE(reloaded, nullptr);
+  MaterialPaintLayer *reloaded_layer = BKE_paint_layers_find(*reloaded, layer_marker);
+  ASSERT_NE(reloaded_layer, nullptr);
+  EXPECT_EQ(BKE_paint_layers_channel_height_blend(*reloaded_layer, PAINT_MATERIAL_CHANNEL_HEIGHT),
+            MA_PAINT_LAYER_HEIGHT_BLEND_SUBTRACT);
+  EXPECT_FLOAT_EQ(
+      BKE_paint_layers_channel_height_scale(*reloaded_layer, PAINT_MATERIAL_CHANNEL_HEIGHT), 2.5f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_strength(*reloaded), 0.25f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_bump_distance(*reloaded), 4.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_normal_strength(*reloaded), 2.0f);
+
+  BLO_blendfiledata_free(bfd);
+  BLI_delete(filepath, false, false);
+}
+
 TEST_F(PaintLayersDescription, duplicate_and_paste_keep_channel_settings)
 {
   Material &ma = *BKE_material_add(bmain, "HeightCopyMat");

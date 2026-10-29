@@ -992,6 +992,9 @@ static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator *op)
 
   Material *ma = BKE_material_add(bmain, DATA_("Layered Material"));
   nodes::node_tree_shader_default(C, bmain, &ma->id);
+  /* A new stack starts with a visible Bump Strength; a file written before the response fields
+   * keeps its zeroes, which already read as one. */
+  BKE_paint_layers_new_material_response_apply(*ma);
   /* The dialog's set takes the place of the build default #BKE_paint_layers_add materialized:
    * written before any record is authored, so the base layer takes part in the chosen channels
    * only. Base Color is no longer forced in, so the material can start without it if unticked. */

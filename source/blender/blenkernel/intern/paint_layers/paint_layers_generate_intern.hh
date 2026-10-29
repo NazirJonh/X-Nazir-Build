@@ -136,6 +136,15 @@ inline constexpr const char *BLEND_NODE_KEY_PROP = "pbr_paint_layers_blend_key";
  * deleted or duplicated (a hand-edited tree), and the group is rebuilt rather than left without a
  * blend. */
 inline constexpr const char *BLEND_NODE_COUNT_PROP = "pbr_paint_layers_blend_nodes";
+/**
+ * On the Bump and Normal Map nodes of the material's own tree that the stack owns: which of the two
+ * the node is (#RESPONSE_NODE_BUMP, #RESPONSE_NODE_NORMAL_MAP), so a user's own Bump or Normal Map
+ * is never mistaken for them the way a "first node of the type" search would. The response values
+ * of the owned nodes live on the material, and the sync below writes them into the sockets.
+ */
+inline constexpr const char *RESPONSE_NODE_KEY_PROP = "pbr_paint_layers_response_key";
+inline constexpr const char *RESPONSE_NODE_BUMP = "bump";
+inline constexpr const char *RESPONSE_NODE_NORMAL_MAP = "normal_map";
 /** #INPUT_ROLE_PROP value of the constant of a channel that carries no map. */
 inline constexpr const char *ROLE_FILL = "fill";
 /** #INPUT_ROLE_PROP value of that constant's alpha: the content alpha a map-less row lays, which
@@ -204,6 +213,52 @@ bNode *material_output_find(Material &ma);
 bNode *mix_node_add(bNodeTree &tree, int ramp_blend, float location_x, float location_y);
 bNode *normal_map_ensure(Material &ma);
 bNode *bump_ensure(Material &ma);
+/**
+ * The Bump or Normal Map node of \a ma's own tree the stack marked as its own
+ * (#RESPONSE_NODE_KEY_PROP), or null. Never creates and never adopts; the generator's
+ * #bump_ensure/#normal_map_ensure do that at regeneration. The mutable overload is what the value
+ * sync writes through; readers take the const one.
+ */
+bNode *response_node_find(Material &ma, const char *key);
+const bNode *response_node_find(const Material &ma, const char *key);
+
+/**
+ * The response values the Normal & Height panel edits: one #Material::paint_layers_*_delta field
+ * each, written into one float socket of one of the two owned nodes.
+ */
+enum ePaintLayersResponseValue : int8_t {
+  PAINT_LAYERS_RESPONSE_BUMP_STRENGTH = 0,
+  PAINT_LAYERS_RESPONSE_BUMP_DISTANCE = 1,
+  PAINT_LAYERS_RESPONSE_NORMAL_STRENGTH = 2,
+};
+
+/** What one response value is: where it lives and where it is written. */
+struct PaintLayersResponseValueInfo {
+  ePaintLayersResponseValue value;
+  /** #RESPONSE_NODE_KEY_PROP of the node the value belongs to. */
+  const char *node_key;
+  /** The float input of that node the value is written into. */
+  const char *socket;
+  /** The highest value the field stores; the field keeps `value - 1`. */
+  float maximum;
+};
+
+/** The three response values, in the order the panel offers them. */
+Span<const PaintLayersResponseValueInfo> paint_layers_response_values();
+
+/** The entry of \a value, or null for a value outside the enum. */
+const PaintLayersResponseValueInfo *paint_layers_response_info(ePaintLayersResponseValue value);
+
+/** The material field \a value is stored in, as the distance from one. */
+float &response_field_delta(Material &ma, ePaintLayersResponseValue value);
+/** The value the panel shows for \a value: `1 + delta`. */
+float response_field(const Material &ma, ePaintLayersResponseValue value);
+/**
+ * Write the material's response values (#Material::paint_layers_bump_strength_delta and the other
+ * two) into the owned nodes' Strength/Distance sockets, in place. A node without the marker is a
+ * user's own and is left alone; tags nothing, so the evaluation can call it on an evaluated copy.
+ */
+void paint_layers_response_nodes_sync(Material &ma);
 bNodeSocket *instance_output_find(bNodeTree &tree, bNode &instance, const char *result_name);
 bNodeSocket *principled_channel_socket(Material &ma, int channel);
 bNodeSocket *socket_in(bNode &node, const char *name);

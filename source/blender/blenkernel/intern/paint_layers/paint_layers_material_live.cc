@@ -102,6 +102,8 @@ static bool live_image_usable(const ChannelSourceImage &source, const bool alpha
   }
   const bNodeSocket *vector = bke::node_find_socket(
       const_cast<bNode &>(*source.node), SOCK_IN, "Vector"_ustr);
+  /* The owner tree keeps a current cache: the node comes from a resolve, which ensures the cache of
+   * every tree it walks, and only a tree update moves it since. */
   return vector == nullptr || !vector->is_directly_linked();
 }
 

@@ -926,6 +926,11 @@ const uchar *get_color_ptr(bTheme *btheme, int spacetype, int colorid)
         case TH_UV_SHADOW:
           cp = ts->uv_shadow;
           break;
+        case TH_PAINT_FILL_WIRE:
+          /* One setting for both spaces: the Image Editor reads the View3D theme copy, like
+           * #TH_SELECT above. */
+          cp = btheme->space_view3d.paint_fill_wire;
+          break;
 
         case TH_MARKER_OUTLINE:
           cp = ts->marker_outline;

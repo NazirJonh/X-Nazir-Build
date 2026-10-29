@@ -254,6 +254,57 @@ static void texture_fill_color_get(const Paint *paint,
 }
 
 /* -------------------------------------------------------------------- */
+/** \name Fill modal events
+ * \{ */
+
+/**
+ * The fill modes run as modal operators on the "Gesture Box" modal keymap, which replaces the raw
+ * input events before they reach the operator: the button press becomes #GESTURE_MODAL_BEGIN, the
+ * release becomes #GESTURE_MODAL_SELECT (or #GESTURE_MODAL_DESELECT with Shift) and Esc / right
+ * mouse become #GESTURE_MODAL_CANCEL.
+ *
+ * A user-edited or partially populated keyconfig delivers the raw event verbatim instead, so both
+ * forms are read here: without the raw keys a stroke could neither be committed on release nor
+ * aborted with Esc, and Esc must abort a held stroke like every other stroke tool of this fork.
+ */
+enum class TextureFillModalAction {
+  None,
+  /** The left button went down: starts the stroke of the mode that has one. */
+  Begin,
+  /** The left button went up: the selected faces are filled. */
+  Confirm,
+  /** Esc or right mouse: the stroke is dropped without writing anything. */
+  Cancel,
+};
+
+static TextureFillModalAction texture_fill_modal_action(const wmEvent &event)
+{
+  if (event.type == EVT_MODAL_MAP) {
+    switch (event.val) {
+      case GESTURE_MODAL_BEGIN:
+        return TextureFillModalAction::Begin;
+      case GESTURE_MODAL_SELECT:
+      case GESTURE_MODAL_DESELECT:
+        return TextureFillModalAction::Confirm;
+      case GESTURE_MODAL_CANCEL:
+        return TextureFillModalAction::Cancel;
+      default:
+        /* Wheel in/out and anything else the gesture keymap adds: no fill meaning. */
+        return TextureFillModalAction::None;
+    }
+  }
+  if (ELEM(event.type, EVT_ESCKEY, RIGHTMOUSE) && event.val == KM_PRESS) {
+    return TextureFillModalAction::Cancel;
+  }
+  if (event.type == LEFTMOUSE && event.val == KM_RELEASE) {
+    return TextureFillModalAction::Confirm;
+  }
+  return TextureFillModalAction::None;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Loop fill mode
  * \{ */
 
@@ -574,30 +625,28 @@ static wmOperatorStatus texture_fill_loop_modal(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  /* The operator uses the "Gesture Box" modal keymap, which replaces the raw mouse button events:
-   * press becomes #GESTURE_MODAL_BEGIN, release becomes #GESTURE_MODAL_SELECT (or
-   * #GESTURE_MODAL_DESELECT with Shift), and Esc / right mouse become #GESTURE_MODAL_CANCEL. */
-  if (event->type == EVT_MODAL_MAP) {
-    switch (event->val) {
-      case GESTURE_MODAL_BEGIN:
-        state->lmb_down = true;
-        texture_fill_loop_pick_and_add(C, *state, event);
-        return OPERATOR_RUNNING_MODAL;
-      case GESTURE_MODAL_SELECT:
-      case GESTURE_MODAL_DESELECT: {
-        /* Releasing ends the stroke: whatever was selected is filled once and the modal
-         * finishes. */
-        state->lmb_down = false;
-        const bool did_fill = texture_fill_loop_commit(C, op, *state);
-        texture_fill_loop_state_free(op);
-        return did_fill ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
-      }
-      case GESTURE_MODAL_CANCEL:
-        texture_fill_loop_state_free(op);
-        return OPERATOR_CANCELLED;
-      default:
-        return OPERATOR_RUNNING_MODAL;
-    }
+  const auto commit = [&]() {
+    /* Releasing ends the stroke: whatever was selected is filled once and the modal finishes. */
+    const bool did_fill = texture_fill_loop_commit(C, op, *state);
+    texture_fill_loop_state_free(op);
+    return did_fill ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+  };
+  const auto cancel = [&]() {
+    texture_fill_loop_state_free(op);
+    return OPERATOR_CANCELLED;
+  };
+
+  switch (texture_fill_modal_action(*event)) {
+    case TextureFillModalAction::Begin:
+      state->lmb_down = true;
+      texture_fill_loop_pick_and_add(C, *state, event);
+      return OPERATOR_RUNNING_MODAL;
+    case TextureFillModalAction::Confirm:
+      return commit();
+    case TextureFillModalAction::Cancel:
+      return cancel();
+    case TextureFillModalAction::None:
+      break;
   }
 
   if (event->type == MOUSEMOVE) {
@@ -880,21 +929,29 @@ static wmOperatorStatus texture_fill_modal(bContext *C, wmOperator *op, const wm
     if (line_state == nullptr) {
       return OPERATOR_CANCELLED;
     }
-    if (ISMOUSE_MOTION(event->type)) {
-      line_state->end = float2(event->mval);
-      return OPERATOR_RUNNING_MODAL;
-    }
-    if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+    const auto commit = [&]() {
       line_state->end = float2(event->mval);
       const bool filled = texture_fill_line(C, op, *line_state);
       MEM_delete(line_state);
       op->customdata = nullptr;
       return filled ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
-    }
-    if (ELEM(event->type, EVT_ESCKEY, RIGHTMOUSE)) {
+    };
+    const auto cancel = [&]() {
       MEM_delete(line_state);
       op->customdata = nullptr;
       return OPERATOR_CANCELLED;
+    };
+    switch (texture_fill_modal_action(*event)) {
+      case TextureFillModalAction::Confirm:
+        return commit();
+      case TextureFillModalAction::Cancel:
+        return cancel();
+      case TextureFillModalAction::Begin:
+      case TextureFillModalAction::None:
+        break;
+    }
+    if (ISMOUSE_MOTION(event->type)) {
+      line_state->end = float2(event->mval);
     }
     return OPERATOR_RUNNING_MODAL;
   }

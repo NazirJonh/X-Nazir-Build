@@ -377,6 +377,7 @@ const bTheme U_theme_default = {
     .grid_axis_brightness = 0.46f,
     .wire = RGBA(0x000000ff),
     .wire_edit = RGBA(0x000000ff),
+    .paint_fill_wire = RGBA(0xcc000070),
     .select = RGBA(0xed5700ff),
     .lamp = RGBA(0x00000050),
     .speaker = RGBA(0x000000ff),

@@ -409,6 +409,13 @@ bool BKE_paint_texture_fill_wire_requested(const ToolSettings *ts);
  */
 bool BKE_paint_fill_wire_overlay_enabled(const Scene *scene, const Object *ob);
 /**
+ * True when the paint selection expands to whole faces and asks for the mesh wireframe
+ * (#ImagePaintSettings::selection_show_wire). The Face expansion picks entire faces, which are
+ * only visible as such with the wireframe drawn. Shared by the 3D and UV overlays so both read
+ * one rule.
+ */
+bool BKE_paint_selection_face_wire_requested(const ToolSettings *ts);
+/**
  * Return true when in vertex/weight paint + vertex-select mode?
  */
 bool BKE_paint_select_vert_test(const Object *ob);

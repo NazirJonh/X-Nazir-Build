@@ -828,7 +828,12 @@ bool image_select_view3d_anchor_from_mval(bContext *C,
             Array<bool> face_visible(mesh.faces_num, false);
             int visible_num = 0;
             for (const int face : IndexRange(mesh.faces_num)) {
-              const uint index = offset + uint(face);
+              /* The select buffer stores `range_start + face_index`; the bitmap from
+               * #DRW_select_buffer_bitmap_from_rect is indexed by `select_id - 1`. Edit Mode's
+               * own box selection uses the same `offset - 1`, so subtract it here too or the
+               * visibility test is shifted by one face (visible faces read as hidden and vice
+               * versa, which is especially visible on multi-object assemblies). */
+              const uint index = offset - 1 + uint(face);
               face_visible[face] = index < bitmap_num && BLI_BITMAP_TEST_BOOL(bitmap, index);
               visible_num += int(face_visible[face]);
             }

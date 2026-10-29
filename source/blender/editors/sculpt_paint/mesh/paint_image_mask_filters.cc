@@ -351,15 +351,10 @@ static void capture_faces_bucket(CaptureObject &item, const Span<int> faces)
     BM_ITER_ELEM (l, &liter, efa, BM_LOOPS_OF_FACE) {
       BLI_rctf_do_minmax_v(&bounds, BM_ELEM_CD_GET_FLOAT_P(l, item.offsets.uv));
     }
-    for (int ty = std::max(int(floorf(bounds.ymin)), 0); ty <= int(floorf(bounds.ymax)); ty++) {
-      for (int tx = std::max(int(floorf(bounds.xmin)), 0);
-           tx <= std::min(int(floorf(bounds.xmax)), 9);
-           tx++)
-      {
+    const auto [tile_min, tile_max] = image_select_udim_tile_range(bounds);
+    for (int ty = tile_min.y; ty <= tile_max.y; ty++) {
+      for (int tx = tile_min.x; tx <= tile_max.x; tx++) {
         const int tile_number = 1001 + ty * 10 + tx;
-        if (tile_number > IMA_UDIM_MAX) {
-          continue;
-        }
         item.tile_faces.lookup_or_add_default(tile_number).append(face_index);
       }
     }
@@ -829,13 +824,11 @@ static Vector<int> objects_uv_tiles_get(const Scene &scene, const Span<Object *>
         const float2 uv = uvs[corner];
         BLI_rctf_do_minmax_v(&bounds, &uv.x);
       }
-      for (int ty = std::max(int(floorf(bounds.ymin)), 0); ty <= int(floorf(bounds.ymax)); ty++) {
-        for (int tx = std::max(int(floorf(bounds.xmin)), 0);
-             tx <= std::min(int(floorf(bounds.xmax)), 9);
-             tx++)
-        {
+      const auto [tile_min, tile_max] = image_select_udim_tile_range(bounds);
+      for (int ty = tile_min.y; ty <= tile_max.y; ty++) {
+        for (int tx = tile_min.x; tx <= tile_max.x; tx++) {
           const int tile_number = 1001 + ty * 10 + tx;
-          if (tile_number <= IMA_UDIM_MAX && !tiles.contains(tile_number)) {
+          if (!tiles.contains(tile_number)) {
             tiles.append(tile_number);
           }
         }

@@ -185,6 +185,13 @@ bool BKE_image_paint_selection_mask_bounds(const Image *image,
                                            int r_min[2],
                                            int r_max[2]);
 
+/**
+ * True when every pixel of the tile's selection mask is selected. Used by the paint-selection
+ * "select all" toggle to distinguish a full selection (clear it on the next press) from a partial
+ * one (select everything first).
+ */
+bool BKE_image_paint_selection_mask_is_full(const Image *image, int tile_number);
+
 /** \return The raw binary mask value, or 0 when out of bounds or the tile has no mask. */
 float BKE_image_paint_selection_mask_sample(const Image *image, int tile_number, int x, int y);
 

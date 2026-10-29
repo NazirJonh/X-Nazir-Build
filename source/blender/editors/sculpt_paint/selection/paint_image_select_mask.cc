@@ -75,6 +75,7 @@
 #include "bmesh.hh"
 
 #include "ED_image.hh"
+#include "ED_mesh.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_select_utils.hh"
@@ -82,11 +83,7 @@
 #include "ED_undo.hh"
 #include "ED_uvedit.hh"
 
-#include "BIF_glutil.hh"
 
-#include "GPU_immediate.hh"
-#include "GPU_state.hh"
-#include "GPU_texture.hh"
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
@@ -862,15 +859,15 @@ BMUVOffsets image_paint_selection_uv_offsets_get(BMesh *bm, Object *ob, const Sc
  * Return true if the UV bounding box of \a efa overlaps \a uv_rect.
  * Used for geometric seed detection in subtract mode.
  */
-static bool face_uv_intersects_rect(const BMFace *efa,
-                                    const BMUVOffsets &offsets,
-                                    const rctf &uv_rect)
+bool image_select_face_uv_intersects_rect(const BMFace &efa,
+                                          const BMUVOffsets &offsets,
+                                          const rctf &uv_rect)
 {
   rctf face_uv_bounds;
   BLI_rctf_init_minmax(&face_uv_bounds);
   BMIter liter;
   BMLoop *l;
-  BM_ITER_ELEM (l, &liter, const_cast<BMFace *>(efa), BM_LOOPS_OF_FACE) {
+  BM_ITER_ELEM (l, &liter, const_cast<BMFace *>(&efa), BM_LOOPS_OF_FACE) {
     const float *uv = BM_ELEM_CD_GET_FLOAT_P(l, offsets.uv);
     BLI_rctf_do_minmax_v(&face_uv_bounds, uv);
   }
@@ -944,7 +941,7 @@ static void image_paint_selection_expand_for_object(Scene *scene,
       if (BM_elem_flag_test(efa, BM_ELEM_HIDDEN)) {
         continue;
       }
-      if (face_uv_intersects_rect(efa, offsets, *gesture_uv_bounds)) {
+      if (image_select_face_uv_intersects_rect(*efa, offsets, *gesture_uv_bounds)) {
         face_seen[face_index] = true;
         seed_faces.append(face_index);
       }
@@ -1013,23 +1010,10 @@ static void image_paint_selection_expand_for_object(Scene *scene,
         const float *uv = BM_ELEM_CD_GET_FLOAT_P(l, offsets.uv);
         BLI_rctf_do_minmax_v(&face_uv_bounds, uv);
       }
-      const int tx_min = int(floorf(face_uv_bounds.xmin));
-      const int tx_max = int(floorf(face_uv_bounds.xmax));
-      const int ty_min = int(floorf(face_uv_bounds.ymin));
-      const int ty_max = int(floorf(face_uv_bounds.ymax));
-      for (int ty = ty_min; ty <= ty_max; ty++) {
-        if (ty < 0) {
-          continue;
-        }
-        for (int tx = tx_min; tx <= tx_max; tx++) {
-          /* UDIM tiles span columns 0..9; ignore UVs outside the valid grid. */
-          if (tx < 0 || tx > 9) {
-            continue;
-          }
+      const auto [tile_min, tile_max] = image_select_udim_tile_range(face_uv_bounds);
+      for (int ty = tile_min.y; ty <= tile_max.y; ty++) {
+        for (int tx = tile_min.x; tx <= tile_max.x; tx++) {
           const int tile_number = 1001 + ty * 10 + tx;
-          if (tile_number > IMA_UDIM_MAX) {
-            continue;
-          }
           tile_faces.lookup_or_add_default(tile_number).append(face_index);
         }
       }
@@ -1337,23 +1321,10 @@ void image_paint_selection_mask_from_face_selection(const bContext *C,
       for (const int corner : faces[face]) {
         BLI_rctf_do_minmax_v(&face_uv_bounds, source.uvs[corner]);
       }
-      const int tx_min = int(floorf(face_uv_bounds.xmin));
-      const int tx_max = int(floorf(face_uv_bounds.xmax));
-      const int ty_min = int(floorf(face_uv_bounds.ymin));
-      const int ty_max = int(floorf(face_uv_bounds.ymax));
-      for (int ty = ty_min; ty <= ty_max; ty++) {
-        if (ty < 0) {
-          continue;
-        }
-        for (int tx = tx_min; tx <= tx_max; tx++) {
-          /* UDIM tiles span columns 0..9; ignore UVs outside the valid grid. */
-          if (tx < 0 || tx > 9) {
-            continue;
-          }
+      const auto [tile_min, tile_max] = image_select_udim_tile_range(face_uv_bounds);
+      for (int ty = tile_min.y; ty <= tile_max.y; ty++) {
+        for (int tx = tile_min.x; tx <= tile_max.x; tx++) {
           const int tile_number = 1001 + ty * 10 + tx;
-          if (tile_number > IMA_UDIM_MAX) {
-            continue;
-          }
           tile_faces.lookup_or_add_default(tile_number).append({src_i, face});
         }
       }
@@ -1454,7 +1425,46 @@ void image_paint_selection_expand(bContext *C,
 /** \name Select All
  * \{ */
 
-static wmOperatorStatus image_select_all_exec(bContext *C, wmOperator * /*op*/)
+/**
+ * Clear every target's paint mask: the Deselect body shared by the Select All toggle
+ * (#SEL_DESELECT) and #PAINT_OT_image_select_none. The undo step carries one shared name, so both
+ * entry points write the same step for the same edit.
+ */
+static void image_select_deselect_apply(bContext *C, const Span<ImagePaintSelectionTarget> targets)
+{
+  image_paint_selection_undo_begin("Deselect All", targets);
+  for (const ImagePaintSelectionTarget &target : targets) {
+    BKE_image_paint_selection_mask_free(target.image);
+  }
+  image_paint_selection_targets_update(C, targets);
+  ED_image_undo_push_end();
+}
+
+/**
+ * Invert the paint mask of every tile of every target: the Invert body shared by the Select All
+ * action (#SEL_INVERT) and #PAINT_OT_image_select_invert.
+ */
+static void image_select_invert_apply(bContext *C, const Span<ImagePaintSelectionTarget> targets)
+{
+  image_paint_selection_undo_begin("Invert Selection", targets);
+  for (const ImagePaintSelectionTarget &target : targets) {
+    for (ImageTile *tile : ListBaseWrapper<ImageTile>(target.image->tiles)) {
+      ImageUser iuser = target.iuser;
+      iuser.tile = tile->tile_number;
+      ImBuf *ibuf = BKE_image_acquire_ibuf(target.image, &iuser, nullptr);
+      if (!ibuf) {
+        continue;
+      }
+      BKE_image_paint_selection_mask_get(target.image, tile->tile_number, ibuf->x, ibuf->y);
+      BKE_image_paint_selection_mask_invert(target.image, tile->tile_number);
+      BKE_image_release_ibuf(target.image, ibuf, nullptr);
+    }
+  }
+  image_paint_selection_targets_update(C, targets);
+  ED_image_undo_push_end();
+}
+
+static wmOperatorStatus image_select_all_exec(bContext *C, wmOperator *op)
 {
   SpaceImage *sima = CTX_wm_space_image(C);
   if (!sima || !sima->runtime) {
@@ -1475,9 +1485,10 @@ static wmOperatorStatus image_select_all_exec(bContext *C, wmOperator * /*op*/)
   image_paint_selection_mask_map_ensure(C);
   const Vector<ImagePaintSelectionTarget> targets = image_paint_selection_targets_get(C, sima);
 
-  /* Resolve the image editor's active UDIM once, then apply that same UV tile to every PBR target.
-   * This exactly preserves single-image behavior and avoids each target silently selecting its own
-   * unrelated active tile. */
+  /* Resolve the image editor's active UDIM once. Select All, the toggle test and Deselect All all
+   * need the same tile, and the select path applies it to every PBR target too. This exactly
+   * preserves single-image behavior and avoids each target silently selecting its own unrelated
+   * active tile. */
   ImageUser active_iuser = sima->iuser;
   if (image->source == IMA_SRC_TILED) {
     const ImageTile *active = static_cast<const ImageTile *>(
@@ -1495,6 +1506,27 @@ static wmOperatorStatus image_select_all_exec(bContext *C, wmOperator * /*op*/)
     return OPERATOR_CANCELLED;
   }
   const int active_tile_number = active_tile->tile_number;
+
+  /* The keymap binds this to plain A, and the menu entry to "All / None". A toggle only clears
+   * once the visible canvas tile is fully selected; from an empty or partial selection it always
+   * selects everything first. Checking "any selection" instead would make a partial box selection
+   * clear on the first press, which is not what the tool is for. An explicit action property still
+   * allows callers to force Select/Deselect/Invert. */
+  int action = RNA_enum_get(op->ptr, "action");
+  if (action == SEL_TOGGLE) {
+    action = BKE_image_paint_selection_mask_is_full(image, active_tile_number) ? SEL_DESELECT :
+                                                                                SEL_SELECT;
+  }
+
+  if (action == SEL_DESELECT) {
+    image_select_deselect_apply(C, targets);
+    return OPERATOR_FINISHED;
+  }
+
+  if (action == SEL_INVERT) {
+    image_select_invert_apply(C, targets);
+    return OPERATOR_FINISHED;
+  }
 
   image_paint_selection_undo_begin("Select All", targets);
   for (const ImagePaintSelectionTarget &target : targets) {
@@ -1525,12 +1557,13 @@ static wmOperatorStatus image_select_all_exec(bContext *C, wmOperator * /*op*/)
 
 void PAINT_OT_image_select_all(wmOperatorType *ot)
 {
-  ot->name = "Select All";
+  ot->name = "(De)select All";
   ot->idname = "PAINT_OT_image_select_all";
-  ot->description = "Select the entire image as a paint mask";
+  ot->description = "Select the entire image paint mask, or clear it when something is selected";
   ot->exec = image_select_all_exec;
   ot->poll = image_paint_selection_poll;
   ot->flag = OPTYPE_REGISTER;
+  WM_operator_properties_select_all(ot);
 }
 
 /** \} */
@@ -1546,23 +1579,17 @@ static wmOperatorStatus image_select_none_exec(bContext *C, wmOperator * /*op*/)
     return OPERATOR_CANCELLED;
   }
   /* End any floating session before changing the selection state, so its undo step is closed
-   * before "Select None" opens its own. See #image_select_all_exec. */
+   * before "Deselect All" opens its own. See #image_select_all_exec. */
   image_select_floating_sessions_end_all(C, sima);
 
   image_paint_selection_mask_map_ensure(C);
-  const Vector<ImagePaintSelectionTarget> targets = image_paint_selection_targets_get(C, sima);
-  image_paint_selection_undo_begin("Select None", targets);
-  for (const ImagePaintSelectionTarget &target : targets) {
-    BKE_image_paint_selection_mask_free(target.image);
-  }
-  image_paint_selection_targets_update(C, targets);
-  ED_image_undo_push_end();
+  image_select_deselect_apply(C, image_paint_selection_targets_get(C, sima));
   return OPERATOR_FINISHED;
 }
 
 void PAINT_OT_image_select_none(wmOperatorType *ot)
 {
-  ot->name = "Select None";
+  ot->name = "Deselect All";
   ot->idname = "PAINT_OT_image_select_none";
   ot->description = "Deselect the entire image (remove paint mask)";
   ot->exec = image_select_none_exec;
@@ -1587,28 +1614,7 @@ static wmOperatorStatus image_select_invert_exec(bContext *C, wmOperator * /*op*
   image_select_floating_sessions_end_all(C, sima);
 
   image_paint_selection_mask_map_ensure(C);
-  const Vector<ImagePaintSelectionTarget> targets = image_paint_selection_targets_get(C, sima);
-  image_paint_selection_undo_begin("Invert Selection", targets);
-
-  for (const ImagePaintSelectionTarget &target : targets) {
-    for (ImageTile *tile : ListBaseWrapper<ImageTile>(target.image->tiles)) {
-      ImageUser iuser = target.iuser;
-      iuser.tile = tile->tile_number;
-      ImBuf *ibuf = BKE_image_acquire_ibuf(target.image, &iuser, nullptr);
-      if (!ibuf) {
-        continue;
-      }
-
-      BKE_image_paint_selection_mask_get(target.image, tile->tile_number, ibuf->x, ibuf->y);
-      BKE_image_paint_selection_mask_invert(target.image, tile->tile_number);
-
-      BKE_image_release_ibuf(target.image, ibuf, nullptr);
-    }
-  }
-
-  image_paint_selection_targets_update(C, targets);
-
-  ED_image_undo_push_end();
+  image_select_invert_apply(C, image_paint_selection_targets_get(C, sima));
   return OPERATOR_FINISHED;
 }
 
@@ -1648,43 +1654,9 @@ class ImageSelectBoxShape : public ImageSelectGestureShape {
 
   bool uv_bounds_calc(const ARegion *region, wmOperator *op, rctf &r_uv_bounds) override
   {
-    rctf rectf;
-    WM_operator_properties_border_to_rctf(op, &rectf);
-    if (BLI_rctf_size_x(&rectf) == 0.0f && BLI_rctf_size_y(&rectf) == 0.0f) {
-      return false;
-    }
-
     uv_points_.reinitialize(4);
-    const float region_points[4][2] = {{rectf.xmin, rectf.ymin},
-                                       {rectf.xmax, rectf.ymin},
-                                       {rectf.xmax, rectf.ymax},
-                                       {rectf.xmin, rectf.ymax}};
-    BLI_rctf_init_minmax(&r_uv_bounds);
-    for (const int i : IndexRange(4)) {
-      float uv[2];
-      ui::view2d_region_to_view(
-          &region->v2d, region_points[i][0], region_points[i][1], &uv[0], &uv[1]);
-      uv_points_[i] = float2(uv[0], uv[1]);
-      BLI_rctf_do_minmax_v(&r_uv_bounds, uv);
-    }
-
-    if (region->v2d.rotation == 0.0f) {
-      /* Preserve the existing axis-aligned UDIM-border snap where it is well-defined. Rotating a
-       * screen-space box produces a UV quadrilateral, whose edges cannot independently snap to
-       * horizontal/vertical UDIM borders without changing the gesture's shape. */
-      const float snap_thresh = 0.02f;
-      auto snap_to_udim_border = [](float v, const float threshold) -> float {
-        const float rounded = roundf(v);
-        return (fabsf(v - rounded) < threshold) ? rounded : v;
-      };
-      r_uv_bounds.xmin = snap_to_udim_border(r_uv_bounds.xmin, snap_thresh);
-      r_uv_bounds.xmax = snap_to_udim_border(r_uv_bounds.xmax, snap_thresh);
-      r_uv_bounds.ymin = snap_to_udim_border(r_uv_bounds.ymin, snap_thresh);
-      r_uv_bounds.ymax = snap_to_udim_border(r_uv_bounds.ymax, snap_thresh);
-      uv_points_[0] = float2(r_uv_bounds.xmin, r_uv_bounds.ymin);
-      uv_points_[1] = float2(r_uv_bounds.xmax, r_uv_bounds.ymin);
-      uv_points_[2] = float2(r_uv_bounds.xmax, r_uv_bounds.ymax);
-      uv_points_[3] = float2(r_uv_bounds.xmin, r_uv_bounds.ymax);
+    if (!image_select_box_uv_bounds_calc(*region, *op, uv_points_, r_uv_bounds)) {
+      return false;
     }
     return true;
   }
@@ -1773,15 +1745,25 @@ static wmOperatorStatus image_select_box_invoke(bContext *C, wmOperator *op, con
   if (image_select_gesture_invoke_begin(C, op, event)) {
     return OPERATOR_FINISHED;
   }
-  return WM_gesture_box_invoke(C, op, event);
+  const wmOperatorStatus status = WM_gesture_box_invoke(C, op, event);
+  if ((status & OPERATOR_RUNNING_MODAL) != 0) {
+    image_select_box_island_preview_invoke(C, op);
+  }
+  return status;
 }
 
 static wmOperatorStatus image_select_box_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
   image_select_gesture_drag_detect(op, event);
   const wmOperatorStatus ret = WM_gesture_box_modal(C, op, event);
-  if (event->type == MOUSEMOVE && (ret & OPERATOR_RUNNING_MODAL)) {
+  /* Update preview on mouse move or Shift key press/release: the Shift events keep the redraw
+   * live while the drag runs, though the preview's own mode comes from the operator's `mode`. */
+  if ((event->type == MOUSEMOVE || event->type == EVT_LEFTSHIFTKEY ||
+       event->type == EVT_RIGHTSHIFTKEY) &&
+      (ret & OPERATOR_RUNNING_MODAL))
+  {
     image_select_box_status_update(C, op, event);
+    image_select_box_island_preview_update(C, op);
   }
   else if ((ret & OPERATOR_RUNNING_MODAL) == 0) {
     image_select_status_clear(C);

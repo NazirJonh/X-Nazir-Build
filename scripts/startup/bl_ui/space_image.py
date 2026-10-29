@@ -203,8 +203,9 @@ class IMAGE_MT_select(Menu):
         sima = context.space_data
 
         if sima.mode == 'PAINT':
-            layout.operator("paint.image_select_all", text="All")
-            layout.operator("paint.image_select_none", text="None")
+            layout.operator("paint.image_select_all", text="All / None")
+            layout.operator("paint.image_select_none", text="None (Paint Mask)")
+            layout.operator("paint.image_select_masks_none", text="None (All Masks)")
             layout.operator("paint.image_select_invert", text="Invert")
             layout.separator()
             imapaint = context.tool_settings.image_paint

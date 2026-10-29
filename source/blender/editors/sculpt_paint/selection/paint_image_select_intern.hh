@@ -37,7 +37,12 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
+#include <utility>
+
 #include "BLI_math_vector_types.hh"
+#include "BLI_rect.h"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
@@ -65,6 +70,7 @@
 struct ImBuf;
 struct ARegion;
 struct BMesh;
+struct BMFace;
 struct BrushMaterialPaint;
 struct PaintModeSettings;
 struct Image;
@@ -273,6 +279,46 @@ inline float2 image_select_udim_tile_uv_origin(int tile_number)
 }
 
 /**
+ * floor() for the inclusive upper bound of a UDIM tile loop: a coordinate that lands exactly on a
+ * tile edge counts for the tile below it, since the covered area there has no width. A face
+ * reaching u == 1.0 (the default 0-1 unwrap ends there) must not pull in the empty tile 1002.
+ * The result is clamped at zero so a degenerate face resting exactly on the tile border still
+ * gets the tile it touches instead of an empty loop.
+ */
+inline int image_select_tile_bound_floor(const float value)
+{
+  const float floored = floorf(value);
+  return std::max((floored == value) ? int(floored) - 1 : int(floored), 0);
+}
+
+/** Columns of the UDIM tile grid: tiles are numbered `1001 + row * 10 + column`. */
+inline constexpr int IMAGE_SELECT_UDIM_TILE_COLUMNS = 10;
+
+/** Largest 0-based UDIM tile row, derived from the tile-number limit #IMA_UDIM_MAX. */
+inline constexpr int IMAGE_SELECT_UDIM_TILE_ROW_MAX = (IMA_UDIM_MAX - 1001) /
+                                                      IMAGE_SELECT_UDIM_TILE_COLUMNS;
+
+/**
+ * The inclusive 0-based UDIM tile index range covered by \a bounds, as `column-row` pairs clamped
+ * to the valid grid (columns `0 .. #IMAGE_SELECT_UDIM_TILE_COLUMNS - 1`, rows
+ * `0 .. #IMAGE_SELECT_UDIM_TILE_ROW_MAX`, so every tile in the range satisfies the tile-number
+ * limit and callers need no extra bound checks).
+ *
+ * The min bound is a plain floor: a face starting exactly on a tile edge paints the tile it starts
+ * on. The max bound is #image_select_tile_bound_floor: a face ending exactly on an edge covers no
+ * area in the tile above or right, so that empty tile stays out of the loop.
+ */
+inline std::pair<int2, int2> image_select_udim_tile_range(const rctf &bounds)
+{
+  const int2 tile_min(
+      std::max(int(floorf(bounds.xmin)), 0), std::max(int(floorf(bounds.ymin)), 0));
+  const int2 tile_max(
+      std::min(image_select_tile_bound_floor(bounds.xmax), IMAGE_SELECT_UDIM_TILE_COLUMNS - 1),
+      std::min(image_select_tile_bound_floor(bounds.ymax), IMAGE_SELECT_UDIM_TILE_ROW_MAX));
+  return {tile_min, tile_max};
+}
+
+/**
  * Which operation is asking for canvas objects.
  *
  * The two callers need different strictness. A selection mask is reversible, so a
@@ -335,6 +381,31 @@ void PAINT_OT_image_select_lasso(wmOperatorType *ot);
 void PAINT_OT_image_select_circle(wmOperatorType *ot);
 void PAINT_OT_image_select_circle_radius(wmOperatorType *ot);
 void PAINT_OT_image_select_curve(wmOperatorType *ot);
+
+/** The gesture seeding rule: whether \a efa's UV bounding box overlaps \a uv_rect. */
+bool image_select_face_uv_intersects_rect(const BMFace &efa,
+                                          const BMUVOffsets &offsets,
+                                          const rctf &uv_rect);
+
+/**
+ * The UV geometry of a box gesture: the four corners of the operator's border in UV space and
+ * their axis-aligned bounds. On an unrotated canvas the bounds (and the corners) snap to UDIM
+ * borders within a small threshold; a rotated canvas maps the box to a quadrilateral, whose edges
+ * cannot snap independently, so no snap happens there.
+ *
+ * \param r_uv_points: Receives the four corners, in the border's corner order.
+ * \param r_uv_bounds: Receives the axis-aligned bounds of the corners.
+ * \return false for a degenerate (zero-size) box.
+ */
+bool image_select_box_uv_bounds_calc(const ARegion &region,
+                                     wmOperator &op,
+                                     MutableSpan<float2> r_uv_points,
+                                     rctf &r_uv_bounds);
+
+/* Select Box island preview (paint_image_select_island_preview.cc): the islands an
+ * island-expansion drag reaches, drawn before the release commits anything. */
+void image_select_box_island_preview_invoke(bContext *C, wmOperator *op);
+void image_select_box_island_preview_update(bContext *C, wmOperator *op);
 
 /* Gradient tool operators. */
 void PAINT_OT_image_select_gradient(wmOperatorType *ot);

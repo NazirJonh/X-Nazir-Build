@@ -9,8 +9,10 @@
 #pragma once
 
 #include "BLI_array.hh"
+#include "BLI_bitmap.h"
 #include "BLI_index_mask_fwd.hh"
 #include "BLI_map.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rand.hh"
 #include "BLI_set.hh"
@@ -41,6 +43,7 @@ enum class PaintMode : int8_t;
 struct ARegion;
 struct ARegionType;
 struct bContext;
+struct BMFace;
 struct BMesh;
 struct Brush;
 struct Depsgraph;
@@ -50,6 +53,7 @@ struct ImageUser;
 struct ImBuf;
 struct Main;
 struct MTex;
+struct Mesh;
 struct Object;
 struct Paint;
 struct PointerRNA;
@@ -1048,6 +1052,72 @@ ImagePaintGeometryFillStrokeCache *paint_image_geometry_fill_cache_new();
 void paint_image_geometry_fill_cache_end(ImagePaintGeometryFillStrokeCache *cache);
 void paint_image_geometry_fill_cache_free(ImagePaintGeometryFillStrokeCache *cache);
 
+/* paint_image_fill_faces.cc */
+
+/**
+ * Original-mesh faces the select engine actually rasterized in the region.
+ *
+ * Box selection must not reach faces hidden behind nearer geometry: a normal test only rejects
+ * faces turned away from the camera, not ones a nearer part of the same mesh -- or of a different
+ * participating object -- covers. Rather than approximating depth, this reads the select ID
+ * buffer -- the same source Edit Mode and Face Select box selection read -- whose IDs pass
+ * through `orig_index_face`, so they are original face indices and map straight onto the ones
+ * the fill expands.
+ *
+ * All objects a Texture Fill operation targets (see #texture_fill_target_objects) are rendered
+ * into one shared select context, so occlusion in multi-object Sculpt Mode is mutual between
+ * them: a face on one participating object hidden behind another is excluded exactly like a face
+ * hidden behind a nearer part of its own mesh, instead of only ever considering an object's own
+ * geometry. The IDs of a combined context are one contiguous range per object (see
+ * #DRW_select_buffer_context_offset_for_object_elem), so a lookup for a given object must offset
+ * its face index by that object's range start -- #contains does this internally.
+ *
+ * The buffer covers the whole region rather than the gesture box, so the highlight (projected
+ * once at gesture start, before any box exists) and the commit agree on what is visible.
+ *
+ * Left inactive -- every face passes -- when the select buffer is unavailable or X-Ray is on,
+ * because Edit Mode selects through the surface in X-Ray and Fill follows that convention.
+ */
+struct ImagePaintGeometryFillVisibleFaces {
+  BLI_bitmap *bitmap = nullptr;
+  uint bitmap_num = 0;
+  Map<const Object *, uint> face_offset_by_object;
+
+  ~ImagePaintGeometryFillVisibleFaces();
+
+  bool contains(const Object *ob, int face_index) const;
+};
+
+void paint_image_geometry_fill_visible_faces_build(
+    const bContext *C, Span<Object *> objects, ImagePaintGeometryFillVisibleFaces &r_visible);
+
+/**
+ * Normal matrix (transpose of the inverse of the object's upper-left 3x3) for the facing test
+ * below. Handles non-uniform scaling and flipped objects; computed once per object so the per-face
+ * test does not invert a matrix for every face. The inverse comes from #Object::object_to_world
+ * rather than #Object::world_to_object: these callers hold original objects, whose cached inverse
+ * is not guaranteed to be synced from the evaluated copy.
+ */
+float3x3 paint_image_geometry_fill_normal_matrix(const Object &ob);
+
+/**
+ * True when the face normal has a component toward the viewer in world space, so its projection
+ * is visible. Evaluated in world space so scaling (including negative or non-uniform scale) cannot
+ * flip the facing test.
+ */
+bool paint_image_geometry_fill_face_facing_view(const Object &ob,
+                                                const float3x3 &normalmatrix,
+                                                BMFace *efa,
+                                                const float3 &view_pos_world,
+                                                const float3 &view_dir_world,
+                                                bool is_ortho);
+
+/** World-space camera position (perspective) / toward-viewer direction (ortho). */
+void paint_image_geometry_fill_view_vectors_world(const RegionView3D &rv3d,
+                                                  float3 &r_view_pos_world,
+                                                  float3 &r_view_dir_world,
+                                                  bool &r_is_ortho);
+
 /**
  * 3D Texture Paint Face/Island/Mesh fill.
  *
@@ -1412,6 +1482,7 @@ void PAINT_OT_vector_edit(wmOperatorType *ot);
 void PAINT_OT_image_symmetry_edit(wmOperatorType *ot);
 /* paint_image_paint_mask_island.cc */
 void PAINT_OT_paint_mask_island(wmOperatorType *ot);
+void PAINT_OT_paint_mask_none(wmOperatorType *ot);
 
 /**
  * Fill \a r_island (one flag per face of \a ob's original mesh) with the UV island under \a uv, the

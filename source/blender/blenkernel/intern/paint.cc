@@ -1817,6 +1817,15 @@ bool BKE_paint_fill_wire_overlay_enabled(const Scene *scene, const Object *ob)
   return is_fill && brush->fill_show_wire != 0;
 }
 
+bool BKE_paint_selection_face_wire_requested(const ToolSettings *ts)
+{
+  if (ts == nullptr) {
+    return false;
+  }
+  return ts->imapaint.selection_expand == IMAGE_PAINT_SELECT_EXPAND_FACE &&
+         ts->imapaint.selection_show_wire != 0;
+}
+
 bool BKE_paint_sculpt_face_selection_mask_supported(const Scene *scene,
                                                     const Object *ob,
                                                     const char *active_tool_idname)

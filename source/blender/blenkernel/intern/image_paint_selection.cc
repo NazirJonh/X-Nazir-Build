@@ -327,6 +327,40 @@ bool BKE_image_paint_selection_mask_bounds(const Image *image,
   return paint_selection_mask_bounds_cached(image, tile_number, mask, r_min, r_max);
 }
 
+bool BKE_image_paint_selection_mask_is_full(const Image *image, int tile_number)
+{
+  const ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);
+  if (!mask) {
+    return false;
+  }
+  const float *pixels = mask->float_data();
+  if (!pixels || mask->x <= 0 || mask->y <= 0) {
+    return false;
+  }
+
+  const int w = mask->x;
+  const int h = mask->y;
+  return threading::parallel_reduce(
+      IndexRange(h),
+      64,
+      true,
+      [&](const IndexRange range, const bool init) {
+        if (!init) {
+          return false;
+        }
+        for (const int64_t y : range) {
+          const float *row = pixels + size_t(y) * w;
+          for (int x = 0; x < w; x++) {
+            if (row[x] <= IMAGE_PAINT_SELECTION_MASK_THRESHOLD) {
+              return false;
+            }
+          }
+        }
+        return true;
+      },
+      [](const bool a, const bool b) { return a && b; });
+}
+
 float BKE_image_paint_selection_mask_sample(const Image *image, int tile_number, int x, int y)
 {
   const ImBuf *mask = BKE_image_paint_selection_mask_lookup(image, tile_number);

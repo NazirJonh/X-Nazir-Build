@@ -19,34 +19,51 @@ void main()
   float2 dd = gpu_fwidth(stipple_pos);
   float line_distance = distance(stipple_pos, stipple_start) / max(dd.x, dd.y);
 
-  if (OVERLAY_UVLineStyle(line_style) == OVERLAY_UV_LINE_STYLE_OUTLINE) {
-    if (use_edge_select) {
-      /* TODO(@ideasman42): The current wire-edit color contrast enough against the selection.
-       * Look into changing the default theme color instead of reducing contrast with edge-select.
-       */
-      inner_color = (selection_fac != 0.0f) ? theme.colors.edge_select :
-                                              (theme.colors.wire_edit * 0.5f);
+  /* Only shaders built from `overlay_wire_override` declare these uniforms; the edit-mode shader
+   * has no such resource to depend on. The `#ifdef` contains only complete statements: an `else`
+   * left open across `#endif` is not handled by the shader metadata tool. */
+  bool wire_override = false;
+#ifdef WIRE_COLOR_OVERRIDE
+  wire_override = use_wire_override;
+  if (wire_override) {
+    /* The Fill wire carries its own fixed color; it only replaces the inner color so the regular
+     * dist / mix_w mask below still applies: that keeps the AA and the same thickness as the
+     * regular UV wire, and lets the `alpha` chain apply the editor opacity. */
+    inner_color = wire_override_color;
+    outer_color = float4(0.0f);
+  }
+#endif
+
+  if (!wire_override) {
+    if (OVERLAY_UVLineStyle(line_style) == OVERLAY_UV_LINE_STYLE_OUTLINE) {
+      if (use_edge_select) {
+        /* TODO(@ideasman42): The current wire-edit color contrast enough against the selection.
+         * Look into changing the default theme color instead of reducing contrast with edge-select.
+         */
+        inner_color = (selection_fac != 0.0f) ? theme.colors.edge_select :
+                                                (theme.colors.wire_edit * 0.5f);
+      }
+      else {
+        inner_color = mix(theme.colors.wire_edit, theme.colors.edge_select, selection_fac);
+      }
+      outer_color = float4(float3(0.0f), 1.0f);
     }
-    else {
-      inner_color = mix(theme.colors.wire_edit, theme.colors.edge_select, selection_fac);
+    else if (OVERLAY_UVLineStyle(line_style) == OVERLAY_UV_LINE_STYLE_DASH) {
+      if (fract(line_distance / float(dash_length)) < 0.5f) {
+        inner_color = mix(float4(float3(0.35f), 1.0f), theme.colors.edge_select, selection_fac);
+      }
     }
-    outer_color = float4(float3(0.0f), 1.0f);
-  }
-  else if (OVERLAY_UVLineStyle(line_style) == OVERLAY_UV_LINE_STYLE_DASH) {
-    if (fract(line_distance / float(dash_length)) < 0.5f) {
-      inner_color = mix(float4(float3(0.35f), 1.0f), theme.colors.edge_select, selection_fac);
+    else if (OVERLAY_UVLineStyle(line_style) == OVERLAY_UV_LINE_STYLE_BLACK) {
+      float4 base_color = float4(float3(0.0f), 1.0f);
+      inner_color = mix(base_color, theme.colors.edge_select, selection_fac);
     }
-  }
-  else if (OVERLAY_UVLineStyle(line_style) == OVERLAY_UV_LINE_STYLE_BLACK) {
-    float4 base_color = float4(float3(0.0f), 1.0f);
-    inner_color = mix(base_color, theme.colors.edge_select, selection_fac);
-  }
-  else if (OVERLAY_UVLineStyle(line_style) == OVERLAY_UV_LINE_STYLE_WHITE) {
-    float4 base_color = float4(1.0f);
-    inner_color = mix(base_color, theme.colors.edge_select, selection_fac);
-  }
-  else if (OVERLAY_UVLineStyle(line_style) == OVERLAY_UV_LINE_STYLE_SHADOW) {
-    inner_color = theme.colors.uv_shadow;
+    else if (OVERLAY_UVLineStyle(line_style) == OVERLAY_UV_LINE_STYLE_WHITE) {
+      float4 base_color = float4(1.0f);
+      inner_color = mix(base_color, theme.colors.edge_select, selection_fac);
+    }
+    else if (OVERLAY_UVLineStyle(line_style) == OVERLAY_UV_LINE_STYLE_SHADOW) {
+      inner_color = theme.colors.uv_shadow;
+    }
   }
 
   float dist = abs(edge_coord) - max(theme.sizes.edge - 0.5f, 0.0f);

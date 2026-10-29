@@ -83,8 +83,6 @@
 
 #include "DEG_depsgraph.hh"
 
-#include "DRW_select_buffer.hh"
-
 #include "GPU_immediate.hh"
 #include "GPU_state.hh"
 
@@ -5424,23 +5422,10 @@ static void paint_2d_geometry_fill_bucket_tiles(ImagePaintUVObjectFaces &item)
       const float *uv = BM_ELEM_CD_GET_FLOAT_P(l, item.offsets.uv);
       BLI_rctf_do_minmax_v(&face_uv_bounds, uv);
     }
-    const int tx_min = int(floorf(face_uv_bounds.xmin));
-    const int tx_max = int(floorf(face_uv_bounds.xmax));
-    const int ty_min = int(floorf(face_uv_bounds.ymin));
-    const int ty_max = int(floorf(face_uv_bounds.ymax));
-    for (int ty = ty_min; ty <= ty_max; ty++) {
-      if (ty < 0) {
-        continue;
-      }
-      for (int tx = tx_min; tx <= tx_max; tx++) {
-        /* UDIM tiles span columns 0..9; ignore UVs outside the valid grid. */
-        if (tx < 0 || tx > 9) {
-          continue;
-        }
+    const auto [tile_min, tile_max] = image_select_udim_tile_range(face_uv_bounds);
+    for (int ty = tile_min.y; ty <= tile_max.y; ty++) {
+      for (int tx = tile_min.x; tx <= tile_max.x; tx++) {
         const int tile_number = 1001 + ty * 10 + tx;
-        if (tile_number > IMA_UDIM_MAX) {
-          continue;
-        }
         item.tile_faces.lookup_or_add_default(tile_number).append(face_index);
       }
     }
@@ -6009,149 +5994,12 @@ static BMUVOffsets paint_image_geometry_fill_uv_offsets(BMesh *bm,
   return image_paint_selection_uv_offsets_get(bm, ob, scene);
 }
 
-/**
- * Original-mesh faces the select engine actually rasterized in the region.
- *
- * Box selection must not reach faces hidden behind nearer geometry: a normal test only rejects
- * faces turned away from the camera, not ones a nearer part of the same mesh -- or of a different
- * participating object -- covers. Rather than approximating depth, this reads the select ID
- * buffer -- the same source Edit Mode and Face Select box selection read -- whose IDs pass
- * through `orig_index_face`, so they are original face indices and map straight onto the ones
- * the fill expands.
- *
- * All objects a Texture Fill operation targets (see #texture_fill_target_objects) are rendered
- * into one shared select context, so occlusion in multi-object Sculpt Mode is mutual between
- * them: a face on one participating object hidden behind another is excluded exactly like a face
- * hidden behind a nearer part of its own mesh, instead of only ever considering an object's own
- * geometry. The IDs of a combined context are one contiguous range per object (see
- * #DRW_select_buffer_context_offset_for_object_elem), so a lookup for a given object must offset
- * its face index by that object's range start -- #contains does this internally.
- *
- * The buffer covers the whole region rather than the gesture box, so the highlight (projected
- * once at gesture start, before any box exists) and the commit agree on what is visible.
- *
- * Left inactive -- every face passes -- when the select buffer is unavailable or X-Ray is on,
- * because Edit Mode selects through the surface in X-Ray and Fill follows that convention.
- */
-struct ImagePaintGeometryFillVisibleFaces {
-  BLI_bitmap *bitmap = nullptr;
-  uint bitmap_num = 0;
-  Map<const Object *, uint> face_offset_by_object;
-
-  ~ImagePaintGeometryFillVisibleFaces()
-  {
-    MEM_SAFE_DELETE(bitmap);
-  }
-
-  bool contains(const Object *ob, const int face_index) const
-  {
-    if (bitmap == nullptr) {
-      return true;
-    }
-    /* An object the shared context was not built for (should not happen for any object the
-     * caller actually iterates) is treated as unfiltered rather than silently hidden. */
-    const uint *offset = face_offset_by_object.lookup_ptr(ob);
-    if (offset == nullptr) {
-      return true;
-    }
-    const uint index = *offset + uint(face_index);
-    return index < bitmap_num && BLI_BITMAP_TEST_BOOL(bitmap, index);
-  }
+enum class FillSeedCulling {
+  /** Do not cull seeds by facing (used by click and exact fills). */
+  None,
+  /** Cull seeds whose faces are turned away from the camera in world space (used by rect/gestures). */
+  Rect,
 };
-
-static void paint_image_geometry_fill_visible_faces_build(
-    const bContext *C,
-    const Span<Object *> objects,
-    ImagePaintGeometryFillVisibleFaces &r_visible)
-{
-  View3D *v3d = CTX_wm_view3d(C);
-  ARegion *region = CTX_wm_region(C);
-  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
-  if (v3d == nullptr || region == nullptr || depsgraph == nullptr || XRAY_ENABLED(v3d) ||
-      objects.is_empty())
-  {
-    return;
-  }
-
-  const Main *bmain = CTX_data_main(C);
-  const Scene *scene = CTX_data_scene(C);
-  ViewLayer *view_layer = CTX_data_view_layer(C);
-  if (bmain == nullptr || view_layer == nullptr) {
-    return;
-  }
-  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
-
-  Vector<Base *> bases;
-  bases.reserve(objects.size());
-  for (Object *ob : objects) {
-    if (Base *base = BKE_view_layer_base_find(view_layer, ob)) {
-      bases.append(base);
-    }
-  }
-  if (bases.is_empty()) {
-    return;
-  }
-
-  DRW_select_buffer_context_create(depsgraph, bases, SCE_SELECT_FACE);
-  rcti region_rect;
-  BLI_rcti_init(&region_rect, 0, region->winx, 0, region->winy);
-  r_visible.bitmap = DRW_select_buffer_bitmap_from_rect(
-      depsgraph, region, v3d, &region_rect, &r_visible.bitmap_num);
-  if (r_visible.bitmap == nullptr) {
-    return;
-  }
-
-  r_visible.face_offset_by_object.reserve(objects.size());
-  for (Object *ob : objects) {
-    r_visible.face_offset_by_object.add(
-        ob, DRW_select_buffer_context_offset_for_object_elem(depsgraph, ob, SCE_SELECT_FACE));
-  }
-}
-
-/** True when the face normal has a component toward the viewer, so its projection is visible. */
-static bool paint_image_geometry_fill_face_facing_view(BMFace *efa,
-                                                       const float3 &view_pos,
-                                                       const float3 &view_dir,
-                                                       const bool is_ortho)
-{
-  float no[3];
-  BM_face_calc_normal(efa, no);
-  if (is_ortho) {
-    /* \a view_dir already points from the scene toward the viewer. */
-    return dot_v3v3(view_dir, no) > 0.0f;
-  }
-  float center[3];
-  BM_face_calc_center_median(efa, center);
-  return dot_v3v3(view_pos - float3(center), no) > 0.0f;
-}
-
-/** Object-space camera position (perspective) / toward-viewer direction (ortho). */
-static void paint_image_geometry_fill_view_vectors_object(const Object &ob,
-                                                          const RegionView3D &rv3d,
-                                                          float3 &r_view_pos,
-                                                          float3 &r_view_dir,
-                                                          bool &r_is_ortho)
-{
-  r_is_ortho = rv3d.is_persp == 0;
-  float ob_imat[4][4];
-  invert_m4_m4(ob_imat, ob.object_to_world().ptr());
-  if (r_is_ortho) {
-    /* The third row of #viewinv is view-space +Z, which points from the scene toward the viewer. */
-    float dir[3] = {rv3d.viewinv[2][0], rv3d.viewinv[2][1], rv3d.viewinv[2][2]};
-    float mat[3][3];
-    copy_m3_m4(mat, ob_imat);
-    mul_m3_v3(mat, dir);
-    normalize_v3(dir);
-    r_view_dir = float3(dir);
-    r_view_pos = float3(0.0f);
-  }
-  else {
-    float pos[3] = {rv3d.viewinv[3][0], rv3d.viewinv[3][1], rv3d.viewinv[3][2]};
-    mul_m4_v3(ob_imat, pos);
-    r_view_pos = float3(pos);
-    r_view_dir = float3(0.0f);
-  }
-}
 
 enum class GeometryFillExpandMode {
   /** Follow `brush.fill_expand` (Face/Island/Mesh), the interactive fill behavior. */
@@ -6184,6 +6032,7 @@ static bool paint_image_proj_geometry_fill_faces_impl(
     const Span<int> seed,
     const bool invert,
     const GeometryFillExpandMode expand_mode,
+    const FillSeedCulling seed_culling = FillSeedCulling::None,
     const ImagePaintGeometryFillVisibleFaces *visible = nullptr,
     ImagePaintGeometryFillStrokeCache *cache = nullptr)
 {
@@ -6196,21 +6045,23 @@ static bool paint_image_proj_geometry_fill_faces_impl(
    * appends to it, so each fill starts from an empty face set rather than from the previous dab's. */
   item.faces.clear();
   item.tile_faces.clear();
-  /* Back-face culling: faces turned away from the camera are skipped for the gesture highlight
-   * and the fill alike, so the two always agree. Re-tested here because symmetry adds mirrored
-   * seed faces after the rect/click entry points collected their seeds. */
-  float3 view_pos, view_dir;
+  /* Back-face culling: only gesture/rect fills cull seeds by facing (#FillSeedCulling::Rect).
+   * Clicks come from a ray-cast that already hit the visible surface; loop/exact fills are
+   * topology-driven. Tested in world space so scaling cannot flip the result. */
+  float3 view_pos_world, view_dir_world;
   bool is_ortho = false;
   bool have_view = false;
-  if (CTX_wm_region(C) != nullptr) {
+  if (seed_culling == FillSeedCulling::Rect && CTX_wm_region(C) != nullptr) {
     if (RegionView3D *rv3d = CTX_wm_region_view3d(C)) {
-      paint_image_geometry_fill_view_vectors_object(*ob, *rv3d, view_pos, view_dir, is_ortho);
+      paint_image_geometry_fill_view_vectors_world(
+          *rv3d, view_pos_world, view_dir_world, is_ortho);
       have_view = true;
     }
   }
 
   VectorSet<int> valid_seed;
   valid_seed.reserve(seed.size());
+  const float3x3 normalmatrix = paint_image_geometry_fill_normal_matrix(*ob);
   for (const int face_index : seed) {
     if (face_index < 0 || face_index >= item.bm->totface) {
       continue;
@@ -6219,10 +6070,9 @@ static bool paint_image_proj_geometry_fill_faces_impl(
     if (efa == nullptr || BM_elem_flag_test(efa, BM_ELEM_HIDDEN)) {
       continue;
     }
-    /* Exact fills are topology-driven: a loop wrapping to the back of the mesh must be filled
-     * completely. Only interactive click/box seeds are back-face culled. */
-    if (expand_mode == GeometryFillExpandMode::Brush && have_view &&
-        !paint_image_geometry_fill_face_facing_view(efa, view_pos, view_dir, is_ortho))
+    if (seed_culling == FillSeedCulling::Rect && have_view &&
+        !paint_image_geometry_fill_face_facing_view(
+            *ob, normalmatrix, efa, view_pos_world, view_dir_world, is_ortho))
     {
       continue;
     }
@@ -6469,9 +6319,10 @@ static bool paint_image_proj_geometry_fill_rect_object(
   /* Screen projection deliberately uses original mesh coordinates. Evaluated mesh faces cannot
    * supply fill seeds because modifiers may have changed their indexing. */
   ED_view3d_init_mats_rv3d(ob, &rv3d);
-  float3 view_pos, view_dir;
+  float3 view_pos_world, view_dir_world;
   bool is_ortho;
-  paint_image_geometry_fill_view_vectors_object(*ob, rv3d, view_pos, view_dir, is_ortho);
+  paint_image_geometry_fill_view_vectors_world(rv3d, view_pos_world, view_dir_world, is_ortho);
+  const float3x3 normalmatrix = paint_image_geometry_fill_normal_matrix(*ob);
 
   Vector<int> seed;
   BMIter fiter;
@@ -6479,7 +6330,8 @@ static bool paint_image_proj_geometry_fill_rect_object(
   int face_index;
   BM_ITER_MESH_INDEX (efa, &fiter, item.bm, BM_FACES_OF_MESH, face_index) {
     if (!BM_elem_flag_test(efa, BM_ELEM_HIDDEN) && visible.contains(ob, face_index) &&
-        paint_image_geometry_fill_face_facing_view(efa, view_pos, view_dir, is_ortho) &&
+        paint_image_geometry_fill_face_facing_view(
+            *ob, normalmatrix, efa, view_pos_world, view_dir_world, is_ortho) &&
         paint_image_geometry_fill_face_intersects_rect(efa, &region, rectf))
     {
       seed.append(face_index);
@@ -6489,7 +6341,7 @@ static bool paint_image_proj_geometry_fill_rect_object(
     paint_image_geometry_fill_seed_add_symmetry(ob, item.bm, *mesh, seed);
   }
   const bool did_fill = paint_image_proj_geometry_fill_faces_impl(
-      C, color, br, ob, item, seed, invert, GeometryFillExpandMode::Brush, &visible);
+      C, color, br, ob, item, seed, invert, GeometryFillExpandMode::Brush, FillSeedCulling::Rect, &visible);
   paint_2d_geometry_fill_item_discard(item);
   return did_fill;
 }
@@ -6589,8 +6441,17 @@ bool paint_image_proj_geometry_fill(const bContext *C,
     BM_mesh_elem_table_ensure(item->bm, BM_FACE);
     image_paint_symmetry_mirror_faces(ob, item->bm, hit_position, mesh->symmetry, seed);
   }
-  const bool did_fill = paint_image_proj_geometry_fill_faces_impl(
-      C, color, br, ob, *item, seed, invert, GeometryFillExpandMode::Brush, nullptr, cache);
+  const bool did_fill = paint_image_proj_geometry_fill_faces_impl(C,
+                                                                  color,
+                                                                  br,
+                                                                  ob,
+                                                                  *item,
+                                                                  seed,
+                                                                  invert,
+                                                                  GeometryFillExpandMode::Brush,
+                                                                  FillSeedCulling::None,
+                                                                  nullptr,
+                                                                  cache);
   paint_2d_geometry_fill_item_discard(local_item);
   return did_fill;
 }
@@ -7206,6 +7067,9 @@ bool paint_image_fill_pick_edge_uv(const bContext *C,
 /** \name Loop fill preview overlay
  * \{ */
 
+/** Declared up front: the destructor below has to redraw what it removes. */
+static void paint_image_fill_preview_tag_redraw();
+
 struct ImagePaintFillPreviewObject {
   Object *object = nullptr;
   ImagePaintUVObjectFaces topology;
@@ -7241,13 +7105,19 @@ struct ImagePaintFillPreview {
     for (ImagePaintFillPreviewObject &entry : objects) {
       paint_2d_geometry_fill_item_discard(entry.topology);
     }
+    /* Dropping the callbacks only takes effect on the next draw, and a cancelled stroke has no
+     * other reason to redraw: without this tag the highlight would stay on screen until some
+     * unrelated event repainted the region. */
+    paint_image_fill_preview_tag_redraw();
   }
 };
 
 /** True when the edge has at least one adjacent face turned toward the viewer. */
-static bool paint_image_fill_preview_edge_facing_view(BMEdge *e,
-                                                      const float3 &view_pos,
-                                                      const float3 &view_dir,
+static bool paint_image_fill_preview_edge_facing_view(const Object &ob,
+                                                      const float3x3 &normalmatrix,
+                                                      BMEdge *e,
+                                                      const float3 &view_pos_world,
+                                                      const float3 &view_dir_world,
                                                       const bool is_ortho)
 {
   if (e->l == nullptr) {
@@ -7257,7 +7127,9 @@ static bool paint_image_fill_preview_edge_facing_view(BMEdge *e,
   BMIter liter;
   BMLoop *l;
   BM_ITER_ELEM (l, &liter, e, BM_LOOPS_OF_EDGE) {
-    if (paint_image_geometry_fill_face_facing_view(l->f, view_pos, view_dir, is_ortho)) {
+    if (paint_image_geometry_fill_face_facing_view(
+            ob, normalmatrix, l->f, view_pos_world, view_dir_world, is_ortho))
+    {
       return true;
     }
   }
@@ -7301,12 +7173,13 @@ static void paint_image_fill_preview_draw(const bContext *C, ARegion *region, vo
     }
     BM_mesh_elem_table_ensure(bm, BM_FACE | BM_EDGE);
 
-    float3 view_pos(0.0f);
-    float3 view_dir(0.0f);
+    float3 view_pos_world(0.0f);
+    float3 view_dir_world(0.0f);
     bool is_ortho = false;
     if (rv3d != nullptr) {
-      paint_image_geometry_fill_view_vectors_object(*ob, *rv3d, view_pos, view_dir, is_ortho);
+      paint_image_geometry_fill_view_vectors_world(*rv3d, view_pos_world, view_dir_world, is_ortho);
     }
+    const float3x3 normalmatrix = paint_image_geometry_fill_normal_matrix(*ob);
 
     for (const int face_index : entry.faces) {
       BMFace *efa = BM_face_at_index(bm, face_index);
@@ -7314,7 +7187,8 @@ static void paint_image_fill_preview_draw(const bContext *C, ARegion *region, vo
         continue;
       }
       if (rv3d != nullptr &&
-          !paint_image_geometry_fill_face_facing_view(efa, view_pos, view_dir, is_ortho))
+          !paint_image_geometry_fill_face_facing_view(
+              *ob, normalmatrix, efa, view_pos_world, view_dir_world, is_ortho))
       {
         continue;
       }
@@ -7377,7 +7251,8 @@ static void paint_image_fill_preview_draw(const bContext *C, ARegion *region, vo
           continue;
         }
         if (rv3d != nullptr &&
-            !paint_image_fill_preview_edge_facing_view(e, view_pos, view_dir, is_ortho))
+            !paint_image_fill_preview_edge_facing_view(
+                *ob, normalmatrix, e, view_pos_world, view_dir_world, is_ortho))
         {
           continue;
         }
@@ -7701,16 +7576,18 @@ bool paint_image_geometry_fill_gesture_begin(const bContext *C,
 
       /* Screen projection deliberately uses original mesh coordinates, like the fill itself. */
       ED_view3d_init_mats_rv3d(ob, rv3d);
-      float3 view_pos, view_dir;
+      float3 view_pos_world, view_dir_world;
       bool is_ortho;
-      paint_image_geometry_fill_view_vectors_object(*ob, *rv3d, view_pos, view_dir, is_ortho);
+      paint_image_geometry_fill_view_vectors_world(*rv3d, view_pos_world, view_dir_world, is_ortho);
+      const float3x3 normalmatrix = paint_image_geometry_fill_normal_matrix(*ob);
 
       BMIter fiter;
       BMFace *efa;
       int face_index;
       BM_ITER_MESH_INDEX (efa, &fiter, gesture_item.item.bm, BM_FACES_OF_MESH, face_index) {
         if (BM_elem_flag_test(efa, BM_ELEM_HIDDEN) || !visible.contains(ob, face_index) ||
-            !paint_image_geometry_fill_face_facing_view(efa, view_pos, view_dir, is_ortho))
+            !paint_image_geometry_fill_face_facing_view(
+                *ob, normalmatrix, efa, view_pos_world, view_dir_world, is_ortho))
         {
           continue;
         }

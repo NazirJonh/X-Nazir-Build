@@ -144,6 +144,7 @@ set(SRC
   mesh/paint_hide.cc
   mesh/paint_image.cc
   mesh/paint_image_2d.cc
+  mesh/paint_image_fill_faces.cc
   mesh/paint_image_mask_filters.cc
   mesh/paint_image_paint_mask_island.cc
   mesh/paint_image_uv_geom.cc
@@ -151,6 +152,7 @@ set(SRC
   selection/paint_image_select_mask.cc
   selection/paint_image_select_gesture.cc
   selection/paint_image_select_curve.cc
+  selection/paint_image_select_island_preview.cc
   mesh/paint_image_shape_symmetry.cc
   mesh/paint_image_shape_composite.cc
   mesh/paint_image_shape_ops.cc
@@ -406,6 +408,7 @@ if(WITH_GTESTS)
     mesh/paint_test.cc
     tests/paint_image_select_warp_tests.cc
     tests/paint_image_select_region_tests.cc
+    tests/paint_image_select_tile_bound_tests.cc
     mesh/paint_image_uv_geom_tests.cc
     mesh/paint_image_uv_symmetry_tests.cc
     mesh/sculpt_boundary_tests.cc

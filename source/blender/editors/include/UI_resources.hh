@@ -291,6 +291,8 @@ enum ThemeColorID {
 
   TH_UV_SHADOW,
 
+  TH_PAINT_FILL_WIRE,
+
   TH_MATCH,            /* highlight color for search matches */
   TH_SELECT_HIGHLIGHT, /* highlight color for selected outliner item */
   TH_SELECT_ACTIVE,    /* highlight color for active outliner item */

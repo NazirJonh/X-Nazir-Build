@@ -49,6 +49,8 @@
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 
+#include "UI_view2d.hh"
+
 #include "WM_api.hh"
 #include "WM_types.hh"
 
@@ -113,6 +115,57 @@ void image_select_gesture_properties(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Shared box-gesture UV geometry
+ * \{ */
+
+bool image_select_box_uv_bounds_calc(const ARegion &region,
+                                     wmOperator &op,
+                                     const MutableSpan<float2> r_uv_points,
+                                     rctf &r_uv_bounds)
+{
+  rctf rectf;
+  WM_operator_properties_border_to_rctf(&op, &rectf);
+  if (BLI_rctf_size_x(&rectf) == 0.0f && BLI_rctf_size_y(&rectf) == 0.0f) {
+    return false;
+  }
+
+  BLI_assert(r_uv_points.size() == 4);
+  const float2 region_points[4] = {{rectf.xmin, rectf.ymin},
+                                   {rectf.xmax, rectf.ymin},
+                                   {rectf.xmax, rectf.ymax},
+                                   {rectf.xmin, rectf.ymax}};
+  BLI_rctf_init_minmax(&r_uv_bounds);
+  for (const int i : IndexRange(4)) {
+    float uv[2];
+    ui::view2d_region_to_view(&region.v2d, region_points[i].x, region_points[i].y, &uv[0], &uv[1]);
+    r_uv_points[i] = float2(uv[0], uv[1]);
+    BLI_rctf_do_minmax_v(&r_uv_bounds, uv);
+  }
+
+  if (region.v2d.rotation == 0.0f) {
+    /* Preserve the axis-aligned UDIM-border snap where it is well-defined. Rotating a screen-space
+     * box produces a UV quadrilateral, whose edges cannot independently snap to horizontal or
+     * vertical UDIM borders without changing the gesture's shape. */
+    constexpr float snap_thresh = 0.02f;
+    const auto snap_to_udim_border = [](const float v) {
+      const float rounded = roundf(v);
+      return (fabsf(v - rounded) < snap_thresh) ? rounded : v;
+    };
+    r_uv_bounds.xmin = snap_to_udim_border(r_uv_bounds.xmin);
+    r_uv_bounds.xmax = snap_to_udim_border(r_uv_bounds.xmax);
+    r_uv_bounds.ymin = snap_to_udim_border(r_uv_bounds.ymin);
+    r_uv_bounds.ymax = snap_to_udim_border(r_uv_bounds.ymax);
+    r_uv_points[0] = float2(r_uv_bounds.xmin, r_uv_bounds.ymin);
+    r_uv_points[1] = float2(r_uv_bounds.xmax, r_uv_bounds.ymin);
+    r_uv_points[2] = float2(r_uv_bounds.xmax, r_uv_bounds.ymax);
+    r_uv_points[3] = float2(r_uv_bounds.xmin, r_uv_bounds.ymax);
+  }
+  return true;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Shared sequence steps
  * \{ */
 
@@ -144,7 +197,8 @@ static void image_select_apply_deselect(bContext *C, const Span<ImagePaintSelect
         return BKE_image_paint_selection_mask_has_any(target.image);
       }))
   {
-    image_paint_selection_undo_begin("Deselect", targets);
+    /* Same undo name as the Deselect operators, so one action writes one step name everywhere. */
+    image_paint_selection_undo_begin("Deselect All", targets);
     image_paint_selection_reset(C, targets);
     ED_image_undo_push_end();
   }

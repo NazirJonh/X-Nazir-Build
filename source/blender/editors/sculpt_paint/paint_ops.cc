@@ -3469,6 +3469,19 @@ void ED_operatormacros_paint()
   otmacro = WM_operatortype_macro_define(ot, "TRANSFORM_OT_translate");
   RNA_boolean_set(otmacro->ptr, "use_proportional_edit", false);
   RNA_boolean_set(otmacro->ptr, "mirror", false);
+
+  /* "Deselect All Masks" clears two selections whose undo lives in two stacks: the paint mask in
+   * the image undo step (#PAINT_OT_image_select_none pushes it manually and carries no
+   * #OPTYPE_UNDO), and the face selection paint mask in the global memfile stack
+   * (#PAINT_OT_paint_mask_none). The macro keeps them as two separate operator calls instead of
+   * one exec writing into both undo systems, so each stack still rolls back its own data. */
+  ot = WM_operatortype_append_macro("PAINT_OT_image_select_masks_none",
+                                    "Deselect All Masks",
+                                    "Deselect the paint mask and the face selection mask of the "
+                                    "canvas objects",
+                                    OPTYPE_UNDO | OPTYPE_REGISTER);
+  WM_operatortype_macro_define(ot, "PAINT_OT_image_select_none");
+  WM_operatortype_macro_define(ot, "PAINT_OT_paint_mask_none");
 }
 
 void ED_operatortypes_paint()
@@ -3705,6 +3718,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_symmetry_edit);
   /* Face selection paint mask from a UV island picked in the Image Editor. */
   WM_operatortype_append(PAINT_OT_paint_mask_island);
+  WM_operatortype_append(PAINT_OT_paint_mask_none);
   WM_operatortype_append(PAINT_OT_id_color_pick);
   WM_operatortype_append(PAINT_OT_uv_island_pick);
   WM_operatortype_append(PAINT_OT_mask_item_bake);

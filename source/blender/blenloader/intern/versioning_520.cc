@@ -2432,6 +2432,37 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     version_paint_layers_internal_maps(*bmain);
   }
 
+  /* The Fill brush's Show Wireframe flag is new and defaults to enabled: it lives in a byte that
+   * was padding in earlier files, so those read zero (hidden) instead of the DNA default, and the
+   * wireframe then never appears when the Fill tool becomes active.
+   *
+   * This also covers brush assets appended or linked after the file was loaded: a library subset
+   * read runs #do_versions on the newly read data-blocks (see the library handling in readfile.cc)
+   * with the library's own #filesdna, so an older asset file passes the same check and gets the
+   * default.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion so this fork-only change
+   * doesn't claim a subversion number that upstream will use for its own versioning. */
+  if (!DNA_struct_member_exists_with_alias(fd->filesdna, "Brush", "char", "fill_show_wire")) {
+    for (Brush &brush : bmain->brushes) {
+      brush.fill_show_wire = 1;
+    }
+  }
+
+  /* The paint selection's Show Wireframe flag is new and defaults to enabled, from the same
+   * formerly-padding byte as the Fill brush's flag above.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion (see above). */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "ImagePaintSettings", "char", "selection_show_wire"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings != nullptr) {
+        scene.toolsettings->imapaint.selection_show_wire = 1;
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

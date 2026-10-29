@@ -89,12 +89,26 @@ void Instance::init()
     state.sculpt_face_selection_mask_supported = BKE_paint_sculpt_face_selection_mask_supported(
         state.scene, ob_orig, state.active_tool_idname);
   }
-  state.fill_tool_wire = false;
-  if ((state.object_mode & (OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT)) && state.scene != nullptr &&
-      state.object_active != nullptr)
-  {
-    state.fill_tool_wire = BKE_paint_fill_wire_overlay_enabled(
-        state.scene, DEG_get_original(state.object_active));
+  state.paint_tool_wire = PAINT_TOOL_WIRE_NONE;
+  if (state.scene != nullptr && state.object_active != nullptr) {
+    /* The BKE helper already checks that the object is in Texture Paint or Sculpt Mode and reads
+     * the active brush there. Do not add a second gate on the draw context's `object_mode` here:
+     * it can lag behind an object mode switch, and the 2D overlay only reads the tool settings.
+     * Keeping the two paths on the same query is what makes the Fill wire appear in 3D. */
+    if (BKE_paint_fill_wire_overlay_enabled(state.scene, DEG_get_original(state.object_active))) {
+      state.paint_tool_wire |= PAINT_TOOL_WIRE_FILL;
+    }
+  }
+  if (state.scene != nullptr && state.scene->toolsettings != nullptr) {
+    const ToolSettings *tool_settings = state.scene->toolsettings;
+    /* The Image Editor request is cached separately: it reads only the brush settings, so an
+     * active object outside the paint modes must not hide the Fill wire the editor asked for. */
+    if (BKE_paint_texture_fill_wire_requested(tool_settings)) {
+      state.paint_tool_wire |= PAINT_TOOL_WIRE_FILL_IMAGE_EDITOR;
+    }
+    if (BKE_paint_selection_face_wire_requested(tool_settings)) {
+      state.paint_tool_wire |= PAINT_TOOL_WIRE_SELECTION_FACE;
+    }
   }
   state.draw_background = ctx->options.draw_background;
   state.show_text = false;

@@ -3438,6 +3438,13 @@ static void rna_def_userdef_theme_space_view3d(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Edge Width", "");
   RNA_def_property_update(prop, 0, "rna_userdef_theme_update");
 
+  prop = RNA_def_property(srna, "paint_fill_wire", PROP_FLOAT, PROP_COLOR_GAMMA);
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_ui_text(prop,
+                           "Paint Fill Wire",
+                           "Color of the Fill tool wireframe in the 3D Viewport and Image Editor");
+  RNA_def_property_update(prop, 0, "rna_userdef_theme_update");
+
   /* Grease Pencil */
 
   rna_def_userdef_theme_spaces_gpencil(srna);

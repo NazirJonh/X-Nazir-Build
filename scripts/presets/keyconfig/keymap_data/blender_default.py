@@ -2341,8 +2341,13 @@ def km_image(params):
          {"properties": [("data_path", "space_data.overlay.show_overlays")]}),
         *_template_items_context_menu("IMAGE_MT_mask_context_menu", params.context_menu_event),
         # Paint selection hotkeys (for menu hotkey display in Paint mode).
+        # A toggles the paint mask: it selects the whole canvas when nothing is selected and
+        # clears the selection on the next press, like the Object/UV Select All toggle.
         ("paint.image_select_all", {"type": 'A', "value": 'PRESS'}, None),
-        ("paint.image_select_none", {"type": 'A', "value": 'PRESS', "alt": True}, None),
+        # Alt+A deselects everything: the paint mask and the face selection mask. The image-undo
+        # and the global-undo parts live in their own stacks; the macro runs them as two
+        # operators instead of one exec writing into both.
+        ("paint.image_select_masks_none", {"type": 'A', "value": 'PRESS', "alt": True}, None),
         ("paint.image_select_invert", {"type": 'I', "value": 'PRESS', "ctrl": True}, None),
         ("paint.image_select_move", {"type": 'T', "value": 'PRESS', "ctrl": True}, None),
         ("paint.image_select_transform", {"type": 'T', "value": 'PRESS', "ctrl": True, "shift": True}, None),
@@ -5283,8 +5288,13 @@ def km_image_paint(params):
          {"properties": [("data_path", "tool_settings.image_paint.brush.use_smooth_stroke")]}),
         ("wm.context_menu_enum", {"type": 'E', "value": 'PRESS', "alt": True},
          {"properties": [("data_path", "tool_settings.image_paint.brush.stroke_method")]}),
+        # A toggles the paint mask: it selects the whole canvas when nothing is selected and
+        # clears the selection on the next press, like the Object/UV Select All toggle.
         ("paint.image_select_all", {"type": 'A', "value": 'PRESS'}, None),
-        ("paint.image_select_none", {"type": 'A', "value": 'PRESS', "alt": True}, None),
+        # Alt+A deselects everything: the paint mask and the face selection mask. The image-undo
+        # and the global-undo parts live in their own stacks; the macro runs them as two
+        # operators instead of one exec writing into both.
+        ("paint.image_select_masks_none", {"type": 'A', "value": 'PRESS', "alt": True}, None),
         ("paint.image_select_invert", {"type": 'I', "value": 'PRESS', "ctrl": True}, None),
         ("paint.image_select_move", {"type": 'T', "value": 'PRESS', "ctrl": True}, None),
         ("paint.image_select_transform", {"type": 'T', "value": 'PRESS', "ctrl": True, "shift": True}, None),

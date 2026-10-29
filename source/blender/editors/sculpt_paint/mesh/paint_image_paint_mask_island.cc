@@ -378,10 +378,8 @@ static bool paint_mask_island_clear(Mesh &mesh)
 }
 
 /**
- * Turn the face selection paint mask of \a mesh on or off.
- *
- * Enabling mirrors the mutual exclusion of #rna_Mesh_update_facemask: the face and the vertex
- * masks cannot be active at the same time.
+ * Turn the face selection paint mask of \a mesh on or off. Enabling mirrors the mutual exclusion
+ * of #rna_Mesh_update_facemask: the face and the vertex masks cannot be active at the same time.
  */
 static void paint_mask_island_mask_set(Mesh &mesh, const bool enabled)
 {
@@ -400,7 +398,8 @@ static void paint_mask_island_mask_set(Mesh &mesh, const bool enabled)
 /** \name Pick handling
  * \{ */
 
-/** Objects the tool operates on: editable canvas meshes outside of Edit Mode. */
+/** Objects the face-selection paint mask tools operate on: editable canvas meshes outside of
+ * Edit Mode. */
 static Vector<Object *> paint_mask_island_targets_get(bContext *C, const Image *image)
 {
   Vector<Object *> targets;
@@ -571,6 +570,57 @@ void PAINT_OT_paint_mask_island(wmOperatorType *ot)
                                0,
                                SHRT_MAX);
   RNA_def_property_flag(ot->prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Deselect Face Selection
+ * \{ */
+
+static wmOperatorStatus paint_mask_none_exec(bContext *C, wmOperator * /*op*/)
+{
+  SpaceImage *sima = CTX_wm_space_image(C);
+  ARegion *region = CTX_wm_region(C);
+  if (sima == nullptr || sima->image == nullptr || region == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const Vector<Object *> targets = paint_mask_island_targets_get(C, sima->image);
+  bool changed = false;
+  Vector<Object *> modified;
+  for (Object *ob : targets) {
+    Mesh &mesh = *id_cast<Mesh *>(ob->data);
+    if (!(mesh.editflag & ME_EDIT_PAINT_FACE_SEL)) {
+      continue;
+    }
+    if (paintface_deselect_all_visible(C, ob, SEL_DESELECT, true)) {
+      changed = true;
+      modified.append(ob);
+      paint_mask_island_mask_set(mesh, false);
+    }
+  }
+
+  if (!changed) {
+    return OPERATOR_CANCELLED;
+  }
+
+  for (Object *ob : modified) {
+    paintface_flush_flags(C, ob, true, false);
+  }
+
+  ED_region_tag_redraw(region);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_paint_mask_none(wmOperatorType *ot)
+{
+  ot->name = "Deselect Face Selection";
+  ot->idname = "PAINT_OT_paint_mask_none";
+  ot->description = "Deselect the face selection paint mask of the canvas objects";
+  ot->exec = paint_mask_none_exec;
+  ot->poll = image_paint_selection_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
 /** \} */

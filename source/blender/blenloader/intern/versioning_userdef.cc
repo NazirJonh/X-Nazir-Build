@@ -455,6 +455,13 @@ static void do_versions_theme(const UserDef *userdef, bTheme *btheme)
     FROM_DEFAULT_V4_UCHAR(space_view3d.sculpt_symmetry_contour);
   }
 
+  /* The Fill wire color is new. Themes saved before it existed read zeroes from the former
+   * padding byte, which would draw an invisible wire; use the default red whenever the alpha is
+   * unset. Zero alpha is never a useful value here, so this is safe to apply unconditionally. */
+  if (btheme->space_view3d.paint_fill_wire[3] == 0) {
+    FROM_DEFAULT_V4_UCHAR(space_view3d.paint_fill_wire);
+  }
+
   if (!USER_VERSION_ATLEAST(502, 77)) {
     FROM_DEFAULT_V4_UCHAR(space_view3d.viewer_text_true);
     FROM_DEFAULT_V4_UCHAR(space_view3d.viewer_text_false);

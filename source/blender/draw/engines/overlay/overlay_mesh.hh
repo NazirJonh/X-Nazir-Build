@@ -669,7 +669,13 @@ class MeshUVs : Overlay {
  public:
   void begin_sync(Resources &res, const State &state) final
   {
-    enabled_ = state.is_space_image();
+    /* "Show Overlays" off must hide every 2D overlay. Most of them add their geometry in
+     * #object_sync / #edit_object_sync, which the instance skips when overlays are hidden. The PBR
+     * passepartout is different: it is a full-screen veil created here in #begin_sync, outside any
+     * object sync. Leaving this class enabled therefore submitted that veil with an empty depth
+     * mask and covered the whole image. Disable the overlay object itself instead of relying on
+     * the per-object gates. */
+    enabled_ = state.is_space_image() && !state.hide_overlays;
 
     if (!enabled_) {
       return;
@@ -754,25 +760,34 @@ class MeshUVs : Overlay {
         mesh_analysis_type_ = eSpaceImage_UVDT_Stretch(space_image->dt_uvstretch);
       }
     }
+    /* The Fill tool can ask for the wireframe to see where the faces are, whatever the UV Guide
+     * overlay setting says (see #Brush::fill_show_wire); so can the Face selection expansion
+     * (see #ImagePaintSettings::selection_show_wire). Both requests are resolved once in
+     * #Instance::init; here they only apply to the Image Editor's own paint mode. Only the Fill
+     * wire replaces the theme color; the selection wire keeps the shadow color. */
+    const bool fill_tool_wire = space_mode_is_paint &&
+                                bool(state.paint_tool_wire & PAINT_TOOL_WIRE_FILL_IMAGE_EDITOR);
     {
       /* Wireframe UV Overlay. */
       const bool show_wireframe_uv_edit = space_image->flag & SI_DRAWSHADOW;
-      /* The Fill tool can ask for the wireframe to see where the faces are, whatever the UV Guide
-       * overlay setting says (see #Brush::fill_show_wire). */
-      const bool fill_tool_wire = space_mode_is_paint &&
-                                  BKE_paint_texture_fill_wire_requested(tool_setting);
-      const bool show_wireframe_uv_guide = (!(space_image->flag & SI_NO_DRAW_UV_GUIDE) ||
-                                            fill_tool_wire) &&
+      const bool selection_face_wire =
+          space_mode_is_paint && bool(state.paint_tool_wire & PAINT_TOOL_WIRE_SELECTION_FACE);
+      /* The user's UV Guide setting, without the per-tool wire requests. */
+      const bool show_wireframe_uv_guide = (!(space_image->flag & SI_NO_DRAW_UV_GUIDE)) &&
                                            (space_mode_is_paint || space_mode_is_uv);
+      const bool wire_tool_requested = (fill_tool_wire || selection_face_wire) &&
+                                       space_mode_is_paint;
 
       if (space_mode_is_uv && object_mode_is_edit) {
         show_wireframe_ = show_wireframe_uv_edit;
         show_face_overlay_ = !(space_image->flag & SI_NO_DRAWFACES);
       }
       else {
-        show_wireframe_ = show_wireframe_uv_guide;
-        /* The face overlay is always enabled when showing wire-frame. */
-        show_face_overlay_ = show_wireframe_;
+        /* The per-tool wire requests force the wireframe past the UV Guide overlay setting, but
+         * they must not drag the translucent face overlay along with it: only the user's UV Guide
+         * setting (and #SpaceImage::uv_face_opacity) controls the face veil. */
+        show_wireframe_ = show_wireframe_uv_guide || wire_tool_requested;
+        show_face_overlay_ = show_wireframe_uv_guide;
       }
     }
 
@@ -816,6 +831,11 @@ class MeshUVs : Overlay {
       pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
       pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
       pass.push_constant("alpha", space_image->uv_edge_opacity);
+      /* Only the Fill tool's own wire replaces the shadow color; the selection wire keeps the
+       * theme colors. The shader's `alpha` chain multiplies the override color by
+       * #uv_edge_opacity, so the editor opacity keeps working for the Fill wire too. */
+      pass.push_constant("use_wire_override", fill_tool_wire);
+      pass.push_constant("wire_override_color", paint_fill_wire_color());
       pass.push_constant("do_smooth_wire", do_smooth_wire);
     }
 

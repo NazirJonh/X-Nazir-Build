@@ -13,6 +13,7 @@
 #include "BKE_object.hh"
 
 #include "BLI_function_ref.hh"
+#include "BLI_math_color.h"
 
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
@@ -126,6 +127,38 @@ using draw::Texture;
 using draw::TextureFromPool;
 using draw::TextureRef;
 
+/**
+ * The single source of the Fill brush wire color (#Brush::fill_show_wire), shared by the 3D paint
+ * overlay and the Image Editor UV wireframe. Both spaces read the same View3D theme entry
+ * (`ThemeView3D::paint_fill_wire`), so one user preference drives both. The theme stores sRGB bytes;
+ * the returned value is linear like the other overlay colors. The alpha is the theme alpha, and the
+ * Image Editor multiplies #SpaceImage::uv_edge_opacity into it through the shader's `alpha` chain.
+ */
+inline float4 paint_fill_wire_color()
+{
+  float4 color;
+  ui::theme::get_color_type_4fv(TH_PAINT_FILL_WIRE, SPACE_VIEW3D, color);
+  srgb_to_linearrgb_v4(color, color);
+  return color;
+}
+
+/** Bit flags of the per-tool wireframe requests (#State::paint_tool_wire). */
+enum PaintToolWire {
+  /** No per-tool wireframe request. */
+  PAINT_TOOL_WIRE_NONE = 0,
+  /** The active object's Fill brush draws its wire in 3D
+   * (#BKE_paint_fill_wire_overlay_enabled): the paint overlay draws it in the alert color. */
+  PAINT_TOOL_WIRE_FILL = (1 << 0),
+  /** The Image Editor brush settings request the Fill wire
+   * (#BKE_paint_texture_fill_wire_requested): the editor's UV wireframe replaces the theme shadow
+   * color. Kept separate from #PAINT_TOOL_WIRE_FILL because the editor reads only the brush, while
+   * the 3D request also requires the active object to be in a paint mode. */
+  PAINT_TOOL_WIRE_FILL_IMAGE_EDITOR = (1 << 1),
+  /** The paint selection expands to faces and asks for the mesh wireframe
+   * (#BKE_paint_selection_face_wire_requested). */
+  PAINT_TOOL_WIRE_SELECTION_FACE = (1 << 2),
+};
+
 struct State {
   Depsgraph *depsgraph = nullptr;
   const ViewLayer *view_layer = nullptr;
@@ -174,8 +207,10 @@ struct State {
    * by the engine through #BKE_paint_sculpt_face_selection_mask_supported, so the per-pass code
    * does not need to depend on the editor-side tool policy. */
   bool sculpt_face_selection_mask_supported = false;
-  /** The active Fill brush asks for the mesh wireframe (#BKE_paint_fill_wire_overlay_enabled). */
-  bool fill_tool_wire = false;
+  /** Per-tool wireframe requests, a combination of #PaintToolWire flags, resolved once by
+   * #Instance::init so the 3D and 2D overlays read the same state instead of re-querying the
+   * brush settings per pass. */
+  uint8_t paint_tool_wire = PAINT_TOOL_WIRE_NONE;
   bool xray_enabled = false;
   bool xray_enabled_and_not_wire = false;
   /** Can be true even if X-ray Alpha is 1.0. */

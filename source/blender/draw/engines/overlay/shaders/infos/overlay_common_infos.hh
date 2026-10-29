@@ -45,3 +45,15 @@ GPU_SHADER_CREATE_INFO(overlay_select)
 DEFINE("SELECT_ENABLE")
 ADDITIONAL_INFO(select_id_patch)
 GPU_SHADER_CREATE_END()
+
+/**
+ * The per-tool wireframe color override: a tool's wire replaces the theme wire color
+ * (#TH_PAINT_FILL_WIRE, see #paint_fill_wire_color). Consumed by the paint wireframe and the
+ * Image Editor UV wireframe shaders. `WIRE_COLOR_OVERRIDE` lets the UV fragment shader, which is
+ * also built for Edit Mode without these uniforms, guard its use of them.
+ */
+GPU_SHADER_CREATE_INFO(overlay_wire_override)
+DEFINE("WIRE_COLOR_OVERRIDE")
+PUSH_CONSTANT(bool, use_wire_override)
+PUSH_CONSTANT(float4, wire_override_color)
+GPU_SHADER_CREATE_END()

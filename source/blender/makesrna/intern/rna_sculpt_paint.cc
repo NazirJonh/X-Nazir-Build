@@ -832,6 +832,15 @@ static void rna_ImagePaintSettings_warp_update(Main * /*bmain*/,
   WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
 }
 
+/** The wireframe is drawn by the viewport overlays, so both spaces need a redraw. */
+static void rna_ImagePaintSettings_show_wire_update(Main * /*bmain*/,
+                                                    Scene * /*scene*/,
+                                                    PointerRNA * /*ptr*/)
+{
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
+}
+
 static PointerRNA rna_Sculpt_gradient_color_ramp_get(PointerRNA *ptr)
 {
   Sculpt *sd = static_cast<Sculpt *>(ptr->data);
@@ -5123,6 +5132,14 @@ static void rna_def_image_paint(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Selection Expand", "How a paint selection gesture is expanded onto the UV layout");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "selection_show_wire", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "selection_show_wire", 0);
+  RNA_def_property_ui_text(prop,
+                           "Show Wireframe",
+                           "Draw the mesh wireframe while the selection expands to faces, "
+                           "regardless of the overlay setting, to show where the faces are");
+  RNA_def_property_update(prop, 0, "rna_ImagePaintSettings_show_wire_update");
 
   static const EnumPropertyItem selection_space_items[] = {
       {IMAGE_PAINT_SELECT_SPACE_VIEW,

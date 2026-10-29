@@ -2096,9 +2096,14 @@ struct ImagePaintSettings {
   char gradient_multi_udim = 0;
   /** #eImagePaint_SelectionSpace (zero = View, so old files need no versioning). */
   char selection_space = IMAGE_PAINT_SELECT_SPACE_VIEW;
-  /* Pad so the embedded #ColorBand starts on an 8-byte boundary and the struct size (which holds
-   * pointers) stays a multiple of 8. */
-  char _pad_gradient2[1] = {};
+  /** Draw the mesh wireframe while the paint selection expands to faces
+   * (#eImagePaint_SelectionExpand FACE), like #Brush::fill_show_wire does for the Fill tool.
+   * Lives in a byte that was padding in earlier files, so those need versioning to read the
+   * default. */
+  char selection_show_wire = 1;
+  /* #selection_show_wire occupies the pad byte this block needs, so the embedded #ColorBand still
+   * starts on an 8-byte boundary and the struct size (which holds pointers) stays a multiple of 8.
+   */
   /**
    * Color ramp (stops + interpolation) for the selection gradient tool. Embedded by value like
    * #ColorMapping::coba, so it needs a runtime #BKE_colorband_init: see #scene_init_data,

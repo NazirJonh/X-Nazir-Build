@@ -113,7 +113,14 @@ class Paints : Overlay {
       return;
     }
 
-    show_wires_ = (state.overlay.paint_flag & V3D_OVERLAY_PAINT_WIRE) || state.fill_tool_wire;
+    /* The Face selection wire belongs to the Texture Paint selection tools; in the other modes
+     * (Sculpt included) only the Fill wire is a per-tool request. */
+    const uint8_t tool_wire_mask = (paint_ctx_mode_ == CTX_MODE_PAINT_TEXTURE) ?
+                                       uint8_t(PAINT_TOOL_WIRE_FILL |
+                                               PAINT_TOOL_WIRE_SELECTION_FACE) :
+                                       uint8_t(PAINT_TOOL_WIRE_FILL);
+    show_wires_ = (state.overlay.paint_flag & V3D_OVERLAY_PAINT_WIRE) ||
+                  (state.paint_tool_wire & tool_wire_mask) != 0;
     show_face_selection_ = (state.overlay.paint_flag & V3D_OVERLAY_PAINT_FACE_SELECTION) &&
                            (state.overlay.paint_face_selection_opacity > 0.0f);
     show_symmetry_contour_ = !state.is_wire() && !state.is_depth_only_drawing &&
@@ -147,6 +154,12 @@ class Paints : Overlay {
                           DRW_STATE_BLEND_ALPHA,
                       state.clipping_plane_count);
         sub.shader_set(res.shaders->paint_region_edge.get());
+        /* The Fill brush draws its wire in a fixed alert color instead of the theme wire color,
+         * so the faces it is about to paint read against any paint below. The color comes from
+         * #paint_fill_wire_color, the same source the Image Editor's UV wireframe reads. */
+        sub.push_constant("use_wire_override",
+                          bool(state.paint_tool_wire & PAINT_TOOL_WIRE_FILL));
+        sub.push_constant("wire_override_color", paint_fill_wire_color());
         paint_region_edge_ps_ = &sub;
       }
       {
@@ -256,10 +269,12 @@ class Paints : Overlay {
         }
         break;
       case CTX_MODE_SCULPT:
-        /* Only the face-selection display below is relevant in Sculpt Mode; the mode specific
-         * weight/texture sub-passes do not apply. Tools that don't consume the face selection
-         * mask (mesh-deforming brushes) hide it. */
-        if (ob_ref.object->mode != OB_MODE_SCULPT || !sculpt_face_mask_tool_ok_) {
+        /* Only meshes in Sculpt Mode are painted here; the mode specific weight/texture
+         * sub-passes do not apply. This is the gate of the whole paint overlay: the
+         * face-selection display below has its own gate (#sculpt_face_mask_tool_ok_), so tools
+         * that hide the face selection (mesh-deforming brushes, multires, dyntopo) still draw
+         * the Fill wire through #show_wires_. */
+        if (ob_ref.object->mode != OB_MODE_SCULPT) {
           return;
         }
         break;
@@ -313,8 +328,13 @@ class Paints : Overlay {
        * draw on the geometry data directly. */
       const bool in_texture_paint_mode = paint_ctx_mode_ == CTX_MODE_PAINT_TEXTURE;
       /* The "Face Selection" overlay toggle hides the whole selection display: the veil and the
-       * selection edges alike. The paint mask itself stays active. */
-      const bool draw_face_selection = use_face_selection && show_face_selection_;
+       * selection edges alike. The paint mask itself stays active.
+       * In Sculpt Mode the display additionally requires the active tool to consume the face
+       * selection mask; the wire below must not depend on that, so the gate lives here and not
+       * in the sculpt case above. */
+      const bool draw_face_selection = use_face_selection && show_face_selection_ &&
+                                       (paint_ctx_mode_ != CTX_MODE_SCULPT ||
+                                        sculpt_face_mask_tool_ok_);
 
       /* Sculpt Mode skips depsgraph geometry updates while the PBVH draws directly, so the
        * evaluated mesh batches below can be stale. Draw from the live PBVH buffers instead, like
@@ -331,8 +351,12 @@ class Paints : Overlay {
       if (use_sculpt_pbvh) {
         ResourceHandleRange handle = manager.unique_handle_for_sculpt(ob_ref);
         /* The face selection attribute is requested even for the plain wireframe: the edge shader
-         * always reads `paint_overlay_flag`, `use_select` decides whether it matters. */
-        paint_region_edge_ps_->push_constant("use_select", draw_face_selection);
+         * always reads `paint_overlay_flag`, `use_select` decides whether it matters. The Fill
+         * wire is a plain wireframe of the faces it will paint, so it never takes the selection
+         * branch (#PaintToolWire), even when a face selection is also displayed. */
+        paint_region_edge_ps_->push_constant(
+            "use_select",
+            draw_face_selection && (state.paint_tool_wire & PAINT_TOOL_WIRE_FILL) == 0);
         for (SculptBatch &batch : sculpt_batches_get(
                  ob_ref.object, SCULPT_BATCH_WIREFRAME | SCULPT_BATCH_FACE_SELECTION))
         {
@@ -347,9 +371,14 @@ class Paints : Overlay {
       }
       else {
         /* Texture Paint has no paint wireframe of its own, but the Fill tool opts in to one so the
-         * faces it picks are visible. */
-        const bool fill_wire = in_texture_paint_mode && state.fill_tool_wire;
-        if ((draw_face_selection || show_wires_) && (!in_texture_paint_mode || fill_wire)) {
+         * faces it picks are visible, and so does the Face selection expansion. */
+        const bool fill_wire = in_texture_paint_mode &&
+                               (state.paint_tool_wire & PAINT_TOOL_WIRE_FILL);
+        const bool face_sel_wire = in_texture_paint_mode &&
+                                   (state.paint_tool_wire & PAINT_TOOL_WIRE_SELECTION_FACE);
+        if ((draw_face_selection || show_wires_) &&
+            (!in_texture_paint_mode || fill_wire || face_sel_wire))
+        {
           gpu::Batch *geom = DRW_cache_mesh_paint_overlay_edges_get(ob_ref.object);
           paint_region_edge_ps_->push_constant("use_select", draw_face_selection && !fill_wire);
           paint_region_edge_ps_->draw(geom, manager.unique_handle(ob_ref));
@@ -359,7 +388,12 @@ class Paints : Overlay {
           paint_region_face_ps_->draw(geom, manager.unique_handle(ob_ref));
         }
       }
-      if (use_vert_selection && !in_texture_paint_mode) {
+      /* The vertex dots belong to the face/vertex selection display, so in Sculpt Mode they
+       * stay behind the same tool gate as the face selection: a mesh-deforming brush hides
+       * them, while the wire (part of #show_wires_) keeps drawing. */
+      if (use_vert_selection && !in_texture_paint_mode &&
+          (paint_ctx_mode_ != CTX_MODE_SCULPT || sculpt_face_mask_tool_ok_))
+      {
         gpu::Batch *geom = DRW_cache_mesh_paint_overlay_verts_get(ob_ref.object);
         paint_region_vert_ps_->draw(geom, manager.unique_handle(ob_ref));
       }

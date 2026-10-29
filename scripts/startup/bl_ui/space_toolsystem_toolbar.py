@@ -2764,9 +2764,8 @@ class _defs_image_paint_select_view3d:
         row.use_property_split = False
         row.prop(props, "mode", text="", expand=True, icon_only=True)
         layout.separator()
-        row = layout.row(align=True)
-        row.use_property_split = False
-        row.prop(imapaint, "selection_expand", text="", expand=True)
+        # Same Selection Expand row (and its Face wireframe toggle) every paint select tool draws.
+        _defs_image_paint_select.draw_select_expand(context, layout)
         if show_space:
             layout.separator()
             row = layout.row(align=True)
@@ -2902,15 +2901,21 @@ class _defs_image_paint_select:
     @staticmethod
     def draw_select_expand(context, layout):
         imapaint = context.tool_settings.image_paint
-        row = layout.row(align=True)
+        row = layout.row()
         row.use_property_split = False
-        row.prop(imapaint, "selection_expand", text="", expand=True)
+        modes = row.row(align=True)
+        modes.prop(imapaint, "selection_expand", text="", expand=True)
+        if imapaint.selection_expand == 'FACE':
+            # Same toggle the Fill brush carries (#Brush.fill_show_wire): a Face selection picks
+            # whole faces, which are only visible as such with the mesh wireframe drawn.
+            row.separator()
+            row.prop(imapaint, "selection_show_wire", text="", icon='SHADING_WIRE', toggle=True)
 
     @staticmethod
     def draw_select_mode_expand(context, layout, props, *, radius=False):
-        """Draw the Select tool Mode enum and the shared Selection Expand toggle, each in its own
-        full-width row. Shared by every Image Editor paint select tool so the tool header and the
-        Active Tool panel lay out identically."""
+        """Draw the Select tool Mode enum, then the shared Selection Expand row (with the Face
+        expansion's wireframe toggle beside it). Shared by every Image Editor paint select tool so
+        the tool header and the Active Tool panel lay out identically."""
         row = layout.row(align=True)
         row.use_property_split = False
         row.prop(props, "mode", text="", expand=True, icon_only=True)

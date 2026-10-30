@@ -552,7 +552,9 @@ static void stack_column_compact_label(bContext *C,
  * The popup block: a full-size integer-percent value slider and every mode as its own row.
  *
  * Unlike a menu, the popup stays open while the pointer is over it, so the value and the mode can
- * both be changed in one visit; it closes on mouse-leave or Escape.
+ * both be changed in one visit; it closes on mouse-leave or Escape. A wheel tick over the mode
+ * rows steps the mode the way a wheel over a dropdown steps its value, with the popup staying
+ * open, so brushing the wheel never settles a mode the user did not see.
  */
 static ui::Block *stack_column_value_menu(bContext *C, ARegion *region, void *arg)
 {
@@ -622,6 +624,9 @@ static ui::Block *stack_column_value_menu(bContext *C, ARegion *region, void *ar
       }
     }
   }
+  /* A wheel tick over the rows steps the mode with the popup staying open; without this the tick
+   * would reach the row under the pointer, whose pick closes the popup right after stepping. */
+  ui::block_enum_rows_wheel_enable(block);
   block_bounds_set_popup(block, int(0.3f * UI_UNIT_Y), nullptr);
   return block;
 }

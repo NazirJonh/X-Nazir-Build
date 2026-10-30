@@ -956,7 +956,7 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         sub.prop(row,
                  "tile_scale_lock",
                  text="",
-                 icon='LOCKED' if row.tile_scale_lock else 'UNLOCKED',
+                 icon='UNLOCKED',
                  icon_only=True)
         col.prop(row, "tile_rotation", text="Rotation")
         col.prop(row, "mapping_wrap", text="UV Wrap")

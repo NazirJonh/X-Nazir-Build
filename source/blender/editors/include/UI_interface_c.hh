@@ -1017,6 +1017,19 @@ void popup_menu_close_from_but(const Button *but, bool is_cancel = false);
  * E.g. WM might need to do this for exiting files correctly.
  */
 void popup_menu_retval_set(const Block *block, int retval, bool enable);
+
+/**
+ * Let a mouse-wheel tick over \a block's enum rows step the enum to the neighboring item, the way
+ * a wheel over a dropdown steps its value, but with the popup staying open: the wheel previews the
+ * neighboring modes, a click on a row still picks one and closes.
+ *
+ * The block must be a popup whose own list is #ButtonType::Row items sharing one enum property (a
+ * radio list). Where another control is active the wheel keeps that control's own meaning (a
+ * slider's Ctrl-wheel step). This takes the block's single block event func slot, which must be
+ * free.
+ */
+void block_enum_rows_wheel_enable(Block *block);
+
 /**
  * Set a dummy panel in the popup `block` to support using layout panels.
  * \param idname: Active #PanelType::idname or #OperatorType::idname in the popup for persistent

@@ -12001,6 +12001,9 @@ static int handle_menu_event(bContext *C,
   Block *block = static_cast<Block *>(region->runtime->uiblocks.first);
 
   int retval = WM_UI_HANDLER_CONTINUE;
+  /* Set when the block's own event func took the event: the event then must not also reach the
+   * buttons of the block. */
+  bool block_handled_event = false;
 
   int mx = event->xy[0];
   int my = event->xy[1];
@@ -12114,7 +12117,7 @@ static int handle_menu_event(bContext *C,
 
     /* first block own event func */
     if (block->block_event_func && block->block_event_func(C, block, event)) {
-      /* pass */
+      block_handled_event = true;
     } /* events not for active search menu button */
     else {
       int act = 0;
@@ -12675,7 +12678,8 @@ static int handle_menu_event(bContext *C,
    * anymore why it was there? but it meant enter didn't work
    * for example when mouse was not over submenu */
   if ((event->type == TIMER) ||
-      (/* inside && */ (!menu->menuretval || (menu->menuretval & RETURN_UPDATE)) &&
+      (/* inside && */ !block_handled_event &&
+       (!menu->menuretval || (menu->menuretval & RETURN_UPDATE)) &&
        retval == WM_UI_HANDLER_CONTINUE))
   {
     retval = handle_menu_button(C, event, menu);
@@ -13242,6 +13246,135 @@ void popup_menu_retval_set(const Block *block, const int retval, const bool enab
     menu->menuretval = enable ? (menu->menuretval | retval) : (menu->menuretval & retval);
   }
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Enum-Row Popup Wheel Stepping
+ *
+ * A popup whose list is enum rows (a radio list) can let a wheel tick step the enum the way a
+ * wheel over a dropdown steps its value, but with the popup staying open: the wheel previews the
+ * neighboring items, a click on a row still picks one and closes.
+ * \{ */
+
+/**
+ * Move the rows' radio marks onto the value now stored in \a prop, without rebuilding the block.
+ *
+ * The row icon is chosen while the layout is built and no update path swaps it in place, so it is
+ * set here. #button_update refreshes #UI_SELECT from the property, so both follow the same state a
+ * rebuild would draw.
+ *
+ * A rebuild is not an option here: a refresh carries the hovered row over into the new block
+ * together with the fresh row's click callback, which captured the fresh row button that the
+ * refresh then frees (#but_update_from_old_block swaps `apply_func`); clicking that row afterwards
+ * would call into freed memory.
+ */
+static void enum_rows_mark_update(Block *block, const PointerRNA &ptr, const PropertyRNA *prop)
+{
+  if (block->handle == nullptr) {
+    return;
+  }
+  for (Button &bt : block->buttons()) {
+    if (!ELEM(bt.type, ButtonType::Row, ButtonType::ListRow) || (bt.rnaprop != prop) ||
+        (bt.rnapoin.data != ptr.data))
+    {
+      continue;
+    }
+    button_update(&bt);
+    const bool is_picked = button_is_pushed(&bt) != 0;
+    bt.icon = is_picked ? ICON_RADIOBUT_ON : ICON_RADIOBUT_OFF;
+    if (is_picked) {
+      /* Bring the row into view; a no-op while the popup is not clipped. */
+      menu_scroll_to_but(block->handle->region, block, &bt);
+    }
+  }
+  ED_region_tag_redraw(block->handle->region);
+}
+
+/** The block event func #block_enum_rows_wheel_enable installs. */
+static int block_enum_rows_wheel_event(const bContext *C, Block *block, const wmEvent *event)
+{
+  /* This implementation stays in this file rather than moving next to #popup_menu_retval_set
+   * (regions/interface_region_popup.cc), because it needs the file-local #apply_but_undo and
+   * #menu_scroll_to_but. */
+  int type = event->type;
+  int val = event->val;
+  if (type == MOUSEPAN) {
+    /* A trackpad pan steps only with Ctrl, as the sliders and the dropdowns step. */
+    if ((event->modifier & KM_CTRL) == 0) {
+      return 0;
+    }
+    pan_to_scroll(event, &type, &val);
+  }
+  if (!ELEM(type, WHEELUPMOUSE, WHEELDOWNMOUSE)) {
+    return 0;
+  }
+  /* Only the wheel over the popup itself steps the rows: a tick with the pointer elsewhere (over
+   * the area behind the popup) stays the no-op it is while a popup is open. */
+  if (block->handle == nullptr) {
+    return 0;
+  }
+  rcti winrct_no_margin;
+  region_winrct_get_no_margin(block->handle->region, &winrct_no_margin);
+  if (!BLI_rcti_isect_pt(&winrct_no_margin, event->xy[0], event->xy[1])) {
+    return 0;
+  }
+
+  /* Where another control is active the wheel keeps that control's own meaning: over the value
+   * slider, Ctrl-wheel steps the value. The rows only step while a row, or nothing, is under the
+   * pointer. */
+  if (const Button *active = block_active_but_get(block);
+      (active != nullptr) &&
+      !ELEM(active->type, ButtonType::Row, ButtonType::ListRow))
+  {
+    return 0;
+  }
+
+  /* The rows share one enum property; the first of them carries it. Refuse a block where they
+   * differ rather than step one property and leave the other rows stale. */
+  Button *row = nullptr;
+  for (Button &bt : block->buttons()) {
+    if (!ELEM(bt.type, ButtonType::Row, ButtonType::ListRow) || (bt.rnaprop == nullptr) ||
+        (RNA_property_type(bt.rnaprop) != PROP_ENUM))
+    {
+      continue;
+    }
+    if (row == nullptr) {
+      row = &bt;
+      continue;
+    }
+    if ((bt.rnaprop != row->rnaprop) || (bt.rnapoin.data != row->rnapoin.data)) {
+      return 0;
+    }
+  }
+  if (row == nullptr) {
+    return 0;
+  }
+
+  /* Swallow the tick whatever happens below, so it never reaches the row under the pointer: a
+   * row's pick applies the mode and closes the popup, and only a click should pick. */
+  if (!RNA_property_editable(&row->rnapoin, row->rnaprop)) {
+    return 1;
+  }
+
+  const int direction = (type == WHEELDOWNMOUSE) ? 1 : -1;
+  const int curval = RNA_property_enum_get(&row->rnapoin, row->rnaprop);
+  const int newval = RNA_property_enum_step(C, &row->rnapoin, row->rnaprop, curval, direction);
+  if (newval != curval) {
+    RNA_property_enum_set(&row->rnapoin, row->rnaprop, newval);
+    RNA_property_update(const_cast<bContext *>(C), &row->rnapoin, row->rnaprop);
+    apply_but_undo(row, true);
+    enum_rows_mark_update(block, row->rnapoin, row->rnaprop);
+  }
+  return 1;
+}
+
+void block_enum_rows_wheel_enable(Block *block)
+{
+  /* The slot holds a single func, already used by e.g. #colorpicker_wheel_cb. */
+  BLI_assert(block->block_event_func == nullptr);
+  block->block_event_func = block_enum_rows_wheel_event;
+}
+
+/** \} */
 
 /** \} */
 

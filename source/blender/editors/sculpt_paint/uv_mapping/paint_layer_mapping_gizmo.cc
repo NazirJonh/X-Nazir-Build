@@ -57,6 +57,10 @@ using namespace ed::sculpt_paint::uv_mapping;
 
 /** Radius of the scale-lock buttons, in UI pixels. */
 constexpr float LOCK_BUTTON_RADIUS = 14.0f;
+/** Distance from the cage's top-right corner to the scale-lock buttons' center, in UI pixels. */
+constexpr float LOCK_BUTTON_OFFSET = 22.0f;
+/** Border width of the decorative lock outline, in pixels. */
+constexpr float LOCK_OUTLINE_WIDTH = 1.5f;
 
 enum class MappingHandle {
   None,
@@ -79,6 +83,8 @@ struct LayerMappingGizmoGroup {
   /** Scale-lock toggle: the locked icon while the axes move together, else the unlocked one. */
   wmGizmo *gz_lock_locked = nullptr;
   wmGizmo *gz_lock_unlocked = nullptr;
+  /** Decorative outline drawn over whichever lock button is visible. */
+  wmGizmo *gz_lock_outline = nullptr;
   bool drag_active = false;
   MappingHandle handle = MappingHandle::None;
   float2 start_mouse_uv = float2(0.0f);
@@ -521,8 +527,7 @@ void layer_mapping_gizmo_invoke_prepare(const bContext *C,
 /** One of the two state buttons: the locked icon while the axes move together, else unlocked. */
 wmGizmo *layer_mapping_lock_button_new(const wmGizmoType *gzt,
                                        wmGizmoGroup *gzgroup,
-                                       const int icon,
-                                       const float color[4])
+                                       const int icon)
 {
   wmGizmo *gz = WM_gizmo_new_ptr(gzt, gzgroup, nullptr);
   /* The size is set every redraw in #layer_mapping_gizmo_draw_prepare: this group has no
@@ -533,12 +538,42 @@ wmGizmo *layer_mapping_lock_button_new(const wmGizmoType *gzt,
   RNA_enum_set(gz->ptr, "draw_options",
                ED_GIZMO_BUTTON_SHOW_OUTLINE | ED_GIZMO_BUTTON_SHOW_BACKDROP);
   RNA_boolean_set(gz->ptr, "show_drag", false);
-  WM_gizmo_set_color(gz, color);
   wmOperatorType *ot = WM_operatortype_find("PAINT_OT_layer_mapping_scale_lock_toggle", false);
   if (ot != nullptr) {
     WM_gizmo_operator_set(gz, 0, ot, nullptr);
   }
   return gz;
+}
+
+/**
+ * Decorative circle outline drawn over the visible lock button. `GIZMO_GT_button_2d` draws its own
+ * outline in the same color as the fill (so it is invisible); this separate, non-selectable layer
+ * adds a readable border in a contrasting theme color.
+ */
+wmGizmo *layer_mapping_lock_outline_new(const wmGizmoType *gzt, wmGizmoGroup *gzgroup)
+{
+  wmGizmo *gz = WM_gizmo_new_ptr(gzt, gzgroup, nullptr);
+  gz->flag |= WM_GIZMO_HIDDEN_SELECT;
+  gz->line_width = LOCK_OUTLINE_WIDTH;
+  RNA_enum_set(gz->ptr, "draw_options", ED_GIZMO_BUTTON_SHOW_BACKDROP);
+  RNA_float_set(gz->ptr, "backdrop_fill_alpha", 0.0f);
+  return gz;
+}
+
+/** Re-read the panel theme colors on every draw, so a theme change applies without a rebuild of
+ * the gizmo map. */
+static void layer_mapping_lock_colors_update(LayerMappingGizmoGroup *ggd)
+{
+  float color[4];
+  ui::theme::get_color_4fv(TH_PANEL_BACK, color);
+  WM_gizmo_set_color(ggd->gz_lock_locked, color);
+  WM_gizmo_set_color(ggd->gz_lock_unlocked, color);
+  ui::theme::get_color_4fv(TH_PANEL_HEADER, color);
+  WM_gizmo_set_color_highlight(ggd->gz_lock_locked, color);
+  WM_gizmo_set_color_highlight(ggd->gz_lock_unlocked, color);
+  ui::theme::get_color_4fv(TH_PANEL_OUTLINE, color);
+  WM_gizmo_set_color(ggd->gz_lock_outline, color);
+  WM_gizmo_set_color_highlight(ggd->gz_lock_outline, color);
 }
 
 bool layer_mapping_gizmo_poll(const bContext *C, wmGizmoGroupType * /*gzgt*/)
@@ -568,10 +603,11 @@ void layer_mapping_gizmo_setup(const bContext * /*C*/, wmGizmoGroup *gzgroup)
   /* The lock buttons come first: the first gizmo hit wins, and the button sits inside the cage's
    * outer rotate zone. */
   const wmGizmoType *gzt_button = WM_gizmotype_find("GIZMO_GT_button_2d", true);
-  float lock_color[4] = {0.8f, 0.8f, 0.8f, 1.0f};
-  ggd->gz_lock_locked = layer_mapping_lock_button_new(gzt_button, gzgroup, ICON_LOCKED, lock_color);
-  ggd->gz_lock_unlocked = layer_mapping_lock_button_new(
-      gzt_button, gzgroup, ICON_UNLOCKED, lock_color);
+  ggd->gz_lock_locked = layer_mapping_lock_button_new(gzt_button, gzgroup, ICON_LOCKED);
+  ggd->gz_lock_unlocked = layer_mapping_lock_button_new(gzt_button, gzgroup, ICON_UNLOCKED);
+  /* Created after the buttons: gizmos draw in creation order, so a later one lies on top. Created
+   * earlier, the button's own backdrop would hide the outline. */
+  ggd->gz_lock_outline = layer_mapping_lock_outline_new(gzt_button, gzgroup);
 
   /* Anchor before cage so the pivot ring wins the hit test over the interior move region. */
   ggd->gz_anchor = WM_gizmo_new_ptr(gzt_move3d, gzgroup, nullptr);
@@ -637,12 +673,14 @@ void layer_mapping_gizmo_refresh(const bContext *C, wmGizmoGroup *gzgroup)
       ggd->gz_lock_locked->flag |= WM_GIZMO_HIDDEN;
       ggd->gz_lock_unlocked->flag &= ~WM_GIZMO_HIDDEN;
     }
+    ggd->gz_lock_outline->flag &= ~WM_GIZMO_HIDDEN;
   }
   else {
     ggd->gz_cage->flag |= WM_GIZMO_HIDDEN;
     ggd->gz_anchor->flag |= WM_GIZMO_HIDDEN;
     ggd->gz_lock_locked->flag |= WM_GIZMO_HIDDEN;
     ggd->gz_lock_unlocked->flag |= WM_GIZMO_HIDDEN;
+    ggd->gz_lock_outline->flag |= WM_GIZMO_HIDDEN;
   }
 
   /* A native gizmo tweak ends on release before custom_modal sees the release: settle the
@@ -725,9 +763,9 @@ void layer_mapping_gizmo_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
   WM_gizmo_set_matrix_location(ggd->gz_anchor, anchor_location);
 
   /* Scale-lock toggle just outside the cage's top-right corner. */
-  const float2 lock_px = corner11 + float2(22.0f, 22.0f);
+  const float2 lock_px = corner11 + float2(LOCK_BUTTON_OFFSET, LOCK_BUTTON_OFFSET);
   const float lock_location[3] = {lock_px.x, lock_px.y, 0.0f};
-  wmGizmo *lock_gizmos[2] = {ggd->gz_lock_locked, ggd->gz_lock_unlocked};
+  wmGizmo *lock_gizmos[3] = {ggd->gz_lock_locked, ggd->gz_lock_unlocked, ggd->gz_lock_outline};
   /* `scale_final = scale_basis * UI_SCALE_FAC * U.gizmo_size` for a group without the SCALE flag
    * (see `wm_gizmo_calculate_scale`), and the button's circle is drawn with that as its radius in
    * pixels. Dividing the gizmo size out leaves a radius of #LOCK_BUTTON_RADIUS UI pixels. */
@@ -739,6 +777,7 @@ void layer_mapping_gizmo_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
     unit_m4(gz->matrix_offset);
     WM_gizmo_set_matrix_location(gz, lock_location);
   }
+  layer_mapping_lock_colors_update(ggd);
 }
 
 }  // namespace

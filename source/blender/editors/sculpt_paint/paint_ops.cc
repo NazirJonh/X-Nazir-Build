@@ -2611,6 +2611,17 @@ void PAINT_OT_material_canvas_cycle(wmOperatorType *ot)
  * keys.
  * \{ */
 
+bool paint_pbr_brush_type_active(bContext *C)
+{
+  const Brush *brush = BKE_paint_brush_for_read(BKE_paint_get_active_from_context(C));
+  return brush != nullptr && ELEM(brush->sculpt_brush_type,
+                                  SCULPT_BRUSH_TYPE_PAINT,
+                                  SCULPT_BRUSH_TYPE_ERASE,
+                                  SCULPT_BRUSH_TYPE_SMEAR,
+                                  SCULPT_BRUSH_TYPE_TEXTURE_FILL,
+                                  SCULPT_BRUSH_TYPE_CLONE);
+}
+
 static bool material_view_pass_cycle_poll(bContext *C)
 {
   const SpaceLink *space = CTX_wm_space_data(C);
@@ -2644,13 +2655,7 @@ static bool material_view_pass_cycle_poll(bContext *C)
   if ((tref->runtime->flag & TOOLREF_FLAG_USE_BRUSHES) == 0) {
     return true;
   }
-  const Brush *brush = BKE_paint_brush_for_read(BKE_paint_get_active_from_context(C));
-  return brush != nullptr && ELEM(brush->sculpt_brush_type,
-                                  SCULPT_BRUSH_TYPE_PAINT,
-                                  SCULPT_BRUSH_TYPE_ERASE,
-                                  SCULPT_BRUSH_TYPE_SMEAR,
-                                  SCULPT_BRUSH_TYPE_TEXTURE_FILL,
-                                  SCULPT_BRUSH_TYPE_CLONE);
+  return paint_pbr_brush_type_active(C);
 }
 
 /** The scene of the active window: its tool settings own the option to sync the view pass. */
@@ -3595,6 +3600,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_paint_channels_assign_images);
   WM_operatortype_append(PAINT_OT_material_canvas_cycle);
   WM_operatortype_append(PAINT_OT_material_view_pass_cycle);
+  WM_operatortype_append(PAINT_OT_scene_light_rotate);
   WM_operatortype_append(PAINT_OT_paint_layer_gradient);
   WM_operatortype_append(PAINT_OT_paint_layer_gradient_space_set);
   WM_operatortype_append(PAINT_OT_paint_layer_gradient_sync_channel);

@@ -18,6 +18,7 @@ set(SRC
   ed_draw.cc
   ed_transverts.cc
   ed_util.cc
+  ed_util_dial_drag.cc
   ed_util_imbuf.cc
   ed_util_modal_multiwin.cc
   ed_util_ops.cc
@@ -91,6 +92,7 @@ set(SRC
   ../include/ED_undo.hh
   ../include/ED_userpref.hh
   ../include/ED_util.hh
+  ../include/ED_util_dial_drag.hh
   ../include/ED_util_imbuf.hh
   ../include/ED_util_modal_multiwin.hh
   ../include/ED_uvedit.hh

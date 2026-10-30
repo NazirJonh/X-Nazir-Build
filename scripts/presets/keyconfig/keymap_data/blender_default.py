@@ -5664,6 +5664,12 @@ def km_sculpt(params):
         ("brush.scale_size", {"type": 'RIGHT_BRACKET', "value": 'PRESS', "repeat": True},
          {"properties": [("scalar", 1.0 / 0.9)]}),
         *_template_paint_radial_control("sculpt", rotation=True),
+        # Scene Light rotation (PBR Paint): the 3D Viewport counterpart of the Image Editor's
+        # light drag. Ahead of the stencil and `sculpt.cursor_set` Shift-RMB bindings on purpose: this
+        # one polls false without a viewport-enabled scene light, so Shift-RMB keeps setting the
+        # sculpt cursor / moving the stencil everywhere else, and is taken over only while a light
+        # drag is possible.
+        ("paint.scene_light_rotate", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True}, None),
         # Stencil
         ("brush.stencil_control", {"type": 'RIGHTMOUSE', "value": 'PRESS'},
          {"properties": [("mode", 'TRANSLATION')]}),

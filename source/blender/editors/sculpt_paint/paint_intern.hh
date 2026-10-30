@@ -1383,6 +1383,14 @@ void PAINT_OT_material_channel_source_image_set(wmOperatorType *ot);
 void PAINT_OT_material_paint_channels_assign_images(wmOperatorType *ot);
 void PAINT_OT_material_canvas_cycle(wmOperatorType *ot);
 void PAINT_OT_material_view_pass_cycle(wmOperatorType *ot);
+void PAINT_OT_scene_light_rotate(wmOperatorType *ot);
+
+/**
+ * Whether the active brush is one of the Paint toolbar group's (paint, erase, smear, texture fill,
+ * clone), the PBR painting that the material view-pass cycle and scene light gestures serve.
+ */
+bool paint_pbr_brush_type_active(bContext *C);
+
 void PAINT_OT_texture_paint_toggle(wmOperatorType *ot);
 void PAINT_OT_project_image(wmOperatorType *ot);
 void PAINT_OT_image_from_view(wmOperatorType *ot);

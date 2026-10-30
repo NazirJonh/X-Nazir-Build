@@ -732,6 +732,62 @@ TEST_F(PaintMaterialChannelTest, layered_material_ensure_grows_the_row_not_the_n
   EXPECT_EQ(again.created, 0);
 }
 
+TEST_F(PaintMaterialChannelTest, layered_ensure_copies_a_shared_map_before_the_stroke)
+{
+  Object *ob = add_mesh_object("SharedEnsureOb");
+  Material *ma = add_material_with_principled(*ob, "SharedEnsureMat");
+
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Row", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *row);
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  PaintModeSettings mode_settings{};
+  mode_settings.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
+  const int visible_channels = paint_material_channel_test_default_visibility();
+
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 1;
+
+  /* The first run grows the row's map. */
+  BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, visible_channels);
+  Image *shared = nullptr;
+  for (int i = 0; i < row->channels_num; i++) {
+    if (row->channels[i].channel == PAINT_MATERIAL_CHANNEL_METALLIC) {
+      shared = row->channels[i].image;
+    }
+  }
+  ASSERT_NE(shared, nullptr);
+  ASSERT_EQ(shared->id.us, 1);
+
+  /* Another row shares the map: the next stroke must copy it instead of painting into it. */
+  id_us_plus(&shared->id);
+  ASSERT_EQ(shared->id.us, 2);
+
+  const PaintMaterialImagesEnsureResult result = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, visible_channels);
+  /* A copy-on-paint is not a new map. */
+  EXPECT_EQ(result.created, 0);
+
+  Image *owned = nullptr;
+  for (int i = 0; i < row->channels_num; i++) {
+    if (row->channels[i].channel == PAINT_MATERIAL_CHANNEL_METALLIC) {
+      owned = row->channels[i].image;
+    }
+  }
+  ASSERT_NE(owned, nullptr);
+  EXPECT_NE(owned, shared);
+  EXPECT_EQ(owned->id.us, 1);
+  EXPECT_EQ(shared->id.us, 1);
+
+  /* The stroke's target list resolves to the copy, not to the shared map. */
+  const Vector<PaintMaterialImageTarget> targets = BKE_paint_material_image_targets_get(
+      *ob, mode_settings, &brush_paint, visible_channels);
+  ASSERT_EQ(targets.size(), 1);
+  EXPECT_EQ(targets[0].image, owned);
+}
+
 TEST_F(PaintMaterialChannelTest, layered_ensure_without_base_color_still_grows_the_other_channels)
 {
   Object *ob = add_mesh_object("NoBaseEnsureOb");

@@ -673,7 +673,7 @@ class SmartMaterialAssetAction final : public StackDropAction {
                ID &owner,
                const StackDropPayload &payload,
                const StackDropTarget &target,
-               const wmEvent * /*event*/,
+               const wmEvent *event,
                int *r_affected_ordinal) const override
   {
     Material *source = drop_payload_material(CTX_data_main(&C), payload);
@@ -681,11 +681,32 @@ class SmartMaterialAssetAction final : public StackDropAction {
       return false;
     }
     const PaintLayerAssetType type = BKE_paint_layers_asset_type_get(*source);
-    const char *undo_name = (type == PaintLayerAssetType::Mask) ? "Apply Smart Mask" :
-                                                                  "Insert Smart Material";
 
     Material &material = layers_owner(owner);
     MaterialPaintLayer *anchor = target_row(material, target);
+
+    if (type == PaintLayerAssetType::Mask) {
+      if (anchor == nullptr) {
+        return false;
+      }
+      /* The same mask can replace the target's or only add its corrections: the popup asks, and
+       * its own operator carries the undo step. */
+      PointerRNA props = WM_operator_properties_create(
+          "OUTLINER_OT_stack_layer_smart_mask_apply");
+      RNA_int_set(&props, "asset_uid", int(payload.id_uid));
+      RNA_int_set(&props, "owner_uid", int(owner.session_uid));
+      char marker_str[UUID_STRING_SIZE];
+      BLI_uuid_format(marker_str, anchor->marker);
+      RNA_string_set(&props, "layer", marker_str);
+      const wmOperatorStatus status = WM_operator_name_call(
+          &C,
+          "OUTLINER_OT_stack_layer_smart_mask_apply",
+          wm::OpCallContext::InvokeDefault,
+          &props,
+          event);
+      WM_operator_properties_free(&props);
+      return (status & (OPERATOR_FINISHED | OPERATOR_INTERFACE)) != 0;
+    }
 
     PaintLayerImportResult result;
     if (!BKE_paint_layers_asset_insert(*CTX_data_main(&C),
@@ -716,7 +737,7 @@ class SmartMaterialAssetAction final : public StackDropAction {
       stack_row_edit_finished(C, *space_outliner, material.id, ordinal, true);
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
-    ED_undo_push(&C, undo_name);
+    ED_undo_push(&C, "Insert Smart Material");
     return true;
   }
 

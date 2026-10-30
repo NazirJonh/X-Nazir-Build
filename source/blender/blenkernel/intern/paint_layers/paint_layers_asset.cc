@@ -6,6 +6,8 @@
  * \ingroup bke
  */
 
+#include <string>
+
 #include "BKE_paint_layers_asset.hh"
 
 #include "BKE_asset.hh"
@@ -15,6 +17,8 @@
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_import.hh"
+
+#include "MEM_guardedalloc.h"
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
@@ -254,6 +258,20 @@ PaintLayerAssetType BKE_paint_layers_asset_type_get(const Material &ma)
   return PaintLayerAssetType(value);
 }
 
+const char *BKE_paint_layers_asset_default_catalog(const PaintLayerAssetType type)
+{
+  switch (type) {
+    case PaintLayerAssetType::Mask:
+      return "Paint/Smart Masks";
+    case PaintLayerAssetType::Layer:
+      return "Paint/Smart Layers";
+    case PaintLayerAssetType::Material:
+      return "Paint/Smart Materials";
+    default:
+      return "";
+  }
+}
+
 void BKE_paint_layers_asset_type_set(Material &ma, const PaintLayerAssetType type)
 {
   id_properties_ensure(ma);
@@ -262,6 +280,32 @@ void BKE_paint_layers_asset_type_set(Material &ma, const PaintLayerAssetType typ
 
   asset_property_set(ma.id.asset_data, ASSET_TYPE_PROP, int(type));
   asset_property_set(ma.id.asset_data, ASSET_VERSION_PROP, ASSET_VERSION);
+}
+
+void BKE_paint_layers_asset_metadata_apply(Material &asset,
+                                           const PaintLayerAssetType type,
+                                           const StringRef description,
+                                           const bUUID &catalog_id,
+                                           const StringRef catalog_simple_name)
+{
+  /* Mirror the tag into the asset metadata now that it exists, so the Asset Browser sees it too. */
+  BKE_paint_layers_asset_type_set(asset, type);
+  AssetMetaData *meta = asset.id.asset_data;
+  if (meta == nullptr) {
+    return;
+  }
+  if (meta->description != nullptr) {
+    MEM_delete_void(static_cast<void *>(meta->description));
+    meta->description = nullptr;
+  }
+  const std::string description_text =
+      description.is_empty() ? "Smart paint asset saved from a layered material's stack" :
+                               std::string(description);
+  meta->description = BLI_strdup(description_text.c_str());
+  BKE_asset_metadata_tag_ensure(meta, "Paint");
+  BKE_asset_metadata_tag_ensure(meta, BKE_paint_layers_asset_type_label(type));
+  BKE_asset_metadata_catalog_id_set(
+      meta, catalog_id, std::string(catalog_simple_name).c_str());
 }
 
 void BKE_paint_layers_asset_type_clear(Material &ma)
@@ -307,7 +351,9 @@ Material *BKE_paint_layers_asset_create(Main &bmain,
                                         Material &source,
                                         const Span<const MaterialPaintLayer *> rows,
                                         const PaintLayerAssetType type,
-                                        const char *name)
+                                        const char *name,
+                                        const PaintLayerImageImportPolicy image_policy,
+                                        PaintLayerImportResult *r_result)
 {
   if (rows.is_empty() || !asset_type_is_valid(type)) {
     return nullptr;
@@ -325,6 +371,9 @@ Material *BKE_paint_layers_asset_create(Main &bmain,
   /* Curve Patch payload is private tool state and its curves live in the source geometry; the
    * core refuses before any ID is created, so a caller cannot leak an asset material. */
   if (BKE_paint_layers_asset_portability_check(source, rows, type).blocking()) {
+    return nullptr;
+  }
+  if (type == PaintLayerAssetType::Mask && BKE_paint_layers_mask_branch_has_anchor(*rows[0])) {
     return nullptr;
   }
 
@@ -364,15 +413,17 @@ Material *BKE_paint_layers_asset_create(Main &bmain,
     /* Mask mode copies the mask stack only. The skip flag still applies to a Curve Patch correction
      * in that stack; the source-channel flag has no meaning here. */
     params.flags = SMART_ASSET_IMPORT_FLAGS;
+    params.image_policy = image_policy;
     ok = holder != nullptr &&
-         BKE_paint_layers_import_rows(bmain, *asset, source, rows, params, nullptr);
+         BKE_paint_layers_import_rows(bmain, *asset, source, rows, params, r_result);
   }
   else {
     PaintLayerImportParams params;
     params.mode = PaintLayerImportMode::Rows;
     params.place = PaintLayerPlace::Above;
     params.flags = SMART_ASSET_IMPORT_FLAGS;
-    ok = BKE_paint_layers_import_rows(bmain, *asset, source, rows, params, nullptr);
+    params.image_policy = image_policy;
+    ok = BKE_paint_layers_import_rows(bmain, *asset, source, rows, params, r_result);
   }
 
   if (!ok) {
@@ -383,6 +434,35 @@ Material *BKE_paint_layers_asset_create(Main &bmain,
   /* Tag the asset now, so a material that is never marked still reads as a Smart asset. */
   BKE_paint_layers_asset_type_set(*asset, type);
   return asset;
+}
+
+/** Whether \a item or anything attached to it is an Anchor Point or a reader. */
+static bool paint_layer_has_anchor_point(const MaterialPaintLayer &item)
+{
+  if (BKE_paint_layers_is_anchor_point(item) || BKE_paint_layers_reads_anchor_point(item)) {
+    return true;
+  }
+  for (const MaterialPaintLayer &effect : item.effects) {
+    if (paint_layer_has_anchor_point(effect)) {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &nested : item.mask_stack) {
+    if (paint_layer_has_anchor_point(nested)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool BKE_paint_layers_mask_branch_has_anchor(const MaterialPaintLayer &row)
+{
+  for (const MaterialPaintLayer &item : row.mask_stack) {
+    if (paint_layer_has_anchor_point(item)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const MaterialPaintLayer *BKE_paint_layers_asset_mask_holder_find(const Material &asset)
@@ -429,8 +509,12 @@ bool BKE_paint_layers_asset_can_insert(const Material &dst,
     if (anchor == nullptr) {
       return fail(TIP_("A Smart Mask needs a layer to land on"));
     }
-    if (BKE_paint_layers_asset_mask_holder_find(asset) == nullptr) {
+    const MaterialPaintLayer *holder = BKE_paint_layers_asset_mask_holder_find(asset);
+    if (holder == nullptr) {
       return fail(TIP_("That Smart Mask has no mask to apply"));
+    }
+    if (BKE_paint_layers_mask_branch_has_anchor(*holder)) {
+      return fail(TIP_("That Smart Mask contains Anchor Point rows and cannot be applied"));
     }
     return true;
   }
@@ -446,7 +530,8 @@ bool BKE_paint_layers_asset_insert(Main &bmain,
                                    Material &asset,
                                    MaterialPaintLayer *anchor,
                                    const PaintLayerPlace place,
-                                   PaintLayerImportResult *r_result)
+                                   PaintLayerImportResult *r_result,
+                                   const bool append_mask)
 {
   if (!BKE_paint_layers_asset_can_insert(dst, asset, anchor, place)) {
     return false;
@@ -469,6 +554,10 @@ bool BKE_paint_layers_asset_insert(Main &bmain,
   params.anchor = anchor;
   params.place = place;
   params.flags = SMART_ASSET_IMPORT_FLAGS;
+  if (type == PaintLayerAssetType::Mask && append_mask) {
+    params.flags |= PAINT_LAYER_IMPORT_APPEND_MASK;
+  }
+  params.image_policy = PaintLayerImageImportPolicy::Share;
 
   PaintLayerImportResult result;
   if (!BKE_paint_layers_import_rows(bmain, dst, asset, rows.as_span(), params, &result)) {

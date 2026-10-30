@@ -274,6 +274,10 @@ Image *BKE_paint_layers_target_image(const PaintLayersTarget &target);
  * step. The created map is a persistent side effect and is not part of that step, so cancelling or
  * undoing the stroke keeps it. It never opens undo itself.
  *
+ * A map the record already has but does not own -- shared with another row, or linked from a
+ * library -- is copied first (copy-on-paint), so the first stroke never paints into the source's
+ * pixels. A map the record owns alone is returned as it is.
+ *
  * \param image_size: the fallback width and height, used only when the material has no size of
  * its own (#Material::paint_layers_image_size is zero).
  * \param new_channel_fill_linear: scene-linear RGBA a record created here starts from, instead of

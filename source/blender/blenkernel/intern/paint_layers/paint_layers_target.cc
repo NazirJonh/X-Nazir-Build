@@ -414,6 +414,39 @@ Image *BKE_paint_layers_target_image(const PaintLayersTarget &target)
 }
 
 /**
+ * The map of \a record, made local first when it is not the row's to paint on: a map another row
+ * shares, or one from a linked library, would otherwise take the stroke into the source's pixels.
+ * The copy replaces the map in the description and is the only user the record holds, as in
+ * #paint_layers_mask_ensure_writable.
+ */
+static Image *paint_layers_record_image_ensure_owned(Main &bmain,
+                                                     Material &ma,
+                                                     MaterialPaintLayer &layer,
+                                                     MaterialPaintLayerChannel &record)
+{
+  if (record.image == nullptr) {
+    return nullptr;
+  }
+  if (record.image->id.us <= 1 && !ID_IS_LINKED(&record.image->id)) {
+    return record.image;
+  }
+  Image *original = record.image;
+  Image *copy = paint_layer_image_duplicate(bmain, *original);
+  if (copy == nullptr) {
+    return original;
+  }
+  if (!BKE_paint_layers_channel_set_image(
+          ma, &layer, eMaterialPaintChannel(record.channel), copy))
+  {
+    BKE_id_free(&bmain, copy);
+    return original;
+  }
+  /* The record took its own user; the one the copy was born with goes, as in the mask helper. */
+  id_us_min(&copy->id);
+  return record.image;
+}
+
+/**
  * The mask counterpart of #BKE_paint_layers_target_ensure_writable: the base mask item gets a map
  * the first time a stroke lands on it. The map is filled with the constant it replaces, so the row
  * looks the same before and after the first stroke; its colorspace is Non-Color, as a mask is a
@@ -435,7 +468,7 @@ static Image *paint_layers_mask_ensure_writable(Main &bmain,
   }
   target.channel_record = record;
   if (record->image != nullptr) {
-    return record->image;
+    return paint_layers_record_image_ensure_owned(bmain, *target.material, *item, *record);
   }
 
   char name[192];
@@ -601,7 +634,8 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
   }
   target.channel_record = record;
   if (record->image != nullptr) {
-    return record->image;
+    return paint_layers_record_image_ensure_owned(
+        bmain, *target.material, *target.layer, *record);
   }
 
   /* A record the row already had carries a flat value, and the first map keeps that look; one this

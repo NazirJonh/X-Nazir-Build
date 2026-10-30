@@ -5258,7 +5258,8 @@ static bool paint_layers_active_row_blocks_strokes(Object &ob,
 /**
  * The layered material's counterpart of the graph path of
  * #paint_material_images_ensure_writable_for_mask: the active row grows a map for every channel in
- * \a channel_mask it takes and has none for.
+ * \a channel_mask it takes and has none for, and copies a map it shares with another row or reads
+ * from a linked library before the stroke can write into it (copy-on-paint).
  *
  * A layered material grows its description on the first stroke: the active row's record gets a
  * map, with no node touched. The stroke's invoke owns the undo group around this.
@@ -5298,9 +5299,13 @@ static PaintMaterialImagesEnsureResult paint_layers_images_ensure_writable_for_m
     }
     /* Only a record the row already has takes the stroke. A row that lacks the channel, or has
      * switched it off, is the user's choice and is left as it is. */
-    if (BKE_paint_layers_target_is_live(target) &&
-        BKE_paint_layers_target_image(target) == nullptr)
-    {
+    if (!BKE_paint_layers_target_is_live(target)) {
+      continue;
+    }
+    const Image *image = BKE_paint_layers_target_image(target);
+    /* A map another row shares, or one from a linked library, is copied by
+     * #BKE_paint_layers_target_ensure_writable before the stroke writes into it. */
+    if (image == nullptr || image->id.us > 1 || ID_IS_LINKED(&image->id)) {
       channels.append(info.channel);
     }
   }
@@ -5310,9 +5315,11 @@ static PaintMaterialImagesEnsureResult paint_layers_images_ensure_writable_for_m
     if (!BKE_paint_layers_target_get(ob, -1, channel, mode, target)) {
       continue;
     }
+    /* A copy-on-paint is not a new map: only count the channels that had none. */
+    const bool had_map = BKE_paint_layers_target_image(target) != nullptr;
     const Image *image = BKE_paint_layers_target_ensure_writable(
         bmain, target, mode_settings.new_channel_image_size);
-    if (image != nullptr) {
+    if (image != nullptr && !had_map) {
       result.created++;
     }
   }

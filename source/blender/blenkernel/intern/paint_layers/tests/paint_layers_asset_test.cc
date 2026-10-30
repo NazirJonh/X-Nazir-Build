@@ -5,6 +5,7 @@
 #include "testing/testing.h"
 
 #include <initializer_list>
+#include <string>
 
 #include "BKE_asset.hh"
 #include "BKE_global.hh"
@@ -18,16 +19,33 @@
 #include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_import.hh"
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_span.hh"
+#include "BLI_string.h"
 #include "BLI_uuid.h"
 
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 
+#include "IMB_imbuf.hh"
+#include "IMB_imbuf_types.hh"
+
 namespace blender::bke::tests {
+
+/** How many tags named \a name the metadata carries; more than one means a duplicate. */
+static int asset_tag_count(const AssetMetaData &meta, const char *name)
+{
+  int count = 0;
+  for (const AssetTag &tag : meta.tags) {
+    if (std::string(tag.name) == name) {
+      count++;
+    }
+  }
+  return count;
+}
 
 class PaintLayersAssetTest : public bke::BlenderGTestBase {
  public:
@@ -684,5 +702,424 @@ TEST_F(PaintLayersAssetTest, ordinary_duplicate_still_copies_the_curve_patch_pay
   EXPECT_NE(effect_copy->curve_patch->vectors, effect->curve_patch->vectors);
   EXPECT_NE(effect_copy->curve_patch->brush, effect->curve_patch->brush);
 }
+
+TEST_F(PaintLayersAssetTest, smart_asset_default_catalog_follows_the_asset_type)
+{
+  EXPECT_STREQ(BKE_paint_layers_asset_default_catalog(PaintLayerAssetType::Material),
+               "Paint/Smart Materials");
+  EXPECT_STREQ(BKE_paint_layers_asset_default_catalog(PaintLayerAssetType::Layer),
+               "Paint/Smart Layers");
+  EXPECT_STREQ(BKE_paint_layers_asset_default_catalog(PaintLayerAssetType::Mask),
+               "Paint/Smart Masks");
+  EXPECT_STREQ(BKE_paint_layers_asset_default_catalog(PaintLayerAssetType::None), "");
+}
+
+TEST_F(PaintLayersAssetTest, saving_the_same_name_again_keeps_both_assets)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Source", add_image("SourceMap"));
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *first = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                                  PaintLayerAssetType::Material,
+                                                  "SmartSameName");
+  ASSERT_NE(first, nullptr);
+  Material *second = BKE_paint_layers_asset_create(*bmain,
+                                                   *src,
+                                                   Span<const MaterialPaintLayer *>(source_rows, 1),
+                                                   PaintLayerAssetType::Material,
+                                                   "SmartSameName");
+  ASSERT_NE(second, nullptr);
+
+  EXPECT_NE(second, first);
+  EXPECT_STRNE(second->id.name, first->id.name);
+  EXPECT_EQ(BLI_listbase_count(&first->paint_layers), 1);
+  EXPECT_EQ(BLI_listbase_count(&second->paint_layers), 1);
+  EXPECT_NE(first->paint_layers.first, second->paint_layers.first);
+
+  /* Both assets land in the same catalog and keep it: a repeated name uniquifies the ID, not the
+   * catalog. */
+  first->id.asset_data = BKE_asset_metadata_create();
+  second->id.asset_data = BKE_asset_metadata_create();
+  const bUUID catalog_id = BLI_uuid_generate_random();
+  BKE_paint_layers_asset_metadata_apply(
+      *first, PaintLayerAssetType::Material, "First", catalog_id, "Smart Materials");
+  BKE_paint_layers_asset_metadata_apply(
+      *second, PaintLayerAssetType::Material, "Second", catalog_id, "Smart Materials");
+  EXPECT_TRUE(BLI_uuid_equal(first->id.asset_data->catalog_id, catalog_id));
+  EXPECT_TRUE(BLI_uuid_equal(second->id.asset_data->catalog_id, catalog_id));
+  EXPECT_STREQ(first->id.asset_data->catalog_simple_name, "Smart Materials");
+  EXPECT_STREQ(second->id.asset_data->catalog_simple_name, "Smart Materials");
+
+  BKE_asset_metadata_free(&first->id.asset_data);
+  BKE_asset_metadata_free(&second->id.asset_data);
+}
+
+TEST_F(PaintLayersAssetTest, smart_asset_metadata_sets_catalog_type_and_tags)
+{
+  Material *asset = BKE_material_add(bmain, "Asset");
+  asset->id.asset_data = BKE_asset_metadata_create();
+  const bUUID catalog_id = BLI_uuid_generate_random();
+
+  BKE_paint_layers_asset_metadata_apply(*asset,
+                                        PaintLayerAssetType::Layer,
+                                        "A layer over a neutral fill",
+                                        catalog_id,
+                                        "Smart Layers");
+
+  AssetMetaData *meta = asset->id.asset_data;
+  ASSERT_NE(meta, nullptr);
+  EXPECT_TRUE(BLI_uuid_equal(meta->catalog_id, catalog_id));
+  EXPECT_STREQ(meta->catalog_simple_name, "Smart Layers");
+  EXPECT_STREQ(meta->description, "A layer over a neutral fill");
+  EXPECT_EQ(BKE_paint_layers_asset_type_get(*asset), PaintLayerAssetType::Layer);
+  EXPECT_NE(BKE_asset_metadata_idprop_find(meta, "paint_asset_type"), nullptr);
+  EXPECT_EQ(asset_tag_count(*meta, "Paint"), 1);
+  EXPECT_EQ(asset_tag_count(*meta, "Smart Layer"), 1);
+
+  BKE_asset_metadata_free(&asset->id.asset_data);
+}
+
+TEST_F(PaintLayersAssetTest, smart_asset_metadata_defaults_description_and_keeps_tags_unique)
+{
+  Material *asset = BKE_material_add(bmain, "Asset");
+  asset->id.asset_data = BKE_asset_metadata_create();
+  const bUUID catalog_id = BLI_uuid_generate_random();
+
+  BKE_paint_layers_asset_metadata_apply(
+      *asset, PaintLayerAssetType::Material, "", catalog_id, "Smart Materials");
+  AssetMetaData *meta = asset->id.asset_data;
+  ASSERT_NE(meta, nullptr);
+  EXPECT_STREQ(meta->description,
+               "Smart paint asset saved from a layered material's stack");
+  const int tags_before = meta->tot_tags;
+
+  BKE_paint_layers_asset_metadata_apply(
+      *asset, PaintLayerAssetType::Material, "", catalog_id, "Smart Materials");
+  EXPECT_EQ(meta->tot_tags, tags_before);
+  EXPECT_EQ(asset_tag_count(*meta, "Paint"), 1);
+  EXPECT_EQ(asset_tag_count(*meta, "Smart Material"), 1);
+  EXPECT_TRUE(BLI_uuid_equal(meta->catalog_id, catalog_id));
+
+  BKE_asset_metadata_free(&asset->id.asset_data);
+}
+
+TEST_F(PaintLayersAssetTest, import_strip_leaves_painted_maps_as_flat_values)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  Material *dst = BKE_material_add(bmain, "Dst");
+  Image *image = add_image("PaintedMap");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", image);
+  const float flat[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_value(
+      *src, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, flat));
+
+  const int images_before = BLI_listbase_count(&bmain->images);
+  const int source_users_before = image->id.us;
+
+  const MaterialPaintLayer *source_rows[1] = {row};
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  params.image_policy = PaintLayerImageImportPolicy::Strip;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(
+      BKE_paint_layers_import_rows(
+          *bmain, *dst, *src, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+
+  /* A stripped map creates no image and takes no user: the record keeps its flat value alone. */
+  EXPECT_EQ(BLI_listbase_count(&bmain->images), images_before);
+  EXPECT_EQ(image->id.us, source_users_before);
+  MaterialPaintLayer *copy = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
+  ASSERT_EQ(copy->channels_num, 1);
+  EXPECT_EQ(copy->channels[0].image, nullptr);
+  for (const int i : IndexRange(4)) {
+    EXPECT_FLOAT_EQ(copy->channels[0].value[i], flat[i]);
+  }
+  EXPECT_EQ(result.stripped_maps, 1);
+}
+
+TEST_F(PaintLayersAssetTest, import_share_reads_an_external_map_by_reference)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  Material *dst = BKE_material_add(bmain, "Dst");
+  Image *image = add_image("FileMap");
+  /* A file-source image that was not painted on reads pixels the file keeps: external. */
+  image->source = IMA_SRC_FILE;
+  MaterialPaintLayer *row = add_layer(*src, "Layer", image);
+
+  const int images_before = BLI_listbase_count(&bmain->images);
+  const int source_users_before = image->id.us;
+
+  const MaterialPaintLayer *source_rows[1] = {row};
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  params.image_policy = PaintLayerImageImportPolicy::Share;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(
+      BKE_paint_layers_import_rows(
+          *bmain, *dst, *src, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+
+  MaterialPaintLayer *copy = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
+  ASSERT_EQ(copy->channels_num, 1);
+  EXPECT_EQ(copy->channels[0].image, image);
+  EXPECT_EQ(image->id.us, source_users_before + 1);
+  EXPECT_EQ(BLI_listbase_count(&bmain->images), images_before);
+  EXPECT_EQ(result.stripped_maps, 0);
+}
+
+TEST_F(PaintLayersAssetTest, import_share_copies_a_map_that_is_an_asset_itself)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  Material *dst = BKE_material_add(bmain, "Dst");
+  Image *image = add_image("ImageAsset");
+  image->source = IMA_SRC_FILE;
+  image->id.asset_data = BKE_asset_metadata_create();
+  MaterialPaintLayer *row = add_layer(*src, "Layer", image);
+  const int source_users_before = image->id.us;
+
+  const MaterialPaintLayer *source_rows[1] = {row};
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  params.image_policy = PaintLayerImageImportPolicy::Share;
+  ASSERT_TRUE(BKE_paint_layers_import_rows(
+      *bmain, *dst, *src, Span<const MaterialPaintLayer *>(source_rows, 1), params, nullptr));
+
+  /* An image asset is never shared with the importing material: the copy is a plain image, so a
+   * Smart asset written to a library holds its data and brings no second asset along. */
+  MaterialPaintLayer *copy = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
+  ASSERT_EQ(copy->channels_num, 1);
+  Image *copied_image = copy->channels[0].image;
+  ASSERT_NE(copied_image, nullptr);
+  EXPECT_NE(copied_image, image);
+  EXPECT_EQ(copied_image->id.asset_data, nullptr);
+  EXPECT_EQ(image->id.us, source_users_before);
+}
+
+TEST_F(PaintLayersAssetTest, import_copy_keeps_copies_painted_maps_with_their_pixels)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  Material *dst = BKE_material_add(bmain, "Dst");
+  Image *image = add_image("PaintedMap");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", image);
+  /* A texel the copy has to carry: the bare image settings would reproduce the generated blank. */
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    ASSERT_NE(ibuf->byte_data_for_write(), nullptr);
+    ibuf->byte_data_for_write()[0] = 200;
+    ibuf->byte_data_for_write()[1] = 100;
+    ibuf->byte_data_for_write()[2] = 50;
+    ibuf->byte_data_for_write()[3] = 255;
+    BKE_image_release_ibuf(image, ibuf, lock);
+  }
+
+  const int images_before = BLI_listbase_count(&bmain->images);
+  const int source_users_before = image->id.us;
+
+  const MaterialPaintLayer *source_rows[1] = {row};
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  params.image_policy = PaintLayerImageImportPolicy::Copy;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(
+      BKE_paint_layers_import_rows(
+          *bmain, *dst, *src, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+
+  MaterialPaintLayer *copy = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
+  ASSERT_EQ(copy->channels_num, 1);
+  Image *copied_image = copy->channels[0].image;
+  ASSERT_NE(copied_image, nullptr);
+  EXPECT_NE(copied_image, image);
+  EXPECT_EQ(BLI_listbase_count(&bmain->images), images_before + 1);
+  EXPECT_EQ(copied_image->id.us, 1);
+  EXPECT_EQ(image->id.us, source_users_before);
+  EXPECT_EQ(result.stripped_maps, 0);
+
+  void *copy_lock = nullptr;
+  ImBuf *copy_ibuf = BKE_image_acquire_ibuf(copied_image, nullptr, &copy_lock);
+  ASSERT_NE(copy_ibuf, nullptr);
+  const uchar *copied_px = copy_ibuf->byte_data();
+  ASSERT_NE(copied_px, nullptr);
+  EXPECT_EQ(copied_px[0], 200);
+  EXPECT_EQ(copied_px[1], 100);
+  EXPECT_EQ(copied_px[2], 50);
+  EXPECT_EQ(copied_px[3], 255);
+  BKE_image_release_ibuf(copied_image, copy_ibuf, copy_lock);
+}
+
+TEST_F(PaintLayersAssetTest, import_mask_strip_reports_the_stripped_items)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  Material *dst = BKE_material_add(bmain, "Dst");
+  MaterialPaintLayer *source_row = add_layer(*src, "Source", add_image("SourceMap"));
+  MaterialPaintLayer *source_mask = BKE_paint_layers_mask_add(*src, source_row, 0.25f);
+  ASSERT_NE(source_mask, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *src, source_mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("MaskMap")));
+  MaterialPaintLayer *target = add_layer(*dst, "Target", add_image("TargetMap"));
+
+  const MaterialPaintLayer *source_rows[1] = {source_row};
+  PaintLayerImportParams params;
+  params.mode = PaintLayerImportMode::Mask;
+  params.anchor = target;
+  params.image_policy = PaintLayerImageImportPolicy::Strip;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(
+      BKE_paint_layers_import_rows(
+          *bmain, *dst, *src, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+
+  EXPECT_EQ(result.stripped_maps, 1);
+  ASSERT_NE(target->mask_stack.first, nullptr);
+  MaterialPaintLayer *item = static_cast<MaterialPaintLayer *>(target->mask_stack.first);
+  ASSERT_GE(item->channels_num, 1);
+  EXPECT_EQ(item->channels[0].image, nullptr);
+}
+
+TEST_F(PaintLayersAssetTest, import_mask_append_keeps_the_target_base)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  Material *dst = BKE_material_add(bmain, "Dst");
+  MaterialPaintLayer *source_row = add_layer(*src, "Source", add_image("SourceMap"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*src, source_row, 0.25f), nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_item_add(
+                *src, source_row, MA_PAINT_LAYER_SOURCE_CONSTANT, "Source Correction"),
+            nullptr);
+  MaterialPaintLayer *target = add_layer(*dst, "Target", add_image("TargetMap"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*dst, target, 0.75f), nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_item_add(
+                *dst, target, MA_PAINT_LAYER_SOURCE_CONSTANT, "Target Correction"),
+            nullptr);
+
+  const int target_count = BLI_listbase_count(&target->mask_stack);
+  const int source_count = BLI_listbase_count(&source_row->mask_stack);
+  MaterialPaintLayer *target_base = BKE_paint_layers_mask_base(*target);
+  ASSERT_NE(target_base, nullptr);
+  const bUUID target_base_marker = target_base->marker;
+
+  const MaterialPaintLayer *source_rows[1] = {source_row};
+  PaintLayerImportParams params;
+  params.mode = PaintLayerImportMode::Mask;
+  params.anchor = target;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS | PAINT_LAYER_IMPORT_APPEND_MASK;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(
+      BKE_paint_layers_import_rows(
+          *bmain, *dst, *src, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+
+  EXPECT_EQ(result.rows, source_count);
+  ASSERT_EQ(BLI_listbase_count(&target->mask_stack), target_count + source_count);
+  MaterialPaintLayer *base_after = BKE_paint_layers_mask_base(*target);
+  ASSERT_NE(base_after, nullptr);
+  EXPECT_TRUE(BLI_uuid_equal(base_after->marker, target_base_marker));
+
+  int index = 0;
+  for (MaterialPaintLayer &item : target->mask_stack) {
+    if (index >= target_count) {
+      EXPECT_TRUE((item.flag & MA_PAINT_LAYER_MASK_BASE) == 0);
+    }
+    index++;
+  }
+}
+
+TEST_F(PaintLayersAssetTest, smart_material_folder_keeps_anchor_points)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row_a = add_layer(*src, "RowA", add_image("MapA"));
+  MaterialPaintLayer *row_b = add_layer(*src, "RowB", add_image("MapB"));
+
+  MaterialPaintLayer *group[2] = {row_a, row_b};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(*src, Span<MaterialPaintLayer *>(group, 2));
+  ASSERT_NE(folder, nullptr);
+
+  MaterialPaintLayer *marker = BKE_paint_layers_anchor_point_add(
+      *src, row_a, PaintLayerAnchorPointList::Effects, nullptr, false, "Point", {});
+  ASSERT_NE(marker, nullptr);
+  MaterialPaintLayer *reader = BKE_paint_layers_anchor_point_add(*src,
+                                                                folder,
+                                                                PaintLayerAnchorPointList::Row,
+                                                                row_a,
+                                                                true,
+                                                                "Reader",
+                                                                marker->marker);
+  ASSERT_NE(reader, nullptr);
+
+  const MaterialPaintLayer *source_rows[1] = {folder};
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                                  PaintLayerAssetType::Material,
+                                                  "SmartFolderTest");
+  ASSERT_NE(asset, nullptr);
+
+  MaterialPaintLayer *copied_reader = nullptr;
+  MaterialPaintLayer *copied_marker = nullptr;
+  BKE_paint_layers_foreach(
+      *asset, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) -> bool {
+        if (STREQ(row.name, "Reader")) {
+          copied_reader = &row;
+        }
+        if (STREQ(row.name, "RowA")) {
+          for (MaterialPaintLayer &effect : row.effects) {
+            if (STREQ(effect.name, "Point")) {
+              copied_marker = &effect;
+            }
+          }
+        }
+        return true;
+      });
+  ASSERT_NE(copied_reader, nullptr);
+  ASSERT_NE(copied_marker, nullptr);
+  EXPECT_FALSE(BLI_uuid_equal(copied_marker->marker, marker->marker));
+  EXPECT_TRUE(
+      BLI_uuid_equal(BKE_paint_layers_anchor_point_source_get(*copied_reader),
+                     copied_marker->marker));
+}
+
+TEST_F(PaintLayersAssetTest, smart_mask_refuses_an_anchor_point_in_the_mask)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Source", add_image("SourceMap"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*src, row, 0.25f), nullptr);
+  const PaintLayerAnchorPointList mask_stack = PaintLayerAnchorPointList::MaskStack;
+  ASSERT_NE(BKE_paint_layers_anchor_point_add(
+                *src, row, mask_stack, nullptr, false, "Mask Point", {}),
+            nullptr);
+  EXPECT_TRUE(BKE_paint_layers_mask_branch_has_anchor(*row));
+
+  const MaterialPaintLayer *source_rows[1] = {row};
+  EXPECT_EQ(BKE_paint_layers_asset_create(*bmain,
+                                          *src,
+                                          Span<const MaterialPaintLayer *>(source_rows, 1),
+                                          PaintLayerAssetType::Mask,
+                                          "SmartMaskAnchor"),
+            nullptr);
+}
+
+TEST_F(PaintLayersAssetTest, smart_mask_refuses_an_anchor_point_reader_in_the_mask)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Source", add_image("SourceMap"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*src, row, 0.25f), nullptr);
+  const PaintLayerAnchorPointList mask_stack = PaintLayerAnchorPointList::MaskStack;
+  MaterialPaintLayer *marker = BKE_paint_layers_anchor_point_add(
+      *src, row, mask_stack, nullptr, false, "Mask Point", {});
+  ASSERT_NE(marker, nullptr);
+  MaterialPaintLayer *reader = BKE_paint_layers_anchor_point_add(
+      *src, row, mask_stack, marker, true, "Mask Reader", marker->marker);
+  ASSERT_NE(reader, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_mask_branch_has_anchor(*row));
+
+  const MaterialPaintLayer *source_rows[1] = {row};
+  EXPECT_EQ(BKE_paint_layers_asset_create(*bmain,
+                                          *src,
+                                          Span<const MaterialPaintLayer *>(source_rows, 1),
+                                          PaintLayerAssetType::Mask,
+                                          "SmartMaskReader"),
+            nullptr);
+}
+
 
 }  // namespace blender::bke::tests

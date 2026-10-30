@@ -19,6 +19,7 @@
 #include <cstdint>
 
 #include "BLI_span.hh"
+#include "BLI_string_ref.hh"
 
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_import.hh"
@@ -83,10 +84,30 @@ PaintLayerAssetPortability BKE_paint_layers_asset_portability_check(
 PaintLayerAssetType BKE_paint_layers_asset_type_get(const Material &ma);
 
 /**
+ * The Asset Browser catalog a new smart asset of \a type is placed in by default, e.g. for a mask
+ * "Paint/Smart Masks". Returns an empty string for #PaintLayerAssetType::None.
+ */
+const char *BKE_paint_layers_asset_default_catalog(PaintLayerAssetType type);
+
+/**
  * Store \a type and format version on \a ma. The material custom properties are primary; the
  * values are mirrored into the asset metadata when the material is already marked as an asset.
  */
 void BKE_paint_layers_asset_type_set(Material &ma, PaintLayerAssetType type);
+
+/**
+ * Apply the metadata a freshly marked Smart asset carries: the type mirror, a description, the two
+ * tags the Asset Browser groups it by and its catalog. An empty \a description falls back to the
+ * default text.
+ *
+ * The catalog is passed as its parts, so this does not depend on the asset system. Calling it
+ * again is safe: the tags are ensured rather than added.
+ */
+void BKE_paint_layers_asset_metadata_apply(Material &asset,
+                                           PaintLayerAssetType type,
+                                           StringRef description,
+                                           const bUUID &catalog_id,
+                                           StringRef catalog_simple_name);
 
 /**
  * Remove the asset tag from both the material custom properties and the asset metadata. The
@@ -128,17 +149,36 @@ bool BKE_paint_layers_asset_can_insert(const Material &dst,
  * (idempotent). The stack rows are imported with #PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS, so
  * the asset keeps every channel it uses. Returns null when the import is refused; the new material
  * is freed in that case.
+ *
+ * \param image_policy: what happens to the imported maps: copied with their pixels by default, or
+ * external ones shared by reference with painted ones copied (#PaintLayerImageImportPolicy::Share)
+ * or left as flat values (#PaintLayerImageImportPolicy::Strip).
+ * \param r_result: the import's report, its #PaintLayerImportResult::stripped_maps included.
  */
 Material *BKE_paint_layers_asset_create(Main &bmain,
                                         Material &source,
                                         Span<const MaterialPaintLayer *> rows,
                                         PaintLayerAssetType type,
-                                        const char *name);
+                                        const char *name,
+                                        PaintLayerImageImportPolicy image_policy =
+                                            PaintLayerImageImportPolicy::Copy,
+                                        PaintLayerImportResult *r_result = nullptr);
+
+/**
+ * Whether the mask branch of \a row holds an Anchor Point marker or reader: a Smart Mask is built
+ * from the base mask and its corrections only, and the points belong to the row they slice, so
+ * they cannot travel in a mask asset.
+ */
+bool BKE_paint_layers_mask_branch_has_anchor(const MaterialPaintLayer &row);
 
 /**
  * Insert the rows (or mask) of \a asset into \a dst at \a anchor by \a place. The asset type
- * decides the import mode and flags; the caller only names the destination.
+ * decides the import mode and flags; the caller only names the destination. File textures are read
+ * by reference (#PaintLayerImageImportPolicy::Share): a drop must not mint a copy of the same image
+ * every time, and a stroke on a shared map copies it first.
  *
+ * \param append_mask: Smart Mask only; lay the asset's corrections over the target's own mask
+ * instead of replacing it.
  * \return false when #BKE_paint_layers_asset_can_insert refuses the insert; \a dst is then
  * untouched.
  */
@@ -147,6 +187,7 @@ bool BKE_paint_layers_asset_insert(Main &bmain,
                                    Material &asset,
                                    MaterialPaintLayer *anchor,
                                    PaintLayerPlace place,
-                                   PaintLayerImportResult *r_result = nullptr);
+                                   PaintLayerImportResult *r_result = nullptr,
+                                   bool append_mask = false);
 
 }  // namespace blender

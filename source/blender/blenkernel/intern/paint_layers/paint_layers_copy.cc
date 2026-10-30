@@ -87,7 +87,7 @@ void paint_layer_anchor_point_foreign_ref_clear(Material &ma, MaterialPaintLayer
  * buffer behind it, and a painted map is a buffer that exists nowhere else -- unsaved, generated --
  * so the bare copy would come back blank and the layer made from it would show nothing.
  */
-static Image *paint_layer_image_duplicate(Main &bmain, Image &source)
+Image *paint_layer_image_duplicate(Main &bmain, Image &source)
 {
   Image *copy = id_cast<Image *>(BKE_id_copy(&bmain, &source.id));
   /* A generated map is of type #IMA_TYPE_UV_TEST, not #IMA_TYPE_IMAGE, so the source alone decides
@@ -131,10 +131,21 @@ static Image *paint_layer_image_duplicate(Main &bmain, Image &source)
   return copy;
 }
 
-/** Give \a dst a copy of \a src's channel records, each map copied into an image of its own. */
+/**
+ * Whether \a image is a painted map -- its pixels exist nowhere but this buffer -- rather than a
+ * texture it reads. A generated image and one the user painted on since it was loaded are painted;
+ * a file-source image that is not dirty is a reference to pixels the file keeps.
+ */
+static bool paint_layer_image_is_painted(Image &image)
+{
+  return image.source == IMA_SRC_GENERATED || BKE_image_is_dirty(&image);
+}
+
+/** Give \a dst a copy of \a src's channel records, each map following the options' policy. */
 static void paint_layer_channels_duplicate(Main &bmain,
                                            MaterialPaintLayer &dst,
-                                           const MaterialPaintLayer &src)
+                                           const MaterialPaintLayer &src,
+                                           const PaintLayerCopyOptions &options)
 {
   if (src.channels_num <= 0 || src.channels == nullptr) {
     return;
@@ -145,11 +156,38 @@ static void paint_layer_channels_duplicate(Main &bmain,
    * block, the way #BKE_paint_layers_channel_add grows the array. */
   memcpy(dst.channels, src.channels, sizeof(*dst.channels) * src.channels_num);
   for (const int i : IndexRange(src.channels_num)) {
-    /* A map is painted in place, so a copy sharing its source's image would turn every stroke on
-     * one into a stroke on the other: the copy gets its own. The fresh image carries the one user
-     * that this record is; no separate id_us_plus is taken (as #BKE_id_copy returns it). */
-    if (dst.channels[i].image != nullptr) {
-      dst.channels[i].image = paint_layer_image_duplicate(bmain, *dst.channels[i].image);
+    Image *image = dst.channels[i].image;
+    if (image != nullptr) {
+      if (paint_layer_image_is_painted(*image)) {
+        if (options.image_policy == PaintLayerImageImportPolicy::Strip) {
+          /* No map: the record keeps its flat value, which is what the import shows. */
+          dst.channels[i].image = nullptr;
+          if (options.r_stripped_maps != nullptr) {
+            (*options.r_stripped_maps)++;
+          }
+        }
+        else {
+          /* Painted in place, so a copy sharing its source's image would turn every stroke on
+           * one into a stroke on the other. The fresh image carries the one user that this
+           * record is; no separate id_us_plus is taken (as #BKE_id_copy returns it). */
+          dst.channels[i].image = paint_layer_image_duplicate(bmain, *image);
+        }
+      }
+      else if (options.image_policy == PaintLayerImageImportPolicy::Copy ||
+               image->id.asset_data != nullptr)
+      {
+        /* Legacy: an external map is copied too, with its pixels. A map that is an asset itself is
+         * copied as well, whatever the policy: sharing it would make the importing material depend
+         * on another asset, and writing a Smart asset to a library would carry that image along
+         * as an asset of its own. The copy is a plain image (no asset metadata) that lives inside
+         * the material. */
+        dst.channels[i].image = paint_layer_image_duplicate(bmain, *image);
+      }
+      else {
+        /* An external map is read, not painted here: the record shares the source's image and
+         * takes a user for it. The copy is plain data, so the source's user is not inherited. */
+        id_us_plus(&image->id);
+      }
     }
     /* A value ramp is owned sub-data like the map: the copy gets one of its own. */
     dst.channels[i].gradient_ramp = (src.channels[i].gradient_ramp != nullptr) ?
@@ -275,7 +313,7 @@ MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   /* A Curve Patch effect carries its payload (its own curve container and brush snapshot) like a
    * Curve Patch row does: the copy owns duplicates of both, never shared. */
   paint_layer_curve_patch_duplicate(bmain, *item_copy, item);
-  paint_layer_channels_duplicate(bmain, *item_copy, item);
+  paint_layer_channels_duplicate(bmain, *item_copy, item, options);
   paint_layer_id_colors_duplicate(*item_copy, item);
   paint_layer_properties_duplicate(*item_copy, item);
   if (r_map != nullptr) {
@@ -321,7 +359,7 @@ void paint_layer_branch_duplicate(Main &bmain,
   dst.mapping = dna::shallow_copy(src.mapping);
   paint_layer_material_duplicate(bmain, dst, src);
   paint_layer_curve_patch_duplicate(bmain, dst, src);
-  paint_layer_channels_duplicate(bmain, dst, src);
+  paint_layer_channels_duplicate(bmain, dst, src, options);
   paint_layer_id_colors_duplicate(dst, src);
   paint_layer_properties_duplicate(dst, src);
   BKE_paint_layers_gradient_copy(dst, src);
@@ -506,10 +544,13 @@ bool BKE_paint_layers_import_rows(Main &bmain,
     ListBaseT<MaterialPaintLayer> staged = {nullptr, nullptr};
     PaintLayerMarkerMap marker_map;
     Vector<MaterialPaintLayer *> staged_items;
+    int stripped_maps = 0;
     int dropped_curve_patches = 0;
     PaintLayerCopyOptions copy_options;
     copy_options.flags = params.flags;
     copy_options.r_dropped_curve_patches = &dropped_curve_patches;
+    copy_options.image_policy = params.image_policy;
+    copy_options.r_stripped_maps = &stripped_maps;
     for (const MaterialPaintLayer &item : source_row.mask_stack) {
       MaterialPaintLayer *copy = paint_layer_item_duplicate(
           bmain, dst, item, &marker_map, copy_options);
@@ -556,6 +597,7 @@ bool BKE_paint_layers_import_rows(Main &bmain,
       r_result->first = params.anchor;
       r_result->rows = int(staged_items.size());
       r_result->dropped_curve_patches = dropped_curve_patches;
+      r_result->stripped_maps = stripped_maps;
     }
     return true;
   }
@@ -599,10 +641,13 @@ bool BKE_paint_layers_import_rows(Main &bmain,
 
   PaintLayerMarkerMap marker_map;
   Vector<MaterialPaintLayer *> inserted;
+  int stripped_maps = 0;
   int dropped_curve_patches = 0;
   PaintLayerCopyOptions copy_options;
   copy_options.flags = params.flags;
   copy_options.r_dropped_curve_patches = &dropped_curve_patches;
+  copy_options.image_policy = params.image_policy;
+  copy_options.r_stripped_maps = &stripped_maps;
   MaterialPaintLayer *anchor = params.anchor;
   for (const MaterialPaintLayer *source_row : rows) {
     MaterialPaintLayer *copy = paint_layer_alloc(dst, source_row->name);
@@ -635,6 +680,7 @@ bool BKE_paint_layers_import_rows(Main &bmain,
     r_result->skipped_channels = skipped_channels;
     r_result->dropped_object_masks = dropped_object_masks;
     r_result->dropped_curve_patches = dropped_curve_patches;
+    r_result->stripped_maps = stripped_maps;
   }
   return true;
 }

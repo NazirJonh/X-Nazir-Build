@@ -52,6 +52,30 @@ enum PaintLayerImportFlag : uint16_t {
   PAINT_LAYER_IMPORT_SKIP_CURVE_PATCH = 1 << 2,
 };
 
+/**
+ * What an import does with the maps a copied row carries.
+ *
+ * A map is either painted or read from somewhere else. Painted maps are the ones whose pixels
+ * exist only in the source's memory: a generated image, or one the user painted on since it was
+ * loaded. Any other map is a texture the row reads, whose pixels live in a file.
+ */
+enum class PaintLayerImageImportPolicy : int8_t {
+  /** Legacy: copy every map with its pixels, whether it is painted or reads a file. */
+  Copy = 0,
+  /**
+   * Read external maps by reference (the same Image, with one more user) and copy painted maps
+   * with their pixels. A stroke on a shared external map copies it first (copy-on-paint), so the
+   * imported row cannot paint into the source's texture.
+   */
+  Share = 1,
+  /**
+   * Read external maps by reference, as #PaintLayerImageImportPolicy::Share, and leave painted maps
+   * behind: the record keeps its flat value and no map. What a Smart asset saved from painted maps
+   * without their pixels wants, so it is small and depends on no generated buffer.
+   */
+  Strip = 2,
+};
+
 struct PaintLayerImportParams {
   PaintLayerImportMode mode = PaintLayerImportMode::Rows;
   /** The row the import is aimed at, or null to append rows at the top of the stack. */
@@ -60,6 +84,11 @@ struct PaintLayerImportParams {
   /** Treat Above/Below on a folder as Into, the way the Add buttons do. */
   bool fill_folder = false;
   uint16_t flags = 0;
+  /**
+   * How the maps of the copied rows travel; #PaintLayerImageImportPolicy::Copy keeps the legacy
+   * behavior of copying every map with its pixels.
+   */
+  PaintLayerImageImportPolicy image_policy = PaintLayerImageImportPolicy::Copy;
 };
 
 struct PaintLayerImportResult {
@@ -79,6 +108,12 @@ struct PaintLayerImportResult {
   bool dropped_object_masks = false;
   /** Curve Patch effects left out because #PAINT_LAYER_IMPORT_SKIP_CURVE_PATCH is set. */
   int dropped_curve_patches = 0;
+  /**
+   * Number of channel records whose map was replaced by its flat value because
+   * #PaintLayerImportParams::image_policy was #PaintLayerImageImportPolicy::Strip: painted maps
+   * only, mask items' Base Color records, corrections and children included.
+   */
+  int stripped_maps = 0;
 };
 
 /**
@@ -89,9 +124,10 @@ struct PaintLayerImportResult {
  * #MaterialPaintLayer::mask_stack is copied onto \a params.anchor, replacing the anchor's mask
  * unless #PAINT_LAYER_IMPORT_APPEND_MASK is set.
  *
- * Each copied row gets a marker of its own, its maps are copied with their pixels (never shared),
- * its anchor point readers are remapped to the copied points, and a reader that named a point
- * outside the imported set loses the reference. A Material row brings a local copy of the material
+ * Each copied row gets a marker of its own, its maps travel by \a params' image policy (a copy with
+ * its pixels by default; an external map may be shared by reference, and a painted map may be left
+ * behind as the record's flat value), its anchor point readers are remapped to the copied points,
+ * and a reader that named a point outside the imported set loses the reference. A Material row brings a local copy of the material
  * it reads, the same way an ordinary duplicate does, so the asset does not depend on the source
  * file's material staying loaded. Object masks are per object and keyed by the old marker, so they
  * are not imported; the copied row still keeps the mesh/UV-tiles mode but carries no exclusions.

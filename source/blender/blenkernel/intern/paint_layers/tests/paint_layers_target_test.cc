@@ -265,6 +265,32 @@ TEST_F(PaintLayersTargetTest, ensure_creates_channel_and_neutral_map)
   EXPECT_EQ(layer->channels_num, 1);
 }
 
+TEST_F(PaintLayersTargetTest, a_shared_map_is_copied_on_the_first_stroke)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, target));
+  Image *image = BKE_paint_layers_target_ensure_writable(*bmain, target, 4);
+  ASSERT_NE(image, nullptr);
+  EXPECT_EQ(image->id.us, 1);
+
+  /* Another row sharing the map: the next stroke must not paint into its pixels. */
+  id_us_plus(&image->id);
+  ASSERT_EQ(image->id.us, 2);
+
+  PaintLayersTarget shared_target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, shared_target));
+  Image *owned = BKE_paint_layers_target_ensure_writable(*bmain, shared_target, 4);
+  ASSERT_NE(owned, nullptr);
+  EXPECT_NE(owned, image);
+  ASSERT_NE(shared_target.channel_record, nullptr);
+  EXPECT_EQ(shared_target.channel_record->image, owned);
+  EXPECT_EQ(image->id.us, 1);
+  EXPECT_EQ(owned->id.us, 1);
+  EXPECT_EQ(layer->channels_num, 1);
+}
+
 TEST_F(PaintLayersTargetTest, a_correction_is_a_paint_target_with_a_transparent_first_map)
 {
   MaterialPaintLayer *row = add_active_row("L");

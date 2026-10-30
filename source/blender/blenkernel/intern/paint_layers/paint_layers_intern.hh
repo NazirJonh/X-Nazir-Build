@@ -23,6 +23,7 @@
 #include "BLI_vector.hh"
 
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_import.hh"
 
 #include "paint_layers_kind.hh"
 
@@ -824,7 +825,18 @@ struct PaintLayerCopyOptions {
   uint16_t flags = 0;
   /** Receives the number of Curve Patch items left out, when the skip flag is set. */
   int *r_dropped_curve_patches = nullptr;
+  /** How the maps of the copied records travel; the legacy copy by default. */
+  PaintLayerImageImportPolicy image_policy = PaintLayerImageImportPolicy::Copy;
+  /** Receives the number of painted maps left behind, when the policy is Strip. */
+  int *r_stripped_maps = nullptr;
 };
+
+/**
+ * A copy of the map \a source with its pixels: the settings come from `BKE_id_copy`, the buffer is
+ * carried over for a painted map, whose pixels exist nowhere else. Used by the ordinary duplicate,
+ * the import and copy-on-paint.
+ */
+Image *paint_layer_image_duplicate(Main &bmain, Image &source);
 
 /** Whether \a layer is a row of \a ma's stack, at any depth. */
 bool paint_layer_in_stack(const Material &ma, const MaterialPaintLayer *layer);

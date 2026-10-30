@@ -125,6 +125,12 @@ struct PaintLayerImportResult {
    * import records them as its own, so a reload can find and replace exactly those rows.
    */
   Vector<MaterialPaintLayer *> imported;
+  /**
+   * The mask items the import staged onto the anchor (Mask mode only). A smart-asset Mask drop
+   * records them as its own, so a reload can find and replace exactly those items; Rows mode
+   * leaves it empty.
+   */
+  Vector<MaterialPaintLayer *> imported_mask_items;
 };
 
 /**

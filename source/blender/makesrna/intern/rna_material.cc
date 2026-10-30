@@ -2943,8 +2943,16 @@ static int rna_MaterialPaintLayer_smart_asset_instance_id_get(PointerRNA *ptr)
   if (ptr->owner_id == nullptr || GS(ptr->owner_id->name) != ID_MA) {
     return -1;
   }
+  Material &ma = *id_cast<Material *>(ptr->owner_id);
   const MaterialPaintLayer *row = static_cast<const MaterialPaintLayer *>(ptr->data);
-  return BKE_paint_layers_asset_instance_of_row(*id_cast<Material *>(ptr->owner_id), *row);
+  const int row_instance = BKE_paint_layers_asset_instance_of_row(ma, *row);
+  if (row_instance >= 0) {
+    return row_instance;
+  }
+  /* A stack row answers as before; what is not a row of an instance's `rows` may still be a mask
+   * item a Smart Mask drop laid down -- the records name those in `mask_items`, and a correction
+   * or a folder child matches nothing there. */
+  return BKE_paint_layers_asset_instance_of_mask_item(ma, row->marker);
 }
 
 static void rna_MaterialPaintLayer_smart_asset_instance_label_get(PointerRNA *ptr, char *value)
@@ -2972,8 +2980,11 @@ struct MaterialSmartAssetInstanceItem {
   int id;
   int number;
   int type;
+  bool is_mask;
   char asset_name[MAX_NAME];
   char label[MAX_NAME + 16];
+  /* The Smart Mask target row's marker, empty for any other instance. */
+  char mask_target[MAX_NAME];
 };
 
 static void rna_Material_smart_asset_instances_begin(CollectionPropertyIterator *iter,
@@ -2999,8 +3010,10 @@ static void rna_Material_smart_asset_instances_begin(CollectionPropertyIterator 
         item.id = info.id;
         item.number = info.number;
         item.type = int(info.type);
+        item.is_mask = info.is_mask;
         STRNCPY(item.asset_name, info.name.c_str());
         STRNCPY(item.label, info.label().c_str());
+        STRNCPY(item.mask_target, info.mask_target.c_str());
       }
     }
   }
@@ -3046,6 +3059,22 @@ static int rna_MaterialSmartAssetInstance_asset_name_length(PointerRNA *ptr)
 static int rna_MaterialSmartAssetInstance_type_get(PointerRNA *ptr)
 {
   return rna_MaterialSmartAssetInstance(ptr)->type;
+}
+
+static bool rna_MaterialSmartAssetInstance_is_mask_get(PointerRNA *ptr)
+{
+  return rna_MaterialSmartAssetInstance(ptr)->is_mask;
+}
+
+static void rna_MaterialSmartAssetInstance_mask_target_get(PointerRNA *ptr, char *value)
+{
+  const MaterialSmartAssetInstanceItem *item = rna_MaterialSmartAssetInstance(ptr);
+  BLI_strncpy(value, item->mask_target, sizeof(item->mask_target));
+}
+
+static int rna_MaterialSmartAssetInstance_mask_target_length(PointerRNA *ptr)
+{
+  return int(strlen(rna_MaterialSmartAssetInstance(ptr)->mask_target));
 }
 
 /** \} */
@@ -4619,6 +4648,28 @@ static void rna_def_material_smart_asset_instance(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, rna_enum_material_smart_asset_type_items);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Type", "What kind of Smart asset the drop came from");
+
+  /* A Smart Mask drop lays no rows: its parameters live on the mask items the drop landed on the
+   * target row with, and the panel tells the instances apart by this flag. */
+  prop = RNA_def_property(srna, "is_mask", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialSmartAssetInstance_is_mask_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Is Mask",
+      "Whether this instance is a Smart Mask drop: it owns mask items on one target row instead "
+      "of stack rows");
+
+  prop = RNA_def_property(srna, "mask_target", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialSmartAssetInstance_mask_target_get",
+                                "rna_MaterialSmartAssetInstance_mask_target_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Mask Target",
+      "Marker of the row the Smart Mask landed on, or empty for any other instance");
 }
 
 static void rna_def_material_paint_layer_id_color(BlenderRNA *brna)
@@ -4765,8 +4816,9 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop,
                            "Smart Asset Instance Id",
-                           "Id of the imported Smart asset this row came from, or -1 when the row "
-                           "is not of an instance");
+                           "Id of the imported Smart asset this row came from -- a Smart Mask "
+                           "instance answers for the mask items it laid down -- or -1 when the "
+                           "row is not of an instance");
 
   prop = RNA_def_property(srna, "smart_asset_instance_label", PROP_STRING, PROP_NONE);
   RNA_def_property_string_funcs(prop,

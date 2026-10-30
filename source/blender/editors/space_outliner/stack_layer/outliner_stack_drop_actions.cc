@@ -722,7 +722,8 @@ class SmartMaterialAssetAction final : public StackDropAction {
     /* Record what the instance came from, so a reload can find the asset and replace these rows:
      * the source by name and library (its session UID does not survive), the laid-down rows by
      * their markers. A fresh instance per drop: dropping the same asset twice keeps both, as
-     * "<name> #1" and "<name> #2". A mask import has no rows of its own to record and no reload. */
+     * "<name> #1" and "<name> #2". A mask drop records nothing here: the apply dialog it opens is
+     * the one point a Smart Mask lands from, and that operator records the instance itself. */
     if (type != PaintLayerAssetType::Mask) {
       BKE_paint_layers_asset_instance_record(material, *source, type, result.imported.as_span());
     }

@@ -72,6 +72,12 @@ constexpr const char *ASSET_SOURCE_LIBRARY_PROP = "library";
 constexpr const char *ASSET_SOURCE_TYPE_PROP = "type";
 /** The source-label subgroup of the imported rows' markers, as a set of names. */
 constexpr const char *ASSET_SOURCE_ROWS_PROP = "rows";
+/** The Smart Mask record's member naming the row the mask landed on, as a marker string. */
+constexpr const char *ASSET_SOURCE_MASK_TARGET_PROP = "mask_target";
+/** The Smart Mask record's subgroup of the laid-down mask items' markers, as a set of names. */
+constexpr const char *ASSET_SOURCE_MASK_ITEMS_PROP = "mask_items";
+/** The Smart Mask record's member: 0 = Replace the target mask, 1 = Add Corrections. */
+constexpr const char *ASSET_SOURCE_MASK_MODE_PROP = "mask_mode";
 
 void id_properties_ensure(Material &ma)
 {
@@ -174,6 +180,13 @@ int instance_group_id(const IDProperty &group)
   return atoi(group.name);
 }
 
+/** The marker string \a group's mask record names the target row by, or null. */
+const char *instance_mask_target_read(const IDProperty &group)
+{
+  const IDProperty *target = IDP_GetPropertyFromGroup(&group, ASSET_SOURCE_MASK_TARGET_PROP);
+  return (target != nullptr && target->type == IDP_STRING) ? IDP_string_get(target) : nullptr;
+}
+
 /**
  * Read the source-label members \a group carries into \a r_info; the id is left alone. False when
  * the group names no source material, which made the old label invalid and keeps it that way.
@@ -206,6 +219,12 @@ bool instance_info_source_read(const IDProperty &group, PaintLayerAssetInstanceI
   {
     r_info.type = PaintLayerAssetType(IDP_int_get(type));
   }
+  r_info.is_mask = (r_info.type == PaintLayerAssetType::Mask);
+  if (r_info.is_mask) {
+    if (const char *target = instance_mask_target_read(group)) {
+      r_info.mask_target = target;
+    }
+  }
   return true;
 }
 
@@ -236,6 +255,28 @@ void instance_rows_read(const IDProperty &group, Set<UUID> &r_markers)
       }
     }
   }
+}
+
+/** The markers of \a group's mask instance: the mask items that drop laid down. */
+void instance_mask_items_read(const IDProperty &group, Set<UUID> &r_markers)
+{
+  if (const IDProperty *items = IDP_GetPropertyFromGroup(&group, ASSET_SOURCE_MASK_ITEMS_PROP);
+      items != nullptr && items->type == IDP_GROUP)
+  {
+    for (const IDProperty &item : items->data.group) {
+      bUUID parsed;
+      if (BLI_uuid_parse_string(&parsed, item.name)) {
+        r_markers.add(parsed);
+      }
+    }
+  }
+}
+
+/** Whether \a group's mask instance was recorded as Add Corrections (0 is Replace, the default). */
+bool instance_mask_mode_is_add(const IDProperty &group)
+{
+  const IDProperty *mode = IDP_GetPropertyFromGroup(&group, ASSET_SOURCE_MASK_MODE_PROP);
+  return mode != nullptr && mode->type == IDP_INT && IDP_int_get(mode) == 1;
 }
 
 /** The next free instance id: one past the highest any record carries. */
@@ -340,6 +381,35 @@ void instance_rows_update(Material &ma,
       IDP_ReplaceInGroup(rows, bke::idprop::create(marker, 1).release());
     }
     IDP_ReplaceInGroup(&group, rows);
+    return;
+  }
+}
+
+/** Replace \a instance's `mask_items` with the markers of \a imported_items, keeping the rest. */
+void instance_mask_items_update(Material &ma,
+                                const int instance_id,
+                                const Span<const MaterialPaintLayer *> imported_items)
+{
+  IDProperty *instances = instances_group_get(ma);
+  if (instances == nullptr) {
+    return;
+  }
+  for (IDProperty &group : instances->data.group) {
+    if (group.type != IDP_GROUP || instance_group_id(group) != instance_id) {
+      continue;
+    }
+    /* The same marker-as-name trick the rows set uses, and no migrate: a mask instance never
+     * existed in the one-instance format, so this record is already in the instances group. */
+    IDProperty *items = bke::idprop::create_group(ASSET_SOURCE_MASK_ITEMS_PROP).release();
+    for (const MaterialPaintLayer *item : imported_items) {
+      if (item == nullptr) {
+        continue;
+      }
+      char marker[UUID_STRING_SIZE];
+      BLI_uuid_format(marker, item->marker);
+      IDP_ReplaceInGroup(items, bke::idprop::create(marker, 1).release());
+    }
+    IDP_ReplaceInGroup(&group, items);
     return;
   }
 }
@@ -1077,13 +1147,17 @@ void BKE_paint_layers_asset_params_unbind(Material &ma, const int instance_id)
    * leave a label of a material that is an asset of its own. */
   const bool unbind_all = (instance_id <= 0);
   Set<UUID> bound_markers;
+  Set<UUID> bound_mask_items;
   if (!unbind_all) {
     const IDProperty *instance = BKE_paint_layers_asset_instance_find(ma, instance_id);
     if (instance == nullptr) {
       /* No such instance: nothing to end, and the other instances stay bound. */
       return;
     }
+    /* One of the two sets is empty: a record names either rows (a row drop) or mask items (a
+     * Smart Mask drop), never both. */
     instance_rows_read(*instance, bound_markers);
+    instance_mask_items_read(*instance, bound_mask_items);
   }
   const auto unbind = [&](const MaterialPaintLayer &row) {
     if (row.system_properties == nullptr) {
@@ -1105,6 +1179,19 @@ void BKE_paint_layers_asset_params_unbind(Material &ma, const int instance_id)
         return unbind_all || bound_markers.contains(UUID(row.marker));
       },
       [&](MaterialPaintLayer &row) { paint_layer_asset_walk(row, unbind); });
+
+  if (!bound_mask_items.is_empty()) {
+    /* A Smart Mask instance's items live on their target row's mask, which the stack walk above
+     * does not reach: the items the record names are unbound wherever they survived. A mask item
+     * owns nothing nested, but the walk keeps the unbind one visit per item either way. */
+    for (MaterialPaintLayer &row : ma.paint_layers) {
+      for (MaterialPaintLayer &item : row.mask_stack) {
+        if (bound_mask_items.contains(UUID(item.marker))) {
+          paint_layer_asset_walk(item, unbind);
+        }
+      }
+    }
+  }
 
   if (!unbind_all) {
     /* Drop this instance's record, and the group with it when nothing is bound any more. */
@@ -1272,6 +1359,28 @@ int BKE_paint_layers_asset_instance_of_marker(const Material &ma, const bUUID &m
   return -1;
 }
 
+int BKE_paint_layers_asset_instance_of_mask_item(const Material &ma, const bUUID &marker)
+{
+  char formatted[UUID_STRING_SIZE];
+  BLI_uuid_format(formatted, marker);
+  /* A mask record only exists in the instances group: the one-instance format never recorded a
+   * Smart Mask drop, so there is no legacy label to answer for one. */
+  if (const IDProperty *instances = instances_group_get(ma)) {
+    for (const IDProperty &group : instances->data.group) {
+      if (group.type != IDP_GROUP) {
+        continue;
+      }
+      if (const IDProperty *items = IDP_GetPropertyFromGroup(&group, ASSET_SOURCE_MASK_ITEMS_PROP);
+          items != nullptr && items->type == IDP_GROUP &&
+          IDP_GetPropertyFromGroup(items, formatted) != nullptr)
+      {
+        return instance_group_id(group);
+      }
+    }
+  }
+  return -1;
+}
+
 /**
  * The instance of the nearest root at or above \a candidate on the path toward the row named by
  * \a row_marker, or -1 while the path has named no root yet. \a nearest is the nearest root seen
@@ -1377,6 +1486,51 @@ int BKE_paint_layers_asset_instance_record(Material &ma,
   return id;
 }
 
+int BKE_paint_layers_asset_instance_record_mask(Material &ma,
+                                                const Material &source,
+                                                const MaterialPaintLayer &target,
+                                                const bool add_corrections,
+                                                const Span<const MaterialPaintLayer *> imported_items)
+{
+  /* The same numbering a row drop uses: the mask instance reads as "<name> #<next>" beside them.
+   * A one-instance label of an older file becomes instance 1 on this first write, the same way. */
+  legacy_instance_migrate(ma);
+  IDProperty *instances = instances_group_ensure(ma);
+
+  const std::string source_name(source.id.name + 2);
+  const char *source_library = (source.id.lib != nullptr) ? source.id.lib->filepath : "";
+  const int id = instance_id_next(*instances);
+  const int number = instance_number_next(*instances, source_name, source_library);
+
+  IDProperty *group = bke::idprop::create_group(std::to_string(id)).release();
+  id_property_set_int(group, ASSET_INSTANCE_ID_PROP, id);
+  id_property_set_int(group, ASSET_INSTANCE_NUMBER_PROP, number);
+  IDP_ReplaceInGroup(group, bke::idprop::create(ASSET_SOURCE_NAME_PROP, source_name).release());
+  IDP_ReplaceInGroup(group,
+                     bke::idprop::create(ASSET_SOURCE_LIBRARY_PROP, StringRefNull(source_library))
+                         .release());
+  id_property_set_int(group, ASSET_SOURCE_TYPE_PROP, int(PaintLayerAssetType::Mask));
+  /* The target row keeps answering for whatever row instance it belonged to: the mask record
+   * names it as a member, never in a `rows` set. */
+  char target_marker[UUID_STRING_SIZE];
+  BLI_uuid_format(target_marker, target.marker);
+  IDP_ReplaceInGroup(
+      group, bke::idprop::create(ASSET_SOURCE_MASK_TARGET_PROP, target_marker).release());
+  id_property_set_int(group, ASSET_SOURCE_MASK_MODE_PROP, add_corrections ? 1 : 0);
+  IDProperty *items = bke::idprop::create_group(ASSET_SOURCE_MASK_ITEMS_PROP).release();
+  for (const MaterialPaintLayer *item : imported_items) {
+    if (item == nullptr) {
+      continue;
+    }
+    char marker[UUID_STRING_SIZE];
+    BLI_uuid_format(marker, item->marker);
+    IDP_ReplaceInGroup(items, bke::idprop::create(marker, 1).release());
+  }
+  IDP_ReplaceInGroup(group, items);
+  IDP_ReplaceInGroup(instances, group);
+  return id;
+}
+
 PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain,
                                                           Material &ma,
                                                           const int instance_id)
@@ -1429,7 +1583,33 @@ PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain,
   };
   Vector<CarriedItem> carried;
   Set<UUID> reload_markers;
-  instance_rows_read(*instance, reload_markers);
+  /* The recorded type decides what a reload replaces: the rows a row drop laid down, or the whole
+   * mask of the one row a Smart Mask landed on. */
+  const IDProperty *type_prop = IDP_GetPropertyFromGroup(instance, ASSET_SOURCE_TYPE_PROP);
+  const bool mask_reload = (type_prop != nullptr && type_prop->type == IDP_INT &&
+                            IDP_int_get(type_prop) == int(PaintLayerAssetType::Mask));
+  /* The row the mask landed on, and whether the instance adds its corrections instead of
+   * replacing the mask; only read for a mask reload. */
+  MaterialPaintLayer *mask_target_row = nullptr;
+  bool mask_add = false;
+  if (mask_reload) {
+    mask_add = instance_mask_mode_is_add(*instance);
+    instance_mask_items_read(*instance, reload_markers);
+    const char *target_str = instance_mask_target_read(*instance);
+    bUUID target_marker;
+    if (target_str == nullptr || !BLI_uuid_parse_string(&target_marker, target_str)) {
+      return PaintLayerAssetReloadResult::ImportFailed;
+    }
+    mask_target_row = BKE_paint_layers_find(ma, target_marker);
+    if (mask_target_row == nullptr) {
+      /* The row the mask landed on is gone: there is nothing left to reload onto, and this is the
+       * one refusal that answers before any change is made. */
+      return PaintLayerAssetReloadResult::ImportFailed;
+    }
+  }
+  else {
+    instance_rows_read(*instance, reload_markers);
+  }
   /* Only this instance's rows are captured: the other instances' values are theirs, and the rows
    * go away with the delete. */
   const auto capture = [&](const MaterialPaintLayer &item) {
@@ -1462,19 +1642,43 @@ PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain,
   bool found_any = false;
   /* The roots in walk order: the first one names the list the fresh rows seam into. */
   Vector<MaterialPaintLayer *> roots;
-  /* Capture first, and only from this instance's rows: the other instances' values are theirs,
-   * and the rows go away with the delete. A root is any row the record names, at any depth, and
-   * the walk hands its subtree whole, so an item is captured once even when the user nested a
-   * root under a root. */
-  paint_layer_stack_walk_list(
-      ma.paint_layers,
-      [&](const MaterialPaintLayer &row) { return reload_markers.contains(UUID(row.marker)); },
-      [&](MaterialPaintLayer &row) {
-        found_any = true;
-        roots.append(&row);
-        paint_layer_asset_walk(row, capture);
-      });
+  if (mask_reload) {
+    /* The mask items are what the instance follows; the target row's own parameters are not part
+     * of the asset. A mask the user emptied or replaced still reloads: the import lays the
+     * asset's items fresh the way the original drop did, only with nothing carried over. */
+    for (MaterialPaintLayer &item : mask_target_row->mask_stack) {
+      if (reload_markers.contains(UUID(item.marker))) {
+        paint_layer_asset_walk(item, capture);
+      }
+    }
+    found_any = true;
+  }
+  else {
+    /* Capture first, and only from this instance's rows: the other instances' values are theirs,
+     * and the rows go away with the delete. A root is any row the record names, at any depth, and
+     * the walk hands its subtree whole, so an item is captured once even when the user nested a
+     * root under a root. */
+    paint_layer_stack_walk_list(
+        ma.paint_layers,
+        [&](const MaterialPaintLayer &row) { return reload_markers.contains(UUID(row.marker)); },
+        [&](MaterialPaintLayer &row) {
+          found_any = true;
+          roots.append(&row);
+          paint_layer_asset_walk(row, capture);
+        });
+  }
   if (!found_any) {
+    return PaintLayerAssetReloadResult::ImportFailed;
+  }
+  if (mask_reload) {
+    /* Refused before the delete below: an asset whose mask is gone would otherwise cost the
+     * instance its items and give nothing back. */
+    const MaterialPaintLayer *source_holder = BKE_paint_layers_asset_mask_holder_find(*source);
+    if (source_holder == nullptr || source_holder->mask_stack.first == nullptr) {
+      return PaintLayerAssetReloadResult::ImportFailed;
+    }
+  }
+  else if (source->paint_layers.first == nullptr) {
     return PaintLayerAssetReloadResult::ImportFailed;
   }
 
@@ -1482,10 +1686,11 @@ PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain,
    * neighbours, so a reload does not hoist the rows to the top of the stack. The roots may sit in
    * different lists -- a drop Into a folder lays them nested, a row the user lifted out hangs on
    * the top level -- and the block of the first root's list is what keeps its place; roots in the
-   * other lists go away with the delete like any row of theirs. */
+   * other lists go away with the delete like any row of theirs. A mask reload lays no rows: its
+   * place is the target row's mask, and no seam is looked for. */
   MaterialPaintLayer *anchor = nullptr;
   PaintLayerPlace place = PaintLayerPlace::Above;
-  {
+  if (!mask_reload) {
     ListBaseT<MaterialPaintLayer> *block_list = BKE_paint_layers_owner_list(ma, *roots[0]);
     if (block_list != nullptr) {
       MaterialPaintLayer *row_below_block = nullptr;
@@ -1532,35 +1737,81 @@ PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain,
 
   /* Delete, then import fresh: the import refuses a half state, and the carried values are safe
    * on this side of the delete. A root nested under another root of the instance goes away with
-   * the outer one, so the lookup after it answers null and the removal is skipped. */
-  for (const bUUID &marker : reload_markers) {
-    if (MaterialPaintLayer *row = BKE_paint_layers_find(ma, marker)) {
-      BKE_paint_layers_remove(ma, row);
+   * the outer one, so the lookup after it answers null and the removal is skipped. A Replace mask
+   * reload deletes nothing here: the mask import replaces the target's whole mask, the way the
+   * original drop laid it; Add Corrections deletes only the items this instance laid down, so the
+   * corrections the target got any other way survive the reload. */
+  if (mask_reload) {
+    if (mask_add) {
+      for (const bUUID &marker : reload_markers) {
+        MaterialPaintLayer *item = BKE_paint_layers_find(ma, marker);
+        if (item == nullptr) {
+          continue;
+        }
+        if ((item->flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+          /* The drop landed on an empty mask and its first item became the base: the whole mask
+           * is the instance's own, so it goes as one and the fresh import lays a new base. */
+          BKE_paint_layers_mask_remove(ma, BKE_paint_layers_mask_item_owner(ma, *item));
+          continue;
+        }
+        BKE_paint_layers_mask_item_remove(ma, item);
+      }
+    }
+  }
+  else {
+    for (const bUUID &marker : reload_markers) {
+      if (MaterialPaintLayer *row = BKE_paint_layers_find(ma, marker)) {
+        BKE_paint_layers_remove(ma, row);
+      }
     }
   }
 
-  Vector<const MaterialPaintLayer *> source_rows;
-  for (const MaterialPaintLayer &row : source->paint_layers) {
-    source_rows.append(&row);
-  }
-  if (source_rows.is_empty()) {
-    return PaintLayerAssetReloadResult::ImportFailed;
-  }
-  /* The same import a drop performs: the asset's channels come along, its Curve Patch effects do
-   * not, and its external maps are shared by reference. The instance is not an asset, so the
-   * textures a Fill reads are not copied with their pixels the way an asset save copies them. */
   PaintLayerImportParams params;
   params.anchor = anchor;
   params.place = place;
   params.flags = SMART_ASSET_IMPORT_FLAGS;
   params.image_policy = PaintLayerImageImportPolicy::Share;
   PaintLayerImportResult result;
-  if (!BKE_paint_layers_import_rows(bmain, ma, *source, source_rows, params, &result)) {
-    return PaintLayerAssetReloadResult::ImportFailed;
+  if (mask_reload) {
+    /* The same import a drop performs: the asset's mask lands on the target row the record still
+     * names, its external maps shared by reference. */
+    const MaterialPaintLayer *holder = BKE_paint_layers_asset_mask_holder_find(*source);
+    if (holder == nullptr || holder->mask_stack.first == nullptr) {
+      return PaintLayerAssetReloadResult::ImportFailed;
+    }
+    params.mode = PaintLayerImportMode::Mask;
+    params.anchor = mask_target_row;
+    if (mask_add) {
+      params.flags |= PAINT_LAYER_IMPORT_APPEND_MASK;
+    }
+    const MaterialPaintLayer *holder_ptr = holder;
+    if (!BKE_paint_layers_import_rows(
+            bmain, ma, *source, Span<const MaterialPaintLayer *>(&holder_ptr, 1), params, &result))
+    {
+      return PaintLayerAssetReloadResult::ImportFailed;
+    }
+    /* The record stays as it was recorded -- id, number, source, target, mode -- and only names
+     * the fresh items, or the next reload would find none of them any more. */
+    instance_mask_items_update(ma, instance_id, result.imported_mask_items.as_span());
   }
-  /* The fresh rows carry fresh markers: the record has to name them, or the next reload would
-   * find none of its rows any more. The id, number and source label stay as they were. */
-  instance_rows_update(ma, instance_id, result.imported.as_span());
+  else {
+    Vector<const MaterialPaintLayer *> source_rows;
+    for (const MaterialPaintLayer &row : source->paint_layers) {
+      source_rows.append(&row);
+    }
+    if (source_rows.is_empty()) {
+      return PaintLayerAssetReloadResult::ImportFailed;
+    }
+    /* The same import a drop performs: the asset's channels come along, its Curve Patch effects do
+     * not, and its external maps are shared by reference. The instance is not an asset, so the
+     * textures a Fill reads are not copied with their pixels the way an asset save copies them. */
+    if (!BKE_paint_layers_import_rows(bmain, ma, *source, source_rows, params, &result)) {
+      return PaintLayerAssetReloadResult::ImportFailed;
+    }
+    /* The fresh rows carry fresh markers: the record has to name them, or the next reload would
+     * find none of its rows any more. The id, number and source label stay as they were. */
+    instance_rows_update(ma, instance_id, result.imported.as_span());
+  }
 
   /* The values the user changed come back on top of the fresh copies, found by the parameter's
    * name: the schema may have grown since the asset was saved, and a name that no longer exists
@@ -1599,9 +1850,20 @@ PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain,
       }
     }
   };
-  for (MaterialPaintLayer *row : result.imported) {
-    if (row != nullptr) {
-      paint_layer_asset_walk(*row, reapply);
+  if (mask_reload) {
+    /* The import laid the fresh items on the target's mask: they are the copies the carried
+     * values go back over, by name. */
+    for (MaterialPaintLayer *item : result.imported_mask_items) {
+      if (item != nullptr) {
+        paint_layer_asset_walk(*item, reapply);
+      }
+    }
+  }
+  else {
+    for (MaterialPaintLayer *row : result.imported) {
+      if (row != nullptr) {
+        paint_layer_asset_walk(*row, reapply);
+      }
     }
   }
 

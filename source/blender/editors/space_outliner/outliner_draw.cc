@@ -3623,7 +3623,9 @@ static void stack_preview_badge_draw(const rctf &preview_rect, const int badge_i
  * The label of the Smart-asset instance a stack row belongs to ("<asset> #<number>"), or empty for
  * a row that belongs to none. A row answers when the drop laid that very row down -- its own
  * marker is a root of the instance, at any depth -- and the rows nested under a root draw no
- * label of their own: the hierarchy already shows what they belong to.
+ * label of their own: the hierarchy already shows what they belong to. A mask item a Smart Mask
+ * drop laid down is a stack row of its own too (it hangs under the owner's mask section), and it
+ * answers for the mask instance the same way.
  */
 static std::string stack_row_smart_asset_label(const TreeViewContext &tvc,
                                                SpaceOutliner &space_outliner,
@@ -3639,7 +3641,12 @@ static std::string stack_row_smart_asset_label(const TreeViewContext &tvc,
     return "";
   }
   const Material &ma = *id_cast<Material *>(owner);
-  const int instance_id = BKE_paint_layers_asset_instance_of_marker(ma, row->stable_id);
+  int instance_id = BKE_paint_layers_asset_instance_of_marker(ma, row->stable_id);
+  if (instance_id < 0) {
+    /* Not a row of an instance: the marker may still be a mask item a Smart Mask drop laid
+     * down, and those answer through their records' `mask_items`. */
+    instance_id = BKE_paint_layers_asset_instance_of_mask_item(ma, row->stable_id);
+  }
   if (instance_id < 0) {
     return "";
   }

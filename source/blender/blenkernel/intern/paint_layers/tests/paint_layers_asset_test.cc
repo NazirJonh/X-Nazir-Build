@@ -2369,5 +2369,279 @@ TEST_F(PaintLayersAssetTest, reload_drops_a_parameter_the_asset_unexposed)
   EXPECT_FALSE(BKE_paint_layers_item_param_is_exposed(*fresh_tone, "gamma"));
 }
 
+/** The last item of \a row's mask stack (a filter lands after the base and the items before it). */
+static MaterialPaintLayer *last_mask_item(MaterialPaintLayer &row)
+{
+  return static_cast<MaterialPaintLayer *>(row.mask_stack.last);
+}
+
+/** Apply \a asset's mask onto \a target the way the drop dialog does, and record the instance. */
+static int apply_mask_and_record(Main &bmain,
+                                 Material &dst,
+                                 Material &asset,
+                                 MaterialPaintLayer &target,
+                                 const bool add_corrections)
+{
+  PaintLayerImportResult result;
+  if (!BKE_paint_layers_asset_insert(
+          bmain, dst, asset, &target, PaintLayerPlace::Above, &result, add_corrections))
+  {
+    return -1;
+  }
+  return BKE_paint_layers_asset_instance_record_mask(
+      dst, asset, target, add_corrections, result.imported_mask_items.as_span());
+}
+
+/** A Smart Mask asset holding the mask of \a src's one row: a base fill and a Levels "Tone". */
+static Material *make_mask_asset(Main &bmain,
+                                 PaintLayersAssetTest &t,
+                                 const char *name,
+                                 Material **r_src)
+{
+  Material *src = BKE_material_add(&bmain, "Src");
+  MaterialPaintLayer *row = t.add_layer(*src, "Source", t.add_image("SourceMap"));
+  EXPECT_NE(BKE_paint_layers_mask_add(*src, row, 0.25f), nullptr);
+  EXPECT_NE(
+      BKE_paint_layers_mask_filter_add(*src, row, MA_PAINT_LAYER_FILTER_LEVELS, "Tone"), nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+  if (r_src != nullptr) {
+    *r_src = src;
+  }
+  return BKE_paint_layers_asset_create(
+      bmain, *src, Span<const MaterialPaintLayer *>(source_rows, 1), PaintLayerAssetType::Mask, name);
+}
+
+TEST_F(PaintLayersAssetTest, mask_instance_record_names_the_target_and_its_items)
+{
+  Material *mask_asset = make_mask_asset(*bmain, *this, "MaskRecord", nullptr);
+  ASSERT_NE(mask_asset, nullptr);
+
+  /* The target is itself the root of a Smart Layer instance: the mask drop on it must not take
+   * the row out of that instance. */
+  Material *row_src = BKE_material_add(bmain, "RowSrc");
+  add_layer(*row_src, "Target", add_image("TargetMap"));
+  const MaterialPaintLayer *row_src_rows[1] = {
+      static_cast<MaterialPaintLayer *>(row_src->paint_layers.first)};
+  Material *row_asset = BKE_paint_layers_asset_create(*bmain,
+                                                      *row_src,
+                                                      Span<const MaterialPaintLayer *>(
+                                                          row_src_rows, 1),
+                                                      PaintLayerAssetType::Layer,
+                                                      "RowAsset");
+  ASSERT_NE(row_asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  PaintLayerImportResult rows_result;
+  ASSERT_TRUE(BKE_paint_layers_import_rows(*bmain,
+                                           *dst,
+                                           *row_asset,
+                                           asset_top_rows(*row_asset).as_span(),
+                                           params,
+                                           &rows_result));
+  MaterialPaintLayer *target = rows_result.imported[0];
+  const int rows_id = BKE_paint_layers_asset_instance_record(
+      *dst, *row_asset, PaintLayerAssetType::Layer, rows_result.imported.as_span());
+  ASSERT_EQ(rows_id, 1);
+
+  const int mask_id = apply_mask_and_record(*bmain, *dst, *mask_asset, *target, false);
+  ASSERT_EQ(mask_id, 2);
+
+  const Vector<PaintLayerAssetInstanceInfo> instances = instances_read(*dst);
+  ASSERT_EQ(instances.size(), 2);
+  EXPECT_EQ(instances[0].id, 1);
+  EXPECT_EQ(instances[0].type, PaintLayerAssetType::Layer);
+  EXPECT_FALSE(instances[0].is_mask);
+  EXPECT_EQ(instances[1].id, 2);
+  EXPECT_EQ(instances[1].type, PaintLayerAssetType::Mask);
+  EXPECT_TRUE(instances[1].is_mask);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_label(*dst, mask_id), "MaskRecord #1");
+
+  /* The items the drop laid down answer for it, the target row does not: its own instance is
+   * still the Smart Layer the rows came from. */
+  MaterialPaintLayer *tone_copy = last_mask_item(*target);
+  ASSERT_NE(tone_copy, nullptr);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_mask_item(*dst, tone_copy->marker), mask_id);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_mask_item(*dst, target->marker), -1);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *target), rows_id);
+}
+
+TEST_F(PaintLayersAssetTest, mask_reload_replace_swaps_the_mask_and_keeps_the_instance_values)
+{
+  Material *asset = make_mask_asset(*bmain, *this, "MaskReload", nullptr);
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  MaterialPaintLayer *target = add_layer(*dst, "Target", add_image("TargetMap"));
+  const int instance_id = apply_mask_and_record(*bmain, *dst, *asset, *target, false);
+  ASSERT_EQ(instance_id, 1);
+
+  /* The instance switched in_black off and moved gamma; the asset moved its own in_black. */
+  MaterialPaintLayer *tone = last_mask_item(*target);
+  ASSERT_NE(tone, nullptr);
+  BKE_paint_layers_item_param_enabled_set(*tone, "in_black", false);
+  ASSERT_TRUE(paint_layer_kind_param_set(*tone, PAINT_LAYER_LEVELS_GAMMA, 2.0f));
+  const bUUID target_marker = target->marker;
+  const bUUID old_tone_marker = tone->marker;
+  MaterialPaintLayer *asset_holder = static_cast<MaterialPaintLayer *>(asset->paint_layers.first);
+  ASSERT_NE(asset_holder, nullptr);
+  MaterialPaintLayer *asset_tone = last_mask_item(*asset_holder);
+  ASSERT_NE(asset_tone, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_set(*asset_tone, PAINT_LAYER_LEVELS_IN_BLACK, 0.75f));
+
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst, instance_id),
+            PaintLayerAssetReloadResult::Reloaded);
+
+  /* The row stayed and the mask came back fresh; the carried values came back over the fresh
+   * copies, the switched-off parameter following the asset instead. */
+  EXPECT_EQ(BLI_listbase_count(&dst->paint_layers), 1);
+  EXPECT_TRUE(BLI_uuid_equal(target->marker, target_marker));
+  EXPECT_EQ(BLI_listbase_count(&target->mask_stack), 2);
+  MaterialPaintLayer *fresh_tone = last_mask_item(*target);
+  ASSERT_NE(fresh_tone, nullptr);
+  EXPECT_STREQ(fresh_tone->name, "Tone");
+  EXPECT_FALSE(BLI_uuid_equal(fresh_tone->marker, old_tone_marker));
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_offered(*fresh_tone, "in_black"));
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_exposed(*fresh_tone, "in_black"));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*fresh_tone, PAINT_LAYER_LEVELS_IN_BLACK), 0.75f);
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*fresh_tone, "gamma"));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*fresh_tone, PAINT_LAYER_LEVELS_GAMMA), 2.0f);
+  /* The fresh items answer for the instance again, or the next reload would find nothing. */
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_mask_item(*dst, fresh_tone->marker), instance_id);
+}
+
+TEST_F(PaintLayersAssetTest, mask_reload_add_keeps_the_target_other_corrections)
+{
+  Material *asset = make_mask_asset(*bmain, *this, "MaskAddReload", nullptr);
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  MaterialPaintLayer *target = add_layer(*dst, "Target", add_image("TargetMap"));
+  /* The target's own mask: a base the drop must keep, and a correction that is not the
+   * instance's to remove. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*dst, target, 0.5f), nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_filter_add(*dst, target, MA_PAINT_LAYER_FILTER_LEVELS, "Own"),
+            nullptr);
+
+  const int instance_id = apply_mask_and_record(*bmain, *dst, *asset, *target, true);
+  ASSERT_EQ(instance_id, 1);
+  ASSERT_EQ(BLI_listbase_count(&target->mask_stack), 4);
+  MaterialPaintLayer *own = static_cast<MaterialPaintLayer *>(target->mask_stack.first->next);
+  ASSERT_NE(own, nullptr);
+  EXPECT_STREQ(own->name, "Own");
+  const bUUID own_marker = own->marker;
+
+  MaterialPaintLayer *tone = last_mask_item(*target);
+  ASSERT_NE(tone, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_set(*tone, PAINT_LAYER_LEVELS_GAMMA, 2.0f));
+
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst, instance_id),
+            PaintLayerAssetReloadResult::Reloaded);
+
+  /* Only the instance's own items were replaced; the correction the target had any other way
+   * keeps its marker and its place. */
+  ASSERT_EQ(BLI_listbase_count(&target->mask_stack), 4);
+  MaterialPaintLayer *own_after = static_cast<MaterialPaintLayer *>(
+      target->mask_stack.first->next);
+  ASSERT_NE(own_after, nullptr);
+  EXPECT_STREQ(own_after->name, "Own");
+  EXPECT_TRUE(BLI_uuid_equal(own_after->marker, own_marker));
+  MaterialPaintLayer *fresh_tone = last_mask_item(*target);
+  ASSERT_NE(fresh_tone, nullptr);
+  EXPECT_STREQ(fresh_tone->name, "Tone");
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*fresh_tone, PAINT_LAYER_LEVELS_GAMMA), 2.0f);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_mask_item(*dst, fresh_tone->marker), instance_id);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_mask_item(*dst, own_after->marker), -1);
+}
+
+TEST_F(PaintLayersAssetTest, mask_reload_fails_when_the_target_row_is_gone)
+{
+  Material *asset = make_mask_asset(*bmain, *this, "MaskGone", nullptr);
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  MaterialPaintLayer *target = add_layer(*dst, "Target", add_image("TargetMap"));
+  const int instance_id = apply_mask_and_record(*bmain, *dst, *asset, *target, false);
+  ASSERT_EQ(instance_id, 1);
+
+  /* The row the mask belonged to is gone: there is nothing left to reload onto, and nothing is
+   * laid down in its place. */
+  BKE_paint_layers_remove(*dst, target);
+  EXPECT_EQ(BLI_listbase_count(&dst->paint_layers), 0);
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst, instance_id),
+            PaintLayerAssetReloadResult::ImportFailed);
+  EXPECT_EQ(BLI_listbase_count(&dst->paint_layers), 0);
+  /* The record stays, so the failure is the report and not a silent unbind. */
+  EXPECT_TRUE(BKE_paint_layers_asset_instances_any(*dst));
+  EXPECT_EQ(instances_read(*dst).size(), 1);
+}
+
+TEST_F(PaintLayersAssetTest, mask_make_unique_unbinds_the_items)
+{
+  Material *asset = make_mask_asset(*bmain, *this, "MaskUnique", nullptr);
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  MaterialPaintLayer *target = add_layer(*dst, "Target", add_image("TargetMap"));
+  const int instance_id = apply_mask_and_record(*bmain, *dst, *asset, *target, false);
+  ASSERT_EQ(instance_id, 1);
+  MaterialPaintLayer *tone = last_mask_item(*target);
+  ASSERT_NE(tone, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_set(*tone, PAINT_LAYER_LEVELS_GAMMA, 2.0f));
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*tone, "gamma"));
+
+  BKE_paint_layers_asset_params_unbind(*dst, instance_id);
+
+  /* The marks and the record are gone, the values stay: unbinding is not a reset. */
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_offered(*tone, "gamma"));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*tone, PAINT_LAYER_LEVELS_GAMMA), 2.0f);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_mask_item(*dst, tone->marker), -1);
+  EXPECT_FALSE(BKE_paint_layers_asset_instances_any(*dst));
+}
+
+TEST_F(PaintLayersAssetTest, two_mask_drops_make_two_instances_and_one_reload_leaves_the_other)
+{
+  Material *asset = make_mask_asset(*bmain, *this, "TwiceMasked", nullptr);
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  MaterialPaintLayer *target_a = add_layer(*dst, "TargetA", add_image("TargetMapA"));
+  MaterialPaintLayer *target_b = add_layer(*dst, "TargetB", add_image("TargetMapB"));
+  const int first_id = apply_mask_and_record(*bmain, *dst, *asset, *target_a, false);
+  const int second_id = apply_mask_and_record(*bmain, *dst, *asset, *target_b, false);
+  ASSERT_EQ(first_id, 1);
+  ASSERT_EQ(second_id, 2);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_label(*dst, first_id), "TwiceMasked #1");
+  EXPECT_EQ(BKE_paint_layers_asset_instance_label(*dst, second_id), "TwiceMasked #2");
+
+  MaterialPaintLayer *tone_a = last_mask_item(*target_a);
+  MaterialPaintLayer *tone_b = last_mask_item(*target_b);
+  ASSERT_NE(tone_a, nullptr);
+  ASSERT_NE(tone_b, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_set(*tone_a, PAINT_LAYER_LEVELS_GAMMA, 0.1f));
+  ASSERT_TRUE(paint_layer_kind_param_set(*tone_b, PAINT_LAYER_LEVELS_GAMMA, 0.9f));
+  const bUUID tone_b_marker = tone_b->marker;
+
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst, first_id),
+            PaintLayerAssetReloadResult::Reloaded);
+
+  /* The first instance's mask came back fresh with its own carried value; the second instance's
+   * items were not touched by it. */
+  MaterialPaintLayer *fresh_a = last_mask_item(*target_a);
+  ASSERT_NE(fresh_a, nullptr);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*fresh_a, PAINT_LAYER_LEVELS_GAMMA), 0.1f);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_mask_item(*dst, fresh_a->marker), first_id);
+  MaterialPaintLayer *tone_b_after = last_mask_item(*target_b);
+  ASSERT_NE(tone_b_after, nullptr);
+  EXPECT_TRUE(BLI_uuid_equal(tone_b_after->marker, tone_b_marker));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*tone_b_after, PAINT_LAYER_LEVELS_GAMMA), 0.9f);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_mask_item(*dst, tone_b_after->marker), second_id);
+  const Vector<PaintLayerAssetInstanceInfo> instances = instances_read(*dst);
+  ASSERT_EQ(instances.size(), 2);
+  EXPECT_EQ(instances[0].number, 1);
+  EXPECT_EQ(instances[1].number, 2);
+}
+
 
 }  // namespace blender::bke::tests

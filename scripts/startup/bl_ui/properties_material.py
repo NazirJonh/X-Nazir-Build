@@ -871,6 +871,44 @@ def _smart_asset_instance_root_rows(ma, instance_id):
     return rows
 
 
+def _smart_asset_instance_mask_items(ma, instance_id):
+    """The mask items one Smart Mask instance laid on its target row.
+
+    A mask drop lays no rows: its items live on the target's mask, and only they answer for the
+    instance -- a duplicated item (a fresh marker) answers for no instance, the way a duplicated
+    row does. The target row itself belongs to whatever row instance it did before.
+    """
+    items = []
+    for row in ma.paint_layers:
+        for item in row.mask_items:
+            if item.smart_asset_instance_id == instance_id:
+                items.append(item)
+    return items
+
+
+def _smart_asset_instance_mask_target_name(ma, inst):
+    """The name of the row the Smart Mask instance landed on, or None when it is gone.
+
+    The record names the target by its marker; the walk follows the folders the way the
+    rows-collecting one does, since a drop can land on a row nested in one.
+    """
+
+    def walk(row):
+        if row.marker == inst.mask_target:
+            return row
+        for child in row.children:
+            found = walk(child)
+            if found is not None:
+                return found
+        return None
+
+    for row in ma.paint_layers:
+        found = walk(row)
+        if found is not None:
+            return found.name
+    return None
+
+
 class LAYER_MATERIAL_PT_smart_asset_params(LayerMaterialButtonsPanel, Panel):
     """The exposed parameters of the imported Smart assets, one section per instance.
 
@@ -898,7 +936,8 @@ class LAYER_MATERIAL_PT_smart_asset_params(LayerMaterialButtonsPanel, Panel):
         layout = self.layout
         ma = self._owner_material(context)
         # The instance the active row belongs to opens its section and marks its header; -1 reads
-        # as "no row active" and leaves every section closed.
+        # as "no row active" and leaves every section closed. A mask item answers for its Smart
+        # Mask instance the same way a stack row does for its own.
         active_instance_id = -1
         active = ma.paint_layers.active
         if active is not None:
@@ -909,15 +948,27 @@ class LAYER_MATERIAL_PT_smart_asset_params(LayerMaterialButtonsPanel, Panel):
             is_active = inst.id == active_instance_id
             # A row belongs to an instance through its record only: asking the row keeps the
             # duplicates (fresh markers, no instance) out of the section, and the roots the drop
-            # laid into a folder come with the walk.
-            rows = _smart_asset_instance_root_rows(ma, inst.id)
+            # laid into a folder come with the walk. A Smart Mask section asks the mask items the
+            # same way and says which row the mask landed on; it draws no rows of its own.
             header, body = layout.panel(
                 "smart_asset_instance_%d" % inst.id, default_closed=not is_active)
-            header.label(text=inst.label, icon='SOLO_ON' if is_active else 'MATERIAL')
-            if not body:
-                continue
-            if not draw_material_smart_asset_rows(body, rows):
-                body.label(text="The asset exposes no parameters", icon='INFO')
+            if inst.is_mask:
+                header.label(text=inst.label, icon='SOLO_ON' if is_active else 'MOD_MASK')
+                target_name = _smart_asset_instance_mask_target_name(ma, inst)
+                if target_name is not None:
+                    header.label(text="on " + target_name)
+                if not body:
+                    continue
+                items = _smart_asset_instance_mask_items(ma, inst.id)
+                if not draw_material_smart_asset_rows(body, items):
+                    body.label(text="The asset exposes no parameters", icon='INFO')
+            else:
+                header.label(text=inst.label, icon='SOLO_ON' if is_active else 'MATERIAL')
+                if not body:
+                    continue
+                rows = _smart_asset_instance_root_rows(ma, inst.id)
+                if not draw_material_smart_asset_rows(body, rows):
+                    body.label(text="The asset exposes no parameters", icon='INFO')
             body.separator()
             column = body.column(align=True)
             reload = column.operator(

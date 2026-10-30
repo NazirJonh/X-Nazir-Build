@@ -667,6 +667,11 @@ wmOperatorStatus smart_mask_apply_exec(bContext *C, wmOperator *op)
     BKE_report(op->reports, RPT_ERROR, "Could not apply the Smart Mask");
     return OPERATOR_CANCELLED;
   }
+  /* The dialog is the one point a Smart Mask is applied from, so this is where the drop becomes an
+   * instance: the record names the target row and the items this application laid on its mask, so
+   * a reload and Make Unique can find them again. */
+  BKE_paint_layers_asset_instance_record_mask(
+      *material, *asset, *target, add_corrections, result.imported_mask_items.as_span());
 
   /* The operator's #OPTYPE_UNDO flag pushes the undo step: the drop that opened the dialog pushes
    * none, and a second push here would record the edit twice. */

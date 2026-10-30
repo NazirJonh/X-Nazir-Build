@@ -620,6 +620,7 @@ bool BKE_paint_layers_import_rows(Main &bmain,
       r_result->rows = int(staged_items.size());
       r_result->dropped_curve_patches = dropped_curve_patches;
       r_result->stripped_maps = stripped_maps;
+      r_result->imported_mask_items = staged_items;
     }
     return true;
   }

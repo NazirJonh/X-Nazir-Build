@@ -235,6 +235,13 @@ void paint_layer_kind_params_init(MaterialPaintLayer &row);
 /** Store the parameter \a index, clamped to the schema's range. False for an unknown index. */
 bool paint_layer_kind_param_set(MaterialPaintLayer &row, int index, float value);
 
+/**
+ * The position of the parameter \a name in \a row's kind's schema, or -1 when the kind has no
+ * parameter of that name. The exposed-parameters list stores the position, so a rebuild of the
+ * list names the same parameter the row's own schema has.
+ */
+int paint_layer_kind_param_index(const MaterialPaintLayer &row, const char *name);
+
 /** The kind of \a row, or null when the file names one this build does not know. */
 const PaintLayerKindInfo *paint_layer_kind_find(int8_t source, int16_t subtype);
 

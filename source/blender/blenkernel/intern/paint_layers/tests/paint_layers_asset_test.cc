@@ -364,6 +364,98 @@ TEST_F(PaintLayersAssetTest, smart_asset_import_marks_the_exposed_parameters)
   EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*tone_copy, PAINT_LAYER_LEVELS_GAMMA), 1.0f);
 }
 
+TEST_F(PaintLayersAssetTest, param_switch_flips_the_instance_flag)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  ASSERT_NE(add_levels_effect(*src, *row, "Tone"), nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartSwitch");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(BKE_paint_layers_import_rows(
+      *bmain, *dst, *asset, asset_top_rows(*asset).as_span(), params, &result));
+  MaterialPaintLayer *tone = first_effect(*result.imported[0]);
+  ASSERT_NE(tone, nullptr);
+
+  /* The import marks Int 1: offered and active. */
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_offered(*tone, "in_black"));
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*tone, "in_black"));
+
+  /* Switching off writes the Int 0 the panel and the reload read; the mark stays, so the
+   * parameter is still offered. */
+  BKE_paint_layers_item_param_enabled_set(*tone, "in_black", false);
+  const IDProperty *marks = IDP_GetPropertyFromGroup(tone->system_properties,
+                                                     ASSET_PARAMS_PROP_NAME);
+  ASSERT_NE(marks, nullptr);
+  const IDProperty *mark = IDP_GetPropertyFromGroup(marks, "in_black");
+  ASSERT_NE(mark, nullptr);
+  EXPECT_EQ(mark->type, IDP_INT);
+  EXPECT_EQ(IDP_int_get(mark), 0);
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_offered(*tone, "in_black"));
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_exposed(*tone, "in_black"));
+
+  /* Switching back on writes the 1 the import had put there. */
+  BKE_paint_layers_item_param_enabled_set(*tone, "in_black", true);
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*tone, "in_black"));
+  EXPECT_EQ(IDP_int_get(IDP_GetPropertyFromGroup(marks, "in_black")), 1);
+}
+
+TEST_F(PaintLayersAssetTest, param_switch_without_a_mark_does_nothing)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  MaterialPaintLayer *tone = add_levels_effect(*src, *row, "Tone");
+  ASSERT_NE(tone, nullptr);
+
+  /* A row the import never marked: not offered, and the switch must not conjure a mark group. */
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_offered(*tone, "gamma"));
+  BKE_paint_layers_item_param_enabled_set(*tone, "gamma", false);
+  EXPECT_EQ(IDP_GetPropertyFromGroup(tone->system_properties, ASSET_PARAMS_PROP_NAME), nullptr);
+
+  /* A row with no system properties at all must survive the switch the same way. */
+  MaterialPaintLayer *plain = BKE_paint_layers_add(*src, "Plain", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(plain, nullptr);
+  BKE_paint_layers_item_param_enabled_set(*plain, "gamma", false);
+  EXPECT_EQ(plain->system_properties, nullptr);
+}
+
+TEST_F(PaintLayersAssetTest, param_mark_without_a_zero_int_reads_as_active)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  MaterialPaintLayer *tone = add_levels_effect(*src, *row, "Tone");
+  ASSERT_NE(tone, nullptr);
+
+  /* Marks an older file or build may carry: a non-zero Int and a mark without a usable Int value
+   * at all. Both read as active -- only an Int 0 is the switched-off state. */
+  IDProperty *marks = bke::idprop::create_group(ASSET_PARAMS_PROP_NAME).release();
+  IDP_ReplaceInGroup(tone->system_properties, marks);
+  IDP_ReplaceInGroup(marks, bke::idprop::create("in_black", 3).release());
+  IDP_ReplaceInGroup(marks, bke::idprop::create("gamma", 0.5f).release());
+
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_offered(*tone, "in_black"));
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*tone, "in_black"));
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_offered(*tone, "gamma"));
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*tone, "gamma"));
+
+  /* The switch only writes an Int: a mark of another shape is left alone, still active. */
+  BKE_paint_layers_item_param_enabled_set(*tone, "gamma", false);
+  const IDProperty *float_mark = IDP_GetPropertyFromGroup(marks, "gamma");
+  ASSERT_NE(float_mark, nullptr);
+  EXPECT_EQ(float_mark->type, IDP_FLOAT);
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*tone, "gamma"));
+}
+
 TEST_F(PaintLayersAssetTest, import_marks_do_not_move_the_bake_hash)
 {
   /* Two stacks built the same way: one imported from a smart asset (its marks in place), one from
@@ -626,6 +718,87 @@ TEST_F(PaintLayersAssetTest, reload_of_one_instance_leaves_the_other_and_the_pla
   EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *fresh), first_id);
   EXPECT_FLOAT_EQ(
       paint_layer_kind_param_get(*first_effect(*fresh), PAINT_LAYER_LEVELS_IN_BLACK), 0.1f);
+}
+
+TEST_F(PaintLayersAssetTest, reload_keeps_a_switched_off_parameter_off)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  ASSERT_NE(add_levels_effect(*src, *row, "Tone"), nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartKeepOff");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  const int instance_id = import_and_record(*bmain, *dst, *asset, asset_top_rows(*asset).as_span());
+  ASSERT_EQ(instance_id, 1);
+  MaterialPaintLayer *tone = first_effect(
+      *static_cast<MaterialPaintLayer *>(dst->paint_layers.first));
+  ASSERT_NE(tone, nullptr);
+
+  /* The instance switched in_black off and moved both values; the asset moved its own too. */
+  BKE_paint_layers_item_param_enabled_set(*tone, "in_black", false);
+  paint_layer_kind_param_set(*tone, PAINT_LAYER_LEVELS_IN_BLACK, 0.25f);
+  paint_layer_kind_param_set(*tone, PAINT_LAYER_LEVELS_GAMMA, 2.0f);
+  MaterialPaintLayer *asset_row = static_cast<MaterialPaintLayer *>(asset->paint_layers.first);
+  paint_layer_kind_param_set(*first_effect(*asset_row), PAINT_LAYER_LEVELS_IN_BLACK, 0.75f);
+  paint_layer_kind_param_set(*first_effect(*asset_row), PAINT_LAYER_LEVELS_GAMMA, 1.5f);
+
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst, instance_id),
+            PaintLayerAssetReloadResult::Reloaded);
+
+  MaterialPaintLayer *fresh = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
+  MaterialPaintLayer *fresh_tone = first_effect(*fresh);
+  ASSERT_NE(fresh_tone, nullptr);
+  /* The switch came back off over the fresh mark, found by the parameter's name, and the value
+   * follows the asset: the carried 0.25 was of a parameter the panel greys out. */
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_offered(*fresh_tone, "in_black"));
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_exposed(*fresh_tone, "in_black"));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*fresh_tone, PAINT_LAYER_LEVELS_IN_BLACK), 0.75f);
+  /* The active parameter's carried value came back, as any reload brings it. */
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*fresh_tone, "gamma"));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*fresh_tone, PAINT_LAYER_LEVELS_GAMMA), 2.0f);
+}
+
+TEST_F(PaintLayersAssetTest, param_switch_of_one_instance_leaves_the_other_and_the_asset_alone)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  ASSERT_NE(add_levels_effect(*src, *row, "Tone"), nullptr);
+  const MaterialPaintLayer *asset_rows[1] = {row};
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(asset_rows, 1),
+                                                  PaintLayerAssetType::Material,
+                                                  "SplitSwitch");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  const int first_id = import_and_record(*bmain, *dst, *asset, asset_top_rows(*asset).as_span());
+  const int second_id = import_and_record(*bmain, *dst, *asset, asset_top_rows(*asset).as_span());
+  ASSERT_EQ(first_id, 1);
+  ASSERT_EQ(second_id, 2);
+  MaterialPaintLayer *first_row = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
+  MaterialPaintLayer *second_row = first_row->next;
+  ASSERT_NE(second_row, nullptr);
+
+  BKE_paint_layers_item_param_enabled_set(*first_effect(*first_row), "gamma", false);
+
+  /* The first instance's switch is off, its mark still there; the second keeps its own mark at
+   * the Int 1 the import wrote -- the switch never crossed the instance border. */
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_exposed(*first_effect(*first_row), "gamma"));
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_offered(*first_effect(*first_row), "gamma"));
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*first_effect(*second_row), "gamma"));
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_offered(*first_effect(*second_row), "gamma"));
+  /* The asset's own rows never carried import marks, and a switch on an instance cannot give
+   * them one. */
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_offered(
+      *first_effect(*static_cast<MaterialPaintLayer *>(asset->paint_layers.first)), "gamma"));
 }
 
 TEST_F(PaintLayersAssetTest, make_unique_of_one_instance_leaves_the_other_bound)
@@ -1976,6 +2149,224 @@ TEST_F(PaintLayersAssetTest, smart_mask_refuses_an_anchor_point_reader_in_the_ma
                                           PaintLayerAssetType::Mask,
                                           "SmartMaskReader"),
             nullptr);
+}
+
+TEST_F(PaintLayersAssetTest, unexposed_parameter_imports_as_a_plain_local)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  MaterialPaintLayer *tone = add_levels_effect(*src, *row, "Tone");
+  ASSERT_NE(tone, nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartTrimmed");
+  ASSERT_NE(asset, nullptr);
+  /* The expose-everything build starts from every schema parameter. */
+  EXPECT_TRUE(BKE_paint_layers_asset_param_is_exposed(*asset, *tone, "gamma"));
+
+  BKE_paint_layers_asset_param_expose_set(*asset, *tone, "gamma", false);
+  EXPECT_FALSE(BKE_paint_layers_asset_param_is_exposed(*asset, *tone, "gamma"));
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(BKE_paint_layers_import_rows(
+      *bmain, *dst, *asset, asset_top_rows(*asset).as_span(), params, &result));
+  MaterialPaintLayer *copy = result.imported[0];
+  MaterialPaintLayer *tone_copy = first_effect(*copy);
+  ASSERT_NE(tone_copy, nullptr);
+
+  /* Only the still-exposed parameters carry their marks; the trimmed one imports as a plain
+   * local, edited in the row's own place and bound to nothing. */
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*tone_copy, "in_black"));
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_exposed(*tone_copy, "gamma"));
+  ASSERT_NE(tone_copy->system_properties, nullptr);
+  const IDProperty *marks = IDP_GetPropertyFromGroup(tone_copy->system_properties,
+                                                     ASSET_PARAMS_PROP_NAME);
+  ASSERT_NE(marks, nullptr);
+  EXPECT_NE(IDP_GetPropertyFromGroup(marks, "in_black"), nullptr);
+  EXPECT_EQ(IDP_GetPropertyFromGroup(marks, "gamma"), nullptr);
+}
+
+TEST_F(PaintLayersAssetTest, reexposing_restores_the_entry_with_its_schema_position)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  MaterialPaintLayer *tone = add_levels_effect(*src, *row, "Tone");
+  ASSERT_NE(tone, nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartReexposed");
+  ASSERT_NE(asset, nullptr);
+  BKE_paint_layers_asset_param_expose_set(*asset, *tone, "gamma", false);
+
+  BKE_paint_layers_asset_param_expose_set(*asset, *tone, "gamma", true);
+  EXPECT_TRUE(BKE_paint_layers_asset_param_is_exposed(*asset, *tone, "gamma"));
+  const IDProperty *params = BKE_paint_layers_asset_params_get(*asset);
+  const IDProperty *tone_entry = IDP_GetPropertyFromGroup(params, "Tone");
+  ASSERT_NE(tone_entry, nullptr);
+  const IDProperty *gamma = IDP_GetPropertyFromGroup(tone_entry, "gamma");
+  ASSERT_NE(gamma, nullptr);
+  EXPECT_EQ(IDP_int_get(gamma), PAINT_LAYER_LEVELS_GAMMA);
+
+  /* Unexposing the last parameter of an item removes the item's group with it: the import walks
+   * entries, and an empty one would only look like work to do. */
+  const PaintLayerKindInfo *kind = paint_layer_kind_of(*tone);
+  ASSERT_NE(kind, nullptr);
+  for (const int i : IndexRange(kind->params_num)) {
+    BKE_paint_layers_asset_param_expose_set(*asset, *tone, kind->params[i].name, false);
+  }
+  EXPECT_EQ(IDP_GetPropertyFromGroup(BKE_paint_layers_asset_params_get(*asset), "Tone"),
+            nullptr);
+}
+
+TEST_F(PaintLayersAssetTest, expose_toggle_mirrors_into_the_asset_metadata)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  MaterialPaintLayer *tone = add_levels_effect(*src, *row, "Tone");
+  ASSERT_NE(tone, nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartMirrored");
+  ASSERT_NE(asset, nullptr);
+  asset->id.asset_data = BKE_asset_metadata_create();
+  BKE_paint_layers_asset_params_expose(*asset);
+
+  BKE_paint_layers_asset_param_expose_set(*asset, *tone, "gamma", false);
+  const IDProperty *mirrored = BKE_asset_metadata_idprop_find(asset->id.asset_data,
+                                                             "paint_asset_params");
+  ASSERT_NE(mirrored, nullptr);
+  const IDProperty *mirrored_tone = IDP_GetPropertyFromGroup(mirrored, "Tone");
+  ASSERT_NE(mirrored_tone, nullptr);
+  EXPECT_NE(IDP_GetPropertyFromGroup(mirrored_tone, "in_black"), nullptr);
+  EXPECT_EQ(IDP_GetPropertyFromGroup(mirrored_tone, "gamma"), nullptr);
+
+  BKE_paint_layers_asset_param_expose_set(*asset, *tone, "gamma", true);
+  mirrored = BKE_asset_metadata_idprop_find(asset->id.asset_data, "paint_asset_params");
+  ASSERT_NE(mirrored, nullptr);
+  mirrored_tone = IDP_GetPropertyFromGroup(mirrored, "Tone");
+  ASSERT_NE(mirrored_tone, nullptr);
+  EXPECT_NE(IDP_GetPropertyFromGroup(mirrored_tone, "gamma"), nullptr);
+}
+
+TEST_F(PaintLayersAssetTest, expose_toggle_on_a_material_without_a_list_is_a_noop)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  MaterialPaintLayer *tone = add_levels_effect(*src, *row, "Tone");
+  ASSERT_NE(tone, nullptr);
+
+  /* A plain material has nothing to select on: the toggle must not build a half list. */
+  BKE_paint_layers_asset_param_expose_set(*src, *tone, "gamma", false);
+  BKE_paint_layers_asset_param_expose_set(*src, *tone, "gamma", true);
+  EXPECT_FALSE(BKE_paint_layers_asset_param_is_exposed(*src, *tone, "gamma"));
+  EXPECT_EQ(IDP_GetPropertyFromGroup_null(src->id.properties, "paint_asset_params"), nullptr);
+}
+
+TEST_F(PaintLayersAssetTest, resaving_an_asset_keeps_the_manual_expose_choice)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  MaterialPaintLayer *tone = add_levels_effect(*src, *row, "Tone");
+  ASSERT_NE(tone, nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartResaved");
+  ASSERT_NE(asset, nullptr);
+  /* The author trims one parameter on the asset's own panel. */
+  BKE_paint_layers_asset_param_expose_set(*asset, *tone, "gamma", false);
+
+  /* The re-save runs the full expose again on the material that already carries the list: the
+   * entry the author trimmed survives, instead of being rebuilt with everything exposed. */
+  BKE_paint_layers_asset_params_expose(*asset);
+  EXPECT_TRUE(BKE_paint_layers_asset_param_is_exposed(*asset, *tone, "in_black"));
+  EXPECT_FALSE(BKE_paint_layers_asset_param_is_exposed(*asset, *tone, "gamma"));
+
+  /* An effect the author added since the last save is new to the list: it arrives with everything
+   * exposed, and the old item's trimming stays. */
+  MaterialPaintLayer *asset_row = static_cast<MaterialPaintLayer *>(asset->paint_layers.first);
+  MaterialPaintLayer *extra = add_levels_effect(*asset, *asset_row, "Extra");
+  ASSERT_NE(extra, nullptr);
+  BKE_paint_layers_asset_params_expose(*asset);
+  EXPECT_TRUE(BKE_paint_layers_asset_param_is_exposed(*asset, *extra, "in_black"));
+  EXPECT_FALSE(BKE_paint_layers_asset_param_is_exposed(*asset, *tone, "gamma"));
+
+  /* An item gone from the stack takes its entry with it. */
+  BKE_paint_layers_remove(*asset, extra);
+  BKE_paint_layers_asset_params_expose(*asset);
+  EXPECT_EQ(IDP_GetPropertyFromGroup(BKE_paint_layers_asset_params_get(*asset), "Extra"),
+            nullptr);
+  EXPECT_FALSE(BKE_paint_layers_asset_param_is_exposed(*asset, *tone, "gamma"));
+}
+
+TEST_F(PaintLayersAssetTest, reload_drops_a_parameter_the_asset_unexposed)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  MaterialPaintLayer *tone = add_levels_effect(*src, *row, "Tone");
+  ASSERT_NE(tone, nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartUnexposed");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(BKE_paint_layers_import_rows(
+      *bmain, *dst, *asset, asset_top_rows(*asset).as_span(), params, &result));
+  const int instance_id = BKE_paint_layers_asset_instance_record(
+      *dst, *asset, PaintLayerAssetType::Material, result.imported.as_span());
+  ASSERT_EQ(instance_id, 1);
+
+  /* The instance changed both parameters; the asset then moved one and stopped exposing the
+   * other. */
+  MaterialPaintLayer *copy = result.imported[0];
+  MaterialPaintLayer *tone_copy = first_effect(*copy);
+  ASSERT_TRUE(paint_layer_kind_param_set(*tone_copy, PAINT_LAYER_LEVELS_IN_BLACK, 0.25f));
+  ASSERT_TRUE(paint_layer_kind_param_set(*tone_copy, PAINT_LAYER_LEVELS_GAMMA, 2.0f));
+  MaterialPaintLayer *asset_row = static_cast<MaterialPaintLayer *>(asset->paint_layers.first);
+  MaterialPaintLayer *asset_tone = first_effect(*asset_row);
+  ASSERT_NE(asset_tone, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_set(*asset_tone, PAINT_LAYER_LEVELS_IN_BLACK, 0.75f));
+  ASSERT_TRUE(paint_layer_kind_param_set(*asset_tone, PAINT_LAYER_LEVELS_GAMMA, 0.5f));
+  BKE_paint_layers_asset_param_expose_set(*asset, *asset_tone, "gamma", false);
+
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst, instance_id),
+            PaintLayerAssetReloadResult::Reloaded);
+
+  /* The still-exposed value came over; the unexposed one follows the asset again. */
+  MaterialPaintLayer *fresh = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
+  MaterialPaintLayer *fresh_tone = first_effect(*fresh);
+  ASSERT_NE(fresh_tone, nullptr);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*fresh_tone, PAINT_LAYER_LEVELS_IN_BLACK), 0.25f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*fresh_tone, PAINT_LAYER_LEVELS_GAMMA), 0.5f);
+  /* The fresh marks bind what the asset still exposes: in_black only. */
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*fresh_tone, "in_black"));
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_exposed(*fresh_tone, "gamma"));
 }
 
 

@@ -174,9 +174,10 @@ Material *BKE_paint_layers_asset_create(Main &bmain,
 /** \name Exposed parameters
  *
  * A smart asset exposes parameters to its instances: the asset carries a list of what to show,
- * and an import marks the copied rows' parameters so the instance's panel can find them. V1
- * exposes every kind parameter of every saved item (a filter's radius, a mask operator's
- * tolerance); picking a subset per parameter is a later step.
+ * and an import marks the copied rows' parameters so the instance's panel can find them. The list
+ * is the selection: #BKE_paint_layers_asset_params_expose builds it with every kind parameter of
+ * every saved item (a filter's radius, a mask operator's tolerance), and
+ * #BKE_paint_layers_asset_param_expose_set trims it per parameter from the asset's own panel.
  *
  * The asset's list lives in the material's custom properties under #ASSET_PARAMS_PROP_NAME and is
  * mirrored into the asset metadata, the way the asset type tag is. It is keyed by item name --
@@ -205,8 +206,40 @@ bool BKE_paint_layers_asset_params_has(const Material &ma);
  * (Re)build \a ma's exposed-parameters list from its own stack: every kind parameter of every row,
  * correction, mask item and folder child, keyed by item name. Mirror it into the asset metadata
  * when the material is already marked as an asset.
+ *
+ * This is the expose-everything build an asset starts with; trimming it afterwards is
+ * #BKE_paint_layers_asset_param_expose_set's job. A re-save must not wipe that trimming: when \a
+ * ma already carries a list, an item it has an entry for keeps the author's subset -- only the
+ * parameters the entry names stay exposed, their stored positions refreshed to the current schema
+ * -- and an item the list has no entry for is new to it and arrives with everything exposed.
+ * Entries of items gone from the stack go with them.
  */
 void BKE_paint_layers_asset_params_expose(Material &ma);
+
+/**
+ * Whether \a ma's exposed-parameters list has an entry for \a item's parameter \a param_name: the
+ * same list an import reads its marks from, so false here means the parameter imports as a plain
+ * local. False too when \a ma carries no list (it is not a smart asset).
+ */
+bool BKE_paint_layers_asset_param_is_exposed(const Material &ma,
+                                             const MaterialPaintLayer &item,
+                                             const char *param_name);
+
+/**
+ * Add or remove \a item's \a param_name from \a ma's exposed-parameters list. The list is the
+ * selection: what an import marks and binds, and what the instances' panel shows. An added entry
+ * carries the position the item's own schema has the parameter at, so an import can still tell a
+ * schema that moved from one that kept its layout; removing the last entry of an item removes the
+ * item's group with it. The asset-metadata mirror is refreshed either way.
+ *
+ * Does nothing when \a ma has no list of its own (it is not a smart asset) or the item's kind has
+ * no parameter of that name. The list is keyed by item name, so two same-named items share one
+ * entry and toggling one toggles both, the way #BKE_paint_layers_asset_params_expose builds it.
+ */
+void BKE_paint_layers_asset_param_expose_set(Material &ma,
+                                             const MaterialPaintLayer &item,
+                                             const char *param_name,
+                                             bool expose);
 
 /**
  * Mark the exposed parameters on the items just copied from \a src, reading \a src's
@@ -227,9 +260,33 @@ void BKE_paint_layers_asset_params_mark_imported(const Material &src,
  */
 void BKE_paint_layers_asset_params_unbind(Material &ma, int instance_id = 0);
 
-/** Whether \a item's parameter \a param_name carries the exposed marker. */
+/**
+ * Whether \a item's parameter \a param_name is an active instance parameter: the exposed marker is
+ * there and not switched off. A marker of any shape but an Int 0 reads as active -- an import
+ * writes Int 1 and older files carry markers without a usable value, so only the explicit 0 means
+ * the user turned the parameter off on this instance.
+ */
 bool BKE_paint_layers_item_param_is_exposed(const MaterialPaintLayer &item,
                                             const char *param_name);
+
+/**
+ * Whether the asset offered \a item's parameter \a param_name to this instance at all: the exposed
+ * marker is there, active or switched off. This is what the instance panel lists; a parameter
+ * without the marker was never offered and the panel shows nothing for it.
+ */
+bool BKE_paint_layers_item_param_is_offered(const MaterialPaintLayer &item,
+                                            const char *param_name);
+
+/**
+ * Switch \a item's offered parameter \a param_name on or off for this instance alone: the marker
+ * stays (Int 1 / Int 0), so the parameter stays offered -- off only greys the panel row out and
+ * makes a reload take the asset's own value instead of the carried one. The asset and the other
+ * instances are not touched. A parameter without the marker is not offered, and there is nothing
+ * to switch: nothing is written and no marker is made.
+ */
+void BKE_paint_layers_item_param_enabled_set(MaterialPaintLayer &item,
+                                             const char *param_name,
+                                             bool enabled);
 
 /** \} */
 
@@ -335,11 +392,14 @@ enum class PaintLayerAssetReloadResult : int8_t {
 /**
  * Replace the rows the instance \a instance_id received from its smart asset with fresh copies of
  * the asset's rows, carrying the exposed-parameter values the user changed on the instance over
- * to the new rows. Every other edit the user made to the imported rows (painted pixels, added
- * layers, moved items) is lost: the asset is the thing being followed. The other instances of the
- * material are not touched, and the reloaded instance keeps its id, its number and its place in
- * the stack: the import lands in the seam between the rows' neighbours, or at the top when the
- * neighbours are gone.
+ * to the new rows. A parameter the asset no longer exposes stopped being an instance parameter:
+ * the fresh copy takes the asset's own value instead of the carried one. A parameter the instance
+ * switched off stays off on the fresh markers, and its value follows the asset the same way.
+ * Every other edit the user
+ * made to the imported rows (painted pixels, added layers, moved items) is lost: the asset is the
+ * thing being followed. The other instances of the material are not touched, and the reloaded
+ * instance keeps its id, its number and its place in the stack: the import lands in the seam
+ * between the rows' neighbours, or at the top when the neighbours are gone.
  */
 PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain, Material &ma, int instance_id);
 

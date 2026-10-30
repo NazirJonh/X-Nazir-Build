@@ -2836,6 +2836,101 @@ static bool rna_MaterialPaintLayerKindParam_exposed_get(PointerRNA *ptr)
       *static_cast<const MaterialPaintLayer *>(parent.data), prop->name);
 }
 
+/**
+ * Whether the smart asset this material is offers the parameter to the materials that import it:
+ * the asset's exposed-parameters list names it. The import reads the same list, so this is the
+ * one property the asset's own panel writes; on an instance (no list on the material) it reads
+ * false and stays that way.
+ */
+static bool rna_MaterialPaintLayerKindParam_asset_exposed_get(PointerRNA *ptr)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  if (prop == nullptr || ptr->owner_id == nullptr || GS(ptr->owner_id->name) != ID_MA ||
+      ptr->ancestors.is_empty())
+  {
+    return false;
+  }
+  const AncestorPointerRNA &parent = ptr->ancestors.last();
+  if (parent.type != RNA_MaterialPaintLayer || parent.data == nullptr) {
+    return false;
+  }
+  return BKE_paint_layers_asset_param_is_exposed(
+      *id_cast<const Material *>(ptr->owner_id),
+      *static_cast<const MaterialPaintLayer *>(parent.data),
+      prop->name);
+}
+
+static void rna_MaterialPaintLayerKindParam_asset_exposed_set(PointerRNA *ptr, const bool value)
+{
+  IDProperty *prop = static_cast<IDProperty *>(ptr->data);
+  if (prop == nullptr || ptr->owner_id == nullptr || GS(ptr->owner_id->name) != ID_MA ||
+      ptr->ancestors.is_empty())
+  {
+    return;
+  }
+  const AncestorPointerRNA &parent = ptr->ancestors.last();
+  if (parent.type != RNA_MaterialPaintLayer || parent.data == nullptr) {
+    return;
+  }
+  BKE_paint_layers_asset_param_expose_set(*id_cast<Material *>(ptr->owner_id),
+                                          *static_cast<MaterialPaintLayer *>(parent.data),
+                                          prop->name,
+                                          value);
+}
+
+/**
+ * Whether the smart asset offered this parameter to the instance that imported it: the import laid
+ * the mark on this copy, active or switched off. Read-only -- whether the asset offers anything is
+ * the asset's decision (#asset_exposed), the instance only switches what it was given. False on the
+ * asset's own rows, which carry no import marks.
+ */
+static bool rna_MaterialPaintLayerKindParam_asset_offered_get(PointerRNA *ptr)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  if (prop == nullptr || ptr->ancestors.is_empty()) {
+    return false;
+  }
+  const AncestorPointerRNA &parent = ptr->ancestors.last();
+  if (parent.type != RNA_MaterialPaintLayer || parent.data == nullptr) {
+    return false;
+  }
+  return BKE_paint_layers_item_param_is_offered(
+      *static_cast<const MaterialPaintLayer *>(parent.data), prop->name);
+}
+
+/** The read side of the instance switch: a parameter that is not offered reads as switched off. */
+static bool rna_MaterialPaintLayerKindParam_asset_enabled_get(PointerRNA *ptr)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  if (prop == nullptr || ptr->ancestors.is_empty()) {
+    return false;
+  }
+  const AncestorPointerRNA &parent = ptr->ancestors.last();
+  if (parent.type != RNA_MaterialPaintLayer || parent.data == nullptr) {
+    return false;
+  }
+  return BKE_paint_layers_item_param_is_exposed(
+      *static_cast<const MaterialPaintLayer *>(parent.data), prop->name);
+}
+
+/**
+ * The write side of the instance switch: on or off for this instance alone. A parameter the asset
+ * never offered has no mark to flip, and the core keeps it that way -- no mark is conjured.
+ */
+static void rna_MaterialPaintLayerKindParam_asset_enabled_set(PointerRNA *ptr, const bool value)
+{
+  IDProperty *prop = static_cast<IDProperty *>(ptr->data);
+  if (prop == nullptr || ptr->ancestors.is_empty()) {
+    return;
+  }
+  const AncestorPointerRNA &parent = ptr->ancestors.last();
+  if (parent.type != RNA_MaterialPaintLayer || parent.data == nullptr) {
+    return;
+  }
+  BKE_paint_layers_item_param_enabled_set(
+      *static_cast<MaterialPaintLayer *>(parent.data), prop->name, value);
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -4433,7 +4528,46 @@ static void rna_def_material_paint_layer_kind_param(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Exposed",
                            "Whether a smart-asset import marked this parameter as one the asset "
-                           "exposes; the Smart Asset Parameters panel shows these");
+                           "exposes and this instance keeps active: a parameter the instance "
+                           "switched off reads false, the mark stays");
+
+  /* The write side of the same list the import reads: the asset's own panel toggles it, and the
+   * next import of the asset marks and binds what it names. Separate from the read-only
+   * #exposed above, which is the label an import already laid on this copy. */
+  prop = RNA_def_property(srna, "asset_exposed", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayerKindParam_asset_exposed_get",
+                                 "rna_MaterialPaintLayerKindParam_asset_exposed_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Expose",
+      "Whether this smart asset offers the parameter to the materials that import it: an import "
+      "marks and binds the exposed ones, the rest arrive as plain locals");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* The import marks on an instance's copy, read-only: what the asset offers is the asset's own
+   * list (#asset_exposed above), the instance only works with what it was given. */
+  prop = RNA_def_property(srna, "asset_offered", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayerKindParam_asset_offered_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Offered",
+                           "Whether the smart asset offered this parameter to the instance that "
+                           "imported it; the instance's Smart Asset Parameters panel lists these");
+
+  /* The instance's own switch over a parameter the asset offered: off, the panel greys the value
+   * out and a reload takes the asset's own value instead of the instance's. The asset and the
+   * other instances are not touched. A parameter that is not offered has no mark and stays off. */
+  prop = RNA_def_property(srna, "asset_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayerKindParam_asset_enabled_get",
+                                 "rna_MaterialPaintLayerKindParam_asset_enabled_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Enabled",
+      "Whether this instance follows the parameter the asset offered: off, the parameter stays "
+      "offered but this instance ignores it");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 }
 
 static void rna_def_material_smart_asset_instance(BlenderRNA *brna)

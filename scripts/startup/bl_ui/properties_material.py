@@ -21,6 +21,7 @@ from bl_ui.properties_material_paint_layers import (
     draw_material_layer_height,
     draw_material_mask_coverage_item,
     draw_material_mask_item,
+    draw_material_smart_asset_expose,
     draw_material_smart_asset_rows,
 )
 # The brush glyph of the New Layered Material button: the same Material Symbols codepoint the Stack
@@ -929,6 +930,34 @@ class LAYER_MATERIAL_PT_smart_asset_params(LayerMaterialButtonsPanel, Panel):
             layout.label(text="The asset exposes no parameters", icon='INFO')
 
 
+class LAYER_MATERIAL_PT_smart_asset_expose(LayerMaterialButtonsPanel, Panel):
+    """The expose switches of a Smart asset on the asset material itself.
+
+    Every kind parameter the asset's stack carries, with a toggle each: checked, an import marks
+    and binds the parameter and the instances' panel shows it; unchecked, it arrives as a plain
+    local. The asset was saved with everything exposed; this is where the author trims the list.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_smart_asset_expose"
+    bl_label = "Expose Parameters"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        if cls._object_mask_editing(context):
+            return False
+        ma = cls._owner_material(context)
+        # The exposed-parameters list lives in the asset material's own custom properties; an
+        # instance carries the import marks beside its rows instead, and no list here.
+        return ma is not None and ma.get("paint_asset_params") is not None
+
+    def draw(self, context):
+        layout = self.layout
+        ma = self._owner_material(context)
+        if not draw_material_smart_asset_expose(layout, ma):
+            layout.label(text="No parameters to expose", icon='INFO')
+
+
 class LAYER_MT_mapping_reset(Menu):
     """Reset the shown row's UV mapping: all of its values, or one part at a time."""
 
@@ -1524,6 +1553,7 @@ classes = (
     LAYER_MATERIAL_PT_output_texture,
     LAYER_MATERIAL_PT_object_mask,
     LAYER_MATERIAL_PT_smart_asset_params,
+    LAYER_MATERIAL_PT_smart_asset_expose,
 )
 
 

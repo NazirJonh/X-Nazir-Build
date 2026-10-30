@@ -391,18 +391,21 @@ def _draw_kind_param(layout, param):
 
 
 def draw_material_smart_asset_rows(layout, rows):
-    """The exposed parameters of the given rows: one smart-asset instance's part of the stack.
+    """The offered parameters of the given rows: one smart-asset instance's part of the stack.
 
     Each parameter is the row's own property, so an edit here is an edit in the row's place with
-    the undo and the invalidation that any edit of it gets. A payload parameter (a ramp, curves, a
-    color balance) is drawn in its row's own panel and not here. Items under a row (a correction,
-    a mask item, a folder child) draw after it, indented, with their name as the caption.
+    the undo and the invalidation that any edit of it gets. Every offered parameter carries the
+    instance's own switch: off, the value greys out and stops answering edits, and a reload takes
+    the asset's own value instead -- the asset and the other instances are not touched. A payload
+    parameter (a ramp, curves, a color balance) is drawn in its row's own panel and not here.
+    Items under a row (a correction, a mask item, a folder child) draw after it, indented, with
+    their name as the caption.
     """
     drawn_any = False
 
     def draw_item(item, depth):
         nonlocal drawn_any
-        params = [param for param in item.kind_params if param.exposed]
+        params = [param for param in item.kind_params if param.asset_offered]
         if not params:
             return
         drawn_any = True
@@ -412,7 +415,14 @@ def draw_material_smart_asset_rows(layout, rows):
             caption.label(text=item.name + ":", icon='DOT')
             column = layout.column(align=True)
         for param in params:
-            _draw_kind_param(column, param)
+            row = column.row(align=True)
+            # The instance's own switch, left of the value: the mark stays either way, so the
+            # parameter stays offered -- off only makes this instance ignore it.
+            row.prop(param, "asset_enabled", text="")
+            value = row.row(align=True)
+            value.active = param.asset_enabled
+            value.enabled = param.asset_enabled
+            _draw_kind_param(value, param)
 
     def draw_row(row, depth):
         draw_item(row, depth)
@@ -424,6 +434,45 @@ def draw_material_smart_asset_rows(layout, rows):
             draw_row(child, depth + 1)
 
     for row in rows:
+        draw_row(row, 0)
+    return drawn_any
+
+
+def draw_material_smart_asset_expose(layout, ma):
+    """The parameters this smart asset offers its instances, with an expose toggle each.
+
+    The asset's own list: a checked parameter is one an import marks and binds, and the instances'
+    panel shows; an unchecked one arrives as a plain local value, edited in its row's own place.
+    The toggle edits the list the import reads, so what is unchecked here changes what the next
+    import of the asset carries. Items under a row (a correction, a mask item, a folder child)
+    draw after it, indented, with their name as the caption.
+    """
+    drawn_any = False
+
+    def draw_item(item, depth):
+        nonlocal drawn_any
+        params = list(item.kind_params)
+        if not params:
+            return
+        drawn_any = True
+        column = layout
+        if depth > 0:
+            caption = layout.row()
+            caption.label(text=item.name + ":", icon='DOT')
+            column = layout.column(align=True)
+        for param in params:
+            column.prop(param, "asset_exposed", text=param.label)
+
+    def draw_row(row, depth):
+        draw_item(row, depth)
+        for effect in row.effects:
+            draw_row(effect, depth + 1)
+        for item in row.mask_items:
+            draw_row(item, depth + 1)
+        for child in row.children:
+            draw_row(child, depth + 1)
+
+    for row in ma.paint_layers:
         draw_row(row, 0)
     return drawn_any
 

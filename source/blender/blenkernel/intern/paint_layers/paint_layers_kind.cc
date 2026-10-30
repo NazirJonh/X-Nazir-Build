@@ -299,4 +299,18 @@ bool paint_layer_kind_param_set(MaterialPaintLayer &row, const int index, const 
   return true;
 }
 
+int paint_layer_kind_param_index(const MaterialPaintLayer &row, const char *name)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+  if (info == nullptr) {
+    return -1;
+  }
+  for (const int i : IndexRange(info->params_num)) {
+    if (STREQ(info->params[i].name, name)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 }  // namespace blender

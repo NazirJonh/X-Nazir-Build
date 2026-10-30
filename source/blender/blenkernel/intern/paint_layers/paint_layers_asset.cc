@@ -928,33 +928,107 @@ bool BKE_paint_layers_asset_params_has(const Material &ma)
 void BKE_paint_layers_asset_params_expose(Material &ma)
 {
   id_properties_ensure(ma);
-  /* Rebuilt from scratch: an entry whose item lost its name, or whose parameters are all gone,
-   * must not linger. */
+  /* The author's own selection lives in the list a first build wrote: a re-save that rebuilt from
+   * scratch would expose everything again and reset every parameter the author trimmed on the
+   * asset's panel. An entry for an item the stack still holds is that item's choice -- the
+   * parameters it does not name stayed unexposed by hand -- so only an item the list has no entry
+   * for is new to it and arrives with everything exposed; entries of items gone from the stack
+   * are simply not rebuilt. */
+  const IDProperty *previous = BKE_paint_layers_asset_params_get(ma);
   IDProperty *params = bke::idprop::create_group(ASSET_PARAMS_PROP_NAME).release();
   const auto collect = [&](const MaterialPaintLayer &item) {
     const PaintLayerKindInfo *kind = paint_layer_kind_of(item);
     if (kind == nullptr || kind->params_num == 0) {
       return;
     }
-    /* Two items of one name share an entry: the label keys on the name that survives a copy, and
-     * an asset with two same-named items exposes whichever set was collected last. */
-    IDProperty *entry = IDP_GetPropertyFromGroup(params, item.name);
-    if (entry == nullptr || entry->type != IDP_GROUP) {
-      entry = bke::idprop::create_group(item.name).release();
-      IDP_ReplaceInGroup(params, entry);
+    const IDProperty *previous_entry =
+        (previous != nullptr) ? IDP_GetPropertyFromGroup(previous, item.name) : nullptr;
+    if (previous_entry != nullptr && previous_entry->type != IDP_GROUP) {
+      previous_entry = nullptr;
     }
+    /* Two items of one name share an entry: the label keys on the name that survives a copy, and
+     * the first of them to keep a parameter decides the entry's shape. */
+    IDProperty *entry = IDP_GetPropertyFromGroup(params, item.name);
     for (const int i : IndexRange(kind->params_num)) {
+      /* A known item's unlisted parameter is the author's trimming, not an omission: it stays a
+       * plain local on import. The listed ones are rewritten with the position the current schema
+       * has them at, so a schema that moved still binds the same parameter. */
+      if (previous_entry != nullptr &&
+          IDP_GetPropertyFromGroup(previous_entry, kind->params[i].name) == nullptr)
+      {
+        continue;
+      }
+      /* The entry is made only when something goes into it: a known item with every parameter
+       * trimmed stays without one, the way expose_set leaves it. */
+      if (entry == nullptr) {
+        entry = bke::idprop::create_group(item.name).release();
+        IDP_ReplaceInGroup(params, entry);
+      }
       IDP_ReplaceInGroup(entry, bke::idprop::create(kind->params[i].name, i).release());
     }
   };
   for (const MaterialPaintLayer &row : ma.paint_layers) {
     paint_layer_asset_walk(row, collect);
   }
-  IDProperty *previous = IDP_GetPropertyFromGroup(ma.id.properties, ASSET_PARAMS_PROP_NAME);
-  if (previous != nullptr) {
-    IDP_FreeFromGroup(ma.id.properties, previous);
+  IDProperty *previous_own = IDP_GetPropertyFromGroup(ma.id.properties, ASSET_PARAMS_PROP_NAME);
+  if (previous_own != nullptr) {
+    IDP_FreeFromGroup(ma.id.properties, previous_own);
   }
   IDP_ReplaceInGroup(ma.id.properties, params);
+  asset_property_group_set(ma.id.asset_data, params);
+}
+
+bool BKE_paint_layers_asset_param_is_exposed(const Material &ma,
+                                             const MaterialPaintLayer &item,
+                                             const char *param_name)
+{
+  const IDProperty *params = BKE_paint_layers_asset_params_get(ma);
+  if (params == nullptr) {
+    return false;
+  }
+  const IDProperty *entry = IDP_GetPropertyFromGroup(params, item.name);
+  return entry != nullptr && entry->type == IDP_GROUP &&
+         IDP_GetPropertyFromGroup(entry, param_name) != nullptr;
+}
+
+void BKE_paint_layers_asset_param_expose_set(Material &ma,
+                                             const MaterialPaintLayer &item,
+                                             const char *param_name,
+                                             const bool expose)
+{
+  /* The list in the material's own custom properties is the one an import reads; the asset
+   * metadata only mirrors it for the browser. No list here means the material is not a smart
+   * asset, and there is nothing to select on. */
+  if (ma.id.properties == nullptr || ma.id.properties->type != IDP_GROUP) {
+    return;
+  }
+  IDProperty *params = IDP_GetPropertyFromGroup(ma.id.properties, ASSET_PARAMS_PROP_NAME);
+  if (params == nullptr || params->type != IDP_GROUP) {
+    return;
+  }
+  const int position = paint_layer_kind_param_index(item, param_name);
+  if (position < 0) {
+    return;
+  }
+  IDProperty *entry = IDP_GetPropertyFromGroup(params, item.name);
+  if (!expose) {
+    if (entry != nullptr && entry->type == IDP_GROUP) {
+      if (IDProperty *mark = IDP_GetPropertyFromGroup(entry, param_name)) {
+        IDP_FreeFromGroup(entry, mark);
+      }
+      /* An item with nothing left to expose has no entry: the import walks entries, not items. */
+      if (BLI_listbase_is_empty(&entry->data.group)) {
+        IDP_FreeFromGroup(params, entry);
+      }
+    }
+  }
+  else {
+    if (entry == nullptr || entry->type != IDP_GROUP) {
+      entry = bke::idprop::create_group(item.name).release();
+      IDP_ReplaceInGroup(params, entry);
+    }
+    IDP_ReplaceInGroup(entry, bke::idprop::create(param_name, position).release());
+  }
   asset_property_group_set(ma.id.asset_data, params);
 }
 
@@ -1057,15 +1131,55 @@ void BKE_paint_layers_asset_params_unbind(Material &ma, const int instance_id)
   id_property_remove(ma.id.properties, ASSET_SOURCE_PROP);
 }
 
-bool BKE_paint_layers_item_param_is_exposed(const MaterialPaintLayer &item, const char *param_name)
+/** The exposed marker of \a item's parameter \a param_name, or null when the item carries none. */
+static const IDProperty *item_param_mark_find(const MaterialPaintLayer &item,
+                                              const char *param_name)
 {
   if (item.system_properties == nullptr || item.system_properties->type != IDP_GROUP) {
-    return false;
+    return nullptr;
   }
   const IDProperty *marks = IDP_GetPropertyFromGroup(item.system_properties,
                                                      ASSET_PARAMS_PROP_NAME);
-  return marks != nullptr && marks->type == IDP_GROUP &&
-         IDP_GetPropertyFromGroup(marks, param_name) != nullptr;
+  if (marks == nullptr || marks->type != IDP_GROUP) {
+    return nullptr;
+  }
+  return IDP_GetPropertyFromGroup(marks, param_name);
+}
+
+bool BKE_paint_layers_item_param_is_exposed(const MaterialPaintLayer &item, const char *param_name)
+{
+  const IDProperty *mark = item_param_mark_find(item, param_name);
+  if (mark == nullptr) {
+    return false;
+  }
+  /* Only an Int 0 mark is the switched-off state of this instance; an import writes Int 1 and
+   * older files may carry a mark without a usable value, which all read as active. */
+  return (mark->type != IDP_INT) || (IDP_int_get(mark) != 0);
+}
+
+bool BKE_paint_layers_item_param_is_offered(const MaterialPaintLayer &item, const char *param_name)
+{
+  return item_param_mark_find(item, param_name) != nullptr;
+}
+
+void BKE_paint_layers_item_param_enabled_set(MaterialPaintLayer &item,
+                                             const char *param_name,
+                                             const bool enabled)
+{
+  if (item.system_properties == nullptr || item.system_properties->type != IDP_GROUP) {
+    return;
+  }
+  IDProperty *marks = IDP_GetPropertyFromGroup(item.system_properties, ASSET_PARAMS_PROP_NAME);
+  if (marks == nullptr || marks->type != IDP_GROUP) {
+    return;
+  }
+  IDProperty *mark = IDP_GetPropertyFromGroup(marks, param_name);
+  /* Not offered (or a mark of an unexpected shape): nothing to switch, and no mark is made -- the
+   * import lays the marks, the panel only flips the ones already there. */
+  if (mark == nullptr || mark->type != IDP_INT) {
+    return;
+  }
+  IDP_int_set(mark, enabled ? 1 : 0);
 }
 
 /** \} */
@@ -1305,6 +1419,9 @@ PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain,
   struct CarriedParam {
     std::string name;
     float scalar;
+    /* The instance's on/off state of P24b: captured for every offered parameter, and the value
+     * only for an active one -- a switched-off parameter follows the asset across the reload. */
+    bool enabled;
   };
   struct CarriedItem {
     std::string name;
@@ -1323,12 +1440,18 @@ PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain,
     CarriedItem recorded;
     for (const int i : IndexRange(kind->params_num)) {
       const PaintLayerKindParam &param = kind->params[i];
-      if (!BKE_paint_layers_item_param_is_exposed(item, param.name)) {
+      /* The on/off flag is captured for every offered parameter, active or not: the user's
+       * switch on this instance survives the reload too. */
+      if (!BKE_paint_layers_item_param_is_offered(item, param.name)) {
         continue;
       }
       CarriedParam recorded_param{};
       recorded_param.name = param.name;
-      recorded_param.scalar = paint_layer_kind_param_get(item, i);
+      recorded_param.enabled = BKE_paint_layers_item_param_is_exposed(item, param.name);
+      /* A switched-off parameter carries no value: the fresh copy takes the asset's own. */
+      if (recorded_param.enabled) {
+        recorded_param.scalar = paint_layer_kind_param_get(item, i);
+      }
       recorded.params.append(recorded_param);
     }
     if (!recorded.params.is_empty()) {
@@ -1453,6 +1576,19 @@ PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain,
         continue;
       }
       for (const CarriedParam &recorded_param : recorded.params) {
+        /* A parameter the asset no longer offers has no fresh mark to carry anything into: the
+         * fresh copy takes the asset's own value, and the carried one is dropped with the other
+         * local edits. */
+        if (!BKE_paint_layers_item_param_is_offered(item, recorded_param.name.c_str())) {
+          continue;
+        }
+        /* The user switched the parameter off on this instance: restore the switch, and leave the
+         * fresh copy at the asset's own value -- carrying the old one would edit a parameter the
+         * panel greys out. The import marked it Int 1, so only the off state needs writing. */
+        if (!recorded_param.enabled) {
+          BKE_paint_layers_item_param_enabled_set(item, recorded_param.name.c_str(), false);
+          continue;
+        }
         for (const int i : IndexRange(kind->params_num)) {
           if (strcmp(kind->params[i].name, recorded_param.name.c_str()) != 0) {
             continue;

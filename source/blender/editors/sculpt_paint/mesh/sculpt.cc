@@ -10914,6 +10914,51 @@ bool SculptPaintStroke::test_cancel()
   return ret_val;
 }
 
+/**
+ * Shift+click with no endpoint to continue from: record the click as a line start that carries no
+ * paint. Painting a dab here would double the brush where the line then starts - invisible for a
+ * color brush that re-mixes the same color, but an Erase stroke subtracts coverage once per
+ * stroke, so the overlap would be erased twice. Consumed without a stroke: no paint, no undo step.
+ *
+ * Returns #OPERATOR_CANCELLED | #OPERATOR_PASS_THROUGH when the click has no surface hit (or no
+ * region), so a Shift+click off the mesh is not silently swallowed.
+ */
+static wmOperatorStatus sculpt_line_start_mark(bContext *C,
+                                               const wmEvent &event,
+                                               ViewContext &vc,
+                                               Sculpt &sd,
+                                               Brush &brush)
+{
+  ARegion *region = vc.region;
+  if (region == nullptr || vc.depsgraph == nullptr) {
+    return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
+  }
+
+  const float mval[2] = {float(event.mval[0]), float(event.mval[1])};
+  float co[3];
+  Object *hit_ob = nullptr;
+  if (!stroke_get_location_bvh(*vc.depsgraph, vc, &sd, &brush, co, mval, false, &hit_ob) ||
+      hit_ob == nullptr)
+  {
+    return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
+  }
+
+  /* Same object-space to world-space conversion as #PaintStroke::record_last_stroke_end. */
+  const float3 world = math::transform_point(hit_ob->object_to_world(), float3(co));
+  ed::sculpt_paint::paint_stroke_line_end_set(
+      sd.paint,
+      float2(event.mval),
+      int2(region->winx, region->winy),
+      &world.x,
+      ed::sculpt_paint::PaintStrokeLineEndState::Marked);
+
+  WorkspaceStatus status(C);
+  status.item(IFACE_("Line start set"), ICON_MOUSE_LMB);
+  status.item(IFACE_("Shift+Click to draw the line"), ICON_EVENT_SHIFT);
+  WM_paint_cursor_tag_redraw(CTX_wm_window(C), region);
+  return OPERATOR_FINISHED;
+}
+
 static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
                                                    wmOperator *op,
                                                    const wmEvent *event)
@@ -10925,6 +10970,11 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     BKE_report(op->reports, RPT_WARNING, blocked);
     return OPERATOR_CANCELLED;
   }
+
+  /* The "Line start set" hint from the previous Shift+click outlives its operator: no destructor
+   * clears the workspace status when #sculpt_line_start_mark returns. Clear it when the next
+   * stroke starts instead. */
+  ED_workspace_status_text(C, nullptr);
 
   SculptPaintStroke *stroke;
   int ignore_background_click;
@@ -10950,8 +11000,18 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
   RNA_boolean_set(op->ptr, "line_from_last", false);
   if ((event->modifier & KM_SHIFT) != 0 && paint_brush_uses_shift_line(brush, paint_mode)) {
     RNA_enum_set(op->ptr, "brush_toggle", int(BrushSwitchMode::None));
-    if (sd.paint.runtime != nullptr && sd.paint.runtime->last_stroke_end.valid) {
+
+    Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+    ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+    float2 line_start;
+    if (sd.paint.runtime != nullptr &&
+        ed::sculpt_paint::paint_stroke_line_start_get(sd.paint, vc, line_start))
+    {
       RNA_boolean_set(op->ptr, "line_from_last", true);
+    }
+    else if (sd.paint.runtime != nullptr) {
+      /* No usable endpoint to continue from: the click only marks the line start. */
+      return sculpt_line_start_mark(C, *event, vc, sd, brush);
     }
   }
 

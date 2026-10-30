@@ -154,10 +154,19 @@ bool paint_stroke_line_start_get(const Paint &paint, const ViewContext &vc, floa
   return false;
 }
 
+bool paint_stroke_line_start_painted(const Paint &paint)
+{
+  if (paint.runtime == nullptr) {
+    return true;
+  }
+  return paint.runtime->last_stroke_end.painted;
+}
+
 void paint_stroke_line_end_set(Paint &paint,
                                const float2 &mouse,
                                const int2 &region_size,
-                               const float world[3])
+                               const float world[3],
+                               const PaintStrokeLineEndState state)
 {
   if (paint.runtime == nullptr) {
     return;
@@ -167,6 +176,7 @@ void paint_stroke_line_end_set(Paint &paint,
   anchor.mouse = mouse;
   anchor.region_size = region_size;
   anchor.world_valid = world != nullptr;
+  anchor.painted = state == PaintStrokeLineEndState::Painted;
   if (world != nullptr) {
     anchor.world = float3(world);
   }
@@ -922,6 +932,7 @@ void PaintStroke::add_step(bContext *C,
     RNA_float_set(&itemptr, "x_tilt", point->x_tilt);
     RNA_float_set(&itemptr, "y_tilt", point->y_tilt);
 
+    this->dab_placed_ = true;
     this->update_step(op, &itemptr);
 
     /* don't record this for now, it takes up a lot of memory when doing long
@@ -1279,6 +1290,7 @@ PaintStroke::PaintStroke(bContext *C, wmOperator *op, int event_type) : event_ty
       /* The stroke runs as a Line stroke (see #stroke_method). The brush is shared, saved data and
        * is deliberately left alone. */
       line_start_valid_ = true;
+      line_start_painted_ = paint_stroke_line_start_painted(*this->paint);
     }
     else {
       line_from_last_ = false;
@@ -1492,10 +1504,20 @@ void PaintStroke::record_last_stroke_end(bContext *C)
   this->object = saved_object;
   this->vc.obact = saved_obact;
 
+  /* Whether the recorded point has paint on it: any dab of this stroke covers it. A line stroke
+   * that placed none re-records the previous anchor (#last_mouse_position stays at the line start
+   * in that case), so its painted state carries over instead of turning a painted anchor bare. */
+  const bool painted = this->dab_placed_ ||
+                       (this->line_from_last_ && this->line_start_valid_ &&
+                        this->line_start_painted_);
+  const PaintStrokeLineEndState end_state = painted ? PaintStrokeLineEndState::Painted :
+                                                      PaintStrokeLineEndState::Marked;
+
   paint_stroke_line_end_set(*this->paint,
                             end_mouse,
                             int2(region->winx, region->winy),
-                            world_valid ? &world.x : nullptr);
+                            world_valid ? &world.x : nullptr,
+                            end_state);
 }
 
 static bool curves_sculpt_brush_uses_spacing(const eBrushCurvesSculptType tool)
@@ -2387,10 +2409,22 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
       paint_stroke_line_constrain(this->line_start_mouse_, this->constrained_pos, mouse);
     }
     if (stroke_started_ && (first_modal || ISMOUSE_MOTION(event->type))) {
-      /* Deliberately no dab at #line_start_mouse_: that point is the previous stroke's own end, so
-       * it is already painted - stamping a full dab there again doubled the brush strength over the
-       * last stroke. The first dab lands one spacing along the line instead, which is what the
-       * previous stroke's coverage already continues into. */
+      if (!this->line_start_painted_ && !this->dab_placed_) {
+        /* The anchor only marks the line start (a Shift+click that placed no dab), so the line is
+         * the first thing to paint there and has to cover the anchor itself. Placed as the first
+         * dab of this stroke, so it shares the stroke's coverage accumulator instead of stacking
+         * a second application on the anchor. Retried until it lands or a line dab is placed, so a
+         * press that missed the mesh does not leave the start unpainted. */
+        paint_runtime.overlap_factor = paint_stroke_integrate_overlap(*br, 1.0);
+        this->add_step(C, op, this->line_start_mouse_, 1.0f);
+        /* #add_step can miss the mesh; only a landed dab makes the anchor painted. */
+        this->line_start_painted_ = this->dab_placed_;
+        needs_redraw = true;
+      }
+      /* Deliberately no dab at #line_start_mouse_ otherwise: that point is the previous stroke's
+       * own end, so it is already painted - stamping a full dab there again doubled the brush
+       * strength over the last stroke. The first dab lands one spacing along the line instead,
+       * which is what the previous stroke's coverage already continues into. */
       if (this->line_stroke_step(C, op, mouse, pressure)) {
         needs_redraw = true;
       }
@@ -2521,6 +2555,7 @@ wmOperatorStatus PaintStroke::exec(bContext *C, wmOperator *op)
     this->update(C, *this->brush, mode, mval, mouse_out, pressure, dummy_location, &dummy_is_set);
     RNA_float_set_array(&itemptr, "mouse", mouse_out);
 
+    this->dab_placed_ = true;
     if (override_location) {
       float3 location;
       if (this->get_location(location, mouse_out, false)) {

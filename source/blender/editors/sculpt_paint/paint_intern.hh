@@ -529,6 +529,12 @@ struct PaintStroke : NonCopyable, NonMovable {
   bool line_from_last_ = false;
   float2 line_start_mouse_ = float2(0.0f, 0.0f);
   bool line_start_valid_ = false;
+  /* Whether the line's anchor was painted by the previous stroke. A Shift+click that only set the
+   * point leaves it false, so this stroke has to place a dab at the anchor. */
+  bool line_start_painted_ = false;
+  /* Whether any dab of this stroke reached the canvas. Decides whether the stroke's end becomes a
+   * painted anchor. */
+  bool dab_placed_ = false;
   float2 initial_mouse_ = float2(0.0f, 0.0f);
   float cached_size_pressure_ = 0.0f;
   /* last pressure will store last pressure value for use in interpolation for space strokes */
@@ -830,13 +836,33 @@ constexpr int paint_stroke_line_dab_max = 10000;
 bool paint_stroke_line_start_get(const Paint &paint, const ViewContext &vc, float2 &r_mouse);
 
 /**
+ * Whether the stored line start already has paint on it. A Shift+click that only marked the line
+ * start records an unpainted anchor, so the next line has to cover the anchor itself.
+ *
+ * The storage lives in #bke::PaintRuntime::StrokeEndAnchor; callers go through this so the
+ * representation can change in one place. A missing runtime reports "painted", the historical
+ * texture-fill default, because there is no anchor state to contradict it.
+ */
+bool paint_stroke_line_start_painted(const Paint &paint);
+
+/** Whether the point recorded by #paint_stroke_line_end_set has paint on it. */
+enum class PaintStrokeLineEndState {
+  /** The point is the end of a painted stroke and is already covered. */
+  Painted,
+  /** The click only marks the line start, so the next line must paint the anchor itself. */
+  Marked,
+};
+
+/**
  * Store the end of a Sculpt paint stroke for the next Shift+click line.
  * \param world: world-space surface hit, or null to keep only the region-space fallback.
+ * \param state: whether paint was applied at \a mouse.
  */
 void paint_stroke_line_end_set(Paint &paint,
                                const float2 &mouse,
                                const int2 &region_size,
-                               const float world[3]);
+                               const float world[3],
+                               PaintStrokeLineEndState state);
 
 float2 paint_stroke_jitter_pos(Paint *paint,
                                PaintMode mode,

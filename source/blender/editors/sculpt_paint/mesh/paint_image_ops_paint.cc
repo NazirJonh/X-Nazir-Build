@@ -123,6 +123,9 @@ static TextureFillGesture *texture_fill_gesture_get(const wmOperator *op)
 struct TextureFillLineGesture {
   float2 start = float2(0.0f, 0.0f);
   float2 end = float2(0.0f, 0.0f);
+  /* False when the start only marks the line (a Shift+click with no previous stroke), so the fill
+   * has to include the start point instead of assuming an earlier stroke covers it. */
+  bool start_painted = true;
 };
 
 static void texture_fill_record_stroke_end(const bContext *C,
@@ -730,8 +733,11 @@ static void texture_fill_record_stroke_end(const bContext *C,
   float world[3];
   const bool world_valid = v3d != nullptr &&
                            ED_view3d_autodist(region, v3d, mval, world, nullptr);
-  ed::sculpt_paint::paint_stroke_line_end_set(
-      paint, mouse, int2(region->winx, region->winy), world_valid ? world : nullptr);
+  ed::sculpt_paint::paint_stroke_line_end_set(paint,
+                                              mouse,
+                                              int2(region->winx, region->winy),
+                                              world_valid ? world : nullptr,
+                                              ed::sculpt_paint::PaintStrokeLineEndState::Painted);
 }
 
 /**
@@ -796,10 +802,11 @@ static bool texture_fill_line(bContext *C,
       }
     }
     else if (steps > 0) {
-      /* Starts at the first spacing step, not at `gesture.start`: that point is the previous
-       * stroke's own end, so filling it again would stamp the brush twice over the last stroke and
-       * double an erase. The segment is instead covered outward from where the paint already is. */
-      for (int i = 1; i <= steps; i++) {
+      /* Starts at the first spacing step when the start is the previous stroke's own end: filling
+       * it again would stamp the brush twice over the last stroke and double an erase. A start
+       * that only marks the line (see #TextureFillLineGesture::start_painted) is not painted
+       * yet, so the loop has to include it. */
+      for (int i = gesture.start_painted ? 1 : 0; i <= steps; i++) {
         const float2 mouse = gesture.start + delta * (float(i) / float(steps));
         if (paint_texture_fill_session_step(*session, &mouse.x)) {
           did_fill = true;
@@ -891,6 +898,7 @@ static wmOperatorStatus texture_fill_invoke(bContext *C, wmOperator *op, const w
       auto *line_state = MEM_new<TextureFillLineGesture>(__func__);
       line_state->start = line_start;
       line_state->end = float2(event->mval);
+      line_state->start_painted = ed::sculpt_paint::paint_stroke_line_start_painted(*paint);
       op->customdata = line_state;
       RNA_boolean_set(op->ptr, "line_fill", true);
       WM_event_add_modal_handler(C, op);

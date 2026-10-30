@@ -74,6 +74,12 @@ struct PaintRuntime : NonCopyable, NonMovable {
    * usable 3D projection. `world` is the surface hit under the stroke's end, so the line start
    * can be reprojected if the view changed between the two strokes. Runtime-only, like the rest
    * of #PaintRuntime: a new file never inherits an endpoint from a previous scene.
+   *
+   * `painted` tells whether anything was actually painted at the anchor. A Shift+click that only
+   * marks the line start records an unpainted anchor, so the line that continues from it has to
+   * cover the anchor itself: skipping a dab there (the rule for an anchor that is the end of a
+   * painted stroke) would leave the start of the line blank, and painting a dab at the anchor in
+   * a separate stroke would double the brush where the two overlap.
    */
   struct StrokeEndAnchor {
     bool valid = false;
@@ -81,6 +87,7 @@ struct PaintRuntime : NonCopyable, NonMovable {
     int2 region_size = int2(0, 0);
     float3 world = float3(0.0f);
     bool world_valid = false;
+    bool painted = false;
   };
   StrokeEndAnchor last_stroke_end;
 

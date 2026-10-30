@@ -141,6 +141,16 @@ static bool paint_layer_image_is_painted(Image &image)
   return image.source == IMA_SRC_GENERATED || BKE_image_is_dirty(&image);
 }
 
+/**
+ * Whether \a row writes its strokes into its own channel maps, as a Paint row or a Paint correction
+ * does. A Fill row's maps are textures the user assigned to it and no stroke goes into them: an
+ * asset import copies those with their pixels instead of following the painted-map policy.
+ */
+static bool paint_layer_row_paints_maps(const MaterialPaintLayer &row)
+{
+  return row.source == MA_PAINT_LAYER_SOURCE_IMAGE;
+}
+
 /** Give \a dst a copy of \a src's channel records, each map following the options' policy. */
 static void paint_layer_channels_duplicate(Main &bmain,
                                            MaterialPaintLayer &dst,
@@ -155,10 +165,15 @@ static void paint_layer_channels_duplicate(Main &bmain,
   /* The record is plain data and DNA types delete their copy assignment, so it is copied as one
    * block, the way #BKE_paint_layers_channel_add grows the array. */
   memcpy(dst.channels, src.channels, sizeof(*dst.channels) * src.channels_num);
+  /* An asset copies the texture a Fill row reads even when the image behind it is generated;
+   * every other import keeps classifying by the image alone, as it did before. A painting row's
+   * external file map stays under the policy, so Share still shares it. */
+  const bool assigned_texture = options.copy_assigned_maps && !paint_layer_row_paints_maps(src);
   for (const int i : IndexRange(src.channels_num)) {
     Image *image = dst.channels[i].image;
     if (image != nullptr) {
-      if (paint_layer_image_is_painted(*image)) {
+      const bool painted_map = !assigned_texture && paint_layer_image_is_painted(*image);
+      if (painted_map) {
         if (options.image_policy == PaintLayerImageImportPolicy::Strip) {
           /* No map: the record keeps its flat value, which is what the import shows. */
           dst.channels[i].image = nullptr;
@@ -174,13 +189,15 @@ static void paint_layer_channels_duplicate(Main &bmain,
         }
       }
       else if (options.image_policy == PaintLayerImageImportPolicy::Copy ||
-               image->id.asset_data != nullptr)
+               assigned_texture || image->id.asset_data != nullptr)
       {
-        /* Legacy: an external map is copied too, with its pixels. A map that is an asset itself is
-         * copied as well, whatever the policy: sharing it would make the importing material depend
-         * on another asset, and writing a Smart asset to a library would carry that image along
-         * as an asset of its own. The copy is a plain image (no asset metadata) that lives inside
-         * the material. */
+        /* Legacy: an external map is copied too, with its pixels. An assigned texture an asset
+         * carries is copied as well: it is not painted data, so the painted-map policy does not
+         * apply to it and the asset keeps the pixels whatever the source does with them. A map
+         * that is an asset itself is copied as well, whatever the policy: sharing it would make
+         * the importing material depend on another asset, and writing a Smart asset to a library
+         * would carry that image along as an asset of its own. The copy is a plain image (no
+         * asset metadata) that lives inside the material. */
         dst.channels[i].image = paint_layer_image_duplicate(bmain, *image);
       }
       else {
@@ -551,6 +568,7 @@ bool BKE_paint_layers_import_rows(Main &bmain,
     copy_options.r_dropped_curve_patches = &dropped_curve_patches;
     copy_options.image_policy = params.image_policy;
     copy_options.r_stripped_maps = &stripped_maps;
+    copy_options.copy_assigned_maps = params.copy_assigned_maps;
     for (const MaterialPaintLayer &item : source_row.mask_stack) {
       MaterialPaintLayer *copy = paint_layer_item_duplicate(
           bmain, dst, item, &marker_map, copy_options);
@@ -648,6 +666,7 @@ bool BKE_paint_layers_import_rows(Main &bmain,
   copy_options.r_dropped_curve_patches = &dropped_curve_patches;
   copy_options.image_policy = params.image_policy;
   copy_options.r_stripped_maps = &stripped_maps;
+  copy_options.copy_assigned_maps = params.copy_assigned_maps;
   MaterialPaintLayer *anchor = params.anchor;
   for (const MaterialPaintLayer *source_row : rows) {
     MaterialPaintLayer *copy = paint_layer_alloc(dst, source_row->name);

@@ -89,6 +89,12 @@ struct PaintLayerImportParams {
    * behavior of copying every map with its pixels.
    */
   PaintLayerImageImportPolicy image_policy = PaintLayerImageImportPolicy::Copy;
+  /**
+   * Copy the maps that are textures assigned to a row (a Fill's channel maps) even when
+   * #image_policy would share them. A smart asset sets it: the textures a Fill or a Fill correction
+   * reads have to travel with the asset, unlike painted maps, which the policy may strip.
+   */
+  bool copy_assigned_maps = false;
 };
 
 struct PaintLayerImportResult {

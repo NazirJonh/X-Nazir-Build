@@ -414,6 +414,9 @@ Material *BKE_paint_layers_asset_create(Main &bmain,
      * in that stack; the source-channel flag has no meaning here. */
     params.flags = SMART_ASSET_IMPORT_FLAGS;
     params.image_policy = image_policy;
+    /* A Fill correction's map is a texture the user assigned, not painted data: the asset has to
+     * carry it whatever the painted-map policy says. */
+    params.copy_assigned_maps = true;
     ok = holder != nullptr &&
          BKE_paint_layers_import_rows(bmain, *asset, source, rows, params, r_result);
   }
@@ -423,6 +426,9 @@ Material *BKE_paint_layers_asset_create(Main &bmain,
     params.place = PaintLayerPlace::Above;
     params.flags = SMART_ASSET_IMPORT_FLAGS;
     params.image_policy = image_policy;
+    /* Textures assigned to a Fill row or correction travel with the asset, unlike painted maps,
+     * which the policy may strip. */
+    params.copy_assigned_maps = true;
     ok = BKE_paint_layers_import_rows(bmain, *asset, source, rows, params, r_result);
   }
 

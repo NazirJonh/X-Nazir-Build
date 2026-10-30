@@ -731,8 +731,8 @@ class SmartMaterialAssetAction final : public StackDropAction {
     if (r_affected_ordinal != nullptr) {
       *r_affected_ordinal = ordinal;
     }
-    /* The drop operator passes no affected ordinal and carries no #OPTYPE_UNDO: this action owns
-     * both the invalidation the row helpers would have done and its undo step. */
+    /* The drop operator carries no #OPTYPE_UNDO: this action owns both the invalidation the row
+     * helpers would have done and its undo step. */
     if (SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C)) {
       stack_row_edit_finished(C, *space_outliner, material.id, ordinal, true);
     }

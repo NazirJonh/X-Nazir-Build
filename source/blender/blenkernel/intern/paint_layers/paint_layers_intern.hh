@@ -829,6 +829,11 @@ struct PaintLayerCopyOptions {
   PaintLayerImageImportPolicy image_policy = PaintLayerImageImportPolicy::Copy;
   /** Receives the number of painted maps left behind, when the policy is Strip. */
   int *r_stripped_maps = nullptr;
+  /**
+   * Copy the texture a non-painting row (a Fill or a Fill correction) has assigned to it even when
+   * the policy would share or strip it: the asset has to carry the texture, it is not painted data.
+   */
+  bool copy_assigned_maps = false;
 };
 
 /**

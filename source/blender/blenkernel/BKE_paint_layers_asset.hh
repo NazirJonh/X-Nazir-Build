@@ -150,9 +150,11 @@ bool BKE_paint_layers_asset_can_insert(const Material &dst,
  * the asset keeps every channel it uses. Returns null when the import is refused; the new material
  * is freed in that case.
  *
- * \param image_policy: what happens to the imported maps: copied with their pixels by default, or
+ * \param image_policy: what happens to the painted maps: copied with their pixels by default, or
  * external ones shared by reference with painted ones copied (#PaintLayerImageImportPolicy::Share)
- * or left as flat values (#PaintLayerImageImportPolicy::Strip).
+ * or left as flat values (#PaintLayerImageImportPolicy::Strip). The maps assigned to a Fill row or
+ * correction are textures, not painted data: they are always copied with their pixels, whatever the
+ * policy says, so the asset carries them.
  * \param r_result: the import's report, its #PaintLayerImportResult::stripped_maps included.
  */
 Material *BKE_paint_layers_asset_create(Main &bmain,

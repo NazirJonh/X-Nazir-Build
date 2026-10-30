@@ -764,7 +764,9 @@ void OUTLINER_OT_stack_layer_smart_asset_save(wmOperatorType *ot)
                          "include_painted_maps",
                          false,
                          "Include Painted Maps",
-                         "Save painted maps with their pixels instead of flat values");
+                         "Save painted maps with their pixels instead of flat "
+                         "values; textures assigned to Fill rows and "
+                         "corrections are always saved");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
   RNA_def_string(ot->srna,
                  "description",

@@ -978,6 +978,124 @@ TEST_F(PaintLayersAssetTest, import_mask_strip_reports_the_stripped_items)
   EXPECT_EQ(item->channels[0].image, nullptr);
 }
 
+TEST_F(PaintLayersAssetTest, smart_mask_strip_keeps_a_fill_correction_texture)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Source", add_image("SourceMap"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*src, row, 0.25f), nullptr);
+  MaterialPaintLayer *fill = BKE_paint_layers_mask_item_add(
+      *src, row, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill Correction");
+  ASSERT_NE(fill, nullptr);
+  Image *texture = add_image("FillTexture");
+  /* A texel the asset's copy has to carry. */
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(texture, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    ASSERT_NE(ibuf->byte_data_for_write(), nullptr);
+    ibuf->byte_data_for_write()[0] = 10;
+    ibuf->byte_data_for_write()[1] = 20;
+    ibuf->byte_data_for_write()[2] = 30;
+    ibuf->byte_data_for_write()[3] = 255;
+    BKE_image_release_ibuf(texture, ibuf, lock);
+  }
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *src, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, texture));
+
+  const int images_before = BLI_listbase_count(&bmain->images);
+  const MaterialPaintLayer *source_rows[1] = {row};
+  PaintLayerImportResult result;
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                                  PaintLayerAssetType::Mask,
+                                                  "SmartMaskFill",
+                                                  PaintLayerImageImportPolicy::Strip,
+                                                  &result);
+  ASSERT_NE(asset, nullptr);
+  /* The Fill correction's map is a texture, not painted data: stripping leaves it in the asset. */
+  EXPECT_EQ(result.stripped_maps, 0);
+  ASSERT_EQ(BLI_listbase_count(&asset->paint_layers), 1);
+  MaterialPaintLayer *holder = static_cast<MaterialPaintLayer *>(asset->paint_layers.first);
+  MaterialPaintLayer *imported_fill = nullptr;
+  for (MaterialPaintLayer &item : holder->mask_stack) {
+    if (STREQ(item.name, "Fill Correction")) {
+      imported_fill = &item;
+    }
+  }
+  ASSERT_NE(imported_fill, nullptr);
+  ASSERT_EQ(imported_fill->channels_num, 1);
+  Image *copied = imported_fill->channels[0].image;
+  ASSERT_NE(copied, nullptr);
+  EXPECT_NE(copied, texture);
+  EXPECT_EQ(BLI_listbase_count(&bmain->images), images_before + 1);
+
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(copied, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  const uchar *pixels = ibuf->byte_data();
+  ASSERT_NE(pixels, nullptr);
+  EXPECT_EQ(pixels[0], 10);
+  EXPECT_EQ(pixels[1], 20);
+  EXPECT_EQ(pixels[2], 30);
+  EXPECT_EQ(pixels[3], 255);
+  BKE_image_release_ibuf(copied, ibuf, lock);
+}
+
+TEST_F(PaintLayersAssetTest, smart_mask_strip_still_drops_a_painted_mask_correction)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Source", add_image("SourceMap"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*src, row, 0.25f), nullptr);
+  MaterialPaintLayer *painted = BKE_paint_layers_mask_item_add(
+      *src, row, MA_PAINT_LAYER_SOURCE_IMAGE, "Painted Correction");
+  ASSERT_NE(painted, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *src, painted, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("PaintedMaskMap")));
+
+  const int images_before = BLI_listbase_count(&bmain->images);
+  const MaterialPaintLayer *source_rows[1] = {row};
+  PaintLayerImportResult result;
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                                  PaintLayerAssetType::Mask,
+                                                  "SmartMaskPainted",
+                                                  PaintLayerImageImportPolicy::Strip,
+                                                  &result);
+  ASSERT_NE(asset, nullptr);
+  EXPECT_EQ(result.stripped_maps, 1);
+  EXPECT_EQ(BLI_listbase_count(&bmain->images), images_before);
+}
+
+TEST_F(PaintLayersAssetTest, smart_material_share_copies_an_assigned_fill_texture)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*src, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  row->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+  Image *texture = add_image("FillTexture");
+  ASSERT_NE(BKE_paint_layers_channel_add(*src, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *src, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, texture));
+
+  const MaterialPaintLayer *source_rows[1] = {row};
+  PaintLayerImportResult result;
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                                  PaintLayerAssetType::Material,
+                                                  "SmartFill",
+                                                  PaintLayerImageImportPolicy::Share,
+                                                  &result);
+  ASSERT_NE(asset, nullptr);
+  MaterialPaintLayer *copy = static_cast<MaterialPaintLayer *>(asset->paint_layers.first);
+  ASSERT_EQ(copy->channels_num, 1);
+  ASSERT_NE(copy->channels[0].image, nullptr);
+  EXPECT_NE(copy->channels[0].image, texture);
+  EXPECT_EQ(result.stripped_maps, 0);
+}
+
 TEST_F(PaintLayersAssetTest, import_mask_append_keeps_the_target_base)
 {
   Material *src = BKE_material_add(bmain, "Src");

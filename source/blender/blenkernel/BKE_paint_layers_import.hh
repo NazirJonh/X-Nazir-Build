@@ -120,6 +120,11 @@ struct PaintLayerImportResult {
    * only, mask items' Base Color records, corrections and children included.
    */
   int stripped_maps = 0;
+  /**
+   * The top-level rows the import laid down, in source order (Rows mode only). A smart-asset
+   * import records them as its own, so a reload can find and replace exactly those rows.
+   */
+  Vector<MaterialPaintLayer *> imported;
 };
 
 /**

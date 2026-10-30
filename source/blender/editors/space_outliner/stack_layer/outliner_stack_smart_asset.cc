@@ -54,6 +54,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_prototypes.hh"
 
 #include "UI_interface_icons.hh"
 
@@ -477,6 +478,9 @@ wmOperatorStatus smart_asset_save_exec(bContext *C, wmOperator *op)
                                         RNA_string_get(op->ptr, "description"),
                                         catalog_entry.catalog_id,
                                         catalog_entry.simple_name);
+  /* The exposed-parameters list mirrors into the asset metadata the same way; its first build ran
+   * before the material was an asset, so there was nothing to mirror into yet. */
+  BKE_paint_layers_asset_params_expose(*asset);
   smart_asset_portability_report(*op, *portability);
   if (import_result.stripped_maps > 0) {
     BKE_reportf(op->reports,
@@ -775,5 +779,101 @@ void OUTLINER_OT_stack_layer_smart_asset_save(wmOperatorType *ot)
                  "Description",
                  "Asset description; empty uses the default text");
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Smart-asset instance operators
+ *
+ * The panel of an imported smart asset (the Layer Material tab) calls these: a reload pulls the
+ * rows fresh from the asset the instance came from, and make unique ends the binding. Both work
+ * on whatever material the context holds, so the outliner is only their registration home.
+ * \{ */
+
+static Material *smart_asset_instance_from_context(bContext *C)
+{
+  Material *ma = static_cast<Material *>(
+      CTX_data_pointer_get_type(C, "material", RNA_Material).data);
+  if (ma == nullptr || BKE_paint_layers_asset_source_get(*ma) == nullptr) {
+    return nullptr;
+  }
+  return ma;
+}
+
+static bool smart_asset_instance_poll(bContext *C)
+{
+  if (smart_asset_instance_from_context(C) == nullptr) {
+    CTX_wm_operator_poll_msg_set(C, "No imported smart asset on this material");
+    return false;
+  }
+  return true;
+}
+
+static wmOperatorStatus smart_asset_reload_exec(bContext *C, wmOperator *op)
+{
+  Material *ma = smart_asset_instance_from_context(C);
+  Main *bmain = CTX_data_main(C);
+  if (ma == nullptr || bmain == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const PaintLayerAssetReloadResult result = BKE_paint_layers_asset_reload(*bmain, *ma);
+  switch (result) {
+    case PaintLayerAssetReloadResult::Reloaded:
+      WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &ma->id);
+      BKE_reportf(
+          op->reports, RPT_INFO, "Reloaded the rows of smart asset '%s'", ma->id.name + 2);
+      return OPERATOR_FINISHED;
+    case PaintLayerAssetReloadResult::NoSource:
+      BKE_report(op->reports, RPT_ERROR, "This material has no smart-asset import to reload");
+      break;
+    case PaintLayerAssetReloadResult::SourceMissing:
+      BKE_report(
+          op->reports, RPT_ERROR, "The smart asset's source material is not in this file");
+      break;
+    case PaintLayerAssetReloadResult::ImportFailed:
+      BKE_report(op->reports, RPT_ERROR, "The source has nothing to import any more");
+      break;
+  }
+  return OPERATOR_CANCELLED;
+}
+
+void OUTLINER_OT_stack_layer_smart_asset_reload(wmOperatorType *ot)
+{
+  ot->name = "Reload Smart Asset";
+  ot->idname = "OUTLINER_OT_stack_layer_smart_asset_reload";
+  ot->description =
+      "Replace the rows this material imported from a smart asset with fresh copies of the "
+      "asset, keeping the exposed parameter values changed on this instance";
+  ot->exec = smart_asset_reload_exec;
+  ot->poll = smart_asset_instance_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus smart_asset_make_unique_exec(bContext *C, wmOperator * /*op*/)
+{
+  Material *ma = smart_asset_instance_from_context(C);
+  if (ma == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The parameter values are the rows' own by now; this only removes the labels, so the material
+   * stops being an instance and stops following its source. */
+  BKE_paint_layers_asset_params_unbind(*ma);
+  BKE_paint_layers_tag_edited(*ma);
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &ma->id);
+  return OPERATOR_FINISHED;
+}
+
+void OUTLINER_OT_stack_layer_smart_asset_make_unique(wmOperatorType *ot)
+{
+  ot->name = "Make Smart Asset Unique";
+  ot->idname = "OUTLINER_OT_stack_layer_smart_asset_make_unique";
+  ot->description =
+      "End the binding to the imported smart asset; the parameter values stay as they are and no "
+      "longer follow the asset";
+  ot->exec = smart_asset_make_unique_exec;
+  ot->poll = smart_asset_instance_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/** \} */
 
 }  // namespace blender::ed::outliner

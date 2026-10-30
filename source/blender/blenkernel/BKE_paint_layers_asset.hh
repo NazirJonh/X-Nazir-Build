@@ -24,6 +24,8 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_import.hh"
 
+#include "DNA_ID.h"
+
 namespace blender {
 
 /**
@@ -165,6 +167,105 @@ Material *BKE_paint_layers_asset_create(Main &bmain,
                                         PaintLayerImageImportPolicy image_policy =
                                             PaintLayerImageImportPolicy::Copy,
                                         PaintLayerImportResult *r_result = nullptr);
+
+/* -------------------------------------------------------------------- */
+/** \name Exposed parameters
+ *
+ * A smart asset exposes parameters to its instances: the asset carries a list of what to show,
+ * and an import marks the copied rows' parameters so the instance's panel can find them. V1
+ * exposes every kind parameter of every saved item (a filter's radius, a mask operator's
+ * tolerance); picking a subset per parameter is a later step.
+ *
+ * The asset's list lives in the material's custom properties under #ASSET_PARAMS_PROP_NAME and is
+ * mirrored into the asset metadata, the way the asset type tag is. It is keyed by item name --
+ * the one identity that survives a copy into another material, unlike the marker, which is
+ * re-issued on import. Each entry holds one integer per exposed parameter, named after the
+ * parameter and storing its position in the kind's schema, so an import can tell a schema that
+ * moved from one that kept its layout.
+ *
+ * The instance side is a marker subgroup of the same name inside a copied item's
+ * #MaterialPaintLayer::system_properties, one integer per exposed parameter. The values stay
+ * where they always were -- the row's own properties, copied as locals -- so the marker is a
+ * binding-lite label: it survives undo, save and load with the row, and removing it (make unique)
+ * changes nothing about the pixels.
+ * \{ */
+
+/** The group name, on the asset material and inside a marked item's system properties. */
+constexpr const char *ASSET_PARAMS_PROP_NAME = "paint_asset_params";
+
+/** The exposed-parameters list of \a ma, or null when it is not a smart asset with one. */
+const IDProperty *BKE_paint_layers_asset_params_get(const Material &ma);
+
+/** Whether \a ma carries an exposed-parameters list. */
+bool BKE_paint_layers_asset_params_has(const Material &ma);
+
+/**
+ * (Re)build \a ma's exposed-parameters list from its own stack: every kind parameter of every row,
+ * correction, mask item and folder child, keyed by item name. Mirror it into the asset metadata
+ * when the material is already marked as an asset.
+ */
+void BKE_paint_layers_asset_params_expose(Material &ma);
+
+/**
+ * Mark the exposed parameters on the items just copied from \a src, reading \a src's
+ * exposed-parameters list and checking every entry against the copied item's own kind schema. An
+ * entry whose name has no item, or whose position no longer names that parameter, is skipped: the
+ * asset and the target build may disagree, and a stale label is worse than a missing one. \a items
+ * are the top-level copies (imported rows, or the mask items a mask import staged).
+ */
+void BKE_paint_layers_asset_params_mark_imported(const Material &src,
+                                                 Span<const MaterialPaintLayer *> items);
+
+/**
+ * Remove the exposed-parameter markers from every item of \a ma's stack, and the source label a
+ * smart-asset import wrote. The values are the rows' own by then; this only ends the binding.
+ */
+void BKE_paint_layers_asset_params_unbind(Material &ma);
+
+/** Whether \a item's parameter \a param_name carries the exposed marker. */
+bool BKE_paint_layers_item_param_is_exposed(const MaterialPaintLayer &item,
+                                            const char *param_name);
+
+/** \} */
+
+/**
+ * The source a smart-asset import came from, as \a ma's custom-property label, or null when \a ma
+ * is not a smart-asset instance. The reload reads it to find the asset again; the label names the
+ * source material and the library it came from, not its session UID, which does not survive.
+ */
+const IDProperty *BKE_paint_layers_asset_source_get(const Material &ma);
+
+/**
+ * Record \a source as \a ma's smart-asset source: which material (by name and library) the rows
+ * came from, what kind of asset it was, and the markers of the top-level rows the import laid
+ * down, so a reload can find and replace exactly those rows. A mask import records no rows (the
+ * items went onto the anchor's own mask) and reload does not cover it. \a ma stops reporting a
+ * source when made unique (#BKE_paint_layers_asset_params_unbind).
+ */
+void BKE_paint_layers_asset_source_record(Material &ma,
+                                          const Material &source,
+                                          PaintLayerAssetType type,
+                                          Span<const MaterialPaintLayer *> imported_rows);
+
+/** What #BKE_paint_layers_asset_reload came back with. */
+enum class PaintLayerAssetReloadResult : int8_t {
+  /** The rows were replaced from the source; parameter values were carried over. */
+  Reloaded = 0,
+  /** The material has no smart-asset import recorded on it. */
+  NoSource = 1,
+  /** The label names no material in this file: the source was never appended, or is gone. */
+  SourceMissing = 2,
+  /** The source has no rows to import any more, or the import was refused. */
+  ImportFailed = 3,
+};
+
+/**
+ * Replace the rows \a ma received from its smart asset with fresh copies of the asset's rows,
+ * carrying the exposed-parameter values the user changed on the instance over to the new rows.
+ * Every other edit the user made to the imported rows (painted pixels, added layers, moved items)
+ * is lost: the asset is the thing being followed.
+ */
+PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain, Material &ma);
 
 /**
  * Whether the mask branch of \a row holds an Anchor Point marker or reader: a Smart Mask is built

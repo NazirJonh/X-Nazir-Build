@@ -78,6 +78,8 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_mask_paste);
   WM_operatortype_append(OUTLINER_OT_stack_layer_smart_asset_save);
   WM_operatortype_append(OUTLINER_OT_stack_layer_smart_mask_apply);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_smart_asset_reload);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_smart_asset_make_unique);
   WM_operatortype_append(OUTLINER_OT_stack_focus_sub_index);
   WM_operatortype_append(OUTLINER_OT_stack_layer_drop);
   WM_operatortype_append(OUTLINER_OT_stack_layer_id_drop);

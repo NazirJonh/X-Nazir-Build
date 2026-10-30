@@ -11,6 +11,7 @@
  */
 
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_import.hh"
 
@@ -607,6 +608,9 @@ bool BKE_paint_layers_import_rows(Main &bmain,
       paint_layer_anchor_point_refs_remap(*item, marker_map);
       paint_layer_anchor_point_foreign_ref_clear(dst, *item);
     }
+    /* A smart asset's mask items carry the parameters it exposes: a label of their own next to the
+     * values, which the import copied as locals. */
+    BKE_paint_layers_asset_params_mark_imported(src, staged_items.as_span());
 
     dst.paint_layers_flag |= MA_PAINT_LAYERED;
     BKE_paint_layers_tag_edited(dst);
@@ -689,6 +693,9 @@ bool BKE_paint_layers_import_rows(Main &bmain,
       skipped_channels += paint_layer_prune_foreign_channels(dst, *copy);
     }
   }
+  /* A smart asset's rows carry the parameters it exposes: a label of their own next to the values,
+   * which the import copied as locals. */
+  BKE_paint_layers_asset_params_mark_imported(src, inserted.as_span());
 
   dst.paint_layers_flag |= MA_PAINT_LAYERED;
   BKE_paint_layers_tag_edited(dst);
@@ -700,6 +707,7 @@ bool BKE_paint_layers_import_rows(Main &bmain,
     r_result->dropped_object_masks = dropped_object_masks;
     r_result->dropped_curve_patches = dropped_curve_patches;
     r_result->stripped_maps = stripped_maps;
+    r_result->imported = inserted;
   }
   return true;
 }

@@ -21,6 +21,7 @@ from bl_ui.properties_material_paint_layers import (
     draw_material_layer_height,
     draw_material_mask_coverage_item,
     draw_material_mask_item,
+    draw_material_smart_asset_params,
 )
 # The brush glyph of the New Layered Material button: the same Material Symbols codepoint the Stack
 # Layers rows and Add menu use (`GLYPH_BRUSH` there, pinned by
@@ -848,6 +849,36 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         draw_material_layer_height(layout, owner, layer)
 
 
+class LAYER_MATERIAL_PT_smart_asset_params(LayerMaterialButtonsPanel, Panel):
+    """The exposed parameters of an imported Smart asset, over every row it laid down.
+
+    The asset decided what to expose when it was saved; the instance edits the values here without
+    hunting the rows in the Outliner stack. Reload pulls the rows fresh from the asset (keeping
+    these values), Make Unique ends the binding and leaves the values as they are.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_smart_asset_params"
+    bl_label = "Smart Asset Parameters"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        if cls._object_mask_editing(context):
+            return False
+        ma = cls._owner_material(context)
+        return ma is not None and ma.smart_asset_instance
+
+    def draw(self, context):
+        layout = self.layout
+        ma = self._owner_material(context)
+        if not draw_material_smart_asset_params(layout, ma):
+            layout.label(text="The asset exposes no parameters", icon='INFO')
+        layout.separator()
+        column = layout.column(align=True)
+        column.operator("outliner.stack_layer_smart_asset_reload", icon='FILE_REFRESH')
+        column.operator("outliner.stack_layer_smart_asset_make_unique", icon='UNLINKED')
+
+
 class LAYER_MT_mapping_reset(Menu):
     """Reset the shown row's UV mapping: all of its values, or one part at a time."""
 
@@ -1442,6 +1473,7 @@ classes = (
     LAYER_MATERIAL_PT_active_channel,
     LAYER_MATERIAL_PT_output_texture,
     LAYER_MATERIAL_PT_object_mask,
+    LAYER_MATERIAL_PT_smart_asset_params,
 )
 
 

@@ -380,6 +380,60 @@ def _draw_mask_output(layout, record, item):
     panel.operator("paint.mask_item_bake", text="Bake to Image", icon='IMAGE_DATA')
 
 
+def _draw_kind_param(layout, param):
+    """One parameter of a row's kind, drawn as its type asks.
+
+    A float draws as a slider; the value is the property of the parameter that carries its type.
+    Typed parameters (an enum as a menu, a color as a picker) draw here once the kind schema
+    carries them; every parameter is a float in this version.
+    """
+    layout.prop(param, "value", text=param.label, slider=True)
+
+
+def draw_material_kind_params(layout, params):
+    """The parameters of a row's kind, in the order the kind reads them."""
+    for param in params:
+        _draw_kind_param(layout, param)
+
+
+def draw_material_smart_asset_params(layout, ma):
+    """The exposed parameters of an imported smart asset, over every row it laid down.
+
+    Each parameter is the row's own property, so an edit here is an edit in the row's place with
+    the undo and the invalidation that any edit of it gets. A payload parameter (a ramp, curves, a
+    color balance) is drawn in its row's own panel and not here. Items under a row (a correction,
+    a mask item, a folder child) draw after it, indented, with their name as the caption.
+    """
+    drawn_any = False
+
+    def draw_item(item, depth):
+        nonlocal drawn_any
+        params = [param for param in item.kind_params if param.exposed]
+        if not params:
+            return
+        drawn_any = True
+        column = layout
+        if depth > 0:
+            caption = layout.row()
+            caption.label(text=item.name + ":", icon='DOT')
+            column = layout.column(align=True)
+        for param in params:
+            _draw_kind_param(column, param)
+
+    def draw_row(row, depth):
+        draw_item(row, depth)
+        for effect in row.effects:
+            draw_row(effect, depth + 1)
+        for item in row.mask_items:
+            draw_row(item, depth + 1)
+        for child in row.children:
+            draw_row(child, depth + 1)
+
+    for row in ma.paint_layers:
+        draw_row(row, 0)
+    return drawn_any
+
+
 def draw_material_mask_coverage_item(layout, _context, item):
     """The controls of a map-driven mask filter (Color ID): its map, how it matches and its output.
 

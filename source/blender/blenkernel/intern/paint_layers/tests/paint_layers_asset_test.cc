@@ -33,6 +33,8 @@
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
+#include "../paint_layers_kind.hh"
+
 namespace blender::bke::tests {
 
 /** How many tags named \a name the metadata carries; more than one means a duplicate. */
@@ -255,6 +257,253 @@ TEST_F(PaintLayersAssetTest, smart_mask_create_keeps_only_the_mask)
   ASSERT_EQ(BLI_listbase_count(&asset->paint_layers), 1);
   MaterialPaintLayer *holder = static_cast<MaterialPaintLayer *>(asset->paint_layers.first);
   EXPECT_NE(holder->mask_stack.first, nullptr);
+}
+
+/** The Levels correction the tests hang on a row, named so the metadata can be told apart. */
+static MaterialPaintLayer *add_levels_effect(Material &ma,
+                                             MaterialPaintLayer &row,
+                                             const char *name)
+{
+  return BKE_paint_layers_filter_add(ma, &row, MA_PAINT_LAYER_FILTER_LEVELS, name);
+}
+
+/** The first effect of \a row, or null. */
+static MaterialPaintLayer *first_effect(MaterialPaintLayer &row)
+{
+  return static_cast<MaterialPaintLayer *>(row.effects.first);
+}
+
+TEST_F(PaintLayersAssetTest, smart_material_create_exposes_every_parameter)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  ASSERT_NE(add_levels_effect(*src, *row, "Tone"), nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartParams");
+  ASSERT_NE(asset, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_asset_params_has(*asset));
+
+  const IDProperty *params = BKE_paint_layers_asset_params_get(*asset);
+  const IDProperty *tone = IDP_GetPropertyFromGroup(params, "Tone");
+  ASSERT_NE(tone, nullptr);
+  ASSERT_EQ(tone->type, IDP_GROUP);
+  /* One integer per schema parameter, named after it and carrying its position. */
+  const IDProperty *in_black = IDP_GetPropertyFromGroup(tone, "in_black");
+  ASSERT_NE(in_black, nullptr);
+  EXPECT_EQ(IDP_int_get(in_black), PAINT_LAYER_LEVELS_IN_BLACK);
+  const IDProperty *gamma = IDP_GetPropertyFromGroup(tone, "gamma");
+  ASSERT_NE(gamma, nullptr);
+  EXPECT_EQ(IDP_int_get(gamma), PAINT_LAYER_LEVELS_GAMMA);
+  /* The plain row has no parameters of its own and so no entry. */
+  EXPECT_EQ(IDP_GetPropertyFromGroup(params, "Layer"), nullptr);
+  /* The metadata reaches the asset copy too, for the Asset Browser. */
+  asset->id.asset_data = BKE_asset_metadata_create();
+  BKE_paint_layers_asset_params_expose(*asset);
+  const IDProperty *mirrored = BKE_asset_metadata_idprop_find(asset->id.asset_data,
+                                                             "paint_asset_params");
+  ASSERT_NE(mirrored, nullptr);
+  ASSERT_NE(IDP_GetPropertyFromGroup(mirrored, "Tone"), nullptr);
+}
+
+TEST_F(PaintLayersAssetTest, smart_asset_import_marks_the_exposed_parameters)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  MaterialPaintLayer *tone = add_levels_effect(*src, *row, "Tone");
+  ASSERT_NE(tone, nullptr);
+  MaterialPaintLayer *tint = BKE_paint_layers_filter_add(
+      *src, row, MA_PAINT_LAYER_FILTER_HSL, nullptr);
+  ASSERT_NE(tint, nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartMarked");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(BKE_paint_layers_import_rows(
+      *bmain, *dst, *asset, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+  ASSERT_EQ(result.imported.size(), 1);
+  MaterialPaintLayer *copy = result.imported[0];
+  EXPECT_STREQ(copy->name, "Layer");
+
+  /* The corrections the asset exposed carry their marks; the plain row has none. */
+  MaterialPaintLayer *tone_copy = first_effect(*copy);
+  ASSERT_NE(tone_copy, nullptr);
+  EXPECT_STREQ(tone_copy->name, "Tone");
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*tone_copy, "in_black"));
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*tone_copy, "out_white"));
+  MaterialPaintLayer *tint_copy = tone_copy->next;
+  ASSERT_NE(tint_copy, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*tint_copy, "hue"));
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*tint_copy, "value"));
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_exposed(*copy, "hue"));
+  /* The values came over as locals, beside the marks. */
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*tone_copy, PAINT_LAYER_LEVELS_GAMMA), 1.0f);
+}
+
+TEST_F(PaintLayersAssetTest, import_marks_do_not_move_the_bake_hash)
+{
+  /* Two stacks built the same way: one imported from a smart asset (its marks in place), one from
+   * a plain material. The label is metadata, so both rows keep the same validity key. */
+  Material *plain = BKE_material_add(bmain, "Plain");
+  MaterialPaintLayer *plain_row = BKE_paint_layers_add(
+      *plain, "Layer", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(plain_row, nullptr);
+  ASSERT_NE(add_levels_effect(*plain, *plain_row, "Tone"), nullptr);
+
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*src, "Layer", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(add_levels_effect(*src, *row, "Tone"), nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartHash");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(BKE_paint_layers_import_rows(
+      *bmain, *dst, *asset, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+  MaterialPaintLayer *marked_row = result.imported[0];
+  ASSERT_NE(marked_row, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*first_effect(*marked_row), "gamma"));
+
+  uint32_t marked_hash[2];
+  uint32_t plain_hash[2];
+  BKE_paint_layers_bake_hash(*dst, *marked_row, marked_hash);
+  BKE_paint_layers_bake_hash(*plain, *plain_row, plain_hash);
+  EXPECT_EQ(marked_hash[0], plain_hash[0]);
+  EXPECT_EQ(marked_hash[1], plain_hash[1]);
+}
+
+TEST_F(PaintLayersAssetTest, reload_replaces_the_rows_and_keeps_the_instance_values)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  MaterialPaintLayer *tone = add_levels_effect(*src, *row, "Tone");
+  ASSERT_NE(tone, nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartReload");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(BKE_paint_layers_import_rows(
+      *bmain, *dst, *asset, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+  MaterialPaintLayer *copy = result.imported[0];
+  BKE_paint_layers_asset_source_record(
+      *dst, *asset, PaintLayerAssetType::Material, result.imported.as_span());
+  ASSERT_NE(BKE_paint_layers_asset_source_get(*dst), nullptr);
+
+  /* The instance changed a value; the asset grew a second row and moved its own value. */
+  paint_layer_kind_param_set(*first_effect(*copy), PAINT_LAYER_LEVELS_IN_BLACK, 0.25f);
+  MaterialPaintLayer *asset_row = static_cast<MaterialPaintLayer *>(asset->paint_layers.first);
+  paint_layer_kind_param_set(*first_effect(*asset_row), PAINT_LAYER_LEVELS_IN_BLACK, 0.75f);
+  ASSERT_NE(BKE_paint_layers_add(*asset, "Added", nullptr, PaintLayerPlace::Above), nullptr);
+
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst), PaintLayerAssetReloadResult::Reloaded);
+
+  /* The structure came from the asset; the instance's own value survived the replacement, over
+   * the one the asset moved. */
+  ASSERT_EQ(BLI_listbase_count(&dst->paint_layers), 2);
+  MaterialPaintLayer *fresh = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
+  const MaterialPaintLayer *added = fresh->next;
+  EXPECT_STREQ(added->name, "Added");
+  EXPECT_STREQ(fresh->name, "Layer");
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*first_effect(*fresh), PAINT_LAYER_LEVELS_IN_BLACK), 0.25f);
+  /* The fresh rows are marked again, so the panel keeps working. */
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*first_effect(*fresh), "in_black"));
+}
+
+TEST_F(PaintLayersAssetTest, reload_reports_a_missing_source)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartGone");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  /* Without a recorded import there is nothing to reload. */
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst),
+            PaintLayerAssetReloadResult::NoSource);
+
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(BKE_paint_layers_import_rows(
+      *bmain, *dst, *asset, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+  BKE_paint_layers_asset_source_record(
+      *dst, *asset, PaintLayerAssetType::Material, result.imported.as_span());
+
+  /* The asset renamed away: the label names a material this file no longer has. */
+  BKE_libblock_rename(*bmain, asset->id, "SmartRenamed");
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst),
+            PaintLayerAssetReloadResult::SourceMissing);
+}
+
+TEST_F(PaintLayersAssetTest, make_unique_ends_the_binding_and_keeps_the_values)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  ASSERT_NE(add_levels_effect(*src, *row, "Tone"), nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartUnique");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(BKE_paint_layers_import_rows(
+      *bmain, *dst, *asset, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+  MaterialPaintLayer *copy = result.imported[0];
+  BKE_paint_layers_asset_source_record(
+      *dst, *asset, PaintLayerAssetType::Material, result.imported.as_span());
+  paint_layer_kind_param_set(*first_effect(*copy), PAINT_LAYER_LEVELS_GAMMA, 2.0f);
+
+  BKE_paint_layers_asset_params_unbind(*dst);
+
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_exposed(*first_effect(*copy), "gamma"));
+  EXPECT_EQ(BKE_paint_layers_asset_source_get(*dst), nullptr);
+  /* The value the instance carried stays: unbinding is not a reset. */
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*first_effect(*copy), PAINT_LAYER_LEVELS_GAMMA), 2.0f);
 }
 
 TEST_F(PaintLayersAssetTest, smart_asset_create_refuses_foreign_and_non_stack_rows)

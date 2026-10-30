@@ -312,6 +312,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_anchor_point_target_
 #  include "BKE_node.hh"
 #  include "BKE_paint.hh"
 #  include "BKE_paint_layers.hh"
+#  include "BKE_paint_layers_asset.hh"
 #  include "BKE_paint_layers_gradient.hh"
 #  include "BKE_paint_layers_composite.hh"
 #  include "BKE_paint_layers_edit.hh"
@@ -1276,6 +1277,11 @@ static bool rna_Material_paint_layers_is_stale_get(PointerRNA *ptr)
   /* BKE-only signal: it cannot see a render the editor has started but not yet marked, which an
    * RNA getter could only learn from a window manager it may not reach. */
   return BKE_paint_layers_is_stale(*id_cast<Material *>(ptr->owner_id));
+}
+
+static bool rna_Material_smart_asset_instance_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_asset_source_get(*id_cast<Material *>(ptr->owner_id)) != nullptr;
 }
 
 /* The effective set, not the raw field: an unauthored field reads the derived set. */
@@ -2673,6 +2679,14 @@ static void rna_MaterialPaintLayer_mask_items_begin(CollectionPropertyIterator *
  * reads and writes them through that data, so no kind is named here.
  * \{ */
 
+/** Kind parameters are the row's own scalars; the binding-marker group a smart-asset import
+ * stores beside them is not one, and a group has no value a parameter could draw. */
+static bool rna_MaterialPaintLayerKindParam_group_skip(CollectionPropertyIterator * /*iter*/,
+                                                       void *data)
+{
+  return static_cast<const IDProperty *>(data)->type == IDP_GROUP;
+}
+
 static void rna_MaterialPaintLayer_kind_params_begin(CollectionPropertyIterator *iter,
                                                      PointerRNA *ptr)
 {
@@ -2682,7 +2696,8 @@ static void rna_MaterialPaintLayer_kind_params_begin(CollectionPropertyIterator 
     rna_iterator_listbase_begin(iter, ptr, nullptr, nullptr);
     return;
   }
-  rna_iterator_listbase_begin(iter, ptr, &layer->system_properties->data.group, nullptr);
+  rna_iterator_listbase_begin(
+      iter, ptr, &layer->system_properties->data.group, rna_MaterialPaintLayerKindParam_group_skip);
 }
 
 static void rna_MaterialPaintLayerKindParam_name_get(PointerRNA *ptr, char *value)
@@ -2800,6 +2815,25 @@ static std::optional<std::string> rna_MaterialPaintLayerKindParam_path(const Poi
     return std::nullopt;
   }
   return fmt::format("{}.kind_params[\"{}\"]", row_path, prop->name);
+}
+
+/**
+ * Whether a smart-asset import marked this parameter as one of the asset's exposed ones. The
+ * collection item is created from its row, so the row is the closest ancestor of the pointer; a
+ * pointer built any other way reports false, which only costs the panel one hidden parameter.
+ */
+static bool rna_MaterialPaintLayerKindParam_exposed_get(PointerRNA *ptr)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  if (prop == nullptr || ptr->ancestors.is_empty()) {
+    return false;
+  }
+  const AncestorPointerRNA &parent = ptr->ancestors.last();
+  if (parent.type != RNA_MaterialPaintLayer || parent.data == nullptr) {
+    return false;
+  }
+  return BKE_paint_layers_item_param_is_exposed(
+      *static_cast<const MaterialPaintLayer *>(parent.data), prop->name);
 }
 
 /** \} */
@@ -4275,6 +4309,14 @@ static void rna_def_material_paint_layer_kind_param(BlenderRNA *brna)
                                "rna_MaterialPaintLayerKindParam_value_range");
   RNA_def_property_ui_text(prop, "Value", "Value of the parameter, within its range");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "exposed", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayerKindParam_exposed_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Exposed",
+                           "Whether a smart-asset import marked this parameter as one the asset "
+                           "exposes; the Smart Asset Parameters panel shows these");
 }
 
 static void rna_def_material_paint_layer_id_color(BlenderRNA *brna)
@@ -6633,6 +6675,14 @@ void RNA_def_material(BlenderRNA *brna)
       "match its current layer stack yet: an edit is waiting out its short pause, or a render is "
       "queued or running. Wait for it to become False, or use MATERIAL_OT_paint_layers_bake_now, "
       "before reading a baked result");
+
+  prop = RNA_def_property(srna, "smart_asset_instance", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Material_smart_asset_instance_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Smart Asset Instance",
+                           "Whether this material holds rows imported from a Smart asset, with the "
+                           "parameters the asset exposes marked on them");
 
   prop = RNA_def_property(srna, "paint_layers_image_size", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "paint_layers_image_size");

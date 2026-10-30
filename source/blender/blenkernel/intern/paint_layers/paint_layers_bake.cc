@@ -18,6 +18,7 @@
  */
 
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_gradient.hh"
 
 #include <algorithm>
@@ -778,6 +779,11 @@ static uint64_t bake_hash_idprops(uint64_t h, const IDProperty *group)
        prop != nullptr;
        prop = prop->next)
   {
+    /* The smart-asset binding labels are metadata, not pixels: making an instance unique or
+     * re-binding it must not invalidate its bakes, so the marks never reach the hash. */
+    if (STREQ(prop->name, ASSET_PARAMS_PROP_NAME)) {
+      continue;
+    }
     for (const char *c = prop->name; *c != '\0'; c++) {
       h = bake_hash_mix(h, uint8_t(*c));
     }

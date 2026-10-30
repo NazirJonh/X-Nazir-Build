@@ -719,6 +719,12 @@ class SmartMaterialAssetAction final : public StackDropAction {
       BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Could not insert the Smart asset");
       return false;
     }
+    /* Record what the instance came from, so a reload can find the asset and replace these rows:
+     * the source by name and library (its session UID does not survive), the laid-down rows by
+     * their markers. A mask import has no rows of its own to record and no reload. */
+    if (type != PaintLayerAssetType::Mask) {
+      BKE_paint_layers_asset_source_record(material, *source, type, result.imported.as_span());
+    }
     if (result.dropped_object_masks) {
       BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Object masks were not imported");
     }

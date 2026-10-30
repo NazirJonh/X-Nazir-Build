@@ -390,14 +390,8 @@ def _draw_kind_param(layout, param):
     layout.prop(param, "value", text=param.label, slider=True)
 
 
-def draw_material_kind_params(layout, params):
-    """The parameters of a row's kind, in the order the kind reads them."""
-    for param in params:
-        _draw_kind_param(layout, param)
-
-
-def draw_material_smart_asset_params(layout, ma):
-    """The exposed parameters of an imported smart asset, over every row it laid down.
+def draw_material_smart_asset_rows(layout, rows):
+    """The exposed parameters of the given rows: one smart-asset instance's part of the stack.
 
     Each parameter is the row's own property, so an edit here is an edit in the row's place with
     the undo and the invalidation that any edit of it gets. A payload parameter (a ramp, curves, a
@@ -429,7 +423,7 @@ def draw_material_smart_asset_params(layout, ma):
         for child in row.children:
             draw_row(child, depth + 1)
 
-    for row in ma.paint_layers:
+    for row in rows:
         draw_row(row, 0)
     return drawn_any
 

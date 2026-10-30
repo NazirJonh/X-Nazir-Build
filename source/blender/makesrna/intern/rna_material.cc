@@ -1281,7 +1281,7 @@ static bool rna_Material_paint_layers_is_stale_get(PointerRNA *ptr)
 
 static bool rna_Material_smart_asset_instance_get(PointerRNA *ptr)
 {
-  return BKE_paint_layers_asset_source_get(*id_cast<Material *>(ptr->owner_id)) != nullptr;
+  return BKE_paint_layers_asset_instances_any(*id_cast<Material *>(ptr->owner_id));
 }
 
 /* The effective set, not the raw field: an unauthored field reads the derived set. */
@@ -2839,6 +2839,123 @@ static bool rna_MaterialPaintLayerKindParam_exposed_get(PointerRNA *ptr)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Smart-asset instances
+ * \{ */
+
+/** The instance \a row belongs to, or -1 for none (a copy of a row is bound to nothing). */
+static int rna_MaterialPaintLayer_smart_asset_instance_id_get(PointerRNA *ptr)
+{
+  if (ptr->owner_id == nullptr || GS(ptr->owner_id->name) != ID_MA) {
+    return -1;
+  }
+  const MaterialPaintLayer *row = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_asset_instance_of_row(*id_cast<Material *>(ptr->owner_id), *row);
+}
+
+static void rna_MaterialPaintLayer_smart_asset_instance_label_get(PointerRNA *ptr, char *value)
+{
+  value[0] = '\0';
+  const int instance_id = rna_MaterialPaintLayer_smart_asset_instance_id_get(ptr);
+  if (instance_id < 0 || ptr->owner_id == nullptr || GS(ptr->owner_id->name) != ID_MA) {
+    return;
+  }
+  const std::string label = BKE_paint_layers_asset_instance_label(
+      *id_cast<Material *>(ptr->owner_id), instance_id);
+  strcpy(value, label.c_str());
+}
+
+static int rna_MaterialPaintLayer_smart_asset_instance_label_length(PointerRNA *ptr)
+{
+  char value[MAX_NAME + 16];
+  rna_MaterialPaintLayer_smart_asset_instance_label_get(ptr, value);
+  return int(strlen(value));
+}
+
+/** One row of the computed `Material.smart_asset_instances` collection, a snapshot of one drop of
+ * a Smart asset into the material; the array is built on iteration and owned by the iterator. */
+struct MaterialSmartAssetInstanceItem {
+  int id;
+  int number;
+  int type;
+  char asset_name[MAX_NAME];
+  char label[MAX_NAME + 16];
+};
+
+static void rna_Material_smart_asset_instances_begin(CollectionPropertyIterator *iter,
+                                                     PointerRNA *ptr)
+{
+  Material *ma = (ptr->owner_id != nullptr && GS(ptr->owner_id->name) == ID_MA) ?
+                     id_cast<Material *>(ptr->owner_id) :
+                     nullptr;
+  MaterialSmartAssetInstanceItem *array = nullptr;
+  int64_t count = 0;
+  if (ma != nullptr) {
+    Vector<PaintLayerAssetInstanceInfo> instances;
+    BKE_paint_layers_asset_instances_foreach(*ma, [&](const PaintLayerAssetInstanceInfo &info) {
+      instances.append(info);
+      return true;
+    });
+    count = instances.size();
+    if (count > 0) {
+      array = MEM_new_array_uninitialized<MaterialSmartAssetInstanceItem>(count, __func__);
+      int64_t i = 0;
+      for (const PaintLayerAssetInstanceInfo &info : instances) {
+        MaterialSmartAssetInstanceItem &item = array[i++];
+        item.id = info.id;
+        item.number = info.number;
+        item.type = int(info.type);
+        STRNCPY(item.asset_name, info.name.c_str());
+        STRNCPY(item.label, info.label().c_str());
+      }
+    }
+  }
+  rna_iterator_array_begin(
+      iter, ptr, array, sizeof(MaterialSmartAssetInstanceItem), count, array != nullptr, nullptr);
+}
+
+static const MaterialSmartAssetInstanceItem *rna_MaterialSmartAssetInstance(
+    const PointerRNA *ptr)
+{
+  return static_cast<const MaterialSmartAssetInstanceItem *>(ptr->data);
+}
+
+static int rna_MaterialSmartAssetInstance_id_get(PointerRNA *ptr)
+{
+  return rna_MaterialSmartAssetInstance(ptr)->id;
+}
+
+static void rna_MaterialSmartAssetInstance_label_get(PointerRNA *ptr, char *value)
+{
+  /* `value` is a plain pointer here, so #STRNCPY (which needs an array) cannot deduce its size;
+   * the item's own buffer is the size that holds the string. */
+  const MaterialSmartAssetInstanceItem *item = rna_MaterialSmartAssetInstance(ptr);
+  BLI_strncpy(value, item->label, sizeof(item->label));
+}
+
+static int rna_MaterialSmartAssetInstance_label_length(PointerRNA *ptr)
+{
+  return int(strlen(rna_MaterialSmartAssetInstance(ptr)->label));
+}
+
+static void rna_MaterialSmartAssetInstance_asset_name_get(PointerRNA *ptr, char *value)
+{
+  const MaterialSmartAssetInstanceItem *item = rna_MaterialSmartAssetInstance(ptr);
+  BLI_strncpy(value, item->asset_name, sizeof(item->asset_name));
+}
+
+static int rna_MaterialSmartAssetInstance_asset_name_length(PointerRNA *ptr)
+{
+  return int(strlen(rna_MaterialSmartAssetInstance(ptr)->asset_name));
+}
+
+static int rna_MaterialSmartAssetInstance_type_get(PointerRNA *ptr)
+{
+  return rna_MaterialSmartAssetInstance(ptr)->type;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Color ID colours and map-coverage filters
  * \{ */
 
@@ -4319,6 +4436,57 @@ static void rna_def_material_paint_layer_kind_param(BlenderRNA *brna)
                            "exposes; the Smart Asset Parameters panel shows these");
 }
 
+static void rna_def_material_smart_asset_instance(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "MaterialSmartAssetInstance", nullptr);
+  RNA_def_struct_ui_text(srna,
+                         "Smart Asset Instance",
+                         "One drop of a Smart asset imported into a material, with its own rows "
+                         "and exposed parameters");
+
+  prop = RNA_def_property(srna, "id", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_funcs(prop, "rna_MaterialSmartAssetInstance_id_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Id",
+                           "Identity of the instance within its material; the Reload and Make "
+                           "Unique operators take it");
+
+  prop = RNA_def_property(srna, "label", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialSmartAssetInstance_label_get",
+                                "rna_MaterialSmartAssetInstance_label_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Label", "The instance's user-facing name: the asset's name and its drop number");
+
+  prop = RNA_def_property(srna, "asset_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialSmartAssetInstance_asset_name_get",
+                                "rna_MaterialSmartAssetInstance_asset_name_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Asset Name", "Name of the Smart asset material the rows came from");
+
+  /* Values must match #PaintLayerAssetType. */
+  static const EnumPropertyItem rna_enum_material_smart_asset_type_items[] = {
+      {1, "MATERIAL", 0, "Smart Material", ""},
+      {2, "LAYER", 0, "Smart Layer", ""},
+      {3, "MASK", 0, "Smart Mask", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialSmartAssetInstance_type_get", nullptr, nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_smart_asset_type_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Type", "What kind of Smart asset the drop came from");
+}
+
 static void rna_def_material_paint_layer_id_color(BlenderRNA *brna)
 {
   StructRNA *srna = RNA_def_struct(brna, "MaterialPaintLayerIdColor", nullptr);
@@ -4454,6 +4622,28 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                                 nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Marker", "Stable identity of the paint layer");
+
+  /* Read-only, and derived from the instance records: a row carries no instance id of its own, so
+   * a duplicate (a fresh marker) reads as bound to nothing without any cleanup. */
+  prop = RNA_def_property(srna, "smart_asset_instance_id", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(
+      prop, "rna_MaterialPaintLayer_smart_asset_instance_id_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Smart Asset Instance Id",
+                           "Id of the imported Smart asset this row came from, or -1 when the row "
+                           "is not of an instance");
+
+  prop = RNA_def_property(srna, "smart_asset_instance_label", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayer_smart_asset_instance_label_get",
+                                "rna_MaterialPaintLayer_smart_asset_instance_label_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Smart Asset Instance Label",
+      "Label of the imported Smart asset this row came from (\"<asset> #<number>\"), or empty");
 
   /* The payload of a Curve Patch row; null for every other kind. */
   prop = RNA_def_property(srna, "curve_patch", PROP_POINTER, PROP_NONE);
@@ -6684,6 +6874,24 @@ void RNA_def_material(BlenderRNA *brna)
                            "Whether this material holds rows imported from a Smart asset, with the "
                            "parameters the asset exposes marked on them");
 
+  prop = RNA_def_property(srna, "smart_asset_instances", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialSmartAssetInstance");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Material_smart_asset_instances_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Smart Asset Instances",
+      "The Smart assets dropped into this material, oldest first; each holds its own rows, which "
+      "Reload and Make Unique act on separately");
+
   prop = RNA_def_property(srna, "paint_layers_image_size", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "paint_layers_image_size");
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layers_image_size_items);
@@ -6864,6 +7072,7 @@ void RNA_def_material(BlenderRNA *brna)
   rna_def_material_greasepencil(brna);
   rna_def_material_lineart(brna);
   rna_def_material_paint_layer_issue(brna);
+  rna_def_material_smart_asset_instance(brna);
   rna_def_material_paint_layer_kind_param(brna);
   rna_def_material_paint_layer_id_color(brna);
   rna_def_material_paint_layer_curve_patch(brna);

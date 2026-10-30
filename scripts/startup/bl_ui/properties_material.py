@@ -21,7 +21,7 @@ from bl_ui.properties_material_paint_layers import (
     draw_material_layer_height,
     draw_material_mask_coverage_item,
     draw_material_mask_item,
-    draw_material_smart_asset_params,
+    draw_material_smart_asset_rows,
 )
 # The brush glyph of the New Layered Material button: the same Material Symbols codepoint the Stack
 # Layers rows and Add menu use (`GLYPH_BRUSH` there, pinned by
@@ -849,12 +849,37 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         draw_material_layer_height(layout, owner, layer)
 
 
-class LAYER_MATERIAL_PT_smart_asset_params(LayerMaterialButtonsPanel, Panel):
-    """The exposed parameters of an imported Smart asset, over every row it laid down.
+def _smart_asset_instance_root_rows(ma, instance_id):
+    """The roots of one smart-asset instance: the rows its drop laid down, at any depth.
 
-    The asset decided what to expose when it was saved; the instance edits the values here without
-    hunting the rows in the Outliner stack. Reload pulls the rows fresh from the asset (keeping
-    these values), Make Unique ends the binding and leaves the values as they are.
+    A drop Into a folder lays its rows nested, so the top-level rows alone miss them. The walk
+    stops at a root it collected: its children draw with it, and a root of the same instance
+    nested under it is drawn once, as part of the root's own subtree.
+    """
+    rows = []
+
+    def walk(row):
+        if row.smart_asset_instance_id == instance_id:
+            rows.append(row)
+            return
+        for child in row.children:
+            walk(child)
+
+    for row in ma.paint_layers:
+        walk(row)
+    return rows
+
+
+class LAYER_MATERIAL_PT_smart_asset_params(LayerMaterialButtonsPanel, Panel):
+    """The exposed parameters of the imported Smart assets, one section per instance.
+
+    Every drop of a Smart asset into this material is an instance of its own: the section shows
+    the parameters of the rows that drop laid down, with its own Reload and Make Unique, so
+    working on one drop never touches the others. The asset decided what to expose when it was
+    saved; the instance edits the values here without hunting the rows in the Outliner stack.
+    Reload pulls the rows fresh from the asset (keeping these values), Make Unique ends the
+    binding and leaves the values as they are. The section of the instance the active row belongs
+    to opens by default, and its header says so.
     """
 
     bl_idname = "LAYER_MATERIAL_PT_smart_asset_params"
@@ -871,12 +896,37 @@ class LAYER_MATERIAL_PT_smart_asset_params(LayerMaterialButtonsPanel, Panel):
     def draw(self, context):
         layout = self.layout
         ma = self._owner_material(context)
-        if not draw_material_smart_asset_params(layout, ma):
+        # The instance the active row belongs to opens its section and marks its header; -1 reads
+        # as "no row active" and leaves every section closed.
+        active_instance_id = -1
+        active = ma.paint_layers.active
+        if active is not None:
+            active_instance_id = active.smart_asset_instance_id
+        drawn_any = False
+        for inst in ma.smart_asset_instances:
+            drawn_any = True
+            is_active = inst.id == active_instance_id
+            # A row belongs to an instance through its record only: asking the row keeps the
+            # duplicates (fresh markers, no instance) out of the section, and the roots the drop
+            # laid into a folder come with the walk.
+            rows = _smart_asset_instance_root_rows(ma, inst.id)
+            header, body = layout.panel(
+                "smart_asset_instance_%d" % inst.id, default_closed=not is_active)
+            header.label(text=inst.label, icon='SOLO_ON' if is_active else 'MATERIAL')
+            if not body:
+                continue
+            if not draw_material_smart_asset_rows(body, rows):
+                body.label(text="The asset exposes no parameters", icon='INFO')
+            body.separator()
+            column = body.column(align=True)
+            reload = column.operator(
+                "outliner.stack_layer_smart_asset_reload", icon='FILE_REFRESH')
+            reload.instance_id = inst.id
+            make_unique = column.operator(
+                "outliner.stack_layer_smart_asset_make_unique", icon='UNLINKED')
+            make_unique.instance_id = inst.id
+        if not drawn_any:
             layout.label(text="The asset exposes no parameters", icon='INFO')
-        layout.separator()
-        column = layout.column(align=True)
-        column.operator("outliner.stack_layer_smart_asset_reload", icon='FILE_REFRESH')
-        column.operator("outliner.stack_layer_smart_asset_make_unique", icon='UNLINKED')
 
 
 class LAYER_MT_mapping_reset(Menu):

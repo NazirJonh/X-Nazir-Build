@@ -17,7 +17,9 @@
  */
 
 #include <cstdint>
+#include <string>
 
+#include "BLI_function_ref.hh"
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 
@@ -217,10 +219,13 @@ void BKE_paint_layers_asset_params_mark_imported(const Material &src,
                                                  Span<const MaterialPaintLayer *> items);
 
 /**
- * Remove the exposed-parameter markers from every item of \a ma's stack, and the source label a
- * smart-asset import wrote. The values are the rows' own by then; this only ends the binding.
+ * Remove the exposed-parameter markers from \a ma's stack, and the instance records with them.
+ * With \a instance_id of 0 (the asset-create path) every marker of every item goes and all
+ * instances are removed. With an instance's id only that instance's rows lose their markers and
+ * only its record goes; the other instances keep following their assets. The values are the rows'
+ * own by then; this only ends the binding.
  */
-void BKE_paint_layers_asset_params_unbind(Material &ma);
+void BKE_paint_layers_asset_params_unbind(Material &ma, int instance_id = 0);
 
 /** Whether \a item's parameter \a param_name carries the exposed marker. */
 bool BKE_paint_layers_item_param_is_exposed(const MaterialPaintLayer &item,
@@ -228,30 +233,98 @@ bool BKE_paint_layers_item_param_is_exposed(const MaterialPaintLayer &item,
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Smart-asset instances
+ *
+ * A material may hold several drops of Smart assets -- the same asset twice, or different assets
+ * side by side -- and each drop is an instance: its own source label and its own set of rows.
+ * The instances live in the material's custom properties under #PAINT_ASSET_INSTANCES_PROP_NAME,
+ * one subgroup per instance keyed by its id as a string; the single #PAINT_ASSET_SOURCE_PROP_NAME
+ * of the one-instance format is read as instance 1 until the next record or reload writes the
+ * new group (a read never mutates the properties).
+ *
+ * A row belongs to an instance through that instance's `rows` marker set only -- nothing is
+ * written into the row -- so a duplicated row (a new marker) belongs to no instance, and the
+ * nested items of a row follow the nearest root above them. \{ */
+
+/** The custom-property group holding one subgroup per instance. */
+constexpr const char *PAINT_ASSET_INSTANCES_PROP_NAME = "paint_asset_instances";
 /**
- * The source a smart-asset import came from, as \a ma's custom-property label, or null when \a ma
- * is not a smart-asset instance. The reload reads it to find the asset again; the label names the
- * source material and the library it came from, not its session UID, which does not survive.
+ * The one-instance label of the format before instances existed; read as instance 1 and replaced
+ * by the instances group on the next record or reload.
  */
-const IDProperty *BKE_paint_layers_asset_source_get(const Material &ma);
+constexpr const char *PAINT_ASSET_SOURCE_PROP_NAME = "paint_asset_source";
+
+/** What one drop of a Smart asset into a material carries, read out of its record. */
+struct PaintLayerAssetInstanceInfo {
+  /** Unique in the material, monotonically growing; ids of removed instances are not reused. */
+  int id = 0;
+  /** Ordinal among the instances of the same asset (name and library) in this material, from 1. */
+  int number = 0;
+  /** The asset material's name, as it was at the drop. */
+  std::string name;
+  /** The library file the asset came from, empty for one in the current file. */
+  std::string library;
+  PaintLayerAssetType type = PaintLayerAssetType::Material;
+
+  /** The user-facing label: "<asset name> #<number>". */
+  std::string label() const
+  {
+    return name + " #" + std::to_string(number);
+  }
+};
+
+/** Whether \a ma holds at least one smart-asset instance (of the current or the old format). */
+bool BKE_paint_layers_asset_instances_any(const Material &ma);
 
 /**
- * Record \a source as \a ma's smart-asset source: which material (by name and library) the rows
- * came from, what kind of asset it was, and the markers of the top-level rows the import laid
- * down, so a reload can find and replace exactly those rows. A mask import records no rows (the
- * items went onto the anchor's own mask) and reload does not cover it. \a ma stops reporting a
- * source when made unique (#BKE_paint_layers_asset_params_unbind).
+ * The record of the instance \a instance_id, as its custom-property subgroup, or null when the
+ * material holds no such instance (including the one-instance format for id 1).
  */
-void BKE_paint_layers_asset_source_record(Material &ma,
-                                          const Material &source,
-                                          PaintLayerAssetType type,
-                                          Span<const MaterialPaintLayer *> imported_rows);
+const IDProperty *BKE_paint_layers_asset_instance_find(const Material &ma, int instance_id);
+
+/**
+ * Visit every instance of \a ma, oldest first, with its read-out info. Return false from \a fn to
+ * stop.
+ */
+void BKE_paint_layers_asset_instances_foreach(
+    const Material &ma, FunctionRef<bool(const PaintLayerAssetInstanceInfo &)> fn);
+
+/**
+ * The id of the instance whose `rows` set names \a marker, or -1 for none. The marker has to be
+ * the row's own: a marker of a nested item is the caller's to lift to its root first
+ * (#BKE_paint_layers_asset_instance_of_row does that walk); a duplicated row's fresh marker
+ * belongs to no instance.
+ */
+int BKE_paint_layers_asset_instance_of_marker(const Material &ma, const bUUID &marker);
+
+/** The instance \a row belongs to: the nearest ancestor of the row -- the row itself included --
+ * whose marker an instance's `rows` set names, at any depth, since a drop Into a folder lays its
+ * roots nested. -1 when the row is not of an instance (or not of the stack at all); the rows
+ * nested under a root answer for it, and a row lifted out of its root belongs to none. */
+int BKE_paint_layers_asset_instance_of_row(const Material &ma, const MaterialPaintLayer &row);
+
+/** The label ("<asset name> #<number>") of the instance \a instance_id, or empty for none. */
+std::string BKE_paint_layers_asset_instance_label(const Material &ma, int instance_id);
+
+/**
+ * Record a fresh instance: one drop of \a source into \a ma. The id is `max(existing)+1` and the
+ * number is `max(number of the same-asset instances)+1`, so a repeated drop reads as
+ * "<name> #2" instead of replacing the first one. A one-instance label still on the material is
+ * migrated into the instances group first, so it keeps its id 1.
+ *
+ * \return the new instance's id.
+ */
+int BKE_paint_layers_asset_instance_record(Material &ma,
+                                           const Material &source,
+                                           PaintLayerAssetType type,
+                                           Span<const MaterialPaintLayer *> imported_rows);
 
 /** What #BKE_paint_layers_asset_reload came back with. */
 enum class PaintLayerAssetReloadResult : int8_t {
   /** The rows were replaced from the source; parameter values were carried over. */
   Reloaded = 0,
-  /** The material has no smart-asset import recorded on it. */
+  /** The material holds no smart-asset instance with the id the caller named. */
   NoSource = 1,
   /** The label names no material in this file: the source was never appended, or is gone. */
   SourceMissing = 2,
@@ -260,12 +333,17 @@ enum class PaintLayerAssetReloadResult : int8_t {
 };
 
 /**
- * Replace the rows \a ma received from its smart asset with fresh copies of the asset's rows,
- * carrying the exposed-parameter values the user changed on the instance over to the new rows.
- * Every other edit the user made to the imported rows (painted pixels, added layers, moved items)
- * is lost: the asset is the thing being followed.
+ * Replace the rows the instance \a instance_id received from its smart asset with fresh copies of
+ * the asset's rows, carrying the exposed-parameter values the user changed on the instance over
+ * to the new rows. Every other edit the user made to the imported rows (painted pixels, added
+ * layers, moved items) is lost: the asset is the thing being followed. The other instances of the
+ * material are not touched, and the reloaded instance keeps its id, its number and its place in
+ * the stack: the import lands in the seam between the rows' neighbours, or at the top when the
+ * neighbours are gone.
  */
-PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain, Material &ma);
+PaintLayerAssetReloadResult BKE_paint_layers_asset_reload(Main &bmain, Material &ma, int instance_id);
+
+/** \} */
 
 /**
  * Whether the mask branch of \a row holds an Anchor Point marker or reader: a Smart Mask is built

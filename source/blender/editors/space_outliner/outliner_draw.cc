@@ -14,6 +14,7 @@
 #include "DNA_layer_types.h"
 #include "DNA_light_types.h"
 #include "DNA_lightprobe_types.h"
+#include "DNA_material_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_sequence_types.h"
@@ -27,6 +28,7 @@
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
 #include "BLI_utildefines.h"
+#include "BLI_uuid.h"
 
 #include "BLF_api.hh"
 #include "BLT_translation.hh"
@@ -50,6 +52,7 @@
 #include "BKE_modifier.hh"
 #include "BKE_node.hh"
 #include "BKE_object.hh"
+#include "BKE_paint_layers_asset.hh"
 #include "BKE_particle.h"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -3616,6 +3619,33 @@ static void stack_preview_badge_draw(const rctf &preview_rect, const int badge_i
                    badge_scale);
 }
 
+/**
+ * The label of the Smart-asset instance a stack row belongs to ("<asset> #<number>"), or empty for
+ * a row that belongs to none. A row answers when the drop laid that very row down -- its own
+ * marker is a root of the instance, at any depth -- and the rows nested under a root draw no
+ * label of their own: the hierarchy already shows what they belong to.
+ */
+static std::string stack_row_smart_asset_label(const TreeViewContext &tvc,
+                                               SpaceOutliner &space_outliner,
+                                               const TreeStoreElem &tselem)
+{
+  const StackReadContext ctx = {tvc.bmain, tvc.scene, tvc.view_layer};
+  ID *owner = outliner_stack_owner_get(ctx, space_outliner);
+  if (owner == nullptr || GS(owner->name) != ID_MA) {
+    return "";
+  }
+  const StackRow *row = outliner_stack_row_find(space_outliner, tselem.nr);
+  if (row == nullptr || BLI_uuid_is_nil(row->stable_id)) {
+    return "";
+  }
+  const Material &ma = *id_cast<Material *>(owner);
+  const int instance_id = BKE_paint_layers_asset_instance_of_marker(ma, row->stable_id);
+  if (instance_id < 0) {
+    return "";
+  }
+  return BKE_paint_layers_asset_instance_label(ma, instance_id);
+}
+
 static void outliner_draw_tree_element(ui::Block *block,
                                        const bContext *C,
                                        const uiFontStyle *fstyle,
@@ -4000,6 +4030,8 @@ static void outliner_draw_tree_element(ui::Block *block,
     /* Name. */
     te->name_xs = startx + offsx;
     te->name_ys = *starty;
+    const float name_width = ui::fontstyle_string_width_with_block_aspect(
+        fstyle, te->name, view_aspect);
     if ((tselem->flag & TSE_TEXTBUT) == 0) {
       if (ELEM(tselem->type, TSE_RNA_PROPERTY, TSE_RNA_ARRAY_ELEM)) {
         ui::theme::get_color_blend_3ubv(TH_BACK, TH_TEXT, 0.75f, text_color);
@@ -4008,10 +4040,30 @@ static void outliner_draw_tree_element(ui::Block *block,
       text_color[3] *= alpha_fac;
       outliner_draw_element_text(
           fstyle, view_aspect, startx + offsx, *starty + 5 * ufac, te->name, text_color);
+
+      /* A stack row of a smart-asset instance trails the grey label of its drop, like the
+       * Outliner's other secondary text. The suffix is display only -- a rename types into the
+       * row's own buffer and hit-testing never sees it -- so it is drawn without moving the
+       * columns that follow. */
+      if (tselem->type == TSE_STACK_LAYER) {
+        const std::string instance_label = stack_row_smart_asset_label(
+            tvc, *space_outliner, *tselem);
+        if (!instance_label.empty()) {
+          const std::string suffix = " " + instance_label;
+          uchar suffix_color[4];
+          ui::theme::get_color_blend_3ubv(TH_BACK, TH_TEXT, 0.75f, suffix_color);
+          suffix_color[3] = text_color[3];
+          outliner_draw_element_text(fstyle,
+                                     view_aspect,
+                                     startx + offsx + name_width,
+                                     *starty + 5 * ufac,
+                                     suffix.c_str(),
+                                     suffix_color);
+        }
+      }
     }
 
-    offsx += int(UI_UNIT_X +
-                 ui::fontstyle_string_width_with_block_aspect(fstyle, te->name, view_aspect));
+    offsx += int(UI_UNIT_X + name_width);
 
     /* A collapsed Stack Layers row -- a folder or a texture layer -- keeps just its name. The
      * merged row of the icons it contains reads as clutter next to the previews the mode already

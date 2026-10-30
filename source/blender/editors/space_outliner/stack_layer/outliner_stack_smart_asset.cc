@@ -783,16 +783,18 @@ void OUTLINER_OT_stack_layer_smart_asset_save(wmOperatorType *ot)
 /* -------------------------------------------------------------------- */
 /** \name Smart-asset instance operators
  *
- * The panel of an imported smart asset (the Layer Material tab) calls these: a reload pulls the
- * rows fresh from the asset the instance came from, and make unique ends the binding. Both work
- * on whatever material the context holds, so the outliner is only their registration home.
+ * The panel of the imported smart assets (the Layer Material tab) calls these, one section per
+ * instance: a reload pulls that instance's rows fresh from the asset it came from, and make unique
+ * ends that instance's binding. Both take the instance's id through a hidden property -- without
+ * it there is no telling which drop the caller means -- and work on whatever material the context
+ * holds, so the outliner is only their registration home.
  * \{ */
 
 static Material *smart_asset_instance_from_context(bContext *C)
 {
   Material *ma = static_cast<Material *>(
       CTX_data_pointer_get_type(C, "material", RNA_Material).data);
-  if (ma == nullptr || BKE_paint_layers_asset_source_get(*ma) == nullptr) {
+  if (ma == nullptr || !BKE_paint_layers_asset_instances_any(*ma)) {
     return nullptr;
   }
   return ma;
@@ -807,6 +809,17 @@ static bool smart_asset_instance_poll(bContext *C)
   return true;
 }
 
+/** The instance id the operator property names, or 0 after reporting that it names none. */
+static int smart_asset_instance_id_from_op(wmOperator *op, Material &ma)
+{
+  const int instance_id = RNA_int_get(op->ptr, "instance_id");
+  if (BKE_paint_layers_asset_instance_find(ma, instance_id) == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No smart-asset instance with that id on this material");
+    return 0;
+  }
+  return instance_id;
+}
+
 static wmOperatorStatus smart_asset_reload_exec(bContext *C, wmOperator *op)
 {
   Material *ma = smart_asset_instance_from_context(C);
@@ -814,14 +827,20 @@ static wmOperatorStatus smart_asset_reload_exec(bContext *C, wmOperator *op)
   if (ma == nullptr || bmain == nullptr) {
     return OPERATOR_CANCELLED;
   }
+  const int instance_id = smart_asset_instance_id_from_op(op, *ma);
+  if (instance_id == 0) {
+    return OPERATOR_CANCELLED;
+  }
 
-  const PaintLayerAssetReloadResult result = BKE_paint_layers_asset_reload(*bmain, *ma);
+  const PaintLayerAssetReloadResult result = BKE_paint_layers_asset_reload(*bmain, *ma, instance_id);
   switch (result) {
-    case PaintLayerAssetReloadResult::Reloaded:
+    case PaintLayerAssetReloadResult::Reloaded: {
       WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &ma->id);
+      const std::string label = BKE_paint_layers_asset_instance_label(*ma, instance_id);
       BKE_reportf(
-          op->reports, RPT_INFO, "Reloaded the rows of smart asset '%s'", ma->id.name + 2);
+          op->reports, RPT_INFO, "Reloaded the rows of smart asset '%s'", label.c_str());
       return OPERATOR_FINISHED;
+    }
     case PaintLayerAssetReloadResult::NoSource:
       BKE_report(op->reports, RPT_ERROR, "This material has no smart-asset import to reload");
       break;
@@ -846,17 +865,33 @@ void OUTLINER_OT_stack_layer_smart_asset_reload(wmOperatorType *ot)
   ot->exec = smart_asset_reload_exec;
   ot->poll = smart_asset_instance_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  PropertyRNA *prop = RNA_def_int(ot->srna,
+                                  "instance_id",
+                                  0,
+                                  INT32_MIN,
+                                  INT32_MAX,
+                                  "Instance",
+                                  "Id of the smart-asset instance to reload",
+                                  INT32_MIN,
+                                  INT32_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
-static wmOperatorStatus smart_asset_make_unique_exec(bContext *C, wmOperator * /*op*/)
+static wmOperatorStatus smart_asset_make_unique_exec(bContext *C, wmOperator *op)
 {
   Material *ma = smart_asset_instance_from_context(C);
   if (ma == nullptr) {
     return OPERATOR_CANCELLED;
   }
-  /* The parameter values are the rows' own by now; this only removes the labels, so the material
-   * stops being an instance and stops following its source. */
-  BKE_paint_layers_asset_params_unbind(*ma);
+  const int instance_id = smart_asset_instance_id_from_op(op, *ma);
+  if (instance_id == 0) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The parameter values are the rows' own by now; this only removes the labels of this
+   * instance's rows, so the material stops following its source there while the other instances
+   * keep theirs. */
+  BKE_paint_layers_asset_params_unbind(*ma, instance_id);
   BKE_paint_layers_tag_edited(*ma);
   WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &ma->id);
   return OPERATOR_FINISHED;
@@ -872,6 +907,17 @@ void OUTLINER_OT_stack_layer_smart_asset_make_unique(wmOperatorType *ot)
   ot->exec = smart_asset_make_unique_exec;
   ot->poll = smart_asset_instance_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  PropertyRNA *prop = RNA_def_int(ot->srna,
+                                  "instance_id",
+                                  0,
+                                  INT32_MIN,
+                                  INT32_MAX,
+                                  "Instance",
+                                  "Id of the smart-asset instance to make unique",
+                                  INT32_MIN,
+                                  INT32_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
 /** \} */

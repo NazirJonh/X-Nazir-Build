@@ -273,6 +273,17 @@ static MaterialPaintLayer *first_effect(MaterialPaintLayer &row)
   return static_cast<MaterialPaintLayer *>(row.effects.first);
 }
 
+/** The top-level rows of \a asset: the span a drop imports, for an import that names \a asset as
+ * its source the rows have to be its own. */
+static Vector<const MaterialPaintLayer *> asset_top_rows(const Material &asset)
+{
+  Vector<const MaterialPaintLayer *> rows;
+  for (const MaterialPaintLayer &row : asset.paint_layers) {
+    rows.append(&row);
+  }
+  return rows;
+}
+
 TEST_F(PaintLayersAssetTest, smart_material_create_exposes_every_parameter)
 {
   Material *src = BKE_material_add(bmain, "Src");
@@ -333,7 +344,7 @@ TEST_F(PaintLayersAssetTest, smart_asset_import_marks_the_exposed_parameters)
   params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
   PaintLayerImportResult result;
   ASSERT_TRUE(BKE_paint_layers_import_rows(
-      *bmain, *dst, *asset, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+      *bmain, *dst, *asset, asset_top_rows(*asset).as_span(), params, &result));
   ASSERT_EQ(result.imported.size(), 1);
   MaterialPaintLayer *copy = result.imported[0];
   EXPECT_STREQ(copy->name, "Layer");
@@ -380,7 +391,7 @@ TEST_F(PaintLayersAssetTest, import_marks_do_not_move_the_bake_hash)
   params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
   PaintLayerImportResult result;
   ASSERT_TRUE(BKE_paint_layers_import_rows(
-      *bmain, *dst, *asset, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+      *bmain, *dst, *asset, asset_top_rows(*asset).as_span(), params, &result));
   MaterialPaintLayer *marked_row = result.imported[0];
   ASSERT_NE(marked_row, nullptr);
   EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*first_effect(*marked_row), "gamma"));
@@ -413,11 +424,12 @@ TEST_F(PaintLayersAssetTest, reload_replaces_the_rows_and_keeps_the_instance_val
   params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
   PaintLayerImportResult result;
   ASSERT_TRUE(BKE_paint_layers_import_rows(
-      *bmain, *dst, *asset, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+      *bmain, *dst, *asset, asset_top_rows(*asset).as_span(), params, &result));
   MaterialPaintLayer *copy = result.imported[0];
-  BKE_paint_layers_asset_source_record(
+  const int instance_id = BKE_paint_layers_asset_instance_record(
       *dst, *asset, PaintLayerAssetType::Material, result.imported.as_span());
-  ASSERT_NE(BKE_paint_layers_asset_source_get(*dst), nullptr);
+  ASSERT_EQ(instance_id, 1);
+  EXPECT_TRUE(BKE_paint_layers_asset_instances_any(*dst));
 
   /* The instance changed a value; the asset grew a second row and moved its own value. */
   paint_layer_kind_param_set(*first_effect(*copy), PAINT_LAYER_LEVELS_IN_BLACK, 0.25f);
@@ -425,7 +437,8 @@ TEST_F(PaintLayersAssetTest, reload_replaces_the_rows_and_keeps_the_instance_val
   paint_layer_kind_param_set(*first_effect(*asset_row), PAINT_LAYER_LEVELS_IN_BLACK, 0.75f);
   ASSERT_NE(BKE_paint_layers_add(*asset, "Added", nullptr, PaintLayerPlace::Above), nullptr);
 
-  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst), PaintLayerAssetReloadResult::Reloaded);
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst, instance_id),
+            PaintLayerAssetReloadResult::Reloaded);
 
   /* The structure came from the asset; the instance's own value survived the replacement, over
    * the one the asset moved. */
@@ -436,8 +449,9 @@ TEST_F(PaintLayersAssetTest, reload_replaces_the_rows_and_keeps_the_instance_val
   EXPECT_STREQ(fresh->name, "Layer");
   EXPECT_FLOAT_EQ(
       paint_layer_kind_param_get(*first_effect(*fresh), PAINT_LAYER_LEVELS_IN_BLACK), 0.25f);
-  /* The fresh rows are marked again, so the panel keeps working. */
+  /* The fresh rows are marked again, so the panel keeps working, and the record names them. */
   EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*first_effect(*fresh), "in_black"));
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *fresh), instance_id);
 }
 
 TEST_F(PaintLayersAssetTest, reload_reports_a_missing_source)
@@ -455,20 +469,20 @@ TEST_F(PaintLayersAssetTest, reload_reports_a_missing_source)
 
   Material *dst = BKE_material_add(bmain, "Dst");
   /* Without a recorded import there is nothing to reload. */
-  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst),
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst, 1),
             PaintLayerAssetReloadResult::NoSource);
 
   PaintLayerImportParams params;
   params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
   PaintLayerImportResult result;
   ASSERT_TRUE(BKE_paint_layers_import_rows(
-      *bmain, *dst, *asset, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
-  BKE_paint_layers_asset_source_record(
+      *bmain, *dst, *asset, asset_top_rows(*asset).as_span(), params, &result));
+  const int instance_id = BKE_paint_layers_asset_instance_record(
       *dst, *asset, PaintLayerAssetType::Material, result.imported.as_span());
 
   /* The asset renamed away: the label names a material this file no longer has. */
   BKE_libblock_rename(*bmain, asset->id, "SmartRenamed");
-  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst),
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst, instance_id),
             PaintLayerAssetReloadResult::SourceMissing);
 }
 
@@ -491,19 +505,495 @@ TEST_F(PaintLayersAssetTest, make_unique_ends_the_binding_and_keeps_the_values)
   params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
   PaintLayerImportResult result;
   ASSERT_TRUE(BKE_paint_layers_import_rows(
-      *bmain, *dst, *asset, Span<const MaterialPaintLayer *>(source_rows, 1), params, &result));
+      *bmain, *dst, *asset, asset_top_rows(*asset).as_span(), params, &result));
   MaterialPaintLayer *copy = result.imported[0];
-  BKE_paint_layers_asset_source_record(
+  const int instance_id = BKE_paint_layers_asset_instance_record(
       *dst, *asset, PaintLayerAssetType::Material, result.imported.as_span());
   paint_layer_kind_param_set(*first_effect(*copy), PAINT_LAYER_LEVELS_GAMMA, 2.0f);
 
-  BKE_paint_layers_asset_params_unbind(*dst);
+  BKE_paint_layers_asset_params_unbind(*dst, instance_id);
 
   EXPECT_FALSE(BKE_paint_layers_item_param_is_exposed(*first_effect(*copy), "gamma"));
-  EXPECT_EQ(BKE_paint_layers_asset_source_get(*dst), nullptr);
+  EXPECT_FALSE(BKE_paint_layers_asset_instances_any(*dst));
   /* The value the instance carried stays: unbinding is not a reset. */
   EXPECT_FLOAT_EQ(
       paint_layer_kind_param_get(*first_effect(*copy), PAINT_LAYER_LEVELS_GAMMA), 2.0f);
+}
+
+/** Import \a asset's rows into \a dst and record them as one instance. */
+static int import_and_record(Main &bmain,
+                             Material &dst,
+                             Material &asset,
+                             Span<const MaterialPaintLayer *> asset_rows)
+{
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  PaintLayerImportResult result;
+  if (!BKE_paint_layers_import_rows(bmain, dst, asset, asset_rows, params, &result)) {
+    return -1;
+  }
+  return BKE_paint_layers_asset_instance_record(
+      dst, asset, PaintLayerAssetType::Material, result.imported.as_span());
+}
+
+/** The instances of \a ma, in record order. */
+static Vector<PaintLayerAssetInstanceInfo> instances_read(const Material &ma)
+{
+  Vector<PaintLayerAssetInstanceInfo> instances;
+  BKE_paint_layers_asset_instances_foreach(ma, [&](const PaintLayerAssetInstanceInfo &info) {
+    instances.append(info);
+    return true;
+  });
+  return instances;
+}
+
+TEST_F(PaintLayersAssetTest, two_drops_of_one_asset_make_two_instances)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  const MaterialPaintLayer *asset_rows[1] = {row};
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(asset_rows, 1),
+                                                  PaintLayerAssetType::Material,
+                                                  "TwiceDropped");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  const int first_id = import_and_record(*bmain, *dst, *asset, asset_top_rows(*asset).as_span());
+  const int second_id = import_and_record(*bmain, *dst, *asset, asset_top_rows(*asset).as_span());
+  ASSERT_EQ(first_id, 1);
+  ASSERT_EQ(second_id, 2);
+
+  const Vector<PaintLayerAssetInstanceInfo> instances = instances_read(*dst);
+  ASSERT_EQ(instances.size(), 2);
+  EXPECT_EQ(instances[0].id, 1);
+  EXPECT_EQ(instances[0].number, 1);
+  EXPECT_EQ(instances[1].id, 2);
+  EXPECT_EQ(instances[1].number, 2);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_label(*dst, 1), "TwiceDropped #1");
+  EXPECT_EQ(BKE_paint_layers_asset_instance_label(*dst, 2), "TwiceDropped #2");
+
+  /* Each drop laid its own rows: fresh markers, one instance each, no overlap. */
+  MaterialPaintLayer *first_row = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
+  MaterialPaintLayer *second_row = first_row->next;
+  ASSERT_NE(second_row, nullptr);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *first_row), 1);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *second_row), 2);
+  EXPECT_FALSE(BLI_uuid_equal(first_row->marker, second_row->marker));
+}
+
+TEST_F(PaintLayersAssetTest, reload_of_one_instance_leaves_the_other_and_the_place_alone)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  ASSERT_NE(add_levels_effect(*src, *row, "Tone"), nullptr);
+  const MaterialPaintLayer *asset_rows[1] = {row};
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(asset_rows, 1),
+                                                  PaintLayerAssetType::Material,
+                                                  "Neighbor");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  ASSERT_NE(BKE_paint_layers_add(*dst, "Bottom", nullptr, PaintLayerPlace::Above), nullptr);
+  const int first_id = import_and_record(*bmain, *dst, *asset, asset_top_rows(*asset).as_span());
+  const int second_id = import_and_record(*bmain, *dst, *asset, asset_top_rows(*asset).as_span());
+  ASSERT_EQ(first_id, 1);
+  ASSERT_EQ(second_id, 2);
+  ASSERT_NE(BKE_paint_layers_add(*dst, "Top", nullptr, PaintLayerPlace::Above), nullptr);
+  /* Bottom to top: Bottom, first instance, second instance, Top. */
+  expect_stack_names(*dst, {"Bottom", "Layer", "Layer", "Top"});
+
+  MaterialPaintLayer *first_row = static_cast<MaterialPaintLayer *>(dst->paint_layers.first->next);
+  MaterialPaintLayer *second_row = first_row->next;
+  paint_layer_kind_param_set(*first_effect(*first_row), PAINT_LAYER_LEVELS_IN_BLACK, 0.1f);
+  paint_layer_kind_param_set(*first_effect(*second_row), PAINT_LAYER_LEVELS_IN_BLACK, 0.9f);
+
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst, first_id),
+            PaintLayerAssetReloadResult::Reloaded);
+
+  /* The second instance's rows are the very same rows with the very same value. */
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *second_row), second_id);
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*first_effect(*second_row), PAINT_LAYER_LEVELS_IN_BLACK), 0.9f);
+  /* The first instance's fresh rows took the block's old place between its neighbours, and the
+   * value the user changed came back on them. */
+  expect_stack_names(*dst, {"Bottom", "Layer", "Layer", "Top"});
+  MaterialPaintLayer *fresh = static_cast<MaterialPaintLayer *>(dst->paint_layers.first->next);
+  ASSERT_NE(fresh, second_row);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *fresh), first_id);
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*first_effect(*fresh), PAINT_LAYER_LEVELS_IN_BLACK), 0.1f);
+}
+
+TEST_F(PaintLayersAssetTest, make_unique_of_one_instance_leaves_the_other_bound)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  ASSERT_NE(add_levels_effect(*src, *row, "Tone"), nullptr);
+  const MaterialPaintLayer *asset_rows[1] = {row};
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(asset_rows, 1),
+                                                  PaintLayerAssetType::Material,
+                                                  "SplitUnique");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  const int first_id = import_and_record(*bmain, *dst, *asset, asset_top_rows(*asset).as_span());
+  const int second_id = import_and_record(*bmain, *dst, *asset, asset_top_rows(*asset).as_span());
+  ASSERT_EQ(first_id, 1);
+  ASSERT_EQ(second_id, 2);
+  MaterialPaintLayer *first_row = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
+  MaterialPaintLayer *second_row = first_row->next;
+
+  BKE_paint_layers_asset_params_unbind(*dst, first_id);
+
+  /* The first instance's marks and record are gone; the second keeps both. */
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_exposed(*first_effect(*first_row), "gamma"));
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*first_effect(*second_row), "gamma"));
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *first_row), -1);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *second_row), second_id);
+  const Vector<PaintLayerAssetInstanceInfo> instances = instances_read(*dst);
+  ASSERT_EQ(instances.size(), 1);
+  EXPECT_EQ(instances[0].id, second_id);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_label(*dst, second_id), "SplitUnique #2");
+}
+
+TEST_F(PaintLayersAssetTest, duplicated_row_belongs_to_no_instance)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  const MaterialPaintLayer *asset_rows[1] = {row};
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(asset_rows, 1),
+                                                  PaintLayerAssetType::Material,
+                                                  "CopySource");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  const int instance_id = import_and_record(*bmain, *dst, *asset, asset_top_rows(*asset).as_span());
+  ASSERT_EQ(instance_id, 1);
+  MaterialPaintLayer *copy_row = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
+
+  MaterialPaintLayer *duplicate = BKE_paint_layers_duplicate(*bmain, *dst, copy_row);
+  ASSERT_NE(duplicate, nullptr);
+  /* The copy has a marker of its own, and nothing written into the row names an instance: it is
+   * local, whatever the record says about the row it was copied from. */
+  EXPECT_FALSE(BLI_uuid_equal(duplicate->marker, copy_row->marker));
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *copy_row), instance_id);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *duplicate), -1);
+}
+
+TEST_F(PaintLayersAssetTest, legacy_source_label_reads_as_the_first_instance)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  ASSERT_NE(add_levels_effect(*src, *row, "Tone"), nullptr);
+  const MaterialPaintLayer *asset_rows[1] = {row};
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(asset_rows, 1),
+                                                  PaintLayerAssetType::Material,
+                                                  "OldFile");
+  ASSERT_NE(asset, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(BKE_paint_layers_import_rows(
+      *bmain, *dst, *asset, asset_top_rows(*asset).as_span(), params, &result));
+  MaterialPaintLayer *copy = result.imported[0];
+
+  /* Simulate the one-instance label an older build wrote: no instances group, one source group. */
+  if (dst->id.properties == nullptr) {
+    dst->id.properties = bke::idprop::create_group("properties").release();
+  }
+  IDProperty *legacy = bke::idprop::create_group("paint_asset_source").release();
+  IDP_ReplaceInGroup(
+      legacy, bke::idprop::create("name", StringRefNull(asset->id.name + 2)).release());
+  IDP_ReplaceInGroup(legacy, bke::idprop::create("library", "").release());
+  IDP_ReplaceInGroup(legacy, bke::idprop::create("type", int(PaintLayerAssetType::Material)).release());
+  IDProperty *legacy_rows = bke::idprop::create_group("rows").release();
+  char marker[UUID_STRING_SIZE];
+  BLI_uuid_format(marker, copy->marker);
+  IDP_ReplaceInGroup(legacy_rows, bke::idprop::create(marker, 1).release());
+  IDP_ReplaceInGroup(legacy, legacy_rows);
+  IDP_ReplaceInGroup(dst->id.properties, legacy);
+
+  /* The read answers for it as instance 1 without touching the properties. */
+  EXPECT_TRUE(BKE_paint_layers_asset_instances_any(*dst));
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *copy), 1);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_label(*dst, 1), "OldFile #1");
+  const Vector<PaintLayerAssetInstanceInfo> before = instances_read(*dst);
+  ASSERT_EQ(before.size(), 1);
+  EXPECT_EQ(before[0].id, 1);
+  EXPECT_EQ(before[0].number, 1);
+  EXPECT_EQ(IDP_GetPropertyFromGroup(dst->id.properties, "paint_asset_instances"), nullptr);
+
+  /* A drop or a reload is the migration point: the label moves into the instances group as
+   * instance 1, and a second drop of the same asset reads as #2. */
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *dst, 1), PaintLayerAssetReloadResult::Reloaded);
+  EXPECT_EQ(IDP_GetPropertyFromGroup(dst->id.properties, "paint_asset_source"), nullptr);
+  const IDProperty *instances = IDP_GetPropertyFromGroup(dst->id.properties,
+                                                         "paint_asset_instances");
+  ASSERT_NE(instances, nullptr);
+  MaterialPaintLayer *fresh = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *fresh), 1);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_label(*dst, 1), "OldFile #1");
+  const int second_id = BKE_paint_layers_asset_instance_record(
+      *dst, *asset, PaintLayerAssetType::Material, Span<const MaterialPaintLayer *>());
+  ASSERT_EQ(second_id, 2);
+  const Vector<PaintLayerAssetInstanceInfo> after = instances_read(*dst);
+  ASSERT_EQ(after.size(), 2);
+  EXPECT_EQ(after[1].number, 2);
+}
+
+TEST_F(PaintLayersAssetTest, drops_of_different_assets_count_their_numbers_separately)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Layer", add_image("SourceMap"));
+  const MaterialPaintLayer *asset_rows[1] = {row};
+  Material *asset_x = BKE_paint_layers_asset_create(
+      *bmain, *src, Span<const MaterialPaintLayer *>(asset_rows, 1), PaintLayerAssetType::Material, "X");
+  Material *asset_y = BKE_paint_layers_asset_create(
+      *bmain, *src, Span<const MaterialPaintLayer *>(asset_rows, 1), PaintLayerAssetType::Material, "Y");
+  ASSERT_NE(asset_x, nullptr);
+  ASSERT_NE(asset_y, nullptr);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  ASSERT_EQ(import_and_record(*bmain, *dst, *asset_x, asset_top_rows(*asset_x).as_span()), 1);
+  /* A different asset is a first drop of its own: the numbers are per asset, not per material. */
+  ASSERT_EQ(import_and_record(*bmain, *dst, *asset_y, asset_top_rows(*asset_y).as_span()), 2);
+  ASSERT_EQ(import_and_record(*bmain, *dst, *asset_x, asset_top_rows(*asset_x).as_span()), 3);
+
+  const Vector<PaintLayerAssetInstanceInfo> instances = instances_read(*dst);
+  ASSERT_EQ(instances.size(), 3);
+  EXPECT_EQ(instances[0].number, 1);
+  EXPECT_EQ(instances[0].name, "X");
+  EXPECT_EQ(instances[1].number, 1);
+  EXPECT_EQ(instances[1].name, "Y");
+  EXPECT_EQ(instances[2].number, 2);
+  EXPECT_EQ(instances[2].name, "X");
+  EXPECT_EQ(BKE_paint_layers_asset_instance_label(*dst, 3), "X #2");
+}
+
+/**
+ * A Smart Material holding one "Folder" row with a "Member" map row and a "Tone" Levels
+ * correction inside it. \a r_child is set to the child row of the asset's copy.
+ */
+static Material *make_folder_asset(PaintLayersAssetTest &t,
+                                   const char *name,
+                                   MaterialPaintLayer **r_child)
+{
+  Material *src = BKE_material_add(t.bmain, "Src");
+  MaterialPaintLayer *member = t.add_layer(*src, "Member", t.add_image("MemberMap"));
+  EXPECT_NE(add_levels_effect(*src, *member, "Tone"), nullptr);
+  MaterialPaintLayer *folder = BKE_paint_layers_group(*src,
+                                                      Span<MaterialPaintLayer *>(&member, 1));
+  EXPECT_NE(folder, nullptr);
+  const MaterialPaintLayer *source_rows[1] = {folder};
+  Material *asset = BKE_paint_layers_asset_create(*t.bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                                  PaintLayerAssetType::Material,
+                                                  name);
+  EXPECT_NE(asset, nullptr);
+  *r_child = nullptr;
+  if (asset != nullptr) {
+    MaterialPaintLayer *asset_folder = static_cast<MaterialPaintLayer *>(asset->paint_layers.first);
+    *r_child = (asset_folder != nullptr) ?
+                   static_cast<MaterialPaintLayer *>(asset_folder->children.first) :
+                   nullptr;
+  }
+  return asset;
+}
+
+/** One drop of a folder asset Into a folder of a fresh material: the state the nested-instance
+ * tests read. The drop lays the asset's folder inside the host folder, above its "Host" row. */
+struct NestedInstanceDrop {
+  Material *dst = nullptr;
+  MaterialPaintLayer *host_folder = nullptr;
+  /** The instance root: the folder copy the drop laid down, nested in the host folder. */
+  MaterialPaintLayer *root = nullptr;
+  /** The root's child row, carrying the Tone correction. */
+  MaterialPaintLayer *child = nullptr;
+  int instance_id = 0;
+};
+
+static NestedInstanceDrop drop_folder_asset_into_host_folder(PaintLayersAssetTest &t,
+                                                             Material &asset)
+{
+  NestedInstanceDrop drop;
+  drop.dst = BKE_material_add(t.bmain, "Dst");
+  EXPECT_NE(drop.dst, nullptr);
+  MaterialPaintLayer *host_member = t.add_layer(*drop.dst, "Host", t.add_image("HostMap"));
+  drop.host_folder = BKE_paint_layers_group(*drop.dst,
+                                            Span<MaterialPaintLayer *>(&host_member, 1));
+  EXPECT_NE(drop.host_folder, nullptr);
+  STRNCPY(drop.host_folder->name, "HostFolder");
+
+  PaintLayerImportParams params;
+  params.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  params.anchor = drop.host_folder;
+  params.place = PaintLayerPlace::Into;
+  PaintLayerImportResult result;
+  EXPECT_TRUE(BKE_paint_layers_import_rows(
+      *t.bmain, *drop.dst, asset, asset_top_rows(asset).as_span(), params, &result));
+  drop.root = (result.imported.size() == 1) ? result.imported[0] : nullptr;
+  drop.instance_id = BKE_paint_layers_asset_instance_record(
+      *drop.dst, asset, PaintLayerAssetType::Material, result.imported.as_span());
+  drop.child = (drop.root != nullptr) ?
+                   static_cast<MaterialPaintLayer *>(drop.root->children.first) :
+                   nullptr;
+  return drop;
+}
+
+TEST_F(PaintLayersAssetTest, drop_into_a_folder_makes_the_nested_rows_an_instance)
+{
+  MaterialPaintLayer *asset_child = nullptr;
+  Material *asset = make_folder_asset(*this, "SmartNested", &asset_child);
+  ASSERT_NE(asset, nullptr);
+
+  NestedInstanceDrop drop = drop_folder_asset_into_host_folder(*this, *asset);
+  ASSERT_NE(drop.root, nullptr);
+  ASSERT_NE(drop.child, nullptr);
+  ASSERT_EQ(drop.instance_id, 1);
+  /* The drop landed Into the folder: the roots hang on its children, not on the top level. */
+  EXPECT_EQ(BKE_paint_layers_owner_list(*drop.dst, *drop.root), &drop.host_folder->children);
+  expect_row_names(drop.host_folder->children, {"Host", "Folder"});
+
+  /* The nested root answers for itself and its child follows it; the child's own marker names no
+   * instance, and the label the panel and the Outliner draw comes from the root alone. */
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*drop.dst, *drop.root), drop.instance_id);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*drop.dst, *drop.child), drop.instance_id);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_marker(*drop.dst, drop.root->marker),
+            drop.instance_id);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_marker(*drop.dst, drop.child->marker), -1);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_label(*drop.dst, drop.instance_id),
+            "SmartNested #1");
+  /* The parameters the asset exposed are marked on the nested copy, so the panel's section finds
+   * them through the same walk. */
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*first_effect(*drop.child), "in_black"));
+}
+
+TEST_F(PaintLayersAssetTest, reload_of_a_nested_instance_replaces_the_rows_in_the_folder)
+{
+  MaterialPaintLayer *asset_child = nullptr;
+  Material *asset = make_folder_asset(*this, "SmartNestedReload", &asset_child);
+  ASSERT_NE(asset, nullptr);
+  NestedInstanceDrop drop = drop_folder_asset_into_host_folder(*this, *asset);
+  ASSERT_NE(drop.root, nullptr);
+  ASSERT_NE(drop.child, nullptr);
+
+  /* The instance changed a value; the asset grew a row and moved its own value. */
+  paint_layer_kind_param_set(*first_effect(*drop.child), PAINT_LAYER_LEVELS_IN_BLACK, 0.25f);
+  paint_layer_kind_param_set(*first_effect(*asset_child), PAINT_LAYER_LEVELS_IN_BLACK, 0.75f);
+  ASSERT_NE(BKE_paint_layers_add(*asset, "Added", nullptr, PaintLayerPlace::Above), nullptr);
+
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *drop.dst, drop.instance_id),
+            PaintLayerAssetReloadResult::Reloaded);
+
+  /* The fresh rows are back inside the same folder, in the block's old place above the host row,
+   * and the instance's own value came back on the nested copy over the asset's. */
+  expect_row_names(drop.host_folder->children, {"Host", "Folder", "Added"});
+  expect_stack_names(*drop.dst, {"HostFolder"});
+  MaterialPaintLayer *fresh_root = static_cast<MaterialPaintLayer *>(
+      drop.host_folder->children.last);
+  ASSERT_NE(fresh_root, nullptr);
+  EXPECT_STREQ(fresh_root->name, "Added");
+  MaterialPaintLayer *fresh_folder = fresh_root->prev;
+  ASSERT_NE(fresh_folder, nullptr);
+  /* Both fresh rows are roots of the instance: the record names everything the import laid down. */
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*drop.dst, *fresh_folder), drop.instance_id);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*drop.dst, *fresh_root), drop.instance_id);
+  MaterialPaintLayer *fresh_child = static_cast<MaterialPaintLayer *>(fresh_folder->children.first);
+  ASSERT_NE(fresh_child, nullptr);
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*first_effect(*fresh_child), PAINT_LAYER_LEVELS_IN_BLACK), 0.25f);
+  /* The record names the fresh nested roots, so the next reload finds them again. */
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_marker(*drop.dst, fresh_folder->marker),
+            drop.instance_id);
+}
+
+TEST_F(PaintLayersAssetTest, reload_of_a_nested_instance_lands_back_into_an_emptied_folder)
+{
+  MaterialPaintLayer *asset_child = nullptr;
+  Material *asset = make_folder_asset(*this, "SmartNestedEmpty", &asset_child);
+  ASSERT_NE(asset, nullptr);
+  NestedInstanceDrop drop = drop_folder_asset_into_host_folder(*this, *asset);
+  ASSERT_NE(drop.root, nullptr);
+  /* The user moves the host row out, so the folder holds the instance's block alone: no seam is
+   * left to anchor on. */
+  ASSERT_TRUE(BKE_paint_layers_move(*drop.dst, drop.host_folder->children.first, nullptr,
+                                    PaintLayerPlace::Above));
+
+  ASSERT_NE(BKE_paint_layers_add(*asset, "Added", nullptr, PaintLayerPlace::Above), nullptr);
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *drop.dst, drop.instance_id),
+            PaintLayerAssetReloadResult::Reloaded);
+
+  /* The fresh rows went back into the folder that held the block, whatever the stack around it. */
+  expect_row_names(drop.host_folder->children, {"Folder", "Added"});
+  expect_stack_names(*drop.dst, {"HostFolder", "Host"});
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(
+                *drop.dst,
+                *static_cast<MaterialPaintLayer *>(drop.host_folder->children.first)),
+            drop.instance_id);
+}
+
+TEST_F(PaintLayersAssetTest, make_unique_of_a_nested_instance_unbinds_the_nested_rows)
+{
+  MaterialPaintLayer *asset_child = nullptr;
+  Material *asset = make_folder_asset(*this, "SmartNestedUnique", &asset_child);
+  ASSERT_NE(asset, nullptr);
+  NestedInstanceDrop drop = drop_folder_asset_into_host_folder(*this, *asset);
+  ASSERT_NE(drop.root, nullptr);
+  ASSERT_NE(drop.child, nullptr);
+  paint_layer_kind_param_set(*first_effect(*drop.child), PAINT_LAYER_LEVELS_GAMMA, 2.0f);
+
+  BKE_paint_layers_asset_params_unbind(*drop.dst, drop.instance_id);
+
+  /* The marks are gone from the nested copy -- the walk reached them under the folder -- and the
+   * record with them; the value the instance carried stays. */
+  EXPECT_FALSE(BKE_paint_layers_item_param_is_exposed(*first_effect(*drop.child), "gamma"));
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*drop.dst, *drop.root), -1);
+  EXPECT_FALSE(BKE_paint_layers_asset_instances_any(*drop.dst));
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*first_effect(*drop.child), PAINT_LAYER_LEVELS_GAMMA), 2.0f);
+}
+
+TEST_F(PaintLayersAssetTest, root_lifted_out_of_the_folder_stays_the_instance_root)
+{
+  MaterialPaintLayer *asset_child = nullptr;
+  Material *asset = make_folder_asset(*this, "SmartNestedLifted", &asset_child);
+  ASSERT_NE(asset, nullptr);
+  NestedInstanceDrop drop = drop_folder_asset_into_host_folder(*this, *asset);
+  ASSERT_NE(drop.root, nullptr);
+  ASSERT_NE(drop.child, nullptr);
+
+  /* The user lifts the root onto the top of the stack: the marker is untouched, so the row keeps
+   * being the instance's root, and its child keeps following it. */
+  ASSERT_TRUE(BKE_paint_layers_move(*drop.dst, drop.root, nullptr, PaintLayerPlace::Above));
+  EXPECT_EQ(BKE_paint_layers_owner_list(*drop.dst, *drop.root), &drop.dst->paint_layers);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*drop.dst, *drop.root), drop.instance_id);
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*drop.dst, *drop.child), drop.instance_id);
+
+  ASSERT_NE(BKE_paint_layers_add(*asset, "Added", nullptr, PaintLayerPlace::Above), nullptr);
+  EXPECT_EQ(BKE_paint_layers_asset_reload(*bmain, *drop.dst, drop.instance_id),
+            PaintLayerAssetReloadResult::Reloaded);
+
+  /* The fresh rows took the block's new place: the top of the stack, above the folder. */
+  expect_stack_names(*drop.dst, {"HostFolder", "Folder", "Added"});
+  expect_row_names(drop.host_folder->children, {"Host"});
+  MaterialPaintLayer *fresh_root = static_cast<MaterialPaintLayer *>(drop.dst->paint_layers.last);
+  ASSERT_NE(fresh_root, nullptr);
+  EXPECT_STREQ(fresh_root->name, "Added");
+  EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*drop.dst, *fresh_root->prev),
+            drop.instance_id);
 }
 
 TEST_F(PaintLayersAssetTest, smart_asset_create_refuses_foreign_and_non_stack_rows)

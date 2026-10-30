@@ -42,7 +42,9 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_paint_layers_import.hh"
 #include "BKE_report.hh"
 
 #include "ED_asset_image_utils.hh"
@@ -99,6 +101,15 @@ static Material *drop_material(const ID &owner, const char **r_hint)
     return nullptr;
   }
   return &material;
+}
+
+/** The material a drop payload names in \a bmain, or null when it is not in this file. */
+static Material *drop_payload_material(Main *bmain, const StackDropPayload &payload)
+{
+  if (bmain == nullptr || payload.id_uid == 0) {
+    return nullptr;
+  }
+  return id_cast<Material *>(BKE_libblock_find_session_uid(bmain, ID_MA, payload.id_uid));
 }
 
 /** The row or attached item a drop target names, or null when it names none. */
@@ -592,6 +603,141 @@ class ImageToChannelAction final : public StackDropAction {
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Built-in Action: Smart Material → Rows
+ *
+ * A Material tagged as a smart paint asset is not a layer that shows another material: it is a
+ * saved part of a stack, and a drop inserts its rows (or applies its mask) at the landing place.
+ * The action runs before #MaterialLayerAction, which still takes every ordinary material.
+ * \{ */
+
+/** The stack's place for a drop target: the seam's two enums are separate types. */
+static PaintLayerPlace paint_layer_place_from_drop(const StackMovePlace place)
+{
+  switch (place) {
+    case StackMovePlace::Below:
+      return PaintLayerPlace::Below;
+    case StackMovePlace::Into:
+      return PaintLayerPlace::Into;
+    case StackMovePlace::Above:
+      break;
+  }
+  return PaintLayerPlace::Above;
+}
+
+/**
+ * Inserts a Smart asset's rows, before #MaterialLayerAction. Its priority 100 sorts it ahead of
+ * the Material layer action's 120, and #StackDropHandler::add_action registers it first as well, so
+ * the ordering survives the sort. A Smart asset must be taken here; otherwise the ordinary
+ * Material layer action would treat the saved stack as a material to show. When this action
+ * refuses, the Material action refuses the same payload too, rather than quietly falling back.
+ */
+class SmartMaterialAssetAction final : public StackDropAction {
+ public:
+  int priority() const override
+  {
+    return 100;
+  }
+
+  bool can_handle(const StackDropPayload &payload) const override
+  {
+    return payload.id_type == ID_MA;
+  }
+
+  bool can_accept(const StackReadContext &ctx,
+                  const ID &owner,
+                  const StackDropPayload &payload,
+                  const StackDropTarget &target,
+                  const char **r_disabled_hint) const override
+  {
+    Material *material = drop_material(owner, r_disabled_hint);
+    if (material == nullptr) {
+      return false;
+    }
+    const Material *source = drop_payload_material(ctx.bmain, payload);
+    if (source == nullptr || BKE_paint_layers_asset_type_get(*source) == PaintLayerAssetType::None)
+    {
+      /* Not a Smart asset: the ordinary Material layer action below takes it. Leave the hint
+       * empty so an accepted drop has nothing to explain. */
+      return false;
+    }
+    MaterialPaintLayer *anchor = target_row(*material, target);
+    return BKE_paint_layers_asset_can_insert(*material,
+                                             *source,
+                                             anchor,
+                                             paint_layer_place_from_drop(target.place),
+                                             r_disabled_hint);
+  }
+
+  bool execute(bContext &C,
+               const StackFocus & /*focus*/,
+               ID &owner,
+               const StackDropPayload &payload,
+               const StackDropTarget &target,
+               const wmEvent * /*event*/,
+               int *r_affected_ordinal) const override
+  {
+    Material *source = drop_payload_material(CTX_data_main(&C), payload);
+    if (source == nullptr) {
+      return false;
+    }
+    const PaintLayerAssetType type = BKE_paint_layers_asset_type_get(*source);
+    const char *undo_name = (type == PaintLayerAssetType::Mask) ? "Apply Smart Mask" :
+                                                                  "Insert Smart Material";
+
+    Material &material = layers_owner(owner);
+    MaterialPaintLayer *anchor = target_row(material, target);
+
+    PaintLayerImportResult result;
+    if (!BKE_paint_layers_asset_insert(*CTX_data_main(&C),
+                                       material,
+                                       *source,
+                                       anchor,
+                                       paint_layer_place_from_drop(target.place),
+                                       &result))
+    {
+      BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Could not insert the Smart asset");
+      return false;
+    }
+    if (result.dropped_object_masks) {
+      BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Object masks were not imported");
+    }
+    if (result.dropped_curve_patches > 0) {
+      BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Curve Patch effects were not imported");
+    }
+
+    const int ordinal = (result.first != nullptr) ? paint_layers_ordinal_of(material, result.first) :
+                                                    -1;
+    if (r_affected_ordinal != nullptr) {
+      *r_affected_ordinal = ordinal;
+    }
+    /* The drop operator passes no affected ordinal and carries no #OPTYPE_UNDO: this action owns
+     * both the invalidation the row helpers would have done and its undo step. */
+    if (SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C)) {
+      stack_row_edit_finished(C, *space_outliner, material.id, ordinal, true);
+    }
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    ED_undo_push(&C, undo_name);
+    return true;
+  }
+
+  std::string tooltip(const StackDropPayload & /*payload*/,
+                      StringRef item_name,
+                      StringRef /*row_name*/,
+                      const StackDropTarget & /*target*/) const override
+  {
+    return fmt::format(fmt::runtime(TIP_("Insert smart asset {}")), item_name);
+  }
+
+  void id_types(Vector<short> &r_types) const override
+  {
+    r_types.append(ID_MA);
+  }
+
+};
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Built-in Action: Material → Material Layer
  *
  * A material dropped onto the stack becomes a Material layer that shows what it shows. The
@@ -624,20 +770,23 @@ class MaterialLayerAction final : public StackDropAction {
     }
     /* The same refusals the Add reports: the drop states them up front, as a hint on the gesture
      * the user is making right now. */
-    if (ctx.bmain != nullptr) {
-      if (const Material *candidate = id_cast<const Material *>(
-              BKE_libblock_find_session_uid(ctx.bmain, ID_MA, payload.id_uid)))
-      {
-        switch (BKE_paint_layers_material_source_issue(*material, *candidate)) {
-          case PaintLayerMaterialSourceIssue::None:
-            break;
-          case PaintLayerMaterialSourceIssue::Self:
-            *r_disabled_hint = TIP_("A layered material cannot read itself");
-            return false;
-          case PaintLayerMaterialSourceIssue::Cycle:
-            *r_disabled_hint = TIP_("That material already reads this one; it would form a cycle");
-            return false;
-        }
+    if (const Material *candidate = drop_payload_material(ctx.bmain, payload)) {
+      /* A smart asset is a saved stack, not a material to read: it is inserted as rows by
+       * #SmartMaterialAssetAction, and when that refuses, the drop is refused rather than
+       * quietly becoming a Material layer. */
+      if (BKE_paint_layers_asset_type_get(*candidate) != PaintLayerAssetType::None) {
+        *r_disabled_hint = TIP_("That material is a Smart asset; drop it on a layer to insert it");
+        return false;
+      }
+      switch (BKE_paint_layers_material_source_issue(*material, *candidate)) {
+        case PaintLayerMaterialSourceIssue::None:
+          break;
+        case PaintLayerMaterialSourceIssue::Self:
+          *r_disabled_hint = TIP_("A layered material cannot read itself");
+          return false;
+        case PaintLayerMaterialSourceIssue::Cycle:
+          *r_disabled_hint = TIP_("That material already reads this one; it would form a cycle");
+          return false;
       }
     }
     return true;
@@ -651,8 +800,7 @@ class MaterialLayerAction final : public StackDropAction {
                const wmEvent * /*event*/,
                int *r_affected_ordinal) const override
   {
-    Material *source = id_cast<Material *>(
-        BKE_libblock_find_session_uid(CTX_data_main(&C), ID_MA, payload.id_uid));
+    Material *source = drop_payload_material(CTX_data_main(&C), payload);
     if (source == nullptr) {
       return false;
     }
@@ -1096,6 +1244,7 @@ std::unique_ptr<StackDropHandler> paint_layers_drop_handler_create()
   handler->add_action(std::make_unique<ImageToMaskFillCorrectionAction>());
   handler->add_action(std::make_unique<ImageToFillLayerAction>());
   handler->add_action(std::make_unique<ImageToChannelAction>());
+  handler->add_action(std::make_unique<SmartMaterialAssetAction>());
   handler->add_action(std::make_unique<MaterialLayerAction>());
   /* Last: only a file no built-in action takes reaches the extensions. */
   handler->add_action(std::make_unique<FileHandlerDropAction>());

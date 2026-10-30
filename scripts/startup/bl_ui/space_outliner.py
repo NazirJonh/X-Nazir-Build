@@ -297,6 +297,21 @@ class OUTLINER_MT_editor_menus(Menu):
             layout.menu("OUTLINER_MT_edit_datablocks")
 
 
+class OUTLINER_MT_smart_asset_save(Menu):
+    bl_label = "Save as Smart Asset"
+
+    def draw(self, _context):
+        layout = self.layout
+        for asset_type, text, icon in (
+                ('MATERIAL', "Smart Material", 'ASSET_MANAGER'),
+                ('LAYER', "Smart Layer", 'LAYER_ACTIVE'),
+                ('MASK', "Smart Mask", 'MOD_MASK'),
+        ):
+            props = layout.operator(
+                "outliner.stack_layer_smart_asset_save", text=text, icon=icon)
+            props.type = asset_type
+
+
 class OUTLINER_MT_context_menu(Menu):
     bl_label = "Outliner"
 
@@ -414,6 +429,15 @@ class OUTLINER_MT_context_menu(Menu):
                 if bpy.ops.outliner.stack_layer_ungroup.poll():
                     layout.operator("outliner.stack_layer_ungroup", text="Ungroup")
                 layout.separator()
+                # The operator's poll is the same for every save type: it answers for the owner
+                # the menu acts on, not for what is selected inside it.
+                if bpy.ops.outliner.stack_layer_smart_asset_save.poll():
+                    layout.menu(
+                        "OUTLINER_MT_smart_asset_save",
+                        text="Save as Smart Asset",
+                        icon='ASSET_MANAGER',
+                    )
+                    layout.separator()
             # A tag belongs to a group, not to a particular source: the poll answers for the row
             # the operator would tag, so a source that grows groups gets the swatches too.
             if bpy.ops.outliner.stack_layer_color_tag_set.poll():
@@ -917,6 +941,7 @@ classes = (
     OUTLINER_MT_object,
     OUTLINER_MT_asset,
     OUTLINER_MT_liboverride,
+    OUTLINER_MT_smart_asset_save,
     OUTLINER_MT_context_menu,
     OUTLINER_MT_context_menu_view,
     OUTLINER_MT_view_pie,

@@ -17,6 +17,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -987,6 +988,137 @@ TEST_F(OutlinerStackPaintLayersSourceTest,
   hint = nullptr;
   EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, target, &hint));
   EXPECT_EQ(hint, nullptr);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, a_smart_mask_uses_its_row_with_a_mask)
+{
+  const StackDropHandler *handler = source().drop_handler();
+  ASSERT_NE(handler, nullptr);
+  MaterialPaintLayer *target = add_layer("Target");
+  Material *mask_source = BKE_material_add(bmain, "MaskSource");
+  MaterialPaintLayer *source_row = BKE_paint_layers_add(
+      *mask_source, "Masked", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(source_row, nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(*mask_source, source_row, 1.0f), nullptr);
+  const MaterialPaintLayer *source_rows[1] = {source_row};
+  Material *smart_mask = BKE_paint_layers_asset_create(*bmain,
+                                                        *mask_source,
+                                                        Span<const MaterialPaintLayer *>(source_rows, 1),
+                                                        PaintLayerAssetType::Mask,
+                                                        "SmartMask");
+  ASSERT_NE(smart_mask, nullptr);
+
+  /* A user may put another row above the holder after saving the asset. */
+  ASSERT_NE(BKE_paint_layers_add(*smart_mask, "Added", nullptr, PaintLayerPlace::Above), nullptr);
+  StackReadContext ctx;
+  ctx.bmain = bmain;
+  StackDropPayload payload;
+  payload.id_type = ID_MA;
+  payload.id_uid = smart_mask->id.session_uid;
+  StackDropTarget drop_target;
+  drop_target.anchor.row_id = target->marker;
+  const char *hint = nullptr;
+  EXPECT_TRUE(handler->can_accept(ctx, material->id, payload, drop_target, &hint));
+
+  MaterialPaintLayer *holder = static_cast<MaterialPaintLayer *>(smart_mask->paint_layers.first);
+  while (holder != nullptr && holder->mask_stack.first == nullptr) {
+    holder = holder->next;
+  }
+  ASSERT_NE(holder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_remove(*smart_mask, holder));
+  hint = nullptr;
+  EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, drop_target, &hint));
+  EXPECT_NE(hint, nullptr);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, smart_material_and_layer_assets_are_accepted)
+{
+  const StackDropHandler *handler = source().drop_handler();
+  ASSERT_NE(handler, nullptr);
+  MaterialPaintLayer *target = add_layer("Target");
+  Material *asset_source = BKE_material_add(bmain, "AssetSource");
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *asset_source, "Saved", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+  const Span<const MaterialPaintLayer *> rows(source_rows, 1);
+
+  Material *material_asset = BKE_paint_layers_asset_create(
+      *bmain, *asset_source, rows, PaintLayerAssetType::Material, "SmartMaterial");
+  Material *layer_asset = BKE_paint_layers_asset_create(
+      *bmain, *asset_source, rows, PaintLayerAssetType::Layer, "SmartLayer");
+  ASSERT_NE(material_asset, nullptr);
+  ASSERT_NE(layer_asset, nullptr);
+
+  StackReadContext ctx;
+  ctx.bmain = bmain;
+  StackDropPayload payload;
+  payload.id_type = ID_MA;
+  StackDropTarget drop_target;
+  drop_target.anchor.row_id = target->marker;
+  drop_target.place = StackMovePlace::Above;
+  const char *hint = nullptr;
+
+  payload.id_uid = material_asset->id.session_uid;
+  EXPECT_TRUE(handler->can_accept(ctx, material->id, payload, drop_target, &hint));
+  EXPECT_EQ(hint, nullptr);
+  payload.id_uid = layer_asset->id.session_uid;
+  EXPECT_TRUE(handler->can_accept(ctx, material->id, payload, drop_target, &hint));
+  EXPECT_EQ(hint, nullptr);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, smart_assets_refuse_into_a_plain_row_and_a_mask_without_anchor)
+{
+  const StackDropHandler *handler = source().drop_handler();
+  ASSERT_NE(handler, nullptr);
+  MaterialPaintLayer *target = add_layer("Target");
+  Material *asset_source = BKE_material_add(bmain, "AssetSource");
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *asset_source, "Saved", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  const MaterialPaintLayer *source_rows[1] = {row};
+  Material *material_asset = BKE_paint_layers_asset_create(*bmain,
+                                                           *asset_source,
+                                                           Span<const MaterialPaintLayer *>(
+                                                               source_rows, 1),
+                                                           PaintLayerAssetType::Material,
+                                                           "SmartMaterial");
+  ASSERT_NE(material_asset, nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(*asset_source, row, 0.5f), nullptr);
+  Material *mask_asset = BKE_paint_layers_asset_create(*bmain,
+                                                       *asset_source,
+                                                       Span<const MaterialPaintLayer *>(
+                                                           source_rows, 1),
+                                                       PaintLayerAssetType::Mask,
+                                                       "SmartMask");
+  ASSERT_NE(mask_asset, nullptr);
+
+  StackReadContext ctx;
+  ctx.bmain = bmain;
+  StackDropPayload payload;
+  payload.id_type = ID_MA;
+  StackDropTarget drop_target;
+  drop_target.anchor.row_id = target->marker;
+  drop_target.place = StackMovePlace::Into;
+  const char *hint = nullptr;
+
+  payload.id_uid = material_asset->id.session_uid;
+  EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, drop_target, &hint));
+  EXPECT_NE(hint, nullptr);
+
+  /* A Smart Mask with no layer to land on: the Smart action refuses, and the ordinary Material
+   * layer action must not pick the asset up either. */
+  payload.id_uid = mask_asset->id.session_uid;
+  drop_target = StackDropTarget();
+  drop_target.place = StackMovePlace::Above;
+  hint = nullptr;
+  EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, drop_target, &hint));
+  EXPECT_NE(hint, nullptr);
+
+  drop_target.place = StackMovePlace::Into;
+  hint = nullptr;
+  EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, drop_target, &hint));
+  EXPECT_NE(hint, nullptr);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, the_drop_catches_materials_and_words_where_they_land)

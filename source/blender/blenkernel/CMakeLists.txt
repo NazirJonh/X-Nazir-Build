@@ -265,7 +265,9 @@ set(SRC
   intern/paint_canvas.cc
   intern/paint_layers/paint_layers.cc
   intern/paint_layers/paint_layers_anchor_point.cc
+  intern/paint_layers/paint_layers_asset.cc
   intern/paint_layers/paint_layers_bake.cc
+  intern/paint_layers/paint_layers_copy.cc
   intern/paint_layers/paint_layers_blend_tier.cc
   intern/paint_layers/paint_layers_kind.cc
   intern/paint_layers/paint_layers_material_live.cc
@@ -556,10 +558,12 @@ set(SRC
   BKE_paint_bvh.hh
   BKE_paint_bvh_pixels.hh
   BKE_paint_layers.hh
+  BKE_paint_layers_asset.hh
   BKE_paint_layers_composite.hh
   BKE_paint_layers_edit.hh
   BKE_paint_layers_generate.hh
   BKE_paint_layers_gradient.hh
+  BKE_paint_layers_import.hh
   BKE_paint_layers_object_mask.hh
   BKE_paint_layers_target.hh
   BKE_paint_types.hh
@@ -872,6 +876,7 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_bake_test.cc
     intern/paint_layers/tests/paint_layers_anchor_point_test.cc
     intern/paint_layers/tests/paint_layers_anchor_point_composite_test.cc
+    intern/paint_layers/tests/paint_layers_asset_test.cc
     intern/paint_layers/tests/paint_layers_blend_tier_test.cc
     intern/paint_layers/tests/paint_layers_correction_bake_test.cc
     intern/paint_layers/tests/paint_layers_curve_patch_test.cc

@@ -133,6 +133,8 @@ void BKE_paint_layers_foreach_source_row(Material &ma,
  */
 ListBaseT<MaterialPaintLayer> *BKE_paint_layers_owner_list(Material &ma,
                                                            const MaterialPaintLayer &layer);
+const ListBaseT<MaterialPaintLayer> *BKE_paint_layers_owner_list(
+    const Material &ma, const MaterialPaintLayer &layer);
 
 /** The folder that holds \a layer, or null when it hangs on the top level (or is not in \a ma). */
 MaterialPaintLayer *BKE_paint_layers_parent(Material &ma, const MaterialPaintLayer &layer);

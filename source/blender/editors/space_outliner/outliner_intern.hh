@@ -1114,6 +1114,7 @@ void OUTLINER_OT_stack_layer_use_as_brush_source(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_paste(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_mask_copy(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_mask_paste(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_smart_asset_save(wmOperatorType *ot);
 void OUTLINER_OT_stack_focus_sub_index(wmOperatorType *ot);
 
 void OUTLINER_OT_orphans_purge(wmOperatorType *ot);

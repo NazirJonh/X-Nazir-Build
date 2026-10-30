@@ -5,18 +5,22 @@
 /** \file
  * \ingroup bke
  *
- * Helpers shared by the Paint Layers description (`paint_layers.cc`) and the code that reads it.
- * They live here rather than in the public header because they are tiny, pure and only meant for
- * the Paint Layers implementation and its tests.
+ * Internals shared by the Paint Layers description (`paint_layers.cc`), its branch copy and the
+ * import between materials (`paint_layers_copy.cc`), and their tests. They live here rather than in
+ * the public header because they are implementation details.
  */
 
 #pragma once
 
+#include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <utility>
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
+#include "BLI_uuid.h"
+#include "BLI_vector.hh"
 
 #include "BKE_paint_layers.hh"
 
@@ -801,5 +805,91 @@ bool BKE_paint_layers_bake_set_map(Material &ma,
 /** Drop the bake of every reader that no longer resolves. Called after an edit that can change a
  * reference: a point or source row was deleted, or a reader was re-targeted. */
 void paint_layer_anchor_point_release_broken_bakes(Material &ma);
+
+/* -------------------------------------------------------------------- */
+/** \name Row copying and import internals
+ *
+ * Shared by `paint_layers.cc` and `paint_layers_copy.cc`. These stay out of the public header:
+ * they expose linkage only, not a contract other modules may depend on.
+ * \{ */
+
+using PaintLayerList = ListBaseT<MaterialPaintLayer>;
+
+/** Old marker -> new marker of a copied branch; linear, a branch is a handful of rows. */
+using PaintLayerMarkerMap = Vector<std::pair<bUUID, bUUID>>;
+
+/** Copy policy shared by the branch and item copies; defaults keep the ordinary duplicate as is. */
+struct PaintLayerCopyOptions {
+  /** #PaintLayerImportFlag bits, for an import across a material boundary. */
+  uint16_t flags = 0;
+  /** Receives the number of Curve Patch items left out, when the skip flag is set. */
+  int *r_dropped_curve_patches = nullptr;
+};
+
+/** Whether \a layer is a row of \a ma's stack, at any depth. */
+bool paint_layer_in_stack(const Material &ma, const MaterialPaintLayer *layer);
+
+/**
+ * Whether \a anchor can take a row by \a place: it is a row of \a ma's stack, and Into names a
+ * folder. Nothing here promotes a plain row to a folder -- its maps would be ignored and the
+ * painted result would silently disappear -- so a UI that drops "into" a plain row groups instead.
+ */
+bool paint_layer_anchor_valid(const Material &ma,
+                              const MaterialPaintLayer *anchor,
+                              PaintLayerPlace place);
+
+/**
+ * Link the unlinked or detached \a layer into \a ma's stack: appended on top for a null \a anchor,
+ * otherwise next to \a anchor by \a place, or inside it for Into. \a anchor must already be
+ * validated (#paint_layer_anchor_valid).
+ */
+void paint_layer_link(Material &ma,
+                      MaterialPaintLayer *layer,
+                      MaterialPaintLayer *anchor,
+                      PaintLayerPlace place);
+
+/**
+ * A detached row with the usual defaults and a marker unique within \a ma. It is not linked yet:
+ * #BKE_paint_layers_add links it into the stack.
+ */
+MaterialPaintLayer *paint_layer_alloc(const Material &ma, const char *name);
+
+/** The new marker copied for \a old, or \a old when the copy stayed outside the branch. */
+bUUID paint_layer_marker_remap(const PaintLayerMarkerMap &map, const bUUID &old);
+
+/** Point the readers of \a row and everything below it at the copied markers in \a map. */
+void paint_layer_anchor_point_refs_remap(MaterialPaintLayer &row,
+                                         const PaintLayerMarkerMap &map);
+
+/**
+ * Clear the reference of the copied reader \a row when its point is not part of \a ma: a copy
+ * from another material would otherwise show a permanent NotFound issue.
+ */
+void paint_layer_anchor_point_foreign_ref_clear(Material &ma, MaterialPaintLayer &row);
+
+/**
+ * An unlinked copy of the mask item or correction \a item: a marker of its own and maps of its own,
+ * for the same reason as the channel maps.
+ */
+MaterialPaintLayer *paint_layer_item_duplicate(
+    Main &bmain,
+    Material &ma,
+    const MaterialPaintLayer &item,
+    PaintLayerMarkerMap *r_map = nullptr,
+    const PaintLayerCopyOptions &options = {});
+
+/**
+ * Fill the linked \a dst with a copy of \a src's own state, its mask and, for a folder, its
+ * children, each row with a marker of its own. \a dst is linked into \a ma before this runs, so
+ * every marker handed out here is unique against it and against the rows copied before.
+ */
+void paint_layer_branch_duplicate(Main &bmain,
+                                  Material &ma,
+                                  MaterialPaintLayer &dst,
+                                  const MaterialPaintLayer &src,
+                                  PaintLayerMarkerMap *r_map = nullptr,
+                                  const PaintLayerCopyOptions &options = {});
+
+/** \} */
 
 }  // namespace blender

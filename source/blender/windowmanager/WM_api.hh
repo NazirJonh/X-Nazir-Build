@@ -2033,6 +2033,8 @@ enum eWM_JobType {
    * separate from the paint-layer planner whose jobs are keyed on the material.
    */
   WM_JOB_TYPE_BRUSH_LAYER_SOURCE,
+  /** A Mesh Map bake, keyed on the material that owns the atlas; see `mesh_map_bake.cc`. */
+  WM_JOB_TYPE_MESH_MAP_BAKE,
   /**
    * Background scan of the external source files of project resources (images) for the asset
    * automatic update system, keyed globally on the #Main.

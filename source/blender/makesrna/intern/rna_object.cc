@@ -20,6 +20,7 @@
 
 #include "BLT_translation.hh"
 
+#include "BKE_mesh_maps_bake.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers_object_mask.hh"
@@ -2893,11 +2894,9 @@ static bool rna_ObjectMeshMapSource_cage_matches(ID *self_id,
   if (owner_mesh == nullptr || cage_mesh == nullptr) {
     return false;
   }
-  /* The same check the full bake applies before it accepts a cage: each low-poly face must have a
-   * matching cage face. The dedicated helper lives on the bake side, which this build does not
-   * carry yet, so the count comparison is made inline here. */
-  return owner_mesh->faces_num == cage_mesh->faces_num &&
-         owner_mesh->corners_num == cage_mesh->corners_num;
+  /* The same check the bake applies before it accepts a cage: each low-poly face must have a
+   * matching cage face. One definition, on the bake side, so the two cannot drift. */
+  return BKE_mesh_maps_bake_cage_matches(*owner_mesh, *cage_mesh);
 }
 
 static PointerRNA rna_ObjectMeshMapSource_cage_get(PointerRNA *ptr)

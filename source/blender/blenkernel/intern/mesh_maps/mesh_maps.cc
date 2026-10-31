@@ -475,19 +475,15 @@ void BKE_mesh_maps_object_hash(const Object &ob_eval,
   h = mesh_map_hash_span(h, mesh->vert_positions());
 
   /* The maps are sampled through the mesh's active UV map: this build has no material-named UV
-   * layer, and the paint brushes read the same active map. A mesh without any UV layer folds a
+   * layer, and the paint brushes read the same active map. A mesh with no usable UV map folds a
    * distinct marker instead of another layer's data, so no valid bake can ever match a missing
    * layer. */
-  if (mesh_map_uv_missing(*mesh)) {
-    h = mesh_map_hash_mix(h, 0x9E3779B97F4A7C15ull);
-  }
-  else if (const StringRefNull uv_name = mesh->active_uv_map_name(); !uv_name.is_empty()) {
-    h = mesh_map_hash_string(h, uv_name);
+  if (const char *uv_name = BKE_mesh_maps_uv_resolve(*mesh); uv_name != nullptr) {
+    h = mesh_map_hash_string(h, StringRef(uv_name));
     h = mesh_map_hash_attribute(h, mesh->attributes(), uv_name);
   }
   else {
-    /* UV layers exist but none is active: an empty marker, distinct from the missing one. */
-    h = mesh_map_hash_mix(h, 0);
+    h = mesh_map_hash_mix(h, 0x9E3779B97F4A7C15ull);
   }
 
   /* Material settings that shape this type's bake. Resolution and margin are used by every merge;
@@ -574,13 +570,24 @@ void BKE_mesh_maps_object_hash(const Object &ob_eval,
   r_hash[1] = uint32_t(h >> 32);
 }
 
+const char *BKE_mesh_maps_uv_resolve(const Mesh &mesh)
+{
+  /* A mesh with no UV layer at all, and one whose layers exist but none is active, both leave the
+   * bake with no texel source: one answer for both, so every caller refuses the same way. */
+  if (mesh_map_uv_missing(mesh)) {
+    return nullptr;
+  }
+  const StringRefNull name = mesh.active_uv_map_name();
+  return name.is_empty() ? nullptr : name.c_str();
+}
+
 bool BKE_mesh_maps_object_uv_missing(const Object &ob_eval, const Material & /*ma*/)
 {
   const Mesh *mesh = mesh_map_object_mesh(ob_eval);
   if (mesh == nullptr) {
     return false;
   }
-  return mesh_map_uv_missing(*mesh);
+  return BKE_mesh_maps_uv_resolve(*mesh) == nullptr;
 }
 
 bool BKE_mesh_maps_object_state_is_current(const ObjectMeshMapState &state,

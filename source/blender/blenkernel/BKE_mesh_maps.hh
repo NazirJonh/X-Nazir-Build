@@ -32,6 +32,7 @@ struct Image;
 struct Main;
 struct Material;
 struct MaterialMeshMapSlot;
+struct Mesh;
 struct Object;
 struct ObjectMeshMapSource;
 struct ObjectMeshMapState;
@@ -143,7 +144,18 @@ void BKE_mesh_maps_object_hash(const Object &ob_eval,
                                uint32_t r_hash[2]);
 
 /**
- * Whether the object's mesh has no UV layer at all, so a map cannot be sampled and its bake must
+ * The UV map every mesh map of \a mesh is sampled through: the mesh's active UV map. This build
+ * has no material-named UV layer (`Material::paint_layers_uv_map` does not exist), so one resolve
+ * serves the content hash, the bake and the foreign-coverage scan alike -- they must never disagree
+ * about which layer a texel belongs to.
+ *
+ * \return the layer name, or null when the mesh has no usable UV map (no layer at all, or none
+ * active). The pointer reads into the mesh and stays valid while its UV layers do not change.
+ */
+const char *BKE_mesh_maps_uv_resolve(const Mesh &mesh);
+
+/**
+ * Whether the object's mesh has no usable UV map, so a map cannot be sampled and its bake must
  * be refused. False when the object is not a mesh with a mesh.
  *
  * This build has no material-named UV map (`Material::paint_layers_uv_map` does not exist), so the

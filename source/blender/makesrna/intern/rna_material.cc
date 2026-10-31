@@ -951,7 +951,10 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
     BKE_paint_layers_active_set(*ma, layer->marker);
   }
   /* Opt in: a script that builds a stack unattended would otherwise allocate every map of every
-   * layer. The maps are made for the active row, so the cursor visits the new row and goes back. */
+   * layer. This makes the whole channel set at once, unlike the UI policy, which makes only the
+   * channel about to be painted (see BKE_paint_layers_active_channel_map_ensure); a script asking
+   * for maps wants them all. The maps are made for the active row, so the cursor visits the new row
+   * and goes back. */
   if (create_maps && layer->source == MA_PAINT_LAYER_SOURCE_IMAGE) {
     const MaterialPaintLayer *previous = BKE_paint_layers_active_layer_get(*ma);
     const bUUID previous_marker = previous != nullptr ? previous->marker : bUUID{};

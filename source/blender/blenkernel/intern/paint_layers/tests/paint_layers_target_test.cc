@@ -640,15 +640,13 @@ TEST_F(PaintLayersTargetTest, mask_target_follows_the_active_correction)
   EXPECT_EQ(paint_layer_channel_find(*paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image, image);
   EXPECT_EQ(paint_layer_channel_find(*base, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image, nullptr);
 
-  /* A Fill's first map keeps its grey, opaque. */
+  /* A Fill correction takes no stroke: its coverage is the texture (or the constant) it carries,
+   * so the resolve refuses and no map grows under it. */
   BKE_paint_layers_active_set(*ma, fill->marker);
-  ASSERT_TRUE(BKE_paint_layers_target_get(
-      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
-  Image *flat = BKE_paint_layers_target_ensure_writable(*bmain, target, 4);
-  ASSERT_NE(flat, nullptr);
-  first_byte_pixel(*flat, pixel);
-  EXPECT_EQ(pixel[3], 255);
-  EXPECT_NEAR(pixel[0], 153, 1);
+  EXPECT_EQ(BKE_paint_layers_target_resolve(
+                *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target),
+            PaintLayersTargetStatus::RowTakesNoStrokes);
+  EXPECT_EQ(paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image, nullptr);
 
   /* The row itself addresses the base again. */
   BKE_paint_layers_active_set(*ma, layer->marker);
@@ -660,6 +658,59 @@ TEST_F(PaintLayersTargetTest, mask_target_follows_the_active_correction)
   ASSERT_TRUE(BKE_paint_layers_find_image_use(*ma, *image, use));
   EXPECT_EQ(use.layer, paint);
   EXPECT_TRUE(use.is_mask);
+}
+
+TEST_F(PaintLayersTargetTest, mask_fill_correction_takes_no_stroke_and_maps_only_when_it_has_a_map)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
+  ASSERT_NE(base, nullptr);
+  PaintLayersTarget target;
+
+  /* The base mask still takes a stroke, and never takes a mapping: the Mask brush writes it at the
+   * raw UV with or without a map. */
+  EXPECT_EQ(BKE_paint_layers_target_resolve(
+                *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target),
+            PaintLayersTargetStatus::Ok);
+  EXPECT_EQ(target.mask_item, base);
+  EXPECT_FALSE(BKE_paint_layers_mapping_available(*ma, *base));
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(*ma, *base));
+
+  Image *base_map = add_solid_image("BaseMaskMap");
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_map));
+  EXPECT_FALSE(BKE_paint_layers_mapping_available(*ma, *base));
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(*ma, *base));
+
+  /* A Paint correction over it stays a stroke target. */
+  MaterialPaintLayer *paint = BKE_paint_layers_mask_item_add(
+      *ma, layer, MA_PAINT_LAYER_SOURCE_IMAGE, "Corr");
+  ASSERT_NE(paint, nullptr);
+  BKE_paint_layers_active_set(*ma, paint->marker);
+  EXPECT_EQ(BKE_paint_layers_target_resolve(
+                *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target),
+            PaintLayersTargetStatus::Ok);
+  EXPECT_EQ(target.mask_item, paint);
+
+  /* A Fill correction takes no stroke, but keeps its Mapping before it has a map to move. */
+  MaterialPaintLayer *fill = BKE_paint_layers_mask_item_add(
+      *ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", 0.5f);
+  ASSERT_NE(fill, nullptr);
+  BKE_paint_layers_active_set(*ma, fill->marker);
+  EXPECT_EQ(BKE_paint_layers_target_resolve(
+                *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target),
+            PaintLayersTargetStatus::RowTakesNoStrokes);
+  EXPECT_TRUE(BKE_paint_layers_mapping_available(*ma, *fill));
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(*ma, *fill));
+  ASSERT_NE(paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  EXPECT_EQ(paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image, nullptr);
+
+  /* With a map it is mapped like any Fill, even though a Mask-mode stroke still refuses it. */
+  Image *fill_map = add_solid_image("FillMaskMap");
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, fill_map));
+  EXPECT_TRUE(BKE_paint_layers_mapping_available(*ma, *fill));
+  EXPECT_TRUE(BKE_paint_layers_mapping_supported(*ma, *fill));
 }
 
 TEST_F(PaintLayersTargetTest, mask_ensure_writable_fills_the_map_with_the_constant)
@@ -948,6 +999,39 @@ TEST_F(PaintLayersTargetTest, active_maps_ensure_covers_the_channel_set_and_spar
 
   /* Idempotent: nothing is left to create. */
   EXPECT_EQ(BKE_paint_layers_active_maps_ensure(*bmain, *ma, 4), 0);
+}
+
+TEST_F(PaintLayersTargetTest, active_channel_map_ensure_makes_only_the_named_channel)
+{
+  add_active_row("L");
+  const uint16_t set = (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_BASE_COLOR)) |
+                       (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS));
+  BKE_paint_layers_channel_set_mask_set(*ma, set);
+
+  /* The named channel is in the set and has no map: it gets one with the row. */
+  Image *base = BKE_paint_layers_active_channel_map_ensure(
+      *bmain, *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, 4);
+  ASSERT_NE(base, nullptr);
+  PaintLayersTarget base_target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_target));
+  EXPECT_EQ(BKE_paint_layers_target_image(base_target), base);
+
+  /* The other channel of the set stays mapless: only the named channel is made. */
+  PaintLayersTarget rough_target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough_target));
+  EXPECT_EQ(BKE_paint_layers_target_image(rough_target), nullptr);
+
+  /* A channel outside the set is not a target, so nothing is made for it. */
+  EXPECT_EQ(BKE_paint_layers_active_channel_map_ensure(
+                *bmain, *ma, PAINT_MATERIAL_CHANNEL_NORMAL, PaintLayersTargetMode::Content, 4),
+            nullptr);
+  PaintLayersTarget normal_target;
+  EXPECT_FALSE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_NORMAL, normal_target));
+
+  /* Idempotent: the row already holds the map, so the call hands back the same one. */
+  EXPECT_EQ(BKE_paint_layers_active_channel_map_ensure(
+                *bmain, *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, 4),
+            base);
 }
 
 TEST_F(PaintLayersTargetTest, resolve_reports_why_a_target_is_refused)

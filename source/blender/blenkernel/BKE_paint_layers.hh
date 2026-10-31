@@ -373,8 +373,8 @@ MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma, MaterialPaintLayer *
 /**
  * Give \a layer a mask that reads \a image: the white base mask an Add White Mask makes, and a
  * Fill correction over it whose Base Color record carries the image -- its grey and its alpha -- as
- * the coverage it lays, the same pair the Outliner's drop of an image makes. A Mask-mode stroke
- * paints the map the correction holds.
+ * the coverage it lays, the same pair the Outliner's drop of an image makes. The correction takes
+ * no stroke: a Mask-mode stroke paints the base mask, and the texture is the correction's to carry.
  *
  * The caller keeps its own user for \a image; the correction's record takes one of its own.
  *
@@ -410,8 +410,9 @@ bool BKE_paint_layers_mask_copy(Main &bmain,
  * alpha `A`) or, as a Fill, its constant (`A` one).
  *
  * A Paint correction (the Image source) lays nothing until it has a map, which the first stroke in
- * Mask mode creates, transparent; a Fill correction (the Constant source) starts as the grey
- * \a value; a Gradient correction (the Generator source) lays its ramp's grey, its alpha and its
+ * Mask mode creates; a Fill correction (the Constant source) starts as the grey \a value and takes
+ * no stroke at all -- its coverage is the texture (or the constant) it carries, never a map a brush
+ * writes; a Gradient correction (the Generator source) lays its ramp's grey, its alpha and its
  * line. Like a row's, its opacity, blend and visibility are its own settings.
  *
  * \param name: the correction's name, or null for "Mask Paint" / "Mask Fill" / "Mask Gradient".
@@ -1206,8 +1207,9 @@ bool BKE_paint_layers_mapping_applies(const Material &ma, const MaterialPaintLay
  * accepts, plus a Fill row that has no map yet. A Fill's mapping belongs to the row, not to the
  * map it happens to read: the row is made with its mapping enabled, so the Mapping panel and the
  * Image Editor's mapping gizmo are there before the first texture is slotted, and the values take
- * effect the moment one is. The graph and the CPU ask #BKE_paint_layers_mapping_remaps, so a row
- * with no map builds nothing.
+ * effect the moment one is. The base mask is no Fill of its own: the Mask brush paints its map at
+ * the raw UV, so it never takes a mapping to edit. The graph and the CPU ask
+ * #BKE_paint_layers_mapping_remaps, so a row with no map builds nothing.
  */
 bool BKE_paint_layers_mapping_available(const Material &ma, const MaterialPaintLayer &layer);
 
@@ -1850,7 +1852,8 @@ const MaterialPaintLayer *BKE_paint_layers_lock_blocker(
  * start reads the target status, not this answer alone.
  *
  * A correction (role #MA_PAINT_LAYER_ROLE_EFFECT) carries its own switch like a row. A row that
- * takes no stroke anyway (a filter) keeps its RowTakesNoStrokes answer from the target resolve.
+ * takes no stroke anyway (a filter), and a Fill correction in Mask mode, keep their
+ * RowTakesNoStrokes answer from the target resolve.
  */
 const MaterialPaintLayer *BKE_paint_layers_hidden_blocker(
     const Material &ma,

@@ -6989,6 +6989,15 @@ static bool proj_paint_add_layered_slot(bContext *C, wmOperator *op, Object &ob,
   if (ed::sculpt_paint::material::paint_layers_status_report(ma, status, op->reports)) {
     return false;
   }
+  if (status == PaintLayersTargetStatus::RowTakesNoStrokes &&
+      mode == PaintLayersTargetMode::Mask)
+  {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "The active mask correction takes no stroke; paint the base mask or add a Paint "
+               "correction");
+    return false;
+  }
   if (status != PaintLayersTargetStatus::Ok) {
     BKE_report(op->reports,
                RPT_ERROR,

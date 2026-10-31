@@ -2648,11 +2648,10 @@ class PaintLayersStackSource final : public StackSource,
       blender::ed::sculpt_paint::curve_patch_layer_enter_if_sculpting(C, material, *created);
     }
     sculpt_paint::paint_stack_gradient_tool_activate(C, created);
-    /* A row with no map makes the first stroke create it and regenerate the graph before it can
-     * write, which loses that stroke. The map the user is about to paint -- the active slot's, or
-     * the Paint mask correction's -- is made together with the row, so the first stroke already
-     * lands in it; the other channels still get theirs when they are used. A Fill mask correction
-     * keeps no map of its own until it is painted, so its flat grey stays editable. */
+    /* The map the user is about to paint -- the active slot's, or the Paint mask correction's -- is
+     * made together with the row, so the first stroke already lands in it; the other channels get
+     * theirs when they are used. A Fill mask correction keeps no map of its own until it is painted,
+     * so its flat grey stays editable. */
     if (ELEM(params.kind,
              PaintLayerAddKind::Paint,
              PaintLayerAddKind::Correction,
@@ -2661,18 +2660,17 @@ class PaintLayersStackSource final : public StackSource,
       if (BKE_paint_layers_active_layer_get(material) != nullptr) {
         const Scene *scene = CTX_data_scene(&C);
         const PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+        /* The Stack follows the slot the brush writes, where New Layered reads the channel cursor;
+         * both name the channel being painted. */
         const int slot_channel = BKE_paint_layers_texpaint_slot_channel(material.paint_active_slot);
-        PaintLayersTarget target;
-        if (BKE_paint_layers_target_get(
+        if (BKE_paint_layers_active_channel_map_ensure(
+                *CTX_data_main(&C),
                 material,
                 is_mask_correction || slot_channel < 0 ? int(PAINT_MATERIAL_CHANNEL_BASE_COLOR) :
                                                          slot_channel,
                 BKE_paint_layers_target_mode(&paint_mode),
-                target) &&
-            BKE_paint_layers_target_image(target) == nullptr)
+                paint_mode.new_channel_image_size) != nullptr)
         {
-          BKE_paint_layers_target_ensure_writable(
-              *CTX_data_main(&C), target, paint_mode.new_channel_image_size);
           sculpt_paint::paint_stack_texpaint_slots_refresh(C);
         }
       }

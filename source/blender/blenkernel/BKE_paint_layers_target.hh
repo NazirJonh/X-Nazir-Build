@@ -92,8 +92,8 @@ enum class PaintLayersTargetStatus : int8_t {
   InvalidChannel,
   /** The material has no active row. */
   NoActiveRow,
-  /** Content: the active row owns no map a stroke could write (a filter, or a row that reads a
-   * material). */
+  /** The row owns no map a stroke could write: a filter or a row that reads a material (Content),
+   * a Gradient or a Fill mask correction (Mask). */
   RowTakesNoStrokes,
   /** Content: the channel is not in the material's channel set, so it takes part nowhere. This is
    * the user's choice and concerns this channel alone, not the rest of the stroke. */
@@ -153,8 +153,9 @@ struct PaintLayersTarget {
   /** What the stroke paints: the row's channel content, or its mask. */
   PaintLayersTargetMode mode = PaintLayersTargetMode::Content;
   /**
-   * The mask item a #PaintLayersTargetMode::Mask target paints: the row's base mask. Its Base Color
-   * record is #channel_record, and its map the one the stroke writes.
+   * The mask item a #PaintLayersTargetMode::Mask target paints: the row's base mask, or the active
+   * Paint correction over it. Its Base Color record is #channel_record, and its map the one the
+   * stroke writes.
    */
   MaterialPaintLayer *mask_item = nullptr;
   /**
@@ -181,9 +182,10 @@ bool BKE_paint_layers_target_get(Material &ma, int channel, PaintLayersTarget &r
 /**
  * Resolve the target of \a ma's active row for \a mode.
  *
- * In #PaintLayersTargetMode::Mask the target is the row's base mask, and only Base Color names it:
- * a mask is one grey map, so a stroke's other channels resolve to nothing instead of being written
- * into it.
+ * In #PaintLayersTargetMode::Mask the target is the row's base mask, or the active Paint correction
+ * over it, and only Base Color names it: a mask is one grey map, so a stroke's other channels
+ * resolve to nothing instead of being written into it. A Fill correction, a Gradient and a mesh-map
+ * mask item take no stroke and refuse with #PaintLayersTargetStatus::RowTakesNoStrokes.
  *
  * In #PaintLayersTargetMode::Content a channel outside #Material::paint_layers_channels resolves to
  * nothing: the material's set is the filter over what the stack paints, and a stroke into such a
@@ -289,6 +291,30 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
                                                PaintLayersTarget &target,
                                                int image_size,
                                                const float *new_channel_fill_linear = nullptr);
+
+/**
+ * Make sure the active row of \a ma holds a writable map for \a channel, growing the description on
+ * the first call.
+ *
+ * This is the "map together with the row" policy: a row is created with a map for the one channel
+ * the user is about to paint, the rest of the set stays mapless and gets its maps on the first
+ * write. Creating every map up front would allocate one map per channel of the set for a row
+ * nothing may ever be painted into (4K is 64 MiB of RAM and ~85 MiB of GPU memory each), and a row
+ * without a map loses the first stroke that has to grow the description and regenerate the graph
+ * before it can write.
+ *
+ * \param channel: the channel that becomes the target; it must be in the material's set for
+ * #PaintLayersTargetMode::Content, otherwise nothing is created.
+ * \param image_size: the fallback width and height, used only when the material has no size of its
+ * own.
+ * \return the map, or null when \a channel is not a target (see #BKE_paint_layers_target_get) or
+ * #BKE_paint_layers_target_ensure_writable refuses.
+ */
+Image *BKE_paint_layers_active_channel_map_ensure(Main &bmain,
+                                                  Material &ma,
+                                                  int channel,
+                                                  PaintLayersTargetMode mode,
+                                                  int image_size);
 
 /**
  * The map of \a row's base mask, created (filled with the mask's constant) when it has none.

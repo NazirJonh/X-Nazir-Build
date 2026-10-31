@@ -573,6 +573,22 @@ inline bool paint_layer_row_empty_base(const Material &ma,
 }
 
 /**
+ * Whether \a item is a Fill that is not the row's base mask: a Fill correction when it is a mask
+ * item. The base mask carries the same flat-value kind, which is what this tells apart. A Fill row
+ * (not a mask item) also answers true; callers that mean mask items check the role first.
+ *
+ * A Fill correction lays the texture it was given, or its constant grey: it has no map of its own
+ * for a stroke to write into. The target resolver refuses it in Mask mode, and the mapping rules
+ * treat it like any other Fill -- mapped before it carries a map -- while the base mask takes the
+ * Mask-mode stroke but no mapping.
+ */
+inline bool paint_layer_mask_item_is_fill_correction(const MaterialPaintLayer &item)
+{
+  return paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_FLAT_VALUE) &&
+         (item.flag & MA_PAINT_LAYER_MASK_BASE) == 0;
+}
+
+/**
  * Whether the mask item \a item lays coverage over its row's factor.
  *
  * The base mask always does: its Base Color record is a coverage of its own, a constant until a

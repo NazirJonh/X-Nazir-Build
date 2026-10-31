@@ -1014,8 +1014,6 @@ static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator *op)
     BKE_paint_layers_channel_set_value(*ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_color);
   }
   BKE_paint_layers_active_set(*ma, base->marker);
-  /* The base layer is paintable in every ticked channel from the start; the material's own size
-   * decides the resolution, the scene's is only the fallback of the call. */
   Scene *scene = CTX_data_scene(C);
   if (scene != nullptr) {
     /* The Stack Layers channel cursor is a scene setting that starts on Base Color; a material
@@ -1023,9 +1021,17 @@ static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator *op)
     int &cursor = scene->toolsettings->paint_mode.stack_layer_channel;
     cursor = BKE_paint_layers_channel_clamp_to_set(*ma, cursor);
   }
-  BKE_paint_layers_active_maps_ensure(
+  /* The new material has no mask yet, so the first map is content. The Stack takes its channel from
+   * the active texture-paint slot instead: both name "the channel being painted", through the
+   * cursor the user set here and through the slot the brush writes there. */
+  const int first_channel = (scene != nullptr) ?
+                                scene->toolsettings->paint_mode.stack_layer_channel :
+                                int(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  BKE_paint_layers_active_channel_map_ensure(
       *bmain,
       *ma,
+      first_channel,
+      PaintLayersTargetMode::Content,
       scene ? scene->toolsettings->paint_mode.new_channel_image_size :
               int(PAINT_NEW_CHANNEL_IMAGE_SIZE_4K));
 

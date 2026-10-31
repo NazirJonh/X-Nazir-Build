@@ -273,6 +273,11 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
   if (r_target.mask_item->source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
     return PaintLayersTargetStatus::RowTakesNoStrokes;
   }
+  /* A Fill correction lays the texture it was given, or its constant grey: a stroke has no map of
+   * its own to write into, so only the base mask or a Paint correction takes a Mask-mode stroke. */
+  if (paint_layer_mask_item_is_fill_correction(*r_target.mask_item)) {
+    return PaintLayersTargetStatus::RowTakesNoStrokes;
+  }
   /* A map-coverage item whose kind is reference-only (Color ID: an external ID Map) is not a
    * stroke target; editability is a trait of the kind, so the user cannot pick it by accident. A
    * paintable one (UV Island) is written by its capture, not by a stroke, but is still a valid
@@ -455,9 +460,11 @@ static Image *paint_layers_record_image_ensure_owned(Main &bmain,
 }
 
 /**
- * The mask counterpart of #BKE_paint_layers_target_ensure_writable: the base mask item gets a map
- * the first time a stroke lands on it. The map is filled with the constant it replaces, so the row
- * looks the same before and after the first stroke; its colorspace is Non-Color, as a mask is a
+ * The mask counterpart of #BKE_paint_layers_target_ensure_writable: the base mask item, or a Paint
+ * correction over it, gets a map the first time a stroke lands on it, or when the stack makes it
+ * ahead of that stroke. A Fill correction never reaches this from Mask mode -- the target resolver
+ * refuses it -- so it grows no map there. The map is filled with the constant it replaces, so the
+ * row looks the same before and after the first stroke; its colorspace is Non-Color, as a mask is a
  * number and not a colour.
  */
 static Image *paint_layers_mask_ensure_writable(Main &bmain,
@@ -669,10 +676,11 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
     fill[1] = 0.5f;
     fill[2] = 1.0f;
   }
-  /* A Fill correction's first map in a channel starts as the colour it laid there: opaque, because a
-   * Fill covers by its opacity alone and its alpha was never part of the look. It laid nothing in
-   * Normal, where the map therefore starts transparent. The channels it has no map in keep their
-   * flat colour. */
+  /* A Fill correction's first Content map in a channel starts as the colour it laid there: opaque,
+   * because a Fill covers by its opacity alone and its alpha was never part of the look. It laid
+   * nothing in Normal, where the map therefore starts transparent. Mask mode never asks this: its
+   * resolver refuses a Fill correction, so only a Content target reaches this branch. The channels
+   * it has no map in keep their flat colour. */
   const bool fill_correction = target.layer->role == MA_PAINT_LAYER_ROLE_EFFECT &&
                                paint_layer_kind_has_flag(*target.layer,
                                                          PAINT_LAYER_KIND_FLAT_VALUE);
@@ -761,6 +769,20 @@ bool BKE_paint_layers_target_content_reset(PaintLayersTarget &target)
   BKE_image_free_gputextures(&image);
   target.channel_record = record;
   return true;
+}
+
+Image *BKE_paint_layers_active_channel_map_ensure(Main &bmain,
+                                                  Material &ma,
+                                                  const int channel,
+                                                  const PaintLayersTargetMode mode,
+                                                  const int image_size)
+{
+  PaintLayersTarget target;
+  if (!BKE_paint_layers_target_get(ma, channel, mode, target)) {
+    return nullptr;
+  }
+  /* No image check: the call is idempotent and hands back the map the row already holds. */
+  return BKE_paint_layers_target_ensure_writable(bmain, target, image_size);
 }
 
 int BKE_paint_layers_active_maps_ensure(Main &bmain, Material &ma, const int image_size)

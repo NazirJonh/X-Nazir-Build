@@ -2489,16 +2489,11 @@ bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintL
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES)) {
     return false;
   }
-  /* Only a Fill's own map repeats under the remap: a painted map is written by strokes at the raw
-   * UV, and a filter owns no map to move. */
-  if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_FLAT_VALUE)) {
-    return false;
-  }
   if (layer.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
     /* The base mask is the layer's own mask: the Mask brush paints it and it takes no map of its
-     * own, so there is nothing for a remap to move. A correction above it reads the map it was
-     * given and keeps its Mapping. */
-    if ((layer.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+     * own, so there is nothing for a remap to move. A Fill correction above it reads the map it was
+     * given and keeps its Mapping; every other mask item owns no mappable map. */
+    if (!paint_layer_mask_item_is_fill_correction(layer)) {
       return false;
     }
     /* A mask is scalar over its owner; its map lives in the Base Color record of the item itself,
@@ -2506,6 +2501,11 @@ bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintL
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     return paint_layer_channel_live(record) && record->image != nullptr;
+  }
+  /* Only a Fill's own map repeats under the remap: a painted map is written by strokes at the raw
+   * UV, and a filter owns no map to move. */
+  if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_FLAT_VALUE)) {
+    return false;
   }
   for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
     if (BKE_paint_layers_fill_reads_map(ma, layer, channel)) {
@@ -2541,8 +2541,10 @@ bool BKE_paint_layers_mapping_available(const Material &ma, const MaterialPaintL
   }
   /* A Fill keeps its mapping before it has a map to move: the values are part of the row, and the
    * panel and the gizmo edit them from the start. Only a Fill can wait that way -- a painted map
-   * is addressed at the raw UV, and a filter, a folder or a generator owns nothing to remap. */
-  return paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_FLAT_VALUE);
+   * is addressed at the raw UV, and a filter, a folder or a generator owns nothing to remap. The
+   * base mask is no Fill of its own: the Mask brush paints its map at the raw UV, so it takes no
+   * mapping to edit, with a map or without. */
+  return paint_layer_mask_item_is_fill_correction(layer);
 }
 
 bool BKE_paint_layers_mapping_is_identity(const MaterialPaintLayer &layer)

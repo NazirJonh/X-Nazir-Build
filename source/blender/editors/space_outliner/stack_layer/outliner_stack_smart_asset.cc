@@ -258,6 +258,13 @@ void smart_asset_portability_report(wmOperator &op, const PaintLayerAssetPortabi
                 "%d layer(s) read other materials; those materials are copied into the asset",
                 portability.material_source_num);
   }
+  if (portability.mesh_map_num > 0) {
+    BKE_reportf(op.reports,
+                RPT_WARNING,
+                "%d Mesh Map layer(s) read the maps of the material they are inserted into; "
+                "bake them there",
+                portability.mesh_map_num);
+  }
   if (portability.object_mask_num > 0) {
     BKE_report(op.reports, RPT_WARNING, "Object masks are not saved");
   }

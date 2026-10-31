@@ -15,8 +15,10 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh_maps.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_asset.hh"
+#include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_import.hh"
 
 #include "BLI_index_range.hh"
@@ -33,6 +35,7 @@
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
+#include "../paint_layers_intern.hh"
 #include "../paint_layers_kind.hh"
 
 namespace blender::bke::tests {
@@ -82,6 +85,21 @@ class PaintLayersAssetTest : public bke::BlenderGTestBase {
     EXPECT_NE(row, nullptr);
     EXPECT_NE(BKE_paint_layers_channel_add(ma, row, channel), nullptr);
     EXPECT_TRUE(BKE_paint_layers_channel_set_image(ma, row, channel, image));
+    return row;
+  }
+
+  /** A MESH_MAP row of the stack for \a type: it owns channel records, never a map of its own. */
+  MaterialPaintLayer *add_mesh_map_row(Material &ma,
+                                       const char *name,
+                                       const eMaterialMeshMapType type)
+  {
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::MeshMap;
+    params.name = name;
+    MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(ma, params);
+    if (row != nullptr) {
+      EXPECT_TRUE(BKE_paint_layers_mesh_map_type_set(ma, row, int8_t(type)));
+    }
     return row;
   }
 
@@ -1594,6 +1612,81 @@ TEST_F(PaintLayersAssetTest, portability_counts_file_images_but_not_generated_on
   const PaintLayerAssetPortability file_check = BKE_paint_layers_asset_portability_check(
       *src, Span<const MaterialPaintLayer *>(file_rows, 1), PaintLayerAssetType::Layer);
   EXPECT_EQ(file_check.external_image_num, 1);
+}
+
+TEST_F(PaintLayersAssetTest, portability_counts_mesh_map_rows_and_the_asset_keeps_the_type_only)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_mesh_map_row(*src, "AO", MA_MESH_MAP_AO);
+  ASSERT_NE(row, nullptr);
+  /* The atlas is the source material's; the row owns no pixels of its own. */
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*src, int8_t(MA_MESH_MAP_AO), add_image("SrcAtlas")));
+
+  const MaterialPaintLayer *saved_rows[1] = {row};
+  const PaintLayerAssetPortability portability = BKE_paint_layers_asset_portability_check(
+      *src, Span<const MaterialPaintLayer *>(saved_rows, 1), PaintLayerAssetType::Layer);
+  EXPECT_EQ(portability.mesh_map_num, 1);
+  EXPECT_FALSE(portability.blocking());
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(saved_rows, 1),
+                                                  PaintLayerAssetType::Layer,
+                                                  "MeshMapLayer");
+  ASSERT_NE(asset, nullptr);
+  ASSERT_EQ(BLI_listbase_count(&asset->paint_layers), 1);
+  const MaterialPaintLayer *asset_row = static_cast<const MaterialPaintLayer *>(
+      asset->paint_layers.first);
+  EXPECT_EQ(asset_row->source, MA_PAINT_LAYER_SOURCE_MESH_MAP);
+  EXPECT_EQ(BKE_paint_layers_mesh_map_type_get(*asset_row), int8_t(MA_MESH_MAP_AO));
+  /* The atlas belongs to the material: the copy carries the type, and no slot comes with it. */
+  EXPECT_EQ(BKE_mesh_maps_slot_find(*asset, int8_t(MA_MESH_MAP_AO)), nullptr);
+}
+
+TEST_F(PaintLayersAssetTest, portability_counts_a_mesh_map_mask_item_in_a_mask_asset)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_layer(*src, "Masked", add_image("MaskedMap"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*src, row, 0.5f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *src, row, MA_PAINT_LAYER_SOURCE_IMAGE, "Map Mask");
+  ASSERT_NE(item, nullptr);
+  /* The Add API has no Mesh Map mask kind: the Paint item is flipped to the Mesh Map source the
+   * kind table allows for mask items, the way the composite tests build theirs. */
+  item->source = MA_PAINT_LAYER_SOURCE_MESH_MAP;
+  ASSERT_TRUE(BKE_paint_layers_mesh_map_type_set(*src, item, int8_t(MA_MESH_MAP_CURVATURE)));
+
+  const MaterialPaintLayer *saved_rows[1] = {row};
+  const PaintLayerAssetPortability portability = BKE_paint_layers_asset_portability_check(
+      *src, Span<const MaterialPaintLayer *>(saved_rows, 1), PaintLayerAssetType::Mask);
+  EXPECT_EQ(portability.mesh_map_num, 1);
+  EXPECT_FALSE(portability.blocking());
+}
+
+TEST_F(PaintLayersAssetTest, inserted_mesh_map_row_reads_the_target_materials_atlas)
+{
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = add_mesh_map_row(*src, "AO", MA_MESH_MAP_AO);
+  ASSERT_NE(row, nullptr);
+  const MaterialPaintLayer *saved_rows[1] = {row};
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  *src,
+                                                  Span<const MaterialPaintLayer *>(saved_rows, 1),
+                                                  PaintLayerAssetType::Layer,
+                                                  "MeshMapInsert");
+  ASSERT_NE(asset, nullptr);
+
+  /* The target has the map baked; the inserted row reads it there, since the asset carried no
+   * pixels of its own. */
+  Material *dst = BKE_material_add(bmain, "Dst");
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*dst, int8_t(MA_MESH_MAP_AO), add_image("DstAtlas")));
+  PaintLayerImportResult result;
+  ASSERT_TRUE(BKE_paint_layers_asset_insert(
+      *bmain, *dst, *asset, nullptr, PaintLayerPlace::Above, &result));
+  ASSERT_NE(result.first, nullptr);
+  EXPECT_EQ(result.first->source, MA_PAINT_LAYER_SOURCE_MESH_MAP);
+  EXPECT_EQ(BKE_paint_layers_mesh_map_type_get(*result.first), int8_t(MA_MESH_MAP_AO));
+  EXPECT_NE(paint_layer_mesh_map_image(*dst, *result.first), nullptr);
 }
 
 TEST_F(PaintLayersAssetTest, ordinary_duplicate_still_copies_the_curve_patch_payload)

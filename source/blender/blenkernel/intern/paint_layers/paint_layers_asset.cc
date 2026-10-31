@@ -554,6 +554,11 @@ void portability_walk(const MaterialPaintLayer &row,
   if (row.source == MA_PAINT_LAYER_SOURCE_MATERIAL && row.material != nullptr) {
     r_portability.material_source_num++;
   }
+  /* A Mesh Map row travels as its atlas type alone, so the inserted row reads the target
+   * material's baked maps. Counted to warn about, never to block the save. */
+  if (row.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    r_portability.mesh_map_num++;
+  }
   if ((row.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0) {
     r_portability.object_mask_num++;
   }
@@ -591,6 +596,9 @@ void portability_mask_walk(const MaterialPaintLayer &row,
     }
     if (item.source == MA_PAINT_LAYER_SOURCE_MATERIAL && item.material != nullptr) {
       r_portability.material_source_num++;
+    }
+    if (item.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+      r_portability.mesh_map_num++;
     }
     if ((item.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0) {
       r_portability.object_mask_num++;

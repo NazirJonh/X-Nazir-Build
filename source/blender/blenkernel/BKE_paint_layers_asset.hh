@@ -65,6 +65,12 @@ struct PaintLayerAssetPortability {
   int movie_image_num = 0;
   /** Row or correction that reads another material. */
   int material_source_num = 0;
+  /**
+   * Rows, mask items or corrections with a Mesh Map source. The asset carries the atlas type
+   * only -- the pixels are the owner material's -- so an inserted row reads whatever the target
+   * material has baked. Informational: the map belongs to the geometry, not to the asset.
+   */
+  int mesh_map_num = 0;
   /** Active object masks that will not be saved. */
   int object_mask_num = 0;
 

@@ -1774,13 +1774,21 @@ MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
 
 void BKE_paint_layers_active_set(Material &ma, const bUUID &marker)
 {
-  const bool active_changed = !BLI_uuid_equal(ma.active_layer_marker, marker);
+  const bUUID old_marker = ma.active_layer_marker;
+  const bool active_changed = !BLI_uuid_equal(old_marker, marker);
+  ma.active_layer_marker = marker;
   /* Leaving a row is when its deferred bake becomes due: the row and its ancestor folders left
    * behind may carry a cache that has to catch up (see #BKE_paint_layers_bake_row_is_deferred). */
   if (active_changed) {
     ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
+    /* Most switches leave no bake to make and would only rebuild the shading for nothing: only a
+     * switch that stops deferring a row whose bake is now due is tagged, and tagged at all because
+     * the planner reads the flag from the original material. The pair is the one every other tag
+     * in this file uses. */
+    if (paint_layers_bake_pending_after_switch(ma, old_marker, marker)) {
+      DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+    }
   }
-  ma.active_layer_marker = marker;
   /* The viewport's Mask pass shows the active row's mask, so moving the active row has to move the
    * root's mask output with it. */
   if (active_changed && BKE_paint_layers_view_pass_get(ma) == PAINT_LAYER_MAP_MASK) {

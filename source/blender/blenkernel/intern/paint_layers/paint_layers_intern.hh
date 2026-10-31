@@ -789,6 +789,32 @@ void paint_layers_blend_tier_prune(Material &ma);
 constexpr int PAINT_LAYERS_AUTO_BAKE_NODES = 36;
 
 /**
+ * What a row that is not due does with the bake it carries, decided by #bake_row_is_due and
+ * carried out by the planner, which is the only caller that may free (it holds the #Main).
+ */
+enum class BakeRowRelease : int8_t {
+  /** The bake is the row's own and stays. */
+  Keep = 0,
+  /**
+   * The maps are stale beyond substitution (the row reads per-object geometry now): they go, but
+   * the record stays -- it keeps the mode the user chose and the size the bake used.
+   */
+  ReleaseMaps,
+  /** The whole structure goes; only #BakeMaterialRuntime remembers the size. */
+  FreeStructure,
+};
+
+/**
+ * Whether \a layer is a row the planner has to bake now: a candidate, not switched off or hidden,
+ * not the row being edited, with no valid bake, and -- for AUTO -- heavy enough and, for a folder,
+ * nested deep enough to be worth a cache. \a r_release carries a bake the rules no longer want
+ * (#BakeRowRelease). Pure: the answer does not depend on the caller.
+ */
+bool bake_row_is_due(const Material &ma,
+                     const MaterialPaintLayer &layer,
+                     BakeRowRelease &r_release);
+
+/**
  * Whether the Anchor Point Reader \a reader takes its slice from the bake in its mode right now:
  * Never stays live, Always bakes, and Auto bakes only over the live limits or with an object mask
  * in the slice (which Auto keeps live, so the mask follows each object).
@@ -848,6 +874,27 @@ bool BKE_paint_layers_bake_changed_region(const Material &ma,
  * \return true when some row was baked or released, so the caller knows the tree needs a rebuild.
  */
 bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed = nullptr);
+
+/**
+ * Create the cache maps a new shared (UV) Gradient will read, before its first bake, so the first
+ * bake only fills pixels. \a edited may be the Gradient row itself or a correction or mask item;
+ * the maps go to the row that is baked (the item's owner), since an item has no cache of its own.
+ *
+ * Called from the gradient edit paths, which run on an original of the local #Main: the guard
+ * inside refuses anything else, and the maps are held by the row's DNA bake structure, so the undo
+ * step that captures the edit captures them with it.
+ */
+void paint_layers_bake_precreate_texture(Material &ma, MaterialPaintLayer &edited);
+
+/**
+ * Whether moving the active marker from \a old_marker to \a new_marker leaves a bake due, read
+ * after the marker moved: what the next plan would find among the rows the switch stops deferring.
+ * The caller uses it to decide whether the switch has to tag the material at all. Only the old
+ * marker's ancestor path is walked.
+ */
+bool paint_layers_bake_pending_after_switch(const Material &ma,
+                                            const bUUID &old_marker,
+                                            const bUUID &new_marker);
 
 /**
  * Allocate \a layer's bake cache if it has none and return it, without marking anything: the

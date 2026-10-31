@@ -55,17 +55,33 @@ float gradient_repeat_apply(const eMaterialPaintLayerGradientRepeat repeat, cons
   return clamp_f(t, 0.0f, 1.0f);
 }
 
-/** The row, its corrections and its mask items; the caller's BKE_paint_layers_foreach already walks
- * folders' children. */
-template<typename LayerT, typename Fn> void gradient_row_foreach(LayerT &layer, const Fn &fn)
+/**
+ * Whether \a row takes part by evaluating itself per texel: an enabled generator row, which owns no
+ * map a cache could stand in for.
+ */
+bool gradient_row_is_live(const MaterialPaintLayer &row)
 {
-  fn(layer);
+  return (row.flag & MA_PAINT_LAYER_ENABLED) != 0 &&
+         paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_GENERATES);
+}
+
+/** The rows laid over \a layer: its corrections and its mask items. */
+template<typename LayerT, typename Fn> void gradient_laid_row_foreach(LayerT &layer, const Fn &fn)
+{
   for (LayerT &item : layer.mask_stack) {
     fn(item);
   }
   for (LayerT &effect : layer.effects) {
     fn(effect);
   }
+}
+
+/** The row, its corrections and its mask items; the caller's BKE_paint_layers_foreach already walks
+ * folders' children. */
+template<typename LayerT, typename Fn> void gradient_row_foreach(LayerT &layer, const Fn &fn)
+{
+  fn(layer);
+  gradient_laid_row_foreach(layer, fn);
 }
 
 }  // namespace
@@ -105,6 +121,24 @@ bool BKE_paint_layers_gradient_subtree_is_shared_bakeable(const MaterialPaintLay
     }
   }
   return true;
+}
+
+bool BKE_paint_layers_gradient_subtree_holds_laid_gradient(const MaterialPaintLayer &layer)
+{
+  bool holds = false;
+  gradient_laid_row_foreach(
+      layer, [&](const MaterialPaintLayer &row) { holds = holds || gradient_row_is_live(row); });
+  /* A folder lays its children, and each of them its own corrections and mask items: a Gradient
+   * anywhere below is one the folder's bake would fold in. */
+  if (holds || !BKE_paint_layers_is_folder(layer)) {
+    return holds;
+  }
+  for (const MaterialPaintLayer &child : layer.children) {
+    if (BKE_paint_layers_gradient_subtree_holds_laid_gradient(child)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void BKE_paint_layers_gradient_init(MaterialPaintLayerGradient &gradient)
@@ -217,7 +251,9 @@ MaterialPaintLayer *BKE_paint_layers_gradient_add(Material &ma,
       break;
     }
   }
-  /* The source and the record change what the graph builds: the Add's own tag was too early. */
+  /* The source and the record change what the graph builds: the Add's own tag was too early. A
+   * shared (UV) Gradient also creates its maps up front, so its first bake only fills pixels. */
+  paint_layers_bake_precreate_texture(ma, *layer);
   BKE_paint_layers_tag_edited(ma);
   return layer;
 }
@@ -568,11 +604,17 @@ bool BKE_paint_layers_gradient_set_space(Material &ma,
     return false;
   }
   if (gradient->space == space) {
+    /* Idempotent: a second call also fills a cache that was released earlier. */
+    paint_layers_bake_precreate_texture(ma, layer);
     return true;
   }
   /* The numbers stay as they are and are read in the new space: the source of the coordinate is
    * graph structure, not a value. */
   gradient->space = space;
+  /* The maps belong to the old space: recreate them for the new one now, so the first bake in it
+   * only fills pixels. A Never or hidden row gets no record at all; a correction's maps go to its
+   * owner row, never to the correction itself. */
+  paint_layers_bake_precreate_texture(ma, layer);
   BKE_paint_layers_tag_edited(ma);
   return true;
 }

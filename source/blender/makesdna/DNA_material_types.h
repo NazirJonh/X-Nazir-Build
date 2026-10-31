@@ -135,6 +135,21 @@ enum eMaterialPaintLayersFlag : short {
 };
 ENUM_OPERATORS(eMaterialPaintLayersFlag)
 
+/**
+ * #Material::paint_layers_gradient_bake: when an AUTO row's Gradient is baked. It answers only the
+ * automatic bake -- an Always or Never the user chose on the row itself outranks it.
+ */
+enum eMaterialPaintLayersGradientBake : int8_t {
+  /** The zero files saved before the setting carry: bake the Gradient as before. */
+  MA_PAINT_LAYERS_GRADIENT_BAKE_ALWAYS = 0,
+  /**
+   * Bake only from a stack the node-count rules already call heavy: a light graph stays live.
+   */
+  MA_PAINT_LAYERS_GRADIENT_BAKE_ONLY_COMPLEX = 1,
+  /** Never bake a Gradient automatically; the row stays live. */
+  MA_PAINT_LAYERS_GRADIENT_BAKE_NEVER = 2,
+};
+
 /** #Material::paint_layers_preview_flag */
 enum eMaterialPaintPreviewFlag : char {
   /** The preview renders after #Material::paint_layers_preview_delay, not right after an edit. */
@@ -1018,6 +1033,17 @@ struct MaterialPaintLayerMapping {
   char _pad[6] = {};
 };
 
+/** #MaterialPaintLayerBake::flag */
+enum eMaterialPaintLayerBakeFlag : int8_t {
+  /**
+   * The #size is the side the user set for the row (#BKE_paint_layers_bake_size_set), not the one a
+   * bake happened to land at or the canvas a Gradient follows: the row bakes at this side whatever
+   * the canvas does. Zero -- what files written before the field carry -- reads as not set, so the
+   * row follows the canvas or its content as before.
+   */
+  MA_PAINT_LAYER_BAKE_SIZE_EXPLICIT = 1 << 0,
+};
+
 /** #MaterialPaintLayerBake::mode */
 enum eMaterialPaintLayerBakeMode : int8_t {
   /** Bake only what is heavy and not being edited; everything else is evaluated live. */
@@ -1054,7 +1080,8 @@ struct MaterialPaintLayerBake {
   struct Image *coverage = nullptr;
   /** #eMaterialPaintLayerBakeMode. */
   int8_t mode = MA_PAINT_LAYER_BAKE_AUTO;
-  char _pad_a[1] = {};
+  /** #eMaterialPaintLayerBakeFlag. */
+  int8_t flag = 0;
   /**
    * Of a Material row: the side divided by 16 of the preview its maps were last rendered as while
    * the row was edited (scaled into the row's maps), or zero when they were rendered at the row's
@@ -1406,9 +1433,14 @@ struct Material {
    * the preview existed read as Combined instead of as the first channel.
    */
   int16_t paint_layers_view_pass = 0;
-  /* The four chars and the int16 above leave the pointer below off its 8-byte boundary; this is
-   * the single pad the pair needs. */
-  char _pad_paint_layers[4] = {};
+  /**
+   * #eMaterialPaintLayersGradientBake: when an AUTO row's Gradient is baked. Zero is Always, so a
+   * file saved before the setting keeps the behavior it was saved with and no versioning reads it.
+   */
+  int8_t paint_layers_gradient_bake = 0;
+  /* The four chars, the int16 and the answer above leave the pointer below off its 8-byte
+   * boundary; this is the single pad the trio needs. */
+  char _pad_paint_layers[3] = {};
   /**
    * Stand-in image for the Image Editor's composite when the stack holds no map at all: the
    * composite is found through an #Image, so a material made of Gradient/Fill/Material rows alone

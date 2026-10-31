@@ -481,7 +481,9 @@ TEST_F(PaintLayersBakeTest, a_never_gradient_row_stays_live)
   bool changed = false;
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
-  EXPECT_EQ(layer->bake, nullptr) << "NEVER is the user asking for the live row";
+  ASSERT_NE(layer->bake, nullptr) << "NEVER is the user asking for the live row";
+  EXPECT_EQ(BKE_paint_layers_bake_mode_get(*layer), MA_PAINT_LAYER_BAKE_NEVER);
+  EXPECT_EQ(layer->bake->coverage, nullptr) << "NEVER writes no cache";
   Vector<PaintMaterialCompositeImageLayer> layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
@@ -489,7 +491,140 @@ TEST_F(PaintLayersBakeTest, a_never_gradient_row_stays_live)
   EXPECT_TRUE(layers[0].gradient.enabled);
 }
 
-TEST_F(PaintLayersBakeTest, switching_a_uv_gradient_to_object_releases_its_bake)
+/**
+ * The material's Gradient answer gates the automatic bake of a Gradient row. Zero bits -- what a
+ * file saved before the setting carries -- reads as Always, so such a file bakes as it always did;
+ * Only Complex Graphs and Never keep the light row live and release a cache the earlier answer
+ * left, and a change of the answer sets the cache again. A mode the user chose on the row itself
+ * outranks the setting, as it always has.
+ */
+TEST_F(PaintLayersBakeTest, the_materials_gradient_answer_gates_a_gradient_row_bake)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  clear_active();
+  EXPECT_EQ(ma->paint_layers_gradient_bake, MA_PAINT_LAYERS_GRADIENT_BAKE_ALWAYS)
+      << "a file saved before the setting carries no answer, which reads as Always";
+
+  bool changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  ASSERT_NE(layer->bake, nullptr) << "Always, the zero an old file reads, bakes as before";
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+
+  /* Only Complex Graphs: the row's own subtree is light, so the cache is released and the row
+   * stays live. */
+  ma->paint_layers_gradient_bake = MA_PAINT_LAYERS_GRADIENT_BAKE_ONLY_COMPLEX;
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed))
+      << "releasing a cache the rules no longer want is a change";
+  EXPECT_TRUE(changed);
+  EXPECT_EQ(layer->bake, nullptr) << "a light graph stays live";
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  EXPECT_TRUE(layers[0].gradient.enabled) << "the Gradient is laid live again";
+
+  /* Never answers the same way; there is nothing left to release. */
+  ma->paint_layers_gradient_bake = MA_PAINT_LAYERS_GRADIENT_BAKE_NEVER;
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(layer->bake, nullptr);
+
+  /* A manual Always is the user's own and outranks the setting. */
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_ALWAYS));
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  ASSERT_NE(layer->bake, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+
+  /* Back to AUTO under the same Never: the cache the manual mode left is released. */
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_AUTO));
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_EQ(layer->bake, nullptr);
+
+  /* And the answer back to Always sets the cache again, with no manual step. */
+  ma->paint_layers_gradient_bake = MA_PAINT_LAYERS_GRADIENT_BAKE_ALWAYS;
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  ASSERT_NE(layer->bake, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+}
+
+/**
+ * "Only Complex Graphs" is the plain AUTO weight rule applied to a row a Gradient folds into: a
+ * light one stays live, a heavy one is cached the way any heavy AUTO row is, and Never releases
+ * the cache whatever the row weighs.
+ */
+TEST_F(PaintLayersBakeTest, the_materials_gradient_answer_weights_a_gradient_folding_row)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, row, "Grad", MA_PAINT_LAYER_SOURCE_GENERATOR);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  clear_active();
+  ma->paint_layers_gradient_bake = MA_PAINT_LAYERS_GRADIENT_BAKE_ONLY_COMPLEX;
+
+  /* One Gradient correction keeps the row light: it stays live. */
+  bool changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(row->bake, nullptr);
+
+  /* Four more push the row past the node count a plain AUTO row answers to: the row is the heavy
+   * thing the setting asks a cache for, and the worker is what bakes it. */
+  const char *names[4] = {"Grad 2", "Grad 3", "Grad 4", "Grad 5"};
+  for (const int i : IndexRange(4)) {
+    MaterialPaintLayer *more = BKE_paint_layers_correction_add(
+        *ma, row, names[i], MA_PAINT_LAYER_SOURCE_GENERATOR);
+    ASSERT_NE(more, nullptr);
+    ASSERT_TRUE(
+        BKE_paint_layers_gradient_set_space(*ma, *more, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  }
+  EXPECT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *row));
+  EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma));
+
+  /* The synchronous planner leaves a heavy row to the worker. */
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_EQ(row->bake, nullptr);
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job, {}, {});
+  EXPECT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *row));
+  EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
+
+  /* Never forbids the automatic bake whatever the row weighs: the cache is released, and nothing
+   * is queued again. */
+  ma->paint_layers_gradient_bake = MA_PAINT_LAYERS_GRADIENT_BAKE_NEVER;
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_EQ(row->bake, nullptr);
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *row));
+  EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
+}
+
+TEST_F(PaintLayersBakeTest, switching_a_uv_gradient_to_object_releases_its_maps_and_keeps_the_record)
 {
   ma->paint_layers_image_size = 8;
   MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
@@ -505,15 +640,20 @@ TEST_F(PaintLayersBakeTest, switching_a_uv_gradient_to_object_releases_its_bake)
   ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
       *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
   bool changed = false;
+  /* A shared bake no longer describes the 3D row: the planner releases its maps, but the record
+   * stays -- it keeps the mode the user chose. */
   EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_TRUE(changed);
-  EXPECT_EQ(layer->bake, nullptr) << "a shared UV bake cannot stand in for a 3D row";
+  ASSERT_NE(layer->bake, nullptr) << "the record keeps the mode the user chose";
+  EXPECT_EQ(layer->bake->coverage, nullptr) << "a stale shared bake is not kept";
+  EXPECT_EQ(BKE_paint_layers_bake_mode_get(*layer), MA_PAINT_LAYER_BAKE_ALWAYS);
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *layer))
+      << "a shared UV bake cannot stand in for a 3D row";
 
-  /* A later pass has nothing to create again. */
   changed = false;
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
-  EXPECT_EQ(layer->bake, nullptr);
+  EXPECT_EQ(layer->bake->coverage, nullptr);
 }
 
 TEST_F(PaintLayersBakeTest, an_object_or_generated_gradient_is_never_shared_baked)
@@ -540,7 +680,9 @@ TEST_F(PaintLayersBakeTest, an_object_or_generated_gradient_is_never_shared_bake
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   for (MaterialPaintLayer *layer : {object, generated}) {
-    EXPECT_EQ(layer->bake, nullptr) << "no shared maps are made for a 3D gradient";
+    ASSERT_NE(layer->bake, nullptr) << "the mode record stays without maps";
+    EXPECT_EQ(layer->bake->coverage, nullptr) << "no shared maps are made for a 3D gradient";
+    EXPECT_EQ(BKE_paint_layers_bake_mode_get(*layer), MA_PAINT_LAYER_BAKE_ALWAYS);
     Vector<float> color(8 * 8 * 4);
     Vector<float> coverage(8 * 8);
     EXPECT_FALSE(BKE_paint_layers_bake_render_node(*ma,
@@ -572,7 +714,9 @@ TEST_F(PaintLayersBakeTest, a_folder_with_a_3d_gradient_is_not_shared_baked)
   bool changed = false;
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
-  EXPECT_EQ(folder->bake, nullptr) << "an object-specific child keeps the whole folder live";
+  ASSERT_NE(folder->bake, nullptr) << "an object-specific child keeps the whole folder live";
+  EXPECT_EQ(folder->bake->coverage, nullptr);
+  EXPECT_EQ(BKE_paint_layers_bake_mode_get(*folder), MA_PAINT_LAYER_BAKE_ALWAYS);
   EXPECT_EQ(gradient->bake, nullptr);
 
   Vector<float> color(8 * 8 * 4);
@@ -925,6 +1069,9 @@ TEST_F(PaintLayersBakeTest, a_gradient_effect_invalidates_the_parent_bake_and_se
   MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
       *ma, row, "Grad", MA_PAINT_LAYER_SOURCE_GENERATOR);
   ASSERT_NE(effect, nullptr);
+  /* A new gradient opens in object space; this test is about the parent's pixels, so the
+   * correction starts UV and the row keeps baking. */
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
   EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row))
       << "a gradient effect is part of the parent's pixels";
 
@@ -973,6 +1120,9 @@ TEST_F(PaintLayersBakeTest, a_mask_gradient_item_invalidates_the_parent_bake_and
   MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
       *ma, row, MA_PAINT_LAYER_SOURCE_GENERATOR, "Mask Grad", 1.0f);
   ASSERT_NE(item, nullptr);
+  /* A new gradient opens in object space; this test is about the parent's pixels, so the item
+   * starts UV and the row keeps baking. */
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *item, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
   EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row))
       << "a gradient mask item is part of the parent's pixels";
 
@@ -984,16 +1134,383 @@ TEST_F(PaintLayersBakeTest, a_mask_gradient_item_invalidates_the_parent_bake_and
   EXPECT_FALSE(changed);
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
 
-  /* A 3D mask item has no shared pixels at all: the parent's bake is released, not re-made. */
+  /* A 3D mask item has no shared pixels: the parent stays live. The planner releases the maps the
+   * shared bake left, and the record keeps the ALWAYS mode and its size. */
   EXPECT_TRUE(BKE_paint_layers_gradient_set_space(
       *ma, *item, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
   changed = false;
   EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
-  EXPECT_EQ(row->bake, nullptr) << "a 3D gradient item keeps the parent live";
+  EXPECT_TRUE(changed);
+  ASSERT_NE(row->bake, nullptr) << "the record keeps the ALWAYS mode";
+  EXPECT_EQ(row->bake->coverage, nullptr) << "a stale shared bake is not kept";
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *row));
+  EXPECT_EQ(BKE_paint_layers_bake_mode_get(*row), MA_PAINT_LAYER_BAKE_ALWAYS);
   changed = false;
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
+}
+
+TEST_F(PaintLayersBakeTest, an_auto_row_under_a_gradient_correction_bakes_when_left)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, row, "Grad", MA_PAINT_LAYER_SOURCE_GENERATOR);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+
+  /* Working on the correction keeps its row live: the bake would fold the Gradient being edited. */
+  BKE_paint_layers_active_set(*ma, effect->marker);
+  EXPECT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
   EXPECT_EQ(row->bake, nullptr);
+
+  /* Leaving it is when the row's bake becomes due, AUTO or not: the Gradient folds into the row's
+   * cache and stops being evaluated per texel for everything laid over the stack. */
+  clear_active();
+  bool changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  ASSERT_NE(row->bake, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *row));
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  ASSERT_EQ(layers[0].content_corrections.size(), 0)
+      << "a substituted row lays no Gradient correction of its own";
+  EXPECT_NE(layers[0].color_image, nullptr);
+
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+}
+
+TEST_F(PaintLayersBakeTest, an_auto_row_with_a_gradient_mask_item_bakes_when_left)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, row, MA_PAINT_LAYER_SOURCE_GENERATOR, "Mask Grad", 1.0f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *item, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+
+  BKE_paint_layers_active_set(*ma, item->marker);
+  EXPECT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+
+  clear_active();
+  bool changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *row));
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+}
+
+TEST_F(PaintLayersBakeTest, a_row_under_a_gradient_correction_bakes_on_the_worker)
+{
+  ma->paint_layers_image_size = 2048;
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_heavy(*ma, *row))
+      << "a light painted row bakes inline, Gradient or not";
+
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, row, "Grad", MA_PAINT_LAYER_SOURCE_GENERATOR);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  EXPECT_TRUE(BKE_paint_layers_gradient_subtree_is_shared_bakeable(*row));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *row))
+      << "a bake that folds a Gradient in costs texels, not nodes";
+}
+
+/**
+ * A Gradient child row caches itself, so the folder around it is not a per-texel row: the child's
+ * cache already stands in for it in the folder's own bake.
+ */
+TEST_F(PaintLayersBakeTest, a_folder_around_a_gradient_row_is_not_made_heavy_by_it)
+{
+  ma->paint_layers_image_size = 2048;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  MaterialPaintLayer *members[] = {gradient};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 1));
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.9f));
+
+  EXPECT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *gradient))
+      << "the child's own bake pays for the canvas";
+  EXPECT_FALSE(BKE_paint_layers_bake_is_heavy(*ma, *folder))
+      << "the child caches itself: the folder's bake is not a texel one";
+}
+
+TEST_F(PaintLayersBakeTest, a_switched_off_gradient_correction_costs_the_row_nothing)
+{
+  ma->paint_layers_image_size = 2048;
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, row, "Grad", MA_PAINT_LAYER_SOURCE_GENERATOR);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *row));
+
+  /* A correction switched off lays no color: the row's bake does not fold its Gradient in. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, effect, false));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_heavy(*ma, *row))
+      << "a Gradient that is switched off costs no texels";
+
+  clear_active();
+  bool changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(row->bake, nullptr) << "a light AUTO row is evaluated live";
+}
+
+TEST_F(PaintLayersBakeTest, a_3d_gradient_correction_keeps_the_row_live_and_undoes_its_bake)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, row, "Grad", MA_PAINT_LAYER_SOURCE_GENERATOR);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+
+  clear_active();
+  bool changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(row->bake, nullptr);
+
+  /* Object space reads per-object geometry: the shared bake no longer describes the row. */
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *row))
+      << "a per-object row is rasterized on the main thread, so it always leaves it";
+  changed = false;
+  /* No view: the maps the shared bake left are released, and the record keeps the mode; the row
+   * stays live and unsubstituted. */
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  ASSERT_NE(row->bake, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *row));
+
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+}
+
+TEST_F(PaintLayersBakeTest, a_gradient_in_never_mode_is_left_live)
+{
+  ma->paint_layers_image_size = 2048;
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, row, "Grad", MA_PAINT_LAYER_SOURCE_GENERATOR);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, MA_PAINT_LAYER_BAKE_NEVER));
+
+  /* Never wins over the texel cost: the Gradient is laid live, whatever it would cost to bake. */
+  clear_active();
+  bool changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  ASSERT_EQ(BKE_paint_layers_bake_mode_get(*row), MA_PAINT_LAYER_BAKE_NEVER);
+  ASSERT_NE(row->bake, nullptr) << "the mode lives in the row's bake record";
+  EXPECT_EQ(row->bake->coverage, nullptr) << "Never writes no cache";
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *row));
+}
+
+/**
+ * Leaving a row is when its bake becomes due, and that is the only switch that has to reach the
+ * depsgraph: tagging every one of them would rebuild the material's shading for nothing.
+ */
+TEST_F(PaintLayersBakeTest, switching_rows_tags_the_material_only_when_a_bake_is_due)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  MaterialPaintLayer *other = add_paint_layer("Other", add_image("Other"));
+  BKE_paint_layers_active_set(*ma, other->marker);
+
+  ma->id.recalc = 0;
+  BKE_paint_layers_active_set(*ma, row->marker);
+  EXPECT_EQ(ma->id.recalc & ID_RECALC_SHADING, 0)
+      << "a light AUTO row left behind has no bake to start";
+
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, row, "Grad", MA_PAINT_LAYER_SOURCE_GENERATOR);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  BKE_paint_layers_active_set(*ma, effect->marker);
+
+  ma->id.recalc = 0;
+  BKE_paint_layers_active_set(*ma, other->marker);
+  EXPECT_NE(ma->id.recalc & ID_RECALC_SHADING, 0)
+      << "the row left behind is due a bake that folds its Gradient in";
+  EXPECT_NE(ma->id.recalc & ID_RECALC_SYNC_TO_EVAL, 0)
+      << "the tag is the pair the rest of the module uses";
+}
+
+TEST_F(PaintLayersBakeTest, a_shared_gradient_precreates_its_maps_and_never_drops_them)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  ASSERT_NE(row->bake, nullptr) << "a shared Gradient creates its canvas up front";
+  EXPECT_NE(row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  EXPECT_NE(row->bake->coverage, nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, MA_PAINT_LAYER_BAKE_NEVER));
+  EXPECT_EQ(BKE_paint_layers_bake_mode_get(*row), MA_PAINT_LAYER_BAKE_NEVER);
+  ASSERT_NE(row->bake, nullptr);
+  EXPECT_EQ(row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  EXPECT_EQ(row->bake->coverage, nullptr);
+}
+
+/**
+ * Precreate makes only the maps the row's first bake will fill: a channel the row lays nothing in
+ * gets no full-size blank map. A record added later brings its map on the next ask -- the
+ * idempotent branch of the space setter re-runs the precreate.
+ */
+TEST_F(PaintLayersBakeTest, a_shared_gradient_precreates_only_the_channels_it_lays)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  ASSERT_NE(layer->bake, nullptr);
+  EXPECT_NE(layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  EXPECT_EQ(layer->bake->images[PAINT_MATERIAL_CHANNEL_ROUGHNESS], nullptr)
+      << "a channel the row has no record for gets no map";
+  EXPECT_NE(layer->bake->coverage, nullptr);
+
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  EXPECT_NE(layer->bake->images[PAINT_MATERIAL_CHANNEL_ROUGHNESS], nullptr);
+}
+
+/**
+ * The side the user set with #BKE_paint_layers_bake_size_set lives in the row's bake structure
+ * (#MA_PAINT_LAYER_BAKE_SIZE_EXPLICIT), so it outranks the canvas a Gradient row would otherwise
+ * follow and survives the bakes and the edits between. It dies with the structure: a release of
+ * the cache takes it, and the row answers to the canvas again.
+ */
+TEST_F(PaintLayersBakeTest, an_explicit_bake_size_outranks_the_canvas_and_dies_with_the_record)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  ASSERT_TRUE(BKE_paint_layers_bake_size_set(*ma, *layer, 4));
+  ASSERT_NE(layer->bake, nullptr);
+  EXPECT_NE(layer->bake->flag & MA_PAINT_LAYER_BAKE_SIZE_EXPLICIT, 0);
+
+  clear_active();
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_EQ(layer->bake->size, 4) << "the explicit side outranks the canvas";
+  int width = 0;
+  int height = 0;
+  BKE_image_get_size(
+      layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr, &width, &height);
+  EXPECT_EQ(width, 4);
+  EXPECT_EQ(height, 4);
+
+  /* A resize of the canvas does not move the row's side: the re-bake lands at the choice again. */
+  ma->paint_layers_image_size = 16;
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *layer))
+      << "the canvas is what the hash vouches for";
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  EXPECT_EQ(layer->bake->size, 4);
+
+  /* Only Complex releases the light row's cache: the choice goes with the structure it lives in. */
+  ma->paint_layers_gradient_bake = MA_PAINT_LAYERS_GRADIENT_BAKE_ONLY_COMPLEX;
+  changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_EQ(layer->bake, nullptr);
+  ma->paint_layers_gradient_bake = MA_PAINT_LAYERS_GRADIENT_BAKE_ALWAYS;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_NE(layer->bake, nullptr);
+  EXPECT_EQ(layer->bake->size, 16) << "without the record the row follows the canvas again";
+  EXPECT_EQ(layer->bake->flag & MA_PAINT_LAYER_BAKE_SIZE_EXPLICIT, 0);
+}
+
+/**
+ * The switch reads only the old marker's ancestor path; its answer stays the one a walk over every
+ * row of the material gives. The pairs run over a deep tree, folders included, and over the marker
+ * of a correction, whose owner row is the one the path ends at.
+ */
+TEST_F(PaintLayersBakeTest, the_switch_pending_answer_matches_a_walk_over_every_row)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *a = add_baked_row("A");
+  MaterialPaintLayer *b = add_baked_row("B");
+  MaterialPaintLayer *inner_members[] = {a, b};
+  MaterialPaintLayer *inner = BKE_paint_layers_group(
+      *ma, Span<MaterialPaintLayer *>(inner_members, 2));
+  ASSERT_NE(inner, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, inner, 0.9f));
+  MaterialPaintLayer *c = add_baked_row("C");
+  MaterialPaintLayer *outer_members[] = {inner, c};
+  MaterialPaintLayer *outer = BKE_paint_layers_group(
+      *ma, Span<MaterialPaintLayer *>(outer_members, 2));
+  ASSERT_NE(outer, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, outer, 0.9f));
+  MaterialPaintLayer *d = add_baked_row("D");
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, d, "Grad", MA_PAINT_LAYER_SOURCE_GENERATOR);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+
+  /* The bakes settle with nothing active, so the switches answer about real caches. */
+  clear_active();
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+
+  const Vector<bUUID> markers = {a->marker,
+                                 b->marker,
+                                 c->marker,
+                                 d->marker,
+                                 inner->marker,
+                                 outer->marker,
+                                 effect->marker};
+  for (const bUUID &old_marker : markers) {
+    for (const bUUID &new_marker : markers) {
+      if (BLI_uuid_equal(old_marker, new_marker)) {
+        continue;
+      }
+      /* The function reads after the marker moved, so the walk sees the same active row. */
+      BKE_paint_layers_active_set(*ma, new_marker);
+      bool expected = false;
+      BKE_paint_layers_foreach(
+          *ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer *) -> bool {
+            if (!BKE_paint_layers_subtree_contains(layer, old_marker) ||
+                BKE_paint_layers_subtree_contains(layer, new_marker))
+            {
+              return true;
+            }
+            BakeRowRelease release = BakeRowRelease::Keep;
+            expected = bake_row_is_due(*ma, layer, release);
+            return !expected;
+          });
+      EXPECT_EQ(paint_layers_bake_pending_after_switch(*ma, old_marker, new_marker), expected);
+    }
+  }
 }
 
 }  // namespace blender::bke::tests

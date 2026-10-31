@@ -30,6 +30,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BKE_global.hh"
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
@@ -240,6 +241,10 @@ bool BKE_paint_layers_bake_mode_set(Material &ma, MaterialPaintLayer &layer, con
   {
     return false;
   }
+  if (mode == MA_PAINT_LAYER_BAKE_NEVER && layer.bake != nullptr) {
+    /* Never reads no cache: drop the maps a precreated or earlier bake left, then keep the mode. */
+    BKE_paint_layers_bake_clear(ma, layer);
+  }
   BKE_paint_layers_bake_struct_ensure(layer)->mode = int8_t(mode);
   BKE_paint_layers_tag_edited(ma);
   return true;
@@ -257,6 +262,10 @@ bool BKE_paint_layers_bake_size_set(Material &ma, MaterialPaintLayer &layer, con
   }
   MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
   bake->size = size;
+  /* The side is the user's choice, not the size a bake happened to land at: the bit keeps it apart
+   * from the canvas a Gradient row would otherwise follow, and dies with the bake structure -- a
+   * cleared or Never row follows the canvas and content again. */
+  bake->flag |= MA_PAINT_LAYER_BAKE_SIZE_EXPLICIT;
   /* A different resolution invalidates whatever was baked before it. */
   bake->hash[0] = 0;
   bake->hash[1] = 0;
@@ -1020,6 +1029,11 @@ bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer
   {
     return false;
   }
+  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
+    /* An Object or Generated Gradient reads per-object geometry: no shared map stands in for the
+     * row, whatever the hash says. */
+    return false;
+  }
   /* The structural hash cannot see pixel edits; the runtime subscription, drained by
    * #BKE_paint_layers_bake_notice_changes, reports those. A layer with no subscription is trusted
    * on its hash alone. */
@@ -1466,15 +1480,60 @@ bool BKE_paint_layers_folder_auto_bake_allowed(const Material &ma, const Materia
   return BKE_paint_layers_folder_level(ma, layer) >= 2;
 }
 
+/**
+ * Whether \a layer's bake pays per texel rather than per node: a Gradient row itself, or a row a
+ * live Gradient is laid over (see #BKE_paint_layers_gradient_subtree_holds_laid_gradient), whose
+ * bake folds that Gradient in.
+ */
+static bool bake_cost_is_texels(const MaterialPaintLayer &layer)
+{
+  return paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES) ||
+         BKE_paint_layers_gradient_subtree_holds_laid_gradient(layer);
+}
+
+/**
+ * Whether the material lets an automatic bake of \a layer's Gradient stand: the Gradient answer of
+ * #Material::paint_layers_gradient_bake speaks only for a row in AUTO -- an Always or Never the
+ * user chose on the row itself outranks it -- and "Only Complex Graphs" hands the question to the
+ * node-count rules a plain AUTO row answers (#bake_subtree_weight against
+ * #PAINT_LAYERS_AUTO_BAKE_NODES), so a light graph stays live and only a heavy one is cached.
+ */
+static bool bake_gradient_auto_allowed(const Material &ma, const MaterialPaintLayer &layer)
+{
+  /* The setting answers only the automatic bake. */
+  if (BKE_paint_layers_bake_mode_get(layer) != MA_PAINT_LAYER_BAKE_AUTO) {
+    return true;
+  }
+  switch (eMaterialPaintLayersGradientBake(ma.paint_layers_gradient_bake)) {
+    case MA_PAINT_LAYERS_GRADIENT_BAKE_NEVER:
+      return false;
+    case MA_PAINT_LAYERS_GRADIENT_BAKE_ONLY_COMPLEX:
+      return bake_subtree_weight(ma, layer) > PAINT_LAYERS_AUTO_BAKE_NODES;
+    case MA_PAINT_LAYERS_GRADIENT_BAKE_ALWAYS:
+      return true;
+  }
+  /* An answer from a later version reads as the zero it was saved without: Always. */
+  return true;
+}
+
 bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer &layer)
 {
+  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
+    /* An Object or Generated Gradient reads the geometry of the object it is shaded on: a bake of
+     * such a row is rasterized from that geometry before a single texel is composited, so it
+     * always leaves the main thread. The row itself is never a shared candidate; a row it is laid
+     * over pays the same surface cost, since its bake folds the Gradient in. */
+    return true;
+  }
   if (bake_subtree_weight(ma, layer) > PAINT_LAYERS_AUTO_BAKE_NODES) {
     return true;
   }
-  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES)) {
+  if (bake_cost_is_texels(layer) && bake_gradient_auto_allowed(ma, layer)) {
     /* A Gradient row is cheap by node count and expensive by texels: its cost is the canvas it is
      * laid on, and the first bake has no stored size to weigh yet. Left on the main thread it would
-     * hitch the moment the user leaves the row. */
+     * hitch the moment the user leaves the row. A row a Gradient is laid over pays the same cost,
+     * since its bake folds the Gradient in. The material's Gradient answer takes part in the
+     * question: a row whose Gradient the answer keeps live is not heavy for the Gradient's sake. */
     const int canvas = int(ma.paint_layers_image_size);
     return canvas <= 0 || canvas >= PAINT_LAYERS_HEAVY_BAKE_SIZE;
   }
@@ -1532,14 +1591,12 @@ static bool bake_row_is_hidden(const Material &ma, const MaterialPaintLayer &lay
 }
 
 /**
- * Free \a layer's bake structure and the service maps only it owns.
- *
- * A map whose last user was the bake is deleted; one still named by the generated tree keeps that
- * other user and is simply detached, because freeing it there would leave the tree's node with a
- * dangling pointer. The caller tags #MA_PAINT_LAYERS_REGEN, so the rebuild that follows drops the
- * node before anything is evaluated.
+ * Release the maps \a layer's bake holds. A map whose last user was the bake is deleted; one still
+ * named by the generated tree keeps that other user and is simply detached, because freeing it
+ * there would leave the tree's node with a dangling pointer. The caller tags
+ * #MA_PAINT_LAYERS_REGEN, so the rebuild that follows drops the node before anything is evaluated.
  */
-static void bake_structure_free(Main &bmain, Material &ma, MaterialPaintLayer &layer)
+static void bake_maps_release(Main &bmain, Material &ma, MaterialPaintLayer &layer)
 {
   if (layer.bake == nullptr) {
     return;
@@ -1566,6 +1623,17 @@ static void bake_structure_free(Main &bmain, Material &ma, MaterialPaintLayer &l
   if (ma.paint_layers_tree != nullptr) {
     DEG_id_tag_update(&ma.paint_layers_tree->id, ID_RECALC_SYNC_TO_EVAL);
   }
+}
+
+/**
+ * Free \a layer's bake structure and the service maps only it owns.
+ */
+static void bake_structure_free(Main &bmain, Material &ma, MaterialPaintLayer &layer)
+{
+  if (layer.bake == nullptr) {
+    return;
+  }
+  bake_maps_release(bmain, ma, layer);
   MEM_SAFE_DELETE(layer.bake);
 }
 
@@ -1608,19 +1676,27 @@ static int bake_size_from_content(const Material &ma, const MaterialPaintLayer &
   return 0;
 }
 
-/** The side \a row is baked at: its stored size, the one an AUTO release kept, then its content's. */
+/**
+ * The side \a row is baked at: the side the user set (the explicit bit of the bake structure, so it
+ * survives a save, a load and an undo), the size it was baked at (or an AUTO release kept), then
+ * its content's. A Gradient row has no map of its own, so unless the user chose a side its cache
+ * follows the material canvas.
+ */
 static int bake_size_for(const Material &ma, const MaterialPaintLayer &row)
 {
-  if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_GENERATES)) {
-    /* A Gradient has no map of its own to keep a size for: its pixels are laid on the material's
-     * canvas, so the cache follows that canvas rather than the size it happened to be baked at
-     * first. */
-    if (ma.paint_layers_image_size > 0) {
-      return int(ma.paint_layers_image_size);
-    }
-    return bake_size_from_content(ma, row);
+  if (row.bake != nullptr && (row.bake->flag & MA_PAINT_LAYER_BAKE_SIZE_EXPLICIT) != 0 &&
+      row.bake->size > 0)
+  {
+    return row.bake->size;
   }
-  int size = (row.bake != nullptr) ? row.bake->size : 0;
+  int size = 0;
+  if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_GENERATES)) {
+    /* A Gradient lays its pixels on the material canvas unless the user chose a side. */
+    size = int(ma.paint_layers_image_size);
+  }
+  else if (row.bake != nullptr) {
+    size = row.bake->size;
+  }
   if (size <= 0) {
     size = bake_dropped_size(ma, row);
   }
@@ -1628,6 +1704,73 @@ static int bake_size_for(const Material &ma, const MaterialPaintLayer &row)
     size = bake_size_from_content(ma, row);
   }
   return size;
+}
+
+void paint_layers_bake_precreate_texture(Material &ma, MaterialPaintLayer &edited)
+{
+  /* Creating Image IDs inside an edit path is why this is guarded: only an original of the local
+   * Main reaches here, the same restriction the planner's own map creation works under, and the
+   * maps are referenced by the row's DNA bake structure, so the undo step of the edit that asked
+   * for them keeps them. */
+  if (G_MAIN == nullptr || !BKE_id_is_in_global_main(&ma.id)) {
+    return;
+  }
+  /* A correction or a mask item has no cache of its own: its Gradient is folded into the bake of
+   * the row it lies over, so that row is the one that gets the maps. */
+  MaterialPaintLayer *row = &edited;
+  if (BKE_paint_layers_owner_list(ma, edited) == nullptr) {
+    row = BKE_paint_layers_correction_owner(ma, edited);
+    if (row == nullptr) {
+      row = BKE_paint_layers_mask_item_owner(ma, edited);
+    }
+    if (row == nullptr) {
+      return;
+    }
+  }
+  MaterialPaintLayer &layer = *row;
+  if (BKE_paint_layers_bake_mode_get(layer) == MA_PAINT_LAYER_BAKE_NEVER ||
+      bake_row_is_hidden(ma, layer))
+  {
+    /* A Never or hidden row never reads a cache; a record for it would be dead weight. */
+    return;
+  }
+  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
+    /* An Object or Generated Gradient reads per-object geometry: its shared maps would be wrong,
+     * so none are precreated and the row stays live. */
+    return;
+  }
+  if (!bake_gradient_auto_allowed(ma, layer)) {
+    /* The material keeps this Gradient live: the planner would release maps created now. */
+    return;
+  }
+  const int size = bake_size_for(ma, layer);
+  if (size <= 0) {
+    return;
+  }
+  BKE_paint_layers_bake_struct_ensure(layer)->size = size;
+  /* Only the channels the row takes part in get a map: the planner writes a map per channel its
+   * render covers, and a precreated one outside that set would sit full-size and blank. The
+   * participation test is the one the generator and the CPU composite share, so it cannot drift
+   * from what the render lays; where it under-asks (a folder whose children carry the channels) a
+   * map skipped here is created by the first bake as usual. */
+  bool any_channel = false;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!paint_layer_row_participates(ma, layer, int(info.channel))) {
+      continue;
+    }
+    bake_service_image(*G_MAIN,
+                       layer,
+                       int(info.channel),
+                       size,
+                       info.is_color,
+                       bake_channel_needs_float(layer, info));
+    any_channel = true;
+  }
+  /* The coverage map travels with the channel maps: the planner writes it once a channel
+   * rendered. */
+  if (any_channel) {
+    bake_service_image(*G_MAIN, layer, -1, size, false, false);
+  }
 }
 
 /**
@@ -1657,29 +1800,52 @@ static bool bake_row_is_candidate(const Material &ma, const MaterialPaintLayer &
   return !BKE_paint_layers_bake_blocked(ma, layer);
 }
 
+/** Whether \a layer's bake holds any map: only then is there something for a release to drop. */
+static bool bake_maps_present(const MaterialPaintLayer &layer)
+{
+  if (layer.bake == nullptr) {
+    return false;
+  }
+  if (layer.bake->coverage != nullptr) {
+    return true;
+  }
+  for (const Image *image : layer.bake->images) {
+    if (image != nullptr) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Whether \a layer is a row the planner has to bake now: a candidate, not switched off or hidden,
  * not the row being edited, with no valid bake, and -- for AUTO -- heavy enough and, for a folder,
  * nested deep enough to be worth a cache.
  *
- * \param r_release: set when the row carries a bake that the AUTO rules no longer want, which the
- * caller frees.
+ * \param r_release: set when the row carries a bake the AUTO rules no longer want, which the
+ * caller frees (#BakeRowRelease).
  */
-static bool bake_row_is_due(const Material &ma, const MaterialPaintLayer &layer, bool &r_release)
+bool bake_row_is_due(const Material &ma,
+                     const MaterialPaintLayer &layer,
+                     BakeRowRelease &r_release)
 {
-  r_release = false;
+  r_release = BakeRowRelease::Keep;
   if (paint_layer_kind_reads_anchor_point(layer)) {
     /* A reader owns a cache only while its effective mode reads one. Switching it back to Live
      * (Never, or Auto after the slice became light again) releases the maps it no longer reads. */
     if (!paint_layer_anchor_point_reader_baked(ma, layer)) {
-      r_release = layer.bake != nullptr;
+      r_release = layer.bake != nullptr ? BakeRowRelease::FreeStructure : BakeRowRelease::Keep;
       return false;
     }
   }
-  /* A shared bake that no longer describes the row -- the usual case being a switch from UV to
-   * Object/Generated -- has to be dropped, not kept as an approximate stand-in. */
   if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
-    r_release = layer.bake != nullptr;
+    /* An Object or Generated Gradient reads the geometry of the object it is shaded on: the row
+     * stays live, and a shared bake it still carries no longer describes it. The maps are
+     * released -- they would otherwise sit full-size until the row or its bake is deleted -- while
+     * the record stays: it keeps the mode the user chose and the size to bake at if the row
+     * becomes shared again. Once the maps are gone the record is let alone, so the plan has
+     * nothing to report for it again. */
+    r_release = bake_maps_present(layer) ? BakeRowRelease::ReleaseMaps : BakeRowRelease::Keep;
     return false;
   }
   if (!bake_row_is_candidate(ma, layer)) {
@@ -1687,24 +1853,38 @@ static bool bake_row_is_due(const Material &ma, const MaterialPaintLayer &layer,
   }
   const bool folder = BKE_paint_layers_is_folder(layer);
   const int mode = BKE_paint_layers_bake_mode_get(layer);
-  /* A Gradient row is cached for the same reason a reader is: it has no map of its own, so its
-   * cache does not double anything, and it is laid per texel -- the cost a cache exists to avoid.
-   * The AUTO exemptions below name it beside the reader for that reason. */
-  const bool cheap_live = paint_layer_kind_reads_anchor_point(layer) ||
-                          paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES);
   if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
     return false;
   }
   if (folder && BKE_paint_layers_folder_is_pass_through(layer)) {
     return false;
   }
+  /* A Gradient row is cached for the same reason a reader is: it has no map of its own, so its
+   * cache does not double anything, and it is laid per texel -- the cost a cache exists to avoid.
+   * The AUTO exemptions below name it beside the reader for that reason. A row a Gradient is laid
+   * over is cached the same way: the bake folds the Gradient in, so the stack stops evaluating it
+   * per texel the moment the active marker leaves the row. Only the AUTO rules read this, so a
+   * switch that already said no never pays for the walk over the row's subtree. */
+  const bool gradient_texels = bake_cost_is_texels(layer);
+  if (mode == MA_PAINT_LAYER_BAKE_AUTO && gradient_texels &&
+      !bake_gradient_auto_allowed(ma, layer))
+  {
+    /* The material's Gradient answer refuses the automatic bake: the row stays live, and a cache
+     * the earlier answer left is released with its size remembered. */
+    r_release = (layer.bake != nullptr) ? BakeRowRelease::FreeStructure : BakeRowRelease::Keep;
+    return false;
+  }
+  const bool cheap_live = mode == MA_PAINT_LAYER_BAKE_AUTO &&
+                          (paint_layer_kind_reads_anchor_point(layer) || gradient_texels);
   if (!folder && mode == MA_PAINT_LAYER_BAKE_AUTO && !cheap_live)
   {
     /* AUTO caches subgraphs: a folder is the heavy thing, a single row is already one map per
      * channel and a cache of it would only double its memory. Always is the way to ask for a row
      * to be baked; a cache carried from an earlier Always keeps standing in while it is valid and
      * is released once it is not. */
-    r_release = layer.bake != nullptr && !BKE_paint_layers_bake_is_valid(ma, layer);
+    r_release = (layer.bake != nullptr && !BKE_paint_layers_bake_is_valid(ma, layer)) ?
+                    BakeRowRelease::FreeStructure :
+                    BakeRowRelease::Keep;
     return false;
   }
   if (folder && mode == MA_PAINT_LAYER_BAKE_AUTO &&
@@ -1712,7 +1892,7 @@ static bool bake_row_is_due(const Material &ma, const MaterialPaintLayer &layer,
   {
     /* A folder in the stack root stays live for responsiveness; a bake it carried from before the
      * rule is released. A manual ALWAYS is the user's and is left alone. */
-    r_release = layer.bake != nullptr;
+    r_release = (layer.bake != nullptr) ? BakeRowRelease::FreeStructure : BakeRowRelease::Keep;
     return false;
   }
   if (layer.bake != nullptr && BKE_paint_layers_bake_is_valid(ma, layer)) {
@@ -1728,10 +1908,76 @@ static bool bake_row_is_due(const Material &ma, const MaterialPaintLayer &layer,
      * reader is exempt: its bake is the slice cache the depth rules asked for, not a cache of a
      * subtree, so a light row deep in a chain still gets one. Neither has a map the live path could
      * read instead, which is the whole reason the exemption is safe. */
-    r_release = layer.bake != nullptr;
+    r_release = (layer.bake != nullptr) ? BakeRowRelease::FreeStructure : BakeRowRelease::Keep;
     return false;
   }
   return true;
+}
+
+/**
+ * The stack rows from the root down to the row \a marker names -- the row itself, or the row whose
+ * corrections or mask items hold it -- outermost first; false when nothing of \a ma carries it.
+ * The only walk a switch needs: a row whose subtree holds the marker being left is on this path.
+ */
+static bool bake_path_to_marker(const PaintLayerList &list,
+                                const bUUID &marker,
+                                Vector<const MaterialPaintLayer *> &r_path)
+{
+  for (const MaterialPaintLayer &layer : list) {
+    r_path.append(&layer);
+    if (BLI_uuid_equal(layer.marker, marker)) {
+      return true;
+    }
+    for (const MaterialPaintLayer &effect : layer.effects) {
+      if (BLI_uuid_equal(effect.marker, marker)) {
+        return true;
+      }
+    }
+    for (const MaterialPaintLayer &item : layer.mask_stack) {
+      if (BLI_uuid_equal(item.marker, marker)) {
+        return true;
+      }
+    }
+    if (BKE_paint_layers_is_folder(layer) && bake_path_to_marker(layer.children, marker, r_path)) {
+      return true;
+    }
+    r_path.remove_last();
+  }
+  return false;
+}
+
+/**
+ * Whether moving the active marker from \a old_marker to \a new_marker leaves a bake due: the rows
+ * a switch stops deferring (see #BKE_paint_layers_bake_row_is_deferred) are the ones whose cache
+ * may have to catch up now. Read after the marker moved, so the answer is what the next plan would
+ * find; a row either marker keeps deferred owes nothing to the switch.
+ *
+ * Only a row on the old marker's ancestor path can turn due -- every other row's subtree holds
+ * neither marker -- so the walk follows that path instead of the whole material. Going upward from
+ * the row left behind, the first ancestor that still holds the new marker ends the question: every
+ * one above it holds the new marker too, and is as deferred as it was.
+ */
+bool paint_layers_bake_pending_after_switch(const Material &ma,
+                                            const bUUID &old_marker,
+                                            const bUUID &new_marker)
+{
+  if (!BKE_paint_layers_is_layered(ma) || BLI_uuid_equal(old_marker, new_marker)) {
+    return false;
+  }
+  Vector<const MaterialPaintLayer *> path;
+  if (!bake_path_to_marker(ma.paint_layers, old_marker, path)) {
+    return false;
+  }
+  for (int index = int(path.size()) - 1; index >= 0; index--) {
+    if (BKE_paint_layers_subtree_contains(*path[index], new_marker)) {
+      break;
+    }
+    BakeRowRelease release = BakeRowRelease::Keep;
+    if (bake_row_is_due(ma, *path[index], release)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1797,12 +2043,24 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
      * least work. */
     for (int index = int(rows.size()) - 1; index >= 0; index--) {
       MaterialPaintLayer &layer = *rows[index];
-      bool release = false;
+      BakeRowRelease release = BakeRowRelease::Keep;
       if (!bake_row_is_due(ma, layer, release)) {
-        if (release) {
-          bake_dropped_size_keep(ma, layer);
-          bake_structure_free(bmain, ma, layer);
-          changed = true;
+        switch (release) {
+          case BakeRowRelease::FreeStructure:
+            bake_dropped_size_keep(ma, layer);
+            bake_structure_free(bmain, ma, layer);
+            changed = true;
+            break;
+          case BakeRowRelease::ReleaseMaps:
+            bake_maps_release(bmain, ma, layer);
+            /* The maps a shared bake left are gone; the record keeping the mode is not. A hash for
+             * maps that no longer exist would vouch for them, so it is dropped too. */
+            layer.bake->hash[0] = 0;
+            layer.bake->hash[1] = 0;
+            changed = true;
+            break;
+          case BakeRowRelease::Keep:
+            break;
         }
         continue;
       }
@@ -1971,7 +2229,7 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
   bool pending = false;
   BKE_paint_layers_foreach(
       ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
-        bool release = false;
+        BakeRowRelease release = BakeRowRelease::Keep;
         pending = bake_row_is_due(ma, layer, release) && BKE_paint_layers_bake_is_heavy(ma, layer);
         return !pending;
       });
@@ -2726,7 +2984,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
    * parent's render composites its children. */
   for (int index = int(rows.size()) - 1; index >= 0; index--) {
     MaterialPaintLayer &layer = *rows[index];
-    bool release = false;
+    BakeRowRelease release = BakeRowRelease::Keep;
     if (!bake_row_is_due(ma, layer, release) || !BKE_paint_layers_bake_is_heavy(ma, layer)) {
       continue;
     }

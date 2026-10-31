@@ -262,6 +262,30 @@ static const EnumPropertyItem rna_enum_material_paint_layers_composite_device_it
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* When an AUTO row's Gradient is baked. The values are #eMaterialPaintLayersGradientBake, stored
+ * in #Material::paint_layers_gradient_bake; zero is Always, which files saved before the setting
+ * carry. */
+static const EnumPropertyItem rna_enum_material_paint_layers_gradient_bake_items[] = {
+    {MA_PAINT_LAYERS_GRADIENT_BAKE_ALWAYS,
+     "ALWAYS",
+     0,
+     "Always",
+     "Bake the Gradient as before: a Gradient row and a row a Gradient is laid over are cached "
+     "once they are not being edited"},
+    {MA_PAINT_LAYERS_GRADIENT_BAKE_ONLY_COMPLEX,
+     "ONLY_COMPLEX",
+     0,
+     "Only Complex Graphs",
+     "Bake the Gradient only from a stack the node-count rules already call heavy; a light graph "
+     "stays live"},
+    {MA_PAINT_LAYERS_GRADIENT_BAKE_NEVER,
+     "NEVER",
+     0,
+     "Never",
+     "Never bake a Gradient automatically; the row stays live"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /* The display tags of a layer group. Outside the #RNA_RUNTIME split, unlike the property definition
  * that uses it: the `#else` branch below is compiled only into the makesrna generator, so a
  * definition placed there never reaches bf_rna -- and #OUTLINER_OT_stack_layer_color_tag_set links
@@ -1321,6 +1345,19 @@ static bool rna_Material_paint_layers_is_stale_get(PointerRNA *ptr)
   /* BKE-only signal: it cannot see a render the editor has started but not yet marked, which an
    * RNA getter could only learn from a window manager it may not reach. */
   return BKE_paint_layers_is_stale(*id_cast<Material *>(ptr->owner_id));
+}
+
+static void rna_Material_paint_layers_gradient_bake_update(Main *bmain,
+                                                           Scene *scene,
+                                                           PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  /* The answer the planner reads changed: a cache it set or released for the earlier answer no
+   * longer stands for what the rules want. The mark asks the next plan run for exactly that, and
+   * the tagged update hands the material to the editor's scheduler, which starts the plan once the
+   * edits stop -- the caches are set or released with no manual step. */
+  ma->paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
+  rna_Material_update(bmain, scene, ptr);
 }
 
 static bool rna_Material_smart_asset_instance_get(PointerRNA *ptr)
@@ -5098,7 +5135,8 @@ static const EnumPropertyItem rna_enum_material_paint_layer_bake_mode_items[] = 
      "AUTO",
      0,
      "Auto",
-     "Bake the heavy inactive folders; the row being edited is evaluated live"},
+     "Bake the heavy inactive folders and the rows a Gradient takes part in, as the material's "
+     "Bake Gradient setting answers; the row being edited is evaluated live"},
     {MA_PAINT_LAYER_BAKE_ALWAYS,
      "ALWAYS",
      0,
@@ -7632,6 +7670,20 @@ void RNA_def_material(BlenderRNA *brna)
                            "Image Editor Composite",
                            "What shades the Combined and channel previews in the Image Editor");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "paint_layers_gradient_bake", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "paint_layers_gradient_bake");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layers_gradient_bake_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Bake Gradient",
+      "When the automatic bake caches a Gradient: a Gradient row and a row a Gradient is laid over "
+      "are the texel cost the bake exists to avoid, so this answers whether that cost is paid ahead "
+      "of time. Only the automatic bake is answered; a bake mode set on the row itself (Always, "
+      "Never) outranks it");
+  RNA_def_property_update(prop,
+                          NC_MATERIAL | ND_SHADING,
+                          "rna_Material_paint_layers_gradient_bake_update");
 
   prop = RNA_def_property(srna, "paint_layers_preview_sync", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_negative_sdna(

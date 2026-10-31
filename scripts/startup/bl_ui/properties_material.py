@@ -1230,8 +1230,10 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
 
     A baked row is a cache of the live row, not a replacement for it: it is read only while it
     matches the row's description, and the first edit to the row or to a map it reads brings the
-    live row back until the cache is rendered again. Auto bakes the heavy folders that are nested in
-    another folder and are not being edited; Always bakes any row once it is not being edited.
+    live row back until the cache is rendered again. Auto bakes the heavy folders nested in another
+    folder that are not being edited, plus any row a Gradient takes part in once it is left -- when
+    exactly that happens the material's Bake Gradient setting answers; Always bakes any row once it
+    is not being edited.
     """
 
     bl_idname = "LAYER_MATERIAL_PT_bake"
@@ -1575,6 +1577,7 @@ class LAYER_MATERIAL_PT_advanced(LayerMaterialButtonsPanel, Panel):
         layout = self.layout
         layout.use_property_split = True
         layout.prop(owner, "paint_layers_composite_device")
+        layout.prop(owner, "paint_layers_gradient_bake")
 
 
 class LAYER_MATERIAL_PT_active_channel(LayerMaterialButtonsPanel, Panel):

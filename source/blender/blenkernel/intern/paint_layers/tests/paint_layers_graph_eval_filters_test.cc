@@ -189,6 +189,106 @@ TEST_F(PaintLayersBrightnessContrastTest, a_parameter_is_clamped_to_its_range)
       paint_layer_kind_param_get(*bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_CONTRAST), -1.0f);
 }
 
+class PaintLayersColorRampTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_color_ramp(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_COLOR_RAMP);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+
+  /** A red-to-blue band, so a grey input comes out coloured and a wrong index is obvious. */
+  static void set_red_to_blue(MaterialPaintLayer &filter)
+  {
+    MaterialPaintLayerRamp *ramp = BKE_paint_layers_ramp_ensure(filter);
+    ASSERT_NE(ramp, nullptr);
+    ColorBand &band = ramp->band;
+    band.tot = 2;
+    band.ipotype = COLBAND_INTERP_LINEAR;
+    band.data[0] = {};
+    band.data[0].pos = 0.0f;
+    band.data[0].r = 1.0f;
+    band.data[0].a = 1.0f;
+    band.data[1] = {};
+    band.data[1].pos = 1.0f;
+    band.data[1].b = 1.0f;
+    band.data[1].a = 1.0f;
+  }
+};
+
+TEST_F(PaintLayersColorRampTest, colour_ramp_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *ramp = add_color_ramp(*row, 0.8f);
+  set_red_to_blue(*ramp);
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersColorRampTest, affect_alpha_multiplies_the_strength_by_the_stop_alpha)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *ramp = add_color_ramp(*row, 0.8f);
+  set_red_to_blue(*ramp);
+  expect_graph_matches_cpu(kColor);
+  const RGBA ignored = cpu_pixel(kColor);
+
+  /* Stops of different alpha, so the found colour's alpha is neither 0 nor 1. */
+  ramp->ramp->band.data[0].a = 0.2f;
+  ramp->ramp->band.data[1].a = 0.9f;
+  expect_graph_matches_cpu(kColor);
+  const RGBA unused_alpha = cpu_pixel(kColor);
+  EXPECT_FLOAT_EQ(unused_alpha.r, ignored.r);
+  EXPECT_FLOAT_EQ(unused_alpha.g, ignored.g);
+  EXPECT_FLOAT_EQ(unused_alpha.b, ignored.b);
+
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*ramp, PAINT_LAYER_COLOR_RAMP_AFFECT_ALPHA, 1));
+  expect_graph_matches_cpu(kColor);
+  const RGBA used_alpha = cpu_pixel(kColor);
+  EXPECT_GT(std::abs(used_alpha.r - ignored.r) + std::abs(used_alpha.b - ignored.b), 1e-3f);
+
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*ramp, PAINT_LAYER_COLOR_RAMP_AFFECT_ALPHA, 0));
+  expect_graph_matches_cpu(kColor);
+  const RGBA back = cpu_pixel(kColor);
+  EXPECT_FLOAT_EQ(back.r, ignored.r);
+  EXPECT_FLOAT_EQ(back.b, ignored.b);
+}
+
+TEST_F(PaintLayersColorRampTest, affect_alpha_adjustment_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Adjustment;
+  params.filter = MA_PAINT_LAYER_FILTER_COLOR_RAMP;
+  MaterialPaintLayer *adjustment = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(adjustment, nullptr);
+  set_red_to_blue(*adjustment);
+  adjustment->ramp->band.data[0].a = 0.2f;
+  adjustment->ramp->band.data[1].a = 0.9f;
+  ASSERT_TRUE(
+      paint_layer_kind_param_int_set(*adjustment, PAINT_LAYER_COLOR_RAMP_AFFECT_ALPHA, 1));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersColorRampTest, editing_the_band_or_a_stop_tags_the_material)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_color_ramp(*row);
+  MaterialPaintLayerRamp *ramp = BKE_paint_layers_ramp_ensure(*filter);
+  ASSERT_NE(ramp, nullptr);
+
+  EXPECT_TRUE(BKE_paint_layers_ramp_edited(*ma, &ramp->band));
+  EXPECT_TRUE(BKE_paint_layers_ramp_edited(*ma, &ramp->band.data[0]));
+  EXPECT_FALSE(BKE_paint_layers_ramp_edited(*ma, &row->mapping));
+}
+
 class PaintLayersHslTest : public PaintLayersFilterTest {
  public:
   MaterialPaintLayer *add_hsl(MaterialPaintLayer &row, const float opacity = 1.0f)
@@ -494,6 +594,31 @@ TEST_F(PaintLayersMaskFilterTest, brightness_contrast_in_the_mask_works_on_its_c
       *bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_CONTRAST, 0.2f));
   expect_graph_matches_cpu(kColor);
   EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.4f, 3e-3f);
+}
+
+TEST_F(PaintLayersMaskFilterTest, color_ramp_in_the_mask_works_on_its_coverage)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  MaterialPaintLayer *ramp = add_mask_filter(*row, MA_PAINT_LAYER_FILTER_COLOR_RAMP);
+  ASSERT_NE(ramp, nullptr);
+  MaterialPaintLayerRamp *band = BKE_paint_layers_ramp_ensure(*ramp);
+  ASSERT_NE(band, nullptr);
+  band->band.tot = 2;
+  band->band.ipotype = COLBAND_INTERP_LINEAR;
+  band->band.data[0] = {};
+  band->band.data[0].a = 1.0f;
+  band->band.data[1] = {};
+  band->band.data[1].pos = 1.0f;
+  band->band.data[1].a = 1.0f;
+
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.25f, 3e-3f);
 }
 
 TEST_F(PaintLayersMaskFilterTest, a_mask_filter_needs_no_channel_and_makes_the_base_mask_itself)

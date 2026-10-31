@@ -217,6 +217,17 @@ static void gradient_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &
   }
 }
 
+/**
+ * Mix a filter's Color Band: it lives in a ColorRamp node's storage, not in a socket, so a stop or an
+ * interpolation edit changes the node itself and the group must be rebuilt, not synced in place.
+ */
+static void filter_ramp_hash_mix(uint64_t &hash, const MaterialPaintLayer &row)
+{
+  if (row.ramp != nullptr && paint_layer_kind_has_ramp_param(row)) {
+    hash = topology_hash_mix(hash, paint_layer_ramp_hash(row.ramp->band));
+  }
+}
+
 uint64_t paint_layers_layer_topology_hash(const Material &ma,
                                           const MaterialPaintLayer &layer,
                                           const Span<int> wired_channels,
@@ -235,6 +246,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   /* Which filter an adjustment is decides its nodes; its parameters are inputs. */
   hash = topology_hash_mix(hash, uint64_t(uint16_t(layer.kind_subtype)));
   gradient_payload_hash_mix(hash, layer);
+  filter_ramp_hash_mix(hash, layer);
   hash = topology_hash_mix(hash, paint_layer_blend_shape(layer));
   /* The runtime tier changes which node a participating channel gets (the dynamic group against a
    * static Mix). Mixing its mask here keeps that transition out of #paint_layer_blend_shape, where
@@ -346,6 +358,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, effect) ? 1 : 0);
     mapping_wrap_hash_mix(hash, ma, effect);
     gradient_payload_hash_mix(hash, effect);
+    filter_ramp_hash_mix(hash, effect);
     const bool reads_source = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE);
     if (reads_source) {
       /* A correction that reads a material has nodes that follow its source, as a Material row's
@@ -436,6 +449,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, item) ? 1 : 0);
     mapping_wrap_hash_mix(hash, ma, item);
     gradient_payload_hash_mix(hash, item);
+    filter_ramp_hash_mix(hash, item);
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE)) {

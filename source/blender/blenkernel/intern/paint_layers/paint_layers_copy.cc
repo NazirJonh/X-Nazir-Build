@@ -337,6 +337,9 @@ MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   paint_layer_channels_duplicate(bmain, *item_copy, item, options);
   paint_layer_id_colors_duplicate(*item_copy, item);
   paint_layer_properties_duplicate(*item_copy, item);
+  if (item.ramp != nullptr) {
+    item_copy->ramp = static_cast<MaterialPaintLayerRamp *>(MEM_dupalloc(item.ramp));
+  }
   if (r_map != nullptr) {
     r_map->append({item.marker, item_copy->marker});
   }
@@ -387,6 +390,9 @@ void paint_layer_branch_duplicate(Main &bmain,
   paint_layer_id_colors_duplicate(dst, src);
   paint_layer_properties_duplicate(dst, src);
   BKE_paint_layers_gradient_copy(dst, src);
+  if (src.ramp != nullptr) {
+    dst.ramp = static_cast<MaterialPaintLayerRamp *>(MEM_dupalloc(src.ramp));
+  }
 
   /* The mask and the corrections go with their row, with maps of their own for the same reason as
    * the channel maps. */

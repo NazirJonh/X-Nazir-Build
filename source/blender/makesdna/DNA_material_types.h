@@ -781,6 +781,8 @@ enum eMaterialPaintLayerFilter : int16_t {
   /** A map-driven mask coverage operator: matches the island mask of the element's Base Color map. */
   MA_PAINT_LAYER_FILTER_UV_ISLAND = 5,
   MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST = 6,
+  /** Remap the colour's luminance through a ColorBand. */
+  MA_PAINT_LAYER_FILTER_COLOR_RAMP = 7,
 };
 
 /**
@@ -1071,6 +1073,17 @@ struct MaterialPaintLayerBake {
 };
 
 /**
+ * The ramp of a kind that reads one (the Color Ramp filter). Kept behind a pointer because a
+ * #ColorBand is close to a kilobyte and every row, correction and mask item would otherwise pay
+ * for it; the row allocates it only when its kind asks for a ramp.
+ */
+struct MaterialPaintLayerRamp {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerRamp)
+
+  struct ColorBand band;
+};
+
+/**
  * One row of a layered material's stack, the DNA description of what the material is painted with.
  *
  * The list is stored bottom-to-top. Folders nest through #children, which holds the same type.
@@ -1132,6 +1145,11 @@ struct MaterialPaintLayer {
    * new kind adds no field here. Owned by the row; null while the kind has set none.
    */
   struct IDProperty *system_properties = nullptr;
+  /**
+   * The ramp a kind with a ramp parameter reads (Color Ramp), or null for every other kind. Owned
+   * by the row and copied, freed and written with it.
+   */
+  struct MaterialPaintLayerRamp *ramp = nullptr;
   /**
    * #eMaterialPaintLayerObjectMaskType: whether the row is limited per object (Mesh) or per UDIM
    * tile of each object (UV Tiles). The per-object choices live on the objects

@@ -17,6 +17,7 @@ from bl_ui.properties_paint_common import (
 
 from bl_ui.properties_material_paint_layers import (
     draw_material_channel_set,
+    draw_material_kind_params,
     draw_material_layer_channels,
     draw_material_layer_height,
     draw_material_mask_coverage_item,
@@ -788,8 +789,9 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 if item.is_map_coverage:
                     draw_material_mask_coverage_item(layout, context, item)
                 else:
-                    for param in item.kind_params:
-                        layout.prop(param, "value", text=param.label, slider=True)
+                    draw_material_kind_params(layout, item.kind_params)
+                    if item.ramp_supported:
+                        layout.template_color_ramp(item, "kind_ramp", expand=True)
                 return
             if item.source == 'ANCHOR_POINT':
                 # A marker publishes a slice and a reader lays one: no map, no channels to choose.
@@ -833,8 +835,9 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         # A filter has no map or channel records: what it is told is the parameters of its kind.
         if layer.source == 'FILTER':
             layout.separator()
-            for param in layer.kind_params:
-                layout.prop(param, "value", text=param.label, slider=True)
+            draw_material_kind_params(layout, layer.kind_params)
+            if layer.ramp_supported:
+                layout.template_color_ramp(layer, "kind_ramp", expand=True)
             # The channels it works in, switched like a layer's; Base Color is on to start with.
             layout.separator()
             draw_material_layer_channels(layout, context, owner, layer)

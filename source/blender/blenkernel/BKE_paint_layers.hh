@@ -63,6 +63,21 @@ bool BKE_paint_layers_is_layered(const Material &ma);
 /** A description edit: whatever is derived from the description is stale until it is rebuilt. */
 void BKE_paint_layers_tag_edited(Material &ma);
 
+/** Whether \a row's kind reads a Color Band (the Color Ramp filter). */
+bool BKE_paint_layers_ramp_supported(const MaterialPaintLayer &row);
+
+/**
+ * The row's ramp payload, allocated with the default black-to-white band when it has none. Only a
+ * kind with a Ramp parameter gets one; returns null for every other kind.
+ */
+struct MaterialPaintLayerRamp *BKE_paint_layers_ramp_ensure(MaterialPaintLayer &row);
+
+/**
+ * Tag \a ma for regeneration when \a data is a row's Color Band or one of its stops. Called from
+ * the ColorRamp RNA update callback, which receives either the band or a stop of it.
+ */
+bool BKE_paint_layers_ramp_edited(Material &ma, const void *data);
+
 /**
  * A strictly value-only edit (a row's opacity, a Fill row's constant): the generated tree keeps its
  * nodes and only its values are re-synced, so no shader rebuild happens. Falls back to

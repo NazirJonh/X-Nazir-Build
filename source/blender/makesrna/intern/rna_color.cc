@@ -64,6 +64,7 @@ const EnumPropertyItem rna_enum_color_space_convert_default_items[] = {
 #  include "BKE_image.hh"
 #  include "BKE_linestyle.h"
 #  include "BKE_main.hh"
+#  include "BKE_paint_layers.hh"
 #  include "BKE_main_invariants.hh"
 #  include "BKE_node_legacy_types.hh"
 #  include "BKE_node_tree_update.hh"
@@ -359,10 +360,12 @@ static void rna_ColorRamp_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr
       case ID_MA: {
         Material *ma = id_cast<Material *>(ptr->owner_id);
 
-        /* A gradient layer's ramp is part of its generated graph: a stop or an interpolation edit
-         * has to rebuild it, not only redraw the material. The callback receives the ColorBand for
-         * the ramp's own properties and a CBData for a stop's, so the BKE helper recognizes both. */
+        /* A gradient layer's ramp is part of its generated graph, and so is a paint-layer filter's
+         * (Color Ramp): a stop or an interpolation edit has to rebuild the tree, not only redraw
+         * the material. The callback receives the ColorBand for the ramp's own properties and a
+         * CBData for a stop's, so both BKE helpers recognize either. */
         BKE_paint_layers_gradient_ramp_edited(*ma, ptr->data);
+        BKE_paint_layers_ramp_edited(*ma, ptr->data);
         DEG_id_tag_update(&ma->id, 0);
         WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
         break;

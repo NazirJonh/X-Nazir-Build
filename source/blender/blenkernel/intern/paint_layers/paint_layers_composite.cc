@@ -239,6 +239,7 @@ static bool composite_row_source_describe(const Material &ma,
     }
     out.adjustment_filter = layer.kind_subtype;
     composite_filter_params(layer, out.adjustment_params);
+    out.adjustment_ramp = BKE_paint_layers_ramp_get(layer);
     return true;
   }
   if (!paint_layer_row_participates(ma, layer, channel)) {
@@ -467,6 +468,7 @@ static void composite_mask_items_describe(
       filter.opacity = BKE_paint_layers_effective_opacity(mask);
       filter.filter = mask.kind_subtype;
       composite_filter_params(mask, filter.filter_params);
+      filter.filter_ramp = BKE_paint_layers_ramp_get(mask);
       r_items.append(filter);
       continue;
     }
@@ -613,6 +615,7 @@ static void composite_effect_append(
     PaintMaterialCompositeCorrection filter;
     filter.filter = effect.kind_subtype;
     composite_filter_params(effect, filter.filter_params);
+    filter.filter_ramp = BKE_paint_layers_ramp_get(effect);
     filter.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
                      pass_through_scale;
     out.content_corrections.append(filter);
@@ -1184,6 +1187,7 @@ PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
     buffer.blend = item.blend;
     buffer.invert = item.invert;
     buffer.filter = item.filter;
+    buffer.filter_ramp = item.filter_ramp;
     std::copy(std::begin(item.filter_params),
               std::end(item.filter_params),
               std::begin(buffer.filter_params));
@@ -2164,6 +2168,12 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
   {
     return "a row has neither a map, a flat colour nor an Anchor Point slice";
   }
+  /* The combined pass knows the pointwise filters it can express in its shader; a Color Ramp is a
+   * band, not a few uniforms, so the whole stack falls back to the CPU rather than showing the
+   * filter as a no-op. */
+  if (layer.adjustment_filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP) {
+    return "a Color Ramp adjustment is read";
+  }
   /* Corrections and mask items first, because a Gradient one is not merely unsupported by a pass
    * that would otherwise lay its map: there is no map, so the gather's own "a correction that
    * changes something" check does not even count it and the row would be shaded without it. The
@@ -2184,6 +2194,14 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
      * coverage map the GPU correction pass does not read. */
     if (correction.anchor_point_coverage_image != nullptr) {
       return "a baked Anchor Point correction is read (no coverage map on the GPU)";
+    }
+    if (correction.filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP) {
+      return "a Color Ramp correction is read";
+    }
+  }
+  for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+    if (item.filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP) {
+      return "a Color Ramp mask item is read";
     }
   }
   return nullptr;

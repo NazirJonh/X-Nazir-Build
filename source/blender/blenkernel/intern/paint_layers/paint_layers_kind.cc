@@ -6,18 +6,25 @@
  * \ingroup bke
  */
 
+#include <cstring>
 #include <iterator>
 
 #include "BLI_index_range.hh"
+#include "BLI_listbase_iterator.hh"
 #include <algorithm>
 
 #include "BLI_math_base.h"
 #include "BLI_math_color.h"
+#include "BLI_math_vector.h"
 #include "BLI_string.h"
+
+#include "MEM_guardedalloc.h"
 
 #include "DNA_ID.h"
 
+#include "BKE_colorband.hh"
 #include "BKE_idprop.hh"
+#include "BKE_paint_layers.hh"
 
 #include "paint_layers_kind.hh"
 
@@ -47,6 +54,25 @@ static const PaintLayerKindParam brightness_contrast_params[] = {
 };
 static_assert(std::size(brightness_contrast_params) ==
               PAINT_LAYER_BRIGHTNESS_CONTRAST_PARAM_NUM);
+
+/* The ramp itself lives in #MaterialPaintLayer::ramp; the schema entry is what tells the row its
+ * kind has one and lets the UI find the payload. */
+static const PaintLayerKindEnumItem color_ramp_alpha_items[] = {
+    {0, "IGNORE", "Ignore"},
+    {1, "MULTIPLY", "Use Stop Alpha"},
+};
+static const PaintLayerKindParam color_ramp_params[] = {
+    {"affect_alpha",
+     "Alpha",
+     0.0f,
+     0.0f,
+     1.0f,
+     PaintLayerKindParamType::Enum,
+     color_ramp_alpha_items,
+     int(std::size(color_ramp_alpha_items))},
+    {"ramp", "Ramp", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Ramp},
+};
+static_assert(std::size(color_ramp_params) == PAINT_LAYER_COLOR_RAMP_PARAM_NUM);
 
 static const PaintLayerKindParam coverage_params[] = {
     /* Half the range: a pick matches the whole region of its colour, not only the exact texel value. */
@@ -168,6 +194,14 @@ static const PaintLayerKindInfo kinds[] = {
      brightness_contrast_params,
      int(std::size(brightness_contrast_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_COLOR_RAMP,
+     "Color Ramp",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     color_ramp_params,
+     int(std::size(color_ramp_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* A map-coverage operator: the map of its Base Color record is an external ID Map, so the map
      * is reference-only and a stroke must not turn it into a paint target. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -260,10 +294,41 @@ static const PaintLayerKindParam *kind_param_find(const MaterialPaintLayer &row,
   return &info->params[index];
 }
 
+PaintLayerKindParamType paint_layer_kind_param_type(const MaterialPaintLayer &row,
+                                                    const int index)
+{
+  const PaintLayerKindParam *param = kind_param_find(row, index);
+  return (param != nullptr) ? param->type : PaintLayerKindParamType::Float;
+}
+
+int paint_layer_kind_param_int_get(const MaterialPaintLayer &row, const int index)
+{
+  const PaintLayerKindParam *param = kind_param_find(row, index);
+  if (param == nullptr || !ELEM(param->type, PaintLayerKindParamType::Int,
+                               PaintLayerKindParamType::Enum))
+  {
+    return 0;
+  }
+  const IDProperty *prop = (row.system_properties != nullptr) ?
+                               IDP_GetPropertyFromGroup(row.system_properties, param->name) :
+                               nullptr;
+  if (prop == nullptr || prop->type != IDP_INT) {
+    return int(param->default_value);
+  }
+  return std::clamp(IDP_int_get(prop), int(param->min), int(param->max));
+}
+
 float paint_layer_kind_param_get(const MaterialPaintLayer &row, const int index)
 {
   const PaintLayerKindParam *param = kind_param_find(row, index);
   if (param == nullptr) {
+    return 0.0f;
+  }
+  if (ELEM(param->type, PaintLayerKindParamType::Int, PaintLayerKindParamType::Enum)) {
+    return float(paint_layer_kind_param_int_get(row, index));
+  }
+  if (ELEM(param->type, PaintLayerKindParamType::Color, PaintLayerKindParamType::Ramp)) {
+    /* Not a scalar: the UI and the kind's consumer read them through the typed accessors. */
     return 0.0f;
   }
   const IDProperty *prop = (row.system_properties != nullptr) ?
@@ -275,6 +340,15 @@ float paint_layer_kind_param_get(const MaterialPaintLayer &row, const int index)
   return clamp_f(IDP_float_get(prop), param->min, param->max);
 }
 
+/** The row's kind-property group, made when the row has none. */
+static IDProperty *kind_param_group_ensure(MaterialPaintLayer &row)
+{
+  if (row.system_properties == nullptr) {
+    row.system_properties = bke::idprop::create_group("kind").release();
+  }
+  return row.system_properties;
+}
+
 /**
  * The stored property of \a param, made with the schema's range, default and label as its UI data
  * when the row has none yet. The UI data is what lets the RNA layer show and clamp the value
@@ -282,10 +356,8 @@ float paint_layer_kind_param_get(const MaterialPaintLayer &row, const int index)
  */
 static IDProperty *kind_param_ensure(MaterialPaintLayer &row, const PaintLayerKindParam &param)
 {
-  if (row.system_properties == nullptr) {
-    row.system_properties = bke::idprop::create_group("kind").release();
-  }
-  IDProperty *existing = IDP_GetPropertyFromGroup(row.system_properties, param.name);
+  IDProperty *group = kind_param_group_ensure(row);
+  IDProperty *existing = IDP_GetPropertyFromGroup(group, param.name);
   if (existing != nullptr && existing->type == IDP_FLOAT) {
     return existing;
   }
@@ -298,7 +370,59 @@ static IDProperty *kind_param_ensure(MaterialPaintLayer &row, const PaintLayerKi
   ui_data->default_value = param.default_value;
   ui_data->step = 0.1f;
   ui_data->precision = 3;
-  IDP_ReplaceInGroup(row.system_properties, prop);
+  IDP_ReplaceInGroup(group, prop);
+  return prop;
+}
+
+/** The stored integer property of \a param, made with the schema's range as UI data. */
+static IDProperty *kind_param_ensure_int(MaterialPaintLayer &row,
+                                         const PaintLayerKindParam &param)
+{
+  IDProperty *group = kind_param_group_ensure(row);
+  IDProperty *existing = IDP_GetPropertyFromGroup(group, param.name);
+  if (existing != nullptr && existing->type == IDP_INT) {
+    return existing;
+  }
+  IDProperty *prop = bke::idprop::create(param.name, int(param.default_value)).release();
+  IDPropertyUIDataInt *ui_data = reinterpret_cast<IDPropertyUIDataInt *>(
+      IDP_ui_data_ensure(prop));
+  ui_data->base.description = BLI_strdup(param.label);
+  ui_data->min = ui_data->soft_min = int(param.min);
+  ui_data->max = ui_data->soft_max = int(param.max);
+  ui_data->default_value = int(param.default_value);
+  ui_data->step = 1;
+  if (param.enum_items != nullptr && param.enum_items_num > 0) {
+    ui_data->enum_items_num = param.enum_items_num;
+    ui_data->enum_items = MEM_new_array<IDPropertyUIDataEnumItem>(
+        param.enum_items_num, __func__);
+    for (const int i : IndexRange(param.enum_items_num)) {
+      IDPropertyUIDataEnumItem &item = ui_data->enum_items[i];
+      item.identifier = BLI_strdup(param.enum_items[i].identifier);
+      item.name = BLI_strdup(param.enum_items[i].label);
+      item.description = nullptr;
+      item.value = param.enum_items[i].value;
+      item.icon = 0;
+    }
+  }
+  IDP_ReplaceInGroup(group, prop);
+  return prop;
+}
+
+/** The stored RGBA array of a Color parameter, made at the schema default when it has none. */
+static IDProperty *kind_param_ensure_color(MaterialPaintLayer &row,
+                                           const PaintLayerKindParam &param)
+{
+  IDProperty *group = kind_param_group_ensure(row);
+  IDProperty *existing = IDP_GetPropertyFromGroup(group, param.name);
+  if (existing != nullptr && existing->type == IDP_ARRAY &&
+      existing->subtype == IDP_FLOAT && existing->len == 4)
+  {
+    return existing;
+  }
+  float default_color[4];
+  copy_v4_v4(default_color, param.default_color);
+  IDProperty *prop = bke::idprop::create(param.name, Span<float>(default_color, 4)).release();
+  IDP_ReplaceInGroup(group, prop);
   return prop;
 }
 
@@ -306,7 +430,22 @@ void paint_layer_kind_params_init(MaterialPaintLayer &row)
 {
   if (const PaintLayerKindInfo *info = paint_layer_kind_of(row)) {
     for (const int i : IndexRange(info->params_num)) {
-      kind_param_ensure(row, info->params[i]);
+      const PaintLayerKindParam &param = info->params[i];
+      switch (param.type) {
+        case PaintLayerKindParamType::Int:
+        case PaintLayerKindParamType::Enum:
+          kind_param_ensure_int(row, param);
+          break;
+        case PaintLayerKindParamType::Color:
+          kind_param_ensure_color(row, param);
+          break;
+        case PaintLayerKindParamType::Ramp:
+          BKE_paint_layers_ramp_ensure(row);
+          break;
+        case PaintLayerKindParamType::Float:
+          kind_param_ensure(row, param);
+          break;
+      }
     }
   }
 }
@@ -314,11 +453,195 @@ void paint_layer_kind_params_init(MaterialPaintLayer &row)
 bool paint_layer_kind_param_set(MaterialPaintLayer &row, const int index, const float value)
 {
   const PaintLayerKindParam *param = kind_param_find(row, index);
-  if (param == nullptr) {
+  if (param == nullptr || param->type != PaintLayerKindParamType::Float) {
     return false;
   }
   IDP_float_set(kind_param_ensure(row, *param), clamp_f(value, param->min, param->max));
   return true;
+}
+
+bool paint_layer_kind_param_int_set(MaterialPaintLayer &row, const int index, const int value)
+{
+  const PaintLayerKindParam *param = kind_param_find(row, index);
+  if (param == nullptr || !ELEM(param->type, PaintLayerKindParamType::Int,
+                               PaintLayerKindParamType::Enum))
+  {
+    return false;
+  }
+  IDP_int_set(kind_param_ensure_int(row, *param),
+              std::clamp(value, int(param->min), int(param->max)));
+  return true;
+}
+
+void paint_layer_kind_param_color_get(const MaterialPaintLayer &row,
+                                      const int index,
+                                      float r_color[4])
+{
+  const PaintLayerKindParam *param = kind_param_find(row, index);
+  if (param == nullptr || param->type != PaintLayerKindParamType::Color) {
+    zero_v4(r_color);
+    return;
+  }
+  const IDProperty *prop = (row.system_properties != nullptr) ?
+                               IDP_GetPropertyFromGroup(row.system_properties, param->name) :
+                               nullptr;
+  if (prop == nullptr || prop->type != IDP_ARRAY || prop->subtype != IDP_FLOAT ||
+      prop->len != 4)
+  {
+    copy_v4_v4(r_color, param->default_color);
+    return;
+  }
+  copy_v4_v4(r_color, IDP_array_float_get(prop));
+}
+
+bool paint_layer_kind_param_color_set(MaterialPaintLayer &row,
+                                      const int index,
+                                      const float color[4])
+{
+  const PaintLayerKindParam *param = kind_param_find(row, index);
+  if (param == nullptr || param->type != PaintLayerKindParamType::Color) {
+    return false;
+  }
+  IDProperty *prop = kind_param_ensure_color(row, *param);
+  copy_v4_v4(IDP_array_float_get(prop), color);
+  return true;
+}
+
+bool BKE_paint_layers_ramp_supported(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_ramp_param(row);
+}
+
+/** Whether \a data is \a band itself or one of its stops. */
+static bool paint_layer_ramp_owns_data(const ColorBand &band, const void *data)
+{
+  if (data == &band) {
+    return true;
+  }
+  for (const int i : IndexRange(band.tot)) {
+    if (data == &band.data[i]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool paint_layer_ramp_edited_walk(MaterialPaintLayer &row, const void *data)
+{
+  if (row.ramp != nullptr && paint_layer_ramp_owns_data(row.ramp->band, data)) {
+    return true;
+  }
+  for (MaterialPaintLayer &item : row.mask_stack) {
+    if (paint_layer_ramp_edited_walk(item, data)) {
+      return true;
+    }
+  }
+  for (MaterialPaintLayer &effect : row.effects) {
+    if (paint_layer_ramp_edited_walk(effect, data)) {
+      return true;
+    }
+  }
+  for (MaterialPaintLayer &child : row.children) {
+    if (paint_layer_ramp_edited_walk(child, data)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool BKE_paint_layers_ramp_edited(Material &ma, const void *data)
+{
+  if (data == nullptr) {
+    return false;
+  }
+  bool found = false;
+  for (MaterialPaintLayer &row : ma.paint_layers) {
+    if (paint_layer_ramp_edited_walk(row, data)) {
+      found = true;
+      break;
+    }
+  }
+  if (found) {
+    /* The stops are in the cached bake's hash like a gradient's: without the stale flag a baked row
+     * or folder that holds the filter keeps showing the old ramp. */
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
+    BKE_paint_layers_tag_edited(ma);
+  }
+  return found;
+}
+
+bool paint_layer_kind_has_ramp_param(const MaterialPaintLayer &row)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+  if (info == nullptr) {
+    return false;
+  }
+  for (const int i : IndexRange(info->params_num)) {
+    if (info->params[i].type == PaintLayerKindParamType::Ramp) {
+      return true;
+    }
+  }
+  return false;
+}
+
+MaterialPaintLayerRamp *BKE_paint_layers_ramp_ensure(MaterialPaintLayer &row)
+{
+  if (!paint_layer_kind_has_ramp_param(row)) {
+    return nullptr;
+  }
+  if (row.ramp == nullptr) {
+    row.ramp = MEM_new<MaterialPaintLayerRamp>(__func__);
+    /* Black to white, linear: the identity on a grey. The gradient brush's default starts its black
+     * stop at the middle with a B-spline, which maps every colour below half luminance to black. */
+    BKE_colorband_init(&row.ramp->band, true);
+  }
+  return row.ramp;
+}
+
+const ColorBand *BKE_paint_layers_ramp_get(const MaterialPaintLayer &row)
+{
+  return (row.ramp != nullptr) ? &row.ramp->band : nullptr;
+}
+
+float paint_layer_color_ramp_apply(const ColorBand &band, const bool use_alpha, float rgb[3])
+{
+  /* The RGB to BW node's scene-linear Rec.709 luminance, matching the graph's #SH_NODE_RGBTOBW. */
+  const float value = clamp_f(
+      0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2], 0.0f, 1.0f);
+  float ramp_color[4];
+  if (BKE_colorband_evaluate(&band, value, ramp_color)) {
+    copy_v3_v3(rgb, ramp_color);
+    /* The stop's alpha scales the strength and not the layer's alpha: a filter lays no alpha. */
+    return use_alpha ? clamp_f(ramp_color[3], 0.0f, 1.0f) : 1.0f;
+  }
+  return 1.0f;
+}
+
+uint64_t paint_layer_ramp_hash(const ColorBand &band)
+{
+  uint64_t hash = 1469598103934665603ull;
+  const auto mix_u32 = [&](const uint32_t value) {
+    hash ^= value;
+    hash *= 1099511628211ull;
+  };
+  const auto mix_float = [&](const float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    mix_u32(bits);
+  };
+  mix_u32(uint32_t(band.tot));
+  mix_u32(uint32_t(band.ipotype));
+  mix_u32(uint32_t(band.ipotype_hue));
+  mix_u32(uint32_t(band.color_mode));
+  for (const int i : IndexRange(band.tot)) {
+    const CBData &element = band.data[i];
+    mix_float(element.pos);
+    mix_float(element.r);
+    mix_float(element.g);
+    mix_float(element.b);
+    mix_float(element.a);
+  }
+  return hash;
 }
 
 int paint_layer_kind_param_index(const MaterialPaintLayer &row, const char *name)

@@ -287,6 +287,24 @@ static const EnumPropertyItem rna_enum_material_paint_layer_anchor_point_target_
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* The type of a kind parameter, derived from how its property stores the value. Outside the
+ * #RNA_RUNTIME split: the runtime getter reads the values and the definition pass needs the item
+ * list for the property. */
+enum rna_MaterialPaintLayerKindParamType {
+  KIND_PARAM_TYPE_FLOAT = 0,
+  KIND_PARAM_TYPE_INT = 1,
+  KIND_PARAM_TYPE_ENUM = 2,
+  KIND_PARAM_TYPE_COLOR = 3,
+};
+
+static const EnumPropertyItem rna_enum_material_paint_layer_kind_param_type_items[] = {
+    {KIND_PARAM_TYPE_FLOAT, "FLOAT", 0, "Float", "A float value"},
+    {KIND_PARAM_TYPE_INT, "INT", 0, "Integer", "A whole number"},
+    {KIND_PARAM_TYPE_ENUM, "ENUM", 0, "Enum", "A choice from the parameter's list"},
+    {KIND_PARAM_TYPE_COLOR, "COLOR", 0, "Color", "An RGBA colour"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 }
 
 #ifdef RNA_RUNTIME
@@ -2769,45 +2787,82 @@ static const IDPropertyUIDataFloat *rna_kind_param_ui_data(const IDProperty *pro
   return reinterpret_cast<const IDPropertyUIDataFloat *>(prop->ui_data);
 }
 
+/** The UI data of an integer (or enum) property, or null when it has none. */
+static const IDPropertyUIDataInt *rna_kind_param_ui_data_int(const IDProperty *prop)
+{
+  if (prop->type != IDP_INT || prop->ui_data == nullptr) {
+    return nullptr;
+  }
+  return reinterpret_cast<const IDPropertyUIDataInt *>(prop->ui_data);
+}
+
+/**
+ * The label of a kind parameter: its UI data's description, or its stored name when it has none.
+ * Float and integer parameters share the #IDPropertyUIData base that holds it.
+ */
+static const char *rna_kind_param_label_text(const IDProperty *prop)
+{
+  if (prop->ui_data != nullptr && ELEM(prop->type, IDP_FLOAT, IDP_INT)) {
+    const IDPropertyUIData *base = static_cast<const IDPropertyUIData *>(prop->ui_data);
+    if (base->description != nullptr) {
+      return base->description;
+    }
+  }
+  return prop->name;
+}
+
 static void rna_MaterialPaintLayerKindParam_label_get(PointerRNA *ptr, char *value)
 {
   const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
-  const IDPropertyUIDataFloat *ui_data = rna_kind_param_ui_data(prop);
-  const char *label = (ui_data != nullptr && ui_data->base.description != nullptr) ?
-                          ui_data->base.description :
-                          prop->name;
-  strcpy(value, label);
+  strcpy(value, rna_kind_param_label_text(prop));
 }
 
 static int rna_MaterialPaintLayerKindParam_label_length(PointerRNA *ptr)
 {
   const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
-  const IDPropertyUIDataFloat *ui_data = rna_kind_param_ui_data(prop);
-  const char *label = (ui_data != nullptr && ui_data->base.description != nullptr) ?
-                          ui_data->base.description :
-                          prop->name;
-  return int(strlen(label));
+  return int(strlen(rna_kind_param_label_text(prop)));
 }
 
 static float rna_MaterialPaintLayerKindParam_value_get(PointerRNA *ptr)
 {
   const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
-  return (prop->type == IDP_FLOAT) ? IDP_float_get(prop) : 0.0f;
+  if (prop->type == IDP_FLOAT) {
+    return IDP_float_get(prop);
+  }
+  if (prop->type == IDP_INT) {
+    return float(IDP_int_get(prop));
+  }
+  return 0.0f;
 }
 
 static void rna_MaterialPaintLayerKindParam_value_set(PointerRNA *ptr, const float value)
 {
   IDProperty *prop = static_cast<IDProperty *>(ptr->data);
-  if (prop->type != IDP_FLOAT) {
+  if (prop->type == IDP_FLOAT) {
+    const IDPropertyUIDataFloat *ui_data = rna_kind_param_ui_data(prop);
+    const float low = (ui_data != nullptr) ? float(ui_data->min) : -FLT_MAX;
+    const float high = (ui_data != nullptr) ? float(ui_data->max) : FLT_MAX;
+    IDP_float_set(prop, std::clamp(value, low, high));
+  }
+  else if (prop->type == IDP_INT) {
+    const IDPropertyUIDataInt *ui_data = rna_kind_param_ui_data_int(prop);
+    const int low = (ui_data != nullptr) ? ui_data->min : INT_MIN;
+    const int high = (ui_data != nullptr) ? ui_data->max : INT_MAX;
+    IDP_int_set(prop, std::clamp(int(value), low, high));
+  }
+  else {
     return;
   }
-  const IDPropertyUIDataFloat *ui_data = rna_kind_param_ui_data(prop);
-  const float low = (ui_data != nullptr) ? float(ui_data->min) : -FLT_MAX;
-  const float high = (ui_data != nullptr) ? float(ui_data->max) : FLT_MAX;
-  IDP_float_set(prop, std::clamp(value, low, high));
-  /* The parameter is an input of the row's group: a value edit, never a different graph. */
+  /* A float parameter is an input of the row's group: a value edit, never a different graph. An
+   * integer or enum one may switch the shape (the Math filter's operation), so the tree is rebuilt;
+   * correct for both, at the cost of a rebuild for a step-count drag. */
   if (Material *ma = reinterpret_cast<Material *>(ptr->owner_id)) {
-    BKE_paint_layers_tag_value_edited(*ma);
+    if (prop->type == IDP_FLOAT) {
+      BKE_paint_layers_tag_value_edited(*ma);
+    }
+    else {
+      BKE_paint_layers_tag_edited(*ma);
+    }
   }
 }
 
@@ -2818,12 +2873,137 @@ static void rna_MaterialPaintLayerKindParam_value_range(PointerRNA *ptr,
                                                         float *softmax)
 {
   const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
-  const IDPropertyUIDataFloat *ui_data = rna_kind_param_ui_data(prop);
+  if (prop->type == IDP_FLOAT) {
+    const IDPropertyUIDataFloat *ui_data = rna_kind_param_ui_data(prop);
+    if (ui_data == nullptr) {
+      return;
+    }
+    *min = *softmin = float(ui_data->min);
+    *max = *softmax = float(ui_data->max);
+  }
+  else if (prop->type == IDP_INT) {
+    const IDPropertyUIDataInt *ui_data = rna_kind_param_ui_data_int(prop);
+    if (ui_data == nullptr) {
+      return;
+    }
+    *min = *softmin = float(ui_data->min);
+    *max = *softmax = float(ui_data->max);
+  }
+}
+
+static int rna_MaterialPaintLayerKindParam_type_get(PointerRNA *ptr)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  if (prop->type == IDP_INT) {
+    const IDPropertyUIDataInt *ui_data = rna_kind_param_ui_data_int(prop);
+    return (ui_data != nullptr && ui_data->enum_items_num > 0) ? KIND_PARAM_TYPE_ENUM :
+                                                                 KIND_PARAM_TYPE_INT;
+  }
+  if (prop->type == IDP_ARRAY && prop->subtype == IDP_FLOAT && prop->len == 4) {
+    return KIND_PARAM_TYPE_COLOR;
+  }
+  return KIND_PARAM_TYPE_FLOAT;
+}
+
+static int rna_MaterialPaintLayerKindParam_int_value_get(PointerRNA *ptr)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  return (prop->type == IDP_INT) ? IDP_int_get(prop) : 0;
+}
+
+static void rna_MaterialPaintLayerKindParam_int_value_set(PointerRNA *ptr, const int value)
+{
+  IDProperty *prop = static_cast<IDProperty *>(ptr->data);
+  if (prop->type != IDP_INT) {
+    return;
+  }
+  const IDPropertyUIDataInt *ui_data = rna_kind_param_ui_data_int(prop);
+  const int low = (ui_data != nullptr) ? ui_data->min : INT_MIN;
+  const int high = (ui_data != nullptr) ? ui_data->max : INT_MAX;
+  IDP_int_set(prop, std::clamp(value, low, high));
+  /* An integer parameter may switch the graph's shape (the Math filter's operation), so the tree
+   * is rebuilt rather than value-synced. */
+  if (Material *ma = reinterpret_cast<Material *>(ptr->owner_id)) {
+    BKE_paint_layers_tag_edited(*ma);
+  }
+}
+
+static void rna_MaterialPaintLayerKindParam_int_value_range(PointerRNA *ptr,
+                                                            int *min,
+                                                            int *max,
+                                                            int *softmin,
+                                                            int *softmax)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  const IDPropertyUIDataInt *ui_data = rna_kind_param_ui_data_int(prop);
   if (ui_data == nullptr) {
     return;
   }
-  *min = *softmin = float(ui_data->min);
-  *max = *softmax = float(ui_data->max);
+  *min = *softmin = ui_data->min;
+  *max = *softmax = ui_data->max;
+}
+
+/** The choices of an enum parameter, from its UI data; the caller frees the array itself. */
+static const EnumPropertyItem *rna_MaterialPaintLayerKindParam_enum_items(
+    bContext * /*C*/, PointerRNA *ptr, PropertyRNA * /*prop*/, bool *r_free)
+{
+  *r_free = false;
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  const IDPropertyUIDataInt *ui_data = rna_kind_param_ui_data_int(prop);
+  if (ui_data == nullptr || ui_data->enum_items_num == 0) {
+    return rna_enum_dummy_NULL_items;
+  }
+  const int total = ui_data->enum_items_num;
+  EnumPropertyItem *items = MEM_new_array_uninitialized<EnumPropertyItem>(total + 1, __func__);
+  for (int i = 0; i < total; i++) {
+    const IDPropertyUIDataEnumItem &src = ui_data->enum_items[i];
+    EnumPropertyItem &dst = items[i];
+    /* The strings live in the property's UI data, which outlives the read. */
+    dst.value = src.value;
+    dst.identifier = src.identifier;
+    dst.name = src.name;
+    dst.description = src.description;
+    dst.icon = src.icon;
+  }
+  items[total] = {0, nullptr, 0, nullptr, nullptr};
+  *r_free = true;
+  return items;
+}
+
+static bool rna_MaterialPaintLayerKindParam_color_prop(const IDProperty *prop)
+{
+  return prop->type == IDP_ARRAY && prop->subtype == IDP_FLOAT && prop->len == 4;
+}
+
+static void rna_MaterialPaintLayerKindParam_color_value_get(PointerRNA *ptr, float *values)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  if (!rna_MaterialPaintLayerKindParam_color_prop(prop)) {
+    for (int i = 0; i < 4; i++) {
+      values[i] = 0.0f;
+    }
+    return;
+  }
+  const float *stored = IDP_array_float_get(const_cast<IDProperty *>(prop));
+  for (int i = 0; i < 4; i++) {
+    values[i] = stored[i];
+  }
+}
+
+static void rna_MaterialPaintLayerKindParam_color_value_set(PointerRNA *ptr, const float *values)
+{
+  IDProperty *prop = static_cast<IDProperty *>(ptr->data);
+  if (!rna_MaterialPaintLayerKindParam_color_prop(prop)) {
+    return;
+  }
+  float *stored = IDP_array_float_get(prop);
+  for (int i = 0; i < 4; i++) {
+    stored[i] = values[i];
+  }
+  /* The colour is an input of the row's group: a value edit, never a different graph. */
+  if (Material *ma = reinterpret_cast<Material *>(ptr->owner_id)) {
+    BKE_paint_layers_tag_value_edited(*ma);
+  }
 }
 
 /**
@@ -3142,6 +3322,44 @@ static int rna_MaterialPaintLayer_filter_type_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
   return (layer->source == MA_PAINT_LAYER_SOURCE_FILTER) ? int(layer->kind_subtype) : 0;
+}
+
+static bool rna_MaterialPaintLayer_ramp_supported_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer != nullptr && BKE_paint_layers_ramp_supported(*layer);
+}
+
+static PointerRNA rna_MaterialPaintLayer_kind_ramp_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (layer == nullptr) {
+    return PointerRNA_NULL;
+  }
+  MaterialPaintLayerRamp *ramp = BKE_paint_layers_ramp_ensure(*layer);
+  if (ramp == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, &ramp->band);
+}
+
+/**
+ * The ramp is a node's storage in the generated graph, so a stop edit has to rebuild the material.
+ * The color ramp template replaces its buttons' callbacks with the ramp property's, so without this
+ * one a stop drag would redraw nothing until another edit regenerated the tree.
+ */
+static void rna_MaterialPaintLayer_kind_ramp_update(Main * /*bmain*/,
+                                                    Scene * /*scene*/,
+                                                    PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  if (ma == nullptr || layer == nullptr || layer->ramp == nullptr) {
+    return;
+  }
+  BKE_paint_layers_ramp_edited(*ma, &layer->ramp->band);
+  DEG_id_tag_update(&ma->id, 0);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
 }
 
 static int rna_MaterialPaintLayer_output_map_get(PointerRNA *ptr)
@@ -4530,6 +4748,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      0,
      "Brightness/Contrast",
      "Brighten or darken and scale the contrast of what is below"},
+    {MA_PAINT_LAYER_FILTER_COLOR_RAMP,
+     "COLOR_RAMP",
+     0,
+     "Color Ramp",
+     "Remap the luminance of what is below through a Color Band"},
     {MA_PAINT_LAYER_FILTER_COLOR_ID,
      "COLOR_ID",
      0,
@@ -4640,7 +4863,7 @@ static void rna_def_material_paint_layer_kind_param(BlenderRNA *brna)
   StructRNA *srna = RNA_def_struct(brna, "MaterialPaintLayerKindParam", nullptr);
   RNA_def_struct_path_func(srna, "rna_MaterialPaintLayerKindParam_path");
   RNA_def_struct_ui_text(
-      srna, "Paint Layer Parameter", "One float parameter of a paint layer's kind, e.g. a filter's");
+      srna, "Paint Layer Parameter", "One parameter of a paint layer's kind, e.g. a filter's");
 
   PropertyRNA *prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
   RNA_def_property_string_funcs(prop,
@@ -4665,6 +4888,40 @@ static void rna_def_material_paint_layer_kind_param(BlenderRNA *brna)
                                "rna_MaterialPaintLayerKindParam_value_set",
                                "rna_MaterialPaintLayerKindParam_value_range");
   RNA_def_property_ui_text(prop, "Value", "Value of the parameter, within its range");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_kind_param_type_items);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayerKindParam_type_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Type", "What the parameter's value is; decides which value property to read");
+
+  prop = RNA_def_property(srna, "int_value", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop,
+                             "rna_MaterialPaintLayerKindParam_int_value_get",
+                             "rna_MaterialPaintLayerKindParam_int_value_set",
+                             "rna_MaterialPaintLayerKindParam_int_value_range");
+  RNA_def_property_ui_text(prop, "Integer Value", "Value of an integer parameter, within its range");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "enum_value", PROP_ENUM, PROP_NONE);
+  /* Dynamic items: the placeholder marks the property for the item callback below. */
+  RNA_def_property_enum_items(prop, rna_enum_dummy_NULL_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayerKindParam_int_value_get",
+                              "rna_MaterialPaintLayerKindParam_int_value_set",
+                              "rna_MaterialPaintLayerKindParam_enum_items");
+  RNA_def_property_ui_text(prop, "Choice", "Choice of an enum parameter");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "color_value", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerKindParam_color_value_get",
+                               "rna_MaterialPaintLayerKindParam_color_value_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Color", "Value of a color parameter");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "exposed", PROP_BOOLEAN, PROP_NONE);
@@ -5492,6 +5749,18 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayer_filter_type_get", nullptr, nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Filter Type", "Which filter a filter row is; None for any other row");
+
+  prop = RNA_def_property(srna, "ramp_supported", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_ramp_supported_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Has Ramp", "Whether the row's kind reads a Color Band");
+
+  prop = RNA_def_property(srna, "kind_ramp", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "ColorRamp");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_MaterialPaintLayer_kind_ramp_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Ramp", "The Color Band a Color Ramp filter reads");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayer_kind_ramp_update");
 
   prop = RNA_def_property(srna, "output_map", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_output_map_items);

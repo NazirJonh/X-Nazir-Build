@@ -948,8 +948,12 @@ static uint64_t bake_hash_layer(uint64_t h,
       h = bake_hash_mix(h, paint_layer_anchor_point_slice_hash(ma, layer, channel));
     }
   }
-  /* A kind's parameters (a filter's, a coverage operator's) change the pixels. */
+  /* A kind's parameters (a filter's, a coverage operator's) change the pixels. A ramp filter keeps
+   * its stops outside the properties, in its own payload. */
   h = bake_hash_idprops(h, layer.system_properties);
+  if (layer.ramp != nullptr) {
+    h = bake_hash_mix(h, paint_layer_ramp_hash(layer.ramp->band));
+  }
   /* Effects first, then mask items, then children, each in its own storage order. */
   for (const MaterialPaintLayer &effect : layer.effects) {
     h = bake_hash_layer(h, ma, effect, true);

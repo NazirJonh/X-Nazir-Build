@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 #include "BLI_function_ref.hh"
 
@@ -83,10 +84,34 @@ inline constexpr uint8_t paint_layer_role_bit(const int role)
   return uint8_t(1u << role);
 }
 
+enum class PaintLayerKindParamType : uint8_t {
+  /** A float slider, the original and still most common kind. */
+  Float = 0,
+  /** An integer, stored in the row's system properties. */
+  Int,
+  /** An integer chosen from a fixed list; #PaintLayerKindParam::enum_items names the choices. */
+  Enum,
+  /** Four floats (RGB + alpha), stored as an array property. */
+  Color,
+  /** A ColorBand, kept in #MaterialPaintLayer::ramp rather than in the properties. */
+  Ramp,
+};
+
+/** One choice of an #PaintLayerKindParamType::Enum parameter. */
+struct PaintLayerKindEnumItem {
+  int value;
+  const char *identifier;
+  const char *label;
+};
+
 /**
- * One float parameter of a kind. The schema lives with the kind; the value lives in the row's
- * #MaterialPaintLayer::system_properties under #name, and reads as #default_value while unset, so
- * a row never has to carry parameters it did not change.
+ * One parameter of a kind. The schema lives with the kind; the value lives in the row's
+ * #MaterialPaintLayer::system_properties under #name, and reads as the default while unset, so a
+ * row never has to carry parameters it did not change.
+ *
+ * The fields after #max are type-specific and default to a plain float, so a kind that has only
+ * float parameters writes the same five-field initializer it always did. A ramp has no value in
+ * the properties: #MaterialPaintLayer::ramp holds it.
  */
 struct PaintLayerKindParam {
   const char *name;
@@ -94,6 +119,12 @@ struct PaintLayerKindParam {
   float default_value;
   float min;
   float max;
+  PaintLayerKindParamType type = PaintLayerKindParamType::Float;
+  /** The choices of an #PaintLayerKindParamType::Enum parameter, or null. */
+  const PaintLayerKindEnumItem *enum_items = nullptr;
+  int enum_items_num = 0;
+  /** The default of a Color parameter. */
+  float default_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 };
 
 /** What a kind is, as far as the rules shared by the generator and the CPU stack care. */
@@ -191,6 +222,13 @@ enum PaintLayerBrightnessContrastParam : int {
   PAINT_LAYER_BRIGHTNESS_CONTRAST_PARAM_NUM = 2,
 };
 
+/** The positions of the Color Ramp filter's parameters in its schema; the ramp payload is last. */
+enum PaintLayerColorRampParam : int {
+  /** 0 ignores the alpha of the ramp stop, 1 multiplies the filter's strength by it. */
+  PAINT_LAYER_COLOR_RAMP_AFFECT_ALPHA = 0,
+  PAINT_LAYER_COLOR_RAMP_PARAM_NUM = 2,
+};
+
 /** The positions of a map-coverage operator's parameters in its schema. */
 enum PaintLayerCoverageParam : int {
   /** How far a sample may differ from a stored colour and still match (max-channel). */
@@ -245,6 +283,13 @@ inline void paint_layer_brightness_contrast_apply(
 }
 
 /**
+ * The Color Ramp filter applied to \a rgb in place: the colour's luminance indexes \a band, and the
+ * ramp's colour replaces the colour. Returns the multiplier of the filter's strength: 1, or the
+ * alpha of the ramp colour found when \a use_alpha is set.
+ */
+float paint_layer_color_ramp_apply(const ColorBand &band, bool use_alpha, float rgb[3]);
+
+/**
  * The value of the parameter \a index of \a row's kind: the stored one, or the schema's default.
  * A row whose kind has no such parameter reads 0. The storage is the row's system properties, which
  * only this and #paint_layer_kind_param_set touch.
@@ -259,6 +304,36 @@ void paint_layer_kind_params_init(MaterialPaintLayer &row);
 
 /** Store the parameter \a index, clamped to the schema's range. False for an unknown index. */
 bool paint_layer_kind_param_set(MaterialPaintLayer &row, int index, float value);
+
+/** The type of parameter \a index, or Float for an unknown one. */
+PaintLayerKindParamType paint_layer_kind_param_type(const MaterialPaintLayer &row, int index);
+
+/** The integer value of parameter \a index, clamped to the schema's range. */
+int paint_layer_kind_param_int_get(const MaterialPaintLayer &row, int index);
+bool paint_layer_kind_param_int_set(MaterialPaintLayer &row, int index, int value);
+
+/** The RGBA value of a Color parameter \a index, or the schema default for an unknown one. */
+void paint_layer_kind_param_color_get(const MaterialPaintLayer &row,
+                                      int index,
+                                      float r_color[4]);
+bool paint_layer_kind_param_color_set(MaterialPaintLayer &row,
+                                      int index,
+                                      const float color[4]);
+
+/** Whether \a row's kind has a Ramp parameter (the Color Ramp filter). */
+bool paint_layer_kind_has_ramp_param(const MaterialPaintLayer &row);
+
+/**
+ * The row's ramp payload, allocated with the default black-to-white band when it has none. Only a
+ * kind with a Ramp parameter gets one; returns null for every other kind.
+ */
+struct MaterialPaintLayerRamp *BKE_paint_layers_ramp_ensure(MaterialPaintLayer &row);
+
+/** The row's ramp band, or null when it has no ramp payload. */
+const struct ColorBand *BKE_paint_layers_ramp_get(const MaterialPaintLayer &row);
+
+/** A hash of every ramp stop, for the bake and composite caches. */
+uint64_t paint_layer_ramp_hash(const struct ColorBand &band);
 
 /**
  * The position of the parameter \a name in \a row's kind's schema, or -1 when the kind has no

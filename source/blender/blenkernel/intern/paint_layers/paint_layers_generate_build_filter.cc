@@ -352,6 +352,110 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       layout::frame_add(tree, effect.name, nodes);
       return true;
     }
+    case MA_PAINT_LAYER_FILTER_COLOR_RAMP: {
+      /* `lerp(c, ramp(luma(c)), opacity)`: the RGB to BW and Color Ramp nodes' own functions, with
+       * the row's band copied into the node so the generated tree owns no ID reference. */
+      const ColorBand *band = BKE_paint_layers_ramp_get(effect);
+      if (band == nullptr) {
+        return false;
+      }
+      /* The one input is `affect_alpha`; the ramp itself has none. A mask item has no stop alpha to
+       * apply, so it needs no input. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (!in_mask && (params == nullptr || params->size() != PAINT_LAYER_COLOR_RAMP_PARAM_NUM - 1 ||
+                       (*params)[PAINT_LAYER_COLOR_RAMP_AFFECT_ALPHA] == nullptr))
+      {
+        return false;
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        for (bNode *node : nodes) {
+          bke::node_remove_node(nullptr, tree, *node, true, false);
+        }
+        return false;
+      };
+
+      bNode *bw = bke::node_add_static_node(nullptr, tree, SH_NODE_RGBTOBW);
+      bNode *ramp = bke::node_add_static_node(nullptr, tree, SH_NODE_VALTORGB);
+      if (bw == nullptr || ramp == nullptr || ramp->storage == nullptr) {
+        if (bw != nullptr) {
+          nodes.append(bw);
+        }
+        if (ramp != nullptr) {
+          nodes.append(ramp);
+        }
+        return discard();
+      }
+      nodes.append(bw);
+      nodes.append(ramp);
+      grid_.place_extra(*bw);
+      grid_.place_extra(*ramp);
+      *static_cast<ColorBand *>(ramp->storage) = *band;
+
+      bNodeSocket *bw_color = socket_in(*bw, "Color");
+      bNodeSocket *bw_val = socket_out(*bw, "Val");
+      bNodeSocket *ramp_fac = socket_in(*ramp, "Fac");
+      bNodeSocket *ramp_color = socket_out(*ramp, "Color");
+      bNodeSocket *ramp_alpha = socket_out(*ramp, "Alpha");
+      if (bw_color == nullptr || bw_val == nullptr || ramp_fac == nullptr ||
+          ramp_color == nullptr || ramp_alpha == nullptr)
+      {
+        return discard();
+      }
+      bke::node_add_link(tree, *content.node, *content.socket, *bw, *bw_color);
+      bke::node_add_link(tree, *bw, *bw_val, *ramp, *ramp_fac);
+
+      bNode *mix = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
+      bNodeSocket *a = (mix != nullptr) ? socket_in(*mix, "A_Color") : nullptr;
+      bNodeSocket *b = (mix != nullptr) ? socket_in(*mix, "B_Color") : nullptr;
+      bNodeSocket *fac = (mix != nullptr) ? socket_in(*mix, "Factor_Float") : nullptr;
+      bNodeSocket *out = (mix != nullptr) ? socket_out(*mix, "Result_Color") : nullptr;
+      if (mix == nullptr || a == nullptr || b == nullptr || fac == nullptr || out == nullptr) {
+        if (mix != nullptr) {
+          bke::node_remove_node(nullptr, tree, *mix, true, false);
+        }
+        return discard();
+      }
+      nodes.append(mix);
+      grid_.place_extra(*mix);
+      bke::node_add_link(tree, *content.node, *content.socket, *mix, *a);
+      bke::node_add_link(tree, *ramp, *ramp_color, *mix, *b);
+      NodeOutput mix_strength = strength;
+      if (!in_mask) {
+        /* `strength * lerp(1, ramp alpha, affect_alpha)` in the shape `1 + affect * (alpha - 1)`,
+         * a fixed tree for either mode: at 0 it is exactly the strength. */
+        bNodeSocket *affect = group_input_socket(
+            group, *(*params)[PAINT_LAYER_COLOR_RAMP_AFFECT_ALPHA]);
+        bNode *less_node = math_constant_node_add(
+            tree, grid_, nodes, NODE_MATH_SUBTRACT, {ramp, ramp_alpha}, 1.0f);
+        if (affect == nullptr || less_node == nullptr) {
+          return discard();
+        }
+        const NodeOutput alpha_less_one = {less_node, socket_out(*less_node, "Value")};
+        const NodeOutput weighted = math_node_add(
+            tree, grid_, nodes, NODE_MATH_MULTIPLY, {group.group_input, affect}, alpha_less_one);
+        bNode *k_node = (weighted.socket != nullptr) ?
+                            math_constant_node_add(
+                                tree, grid_, nodes, NODE_MATH_ADD, weighted, 1.0f) :
+                            nullptr;
+        if (k_node == nullptr) {
+          return discard();
+        }
+        mix_strength = math_node_add(tree,
+                                     grid_,
+                                     nodes,
+                                     NODE_MATH_MULTIPLY,
+                                     strength,
+                                     {k_node, socket_out(*k_node, "Value")});
+        if (mix_strength.socket == nullptr) {
+          return discard();
+        }
+      }
+      bke::node_add_link(tree, *mix_strength.node, *mix_strength.socket, *mix, *fac);
+      content = {mix, out};
+      layout::frame_add(tree, effect.name, nodes);
+      return true;
+    }
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
       /* Map-coverage operators only exist in a mask, where #map_coverage_match_add builds them. */

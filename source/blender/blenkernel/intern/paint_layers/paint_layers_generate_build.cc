@@ -817,6 +817,11 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
       acts |= paint_layer_effect_filters(ma_, filter, channel);
     }
     for (int i = 0; acts && i < kind->params_num; i++) {
+      /* A ramp is no scalar: the generator copies its band into a node, so an input for it would
+       * be dead. It is the last parameter, so the indices of the others stay the schema's. */
+      if (kind->params[i].type == PaintLayerKindParamType::Ramp) {
+        continue;
+      }
       char base[200];
       SNPRINTF(base, "%s %s %s", layer_name, paint_layer_effect_label(filter), kind->params[i].label);
       bNodeTreeInterfaceSocket *param = layer_group_value_input(

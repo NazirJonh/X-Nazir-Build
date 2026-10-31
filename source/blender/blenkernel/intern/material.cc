@@ -148,6 +148,7 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
     MEM_delete(layer->curve_patch);
     layer->curve_patch = nullptr;
   }
+  MEM_SAFE_DELETE(layer->ramp);
   /* The ID users of the parameters are released by the generic free pass through
    * #material_paint_layer_foreach_id, like the channel maps. */
   if (layer->system_properties != nullptr) {
@@ -222,6 +223,8 @@ static MaterialPaintLayer *material_paint_layer_copy(Main *bmain,
                                       nullptr;
   /* The generator payload is plain sub-data owned by the row, so the copy gets one of its own. */
   BKE_paint_layers_gradient_copy(*dst, src);
+  dst->ramp = (src.ramp != nullptr) ? static_cast<MaterialPaintLayerRamp *>(MEM_dupalloc(src.ramp)) :
+                                      nullptr;
   /* Like the channel maps, the users of ID parameters are added by the generic copy pass. */
   if (src.system_properties != nullptr) {
     dst->system_properties = IDP_CopyProperty_ex(src.system_properties,
@@ -317,6 +320,9 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
   if (layer.curve_patch != nullptr) {
     writer->write_struct(layer.curve_patch);
   }
+  if (layer.ramp != nullptr) {
+    writer->write_struct(layer.ramp);
+  }
   if (layer.system_properties != nullptr) {
     IDP_BlendWrite(writer, layer.system_properties);
   }
@@ -365,6 +371,7 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
      * give it the defaults so the generated graph and the CPU have something to read. */
     BKE_paint_layers_gradient_ensure(layer);
   }
+  BLO_read_struct(reader, MaterialPaintLayerRamp, &layer.ramp);
   if (layer.bake != nullptr && !BLO_read_data_is_undo(reader)) {
     /* The bake maps are generated images whose pixels the file does not keep, and the pixel-edit
      * subscription that vouches for them is runtime only. A loaded bake therefore proves nothing:

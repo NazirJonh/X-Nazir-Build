@@ -380,14 +380,30 @@ def _draw_mask_output(layout, record, item):
     panel.operator("paint.mask_item_bake", text="Bake to Image", icon='IMAGE_DATA')
 
 
+def draw_material_kind_params(layout, params):
+    """The parameters of a row's kind, each drawn as its type asks.
+
+    A float draws as a slider, an integer as a number field, an enum as a menu, a color as a
+    picker; the value is whichever property of the parameter carries its type.
+    """
+    for param in params:
+        _draw_kind_param(layout, param)
+
+
 def _draw_kind_param(layout, param):
     """One parameter of a row's kind, drawn as its type asks.
 
-    A float draws as a slider; the value is the property of the parameter that carries its type.
-    Typed parameters (an enum as a menu, a color as a picker) draw here once the kind schema
-    carries them; every parameter is a float in this version.
+    A float draws as a slider, an integer as a number field, an enum as a menu, a color as a
+    picker; the value is whichever property of the parameter carries its type.
     """
-    layout.prop(param, "value", text=param.label, slider=True)
+    if param.type == 'ENUM':
+        layout.prop(param, "enum_value", text=param.label)
+    elif param.type == 'INT':
+        layout.prop(param, "int_value", text=param.label)
+    elif param.type == 'COLOR':
+        layout.prop(param, "color_value", text=param.label)
+    else:
+        layout.prop(param, "value", text=param.label, slider=True)
 
 
 def draw_material_smart_asset_rows(layout, rows):
@@ -503,8 +519,7 @@ def draw_material_mask_coverage_item(layout, _context, item):
         )
         layout.prop(item, "color_id_mode", text="Mode", expand=True)
         if item.color_id_mode == 'SIMPLE':
-            for param in item.kind_params:
-                layout.prop(param, "value", text=param.label, slider=True)
+            draw_material_kind_params(layout, item.kind_params)
 
         # Pick Color sits right before the colours, with air above and below it.
         layout.separator()

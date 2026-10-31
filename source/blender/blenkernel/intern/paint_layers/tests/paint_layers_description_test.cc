@@ -1000,6 +1000,105 @@ TEST_F(PaintLayersDescription, rna_lists_the_parameters_of_a_filter_and_clamps_a
             0);
 }
 
+/* The stored integer property of a kind parameter, made with the range -- and, when \a items is
+ * given, the choices -- as its UI data. No built-in kind carries an Int or an Enum parameter yet
+ * (the schema is what makes one), so the tests shape the properties the way a kind's
+ * #paint_layer_kind_params_init would. */
+static IDProperty *rna_kind_param_int_property_make(MaterialPaintLayer &row,
+                                                    const char *name,
+                                                    const int value,
+                                                    const int min,
+                                                    const int max,
+                                                    const IDPropertyUIDataEnumItem *items,
+                                                    const int items_num)
+{
+  if (row.system_properties == nullptr) {
+    row.system_properties = bke::idprop::create_group("kind").release();
+  }
+  IDProperty *prop = bke::idprop::create(name, value).release();
+  IDPropertyUIDataInt *ui_data = reinterpret_cast<IDPropertyUIDataInt *>(
+      IDP_ui_data_ensure(prop));
+  ui_data->base.description = BLI_strdup(name);
+  ui_data->min = ui_data->soft_min = min;
+  ui_data->max = ui_data->soft_max = max;
+  ui_data->default_value = value;
+  ui_data->step = 1;
+  if (items != nullptr && items_num > 0) {
+    ui_data->enum_items_num = items_num;
+    ui_data->enum_items = MEM_new_array<IDPropertyUIDataEnumItem>(items_num, __func__);
+    for (const int i : IndexRange(items_num)) {
+      ui_data->enum_items[i].identifier = BLI_strdup(items[i].identifier);
+      ui_data->enum_items[i].name = BLI_strdup(items[i].name);
+      ui_data->enum_items[i].description = nullptr;
+      ui_data->enum_items[i].value = items[i].value;
+      ui_data->enum_items[i].icon = 0;
+    }
+  }
+  IDP_ReplaceInGroup(row.system_properties, prop);
+  return prop;
+}
+
+TEST_F(PaintLayersDescription, rna_kind_params_carry_their_type)
+{
+  Material *ma = BKE_material_add(bmain, "RnaTypedParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+
+  /* An integer parameter with a range, and an integer one with choices: what a future kind's
+   * schema would make. */
+  rna_kind_param_int_property_make(*row, "steps", 4, 2, 64, nullptr, 0);
+  IDPropertyUIDataEnumItem items[2];
+  items[0].identifier = const_cast<char *>("ADD");
+  items[0].name = const_cast<char *>("Add");
+  items[0].value = 0;
+  items[1].identifier = const_cast<char *>("SUBTRACT");
+  items[1].name = const_cast<char *>("Subtract");
+  items[1].value = 1;
+  rna_kind_param_int_property_make(*row, "operation", 0, 0, 1, items, 2);
+
+  PointerRNA layer_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, row);
+  PropertyRNA *params = RNA_struct_find_property(&layer_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&layer_ptr, params), 2);
+
+  /* The integer one reads as an INT, its value through both the typed and the generic property,
+   * and an edit outside the range clamps to it. */
+  PointerRNA steps_ptr;
+  ASSERT_TRUE(RNA_property_collection_lookup_string(&layer_ptr, params, "steps", &steps_ptr));
+  PropertyRNA *type_prop = RNA_struct_find_property(&steps_ptr, "type");
+  ASSERT_NE(type_prop, nullptr);
+  EXPECT_EQ(RNA_property_enum_get(&steps_ptr, type_prop), 1); /* INT */
+  PropertyRNA *int_value = RNA_struct_find_property(&steps_ptr, "int_value");
+  ASSERT_NE(int_value, nullptr);
+  EXPECT_EQ(RNA_property_int_get(&steps_ptr, int_value), 4);
+  RNA_property_int_set(&steps_ptr, int_value, 100);
+  EXPECT_EQ(RNA_property_int_get(&steps_ptr, int_value), 64);
+  EXPECT_EQ(paint_layer_kind_param_int_get(*row, 0), 0) << "no built-in kind owns this parameter";
+  PropertyRNA *value = RNA_struct_find_property(&steps_ptr, "value");
+  ASSERT_NE(value, nullptr);
+  EXPECT_FLOAT_EQ(RNA_property_float_get(&steps_ptr, value), 64.0f);
+
+  /* The one with choices reads as an ENUM, offers them from the UI data and round-trips. */
+  PointerRNA op_ptr;
+  ASSERT_TRUE(RNA_property_collection_lookup_string(&layer_ptr, params, "operation", &op_ptr));
+  EXPECT_EQ(RNA_property_enum_get(&op_ptr, type_prop), 2); /* ENUM */
+  PropertyRNA *enum_value = RNA_struct_find_property(&op_ptr, "enum_value");
+  ASSERT_NE(enum_value, nullptr);
+  const EnumPropertyItem *menu = nullptr;
+  int menu_num = 0;
+  bool menu_free = false;
+  RNA_property_enum_items(nullptr, &op_ptr, enum_value, &menu, &menu_num, &menu_free);
+  ASSERT_EQ(menu_num, 2);
+  EXPECT_STREQ(menu[0].identifier, "ADD");
+  EXPECT_STREQ(menu[1].identifier, "SUBTRACT");
+  if (menu_free) {
+    MEM_freeN(const_cast<EnumPropertyItem *>(menu));
+  }
+  RNA_property_enum_set(&op_ptr, enum_value, 1);
+  EXPECT_EQ(RNA_property_enum_get(&op_ptr, enum_value), 1);
+  EXPECT_EQ(RNA_property_int_get(&op_ptr, int_value), 1);
+}
+
 TEST_F(PaintLayersDescription, rna_paint_layers_collection_is_registered)
 {
   Material *ma = BKE_material_add(bmain, "RnaLayersMat");

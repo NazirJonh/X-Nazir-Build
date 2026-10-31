@@ -24,6 +24,7 @@
 
 #include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
+#include "BKE_colorband.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
@@ -449,6 +450,12 @@ class GraphInterpreter {
                                                          vector.b;
         return {value, value, value, value};
       }
+      case SH_NODE_COMBXYZ: {
+        const RGBA x = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "X"_ustr));
+        const RGBA y = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Y"_ustr));
+        const RGBA z = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Z"_ustr));
+        return {x.r, y.r, z.r, 1.0f};
+      }
       case SH_NODE_VECTOR_MATH: {
         const RGBA vector = eval_socket(
             *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
@@ -477,6 +484,19 @@ class GraphInterpreter {
           const RGBA other = eval_socket(
               *bke::node_find_socket(mutable_node, SOCK_IN, "Vector_001"_ustr));
           return {vector.r * other.r, vector.g * other.g, vector.b * other.b, 1.0f};
+        }
+        if (node.custom1 == NODE_VECTOR_MATH_ADD) {
+          const RGBA other = eval_socket(
+              *bke::node_find_socket(mutable_node, SOCK_IN, "Vector_001"_ustr));
+          return {vector.r + other.r, vector.g + other.g, vector.b + other.b, 1.0f};
+        }
+        if (node.custom1 == NODE_VECTOR_MATH_SUBTRACT) {
+          const RGBA other = eval_socket(
+              *bke::node_find_socket(mutable_node, SOCK_IN, "Vector_001"_ustr));
+          return {vector.r - other.r, vector.g - other.g, vector.b - other.b, 1.0f};
+        }
+        if (node.custom1 == NODE_VECTOR_MATH_FLOOR) {
+          return {floorf(vector.r), floorf(vector.g), floorf(vector.b), 1.0f};
         }
         if (node.custom1 == NODE_VECTOR_MATH_DIVIDE) {
           /* Per component, zero where the divisor is zero: what an empty folder relies on. */
@@ -543,6 +563,28 @@ class GraphInterpreter {
                 std::max(a * color.g + b, 0.0f),
                 std::max(a * color.b + b, 0.0f),
                 color.a};
+      }
+      case SH_NODE_RGBTOBW: {
+        /* The node's scene-linear Rec.709 luminance, the same coefficients the CPU ramp reads. */
+        const RGBA color = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Color"_ustr));
+        const float value =
+            0.2126f * color.r + 0.7152f * color.g + 0.0722f * color.b;
+        return {value, value, value, value};
+      }
+      case SH_NODE_VALTORGB: {
+        const RGBA fac = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Fac"_ustr));
+        const ColorBand *band = static_cast<const ColorBand *>(node.storage);
+        float ramp_color[4];
+        if (band != nullptr &&
+            BKE_colorband_evaluate(band, std::clamp(fac.r, 0.0f, 1.0f), ramp_color))
+        {
+          /* The Alpha output is a float: a consumer reads its `.r`. */
+          if (STREQ(out_identifier, "Alpha")) {
+            return {ramp_color[3], ramp_color[3], ramp_color[3], ramp_color[3]};
+          }
+          return {ramp_color[0], ramp_color[1], ramp_color[2], ramp_color[3]};
+        }
+        return {};
       }
       default:
         return {};

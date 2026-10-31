@@ -53,6 +53,7 @@ class ColorSpace;
 }
 using ColorSpace = ocio::ColorSpace;
 
+struct ColorBand;
 struct ImBuf;
 struct Image;
 struct Main;
@@ -382,6 +383,8 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
   int16_t adjustment_filter = 0;
   /** The adjustment's parameters in its kind's schema order. */
   float adjustment_params[8] = {};
+  /** The Color Band a ramp filter (Color Ramp) reads, or null for every other filter. */
+  const ColorBand *adjustment_ramp = nullptr;
   /**
    * An Anchor Point slice laid as a row: straight colour and content alpha, plus the coverage it
    * lays (a grey in RGB). The description owns a reference (the slice cache may evict and clear its
@@ -413,6 +416,8 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   int16_t filter = 0;
   /** The filter's parameters in its kind's schema order. */
   float filter_params[8] = {};
+  /** The Color Band a ramp filter (Color Ramp) reads, or null. */
+  const ColorBand *filter_ramp = nullptr;
   Image *image = nullptr;
   /** Null selects the default #ImageUser. */
   const ImageUser *iuser = nullptr;
@@ -452,6 +457,7 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   /** See #PaintMaterialCompositeCorrection::filter. */
   int16_t filter = 0;
   float filter_params[8] = {};
+  const ColorBand *filter_ramp = nullptr;
   ImBuf *ibuf = nullptr;
   /** Colorspace name of #ibuf's own buffer, or null for scene linear. */
   const char *colorspace_name = nullptr;
@@ -514,6 +520,8 @@ struct PaintMaterialCompositeMaskItem {
    */
   int16_t filter = 0;
   float filter_params[8] = {};
+  /** The Color Band a ramp filter (Color Ramp) reads, or null. */
+  const ColorBand *filter_ramp = nullptr;
   /** The item's UV mapping, applied to its map while the buffers are acquired. */
   PaintMaterialCompositeMapping mapping;
 
@@ -647,6 +655,7 @@ struct PaintMaterialCompositeMaskBuffer {
   /** See #PaintMaterialCompositeMaskItem::filter. */
   int16_t filter = 0;
   float filter_params[8] = {};
+  const ColorBand *filter_ramp = nullptr;
   /** See #PaintMaterialCompositeMaskItem::map_coverage. */
   int16_t map_coverage = 0;
   /** The operator's map as a buffer, or null when it has none. */

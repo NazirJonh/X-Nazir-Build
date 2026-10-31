@@ -1016,6 +1016,9 @@ static void composite_filter_color(const int16_t filter, const float *params, fl
         rgb[k] = paint_layer_levels_apply(rgb[k], params);
       }
       break;
+    case MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST:
+      paint_layer_brightness_contrast_apply(rgb, params);
+      break;
     default:
       break;
   }

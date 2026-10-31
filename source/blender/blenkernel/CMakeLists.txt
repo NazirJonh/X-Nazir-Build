@@ -282,6 +282,7 @@ set(SRC
   intern/paint_layers/paint_layers_generate_build.cc
   intern/paint_layers/paint_layers_generate_build_chain.cc
   intern/paint_layers/paint_layers_generate_build_height.cc
+  intern/paint_layers/paint_layers_generate_build_filter.cc
   intern/paint_layers/paint_layers_generate_build_intern.hh
   intern/paint_layers/paint_layers_generate_common.cc
   intern/paint_layers/paint_layers_generate_intern.hh

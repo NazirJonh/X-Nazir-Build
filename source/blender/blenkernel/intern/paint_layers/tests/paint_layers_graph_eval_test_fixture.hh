@@ -10,8 +10,9 @@
  * This is *not* the "render == CPU" test: a tiny interpreter evaluates the generated group at one
  * pixel for the narrow set of nodes the generator emits -- Image Texture (read at the pixel, or
  * through a Mapping), Texture Coordinate, Mapping, Mix (through the same #ramp_blend the CPU uses),
- * Math (with Floor and Compare, the UV wrap's clip factor), Vector Math, Value, RGB, group
- * input/output and the Normal Combine group -- and the result
+ * Math (with Floor and Compare, the UV wrap's clip factor), Vector Math, Value, RGB, Group Input,
+ * Hue/Saturation/Value, Gamma, Brightness/Contrast, group input/output and the Normal Combine
+ * group -- and the result
  * is compared with #BKE_paint_layers_composite_image_layers
  * evaluated at the same pixel.
  *
@@ -528,6 +529,20 @@ class GraphInterpreter {
           return value > 0.0f ? powf(value, gamma) : value;
         };
         return {raise(color.r), raise(color.g), raise(color.b), color.a};
+      }
+      case SH_NODE_BRIGHTCONTRAST: {
+        /* The node's own function, written out here so the CPU filter is not its own witness. */
+        const RGBA color = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Color"_ustr));
+        const float brightness =
+            eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Bright"_ustr)).r;
+        const float contrast =
+            eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Contrast"_ustr)).r;
+        const float a = 1.0f + contrast;
+        const float b = brightness - contrast * 0.5f;
+        return {std::max(a * color.r + b, 0.0f),
+                std::max(a * color.g + b, 0.0f),
+                std::max(a * color.b + b, 0.0f),
+                color.a};
       }
       default:
         return {};

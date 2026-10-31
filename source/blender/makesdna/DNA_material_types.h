@@ -780,6 +780,7 @@ enum eMaterialPaintLayerFilter : int16_t {
   MA_PAINT_LAYER_FILTER_COLOR_ID = 4,
   /** A map-driven mask coverage operator: matches the island mask of the element's Base Color map. */
   MA_PAINT_LAYER_FILTER_UV_ISLAND = 5,
+  MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST = 6,
 };
 
 /**

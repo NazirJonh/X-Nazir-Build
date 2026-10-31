@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 
 #include "BLI_function_ref.hh"
@@ -183,6 +184,13 @@ enum PaintLayerHslParam : int {
   PAINT_LAYER_HSL_PARAM_NUM = 3,
 };
 
+/** The positions of the Brightness/Contrast filter's parameters in its schema. */
+enum PaintLayerBrightnessContrastParam : int {
+  PAINT_LAYER_BRIGHTNESS_CONTRAST_BRIGHTNESS = 0,
+  PAINT_LAYER_BRIGHTNESS_CONTRAST_CONTRAST = 1,
+  PAINT_LAYER_BRIGHTNESS_CONTRAST_PARAM_NUM = 2,
+};
+
 /** The positions of a map-coverage operator's parameters in its schema. */
 enum PaintLayerCoverageParam : int {
   /** How far a sample may differ from a stored colour and still match (max-channel). */
@@ -217,6 +225,23 @@ inline float paint_layer_levels_apply(const float value, const float params[PAIN
   }
   return t * (params[PAINT_LAYER_LEVELS_OUT_WHITE] - params[PAINT_LAYER_LEVELS_OUT_BLACK]) +
          params[PAINT_LAYER_LEVELS_OUT_BLACK];
+}
+
+/**
+ * The Brightness/Contrast filter applied to \a rgb in place, at full strength: the
+ * Brightness/Contrast shader node's function, `out = max(a * in + b, 0)` with `a = 1 + contrast`
+ * and `b = brightness - contrast * 0.5`, so the CPU composite and the generated node agree. Alpha is
+ * not part of \a rgb and so stays untouched.
+ */
+inline void paint_layer_brightness_contrast_apply(
+    float rgb[3], const float params[PAINT_LAYER_BRIGHTNESS_CONTRAST_PARAM_NUM])
+{
+  const float contrast = params[PAINT_LAYER_BRIGHTNESS_CONTRAST_CONTRAST];
+  const float a = 1.0f + contrast;
+  const float b = params[PAINT_LAYER_BRIGHTNESS_CONTRAST_BRIGHTNESS] - contrast * 0.5f;
+  for (int i = 0; i < 3; i++) {
+    rgb[i] = std::max(a * rgb[i] + b, 0.0f);
+  }
 }
 
 /**

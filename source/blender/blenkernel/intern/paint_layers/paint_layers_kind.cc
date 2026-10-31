@@ -41,6 +41,13 @@ static const PaintLayerKindParam hsl_params[] = {
 };
 static_assert(std::size(hsl_params) == PAINT_LAYER_HSL_PARAM_NUM);
 
+static const PaintLayerKindParam brightness_contrast_params[] = {
+    {"brightness", "Brightness", 0.0f, -1.0f, 1.0f},
+    {"contrast", "Contrast", 0.0f, -1.0f, 1.0f},
+};
+static_assert(std::size(brightness_contrast_params) ==
+              PAINT_LAYER_BRIGHTNESS_CONTRAST_PARAM_NUM);
+
 static const PaintLayerKindParam coverage_params[] = {
     /* Half the range: a pick matches the whole region of its colour, not only the exact texel value. */
     {"tolerance", "Tolerance", 0.5f, 0.0f, 1.0f},
@@ -152,6 +159,14 @@ static const PaintLayerKindInfo kinds[] = {
      filter_roles,
      hsl_params,
      int(std::size(hsl_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST,
+     "Brightness Contrast",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     brightness_contrast_params,
+     int(std::size(brightness_contrast_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* A map-coverage operator: the map of its Base Color record is an external ID Map, so the map
      * is reference-only and a stroke must not turn it into a paint target. */

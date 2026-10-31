@@ -405,6 +405,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
       return {ICON_IMAGE_ALPHA, paint_glyph::LEVELS};
     case MA_PAINT_LAYER_FILTER_HSL:
       return {ICON_COLOR, paint_glyph::HSL};
+    case MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST:
+      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
+      return {ICON_COLOR, 0};
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
       return {ICON_COLOR, paint_glyph::COLORIZE};
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
@@ -489,6 +492,10 @@ static const PaintFilterAddKind paint_filter_add_kinds[] = {
      N_("Hue Saturation Value"),
      "Shift the active layer's hue, saturation and value",
      MA_PAINT_LAYER_FILTER_HSL},
+    {"FILTER_BRIGHTNESS_CONTRAST",
+     N_("Brightness/Contrast"),
+     "Brighten or darken the active layer and scale its contrast",
+     MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST},
 };
 
 /**

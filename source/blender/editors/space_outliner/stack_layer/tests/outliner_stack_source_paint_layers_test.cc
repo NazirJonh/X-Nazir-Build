@@ -129,7 +129,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
   /* The order #StackEditor::row_add dispatches by index. */
-  ASSERT_EQ(kinds.size(), 29u);
+  ASSERT_EQ(kinds.size(), 32u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
@@ -152,53 +152,57 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_TRUE(kinds[8].is_effect);
   EXPECT_EQ(kinds[9].identifier, "FILTER_HSL");
   EXPECT_TRUE(kinds[9].is_effect);
+  EXPECT_EQ(kinds[10].identifier, "FILTER_BRIGHTNESS_CONTRAST");
+  EXPECT_TRUE(kinds[10].is_effect);
   /* The same filters again as rows of the stack, in the same order. */
-  EXPECT_EQ(kinds[10].identifier, "ADJUSTMENT_INVERT");
-  EXPECT_FALSE(kinds[10].is_effect);
-  EXPECT_EQ(kinds[11].identifier, "ADJUSTMENT_LEVELS");
-  EXPECT_EQ(kinds[12].identifier, "ADJUSTMENT_HSL");
-  EXPECT_FALSE(kinds[12].is_effect);
+  EXPECT_EQ(kinds[11].identifier, "ADJUSTMENT_INVERT");
+  EXPECT_FALSE(kinds[11].is_effect);
+  EXPECT_EQ(kinds[12].identifier, "ADJUSTMENT_LEVELS");
+  EXPECT_EQ(kinds[13].identifier, "ADJUSTMENT_HSL");
+  EXPECT_FALSE(kinds[13].is_effect);
+  EXPECT_EQ(kinds[14].identifier, "ADJUSTMENT_BRIGHTNESS_CONTRAST");
   /* And as corrections of the mask, in no channel. */
-  EXPECT_EQ(kinds[13].identifier, "MASK_FILTER_INVERT");
-  EXPECT_TRUE(kinds[13].is_effect);
-  EXPECT_EQ(kinds[15].identifier, "MASK_FILTER_HSL");
+  EXPECT_EQ(kinds[15].identifier, "MASK_FILTER_INVERT");
+  EXPECT_TRUE(kinds[15].is_effect);
+  EXPECT_EQ(kinds[17].identifier, "MASK_FILTER_HSL");
+  EXPECT_EQ(kinds[18].identifier, "MASK_FILTER_BRIGHTNESS_CONTRAST");
   /* The map-driven filters follow, only as corrections of the mask. */
-  EXPECT_EQ(kinds[16].identifier, "MASK_FILTER_COLOR_ID");
-  EXPECT_TRUE(kinds[16].is_effect);
-  EXPECT_EQ(kinds[17].identifier, "MASK_FILTER_UV_ISLAND");
-  EXPECT_TRUE(kinds[17].is_effect);
-  /* Last, so no index above moves: the kind a dropped material is made into. */
-  EXPECT_EQ(kinds[18].identifier, "MATERIAL");
-  EXPECT_EQ(kinds[18].source_id_type, ID_MA);
-  EXPECT_EQ(kinds[19].identifier, "CORRECTION_MATERIAL");
-  EXPECT_EQ(kinds[19].source_id_type, ID_MA);
-  EXPECT_TRUE(kinds[19].is_effect) << "listed with the other corrections";
-  EXPECT_EQ(kinds[20].identifier, "MASK_CORRECTION_MATERIAL");
-  EXPECT_EQ(kinds[20].source_id_type, ID_MA);
+  EXPECT_EQ(kinds[19].identifier, "MASK_FILTER_COLOR_ID");
+  EXPECT_TRUE(kinds[19].is_effect);
+  EXPECT_EQ(kinds[20].identifier, "MASK_FILTER_UV_ISLAND");
   EXPECT_TRUE(kinds[20].is_effect);
-  /* The marker and the three places its reader can land are last, so no index above moves. */
-  EXPECT_EQ(kinds[21].identifier, "ANCHOR_POINT");
-  EXPECT_TRUE(kinds[21].is_effect);
-  EXPECT_EQ(kinds[22].identifier, "ANCHOR_POINT_LAYER");
-  EXPECT_FALSE(kinds[22].is_effect);
-  EXPECT_EQ(kinds[23].identifier, "ANCHOR_POINT_CORRECTION");
+  /* Last, so no index above moves: the kind a dropped material is made into. */
+  EXPECT_EQ(kinds[21].identifier, "MATERIAL");
+  EXPECT_EQ(kinds[21].source_id_type, ID_MA);
+  EXPECT_EQ(kinds[22].identifier, "CORRECTION_MATERIAL");
+  EXPECT_EQ(kinds[22].source_id_type, ID_MA);
+  EXPECT_TRUE(kinds[22].is_effect) << "listed with the other corrections";
+  EXPECT_EQ(kinds[23].identifier, "MASK_CORRECTION_MATERIAL");
+  EXPECT_EQ(kinds[23].source_id_type, ID_MA);
   EXPECT_TRUE(kinds[23].is_effect);
-  EXPECT_EQ(kinds[24].identifier, "ANCHOR_POINT_MASK_CORRECTION");
+  /* The marker and the three places its reader can land are last, so no index above moves. */
+  EXPECT_EQ(kinds[24].identifier, "ANCHOR_POINT");
   EXPECT_TRUE(kinds[24].is_effect);
-  EXPECT_FALSE(kinds[18].is_effect);
+  EXPECT_EQ(kinds[25].identifier, "ANCHOR_POINT_LAYER");
+  EXPECT_FALSE(kinds[25].is_effect);
+  EXPECT_EQ(kinds[26].identifier, "ANCHOR_POINT_CORRECTION");
+  EXPECT_TRUE(kinds[26].is_effect);
+  EXPECT_EQ(kinds[27].identifier, "ANCHOR_POINT_MASK_CORRECTION");
+  EXPECT_TRUE(kinds[27].is_effect);
+  EXPECT_FALSE(kinds[21].is_effect);
   EXPECT_FALSE(kinds[15].takes_color);
   /* Last of all: a procedural Gradient layer, a row of the stack rather than a correction, then
    * the same generator in its two correction roles. */
-  EXPECT_EQ(kinds[25].identifier, "GRADIENT");
-  EXPECT_FALSE(kinds[25].is_effect);
-  EXPECT_FALSE(kinds[25].takes_color);
-  EXPECT_EQ(kinds[26].identifier, "CORRECTION_GRADIENT");
-  EXPECT_TRUE(kinds[26].is_effect);
-  EXPECT_EQ(kinds[27].identifier, "MASK_CORRECTION_GRADIENT");
-  EXPECT_TRUE(kinds[27].is_effect);
+  EXPECT_EQ(kinds[28].identifier, "GRADIENT");
+  EXPECT_FALSE(kinds[28].is_effect);
+  EXPECT_FALSE(kinds[28].takes_color);
+  EXPECT_EQ(kinds[29].identifier, "CORRECTION_GRADIENT");
+  EXPECT_TRUE(kinds[29].is_effect);
+  EXPECT_EQ(kinds[30].identifier, "MASK_CORRECTION_GRADIENT");
+  EXPECT_TRUE(kinds[30].is_effect);
   /* Then the Curve Patch, only ever an effect of a layer. */
-  EXPECT_EQ(kinds[28].identifier, "CURVE_PATCH_CORRECTION");
-  EXPECT_TRUE(kinds[28].is_effect);
+  EXPECT_EQ(kinds[31].identifier, "CURVE_PATCH_CORRECTION");
+  EXPECT_TRUE(kinds[31].is_effect);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, glyph_constants_stay_in_step_with_space_outliner)
@@ -244,7 +248,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
   const Vector<StackEffectMenuKind> content = kinds_for(PAINT_LAYER_TARGET_CONTENT);
   const Vector<StackEffectMenuKind> mask = kinds_for(PAINT_LAYER_TARGET_MASK);
 
-  /* One line per thing: the mask twins are folded into the content entries in either mode. */
+  /* One line per thing: in the content mode a mask twin is not offered, in the mask mode the line
+   * resolves to its own twin. */
   for (const char *twin : {"MASK_CORRECTION",
                            "MASK_CORRECTION_FILL",
                            "MASK_CORRECTION_MATERIAL",
@@ -252,7 +257,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
                            "MASK_CORRECTION_GRADIENT"})
   {
     EXPECT_FALSE(has_identifier(content, twin));
-    EXPECT_FALSE(has_identifier(mask, twin));
+    EXPECT_TRUE(has_identifier(mask, twin));
   }
 
   /* The line keeps its short name and resolves to the role of the target: the content kind in one
@@ -982,8 +987,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest,
   EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, target, &hint));
   EXPECT_NE(hint, nullptr);
 
-  /* Anything that is not a material is not this drop's business. */
-  payload.id_type = ID_IM;
+  /* Anything no drop action handles is not this drop's business. */
+  payload.id_type = ID_OB;
   payload.id_uid = 1;
   hint = nullptr;
   EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, target, &hint));
@@ -1284,13 +1289,14 @@ TEST_F(OutlinerStackPaintLayersSourceTest,
 
   Vector<StackAddKindInfo> kinds;
   source().editor()->add_kinds(kinds);
-  ASSERT_EQ(kinds.size(), 29u);
-  EXPECT_EQ(kinds[24].identifier, "ANCHOR_POINT_MASK_CORRECTION")
+  ASSERT_EQ(kinds.size(), 32u);
+  EXPECT_EQ(kinds[27].identifier, "ANCHOR_POINT_MASK_CORRECTION")
       << "row_add dispatches by index, last of the Anchor Point kinds";
-  EXPECT_EQ(kinds[25].identifier, "GRADIENT")
+  EXPECT_EQ(kinds[28].identifier, "GRADIENT")
       << "the Gradient kind is appended after every other kind";
-  EXPECT_EQ(kinds[26].identifier, "CORRECTION_GRADIENT");
-  EXPECT_EQ(kinds[27].identifier, "MASK_CORRECTION_GRADIENT");
+  EXPECT_EQ(kinds[29].identifier, "CORRECTION_GRADIENT");
+  EXPECT_EQ(kinds[30].identifier, "MASK_CORRECTION_GRADIENT");
+  EXPECT_EQ(kinds[31].identifier, "CURVE_PATCH_CORRECTION");
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_marker_after_active_correction)
@@ -1304,7 +1310,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_marker_after_active_corr
   ASSERT_GE(ordinal, 0);
 
   /* The Add button's real path: the marker lands right after the active correction. */
-  const int created = row_add(22 /* ANCHOR_POINT */, ordinal);
+  const int created = row_add(24 /* ANCHOR_POINT */, ordinal);
   ASSERT_GE(created, 0);
   MaterialPaintLayer *point = paint_description_row_for_ordinal(*material, created);
   ASSERT_NE(point, nullptr);
@@ -1325,7 +1331,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_marker_with_active_mask_
   const int ordinal = paint_layers_ordinal_of(*material, item);
   ASSERT_GE(ordinal, 0);
 
-  const int created = row_add(22 /* ANCHOR_POINT */, ordinal);
+  const int created = row_add(24 /* ANCHOR_POINT */, ordinal);
   ASSERT_GE(created, 0);
   MaterialPaintLayer *point = paint_description_row_for_ordinal(*material, created);
   ASSERT_NE(point, nullptr);

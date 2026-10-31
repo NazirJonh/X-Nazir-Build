@@ -253,6 +253,7 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_INVERT 1
 #define COMBINED_FILTER_LEVELS 2
 #define COMBINED_FILTER_HSL 3
+#define COMBINED_FILTER_BRIGHTNESS_CONTRAST 6
 
 float levels_channel(float value, float4 p0, float4 p1)
 {
@@ -288,6 +289,12 @@ float3 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1)
       hsv.y = clamp(hsv.y * p0.y, 0.0f, 1.0f);
       hsv.z = hsv.z * p0.z;
       result = max(hsv_to_rgb3(hsv), float3(0.0f));
+      break;
+    }
+    case COMBINED_FILTER_BRIGHTNESS_CONTRAST: {
+      float a = 1.0f + p0.y;
+      float b = p0.x - p0.y * 0.5f;
+      result = max(a * rgb + b, float3(0.0f));
       break;
     }
     default:

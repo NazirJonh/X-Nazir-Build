@@ -126,6 +126,69 @@ TEST_F(PaintLayersLevelsTest, a_parameter_is_clamped_to_its_range)
   EXPECT_FALSE(paint_layer_kind_param_set(*levels, 99, 1.0f));
 }
 
+class PaintLayersBrightnessContrastTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_brightness_contrast(MaterialPaintLayer &row,
+                                              const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+
+  static void params_set(MaterialPaintLayer &filter,
+                         const float brightness,
+                         const float contrast)
+  {
+    EXPECT_TRUE(paint_layer_kind_param_set(
+        filter, PAINT_LAYER_BRIGHTNESS_CONTRAST_BRIGHTNESS, brightness));
+    EXPECT_TRUE(
+        paint_layer_kind_param_set(filter, PAINT_LAYER_BRIGHTNESS_CONTRAST_CONTRAST, contrast));
+  }
+};
+
+TEST_F(PaintLayersBrightnessContrastTest, brightness_contrast_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *bc = add_brightness_contrast(*row, 0.7f);
+  /* The dark channels go below zero, so both sides must clamp them there. */
+  params_set(*bc, -0.5f, 0.5f);
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersBrightnessContrastTest, default_parameters_leave_the_colour_alone)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  add_brightness_contrast(*row);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, before.r, 2e-3f);
+  EXPECT_NEAR(after.g, before.g, 2e-3f);
+  EXPECT_NEAR(after.b, before.b, 2e-3f);
+}
+
+TEST_F(PaintLayersBrightnessContrastTest, a_parameter_is_clamped_to_its_range)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *bc = add_brightness_contrast(*row);
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_BRIGHTNESS), 0.0f);
+  EXPECT_TRUE(paint_layer_kind_param_set(
+      *bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_BRIGHTNESS, 2.0f));
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_BRIGHTNESS), 1.0f);
+  EXPECT_TRUE(paint_layer_kind_param_set(
+      *bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_CONTRAST, -2.0f));
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_CONTRAST), -1.0f);
+}
+
 class PaintLayersHslTest : public PaintLayersFilterTest {
  public:
   MaterialPaintLayer *add_hsl(MaterialPaintLayer &row, const float opacity = 1.0f)
@@ -247,6 +310,20 @@ TEST_F(PaintLayersAdjustmentTest, levels_and_hsl_adjustments_match_the_cpu)
   MaterialPaintLayer *hsl = add_adjustment(MA_PAINT_LAYER_FILTER_HSL, 0.7f);
   ASSERT_NE(hsl, nullptr);
   EXPECT_TRUE(paint_layer_kind_param_set(*hsl, PAINT_LAYER_HSL_SATURATION, 1.5f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersAdjustmentTest, brightness_contrast_adjustment_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *bc = add_adjustment(MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST, 0.8f);
+  ASSERT_NE(bc, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_set(
+      *bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_BRIGHTNESS, 0.2f));
+  EXPECT_TRUE(paint_layer_kind_param_set(
+      *bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_CONTRAST, 0.4f));
 
   expect_graph_matches_cpu(kColor);
 }
@@ -397,6 +474,26 @@ TEST_F(PaintLayersMaskFilterTest, levels_and_hsl_in_the_mask_work_on_its_coverag
   EXPECT_TRUE(paint_layer_kind_param_set(*hsl, PAINT_LAYER_HSL_VALUE, 0.5f));
   expect_graph_matches_cpu(kColor);
   EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.25f, 3e-3f);
+}
+
+TEST_F(PaintLayersMaskFilterTest, brightness_contrast_in_the_mask_works_on_its_coverage)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  /* `max(1.2 * 0.25 + (0.2 - 0.1), 0) = 0.4`. */
+  MaterialPaintLayer *bc = add_mask_filter(*row, MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST);
+  ASSERT_NE(bc, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_set(
+      *bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_BRIGHTNESS, 0.2f));
+  EXPECT_TRUE(paint_layer_kind_param_set(
+      *bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_CONTRAST, 0.2f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.4f, 3e-3f);
 }
 
 TEST_F(PaintLayersMaskFilterTest, a_mask_filter_needs_no_channel_and_makes_the_base_mask_itself)

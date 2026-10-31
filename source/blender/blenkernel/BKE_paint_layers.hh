@@ -1364,6 +1364,18 @@ bool BKE_paint_layers_set_source(Material &ma,
                                  eMaterialPaintLayerSource source);
 
 /**
+ * Which geometry map a #MA_PAINT_LAYER_SOURCE_MESH_MAP row reads, or -1 for any other source.
+ */
+int BKE_paint_layers_mesh_map_type_get(const MaterialPaintLayer &layer);
+
+/**
+ * Point the MESH_MAP \a layer at another #eMaterialMeshMapType. Refused for any other source, a
+ * row outside the description and a value outside the enum; a different type makes the row's read
+ * of the material atlas structural, so the material is tagged edited.
+ */
+bool BKE_paint_layers_mesh_map_type_set(Material &ma, MaterialPaintLayer *layer, int8_t type);
+
+/**
  * Whether \a from reads \a target, directly or through the sources of its own Material rows (the
  * rows of the stack, their corrections and masks, and what folders hold). A material reads itself.
  * The walk follows the descriptions only: it asks nothing of the generated trees.

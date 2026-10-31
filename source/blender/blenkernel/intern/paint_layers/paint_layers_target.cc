@@ -234,6 +234,10 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
     if (paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_GENERATES)) {
       return PaintLayersTargetStatus::RowTakesNoStrokes;
     }
+    /* A MESH_MAP row reads the material's atlas, not a map a stroke writes into. */
+    if (layer->source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+      return PaintLayersTargetStatus::RowTakesNoStrokes;
+    }
     /* Cannot paint into a channel that is not in the material's channel set. */
     if (!BKE_paint_layers_channel_in_set(ma, eMaterialPaintChannel(channel))) {
       /* The stroke gate asks with Base Color whatever the material's set holds, so a hidden row
@@ -263,6 +267,10 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
   }
   /* A Gradient mask item produces its grey from nodes; a stroke has no map to write into it. */
   if (paint_layer_kind_has_flag(*r_target.mask_item, PAINT_LAYER_KIND_GENERATES)) {
+    return PaintLayersTargetStatus::RowTakesNoStrokes;
+  }
+  /* A mesh-map mask item reads the material's atlas; there is no map a stroke writes into. */
+  if (r_target.mask_item->source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
     return PaintLayersTargetStatus::RowTakesNoStrokes;
   }
   /* A map-coverage item whose kind is reference-only (Color ID: an external ID Map) is not a

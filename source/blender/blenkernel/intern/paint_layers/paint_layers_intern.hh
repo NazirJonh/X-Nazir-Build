@@ -19,9 +19,11 @@
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
+#include "BLI_utildefines.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
+#include "BKE_mesh_maps.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_import.hh"
 
@@ -53,6 +55,39 @@ struct Main;
 struct MaterialPaintLayerBake;
 struct bNode;
 struct bNodeSocket;
+
+/**
+ * Whether a #eMaterialMeshMapType is scalar -- its R is the whole value -- rather than an RGB map.
+ *
+ * A scalar atlas (AO, Curvature, Edge) contributes its R spread across the channel's RGB; an RGB
+ * atlas (Normal, the two IDs) contributes its stored RGB as-is. The one classification the
+ * generator and the CPU composite share, so a scalar map cannot render grey on one side and
+ * coloured on the other.
+ */
+inline bool paint_layer_mesh_map_is_scalar(const int8_t type)
+{
+  return ELEM(type, MA_MESH_MAP_AO, MA_MESH_MAP_CURVATURE, MA_MESH_MAP_EDGE);
+}
+
+/**
+ * The atlas a MESH_MAP \a layer reads, when one is assigned, or null.
+ *
+ * A MESH_MAP row reads the material's atlas slot for its #MaterialPaintLayer::mesh_map_type; every
+ * channel of the row reads the same Image. The one definition the generator and the CPU composite
+ * both use, so the two cannot disagree about whether the row contributes at all. Null -- no slot or
+ * no image -- means the row contributes nothing on either side.
+ */
+inline Image *paint_layer_mesh_map_image(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if (layer.source != MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    return nullptr;
+  }
+  const MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, layer.mesh_map_type);
+  if (slot == nullptr) {
+    return nullptr;
+  }
+  return slot->image;
+}
 
 /**
  * Whether \a layer is a Material row that shows maps rendered from its source in \a channel: the
@@ -384,6 +419,10 @@ inline bool paint_layer_channel_contributes(const Material &ma,
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES)) {
     return paint_layer_channel_live(record) && record->channel != PAINT_MATERIAL_CHANNEL_NORMAL;
   }
+  /* A mesh-map row's map is the material's shared atlas, never the channel record's own image. */
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    return paint_layer_channel_live(record) && paint_layer_mesh_map_image(ma, layer) != nullptr;
+  }
   return paint_layer_channel_contributes(record);
 }
 
@@ -416,6 +455,10 @@ inline bool paint_layer_effect_lays(const Material &ma,
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
   if (!paint_layer_channel_live(record)) {
     return false;
+  }
+  /* A mesh-map correction reads the material's shared atlas; its record carries no image. */
+  if (effect.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    return paint_layer_mesh_map_image(ma, effect) != nullptr;
   }
   if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES)) {
     /* A generator correction produces its colour and coverage itself; Normal is not a colour. */

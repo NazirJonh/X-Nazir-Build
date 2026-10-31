@@ -571,6 +571,15 @@ MaterialPaintLayer *BKE_paint_layers_anchor_point_add(Material &ma,
 
 void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &layer)
 {
+  /* A MESH_MAP row reads the material's shared atlas; a layer has a single explicit participation
+   * in it, so it defaults to Base Color alone. Its records name which channels the row paints, and
+   * channels are added and removed like a Paint row's, so the user opts into more. */
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    if (paint_layer_channel_find(layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr) {
+      BKE_paint_layers_channel_add(ma, &layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    }
+    return;
+  }
   /* Every channel the material's set names gets a record. A set that was never authored derives
    * from the layer records and the build default, so this is also how the default reaches a fresh
    * stack: one source of truth instead of a second hard-coded list here. */
@@ -2967,9 +2976,13 @@ bool BKE_paint_layers_set_source(Material &ma,
     return false;
   }
   /* Turning a folder into a layer would orphan what it holds, and ungrouping is the one way out. A
-   * Material row has no map to turn into a colour or back: it is added as one, and removed. */
-  if (BKE_paint_layers_is_folder(*layer) || layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL ||
-      layer->source == MA_PAINT_LAYER_SOURCE_ANCHOR_POINT)
+   * Material or Mesh Map row has no map to turn into a colour or back: it is added as one, and
+   * removed. */
+  if (BKE_paint_layers_is_folder(*layer) ||
+      ELEM(layer->source,
+           MA_PAINT_LAYER_SOURCE_MATERIAL,
+           MA_PAINT_LAYER_SOURCE_ANCHOR_POINT,
+           MA_PAINT_LAYER_SOURCE_MESH_MAP))
   {
     return false;
   }
@@ -3023,6 +3036,28 @@ bool BKE_paint_layers_set_source(Material &ma,
     }
   }
   layer->source = source;
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+int BKE_paint_layers_mesh_map_type_get(const MaterialPaintLayer &layer)
+{
+  return (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) ? layer.mesh_map_type : -1;
+}
+
+bool BKE_paint_layers_mesh_map_type_set(Material &ma,
+                                        MaterialPaintLayer *layer,
+                                        const int8_t type)
+{
+  if (layer == nullptr || !paint_layer_owned(ma, layer) ||
+      layer->source != MA_PAINT_LAYER_SOURCE_MESH_MAP || type < 0 || type >= MA_MESH_MAP_TYPE_NUM)
+  {
+    return false;
+  }
+  if (layer->mesh_map_type == type) {
+    return true;
+  }
+  layer->mesh_map_type = type;
   BKE_paint_layers_tag_edited(ma);
   return true;
 }

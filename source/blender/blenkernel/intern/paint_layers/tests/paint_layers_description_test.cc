@@ -3439,6 +3439,46 @@ TEST_F(PaintLayersDescription, mapping_wrap_copies_with_the_row)
   EXPECT_EQ(BKE_paint_layers_mapping_wrap_get(*duplicate), MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y);
 }
 
+TEST_F(PaintLayersDescription, mesh_map_row_adds_base_color_and_reads_the_atlas)
+{
+  Material *ma = BKE_material_add(bmain, "MeshMapMat");
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::MeshMap;
+  MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->source, MA_PAINT_LAYER_SOURCE_MESH_MAP);
+  EXPECT_EQ(row->mesh_map_type, MA_MESH_MAP_AO);
+  /* A mesh-map row defaults to Base Color alone. */
+  ASSERT_EQ(row->channels_num, 1);
+  EXPECT_NE(paint_layer_channel_find(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_mesh_map_type_set(*ma, row, MA_MESH_MAP_CURVATURE));
+  EXPECT_EQ(row->mesh_map_type, MA_MESH_MAP_CURVATURE);
+  EXPECT_EQ(BKE_paint_layers_mesh_map_type_get(*row), MA_MESH_MAP_CURVATURE);
+  EXPECT_FALSE(BKE_paint_layers_mesh_map_type_set(*ma, row, MA_MESH_MAP_TYPE_NUM));
+
+  /* Only a MESH_MAP row can name a geometry map. */
+  MaterialPaintLayer *paint = paint_layer_add(*ma, "Paint");
+  EXPECT_FALSE(BKE_paint_layers_mesh_map_type_set(*ma, paint, MA_MESH_MAP_AO));
+
+  /* A duplicate and a copied row carry the type: the copy reads the owner material's slot for the
+   * same type, which is what an import between materials relies on too. */
+  MaterialPaintLayer *duplicate = BKE_paint_layers_duplicate(*bmain, *ma, row);
+  ASSERT_NE(duplicate, nullptr);
+  EXPECT_EQ(duplicate->source, MA_PAINT_LAYER_SOURCE_MESH_MAP);
+  EXPECT_EQ(duplicate->mesh_map_type, MA_MESH_MAP_CURVATURE);
+  EXPECT_EQ(BKE_paint_layers_mesh_map_type_get(*duplicate), MA_MESH_MAP_CURVATURE);
+
+  /* The atlas resolver is structural: no slot, no contribution; a slot with an Image, the atlas. */
+  EXPECT_EQ(paint_layer_mesh_map_image(*ma, *row), nullptr);
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *atlas = BKE_image_add_generated(
+      bmain, 8, 8, "Atlas", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_CURVATURE, atlas));
+  EXPECT_EQ(paint_layer_mesh_map_image(*ma, *row), atlas);
+}
+
 TEST_F(PaintLayersDescription, row_lock_is_a_flag_and_refuses_foreign_rows)
 {
   Material *ma = BKE_material_add(bmain, "LockMat");

@@ -471,6 +471,7 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
   const char *name_base = (params.kind == PaintLayerAddKind::Fill)     ? "Fill" :
                           (params.kind == PaintLayerAddKind::Gradient) ? "Gradient" :
                           (params.kind == PaintLayerAddKind::Folder)   ? "Folder" :
+                          (params.kind == PaintLayerAddKind::MeshMap)  ? "Mesh Map" :
                                                                          "Layer";
   std::string name;
   if (params.name != nullptr) {
@@ -516,6 +517,11 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     created->source = MA_PAINT_LAYER_SOURCE_STACK;
     return created;
   }
+  if (params.kind == PaintLayerAddKind::MeshMap) {
+    /* The row reads the material's shared atlas; the default channel policy below gives it Base
+     * Color alone, the one record every mesh map row needs to take part. */
+    created->source = MA_PAINT_LAYER_SOURCE_MESH_MAP;
+  }
   /* A Fill is a Constant row. Set before the channels, so a fresh Fill's default Base Color starts
    * transparent, the way a Fill expects until #BKE_paint_layers_set_fill_color gives it a colour. */
   if (params.kind == PaintLayerAddKind::Fill) {
@@ -546,7 +552,8 @@ static bool paint_layer_add_kind_is_row(const PaintLayerAddKind kind)
               PaintLayerAddKind::Gradient,
               PaintLayerAddKind::Folder,
               PaintLayerAddKind::Adjustment,
-              PaintLayerAddKind::Material);
+              PaintLayerAddKind::Material,
+              PaintLayerAddKind::MeshMap);
 }
 
 /**

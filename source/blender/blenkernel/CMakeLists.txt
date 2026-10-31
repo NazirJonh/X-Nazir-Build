@@ -213,6 +213,7 @@ set(SRC
   intern/mesh_iterators.cc
   intern/mesh_legacy_convert.cc
   intern/mesh_mapping.cc
+  intern/mesh_maps/mesh_maps.cc
   intern/mesh_merge_customdata.cc
   intern/mesh_mirror.cc
   intern/mesh_normals.cc
@@ -520,6 +521,7 @@ set(SRC
   BKE_mesh_iterators.hh
   BKE_mesh_legacy_convert.hh
   BKE_mesh_mapping.hh
+  BKE_mesh_maps.hh
   BKE_mesh_mirror.hh
   BKE_mesh_remap.hh
   BKE_mesh_remesh_voxel.hh
@@ -869,6 +871,7 @@ if(WITH_GTESTS)
     intern/lib_remap_test.cc
     intern/main_test.cc
     intern/main_namemap_test.cc
+    intern/mesh_maps/tests/mesh_maps_test.cc
     intern/multires_group_test.cc
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc

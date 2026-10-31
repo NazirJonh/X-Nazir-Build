@@ -613,15 +613,21 @@ enum eMaterialPaintLayerSource : int8_t {
    */
   MA_PAINT_LAYER_SOURCE_STACK = 4,
   /**
+   * A geometry map of the owning object (ambient occlusion, curvature, normal, ...), read from the
+   * material's shared UV atlas. The row stores only the abstract map type
+   * (#MaterialPaintLayer::mesh_map_type); the pixels live on the material as a #MaterialMeshMapSlot,
+   * so the same stack can be placed on another object without rewriting the row.
+   */
+  MA_PAINT_LAYER_SOURCE_MESH_MAP = 5,
+  /**
    * A filter: no colour of its own, it changes the colour it reads. The member is
    * #MaterialPaintLayer::kind_subtype (#eMaterialPaintLayerFilter). Only as a correction for now.
-   * 5 is reserved for the Mesh Map source.
    */
   MA_PAINT_LAYER_SOURCE_FILTER = 6,
   /**
    * An Anchor Point or an Anchor Point Reader: the marker publishes a slice of its row, the reader
    * lays that slice. The member is #MaterialPaintLayer::kind_subtype
-   * (#eMaterialPaintLayerAnchorPoint). 3 and 5 stay reserved for the source families named above.
+   * (#eMaterialPaintLayerAnchorPoint). 3 stays reserved for the Node Group source named above.
    */
   MA_PAINT_LAYER_SOURCE_ANCHOR_POINT = 8,
   /**
@@ -774,6 +780,26 @@ enum eMaterialPaintLayerFilter : int16_t {
   MA_PAINT_LAYER_FILTER_COLOR_ID = 4,
   /** A map-driven mask coverage operator: matches the island mask of the element's Base Color map. */
   MA_PAINT_LAYER_FILTER_UV_ISLAND = 5,
+};
+
+/**
+ * #MaterialPaintLayer::mesh_map_type, and the key of #MaterialMeshMapSlot: which geometry map of
+ * the owning object a #MA_PAINT_LAYER_SOURCE_MESH_MAP row reads from the material's shared atlas.
+ * The reserved values keep room for later maps without renumbering.
+ */
+enum eMaterialMeshMapType : int8_t {
+  MA_MESH_MAP_AO = 0,
+  MA_MESH_MAP_CURVATURE = 1,
+  MA_MESH_MAP_NORMAL_WORLD = 2,
+  MA_MESH_MAP_NORMAL_OBJECT = 3,
+  MA_MESH_MAP_ID_OBJECT = 4,
+  MA_MESH_MAP_ID_MATERIAL = 5,
+  MA_MESH_MAP_EDGE = 6,
+  /** Reserved; the architecture must not exclude these. */
+  MA_MESH_MAP_THICKNESS = 7,
+  /** Reserved; the architecture must not exclude these. */
+  MA_MESH_MAP_POSITION = 8,
+  MA_MESH_MAP_TYPE_NUM = 9,
 };
 
 /** #MaterialPaintLayerIdColor::flag */
@@ -1068,7 +1094,8 @@ struct MaterialPaintLayer {
   int channels_num = 0;
   /** #eMaterialPaintLayerRole. */
   int8_t role = MA_PAINT_LAYER_ROLE_LAYER;
-  char _pad1[1] = {};
+  /** #eMaterialMeshMapType; read only when #source is #MA_PAINT_LAYER_SOURCE_MESH_MAP. */
+  int8_t mesh_map_type = MA_MESH_MAP_AO;
   /**
    * The member of the family #source names (a filter's kind, a generator's kind); 0 for the
    * families that have no members. Together with #source it is the key of the row's kind.
@@ -1166,6 +1193,45 @@ struct MaterialPaintLayer {
    * `paint_layer_dependencies` and the row's `foreach_id`.
    */
   MaterialPaintLayerCurvePatch *curve_patch = nullptr;
+};
+
+/**
+ * One shared atlas of a material: a #MaterialMeshMapSlot per #eMaterialMeshMapType, holding the
+ * Image the material's MESH_MAP rows read. The pixels are a material resource because one material
+ * is one generated shader shared by every object that uses it.
+ */
+struct MaterialMeshMapSlot {
+  DNA_DEFINE_CXX_METHODS(MaterialMeshMapSlot)
+
+  struct MaterialMeshMapSlot *next = nullptr, *prev = nullptr;
+  /** #eMaterialMeshMapType. */
+  int8_t type = MA_MESH_MAP_AO;
+  char _pad[7] = {};
+  /** The shared atlas for this map type, or null while nothing is baked. */
+  struct Image *image = nullptr;
+};
+
+/**
+ * Baking and viewport settings shared by every mesh map of a material. v1 stores the bake controls
+ * a per-map bake job reads; the file format and encoding of the atlas Image are decided there.
+ */
+struct MaterialMeshMapSettings {
+  DNA_DEFINE_CXX_METHODS(MaterialMeshMapSettings)
+
+  /** Square side the atlas is allocated at when it is first created. */
+  int resolution = 2048;
+  /** Cycles samples the mesh map bake renders with. */
+  int samples = 32;
+  /** Whether the mesh map bake asks Cycles for denoising. */
+  int8_t use_denoise = 0;
+  char _pad[3] = {};
+  /** UV margin in pixels applied while merging a per-object bake into the atlas. */
+  float margin = 16.0f;
+  /** Ambient-occlusion ray distance; zero means "from the object bounds". */
+  float ao_distance = 0.0f;
+  /** Edge/bevel ray radius in object-space units. */
+  float edge_radius = 0.01f;
+  char _pad2[4] = {};
 };
 
 struct Material {
@@ -1349,6 +1415,12 @@ struct Material {
    * pointer-size multiple the file format wants. The two pads are not one: this one closes the
    * tail, #_pad_paint_layers aligns the pointer. */
   char _pad_paint_layers_tail[4] = {};
+  /** The material's mesh map atlases, one #MaterialMeshMapSlot per #eMaterialMeshMapType. */
+  ListBaseT<MaterialMeshMapSlot> mesh_map_slots = {nullptr, nullptr};
+  /** Bake/viewport settings shared by every mesh map of this material. */
+  MaterialMeshMapSettings mesh_map_settings;
+  /** Explicit tail padding: the struct's pointer alignment must not leave uninitialized bytes. */
+  char _pad_tail[4] = {};
 };
 
 }  // namespace blender

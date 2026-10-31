@@ -228,6 +228,10 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
    * deliberately absent. A blend mode is structure only through #paint_layer_blend_shape: the
    * mode itself is the `blend_type` of an existing Mix node, kept current by the blend sync. */
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.source)));
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    /* Which geometry map the row reads is topology: another map is another node. */
+    hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.mesh_map_type)));
+  }
   /* Which filter an adjustment is decides its nodes; its parameters are inputs. */
   hash = topology_hash_mix(hash, uint64_t(uint16_t(layer.kind_subtype)));
   gradient_payload_hash_mix(hash, layer);
@@ -333,6 +337,10 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, paint_layer_blend_dynamic_mask(ma, effect));
     /* A flat colour and a map are different nodes, so the source is structure. */
     hash = topology_hash_mix(hash, uint64_t(uint8_t(effect.source)));
+    if (effect.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+      /* Which geometry map the row reads is topology: another map is another node. */
+      hash = topology_hash_mix(hash, uint64_t(uint8_t(effect.mesh_map_type)));
+    }
     /* Which filter it is decides its nodes; its parameters are inputs. */
     hash = topology_hash_mix(hash, uint64_t(uint16_t(effect.kind_subtype)));
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, effect) ? 1 : 0);
@@ -411,6 +419,10 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     }
     /* A filter item is nodes of its own, and which filter decides them. */
     hash = topology_hash_mix(hash, uint64_t(uint8_t(item.source)));
+    if (item.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+      /* Which geometry map the row reads is topology: another map is another node. */
+      hash = topology_hash_mix(hash, uint64_t(uint8_t(item.mesh_map_type)));
+    }
     hash = topology_hash_mix(hash, uint64_t(uint16_t(item.kind_subtype)));
     /* A map-coverage item builds one comparison per stored colour, so the count is structure; each
      * colour's value and enabled flag are inputs the graph reads, so they stay out of the hash. */

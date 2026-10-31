@@ -309,6 +309,9 @@ MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   item_copy->role = item.role;
   item_copy->source = item.source;
   item_copy->kind_subtype = item.kind_subtype;
+  /* The atlas a MESH_MAP item reads is chosen by type, not carried: the copy reads the owner
+   * material's slot for the same type. */
+  item_copy->mesh_map_type = item.mesh_map_type;
   item_copy->blend = item.blend;
   item_copy->flag = item.flag;
   item_copy->opacity = item.opacity;
@@ -358,6 +361,9 @@ void paint_layer_branch_duplicate(Main &bmain,
   dst.blend = src.blend;
   dst.source = src.source;
   dst.kind_subtype = src.kind_subtype;
+  /* The atlas a MESH_MAP row reads is chosen by type, not carried: the copy reads the owner
+   * material's slot for the same type. */
+  dst.mesh_map_type = src.mesh_map_type;
   /* A reader of a point inside the branch has to read the copied point, not the original; the
    * caller remaps it once every new marker is known. */
   dst.anchor_point_source = src.anchor_point_source;

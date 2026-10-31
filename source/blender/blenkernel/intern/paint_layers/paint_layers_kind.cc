@@ -119,6 +119,13 @@ static const PaintLayerKindInfo kinds[] = {
      "Stack",
      PaintLayerKindCategory::Container,
      paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER)},
+    /* A geometry map of the object, read from the material's shared atlas: it owns channel records
+     * but no map of its own, and contributes as a layer, a content correction or a mask item. */
+    {MA_PAINT_LAYER_SOURCE_MESH_MAP,
+     0,
+     "Mesh Map",
+     PaintLayerKindCategory::Source,
+     all_roles},
     /* A filter changes the colour it reads and owns none: as a correction it works on its row's
      * colour, as a layer (an adjustment) on the stack below it. It has no coverage a mask item could
      * be. */

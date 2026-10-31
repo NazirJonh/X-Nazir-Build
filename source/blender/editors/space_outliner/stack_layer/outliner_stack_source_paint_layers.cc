@@ -441,6 +441,10 @@ static PaintKindLook paint_look_for_source(const eMaterialPaintLayerSource sourc
       return {ICON_EMPTY_AXIS, paint_glyph::ANCHOR};
     case MA_PAINT_LAYER_SOURCE_STACK:
       return {ICON_FILE_FOLDER, 0};
+    case MA_PAINT_LAYER_SOURCE_MESH_MAP:
+      /* A geometry map of the object; the glyph keeps the texture look, the icon names the mesh
+       * the map is baked from. */
+      return {ICON_MESH_DATA, paint_glyph::TEXTURE};
   }
   return {ICON_IMAGE_RGB, 0};
 }

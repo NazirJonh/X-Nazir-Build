@@ -35,6 +35,7 @@
 #include "BKE_image_partial_update.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
+#include "BKE_mesh_maps.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_material_resolve.hh"
@@ -820,6 +821,18 @@ static uint64_t bake_hash_layer(uint64_t h,
   h = bake_hash_mix(h, uint64_t(0x9e3779b97f4a7c15ull));
   h = bake_hash_mix(h, uint8_t(layer.source));
   h = bake_hash_mix(h, uint16_t(layer.kind_subtype));
+  /* Which geometry map a MESH_MAP row reads decides its result; only those rows carry the field.
+   * The atlas Image's identity is folded in when the owning material is known, so pointing the slot
+   * at another Image invalidates the row's bake while a pixel edit (which does not change the UID)
+   * does not. */
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    h = bake_hash_mix(h, uint8_t(layer.mesh_map_type));
+    const MaterialMeshMapSlot *slot = BKE_mesh_maps_slot_find(ma, layer.mesh_map_type);
+    h = bake_hash_mix(h,
+                      (slot != nullptr && slot->image != nullptr) ?
+                          uint64_t(slot->image->id.session_uid) :
+                          uint64_t(0));
+  }
   if (BKE_paint_layers_gradient_supported(layer) && layer.gradient != nullptr) {
     /* A Gradient's pixels are its payload: the line, the shape and the ramp. The channel records'
      * value ramps below carry the scalar channels. The leading version invalidates the caches if

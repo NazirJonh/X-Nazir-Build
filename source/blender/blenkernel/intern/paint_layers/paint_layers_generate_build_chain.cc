@@ -1575,6 +1575,9 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
     return this->filter_lay(tree, group, effect, channel, content);
   }
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
+  /* A mesh-map correction reads the material's shared atlas; its record carries no image. */
+  const bool mesh_map = effect.source == MA_PAINT_LAYER_SOURCE_MESH_MAP &&
+                        paint_layer_mesh_map_image(ma_, effect) != nullptr;
   Map<int, bNodeTreeInterfaceSocket *> *by_channel = effect_opacity_inputs_.lookup_ptr(&effect);
   /* A correction that reads a material has no record: its colour and alpha are what the source
    * supplies in the channel, built the way a Material row's are. */
@@ -1587,7 +1590,8 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   const bool flat = !from_source && !generates && record != nullptr && record->image == nullptr &&
                     paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_FLAT_VALUE);
   if (by_channel == nullptr || content.socket == nullptr ||
-      (!from_source && (record == nullptr || (!flat && !generates && record->image == nullptr))))
+      (!from_source &&
+       (record == nullptr || (!flat && !generates && !mesh_map && record->image == nullptr))))
   {
     return false;
   }
@@ -1597,6 +1601,7 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   bNode *map = nullptr;
   bNodeSocket *map_color = nullptr;
   bNodeSocket *map_alpha = nullptr;
+  bNode *map_color_node = nullptr;
   KindEmitResult source_emitted;
   if (from_source) {
     /* The source's colour, its content alpha (a map's own, one for a value or a graph) and the
@@ -1638,6 +1643,24 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
       return false;
     }
   }
+  else if (mesh_map) {
+    /* The material's shared atlas, sampled Extend and never through the correction's Mapping; it
+     * covers by the correction's opacity alone, its alpha being data. */
+    map = this->image_map_node_add(tree, *paint_layer_mesh_map_image(ma_, effect));
+    if (map == nullptr) {
+      return false;
+    }
+    if (NodeTexImage *storage = static_cast<NodeTexImage *>(map->storage)) {
+      storage->extension = SHD_IMAGE_EXTENSION_EXTEND;
+    }
+    map_color_node = map;
+    map_color = socket_out(*map, "Color");
+    if (opacity == nullptr || map_color == nullptr) {
+      bke::node_remove_node(nullptr, tree, *map, true, false);
+      return false;
+    }
+    grid_.place_extra(*map);
+  }
   else {
     map = this->image_map_node_add(tree, *record->image);
     map_color = (map != nullptr) ? socket_out(*map, "Color") : nullptr;
@@ -1654,8 +1677,38 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   if (map != nullptr) {
     nodes.append(map);
   }
-  /* A Fill correction's own map reads through the correction's Mapping while it applies. */
-  const bool mapped = map != nullptr && this->mapping_apply(tree, effect, *map, nodes);
+  /* A scalar atlas stores its value in R; spread it across RGB so a colour channel reads it as
+   * grey and the CPU reads the same. */
+  if (mesh_map && paint_layer_mesh_map_is_scalar(effect.mesh_map_type)) {
+    bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+    bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineXYZ"_ustr);
+    if (separate != nullptr && combine != nullptr && map_color != nullptr) {
+      bNodeSocket *sep_vector = socket_in(*separate, "Vector");
+      bNodeSocket *sep_x = socket_out(*separate, "X");
+      bNodeSocket *combine_x = socket_in(*combine, "X");
+      bNodeSocket *combine_y = socket_in(*combine, "Y");
+      bNodeSocket *combine_z = socket_in(*combine, "Z");
+      if (sep_vector != nullptr && sep_x != nullptr && combine_x != nullptr &&
+          combine_y != nullptr && combine_z != nullptr)
+      {
+        separate->location[0] = map->location[0] + 80.0f;
+        separate->location[1] = map->location[1];
+        combine->location[0] = map->location[0] + 160.0f;
+        combine->location[1] = map->location[1];
+        bke::node_add_link(tree, *map, *map_color, *separate, *sep_vector);
+        bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_x);
+        bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_y);
+        bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_z);
+        nodes.append(separate);
+        nodes.append(combine);
+        map_color = socket_out(*combine, "Vector");
+        map_color_node = combine;
+      }
+    }
+  }
+  /* A correction's own map reads through the correction's Mapping while it applies; an atlas is
+   * already in the stack's UV space and is read as it is. */
+  const bool mapped = map != nullptr && !mesh_map && this->mapping_apply(tree, effect, *map, nodes);
   /* Nothing of the correction is linked to the chain until it is complete, so a failure removes
    * what was made and leaves the row as it was. */
   const auto discard = [&]() {
@@ -1666,7 +1719,9 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
    * and a data map follows the same rule a row's does, so the two cannot disagree. */
   NodeOutput color = (from_source || generates) ?
                          source_emitted.color :
-                         NodeOutput{flat ? group.group_input : map, map_color};
+                         NodeOutput{flat ? group.group_input :
+                                           (mesh_map ? map_color_node : map),
+                                    map_color};
   if (mapped && channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
     /* The Mapping moved only the read point; the tangent-space vectors follow it. */
     color = this->normal_remap_add(tree, effect, color, &nodes);
@@ -1689,10 +1744,10 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
     }
     layout::frame_add(tree, effect.name, framed);
   };
-  /* The correction's own factor: its opacity times the map's alpha. A flat colour covers by its
-   * opacity alone, as a Fill row does. */
+  /* The correction's own factor: its opacity times the map's alpha. A flat colour and a mesh-map
+   * atlas cover by opacity alone, as a Fill row does. */
   NodeOutput factor = {group.group_input, opacity};
-  if (!flat) {
+  if (!flat && !mesh_map) {
     factor = this->multiply_nodes_add(tree, {group.group_input, opacity}, alpha);
     if (factor.node == nullptr) {
       return discard();
@@ -2796,6 +2851,71 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
       }
     }
     out.content_alpha = {color_map, alpha_out};
+    layout::frame_add(tree, "Source", source_nodes);
+  }
+  else if (ctx.layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP &&
+           paint_layer_mesh_map_image(ma_, ctx.layer) != nullptr)
+  {
+    /* A geometry map of the owning object: the material's shared atlas, sampled with Extend (the
+     * CPU's bilinear resample clamps at the border), never through the row's Mapping. The atlas
+     * covers fully -- its alpha is data, not painted coverage -- so the row's factor stays its
+     * opacity and mask. */
+    Image *atlas = paint_layer_mesh_map_image(ma_, ctx.layer);
+    bNode *map = this->image_map_node_add(tree, *atlas);
+    if (map == nullptr) {
+      return {};
+    }
+    if (NodeTexImage *storage = static_cast<NodeTexImage *>(map->storage)) {
+      storage->extension = SHD_IMAGE_EXTENSION_EXTEND;
+    }
+    grid_.place(*map, layout::Column::Source, 0);
+    Vector<bNode *> source_nodes;
+    source_nodes.append(map);
+    NodeOutput color = {map, socket_out(*map, "Color")};
+    if (color.socket == nullptr) {
+      this->nodes_discard(tree, source_nodes);
+      return {};
+    }
+    if (paint_layer_mesh_map_is_scalar(ctx.layer.mesh_map_type)) {
+      /* A scalar atlas stores its value in R; spread it across RGB so a colour channel reads it
+       * as grey and the CPU reads the same. */
+      bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+      bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineXYZ"_ustr);
+      if (separate != nullptr && combine != nullptr) {
+        bNodeSocket *sep_vector = socket_in(*separate, "Vector");
+        bNodeSocket *sep_x = socket_out(*separate, "X");
+        bNodeSocket *combine_x = socket_in(*combine, "X");
+        bNodeSocket *combine_y = socket_in(*combine, "Y");
+        bNodeSocket *combine_z = socket_in(*combine, "Z");
+        if (sep_vector != nullptr && sep_x != nullptr && combine_x != nullptr &&
+            combine_y != nullptr && combine_z != nullptr)
+        {
+          separate->location[0] = map->location[0] + 80.0f;
+          separate->location[1] = map->location[1];
+          combine->location[0] = map->location[0] + 160.0f;
+          combine->location[1] = map->location[1];
+          bke::node_add_link(tree, *map, *color.socket, *separate, *sep_vector);
+          bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_x);
+          bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_y);
+          bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_z);
+          source_nodes.append(separate);
+          source_nodes.append(combine);
+          color = {combine, socket_out(*combine, "Vector")};
+        }
+      }
+    }
+    out.color = color;
+    /* Opaque: the content alpha is one and the atlas contributes no coverage of its own. */
+    bNode *one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+    bNodeSocket *one_out = (one != nullptr) ? socket_out(*one, "Value") : nullptr;
+    if (one == nullptr || one_out == nullptr || one_out->default_value == nullptr) {
+      this->nodes_discard(tree, source_nodes);
+      return {};
+    }
+    static_cast<bNodeSocketValueFloat *>(one_out->default_value)->value = 1.0f;
+    grid_.place(*one, layout::Column::Source, 2);
+    source_nodes.append(one);
+    out.content_alpha = {one, one_out};
     layout::frame_add(tree, "Source", source_nodes);
   }
   else if (ctx.record != nullptr && ctx.record->image != nullptr) {

@@ -115,6 +115,12 @@ enum class PaintLayerAddKind : int8_t {
    * standalone Curve Patch row.
    */
   CurvePatchEffect,
+  /**
+   * A row reading one of the material's shared mesh map atlases
+   * (#MaterialPaintLayer::mesh_map_type). It owns Base Color channel records, all reading the same
+   * atlas, and never a map of its own.
+   */
+  MeshMap,
 };
 
 struct PaintLayerAddParams {

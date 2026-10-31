@@ -790,4 +790,30 @@ void ED_paint_image_select_view3d_draw_cb_register(ARegionType *art);
 /** Free the global overlay cache (mask outline GPU batch), e.g. when a 3D Viewport closes. */
 void ED_paint_image_select_view3d_overlay_free();
 
+/* `mesh/paint_hide.cc` */
+
+namespace ed::sculpt_paint::hide {
+
+/**
+ * Whether the visible surface of \a object is isolated to its active material slot: that slot holds
+ * a layered material, its first face is visible and the first face of any other slot is hidden.
+ *
+ * The answer is derived from the mesh's own hide attribute, never cached in an editor or in DNA, so
+ * undo, a manual hide/show and a change of the active object keep it truthful. A heuristic with an
+ * early-out: it stops at the first face of each group.
+ */
+bool layered_material_isolate_is_active(Object &object);
+
+/**
+ * Re-target an armed layered-material isolation onto the object's new active material slot.
+ *
+ * Called from every place that can move the slot (the material UI List, the Outliner stack), so the
+ * visible faces follow the slot while the toggle is on. The session marker only permits the follow:
+ * the mesh has to still read as isolated for the old slot, or the marker is dropped and nothing is
+ * written -- undo and a manual hide/show must never be overridden by a stale marker.
+ */
+void layered_material_isolate_follow_active_slot(bContext &C, Object &object);
+
+}  // namespace ed::sculpt_paint::hide
+
 }  // namespace blender

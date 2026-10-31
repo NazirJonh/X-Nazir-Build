@@ -44,6 +44,7 @@ void PAINT_OT_hide_show_polyline_gesture(wmOperatorType *ot);
 
 void PAINT_OT_visibility_invert(wmOperatorType *ot);
 void PAINT_OT_visibility_filter(wmOperatorType *ot);
+void PAINT_OT_layered_material_isolate(wmOperatorType *ot);
 }  // namespace ed::sculpt_paint::hide
 
 }  // namespace blender

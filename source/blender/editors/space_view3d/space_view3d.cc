@@ -1217,6 +1217,11 @@ static void view3d_header_region_listener(const wmRegionListenerParams *params)
         case ND_SPACE_VIEW3D:
           ED_region_tag_redraw(region);
           break;
+        case ND_ASSET_SHELF_BRUSH_SET:
+          /* The Sculpt/Paint tool group switch: the header shows buttons bound to one group, such
+           * as the layered-material isolate one. */
+          ED_region_tag_redraw(region);
+          break;
         case ND_SPACE_ASSET_PARAMS:
           ED_region_tag_redraw(region);
           break;

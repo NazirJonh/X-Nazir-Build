@@ -427,6 +427,22 @@ static void outliner_space_listener(const wmSpaceTypeListenerParams *params)
     stack_listener_resync_workspace(*space_outliner, *params->area);
     return;
   }
+  /* Which stack the mode shows is the focused object's own active material slot; the material UI
+   * List writes that slot and only this notifier says so. A pinned stack mirrors its own object,
+   * never the active one, because the source reads the slot of the object it focuses. */
+  if (wmn->category == NC_MATERIAL && wmn->data == ND_SHADING_LINKS &&
+      space_outliner->outlinevis == SO_STACK_LAYERS && params->window != nullptr &&
+      params->bmain != nullptr)
+  {
+    const StackReadContext ctx{const_cast<Main *>(params->bmain),
+                               WM_window_get_active_scene(params->window),
+                               WM_window_get_active_view_layer(params->window)};
+    if (outliner_stack_focus_sub_index_sync(ctx, *space_outliner)) {
+      /* The region listener re-reads the rows on this same notifier; the area tag makes sure the
+       * header's slot button is redrawn with them. */
+      ED_area_tag_redraw(params->area);
+    }
+  }
   /* What can change the answer to "which stack does the active object have": another active
    * object, another view layer or scene, a file that was read, and a stack that came or went
    * with the layered material. */

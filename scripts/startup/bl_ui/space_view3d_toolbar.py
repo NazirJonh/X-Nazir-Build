@@ -272,6 +272,15 @@ class TEXTURE_UL_texpaintslots(UIList):
         layout.label(text=item.name, icon_value=item.icon_value)
 
 
+def _sculpt_paint_group_is_paint(context):
+    """Whether the Sculpt toolbar shows the Paint group (`Workspace.sculpt_paint_tool_display`).
+
+    Dyntopo and Remesh belong to the sculpting tools, so their panels step aside in that group.
+    """
+    workspace = getattr(context, "workspace", None)
+    return workspace is not None and workspace.sculpt_paint_tool_display == 'PAINT'
+
+
 class View3DPaintPanel(View3DPanel, UnifiedPaintPanel):
     bl_category = "Tool"
 
@@ -1419,7 +1428,10 @@ class VIEW3D_PT_sculpt_dyntopo(Panel, View3DPaintPanel):
     @classmethod
     def poll(cls, context):
         paint_settings = cls.paint_settings(context)
-        return (context.sculpt_object and context.tool_settings.sculpt and paint_settings)
+        return (
+            context.sculpt_object and context.tool_settings.sculpt and paint_settings and
+            not _sculpt_paint_group_is_paint(context)
+        )
 
     def draw_header(self, context):
         is_popover = self.is_popover
@@ -1470,7 +1482,10 @@ class VIEW3D_PT_sculpt_voxel_remesh(Panel, View3DPaintPanel):
 
     @classmethod
     def poll(cls, context):
-        return (context.sculpt_object and context.tool_settings.sculpt)
+        return (
+            context.sculpt_object and context.tool_settings.sculpt and
+            not _sculpt_paint_group_is_paint(context)
+        )
 
     def draw(self, context):
         layout = self.layout

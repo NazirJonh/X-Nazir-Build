@@ -118,6 +118,66 @@ def _get_visible_tag_names_in_view3d_order(wm, context):
     return visible_names
 
 
+def _sculpt_paint_tool_is_paint(context, tool=None):
+    """Whether the active sculpt tool paints onto a canvas (Paint/Erase/Smear/Texture Fill/Clone).
+
+    Mirrors `ED_paint_brush_type_use_canvas()`. Shared by the canvas-selector popover and the
+    layered-material isolate button.
+    """
+    obj = context.active_object
+    if obj is None or obj.mode != 'SCULPT':
+        return False
+    if tool is None:
+        from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
+        tool = ToolSelectPanelHelper.tool_active_from_context(context)
+    if tool is None:
+        return False
+    if tool.use_brushes:
+        brush = context.tool_settings.sculpt.brush
+        return bool(brush) and brush.sculpt_brush_type in {
+            'PAINT',
+            'ERASE',
+            'SMEAR',
+            'TEXTURE_FILL',
+            'CLONE',
+        }
+    return bool(tool.use_paint_canvas)
+
+
+def _sculpt_paint_group_is_paint(context):
+    """Whether the Sculpt toolbar shows the Paint group (`Workspace.sculpt_paint_tool_display`).
+
+    Mirrors `ED_paint_curve_sculpt_tool_display_is_paint()`, the isolate operator's poll. The group
+    is what decides, not the brush type: the drawing brushes also sit in the Sculpt group.
+    """
+    workspace = getattr(context, "workspace", None)
+    return workspace is not None and workspace.sculpt_paint_tool_display == 'PAINT'
+
+
+# Material Symbols "all_out" (U+E90B); the UI font fallback draws it as an icon glyph.
+_LAYERED_MATERIAL_ISOLATE_GLYPH = 0xE90B
+
+
+def _toggle_layered_material_isolate_operator(layout, context):
+    """Isolate the mesh surface of the active material slot: hide every face of the active object
+    that does not use that slot (a viewport-only toggle).
+
+    Only shown for a mesh in Sculpt Mode while the toolbar shows the Paint group.
+    """
+    obj = context.active_object
+    if obj is None or obj.type != 'MESH' or obj.mode != 'SCULPT':
+        return
+    if not _sculpt_paint_group_is_paint(context):
+        return
+    # A glyph icon where the font provides one, the built-in icon otherwise (background mode),
+    # like the Stack Layers Add buttons in the Outliner.
+    props = {"text": "", "depress": obj.is_layered_material_isolated}
+    if glyph := bpy.app.icons.glyph(_LAYERED_MATERIAL_ISOLATE_GLYPH):
+        layout.operator("paint.layered_material_isolate", icon_value=glyph, **props)
+    else:
+        layout.operator("paint.layered_material_isolate", icon='HIDE_OFF', **props)
+
+
 def _toggle_xray_operator(layout, context, text=None):
     # The X-ray toggle has to have special logic since it affects a different property in pose mode.
     # See #70433 and #58661.
@@ -315,6 +375,7 @@ class VIEW3D_HT_tool_header(Header):
                 row.popover(panel="VIEW3D_PT_tools_weightpaint_symmetry_for_topbar", text="")
             elif mode_string == 'SCULPT':
                 row.popover(panel="VIEW3D_PT_sculpt_symmetry_for_topbar", text="")
+                _toggle_layered_material_isolate_operator(layout, context)
             elif mode_string == 'PAINT_VERTEX':
                 row.popover(panel="VIEW3D_PT_tools_vertexpaint_symmetry_for_topbar", text="")
         elif mode_string == 'SCULPT_CURVES':
@@ -1201,14 +1262,7 @@ class VIEW3D_HT_header(Header):
             from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
             tool = ToolSelectPanelHelper.tool_active_from_context(context)
 
-            is_paint_tool = False
-            if tool.use_brushes:
-                paint = tool_settings.sculpt
-                brush = paint.brush
-                if brush:
-                    is_paint_tool = brush.sculpt_brush_type in {'PAINT', 'ERASE', 'SMEAR', 'TEXTURE_FILL', 'CLONE'}
-            else:
-                is_paint_tool = tool and tool.use_paint_canvas
+            is_paint_tool = _sculpt_paint_tool_is_paint(context, tool)
 
             shading = VIEW3D_PT_shading.get_shading(context)
             color_type = shading.color_type

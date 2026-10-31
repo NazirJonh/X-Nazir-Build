@@ -318,21 +318,40 @@ void outliner_stack_focus_normalize(const StackReadContext &ctx, SpaceOutliner &
     runtime.stack_focus.object_uid = object->id.session_uid;
   }
   /* A focus without a sub-selection is read by the tree as the object's own current one, but the
-   * header's enum has no "-1" item to say that with and would draw an empty label. Writing the
-   * resolved slot down keeps the two on one value. */
-  if (runtime.stack_focus.sub_index < 0) {
-    const StackSource &source = *stack_source_for_space(space_outliner);
-    Vector<StackSubSelection> selections;
-    source.sub_selections_get(ctx, runtime.stack_focus, selections);
-    if (!selections.is_empty()) {
-      runtime.stack_focus.sub_index = source.default_sub_index(ctx, runtime.stack_focus);
-    }
-  }
+   * header's enum has no "-1" item to say that with and would draw an empty label. Mirroring the
+   * object's own choice here also keeps the two together when the choice is made outside this
+   * editor (the material UI List) and the notifier that would have said so never arrives. */
+  outliner_stack_focus_sub_index_sync(ctx, space_outliner);
 }
 
 void outliner_stack_focus_normalize(bContext &C, SpaceOutliner &space_outliner)
 {
   outliner_stack_focus_normalize(outliner_stack_read_context(C), space_outliner);
+}
+
+bool outliner_stack_focus_sub_index_sync(const StackReadContext &ctx,
+                                         SpaceOutliner &space_outliner)
+{
+  if (space_outliner.runtime == nullptr) {
+    return false;
+  }
+  StackFocus &focus = space_outliner.runtime->stack_focus;
+  const StackSource &source = *stack_source_for_space(space_outliner);
+  /* A source with no sub-selections has nothing to mirror. */
+  Vector<StackSubSelection> selections;
+  source.sub_selections_get(ctx, focus, selections);
+  if (selections.is_empty()) {
+    return false;
+  }
+  const int sub_index = source.default_sub_index(ctx, focus);
+  /* Comparing before writing is what keeps a choice made in this editor, which writes the object's
+   * slot and then notifies, from bouncing back into a second write here. */
+  if (sub_index == focus.sub_index) {
+    return false;
+  }
+  focus.sub_index = sub_index;
+  outliner_stack_rows_invalidate(space_outliner);
+  return true;
 }
 
 ID *outliner_stack_owner_get(const StackReadContext &ctx, SpaceOutliner &space_outliner)

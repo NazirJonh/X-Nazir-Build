@@ -995,6 +995,16 @@ bool outliner_stack_view_follow_active(SpaceOutliner &space_outliner,
 void outliner_stack_focus_normalize(const ed::outliner::StackReadContext &ctx,
                                     SpaceOutliner &space_outliner);
 /**
+ * Mirror the focused object's own sub-selection -- its active material slot, for a paint stack --
+ * into the runtime index the rows are read with.
+ *
+ * The object's slot is the one source of truth: the material UI List writes it and the Outliner
+ * only mirrors it. Returns true when the index moved, in which case the cached rows belong to
+ * another sub-selection and the caller has to let them be rebuilt.
+ */
+bool outliner_stack_focus_sub_index_sync(const ed::outliner::StackReadContext &ctx,
+                                         SpaceOutliner &space_outliner);
+/**
  * Make the focused object the active one, so the stack's rows are edited in the context they show.
  *
  * A pinned stack can point at an object the rest of Blender does not have active, and a row is then

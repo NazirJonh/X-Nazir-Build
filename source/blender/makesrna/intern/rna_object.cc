@@ -29,6 +29,7 @@
 #include "rna_internal.hh"
 
 #include "ED_object_vgroup.hh"
+#include "ED_paint.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -1262,6 +1263,17 @@ static void rna_Object_active_material_index_set(PointerRNA *ptr, int value)
   }
 }
 
+/* The material UI List moves the slot through this property, so an armed layered-material isolation
+ * has to follow it to the new slot. RNA sends NC_MATERIAL|ND_SHADING_LINKS itself, right after. */
+static void rna_Object_active_material_index_update(bContext *C, PointerRNA *ptr)
+{
+  if (C == nullptr) {
+    return;
+  }
+  Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
+  ed::sculpt_paint::hide::layered_material_isolate_follow_active_slot(*C, *ob);
+}
+
 static void rna_Object_active_material_index_range(
     PointerRNA *ptr, int *min, int *max, int * /*softmin*/, int * /*softmax*/)
 {
@@ -2317,6 +2329,17 @@ static bool rna_Object_sculpt_layers_rec_active_get(PointerRNA *ptr)
   const Object *ob = static_cast<const Object *>(ptr->data);
   const SculptSession *ss = ob->runtime ? ob->runtime->sculpt_session : nullptr;
   return ss ? ss->layers.rec_active : false;
+}
+
+static bool rna_Object_is_layered_material_isolated_get(PointerRNA *ptr)
+{
+  Object *ob = static_cast<Object *>(ptr->data);
+  /* Sculpt-only state. The paint-toolset gate is the button's and the operator's poll's business:
+   * this getter has no context to ask which tool is in hand. */
+  if (ob->type != OB_MESH || ob->mode != OB_MODE_SCULPT || ob->data == nullptr) {
+    return false;
+  }
+  return ed::sculpt_paint::hide::layered_material_isolate_is_active(*ob);
 }
 
 static int rna_Object_sculpt_layer_sync_group_name_editable(const PointerRNA *ptr,
@@ -3510,14 +3533,15 @@ static void rna_def_object(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "active_material_index", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_int_sdna(prop, nullptr, "actcol");
-  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE | PROP_CONTEXT_UPDATE);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_int_funcs(prop,
                              "rna_Object_active_material_index_get",
                              "rna_Object_active_material_index_set",
                              "rna_Object_active_material_index_range");
   RNA_def_property_ui_text(prop, "Active Material Index", "Index of active material slot");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING_LINKS, nullptr);
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING_LINKS, "rna_Object_active_material_index_update");
 
   /* transform */
   prop = RNA_def_property(srna, "location", PROP_FLOAT, PROP_TRANSLATION);
@@ -4069,6 +4093,15 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_property_boolean_funcs(prop, "rna_Object_use_dynamic_topology_sculpting_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Dynamic Topology Sculpting", nullptr);
+
+  prop = RNA_def_property(srna, "is_layered_material_isolated", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Object_is_layered_material_isolated_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Is Layered Material Isolated",
+      "Sculpt Mode shows only the faces that use the active material slot, which holds a layered "
+      "material");
 
   /* Base Settings */
   prop = RNA_def_property(srna, "is_from_instancer", PROP_BOOLEAN, PROP_NONE);

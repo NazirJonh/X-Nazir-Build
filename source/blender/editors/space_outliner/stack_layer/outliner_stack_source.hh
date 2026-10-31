@@ -1486,6 +1486,10 @@ class StackSource {
    * Lets the source pick the object's own current choice -- the active material slot for paint
    * layers -- so the generic focus code never reads it. -1, the default, keeps the unresolved
    * "active" meaning.
+   *
+   * It must answer the source's *current* choice, not a fixed starting value: every tree build
+   * mirrors it into the focus (#outliner_stack_focus_sub_index_sync), so a source whose default
+   * differs from what the user picked would have the pick overwritten.
    */
   virtual int default_sub_index(const StackReadContext & /*ctx*/,
                                 const StackFocus & /*focus*/) const

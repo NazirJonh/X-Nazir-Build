@@ -2186,7 +2186,7 @@ class PaintLayersStackSource final : public StackSource,
     return (object != nullptr && object->actcol > 0) ? int(object->actcol) - 1 : -1;
   }
 
-  void sub_selection_apply(bContext & /*C*/,
+  void sub_selection_apply(bContext &C,
                            const StackFocus &focus,
                            Object &object) const override
   {
@@ -2201,6 +2201,12 @@ class PaintLayersStackSource final : public StackSource,
           mesh->runtime->edit_mesh->mat_nr = focus.sub_index;
         }
       }
+      /* The slot is the object's, so the editors that show it -- the material UI List and the
+       * viewport header among them -- only learn about this choice through this notifier, the same
+       * one `Object.active_material_index` sends for its own writes. An armed layered-material
+       * isolation also has to follow the slot the user just chose. */
+      sculpt_paint::hide::layered_material_isolate_follow_active_slot(C, object);
+      WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING_LINKS, &object.id);
     }
   }
 

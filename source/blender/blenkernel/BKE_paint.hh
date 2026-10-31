@@ -1052,6 +1052,14 @@ struct SculptSession : NonCopyable, NonMovable {
   bool pbvh_draw_required = false;
 
   /**
+   * Material slot whose faces the layered-material isolation keeps visible, -1 when the toggle is
+   * off. Only says that the user armed it: the visibility itself lives in the mesh, and every
+   * follow checks the mesh before acting, so undo or a manual hide/show drops this marker instead
+   * of letting it dictate faces. Runtime only, like the rest of the session.
+   */
+  int layered_isolate_slot = -1;
+
+  /**
    * Some tools follows the shading chosen by the last used tool canvas.
    * When not set the viewport shading color would be used.
    *

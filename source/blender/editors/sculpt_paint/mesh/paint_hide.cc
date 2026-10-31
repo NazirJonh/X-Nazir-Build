@@ -8,6 +8,8 @@
  */
 #include "paint_hide.hh"
 
+#include <algorithm>
+
 #include "MEM_guardedalloc.h"
 
 #include "BLI_array_utils.hh"
@@ -21,11 +23,13 @@
 #include "BKE_attribute.hh"
 #include "BKE_ccg.hh"
 #include "BKE_context.hh"
+#include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_multires.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "DEG_depsgraph.hh"
@@ -33,6 +37,8 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "ED_paint.hh"
+#include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
 
 #include "RNA_access.hh"
@@ -871,6 +877,281 @@ void PAINT_OT_visibility_invert(wmOperatorType *ot)
 
   ot->flag = OPTYPE_REGISTER;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Layered Material Isolation
+ *
+ * A viewport-only toggle: every face of the active mesh that does not use the object's active
+ * material slot is hidden, so only the surface the active layered material paints stays visible.
+ * Element-level hide is viewport-only, renders are unaffected.
+ * \{ */
+
+/**
+ * Whether the material slot \a slot of \a object holds a layered material. The slot is zero-based,
+ * as the mesh's `material_index` values are; `Object::actcol` is the same slot, one-based.
+ */
+static bool material_slot_is_layered(Object &object, const int slot)
+{
+  if (slot < 0 || slot >= int(object.totcol)) {
+    return false;
+  }
+  const Material *material = BKE_object_material_get(&object, short(slot + 1));
+  return material != nullptr && BKE_paint_layers_is_layered(*material);
+}
+
+/**
+ * Whether the visible surface of \a object already reads as isolated to \a slot: the first face of
+ * the slot is visible and the first face outside it is hidden. Does not ask whether the slot holds
+ * a layered material; that is the callers' guard.
+ */
+static bool layered_material_isolate_state(Object &object, const int slot)
+{
+  if (slot < 0) {
+    return false;
+  }
+
+  const Mesh &mesh = *id_cast<Mesh *>(object.data);
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  /* A missing `.hide_poly` means nothing was ever hidden, so the default answers after the first
+   * face instead of walking the mesh. Plain #VArray access: #VArraySpan would materialize a
+   * single-value array in full on every header redraw. */
+  const VArray<int> material_indices = *attributes.lookup_or_default<int>(
+      "material_index", bke::AttrDomain::Face, 0);
+  const VArray<bool> hide_poly = *attributes.lookup_or_default<bool>(
+      ".hide_poly", bke::AttrDomain::Face, false);
+
+  /* The header asks on every redraw. A mesh of one slot has no "other" group and a mesh that never
+   * hid a face has nothing hidden, so neither can read as isolated: answer without the walk. */
+  if (material_indices.is_single() || (hide_poly.is_single() && !hide_poly.get_internal_single())) {
+    return false;
+  }
+
+  /* The first face of each group decides: isolated means the other slots are hidden and this one
+   * is not. Either half alone is some other hide, not this toggle. */
+  int slot_face = -1;
+  int other_face = -1;
+  for (const int face : hide_poly.index_range()) {
+    if (material_indices[face] == slot) {
+      if (slot_face < 0) {
+        slot_face = face;
+      }
+    }
+    else if (other_face < 0) {
+      other_face = face;
+    }
+    if (slot_face >= 0 && other_face >= 0) {
+      break;
+    }
+  }
+  return slot_face >= 0 && other_face >= 0 && !hide_poly[slot_face] && hide_poly[other_face];
+}
+
+bool layered_material_isolate_is_active(Object &object)
+{
+  const int slot = int(object.actcol) - 1;
+  /* A slot that holds no layered material cannot be isolated, whatever its faces say. */
+  return material_slot_is_layered(object, slot) && layered_material_isolate_state(object, slot);
+}
+
+static void layered_material_isolate_write(Mesh &mesh, const int slot, const bool hide)
+{
+  bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
+  bke::SpanAttributeWriter<bool> hide_poly = attributes.lookup_or_add_for_write_span<bool>(
+      ".hide_poly", bke::AttrDomain::Face);
+  /* Only a hide needs to clear the selection; a reveal must not add the attribute. */
+  bke::SpanAttributeWriter<bool> select_poly;
+  if (hide) {
+    select_poly = attributes.lookup_or_add_for_write_span<bool>(".select_poly",
+                                                                bke::AttrDomain::Face);
+  }
+  /* Faces without a material index all use the first slot. */
+  const VArray<int> material_indices = *attributes.lookup_or_default<int>(
+      "material_index", bke::AttrDomain::Face, 0);
+
+  for (const int face : hide_poly.span.index_range()) {
+    /* Revealing drops the isolation altogether: every face goes back to visible. */
+    const bool face_hidden = hide && material_indices[face] != slot;
+    hide_poly.span[face] = face_hidden;
+    if (face_hidden) {
+      /* A hidden face must not stay selected, or the selection overlay would still draw it. */
+      select_poly.span[face] = false;
+    }
+  }
+
+  hide_poly.finish();
+  if (hide) {
+    select_poly.finish();
+  }
+}
+
+static bool layered_material_isolate_poll(bContext *C)
+{
+  Object *object = CTX_data_active_object(C);
+  if (object == nullptr || object->type != OB_MESH || object->mode != OB_MODE_SCULPT) {
+    return false;
+  }
+  /* The toggle belongs to the Paint group of the Sculpt toolbar, not to the drawing brushes: those
+   * also sit in the Sculpt group, so the brush type cannot tell the two groups apart. */
+  if (!ED_paint_curve_sculpt_tool_display_is_paint(C)) {
+    return false;
+  }
+  /* Dyntopo (BMesh) and multires (grids) keep their visibility in their own structures; only the
+   * plain mesh tree reads the face-hide attribute this operator writes. */
+  const SculptSession *ss = object->runtime->sculpt_session;
+  if (ss == nullptr || ss->bm != nullptr || ss->subdiv_ccg != nullptr) {
+    return false;
+  }
+  return material_slot_is_layered(*object, int(object->actcol) - 1);
+}
+
+/**
+ * Hide every face outside \a slot (or reveal all of them), with the visibility chain a face hide
+ * needs and no undo step. The one writer shared by the button and the follow that keeps the
+ * isolation on the active slot.
+ */
+static wmOperatorStatus layered_material_isolate_apply(bContext &C,
+                                                       Object &object,
+                                                       const int slot,
+                                                       const bool hide)
+{
+  Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(&C);
+  bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(depsgraph, object);
+  if (pbvh.type() != bke::pbvh::Type::Mesh) {
+    return OPERATOR_CANCELLED;
+  }
+  MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+  IndexMaskMemory memory;
+  const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  /* Only the nodes whose faces really change carry an undo snapshot; on a large mesh most of them
+   * already sit in the target state. The readers are scoped so they no longer share the attribute
+   * data when the write below needs it unshared. */
+  IndexMask changed_nodes;
+  {
+    const bke::AttributeAccessor attributes = mesh.attributes();
+    const VArray<int> material_indices = *attributes.lookup_or_default<int>(
+        "material_index", bke::AttrDomain::Face, 0);
+    const VArray<bool> hide_poly = *attributes.lookup_or_default<bool>(
+        ".hide_poly", bke::AttrDomain::Face, false);
+    changed_nodes = IndexMask::from_predicate(
+        node_mask,
+        memory,
+        [&](const int i) {
+          for (const int face : nodes[i].faces()) {
+            if (hide_poly[face] != (hide && (material_indices[face] != slot))) {
+              return true;
+            }
+          }
+          return false;
+        },
+        exec_mode::grain_size(1));
+  }
+  if (changed_nodes.is_empty()) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Object *object_ptr = &object;
+  const Span<Object *> objects(&object_ptr, 1);
+
+  /* No undo step, on purpose: the isolation is a view state like Local View, and the button is its
+   * own inverse. The state is derived from the mesh, so a later undo of anything else cannot leave
+   * it wrong, and following the active slot would otherwise bury the user's own steps in ones
+   * they never asked for. */
+  layered_material_isolate_write(mesh, slot, hide);
+  /* Face hide is the authored state; the vertex and edge attributes and the nodes' own
+   * fully-hidden flags only follow from it. */
+  bke::mesh_hide_face_flush(mesh);
+  pbvh.tag_visibility_changed(changed_nodes);
+  pbvh.update_visibility(object);
+  islands::invalidate(*object.runtime->sculpt_session);
+
+  tag_update_visibility(C, objects);
+  WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, &object);
+  /* The header button state is derived from the mesh; its region only listens to space
+   * notifiers. */
+  WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
+  return OPERATOR_FINISHED;
+}
+
+void layered_material_isolate_follow_active_slot(bContext &C, Object &object)
+{
+  SculptSession *ss = object.runtime->sculpt_session;
+  if (ss == nullptr || object.type != OB_MESH || object.mode != OB_MODE_SCULPT) {
+    return;
+  }
+  const int slot = int(object.actcol) - 1;
+  const int armed_slot = ss->layered_isolate_slot;
+  if (armed_slot < 0 || armed_slot == slot) {
+    return;
+  }
+  /* The button that arms this lives in the Paint group of the toolbar; a switch made while another
+   * group is in hand must not rewrite visibility. */
+  if (!ED_paint_curve_sculpt_tool_display_is_paint(&C)) {
+    return;
+  }
+  /* The marker only says the user armed the toggle; the mesh says whether it still holds. Undo or a
+   * manual hide/show leaves the marker stale, and a stale marker drops itself instead of dictating
+   * faces. */
+  if (!layered_material_isolate_state(object, armed_slot)) {
+    ss->layered_isolate_slot = -1;
+    return;
+  }
+  /* A slot this toggle cannot isolate leaves the marker alone: coming back to a layered slot
+   * resumes the follow while the data still shows the isolation. */
+  if (!material_slot_is_layered(object, slot)) {
+    return;
+  }
+  if (layered_material_isolate_state(object, slot)) {
+    /* Already isolated for the new slot; only the marker has to move along. */
+    ss->layered_isolate_slot = slot;
+    return;
+  }
+  if (layered_material_isolate_apply(C, object, slot, true) == OPERATOR_FINISHED) {
+    ss->layered_isolate_slot = slot;
+  }
+}
+
+static wmOperatorStatus layered_material_isolate_exec(bContext *C, wmOperator * /*op*/)
+{
+  Object *object = CTX_data_active_object(C);
+  if (object == nullptr || object->type != OB_MESH) {
+    return OPERATOR_CANCELLED;
+  }
+  const int slot = int(object->actcol) - 1;
+  if (!material_slot_is_layered(*object, slot)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* The direction is derived from the mesh data rather than remembered in the viewport, so undo,
+   * a manual hide and a change of the active object cannot leave it stale. */
+  const bool hide = !layered_material_isolate_state(*object, slot);
+  const wmOperatorStatus result = layered_material_isolate_apply(*C, *object, slot, hide);
+  SculptSession *ss = object->runtime->sculpt_session;
+  if (result == OPERATOR_FINISHED && ss != nullptr) {
+    /* Arm the follow: while this marker is set, choosing another slot re-targets the isolation. */
+    ss->layered_isolate_slot = hide ? slot : -1;
+  }
+  return result;
+}
+
+void PAINT_OT_layered_material_isolate(wmOperatorType *ot)
+{
+  ot->name = "Isolate Layered Material";
+  ot->idname = "PAINT_OT_layered_material_isolate";
+  ot->description =
+      "Hide the faces that do not use the active material slot, so only the surface the active "
+      "layered material paints stays visible";
+
+  ot->exec = layered_material_isolate_exec;
+  ot->poll = layered_material_isolate_poll;
+
+  /* No OPTYPE_UNDO: a view-state toggle, see #layered_material_isolate_apply. */
+  ot->flag = OPTYPE_REGISTER;
+}
+
+/** \} */
 
 /* Number of vertices per iteration step size when growing or shrinking visibility. */
 static constexpr float VERTEX_ITERATION_THRESHOLD = 50000.0f;

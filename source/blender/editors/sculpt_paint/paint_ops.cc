@@ -3681,6 +3681,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(hide::PAINT_OT_hide_show_polyline_gesture);
   WM_operatortype_append(hide::PAINT_OT_visibility_invert);
   WM_operatortype_append(hide::PAINT_OT_visibility_filter);
+  WM_operatortype_append(hide::PAINT_OT_layered_material_isolate);
 
   /* paint masking */
   WM_operatortype_append(mask::PAINT_OT_mask_flood_fill);

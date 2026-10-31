@@ -786,6 +786,14 @@ struct SelectionMaskSnapshot {
    */
   PaintSelectionEdgePolicy pre_edge_policy;
   PaintSelectionEdgePolicy post_edge_policy;
+
+  /**
+   * Session UID of the shared material-canvas owner the captured mask lived in (0 for a local,
+   * per-image mask). A memfile undo can rebuild an image's runtime, which drops the binding
+   * handle; the restore re-binds by UID before writing, so the snapshot lands back in the owner
+   * instead of an orphaned local map.
+   */
+  uint32_t owner_uid;
 };
 
 struct ImageUndoStep {
@@ -1150,6 +1158,14 @@ static void selection_mask_snapshot_restore(const SelectionMaskSnapshot &entry,
   if (!entry.image_ref.ptr) {
     return;
   }
+  /* The snapshot was captured through a shared material-canvas owner: make sure the image routes
+   * there again before writing, or a runtime rebuilt by memfile undo would silently restore into
+   * a local map no reader looks at. */
+  if (entry.owner_uid != 0 &&
+      BKE_image_paint_selection_owner_uid_get(entry.image_ref.ptr) != entry.owner_uid)
+  {
+    BKE_image_paint_selection_owner_bind_by_uid(entry.image_ref.ptr, entry.owner_uid);
+  }
   BKE_image_paint_selection_edge_policy_set(entry.image_ref.ptr, edge_policy);
   if (entry.is_region) {
     /* Narrowed snapshot: only the changed rectangle was stored, so write just that back and leave
@@ -1461,6 +1477,7 @@ void ED_image_undo_capture_selection_mask(Image *image, int tile_number)
   snapshot.pre_mask_ibuf = pre_snapshot;
   snapshot.post_mask_ibuf = nullptr;
   snapshot.pre_edge_policy = BKE_image_paint_selection_edge_policy_get(image);
+  snapshot.owner_uid = BKE_image_paint_selection_owner_uid_get(image);
   us->selection_mask_snapshots.append(snapshot);
 }
 

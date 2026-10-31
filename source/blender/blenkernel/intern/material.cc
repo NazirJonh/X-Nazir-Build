@@ -59,6 +59,7 @@
 #include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
 #include "BKE_main.hh"
@@ -496,6 +497,10 @@ static void material_free_data(ID *id)
     BKE_paint_layers_slice_cache_free_material(*material);
     /* Legitimate from here because the Combined cache lives in this module too. */
     BKE_paint_material_combined_cache_free_material(*material);
+    /* The shared canvas-wide selection owner is keyed on the session UID like the caches above,
+     * so the same evaluated-copy exemption applies: freeing a CoE copy must not release the live
+     * original's owner. */
+    BKE_image_paint_selection_owner_release(material->id.session_uid);
   }
 
   /* Invalidate image paint slot info for all images used in this material. */

@@ -20,6 +20,10 @@
 
 #include "BKE_image.hh"
 
+/* DNA struct; forward-declared at global scope so it matches the definition in
+ * DNA_material_types.h whichever include order the caller uses. */
+struct Material;
+
 namespace blender {
 
 struct ImBuf;
@@ -415,6 +419,62 @@ bool BKE_image_paint_selection_write_region(Image *image,
                                             int width,
                                             int height,
                                             const float *mask);
+
+/* -------------------------------------------------------------------- */
+/** \name Shared Material-Canvas Owner
+ *
+ * A layered material owns ONE canvas-wide selection: every map of every row, every mask map, and
+ * every object using the material route their user-authored masks to a single #bke::
+ * PaintSelectionShared, keyed by the material's session UID. This is what makes the selection
+ * survive layer creation/removal/activation, copy-on-paint and tool switches: the storage no
+ * longer belongs to any individual Image.
+ *
+ * Binding is re-established by the BKE resolution paths (material target resolution, layer target
+ * ensure) whenever a layered map comes into play, so an image recreated by undo or file load is
+ * re-attached on its next use. Images of plain (non-layered) canvases never bind and keep their
+ * per-image masks, exactly as before.
+ * \{ */
+
+/**
+ * Bind \a image's user-authored selection to the shared owner of the layered material \a ma.
+ * A null or non-layered \a ma unbinds instead. The first bind of a still-empty owner adopts the
+ * image's existing local selection, so a selection made before the first target resolved (e.g. on
+ * the legacy fallback canvas) survives. Idempotent; main thread only (target resolution and
+ * stroke invoke paths).
+ */
+void BKE_image_paint_selection_owner_bind(Image *image, const Material *ma);
+
+/**
+ * Bind by a material session UID without needing the material (undo restore): re-establishes the
+ * handle when the owner still exists, so mask snapshots restore into it. False when the owner is
+ * gone (its material was freed); the restore then falls back to the local state as before.
+ */
+bool BKE_image_paint_selection_owner_bind_by_uid(Image *image, uint32_t material_uid);
+
+/**
+ * The session UID of the owner \a image routes its user selection to, or 0 when it keeps a local
+ * (per-image) selection. Used by undo snapshots to remember where a captured mask lived.
+ */
+uint32_t BKE_image_paint_selection_owner_uid_get(const Image *image);
+
+/**
+ * Release the owner of the material with session UID \a material_uid (material free / teardown).
+ * Bound images fall back to their local (empty) state. The owner is deleted once its last user
+ * (the table or a bound image) is gone.
+ */
+void BKE_image_paint_selection_owner_release(uint32_t material_uid);
+
+/**
+ * Image-lifecycle hook (buffer free, ID free): discard the image's LOCAL selection state and
+ * detach it from any shared owner. The shared owner itself is deliberately kept -- this is not a
+ * deselect, and the material's canvas-wide selection must survive one map going away.
+ */
+void BKE_image_paint_selection_state_discard(Image *image);
+
+/** True when \a image routes its user selection to a shared material-canvas owner. */
+bool BKE_image_paint_selection_is_shared(const Image *image);
+
+/** \} */
 
 /** \} */
 

@@ -27,6 +27,7 @@
 #include "BLI_vector.hh"
 
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
@@ -121,6 +122,18 @@ static void paint_layers_image_fill(Image &image, const bool is_color, const flo
     }
   }
   BKE_image_release_ibuf(&image, ibuf, lock);
+}
+
+/**
+ * Route a layered material's map to its canvas-wide selection owner. Called both when a map becomes
+ * the resolved target and when a new map takes an image record: the selection follows the canvas,
+ * not the pixel buffer, so copy-on-paint and freshly minted maps inherit it.
+ */
+static void paint_layers_map_bind_selection(Material &ma, Image *image)
+{
+  if (image != nullptr) {
+    BKE_image_paint_selection_owner_bind(image, &ma);
+  }
 }
 
 static Image *paint_layers_map_create(Main &bmain,
@@ -246,6 +259,9 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
                                                             PaintLayersTargetStatus::OutsideChannelSet;
     }
     r_target.channel_record = paint_layer_channel_find(*layer, channel);
+    if (r_target.channel_record != nullptr) {
+      paint_layers_map_bind_selection(ma, r_target.channel_record->image);
+    }
     return ok_status;
   }
   /* A mask is one grey map in the item's Base Color record: a stroke's other channels have nothing
@@ -288,6 +304,9 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
     return PaintLayersTargetStatus::NoMask;
   }
   r_target.channel_record = paint_layer_channel_find(*r_target.mask_item, channel);
+  if (r_target.channel_record != nullptr) {
+    paint_layers_map_bind_selection(ma, r_target.channel_record->image);
+  }
   return ok_status;
 }
 
@@ -456,6 +475,7 @@ static Image *paint_layers_record_image_ensure_owned(Main &bmain,
   }
   /* The record took its own user; the one the copy was born with goes, as in the mask helper. */
   id_us_min(&copy->id);
+  paint_layers_map_bind_selection(ma, record.image);
   return record.image;
 }
 
@@ -508,9 +528,10 @@ static Image *paint_layers_mask_ensure_writable(Main &bmain,
     BKE_id_free(&bmain, image);
     return nullptr;
   }
-  /* The record took its own user; the one the image was born with goes, or the map could never
+  /* The record took its own user; the one the image was born with goes, or the mask could never
    * become an orphan once its mask is removed. */
   id_us_min(&image->id);
+  paint_layers_map_bind_selection(*target.material, record->image);
   return record->image;
 }
 
@@ -575,6 +596,8 @@ Image *BKE_paint_layers_map_coverage_map_ensure(Main &bmain,
   /* The record took its own user; the one the new image was born with goes, so the map can become
    * an orphan once its item is removed. */
   id_us_min(&image->id);
+  paint_layers_map_bind_selection(
+      ma, paint_layer_channel_find(item, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image);
   /* #BKE_paint_layers_channel_set_image does not reallocate the records, so \a record stays valid,
    * but the item may have had none: read the image back through the record the setter used. */
   return paint_layer_channel_find(item, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image;
@@ -718,6 +741,7 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
   /* The channel took its own user; the one the new image was born with was only ever the first
    * reference's, so it goes, or the map could never become an orphan once its row is removed. */
   id_us_min(&image->id);
+  paint_layers_map_bind_selection(*target.material, record->image);
 
   /* #BKE_paint_layers_channel_set_image does not reallocate the records, so \a record stays valid. */
   return record->image;

@@ -118,6 +118,13 @@ Vector<ImagePaintSelectionTarget> image_paint_selection_targets_get(const bConte
                                                                      const SpaceImage *sima);
 
 /**
+ * Bind a fallback canvas image to the active layered material of \a ob, when there is one. The
+ * fallback canvas still belongs to the material: a selection made while the targets resolve
+ * nothing is the same canvas-wide one the row maps show later.
+ */
+void image_paint_selection_owner_bind_active(Object *ob, Image *image);
+
+/**
  * Selection targets of a Material canvas: the maps \a brush_paint writes, plus every other image
  * channel map the canvas resolves (Content target mode only; a Mask row has just its one map).
  *
@@ -223,6 +230,12 @@ void image_paint_selection_mask_snapshots_free(
 
 /** #image_paint_selection_poll and an Image Editor with an image open. */
 bool image_paint_selection_image_poll(bContext *C);
+
+/**
+ * Edge policy from the feather setting: hard, or feathered with an integer blend radius once
+ * \a feather_px reaches 1. Shared by Wand, Quick and the free-form gestures so their edges agree.
+ */
+PaintSelectionEdgePolicy image_paint_selection_edge_policy_from_feather(float feather_px);
 
 /**
  * Set the always-explicit edge policy on every target from the feather setting: hard, or

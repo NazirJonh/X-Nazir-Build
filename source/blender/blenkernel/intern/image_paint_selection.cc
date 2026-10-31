@@ -23,16 +23,254 @@
 #include "BLI_utildefines.h"
 
 #include "DNA_image_types.h"
+#include "DNA_material_types.h"
+
+#include "MEM_guardedalloc.h"
 
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
 #include "BKE_image_partial_update.hh"
+#include "BKE_paint_layers.hh"
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
+#include "CLG_log.h"
+
 namespace blender {
+
+/* -------------------------------------------------------------------- */
+/** \name Shared Material-Canvas Owner
+ *
+ * The canvas-wide selection of a layered material: one #bke::PaintSelectionShared per material,
+ * keyed by its session UID. Images route their user-authored mask accesses here through the
+ * handle in their runtime; plain images keep the embedded local state. The hot accessors read
+ * only the image's own handle (no table lookups); the table is guarded for the rare
+ * bind/release/clear paths.
+ * \{ */
+
+static CLG_LogRef LOG = {"image.paint_selection"};
+
+static Mutex paint_selection_owners_mutex;
+static Map<uint32_t, bke::PaintSelectionShared *> paint_selection_owners;
+
+/**
+ * The state \a image's user-authored selection lives in: the shared owner, or the local one.
+ *
+ * A single overload that takes a `const Image *` and returns a mutable reference: the memoized
+ * bounds cache is derived data behind logically-const queries, which is exactly how the runtime
+ * fields were accessed before the owner existed (`*image->runtime` through a const image).
+ */
+static bke::PaintSelectionState &paint_selection_state(const Image *image)
+{
+  const bke::ImageRuntime *runtime = image->runtime;
+  if (runtime->paint_selection_shared != nullptr) {
+    /* The owner is a separate allocation: the handle in the (possibly const) runtime points to it
+     * without const-qualifying the pointee. */
+    return *runtime->paint_selection_shared;
+  }
+  return const_cast<bke::PaintSelectionState &>(runtime->paint_selection);
+}
+
+/** Free the mask buffers an owner holds, then the owner: the state has no destructor of its own. */
+static void paint_selection_shared_delete(bke::PaintSelectionShared *owner)
+{
+  for (ImBuf *mask : owner->paint_selection_masks.values()) {
+    IMB_freeImBuf(mask);
+  }
+  for (ImBuf *blend : owner->paint_selection_blend_masks.values()) {
+    IMB_freeImBuf(blend);
+  }
+  MEM_delete(owner);
+}
+
+/**
+ * Drop \a image's handle to its shared owner (if any): one owner user goes, and the owner is
+ * deleted when nothing holds it anymore. The image's local state is not touched. Callers hold
+ * #paint_selection_owners_mutex.
+ */
+static void paint_selection_shared_unbind(Image *image)
+{
+  bke::ImageRuntime *runtime = image->runtime;
+  bke::PaintSelectionShared *owner = runtime->paint_selection_shared;
+  if (owner == nullptr) {
+    return;
+  }
+  runtime->paint_selection_shared = nullptr;
+  runtime->paint_selection_shared_uid = 0;
+  const int64_t index = owner->bound_images.first_index_of_try(image);
+  if (index != -1) {
+    owner->bound_images.remove(index);
+  }
+  if (--owner->users == 0) {
+    paint_selection_shared_delete(owner);
+  }
+}
+
+void BKE_image_paint_selection_owner_bind(Image *image, const Material *ma)
+{
+  if (image == nullptr || image->runtime == nullptr) {
+    return;
+  }
+  /* The fast path reads the handle and the UID that #BKE_image_paint_selection_owner_release
+   * rewrites under this lock, so it takes the lock too: a bind racing a material free must not see
+   * a half-cleared handle. */
+  std::scoped_lock lock(paint_selection_owners_mutex);
+  if (ma == nullptr || !BKE_paint_layers_is_layered(*ma)) {
+    /* A plain canvas never shares: fall back to the per-image selection. */
+    paint_selection_shared_unbind(image);
+    return;
+  }
+  const uint32_t uid = ma->id.session_uid;
+  if (image->runtime->paint_selection_shared != nullptr &&
+      image->runtime->paint_selection_shared_uid == uid)
+  {
+    return;
+  }
+
+  paint_selection_shared_unbind(image);
+  bke::PaintSelectionShared **owner_ptr = paint_selection_owners.lookup_ptr(uid);
+  bke::PaintSelectionShared *owner;
+  if (owner_ptr == nullptr) {
+    owner = MEM_new<bke::PaintSelectionShared>(__func__);
+    owner->uid = uid;
+    owner->users = 1; /* The table's user. */
+    paint_selection_owners.add_new(uid, owner);
+  }
+  else {
+    owner = *owner_ptr;
+  }
+
+  bke::PaintSelectionState &local = image->runtime->paint_selection;
+  if (!local.paint_selection_masks.is_empty()) {
+    if (owner->paint_selection_masks.is_empty()) {
+      /* A selection made before this image ever resolved to the material (e.g. on the legacy
+       * fallback canvas) must survive the bind: the owner adopts the local masks and policy. */
+      /* Mutable items() yields its pair by value, so the loop binds a copy, not a reference. */
+      for (const auto item : local.paint_selection_masks.items()) {
+        owner->paint_selection_masks.add_new(item.key, item.value);
+      }
+      local.paint_selection_masks.clear(); /* The owner adopted the buffers. */
+      owner->paint_selection_edge_policy = local.paint_selection_edge_policy;
+      owner->paint_selection_revision++;
+    }
+    else {
+      /* The owner already holds the canvas-wide selection: the local masks are redundant. */
+      for (ImBuf *mask : local.paint_selection_masks.values()) {
+        IMB_freeImBuf(mask);
+      }
+      local.paint_selection_masks.clear();
+    }
+    /* The local derived caches refer to the moved or dropped buffers. */
+    for (ImBuf *blend : local.paint_selection_blend_masks.values()) {
+      IMB_freeImBuf(blend);
+    }
+    local.paint_selection_blend_masks.clear();
+    local.paint_selection_bounds_cache.clear();
+  }
+
+  image->runtime->paint_selection_shared = owner;
+  image->runtime->paint_selection_shared_uid = uid;
+  owner->users++;
+  owner->bound_images.append(image);
+}
+
+bool BKE_image_paint_selection_owner_bind_by_uid(Image *image, const uint32_t material_uid)
+{
+  if (image == nullptr || image->runtime == nullptr || material_uid == 0) {
+    return false;
+  }
+  std::scoped_lock lock(paint_selection_owners_mutex);
+  if (image->runtime->paint_selection_shared != nullptr &&
+      image->runtime->paint_selection_shared_uid == material_uid)
+  {
+    return true;
+  }
+  bke::PaintSelectionShared **owner_ptr = paint_selection_owners.lookup_ptr(material_uid);
+  if (owner_ptr == nullptr) {
+    return false;
+  }
+  paint_selection_shared_unbind(image);
+  bke::PaintSelectionShared *owner = *owner_ptr;
+  image->runtime->paint_selection_shared = owner;
+  image->runtime->paint_selection_shared_uid = material_uid;
+  owner->users++;
+  owner->bound_images.append(image);
+  return true;
+}
+
+uint32_t BKE_image_paint_selection_owner_uid_get(const Image *image)
+{
+  if (image == nullptr || image->runtime == nullptr) {
+    return 0;
+  }
+  std::scoped_lock lock(paint_selection_owners_mutex);
+  return image->runtime->paint_selection_shared_uid;
+}
+
+void BKE_image_paint_selection_owner_release(const uint32_t material_uid)
+{
+  if (material_uid == 0) {
+    return;
+  }
+  std::scoped_lock lock(paint_selection_owners_mutex);
+  bke::PaintSelectionShared **owner_ptr = paint_selection_owners.lookup_ptr(material_uid);
+  if (owner_ptr == nullptr) {
+    return;
+  }
+  bke::PaintSelectionShared *owner = *owner_ptr;
+  paint_selection_owners.remove(material_uid);
+  /* Images fall back to their local state; their handles must not dangle. */
+  for (Image *image : owner->bound_images) {
+    image->runtime->paint_selection_shared = nullptr;
+    image->runtime->paint_selection_shared_uid = 0;
+    owner->users--;
+  }
+  owner->bound_images.clear();
+  owner->users--; /* The table's user. */
+  if (owner->users == 0) {
+    paint_selection_shared_delete(owner);
+  }
+}
+
+void BKE_image_paint_selection_state_discard(Image *image)
+{
+  if (image == nullptr || image->runtime == nullptr) {
+    return;
+  }
+  {
+    /* Detaching drops the image's owner user, which may delete the owner. */
+    std::scoped_lock lock(paint_selection_owners_mutex);
+    paint_selection_shared_unbind(image);
+  }
+  /* The image-local storage dies with the runtime; the shared owner (if any) keeps the canvas
+   * selection, so one map going away (buffer reload, unlink) never resets the material's
+   * selection. */
+  bke::PaintSelectionState &state = image->runtime->paint_selection;
+  for (ImBuf *mask : state.paint_selection_masks.values()) {
+    IMB_freeImBuf(mask);
+  }
+  state.paint_selection_masks.clear();
+  for (ImBuf *blend : state.paint_selection_blend_masks.values()) {
+    IMB_freeImBuf(blend);
+  }
+  state.paint_selection_blend_masks.clear();
+  state.paint_selection_edge_policy = BKE_image_paint_selection_edge_policy_feathered();
+  state.paint_selection_revision++;
+  state.paint_selection_bounds_cache.clear();
+}
+
+bool BKE_image_paint_selection_is_shared(const Image *image)
+{
+  if (image == nullptr || image->runtime == nullptr) {
+    return false;
+  }
+  std::scoped_lock lock(paint_selection_owners_mutex);
+  return image->runtime->paint_selection_shared != nullptr;
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Mask Storage
@@ -44,7 +282,7 @@ static void paint_selection_blend_mask_tile_invalidate(Image *image, int tile_nu
 static void paint_selection_bounds_cache_clear(Image *image)
 {
   if (image && image->runtime) {
-    image->runtime->paint_selection_bounds_cache.clear();
+    paint_selection_state(image).paint_selection_bounds_cache.clear();
   }
 }
 
@@ -55,7 +293,8 @@ static void paint_selection_bounds_cache_clear(Image *image)
 static void paint_selection_revision_bump(Image *image)
 {
   if (image && image->runtime) {
-    image->runtime->paint_selection_revision++;
+    bke::PaintSelectionState &state = paint_selection_state(image);
+    state.paint_selection_revision++;
     /* The memoized bounding boxes are derived from the mask contents, so they die with it. The
      * revision comparison below would catch this on its own; clearing here also releases the
      * memory instead of leaving stale entries around until the next query. */
@@ -81,13 +320,14 @@ uint64_t BKE_image_paint_selection_mask_revision_get(const Image *image)
   if (!image || !image->runtime) {
     return 0;
   }
-  return image->runtime->paint_selection_revision;
+  return paint_selection_state(image).paint_selection_revision;
 }
 
 ImBuf *BKE_image_paint_selection_mask_get(Image *image, int tile_number, int width, int height)
 {
   bke::ImageRuntime *runtime = image->runtime;
-  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(tile_number);
+  bke::PaintSelectionState &state = paint_selection_state(image);
+  ImBuf **mask_ptr = state.paint_selection_masks.lookup_ptr(tile_number);
   if (mask_ptr) {
     ImBuf *mask = *mask_ptr;
     if (mask->x == width && mask->y == height) {
@@ -96,16 +336,47 @@ ImBuf *BKE_image_paint_selection_mask_get(Image *image, int tile_number, int wid
       paint_selection_mark_tile_dirty(image, tile_number);
       return mask;
     }
+    if (runtime->paint_selection_shared != nullptr) {
+      /* The shared mask is the canvas's: a writer whose tile differs from the canonical size
+       * resamples the existing content into its own resolution (nearest, like the 2D copy -- the
+       * masks are binary, so a point lookup preserves the boundary) and that becomes the
+       * canonical size. Same-size maps, the layered norm, skip the copy entirely. */
+      CLOG_WARN(&LOG,
+                "Shared paint selection mask is %dx%d but %dx%d was requested; resampling the "
+                "canonical mask",
+                mask->x,
+                mask->y,
+                width,
+                height);
+      ImBuf *resampled = IMB_allocImBuf(width, height, ImBufFlags::Zero);
+      IMB_alloc_float_pixels(resampled, 1);
+      if (mask->float_data() != nullptr) {
+        const float *src_data = mask->float_data();
+        float *dst_data = resampled->float_data_for_write();
+        for (const int y : IndexRange(height)) {
+          const int sy = std::clamp(int(int64_t(y) * mask->y / height), 0, mask->y - 1);
+          for (const int x : IndexRange(width)) {
+            const int sx = std::clamp(int(int64_t(x) * mask->x / width), 0, mask->x - 1);
+            dst_data[int64_t(y) * width + x] = src_data[int64_t(sy) * mask->x + sx];
+          }
+        }
+      }
+      IMB_freeImBuf(mask);
+      *mask_ptr = resampled;
+      paint_selection_blend_mask_tile_invalidate(image, tile_number);
+      paint_selection_mark_tile_dirty(image, tile_number);
+      return resampled;
+    }
     /* Size changed, free old mask. */
     IMB_freeImBuf(mask);
-    runtime->paint_selection_masks.remove(tile_number);
+    state.paint_selection_masks.remove(tile_number);
     paint_selection_blend_mask_tile_invalidate(image, tile_number);
   }
 
   ImBuf *mask = IMB_allocImBuf(width, height, ImBufFlags::Zero);
   IMB_alloc_float_pixels(mask, 1);
   memset(mask->float_data_for_write(), 0, size_t(width) * height * sizeof(float));
-  runtime->paint_selection_masks.add_new(tile_number, mask);
+  state.paint_selection_masks.add_new(tile_number, mask);
   paint_selection_mark_tile_dirty(image, tile_number);
   return mask;
 }
@@ -115,13 +386,13 @@ static void paint_selection_blend_mask_tile_invalidate(Image *image, int tile_nu
   if (!image || !image->runtime) {
     return;
   }
-  bke::ImageRuntime *runtime = image->runtime;
-  ImBuf **blend_ptr = runtime->paint_selection_blend_masks.lookup_ptr(tile_number);
+  bke::PaintSelectionState &state = paint_selection_state(image);
+  ImBuf **blend_ptr = state.paint_selection_blend_masks.lookup_ptr(tile_number);
   if (blend_ptr) {
     if (*blend_ptr) {
       IMB_freeImBuf(*blend_ptr);
     }
-    runtime->paint_selection_blend_masks.remove(tile_number);
+    state.paint_selection_blend_masks.remove(tile_number);
   }
 }
 
@@ -139,33 +410,42 @@ void BKE_image_paint_selection_blend_mask_invalidate(Image *image)
   if (!image || !image->runtime) {
     return;
   }
-  bke::ImageRuntime *runtime = image->runtime;
-  for (ImBuf *blend : runtime->paint_selection_blend_masks.values()) {
+  bke::PaintSelectionState &state = paint_selection_state(image);
+  for (ImBuf *blend : state.paint_selection_blend_masks.values()) {
     IMB_freeImBuf(blend);
   }
-  runtime->paint_selection_blend_masks.clear();
+  state.paint_selection_blend_masks.clear();
 }
 
 void BKE_image_paint_selection_mask_free(Image *image)
 {
-  bke::ImageRuntime *runtime = image->runtime;
-  for (ImBuf *mask : runtime->paint_selection_masks.values()) {
+  if (!image || !image->runtime) {
+    return;
+  }
+  /* Routed: for a layered-canvas image this clears the material's canvas-wide selection, which
+   * is what the Deselect / Set-gesture callers mean. The image-lifecycle path uses
+   * #BKE_image_paint_selection_state_discard instead, which keeps the owner alive. */
+  bke::PaintSelectionState &state = paint_selection_state(image);
+  for (ImBuf *mask : state.paint_selection_masks.values()) {
     IMB_freeImBuf(mask);
   }
-  runtime->paint_selection_masks.clear();
+  state.paint_selection_masks.clear();
 
   BKE_image_paint_selection_blend_mask_invalidate(image);
-  image->runtime->paint_selection_edge_policy = BKE_image_paint_selection_edge_policy_feathered();
+  state.paint_selection_edge_policy = BKE_image_paint_selection_edge_policy_feathered();
   paint_selection_revision_bump(image);
 }
 
 void BKE_image_paint_selection_mask_tile_free(Image *image, int tile_number)
 {
-  bke::ImageRuntime *runtime = image->runtime;
-  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(tile_number);
+  if (!image || !image->runtime) {
+    return;
+  }
+  bke::PaintSelectionState &state = paint_selection_state(image);
+  ImBuf **mask_ptr = state.paint_selection_masks.lookup_ptr(tile_number);
   if (mask_ptr) {
     IMB_freeImBuf(*mask_ptr);
-    runtime->paint_selection_masks.remove(tile_number);
+    state.paint_selection_masks.remove(tile_number);
   }
   paint_selection_mark_tile_dirty(image, tile_number);
 }
@@ -177,21 +457,21 @@ void BKE_image_paint_selection_mask_tile_reassign(Image *image,
   if (!image || !image->runtime || old_tile_number == new_tile_number) {
     return;
   }
-  bke::ImageRuntime *runtime = image->runtime;
-  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(old_tile_number);
+  bke::PaintSelectionState &state = paint_selection_state(image);
+  ImBuf **mask_ptr = state.paint_selection_masks.lookup_ptr(old_tile_number);
   if (!mask_ptr) {
     return;
   }
   ImBuf *mask = *mask_ptr;
-  runtime->paint_selection_masks.remove(old_tile_number);
+  state.paint_selection_masks.remove(old_tile_number);
 
   /* Drop any stale mask that already sat at the destination tile number. */
-  ImBuf **existing_ptr = runtime->paint_selection_masks.lookup_ptr(new_tile_number);
+  ImBuf **existing_ptr = state.paint_selection_masks.lookup_ptr(new_tile_number);
   if (existing_ptr) {
     IMB_freeImBuf(*existing_ptr);
-    runtime->paint_selection_masks.remove(new_tile_number);
+    state.paint_selection_masks.remove(new_tile_number);
   }
-  runtime->paint_selection_masks.add_new(new_tile_number, mask);
+  state.paint_selection_masks.add_new(new_tile_number, mask);
 
   paint_selection_blend_mask_tile_invalidate(image, old_tile_number);
   paint_selection_blend_mask_tile_invalidate(image, new_tile_number);
@@ -203,7 +483,7 @@ ImBuf *BKE_image_paint_selection_mask_lookup(Image *image, int tile_number)
   if (!image || !image->runtime) {
     return nullptr;
   }
-  ImBuf **mask_ptr = image->runtime->paint_selection_masks.lookup_ptr(tile_number);
+  ImBuf **mask_ptr = paint_selection_state(image).paint_selection_masks.lookup_ptr(tile_number);
   if (!mask_ptr) {
     return nullptr;
   }
@@ -219,7 +499,8 @@ const ImBuf *BKE_image_paint_selection_mask_lookup(const Image *image, int tile_
   if (!image || !image->runtime) {
     return nullptr;
   }
-  ImBuf *const *mask_ptr = image->runtime->paint_selection_masks.lookup_ptr(tile_number);
+  ImBuf *const *mask_ptr = paint_selection_state(image).paint_selection_masks.lookup_ptr(
+      tile_number);
   return mask_ptr ? *mask_ptr : nullptr;
 }
 
@@ -292,23 +573,23 @@ static bool paint_selection_mask_bounds_cached(
   if (!image || !image->runtime) {
     return image_paint_selection_mask_imbuf_bounds(mask, r_min, r_max);
   }
-  /* `runtime` is a non-const pointee even on a `const Image *`; the cache is derived data behind a
+  /* The state is a non-const pointee even on a `const Image *` (the owner is a separate
+   * allocation; the local state lives in the runtime): the cache is derived data behind a
    * logically const query. */
-  bke::ImageRuntime &runtime = *image->runtime;
+  bke::PaintSelectionState &state = paint_selection_state(image);
 
-  if (runtime.paint_selection_bounds_revision != runtime.paint_selection_revision) {
-    runtime.paint_selection_bounds_cache.clear();
-    runtime.paint_selection_bounds_revision = runtime.paint_selection_revision;
+  if (state.paint_selection_bounds_revision != state.paint_selection_revision) {
+    state.paint_selection_bounds_cache.clear();
+    state.paint_selection_bounds_revision = state.paint_selection_revision;
   }
 
-  const PaintSelectionBounds *cached = runtime.paint_selection_bounds_cache.lookup_ptr(
-      tile_number);
+  const PaintSelectionBounds *cached = state.paint_selection_bounds_cache.lookup_ptr(tile_number);
   if (!cached) {
     PaintSelectionBounds bounds;
     /* Leaves `min` / `max` at their zeroed defaults when it returns false, so the cached entry is
      * never populated from uninitialized memory. */
     bounds.has_selection = image_paint_selection_mask_imbuf_bounds(mask, bounds.min, bounds.max);
-    cached = &runtime.paint_selection_bounds_cache.lookup_or_add(tile_number, bounds);
+    cached = &state.paint_selection_bounds_cache.lookup_or_add(tile_number, bounds);
   }
 
   r_min[0] = cached->min[0];
@@ -495,7 +776,7 @@ const PaintSelectionEdgePolicy &BKE_image_paint_selection_edge_policy_get(const 
   if (!image || !image->runtime) {
     return default_policy;
   }
-  return image->runtime->paint_selection_edge_policy;
+  return paint_selection_state(image).paint_selection_edge_policy;
 }
 
 void BKE_image_paint_selection_edge_policy_set(Image *image,
@@ -504,14 +785,14 @@ void BKE_image_paint_selection_edge_policy_set(Image *image,
   if (!image || !image->runtime) {
     return;
   }
-  if (image->runtime->paint_selection_edge_policy.use_outward_feather ==
-          edge_policy.use_outward_feather &&
-      image->runtime->paint_selection_edge_policy.blend_radius_px == edge_policy.blend_radius_px &&
-      image->runtime->paint_selection_edge_policy.edge_gamma == edge_policy.edge_gamma)
+  bke::PaintSelectionState &state = paint_selection_state(image);
+  if (state.paint_selection_edge_policy.use_outward_feather == edge_policy.use_outward_feather &&
+      state.paint_selection_edge_policy.blend_radius_px == edge_policy.blend_radius_px &&
+      state.paint_selection_edge_policy.edge_gamma == edge_policy.edge_gamma)
   {
     return;
   }
-  image->runtime->paint_selection_edge_policy = edge_policy;
+  state.paint_selection_edge_policy = edge_policy;
   BKE_image_paint_selection_blend_mask_invalidate(image);
 }
 
@@ -548,14 +829,14 @@ static ImBuf *paint_selection_blend_mask_ensure(Image *image, int tile_number)
     return nullptr;
   }
 
-  bke::ImageRuntime *runtime = image->runtime;
+  bke::PaintSelectionState &state = paint_selection_state(image);
 
   /* Multi-threaded rasterizers (e.g. the gradient tool) call this per-pixel from worker
    * threads for the same image, so the lazy fill of #paint_selection_blend_masks below must be
    * serialized: unguarded concurrent inserts corrupt the map / hit its `add_new` assert. */
   {
-    std::scoped_lock lock(runtime->paint_selection_blend_masks_mutex);
-    ImBuf **blend_ptr = runtime->paint_selection_blend_masks.lookup_ptr(tile_number);
+    std::scoped_lock lock(state.paint_selection_blend_masks_mutex);
+    ImBuf **blend_ptr = state.paint_selection_blend_masks.lookup_ptr(tile_number);
     if (blend_ptr && *blend_ptr && (*blend_ptr)->x == binary->x && (*blend_ptr)->y == binary->y) {
       return *blend_ptr;
     }
@@ -566,8 +847,8 @@ static ImBuf *paint_selection_blend_mask_ensure(Image *image, int tile_number)
   const PaintSelectionEdgePolicy &edge_policy = BKE_image_paint_selection_edge_policy_get(image);
   ImBuf *blend = BKE_image_paint_selection_compute_blend_mask(binary, edge_policy);
 
-  std::scoped_lock lock(runtime->paint_selection_blend_masks_mutex);
-  ImBuf **blend_ptr = runtime->paint_selection_blend_masks.lookup_ptr(tile_number);
+  std::scoped_lock lock(state.paint_selection_blend_masks_mutex);
+  ImBuf **blend_ptr = state.paint_selection_blend_masks.lookup_ptr(tile_number);
   if (blend_ptr && *blend_ptr && (*blend_ptr)->x == binary->x && (*blend_ptr)->y == binary->y) {
     /* Another thread finished first. */
     IMB_freeImBuf(blend);
@@ -575,7 +856,7 @@ static ImBuf *paint_selection_blend_mask_ensure(Image *image, int tile_number)
   }
   paint_selection_blend_mask_tile_invalidate(image, tile_number);
   if (blend) {
-    runtime->paint_selection_blend_masks.add_new(tile_number, blend);
+    state.paint_selection_blend_masks.add_new(tile_number, blend);
   }
   return blend;
 }
@@ -656,10 +937,12 @@ static ImBuf *paint_selection_face_blend_mask_ensure(Image *image, const int til
   }
 
   bke::ImageRuntime *runtime = image->runtime;
-  /* Same concurrency contract as the user blend mask: multi-threaded rasterizers call this
-   * per-pixel for the same image. */
+  /* The derived masks stay per-image even for a shared user selection, so their blend cache and
+   * its mutex are the image-local ones. Same concurrency contract as the user blend mask:
+   * multi-threaded rasterizers call this per-pixel for the same image. */
+  Mutex &blend_masks_mutex = runtime->paint_selection.paint_selection_blend_masks_mutex;
   {
-    std::scoped_lock lock(runtime->paint_selection_blend_masks_mutex);
+    std::scoped_lock lock(blend_masks_mutex);
     ImBuf **blend_ptr = runtime->paint_selection_face_blend_masks.lookup_ptr(tile_number);
     if (blend_ptr && *blend_ptr && (*blend_ptr)->x == binary->x && (*blend_ptr)->y == binary->y) {
       return *blend_ptr;
@@ -671,7 +954,7 @@ static ImBuf *paint_selection_face_blend_mask_ensure(Image *image, const int til
   const PaintSelectionEdgePolicy &edge_policy = BKE_image_paint_selection_edge_policy_get(image);
   ImBuf *blend = BKE_image_paint_selection_compute_blend_mask(binary, edge_policy);
 
-  std::scoped_lock lock(runtime->paint_selection_blend_masks_mutex);
+  std::scoped_lock lock(blend_masks_mutex);
   ImBuf **blend_ptr = runtime->paint_selection_face_blend_masks.lookup_ptr(tile_number);
   if (blend_ptr && *blend_ptr && (*blend_ptr)->x == binary->x && (*blend_ptr)->y == binary->y) {
     /* Another thread finished first. */
@@ -1266,7 +1549,8 @@ bool BKE_image_paint_selection_mask_has_any(const Image *image)
   /* A tile can hold a fully zeroed mask (e.g. after subtracting the whole selection), so the
    * presence of a map entry alone is not enough: check that at least one tile has a selected
    * pixel. Bounds are memoized, so this is cheap after the first query per revision. */
-  for (const auto &item : image->runtime->paint_selection_masks.items()) {
+  const bke::PaintSelectionState &state = paint_selection_state(image);
+  for (const auto &item : state.paint_selection_masks.items()) {
     int r_min[2], r_max[2];
     if (paint_selection_mask_bounds_cached(image, item.key, item.value, r_min, r_max)) {
       return true;
@@ -1299,7 +1583,8 @@ int BKE_image_paint_selection_mask_first_tile_with_selection(const Image *image)
   /* Goes through the memoized bounds: this walks every tile, and each scan is O(width * height).
    * Populating #paint_selection_bounds_cache does not touch #paint_selection_masks, so mutating it
    * while iterating here is safe. */
-  for (const auto &item : image->runtime->paint_selection_masks.items()) {
+  const bke::PaintSelectionState &state = paint_selection_state(image);
+  for (const auto &item : state.paint_selection_masks.items()) {
     int r_min[2], r_max[2];
     if (paint_selection_mask_bounds_cached(image, item.key, item.value, r_min, r_max)) {
       return item.key;
@@ -1323,8 +1608,8 @@ void BKE_image_paint_selection_mask_restore_tile(Image *image,
   if (!image || !image->runtime) {
     return;
   }
-  bke::ImageRuntime *runtime = image->runtime;
-  ImBuf **mask_ptr = runtime->paint_selection_masks.lookup_ptr(tile_number);
+  bke::PaintSelectionState &state = paint_selection_state(image);
+  ImBuf **mask_ptr = state.paint_selection_masks.lookup_ptr(tile_number);
 
   if (src_mask) {
     if (mask_ptr && *mask_ptr) {
@@ -1343,13 +1628,13 @@ void BKE_image_paint_selection_mask_restore_tile(Image *image,
       }
     }
     else {
-      runtime->paint_selection_masks.add(tile_number, IMB_dupImBuf(src_mask));
+      state.paint_selection_masks.add(tile_number, IMB_dupImBuf(src_mask));
     }
   }
   else {
     if (mask_ptr && *mask_ptr) {
       IMB_freeImBuf(*mask_ptr);
-      runtime->paint_selection_masks.remove(tile_number);
+      state.paint_selection_masks.remove(tile_number);
     }
   }
   paint_selection_mark_tile_dirty(image, tile_number);

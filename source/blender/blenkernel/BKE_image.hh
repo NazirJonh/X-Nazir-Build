@@ -152,6 +152,67 @@ inline uint64_t image_pixel_version_next()
   return counter.fetch_add(1) + 1;
 }
 
+/**
+ * Per-UDIM-tile user-authored paint selection masks and their derived caches.
+ *
+ * A plain (non-layered) canvas image keeps one of these embedded in its #ImageRuntime; the layered
+ * material's canvas-wide selection lives in a #PaintSelectionShared instead, which derives from
+ * this so every `BKE_image_paint_selection_*` access can treat both alike. Never saved.
+ */
+struct PaintSelectionState {
+  /* The binary per-tile masks. */
+  Map<int, ImBuf *> paint_selection_masks;
+  /* Cached smooth blend weights derived from #paint_selection_masks (runtime only). */
+  Map<int, ImBuf *> paint_selection_blend_masks;
+  /* Guards #paint_selection_blend_masks: lazily filled by multi-threaded samplers (e.g. the
+   * gradient tool) that would otherwise insert into the map concurrently. */
+  Mutex paint_selection_blend_masks_mutex;
+  /** Edge compositing policy for the active selection (box=all hard, lasso/circle=feathered). */
+  PaintSelectionEdgePolicy paint_selection_edge_policy;
+  /**
+   * Monotonically increasing counter bumped whenever #paint_selection_masks may have changed.
+   * Consumers cache derived data (such as the editor's outline batch) against it. See
+   * #BKE_image_paint_selection_mask_revision_get.
+   */
+  uint64_t paint_selection_revision = 0;
+  /**
+   * Memoized per-tile results of #BKE_image_paint_selection_mask_bounds, valid only while
+   * #paint_selection_bounds_revision still equals #paint_selection_revision.
+   *
+   * \note The revision counter is global to the state rather than per-tile, so editing any tile
+   * drops every tile's cached box. That is conservative but never stale, and it keeps a single
+   * invalidation signal shared with the editor's outline batch cache. Making it per-tile would
+   * require splitting that signal, which the outline batch consumes as one value.
+   */
+  Map<int, PaintSelectionBounds> paint_selection_bounds_cache;
+  uint64_t paint_selection_bounds_revision = 0;
+};
+
+/**
+ * The canvas-wide paint selection of a layered material: one instance per material, shared by
+ * every map of every row, by mask maps, and by every object using the material.
+ *
+ * Owned by the BKE owner table keyed by the material's session UID (see
+ * #BKE_image_paint_selection_owner_bind in BKE_image_paint_selection.hh); images reference it
+ * through #ImageRuntime::paint_selection_shared. The mask holds the canonical UV-plane
+ * resolution: a writer whose tile size differs resamples the content into its own size (nearest),
+ * and the maps of a layered material agree on one size by construction
+ * (#Material::paint_layers_image_size), so this only triggers for a foreign-size fallback canvas.
+ * Never saved.
+ */
+struct PaintSelectionShared : public PaintSelectionState {
+  /** Session UID of the material this selection belongs to. */
+  uint32_t uid = 0;
+  /**
+   * Implicit users: one for the owner table plus one per bound image runtime. When it drops to
+   * zero the owner is deleted; the table releases its user on material free, and each image
+   * releases its own when its runtime is discarded.
+   */
+  int users = 0;
+  /** Weak back-references to the images currently bound, so a release can clear their handles. */
+  Vector<Image *> bound_images;
+};
+
 struct ImageRuntime {
   /* Mutex used to guarantee thread-safe access to the cached ImBuf of the corresponding image ID.
    */
@@ -219,8 +280,22 @@ struct ImageRuntime {
   /* Runtime index for fast image filtering by material and slot type. */
   ImagePaintSlotInfo *paint_slot_info = nullptr;
 
-  /* Per-tile selection masks for 2D image paint (runtime only). */
-  Map<int, ImBuf *> paint_selection_masks;
+  /**
+   * Local (per-image) user-authored paint selection state. Used whenever the image does not route
+   * to a shared owner: a plain canvas image, or a layered-canvas image whose owner has not been
+   * resolved (yet). The `BKE_image_paint_selection_*` functions pick this or the shared owner
+   * transparently. Never saved.
+   */
+  PaintSelectionState paint_selection;
+  /**
+   * Shared canvas-wide selection of a layered material. Null while the image keeps its selection
+   * in #paint_selection. A borrowed pointer owned by the BKE owner table; it is re-established
+   * whenever a material target resolves (see #BKE_image_paint_selection_owner_bind) and dropped
+   * when this runtime is discarded, so it can never dangle. Never saved.
+   */
+  PaintSelectionShared *paint_selection_shared = nullptr;
+  /** Session UID of the material that owns #paint_selection_shared, for undo re-binding. */
+  uint32_t paint_selection_shared_uid = 0;
   /**
    * Runtime state of the derived masks in #paint_selection_face_masks: Active when they restrict
    * 2D painting, Inactive when no canvas object has an active face selection (see the
@@ -231,9 +306,10 @@ struct ImageRuntime {
   bool paint_selection_derived_active = false;
   /**
    * Per-tile selection masks derived from the mesh face selection (runtime only). Kept strictly
-   * separate from #paint_selection_masks so the face-selection sync never touches user-authored
-   * masks (no undo loss, no provenance bookkeeping); the two are combined at sampling time inside
-   * #BKE_image_paint_selection_blend_sample. Never saved.
+   * separate from the user-authored masks so the face-selection sync never touches those (no undo
+   * loss, no provenance bookkeeping); the two are combined at sampling time inside
+   * #BKE_image_paint_selection_blend_sample. These stay per-image: they are rasterized through
+   * each canvas object's own UVs. Never saved.
    */
   Map<int, ImBuf *> paint_selection_face_masks;
   /* Cached smooth blend weights derived from #paint_selection_face_masks (runtime only). */
@@ -252,31 +328,6 @@ struct ImageRuntime {
    * Released by #BKE_image_paint_selection_face_mask_free. Never saved.
    */
   Vector<const ImplicitSharingInfo *> paint_selection_derived_sharing_infos;
-  /* Cached smooth blend weights derived from #paint_selection_masks (runtime only). */
-  Map<int, ImBuf *> paint_selection_blend_masks;
-  /* Guards #paint_selection_blend_masks and #paint_selection_face_blend_masks: lazily filled
-   * from #BKE_image_paint_selection_blend_sample_bilinear and the face-selection samplers, which
-   * multi-threaded rasterizers (e.g. the gradient tool) call concurrently for the same image. */
-  Mutex paint_selection_blend_masks_mutex;
-  /** Edge compositing policy for the active selection (box=all hard, lasso/circle=feathered). */
-  PaintSelectionEdgePolicy paint_selection_edge_policy;
-  /**
-   * Monotonically increasing counter bumped whenever #paint_selection_masks may have changed.
-   * Consumers cache derived data (such as the editor's outline batch) against it. See
-   * #BKE_image_paint_selection_mask_revision_get.
-   */
-  uint64_t paint_selection_revision = 0;
-  /**
-   * Memoized per-tile results of #BKE_image_paint_selection_mask_bounds, valid only while
-   * #paint_selection_bounds_revision still equals #paint_selection_revision.
-   *
-   * \note The revision counter is global to the image rather than per-tile, so editing any tile
-   * drops every tile's cached box. That is conservative but never stale, and it keeps a single
-   * invalidation signal shared with the editor's outline batch cache. Making it per-tile would
-   * require splitting that signal, which the outline batch consumes as one value.
-   */
-  Map<int, PaintSelectionBounds> paint_selection_bounds_cache;
-  uint64_t paint_selection_bounds_revision = 0;
   /**
    * Memoized per-tile results of #BKE_image_paint_selection_face_mask_bounds, valid only while
    * #paint_selection_face_bounds_sync_key still equals #paint_selection_derived_sync_key.

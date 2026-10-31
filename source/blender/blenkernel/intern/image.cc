@@ -231,7 +231,9 @@ static void image_free_data(ID *id)
 
   image->tiles.free_no_destruct();
 
-  BKE_image_paint_selection_mask_free(image);
+  /* Discard (not clear): the image dies, but a shared material-canvas selection must survive it
+   * and re-attach when another map resolves. */
+  BKE_image_paint_selection_state_discard(image);
   BKE_image_paint_selection_face_mask_free(image);
   image_runtime_free_data(image);
   /* Nulled, unlike a plain #MEM_delete: `runtime` is dereferenced unconditionally all over
@@ -751,9 +753,10 @@ void BKE_image_free_buffers_ex(Image *ima, bool do_lock)
 
   BKE_image_free_gputextures(ima);
 
-  /* Paint selection masks (and their GPU textures) are built against the image buffers being
-   * freed here; keeping them would leak the textures and leave stale-sized masks behind. */
-  BKE_image_paint_selection_mask_free(ima);
+  /* The image-local paint selection masks die with the buffers being freed here. A shared
+   * material-canvas selection is detached, not cleared: it is the canvas's, not this buffer's,
+   * and re-attaches when a target resolves again. */
+  BKE_image_paint_selection_state_discard(ima);
   BKE_image_paint_selection_face_mask_free(ima);
   if (do_lock) {
     ima->runtime->cache_mutex.unlock();

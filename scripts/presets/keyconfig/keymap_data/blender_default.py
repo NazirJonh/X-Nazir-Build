@@ -8975,15 +8975,17 @@ def km_3d_view_tool_sculpt_image_select_polyline(params):
         "3D View Tool: Sculpt, Image Select Polyline",
         {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
         {"items": [
-            ("paint.image_select_view3d_polyline", params.tool_maybe_tweak_event, None),
+            # The first click (press and release without a drag) places the first point and starts the
+            # modal; the following clicks are handled by the operator itself. A drag is not a polyline
+            # gesture, and the plain-click deselect of the other selection tools would swallow this
+            # click, so it is not bound here.
+            ("paint.image_select_view3d_polyline", {"type": params.tool_mouse, "value": 'CLICK'}, None),
             ("paint.image_select_view3d_polyline",
-             {**params.tool_maybe_tweak_event, "shift": True},
+             {"type": params.tool_mouse, "value": 'CLICK', "shift": True},
              {"properties": [("mode", 'ADD')]}),
             ("paint.image_select_view3d_polyline",
-             {**params.tool_maybe_tweak_event, "ctrl": True},
+             {"type": params.tool_mouse, "value": 'CLICK', "ctrl": True},
              {"properties": [("mode", 'SUB')]}),
-            # A plain click (no drag) clears the selection.
-            ("paint.image_select_view3d_none", {"type": params.tool_mouse, "value": 'CLICK'}, None),
         ]},
     )
 

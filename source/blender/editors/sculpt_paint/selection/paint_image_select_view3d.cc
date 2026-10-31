@@ -68,9 +68,9 @@
 #include "BKE_library.hh"
 #include "BKE_mesh.hh"
 #include "BKE_paint.hh"
-#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_screen.hh"
 
@@ -316,6 +316,7 @@ Vector<ImagePaintSelectionTarget> image_paint_selection_view3d_targets_get(bCont
   /* A temporarily unresolved Material canvas keeps the single-canvas behavior. */
   if (targets.is_empty() && canvas_image != nullptr) {
     targets.append({canvas_image, canvas_iuser});
+    image_paint_selection_owner_bind_active(&ob, canvas_image);
   }
   return targets;
 }
@@ -1788,18 +1789,37 @@ static void gesture_draw_preview(const bContext * /*C*/, ARegion *region, void *
   {
     /* The polyline is click-built: draw the committed points plus the segment to the live cursor
      * position (#last_xy, refreshed on every MOUSEMOVE), so the click target is visible. */
-    const int extra = (data->kind == GestureKind::Polyline) ? 1 : 0;
     /* A line strip needs two vertices: the first lasso point alone has nothing to connect to
      * yet, and `immBegin` asserts on it. */
-    if (data->path_region.size() + extra >= 2) {
-      immBegin(GPU_PRIM_LINE_STRIP, uint(data->path_region.size()) + extra);
+    if (data->path_region.size() >= 2) {
+      immBegin(GPU_PRIM_LINE_STRIP, uint(data->path_region.size()));
       for (const float2 &p : data->path_region) {
         immVertex2f(pos, p.x, p.y);
       }
-      if (extra != 0) {
-        immVertex2f(pos, data->last_xy.x, data->last_xy.y);
-      }
       immEnd();
+    }
+    if (data->kind == GestureKind::Polyline) {
+      /* The segment still being aimed is dashed, so it reads as not yet placed. Dashes are laid out
+       * by hand: the immediate-mode line has no stipple in this version. */
+      const float2 from = data->path_region.last();
+      const float2 to = float2(data->last_xy);
+      const float length = math::distance(from, to);
+      const float dash = 6.0f * UI_SCALE_FAC;
+      const float gap = 4.0f * UI_SCALE_FAC;
+      if (length > 1.0f) {
+        const float2 dir = (to - from) / length;
+        const int dash_num = int(length / (dash + gap)) + 1;
+        immBegin(GPU_PRIM_LINES, uint(dash_num) * 2);
+        for (const int i : IndexRange(dash_num)) {
+          const float start = float(i) * (dash + gap);
+          const float end = std::min(start + dash, length);
+          const float2 a = from + dir * start;
+          const float2 b = from + dir * end;
+          immVertex2f(pos, a.x, a.y);
+          immVertex2f(pos, b.x, b.y);
+        }
+        immEnd();
+      }
     }
   }
   else if (data->kind == GestureKind::Circle && data->circle_radius > 0.0f) {
@@ -1923,6 +1943,19 @@ static bool gesture_box_to_plane_quad(const SelectGesture3DData &data,
   return true;
 }
 
+/**
+ * Edge policy of the free-form gestures, from the same feather setting the 2D Wand / Quick
+ * selection use. The default feathered policy leaves a visible outline around the selected
+ * fragment.
+ */
+static PaintSelectionEdgePolicy gesture_edge_policy_from_settings(const bContext *C)
+{
+  const Scene *scene = CTX_data_scene(C);
+  const float feather_px = scene != nullptr ? scene->toolsettings->imapaint.select_feather_px :
+                                              0.0f;
+  return image_paint_selection_edge_policy_from_feather(feather_px);
+}
+
 /** Rasterize the quad / polygon / circle the gesture described. */
 static bool gesture_apply(bContext *C, wmOperator *op, SelectGesture3DData &data)
 {
@@ -1986,7 +2019,7 @@ static bool gesture_apply(bContext *C, wmOperator *op, SelectGesture3DData &data
       polygon[i] = p;
     }
     undo_name = "Lasso Select";
-    edge_policy = BKE_image_paint_selection_edge_policy_feathered();
+    edge_policy = gesture_edge_policy_from_settings(C);
   }
   else { /* Circle. */
     if (gesture_is_scene_shape(data)) {
@@ -2006,7 +2039,7 @@ static bool gesture_apply(bContext *C, wmOperator *op, SelectGesture3DData &data
       circle_radius = std::max(data.circle_radius, 1.0f);
     }
     undo_name = "Circle Select";
-    edge_policy = BKE_image_paint_selection_edge_policy_feathered();
+    edge_policy = gesture_edge_policy_from_settings(C);
   }
 
   rctf domain;
@@ -2314,12 +2347,15 @@ static wmOperatorStatus view3d_select_polyline_modal(bContext *C,
     case LEFTMOUSE:
       if (event->val == KM_PRESS) {
         const float2 mval = gesture_mval_f(event);
-        if (!data->path_region.is_empty() &&
+        /* A click within the close radius of the first point closes the polygon, like the WM
+         * polyline gesture (#wm::gesture::POLYLINE_CLICK_RADIUS). With fewer than 3 points the
+         * click cannot close anything and just places another point: canceling on it would make
+         * the radius swallow the second click of a short polyline. */
+        if (data->path_region.size() >= 3 &&
             math::distance(mval, data->path_region.first()) <
-                float(SELECT_VIEW3D_CLICK_DRAG_THRESHOLD_PX))
+                wm::gesture::POLYLINE_CLICK_RADIUS * UI_SCALE_FAC)
         {
-          /* Clicking the first point closes the polygon. */
-          if (data->path_region.size() >= 3 && gesture_apply(C, op, *data)) {
+          if (gesture_apply(C, op, *data)) {
             gesture_finish_common(C, op);
             return OPERATOR_FINISHED;
           }

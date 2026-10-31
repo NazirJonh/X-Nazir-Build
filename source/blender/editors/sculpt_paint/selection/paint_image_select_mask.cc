@@ -150,6 +150,7 @@ Vector<ImagePaintSelectionTarget> image_paint_selection_targets_get(const bConte
    * the single-image behavior until the configured PBR targets become available again. */
   if (targets.is_empty()) {
     targets.append({sima->image, sima->iuser});
+    image_paint_selection_owner_bind_active(ob, sima->image);
   }
   else {
     for (const int i : targets.index_range()) {
@@ -160,6 +161,16 @@ Vector<ImagePaintSelectionTarget> image_paint_selection_targets_get(const bConte
     }
   }
   return targets;
+}
+
+void image_paint_selection_owner_bind_active(Object *ob, Image *image)
+{
+  if (ob == nullptr || image == nullptr) {
+    return;
+  }
+  if (Material *layered = BKE_paint_layers_active_material_get(ob)) {
+    BKE_image_paint_selection_owner_bind(image, layered);
+  }
 }
 
 Vector<ImagePaintSelectionTarget> image_paint_selection_material_targets_get(
@@ -268,6 +279,15 @@ void image_paint_selection_targets_update(bContext *C,
 
 void image_paint_selection_masks_copy(Image &dest, const Image &src, const ImageUser &dest_iuser)
 {
+  /* A shared owner makes a copy of the mask onto itself meaningless (and a self-memcpy undefined):
+   * both images route to the same canvas-wide mask, so there is nothing to transfer. */
+  if (&dest == &src ||
+      (BKE_image_paint_selection_is_shared(&dest) && BKE_image_paint_selection_is_shared(&src) &&
+       BKE_image_paint_selection_owner_uid_get(&dest) ==
+           BKE_image_paint_selection_owner_uid_get(&src)))
+  {
+    return;
+  }
   for (const ImageTile *tile : ConstListBaseWrapper<ImageTile>(src.tiles)) {
     const ImBuf *src_mask = BKE_image_paint_selection_mask_lookup(&src, tile->tile_number);
     if (src_mask == nullptr || src_mask->float_data() == nullptr) {
@@ -429,14 +449,21 @@ bool image_paint_selection_image_poll(bContext *C)
   return (sima != nullptr) && (sima->image != nullptr);
 }
 
+PaintSelectionEdgePolicy image_paint_selection_edge_policy_from_feather(const float feather_px)
+{
+  if (feather_px < 1.0f) {
+    return BKE_image_paint_selection_edge_policy_hard();
+  }
+  PaintSelectionEdgePolicy policy = BKE_image_paint_selection_edge_policy_feathered();
+  policy.blend_radius_px = int(feather_px);
+  return policy;
+}
+
 void image_paint_selection_edge_policy_apply(const Span<ImagePaintSelectionTarget> targets,
                                              const float feather_px)
 {
-  PaintSelectionEdgePolicy policy = BKE_image_paint_selection_edge_policy_hard();
-  if (feather_px >= 1.0f) {
-    policy = BKE_image_paint_selection_edge_policy_feathered();
-    policy.blend_radius_px = int(feather_px);
-  }
+  const PaintSelectionEdgePolicy policy =
+      image_paint_selection_edge_policy_from_feather(feather_px);
   for (const ImagePaintSelectionTarget &target : targets) {
     BKE_image_paint_selection_edge_policy_set(target.image, policy);
   }

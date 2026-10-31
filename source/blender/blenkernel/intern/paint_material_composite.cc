@@ -28,6 +28,7 @@
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
 #include "BLI_math_base.h"
+#include "BLI_math_interp.hh"
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
@@ -1082,8 +1083,14 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
     float gray = clamp_f(item.constant_gray, 0.0f, 1.0f);
     float weight = opacity;
     if (c != nullptr) {
-      gray = clamp_f((c[0] + c[1] + c[2]) / 3.0f, 0.0f, 1.0f);
-      weight = clamp_f(c[3], 0.0f, 1.0f) * opacity;
+      if (item.is_mesh_map) {
+        /* A MESH_MAP atlas' R is the grey; its alpha is data, not coverage. */
+        gray = clamp_f(item.is_mesh_map_scalar ? c[0] : (c[0] + c[1] + c[2]) / 3.0f, 0.0f, 1.0f);
+      }
+      else {
+        gray = clamp_f((c[0] + c[1] + c[2]) / 3.0f, 0.0f, 1.0f);
+        weight = clamp_f(c[3], 0.0f, 1.0f) * opacity;
+      }
     }
     /* The grey only: a transparent texel is still one the item does not cover. */
     if (item.invert) {
@@ -1334,7 +1341,9 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
         const float *cov = anchor_coverage + i * 4;
         correction_factor = (cov[0] + cov[1] + cov[2]) / 3.0f;
       }
-      else if (correction.ibuf != nullptr || correction.gradient.enabled) {
+      else if ((correction.ibuf != nullptr && !correction.is_mesh_map) ||
+               correction.gradient.enabled)
+      {
         correction_factor = c[3];
       }
       const float f = clamp_f(correction.opacity * correction_factor, 0.0f, 1.0f);
@@ -2129,6 +2138,95 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
 }
 
 /**
+ * Resample \a src (a MESH_MAP atlas) onto a \a ref_width x \a ref_height grid, as a float RGBA
+ * scene-linear ImBuf the caller owns.
+ *
+ * The mapping matches the generator's Image Texture sampling: the reference texel centre
+ * `(x + 0.5) / W_ref` is looked up in the atlas at `u * W_atlas - 0.5`, bilinearly filtered with
+ * Extend clamping, so a differently sized atlas agrees between the graph and the CPU, including at
+ * the borders. The atlas is Non-Color and its alpha is ignored (alpha 1). A scalar atlas
+ * (#scalar) contributes its R spread across the RGB, the grey the generator's Separate/Combine
+ * pair builds; an RGB atlas passes its stored RGB through.
+ */
+static ImBuf *composite_resample_mesh_map(const ImBuf *src,
+                                          const int ref_width,
+                                          const int ref_height,
+                                          const bool scalar)
+{
+  if (src == nullptr || ref_width <= 0 || ref_height <= 0) {
+    return nullptr;
+  }
+  ImBuf *dst = IMB_allocImBuf(uint(ref_width), uint(ref_height), ImBufFlags::FloatData);
+  if (dst == nullptr || dst->float_data() == nullptr) {
+    if (dst != nullptr) {
+      IMB_freeImBuf(dst);
+    }
+    return nullptr;
+  }
+  dst->channels = 4;
+  float *out = dst->float_data_for_write();
+  const bool src_is_float = src->byte_buffer.data == nullptr && src->float_buffer.data != nullptr;
+  const int channels = src->channels == 0 ? 4 : src->channels;
+  for (int y = 0; y < ref_height; y++) {
+    const float v = (float(y) + 0.5f) / float(ref_height);
+    const float sv = v * float(src->y) - 0.5f;
+    for (int x = 0; x < ref_width; x++) {
+      const float u = (float(x) + 0.5f) / float(ref_width);
+      const float su = u * float(src->x) - 0.5f;
+      float *p = out + (int64_t(y) * ref_width + x) * 4;
+      if (!src_is_float) {
+        const uchar4 c = math::interpolate_bilinear_byte(src->byte_data(), src->x, src->y, su, sv);
+        p[0] = float(c.x) / 255.0f;
+        p[1] = float(c.y) / 255.0f;
+        p[2] = float(c.z) / 255.0f;
+      }
+      else {
+        const float *data = src->float_buffer.data;
+        if (channels == 4) {
+          const float4 c = math::interpolate_bilinear_fl(data, src->x, src->y, su, sv);
+          p[0] = c.x;
+          p[1] = c.y;
+          p[2] = c.z;
+        }
+        else {
+          const int cx = min_ii(max_ii(int(floorf(su + 0.5f)), 0), src->x - 1);
+          const int cy = min_ii(max_ii(int(floorf(sv + 0.5f)), 0), src->y - 1);
+          const float *px = data + (int64_t(cy) * src->x + cx) * channels;
+          p[0] = px[0];
+          p[1] = px[1];
+          p[2] = px[2];
+        }
+      }
+      p[3] = 1.0f;
+      if (scalar) {
+        p[1] = p[0];
+        p[2] = p[0];
+      }
+    }
+  }
+  /* The result is scene linear, so the evaluator's decode is the identity. */
+  IMB_colormanagement_assign_float_colorspace(
+      dst, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
+  return dst;
+}
+
+/** Resample a MESH_MAP atlas buffer to the reference grid, owning the result with the locks. */
+static void composite_mesh_map_remap(ImBuf *&r_ibuf,
+                                     const int ref_width,
+                                     const int ref_height,
+                                     const bool scalar,
+                                     Vector<CompositeImageLock> &r_locks)
+{
+  if (r_ibuf == nullptr) {
+    return;
+  }
+  if (ImBuf *resampled = composite_resample_mesh_map(r_ibuf, ref_width, ref_height, scalar)) {
+    composite_image_own(resampled, r_locks);
+    r_ibuf = resampled;
+  }
+}
+
+/**
  * Replace an acquired map buffer by its UV-mapped resample when the row remaps it. A null resample
  * keeps the acquired buffer, so a mapping never fails the stack, it just reads unmapped. One owned
  * buffer per mapped map, reused for every pixel and tile of the evaluation; nothing is allocated
@@ -2417,6 +2515,13 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         return false;
       }
       composite_mapped_remap(layer.color_ibuf, image_layer.mapping, ref_width, ref_height, r_locks);
+      if (image_layer.is_mesh_map) {
+        composite_mesh_map_remap(layer.color_ibuf,
+                                 ref_width,
+                                 ref_height,
+                                 image_layer.is_mesh_map_scalar,
+                                 r_locks);
+      }
       layer.color_ibuf = composite_buffer_to_eval_grid(
           layer.color_ibuf, ref_width, ref_height, r_locks);
       /* The buffer's own colorspace, not the Image setting: the two can disagree, and the
@@ -2467,8 +2572,16 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         if (buffer.ibuf == nullptr) {
           return false;
         }
-        /* Resampled before the grey is reduced, so the grey is read after the mapping. */
-        composite_mapped_remap(buffer.ibuf, item.mapping, ref_width, ref_height, r_locks);
+        buffer.is_mesh_map = item.is_mesh_map;
+        buffer.is_mesh_map_scalar = item.is_mesh_map_scalar;
+        if (item.is_mesh_map) {
+          composite_mesh_map_remap(
+              buffer.ibuf, ref_width, ref_height, item.is_mesh_map_scalar, r_locks);
+        }
+        else {
+          /* Resampled before the grey is reduced, so the grey is read after the mapping. */
+          composite_mapped_remap(buffer.ibuf, item.mapping, ref_width, ref_height, r_locks);
+        }
         buffer.ibuf = composite_buffer_to_eval_grid(buffer.ibuf, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
@@ -2532,8 +2645,18 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         if (buffer.ibuf == nullptr) {
           return false;
         }
-        composite_mapped_remap(
-            buffer.ibuf, correction.mapping, ref_width, ref_height, r_locks);
+        buffer.is_mesh_map = correction.is_mesh_map;
+        if (correction.is_mesh_map) {
+          composite_mesh_map_remap(buffer.ibuf,
+                                   ref_width,
+                                   ref_height,
+                                   correction.is_mesh_map_scalar,
+                                   r_locks);
+        }
+        else {
+          composite_mapped_remap(
+              buffer.ibuf, correction.mapping, ref_width, ref_height, r_locks);
+        }
         buffer.ibuf = composite_buffer_to_eval_grid(buffer.ibuf, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }

@@ -883,6 +883,7 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_blend_tier_test.cc
     intern/paint_layers/tests/paint_layers_correction_bake_test.cc
     intern/paint_layers/tests/paint_layers_curve_patch_test.cc
+    intern/paint_layers/tests/paint_layers_composite_mesh_map_test.cc
     intern/paint_layers/tests/paint_layers_description_test.cc
     intern/paint_layers/tests/paint_layers_generate_test.cc
     intern/paint_layers/tests/paint_layers_gradient_test.cc

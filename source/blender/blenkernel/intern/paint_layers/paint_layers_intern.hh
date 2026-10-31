@@ -598,6 +598,10 @@ inline bool paint_layer_mask_item_lays(const MaterialPaintLayer &item)
   }
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(
       item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  /* A mesh-map mask item reads the material's atlas; its record carries no image. */
+  if (item.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    return paint_layer_channel_live(record);
+  }
   return paint_layer_channel_live(record) &&
          (record->image != nullptr || paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_FLAT_VALUE) ||
           paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_GENERATES));

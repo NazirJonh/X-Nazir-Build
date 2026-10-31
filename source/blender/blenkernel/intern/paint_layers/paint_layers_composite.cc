@@ -304,6 +304,20 @@ static bool composite_row_source_describe(const Material &ma,
     out.empty_base = true;
     return true;
   }
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    /* The material's shared atlas, already in the stack's UV space: no Mapping, and its alpha is
+     * data rather than painted coverage. */
+    Image *atlas = paint_layer_mesh_map_image(ma, layer);
+    if (atlas == nullptr) {
+      return false;
+    }
+    out.color_image = atlas;
+    out.color_iuser = nullptr;
+    out.color_alpha_coverage = false;
+    out.is_mesh_map = true;
+    out.is_mesh_map_scalar = paint_layer_mesh_map_is_scalar(layer.mesh_map_type);
+    return true;
+  }
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
   if (record->image != nullptr) {
     out.color_image = record->image;
@@ -514,6 +528,26 @@ static void composite_mask_items_describe(
     }
     const MaterialPaintLayerChannel *mask_record = paint_layer_channel_find(
         mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    if (mask.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+      /* The atlas' R is the grey; it is read with Extend, no Mapping, and its alpha is data. */
+      if (!paint_layer_mask_item_lays(ma, mask)) {
+        continue;
+      }
+      Image *atlas = paint_layer_mesh_map_image(ma, mask);
+      if (atlas == nullptr) {
+        continue;
+      }
+      PaintMaterialCompositeMaskItem item;
+      item.opacity = BKE_paint_layers_effective_opacity(mask);
+      item.image = atlas;
+      item.is_mesh_map = true;
+      item.is_mesh_map_scalar = paint_layer_mesh_map_is_scalar(mask.mesh_map_type);
+      item.blend = CompositeBlend(
+          BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
+      item.invert = paint_layer_mask_item_inverted(mask);
+      r_items.append(item);
+      continue;
+    }
     if (mask_record == nullptr || !paint_layer_mask_item_lays(mask)) {
       continue;
     }
@@ -669,7 +703,17 @@ static void composite_effect_append(
   }
   else {
     const MaterialPaintLayerChannel *effect_record = paint_layer_channel_find(effect, channel);
-    if (effect_record->image != nullptr) {
+    if (effect.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+      /* A mesh-map correction reads the material's shared atlas; no Mapping, alpha is data. */
+      Image *atlas = paint_layer_mesh_map_image(ma, effect);
+      if (atlas == nullptr) {
+        return;
+      }
+      correction.image = atlas;
+      correction.is_mesh_map = true;
+      correction.is_mesh_map_scalar = paint_layer_mesh_map_is_scalar(effect.mesh_map_type);
+    }
+    else if (effect_record->image != nullptr) {
       correction.image = effect_record->image;
       composite_mapping_describe(ma, effect, channel, correction.mapping);
     }
@@ -1131,6 +1175,10 @@ PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
   for (const int i : items_.index_range()) {
     const PaintMaterialCompositeMaskItem &item = items_[i];
     PaintMaterialCompositeMaskBuffer &buffer = buffers_[i];
+    /* A MESH_MAP atlas' alpha is data: the shared mask arithmetic (#BKE_paint_material_mask_factor_eval)
+     * weights the item by its opacity alone and reads the scalar atlas' R, like the composite does. */
+    buffer.is_mesh_map = item.is_mesh_map;
+    buffer.is_mesh_map_scalar = item.is_mesh_map_scalar;
     buffer.constant_gray = item.constant_gray;
     buffer.opacity = item.opacity;
     buffer.blend = item.blend;

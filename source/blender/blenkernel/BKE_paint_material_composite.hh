@@ -416,6 +416,10 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   Image *image = nullptr;
   /** Null selects the default #ImageUser. */
   const ImageUser *iuser = nullptr;
+  /** Whether #image is a MESH_MAP atlas: resampled with Extend, no Mapping, alpha ignored. */
+  bool is_mesh_map = false;
+  /** Whether the atlas stores one scalar in R (AO, Curvature, Edge) rather than an RGB map. */
+  bool is_mesh_map_scalar = false;
   CompositeBlend blend = CompositeBlend::Mix;
   /** The correction's effective opacity (enabled folded in). */
   float opacity = 1.0f;
@@ -453,6 +457,8 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   const char *colorspace_name = nullptr;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
+  /** A MESH_MAP atlas: its alpha is data, so the correction covers by its opacity alone. */
+  bool is_mesh_map = false;
   /** Borrowed from #PaintMaterialCompositeCorrection::anchor_point_slice, which keeps them alive. */
   ImBuf *anchor_point_slice = nullptr;
   ImBuf *anchor_point_coverage = nullptr;
@@ -490,6 +496,10 @@ struct PaintMaterialCompositeMaskItem {
   Image *image = nullptr;
   /** Null selects the default #ImageUser. */
   const ImageUser *iuser = nullptr;
+  /** Whether #image is a MESH_MAP atlas: R is the grey, alpha is data, no Mapping. */
+  bool is_mesh_map = false;
+  /** Whether the atlas stores one scalar in R (AO, Curvature, Edge) rather than an RGB map. */
+  bool is_mesh_map_scalar = false;
   /** The constant coverage, used while #image is null. */
   float constant_gray = 1.0f;
   /** The item's effective opacity (enabled folded in). */
@@ -576,6 +586,13 @@ struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
    * clipping wrap; a Fill or painted row already clips through its map's alpha.
    */
   bool mapping_clips_coverage = false;
+  /**
+   * A MESH_MAP row: #color_image is the material's shared atlas, read with Extend and no Mapping,
+   * and #color_alpha_coverage stays false (the atlas alpha is data, not painted coverage).
+   */
+  bool is_mesh_map = false;
+  /** Whether the atlas stores one scalar in R (AO, Curvature, Edge) rather than an RGB map. */
+  bool is_mesh_map_scalar = false;
   Image *color_image = nullptr;
   /**
    * The image node's own #ImageUser, or null. Owned by the material: copy it before acquiring a
@@ -619,6 +636,10 @@ struct PaintMaterialCompositeMaskBuffer {
   ImBuf *ibuf = nullptr;
   /** Colorspace name of #ibuf's own buffer, or null for scene linear. */
   const char *colorspace_name = nullptr;
+  /** A MESH_MAP atlas: R is the grey, its alpha is ignored, no Mapping was applied. */
+  bool is_mesh_map = false;
+  /** Whether the atlas stores one scalar in R (AO, Curvature, Edge) rather than an RGB map. */
+  bool is_mesh_map_scalar = false;
   float constant_gray = 1.0f;
   float opacity = 1.0f;
   CompositeBlend blend = CompositeBlend::Multiply;

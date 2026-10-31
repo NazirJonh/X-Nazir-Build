@@ -903,7 +903,6 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_object_mask_test.cc
     intern/paint_layers/tests/paint_layers_refactor_test.cc
     intern/paint_layers/tests/paint_layers_target_test.cc
-    intern/paint_layers/tests/paint_layers_test_util.cc
     intern/paint_material_channel_test.cc
     intern/paint_material_combined_cache_test.cc
     intern/paint_material_combined_test.cc
@@ -929,5 +928,9 @@ if(WITH_GTESTS)
     ${LIB}
     bf_rna  # RNA_prototypes.hh
   )
-  blender_add_test_suite_lib(blenkernel "${TEST_SRC}" "${INC};${TEST_INC}" "${INC_SYS}" "${TEST_LIB}")
+  # The shared fixture is compiled into every suite instead of being a suite of its own, so each
+  # test executable links when WITH_TESTS_SINGLE_BINARY is OFF.
+  blender_add_test_suite_lib(blenkernel "${TEST_SRC}" "${INC};${TEST_INC}" "${INC_SYS}" "${TEST_LIB}"
+    intern/paint_layers/tests/paint_layers_test_util.cc
+  )
 endif()

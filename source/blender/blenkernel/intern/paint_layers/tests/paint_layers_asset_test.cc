@@ -716,7 +716,8 @@ TEST_F(PaintLayersAssetTest, reload_of_one_instance_leaves_the_other_and_the_pla
   /* Bottom to top: Bottom, first instance, second instance, Top. */
   expect_stack_names(*dst, {"Bottom", "Layer", "Layer", "Top"});
 
-  MaterialPaintLayer *first_row = static_cast<MaterialPaintLayer *>(dst->paint_layers.first->next);
+  MaterialPaintLayer *first_row =
+      static_cast<MaterialPaintLayer *>(dst->paint_layers.first)->next;
   MaterialPaintLayer *second_row = first_row->next;
   paint_layer_kind_param_set(*first_effect(*first_row), PAINT_LAYER_LEVELS_IN_BLACK, 0.1f);
   paint_layer_kind_param_set(*first_effect(*second_row), PAINT_LAYER_LEVELS_IN_BLACK, 0.9f);
@@ -731,7 +732,7 @@ TEST_F(PaintLayersAssetTest, reload_of_one_instance_leaves_the_other_and_the_pla
   /* The first instance's fresh rows took the block's old place between its neighbours, and the
    * value the user changed came back on them. */
   expect_stack_names(*dst, {"Bottom", "Layer", "Layer", "Top"});
-  MaterialPaintLayer *fresh = static_cast<MaterialPaintLayer *>(dst->paint_layers.first->next);
+  MaterialPaintLayer *fresh = static_cast<MaterialPaintLayer *>(dst->paint_layers.first)->next;
   ASSERT_NE(fresh, second_row);
   EXPECT_EQ(BKE_paint_layers_asset_instance_of_row(*dst, *fresh), first_id);
   EXPECT_FLOAT_EQ(
@@ -1120,7 +1121,9 @@ TEST_F(PaintLayersAssetTest, reload_of_a_nested_instance_lands_back_into_an_empt
   ASSERT_NE(drop.root, nullptr);
   /* The user moves the host row out, so the folder holds the instance's block alone: no seam is
    * left to anchor on. */
-  ASSERT_TRUE(BKE_paint_layers_move(*drop.dst, drop.host_folder->children.first, nullptr,
+  ASSERT_TRUE(BKE_paint_layers_move(*drop.dst,
+                                    static_cast<MaterialPaintLayer *>(drop.host_folder->children.first),
+                                    nullptr,
                                     PaintLayerPlace::Above));
 
   ASSERT_NE(BKE_paint_layers_add(*asset, "Added", nullptr, PaintLayerPlace::Above), nullptr);
@@ -1224,8 +1227,9 @@ TEST_F(PaintLayersAssetTest, smart_asset_type_rejects_invalid_type_and_future_ve
   IDP_ReplaceInGroup(asset->id.properties,
                      bke::idprop::create("paint_asset_type", int(PaintLayerAssetType::Material))
                          .release());
+  /* One past the version this build writes (#ASSET_VERSION is 2 since the parameters landed). */
   IDP_ReplaceInGroup(
-      asset->id.properties, bke::idprop::create("paint_asset_version", 2).release());
+      asset->id.properties, bke::idprop::create("paint_asset_version", 3).release());
   EXPECT_EQ(BKE_paint_layers_asset_type_get(*asset), PaintLayerAssetType::None);
 }
 
@@ -2403,7 +2407,7 @@ TEST_F(PaintLayersAssetTest, resaving_an_asset_keeps_the_manual_expose_choice)
   EXPECT_FALSE(BKE_paint_layers_asset_param_is_exposed(*asset, *tone, "gamma"));
 
   /* An item gone from the stack takes its entry with it. */
-  BKE_paint_layers_remove(*asset, extra);
+  ASSERT_TRUE(BKE_paint_layers_correction_remove(*asset, extra));
   BKE_paint_layers_asset_params_expose(*asset);
   EXPECT_EQ(IDP_GetPropertyFromGroup(BKE_paint_layers_asset_params_get(*asset), "Extra"),
             nullptr);
@@ -2620,7 +2624,7 @@ TEST_F(PaintLayersAssetTest, mask_reload_add_keeps_the_target_other_corrections)
   const int instance_id = apply_mask_and_record(*bmain, *dst, *asset, *target, true);
   ASSERT_EQ(instance_id, 1);
   ASSERT_EQ(BLI_listbase_count(&target->mask_stack), 4);
-  MaterialPaintLayer *own = static_cast<MaterialPaintLayer *>(target->mask_stack.first->next);
+  MaterialPaintLayer *own = static_cast<MaterialPaintLayer *>(target->mask_stack.first)->next;
   ASSERT_NE(own, nullptr);
   EXPECT_STREQ(own->name, "Own");
   const bUUID own_marker = own->marker;
@@ -2635,8 +2639,8 @@ TEST_F(PaintLayersAssetTest, mask_reload_add_keeps_the_target_other_corrections)
   /* Only the instance's own items were replaced; the correction the target had any other way
    * keeps its marker and its place. */
   ASSERT_EQ(BLI_listbase_count(&target->mask_stack), 4);
-  MaterialPaintLayer *own_after = static_cast<MaterialPaintLayer *>(
-      target->mask_stack.first->next);
+  MaterialPaintLayer *own_after =
+      static_cast<MaterialPaintLayer *>(target->mask_stack.first)->next;
   ASSERT_NE(own_after, nullptr);
   EXPECT_STREQ(own_after->name, "Own");
   EXPECT_TRUE(BLI_uuid_equal(own_after->marker, own_marker));

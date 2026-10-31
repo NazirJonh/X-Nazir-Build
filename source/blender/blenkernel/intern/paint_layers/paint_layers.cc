@@ -373,6 +373,10 @@ static bool paint_layer_owned(const Material &ma, const MaterialPaintLayer *laye
 
 MaterialPaintLayer *BKE_paint_layers_correction_owner(Material &ma, const MaterialPaintLayer &effect)
 {
+  /* Only an effect has a correction owner: a mask item shares the read but not the answer. */
+  if (effect.role != MA_PAINT_LAYER_ROLE_EFFECT) {
+    return nullptr;
+  }
   /* The read answers a row of this same mutable stack, so aliasing it back is safe. */
   return const_cast<MaterialPaintLayer *>(paint_layers_content_owner_read(ma, effect));
 }
@@ -1271,6 +1275,11 @@ MaterialPaintLayer *BKE_paint_layers_mask_add_image(Material &ma,
 
 MaterialPaintLayer *BKE_paint_layers_mask_item_owner(Material &ma, const MaterialPaintLayer &item)
 {
+  /* The shared read answers for both roles; an effect must not look like a mask item, or a move
+   * would unlink it from a mask stack it was never in. */
+  if (item.role != MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return nullptr;
+  }
   /* The read answers a row of this same mutable stack, so aliasing it back is safe. */
   return const_cast<MaterialPaintLayer *>(paint_layers_content_owner_read(ma, item));
 }

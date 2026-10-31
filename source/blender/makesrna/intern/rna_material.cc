@@ -210,6 +210,25 @@ const EnumPropertyItem rna_enum_material_paint_layers_image_size_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Values match #eMaterialMeshMapType. THICKNESS and POSITION have DNA values but no bake side
+ * yet, so they are not offered. Defined here, outside the makesrna-only section, because
+ * rna_object.cc reuses the table at runtime (see #DEF_ENUM): the Object mesh map states key on the
+ * same map types. */
+const EnumPropertyItem rna_enum_material_mesh_map_type_items[] = {
+    {MA_MESH_MAP_AO, "AO", 0, "Ambient Occlusion", "Ambient occlusion map"},
+    {MA_MESH_MAP_CURVATURE, "CURVATURE", 0, "Curvature", "Curvature map"},
+    {MA_MESH_MAP_NORMAL_WORLD, "NORMAL_WORLD", 0, "Normal (World)", "World-space normal map"},
+    {MA_MESH_MAP_NORMAL_OBJECT,
+     "NORMAL_OBJECT",
+     0,
+     "Normal (Object)",
+     "Object-space normal map"},
+    {MA_MESH_MAP_ID_OBJECT, "ID_OBJECT", 0, "Object ID", "Object index map"},
+    {MA_MESH_MAP_ID_MATERIAL, "ID_MATERIAL", 0, "Material ID", "Material index map"},
+    {MA_MESH_MAP_EDGE, "EDGE", 0, "Edge", "Edge/bevel map"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_material_paint_layers_preview_size_items[] = {
     {MA_PAINT_PREVIEW_SIZE_AUTO,
      "AUTO",
@@ -4360,23 +4379,6 @@ static PointerRNA rna_Material_mesh_map_settings_get(PointerRNA *ptr)
 
 namespace blender {
 
-/* Values match #eMaterialMeshMapType. THICKNESS and POSITION have DNA values but no bake side
- * yet, so they are not offered. */
-static const EnumPropertyItem rna_enum_material_mesh_map_type_items[] = {
-    {MA_MESH_MAP_AO, "AO", 0, "Ambient Occlusion", "Ambient occlusion map"},
-    {MA_MESH_MAP_CURVATURE, "CURVATURE", 0, "Curvature", "Curvature map"},
-    {MA_MESH_MAP_NORMAL_WORLD, "NORMAL_WORLD", 0, "Normal (World)", "World-space normal map"},
-    {MA_MESH_MAP_NORMAL_OBJECT,
-     "NORMAL_OBJECT",
-     0,
-     "Normal (Object)",
-     "Object-space normal map"},
-    {MA_MESH_MAP_ID_OBJECT, "ID_OBJECT", 0, "Object ID", "Object index map"},
-    {MA_MESH_MAP_ID_MATERIAL, "ID_MATERIAL", 0, "Material ID", "Material index map"},
-    {MA_MESH_MAP_EDGE, "EDGE", 0, "Edge", "Edge/bevel map"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
 /* Values match #eMaterialPaintLayerChannelState. */
 static const EnumPropertyItem rna_enum_material_paint_layer_channel_state_items[] = {
     {MA_PAINT_LAYER_CHANNEL_ABSENT, "ABSENT", 0, "Absent", "No map: the channel carries no map"},
@@ -5001,6 +5003,9 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                               "rna_MaterialPaintLayer_anchor_point_target_get",
                               "rna_MaterialPaintLayer_anchor_point_target_set",
                               "rna_MaterialPaintLayer_anchor_point_target_itemf");
+  /* The item callback reads the material only, so the items must be built without a context too
+   * (a script or a test asking for them has none). */
+  RNA_def_property_flag(prop, PROP_ENUM_NO_CONTEXT);
   RNA_def_property_ui_text(prop, "Anchor Point", "Anchor Point whose slice this reader lays");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 

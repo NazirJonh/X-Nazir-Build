@@ -377,7 +377,8 @@ TEST_F(PaintLayersDescription, kind_registry_describes_the_built_in_kinds)
   EXPECT_TRUE(paint_layer_kind_role_allowed(*row));
 
   /* A source or subtype this build does not know is reported as unknown, never as a built-in. */
-  row->source = 2;
+  /* 3 is reserved for the Node Group source, which this build does not have. */
+  row->source = 3;
   EXPECT_EQ(paint_layer_kind_of(*row), nullptr);
   EXPECT_FALSE(paint_layer_kind_role_allowed(*row));
   row->source = MA_PAINT_LAYER_SOURCE_IMAGE;
@@ -449,6 +450,8 @@ TEST_F(PaintLayersDescription, maps_collect_reads_nested_rows_once)
   Material *ma = BKE_material_add(bmain, "CollectMat");
   ma->paint_layers_flag = MA_PAINT_LAYERED;
   MaterialPaintLayer *folder = paint_layer_add(*ma, "Folder");
+  /* Only a folder is walked into: a row linked by hand has to say what it is. */
+  folder->source = MA_PAINT_LAYER_SOURCE_STACK;
   Image *shared = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "CollectShared"));
   Image *item_image = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "CollectItem"));
 
@@ -512,11 +515,13 @@ TEST_F(PaintLayersDescription, copy_keeps_layers)
   EXPECT_STREQ(copy_first->name, "First");
   EXPECT_TRUE(BLI_uuid_equal(copy_first->marker, first_marker));
 
-  /* The channel array is deep-copied, the channel's image stays owned elsewhere. */
+  /* The channel array is deep-copied, and an editable map is cloned: painting on the copy must
+   * never reach the original. */
   ASSERT_EQ(copy_first->channels_num, 1);
   ASSERT_NE(copy_first->channels, nullptr);
   EXPECT_NE(copy_first->channels, first->channels);
-  EXPECT_EQ(copy_first->channels[0].image, channel_image);
+  ASSERT_NE(copy_first->channels[0].image, nullptr);
+  EXPECT_NE(copy_first->channels[0].image, channel_image);
   EXPECT_EQ(copy_first->channels[0].channel, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
 
   MaterialPaintLayer *copy_second = copy_first->next;
@@ -824,18 +829,19 @@ TEST_F(PaintLayersDescription, value_setters_write_and_tag)
   MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
 
-  /* Opacity is clamped to [0, 1] and an edit marks the derived state stale. */
+  /* Opacity is clamped to [0, 1]. A value edit asks the bake planner for a re-check and leaves the
+   * graph shape alone, so it is not a regeneration. */
   ma->paint_layers_flag = MA_PAINT_LAYERED;
   EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, 2.0f));
   EXPECT_FLOAT_EQ(layer->opacity, 1.0f);
-  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
   EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, 0.4f));
   EXPECT_FLOAT_EQ(layer->opacity, 0.4f);
 
   ma->paint_layers_flag = MA_PAINT_LAYERED;
   EXPECT_TRUE(BKE_paint_layers_set_enabled(*ma, layer, false));
   EXPECT_EQ(layer->flag & MA_PAINT_LAYER_ENABLED, 0);
-  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
   EXPECT_TRUE(BKE_paint_layers_set_enabled(*ma, layer, true));
   EXPECT_NE(layer->flag & MA_PAINT_LAYER_ENABLED, 0);
 
@@ -1552,9 +1558,10 @@ TEST_F(PaintLayersDescription, mask_add_creates_a_constant_base_item)
   EXPECT_FLOAT_EQ(record->value[2], 0.4f);
   EXPECT_FLOAT_EQ(record->value[3], 1.0f);
 
-  /* The item belongs to its row, not to the stack: nothing new is a row of the material. */
+  /* The item belongs to its row, not to the stack: nothing new is a row of the material, though
+   * the generator addresses the item by its own marker. */
   EXPECT_EQ(BLI_listbase_count(&ma->paint_layers), 1);
-  EXPECT_EQ(BKE_paint_layers_find(*ma, item->marker), nullptr);
+  EXPECT_EQ(BKE_paint_layers_find(*ma, item->marker), item);
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 
   /* One base mask per row; a foreign row is refused. */
@@ -1587,8 +1594,9 @@ TEST_F(PaintLayersDescription, mask_edits_go_through_the_item)
   EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, item, 0.5f));
   EXPECT_FLOAT_EQ(BKE_paint_layers_effective_opacity(*item), 0.5f);
 
-  /* The item is not a row: structural edits stay refused. */
-  EXPECT_FALSE(BKE_paint_layers_rename(*ma, item, "Renamed"));
+  /* The item can be named like a correction, but it is not a row: structural edits stay refused. */
+  EXPECT_TRUE(BKE_paint_layers_rename(*ma, item, "Renamed"));
+  EXPECT_STREQ(item->name, "Renamed");
   EXPECT_FALSE(BKE_paint_layers_remove(*ma, item));
   EXPECT_FALSE(BKE_paint_layers_set_source(*ma, item, MA_PAINT_LAYER_SOURCE_IMAGE));
 }
@@ -1642,7 +1650,9 @@ TEST_F(PaintLayersDescription, mask_is_deep_copied_with_material_and_duplicate)
   EXPECT_NE(copy_item->channels, item->channels);
   EXPECT_TRUE(BLI_uuid_equal(copy_item->marker, item->marker));
   ASSERT_EQ(copy_item->channels_num, 1);
-  EXPECT_EQ(copy_item->channels[0].image, map);
+  /* An editable map is cloned with the material, so the copy never paints into the original. */
+  ASSERT_NE(copy_item->channels[0].image, nullptr);
+  EXPECT_NE(copy_item->channels[0].image, map);
   EXPECT_NE(copy_item->flag & MA_PAINT_LAYER_MASK_BASE, 0);
   BKE_id_free(bmain, copy);
 
@@ -2216,7 +2226,7 @@ TEST_F(PaintLayersDescription, issues_report_a_kind_that_is_unknown_or_not_allow
 
   /* A folder as a correction, and a kind a newer build wrote: both are skipped and both say so. */
   effect->source = MA_PAINT_LAYER_SOURCE_STACK;
-  other->source = 2;
+  other->source = 3;
   BKE_paint_layers_issues_get(ma, issues);
   ASSERT_EQ(issues.size(), 2);
   bool correction = false;
@@ -2364,7 +2374,7 @@ TEST_F(PaintLayersDescription, correction_is_deep_copied_with_material_and_dupli
   ASSERT_TRUE(
       BKE_paint_layers_channel_set_image(*ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
 
-  /* A material copy owns its own correction and record array; the map stays the shared block. */
+  /* A material copy owns its own correction and record array, and a clone of the editable map. */
   Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
   ASSERT_NE(copy, nullptr);
   MaterialPaintLayer *copy_row = paint_layers_first(*copy);
@@ -2379,7 +2389,8 @@ TEST_F(PaintLayersDescription, correction_is_deep_copied_with_material_and_dupli
   const MaterialPaintLayerChannel *copy_record = paint_layer_channel_find(
       *copy_effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   ASSERT_NE(copy_record, nullptr);
-  EXPECT_EQ(copy_record->image, map);
+  ASSERT_NE(copy_record->image, nullptr);
+  EXPECT_NE(copy_record->image, map);
   BKE_id_free(bmain, copy);
 
   /* Duplicating a row gives the copy corrections of its own, with maps of their own. */
@@ -2478,6 +2489,8 @@ TEST_F(PaintLayersDescription, pack_maps_packs_a_generated_map_once_and_again_on
   Image *map = BKE_image_add_generated(
       bmain, 8, 8, "PackMapsMap", 24, false, IMA_GENTYPE_BLANK, clear, false, true, false);
   ASSERT_NE(map, nullptr);
+  /* A bare row owns no record yet: the map needs one to land in. */
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
   ASSERT_TRUE(BKE_paint_layers_channel_set_image(*ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
 
   /* A generated map holds its pixels only in the buffer: it is packed even when never painted. */
@@ -2590,6 +2603,8 @@ TEST_F(PaintLayersDescription, duplicate_copies_the_painted_pixels_of_a_generate
   pixels[3] = 255;
   BKE_image_mark_dirty(map, ibuf);
   BKE_image_release_ibuf(map, ibuf, lock);
+  /* A bare row owns no record yet: the map needs one to land in. */
+  ASSERT_NE(BKE_paint_layers_channel_add(ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
   ASSERT_TRUE(
       BKE_paint_layers_channel_set_image(ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
 
@@ -2982,6 +2997,8 @@ static MaterialPaintLayer *mapping_fill_with_map(Main &bmain, Material &ma, cons
   MaterialPaintLayer *fill = BKE_paint_layers_add(ma, name, nullptr, PaintLayerPlace::Above);
   EXPECT_TRUE(BKE_paint_layers_set_source(ma, fill, MA_PAINT_LAYER_SOURCE_CONSTANT));
   Image *map = static_cast<Image *>(BKE_id_new(&bmain, ID_IM, name));
+  /* A bare row owns no record yet: the map needs one to land in. */
+  EXPECT_NE(BKE_paint_layers_channel_add(ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
   EXPECT_TRUE(
       BKE_paint_layers_channel_set_image(ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
   return fill;
@@ -3013,6 +3030,7 @@ TEST_F(PaintLayersDescription, mapping_is_carried_by_a_fill_before_it_has_a_map)
   /* A painted map is written by strokes at the raw UV: a Paint row never maps. */
   MaterialPaintLayer *paint = BKE_paint_layers_add(ma, "Paint", nullptr, PaintLayerPlace::Above);
   Image *paint_map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "PaintMap"));
+  ASSERT_NE(BKE_paint_layers_channel_add(ma, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
   ASSERT_TRUE(BKE_paint_layers_channel_set_image(
       ma, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR, paint_map));
   EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *paint));
@@ -3061,7 +3079,7 @@ TEST_F(PaintLayersDescription, mapping_is_supported_by_a_fill_correction_and_a_f
   ASSERT_NE(mask_base, nullptr);
   /* The base mask is painted by the Mask brush and takes no map of its own: there is nothing for a
    * remap to move, even when a map is on it. */
-  Image *base_map = id_cast<Image *>(BKE_id_new(bmain, ID_IM, "BaseMaskMap"));
+  Image *base_map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "BaseMaskMap"));
   ASSERT_TRUE(BKE_paint_layers_channel_set_image(
       ma, mask_base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_map));
   EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *mask_base));
@@ -3751,7 +3769,8 @@ TEST_F(PaintLayersDescription, height_effective_blend_follows_the_row)
   };
   for (const Case &test_case : cases) {
     SCOPED_TRACE(::testing::Message() << "row blend=" << test_case.row_blend);
-    ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, layer, test_case.row_blend));
+    ASSERT_TRUE(BKE_paint_layers_set_blend(
+        *ma, layer, eMaterialPaintLayerBlend(test_case.row_blend)));
     EXPECT_EQ(BKE_paint_layers_channel_height_blend_effective(*layer,
                                                               PAINT_MATERIAL_CHANNEL_HEIGHT),
               test_case.effective);
@@ -3774,6 +3793,8 @@ TEST_F(PaintLayersDescription, height_effective_blend_follows_the_row)
 TEST_F(PaintLayersDescription, response_values_default_to_one_and_clamp)
 {
   Material *ma = BKE_material_add(bmain, "ResponseDefaultMat");
+  /* A new material already owns a tree; the edits below must leave it exactly as it is. */
+  const bNodeTree *tree_before = ma->nodetree;
   /* A material written before the response fields carries zeroes, which read as the node's own
    * defaults: one. */
   EXPECT_FLOAT_EQ(BKE_paint_layers_bump_strength(*ma), 1.0f);
@@ -3795,7 +3816,7 @@ TEST_F(PaintLayersDescription, response_values_default_to_one_and_clamp)
   EXPECT_FLOAT_EQ(BKE_paint_layers_normal_strength(*ma), 2.0f);
   /* No node was created and nothing was regenerated: the edit waits for the owned node. */
   EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
-  EXPECT_EQ(ma->nodetree, nullptr);
+  EXPECT_EQ(ma->nodetree, tree_before);
 
   /* Out-of-range values clamp to the stored range rather than being refused. */
   EXPECT_TRUE(BKE_paint_layers_bump_strength_set(*ma, 500.0f));
@@ -3913,18 +3934,13 @@ TEST_F(PaintLayersDescription, height_write_skip_takes_the_row_out_of_height_alo
   Image *image = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "HeightSkipImage"));
   MaterialPaintLayer *layer = paint_layer_add(*ma, "Layer");
   paint_layer_channel_add(*layer, *image);
-  /* A Height record of the row's own: a flat value, so the row lays height without a map. DNA
-   * structs delete their copy assignment, so the record lands with a memcpy like a file read. */
-  MaterialPaintLayerChannel *height_record = MEM_new<MaterialPaintLayerChannel>(__func__);
-  height_record->channel = PAINT_MATERIAL_CHANNEL_HEIGHT;
+  /* A Height record of the row's own: a flat value, so the row lays height without a map. */
+  MaterialPaintLayerChannel *height_record = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_NE(height_record, nullptr);
   height_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
   height_record->value[0] = 0.8f;
   height_record->value[3] = 1.0f;
-  layer->channels = static_cast<MaterialPaintLayerChannel *>(
-      MEM_reallocN(layer->channels, sizeof(MaterialPaintLayerChannel) * 2));
-  memcpy(&layer->channels[1], height_record, sizeof(MaterialPaintLayerChannel));
-  MEM_freeN(height_record);
-  layer->channels_num = 2;
 
   /* By default the row writes its height. */
   EXPECT_TRUE(BKE_paint_layers_channel_height_write(*layer));

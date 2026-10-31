@@ -184,6 +184,17 @@ struct SpaceOutliner_Runtime {
    */
   Set<UUID> stack_row_ui_state_seen;
   /**
+   * A workspace switch brought this screen back with the row state of the moment it was last
+   * used, and a row activated somewhere else in the meantime has left it behind. Set by the
+   * space listener on the switch's own notifier, and only for a space showing the stack: any
+   * other display mode has no row state of its own, and a wish left hanging on it would fire
+   * long after the switch. The next Stack Layers tree build consumes it, reading the active row
+   * from the source before the remembered state is applied to the rows; a build where the source
+   * has no owner, or names no active row, spends the flag all the same and leaves the remembered
+   * state standing.
+   */
+  bool stack_row_ui_needs_resync = false;
+  /**
    * Which row the drop under way is pointing at, and how -- what the drag draws as a line or an
    * outline.
    *

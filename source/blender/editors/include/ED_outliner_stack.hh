@@ -116,6 +116,21 @@ void outliner_stack_paint_row_ui_sync(Main &bmain,
                                       Material &material);
 
 /**
+ * Make this Outliner's Stack Layers selection and active row name the owner's active row again.
+ *
+ * The remembered selection and active row are per space, and a screen keeps them from when it was
+ * last used: after a workspace switch they name whichever row was active then, not the one the
+ * data has been telling every other editor about since. This reads the active row from the source
+ * -- the material's active paint layer, the object's active shape key -- and leaves it as the one
+ * selected and active row, the same thing #outliner_stack_paint_row_ui_sync does when a row is
+ * activated by a notifier this space can name.
+ */
+void outliner_stack_row_ui_resync(Main &bmain,
+                                  Scene &scene,
+                                  ViewLayer &view_layer,
+                                  SpaceOutliner &space_outliner);
+
+/**
  * Give \a layer a mask that reads \a image: the white base mask an Add White Mask makes, and a
  * Fill correction over it whose Base Color record carries the image. The paint half is
  * #blender::ed::sculpt_paint::paint_layers_mask_add_image's; this adds the Outliner sync, so the

@@ -18,6 +18,8 @@
 #include "BLI_map.hh"
 #include "BLI_set.hh"
 
+#include "ED_outliner_stack.hh"
+
 #include "tree_element_stack_layer.hh"
 
 #include "../outliner_intern.hh"
@@ -122,6 +124,22 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
   outliner_stack_row_ui_state_sync(space_outliner_, *owner);
   outliner_stack_rows_ensure(ctx, space_outliner_, *owner);
   space_outliner_.runtime->stack_rows_rebuilt_since_build = false;
+
+  /* A workspace switch left the wish to read the active row from the data again. It is answered
+   * here, where the state this screen's last visit left has just been read into the map and the
+   * rows are in front of the resync: the map then names the row the source calls active before
+   * the build below applies it, so the selection follows the data without a pass of its own.
+   * The flag is spent either way: a resync the source cannot answer -- no owner, or the source
+   * names no active row -- leaves the remembered state standing and does not wait for another. */
+  if (space_outliner_.runtime->stack_row_ui_needs_resync) {
+    space_outliner_.runtime->stack_row_ui_needs_resync = false;
+    if (source_data.bmain != nullptr && source_data.scene != nullptr &&
+        source_data.view_layer != nullptr)
+    {
+      outliner_stack_row_ui_resync(
+          *source_data.bmain, *source_data.scene, *source_data.view_layer, space_outliner_);
+    }
+  }
 
   SpaceOutliner_Runtime &runtime = *space_outliner_.runtime;
   if (runtime.stack_rows.is_empty()) {

@@ -46,6 +46,16 @@ void stack_row_ui_state_edit_select(const StackReadContext &ctx,
                                     SpaceOutliner &space_outliner,
                                     ID &owner,
                                     int select_ordinal);
+/**
+ * The follow of an activation from outside this space's own click: like
+ * #stack_row_ui_state_edit_select, but it stands down when the map already names the row active
+ * -- the selection on display is then the one the activating gesture wrote. The follow paths
+ * only; an edit re-targets the selection unconditionally.
+ */
+void stack_row_ui_state_follow_select(const StackReadContext &ctx,
+                                      SpaceOutliner &space_outliner,
+                                      ID &owner,
+                                      int select_ordinal);
 const char *stack_enum_string_intern(StringRefNull text);
 
 /**

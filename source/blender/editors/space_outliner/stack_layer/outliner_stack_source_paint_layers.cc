@@ -281,13 +281,14 @@ void outliner_stack_paint_row_ui_sync(Main &bmain,
   if (ordinal < 0) {
     return;
   }
-  /* No "already active" shortcut: the Outliner reads a row as active from the material's active
-   * marker, which the activation has already set, so it would always bail out here while the UI
-   * selection still sits on the previous row. */
+  /* The comparison is against this space's UI state rather than against the marker, which the
+   * activation has already set: #stack_row_ui_state_follow_select leaves the selection a gesture
+   * of this Outliner wrote when the map names the row active, and selects the row in place of
+   * whatever else the map names otherwise. */
   /* The identity-keyed UI state map carries the flags across the next tree build, and revealing
    * the attached section brings a correction row out from under its owner's content section. */
   stack_row_reveal_attached(space_outliner, ordinal);
-  stack_row_ui_state_edit_select(ctx, space_outliner, material.id, ordinal);
+  stack_row_ui_state_follow_select(ctx, space_outliner, material.id, ordinal);
 }
 
 namespace {

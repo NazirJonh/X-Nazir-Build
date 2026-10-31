@@ -210,23 +210,46 @@ static bool stack_drop_target_in_block(const StackReadContext &ctx,
   return block_low <= block_high && target_ordinal > block_low && target_ordinal < block_high;
 }
 
+/** What the dragged block is made of, which decides which set of the attached-rows rules applies. */
+enum class StackDropBlockKind {
+  Plain,
+  Attached,
+  /** A block of both has no single answer for where it lands beside an attached row. */
+  Mixed,
+};
+
+/** The dragged rows resolved against the rows this space holds, with what they are made of. */
+struct StackDropBlock {
+  StackDropBlockKind kind = StackDropBlockKind::Plain;
+  /** The rows that resolved, in the order the drag carries them. */
+  Vector<const StackRow *> rows;
+};
+
 /**
- * Apply the rules for rows attached to a parent's content section, which may refine
- * \a io_insert_type. Returns false when the drop has to be refused.
- *
- * A row attached to a parent's content section only ever lands among its own kind: beside a
- * sibling from the same section, and never inside anything -- "into" would read as joining the
- * target's content, which is not a move between rows at all. A plain row, in turn, never lands
- * beside an attached one: the run between a parent's attached rows is that section's own
- * ordering, not a place among the plain rows.
+ * Where a row drop lands once the attached-rows rules have had their say: the row it is anchored
+ * to, how it sits there, and the row the insertion line is drawn on -- which a re-aimed drop
+ * separates from the anchor. By ordinal, and spent the moment the payload and the indicator are
+ * written from it. The runtime's #SpaceOutliner_Runtime::StackDropAim is the data-block drop's
+ * identity-keyed counterpart, kept for its operator to read back.
  */
-static bool stack_drop_attached_rules_apply(const StackReadContext &ctx,
-                                            SpaceOutliner &space_outliner,
-                                            const Span<StackItemIdentity> drag_rows,
-                                            const StackRow &target_row,
-                                            const float offset_fraction,
-                                            TreeElementInsertType &io_insert_type)
+struct StackRowDropAim {
+  int anchor_ordinal;
+  TreeElementInsertType insert_type;
+  int indicator_ordinal;
+};
+
+/**
+ * Resolve the dragged rows once and say what the block is made of. A drop poll runs per mouse
+ * move, and the resolve walks the rows for each identity, so the pass that judges the block keeps
+ * what it resolved.
+ */
+static StackDropBlock stack_drop_block_classify(const StackReadContext &ctx,
+                                                SpaceOutliner &space_outliner,
+                                                const Span<StackItemIdentity> drag_rows)
 {
+  StackDropBlock block;
+  bool has_plain = false;
+  bool has_attached = false;
   for (const StackItemIdentity &drag_row : drag_rows) {
     const int drag_ordinal = outliner_stack_identity_resolve(ctx, space_outliner, drag_row);
     const StackRow *drag_stack_row = (drag_ordinal >= 0) ?
@@ -235,23 +258,101 @@ static bool stack_drop_attached_rules_apply(const StackReadContext &ctx,
     if (drag_stack_row == nullptr) {
       continue;
     }
+    block.rows.append(drag_stack_row);
     if (drag_stack_row->parent_section_id.empty()) {
-      if (!target_row.parent_section_id.empty()) {
-        return false;
-      }
-      continue;
+      has_plain = true;
     }
-    if (!stack_rows_are_siblings(*drag_stack_row, target_row)) {
-      return false;
-    }
-    if (io_insert_type == TE_INSERT_INTO) {
-      /* An attached row has no inside to land in, and its rows are only one line high, so the
-       * middle third of one is a dead zone. It reads as "put it here": above or below the row by
-       * the half of it the pointer is in. */
-      io_insert_type = (offset_fraction > 0.5f) ? TE_INSERT_BEFORE : TE_INSERT_AFTER;
+    else {
+      has_attached = true;
     }
   }
-  return true;
+  if (has_plain && has_attached) {
+    block.kind = StackDropBlockKind::Mixed;
+  }
+  else if (has_attached) {
+    block.kind = StackDropBlockKind::Attached;
+  }
+  else {
+    block.kind = StackDropBlockKind::Plain;
+  }
+  return block;
+}
+
+/**
+ * The lowest-ordinal row of the run of attached rows \a run_row belongs to: the run is listed
+ * topmost first, so that is its last listed row -- the one the display draws the insertion line
+ * under for an aim below the run's owner. \a run_row itself is one of the run's, which is the
+ * starting point.
+ */
+static int stack_drop_attached_run_last_find(const SpaceOutliner &space_outliner,
+                                             const StackRow &run_row)
+{
+  int last_listed = run_row.ordinal;
+  for (const StackRow &row : space_outliner.runtime->stack_rows) {
+    if (row.parent_ordinal == run_row.parent_ordinal &&
+        row.parent_section_id == run_row.parent_section_id && row.ordinal < last_listed)
+    {
+      last_listed = row.ordinal;
+    }
+  }
+  return last_listed;
+}
+
+/**
+ * Where the drop of \a block lands by the rules for rows attached to a parent's content section,
+ * or nullopt when it has to be refused.
+ *
+ * A row attached to a parent's content section only ever lands among its own kind: beside a
+ * sibling from the same section, and never inside anything -- "into" would read as joining the
+ * target's content, which is not a move between rows at all. The middle third of one reads as
+ * "put it here": above or below the row by the half of it the pointer is in.
+ *
+ * A plain row never lands *between* a parent's attached rows -- that run is the section's own
+ * ordering, not a place among the plain rows -- and with the run expanded there is no seam of the
+ * parent's own row left that reads as "below the parent". A plain row aimed at an attached row is
+ * therefore read as "beside that row's owner", directly below it, and the line is drawn under the
+ * run's last listed row. The run absorbs the aim whole: a drop on the top half of its first
+ * listed row -- the one directly under the owner's own row -- aims below the owner just the same.
+ * The two orderings do not agree: in the stack the corrections of a row sit above it, while the
+ * flat display lists them after it, hanging under the owner's row; "below the owner" names the
+ * stack position, which is the seam the display draws under the run's last listed row.
+ */
+static std::optional<StackRowDropAim> stack_drop_attached_aim_find(
+    const SpaceOutliner &space_outliner,
+    const StackDropBlock &block,
+    const StackRow &target_row,
+    const float offset_fraction,
+    const TreeElementInsertType insert_type)
+{
+  if (block.kind == StackDropBlockKind::Mixed) {
+    return std::nullopt;
+  }
+  if (block.kind == StackDropBlockKind::Attached) {
+    for (const StackRow *drag_stack_row : block.rows) {
+      if (!stack_rows_are_siblings(*drag_stack_row, target_row)) {
+        return std::nullopt;
+      }
+    }
+    TreeElementInsertType place = insert_type;
+    if (place == TE_INSERT_INTO) {
+      place = (offset_fraction > 0.5f) ? TE_INSERT_BEFORE : TE_INSERT_AFTER;
+    }
+    return StackRowDropAim{target_row.ordinal, place, target_row.ordinal};
+  }
+  if (target_row.parent_section_id.empty()) {
+    /* Plain rows beside a plain row: nothing attached is involved, so there is nothing to refine. */
+    return StackRowDropAim{target_row.ordinal, insert_type, target_row.ordinal};
+  }
+  /* A plain block aimed at an attached row: the anchor becomes the row the attachment hangs on,
+   * and the place becomes "directly below it". */
+  const StackRow *owner_row = outliner_stack_row_find(space_outliner, target_row.parent_ordinal);
+  if (owner_row == nullptr || !owner_row->parent_section_id.empty()) {
+    /* A run hanging on a row that is gone, or on another attached row -- the latter is not how
+     * runs are built, so treat both as an aim at nothing. */
+    return std::nullopt;
+  }
+  const int last_listed = stack_drop_attached_run_last_find(space_outliner, target_row);
+  return StackRowDropAim{owner_row->ordinal, TE_INSERT_AFTER, last_listed};
 }
 
 /** Whether any dragged group would end up inside itself when dropped on \a target_row. */
@@ -310,24 +411,32 @@ static bool stack_layer_drop_init(bContext *C, const wmEvent *event, StackLayerD
     return false;
   }
   const int target_ordinal = int(TREESTORE(zone.te)->nr);
-  if (stack_drop_target_in_block(ctx, *space_outliner, drag_rows, target_ordinal)) {
-    return false;
-  }
   const StackRow *target_row = outliner_stack_row_find(*space_outliner, target_ordinal);
   if (target_row == nullptr) {
     return false;
   }
 
-  TreeElementInsertType insert_type = zone.insert_type;
-  if (!stack_drop_attached_rules_apply(
-          ctx, *space_outliner, drag_rows, *target_row, zone.offset_fraction, insert_type))
-  {
+  /* The row the drop is anchored to starts as the one under the cursor; a plain drop aimed at a
+   * row attached to another row's content section is re-aimed at that row's owner instead, with
+   * the line drawn where the row will actually show. */
+  const StackDropBlock block = stack_drop_block_classify(ctx, *space_outliner, drag_rows);
+  const std::optional<StackRowDropAim> aim = stack_drop_attached_aim_find(
+      *space_outliner, block, *target_row, zone.offset_fraction, zone.insert_type);
+  if (!aim.has_value()) {
     return false;
   }
-  if (stack_drop_group_into_itself(ctx, *space_outliner, drag_rows, *target_row)) {
+  const StackRow *anchor_row = outliner_stack_row_find(*space_outliner, aim->anchor_ordinal);
+  if (anchor_row == nullptr) {
     return false;
   }
-  if (insert_type == TE_INSERT_INTO && !target_row->can_hold_children) {
+  if (stack_drop_target_in_block(ctx, *space_outliner, drag_rows, aim->anchor_ordinal)) {
+    return false;
+  }
+  if (stack_drop_group_into_itself(ctx, *space_outliner, drag_rows, *anchor_row)) {
+    return false;
+  }
+  TreeElementInsertType insert_type = aim->insert_type;
+  if (insert_type == TE_INSERT_INTO && !anchor_row->can_hold_children) {
     /* Only a row that can hold children has an inside. Aiming at the middle of a plain row is not
      * a mistake worth refusing, though -- it reads as "put it here", above the row it points
      * at. */
@@ -339,11 +448,11 @@ static bool stack_layer_drop_init(bContext *C, const wmEvent *event, StackLayerD
    * any other. The list is drawn top of stack first, so "before" on screen is "above". */
   const StackMovePlace place = stack_drop_place_from_insert_type(insert_type);
 
-  drop_data->target = outliner_stack_identity_of(*space_outliner, target_row->ordinal);
+  drop_data->target = outliner_stack_identity_of(*space_outliner, aim->anchor_ordinal);
   drop_data->target_place = place;
   /* The indicator points at *this* space's tree: it lives here, not on the drag, which may have
    * come from a different window and outlives the tree it was born over. */
-  space_outliner->runtime->stack_drop_indicator.ordinal = target_ordinal;
+  space_outliner->runtime->stack_drop_indicator.ordinal = aim->indicator_ordinal;
   space_outliner->runtime->stack_drop_indicator.insert_type = insert_type;
   return true;
 }
@@ -433,6 +542,11 @@ static void stack_drop_ui_state_restore(bContext *C,
   const int active_ordinal_after = outliner_stack_identity_resolve(
       ctx, space_outliner, active_before);
   if (active_ordinal_after >= 0) {
+    /* The activation sends the material notifier whose follow-sync would collapse the selection
+     * onto the one active row. It reads this space's UI state map first, and the restore below
+     * leaves that map naming the active row active -- so the sync stands down on its own, and a
+     * block drop keeps the selection it just put back, the same courtesy a Ctrl click of a row
+     * gets. */
     outliner_stack_row_activate(C, space_outliner, active_ordinal_after);
   }
   for (StackRowUiState &state : runtime.stack_row_ui_state.values()) {
@@ -600,7 +714,7 @@ static TreeElement *stack_drop_target_row(bContext *C,
     /* A correction or mask item is one line high and has no inside to land in, so its middle third
      * is a dead zone that would swallow the gesture of dropping between two of them: read it as the
      * half of the row the pointer is in, the way a row move does (see
-     * #stack_drop_attached_rules_apply). */
+     * #stack_drop_attached_aim_find). */
     SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
     const StackRow *row = (space_outliner != nullptr) ?
                               outliner_stack_row_find(*space_outliner,

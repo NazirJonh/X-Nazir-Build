@@ -373,6 +373,43 @@ static void outliner_main_region_listener(const wmRegionListenerParams *params)
 /* ************************ area listener *********************** */
 
 /**
+ * A workspace switch brings back the screen the workspace was last used with: its Outliners carry
+ * the row state of that moment, which a row activated somewhere else in the meantime has left
+ * behind. Only a space showing the stack records the wish to read the active row from the data
+ * again: any other display mode has no row state of its own to resync, and a wish left hanging on
+ * it would fire long after the switch, from an outdated premise. The tree build consumes the
+ * wish; the notifier itself carries nothing to resync against, so nothing more happens here.
+ */
+static void stack_listener_resync_workspace(SpaceOutliner &space_outliner, ScrArea &area)
+{
+  if (space_outliner.outlinevis == SO_STACK_LAYERS) {
+    space_outliner.runtime->stack_row_ui_needs_resync = true;
+  }
+  ED_area_tag_redraw(&area);
+}
+
+/**
+ * A paint-stack row was activated outside this editor -- the viewport pick of a Curve Patch
+ * effect's curve, or another editor's activation: follow its active row in this Outliner instead
+ * of making every such editor find and drive every screen. The notifier names the material the
+ * activation landed in, and a notifier of another data-block is not this Outliner's stack.
+ */
+static void stack_listener_follow_paint_row(const StackReadContext &ctx,
+                                            ScrArea &area,
+                                            SpaceOutliner &space_outliner,
+                                            ID *notified_id)
+{
+  if (notified_id == nullptr || GS(notified_id->name) != ID_MA || ctx.bmain == nullptr ||
+      ctx.scene == nullptr || ctx.view_layer == nullptr)
+  {
+    return;
+  }
+  outliner_stack_paint_row_ui_sync(
+      *ctx.bmain, *ctx.scene, *ctx.view_layer, space_outliner, *id_cast<Material *>(notified_id));
+  ED_area_tag_redraw(&area);
+}
+
+/**
  * Keep the Stack Layers view on whatever the active object has: its stack while it has one, and the
  * mode's object list while it has none.
  *
@@ -384,6 +421,10 @@ static void outliner_space_listener(const wmSpaceTypeListenerParams *params)
   const wmNotifier *wmn = params->notifier;
   SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(params->area->spacedata.first);
   if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
+    return;
+  }
+  if (wmn->category == NC_SCREEN && wmn->data == ND_WORKSPACE_SET) {
+    stack_listener_resync_workspace(*space_outliner, *params->area);
     return;
   }
   /* What can change the answer to "which stack does the active object have": another active
@@ -411,18 +452,11 @@ static void outliner_space_listener(const wmSpaceTypeListenerParams *params)
   const StackReadContext ctx{const_cast<Main *>(params->bmain),
                              WM_window_get_active_scene(params->window),
                              WM_window_get_active_view_layer(params->window)};
-  ID *notified_id = (wmn->category == NC_MATERIAL) ? static_cast<ID *>(wmn->reference) : nullptr;
-  if (notified_id != nullptr && wmn->data == ND_SHADING && GS(notified_id->name) == ID_MA &&
-      ctx.bmain != nullptr && ctx.scene != nullptr && ctx.view_layer != nullptr)
-  {
-    /* A paint-stack row was activated outside this editor (the viewport pick): follow its active
-     * row in this Outliner instead of making every such editor find and drive every screen. */
-    outliner_stack_paint_row_ui_sync(*ctx.bmain,
-                                     *ctx.scene,
-                                     *ctx.view_layer,
-                                     *space_outliner,
-                                     *id_cast<Material *>(notified_id));
-    ED_area_tag_redraw(params->area);
+  /* Only the shading notifier: it is the one every row activation sends, while the rest of the
+   * material category (previews, drawing) fires far more often and has no row to follow. */
+  if (wmn->category == NC_MATERIAL && wmn->data == ND_SHADING) {
+    stack_listener_follow_paint_row(
+        ctx, *params->area, *space_outliner, static_cast<ID *>(wmn->reference));
   }
   if (outliner_stack_view_follow_active(*space_outliner, ctx)) {
     /* The display mode may have changed under the header, and the tool header exists only in

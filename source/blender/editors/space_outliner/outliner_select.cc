@@ -2001,7 +2001,11 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
         std::string preview_section;
         const bool is_preview_click = outliner_stack_preview_section_from_cursor(
             *space_outliner, *activate_te, view_mval[0], preview_section);
-        outliner_stack_row_activate(C, *space_outliner, activate_tselem->nr);
+        /* A range select keeps the row it started from active, so the data is only activated for
+         * the clicked row once the range has said which row ends up active (see below). */
+        if (!use_range) {
+          outliner_stack_row_activate(C, *space_outliner, activate_tselem->nr);
+        }
         if (is_preview_click) {
           const StackRow *row = outliner_stack_row_find(*space_outliner, activate_tselem->nr);
           if (row != nullptr && !row->content_sections.is_empty()) {
@@ -2043,6 +2047,19 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
     if (use_range) {
       do_outliner_range_select(
           C, space_outliner, activate_te, extend, (recurse && is_over_icon), parent_collection);
+
+      if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+          activate_tselem->type == TSE_STACK_LAYER && activate_tselem->id != nullptr)
+      {
+        /* The range select only wrote the tree store. It activates the clicked row just when it
+         * had no visible selected anchor, and only then does the data have a new active row.
+         * Capturing the selection into the identity-keyed state is what lets the follow-sync of
+         * that activation see a state that already names the active row, and leave the range. */
+        if (activate_tselem->flag & TSE_ACTIVE) {
+          outliner_stack_row_activate(C, *space_outliner, activate_tselem->nr);
+        }
+        outliner_stack_row_ui_state_capture_now(*space_outliner, *activate_tselem->id);
+      }
     }
     else {
       const bool is_over_name_icons = outliner_item_is_co_over_name_icons(activate_te,

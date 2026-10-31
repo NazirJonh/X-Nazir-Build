@@ -136,6 +136,58 @@ void stack_row_ui_state_edit_select(const StackReadContext &ctx,
   state.active = true;
 }
 
+/**
+ * The follow of an activation that reached this space from outside its own click: make the row
+ * \a select_ordinal names -- the one the source calls active -- the selected and active row here,
+ * unless the map already names it active. The map naming it active means the selection on display
+ * is the one the activating gesture itself wrote: a Ctrl or Shift click of this Outliner, or the
+ * selection a block drop put back -- several rows of it, which collapsing onto the one row would
+ * undo before it is ever drawn.
+ */
+void stack_row_ui_state_follow_select(const StackReadContext &ctx,
+                                      SpaceOutliner &space_outliner,
+                                      ID &owner,
+                                      const int select_ordinal)
+{
+  SpaceOutliner_Runtime &runtime = *space_outliner.runtime;
+  outliner_stack_rows_ensure(ctx, space_outliner, owner);
+  if (select_ordinal >= 0) {
+    const StackItemIdentity identity = outliner_stack_identity_of(space_outliner, select_ordinal);
+    if (!BLI_uuid_is_nil(identity.row_id)) {
+      const StackRowUiState *state = runtime.stack_row_ui_state.lookup_ptr(identity.row_id);
+      if (state != nullptr && state->active) {
+        return;
+      }
+    }
+  }
+  stack_row_ui_state_edit_select(ctx, space_outliner, owner, select_ordinal);
+}
+
+void outliner_stack_row_ui_resync(Main &bmain,
+                                  Scene &scene,
+                                  ViewLayer &view_layer,
+                                  SpaceOutliner &space_outliner)
+{
+  if (space_outliner.outlinevis != SO_STACK_LAYERS || space_outliner.runtime == nullptr) {
+    return;
+  }
+  const StackReadContext ctx{&bmain, &scene, &view_layer};
+  ID *owner = outliner_stack_owner_get(ctx, space_outliner);
+  if (owner == nullptr) {
+    return;
+  }
+  /* The source is what knows which row is active -- the material's active paint layer, the
+   * object's active shape key -- and it answers for the owner this space shows, whatever a stale
+   * tree store and a stale state map still claim. -1 is a stack whose source names no active row,
+   * which nothing here can select on its behalf. */
+  const int active_ordinal = outliner_stack_active_ordinal_get(ctx, space_outliner);
+  if (active_ordinal < 0) {
+    return;
+  }
+  stack_row_reveal_attached(space_outliner, active_ordinal);
+  stack_row_ui_state_follow_select(ctx, space_outliner, *owner, active_ordinal);
+}
+
 void stack_row_edit_finished(bContext &C,
                              SpaceOutliner &space_outliner,
                              ID &owner,

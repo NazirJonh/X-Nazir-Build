@@ -12,7 +12,7 @@
  *
  * `BKE_mesh_maps.hh` is the data model (slots, states, content hash); this file is the bake side of
  * it. Everything here is deliberately free of #Render, #wmJob and the user's scene: the job that
- * drives the bake lives in `editors/object/mesh_map/mesh_map_bake.cc`, and this half can be tested
+ * drives Cycles lives in `editors/object/mesh_map/mesh_map_bake.cc`, and this half can be tested
  * without an engine. The joint contract is the atlas format the generated graph and the CPU
  * composite already read: a float image, `Non-Color`, a scalar map in R (spread to RGB by the
  * writer), an RGB map as stored.
@@ -20,7 +20,7 @@
  * The three map families are:
  * - ray-traced maps baked through Cycles: AO, Curvature, Edge (an emission graph fed to the EMIT
  *   pass) and the two normals (the native NORMAL pass, always in world space, rotated on the CPU);
- *   the engine half of them is not here yet, only its classification;
+ *   this file turns a type into a pass/space/emission graph, but never calls the engine itself;
  * - CPU maps: the two ID maps, filled per covered texel from the mesh's `material_index`;
  * - an atlas shared by every object that uses the material (only the covered texels are written).
  */
@@ -34,6 +34,8 @@
 #include "BLI_vector.hh"
 
 #include "DNA_material_types.h"
+#include "DNA_scene_enums.h"
+#include "DNA_scene_types.h"
 
 namespace blender {
 
@@ -47,6 +49,17 @@ struct Object;
 struct ObjectMeshMapState;
 struct Scene;
 struct ViewLayer;
+struct bNode;
+struct bNodeTree;
+
+/**
+ * The `1 - dot(bevel normal, geometry normal)` range the v1 Edge map maps onto [0, 1].
+ *
+ * A raw `1 - dot` is tiny for the shallow angles an edge mask has to catch (about 0.13 at 30
+ * degrees), so the v1 bake divides by this constant, clamped. It is tuned by hand and validated
+ * visually; there is deliberately no DNA parameter for it yet.
+ */
+constexpr float MESH_MAP_BAKE_EDGE_RANGE = 0.3f;
 
 /** Whether \a type is baked by a render pass (AO, Curvature, Edge, both normals). */
 bool BKE_mesh_maps_bake_type_renders(int8_t type);
@@ -60,6 +73,39 @@ bool BKE_mesh_maps_bake_type_cpu_id(int8_t type);
  * already share.
  */
 bool BKE_mesh_maps_bake_type_scalar(int8_t type);
+
+/**
+ * The bake pass for \a type: #SCE_PASS_EMIT for the emission-graph maps, #SCE_PASS_NORMAL for the
+ * normals. A type that is not rendered yields `eScenePassType(0)`.
+ */
+eScenePassType BKE_mesh_maps_bake_pass_for_type(int8_t type);
+
+/**
+ * The normal space for the two normal maps. Returns false for anything else, leaving \a r_space
+ * untouched.
+ */
+bool BKE_mesh_maps_bake_normal_space_for_type(int8_t type, eBakeSpace &r_space);
+
+/**
+ * The AO ray distance for \a mesh: \a settings.ao_distance when it is positive, otherwise half the
+ * diagonal of the mesh's local bounding box (the "from the object bounds" the setting documents).
+ * A degenerate or empty mesh yields a small positive fallback so the AO node never reads 0, which
+ * would silently mean the global radius.
+ */
+float BKE_mesh_maps_bake_ao_distance(const Mesh &mesh, const MaterialMeshMapSettings &settings);
+
+/**
+ * Build the emission surface for one ray-traced, non-native map (AO, Curvature, Edge) inside \a
+ * tree: the value nodes, a #SH_NODE_EMISSION and the link into the material output. Returns the
+ * emission node, or null for a type that has no emission graph (normals and the ID maps use another
+ * path).
+ *
+ * \param ao_distance: the already-resolved AO ray distance; ignored unless \a type is AO.
+ */
+bNode *BKE_mesh_maps_bake_build_emit_tree(bNodeTree &tree,
+                                          int8_t type,
+                                          const MaterialMeshMapSettings &settings,
+                                          float ao_distance);
 
 /** A stable ID colour for \a ob, raw RGB in [0, 1] (no color management). */
 void BKE_mesh_maps_bake_id_object_color(const Object &ob, float r_color[3]);
@@ -302,8 +348,15 @@ enum eMeshMapBakeObjectScope : int8_t {
 #define MESH_MAP_BAKE_TYPE_MASK_SUPPORTED 0x7Fu
 
 /**
- * The two CPU ID maps only: what this bake build can actually run. The render-pass maps join it
- * when the Cycles half lands; operators mask against this for now.
+ * Every map the bake can produce. The Cycles half of the render types has landed, so operators
+ * mask against this. #MESH_MAP_BAKE_TYPE_MASK_CPU stays for the tests and callers that need the
+ * subset that runs without an engine.
+ */
+#define MESH_MAP_BAKE_TYPE_MASK_ALL MESH_MAP_BAKE_TYPE_MASK_SUPPORTED
+
+/**
+ * The two CPU ID maps only: what this bake can run without an engine (handy for scripts and tests
+ * on machines that do not have Cycles built in).
  */
 #define MESH_MAP_BAKE_TYPE_MASK_CPU \
   ((1u << MA_MESH_MAP_ID_OBJECT) | (1u << MA_MESH_MAP_ID_MATERIAL))

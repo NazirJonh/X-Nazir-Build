@@ -778,6 +778,198 @@ class PAINT_IDF_layer_material(bpy.types.IDFilter):
         return getattr(id, "is_layered", False)
 
 
+# Mesh Maps ###################################################################
+
+# The bake operators, the source add/remove wrappers and the helpers the Mesh Maps panel reads.
+# Everything here goes through the layered material's active slot -- the same owner the panel and
+# the C++ bake job pick, so a UI click and a scripted call agree on which material's atlas is
+# touched. There is no automatic STALE recheck in this build: the panel's `Refresh Status` button
+# (see OBJECT_OT_mesh_map_refresh below) is the only path, and a depsgraph handler with a timer is
+# a separate task.
+
+_MESH_MAP_TYPE_ITEMS = (
+    ('AO', "Ambient Occlusion", "Ambient occlusion map"),
+    ('CURVATURE', "Curvature", "Curvature map"),
+    ('NORMAL_WORLD', "Normal (World)", "World-space normal map"),
+    ('NORMAL_OBJECT', "Normal (Object)", "Object-space normal map"),
+    ('ID_OBJECT', "Object ID", "Object index map"),
+    ('ID_MATERIAL', "Material ID", "Material index map"),
+    ('EDGE', "Edge", "Edge/bevel map"),
+)
+_MESH_MAP_LAYER_NAMES = {
+    'AO': "AO Map",
+    'CURVATURE': "Curvature Map",
+    'NORMAL_WORLD': "Normal (World) Map",
+    'NORMAL_OBJECT': "Normal (Object) Map",
+    'ID_OBJECT': "Object ID Map",
+    'ID_MATERIAL': "Material ID Map",
+    'EDGE': "Edge Map",
+}
+
+
+def _mesh_map_owner(context):
+    # The stack owner is the active slot's material, not `context.material`: in the Layer Material
+    # tab that can be the active Material row's source. The bake operator uses the active slot too.
+    ob = context.object
+    mat = ob.active_material if ob is not None else None
+    if mat is None or not mat.is_layered:
+        return None
+    return mat
+
+
+class OBJECT_OT_mesh_map_refresh(Operator):
+    bl_idname = "object.mesh_map_refresh"
+    bl_label = "Refresh Mesh Map Status"
+    bl_description = "Re-check mesh map bake statuses for the active object"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.object
+        return ob is not None and ob.type == 'MESH'
+
+    def execute(self, context):
+        depsgraph = context.evaluated_depsgraph_get()
+        changed = context.object.mesh_map_states.refresh_all(depsgraph=depsgraph)
+        self.report({'INFO'}, "Changed {} mesh map status(es)".format(changed))
+        return {'FINISHED'}
+
+
+class MATERIAL_OT_mesh_map_add_layer(Operator):
+    bl_idname = "material.mesh_map_add_layer"
+    bl_label = "Add Mesh Map Layer"
+    bl_description = "Add a Mesh Map layer to the material"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    type: bpy.props.EnumProperty(name="Map Type", items=_MESH_MAP_TYPE_ITEMS)
+
+    @classmethod
+    def poll(cls, context):
+        return _mesh_map_owner(context) is not None
+
+    def execute(self, context):
+        mat = _mesh_map_owner(context)
+        layer = mat.paint_layers.new(source='MESH_MAP', name=_MESH_MAP_LAYER_NAMES[self.type])
+        if layer is None:
+            self.report({'ERROR'}, "Cannot add Mesh Map layer")
+            return {'CANCELLED'}
+        layer.mesh_map_type = self.type
+        mat.paint_layers.active = layer
+        return {'FINISHED'}
+
+
+class OBJECT_OT_mesh_map_source_add(Operator):
+    bl_idname = "object.mesh_map_source_add"
+    bl_label = "Use High-poly Source"
+    bl_description = "Give this material a high-poly source object or collection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return _mesh_map_owner(context) is not None
+
+    def execute(self, context):
+        mat = _mesh_map_owner(context)
+        ob = context.object
+        if mat is None or ob is None:
+            return {'CANCELLED'}
+        if ob.mesh_map_sources.ensure(material=mat) is None:
+            self.report({'ERROR'}, "Cannot create a high-poly source")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class OBJECT_OT_mesh_map_source_remove(Operator):
+    bl_idname = "object.mesh_map_source_remove"
+    bl_label = "Remove High-poly Source"
+    bl_description = "Remove this material's high-poly source"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return _mesh_map_owner(context) is not None
+
+    def execute(self, context):
+        mat = _mesh_map_owner(context)
+        ob = context.object
+        if mat is None or ob is None:
+            return {'CANCELLED'}
+        ob.mesh_map_sources.remove(material=mat)
+        return {'FINISHED'}
+
+
+def mesh_map_source_objects(scene, mat):
+    """The objects that are high-poly sources (object, collection members or cage) for \a mat.
+
+    A source is geometry the low-poly samples, never a low-poly to bake: it must not show up in the
+    object list and must not be treated as an owner of the shared atlas.
+    """
+    result = set()
+    if scene is None or mat is None:
+        return result
+    for ob in scene.objects:
+        for source in ob.mesh_map_sources:
+            if source.material != mat:
+                continue
+            if source.high_poly is not None:
+                result.add(source.high_poly)
+            if source.high_poly_collection is not None:
+                for member in source.high_poly_collection.all_objects:
+                    result.add(member)
+            if source.cage is not None:
+                result.add(source.cage)
+    return result
+
+
+def mesh_map_objects_for_material(scene, mat):
+    """The mesh objects of \a scene that use \a mat in one of their slots, sources excluded.
+
+    Exposed for addons and the Mesh Maps panel, so both agree on which objects a "bake all"
+    touches.
+    """
+    if scene is None or mat is None:
+        return []
+    sources = mesh_map_source_objects(scene, mat)
+    result = []
+    for ob in scene.objects:
+        if ob.type != 'MESH' or ob.data is None or ob in sources:
+            continue
+        if any(slot.material == mat for slot in ob.material_slots):
+            result.append(ob)
+    return result
+
+
+def mesh_map_summary_status(ob, mat):
+    """The worst mesh-map status of \a ob for \a mat, and how many states it has."""
+    states = [state for state in ob.mesh_map_states if state.material == mat]
+    if len(states) == 0:
+        return ('NONE', 0)
+    statuses = {state.status for state in states}
+    for candidate in ('BAKING', 'ERROR', 'STALE', 'VALID'):
+        if candidate in statuses:
+            return (candidate, len(states))
+    return ('NONE', len(states))
+
+
+def mesh_map_states_need_refresh(states):
+    """Whether an object with \a states should be re-checked on a geometry change.
+
+    Only VALID or STALE states have something to re-check: NONE was never baked, ERROR stays until an
+    explicit retry, and an in-flight bake owns its status until the worker sets the final one.
+    """
+    return any(state.status in {'VALID', 'STALE'} for state in states)
+
+
+def mesh_map_source_member_count(source):
+    """How many mesh objects a source record resolves to (0 means the source is empty)."""
+    count = 0
+    if source.high_poly is not None:
+        count += 1
+    if source.high_poly_collection is not None:
+        count += sum(1 for ob in source.high_poly_collection.all_objects if ob.type == 'MESH')
+    return count
+
+
 def register():
     bpy.types.Material.paint_layers_output = bpy.props.PointerProperty(type=MaterialPaintLayersOutput)
 
@@ -801,4 +993,8 @@ classes = (
     MATERIAL_OT_paint_layer_object_mask_refresh_tiles,
     PAINT_OT_brush_layer_source_row_search,
     PAINT_IDF_layer_material,
+    OBJECT_OT_mesh_map_refresh,
+    MATERIAL_OT_mesh_map_add_layer,
+    OBJECT_OT_mesh_map_source_add,
+    OBJECT_OT_mesh_map_source_remove,
 )

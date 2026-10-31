@@ -9,15 +9,17 @@
  *
  * A bake turns one #eMaterialMeshMapType of one object into the atlas Image the material's slot
  * owns. Nothing of the user's scene is touched: the job works on local copies of the evaluated
- * meshes, fills the CPU ID maps into a private float buffer, and commits the covered texels into
- * the atlas on the main thread. This half covers the CPU maps only (ID_OBJECT, ID_MATERIAL); the
- * ray-traced maps arrive with the Cycles bake of the next task, which adds its engine calls to the
- * worker without changing this job's shape.
+ * meshes, fills the CPU ID maps into a private float buffer, and -- for the ray-traced maps --
+ * builds a throw-away #Main with a temporary scene, an emission-graph material and copies of the
+ * high-poly sources, drives Cycles on that private world, then commits the covered texels into the
+ * atlas on the main thread. The user's own render engine and Cycles settings are never read or
+ * written; only the private scene's are pointed at.
  *
  * The job is keyed on the material (the atlas is a material resource, and the status-bar template
- * already enumerates materials), and follows the paint-layer bake split the rest of the codebase
- * uses: the main thread prepares the input and commits the result, the worker only fills the margin
- * into private buffers, and the state is moved exclusively through `BKE_mesh_maps_bake_state_*`.
+ * already enumerates materials), runs Cycles once (#WM_JOB_EXCL_RENDER), and follows the paint-layer
+ * bake split the rest of the codebase uses: the main thread prepares the input and commits the
+ * result, the worker only renders into private buffers, and the state is moved exclusively through
+ * `BKE_mesh_maps_bake_state_*`.
  *
  * A "bake all" run is a sequence of (object, type) pairs. The private world holds exactly one pair
  * at a time: the main thread builds it, the worker runs its part, the main thread commits it and
@@ -43,6 +45,8 @@
 #include "MEM_guardedalloc.h"
 
 #include "BKE_context.hh"
+#include "BKE_collection.hh"
+#include "BKE_global.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
@@ -51,12 +55,14 @@
 #include "BKE_mesh_maps.hh"
 #include "BKE_mesh_maps_bake.hh"
 #include "BKE_mesh_maps_bake_handshake.hh"
+#include "BKE_node_tree_update.hh"
 #include "BKE_object.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph_query.hh"
 
 #include "DNA_ID.h"
@@ -70,6 +76,8 @@
 #include "IMB_imbuf_types.hh"
 
 #include "RE_bake.h"
+#include "RE_engine.h"
+#include "RE_pipeline.h"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -112,6 +120,15 @@ void mesh_map_bake_populate_geometry_pixels(Mesh &mesh,
 
 /** One (object, type) of a run: the private world plus its bookkeeping. */
 struct MeshMapBakeWorld {
+  /* The private render world. Null for a CPU ID pair, which needs no engine and so keeps the
+   * 05-03 shape (a local mesh copy, no temporary Main). */
+  Main *temp_main = nullptr;
+  Scene *temp_scene = nullptr;
+  ViewLayer *temp_view_layer = nullptr;
+  Object *temp_object = nullptr;
+  Depsgraph *temp_depsgraph = nullptr;
+  Render *render = nullptr;
+
   /** The atlas this world bakes into. */
   Image *atlas = nullptr;
 
@@ -130,9 +147,12 @@ struct MeshMapBakeWorld {
   int resolution = 0;
   char *margin_mask = nullptr;
 
-  /* The high-poly source: the user's original objects (their names decide the ID colours, and the
-   * ray code only reads a name for its error path) and local copies of their evaluated meshes,
-   * owned here. The cage likewise: original object for the matrix, owned copy for the ray data. */
+  /* The high-poly source: for a CPU ID pair, the user's original objects (their names decide the
+   * ID colours, and the ray code only reads a name for its error path) and local copies of their
+   * evaluated meshes, owned here. For a render pair, temp copies owned by `temp_main` -- Cycles
+   * must see them inside `temp_depsgraph`, not the user's objects from another depsgraph. The cage
+   * likewise: original object for the matrix (CPU) or temp copy (render), owned copy for the ray
+   * data. */
   Vector<Object *> source_objects;
   Vector<Mesh *> source_meshes;
   Object *cage_object = nullptr;
@@ -142,6 +162,8 @@ struct MeshMapBakeWorld {
   BakeHighPolyData *highpoly = nullptr;
   int highpoly_num = 0;
   BakePixel *pixels_high = nullptr;
+  /** Set by the worker when the engine bake failed, so the commit does not call zeros a bake. */
+  bool engine_failed = false;
 };
 
 /** What the pair started from, so a cancel can put the status back. */
@@ -186,6 +208,24 @@ struct MeshMapBakeJob {
   int cancelled_num = 0;
 };
 
+/**
+ * Progress and break hooks the render layer would call from inside Cycles. This build does not
+ * wire them through #RE_bake_engine (the private Render inherits its own break check via
+ * #G.is_break, which the synchronous exec path and #WM_jobs_setting_kill set for us). They stay
+ * here so a future engine-side hook can drop in without touching the surrounding code.
+ */
+[[maybe_unused]] void mesh_map_bake_progress_cb(void *handle, const float progress)
+{
+  wmJobWorkerStatus *worker_status = static_cast<wmJobWorkerStatus *>(handle);
+  worker_status->progress = progress;
+  worker_status->do_update = true;
+}
+
+[[maybe_unused]] bool mesh_map_bake_test_break_cb(void *handle)
+{
+  return static_cast<wmJobWorkerStatus *>(handle)->stop;
+}
+
 /** The mesh the bake copies: the evaluated one when available, else the object's own data. */
 Mesh *mesh_map_bake_object_mesh(Object &ob)
 {
@@ -206,6 +246,31 @@ Mesh *mesh_map_bake_copy_mesh(Mesh *mesh_eval)
                                         nullptr,
                                         LIB_ID_CREATE_LOCAL | LIB_ID_COPY_LOCALIZE |
                                             LIB_ID_COPY_NO_ANIMDATA));
+}
+
+/** Cycles samples/denoise live on the scene's Python-side `cycles` group; set them when present. */
+void mesh_map_bake_apply_cycles_settings(Scene &scene, const MaterialMeshMapSettings &settings)
+{
+  PointerRNA scene_ptr = RNA_id_pointer_create(&scene.id);
+  if (RNA_struct_find_property(&scene_ptr, "cycles") == nullptr) {
+    return;
+  }
+  PointerRNA cycles = RNA_pointer_get(&scene_ptr, "cycles");
+  if (cycles.data == nullptr) {
+    return;
+  }
+  RNA_int_set(&cycles, "samples", std::max(settings.samples, 1));
+  RNA_boolean_set(&cycles, "use_denoising", settings.use_denoise != 0);
+}
+
+/** Build a render depsgraph for \a scene/\a view_layer, updated and ready to evaluate \a ob. */
+Depsgraph *mesh_map_bake_depsgraph_new(Main &bmain, Scene &scene, ViewLayer &view_layer)
+{
+  Depsgraph *depsgraph = DEG_graph_new(&bmain, &scene, &view_layer, DAG_EVAL_RENDER);
+  DEG_disable_visibility_optimization(depsgraph);
+  DEG_graph_build_from_view_layer(depsgraph);
+  BKE_scene_graph_update_tagged(depsgraph, &bmain);
+  return depsgraph;
 }
 
 const char *mesh_map_bake_type_name(const int8_t type)
@@ -232,24 +297,49 @@ const char *mesh_map_bake_type_name(const int8_t type)
 
 void mesh_map_bake_world_free(MeshMapBakeWorld &world)
 {
-  /* The mesh copies are local IDs outside any Main; that is exactly how they were created, so a
-   * null-Main free releases them and their custom data. */
-  if (world.mesh != nullptr) {
-    BKE_id_free(nullptr, &world.mesh->id);
-    world.mesh = nullptr;
+  /* Order mirrors M:: the engine handle first (it references the depsgraph's evaluated objects),
+   * then the depsgraph, then the temp-Main that owns every temp ID including the mesh copies that
+   * the render branch stores in `world.mesh`/`world.source_meshes`/`world.cage_mesh`. The CPU
+   * branch keeps those as null-Main locals, so it frees them explicitly before the Main-free
+   * short-circuits on a null `temp_main`. */
+  if (world.render != nullptr) {
+    RE_FreeRender(world.render);
+    world.render = nullptr;
   }
-  for (Mesh *source_mesh : world.source_meshes) {
-    if (source_mesh != nullptr) {
-      BKE_id_free(nullptr, &source_mesh->id);
+  if (world.temp_depsgraph != nullptr) {
+    DEG_graph_free(world.temp_depsgraph);
+    world.temp_depsgraph = nullptr;
+  }
+  if (world.temp_main != nullptr) {
+    /* Every mesh/object copy created for the render world lives inside `temp_main`; dropping it
+     * also drops `world.mesh`, `world.source_meshes`, `world.cage_mesh` and their objects. The
+     * pointers themselves are cleared by the assignment at the bottom. */
+    BKE_main_free(world.temp_main);
+    world.temp_main = nullptr;
+  }
+  else {
+    /* CPU branch: the mesh copies are local IDs outside any Main; that is exactly how they were
+     * created, so a null-Main free releases them and their custom data. */
+    if (world.mesh != nullptr) {
+      BKE_id_free(nullptr, &world.mesh->id);
+      world.mesh = nullptr;
+    }
+    for (Mesh *source_mesh : world.source_meshes) {
+      if (source_mesh != nullptr) {
+        BKE_id_free(nullptr, &source_mesh->id);
+      }
+    }
+    if (world.cage_mesh != nullptr) {
+      BKE_id_free(nullptr, &world.cage_mesh->id);
+      world.cage_mesh = nullptr;
     }
   }
   world.source_meshes.clear();
   world.source_objects.clear();
-  if (world.cage_mesh != nullptr) {
-    BKE_id_free(nullptr, &world.cage_mesh->id);
-    world.cage_mesh = nullptr;
-  }
   world.cage_object = nullptr;
+  world.temp_scene = nullptr;
+  world.temp_view_layer = nullptr;
+  world.temp_object = nullptr;
   world.atlas = nullptr;
   MEM_delete(world.pixels);
   world.pixels = nullptr;
@@ -287,9 +377,10 @@ Object *mesh_map_bake_find_object(MeshMapBakeJob &job, const MeshMapBakePairStat
 }
 
 /**
- * Build the private world for \a pair, rasterize its texels, fill the CPU ID result and leave the
- * object state #OB_MESH_MAP_STATUS_BAKING (already entered). On failure the state is marked
- * #OB_MESH_MAP_STATUS_ERROR, \a pair records the message and false is returned. Main thread only.
+ * Build the private world for \a pair, rasterize its texels, fill the CPU ID result (or the render
+ * world for a Cycles type) and leave the object state #OB_MESH_MAP_STATUS_BAKING (already entered).
+ * On failure the state is marked #OB_MESH_MAP_STATUS_ERROR, \a pair records the message and false is
+ * returned. Main thread only.
  */
 bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
 {
@@ -302,14 +393,6 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   }
   if (pair.type < 0 || pair.type >= MA_MESH_MAP_TYPE_NUM) {
     BLI_strncpy(pair.error, "Unsupported mesh map type", sizeof(pair.error));
-    pair.failed = true;
-    return false;
-  }
-  if (!BKE_mesh_maps_bake_type_cpu_id(pair.type)) {
-    /* A plan that reached here skipped the operator's mask; refuse instead of writing noise. */
-    BLI_strncpy(pair.error,
-                "This map needs the Cycles bake (not available yet)",
-                sizeof(pair.error));
     pair.failed = true;
     return false;
   }
@@ -351,8 +434,11 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   BKE_mesh_maps_object_hash(*ob_eval, *ma, pair.type, pair.start_hash);
   const float4x4 object_matrix = ob_eval->object_to_world();
 
-  /* The high-poly source of this material, if any: its meshes are copied locally so the ray pass
-   * can build its BVH trees off the user's data. */
+  const bool is_render = BKE_mesh_maps_bake_type_renders(pair.type);
+
+  /* The high-poly source of this material, if any. For a CPU pair its meshes are copied locally so
+   * the ray pass can build its BVH trees off the user's data; for a render pair they are copied
+   * into the private Main so Cycles can see them inside the render depsgraph. */
   Vector<Object *> source_objects;
   Object *cage = nullptr;
   BKE_mesh_maps_source_resolve(*ob, *ma, source_objects, &cage);
@@ -372,6 +458,187 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   }
   job.world.mesh = mesh_copy;
   job.world.low_matrix = object_matrix;
+
+  if (is_render) {
+    /* The private render world: a fresh Main holding the mesh copy, a throw-away scene with the
+     * Cycles engine, and the low-poly object positioned at the user's matrix. Everything below
+     * lives inside `temp_main` so a single #BKE_main_free releases it all. */
+    job.world.temp_main = BKE_main_new();
+    BKE_libblock_management_main_add(job.world.temp_main, mesh_copy);
+    job.world.temp_scene = BKE_scene_add(job.world.temp_main, "Mesh Map Bake");
+    job.world.temp_view_layer = static_cast<ViewLayer *>(job.world.temp_scene->view_layers.first);
+    STRNCPY(job.world.temp_scene->r.engine, RE_engine_id_CYCLES);
+    job.world.temp_scene->r.xsch = job.resolution;
+    job.world.temp_scene->r.ysch = job.resolution;
+    job.world.temp_scene->r.size = 100;
+    job.world.temp_scene->r.cfra = 1;
+    mesh_map_bake_apply_cycles_settings(*job.world.temp_scene, ma->mesh_map_settings);
+
+    job.world.temp_object = BKE_object_add_for_data(job.world.temp_main,
+                                                    job.world.temp_scene,
+                                                    job.world.temp_view_layer,
+                                                    OB_MESH,
+                                                    "Mesh Map Bake",
+                                                    &mesh_copy->id,
+                                                    true);
+    BKE_object_apply_mat4(job.world.temp_object, object_matrix.ptr(), false, false);
+    BKE_collection_object_add(
+        job.world.temp_main, job.world.temp_scene->master_collection, job.world.temp_object);
+    if (!source_objects.is_empty()) {
+      /* Selected-to-active hides the low-poly so Cycles bakes the high-poly surface it was cast
+       * onto, not the low-poly in front of it (mirrors the full bake). */
+      job.world.temp_object->visibility_flag |= OB_HIDE_RENDER;
+    }
+
+    Material *temp_material = BKE_material_add(job.world.temp_main, "Mesh Map Bake");
+    const auto assign_material = [&](Object *temp_ob) {
+      BKE_object_material_slot_add(job.world.temp_main, temp_ob);
+      BKE_object_material_assign(
+          job.world.temp_main, temp_ob, temp_material, 1, BKE_MAT_ASSIGN_OBJECT);
+    };
+    assign_material(job.world.temp_object);
+    if (BKE_mesh_maps_bake_pass_for_type(pair.type) == SCE_PASS_EMIT) {
+      const float ao_distance = BKE_mesh_maps_bake_ao_distance(*mesh_copy, ma->mesh_map_settings);
+      BKE_mesh_maps_bake_build_emit_tree(
+          *temp_material->nodetree, pair.type, ma->mesh_map_settings, ao_distance);
+      BKE_ntree_update_without_main(*temp_material->nodetree);
+    }
+
+    /* Copy each source object into the private scene, sharing the throw-away material so the EMIT
+     * passes trace the high-poly through the same value graph. */
+    for (Object *source : source_objects) {
+      Object *source_eval = DEG_get_evaluated(user_depsgraph, source);
+      if (source_eval == nullptr) {
+        source_eval = source;
+      }
+      Mesh *source_copy = mesh_map_bake_copy_mesh(mesh_map_bake_object_mesh(*source_eval));
+      if (source_copy == nullptr) {
+        BKE_mesh_maps_bake_state_fail(*state);
+        BLI_strncpy(pair.error, "Could not copy a high-poly source mesh", sizeof(pair.error));
+        pair.failed = true;
+        return false;
+      }
+      BKE_libblock_management_main_add(job.world.temp_main, source_copy);
+      Object *temp_source = BKE_object_add_for_data(job.world.temp_main,
+                                                    job.world.temp_scene,
+                                                    job.world.temp_view_layer,
+                                                    OB_MESH,
+                                                    "Mesh Map Source",
+                                                    &source_copy->id,
+                                                    true);
+      BKE_object_apply_mat4(temp_source, source_eval->object_to_world().ptr(), false, false);
+      BKE_collection_object_add(
+          job.world.temp_main, job.world.temp_scene->master_collection, temp_source);
+      assign_material(temp_source);
+      job.world.source_objects.append(temp_source);
+      job.world.source_meshes.append(source_copy);
+    }
+
+    /* Cage: a custom cage must mirror the low-poly face count; an empty one means an auto-cage. */
+    if (cage != nullptr) {
+      Object *cage_eval = DEG_get_evaluated(user_depsgraph, cage);
+      if (cage_eval == nullptr) {
+        cage_eval = cage;
+      }
+      Mesh *cage_eval_mesh = mesh_map_bake_object_mesh(*cage_eval);
+      if (cage_eval_mesh == nullptr ||
+          !BKE_mesh_maps_bake_cage_matches(*mesh_copy, *cage_eval_mesh))
+      {
+        BKE_mesh_maps_bake_state_fail(*state);
+        BLI_strncpy(pair.error,
+                    "The cage mesh must have the same number of faces as the low-poly object",
+                    sizeof(pair.error));
+        pair.failed = true;
+        return false;
+      }
+      Mesh *cage_copy = mesh_map_bake_copy_mesh(cage_eval_mesh);
+      if (cage_copy == nullptr) {
+        BKE_mesh_maps_bake_state_fail(*state);
+        BLI_strncpy(pair.error, "Could not copy the cage mesh", sizeof(pair.error));
+        pair.failed = true;
+        return false;
+      }
+      BKE_libblock_management_main_add(job.world.temp_main, cage_copy);
+      Object *temp_cage = BKE_object_add_for_data(job.world.temp_main,
+                                                  job.world.temp_scene,
+                                                  job.world.temp_view_layer,
+                                                  OB_MESH,
+                                                  "Mesh Map Cage",
+                                                  &cage_copy->id,
+                                                  true);
+      BKE_object_apply_mat4(temp_cage, cage_eval->object_to_world().ptr(), false, false);
+      BKE_collection_object_add(
+          job.world.temp_main, job.world.temp_scene->master_collection, temp_cage);
+      /* The cage is only the ray origin; it must not render. */
+      temp_cage->visibility_flag |= OB_HIDE_RENDER;
+      job.world.cage_object = temp_cage;
+      job.world.cage_mesh = cage_copy;
+      job.world.cage_matrix = cage_eval->object_to_world();
+    }
+
+    job.world.temp_depsgraph = mesh_map_bake_depsgraph_new(
+        *job.world.temp_main, *job.world.temp_scene, *job.world.temp_view_layer);
+    job.world.render = RE_NewSceneRender(job.world.temp_scene);
+    RE_bake_engine_set_engine_parameters(
+        job.world.render, job.world.temp_main, job.world.temp_scene);
+    if (!RE_bake_has_engine(job.world.render)) {
+      BKE_mesh_maps_bake_state_fail(*state);
+      BLI_strncpy(pair.error, "The Cycles bake engine is not available", sizeof(pair.error));
+      pair.failed = true;
+      return false;
+    }
+  }
+  else {
+    /* CPU branch (05-03 shape): the user's original objects go into `world.source_objects` so the
+     * ID colour reads their names, and their evaluated meshes go into `world.source_meshes` as
+     * local copies owned by the world (freed by a null-Main `BKE_id_free` in the world-free). */
+    job.world.source_objects.reserve(source_objects.size());
+    job.world.source_meshes.reserve(source_objects.size());
+    for (Object *source : source_objects) {
+      Object *source_eval = DEG_get_evaluated(user_depsgraph, source);
+      if (source_eval == nullptr) {
+        source_eval = source;
+      }
+      Mesh *source_copy = mesh_map_bake_copy_mesh(mesh_map_bake_object_mesh(*source_eval));
+      if (source_copy == nullptr) {
+        BKE_mesh_maps_bake_state_fail(*state);
+        BLI_strncpy(pair.error, "Could not copy a high-poly source mesh", sizeof(pair.error));
+        pair.failed = true;
+        return false;
+      }
+      job.world.source_objects.append(source);
+      job.world.source_meshes.append(source_copy);
+    }
+
+    /* Cage: a custom cage must mirror the low-poly face count; an empty one means an auto-cage. */
+    if (cage != nullptr) {
+      Object *cage_eval = DEG_get_evaluated(user_depsgraph, cage);
+      if (cage_eval == nullptr) {
+        cage_eval = cage;
+      }
+      Mesh *cage_eval_mesh = mesh_map_bake_object_mesh(*cage_eval);
+      if (cage_eval_mesh == nullptr ||
+          !BKE_mesh_maps_bake_cage_matches(*mesh_copy, *cage_eval_mesh))
+      {
+        BKE_mesh_maps_bake_state_fail(*state);
+        BLI_strncpy(pair.error,
+                    "The cage mesh must have the same number of faces as the low-poly object",
+                    sizeof(pair.error));
+        pair.failed = true;
+        return false;
+      }
+      Mesh *cage_copy = mesh_map_bake_copy_mesh(cage_eval_mesh);
+      if (cage_copy == nullptr) {
+        BKE_mesh_maps_bake_state_fail(*state);
+        BLI_strncpy(pair.error, "Could not copy the cage mesh", sizeof(pair.error));
+        pair.failed = true;
+        return false;
+      }
+      job.world.cage_object = cage;
+      job.world.cage_mesh = cage_copy;
+      job.world.cage_matrix = cage_eval->object_to_world();
+    }
+  }
 
   Image *atlas = BKE_mesh_maps_bake_atlas_ensure(*job.bmain, *ma, pair.type, job.resolution);
   if (atlas == nullptr) {
@@ -407,74 +674,33 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
 
   RE_bake_pixels_populate(
       mesh_copy, job.world.pixels, pixels_num, &job.world.targets, StringRef(job.world.uv_name));
-  /* Warm the lazy triangulation caches on the main thread: the worker's margin there only reads
+  /* Warm the lazy triangulation caches on the main thread: the worker's rasterize there only reads
    * them, and computing them off-thread would race the main thread's own mesh access. */
   (void)mesh_copy->corner_tris();
   (void)mesh_copy->corner_tri_faces();
   BKE_mesh_maps_bake_restrict_to_material(job.world.pixels, pixels_num, *mesh_copy, *ob, *ma);
 
-  job.world.highpoly_num = int(source_objects.size());
+  job.world.highpoly_num = int(job.world.source_objects.size());
   if (job.world.highpoly_num > 0) {
-    /* Copy each source's evaluated mesh into the world. The original object pointers stay what the
-     * ID colour reads: a bake of a high-poly is a picture of the user's objects, not of a
-     * throw-away copy whose name nothing else in the file matches. */
-    job.world.source_objects.reserve(source_objects.size());
-    job.world.source_meshes.reserve(source_objects.size());
     job.world.highpoly = MEM_new_array_zeroed<BakeHighPolyData>(job.world.highpoly_num, __func__);
-    int index = 0;
-    for (Object *source : source_objects) {
-      Object *source_eval = DEG_get_evaluated(user_depsgraph, source);
+    for (int i = 0; i < job.world.highpoly_num; i++) {
+      Object *source_obj = job.world.source_objects[i];
+      Depsgraph *source_depsgraph = is_render ? job.world.temp_depsgraph : user_depsgraph;
+      Object *source_eval = DEG_get_evaluated(source_depsgraph, source_obj);
       if (source_eval == nullptr) {
-        source_eval = source;
+        source_eval = source_obj;
       }
-      Mesh *source_copy = mesh_map_bake_copy_mesh(mesh_map_bake_object_mesh(*source_eval));
-      if (source_copy == nullptr) {
-        BKE_mesh_maps_bake_state_fail(*state);
-        BLI_strncpy(pair.error, "Could not copy a high-poly source mesh", sizeof(pair.error));
-        pair.failed = true;
-        return false;
-      }
-      job.world.source_objects.append(source);
-      job.world.source_meshes.append(source_copy);
-      job.world.highpoly[index].ob = source;
-      job.world.highpoly[index].ob_eval = source_eval;
-      job.world.highpoly[index].mesh = source_copy;
-      copy_m4_m4(job.world.highpoly[index].obmat, source_eval->object_to_world().ptr());
-      invert_m4_m4(job.world.highpoly[index].imat, job.world.highpoly[index].obmat);
-      job.world.highpoly[index].is_flip_object = is_negative_m4(
+      /* A render world raycasts against the evaluated temp mesh; a CPU world against its own
+       * null-Main copy so the ray pass reads nothing but private data. */
+      Mesh *source_mesh = is_render ? mesh_map_bake_object_mesh(*source_eval) :
+                                      job.world.source_meshes[i];
+      job.world.highpoly[i].ob = source_obj;
+      job.world.highpoly[i].ob_eval = source_eval;
+      job.world.highpoly[i].mesh = source_mesh;
+      copy_m4_m4(job.world.highpoly[i].obmat, source_eval->object_to_world().ptr());
+      invert_m4_m4(job.world.highpoly[i].imat, job.world.highpoly[i].obmat);
+      job.world.highpoly[i].is_flip_object = is_negative_m4(
           source_eval->object_to_world().ptr());
-      index++;
-    }
-
-    /* Cage: a custom cage must mirror the low-poly face count; an empty one means an auto-cage. */
-    Mesh *cage_eval_mesh = nullptr;
-    Object *cage_eval = nullptr;
-    if (cage != nullptr) {
-      cage_eval = DEG_get_evaluated(user_depsgraph, cage);
-      if (cage_eval == nullptr) {
-        cage_eval = cage;
-      }
-      cage_eval_mesh = mesh_map_bake_object_mesh(*cage_eval);
-      if (cage_eval_mesh == nullptr ||
-          !BKE_mesh_maps_bake_cage_matches(*mesh_copy, *cage_eval_mesh))
-      {
-        BKE_mesh_maps_bake_state_fail(*state);
-        BLI_strncpy(pair.error,
-                    "The cage mesh must have the same number of faces as the low-poly object",
-                    sizeof(pair.error));
-        pair.failed = true;
-        return false;
-      }
-      Mesh *cage_copy = mesh_map_bake_copy_mesh(cage_eval_mesh);
-      if (cage_copy == nullptr) {
-        BKE_mesh_maps_bake_state_fail(*state);
-        BLI_strncpy(pair.error, "Could not copy the cage mesh", sizeof(pair.error));
-        pair.failed = true;
-        return false;
-      }
-      job.world.cage_object = cage;
-      job.world.cage_mesh = cage_copy;
-      job.world.cage_matrix = cage_eval->object_to_world();
     }
 
     job.world.pixels_high = MEM_new_array_uninitialized<BakePixel>(pixels_num, __func__);
@@ -501,25 +727,27 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
       pair.failed = true;
       return false;
     }
-    Vector<const Object *> id_objects;
-    Vector<const Mesh *> id_meshes;
-    id_objects.reserve(job.world.highpoly_num);
-    id_meshes.reserve(job.world.highpoly_num);
-    for (int i = 0; i < job.world.highpoly_num; i++) {
-      id_objects.append(job.world.source_objects[i]);
-      id_meshes.append(job.world.source_meshes[i]);
+    if (!is_render) {
+      Vector<const Object *> id_objects;
+      Vector<const Mesh *> id_meshes;
+      id_objects.reserve(job.world.highpoly_num);
+      id_meshes.reserve(job.world.highpoly_num);
+      for (int i = 0; i < job.world.highpoly_num; i++) {
+        id_objects.append(job.world.source_objects[i]);
+        id_meshes.append(job.world.source_meshes[i]);
+      }
+      BKE_mesh_maps_bake_fill_id_from_high_poly(job.world.pixels_high,
+                                                pixels_num,
+                                                id_objects.data(),
+                                                size_t(job.world.highpoly_num),
+                                                id_meshes.data(),
+                                                size_t(job.world.highpoly_num),
+                                                pair.type,
+                                                4,
+                                                job.world.result);
     }
-    BKE_mesh_maps_bake_fill_id_from_high_poly(job.world.pixels_high,
-                                              pixels_num,
-                                              id_objects.data(),
-                                              size_t(job.world.highpoly_num),
-                                              id_meshes.data(),
-                                              size_t(job.world.highpoly_num),
-                                              pair.type,
-                                              4,
-                                              job.world.result);
   }
-  else {
+  else if (!is_render) {
     /* No source: the low-poly's own faces decide every covered texel. */
     BKE_mesh_maps_bake_fill_id_pixels(
         job.world.pixels, pixels_num, *mesh_copy, *ob, pair.type, 4, job.world.result);
@@ -596,16 +824,66 @@ void mesh_map_bake_apply_margin(MeshMapBakeWorld &world, const int margin)
 /**
  * Run the prepared world's worker half. Worker thread only.
  *
- * In this CPU-only build that is the margin fill alone: the ID pixels were already resolved into
- * `world.result` on the main thread during the prepare. The Cycles engine calls of the render maps
- * will join here, reading nothing but the private buffers.
+ * A render world calls #RE_bake_engine on the private buffers, then converts the world-space
+ * normals Cycles delivers into the space the map claims. A CPU world already has its result from
+ * the prepare. Either way the margin expansion that follows touches nothing but the private
+ * buffers.
  */
 void mesh_map_bake_worker_run(MeshMapBakeJob &job, MeshMapBakeWorld &world)
 {
   if (BKE_mesh_maps_bake_type_renders(world.type)) {
-    /* The render-pass maps are the next task's engine half; the operators mask them out of a plan
-     * long before here, so a world of that kind means a caller skipped the mask. Write nothing. */
-    return;
+    if (world.render == nullptr) {
+      /* The prepare would have failed already; guard so an inconsistent world cannot crash the
+       * worker. */
+      return;
+    }
+    const eScenePassType pass_type = BKE_mesh_maps_bake_pass_for_type(world.type);
+    bool ok = true;
+    if (world.highpoly_num > 0) {
+      /* Selected-to-active: each source object bakes the texels that were cast onto it, through
+       * `pixels_high` whose `object_id` selects the object. */
+      for (int i = 0; i < world.highpoly_num && ok; i++) {
+        ok = RE_bake_engine(world.render,
+                            world.temp_depsgraph,
+                            world.highpoly[i].ob_eval,
+                            i,
+                            world.pixels_high,
+                            &world.targets,
+                            pass_type,
+                            0,
+                            world.result);
+      }
+    }
+    else {
+      ok = RE_bake_engine(world.render,
+                          world.temp_depsgraph,
+                          world.temp_object,
+                          0,
+                          world.pixels,
+                          &world.targets,
+                          pass_type,
+                          0,
+                          world.result);
+    }
+    if (!ok) {
+      /* The commit sees the flag and marks the pair ERROR instead of writing the empty result. */
+      world.engine_failed = true;
+      return;
+    }
+    if (pass_type == SCE_PASS_NORMAL) {
+      /* Cycles always delivers world-space normals; rotate and compress them for the atlas. */
+      const eBakeNormalSwizzle swizzle[3] = {R_BAKE_POSX, R_BAKE_POSY, R_BAKE_POSZ};
+      eBakeSpace space = R_BAKE_SPACE_WORLD;
+      BKE_mesh_maps_bake_normal_space_for_type(world.type, space);
+      if (space == R_BAKE_SPACE_OBJECT) {
+        RE_bake_normal_world_to_object(
+            world.pixels, world.pixels_num, 4, world.result, world.temp_object, swizzle);
+      }
+      else {
+        RE_bake_normal_world_to_world(
+            world.pixels, world.pixels_num, 4, world.result, swizzle);
+      }
+    }
   }
   mesh_map_bake_apply_margin(world, job.margin_pixels);
 }
@@ -638,6 +916,11 @@ void mesh_map_bake_commit_current(MeshMapBakeJob &job, MeshMapBakePairState &pai
   }
   ObjectMeshMapState *state = BKE_mesh_maps_object_state_find(*ob, *ma, pair.type);
   if (state == nullptr) {
+    return;
+  }
+  if (world.engine_failed) {
+    BKE_mesh_maps_bake_state_fail(*state);
+    job.error_num++;
     return;
   }
 
@@ -877,6 +1160,8 @@ void mesh_map_bake_free(void *customdata)
 {
   MeshMapBakeJob *job = static_cast<MeshMapBakeJob *>(customdata);
   mesh_map_bake_world_free(job->world);
+  G.is_rendering = false;
+  G.is_break = false;
   MEM_delete(job);
 }
 
@@ -974,16 +1259,29 @@ wmOperatorStatus mesh_map_bake_run_sync(MeshMapBakeJob *job)
   if (job == nullptr) {
     return OPERATOR_CANCELLED;
   }
+  /* Cycles reads #G.is_break to end a sample early when the user asks to stop, and honours
+   * #G.is_rendering as the flag that gives it that permission. The synchronous path runs on the
+   * main thread without a wmJob, so nothing else would set them. */
+  const bool was_rendering = G.is_rendering;
+  G.is_break = false;
+  G.is_rendering = true;
   for (;;) {
     if (!mesh_map_bake_prepare_next(*job)) {
       break;
     }
     mesh_map_bake_worker_run(*job, job->world);
+    if (G.is_break) {
+      job->stop_requested = true;
+      mesh_map_bake_world_free(job->world);
+      break;
+    }
     mesh_map_bake_commit_current(*job, job->pairs[job->current]);
     mesh_map_bake_world_free(job->world);
     job->current++;
   }
   mesh_map_bake_world_free(job->world);
+  G.is_rendering = was_rendering;
+  G.is_break = false;
   mesh_map_bake_finalize(*job, job->stop_requested);
   MEM_delete(job);
   return OPERATOR_FINISHED;
@@ -1008,36 +1306,25 @@ wmOperatorStatus mesh_map_bake_job_start(bContext *C, MeshMapBakeJob *job)
                               CTX_wm_window(C),
                               ma,
                               "Baking mesh maps...",
-                              WM_JOB_PROGRESS,
+                              WM_JOB_EXCL_RENDER | WM_JOB_PROGRESS,
                               WM_JOB_TYPE_MESH_MAP_BAKE);
   WM_jobs_customdata_set(wm_job, job, mesh_map_bake_free);
   WM_jobs_timer(wm_job, 0.2, NC_MATERIAL, NC_MATERIAL);
   WM_jobs_callbacks(wm_job, mesh_map_bake_start, nullptr, mesh_map_bake_update, mesh_map_bake_end);
+  /* Match the full-bake job: mark the app as rendering so Cycles sees #G.is_break as the kill
+   * signal, and let #mesh_map_bake_free reset both when the job ends. */
+  G.is_break = false;
+  G.is_rendering = true;
   WM_jobs_start(CTX_wm_manager(C), wm_job);
   return OPERATOR_FINISHED;
 }
 
 /**
- * Keep only the bits this build can bake, reporting what was dropped. An empty \a requested means
- * the operator's default: every CPU map.
+ * An empty \a requested means the operator's default: every map the bake can produce.
  */
-uint32_t mesh_map_bake_filter_cpu_mask(wmOperator *op, const uint32_t requested, bool *r_ok)
+uint32_t mesh_map_bake_resolve_type_mask(const uint32_t requested)
 {
-  *r_ok = true;
-  const uint32_t mask = requested == 0 ? MESH_MAP_BAKE_TYPE_MASK_CPU : requested;
-  const uint32_t cpu = mask & MESH_MAP_BAKE_TYPE_MASK_CPU;
-  const uint32_t dropped = mask & ~cpu;
-  if (cpu == 0) {
-    BKE_report(op->reports, RPT_ERROR, "This map needs the Cycles bake (not available yet)");
-    *r_ok = false;
-    return 0;
-  }
-  if (dropped != 0) {
-    BKE_report(op->reports,
-               RPT_INFO,
-               "Skipped the maps that need the Cycles bake (not available yet)");
-  }
-  return cpu;
+  return requested == 0 ? MESH_MAP_BAKE_TYPE_MASK_ALL : requested;
 }
 
 /** Validate the context and build the job for either bake operator. */
@@ -1077,58 +1364,40 @@ MeshMapBakeJob *mesh_map_bake_build_job(bContext *C,
 wmOperatorStatus mesh_map_bake_exec(bContext *C, wmOperator *op)
 {
   const uint32_t type_mask = 1u << uint(RNA_enum_get(op->ptr, "type"));
-  bool ok = false;
-  const uint32_t cpu_mask = mesh_map_bake_filter_cpu_mask(op, type_mask, &ok);
-  if (!ok) {
-    return OPERATOR_CANCELLED;
-  }
   return mesh_map_bake_run_sync(
-      mesh_map_bake_build_job(C, op, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, cpu_mask));
+      mesh_map_bake_build_job(C, op, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, type_mask));
 }
 
 wmOperatorStatus mesh_map_bake_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
 {
   const uint32_t type_mask = 1u << uint(RNA_enum_get(op->ptr, "type"));
-  bool ok = false;
-  const uint32_t cpu_mask = mesh_map_bake_filter_cpu_mask(op, type_mask, &ok);
-  if (!ok) {
-    return OPERATOR_CANCELLED;
-  }
   if (CTX_wm_window(C) == nullptr) {
     /* A background run has no event loop to drive a wmJob; the synchronous path does the same
      * work on this thread. */
     return mesh_map_bake_run_sync(
-        mesh_map_bake_build_job(C, op, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, cpu_mask));
+        mesh_map_bake_build_job(C, op, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, type_mask));
   }
   return mesh_map_bake_job_start(
-      C, mesh_map_bake_build_job(C, op, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, cpu_mask));
+      C, mesh_map_bake_build_job(C, op, MA_MESH_MAP_BAKE_ACTIVE_OBJECT, type_mask));
 }
 
 wmOperatorStatus mesh_map_bake_all_exec(bContext *C, wmOperator *op)
 {
   const int8_t scope = RNA_enum_get(op->ptr, "object_scope");
-  bool ok = false;
-  const uint32_t cpu_mask = mesh_map_bake_filter_cpu_mask(
-      op, uint32_t(RNA_enum_get(op->ptr, "types")), &ok);
-  if (!ok) {
-    return OPERATOR_CANCELLED;
-  }
-  return mesh_map_bake_run_sync(mesh_map_bake_build_job(C, op, scope, cpu_mask));
+  const uint32_t type_mask = mesh_map_bake_resolve_type_mask(
+      uint32_t(RNA_enum_get(op->ptr, "types")));
+  return mesh_map_bake_run_sync(mesh_map_bake_build_job(C, op, scope, type_mask));
 }
 
 wmOperatorStatus mesh_map_bake_all_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
 {
   const int8_t scope = RNA_enum_get(op->ptr, "object_scope");
-  bool ok = false;
-  const uint32_t cpu_mask = mesh_map_bake_filter_cpu_mask(
-      op, uint32_t(RNA_enum_get(op->ptr, "types")), &ok);
-  if (!ok) {
-    return OPERATOR_CANCELLED;
-  }
+  const uint32_t type_mask = mesh_map_bake_resolve_type_mask(
+      uint32_t(RNA_enum_get(op->ptr, "types")));
   if (CTX_wm_window(C) == nullptr) {
-    return mesh_map_bake_run_sync(mesh_map_bake_build_job(C, op, scope, cpu_mask));
+    return mesh_map_bake_run_sync(mesh_map_bake_build_job(C, op, scope, type_mask));
   }
-  return mesh_map_bake_job_start(C, mesh_map_bake_build_job(C, op, scope, cpu_mask));
+  return mesh_map_bake_job_start(C, mesh_map_bake_build_job(C, op, scope, type_mask));
 }
 
 wmOperatorStatus mesh_map_clear_exec(bContext *C, wmOperator *op)
@@ -1151,17 +1420,13 @@ wmOperatorStatus mesh_map_clear_exec(bContext *C, wmOperator *op)
     BKE_report(op->reports, RPT_ERROR, "A mesh map bake is already running for this material");
     return OPERATOR_CANCELLED;
   }
-  bool ok = false;
-  const uint32_t type_mask = mesh_map_bake_filter_cpu_mask(
-      op, uint32_t(RNA_enum_get(op->ptr, "types")), &ok);
-  if (!ok) {
-    return OPERATOR_CANCELLED;
-  }
+  const uint32_t type_mask = mesh_map_bake_resolve_type_mask(
+      uint32_t(RNA_enum_get(op->ptr, "types")));
   Main *bmain = CTX_data_main(C);
   int cleared = 0;
   for (int type = 0; type < MA_MESH_MAP_TYPE_NUM; type++) {
     if ((type_mask & (1u << uint(type))) == 0 ||
-        !BKE_mesh_maps_bake_type_cpu_id(int8_t(type)))
+        !BKE_mesh_maps_bake_type_is_supported(int8_t(type)))
     {
       continue;
     }
@@ -1224,7 +1489,7 @@ void OBJECT_OT_mesh_map_bake_all(wmOperatorType *ot)
                     mesh_map_bake_type_flag_items(),
                     0,
                     "Map Types",
-                    "Maps to bake; empty means every map this build can bake on the CPU");
+                    "Maps to bake; empty means every supported map");
   RNA_def_enum(ot->srna,
                "object_scope",
                mesh_map_bake_object_scope_items(),
@@ -1257,7 +1522,7 @@ void OBJECT_OT_mesh_map_clear(wmOperatorType *ot)
                     mesh_map_bake_type_flag_items(),
                     0,
                     "Map Types",
-                    "Maps to clear; empty means every map this build can bake on the CPU");
+                    "Maps to clear; empty means every supported map");
   RNA_def_int(ot->srna,
               "material_index",
               0,

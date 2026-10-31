@@ -25,6 +25,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_string.h"
+#include "BLI_ustring.hh"
 
 #include "BKE_attribute.hh"
 #include "BKE_collection.hh"
@@ -40,6 +41,8 @@
 #include "BKE_mesh_maps_bake.hh"
 #include "BKE_mesh_maps_bake_handshake.hh"
 #include "BKE_modifier.hh"
+#include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_object.hh"
 #include "BKE_scene.hh"
 
@@ -55,7 +58,9 @@
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_modifier_types.h"
+#include "DNA_node_types.h"
 #include "DNA_object_types.h"
+#include "DNA_scene_enums.h"
 #include "DNA_scene_types.h"
 
 #include "IMB_colormanagement.hh"
@@ -253,6 +258,52 @@ class MeshMapBakeTest : public bke::BlenderGTestBase {
     mesh->tag_positions_changed();
     return mesh;
   }
+
+  static bNode *find_node(bNodeTree &tree, const int type)
+  {
+    for (bNode &node : tree.nodes) {
+      if (node.type_legacy == type) {
+        return &node;
+      }
+    }
+    return nullptr;
+  }
+
+  static int count_nodes(bNodeTree &tree, const int type)
+  {
+    int count = 0;
+    for (bNode &node : tree.nodes) {
+      if (node.type_legacy == type) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  static float socket_float(bNode &node, const eNodeSocketInOut in_out, const char *name)
+  {
+    bNodeSocket *socket = bke::node_find_socket(node, in_out, UString(name));
+    if (socket == nullptr) {
+      return NAN;
+    }
+    const bNodeSocketValueFloat *stored = socket->default_value_typed<bNodeSocketValueFloat>();
+    return stored != nullptr ? stored->value : NAN;
+  }
+
+  static bNodeSocket *socket_find(bNode &node, const eNodeSocketInOut in_out, const char *name)
+  {
+    return bke::node_find_socket(node, in_out, UString(name));
+  }
+
+  static bool has_link(bNodeTree &tree, const bNode &from, const bNode &to)
+  {
+    for (bNodeLink &link : tree.links) {
+      if (link.fromnode == &from && link.tonode == &to) {
+        return true;
+      }
+    }
+    return false;
+  }
 };
 
 TEST_F(MeshMapBakeTest, plan_renders_cpu_and_scalar_per_type)
@@ -272,6 +323,160 @@ TEST_F(MeshMapBakeTest, plan_renders_cpu_and_scalar_per_type)
   for (const int8_t type : {int8_t(MA_MESH_MAP_THICKNESS), int8_t(MA_MESH_MAP_POSITION)}) {
     EXPECT_FALSE(BKE_mesh_maps_bake_type_renders(type));
     EXPECT_FALSE(BKE_mesh_maps_bake_type_cpu_id(type));
+  }
+}
+
+/** The two families are strictly disjoint: nothing is both rendered and CPU-filled. */
+TEST_F(MeshMapBakeTest, render_types_are_not_cpu_id)
+{
+  for (int type = 0; type < MA_MESH_MAP_TYPE_NUM; type++) {
+    const int8_t t = int8_t(type);
+    const bool renders = BKE_mesh_maps_bake_type_renders(t);
+    const bool cpu = BKE_mesh_maps_bake_type_cpu_id(t);
+    EXPECT_FALSE(renders && cpu) << type;
+  }
+}
+
+TEST_F(MeshMapBakeTest, pass_and_normal_space_per_type)
+{
+  EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_AO), SCE_PASS_EMIT);
+  EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_CURVATURE), SCE_PASS_EMIT);
+  EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_EDGE), SCE_PASS_EMIT);
+  EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_NORMAL_WORLD), SCE_PASS_NORMAL);
+  EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_NORMAL_OBJECT), SCE_PASS_NORMAL);
+  EXPECT_EQ(BKE_mesh_maps_bake_pass_for_type(MA_MESH_MAP_ID_OBJECT), eScenePassType(0));
+
+  eBakeSpace space = R_BAKE_SPACE_CAMERA;
+  EXPECT_TRUE(BKE_mesh_maps_bake_normal_space_for_type(MA_MESH_MAP_NORMAL_WORLD, space));
+  EXPECT_EQ(space, R_BAKE_SPACE_WORLD);
+  EXPECT_TRUE(BKE_mesh_maps_bake_normal_space_for_type(MA_MESH_MAP_NORMAL_OBJECT, space));
+  EXPECT_EQ(space, R_BAKE_SPACE_OBJECT);
+  EXPECT_FALSE(BKE_mesh_maps_bake_normal_space_for_type(MA_MESH_MAP_AO, space));
+}
+
+TEST_F(MeshMapBakeTest, ao_distance_uses_setting_when_positive)
+{
+  Mesh *mesh = add_pair_mesh("Pair");
+  MaterialMeshMapSettings settings;
+  settings.ao_distance = 2.5f;
+  EXPECT_FLOAT_EQ(BKE_mesh_maps_bake_ao_distance(*mesh, settings), 2.5f);
+}
+
+TEST_F(MeshMapBakeTest, ao_distance_falls_back_to_half_bbox_diagonal)
+{
+  Mesh *mesh = add_pair_mesh("Pair");
+  MaterialMeshMapSettings settings;
+  settings.ao_distance = 0.0f;
+  /* The unit quad spans (1, 1, 0), so the half diagonal is sqrt(2) / 2. */
+  EXPECT_NEAR(BKE_mesh_maps_bake_ao_distance(*mesh, settings), float(M_SQRT2) * 0.5f, 1e-5f);
+
+  for (MutableSpan<float3> positions = mesh->vert_positions_for_write(); float3 &position :
+       positions)
+  {
+    position = float3(0.0f);
+  }
+  mesh->tag_positions_changed();
+  /* A flat mesh would give 0, which the AO node reads as "global radius"; the fallback keeps it
+   * positive. */
+  EXPECT_GT(BKE_mesh_maps_bake_ao_distance(*mesh, settings), 0.0f);
+}
+
+TEST_F(MeshMapBakeTest, emit_tree_ao_is_local_with_distance_and_samples)
+{
+  Material *ma = add_material("MapsMat");
+  MaterialMeshMapSettings settings;
+  settings.samples = 64;
+  bNode *emission = BKE_mesh_maps_bake_build_emit_tree(
+      *ma->nodetree, MA_MESH_MAP_AO, settings, 3.5f);
+  ASSERT_NE(emission, nullptr);
+  EXPECT_EQ(emission->type_legacy, SH_NODE_EMISSION);
+
+  bNode *ao = find_node(*ma->nodetree, SH_NODE_AMBIENT_OCCLUSION);
+  ASSERT_NE(ao, nullptr);
+  EXPECT_EQ(ao->custom1, 64);
+  EXPECT_TRUE(ao->custom2 & SHD_AO_LOCAL);
+  EXPECT_FLOAT_EQ(socket_float(*ao, SOCK_IN, "Distance"), 3.5f);
+
+  bNode *output = find_node(*ma->nodetree, SH_NODE_OUTPUT_MATERIAL);
+  ASSERT_NE(output, nullptr);
+  EXPECT_TRUE(has_link(*ma->nodetree, *emission, *output));
+}
+
+TEST_F(MeshMapBakeTest, emit_tree_curvature_reads_pointiness)
+{
+  Material *ma = add_material("MapsMat");
+  MaterialMeshMapSettings settings;
+  bNode *emission = BKE_mesh_maps_bake_build_emit_tree(
+      *ma->nodetree, MA_MESH_MAP_CURVATURE, settings, 0.0f);
+  ASSERT_NE(emission, nullptr);
+  bNode *geometry = find_node(*ma->nodetree, SH_NODE_NEW_GEOMETRY);
+  ASSERT_NE(geometry, nullptr);
+  EXPECT_TRUE(has_link(*ma->nodetree, *geometry, *emission));
+}
+
+TEST_F(MeshMapBakeTest, emit_tree_edge_uses_bevel_and_map_range)
+{
+  Material *ma = add_material("MapsMat");
+  MaterialMeshMapSettings settings;
+  settings.samples = 8;
+  settings.edge_radius = 0.02f;
+  bNode *emission = BKE_mesh_maps_bake_build_emit_tree(
+      *ma->nodetree, MA_MESH_MAP_EDGE, settings, 0.0f);
+  ASSERT_NE(emission, nullptr);
+
+  bNode *bevel = find_node(*ma->nodetree, SH_NODE_BEVEL);
+  ASSERT_NE(bevel, nullptr);
+  EXPECT_EQ(bevel->custom1, 8);
+  EXPECT_FLOAT_EQ(socket_float(*bevel, SOCK_IN, "Radius"), 0.02f);
+  EXPECT_NE(find_node(*ma->nodetree, SH_NODE_VECTOR_MATH), nullptr);
+  EXPECT_NE(find_node(*ma->nodetree, SH_NODE_MATH), nullptr);
+
+  bNode *range = find_node(*ma->nodetree, SH_NODE_MAP_RANGE);
+  ASSERT_NE(range, nullptr);
+  const NodeMapRange *storage = static_cast<const NodeMapRange *>(range->storage);
+  ASSERT_NE(storage, nullptr);
+  EXPECT_EQ(storage->clamp, 1);
+  EXPECT_FLOAT_EQ(socket_float(*range, SOCK_IN, "From Min"), 0.0f);
+  EXPECT_FLOAT_EQ(socket_float(*range, SOCK_IN, "From Max"), MESH_MAP_BAKE_EDGE_RANGE);
+  EXPECT_FLOAT_EQ(socket_float(*range, SOCK_IN, "To Min"), 0.0f);
+  EXPECT_FLOAT_EQ(socket_float(*range, SOCK_IN, "To Max"), 1.0f);
+
+  bNodeSocket *color = socket_find(*emission, SOCK_IN, "Color");
+  ASSERT_NE(color, nullptr);
+  EXPECT_TRUE(has_link(*ma->nodetree, *range, *emission));
+}
+
+TEST_F(MeshMapBakeTest, emit_tree_is_null_for_non_emission_types)
+{
+  Material *ma = add_material("MapsMat");
+  MaterialMeshMapSettings settings;
+  EXPECT_EQ(BKE_mesh_maps_bake_build_emit_tree(
+                *ma->nodetree, MA_MESH_MAP_NORMAL_WORLD, settings, 0.0f),
+            nullptr);
+  EXPECT_EQ(BKE_mesh_maps_bake_build_emit_tree(
+                *ma->nodetree, MA_MESH_MAP_ID_MATERIAL, settings, 0.0f),
+            nullptr);
+  EXPECT_EQ(count_nodes(*ma->nodetree, SH_NODE_EMISSION), 0);
+  /* The negative guard is only meaningful next to a type that does build an emission surface. */
+  EXPECT_NE(BKE_mesh_maps_bake_build_emit_tree(*ma->nodetree, MA_MESH_MAP_AO, settings, 1.0f),
+            nullptr);
+}
+
+/** The Bevel node clamps its sample count into [2, 128] regardless of what the settings say. */
+TEST_F(MeshMapBakeTest, edge_samples_are_clamped)
+{
+  const int inputs[] = {0, 1, 2, 8, 128, 512, 4096};
+  const int expected[] = {2, 2, 2, 8, 128, 128, 128};
+  for (int i = 0; i < 7; i++) {
+    Material *ma = add_material("MapsMat");
+    MaterialMeshMapSettings settings;
+    settings.samples = inputs[i];
+    bNode *emission = BKE_mesh_maps_bake_build_emit_tree(
+        *ma->nodetree, MA_MESH_MAP_EDGE, settings, 0.0f);
+    ASSERT_NE(emission, nullptr) << inputs[i];
+    bNode *bevel = find_node(*ma->nodetree, SH_NODE_BEVEL);
+    ASSERT_NE(bevel, nullptr) << inputs[i];
+    EXPECT_EQ(bevel->custom1, expected[i]) << inputs[i];
   }
 }
 

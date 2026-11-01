@@ -21,6 +21,7 @@
 #include "BLI_math_base.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
+#include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_string_ref.hh"
 #include "BLI_task.hh"
@@ -40,6 +41,7 @@
 #include "BKE_paint_material_composite.hh"
 #include "BKE_report.hh"
 
+#include "paint_layers_generate_intern.hh"
 #include "paint_layers_intern.hh"
 
 #include "IMB_colormanagement.hh"
@@ -48,10 +50,13 @@
 
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 namespace blender {
+
+using bke::paint_layers::row_map_images;
 
 /** Encode a scene-linear colour into \a image's stored colorspace; data colorspaces stay as is. */
 static void paint_layers_image_encode(const Image &image, float rgba[4])
@@ -445,6 +450,149 @@ Image *BKE_paint_layers_target_image(const PaintLayersTarget &target)
   return target.channel_record->image;
 }
 
+/* The generated stack owns its root tree (`ma.paint_layers_tree`) and every node group nested in
+ * it. Collect that set: a map referenced only from these trees is the row's own, not shared with
+ * anyone outside the stack, and must not be copied. */
+static void paint_layers_stack_tree_collect(const bNodeTree *tree, Set<const bNodeTree *> &r_out)
+{
+  if (tree == nullptr || r_out.contains(tree)) {
+    return;
+  }
+  r_out.add(tree);
+  for (const bNode &node : tree->nodes) {
+    if (node.id != nullptr && GS(node.id->name) == ID_NT) {
+      paint_layers_stack_tree_collect(id_cast<const bNodeTree *>(node.id), r_out);
+    }
+  }
+}
+
+static bool paint_layers_node_tree_holds_image(const bNodeTree &tree, const ID *image_id)
+{
+  for (const bNode &node : tree.nodes) {
+    if (node.id == image_id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Whether a holder of \a row's subtree other than \a skip holds \a image. #row_map_images has
+ * already said the row holds the map somewhere; this tells the painted record apart from the rest
+ * by record address, which the image set alone cannot. */
+static bool paint_layers_row_holds_beyond(const MaterialPaintLayer &row,
+                                          const Image &image,
+                                          const MaterialPaintLayerChannel *skip)
+{
+  const auto item_holds = [&](const MaterialPaintLayer &item) {
+    /* A bake snapshot is never the painted record: a stroke into it would rewrite the frozen
+     * copy. */
+    if (item.bake != nullptr) {
+      if (item.bake->coverage == &image) {
+        return true;
+      }
+      for (const Image *baked : item.bake->images) {
+        if (baked == &image) {
+          return true;
+        }
+      }
+    }
+    for (const int i : IndexRange(item.channels_num)) {
+      if (item.channels[i].image == &image && &item.channels[i] != skip) {
+        return true;
+      }
+    }
+    return false;
+  };
+  if (item_holds(row)) {
+    return true;
+  }
+  for (const MaterialPaintLayer &effect : row.effects) {
+    if (item_holds(effect)) {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &item : row.mask_stack) {
+    if (item_holds(item)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Whether painting \a record's map would edit a shared image: it comes from a linked library, or a
+ * holder other than \a record points at it. Holders are the channel records of every material (a
+ * row's own records and the ones of its corrections and mask items), each row's bake copies, the
+ * materials' mesh-map slots, and a node in a tree outside this stack's generated group. A node
+ * inside the stack's own generated tree, and the painted record itself, do not count -- raw
+ * `id.us` would, which is what made every map on screen look shared and get copied on every
+ * stroke. */
+static bool paint_layers_image_is_foreign(Main &bmain,
+                                          const Image &image,
+                                          const Material &ma,
+                                          const MaterialPaintLayerChannel &record)
+{
+  if (ID_IS_LINKED(&image.id)) {
+    return true;
+  }
+
+  /* The material being painted first: the common case, and the only one with an exempt record. */
+  bool held = false;
+  BKE_paint_layers_foreach(ma, [&](const MaterialPaintLayer &row,
+                                   const MaterialPaintLayer * /*parent*/) -> bool {
+    if (row_map_images(row).contains(&image) &&
+        paint_layers_row_holds_beyond(row, image, &record))
+    {
+      held = true;
+      return false;
+    }
+    return true;
+  });
+  if (held) {
+    return true;
+  }
+  for (const MaterialMeshMapSlot &slot : ma.mesh_map_slots) {
+    if (slot.image == &image) {
+      return true;
+    }
+  }
+
+  /* Every other layered material: any holder is a foreign one. */
+  for (const Material &m : bmain.materials) {
+    if (&m == &ma || !BKE_paint_layers_is_layered(m)) {
+      continue;
+    }
+    held = false;
+    BKE_paint_layers_foreach(m, [&](const MaterialPaintLayer &row,
+                                    const MaterialPaintLayer * /*parent*/) -> bool {
+      if (row_map_images(row).contains(&image)) {
+        held = true;
+        return false;
+      }
+      return true;
+    });
+    if (held) {
+      return true;
+    }
+    for (const MaterialMeshMapSlot &slot : m.mesh_map_slots) {
+      if (slot.image == &image) {
+        return true;
+      }
+    }
+  }
+
+  /* A node outside the stack's own generated graph: whoever references the map there sees the
+   * stroke. The nodes of the stack's own generated tree are the painters themselves, never
+   * holders. */
+  Set<const bNodeTree *> stack_trees;
+  paint_layers_stack_tree_collect(ma.paint_layers_tree, stack_trees);
+  for (const bNodeTree &tree : bmain.nodetrees) {
+    if (!stack_trees.contains(&tree) && paint_layers_node_tree_holds_image(tree, &image.id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * The map of \a record, made local first when it is not the row's to paint on: a map another row
  * shares, or one from a linked library, would otherwise take the stroke into the source's pixels.
@@ -459,7 +607,14 @@ static Image *paint_layers_record_image_ensure_owned(Main &bmain,
   if (record.image == nullptr) {
     return nullptr;
   }
-  if (record.image->id.us <= 1 && !ID_IS_LINKED(&record.image->id)) {
+  /* A linked map is never the row's to paint on. A single-user map is the row's own; a shared one
+   * is still reused while every other holder is inside this stack's generated graph (see
+   * #paint_layers_image_is_foreign), so only a map that painting would edit outside the stack is
+   * copied. */
+  if (!ID_IS_LINKED(&record.image->id) &&
+      (record.image->id.us <= 1 ||
+       !paint_layers_image_is_foreign(bmain, *record.image, ma, record)))
+  {
     return record.image;
   }
   Image *original = record.image;

@@ -74,6 +74,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
+#include "BKE_paint_layers_graph_heal.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_preview_image.hh"
@@ -9783,6 +9784,16 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     if (records_into_layer) {
       for (Object *rec_ob_ptr : this->layer_recording_objects_) {
         layers::stroke_record_begin(*this->depsgraph, *rec_ob_ptr);
+      }
+    }
+
+    /* Self-heal: check the active layered material's generated graph when a stroke starts and
+     * rebuild it when an undo left it broken -- a broken graph here is what the viewport shows for
+     * the whole stroke. It creates no undo step and re-enters no undo code: the rebuild is the
+     * same regeneration request the stack edits make. */
+    if (Material *heal_ma = BKE_paint_layers_active_material_get(&ob)) {
+      if (BKE_paint_layers_graph_check_and_heal(*this->bmain_, *heal_ma)) {
+        WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, &heal_ma->id);
       }
     }
 

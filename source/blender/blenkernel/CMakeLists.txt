@@ -293,6 +293,7 @@ set(SRC
   intern/paint_layers/paint_layers_generate_source_group_mapping.cc
   intern/paint_layers/paint_layers_generate_topology.cc
   intern/paint_layers/paint_layers_generate_values.cc
+  intern/paint_layers/paint_layers_graph_heal.cc
   intern/paint_layers/paint_layers_object_mask.cc
   intern/paint_layers/paint_layers_source_hash.cc
   intern/paint_layers/paint_layers_target.cc
@@ -569,6 +570,7 @@ set(SRC
   BKE_paint_layers_edit.hh
   BKE_paint_layers_generate.hh
   BKE_paint_layers_gradient.hh
+  BKE_paint_layers_graph_heal.hh
   BKE_paint_layers_import.hh
   BKE_paint_layers_object_mask.hh
   BKE_paint_layers_target.hh

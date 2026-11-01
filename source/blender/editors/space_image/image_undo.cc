@@ -456,6 +456,18 @@ static void utile_restore(const UndoImageTile *utile,
   }
 }
 
+/** The pixel rectangle of a tile, matching exactly what #utile_restore writes back. */
+static rcti calc_tile_region(const ImBuf &ibuf, const int x_tile, const int y_tile)
+{
+  int2 tile_pos;
+  int2 tile_size;
+  calc_tile_rect(ibuf, x_tile, y_tile, tile_pos, tile_size);
+
+  rcti region;
+  BLI_rcti_init(&region, tile_pos.x, tile_pos.x + tile_size.x, tile_pos.y, tile_pos.y + tile_size.y);
+  return region;
+}
+
 static void utile_decref(UndoImageTile *utile)
 {
   utile->users -= 1;
@@ -539,20 +551,30 @@ static void ubuf_from_image_all_tiles(UndoImageBuf *ubuf, const ImBuf *ibuf)
   BLI_assert(i == ubuf->tiles_len);
 }
 
-/** Ensure we can copy the ubuf into the ibuf. */
-static void ubuf_ensure_compat_ibuf(const UndoImageBuf *ubuf, ImBuf *ibuf)
+/**
+ * Ensure we can copy the ubuf into the ibuf.
+ *
+ * \return True when the pixel buffer was replaced (an unused float buffer was freed, or the pixels
+ * were freed and reallocated because of a different size or type). A replaced buffer keeps no
+ * trace of the undo step's tile history, so the caller has to restore every recorded tile and mark
+ * the whole image for a full update.
+ */
+[[nodiscard]] static bool ubuf_ensure_compat_ibuf(const UndoImageBuf *ubuf, ImBuf *ibuf)
 {
+  bool replaced = false;
+
   /* We could have both float and rect buffers,
    * in this case free the float buffer if it's unused. */
   if ((ibuf->float_data() != nullptr) && (ubuf->image_state.use_float == false)) {
     IMB_free_float_pixels(ibuf);
+    replaced = true;
   }
 
   if (ibuf->x == ubuf->image_dims[0] && ibuf->y == ubuf->image_dims[1] &&
       (ubuf->image_state.use_float ? static_cast<void *>(ibuf->float_data_for_write()) :
                                      static_cast<void *>(ibuf->byte_data_for_write())))
   {
-    return;
+    return replaced;
   }
 
   IMB_free_all_data(ibuf);
@@ -564,6 +586,8 @@ static void ubuf_ensure_compat_ibuf(const UndoImageBuf *ubuf, ImBuf *ibuf)
   else {
     IMB_alloc_byte_pixels(ibuf);
   }
+
+  return true;
 }
 
 static void ubuf_free(UndoImageBuf *ubuf)
@@ -571,7 +595,10 @@ static void ubuf_free(UndoImageBuf *ubuf)
   UndoImageBuf *ubuf_post = ubuf->post;
   for (uint i = 0; i < ubuf->tiles_len; i++) {
     UndoImageTile *utile = ubuf->tiles[i];
-    utile_decref(utile);
+    /* A null slot is an untouched tile this step never recorded; nothing to release. */
+    if (utile != nullptr) {
+      utile_decref(utile);
+    }
   }
   MEM_delete(ubuf->tiles);
   MEM_delete(ubuf);
@@ -604,6 +631,17 @@ struct UndoImageHandle {
   ListBaseT<UndoImageBuf> buffers;
 };
 
+/**
+ * Copy the tiles of every #UndoImageBuf back into the image buffers.
+ *
+ * A tile whose pre- and post-state point at the same #UndoImageTile (an untouched shared tile), or
+ * that is null in both (untouched and not recorded), was not changed by the step and is left alone,
+ * so only the tiles that actually changed are written back and marked for a partial GPU update.
+ * Everything is restored instead when that comparison is impossible: a replaced pixel buffer, or a
+ * pre- and post-state on different tile grids.
+ *
+ * \param use_init: Restore the state before the undo step, instead of the state after it.
+ */
 static void uhandle_restore_list(ListBaseT<UndoImageHandle> *undo_handles, bool use_init)
 {
   for (UndoImageHandle &uh : *undo_handles) {
@@ -615,16 +653,36 @@ static void uhandle_restore_list(ListBaseT<UndoImageHandle> *undo_handles, bool 
       CLOG_ERROR(&LOG, "Unable to get buffer for image '%s'", image->id.name + 2);
       continue;
     }
+    ImageTile *image_tile = BKE_image_get_tile_from_iuser(image, &uh.iuser);
     bool changed = false;
+    bool restore_all_any = false;
+    blender::Vector<rcti> changed_regions;
     for (UndoImageBuf &ubuf_iter : uh.buffers) {
       UndoImageBuf *ubuf = use_init ? &ubuf_iter : ubuf_iter.post;
-      ubuf_ensure_compat_ibuf(ubuf, ibuf);
+      UndoImageBuf *ubuf_other = use_init ? ubuf_iter.post : &ubuf_iter;
+      const bool replaced = ubuf_ensure_compat_ibuf(ubuf, ibuf);
+      /* Restore every recorded tile when their states cannot be compared tile by tile. A replaced
+       * pixel buffer keeps no trace of which tiles the step touched: the recorded tiles go back as
+       * they are, and an unrecorded one has no copy to be restored from, so its live pixels stay.
+       * A missing other state, or one on another tile grid, could hide an untouched shared tile
+       * behind a differing pointer, so it restores all the same. */
+      const bool restore_all = replaced || ubuf_other == nullptr ||
+                               ubuf_other->tiles_dims[0] != ubuf->tiles_dims[0] ||
+                               ubuf_other->tiles_dims[1] != ubuf->tiles_dims[1];
+      restore_all_any = restore_all_any || restore_all;
 
       int i = 0;
       for (uint y_tile = 0; y_tile < ubuf->tiles_dims[1]; y_tile += 1) {
         for (uint x_tile = 0; x_tile < ubuf->tiles_dims[0]; x_tile += 1) {
-          utile_restore(ubuf->tiles[i], x_tile, y_tile, ibuf);
-          changed = true;
+          /* A null slot is a tile this step did not change: its pre and post equal the live pixels,
+           * so leaving them in place is the correct restore; only recorded tiles are written back. */
+          if (ubuf->tiles[i] != nullptr) {
+            if (restore_all || ubuf->tiles[i] != ubuf_other->tiles[i]) {
+              utile_restore(ubuf->tiles[i], x_tile, y_tile, ibuf);
+              changed_regions.append(calc_tile_region(*ibuf, x_tile, y_tile));
+              changed = true;
+            }
+          }
           i += 1;
         }
       }
@@ -632,9 +690,15 @@ static void uhandle_restore_list(ListBaseT<UndoImageHandle> *undo_handles, bool 
 
     if (changed) {
       BKE_image_mark_dirty(image, ibuf);
-      /* TODO(@jbakker): only mark areas that are actually updated to improve performance. */
       /* Both material caches subscribe to this log, so the mark is all the telling they need. */
-      BKE_image_partial_update_mark_full_update(image);
+      if (restore_all_any || image_tile == nullptr) {
+        BKE_image_partial_update_mark_full_update(image);
+      }
+      else {
+        for (const rcti &region : changed_regions) {
+          BKE_image_partial_update_mark_region(image, image_tile, ibuf, &region);
+        }
+      }
 
       if (ibuf->float_data()) {
         ibuf->userflags |= IB_RECT_INVALID; /* Force recreate of char `rect` */
@@ -1066,48 +1130,42 @@ static bool image_undosys_step_encode(bContext *C, Main * /*bmain*/, UndoStep *u
           int i = 0;
           for (uint y_tile = 0; y_tile < ubuf_pre.tiles_dims[1]; y_tile += 1) {
             for (uint x_tile = 0; x_tile < ubuf_pre.tiles_dims[0]; x_tile += 1) {
-
-              if ((ubuf_reference != nullptr) &&
-                  ((ubuf_pre.tiles[i] == nullptr) ||
-                   /* In this case the paint stroke as has added a tile
-                    * which we have a duplicate reference available. */
-                   (ubuf_pre.tiles[i]->users == 1)))
-              {
-                if (ubuf_pre.tiles[i] != nullptr) {
-                  /* If we have a reference, re-use this single use tile for the post state. */
-                  BLI_assert(ubuf_pre.tiles[i]->users == 1);
+              if (ubuf_pre.tiles[i] != nullptr) {
+                /* Touched tile: its pre-state was adopted into `ubuf_pre` (single use). The post
+                 * state differs, so it must be recorded separately. */
+                if (ubuf_reference != nullptr && ubuf_reference->tiles[i] != nullptr &&
+                    ubuf_pre.tiles[i]->users == 1)
+                {
+                  /* An earlier step already stores this tile's pre-state: reuse it, and turn the
+                   * adopted tile into the post-state copy. Only a single-use tile may be rewritten
+                   * in place; a shared one would corrupt the step that also holds it. */
                   ubuf_post->tiles[i] = ubuf_pre.tiles[i];
                   ubuf_pre.tiles[i] = nullptr;
                   utile_init_from_imbuf(ubuf_post->tiles[i], x_tile, y_tile, ibuf);
+                  ubuf_pre.tiles[i] = ubuf_reference->tiles[i];
+                  ubuf_pre.tiles[i]->users += 1;
                 }
                 else {
-                  BLI_assert(ubuf_post->tiles[i] == nullptr);
-                  ubuf_post->tiles[i] = ubuf_reference->tiles[i];
-                  ubuf_post->tiles[i]->users += 1;
-                }
-                BLI_assert(ubuf_pre.tiles[i] == nullptr);
-                ubuf_pre.tiles[i] = ubuf_reference->tiles[i];
-                ubuf_pre.tiles[i]->users += 1;
-
-                BLI_assert(ubuf_pre.tiles[i] != nullptr);
-                BLI_assert(ubuf_post->tiles[i] != nullptr);
-              }
-              else {
-                UndoImageTile *utile = utile_alloc(has_float);
-                utile_init_from_imbuf(utile, x_tile, y_tile, ibuf);
-
-                if (ubuf_pre.tiles[i] != nullptr) {
+                  /* No earlier copy for this tile: keep the adopted pre-state and copy the current
+                   * pixels into a fresh post-state tile. */
+                  UndoImageTile *utile = utile_alloc(has_float);
+                  utile_init_from_imbuf(utile, x_tile, y_tile, ibuf);
                   ubuf_post->tiles[i] = utile;
                   utile->users = 1;
                 }
-                else {
-                  ubuf_pre.tiles[i] = utile;
-                  ubuf_post->tiles[i] = utile;
-                  utile->users = 2;
-                }
               }
-              BLI_assert(ubuf_pre.tiles[i] != nullptr);
-              BLI_assert(ubuf_post->tiles[i] != nullptr);
+              else if (ubuf_reference != nullptr && ubuf_reference->tiles[i] != nullptr) {
+                /* Untouched tile that an earlier step already stores: share that one buffer into
+                 * both states instead of copying (pointer only, no pixel work). */
+                ubuf_pre.tiles[i] = ubuf_reference->tiles[i];
+                ubuf_pre.tiles[i]->users += 1;
+                ubuf_post->tiles[i] = ubuf_reference->tiles[i];
+                ubuf_post->tiles[i]->users += 1;
+              }
+              /* Untouched tile with nothing to share: its pre and post equal the live pixels, so it
+               * is left null in both buffers. `uhandle_restore_list` and `ubuf_free` skip null
+               * slots, which restores the unchanged tile correctly -- recording a full copy of every
+               * untouched tile (the whole 64x64 grid) was the dominant end-of-stroke undo cost. */
               i += 1;
             }
           }
@@ -1447,10 +1505,27 @@ void ED_image_undo_push(Image *image, ImBuf *ibuf, ImageUser *iuser, ImageUndoSt
 
   if (ubuf_reference) {
     memcpy(ubuf_pre->tiles, ubuf_reference->tiles, sizeof(*ubuf_pre->tiles) * ubuf_pre->tiles_len);
-    for (uint32_t i = 0; i < ubuf_pre->tiles_len; i++) {
-      UndoImageTile *utile = ubuf_pre->tiles[i];
-      utile->users += 1;
+    const bool has_float = ibuf->float_data();
+    int i = 0;
+    for (uint y_tile = 0; y_tile < ubuf_pre->tiles_dims[1]; y_tile += 1) {
+      for (uint x_tile = 0; x_tile < ubuf_pre->tiles_dims[0]; x_tile += 1) {
+        UndoImageTile *utile = ubuf_pre->tiles[i];
+        if (utile != nullptr) {
+          utile->users += 1;
+        }
+        else {
+          /* The reference leaves untouched tiles null (see #image_undosys_step_encode), but this
+           * is a full push: an operation over the whole image (a fill, a selection op) changes the
+           * untouched tiles too, so their pre-state is captured from the live pixels as well. */
+          utile = utile_alloc(has_float);
+          utile->users = 1;
+          utile_init_from_imbuf(utile, x_tile, y_tile, ibuf);
+          ubuf_pre->tiles[i] = utile;
+        }
+        i += 1;
+      }
     }
+    BLI_assert(i == ubuf_pre->tiles_len);
   }
   else {
     ubuf_from_image_all_tiles(ubuf_pre, ibuf);

@@ -14,6 +14,7 @@
 #include "DNA_scene_types.h"
 
 #include "BLI_listbase.h"
+#include "BLI_listbase_iterator.hh"
 #include "BLI_utildefines.h"
 
 #include "BKE_blender_undo.hh"
@@ -23,6 +24,7 @@
 #include "BKE_layer.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_graph_heal.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
@@ -274,6 +276,17 @@ static void ed_undo_step_post(bContext *C,
   WM_toolsystem_refresh_screen_all(bmain);
 
   asset::list::storage_tag_main_data_dirty();
+
+  /* Self-heal: an undo or redo decode can leave a layered material's generated graph with dangling
+   * references (a group node without its tree, a lost map) while the graph still counts as up to
+   * date, which showed as a black object. Check every layered material and rebuild the broken
+   * graphs. It creates no undo step and re-enters no undo code: the rebuild is the same
+   * regeneration request the stack edits make. */
+  for (Material &ma : bmain->materials) {
+    if (BKE_paint_layers_graph_check_and_heal(*bmain, ma)) {
+      WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, &ma.id);
+    }
+  }
 
   if (CLOG_CHECK(&LOG, CLG_LEVEL_DEBUG)) {
     BKE_undosys_print(wm->runtime->undo_stack);

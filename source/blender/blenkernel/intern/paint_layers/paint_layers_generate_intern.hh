@@ -41,6 +41,7 @@ struct bNodeTree;
 struct bNodeTreeInterface;
 struct bNodeTreeInterfaceSocket;
 struct IDProperty;
+struct Image;
 struct Main;
 struct Material;
 struct MaterialPaintLayer;
@@ -577,6 +578,29 @@ void wire_instance_to_material(Material &ma,
                                bNodeTree &tree,
                                bNode &instance,
                                PaintLayersRegenerateReport &r_report);
+
+/* -------------------------------------------------------------------- */
+/** \name Row map holders
+ *
+ * What images a stack row's description holds. The graph self-heal and the paint target both ask
+ * it -- the heal to decide whether a lost image node is a defect, the target to decide whether a
+ * map is foreign -- so the one definition lives here rather than in either of them.
+ * \{ */
+
+/**
+ * The images a row legitimately reads in the generated graph: its own channel records' maps, the
+ * maps of its corrections and mask items, and its bake's snapshot maps. A bake-built row reads the
+ * bake's copies, not the live maps, so both sets are allowed.
+ */
+Vector<const Image *> row_map_images(const MaterialPaintLayer &row);
+
+/**
+ * Whether the stack still holds at least one map for \a row: its own records, its corrections and
+ * mask items, or a mesh-map slot of \a ma.
+ */
+bool row_has_maps(const Material &ma, const MaterialPaintLayer &row);
+
+/** \} */
 
 }  // namespace bke::paint_layers
 }  // namespace blender

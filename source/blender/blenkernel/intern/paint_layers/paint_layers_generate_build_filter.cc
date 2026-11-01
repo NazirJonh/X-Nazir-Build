@@ -175,9 +175,7 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
 
       Vector<bNode *> nodes;
       const auto discard = [&]() {
-        for (bNode *node : nodes) {
-          bke::node_remove_node(nullptr, tree, *node, true, false);
-        }
+        nodes_discard(tree, nodes);
         return false;
       };
       const NodeOutput span = math_node_add(tree,
@@ -269,24 +267,16 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
         return discard();
       }
 
-      bNode *mix = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
-      bNodeSocket *a = (mix != nullptr) ? socket_in(*mix, "A_Color") : nullptr;
-      bNodeSocket *b = (mix != nullptr) ? socket_in(*mix, "B_Color") : nullptr;
-      bNodeSocket *fac = (mix != nullptr) ? socket_in(*mix, "Factor_Float") : nullptr;
-      bNodeSocket *out = (mix != nullptr) ? socket_out(*mix, "Result_Color") : nullptr;
-      if (out == nullptr || a == nullptr || b == nullptr || fac == nullptr) {
-        if (mix != nullptr) {
-          bke::node_remove_node(nullptr, tree, *mix, true, false);
-        }
+      if (!filter_result_mix_add(tree,
+                                 grid_,
+                                 nodes,
+                                 content,
+                                 {mapped, socket_out(*mapped, "Vector")},
+                                 strength,
+                                 effect.name))
+      {
         return discard();
       }
-      nodes.append(mix);
-      grid_.place_extra(*mix);
-      bke::node_add_link(tree, *content.node, *content.socket, *mix, *a);
-      bke::node_add_link(tree, *mapped, *socket_out(*mapped, "Vector"), *mix, *b);
-      bke::node_add_link(tree, *strength.node, *strength.socket, *mix, *fac);
-      content = {mix, out};
-      layout::frame_add(tree, effect.name, nodes);
       return true;
     }
     case MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST: {
@@ -299,9 +289,7 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       }
       Vector<bNode *> nodes;
       const auto discard = [&]() {
-        for (bNode *node : nodes) {
-          bke::node_remove_node(nullptr, tree, *node, true, false);
-        }
+        nodes_discard(tree, nodes);
         return false;
       };
 
@@ -332,24 +320,16 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       }
       bke::node_add_link(tree, *content.node, *content.socket, *bc, *color_in);
 
-      bNode *mix = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
-      bNodeSocket *a = (mix != nullptr) ? socket_in(*mix, "A_Color") : nullptr;
-      bNodeSocket *b = (mix != nullptr) ? socket_in(*mix, "B_Color") : nullptr;
-      bNodeSocket *fac = (mix != nullptr) ? socket_in(*mix, "Factor_Float") : nullptr;
-      bNodeSocket *out = (mix != nullptr) ? socket_out(*mix, "Result_Color") : nullptr;
-      if (mix == nullptr || a == nullptr || b == nullptr || fac == nullptr || out == nullptr) {
-        if (mix != nullptr) {
-          bke::node_remove_node(nullptr, tree, *mix, true, false);
-        }
+      if (!filter_result_mix_add(tree,
+                                 grid_,
+                                 nodes,
+                                 content,
+                                 {bc, color_out},
+                                 strength,
+                                 effect.name))
+      {
         return discard();
       }
-      nodes.append(mix);
-      grid_.place_extra(*mix);
-      bke::node_add_link(tree, *content.node, *content.socket, *mix, *a);
-      bke::node_add_link(tree, *bc, *color_out, *mix, *b);
-      bke::node_add_link(tree, *strength.node, *strength.socket, *mix, *fac);
-      content = {mix, out};
-      layout::frame_add(tree, effect.name, nodes);
       return true;
     }
     case MA_PAINT_LAYER_FILTER_COLOR_RAMP: {
@@ -369,9 +349,7 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       }
       Vector<bNode *> nodes;
       const auto discard = [&]() {
-        for (bNode *node : nodes) {
-          bke::node_remove_node(nullptr, tree, *node, true, false);
-        }
+        nodes_discard(tree, nodes);
         return false;
       };
 
@@ -474,9 +452,7 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       const NodeOutput steps{group.group_input, steps_socket};
       Vector<bNode *> nodes;
       const auto discard = [&]() {
-        for (bNode *node : nodes) {
-          bke::node_remove_node(nullptr, tree, *node, true, false);
-        }
+        nodes_discard(tree, nodes);
         return false;
       };
 
@@ -537,24 +513,16 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
         return discard();
       }
 
-      bNode *mix = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
-      bNodeSocket *a = (mix != nullptr) ? socket_in(*mix, "A_Color") : nullptr;
-      bNodeSocket *b = (mix != nullptr) ? socket_in(*mix, "B_Color") : nullptr;
-      bNodeSocket *fac = (mix != nullptr) ? socket_in(*mix, "Factor_Float") : nullptr;
-      bNodeSocket *out = (mix != nullptr) ? socket_out(*mix, "Result_Color") : nullptr;
-      if (mix == nullptr || a == nullptr || b == nullptr || fac == nullptr || out == nullptr) {
-        if (mix != nullptr) {
-          bke::node_remove_node(nullptr, tree, *mix, true, false);
-        }
+      if (!filter_result_mix_add(tree,
+                                 grid_,
+                                 nodes,
+                                 content,
+                                 {divided, socket_out(*divided, "Vector")},
+                                 strength,
+                                 effect.name))
+      {
         return discard();
       }
-      nodes.append(mix);
-      grid_.place_extra(*mix);
-      bke::node_add_link(tree, *content.node, *content.socket, *mix, *a);
-      bke::node_add_link(tree, *divided, *socket_out(*divided, "Vector"), *mix, *b);
-      bke::node_add_link(tree, *strength.node, *strength.socket, *mix, *fac);
-      content = {mix, out};
-      layout::frame_add(tree, effect.name, nodes);
       return true;
     }
     case MA_PAINT_LAYER_FILTER_MATH: {
@@ -610,9 +578,7 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       }
       Vector<bNode *> nodes;
       const auto discard = [&]() {
-        for (bNode *node : nodes) {
-          bke::node_remove_node(nullptr, tree, *node, true, false);
-        }
+        nodes_discard(tree, nodes);
         return false;
       };
 
@@ -643,24 +609,51 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
         return discard();
       }
 
-      bNode *mix = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
-      bNodeSocket *a = (mix != nullptr) ? socket_in(*mix, "A_Color") : nullptr;
-      bNodeSocket *b = (mix != nullptr) ? socket_in(*mix, "B_Color") : nullptr;
-      bNodeSocket *fac = (mix != nullptr) ? socket_in(*mix, "Factor_Float") : nullptr;
-      bNodeSocket *out = (mix != nullptr) ? socket_out(*mix, "Result_Color") : nullptr;
-      if (mix == nullptr || a == nullptr || b == nullptr || fac == nullptr || out == nullptr) {
-        if (mix != nullptr) {
-          bke::node_remove_node(nullptr, tree, *mix, true, false);
-        }
+      if (!filter_result_mix_add(tree, grid_, nodes, content, combined, strength, effect.name)) {
         return discard();
       }
-      nodes.append(mix);
-      grid_.place_extra(*mix);
-      bke::node_add_link(tree, *content.node, *content.socket, *mix, *a);
-      bke::node_add_link(tree, *combined.node, *combined.socket, *mix, *b);
-      bke::node_add_link(tree, *strength.node, *strength.socket, *mix, *fac);
-      content = {mix, out};
-      layout::frame_add(tree, effect.name, nodes);
+      return true;
+    }
+    case MA_PAINT_LAYER_FILTER_THRESHOLD: {
+      /* `(c > threshold) ? 1 : 0` per channel, the Math node's Greater Than with the threshold as
+       * an input, so an edit of it is a value and not a different graph. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_THRESHOLD_PARAM_NUM ||
+          (*params)[PAINT_LAYER_THRESHOLD_THRESHOLD] == nullptr)
+      {
+        return false;
+      }
+      bNodeSocket *threshold_socket = group_input_socket(
+          group, *(*params)[PAINT_LAYER_THRESHOLD_THRESHOLD]);
+      if (threshold_socket == nullptr) {
+        return false;
+      }
+      const NodeOutput threshold{group.group_input, threshold_socket};
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      NodeOutput xyz[3];
+      if (!separate_xyz_node_add(tree, grid_, nodes, content, xyz)) {
+        return discard();
+      }
+      NodeOutput compared[3];
+      for (const int i : IndexRange(3)) {
+        compared[i] = math_node_add(tree, grid_, nodes, NODE_MATH_GREATER_THAN, xyz[i], threshold);
+        if (compared[i].socket == nullptr) {
+          return discard();
+        }
+      }
+      NodeOutput combined = combine_xyz_node_add(tree, grid_, nodes, compared);
+      if (combined.socket == nullptr) {
+        return discard();
+      }
+
+      if (!filter_result_mix_add(tree, grid_, nodes, content, combined, strength, effect.name)) {
+        return discard();
+      }
       return true;
     }
     case MA_PAINT_LAYER_FILTER_COLOR_ID:

@@ -102,6 +102,18 @@ class OutlinerStackPaintLayersSourceTest : public bke::BlenderGTestBase {
     return created;
   }
 
+  /** The index of \a identifier in the kinds the Add offers, or -1 when it is not there. Keeps a
+   * caller free of the absolute index that every kind added later shifts. */
+  static int kind_index(const Span<StackAddKindInfo> kinds, const StringRefNull identifier)
+  {
+    for (const int i : kinds.index_range()) {
+      if (kinds[i].identifier == identifier) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   const StackSource &source()
   {
     const StackSource *source = stack_source_get(SO_STACK_SRC_PAINT_MATERIAL);
@@ -129,7 +141,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
   /* The order #StackEditor::row_add dispatches by index. */
-  ASSERT_EQ(kinds.size(), 41u);
+  ASSERT_EQ(kinds.size(), 44u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
@@ -160,61 +172,65 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_TRUE(kinds[12].is_effect);
   EXPECT_EQ(kinds[13].identifier, "FILTER_MATH");
   EXPECT_TRUE(kinds[13].is_effect);
+  EXPECT_EQ(kinds[14].identifier, "FILTER_THRESHOLD");
+  EXPECT_TRUE(kinds[14].is_effect);
   /* The same filters again as rows of the stack, in the same order. */
-  EXPECT_EQ(kinds[14].identifier, "ADJUSTMENT_INVERT");
-  EXPECT_FALSE(kinds[14].is_effect);
-  EXPECT_EQ(kinds[15].identifier, "ADJUSTMENT_LEVELS");
-  EXPECT_EQ(kinds[16].identifier, "ADJUSTMENT_HSL");
-  EXPECT_FALSE(kinds[16].is_effect);
-  EXPECT_EQ(kinds[17].identifier, "ADJUSTMENT_BRIGHTNESS_CONTRAST");
-  EXPECT_EQ(kinds[18].identifier, "ADJUSTMENT_COLOR_RAMP");
-  EXPECT_EQ(kinds[19].identifier, "ADJUSTMENT_POSTERIZE");
-  EXPECT_EQ(kinds[20].identifier, "ADJUSTMENT_MATH");
+  EXPECT_EQ(kinds[15].identifier, "ADJUSTMENT_INVERT");
+  EXPECT_FALSE(kinds[15].is_effect);
+  EXPECT_EQ(kinds[16].identifier, "ADJUSTMENT_LEVELS");
+  EXPECT_EQ(kinds[17].identifier, "ADJUSTMENT_HSL");
+  EXPECT_FALSE(kinds[17].is_effect);
+  EXPECT_EQ(kinds[18].identifier, "ADJUSTMENT_BRIGHTNESS_CONTRAST");
+  EXPECT_EQ(kinds[19].identifier, "ADJUSTMENT_COLOR_RAMP");
+  EXPECT_EQ(kinds[20].identifier, "ADJUSTMENT_POSTERIZE");
+  EXPECT_EQ(kinds[21].identifier, "ADJUSTMENT_MATH");
+  EXPECT_EQ(kinds[22].identifier, "ADJUSTMENT_THRESHOLD");
   /* And as corrections of the mask, in no channel. */
-  EXPECT_EQ(kinds[21].identifier, "MASK_FILTER_INVERT");
-  EXPECT_TRUE(kinds[21].is_effect);
-  EXPECT_EQ(kinds[23].identifier, "MASK_FILTER_HSL");
-  EXPECT_EQ(kinds[24].identifier, "MASK_FILTER_BRIGHTNESS_CONTRAST");
-  EXPECT_EQ(kinds[25].identifier, "MASK_FILTER_COLOR_RAMP");
-  EXPECT_EQ(kinds[26].identifier, "MASK_FILTER_POSTERIZE");
-  EXPECT_EQ(kinds[27].identifier, "MASK_FILTER_MATH");
+  EXPECT_EQ(kinds[23].identifier, "MASK_FILTER_INVERT");
+  EXPECT_TRUE(kinds[23].is_effect);
+  EXPECT_EQ(kinds[25].identifier, "MASK_FILTER_HSL");
+  EXPECT_EQ(kinds[26].identifier, "MASK_FILTER_BRIGHTNESS_CONTRAST");
+  EXPECT_EQ(kinds[27].identifier, "MASK_FILTER_COLOR_RAMP");
+  EXPECT_EQ(kinds[28].identifier, "MASK_FILTER_POSTERIZE");
+  EXPECT_EQ(kinds[29].identifier, "MASK_FILTER_MATH");
+  EXPECT_EQ(kinds[30].identifier, "MASK_FILTER_THRESHOLD");
   /* The map-driven filters follow, only as corrections of the mask. */
-  EXPECT_EQ(kinds[28].identifier, "MASK_FILTER_COLOR_ID");
-  EXPECT_TRUE(kinds[28].is_effect);
-  EXPECT_EQ(kinds[29].identifier, "MASK_FILTER_UV_ISLAND");
-  EXPECT_TRUE(kinds[29].is_effect);
-  /* Last, so no index above moves: the kind a dropped material is made into. */
-  EXPECT_EQ(kinds[30].identifier, "MATERIAL");
-  EXPECT_EQ(kinds[30].source_id_type, ID_MA);
-  EXPECT_EQ(kinds[31].identifier, "CORRECTION_MATERIAL");
-  EXPECT_EQ(kinds[31].source_id_type, ID_MA);
-  EXPECT_TRUE(kinds[31].is_effect) << "listed with the other corrections";
-  EXPECT_EQ(kinds[32].identifier, "MASK_CORRECTION_MATERIAL");
-  EXPECT_EQ(kinds[32].source_id_type, ID_MA);
+  EXPECT_EQ(kinds[31].identifier, "MASK_FILTER_COLOR_ID");
+  EXPECT_TRUE(kinds[31].is_effect);
+  EXPECT_EQ(kinds[32].identifier, "MASK_FILTER_UV_ISLAND");
   EXPECT_TRUE(kinds[32].is_effect);
-  /* The marker and the three places its reader can land are last, so no index above moves. */
-  EXPECT_EQ(kinds[33].identifier, "ANCHOR_POINT");
-  EXPECT_TRUE(kinds[33].is_effect);
-  EXPECT_EQ(kinds[34].identifier, "ANCHOR_POINT_LAYER");
-  EXPECT_FALSE(kinds[34].is_effect);
-  EXPECT_EQ(kinds[35].identifier, "ANCHOR_POINT_CORRECTION");
+  /* Last, so no index above moves: the kind a dropped material is made into. */
+  EXPECT_EQ(kinds[33].identifier, "MATERIAL");
+  EXPECT_EQ(kinds[33].source_id_type, ID_MA);
+  EXPECT_EQ(kinds[34].identifier, "CORRECTION_MATERIAL");
+  EXPECT_EQ(kinds[34].source_id_type, ID_MA);
+  EXPECT_TRUE(kinds[34].is_effect) << "listed with the other corrections";
+  EXPECT_EQ(kinds[35].identifier, "MASK_CORRECTION_MATERIAL");
+  EXPECT_EQ(kinds[35].source_id_type, ID_MA);
   EXPECT_TRUE(kinds[35].is_effect);
-  EXPECT_EQ(kinds[36].identifier, "ANCHOR_POINT_MASK_CORRECTION");
+  /* The marker and the three places its reader can land are last, so no index above moves. */
+  EXPECT_EQ(kinds[36].identifier, "ANCHOR_POINT");
   EXPECT_TRUE(kinds[36].is_effect);
-  EXPECT_FALSE(kinds[30].is_effect);
-  EXPECT_FALSE(kinds[23].takes_color);
+  EXPECT_EQ(kinds[37].identifier, "ANCHOR_POINT_LAYER");
+  EXPECT_FALSE(kinds[37].is_effect);
+  EXPECT_EQ(kinds[38].identifier, "ANCHOR_POINT_CORRECTION");
+  EXPECT_TRUE(kinds[38].is_effect);
+  EXPECT_EQ(kinds[39].identifier, "ANCHOR_POINT_MASK_CORRECTION");
+  EXPECT_TRUE(kinds[39].is_effect);
+  EXPECT_FALSE(kinds[33].is_effect);
+  EXPECT_FALSE(kinds[25].takes_color);
   /* Last of all: a procedural Gradient layer, a row of the stack rather than a correction, then
    * the same generator in its two correction roles. */
-  EXPECT_EQ(kinds[37].identifier, "GRADIENT");
-  EXPECT_FALSE(kinds[37].is_effect);
-  EXPECT_FALSE(kinds[37].takes_color);
-  EXPECT_EQ(kinds[38].identifier, "CORRECTION_GRADIENT");
-  EXPECT_TRUE(kinds[38].is_effect);
-  EXPECT_EQ(kinds[39].identifier, "MASK_CORRECTION_GRADIENT");
-  EXPECT_TRUE(kinds[39].is_effect);
+  EXPECT_EQ(kinds[40].identifier, "GRADIENT");
+  EXPECT_FALSE(kinds[40].is_effect);
+  EXPECT_FALSE(kinds[40].takes_color);
+  EXPECT_EQ(kinds[41].identifier, "CORRECTION_GRADIENT");
+  EXPECT_TRUE(kinds[41].is_effect);
+  EXPECT_EQ(kinds[42].identifier, "MASK_CORRECTION_GRADIENT");
+  EXPECT_TRUE(kinds[42].is_effect);
   /* Then the Curve Patch, only ever an effect of a layer. */
-  EXPECT_EQ(kinds[40].identifier, "CURVE_PATCH_CORRECTION");
-  EXPECT_TRUE(kinds[40].is_effect);
+  EXPECT_EQ(kinds[43].identifier, "CURVE_PATCH_CORRECTION");
+  EXPECT_TRUE(kinds[43].is_effect);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, glyph_constants_stay_in_step_with_space_outliner)
@@ -1301,14 +1317,16 @@ TEST_F(OutlinerStackPaintLayersSourceTest,
 
   Vector<StackAddKindInfo> kinds;
   source().editor()->add_kinds(kinds);
-  ASSERT_EQ(kinds.size(), 41u);
-  EXPECT_EQ(kinds[36].identifier, "ANCHOR_POINT_MASK_CORRECTION")
+  ASSERT_GE(kinds.size(), 5u);
+  /* The tail in order, bound to the end of the list rather than to absolute indexes: every kind
+   * added later shifts the Gradient block, and the test only means to pin the order. */
+  EXPECT_EQ(kinds[kinds.size() - 5].identifier, "ANCHOR_POINT_MASK_CORRECTION")
       << "row_add dispatches by index, last of the Anchor Point kinds";
-  EXPECT_EQ(kinds[37].identifier, "GRADIENT")
+  EXPECT_EQ(kinds[kinds.size() - 4].identifier, "GRADIENT")
       << "the Gradient kind is appended after every other kind";
-  EXPECT_EQ(kinds[38].identifier, "CORRECTION_GRADIENT");
-  EXPECT_EQ(kinds[39].identifier, "MASK_CORRECTION_GRADIENT");
-  EXPECT_EQ(kinds[40].identifier, "CURVE_PATCH_CORRECTION");
+  EXPECT_EQ(kinds[kinds.size() - 3].identifier, "CORRECTION_GRADIENT");
+  EXPECT_EQ(kinds[kinds.size() - 2].identifier, "MASK_CORRECTION_GRADIENT");
+  EXPECT_EQ(kinds[kinds.size() - 1].identifier, "CURVE_PATCH_CORRECTION");
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_marker_after_active_correction)
@@ -1322,7 +1340,11 @@ TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_marker_after_active_corr
   ASSERT_GE(ordinal, 0);
 
   /* The Add button's real path: the marker lands right after the active correction. */
-  const int created = row_add(33 /* ANCHOR_POINT */, ordinal);
+  Vector<StackAddKindInfo> kinds;
+  source().editor()->add_kinds(kinds);
+  const int anchor_kind = kind_index(kinds, "ANCHOR_POINT");
+  ASSERT_GE(anchor_kind, 0);
+  const int created = row_add(anchor_kind, ordinal);
   ASSERT_GE(created, 0);
   MaterialPaintLayer *point = paint_description_row_for_ordinal(*material, created);
   ASSERT_NE(point, nullptr);
@@ -1343,7 +1365,11 @@ TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_marker_with_active_mask_
   const int ordinal = paint_layers_ordinal_of(*material, item);
   ASSERT_GE(ordinal, 0);
 
-  const int created = row_add(33 /* ANCHOR_POINT */, ordinal);
+  Vector<StackAddKindInfo> kinds;
+  source().editor()->add_kinds(kinds);
+  const int anchor_kind = kind_index(kinds, "ANCHOR_POINT");
+  ASSERT_GE(anchor_kind, 0);
+  const int created = row_add(anchor_kind, ordinal);
   ASSERT_GE(created, 0);
   MaterialPaintLayer *point = paint_description_row_for_ordinal(*material, created);
   ASSERT_NE(point, nullptr);
@@ -1416,8 +1442,12 @@ TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_mask_correction_creates_
 
 TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_add_without_a_row_is_refused)
 {
+  Vector<StackAddKindInfo> kinds;
+  source().editor()->add_kinds(kinds);
+  const int anchor_kind = kind_index(kinds, "ANCHOR_POINT");
+  ASSERT_GE(anchor_kind, 0);
   ReportList *reports = nullptr;
-  EXPECT_EQ(row_add_catching_reports(21 /* ANCHOR_POINT */, -1, &reports), -1);
+  EXPECT_EQ(row_add_catching_reports(anchor_kind, -1, &reports), -1);
   ASSERT_NE(reports, nullptr);
   EXPECT_TRUE(BKE_reports_contain(reports, RPT_WARNING))
       << "the refusal is a warning the user can read, not a silent no-op";

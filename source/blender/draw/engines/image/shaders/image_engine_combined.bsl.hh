@@ -256,6 +256,7 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_BRIGHTNESS_CONTRAST 6
 #define COMBINED_FILTER_POSTERIZE 8
 #define COMBINED_FILTER_MATH 9
+#define COMBINED_FILTER_THRESHOLD 10
 
 float levels_channel(float value, float4 p0, float4 p1)
 {
@@ -359,6 +360,14 @@ float3 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1)
       result = float3(math_channel(rgb.x, operation, p0.z, clamped),
                       math_channel(rgb.y, operation, p0.w, clamped),
                       math_channel(rgb.z, operation, p1.x, clamped));
+      break;
+    }
+    case COMBINED_FILTER_THRESHOLD: {
+      /* The Math node's Greater Than, `1` strictly above the threshold (the CPU's own edge). */
+      float threshold = p0.x;
+      result = float3(rgb.x > threshold ? 1.0f : 0.0f,
+                      rgb.y > threshold ? 1.0f : 0.0f,
+                      rgb.z > threshold ? 1.0f : 0.0f);
       break;
     }
     default:

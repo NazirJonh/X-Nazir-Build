@@ -802,6 +802,8 @@ enum eMaterialPaintLayerFilter : int16_t {
   MA_PAINT_LAYER_FILTER_POSTERIZE = 8,
   /** A per-channel arithmetic operation against a constant operand. */
   MA_PAINT_LAYER_FILTER_MATH = 9,
+  /** Turn each channel into the two states of a comparison against a constant. */
+  MA_PAINT_LAYER_FILTER_THRESHOLD = 10,
 };
 
 /**

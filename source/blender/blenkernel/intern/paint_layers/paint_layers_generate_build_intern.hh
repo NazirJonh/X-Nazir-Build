@@ -147,6 +147,19 @@ NodeOutput combine_xyz_node_add(bNodeTree &tree,
 /** A Mix node in float mode, `mix(A, B, factor)`; null when it cannot be made. */
 bNode *mix_float_node_add(bNodeTree &tree);
 
+/**
+ * The tail every filter case shares: a Mix node in Blend mode that lays \a filtered over
+ * \a content by \a strength, its result replaces \a content, and the nodes of \a r_nodes join
+ * the frame \a frame_name. False, with nothing left in the tree, when the node cannot be made.
+ */
+bool filter_result_mix_add(bNodeTree &tree,
+                           layout::LayoutGrid &grid,
+                           Vector<bNode *> &r_nodes,
+                           NodeOutput &content,
+                           NodeOutput filtered,
+                           NodeOutput strength,
+                           const char *frame_name);
+
 /** A Value node holding \a value; the null output when it cannot be made. */
 NodeOutput value_node_add(bNodeTree &tree,
                           layout::LayoutGrid &grid,

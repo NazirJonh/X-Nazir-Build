@@ -636,6 +636,65 @@ TEST_F(PaintLayersMathTest, turning_the_clamp_on_moves_the_hash_and_sets_the_nod
   EXPECT_EQ(math_group_count_op(*group, NODE_MATH_ADD, 0), 0);
 }
 
+class PaintLayersThresholdTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_threshold(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_THRESHOLD);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+};
+
+TEST_F(PaintLayersThresholdTest, threshold_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *threshold = add_threshold(*row, 0.7f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD, 0.4f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersThresholdTest, a_dark_row_thresholds_to_black_and_white_stays_white)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 50, 50, 50, 255));
+  MaterialPaintLayer *threshold = add_threshold(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD, 0.5f));
+
+  expect_graph_matches_cpu(kColor);
+  /* A dark grey is far below the threshold: every channel is off. */
+  const RGBA dark = cpu_pixel(kColor);
+  EXPECT_NEAR(dark.r, 0.0f, 2e-3f);
+  EXPECT_NEAR(dark.g, 0.0f, 2e-3f);
+  EXPECT_NEAR(dark.b, 0.0f, 2e-3f);
+
+  MaterialPaintLayer *white = add_layer("White", add_solid_image("White", 255, 255, 255, 255));
+  add_threshold(*white);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA bright = cpu_pixel(kColor);
+  EXPECT_NEAR(bright.r, 1.0f, 2e-3f);
+  EXPECT_NEAR(bright.g, 1.0f, 2e-3f);
+  EXPECT_NEAR(bright.b, 1.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersThresholdTest, the_threshold_is_clamped_to_its_range)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *threshold = add_threshold(*row);
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD), 0.5f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD, 5.0f));
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD), 1.0f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD, -1.0f));
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD), 0.0f);
+}
+
 class PaintLayersHslTest : public PaintLayersFilterTest {
  public:
   MaterialPaintLayer *add_hsl(MaterialPaintLayer &row, const float opacity = 1.0f)
@@ -789,6 +848,17 @@ TEST_F(PaintLayersAdjustmentTest, posterize_and_math_adjustments_match_the_cpu)
   EXPECT_TRUE(paint_layer_kind_param_set(*math, PAINT_LAYER_MATH_OPERAND_R, 0.2f));
   EXPECT_TRUE(paint_layer_kind_param_set(*math, PAINT_LAYER_MATH_OPERAND_G, 0.2f));
   EXPECT_TRUE(paint_layer_kind_param_set(*math, PAINT_LAYER_MATH_OPERAND_B, 0.2f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersAdjustmentTest, threshold_adjustment_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *threshold = add_adjustment(MA_PAINT_LAYER_FILTER_THRESHOLD, 0.7f);
+  ASSERT_NE(threshold, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_set(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD, 0.4f));
 
   expect_graph_matches_cpu(kColor);
 }
@@ -1022,6 +1092,47 @@ TEST_F(PaintLayersMaskFilterTest, math_in_the_mask_works_on_its_coverage)
   EXPECT_TRUE(paint_layer_kind_param_set(*math, PAINT_LAYER_MATH_OPERAND_B, 2.0f));
   expect_graph_matches_cpu(kColor);
   EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.5f, 3e-3f);
+}
+
+TEST_F(PaintLayersMaskFilterTest, threshold_in_the_mask_turns_the_coverage_into_two_states)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  /* `0.25 > 0.2`: the whole coverage passes. */
+  MaterialPaintLayer *threshold = add_mask_filter(*row, MA_PAINT_LAYER_FILTER_THRESHOLD);
+  ASSERT_NE(threshold, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_set(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD, 0.2f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 1.0f, 3e-3f);
+
+  /* `0.25 > 0.3` is false: none of it passes. */
+  EXPECT_TRUE(paint_layer_kind_param_set(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD, 0.3f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.0f, 3e-3f);
+}
+
+TEST_F(PaintLayersMaskFilterTest, a_threshold_equal_to_the_coverage_passes_nothing)
+{
+  /* The strict `>` at its own edge. The coverage travels as a plain float, with no image decode in
+   * between, so both sides compare the very same value; a byte colour decodes through each side's
+   * own sRGB step and is not reproducible bit for bit. */
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  MaterialPaintLayer *threshold = add_mask_filter(*row, MA_PAINT_LAYER_FILTER_THRESHOLD);
+  ASSERT_NE(threshold, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_set(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD, 0.25f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.0f, 3e-3f);
 }
 
 TEST_F(PaintLayersMaskFilterTest, a_mask_filter_needs_no_channel_and_makes_the_base_mask_itself)

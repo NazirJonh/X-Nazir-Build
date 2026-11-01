@@ -1395,6 +1395,35 @@ NodeOutput math_node_add(bNodeTree &tree,
   return {node, out};
 }
 
+bool filter_result_mix_add(bNodeTree &tree,
+                           layout::LayoutGrid &grid,
+                           Vector<bNode *> &r_nodes,
+                           NodeOutput &content,
+                           const NodeOutput filtered,
+                           const NodeOutput strength,
+                           const char *frame_name)
+{
+  bNode *mix = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
+  bNodeSocket *a = (mix != nullptr) ? socket_in(*mix, "A_Color") : nullptr;
+  bNodeSocket *b = (mix != nullptr) ? socket_in(*mix, "B_Color") : nullptr;
+  bNodeSocket *fac = (mix != nullptr) ? socket_in(*mix, "Factor_Float") : nullptr;
+  bNodeSocket *out = (mix != nullptr) ? socket_out(*mix, "Result_Color") : nullptr;
+  if (mix == nullptr || a == nullptr || b == nullptr || fac == nullptr || out == nullptr) {
+    if (mix != nullptr) {
+      bke::node_remove_node(nullptr, tree, *mix, true, false);
+    }
+    return false;
+  }
+  r_nodes.append(mix);
+  grid.place_extra(*mix);
+  bke::node_add_link(tree, *content.node, *content.socket, *mix, *a);
+  bke::node_add_link(tree, *filtered.node, *filtered.socket, *mix, *b);
+  bke::node_add_link(tree, *strength.node, *strength.socket, *mix, *fac);
+  content = {mix, out};
+  layout::frame_add(tree, frame_name, r_nodes);
+  return true;
+}
+
 bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
                                             LayerGroup &group,
                                             const MaterialPaintLayer &effect,

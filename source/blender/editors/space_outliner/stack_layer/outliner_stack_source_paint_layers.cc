@@ -417,6 +417,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_MATH:
       /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
       return {ICON_DRIVER, 0};
+    case MA_PAINT_LAYER_FILTER_THRESHOLD:
+      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
+      return {ICON_MOD_THICKNESS, 0};
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
       return {ICON_COLOR, paint_glyph::COLORIZE};
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
@@ -517,6 +520,10 @@ static const PaintFilterAddKind paint_filter_add_kinds[] = {
      N_("Math"),
      "Combine the active layer with a constant operand, per channel",
      MA_PAINT_LAYER_FILTER_MATH},
+    {"FILTER_THRESHOLD",
+     N_("Threshold"),
+     "Turn the active layer's channels into the two states of a comparison",
+     MA_PAINT_LAYER_FILTER_THRESHOLD},
 };
 
 /**

@@ -1090,6 +1090,45 @@ TEST_F(PaintLayersDescription, rna_kind_params_carry_their_type)
   EXPECT_FLOAT_EQ(RNA_property_float_get(&clamp_ptr, clamp_float), 1.0f);
 }
 
+TEST_F(PaintLayersDescription, rna_threshold_param_is_a_ranged_float)
+{
+  Material *ma = BKE_material_add(bmain, "RnaThresholdParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *threshold = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_THRESHOLD);
+  ASSERT_NE(threshold, nullptr);
+
+  /* The kind's one parameter: the collection lists exactly it, as a float. */
+  PointerRNA threshold_ptr = RNA_pointer_create_discrete(
+      &ma->id, RNA_MaterialPaintLayer, threshold);
+  PropertyRNA *params = RNA_struct_find_property(&threshold_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&threshold_ptr, params), 1);
+
+  PointerRNA value_ptr;
+  ASSERT_TRUE(
+      RNA_property_collection_lookup_string(&threshold_ptr, params, "threshold", &value_ptr));
+  const char *type_identifier = nullptr;
+  PropertyRNA *type = RNA_struct_find_property(&value_ptr, "type");
+  ASSERT_NE(type, nullptr);
+  ASSERT_TRUE(RNA_property_enum_identifier(
+      nullptr, &value_ptr, type, RNA_property_enum_get(&value_ptr, type), &type_identifier));
+  EXPECT_STREQ(type_identifier, "FLOAT");
+
+  /* The schema's default and range, and a write past the range clamps to it. */
+  PropertyRNA *float_value = RNA_struct_find_property(&value_ptr, "value");
+  ASSERT_NE(float_value, nullptr);
+  EXPECT_FLOAT_EQ(RNA_property_float_get(&value_ptr, float_value), 0.5f);
+  float range_min = 0.0f, range_max = 0.0f;
+  RNA_property_float_range(&value_ptr, float_value, &range_min, &range_max);
+  EXPECT_FLOAT_EQ(range_min, 0.0f);
+  EXPECT_FLOAT_EQ(range_max, 1.0f);
+  RNA_property_float_set(&value_ptr, float_value, 5.0f);
+  EXPECT_FLOAT_EQ(RNA_property_float_get(&value_ptr, float_value), 1.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD), 1.0f);
+}
+
 TEST_F(PaintLayersDescription, rna_paint_layers_collection_is_registered)
 {
   Material *ma = BKE_material_add(bmain, "RnaLayersMat");

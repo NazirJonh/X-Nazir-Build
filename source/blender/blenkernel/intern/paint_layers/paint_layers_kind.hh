@@ -262,6 +262,12 @@ enum PaintLayerMathParam : int {
   PAINT_LAYER_MATH_PARAM_NUM = 5,
 };
 
+/** The positions of the Threshold filter's parameters in its schema. */
+enum PaintLayerThresholdParam : int {
+  PAINT_LAYER_THRESHOLD_THRESHOLD = 0,
+  PAINT_LAYER_THRESHOLD_PARAM_NUM = 1,
+};
+
 /** The positions of a map-coverage operator's parameters in its schema. */
 enum PaintLayerCoverageParam : int {
   /** How far a sample may differ from a stored colour and still match (max-channel). */
@@ -377,6 +383,16 @@ inline float paint_layer_math_apply(const float value,
       break;
   }
   return clamp ? std::clamp(result, 0.0f, 1.0f) : result;
+}
+
+/**
+ * One channel of the Threshold filter: the two states of the Math node's Greater Than, `1.0` when
+ * the value is strictly above \a threshold and `0.0` otherwise, so the CPU composite and the
+ * generated node agree on the comparison's edge.
+ */
+inline float paint_layer_threshold_apply(const float value, const float threshold)
+{
+  return (value > threshold) ? 1.0f : 0.0f;
 }
 
 /**

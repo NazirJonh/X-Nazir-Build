@@ -9,6 +9,7 @@
 #pragma once
 
 #include "DNA_ID.h"
+#include "DNA_color_types.h"
 #include "DNA_colorband_types.h"
 #include "DNA_defs.h"
 #include "DNA_listBase.h"
@@ -806,6 +807,8 @@ enum eMaterialPaintLayerFilter : int16_t {
   MA_PAINT_LAYER_FILTER_THRESHOLD = 10,
   /** Keep each channel inside a constant range. */
   MA_PAINT_LAYER_FILTER_CLAMP = 11,
+  /** Remap each channel through its own Bézier curve, with black and white levels. */
+  MA_PAINT_LAYER_FILTER_CURVES = 12,
 };
 
 /**
@@ -1149,6 +1152,18 @@ struct MaterialPaintLayerRamp {
 };
 
 /**
+ * The curves of a kind that reads one (the RGB Curves filter). Kept behind a pointer like the
+ * ramp, because a #CurveMapping carries four evaluated tables and every row would otherwise pay
+ * for them; the row allocates it only when its kind asks for curves. The tables are runtime data:
+ * a copy keeps the ones it carries, a file load has none and rebuilds them.
+ */
+struct MaterialPaintLayerCurves {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerCurves)
+
+  struct CurveMapping curve_mapping;
+};
+
+/**
  * One row of a layered material's stack, the DNA description of what the material is painted with.
  *
  * The list is stored bottom-to-top. Folders nest through #children, which holds the same type.
@@ -1215,6 +1230,11 @@ struct MaterialPaintLayer {
    * by the row and copied, freed and written with it.
    */
   struct MaterialPaintLayerRamp *ramp = nullptr;
+  /**
+   * The curves a kind with a curves parameter reads (RGB Curves), or null for every other kind.
+   * Owned by the row and copied, freed and written with it.
+   */
+  struct MaterialPaintLayerCurves *curves = nullptr;
   /**
    * #eMaterialPaintLayerObjectMaskType: whether the row is limited per object (Mesh) or per UDIM
    * tile of each object (UV Tiles). The per-object choices live on the objects

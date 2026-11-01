@@ -98,6 +98,8 @@ enum class PaintLayerKindParamType : uint8_t {
   Ramp,
   /** An on/off checkbox, stored as an #IDP_BOOLEAN in the row's system properties. */
   Bool,
+  /** A CurveMapping, kept in #MaterialPaintLayer::curves rather than in the properties. */
+  Curves,
 };
 
 /** One choice of an #PaintLayerKindParamType::Enum parameter. */
@@ -336,6 +338,14 @@ inline void paint_layer_brightness_contrast_apply(
 float paint_layer_color_ramp_apply(const ColorBand &band, bool use_alpha, float rgb[3]);
 
 /**
+ * The RGB Curves filter applied to \a rgb in place, at full strength: the RGB Curves shader node's
+ * own function, each channel through its curve with no white balancing (the node's GPU and
+ * multi-function evaluations ignore the levels). The mapping's tables must be built
+ * (#BKE_curvemapping_init) when this runs. Alpha is untouched.
+ */
+void paint_layer_curves_apply(const CurveMapping &curve_mapping, float rgb[3]);
+
+/**
  * The Posterize filter applied to one channel: the value quantized to \a steps evenly spaced levels
  * over [0, 1], `floor(clamp(value, 0, 1) * (steps - 1) + 0.5) / (steps - 1)`, so both endpoints are
  * preserved and a value at a level's midpoint rounds to the nearer one. A step count below two
@@ -460,6 +470,27 @@ const struct ColorBand *BKE_paint_layers_ramp_get(const MaterialPaintLayer &row)
 
 /** A hash of every ramp stop, for the bake and composite caches. */
 uint64_t paint_layer_ramp_hash(const struct ColorBand &band);
+
+/** Whether \a row's kind has a Curves parameter (the RGB Curves filter). */
+bool paint_layer_kind_has_curves_param(const MaterialPaintLayer &row);
+
+/**
+ * The row's curves payload, allocated with a flat 0..1 four-curve mapping when it has none. Only a
+ * kind with a Curves parameter gets one; returns null for every other kind.
+ */
+struct MaterialPaintLayerCurves *BKE_paint_layers_curves_ensure(MaterialPaintLayer &row);
+
+/** The row's curve mapping, or null when it has no curves payload. */
+const struct CurveMapping *BKE_paint_layers_curves_get(const MaterialPaintLayer &row);
+
+/**
+ * Tag \a ma for regeneration when \a data is a row's curve mapping. Called from the RNA update of
+ * the mapping pointer, which the curve widget fires after every edit of it.
+ */
+bool BKE_paint_layers_curves_edited(Material &ma, const void *data);
+
+/** A hash of the curves' shape, levels and tone, for the bake and composite caches. */
+uint64_t paint_layer_curves_hash(const struct CurveMapping &curve_mapping);
 
 /**
  * The position of the parameter \a name in \a row's kind's schema, or -1 when the kind has no

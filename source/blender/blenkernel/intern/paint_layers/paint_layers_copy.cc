@@ -15,6 +15,7 @@
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_import.hh"
 
+#include "BKE_colortools.hh"
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
@@ -340,6 +341,10 @@ MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   if (item.ramp != nullptr) {
     item_copy->ramp = static_cast<MaterialPaintLayerRamp *>(MEM_dupalloc(item.ramp));
   }
+  if (item.curves != nullptr) {
+    item_copy->curves = static_cast<MaterialPaintLayerCurves *>(MEM_dupalloc(item.curves));
+    BKE_curvemapping_copy_data(&item_copy->curves->curve_mapping, &item.curves->curve_mapping);
+  }
   if (r_map != nullptr) {
     r_map->append({item.marker, item_copy->marker});
   }
@@ -392,6 +397,10 @@ void paint_layer_branch_duplicate(Main &bmain,
   BKE_paint_layers_gradient_copy(dst, src);
   if (src.ramp != nullptr) {
     dst.ramp = static_cast<MaterialPaintLayerRamp *>(MEM_dupalloc(src.ramp));
+  }
+  if (src.curves != nullptr) {
+    dst.curves = static_cast<MaterialPaintLayerCurves *>(MEM_dupalloc(src.curves));
+    BKE_curvemapping_copy_data(&dst.curves->curve_mapping, &src.curves->curve_mapping);
   }
 
   /* The mask and the corrections go with their row, with maps of their own for the same reason as

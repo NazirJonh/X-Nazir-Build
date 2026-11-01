@@ -50,6 +50,7 @@
 #include "BKE_attribute.h"
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
+#include "BKE_colortools.hh"
 #include "BKE_curve.hh"
 #include "BKE_curves.hh"
 #include "BKE_displist.h"
@@ -155,6 +156,11 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
     layer->curve_patch = nullptr;
   }
   MEM_SAFE_DELETE(layer->ramp);
+  if (layer->curves != nullptr) {
+    /* The curves' points and tables are heap data the wrapper owns by value. */
+    BKE_curvemapping_free_data(&layer->curves->curve_mapping);
+    MEM_SAFE_DELETE(layer->curves);
+  }
   /* The ID users of the parameters are released by the generic free pass through
    * #material_paint_layer_foreach_id, like the channel maps. */
   if (layer->system_properties != nullptr) {
@@ -237,6 +243,12 @@ static MaterialPaintLayer *material_paint_layer_copy(Main *bmain,
   BKE_paint_layers_gradient_copy(*dst, src);
   dst->ramp = (src.ramp != nullptr) ? static_cast<MaterialPaintLayerRamp *>(MEM_dupalloc(src.ramp)) :
                                       nullptr;
+  if (src.curves != nullptr) {
+    dst->curves = static_cast<MaterialPaintLayerCurves *>(MEM_dupalloc(src.curves));
+    /* The duplicate carried the source's point and table pointers: deep-copy them, tables included
+     * when they were built. */
+    BKE_curvemapping_copy_data(&dst->curves->curve_mapping, &src.curves->curve_mapping);
+  }
   /* Like the channel maps, the users of ID parameters are added by the generic copy pass. */
   if (src.system_properties != nullptr) {
     dst->system_properties = IDP_CopyProperty_ex(src.system_properties,
@@ -338,6 +350,11 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
   if (layer.ramp != nullptr) {
     writer->write_struct(layer.ramp);
   }
+  if (layer.curves != nullptr) {
+    /* The wrapper carries the CurveMapping by value; the points are the heap arrays BKE owns. */
+    writer->write_struct(layer.curves);
+    BKE_curvemapping_curves_blend_write(writer, &layer.curves->curve_mapping);
+  }
   if (layer.system_properties != nullptr) {
     IDP_BlendWrite(writer, layer.system_properties);
   }
@@ -392,6 +409,12 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
     BKE_paint_layers_gradient_ensure(layer);
   }
   BLO_read_struct(reader, MaterialPaintLayerRamp, &layer.ramp);
+  BLO_read_struct(reader, MaterialPaintLayerCurves, &layer.curves);
+  if (layer.curves != nullptr) {
+    /* The load brings the points back and leaves the tables null: rebuild them. */
+    BKE_curvemapping_blend_read(reader, &layer.curves->curve_mapping);
+    BKE_curvemapping_init(&layer.curves->curve_mapping);
+  }
   if (layer.bake != nullptr && !BLO_read_data_is_undo(reader)) {
     /* The bake maps are generated images whose pixels the file does not keep, and the pixel-edit
      * subscription that vouches for them is runtime only. A loaded bake therefore proves nothing:

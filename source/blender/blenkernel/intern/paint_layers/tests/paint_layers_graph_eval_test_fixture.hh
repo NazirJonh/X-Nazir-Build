@@ -25,6 +25,7 @@
 #include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_colorband.hh"
+#include "BKE_colortools.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
@@ -602,6 +603,24 @@ class GraphInterpreter {
           return {ramp_color[0], ramp_color[1], ramp_color[2], ramp_color[3]};
         }
         return {};
+      }
+      case SH_NODE_CURVE_RGB: {
+        /* The node's own function, the one the CPU filter calls: each channel through its curve,
+         * no white balancing, then the node's mix by its Fac (one, unless the tree says other). */
+        const RGBA color = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Color"_ustr));
+        const float fac = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Fac"_ustr)).r;
+        const CurveMapping *cumap = static_cast<const CurveMapping *>(node.storage);
+        if (cumap == nullptr) {
+          return {};
+        }
+        const float in[3] = {color.r, color.g, color.b};
+        float out[3];
+        BKE_curvemapping_evaluateRGBF(cumap, out, in);
+        const float clamped = clamp_f(fac, 0.0f, 1.0f);
+        return {in[0] + (out[0] - in[0]) * clamped,
+                in[1] + (out[1] - in[1]) * clamped,
+                in[2] + (out[2] - in[2]) * clamped,
+                color.a};
       }
       default:
         return {};

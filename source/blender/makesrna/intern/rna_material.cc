@@ -3439,6 +3439,46 @@ static void rna_MaterialPaintLayer_kind_ramp_update(Main * /*bmain*/,
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
 }
 
+static bool rna_MaterialPaintLayer_curves_supported_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer != nullptr && BKE_paint_layers_curves_supported(*layer);
+}
+
+/**
+ * The mapping is a node's storage in the generated graph, so a point edit has to rebuild the
+ * material. The curve template fires the mapping pointer property's own update after every edit of
+ * it, so without this one a point drag would redraw nothing until another edit regenerated the
+ * tree. The pointer the template hands back is the row's, so the mapping to tag is read off it,
+ * like the ramp's band is in #rna_MaterialPaintLayer_kind_ramp_update.
+ */
+static void rna_MaterialPaintLayer_kind_curves_update(Main * /*bmain*/,
+                                                      Scene * /*scene*/,
+                                                      PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma == nullptr || layer == nullptr || layer->curves == nullptr) {
+    return;
+  }
+  BKE_paint_layers_curves_edited(*ma, &layer->curves->curve_mapping);
+  DEG_id_tag_update(&ma->id, 0);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
+}
+
+static PointerRNA rna_MaterialPaintLayer_kind_curves_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (layer == nullptr) {
+    return PointerRNA_NULL;
+  }
+  MaterialPaintLayerCurves *curves = BKE_paint_layers_curves_ensure(*layer);
+  if (curves == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_CurveMapping, &curves->curve_mapping);
+}
+
 static int rna_MaterialPaintLayer_output_map_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *item = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -4850,6 +4890,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      0,
      "Clamp",
      "Keep each channel of what is below inside a constant range"},
+    {MA_PAINT_LAYER_FILTER_CURVES,
+     "CURVES",
+     0,
+     "RGB Curves",
+     "Remap each channel of what is below through its own curve"},
     {MA_PAINT_LAYER_FILTER_COLOR_ID,
      "COLOR_ID",
      0,
@@ -5905,6 +5950,20 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       prop, "rna_MaterialPaintLayer_kind_ramp_get", nullptr, nullptr, nullptr);
   RNA_def_property_ui_text(prop, "Ramp", "The Color Band a Color Ramp filter reads");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayer_kind_ramp_update");
+
+  prop = RNA_def_property(srna, "curves_supported", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_curves_supported_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Has Curves", "Whether the row's kind reads a Curve Mapping");
+
+  prop = RNA_def_property(srna, "kind_curves", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "CurveMapping");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_MaterialPaintLayer_kind_curves_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Curves", "The curve mapping an RGB Curves filter reads");
+  RNA_def_property_update(prop,
+                          NC_MATERIAL | ND_SHADING_DRAW,
+                          "rna_MaterialPaintLayer_kind_curves_update");
 
   prop = RNA_def_property(srna, "output_map", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_output_map_items);

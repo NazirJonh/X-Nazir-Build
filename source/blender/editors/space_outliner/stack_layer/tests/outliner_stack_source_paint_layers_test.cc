@@ -141,7 +141,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
   /* The order #StackEditor::row_add dispatches by index. */
-  ASSERT_EQ(kinds.size(), 47u);
+  ASSERT_EQ(kinds.size(), 50u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
@@ -176,65 +176,69 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_TRUE(kinds[14].is_effect);
   EXPECT_EQ(kinds[15].identifier, "FILTER_CLAMP");
   EXPECT_TRUE(kinds[15].is_effect);
+  EXPECT_EQ(kinds[16].identifier, "FILTER_CURVES");
+  EXPECT_TRUE(kinds[16].is_effect);
   /* The same filters again as rows of the stack, in the same order. */
-  EXPECT_EQ(kinds[16].identifier, "ADJUSTMENT_INVERT");
-  EXPECT_FALSE(kinds[16].is_effect);
-  EXPECT_EQ(kinds[17].identifier, "ADJUSTMENT_LEVELS");
-  EXPECT_EQ(kinds[18].identifier, "ADJUSTMENT_HSL");
-  EXPECT_FALSE(kinds[18].is_effect);
-  EXPECT_EQ(kinds[19].identifier, "ADJUSTMENT_BRIGHTNESS_CONTRAST");
-  EXPECT_EQ(kinds[20].identifier, "ADJUSTMENT_COLOR_RAMP");
-  EXPECT_EQ(kinds[21].identifier, "ADJUSTMENT_POSTERIZE");
-  EXPECT_EQ(kinds[22].identifier, "ADJUSTMENT_MATH");
-  EXPECT_EQ(kinds[23].identifier, "ADJUSTMENT_THRESHOLD");
-  EXPECT_EQ(kinds[24].identifier, "ADJUSTMENT_CLAMP");
+  EXPECT_EQ(kinds[17].identifier, "ADJUSTMENT_INVERT");
+  EXPECT_FALSE(kinds[17].is_effect);
+  EXPECT_EQ(kinds[18].identifier, "ADJUSTMENT_LEVELS");
+  EXPECT_EQ(kinds[19].identifier, "ADJUSTMENT_HSL");
+  EXPECT_FALSE(kinds[19].is_effect);
+  EXPECT_EQ(kinds[20].identifier, "ADJUSTMENT_BRIGHTNESS_CONTRAST");
+  EXPECT_EQ(kinds[21].identifier, "ADJUSTMENT_COLOR_RAMP");
+  EXPECT_EQ(kinds[22].identifier, "ADJUSTMENT_POSTERIZE");
+  EXPECT_EQ(kinds[23].identifier, "ADJUSTMENT_MATH");
+  EXPECT_EQ(kinds[24].identifier, "ADJUSTMENT_THRESHOLD");
+  EXPECT_EQ(kinds[25].identifier, "ADJUSTMENT_CLAMP");
+  EXPECT_EQ(kinds[26].identifier, "ADJUSTMENT_CURVES");
   /* And as corrections of the mask, in no channel. */
-  EXPECT_EQ(kinds[25].identifier, "MASK_FILTER_INVERT");
-  EXPECT_TRUE(kinds[25].is_effect);
-  EXPECT_EQ(kinds[27].identifier, "MASK_FILTER_HSL");
-  EXPECT_EQ(kinds[28].identifier, "MASK_FILTER_BRIGHTNESS_CONTRAST");
-  EXPECT_EQ(kinds[29].identifier, "MASK_FILTER_COLOR_RAMP");
-  EXPECT_EQ(kinds[30].identifier, "MASK_FILTER_POSTERIZE");
-  EXPECT_EQ(kinds[31].identifier, "MASK_FILTER_MATH");
-  EXPECT_EQ(kinds[32].identifier, "MASK_FILTER_THRESHOLD");
-  EXPECT_EQ(kinds[33].identifier, "MASK_FILTER_CLAMP");
+  EXPECT_EQ(kinds[27].identifier, "MASK_FILTER_INVERT");
+  EXPECT_TRUE(kinds[27].is_effect);
+  EXPECT_EQ(kinds[29].identifier, "MASK_FILTER_HSL");
+  EXPECT_EQ(kinds[30].identifier, "MASK_FILTER_BRIGHTNESS_CONTRAST");
+  EXPECT_EQ(kinds[31].identifier, "MASK_FILTER_COLOR_RAMP");
+  EXPECT_EQ(kinds[32].identifier, "MASK_FILTER_POSTERIZE");
+  EXPECT_EQ(kinds[33].identifier, "MASK_FILTER_MATH");
+  EXPECT_EQ(kinds[34].identifier, "MASK_FILTER_THRESHOLD");
+  EXPECT_EQ(kinds[35].identifier, "MASK_FILTER_CLAMP");
+  EXPECT_EQ(kinds[36].identifier, "MASK_FILTER_CURVES");
   /* The map-driven filters follow, only as corrections of the mask. */
-  EXPECT_EQ(kinds[34].identifier, "MASK_FILTER_COLOR_ID");
-  EXPECT_TRUE(kinds[34].is_effect);
-  EXPECT_EQ(kinds[35].identifier, "MASK_FILTER_UV_ISLAND");
-  EXPECT_TRUE(kinds[35].is_effect);
-  /* Last, so no index above moves: the kind a dropped material is made into. */
-  EXPECT_EQ(kinds[36].identifier, "MATERIAL");
-  EXPECT_EQ(kinds[36].source_id_type, ID_MA);
-  EXPECT_EQ(kinds[37].identifier, "CORRECTION_MATERIAL");
-  EXPECT_EQ(kinds[37].source_id_type, ID_MA);
-  EXPECT_TRUE(kinds[37].is_effect) << "listed with the other corrections";
-  EXPECT_EQ(kinds[38].identifier, "MASK_CORRECTION_MATERIAL");
-  EXPECT_EQ(kinds[38].source_id_type, ID_MA);
+  EXPECT_EQ(kinds[37].identifier, "MASK_FILTER_COLOR_ID");
+  EXPECT_TRUE(kinds[37].is_effect);
+  EXPECT_EQ(kinds[38].identifier, "MASK_FILTER_UV_ISLAND");
   EXPECT_TRUE(kinds[38].is_effect);
-  /* The marker and the three places its reader can land are last, so no index above moves. */
-  EXPECT_EQ(kinds[39].identifier, "ANCHOR_POINT");
-  EXPECT_TRUE(kinds[39].is_effect);
-  EXPECT_EQ(kinds[40].identifier, "ANCHOR_POINT_LAYER");
-  EXPECT_FALSE(kinds[40].is_effect);
-  EXPECT_EQ(kinds[41].identifier, "ANCHOR_POINT_CORRECTION");
+  /* Last, so no index above moves: the kind a dropped material is made into. */
+  EXPECT_EQ(kinds[39].identifier, "MATERIAL");
+  EXPECT_EQ(kinds[39].source_id_type, ID_MA);
+  EXPECT_EQ(kinds[40].identifier, "CORRECTION_MATERIAL");
+  EXPECT_EQ(kinds[40].source_id_type, ID_MA);
+  EXPECT_TRUE(kinds[40].is_effect) << "listed with the other corrections";
+  EXPECT_EQ(kinds[41].identifier, "MASK_CORRECTION_MATERIAL");
+  EXPECT_EQ(kinds[41].source_id_type, ID_MA);
   EXPECT_TRUE(kinds[41].is_effect);
-  EXPECT_EQ(kinds[42].identifier, "ANCHOR_POINT_MASK_CORRECTION");
+  /* The marker and the three places its reader can land are last, so no index above moves. */
+  EXPECT_EQ(kinds[42].identifier, "ANCHOR_POINT");
   EXPECT_TRUE(kinds[42].is_effect);
-  EXPECT_FALSE(kinds[36].is_effect);
-  EXPECT_FALSE(kinds[27].takes_color);
+  EXPECT_EQ(kinds[43].identifier, "ANCHOR_POINT_LAYER");
+  EXPECT_FALSE(kinds[43].is_effect);
+  EXPECT_EQ(kinds[44].identifier, "ANCHOR_POINT_CORRECTION");
+  EXPECT_TRUE(kinds[44].is_effect);
+  EXPECT_EQ(kinds[45].identifier, "ANCHOR_POINT_MASK_CORRECTION");
+  EXPECT_TRUE(kinds[45].is_effect);
+  EXPECT_FALSE(kinds[39].is_effect);
+  EXPECT_FALSE(kinds[29].takes_color);
   /* Last of all: a procedural Gradient layer, a row of the stack rather than a correction, then
    * the same generator in its two correction roles. */
-  EXPECT_EQ(kinds[43].identifier, "GRADIENT");
-  EXPECT_FALSE(kinds[43].is_effect);
-  EXPECT_FALSE(kinds[43].takes_color);
-  EXPECT_EQ(kinds[44].identifier, "CORRECTION_GRADIENT");
-  EXPECT_TRUE(kinds[44].is_effect);
-  EXPECT_EQ(kinds[45].identifier, "MASK_CORRECTION_GRADIENT");
-  EXPECT_TRUE(kinds[45].is_effect);
+  EXPECT_EQ(kinds[46].identifier, "GRADIENT");
+  EXPECT_FALSE(kinds[46].is_effect);
+  EXPECT_FALSE(kinds[46].takes_color);
+  EXPECT_EQ(kinds[47].identifier, "CORRECTION_GRADIENT");
+  EXPECT_TRUE(kinds[47].is_effect);
+  EXPECT_EQ(kinds[48].identifier, "MASK_CORRECTION_GRADIENT");
+  EXPECT_TRUE(kinds[48].is_effect);
   /* Then the Curve Patch, only ever an effect of a layer. */
-  EXPECT_EQ(kinds[46].identifier, "CURVE_PATCH_CORRECTION");
-  EXPECT_TRUE(kinds[46].is_effect);
+  EXPECT_EQ(kinds[49].identifier, "CURVE_PATCH_CORRECTION");
+  EXPECT_TRUE(kinds[49].is_effect);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, glyph_constants_stay_in_step_with_space_outliner)

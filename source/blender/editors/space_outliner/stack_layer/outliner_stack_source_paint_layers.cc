@@ -423,6 +423,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_CLAMP:
       /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
       return {ICON_RESTRICT_COLOR_ON, 0};
+    case MA_PAINT_LAYER_FILTER_CURVES:
+      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
+      return {ICON_RNDCURVE, 0};
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
       return {ICON_COLOR, paint_glyph::COLORIZE};
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
@@ -531,6 +534,10 @@ static const PaintFilterAddKind paint_filter_add_kinds[] = {
      N_("Clamp"),
      "Keep the active layer's channels inside a constant range",
      MA_PAINT_LAYER_FILTER_CLAMP},
+    {"FILTER_CURVES",
+     N_("RGB Curves"),
+     "Remap the active layer's channels through their own curves",
+     MA_PAINT_LAYER_FILTER_CURVES},
 };
 
 /**

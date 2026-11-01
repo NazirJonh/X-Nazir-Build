@@ -240,6 +240,7 @@ static bool composite_row_source_describe(const Material &ma,
     out.adjustment_filter = layer.kind_subtype;
     composite_filter_params(layer, out.adjustment_params);
     out.adjustment_ramp = BKE_paint_layers_ramp_get(layer);
+    out.adjustment_curves = BKE_paint_layers_curves_get(layer);
     return true;
   }
   if (!paint_layer_row_participates(ma, layer, channel)) {
@@ -469,6 +470,7 @@ static void composite_mask_items_describe(
       filter.filter = mask.kind_subtype;
       composite_filter_params(mask, filter.filter_params);
       filter.filter_ramp = BKE_paint_layers_ramp_get(mask);
+      filter.filter_curves = BKE_paint_layers_curves_get(mask);
       r_items.append(filter);
       continue;
     }
@@ -616,6 +618,7 @@ static void composite_effect_append(
     filter.filter = effect.kind_subtype;
     composite_filter_params(effect, filter.filter_params);
     filter.filter_ramp = BKE_paint_layers_ramp_get(effect);
+    filter.filter_curves = BKE_paint_layers_curves_get(effect);
     filter.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
                      pass_through_scale;
     out.content_corrections.append(filter);
@@ -1188,6 +1191,7 @@ PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
     buffer.invert = item.invert;
     buffer.filter = item.filter;
     buffer.filter_ramp = item.filter_ramp;
+    buffer.filter_curves = item.filter_curves;
     std::copy(std::begin(item.filter_params),
               std::end(item.filter_params),
               std::begin(buffer.filter_params));
@@ -2196,9 +2200,13 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
   }
   /* The combined pass knows the pointwise filters it can express in its shader; a Color Ramp is a
    * band, not a few uniforms, so the whole stack falls back to the CPU rather than showing the
-   * filter as a no-op. */
+   * filter as a no-op. An RGB Curves is the same: its four Bézier tables are baked data, not
+   * uniforms. */
   if (layer.adjustment_filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP) {
     return "a Color Ramp adjustment is read";
+  }
+  if (layer.adjustment_filter == MA_PAINT_LAYER_FILTER_CURVES) {
+    return "an RGB Curves adjustment is read";
   }
   /* Corrections and mask items first, because a Gradient one is not merely unsupported by a pass
    * that would otherwise lay its map: there is no map, so the gather's own "a correction that
@@ -2224,10 +2232,16 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
     if (correction.filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP) {
       return "a Color Ramp correction is read";
     }
+    if (correction.filter == MA_PAINT_LAYER_FILTER_CURVES) {
+      return "an RGB Curves correction is read";
+    }
   }
   for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
     if (item.filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP) {
       return "a Color Ramp mask item is read";
+    }
+    if (item.filter == MA_PAINT_LAYER_FILTER_CURVES) {
+      return "an RGB Curves mask item is read";
     }
   }
   return nullptr;

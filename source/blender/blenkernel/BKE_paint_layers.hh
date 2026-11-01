@@ -83,6 +83,21 @@ struct MaterialPaintLayerRamp *BKE_paint_layers_ramp_ensure(MaterialPaintLayer &
  */
 bool BKE_paint_layers_ramp_edited(Material &ma, const void *data);
 
+/** Whether \a row's kind reads a CurveMapping (the RGB Curves filter). */
+bool BKE_paint_layers_curves_supported(const MaterialPaintLayer &row);
+
+/**
+ * The row's curves payload, allocated with a flat 0..1 four-curve mapping when it has none. Only a
+ * kind with a Curves parameter gets one; returns null for every other kind.
+ */
+struct MaterialPaintLayerCurves *BKE_paint_layers_curves_ensure(MaterialPaintLayer &row);
+
+/**
+ * Tag \a ma for regeneration when \a data is a row's curve mapping. Called from the RNA update of
+ * the mapping pointer, which the curve widget fires after every edit of it.
+ */
+bool BKE_paint_layers_curves_edited(Material &ma, const void *data);
+
 /**
  * A strictly value-only edit (a row's opacity, a Fill row's constant): the generated tree keeps its
  * nodes and only its values are re-synced, so no shader rebuild happens. Falls back to

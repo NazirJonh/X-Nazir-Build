@@ -23,6 +23,7 @@
 #include "DNA_ID.h"
 
 #include "BKE_colorband.hh"
+#include "BKE_colortools.hh"
 #include "BKE_idprop.hh"
 #include "BKE_paint_layers.hh"
 
@@ -111,6 +112,11 @@ static const PaintLayerKindParam clamp_params[] = {
     {"max", "Max", 1.0f, 0.0f, 1.0f},
 };
 static_assert(std::size(clamp_params) == PAINT_LAYER_CLAMP_PARAM_NUM);
+
+/* The curves live in #MaterialPaintLayer::curves, like the ramp's band in its payload. */
+static const PaintLayerKindParam curves_params[] = {
+    {"curves", "Curves", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Curves},
+};
 
 /* The ramp itself lives in #MaterialPaintLayer::ramp; the schema entry is what tells the row its
  * kind has one and lets the UI find the payload. */
@@ -291,6 +297,14 @@ static const PaintLayerKindInfo kinds[] = {
      clamp_params,
      int(std::size(clamp_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_CURVES,
+     "RGB Curves",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     curves_params,
+     int(std::size(curves_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* A map-coverage operator: the map of its Base Color record is an external ID Map, so the map
      * is reference-only and a stroke must not turn it into a paint target. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -436,7 +450,11 @@ float paint_layer_kind_param_get(const MaterialPaintLayer &row, const int index)
      * float: a Boolean reads as 0.0f or 1.0f through the same path. */
     return float(paint_layer_kind_param_bool_get(row, index));
   }
-  if (ELEM(param->type, PaintLayerKindParamType::Color, PaintLayerKindParamType::Ramp)) {
+  if (ELEM(param->type,
+           PaintLayerKindParamType::Color,
+           PaintLayerKindParamType::Ramp,
+           PaintLayerKindParamType::Curves))
+  {
     /* Not a scalar: the UI and the kind's consumer read them through the typed accessors. */
     return 0.0f;
   }
@@ -570,6 +588,9 @@ void paint_layer_kind_params_init(MaterialPaintLayer &row)
         case PaintLayerKindParamType::Ramp:
           BKE_paint_layers_ramp_ensure(row);
           break;
+        case PaintLayerKindParamType::Curves:
+          BKE_paint_layers_curves_ensure(row);
+          break;
         case PaintLayerKindParamType::Bool:
           kind_param_ensure_bool(row, param);
           break;
@@ -667,23 +688,25 @@ static bool paint_layer_ramp_owns_data(const ColorBand &band, const void *data)
   return false;
 }
 
-static bool paint_layer_ramp_edited_walk(MaterialPaintLayer &row, const void *data)
+/** Whether \a owns is true of the row itself, one of its mask items, its effects or its children. */
+template<typename Owns> static bool paint_layer_payload_edited_walk(MaterialPaintLayer &row,
+                                                                    const Owns owns)
 {
-  if (row.ramp != nullptr && paint_layer_ramp_owns_data(row.ramp->band, data)) {
+  if (owns(row)) {
     return true;
   }
   for (MaterialPaintLayer &item : row.mask_stack) {
-    if (paint_layer_ramp_edited_walk(item, data)) {
+    if (paint_layer_payload_edited_walk(item, owns)) {
       return true;
     }
   }
   for (MaterialPaintLayer &effect : row.effects) {
-    if (paint_layer_ramp_edited_walk(effect, data)) {
+    if (paint_layer_payload_edited_walk(effect, owns)) {
       return true;
     }
   }
   for (MaterialPaintLayer &child : row.children) {
-    if (paint_layer_ramp_edited_walk(child, data)) {
+    if (paint_layer_payload_edited_walk(child, owns)) {
       return true;
     }
   }
@@ -695,9 +718,12 @@ bool BKE_paint_layers_ramp_edited(Material &ma, const void *data)
   if (data == nullptr) {
     return false;
   }
+  const auto owns = [&](const MaterialPaintLayer &row) {
+    return row.ramp != nullptr && paint_layer_ramp_owns_data(row.ramp->band, data);
+  };
   bool found = false;
   for (MaterialPaintLayer &row : ma.paint_layers) {
-    if (paint_layer_ramp_edited_walk(row, data)) {
+    if (paint_layer_payload_edited_walk(row, owns)) {
       found = true;
       break;
     }
@@ -781,6 +807,114 @@ uint64_t paint_layer_ramp_hash(const ColorBand &band)
     mix_float(element.g);
     mix_float(element.b);
     mix_float(element.a);
+  }
+  return hash;
+}
+
+bool paint_layer_kind_has_curves_param(const MaterialPaintLayer &row)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+  if (info == nullptr) {
+    return false;
+  }
+  for (const int i : IndexRange(info->params_num)) {
+    if (info->params[i].type == PaintLayerKindParamType::Curves) {
+      return true;
+    }
+  }
+  return false;
+}
+
+MaterialPaintLayerCurves *BKE_paint_layers_curves_ensure(MaterialPaintLayer &row)
+{
+  if (!paint_layer_kind_has_curves_param(row)) {
+    return nullptr;
+  }
+  if (row.curves == nullptr) {
+    row.curves = MEM_new<MaterialPaintLayerCurves>(__func__);
+    /* Four curves (R, G, B and the combined one), flat over 0..1, with the tables built for the
+     * CPU composite to read. */
+    BKE_curvemapping_set_defaults(&row.curves->curve_mapping, 4, 0.0f, 0.0f, 1.0f, 1.0f, HD_AUTO);
+    BKE_curvemapping_init(&row.curves->curve_mapping);
+  }
+  return row.curves;
+}
+
+const CurveMapping *BKE_paint_layers_curves_get(const MaterialPaintLayer &row)
+{
+  return (row.curves != nullptr) ? &row.curves->curve_mapping : nullptr;
+}
+
+bool BKE_paint_layers_curves_supported(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_curves_param(row);
+}
+
+bool BKE_paint_layers_curves_edited(Material &ma, const void *data)
+{
+  if (data == nullptr) {
+    return false;
+  }
+  const auto owns = [&](const MaterialPaintLayer &row) {
+    return row.curves != nullptr && data == &row.curves->curve_mapping;
+  };
+  bool found = false;
+  for (MaterialPaintLayer &row : ma.paint_layers) {
+    if (paint_layer_payload_edited_walk(row, owns)) {
+      found = true;
+      break;
+    }
+  }
+  if (found) {
+    /* The curves' shape is part of the row's state the generated node carries a copy of, so an
+     * edit of one is a shape edit, not a value one. The shape is in the cached bake's hash like a
+     * ramp's stops: without the stale flag a baked row that holds the filter keeps showing the old
+     * curves. */
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
+    BKE_paint_layers_tag_edited(ma);
+  }
+  return found;
+}
+
+void paint_layer_curves_apply(const CurveMapping &curve_mapping, float rgb[3])
+{
+  /* The RGB Curves shader node's own function: each channel through its curve, with no white
+   * balancing — the node's GPU and multi-function evaluations ignore the levels ("shader nodes
+   * don't do white balancing"), so the CPU does too. The tables are built
+   * (#BKE_curvemapping_init) when the payload is made, copied or loaded. */
+  BKE_curvemapping_evaluateRGBF(&curve_mapping, rgb, rgb);
+}
+
+uint64_t paint_layer_curves_hash(const CurveMapping &curve_mapping)
+{
+  uint64_t hash = 1469598103934665603ull;
+  const auto mix_u32 = [&](const uint32_t value) {
+    hash ^= value;
+    hash *= 1099511628211ull;
+  };
+  const auto mix_float = [&](const float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    mix_u32(bits);
+  };
+  /* What the evaluation reads: the clip and extrapolation flags, the levels and the tone, then
+   * every curve's points. The preset and the current-curve index are UI state. */
+  mix_u32(uint32_t(curve_mapping.flag));
+  mix_u32(uint32_t(curve_mapping.tone));
+  for (const int i : IndexRange(3)) {
+    mix_float(curve_mapping.black[i]);
+    mix_float(curve_mapping.white[i]);
+  }
+  for (const CurveMap &curve : curve_mapping.cm) {
+    mix_u32(uint32_t(curve.totpoint));
+    for (const int i : IndexRange(2)) {
+      mix_float(curve.ext_in[i]);
+      mix_float(curve.ext_out[i]);
+    }
+    for (const int i : IndexRange(curve.totpoint)) {
+      mix_float(curve.curve[i].x);
+      mix_float(curve.curve[i].y);
+    }
   }
   return hash;
 }

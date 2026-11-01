@@ -1223,10 +1223,13 @@ static uint64_t bake_hash_layer(uint64_t h,
     }
   }
   /* A kind's parameters (a filter's, a coverage operator's) change the pixels. A ramp filter keeps
-   * its stops outside the properties, in its own payload. */
+   * its stops outside the properties, in its own payload; a curves filter its Bézier points. */
   h = bake_hash_idprops(h, layer.system_properties);
   if (layer.ramp != nullptr) {
     h = bake_hash_mix(h, paint_layer_ramp_hash(layer.ramp->band));
+  }
+  if (layer.curves != nullptr) {
+    h = bake_hash_mix(h, paint_layer_curves_hash(layer.curves->curve_mapping));
   }
   /* Effects first, then mask items, then children, each in its own storage order. */
   for (const MaterialPaintLayer &effect : layer.effects) {

@@ -16,6 +16,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_vector.hh"
 
+#include "BKE_colortools.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_paint_layers.hh"
@@ -698,6 +699,49 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
                                  {upper, socket_out(*upper, "Vector")},
                                  strength,
                                  effect.name))
+      {
+        return discard();
+      }
+      return true;
+    }
+    case MA_PAINT_LAYER_FILTER_CURVES: {
+      /* `curves(c)` per channel, the row's mapping copied into the node so the generated tree owns
+       * no reference. The node's own evaluation — each channel through its curve, no white
+       * balancing — is the CPU's, and its Fac stays at one: the opacity mixes outside, like every
+       * other filter. */
+      const CurveMapping *curve_mapping = BKE_paint_layers_curves_get(effect);
+      if (curve_mapping == nullptr) {
+        return false;
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      bNode *curves = bke::node_add_static_node(nullptr, tree, SH_NODE_CURVE_RGB);
+      if (curves == nullptr || curves->storage == nullptr) {
+        if (curves != nullptr) {
+          nodes.append(curves);
+        }
+        return discard();
+      }
+      nodes.append(curves);
+      grid_.place_extra(*curves);
+      /* The node's own storage is a default mapping: free its points and take a deep copy of the
+       * row's, tables included. */
+      BKE_curvemapping_free_data(static_cast<CurveMapping *>(curves->storage));
+      BKE_curvemapping_copy_data(static_cast<CurveMapping *>(curves->storage), curve_mapping);
+
+      bNodeSocket *color_in = socket_in(*curves, "Color");
+      bNodeSocket *color_out = socket_out(*curves, "Color");
+      if (color_in == nullptr || color_out == nullptr) {
+        return discard();
+      }
+      bke::node_add_link(tree, *content.node, *content.socket, *curves, *color_in);
+
+      if (!filter_result_mix_add(
+              tree, grid_, nodes, content, {curves, color_out}, strength, effect.name))
       {
         return discard();
       }

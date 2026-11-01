@@ -12,7 +12,13 @@
 
 #include "paint_layers_graph_eval_test_fixture.hh"
 
+#include "BKE_appdir.hh"
 #include "BKE_paint_layers_edit.hh"
+
+#include "BLI_path_utils.hh"
+
+#include "BLO_readfile.hh"
+#include "BLO_writefile.hh"
 
 #include "../paint_layers_generate_intern.hh"
 #include "../paint_layers_kind.hh"
@@ -759,6 +765,239 @@ TEST_F(PaintLayersClampTest, a_clamp_with_min_above_max_reads_the_max)
   EXPECT_NEAR(after.r, 0.2f, 2e-3f);
   EXPECT_NEAR(after.g, 0.2f, 2e-3f);
   EXPECT_NEAR(after.b, 0.2f, 2e-3f);
+}
+
+class PaintLayersCurvesTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_curves(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_CURVES);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+
+  /**
+   * Channel curves that lift the value by a quarter (`v + 0.25` over the range, extrapolated past
+   * it), with the combined curve left at its identity, so a lifted value is one lift only.
+   */
+  static void set_lift(MaterialPaintLayer &filter)
+  {
+    MaterialPaintLayerCurves *curves = BKE_paint_layers_curves_ensure(filter);
+    ASSERT_NE(curves, nullptr);
+    CurveMapping &cumap = curves->curve_mapping;
+    for (const int i : IndexRange(3)) {
+      CurveMap &curve = cumap.cm[i];
+      ASSERT_EQ(curve.totpoint, 2);
+      curve.curve[0].x = 0.0f;
+      curve.curve[0].y = 0.25f;
+      curve.curve[1].x = 1.0f;
+      curve.curve[1].y = 1.25f;
+    }
+    BKE_curvemapping_init(&cumap);
+  }
+};
+
+TEST_F(PaintLayersCurvesTest, curves_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *curves = add_curves(*row, 0.7f);
+  set_lift(*curves);
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersCurvesTest, the_default_curves_leave_the_colour_alone)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  add_curves(*row);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, before.r, 2e-3f);
+  EXPECT_NEAR(after.g, before.g, 2e-3f);
+  EXPECT_NEAR(after.b, before.b, 2e-3f);
+}
+
+TEST_F(PaintLayersCurvesTest, a_full_strength_lift_raises_every_channel)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  MaterialPaintLayer *curves = add_curves(*row);
+  set_lift(*curves);
+
+  expect_graph_matches_cpu(kColor);
+  /* The lift is linear over the range: every channel reads exactly a quarter up. */
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, before.r + 0.25f, 2e-3f);
+  EXPECT_NEAR(after.g, before.g + 0.25f, 2e-3f);
+  EXPECT_NEAR(after.b, before.b + 0.25f, 2e-3f);
+}
+
+TEST_F(PaintLayersCurvesTest, editing_the_mapping_tags_the_material_and_moves_the_topology_hash)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_curves(*row);
+  MaterialPaintLayerCurves *curves = BKE_paint_layers_curves_ensure(*filter);
+  ASSERT_NE(curves, nullptr);
+
+  /* The shape the node carries a copy of is topology, like a ramp's band: the hash has to move
+   * with the edit, or the rebuilt tree keeps the old curves until the next structure change. */
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t before = paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms);
+
+  EXPECT_TRUE(BKE_paint_layers_curves_edited(*ma, &curves->curve_mapping));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  const uint64_t after = paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms);
+  EXPECT_NE(after, before);
+
+  EXPECT_FALSE(BKE_paint_layers_curves_edited(*ma, &row->mapping));
+}
+
+TEST_F(PaintLayersCurvesTest, curves_adjustment_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Adjustment;
+  params.filter = MA_PAINT_LAYER_FILTER_CURVES;
+  MaterialPaintLayer *curves = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(curves, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, curves, 0.8f));
+  set_lift(*curves);
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersCurvesTest, curves_in_the_mask_lift_the_coverage)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  /* The combined curve is the identity, so the coverage lifts once: 0.25 + 0.25 = 0.5. */
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::MaskFilter;
+  params.anchor = row;
+  params.filter = MA_PAINT_LAYER_FILTER_CURVES;
+  MaterialPaintLayer *curves = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(curves, nullptr);
+  set_lift(*curves);
+
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.5f, 3e-3f);
+}
+
+TEST_F(PaintLayersCurvesTest, a_duplicate_of_the_row_owns_curves_of_its_own)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_curves(*row);
+  set_lift(*filter);
+
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *ma, filter);
+  ASSERT_NE(copy, nullptr);
+  MaterialPaintLayerCurves *orig_curves = BKE_paint_layers_curves_ensure(*filter);
+  MaterialPaintLayerCurves *copy_curves = BKE_paint_layers_curves_ensure(*copy);
+  ASSERT_NE(orig_curves, nullptr);
+  ASSERT_NE(copy_curves, nullptr);
+  /* The copy is deep: its own points and tables, equal to the original's at the moment of the
+   * copy. */
+  EXPECT_NE(orig_curves, copy_curves);
+  EXPECT_NE(orig_curves->curve_mapping.cm[0].curve, copy_curves->curve_mapping.cm[0].curve);
+  ASSERT_EQ(copy_curves->curve_mapping.cm[0].totpoint, orig_curves->curve_mapping.cm[0].totpoint);
+  EXPECT_NEAR(copy_curves->curve_mapping.cm[0].curve[0].y, 0.25f, 1e-6f);
+
+  /* An edit of the original's curve leaves the copy where it was. */
+  orig_curves->curve_mapping.cm[0].curve[0].y = 0.6f;
+  BKE_curvemapping_init(&orig_curves->curve_mapping);
+  EXPECT_NEAR(copy_curves->curve_mapping.cm[0].curve[0].y, 0.25f, 1e-6f);
+}
+
+TEST_F(PaintLayersCurvesTest, a_copied_material_owns_curves_of_its_own)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_curves(*row);
+  set_lift(*filter);
+
+  Material *ma_dup = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(ma_dup, nullptr);
+  MaterialPaintLayer *dup_row = static_cast<MaterialPaintLayer *>(ma_dup->paint_layers.first);
+  ASSERT_NE(dup_row, nullptr);
+  MaterialPaintLayer *dup_filter = static_cast<MaterialPaintLayer *>(dup_row->effects.first);
+  ASSERT_NE(dup_filter, nullptr);
+  const CurveMapping *saved_curves = BKE_paint_layers_curves_get(*filter);
+  const CurveMapping *dup_curves = BKE_paint_layers_curves_get(*dup_filter);
+  ASSERT_NE(saved_curves, nullptr);
+  ASSERT_NE(dup_curves, nullptr);
+  /* The material copy is deep too: own points, same shape at the moment of the copy. */
+  EXPECT_NE(saved_curves->cm[0].curve, dup_curves->cm[0].curve);
+  ASSERT_EQ(dup_curves->cm[0].totpoint, saved_curves->cm[0].totpoint);
+  EXPECT_NEAR(dup_curves->cm[0].curve[0].y, 0.25f, 1e-6f);
+
+  /* Freeing the copy must not touch the original's points (each owns its own). */
+  BKE_id_free(bmain, ma_dup);
+  EXPECT_NE(saved_curves->cm[0].curve, nullptr);
+  EXPECT_NEAR(saved_curves->cm[0].curve[0].y, 0.25f, 1e-6f);
+}
+
+TEST_F(PaintLayersCurvesTest, blend_round_trip_rebuilds_and_keeps_the_curves)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_curves(*row);
+  set_lift(*filter);
+  const bUUID filter_marker = filter->marker;
+  id_us_plus(&ma->id);
+
+  char filepath[FILE_MAX];
+  BLI_path_join(
+      filepath, sizeof(filepath), BKE_tempdir_session(), "paint_layers_curves.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+  Material *reloaded = nullptr;
+  for (Material &candidate : bfd->main->materials) {
+    if (STREQ(candidate.id.name + 2, "Layered")) {
+      reloaded = &candidate;
+      break;
+    }
+  }
+  ASSERT_NE(reloaded, nullptr);
+  MaterialPaintLayer *reloaded_filter = BKE_paint_layers_find(*reloaded, filter_marker);
+  ASSERT_NE(reloaded_filter, nullptr);
+  const CurveMapping *reloaded_curves = BKE_paint_layers_curves_get(*reloaded_filter);
+  ASSERT_NE(reloaded_curves, nullptr);
+  /* The load rebuilt the tables the file does not keep. */
+  for (const int i : IndexRange(4)) {
+    EXPECT_NE(reloaded_curves->cm[i].table, nullptr);
+    EXPECT_NE(reloaded_curves->cm[i].curve, nullptr);
+  }
+  /* And the shape works: a lift of the same colour reads the same both sides. */
+  const CurveMapping *saved_curves = BKE_paint_layers_curves_get(*filter);
+  ASSERT_NE(saved_curves, nullptr);
+  const float sample_in[3] = {0.3f, 0.6f, 0.9f};
+  float saved_out[3];
+  float reloaded_out[3];
+  copy_v3_v3(saved_out, sample_in);
+  copy_v3_v3(reloaded_out, sample_in);
+  paint_layer_curves_apply(*saved_curves, saved_out);
+  paint_layer_curves_apply(*reloaded_curves, reloaded_out);
+  EXPECT_NEAR(reloaded_out[0], saved_out[0], 1e-6f);
+  EXPECT_NEAR(reloaded_out[1], saved_out[1], 1e-6f);
+  EXPECT_NEAR(reloaded_out[2], saved_out[2], 1e-6f);
+
+  BLO_blendfiledata_free(bfd);
+  BLI_delete(filepath, false, false);
 }
 
 class PaintLayersHslTest : public PaintLayersFilterTest {

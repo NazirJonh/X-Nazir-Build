@@ -792,6 +792,8 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                     draw_material_kind_params(layout, item.kind_params)
                     if item.ramp_supported:
                         layout.template_color_ramp(item, "kind_ramp", expand=True)
+                    if item.curves_supported:
+                        layout.template_curve_mapping(item, "kind_curves", type='COLOR')
                 return
             if item.source == 'ANCHOR_POINT':
                 # A marker publishes a slice and a reader lays one: no map, no channels to choose.
@@ -838,6 +840,8 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             draw_material_kind_params(layout, layer.kind_params)
             if layer.ramp_supported:
                 layout.template_color_ramp(layer, "kind_ramp", expand=True)
+            if layer.curves_supported:
+                layout.template_curve_mapping(layer, "kind_curves", type='COLOR')
             # The channels it works in, switched like a layer's; Base Color is on to start with.
             layout.separator()
             draw_material_layer_channels(layout, context, owner, layer)

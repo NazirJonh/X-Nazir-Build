@@ -818,8 +818,10 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     }
     for (int i = 0; acts && i < kind->params_num; i++) {
       /* A ramp is no scalar: the generator copies its band into a node, so an input for it would
-       * be dead. It is the last parameter, so the indices of the others stay the schema's. */
-      if (kind->params[i].type == PaintLayerKindParamType::Ramp) {
+       * be dead. It is the last parameter, so the indices of the others stay the schema's. The
+       * curves' mapping is the same: the generator copies it into the node's storage. */
+      if (ELEM(kind->params[i].type, PaintLayerKindParamType::Ramp, PaintLayerKindParamType::Curves))
+      {
         continue;
       }
       char base[200];

@@ -1005,6 +1005,7 @@ static void composite_row_blend(float dst[4],
 static float composite_filter_color(const int16_t filter,
                                     const float *params,
                                     const ColorBand *ramp,
+                                    const CurveMapping *curves,
                                     float rgb[3])
 {
   switch (filter) {
@@ -1055,6 +1056,11 @@ static float composite_filter_color(const int16_t filter,
             *ramp, params[PAINT_LAYER_COLOR_RAMP_AFFECT_ALPHA] > 0.5f, rgb);
       }
       break;
+    case MA_PAINT_LAYER_FILTER_CURVES:
+      if (curves != nullptr) {
+        paint_layer_curves_apply(*curves, rgb);
+      }
+      break;
     default:
       break;
   }
@@ -1100,7 +1106,8 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
        * the one a correction applies to a colour. */
       float grey[3] = {mask_factor, mask_factor, mask_factor};
       /* The strength multiplier is ignored: a grey coefficient has no stop alpha to apply. */
-      composite_filter_color(item.filter, item.filter_params, item.filter_ramp, grey);
+      composite_filter_color(
+          item.filter, item.filter_params, item.filter_ramp, item.filter_curves, grey);
       mask_factor += (grey[0] - mask_factor) * opacity;
       continue;
     }
@@ -1307,8 +1314,11 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       for (int64_t i = 0; i < count; i++) {
         float *s = r_color + i * 4;
         float filtered[3] = {s[0], s[1], s[2]};
-        const float strength_mul = composite_filter_color(
-            correction.filter, correction.filter_params, correction.filter_ramp, filtered);
+        const float strength_mul = composite_filter_color(correction.filter,
+                                                          correction.filter_params,
+                                                          correction.filter_ramp,
+                                                          correction.filter_curves,
+                                                          filtered);
         for (const int k : IndexRange(3)) {
           s[k] += (filtered[k] - s[k]) * weight * strength_mul;
         }
@@ -1814,8 +1824,11 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
             float *c = color_storage.data() + i * 4;
             copy_v4_v4(c, tile_dst + i * 4);
             float filtered[3] = {c[0], c[1], c[2]};
-            const float strength_mul = composite_filter_color(
-                layer.adjustment_filter, layer.adjustment_params, layer.adjustment_ramp, filtered);
+            const float strength_mul = composite_filter_color(layer.adjustment_filter,
+                                                              layer.adjustment_params,
+                                                              layer.adjustment_ramp,
+                                                              layer.adjustment_curves,
+                                                              filtered);
             /* Applied in full unless the ramp's stop alpha lowers it; `c[3]` is left as it is. */
             for (const int k : IndexRange(3)) {
               /* The exact result at full strength, so other filters keep their bits. */
@@ -2615,6 +2628,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       buffer.invert = item.invert;
       buffer.filter = item.filter;
       buffer.filter_ramp = item.filter_ramp;
+      buffer.filter_curves = item.filter_curves;
       std::copy(std::begin(item.filter_params),
                 std::end(item.filter_params),
                 std::begin(buffer.filter_params));
@@ -2679,6 +2693,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       PaintMaterialCompositeCorrectionBuffer buffer;
       buffer.filter = correction.filter;
       buffer.filter_ramp = correction.filter_ramp;
+      buffer.filter_curves = correction.filter_curves;
       std::copy(std::begin(correction.filter_params),
                 std::end(correction.filter_params),
                 std::begin(buffer.filter_params));
@@ -3245,6 +3260,9 @@ uint64_t BKE_paint_material_composite_stack_hash(
     if (layer.adjustment_ramp != nullptr) {
       hash = get_default_hash(hash, paint_layer_ramp_hash(*layer.adjustment_ramp));
     }
+    if (layer.adjustment_curves != nullptr) {
+      hash = get_default_hash(hash, paint_layer_curves_hash(*layer.adjustment_curves));
+    }
     hash = composite_mapping_hash(get_default_hash(hash, layer.mapping.enabled), layer.mapping);
     /* A correction changes the colour and the coverage: its map (by session uid), its blend and its
      * opacity all have to move the hash, or an edit would keep serving the cached composite. */
@@ -3264,6 +3282,9 @@ uint64_t BKE_paint_material_composite_stack_hash(
       }
       if (correction.filter_ramp != nullptr) {
         hash = get_default_hash(hash, paint_layer_ramp_hash(*correction.filter_ramp));
+      }
+      if (correction.filter_curves != nullptr) {
+        hash = get_default_hash(hash, paint_layer_curves_hash(*correction.filter_curves));
       }
       hash = get_default_hash(hash, correction.anchor_point_hash);
       hash = composite_mapping_hash(get_default_hash(hash, correction.mapping.enabled),
@@ -3298,6 +3319,9 @@ uint64_t BKE_paint_material_composite_stack_hash(
       }
       if (item.filter_ramp != nullptr) {
         hash = get_default_hash(hash, paint_layer_ramp_hash(*item.filter_ramp));
+      }
+      if (item.filter_curves != nullptr) {
+        hash = get_default_hash(hash, paint_layer_curves_hash(*item.filter_curves));
       }
       hash = composite_mapping_hash(get_default_hash(hash, item.mapping.enabled), item.mapping);
       hash = composite_gradient_hash(hash, item.gradient);

@@ -764,12 +764,12 @@ static bool separate_xyz_node_add(bNodeTree &tree,
  * A Vector Math node of \a operation whose first input is \a a and, when \a b carries a socket, its
  * second is \a b; null when it cannot be made.
  */
-static bNode *vector_math_node_add(bNodeTree &tree,
-                                   layout::LayoutGrid &grid,
-                                   Vector<bNode *> &r_nodes,
-                                   const int operation,
-                                   const NodeOutput a,
-                                   const NodeOutput b)
+bNode *vector_math_node_add(bNodeTree &tree,
+                            layout::LayoutGrid &grid,
+                            Vector<bNode *> &r_nodes,
+                            const int operation,
+                            const NodeOutput a,
+                            const NodeOutput b)
 {
   bNode *node = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
   bNodeSocket *a_in = (node != nullptr) ? socket_in(*node, "Vector") : nullptr;

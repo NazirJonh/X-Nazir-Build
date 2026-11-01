@@ -411,6 +411,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_COLOR_RAMP:
       /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
       return {ICON_COLOR, 0};
+    case MA_PAINT_LAYER_FILTER_POSTERIZE:
+      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
+      return {ICON_MOD_SMOOTH, 0};
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
       return {ICON_COLOR, paint_glyph::COLORIZE};
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
@@ -503,6 +506,10 @@ static const PaintFilterAddKind paint_filter_add_kinds[] = {
      N_("Color Ramp"),
      "Remap the active layer's luminance through a color band",
      MA_PAINT_LAYER_FILTER_COLOR_RAMP},
+    {"FILTER_POSTERIZE",
+     N_("Posterize"),
+     "Quantize the active layer's colours to a whole number of steps per channel",
+     MA_PAINT_LAYER_FILTER_POSTERIZE},
 };
 
 /**

@@ -229,6 +229,12 @@ enum PaintLayerColorRampParam : int {
   PAINT_LAYER_COLOR_RAMP_PARAM_NUM = 2,
 };
 
+/** The positions of the Posterize filter's parameters in its schema. */
+enum PaintLayerPosterizeParam : int {
+  PAINT_LAYER_POSTERIZE_STEPS = 0,
+  PAINT_LAYER_POSTERIZE_PARAM_NUM = 1,
+};
+
 /** The positions of a map-coverage operator's parameters in its schema. */
 enum PaintLayerCoverageParam : int {
   /** How far a sample may differ from a stored colour and still match (max-channel). */
@@ -288,6 +294,19 @@ inline void paint_layer_brightness_contrast_apply(
  * alpha of the ramp colour found when \a use_alpha is set.
  */
 float paint_layer_color_ramp_apply(const ColorBand &band, bool use_alpha, float rgb[3]);
+
+/**
+ * The Posterize filter applied to one channel: the value quantized to \a steps evenly spaced levels
+ * over [0, 1], `floor(clamp(value, 0, 1) * (steps - 1) + 0.5) / (steps - 1)`, so both endpoints are
+ * preserved and a value at a level's midpoint rounds to the nearer one. A step count below two
+ * reads as two, the smallest count that shows a step.
+ */
+inline float paint_layer_posterize_apply(const float value, const float steps)
+{
+  const float k = std::max(steps - 1.0f, 1.0f);
+  const float clamped = std::clamp(value, 0.0f, 1.0f);
+  return std::floor(clamped * k + 0.5f) / k;
+}
 
 /**
  * The value of the parameter \a index of \a row's kind: the stored one, or the schema's default.

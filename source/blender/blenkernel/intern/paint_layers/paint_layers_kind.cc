@@ -55,6 +55,12 @@ static const PaintLayerKindParam brightness_contrast_params[] = {
 static_assert(std::size(brightness_contrast_params) ==
               PAINT_LAYER_BRIGHTNESS_CONTRAST_PARAM_NUM);
 
+static const PaintLayerKindParam posterize_params[] = {
+    /* Whole steps: two is the smallest count that shows a step. */
+    {"steps", "Steps", 4.0f, 2.0f, 64.0f, PaintLayerKindParamType::Int},
+};
+static_assert(std::size(posterize_params) == PAINT_LAYER_POSTERIZE_PARAM_NUM);
+
 /* The ramp itself lives in #MaterialPaintLayer::ramp; the schema entry is what tells the row its
  * kind has one and lets the UI find the payload. */
 static const PaintLayerKindEnumItem color_ramp_alpha_items[] = {
@@ -201,6 +207,14 @@ static const PaintLayerKindInfo kinds[] = {
      filter_roles,
      color_ramp_params,
      int(std::size(color_ramp_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_POSTERIZE,
+     "Posterize",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     posterize_params,
+     int(std::size(posterize_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* A map-coverage operator: the map of its Base Color record is an external ID Map, so the map
      * is reference-only and a stroke must not turn it into a paint target. */

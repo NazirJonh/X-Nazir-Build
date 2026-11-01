@@ -289,6 +289,81 @@ TEST_F(PaintLayersColorRampTest, editing_the_band_or_a_stop_tags_the_material)
   EXPECT_FALSE(BKE_paint_layers_ramp_edited(*ma, &row->mapping));
 }
 
+class PaintLayersPosterizeTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_posterize(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_POSTERIZE);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+};
+
+TEST_F(PaintLayersPosterizeTest, posterize_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *posterize = add_posterize(*row, 0.7f);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*posterize, PAINT_LAYER_POSTERIZE_STEPS, 5));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersPosterizeTest, two_steps_round_every_channel_to_an_endpoint)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *posterize = add_posterize(*row);
+  /* `k = steps - 1 = 1`: every channel rounds to the nearer of 0 and 1. */
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*posterize, PAINT_LAYER_POSTERIZE_STEPS, 2));
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  const auto an_endpoint = [](const float value) {
+    return std::abs(value) < 2e-3f || std::abs(value - 1.0f) < 2e-3f;
+  };
+  EXPECT_TRUE(an_endpoint(after.r));
+  EXPECT_TRUE(an_endpoint(after.g));
+  EXPECT_TRUE(an_endpoint(after.b));
+}
+
+TEST_F(PaintLayersPosterizeTest, white_and_black_survive_a_full_strength_posterize)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 255, 255, 255, 255));
+  add_posterize(*row);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA white = cpu_pixel(kColor);
+  EXPECT_NEAR(white.r, 1.0f, 2e-3f);
+  EXPECT_NEAR(white.g, 1.0f, 2e-3f);
+  EXPECT_NEAR(white.b, 1.0f, 2e-3f);
+
+  MaterialPaintLayer *black = add_layer("Black", add_solid_image("Black", 0, 0, 0, 255));
+  add_posterize(*black);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA dark = cpu_pixel(kColor);
+  EXPECT_NEAR(dark.r, 0.0f, 2e-3f);
+  EXPECT_NEAR(dark.g, 0.0f, 2e-3f);
+  EXPECT_NEAR(dark.b, 0.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersPosterizeTest, the_step_count_is_an_integer_clamped_to_its_range)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *posterize = add_posterize(*row);
+  EXPECT_EQ(paint_layer_kind_param_type(*posterize, PAINT_LAYER_POSTERIZE_STEPS),
+            PaintLayerKindParamType::Int);
+  EXPECT_EQ(paint_layer_kind_param_int_get(*posterize, PAINT_LAYER_POSTERIZE_STEPS), 4);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*posterize, PAINT_LAYER_POSTERIZE_STEPS, 0));
+  EXPECT_EQ(paint_layer_kind_param_int_get(*posterize, PAINT_LAYER_POSTERIZE_STEPS), 2);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*posterize, PAINT_LAYER_POSTERIZE_STEPS, 100));
+  EXPECT_EQ(paint_layer_kind_param_int_get(*posterize, PAINT_LAYER_POSTERIZE_STEPS), 64);
+  /* A float write to an integer parameter is refused. */
+  EXPECT_FALSE(paint_layer_kind_param_set(*posterize, PAINT_LAYER_POSTERIZE_STEPS, 8.0f));
+}
+
 class PaintLayersHslTest : public PaintLayersFilterTest {
  public:
   MaterialPaintLayer *add_hsl(MaterialPaintLayer &row, const float opacity = 1.0f)
@@ -619,6 +694,23 @@ TEST_F(PaintLayersMaskFilterTest, color_ramp_in_the_mask_works_on_its_coverage)
 
   expect_graph_matches_cpu(kColor);
   EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.25f, 3e-3f);
+}
+
+TEST_F(PaintLayersMaskFilterTest, posterize_in_the_mask_works_on_its_coverage)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  /* `floor(0.25 * 3 + 0.5) / 3 = 1 / 3`: the coverage rounds to the second of four steps. */
+  MaterialPaintLayer *posterize = add_mask_filter(*row, MA_PAINT_LAYER_FILTER_POSTERIZE);
+  ASSERT_NE(posterize, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*posterize, PAINT_LAYER_POSTERIZE_STEPS, 4));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 1.0f / 3.0f, 3e-3f);
 }
 
 TEST_F(PaintLayersMaskFilterTest, a_mask_filter_needs_no_channel_and_makes_the_base_mask_itself)

@@ -1024,6 +1024,11 @@ static float composite_filter_color(const int16_t filter,
     case MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST:
       paint_layer_brightness_contrast_apply(rgb, params);
       break;
+    case MA_PAINT_LAYER_FILTER_POSTERIZE:
+      for (const int k : IndexRange(3)) {
+        rgb[k] = paint_layer_posterize_apply(rgb[k], params[PAINT_LAYER_POSTERIZE_STEPS]);
+      }
+      break;
     case MA_PAINT_LAYER_FILTER_COLOR_RAMP:
       if (ramp != nullptr) {
         return paint_layer_color_ramp_apply(

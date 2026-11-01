@@ -118,6 +118,15 @@ bNode *math_constant_node_add(bNodeTree &tree,
                               NodeOutput a,
                               float b);
 
+/** A Vector Math node of \a operation whose first input is \a a and, when \a b carries a socket, its
+ * second is \a b; null when it cannot be made. */
+bNode *vector_math_node_add(bNodeTree &tree,
+                            layout::LayoutGrid &grid,
+                            Vector<bNode *> &r_nodes,
+                            int operation,
+                            NodeOutput a,
+                            NodeOutput b);
+
 /** A Mix node in float mode, `mix(A, B, factor)`; null when it cannot be made. */
 bNode *mix_float_node_add(bNodeTree &tree);
 

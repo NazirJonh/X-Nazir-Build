@@ -783,6 +783,8 @@ enum eMaterialPaintLayerFilter : int16_t {
   MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST = 6,
   /** Remap the colour's luminance through a ColorBand. */
   MA_PAINT_LAYER_FILTER_COLOR_RAMP = 7,
+  /** Quantize the colour to a whole number of steps per channel. */
+  MA_PAINT_LAYER_FILTER_POSTERIZE = 8,
 };
 
 /**

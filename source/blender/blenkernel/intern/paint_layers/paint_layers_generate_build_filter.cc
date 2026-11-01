@@ -456,6 +456,107 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       layout::frame_add(tree, effect.name, nodes);
       return true;
     }
+    case MA_PAINT_LAYER_FILTER_POSTERIZE: {
+      /* `floor(clamp(c, 0, 1) * (steps - 1) + 0.5) / (steps - 1)` per channel: the quantization the
+       * CPU composite applies, with the step count as an input so an edit of it is a value and not
+       * a different graph. Vector Math MULTIPLY_ADD carries the scale and the half that turns the
+       * floor into a round. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_POSTERIZE_PARAM_NUM ||
+          (*params)[PAINT_LAYER_POSTERIZE_STEPS] == nullptr)
+      {
+        return false;
+      }
+      bNodeSocket *steps_socket = group_input_socket(group, *(*params)[PAINT_LAYER_POSTERIZE_STEPS]);
+      if (steps_socket == nullptr) {
+        return false;
+      }
+      const NodeOutput steps{group.group_input, steps_socket};
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        for (bNode *node : nodes) {
+          bke::node_remove_node(nullptr, tree, *node, true, false);
+        }
+        return false;
+      };
+
+      bNode *k = math_constant_node_add(tree, grid_, nodes, NODE_MATH_SUBTRACT, steps, 1.0f);
+      bNode *lower = vector_math_node_add(
+          tree, grid_, nodes, NODE_VECTOR_MATH_MAXIMUM, content, {});
+      bNode *upper = (lower != nullptr) ?
+                         vector_math_node_add(tree,
+                                              grid_,
+                                              nodes,
+                                              NODE_VECTOR_MATH_MINIMUM,
+                                              {lower, socket_out(*lower, "Vector")},
+                                              {}) :
+                         nullptr;
+      if (k == nullptr || upper == nullptr) {
+        return discard();
+      }
+      /* The CPU clamps the value before quantizing, so the clamps are set explicitly and the
+       * quantized result stays in [0, 1]. */
+      bNodeSocket *lower_b = socket_in(*lower, "Vector_001");
+      bNodeSocket *upper_b = socket_in(*upper, "Vector_001");
+      if (lower_b == nullptr || lower_b->default_value == nullptr || upper_b == nullptr ||
+          upper_b->default_value == nullptr)
+      {
+        return discard();
+      }
+      zero_v3(static_cast<bNodeSocketValueVector *>(lower_b->default_value)->value);
+      copy_v3_fl(static_cast<bNodeSocketValueVector *>(upper_b->default_value)->value, 1.0f);
+      bNode *scaled = vector_math_node_add(tree,
+                                           grid_,
+                                           nodes,
+                                           NODE_VECTOR_MATH_MULTIPLY_ADD,
+                                           {upper, socket_out(*upper, "Vector")},
+                                           {k, socket_out(*k, "Value")});
+      bNode *floored = (scaled != nullptr) ?
+                           vector_math_node_add(tree,
+                                                grid_,
+                                                nodes,
+                                                NODE_VECTOR_MATH_FLOOR,
+                                                {scaled, socket_out(*scaled, "Vector")},
+                                                {}) :
+                           nullptr;
+      if (scaled == nullptr || floored == nullptr) {
+        return discard();
+      }
+      bNodeSocket *offset = socket_in(*scaled, "Vector_002");
+      if (offset == nullptr || offset->default_value == nullptr) {
+        return discard();
+      }
+      copy_v3_fl(static_cast<bNodeSocketValueVector *>(offset->default_value)->value, 0.5f);
+      bNode *divided = vector_math_node_add(tree,
+                                            grid_,
+                                            nodes,
+                                            NODE_VECTOR_MATH_DIVIDE,
+                                            {floored, socket_out(*floored, "Vector")},
+                                            {k, socket_out(*k, "Value")});
+      if (divided == nullptr) {
+        return discard();
+      }
+
+      bNode *mix = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
+      bNodeSocket *a = (mix != nullptr) ? socket_in(*mix, "A_Color") : nullptr;
+      bNodeSocket *b = (mix != nullptr) ? socket_in(*mix, "B_Color") : nullptr;
+      bNodeSocket *fac = (mix != nullptr) ? socket_in(*mix, "Factor_Float") : nullptr;
+      bNodeSocket *out = (mix != nullptr) ? socket_out(*mix, "Result_Color") : nullptr;
+      if (mix == nullptr || a == nullptr || b == nullptr || fac == nullptr || out == nullptr) {
+        if (mix != nullptr) {
+          bke::node_remove_node(nullptr, tree, *mix, true, false);
+        }
+        return discard();
+      }
+      nodes.append(mix);
+      grid_.place_extra(*mix);
+      bke::node_add_link(tree, *content.node, *content.socket, *mix, *a);
+      bke::node_add_link(tree, *divided, *socket_out(*divided, "Vector"), *mix, *b);
+      bke::node_add_link(tree, *strength.node, *strength.socket, *mix, *fac);
+      content = {mix, out};
+      layout::frame_add(tree, effect.name, nodes);
+      return true;
+    }
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
       /* Map-coverage operators only exist in a mask, where #map_coverage_match_add builds them. */

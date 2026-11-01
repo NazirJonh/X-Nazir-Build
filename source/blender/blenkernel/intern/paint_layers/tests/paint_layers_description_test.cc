@@ -2673,6 +2673,112 @@ TEST_F(PaintLayersDescription, pack_maps_packs_a_generated_map_once_and_again_on
   EXPECT_EQ(BKE_paint_layers_pack_maps(*bmain, false, nullptr), 0);
 }
 
+TEST_F(PaintLayersDescription, pack_maps_packs_a_modified_assigned_map_and_leaves_a_clean_one)
+{
+  Material *ma = BKE_material_add(bmain, "PackAssignedMat");
+  MaterialPaintLayer *painted_row = BKE_paint_layers_add(*ma, "P", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *clean_row = BKE_paint_layers_add(*ma, "C", nullptr, PaintLayerPlace::Above);
+  const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *painted = BKE_image_add_generated(
+      bmain, 8, 8, "PackAssignedPainted", 24, false, IMA_GENTYPE_BLANK, clear, false, true, false);
+  Image *clean = BKE_image_add_generated(
+      bmain, 8, 8, "PackAssignedClean", 24, false, IMA_GENTYPE_BLANK, clear, false, true, false);
+  ASSERT_NE(painted, nullptr);
+  ASSERT_NE(clean, nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, painted_row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, painted));
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, clean_row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, clean));
+
+  /* Both now read as textures the user assigned from disk; painting modified one of them. The
+   * names stand for paths only -- nothing here reads from disk. */
+  STRNCPY(painted->filepath, "paint_layers_assigned_painted.png");
+  STRNCPY(clean->filepath, "paint_layers_assigned_clean.png");
+  painted->source = IMA_SRC_FILE;
+  clean->source = IMA_SRC_FILE;
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(painted, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  ibuf->byte_data_for_write()[0] = 200;
+  BKE_image_mark_dirty(painted, ibuf);
+  BKE_image_release_ibuf(painted, ibuf, lock);
+
+  /* The assigned maps are project data either way, so the close prompt never offers them; only a
+   * modified one needs its pixels embedded. */
+  Set<const Image *> internal_images;
+  BKE_paint_layers_internal_images_collect(*bmain, internal_images);
+  EXPECT_TRUE(internal_images.contains(painted));
+  EXPECT_TRUE(internal_images.contains(clean));
+  EXPECT_EQ(BKE_paint_layers_pack_maps(*bmain, false, nullptr), 1);
+  /* The pack embeds the buffer and keeps both images file sources: the project carries the pixels,
+   * and no user file was touched. */
+  EXPECT_EQ(painted->source, IMA_SRC_FILE);
+  EXPECT_EQ(clean->source, IMA_SRC_FILE);
+  EXPECT_TRUE(BKE_image_has_packedfile(painted));
+  EXPECT_FALSE(BKE_image_has_packedfile(clean));
+
+  /* Packed and not modified since: the file already has it as it stands. */
+  EXPECT_EQ(BKE_paint_layers_pack_maps(*bmain, false, nullptr), 0);
+}
+
+TEST_F(PaintLayersDescription, bake_cache_maps_collect_keeps_caches_out_of_the_packs)
+{
+  Material *ma = BKE_material_add(bmain, "BakeCollectMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *row = paint_layer_add(*ma, "Baked");
+  Image *cache = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "BakeCacheImg"));
+  Image *map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "BakeChannelImg"));
+  paint_layer_channel_add(*row, *map);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*row);
+  bake->images[0] = cache;
+
+  Vector<Image *> caches;
+  BKE_paint_layers_bake_cache_maps_collect(*bmain, caches);
+  ASSERT_EQ(caches.size(), 1);
+  EXPECT_TRUE(caches.contains(cache));
+
+  Vector<Image *> maps;
+  BKE_paint_layers_maps_collect(*bmain, maps);
+  EXPECT_TRUE(maps.contains(map));
+  EXPECT_FALSE(maps.contains(cache));
+
+  /* The planner re-bakes a loaded row (the read clears its hash), so a cache is never packed. */
+  EXPECT_EQ(BKE_paint_layers_pack_maps(*bmain, false, nullptr), 0);
+  EXPECT_FALSE(BKE_image_has_packedfile(cache));
+}
+
+TEST_F(PaintLayersDescription, internal_images_collect_leaves_a_linked_map_to_the_save_prompt)
+{
+  Library *lib = BKE_id_new<Library>(bmain, "InternalImagesLib");
+  Material *ma = BKE_material_add(bmain, "InternalImagesMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *owned_row = paint_layer_add(*ma, "Owned");
+  Image *owned_map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "InternalOwnedMap"));
+  paint_layer_channel_add(*owned_row, *owned_map);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*owned_row);
+  Image *cache = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "InternalBakeCache"));
+  bake->images[0] = cache;
+
+  MaterialPaintLayer *linked_row = paint_layer_add(*ma, "Linked");
+  Image *linked_map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "InternalLinkedMap"));
+  paint_layer_channel_add(*linked_row, *linked_map);
+  /* A copy a library holds keeps its pixels outside the project: not editable, so neither the pack
+   * nor the internal set claims it, and the save prompt treats it like any other image. */
+  linked_map->id.lib = lib;
+  linked_map->id.tag |= ID_TAG_EXTERN;
+  ASSERT_FALSE(ID_IS_EDITABLE(&linked_map->id));
+
+  Set<const Image *> internal_images;
+  BKE_paint_layers_internal_images_collect(*bmain, internal_images);
+  EXPECT_TRUE(internal_images.contains(owned_map));
+  EXPECT_TRUE(internal_images.contains(cache));
+  EXPECT_FALSE(internal_images.contains(linked_map));
+
+  /* An image no layer holds a map in stays out, editable as it is. */
+  Image *loose = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "InternalLooseMap"));
+  EXPECT_FALSE(internal_images.contains(loose));
+}
+
 TEST_F(PaintLayersDescription, rna_effects_expose_the_correction_and_add_one)
 {
   Material *ma = BKE_material_add(bmain, "RnaCorrectionMat");

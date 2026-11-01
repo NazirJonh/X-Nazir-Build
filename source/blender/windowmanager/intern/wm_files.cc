@@ -2290,9 +2290,10 @@ static bool wm_file_write(bContext *C,
 
   /* Operator now handles overwrite checks. */
 
-  /* Regardless of auto-pack: a layered material's maps are generated images, so the file would
-   * otherwise reopen with them empty. The "save modified images" prompt only ever covered the ones
-   * modified, and not at all when it is declined. */
+  /* Regardless of auto-pack: a layered material's maps are project data, so the file would
+   * otherwise reopen with the generated ones empty and lose the edits made on assigned files. The
+   * "save modified images" prompt no longer offers them at all; this write embeds every modified
+   * map, whether the user accepts, declines, or never sees that checkbox. */
   BKE_paint_layers_pack_maps(*bmain, false, reports);
 
   if (G.fileflags & G_FILE_AUTOPACK) {

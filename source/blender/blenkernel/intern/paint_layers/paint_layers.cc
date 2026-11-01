@@ -600,10 +600,8 @@ void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &l
   }
 }
 
-namespace {
-
 /** The channels a layered material offers before any channel set is authored. Base Color included. */
-constexpr uint16_t PAINT_LAYERS_DEFAULT_CHANNEL_SET =
+static constexpr uint16_t PAINT_LAYERS_DEFAULT_CHANNEL_SET =
     (uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
     (uint16_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
     (uint16_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
@@ -613,10 +611,8 @@ constexpr uint16_t PAINT_LAYERS_DEFAULT_CHANNEL_SET =
 /** The build default plus Height, the set a stack created through the New Layered Material dialog
  * starts from. Kept apart from #PAINT_LAYERS_DEFAULT_CHANNEL_SET so a file with no authored set
  * (and therefore reading the build default) never gains Height by opening. */
-constexpr uint16_t PAINT_LAYERS_NEW_MATERIAL_CHANNEL_SET =
+static constexpr uint16_t PAINT_LAYERS_NEW_MATERIAL_CHANNEL_SET =
     PAINT_LAYERS_DEFAULT_CHANNEL_SET | (uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT);
-
-}  // namespace
 
 uint16_t BKE_paint_layers_default_channel_set()
 {
@@ -3654,15 +3650,22 @@ void BKE_paint_layers_channel_bottom_color(const eMaterialPaintChannel channel, 
   }
 }
 
-void BKE_paint_layers_maps_collect(const Main &bmain, Vector<Image *> &r_images)
+/**
+ * Append every image that a layered material holds in a slot of dependency \a kind to \a r_images,
+ * once each. Shared by the map collection and the bake-cache collection, which differ only in the
+ * dependency they select.
+ */
+static void paint_layers_slot_images_collect(const Main &bmain,
+                                             const PaintLayerDependencyKind kind,
+                                             Vector<Image *> &r_images)
 {
   Set<Image *> seen;
   const auto add_channels = [&](const MaterialPaintLayer &row) {
     paint_layer_dependencies(row, [&](const PaintLayerDependency &dep) {
-      if (dep.kind != PaintLayerDependencyKind::ImageMap || *dep.slot == nullptr) {
+      if (dep.kind != kind || *dep.slot == nullptr) {
         return;
       }
-      Image *image = reinterpret_cast<Image *>(*dep.slot);
+      Image *image = id_cast<Image *>(*dep.slot);
       if (seen.add(image)) {
         r_images.append(image);
       }
@@ -3686,10 +3689,33 @@ void BKE_paint_layers_maps_collect(const Main &bmain, Vector<Image *> &r_images)
   }
 }
 
-bool BKE_paint_layers_map_is_packed_on_save(const Image &image)
+void BKE_paint_layers_maps_collect(const Main &bmain, Vector<Image *> &r_images)
 {
-  return ID_IS_EDITABLE(&image.id) &&
-         (image.source == IMA_SRC_GENERATED || BKE_image_has_packedfile(&image));
+  paint_layers_slot_images_collect(bmain, PaintLayerDependencyKind::ImageMap, r_images);
+}
+
+void BKE_paint_layers_bake_cache_maps_collect(const Main &bmain, Vector<Image *> &r_images)
+{
+  paint_layers_slot_images_collect(bmain, PaintLayerDependencyKind::BakeCache, r_images);
+}
+
+void BKE_paint_layers_internal_images_collect(const Main &bmain, Set<const Image *> &r_images)
+{
+  /* What the file write owns the pixels of: a map it embeds (#BKE_paint_layers_pack_maps packs
+   * every editable one, generated or an assigned file), and a cache the planner rebuilds on load.
+   * A linked library's map is not editable, so it stays out and keeps the usual save prompt. */
+  Vector<Image *> maps;
+  BKE_paint_layers_maps_collect(bmain, maps);
+  for (const Image *image : maps) {
+    if (ID_IS_EDITABLE(&image->id)) {
+      r_images.add(image);
+    }
+  }
+  Vector<Image *> bake_caches;
+  BKE_paint_layers_bake_cache_maps_collect(bmain, bake_caches);
+  for (const Image *image : bake_caches) {
+    r_images.add(image);
+  }
 }
 
 int BKE_paint_layers_pack_maps(const Main &bmain, const bool for_autosave, ReportList *reports)
@@ -3710,9 +3736,11 @@ int BKE_paint_layers_pack_maps(const Main &bmain, const bool for_autosave, Repor
         continue;
       }
     }
-    else if (!generated && !(BKE_image_has_packedfile(image) && BKE_image_is_dirty(image))) {
-      /* A map already packed and not modified since is in the file as it stands; encoding it
-       * again would cost seconds on a 4K map for the same bytes. */
+    else if (!generated && !BKE_image_is_dirty(image)) {
+      /* A map already on disk or packed and not painted on since is in the file as it stands;
+       * encoding it again would cost seconds on a 4K map for the same bytes. A modified one, packed
+       * or an assigned file, is embedded here, so its pixels live in the project and the
+       * modified-images prompt never has to offer them. */
       continue;
     }
 
@@ -3734,8 +3762,10 @@ int BKE_paint_layers_pack_maps(const Main &bmain, const bool for_autosave, Repor
       packed_num++;
     }
     else if (reports != nullptr) {
+      /* The map loses its pixels with this file write: louder than a warning, and the save
+       * surfaces the report banner to the user. */
       BKE_reportf(reports,
-                  RPT_WARNING,
+                  RPT_ERROR,
                   "Paint layer map \"%s\" could not be packed and will be empty in the file",
                   image->id.name + 2);
     }

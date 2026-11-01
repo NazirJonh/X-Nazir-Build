@@ -23,6 +23,7 @@
 #include <memory>
 
 #include "BLI_function_ref.hh"
+#include "BLI_set.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
@@ -1927,19 +1928,30 @@ void BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel channel, float 
 void BKE_paint_layers_maps_collect(const Main &bmain, Vector<Image *> &r_images);
 
 /**
- * Whether #BKE_paint_layers_pack_maps takes care of \a image on a file write: an editable
- * generated map, or one that is already packed. Any other map (an external file the user assigned)
- * keeps its pixels in that file and has to go through the usual save prompt.
+ * Append every bake-cache image of a layered material to \a r_images, once each. The file keeps no
+ * bake pixels and the first plan after a load bakes the rows again (see the read-time hash clear),
+ * so these maps are a regeneratable cache: never offered to the user for saving.
  */
-bool BKE_paint_layers_map_is_packed_on_save(const Image &image);
+void BKE_paint_layers_bake_cache_maps_collect(const Main &bmain, Vector<Image *> &r_images);
+
+/**
+ * Collect the images of \a bmain a file write owns the pixels of into \a r_images, once each: the
+ * bake caches #BKE_paint_layers_bake_cache_maps_collect names, plus every map an owned layer slot
+ * holds that #BKE_paint_layers_pack_maps can embed -- an editable one, generated or an assigned
+ * file. These are the images the save prompt and its disk write skip, because their edits belong
+ * to the project. A map a linked library holds is not editable, so it stays out and keeps the
+ * usual save prompt.
+ */
+void BKE_paint_layers_internal_images_collect(const Main &bmain, Set<const Image *> &r_images);
 
 /**
  * Pack the maps of every layered material of \a bmain, so a written file reopens with its pixels.
  *
- * A map is a generated image: its pixels exist only in the buffer, and the file keeps nothing but
- * the generation settings (an empty map) unless the image is packed. Packing turns it into a
- * packed file-source image; a map already packed and not modified since is left alone, so the
- * cost follows what changed, not what exists.
+ * A generated map's pixels exist only in the buffer, and painting moves an assigned file map's
+ * pixels away from the file on disk: both are embedded here, or the edits would be lost with the
+ * project, and a layered material's maps always reopen complete. A map already current with the
+ * file (or with its disk file) is left alone, so the cost follows what changed, not what exists.
+ * Packing turns it into a packed file-source image.
  *
  * \param for_autosave: write into the images' auto-save packed files instead, which leaves the
  * session's images as they are (auto-save and session recovery); only generated maps the image

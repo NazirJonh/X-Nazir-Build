@@ -2739,37 +2739,36 @@ static bool image_should_pack_during_save_all(const Image *ima)
          (ima->source == IMA_SRC_TILED && !BKE_image_has_filepath(ima));
 }
 
-bool ED_image_should_save_modified(const Main *bmain)
+/**
+ * The images a layered material keeps as project data, not user files: the prompt and its save
+ * never touch them. #BKE_paint_layers_pack_maps embeds every modified one with the file write
+ * (declining the prompt must not be able to leave the graph with empty maps), and the bake caches
+ * the planner rebuilds on load need no save at all. A map a linked library holds is not editable,
+ * so it stays in the prompt like any other image.
+ */
+static Set<const Image *> paint_layers_internal_images(const Main &bmain)
 {
-  ReportList reports;
-  BKE_reports_init(&reports, RPT_STORE);
-
-  uint modified_images_count = ED_image_save_all_modified_info(bmain, &reports);
-  bool should_save = modified_images_count || !reports.list.is_empty();
-
-  BKE_reports_free(&reports);
-
-  return should_save;
+  Set<const Image *> internal_images;
+  BKE_paint_layers_internal_images_collect(bmain, internal_images);
+  return internal_images;
 }
 
-int ED_image_save_all_modified_info(const Main *bmain, ReportList *reports)
+/** The count behind #ED_image_save_all_modified_info, over the caller's set of project-data
+ * images. */
+static int image_save_all_modified_info(const Main *bmain,
+                                        ReportList *reports,
+                                        const Set<const Image *> &internal_images)
 {
   Set<std::string> unique_paths;
 
   int num_saveable_images = 0;
-
-  /* A layered material's maps that every file write packs (#BKE_paint_layers_pack_maps) are never
-   * offered here: declining the prompt must not be able to leave the graph with empty maps. A map
-   * backed by an external file is not packed, so it stays in the prompt like any other image. */
-  Vector<Image *> paint_layer_maps;
-  BKE_paint_layers_maps_collect(*bmain, paint_layer_maps);
 
   for (Image *ima = static_cast<Image *>(bmain->images.first); ima;
        ima = static_cast<Image *>(ima->id.next))
   {
     bool is_format_writable;
 
-    if (paint_layer_maps.contains(ima) && BKE_paint_layers_map_is_packed_on_save(*ima)) {
+    if (internal_images.contains(ima)) {
       continue;
     }
 
@@ -2818,6 +2817,27 @@ int ED_image_save_all_modified_info(const Main *bmain, ReportList *reports)
   return num_saveable_images;
 }
 
+bool ED_image_should_save_modified(const Main *bmain)
+{
+  ReportList reports;
+  BKE_reports_init(&reports, RPT_STORE);
+
+  uint modified_images_count = ED_image_save_all_modified_info(bmain, &reports);
+  bool should_save = modified_images_count || !reports.list.is_empty();
+
+  BKE_reports_free(&reports);
+
+  return should_save;
+}
+
+int ED_image_save_all_modified_info(const Main *bmain, ReportList *reports)
+{
+  /* The same project-data set the save skips (see #ED_image_save_all_modified), or the count
+   * would offer an image the save packs instead. */
+  const Set<const Image *> internal_images = paint_layers_internal_images(*bmain);
+  return image_save_all_modified_info(bmain, reports, internal_images);
+}
+
 bool ED_image_save_all_modified(const bContext *C, ReportList *reports)
 {
   Main *bmain = CTX_data_main(C);
@@ -2826,7 +2846,11 @@ bool ED_image_save_all_modified(const bContext *C, ReportList *reports)
    * (commit-before-save, see #image_save_exec). */
   ED_image_paint_select_sessions_settle_all(const_cast<bContext *>(C));
 
-  ED_image_save_all_modified_info(bmain, reports);
+  /* The count and this save skip the same set: the project-data images' edits belong to the file
+   * write, so this disk write neither saves them nor silently overwrites the external file the
+   * user assigned. */
+  const Set<const Image *> internal_images = paint_layers_internal_images(*bmain);
+  image_save_all_modified_info(bmain, reports, internal_images);
 
   bool ok = true;
 
@@ -2834,6 +2858,10 @@ bool ED_image_save_all_modified(const bContext *C, ReportList *reports)
        ima = static_cast<Image *>(ima->id.next))
   {
     bool is_format_writable;
+
+    if (internal_images.contains(ima)) {
+      continue;
+    }
 
     if (image_should_be_saved(ima, &is_format_writable)) {
       if (BKE_image_has_packedfile(ima) || image_should_pack_during_save_all(ima)) {

@@ -6647,6 +6647,12 @@ void button_func_set(Button *but, std::function<void(bContext &)> func)
   but->apply_func = std::move(func);
 }
 
+void button_curve_live_func_set(Button *but, std::function<void(bContext &)> func)
+{
+  BLI_assert(but->type == ButtonType::Curve);
+  but->curve_live_func = std::move(func);
+}
+
 void button_funcN_set(Button *but,
                       ButtonHandleNFunc funcN,
                       void *argN,

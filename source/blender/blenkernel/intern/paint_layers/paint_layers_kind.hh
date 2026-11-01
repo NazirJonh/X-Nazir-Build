@@ -18,6 +18,9 @@
 
 #include "BLI_function_ref.hh"
 #include "BLI_math_base_safe.h"
+#include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
+#include "BLI_vector.hh"
 
 #include "DNA_ID.h"
 #include "DNA_material_types.h"
@@ -346,6 +349,24 @@ float paint_layer_color_ramp_apply(const ColorBand &band, bool use_alpha, float 
 void paint_layer_curves_apply(const CurveMapping &curve_mapping, float rgb[3]);
 
 /**
+ * The shader's own lookup in the table #paint_layer_curves_lut_build (BKE_paint_layers_composite.hh)
+ * made, as a CPU reference.
+ */
+void paint_layer_curves_lut_eval(Span<float4> texels, int width, float rgb[3]);
+
+/**
+ * The shader's own lookup in the table #paint_layer_color_ramp_lut_build made, as a CPU reference.
+ * \a constant selects the nearest texel, which is what a CONSTANT band lays; otherwise the two
+ * neighbours are linearly interpolated. Returns the filter's strength multiplier: the stop's alpha
+ * when \a use_alpha is set, one otherwise.
+ */
+float paint_layer_color_ramp_lut_eval(Span<float4> texels,
+                                      int width,
+                                      bool constant,
+                                      bool use_alpha,
+                                      float rgb[3]);
+
+/**
  * The Posterize filter applied to one channel: the value quantized to \a steps evenly spaced levels
  * over [0, 1], `floor(clamp(value, 0, 1) * (steps - 1) + 0.5) / (steps - 1)`, so both endpoints are
  * preserved and a value at a level's midpoint rounds to the nearer one. A step count below two
@@ -484,10 +505,13 @@ struct MaterialPaintLayerCurves *BKE_paint_layers_curves_ensure(MaterialPaintLay
 const struct CurveMapping *BKE_paint_layers_curves_get(const MaterialPaintLayer &row);
 
 /**
- * Tag \a ma for regeneration when \a data is a row's curve mapping. Called from the RNA update of
- * the mapping pointer, which the curve widget fires after every edit of it.
+ * Sync \a ma's generated curves nodes with the row's curve mapping, in place, and mark the bake
+ * accordingly. \a bmain is the main the tree updates run against. Called from the RNA update of
+ * the mapping pointer, which the curve widget fires after every edit of it; during a point drag
+ * (inside #BKE_paint_layers_curves_live_begin) the bake flags are left alone.
+ * \return true when \a data is a row's curve mapping, whether or not the sync succeeded.
  */
-bool BKE_paint_layers_curves_edited(Material &ma, const void *data);
+bool BKE_paint_layers_curves_edited(Main &bmain, Material &ma, const void *data);
 
 /** A hash of the curves' shape, levels and tone, for the bake and composite caches. */
 uint64_t paint_layer_curves_hash(const struct CurveMapping &curve_mapping);

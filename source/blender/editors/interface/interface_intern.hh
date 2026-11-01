@@ -312,6 +312,15 @@ struct Button : NonMovable {
    */
   std::function<void(bContext &)> apply_func;
 
+  /**
+   * Optional "live" callback of a #ButtonType::Curve button: fired on every point move while the
+   * point is dragged, before the final apply on release. Curve buttons never apply interactively
+   * (#button_activate_init skips #HandleButtonData::interactive for them), so without this a drag
+   * redraws nothing until the release. Only the templates that ask for it set it (a non-null
+   * check is the flag); every other curve widget stays on the apply-on-release behaviour.
+   */
+  std::function<void(bContext &)> curve_live_func;
+
   ButtonHandleNFunc funcN = nullptr;
   void *func_argN = nullptr;
   ButtonArgNFree func_argN_free_fn;

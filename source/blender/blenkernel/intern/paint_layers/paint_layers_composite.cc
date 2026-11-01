@@ -2198,16 +2198,10 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
   {
     return "a row has neither a map, a flat colour nor an Anchor Point slice";
   }
-  /* The combined pass knows the pointwise filters it can express in its shader; a Color Ramp is a
-   * band, not a few uniforms, so the whole stack falls back to the CPU rather than showing the
-   * filter as a no-op. An RGB Curves is the same: its four Bézier tables are baked data, not
-   * uniforms. */
-  if (layer.adjustment_filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP) {
-    return "a Color Ramp adjustment is read";
-  }
-  if (layer.adjustment_filter == MA_PAINT_LAYER_FILTER_CURVES) {
-    return "an RGB Curves adjustment is read";
-  }
+  /* The combined pass knows the pointwise filters it can express in its shader, and reads a Color
+   * Ramp or RGB Curves from a table the gather bakes into a texture. What still has no shader
+   * branch is a Gradient, a baked Anchor Point correction's coverage map, and the row shapes
+   * refused above; those fall back to the CPU rather than shading something different. */
   /* Corrections and mask items first, because a Gradient one is not merely unsupported by a pass
    * that would otherwise lay its map: there is no map, so the gather's own "a correction that
    * changes something" check does not even count it and the row would be shaded without it. The
@@ -2228,20 +2222,6 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
      * coverage map the GPU correction pass does not read. */
     if (correction.anchor_point_coverage_image != nullptr) {
       return "a baked Anchor Point correction is read (no coverage map on the GPU)";
-    }
-    if (correction.filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP) {
-      return "a Color Ramp correction is read";
-    }
-    if (correction.filter == MA_PAINT_LAYER_FILTER_CURVES) {
-      return "an RGB Curves correction is read";
-    }
-  }
-  for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
-    if (item.filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP) {
-      return "a Color Ramp mask item is read";
-    }
-    if (item.filter == MA_PAINT_LAYER_FILTER_CURVES) {
-      return "an RGB Curves mask item is read";
     }
   }
   return nullptr;

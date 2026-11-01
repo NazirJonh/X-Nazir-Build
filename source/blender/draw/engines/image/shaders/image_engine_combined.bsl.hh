@@ -254,10 +254,12 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_LEVELS 2
 #define COMBINED_FILTER_HSL 3
 #define COMBINED_FILTER_BRIGHTNESS_CONTRAST 6
+#define COMBINED_FILTER_COLOR_RAMP 7
 #define COMBINED_FILTER_POSTERIZE 8
 #define COMBINED_FILTER_MATH 9
 #define COMBINED_FILTER_THRESHOLD 10
 #define COMBINED_FILTER_CLAMP 11
+#define COMBINED_FILTER_CURVES 12
 
 float levels_channel(float value, float4 p0, float4 p1)
 {
@@ -319,9 +321,97 @@ float math_channel(float a, int operation, float b, bool use_clamp)
   return use_clamp ? clamp(result, 0.0f, 1.0f) : result;
 }
 
-float3 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1)
+/* -------------------------------------------------------------------- */
+/** \name Filter LUTs
+ *
+ * A Color Ramp and an RGB Curves are not a handful of uniforms: the gather bakes their payload into
+ * a 2D RGBA32F table and reads it with `texelFetch` and explicit interpolation, so the result does
+ * not depend on sampler filtering. The layout is the one `paint_layer_*_lut_build` writes.
+ * \{ */
+
+/** One texel of a filter LUT, clamped to its bounds so an out-of-range index reads the edge. */
+float4 filter_lut_fetch(sampler2D lut_tx, int x, int y)
+{
+  int2 size = textureSize(lut_tx, 0);
+  return texelFetch(lut_tx, int2(clamp(x, 0, size.x - 1), clamp(y, 0, size.y - 1)), 0);
+}
+
+/** Row 0 of an RGB Curves table at \a parameter, linearly interpolated like `CurveMap::range`. */
+float4 curves_lut_sample(sampler2D lut_tx, float parameter)
+{
+  int last = textureSize(lut_tx, 0).x - 1;
+  float index = parameter * float(last);
+  float low = floor(index);
+  float fraction = index - low;
+  return mix(filter_lut_fetch(lut_tx, int(low), 0),
+             filter_lut_fetch(lut_tx, int(low) + 1, 0),
+             fraction);
+}
+
+/** `extrapolate_if_needed` of the RGB Curves node: the edge value plus the slope outside [0, 1]. */
+float3 curves_lut_extrapolate(float3 parameters,
+                              float3 values,
+                              float3 start_slopes,
+                              float3 end_slopes)
+{
+  float3 slopes = float3(0.0f);
+  slopes = select(slopes, end_slopes, greaterThan(parameters, float3(1.0f)));
+  slopes = select(slopes, start_slopes, lessThan(parameters, float3(0.0f)));
+  float3 above = select(float3(0.0f), float3(1.0f), greaterThan(parameters, float3(1.0f)));
+  return values + (parameters - above) * slopes;
+}
+
+/** The RGB Curves node's `curves_combined_rgb`, without white balancing: the CPU does the same. */
+float3 apply_curves(sampler2D lut_tx, float3 rgb)
+{
+  /* Row 1: the start slopes, end slopes, range minimums and range dividers of the four curves. */
+  float4 start_slopes = filter_lut_fetch(lut_tx, 0, 1);
+  float4 end_slopes = filter_lut_fetch(lut_tx, 1, 1);
+  float4 range_minimums = filter_lut_fetch(lut_tx, 2, 1);
+  float4 range_dividers = filter_lut_fetch(lut_tx, 3, 1);
+
+  /* The combined curve first, on all three channels. */
+  float3 parameters = (rgb - range_minimums.aaa) * range_dividers.aaa;
+  float3 combined = float3(curves_lut_sample(lut_tx, parameters.x).a,
+                           curves_lut_sample(lut_tx, parameters.y).a,
+                           curves_lut_sample(lut_tx, parameters.z).a);
+  combined = curves_lut_extrapolate(parameters, combined, start_slopes.aaa, end_slopes.aaa);
+
+  /* Then each channel's own curve. */
+  parameters = (combined - range_minimums.rgb) * range_dividers.rgb;
+  float3 result = float3(curves_lut_sample(lut_tx, parameters.x).r,
+                         curves_lut_sample(lut_tx, parameters.y).g,
+                         curves_lut_sample(lut_tx, parameters.z).b);
+  return curves_lut_extrapolate(parameters, result, start_slopes.rgb, end_slopes.rgb);
+}
+
+/** The Color Ramp's colour at the Rec.709 luminance of \a rgb; `use_nearest` reads the nearest. */
+float4 apply_color_ramp(sampler2D lut_tx, float3 rgb, bool use_nearest)
+{
+  float width = float(textureSize(lut_tx, 0).x);
+  /* The RGB to BW node's scene-linear Rec.709 luminance, as `paint_layer_color_ramp_apply`. */
+  float value = clamp(0.2126f * rgb.x + 0.7152f * rgb.y + 0.0722f * rgb.z, 0.0f, 1.0f);
+  float index = value * (width - 1.0f);
+  if (use_nearest) {
+    return filter_lut_fetch(lut_tx, int(index + 0.5f), 0);
+  }
+  float low = floor(index);
+  return mix(filter_lut_fetch(lut_tx, int(low), 0),
+             filter_lut_fetch(lut_tx, int(low) + 1, 0),
+             index - low);
+}
+
+/** \} */
+
+/**
+ * One filter at full strength. `.xyz` is the filtered colour and `.w` the strength multiplier the
+ * CPU's `composite_filter_color` returns: a Color Ramp's stop alpha when Affect Alpha is set, one
+ * for every other filter and for a ramp that ignores it.
+ */
+float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, sampler2D lut_tx)
 {
   float3 result = rgb;
+  float strength = 1.0f;
   switch (filter_kind) {
     case COMBINED_FILTER_INVERT:
       result = abs(rgb - 1.0f);
@@ -338,6 +428,13 @@ float3 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1)
       hsv.y = clamp(hsv.y * p0.y, 0.0f, 1.0f);
       hsv.z = hsv.z * p0.z;
       result = max(hsv_to_rgb3(hsv), float3(0.0f));
+      break;
+    }
+    case COMBINED_FILTER_COLOR_RAMP: {
+      /* `p1.x` says the band is CONSTANT; `p0.x` is Affect Alpha, the schema's first parameter. */
+      float4 ramp = apply_color_ramp(lut_tx, rgb, p1.x > 0.5f);
+      result = ramp.xyz;
+      strength = (p0.x > 0.5f) ? clamp(ramp.w, 0.0f, 1.0f) : 1.0f;
       break;
     }
     case COMBINED_FILTER_BRIGHTNESS_CONTRAST: {
@@ -379,10 +476,13 @@ float3 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1)
                       min(max(rgb.z, p0.x), p0.y));
       break;
     }
+    case COMBINED_FILTER_CURVES:
+      result = apply_curves(lut_tx, rgb);
+      break;
     default:
       break;
   }
-  return result;
+  return float4(result, strength);
 }
 
 /** \} */
@@ -495,6 +595,8 @@ float4 sample_map(sampler2D tx,
 
 struct MaskResources {
   [[sampler(0)]] sampler2D mask_tx;
+  /** A Color Ramp or RGB Curves table, or the gather's placeholder for other filters. */
+  [[sampler(1)]] sampler2D filter_lut_tx;
   [[image(0, read_write, SFLOAT_16_16_16_16)]] image2D mask_img;
   /** The destination of #COMBINED_MASK_SLOT_STORE. */
   [[image(1, write, SFLOAT_16_16_16_16)]] image2D slot_img;
@@ -602,10 +704,15 @@ void mask_comp([[resource_table]] MaskResources &srt,
   if (srt.mode == COMBINED_MASK_ITEM) {
     float opacity = clamp(srt.opacity, 0.0f, 1.0f);
     if (srt.filter_kind != COMBINED_FILTER_NONE) {
-      /* A filter works on the factor so far as a grey. */
-      float grey = apply_filter(
-                       srt.filter_kind, float3(m), srt.filter_params_0, srt.filter_params_1)
-                       .x;
+      /* A filter works on the factor so far as a grey. The Color Ramp's strength multiplier is
+       * ignored, as the CPU's mask path ignores it: a grey coefficient has no stop alpha. */
+      float grey =
+          apply_filter(srt.filter_kind,
+                       float3(m),
+                       srt.filter_params_0,
+                       srt.filter_params_1,
+                       srt.filter_lut_tx)
+              .x;
       m += (grey - m) * opacity;
     }
     else {
@@ -667,6 +774,8 @@ struct LayerResources {
   [[sampler(1)]] sampler2D mask_tx;
   /** The coverage of an Anchor Point slice in its `x`, read when #COMBINED_LAYER_SLOT is set. */
   [[sampler(2)]] sampler2D slot_cov_tx;
+  /** A Color Ramp or RGB Curves table, or the gather's placeholder for other filters. */
+  [[sampler(3)]] sampler2D filter_lut_tx;
   [[image(0, read_write, SFLOAT_16_16_16_16)]] image2D accum_img;
   /** The row's colour and coverage while corrections are laid over it. */
   [[image(1, read_write, SFLOAT_16_16_16_16)]] image2D row_color_img;
@@ -720,9 +829,16 @@ void layer_comp([[resource_table]] LayerResources &srt,
   }
   else {
     if ((srt.flags & COMBINED_LAYER_ADJUSTMENT) != 0) {
-      /* The stack so far, filtered; the row then lays it by its own blend, opacity and mask. */
+      /* The stack so far, filtered; the row then lays it by its own blend, opacity and mask. A
+       * Color Ramp's stop alpha lowers the strength the way the CPU's adjustment path does. */
       top = dst;
-      top.xyz = apply_filter(srt.filter_kind, dst.xyz, srt.filter_params_0, srt.filter_params_1);
+      float4 filtered = apply_filter(srt.filter_kind,
+                                     dst.xyz,
+                                     srt.filter_params_0,
+                                     srt.filter_params_1,
+                                     srt.filter_lut_tx);
+      top.xyz = (filtered.w == 1.0f) ? filtered.xyz :
+                                      dst.xyz + (filtered.xyz - dst.xyz) * filtered.w;
     }
     else if ((srt.flags & COMBINED_LAYER_SLOT) != 0) {
       /* An Anchor Point slice: screen-space colour and coverage, no mapping, no lod and no
@@ -795,6 +911,8 @@ struct CorrectionResources {
   [[sampler(0)]] sampler2D correction_tx;
   /** The coverage of an Anchor Point slice in its `x`, read when #COMBINED_LAYER_SLOT is set. */
   [[sampler(1)]] sampler2D slot_cov_tx;
+  /** A Color Ramp or RGB Curves table, or the gather's placeholder for other filters. */
+  [[sampler(2)]] sampler2D filter_lut_tx;
   [[image(0, read_write, SFLOAT_16_16_16_16)]] image2D row_color_img;
   [[image(1, read_write, SFLOAT_16_16_16_16)]] image2D row_factor_img;
   [[push_constant]] const float4x4 texel_to_uv;
@@ -829,8 +947,12 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
   float4 s = imageLoad(srt.row_color_img, texel);
   if (srt.filter_kind != COMBINED_FILTER_NONE) {
     float weight = clamp(srt.opacity, 0.0f, 1.0f);
-    float3 filtered = apply_filter(srt.filter_kind, s.xyz, srt.filter_params_0, srt.filter_params_1);
-    s.xyz = s.xyz + (filtered - s.xyz) * weight;
+    float4 filtered = apply_filter(srt.filter_kind,
+                                   s.xyz,
+                                   srt.filter_params_0,
+                                   srt.filter_params_1,
+                                   srt.filter_lut_tx);
+    s.xyz = s.xyz + (filtered.xyz - s.xyz) * weight * filtered.w;
     imageStore(srt.row_color_img, texel, s);
     return;
   }

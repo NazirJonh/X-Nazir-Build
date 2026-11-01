@@ -138,6 +138,17 @@ inline constexpr const char *BLEND_NODE_KEY_PROP = "pbr_paint_layers_blend_key";
  * blend. */
 inline constexpr const char *BLEND_NODE_COUNT_PROP = "pbr_paint_layers_blend_nodes";
 /**
+ * On a generated RGB Curves node: the marker of the row (a correction, an adjustment or a mask
+ * item) whose curve mapping the node carries a copy of in its storage. Unlike a blend, the curves'
+ * shape changes no node set, so the sync updates the storage in place and the shape is deliberately
+ * out of the topology hash; this key is what lets the sync find the node without a rebuild. The
+ * value is the plain UUID string of the row's marker, parsed back with #BLI_uuid_parse_string.
+ */
+inline constexpr const char *CURVES_NODE_KEY_PROP = "pbr_paint_layers_curves_key";
+/** On a layer group: how many nodes carry #CURVES_NODE_KEY_PROP, the same hand-edit guard the
+ * blend nodes carry #BLEND_NODE_COUNT_PROP for. */
+inline constexpr const char *CURVES_NODE_COUNT_PROP = "pbr_paint_layers_curves_nodes";
+/**
  * On the Bump and Normal Map nodes of the material's own tree that the stack owns: which of the two
  * the node is (#RESPONSE_NODE_BUMP, #RESPONSE_NODE_NORMAL_MAP), so a user's own Bump or Normal Map
  * is never mistaken for them the way a "first node of the type" search would. The response values
@@ -427,6 +438,18 @@ bool paint_layers_blend_sync(Material &ma, Main &bmain);
 
 /** Record how many keyed blend nodes each layer group holds, after a build. */
 void paint_layers_blend_nodes_commit(Material &ma);
+
+/**
+ * Bring every generated RGB Curves node's storage in line with its row's curve mapping, in place —
+ * the same deal the blend sync offers a `blend_type`: a point edit re-copies the mapping into the
+ * node and rebuilds no group. \return false when the tree no longer carries the curves nodes the
+ * description expects (a hand-edited tree, or one built before the nodes were keyed), so the
+ * caller falls back to a full rebuild.
+ */
+bool paint_layers_curves_sync(Material &ma, Main &bmain);
+
+/** Record how many keyed curves nodes each layer group holds, after a build. */
+void paint_layers_curves_nodes_commit(Material &ma);
 
 /** \} */
 

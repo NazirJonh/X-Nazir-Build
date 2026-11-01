@@ -3336,7 +3336,8 @@ void template_curve_mapping(Layout *layout,
                             bool brush,
                             bool neg_slope,
                             bool tone,
-                            bool presets);
+                            bool presets,
+                            bool live_update = false);
 /**
  * Template for a path creation widget intended for custom bevel profiles.
  * This section is quite similar to #template_curve_mapping, but with reduced complexity.

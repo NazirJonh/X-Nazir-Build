@@ -20,7 +20,12 @@
 #include <utility>
 
 #include "BLI_map.hh"
+#include "BLI_math_vector_types.hh"
 #include "BLI_set.hh"
+#include "BLI_vector.hh"
+
+#include "DNA_color_types.h"
+#include "DNA_colorband_types.h"
 
 #include "BKE_paint_material_composite.hh"
 
@@ -447,5 +452,28 @@ class PaintLayersMaskSampler {
   Vector<PaintMaterialCompositeMaskBuffer> buffers_;
   Vector<Tile> tiles_;
 };
+
+/**
+ * Build the table the Combined preview's shader reads in place of \a curve_mapping. The mapping's
+ * tables must be built (#BKE_curvemapping_init) when this runs.
+ *
+ * Row 0 is `BKE_curvemapping_table_RGBA`: one texel per table entry, with the R, G, B and combined
+ * curves in its components. Row 1 holds the data the GLSL node reads as uniforms: texel 0 the start
+ * slopes, 1 the end slopes, 2 the range minimums and 3 the range dividers, each four values
+ * (#CM_TOT). \a r_width is the table's entry count (at least four, for row 1).
+ */
+void paint_layer_curves_lut_build(const CurveMapping &curve_mapping,
+                                  Vector<float4> &r_texels,
+                                  int &r_width,
+                                  int &r_height);
+
+/**
+ * Build the table the Combined preview's shader reads in place of \a band. \a r_texels holds
+ * `r_width` samples of `BKE_colorband_evaluate(band, i / (r_width - 1))`, the stop's alpha in `.w`.
+ * The interpolation and colour mode are already part of the evaluation.
+ */
+void paint_layer_color_ramp_lut_build(const ColorBand &band,
+                                      Vector<float4> &r_texels,
+                                      int &r_width);
 
 }  // namespace blender

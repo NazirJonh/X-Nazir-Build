@@ -3917,6 +3917,55 @@ TEST_F(PaintLayersCompositeTest, the_gpu_path_refuses_gradient_corrections_and_m
   EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layers[2]), nullptr);
 }
 
+/**
+ * A Color Ramp and an RGB Curves are table lookups in the GPU shader now, so neither costs the CPU
+ * fallback: the gather bakes their payload into a texture. This is the contract that keeps a live
+ * drag on the GPU path.
+ */
+TEST_F(PaintLayersCompositeTest, the_gpu_path_lays_color_ramp_and_curves_filters)
+{
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 255, 0, 0, 255));
+  MaterialPaintLayer *corrected = add_paint_layer(
+      "Corrected", add_solid_image("Corrected", 4, 0, 255, 0, 255));
+  ASSERT_NE(BKE_paint_layers_filter_add(
+                *ma, corrected, MA_PAINT_LAYER_FILTER_CURVES, "Curves Correction"),
+            nullptr);
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Adjustment;
+  params.filter = MA_PAINT_LAYER_FILTER_COLOR_RAMP;
+  ASSERT_NE(BKE_paint_layers_add_with_policy(*ma, params), nullptr);
+
+  MaterialPaintLayer *masked = add_paint_layer(
+      "Masked", add_solid_image("Masked", 4, 0, 0, 255, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, masked, 1.0f), nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_filter_add(
+                *ma, masked, MA_PAINT_LAYER_FILTER_COLOR_RAMP, "Ramp Mask"),
+            nullptr);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_FALSE(layers.is_empty());
+
+  bool saw_curves = false;
+  bool saw_ramp = false;
+  for (const PaintMaterialCompositeImageLayer &layer : layers) {
+    EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layer), nullptr);
+    saw_curves |= layer.adjustment_curves != nullptr;
+    saw_ramp |= layer.adjustment_ramp != nullptr;
+    for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+      saw_curves |= correction.filter_curves != nullptr;
+    }
+    for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+      saw_ramp |= item.filter_ramp != nullptr;
+    }
+  }
+  /* The payloads really are in the description, not just the filter codes. */
+  EXPECT_TRUE(saw_curves);
+  EXPECT_TRUE(saw_ramp);
+}
+
 /** \} */
 
 }  // namespace blender::bke::tests

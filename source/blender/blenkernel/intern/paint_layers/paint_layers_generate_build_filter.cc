@@ -14,6 +14,7 @@
 #include "BLI_index_range.hh"
 #include "BLI_map.hh"
 #include "BLI_math_vector.h"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "BKE_colortools.hh"
@@ -732,6 +733,12 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
        * row's, tables included. */
       BKE_curvemapping_free_data(static_cast<CurveMapping *>(curves->storage));
       BKE_curvemapping_copy_data(static_cast<CurveMapping *>(curves->storage), curve_mapping);
+      /* Key the node with the effect's marker, like a blend node carries `B:<marker>:<channel>`:
+       * the curves sync finds the node by it and updates its storage in place, so a point edit
+       * rebuilds no group. The shape stays out of the topology hash on purpose. */
+      char curves_marker[UUID_STRING_SIZE];
+      BLI_uuid_format(curves_marker, effect.marker);
+      prop_string_set(curves->system_properties, CURVES_NODE_KEY_PROP, curves_marker);
 
       bNodeSocket *color_in = socket_in(*curves, "Color");
       bNodeSocket *color_out = socket_out(*curves, "Color");

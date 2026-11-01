@@ -93,10 +93,33 @@ bool BKE_paint_layers_curves_supported(const MaterialPaintLayer &row);
 struct MaterialPaintLayerCurves *BKE_paint_layers_curves_ensure(MaterialPaintLayer &row);
 
 /**
- * Tag \a ma for regeneration when \a data is a row's curve mapping. Called from the RNA update of
- * the mapping pointer, which the curve widget fires after every edit of it.
+ * Sync \a ma's generated curves nodes with the row's curve mapping, in place: the node's storage
+ * re-copies the mapping and no group is rebuilt, so a curve widget drag is cheap. \a bmain is the
+ * main the tree updates run against. Called from the RNA update of the mapping pointer, which the
+ * curve widget fires after every edit of it.
+ *
+ * During a point drag — the calls made inside #BKE_paint_layers_curves_live_begin and
+ * #BKE_paint_layers_curves_live_end — the bake flags are left alone and only the node and the
+ * shading are updated; the edit that ends the drag re-checks the shape with "remove doubles" and
+ * marks the bake stale there.
+ *
+ * \return true when \a data is a row's curve mapping. When the tree no longer carries the curves
+ * node the description expects, the material is tagged #MA_PAINT_LAYERS_REGEN instead (a rebuild),
+ * never left stale.
  */
-bool BKE_paint_layers_curves_edited(Material &ma, const void *data);
+bool BKE_paint_layers_curves_edited(Main &bmain, Material &ma, const void *data);
+
+/**
+ * Open a live-drag scope on this thread: curve edits made until the matching
+ * #BKE_paint_layers_curves_live_end take the in-place node sync only, without the bake flags, so
+ * a point drag re-renders no baked maps. The curve template's "live update" callback wraps its
+ * RNA update in these; the final update on release runs outside of the scope. The scopes nest,
+ * and the calls must pair (asserted).
+ */
+void BKE_paint_layers_curves_live_begin();
+
+/** Close the innermost live-drag scope #BKE_paint_layers_curves_live_begin opened. */
+void BKE_paint_layers_curves_live_end();
 
 /**
  * A strictly value-only edit (a row's opacity, a Fill row's constant): the generated tree keeps its

@@ -13,12 +13,19 @@
 #include "paint_layers_graph_eval_test_fixture.hh"
 
 #include "BKE_appdir.hh"
+#include "BKE_colorband.hh"
+#include "BKE_colortools.hh"
 #include "BKE_paint_layers_edit.hh"
 
+#include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
 
 #include "BLO_readfile.hh"
 #include "BLO_writefile.hh"
+
+#include "DNA_color_types.h"
+#include "DNA_colorband_types.h"
+#include "DNA_curve_types.h"
 
 #include "../paint_layers_generate_intern.hh"
 #include "../paint_layers_kind.hh"
@@ -837,26 +844,172 @@ TEST_F(PaintLayersCurvesTest, a_full_strength_lift_raises_every_channel)
   EXPECT_NEAR(after.b, before.b + 0.25f, 2e-3f);
 }
 
-TEST_F(PaintLayersCurvesTest, editing_the_mapping_tags_the_material_and_moves_the_topology_hash)
+namespace {
+
+/** The `.PL Layer <name>` group the generator made for the row of that name, or null. */
+bNodeTree *curves_test_layer_tree(Main &bmain, const char *layer_name)
+{
+  char full[96];
+  SNPRINTF(full, ".PL Layer %s", layer_name);
+  for (bNodeTree &tree : bmain.nodetrees) {
+    if (STREQ(tree.id.name + 2, full)) {
+      return &tree;
+    }
+  }
+  return nullptr;
+}
+
+/** The mapping of the keyed curves node in \a group, or null. */
+const CurveMapping *curves_node_mapping_find(bNodeTree &group)
+{
+  for (bNode &node : group.nodes) {
+    if (paint_layers::prop_string_get(node.system_properties,
+                                      paint_layers::CURVES_NODE_KEY_PROP) == nullptr)
+    {
+      continue;
+    }
+    if (node.type_legacy == SH_NODE_CURVE_RGB && node.storage != nullptr) {
+      return static_cast<const CurveMapping *>(node.storage);
+    }
+    return nullptr;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST_F(PaintLayersCurvesTest, editing_the_mapping_syncs_the_node_in_place)
 {
   MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
   MaterialPaintLayer *filter = add_curves(*row);
   MaterialPaintLayerCurves *curves = BKE_paint_layers_curves_ensure(*filter);
   ASSERT_NE(curves, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
-  /* The shape the node carries a copy of is topology, like a ramp's band: the hash has to move
-   * with the edit, or the rebuilt tree keeps the old curves until the next structure change. */
+  /* The curves are a value of the keyed node, not topology: the hash has to stay where it was,
+   * the node's storage takes the new shape in place, and no rebuild is asked for. */
   const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
   const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
   const uint64_t before = paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms);
 
-  EXPECT_TRUE(BKE_paint_layers_curves_edited(*ma, &curves->curve_mapping));
-  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  set_lift(*filter);
+  EXPECT_TRUE(BKE_paint_layers_curves_edited(*bmain, *ma, &curves->curve_mapping));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 
   const uint64_t after = paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms);
-  EXPECT_NE(after, before);
+  EXPECT_EQ(after, before);
 
-  EXPECT_FALSE(BKE_paint_layers_curves_edited(*ma, &row->mapping));
+  /* The node in the row's group carries the edited shape already, hash against hash. */
+  bNodeTree *group = curves_test_layer_tree(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  const CurveMapping *node_mapping = curves_node_mapping_find(*group);
+  ASSERT_NE(node_mapping, nullptr);
+  EXPECT_EQ(paint_layer_curves_hash(*node_mapping),
+            paint_layer_curves_hash(curves->curve_mapping));
+
+  /* A mapping no row owns edits nothing. */
+  EXPECT_FALSE(BKE_paint_layers_curves_edited(*bmain, *ma, &row->mapping));
+}
+
+TEST_F(PaintLayersCurvesTest, live_edit_reaches_the_graph_without_regeneration)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_curves(*row, 0.7f);
+  set_lift(*filter);
+  /* The tree the drag edits below. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  MaterialPaintLayerCurves *curves = BKE_paint_layers_curves_ensure(*filter);
+  ASSERT_NE(curves, nullptr);
+  curves->curve_mapping.cm[0].curve[0].y = 0.5f;
+  BKE_curvemapping_init(&curves->curve_mapping);
+
+  /* A drag: the edit lands inside the live scope, the interpreter reads `node.storage` as it is
+   * afterwards — no regeneration in between. */
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  BKE_paint_layers_curves_live_begin();
+  EXPECT_TRUE(BKE_paint_layers_curves_edited(*bmain, *ma, &curves->curve_mapping));
+  BKE_paint_layers_curves_live_end();
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  GraphInterpreter interpreter;
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  const RGBA graph = interpreter.eval_result(result_name(kColor));
+  const RGBA cpu = cpu_pixel(kColor);
+  EXPECT_NEAR(graph.r, cpu.r, 2e-3f);
+  EXPECT_NEAR(graph.g, cpu.g, 2e-3f);
+  EXPECT_NEAR(graph.b, cpu.b, 2e-3f);
+}
+
+TEST_F(PaintLayersCurvesTest, missing_curves_node_falls_back_to_rebuild)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_curves(*row);
+  set_lift(*filter);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* A hand edit took the keyed node out: the sync cannot carry the group any more. */
+  bNodeTree *group = curves_test_layer_tree(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  bNode *curves_node = nullptr;
+  for (bNode &node : group->nodes) {
+    if (paint_layers::prop_string_get(node.system_properties,
+                                      paint_layers::CURVES_NODE_KEY_PROP) != nullptr)
+    {
+      curves_node = &node;
+      break;
+    }
+  }
+  ASSERT_NE(curves_node, nullptr);
+  bke::node_remove_node(bmain, *group, *curves_node, true, false);
+
+  MaterialPaintLayerCurves *curves = BKE_paint_layers_curves_ensure(*filter);
+  ASSERT_NE(curves, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_curves_edited(*bmain, *ma, &curves->curve_mapping));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  /* And the rebuild the tag asks for heals the group: the count is there again. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = curves_test_layer_tree(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  EXPECT_GE(paint_layers::prop_int_get(
+                group->id.properties, paint_layers::CURVES_NODE_COUNT_PROP, -1),
+            0);
+}
+
+TEST_F(PaintLayersCurvesTest, loaded_group_without_the_count_rebuilds_once)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_curves(*row);
+  set_lift(*filter);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* A file written before the curves nodes were keyed: no count on the group. */
+  bNodeTree *group = curves_test_layer_tree(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  paint_layers::prop_int_set(
+      group->id.properties, paint_layers::CURVES_NODE_COUNT_PROP, -1);
+
+  MaterialPaintLayerCurves *curves = BKE_paint_layers_curves_ensure(*filter);
+  ASSERT_NE(curves, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_curves_edited(*bmain, *ma, &curves->curve_mapping));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  /* The rebuild the tag asks for commits the count, so the next edit syncs in place. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = curves_test_layer_tree(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(paint_layers::prop_int_get(
+                group->id.properties, paint_layers::CURVES_NODE_COUNT_PROP, -1),
+            1);
+
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  curves->curve_mapping.cm[0].curve[0].y = 0.75f;
+  BKE_curvemapping_init(&curves->curve_mapping);
+  EXPECT_TRUE(BKE_paint_layers_curves_edited(*bmain, *ma, &curves->curve_mapping));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 }
 
 TEST_F(PaintLayersCurvesTest, curves_adjustment_matches_the_cpu)
@@ -1545,5 +1698,189 @@ TEST_F(PaintLayersFilterTest, a_filter_alone_does_not_make_a_row_take_part)
   EXPECT_NEAR(after.g, before.g, 2e-3f);
   EXPECT_NEAR(after.b, before.b, 2e-3f);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Filter LUTs
+ *
+ * The Combined preview reads a Color Ramp and an RGB Curves from a table instead of uniforms. The
+ * shader's lookup has a CPU twin, and these hold it to the functions the CPU preview applies: if the
+ * two disagree here, the GPU preview disagrees with the bake and the 3D viewport.
+ * \{ */
+
+namespace {
+
+/** Compare the LUT's lookup with `paint_layer_curves_apply` over the range and past both ends. */
+void expect_curves_lut_matches_apply(CurveMapping &cumap, const char *label)
+{
+  BKE_curvemapping_init(&cumap);
+
+  Vector<float4> texels;
+  int width = 0;
+  int height = 0;
+  paint_layer_curves_lut_build(cumap, texels, width, height);
+  ASSERT_EQ(height, 2) << label;
+  ASSERT_GE(width, CM_TOT) << label;
+
+  for (const int i : IndexRange(512)) {
+    const float value = -0.5f + 2.0f * (float(i) / 511.0f);
+    const float input[3] = {value, value * 0.5f, 1.0f - value};
+    float expected[3];
+    copy_v3_v3(expected, input);
+    paint_layer_curves_apply(cumap, expected);
+
+    float actual[3];
+    copy_v3_v3(actual, input);
+    paint_layer_curves_lut_eval(texels, width, actual);
+
+    for (const int channel : IndexRange(3)) {
+      EXPECT_NEAR(actual[channel], expected[channel], 2e-3f)
+          << label << " value " << value << " channel " << channel;
+    }
+  }
+}
+
+}  // namespace
+
+TEST(PaintLayersCurvesLut, lookup_matches_the_filter_for_flat_lift_s_curve_and_extrapolation)
+{
+  {
+    /* Flat: the identity mapping. */
+    CurveMapping cumap = {};
+    BKE_curvemapping_set_defaults(&cumap, 4, 0.0f, 0.0f, 1.0f, 1.0f, HD_AUTO);
+    expect_curves_lut_matches_apply(cumap, "identity");
+    BKE_curvemapping_free_data(&cumap);
+  }
+  {
+    /* Different offsets on each channel: R lifts, G drops, B compresses. */
+    CurveMapping cumap = {};
+    BKE_curvemapping_set_defaults(&cumap, 4, 0.0f, 0.0f, 1.0f, 1.0f, HD_AUTO);
+    cumap.cm[0].curve[0].x = 0.0f;
+    cumap.cm[0].curve[0].y = 0.25f;
+    cumap.cm[0].curve[1].x = 1.0f;
+    cumap.cm[0].curve[1].y = 1.25f;
+    cumap.cm[1].curve[0].x = 0.0f;
+    cumap.cm[1].curve[0].y = -0.1f;
+    cumap.cm[1].curve[1].x = 1.0f;
+    cumap.cm[1].curve[1].y = 0.9f;
+    cumap.cm[2].curve[0].x = 0.0f;
+    cumap.cm[2].curve[0].y = 0.0f;
+    cumap.cm[2].curve[1].x = 1.0f;
+    cumap.cm[2].curve[1].y = 0.5f;
+    expect_curves_lut_matches_apply(cumap, "per-channel");
+    BKE_curvemapping_free_data(&cumap);
+  }
+  {
+    /* An S: the combined curve gets a middle point above the diagonal. */
+    CurveMapping cumap = {};
+    BKE_curvemapping_set_defaults(&cumap, 4, 0.0f, 0.0f, 1.0f, 1.0f, HD_AUTO);
+    BKE_curvemap_insert(&cumap.cm[3], 0.5f, 0.8f);
+    expect_curves_lut_matches_apply(cumap, "s-curve");
+    BKE_curvemapping_free_data(&cumap);
+  }
+  {
+    /* Extrapolation past [0, 1] with non-horizontal slopes. */
+    CurveMapping cumap = {};
+    BKE_curvemapping_set_defaults(&cumap, 4, 0.0f, 0.0f, 1.0f, 1.0f, HD_AUTO);
+    cumap.flag |= CUMA_EXTEND_EXTRAPOLATE;
+    for (const int i : IndexRange(CM_TOT)) {
+      CurveMap &curve = cumap.cm[i];
+      curve.ext_in[0] = 1.0f;
+      curve.ext_in[1] = 0.5f;
+      curve.ext_out[0] = 1.0f;
+      curve.ext_out[1] = 0.5f;
+    }
+    expect_curves_lut_matches_apply(cumap, "extrapolate");
+    BKE_curvemapping_free_data(&cumap);
+  }
+  {
+    /* Extrapolation off: beyond the table the edge value stays flat, zero slopes. */
+    CurveMapping cumap = {};
+    BKE_curvemapping_set_defaults(&cumap, 4, 0.0f, 0.0f, 1.0f, 1.0f, HD_AUTO);
+    cumap.flag &= ~CUMA_EXTEND_EXTRAPOLATE;
+    expect_curves_lut_matches_apply(cumap, "flat-extrapolate");
+    BKE_curvemapping_free_data(&cumap);
+  }
+  {
+    /* The clip flag changes what the UI clamps, not what the RGB Curves filter evaluates. */
+    CurveMapping cumap = {};
+    BKE_curvemapping_set_defaults(&cumap, 4, 0.0f, 0.0f, 1.0f, 1.0f, HD_AUTO);
+    cumap.flag |= CUMA_DO_CLIP;
+    cumap.clipr.ymin = 0.1f;
+    cumap.clipr.ymax = 0.9f;
+    expect_curves_lut_matches_apply(cumap, "clip");
+    BKE_curvemapping_free_data(&cumap);
+  }
+}
+
+TEST(PaintLayersColorRampLut, lookup_matches_the_filter_for_every_interpolation_and_colour_mode)
+{
+  const int interpolations[] = {COLBAND_INTERP_LINEAR,
+                                COLBAND_INTERP_EASE,
+                                COLBAND_INTERP_CARDINAL,
+                                COLBAND_INTERP_B_SPLINE,
+                                COLBAND_INTERP_CONSTANT};
+  const int colour_modes[] = {COLBAND_BLEND_RGB, COLBAND_BLEND_HSV, COLBAND_BLEND_HSL};
+
+  for (const int ipotype : interpolations) {
+    for (const int colour_mode : colour_modes) {
+      ColorBand band = {};
+      BKE_colorband_init(&band, true);
+      band.ipotype = ipotype;
+      band.color_mode = colour_mode;
+      /* Three stops, so every interpolation has a segment on both sides. */
+      band.tot = 3;
+      band.data[0].pos = 0.0f;
+      band.data[0].r = 0.05f;
+      band.data[0].g = 0.1f;
+      band.data[0].b = 0.5f;
+      band.data[0].a = 0.3f;
+      band.data[1].pos = 0.3f;
+      band.data[1].r = 0.8f;
+      band.data[1].g = 0.2f;
+      band.data[1].b = 0.1f;
+      band.data[1].a = 0.7f;
+      band.data[2].pos = 1.0f;
+      band.data[2].r = 0.95f;
+      band.data[2].g = 0.9f;
+      band.data[2].b = 0.1f;
+      band.data[2].a = 1.0f;
+
+      Vector<float4> texels;
+      int width = 0;
+      paint_layer_color_ramp_lut_build(band, texels, width);
+      ASSERT_EQ(width, 2048);
+
+      /* A CONSTANT band is read at its nearest sample; every other mode interpolates. The CPU
+       * forces a LINEAR interpolation for the HSV and HSL colour modes. */
+      const bool constant = colour_mode == COLBAND_BLEND_RGB &&
+                            ipotype == COLBAND_INTERP_CONSTANT;
+      for (const bool use_alpha : {false, true}) {
+        for (const int i : IndexRange(512)) {
+          const float value = float(i) / 511.0f;
+          const float input[3] = {value, value, value};
+          float expected[3];
+          copy_v3_v3(expected, input);
+          const float expected_strength = paint_layer_color_ramp_apply(band, use_alpha, expected);
+
+          float actual[3];
+          copy_v3_v3(actual, input);
+          const float actual_strength = paint_layer_color_ramp_lut_eval(
+              texels, width, constant, use_alpha, actual);
+
+          for (const int channel : IndexRange(3)) {
+            EXPECT_NEAR(actual[channel], expected[channel], 2e-3f)
+                << "ipotype " << ipotype << " mode " << colour_mode << " value " << value
+                << " channel " << channel;
+          }
+          EXPECT_NEAR(actual_strength, expected_strength, 2e-3f)
+              << "ipotype " << ipotype << " mode " << colour_mode << " value " << value
+              << " strength";
+        }
+      }
+    }
+  }
+}
+
+/** \} */
 
 }  // namespace blender::bke::tests

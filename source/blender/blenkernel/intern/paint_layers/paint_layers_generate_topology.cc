@@ -221,18 +221,17 @@ static void gradient_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &
  * Mix a filter's payload: what it decides about the nodes rather than reads as a value. A Color
  * Band lives in a ColorRamp node's storage, not in a socket, so a stop or an interpolation edit
  * changes the node itself and the group must be rebuilt, not synced in place. The RGB Curves
- * filter's mapping is the same: the generated node carries a copy of it in its storage, so an edit
- * of a point is a different node. The Math filter's operation and clamp are the same kind of
- * decision: they pick which Math nodes the generator builds and what flags they carry, so an edit
- * of either is a different graph while the operands stay value inputs.
+ * filter's mapping is deliberately absent: the generated node carries a copy of it in its storage,
+ * but an edit of a point is a value there, not a different node — the curves sync updates the
+ * storage in place (#paint_layers_curves_sync), so the shape is not part of the graph. The Math
+ * filter's operation and clamp are the same kind of decision as the ColorRamp's: they pick which
+ * Math nodes the generator builds and what flags they carry, so an edit of either is a different
+ * graph while the operands stay value inputs.
  */
 static void filter_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &row)
 {
   if (row.ramp != nullptr && paint_layer_kind_has_ramp_param(row)) {
     hash = topology_hash_mix(hash, paint_layer_ramp_hash(row.ramp->band));
-  }
-  if (row.curves != nullptr && paint_layer_kind_has_curves_param(row)) {
-    hash = topology_hash_mix(hash, paint_layer_curves_hash(row.curves->curve_mapping));
   }
   if (row.kind_subtype == MA_PAINT_LAYER_FILTER_MATH) {
     /* A salt first, so the operation cannot read like a payload the shape already carries. */

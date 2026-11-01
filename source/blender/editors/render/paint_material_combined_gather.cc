@@ -1190,6 +1190,10 @@ bool combined_preview_gpu_update(const Material &ma,
   std::array<gpu::Texture *, gpu_folder_levels_max> folder_cover;
   folder_premul.fill(nullptr);
   folder_cover.fill(nullptr);
+  /* The Color Ramp and RGB Curves tables made for this update, released with the other temporaries.
+   * No cache yet: a table is cheap next to the dispatch that reads it, and the payload hash would
+   * have to be tracked across frames to make one worth its invalidation rules. */
+  Vector<gpu::Texture *> filter_luts;
   /* Anchor Point slices captured before the channel passes, and the mask slices beside them. */
   Vector<GpuSliceSlot> slice_slots;
   Vector<GpuMaskSlot> mask_slots;
@@ -1214,6 +1218,11 @@ bool combined_preview_gpu_update(const Material &ma,
       }
     }
     for (gpu::Texture *texture : folder_cover) {
+      if (texture != nullptr) {
+        pool.release_texture(texture);
+      }
+    }
+    for (gpu::Texture *texture : filter_luts) {
       if (texture != nullptr) {
         pool.release_texture(texture);
       }
@@ -1254,6 +1263,55 @@ bool combined_preview_gpu_update(const Material &ma,
   if (slot_dummy == nullptr) {
     return gpu_refuse("the placeholder slot texture could not be allocated");
   }
+
+  /** Whether a Color Ramp's table steps at its stops instead of interpolating between them. */
+  const auto color_ramp_is_constant = [](const ColorBand &band) {
+    return band.color_mode == COLBAND_BLEND_RGB && band.ipotype == COLBAND_INTERP_CONSTANT;
+  };
+
+  /**
+   * The table the shader's `filter_lut_tx` reads for \a filter_kind, or \a dummy for a filter that
+   * needs none. Null when the filter has no payload or the texture could not be allocated, which
+   * the caller turns into a refusal; a Color Ramp or RGB Curves without its payload must not be
+   * shaded as if it were the identity.
+   */
+  const auto filter_lut_acquire = [&](const int filter_kind,
+                                      const ColorBand *ramp,
+                                      const CurveMapping *curves) -> gpu::Texture * {
+    Vector<float4> texels;
+    int width = 0;
+    int height = 0;
+    if (filter_kind == MA_PAINT_LAYER_FILTER_COLOR_RAMP) {
+      if (ramp == nullptr || ramp->tot == 0) {
+        return nullptr;
+      }
+      paint_layer_color_ramp_lut_build(*ramp, texels, width);
+      height = 1;
+    }
+    else if (filter_kind == MA_PAINT_LAYER_FILTER_CURVES) {
+      if (curves == nullptr) {
+        return nullptr;
+      }
+      paint_layer_curves_lut_build(*curves, texels, width, height);
+    }
+    else {
+      return dummy;
+    }
+    gpu::Texture *lut = pool.acquire_texture_2d(
+        int2(width, height),
+        1,
+        gpu::TextureFormat::SFLOAT_32_32_32_32,
+        eGPUTextureUsage(GPU_TEXTURE_USAGE_SHADER_READ),
+        "combined_filter_lut");
+    if (lut == nullptr) {
+      return nullptr;
+    }
+    GPU_texture_update(lut, GPU_DATA_FLOAT, texels.data());
+    /* The upload is read by the dispatch that follows; the tests upload-and-read the same way. */
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE);
+    filter_luts.append(lut);
+    return lut;
+  };
 
   /* An affine 2D map as the mat4 the push constants take: GLSL multiplies columns, so the
    * translation sits in the fourth one. */
@@ -1298,6 +1356,8 @@ bool combined_preview_gpu_update(const Material &ma,
                        gpu::Texture *mask = nullptr,
                        const int filter_kind = 0,
                        const float *filter_params = nullptr,
+                       const ColorBand *filter_ramp = nullptr,
+                       const CurveMapping *filter_curves = nullptr,
                        gpu::Texture *slot_coverage = nullptr) {
     gpu::Texture *sampled = map != nullptr ? map : dummy;
     gpu::Texture *mask_sampled = mask != nullptr ? mask : dummy;
@@ -1319,9 +1379,23 @@ bool combined_preview_gpu_update(const Material &ma,
     const float4 adjustment_0 = filter_params != nullptr ?
                                     float4(filter_params[0], filter_params[1], filter_params[2], filter_params[3]) :
                                     float4(0.0f);
-    const float4 adjustment_1 = filter_params != nullptr ?
-                                    float4(filter_params[4], filter_params[5], filter_params[6], filter_params[7]) :
-                                    float4(0.0f);
+    float4 adjustment_1 = filter_params != nullptr ?
+                              float4(filter_params[4], filter_params[5], filter_params[6], filter_params[7]) :
+                              float4(0.0f);
+    if (filter_kind == MA_PAINT_LAYER_FILTER_COLOR_RAMP && filter_ramp != nullptr) {
+      /* The band's CONSTANT interpolation, which the shader reads from `filter_params_1.x`. */
+      adjustment_1.x = color_ramp_is_constant(*filter_ramp) ? 1.0f : 0.0f;
+    }
+    /* The shader applies a layer filter only on an adjustment that is not reading a row already
+     * filtered: the row-use pass would otherwise build a table it never samples. */
+    const bool applies_filter = (flags & gpu_layer_adjustment) != 0 &&
+                                (flags & gpu_layer_row_use) == 0;
+    gpu::Texture *filter_lut = applies_filter ?
+                                   filter_lut_acquire(filter_kind, filter_ramp, filter_curves) :
+                                   dummy;
+    if (filter_lut == nullptr) {
+      return gpu_refuse("a filter LUT could not be built");
+    }
     GPU_shader_uniform_4fv(layer_shader, "filter_params_0", &adjustment_0.x);
     GPU_shader_uniform_4fv(layer_shader, "filter_params_1", &adjustment_1.x);
 
@@ -1332,6 +1406,7 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_texture_bind(mask_sampled, GPU_shader_get_sampler_binding(layer_shader, "mask_tx"));
     GPU_texture_bind(slot_cov_sampled,
                      GPU_shader_get_sampler_binding(layer_shader, "slot_cov_tx"));
+    GPU_texture_bind(filter_lut, GPU_shader_get_sampler_binding(layer_shader, "filter_lut_tx"));
     GPU_texture_image_bind(accum[channel_index],
                            GPU_shader_get_sampler_binding(layer_shader, "accum_img"));
     GPU_texture_image_bind(row_color, GPU_shader_get_sampler_binding(layer_shader, "row_color_img"));
@@ -1341,10 +1416,12 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_texture_image_unbind(row_factor);
     GPU_texture_image_unbind(row_color);
     GPU_texture_image_unbind(accum[channel_index]);
+    GPU_texture_unbind(filter_lut);
     GPU_texture_unbind(slot_cov_sampled);
     GPU_texture_unbind(mask_sampled);
     GPU_texture_unbind(sampled);
     dispatches++;
+    return true;
   };
 
   /* One step of a row's mask factor, into the mask accumulator. */
@@ -1357,6 +1434,8 @@ bool combined_preview_gpu_update(const Material &ma,
                              const int blend,
                              const int filter,
                              const float *filter_params,
+                             const ColorBand *filter_ramp,
+                             const CurveMapping *filter_curves,
                              const PaintMaterialCompositeMapping *mapping,
                              gpu::Texture *slot_dst = nullptr,
                              gpu::Texture *mask_source = nullptr) {
@@ -1373,6 +1452,13 @@ bool combined_preview_gpu_update(const Material &ma,
     if (filter_params != nullptr) {
       params_0 = float4(filter_params[0], filter_params[1], filter_params[2], filter_params[3]);
       params_1 = float4(filter_params[4], filter_params[5], filter_params[6], filter_params[7]);
+    }
+    if (filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP && filter_ramp != nullptr) {
+      params_1.x = color_ramp_is_constant(*filter_ramp) ? 1.0f : 0.0f;
+    }
+    gpu::Texture *filter_lut = filter_lut_acquire(filter, filter_ramp, filter_curves);
+    if (filter_lut == nullptr) {
+      return gpu_refuse("a filter LUT could not be built");
     }
     /* A mask map is painted like a layer's: its base level, for the same reason. */
     const float lod = 0.0f;
@@ -1397,14 +1483,17 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
     gpu::Texture *mask_target = mask_source != nullptr ? mask_source : mask_accum;
     GPU_texture_bind(sampled, GPU_shader_get_sampler_binding(mask_shader, "mask_tx"));
+    GPU_texture_bind(filter_lut, GPU_shader_get_sampler_binding(mask_shader, "filter_lut_tx"));
     GPU_texture_image_bind(mask_target, GPU_shader_get_sampler_binding(mask_shader, "mask_img"));
     GPU_texture_image_bind(slot_dst != nullptr ? slot_dst : slot_dummy,
                            GPU_shader_get_sampler_binding(mask_shader, "slot_img"));
     GPU_compute_dispatch(mask_shader, uint(groups.x), uint(groups.y), 1);
     GPU_texture_image_unbind(slot_dst != nullptr ? slot_dst : slot_dummy);
     GPU_texture_image_unbind(mask_target);
+    GPU_texture_unbind(filter_lut);
     GPU_texture_unbind(sampled);
     dispatches++;
+    return true;
   };
 
   /* One correction laid over the row's colour and coverage. False when its map has no GPU texture. */
@@ -1440,10 +1529,19 @@ bool combined_preview_gpu_update(const Material &ma,
                           correction.filter_params[1],
                           correction.filter_params[2],
                           correction.filter_params[3]);
-    const float4 params_1(correction.filter_params[4],
-                          correction.filter_params[5],
-                          correction.filter_params[6],
-                          correction.filter_params[7]);
+    float4 params_1(correction.filter_params[4],
+                    correction.filter_params[5],
+                    correction.filter_params[6],
+                    correction.filter_params[7]);
+    if (correction.filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP && correction.filter_ramp != nullptr)
+    {
+      params_1.x = color_ramp_is_constant(*correction.filter_ramp) ? 1.0f : 0.0f;
+    }
+    gpu::Texture *filter_lut = filter_lut_acquire(
+        int(correction.filter), correction.filter_ramp, correction.filter_curves);
+    if (filter_lut == nullptr) {
+      return gpu_refuse("a filter LUT could not be built");
+    }
     /* A correction map is painted like a layer's: its base level, for the same reason. */
     const float lod = 0.0f;
     GPU_shader_bind(correction_shader);
@@ -1466,6 +1564,8 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_texture_bind(sampled, GPU_shader_get_sampler_binding(correction_shader, "correction_tx"));
     GPU_texture_bind(slot_sampled,
                      GPU_shader_get_sampler_binding(correction_shader, "slot_cov_tx"));
+    GPU_texture_bind(filter_lut,
+                     GPU_shader_get_sampler_binding(correction_shader, "filter_lut_tx"));
     GPU_texture_image_bind(row_color,
                            GPU_shader_get_sampler_binding(correction_shader, "row_color_img"));
     GPU_texture_image_bind(row_factor,
@@ -1473,6 +1573,7 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_compute_dispatch(correction_shader, uint(groups.x), uint(groups.y), 1);
     GPU_texture_image_unbind(row_factor);
     GPU_texture_image_unbind(row_color);
+    GPU_texture_unbind(filter_lut);
     GPU_texture_unbind(slot_sampled);
     GPU_texture_unbind(sampled);
     dispatches++;
@@ -1559,7 +1660,21 @@ bool combined_preview_gpu_update(const Material &ma,
     if (!r_has_mask) {
       return true;
     }
-    mask_step(gpu_mask_init, nullptr, 0, 1.0f, 1.0f, 1.0f, int(CompositeBlend::Mix), 0, nullptr, nullptr);
+    if (!mask_step(gpu_mask_init,
+                   nullptr,
+                   0,
+                   1.0f,
+                   1.0f,
+                   1.0f,
+                   int(CompositeBlend::Mix),
+                   0,
+                   nullptr,
+                   nullptr,
+                   nullptr,
+                   nullptr))
+    {
+      return false;
+    }
     for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
       if (item.opacity <= 0.0f) {
         continue;
@@ -1568,7 +1683,21 @@ bool combined_preview_gpu_update(const Material &ma,
       if (item.map_coverage != 0) {
         /* The match accumulates over the passes; a missing or unreadable map leaves it at zero, the
          * full restriction the CPU composite gives. */
-        mask_step(gpu_mask_cov_begin, nullptr, 0, 1.0f, 1.0f, 1.0f, int(CompositeBlend::Mix), 0, nullptr, nullptr);
+        if (!mask_step(gpu_mask_cov_begin,
+                       nullptr,
+                       0,
+                       1.0f,
+                       1.0f,
+                       1.0f,
+                       int(CompositeBlend::Mix),
+                       0,
+                       nullptr,
+                       nullptr,
+                       nullptr,
+                       nullptr))
+        {
+          return false;
+        }
         bool premultiplied = false;
         gpu::Texture *coverage_map = item.coverage_image != nullptr ?
                                          gpu_map_texture(
@@ -1578,8 +1707,21 @@ bool combined_preview_gpu_update(const Material &ma,
           const int map_flags = gpu_layer_has_map | gpu_map_nearest |
                                 (premultiplied ? gpu_layer_premultiplied : 0);
           if (item.map_coverage == MA_PAINT_LAYER_FILTER_UV_ISLAND) {
-            mask_step(gpu_mask_cov_scalar, coverage_map, map_flags, 1.0f, 1.0f, 1.0f,
-                      int(CompositeBlend::Mix), 0, nullptr, &item.coverage_mapping);
+            if (!mask_step(gpu_mask_cov_scalar,
+                           coverage_map,
+                           map_flags,
+                           1.0f,
+                           1.0f,
+                           1.0f,
+                           int(CompositeBlend::Mix),
+                           0,
+                           nullptr,
+                           nullptr,
+                           nullptr,
+                           &item.coverage_mapping))
+            {
+              return false;
+            }
           }
           else if (item.map_coverage == MA_PAINT_LAYER_FILTER_COLOR_ID) {
             const float shared_tol = std::max(0.0f, item.coverage_tolerance);
@@ -1597,13 +1739,39 @@ bool combined_preview_gpu_update(const Material &ma,
                                        0.0f,
                                        0.0f,
                                        0.0f};
-              mask_step(gpu_mask_cov_color, coverage_map, map_flags, 1.0f, 1.0f, 1.0f,
-                        int(CompositeBlend::Mix), 0, params, &item.coverage_mapping);
+              if (!mask_step(gpu_mask_cov_color,
+                             coverage_map,
+                             map_flags,
+                             1.0f,
+                             1.0f,
+                             1.0f,
+                             int(CompositeBlend::Mix),
+                             0,
+                             params,
+                             nullptr,
+                             nullptr,
+                             &item.coverage_mapping))
+              {
+                return false;
+              }
             }
           }
         }
-        mask_step(gpu_mask_cov_end, nullptr, item_flags, 1.0f, item.opacity, item.coverage_output,
-                  int(CompositeBlend::Mix), 0, nullptr, nullptr);
+        if (!mask_step(gpu_mask_cov_end,
+                       nullptr,
+                       item_flags,
+                       1.0f,
+                       item.opacity,
+                       item.coverage_output,
+                       int(CompositeBlend::Mix),
+                       0,
+                       nullptr,
+                       nullptr,
+                       nullptr,
+                       nullptr))
+        {
+          return false;
+        }
         continue;
       }
       gpu::Texture *item_map = nullptr;
@@ -1636,16 +1804,21 @@ bool combined_preview_gpu_update(const Material &ma,
         }
         item_flags |= gpu_layer_has_map | (premultiplied ? gpu_layer_premultiplied : 0);
       }
-      mask_step(gpu_mask_item,
-                item_map,
-                item_flags,
-                item.constant_gray,
-                item.opacity,
-                1.0f,
-                int(item.blend),
-                int(item.filter),
-                item.filter_params,
-                live_reader ? nullptr : &item.mapping);
+      if (!mask_step(gpu_mask_item,
+                     item_map,
+                     item_flags,
+                     item.constant_gray,
+                     item.opacity,
+                     1.0f,
+                     int(item.blend),
+                     int(item.filter),
+                     item.filter_params,
+                     item.filter_ramp,
+                     item.filter_curves,
+                     live_reader ? nullptr : &item.mapping))
+      {
+        return false;
+      }
     }
     if (layer.mask_image != nullptr) {
       bool premultiplied = false;
@@ -1657,16 +1830,21 @@ bool combined_preview_gpu_update(const Material &ma,
       if (layer.mask_from_alpha) {
         map_flags |= gpu_mask_from_alpha;
       }
-      mask_step(gpu_mask_map,
-                mask_map,
-                map_flags,
-                1.0f,
-                1.0f,
-                layer.mask_influence,
-                int(CompositeBlend::Mix),
-                0,
-                nullptr,
-                nullptr);
+      if (!mask_step(gpu_mask_map,
+                     mask_map,
+                     map_flags,
+                     1.0f,
+                     1.0f,
+                     layer.mask_influence,
+                     int(CompositeBlend::Mix),
+                     0,
+                     nullptr,
+                     nullptr,
+                     nullptr,
+                     nullptr))
+      {
+        return false;
+      }
     }
     return true;
   };
@@ -1789,20 +1967,25 @@ bool combined_preview_gpu_update(const Material &ma,
         gpu_mapping_setup(layer.mapping, flags, mapping_offset, mapping_scale, mapping_rotation);
       }
       if (row_in_textures) {
-        lay(i,
-            map,
-            flags | gpu_layer_row_store,
-            layer_color,
-            float4(0.0f),
-            1.0f,
-            mapping_offset,
-            mapping_scale,
-            mapping_rotation,
-            int(CompositeBlend::Mix),
-            nullptr,
-            int(layer.adjustment_filter),
-            layer.adjustment_params,
-            reader_slot != nullptr ? reader_slot->coverage : nullptr);
+        if (!lay(i,
+                 map,
+                 flags | gpu_layer_row_store,
+                 layer_color,
+                 float4(0.0f),
+                 1.0f,
+                 mapping_offset,
+                 mapping_scale,
+                 mapping_rotation,
+                 int(CompositeBlend::Mix),
+                 nullptr,
+                 int(layer.adjustment_filter),
+                 layer.adjustment_params,
+                 layer.adjustment_ramp,
+                 layer.adjustment_curves,
+                 reader_slot != nullptr ? reader_slot->coverage : nullptr))
+        {
+          return false;
+        }
       }
     }
 
@@ -1843,18 +2026,23 @@ bool combined_preview_gpu_update(const Material &ma,
       GPU_texture_copy(capture_color, row_color);
       /* The coverage slot is grey in rgb and opaque in alpha; the mask store pass does that from
        * the row factor's `x`. */
-      mask_step(gpu_mask_slot_store,
-                nullptr,
-                0,
-                1.0f,
-                1.0f,
-                1.0f,
-                int(CompositeBlend::Mix),
-                0,
-                nullptr,
-                nullptr,
-                capture_coverage,
-                row_factor);
+      if (!mask_step(gpu_mask_slot_store,
+                     nullptr,
+                     0,
+                     1.0f,
+                     1.0f,
+                     1.0f,
+                     int(CompositeBlend::Mix),
+                     0,
+                     nullptr,
+                     nullptr,
+                     nullptr,
+                     nullptr,
+                     capture_coverage,
+                     row_factor))
+      {
+        return false;
+      }
       GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE | GPU_BARRIER_TEXTURE_FETCH);
       return true;
     }
@@ -1869,20 +2057,25 @@ bool combined_preview_gpu_update(const Material &ma,
                   has_mask ? mask_accum : nullptr);
       return true;
     }
-    lay(i,
-        row_in_textures ? nullptr : map,
-        (row_in_textures ? gpu_layer_row_use : flags) | mask_flags,
-        layer_color,
-        float4(0.0f),
-        layer.opacity,
-        mapping_offset,
-        mapping_scale,
-        mapping_rotation,
-        int(layer.blend),
-        has_mask ? mask_accum : nullptr,
-        int(layer.adjustment_filter),
-        layer.adjustment_params,
-        reader_slot != nullptr ? reader_slot->coverage : nullptr);
+    if (!lay(i,
+             row_in_textures ? nullptr : map,
+             (row_in_textures ? gpu_layer_row_use : flags) | mask_flags,
+             layer_color,
+             float4(0.0f),
+             layer.opacity,
+             mapping_offset,
+             mapping_scale,
+             mapping_rotation,
+             int(layer.blend),
+             has_mask ? mask_accum : nullptr,
+             int(layer.adjustment_filter),
+             layer.adjustment_params,
+             layer.adjustment_ramp,
+             layer.adjustment_curves,
+             reader_slot != nullptr ? reader_slot->coverage : nullptr))
+    {
+      return false;
+    }
     return true;
   };
 
@@ -1983,17 +2176,22 @@ bool combined_preview_gpu_update(const Material &ma,
           return gpu_refuse("an Anchor Point mask slot is missing");
         }
         if (has_mask) {
-          mask_step(gpu_mask_slot_store,
-                    nullptr,
-                    0,
-                    1.0f,
-                    1.0f,
-                    1.0f,
-                    int(CompositeBlend::Mix),
-                    0,
-                    nullptr,
-                    nullptr,
-                    slot->texture);
+          if (!mask_step(gpu_mask_slot_store,
+                         nullptr,
+                         0,
+                         1.0f,
+                         1.0f,
+                         1.0f,
+                         int(CompositeBlend::Mix),
+                         0,
+                         nullptr,
+                         nullptr,
+                         nullptr,
+                         nullptr,
+                         slot->texture))
+          {
+            return false;
+          }
         }
         else {
           /* A slice of items that all lay nothing is a factor of one, as on the CPU. */
@@ -2014,17 +2212,22 @@ bool combined_preview_gpu_update(const Material &ma,
           return gpu_refuse("an Anchor Point slot is missing");
         }
         if (has_mask) {
-          mask_step(gpu_mask_slot_store,
-                    nullptr,
-                    0,
-                    1.0f,
-                    1.0f,
-                    1.0f,
-                    int(CompositeBlend::Mix),
-                    0,
-                    nullptr,
-                    nullptr,
-                    slot->color);
+          if (!mask_step(gpu_mask_slot_store,
+                         nullptr,
+                         0,
+                         1.0f,
+                         1.0f,
+                         1.0f,
+                         int(CompositeBlend::Mix),
+                         0,
+                         nullptr,
+                         nullptr,
+                         nullptr,
+                         nullptr,
+                         slot->color))
+          {
+            return false;
+          }
         }
         else {
           const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};

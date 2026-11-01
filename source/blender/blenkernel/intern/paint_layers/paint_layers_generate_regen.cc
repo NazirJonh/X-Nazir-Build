@@ -256,6 +256,7 @@ class LayerTreeFactory {
         tree_hash_clear(*candidate);
         /* The keyed blend nodes are gone with the nodes; the commit after the build recounts. */
         prop_int_set(candidate->id.properties, BLEND_NODE_COUNT_PROP, -1);
+        prop_int_set(candidate->id.properties, CURVES_NODE_COUNT_PROP, -1);
         pending_hashes_.append({candidate, topology});
         if (!STREQ(candidate->id.name + 2, name)) {
           BKE_id_rename(bmain_, candidate->id, name);
@@ -1125,16 +1126,17 @@ bool BKE_paint_layers_regenerate(Main &bmain,
                          kept_instance->id == &tree->id;
 
   bool relations_changed = report.replaced_foreign_tree;
-  /* A failed sync means a value input has no socket on its instance (a hand-edited tree) or a
-   * keyed blend node no longer matches the description: the kept root cannot be trusted, so the
-   * full rebuild below takes over. Nodes are synced before values, so a tree update cannot reset a
-   * value written in the same pass. */
+  /* A failed sync means a value input has no socket on its instance (a hand-edited tree), a keyed
+   * blend node no longer matches the description, or a curves node is out of step with its row:
+   * the kept root cannot be trusted, so the full rebuild below takes over. Nodes are synced before
+   * values, so a tree update cannot reset a value written in the same pass. */
   const bool blend_sync_ok = keep_root && paint_layers_blend_sync(ma, bmain);
-  const bool values_sync_ok = blend_sync_ok && BKE_paint_layers_values_sync(ma);
+  const bool curves_sync_ok = blend_sync_ok && paint_layers_curves_sync(ma, bmain);
+  const bool values_sync_ok = curves_sync_ok && BKE_paint_layers_values_sync(ma);
   const bool kept = values_sync_ok;
   PBR_LAYERS_LOG(
       "[PBR-Layers regen] material=\"%s\" created_tree=%d root_hash=%llu stored_root=%llu "
-      "instance_ok=%d keep_root=%d blend_sync=%d values_sync=%d => %s\n",
+      "instance_ok=%d keep_root=%d blend_sync=%d curves_sync=%d values_sync=%d => %s\n",
       ma.id.name + 2,
       int(created_tree),
       (unsigned long long)root_hash,
@@ -1142,6 +1144,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
       int(kept_instance != nullptr && kept_instance->id == &tree->id),
       int(keep_root),
       int(blend_sync_ok),
+      int(curves_sync_ok),
       int(values_sync_ok),
       kept ? "KEPT (in-place)" : "FULL REBUILD");
   if (kept) {
@@ -1182,8 +1185,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     generated_trees_update(bmain, generated, *tree);
     factory.prune_unused();
     /* The groups are built and instantiated: record how many keyed blend nodes each holds, so a
-     * later blend edit can tell a whole tree from a hand-edited one. */
+     * later blend edit can tell a whole tree from a hand-edited one. The curves nodes get their
+     * count the same way, so a curves edit can trust the group it syncs. */
     paint_layers_blend_nodes_commit(ma);
+    paint_layers_curves_nodes_commit(ma);
 
     bNode *instance = instance_ensure(ma, *tree);
     if (instance == nullptr) {

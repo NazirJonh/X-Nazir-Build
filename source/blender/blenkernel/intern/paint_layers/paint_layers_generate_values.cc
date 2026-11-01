@@ -27,6 +27,7 @@
 #include "BLI_ustring.hh"
 #include "BLI_uuid.h"
 
+#include "BKE_colortools.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
@@ -440,6 +441,18 @@ int blend_nodes_count(bNodeTree &group)
   return count;
 }
 
+/** The curves counterpart of #blend_nodes_count: nodes carrying #CURVES_NODE_KEY_PROP. */
+int curves_nodes_count(bNodeTree &group)
+{
+  int count = 0;
+  for (bNode &node : group.nodes) {
+    if (prop_string_get(node.system_properties, CURVES_NODE_KEY_PROP) != nullptr) {
+      count++;
+    }
+  }
+  return count;
+}
+
 }  // namespace
 
 namespace bke::paint_layers {
@@ -471,6 +484,36 @@ void paint_layers_blend_nodes_commit(Material &ma)
       continue;
     }
     prop_int_set(group->id.properties, BLEND_NODE_COUNT_PROP, blend_nodes_count(*group));
+  }
+}
+
+void paint_layers_curves_nodes_commit(Material &ma)
+{
+  bNodeTree *root = ma.paint_layers_tree;
+  if (root == nullptr) {
+    return;
+  }
+  for (bNode &instance : root->nodes) {
+    if (!instance.is_group() || instance.id == nullptr || GS(instance.id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree *group = id_cast<bNodeTree *>(instance.id);
+    if (group == nullptr) {
+      continue;
+    }
+    bUUID marker = BLI_uuid_nil();
+    if (!layer_tree_marker_get(*group, marker)) {
+      continue;
+    }
+    if (BKE_paint_layers_find(ma, marker) == nullptr) {
+      continue;
+    }
+    /* Same rule as the blend count: a kept group keeps its number, a cleared or fresh one gets
+     * recounted, so a node the user deleted stays noticed. */
+    if (prop_int_get(group->id.properties, CURVES_NODE_COUNT_PROP, -1) >= 0) {
+      continue;
+    }
+    prop_int_set(group->id.properties, CURVES_NODE_COUNT_PROP, curves_nodes_count(*group));
   }
 }
 
@@ -571,6 +614,99 @@ bool paint_layers_blend_sync(Material &ma, Main &bmain)
     }
     if (!group_ok || found != expected) {
       /* The group carries an incomplete or foreign set of blend nodes: drop its stored shape so
+       * the rebuild that follows clears and builds it again, rather than keeping it by its hash. */
+      tree_hash_clear(*group);
+      ok = false;
+    }
+    if (group_changed) {
+      changed_groups.append(group);
+    }
+  }
+  /* The updates run after the walk: a tree update can touch the instances the loop is reading. */
+  for (bNodeTree *group : changed_groups) {
+    BKE_ntree_update_after_single_tree_change(bmain, *group);
+    DEG_id_tag_update(&group->id, ID_RECALC_SYNC_TO_EVAL);
+  }
+  if (!changed_groups.is_empty()) {
+    BKE_paint_layers_values_tag_trees(ma);
+  }
+  return ok;
+}
+
+bool paint_layers_curves_sync(Material &ma, Main &bmain)
+{
+  bNodeTree *root = ma.paint_layers_tree;
+  if (root == nullptr) {
+    return true;
+  }
+  bool ok = true;
+  Vector<bNodeTree *> changed_groups;
+  for (bNode &instance : root->nodes) {
+    if (!instance.is_group() || instance.id == nullptr || GS(instance.id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree *group = id_cast<bNodeTree *>(instance.id);
+    if (group == nullptr) {
+      continue;
+    }
+    bUUID group_marker = BLI_uuid_nil();
+    if (!layer_tree_marker_get(*group, group_marker)) {
+      continue;
+    }
+    if (BKE_paint_layers_find(ma, group_marker) == nullptr) {
+      continue;
+    }
+    /* A tree without the count was built before the curves nodes were keyed (or by a hand edit
+     * that removed the property): it cannot be trusted to carry every curves node, so the caller
+     * rebuilds. */
+    const int expected = prop_int_get(group->id.properties, CURVES_NODE_COUNT_PROP, -1);
+    if (expected < 0) {
+      /* Drop the stored shape too, so the rebuild below cannot keep this group as it is. */
+      tree_hash_clear(*group);
+      ok = false;
+      continue;
+    }
+    int found = 0;
+    bool group_ok = true;
+    bool group_changed = false;
+    for (bNode &node : group->nodes) {
+      const char *key = prop_string_get(node.system_properties, CURVES_NODE_KEY_PROP);
+      if (key == nullptr) {
+        continue;
+      }
+      found++;
+      bUUID marker = BLI_uuid_nil();
+      if (!BLI_uuid_parse_string(&marker, key)) {
+        group_ok = false;
+        continue;
+      }
+      MaterialPaintLayer *row = BKE_paint_layers_find(ma, marker);
+      if (row == nullptr) {
+        group_ok = false;
+        continue;
+      }
+      const CurveMapping *row_mapping = BKE_paint_layers_curves_get(*row);
+      if (node.type_legacy != SH_NODE_CURVE_RGB || node.storage == nullptr ||
+          row_mapping == nullptr)
+      {
+        /* A keyed node of any other type, a storage-less one, or a row whose curves payload is
+         * gone: none can be trusted to carry the description's curves. */
+        group_ok = false;
+        continue;
+      }
+      auto *node_mapping = static_cast<CurveMapping *>(node.storage);
+      /* The hash covers exactly what an evaluation reads (points, slopes, levels, tone), so equal
+       * hashes are an equal shape and the node is left alone; a mismatch re-copies the row's
+       * mapping into the storage, deep, tables included — the same copy the build made. */
+      if (paint_layer_curves_hash(*node_mapping) != paint_layer_curves_hash(*row_mapping)) {
+        BKE_curvemapping_free_data(node_mapping);
+        BKE_curvemapping_copy_data(node_mapping, row_mapping);
+        BKE_ntree_update_tag_node_property(group, &node);
+        group_changed = true;
+      }
+    }
+    if (!group_ok || found != expected) {
+      /* The group carries an incomplete or foreign set of curves nodes: drop its stored shape so
        * the rebuild that follows clears and builds it again, rather than keeping it by its hash. */
       tree_hash_clear(*group);
       ok = false;

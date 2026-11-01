@@ -4872,6 +4872,13 @@ static void numedit_apply(bContext *C, Block *block, Button *but, HandleButtonDa
   }
   else {
     button_update(but);
+    /* A curve with a live callback (the opt-in the template makes) applies on every point move:
+     * Curve buttons never run the interactive apply, so this is the only per-move hook a drag
+     * gets. The release still runs the final apply (#apply_but_CURVE), which the curve mapping's
+     * "remove doubles" can follow. Curve buttons without a callback redraw only, as before. */
+    if (but->type == ButtonType::Curve && but->curve_live_func) {
+      but->curve_live_func(*C);
+    }
   }
 
   ED_region_tag_redraw(data->region);

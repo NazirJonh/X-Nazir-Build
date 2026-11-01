@@ -2937,6 +2937,12 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_boolean(func, "use_negative_slope", false, "", "Use a negative slope by default");
   RNA_def_boolean(func, "show_tone", false, "", "Show tone options");
   RNA_def_boolean(func, "show_presets", false, "", "Show preset options");
+  RNA_def_boolean(func,
+                  "live_update",
+                  false,
+                  "",
+                  "Fire the property's update on every dragged point instead of only on the "
+                  "release, so a widget whose data applies cheaply follows the drag live");
 
   func = RNA_def_function(srna, "template_curveprofile", "template_curve_profile");
   RNA_def_function_ui_description(func, "A profile path editor used for custom profiles");

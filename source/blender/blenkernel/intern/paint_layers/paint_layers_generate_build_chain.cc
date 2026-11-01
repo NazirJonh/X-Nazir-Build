@@ -3633,8 +3633,10 @@ RowResult PaintLayersTreeBuilder::row_rebuild_kept(const MaterialPaintLayer &lay
    * root stays too: every channel already chained through it keeps its links, and the channel
    * rebuilt below fills the group again. Removing it would silently cut those channels off. */
   tree_clear_nodes(*ctx_.bmain, *group.tree);
-  /* The keyed blend nodes went with the nodes; the commit after the build recounts them. */
+  /* The keyed blend nodes went with the nodes; the commit after the build recounts them. The same
+   * goes for the keyed curves nodes. */
   prop_int_set(group.tree->id.properties, BLEND_NODE_COUNT_PROP, -1);
+  prop_int_set(group.tree->id.properties, CURVES_NODE_COUNT_PROP, -1);
   if (!layer_group_io_nodes_add(group)) {
     return {};
   }

@@ -40,6 +40,11 @@ struct Layout;
 struct SearchItems;
 
 void button_func_set(Button *but, std::function<void(bContext &)> func);
+/**
+ * The curve button's "live" callback, fired on every point move while a point is dragged, before
+ * the final apply on release. A curve-only opt-in (see #Button::curve_live_func).
+ */
+void button_curve_live_func_set(Button *but, std::function<void(bContext &)> func);
 void button_func_pushed_state_set(Button *but, std::function<bool(const Button &)> func);
 
 /**

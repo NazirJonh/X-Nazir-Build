@@ -26,7 +26,12 @@
 #include "BKE_colortools.hh"
 #include "BKE_idprop.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_material_composite.hh"
 
+#include "DEG_depsgraph.hh"
+
+#include "paint_layers_generate_intern.hh"
 #include "paint_layers_kind.hh"
 
 namespace blender {
@@ -850,7 +855,22 @@ bool BKE_paint_layers_curves_supported(const MaterialPaintLayer &row)
   return paint_layer_kind_has_curves_param(row);
 }
 
-bool BKE_paint_layers_curves_edited(Material &ma, const void *data)
+/** The depth of the live-drag scope #BKE_paint_layers_curves_live_begin opened on this thread. */
+static thread_local int curves_live_depth = 0;
+
+void BKE_paint_layers_curves_live_begin()
+{
+  curves_live_depth++;
+}
+
+void BKE_paint_layers_curves_live_end()
+{
+  /* A missing end would flip every later edit to the live path, so an unbalanced call is loud. */
+  BLI_assert(curves_live_depth > 0);
+  curves_live_depth--;
+}
+
+bool BKE_paint_layers_curves_edited(Main &bmain, Material &ma, const void *data)
 {
   if (data == nullptr) {
     return false;
@@ -865,13 +885,32 @@ bool BKE_paint_layers_curves_edited(Material &ma, const void *data)
       break;
     }
   }
-  if (found) {
-    /* The curves' shape is part of the row's state the generated node carries a copy of, so an
-     * edit of one is a shape edit, not a value one. The shape is in the cached bake's hash like a
-     * ramp's stops: without the stale flag a baked row that holds the filter keeps showing the old
-     * curves. */
+  if (!found) {
+    return false;
+  }
+  /* No composite cache invalidation here: the curves are in the composite stack's hash, so the
+   * channel the filter works in re-composites by itself on the next read. Dropping the whole
+   * material's cache re-rendered every channel at full size (about 0.9 s at 4K, measured) for a
+   * shape only one of them reads. */
+  /* The curves' shape is part of the row's state the generated node carries a copy of, so the
+   * cheap path is the in-place sync (#paint_layers_curves_sync): the node's storage re-copies the
+   * mapping and no group is rebuilt. A live drag (inside #BKE_paint_layers_curves_live_begin)
+   * takes that sync but none of the bake flags — re-baking on every point move would re-render
+   * the baked maps for a shape the release re-checks anyway. The final edit — the release, or any
+   * non-drag update — marks the bake stale like a ramp's stops do: without it a baked row that
+   * holds the filter keeps showing the old curves. */
+  const bool live = curves_live_depth > 0;
+  if (!live) {
+    ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_CANCELLED;
     ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
-    BKE_paint_layers_tag_edited(ma);
+  }
+  DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+  if (!bke::paint_layers::paint_layers_curves_sync(ma, bmain)) {
+    /* The node is missing, mistyped or the group no longer matches the description: the sync
+     * cannot fix that in place, so the regeneration point rebuilds it. The old behaviour — a tag,
+     * no failure — keeps a drag alive when a tree is hand-edited underneath it. */
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+    DEG_id_tag_update(&ma.id, ID_RECALC_SHADING);
   }
   return found;
 }
@@ -883,6 +922,140 @@ void paint_layer_curves_apply(const CurveMapping &curve_mapping, float rgb[3])
    * don't do white balancing"), so the CPU does too. The tables are built
    * (#BKE_curvemapping_init) when the payload is made, copied or loaded. */
   BKE_curvemapping_evaluateRGBF(&curve_mapping, rgb, rgb);
+}
+
+void paint_layer_curves_lut_build(const CurveMapping &curve_mapping,
+                                  Vector<float4> &r_texels,
+                                  int &r_width,
+                                  int &r_height)
+{
+  float *band_values = nullptr;
+  int band_size = 0;
+  BKE_curvemapping_table_RGBA(&curve_mapping, &band_values, &band_size);
+
+  /* Row 1 holds four texels of four values each; a table shorter than that would clip them. */
+  r_width = std::max(band_size, CM_TOT);
+  r_height = 2;
+  r_texels.resize(size_t(r_width) * size_t(r_height));
+  for (const int i : IndexRange(band_size)) {
+    r_texels[i] = float4(band_values[i * 4 + 0],
+                         band_values[i * 4 + 1],
+                         band_values[i * 4 + 2],
+                         band_values[i * 4 + 3]);
+  }
+  MEM_delete(band_values);
+
+  float start_slopes[CM_TOT];
+  float end_slopes[CM_TOT];
+  float range_minimums[CM_TOT];
+  float range_dividers[CM_TOT];
+  BKE_curvemapping_compute_slopes(&curve_mapping, start_slopes, end_slopes);
+  BKE_curvemapping_get_range_minimums(&curve_mapping, range_minimums);
+  BKE_curvemapping_compute_range_dividers(&curve_mapping, range_dividers);
+  const int row = r_width;
+  r_texels[row + 0] = float4(start_slopes[0], start_slopes[1], start_slopes[2], start_slopes[3]);
+  r_texels[row + 1] = float4(end_slopes[0], end_slopes[1], end_slopes[2], end_slopes[3]);
+  r_texels[row + 2] = float4(
+      range_minimums[0], range_minimums[1], range_minimums[2], range_minimums[3]);
+  r_texels[row + 3] = float4(
+      range_dividers[0], range_dividers[1], range_dividers[2], range_dividers[3]);
+}
+
+namespace {
+
+/** One component of row 0 at the normalized table coordinate \a parameter, linearly interpolated. */
+float curves_lut_component(const Span<float4> texels, const int width, float parameter, int component)
+{
+  /* The table spans `CM_TABLE` intervals over the normalized range, as `CurveMap::range` has it. */
+  const float last = float(CM_TABLE);
+  const float index = parameter * last;
+  const float low = std::floor(index);
+  const float fraction = index - low;
+  const int i0 = std::clamp(int(low), 0, width - 1);
+  const int i1 = std::clamp(int(low) + 1, 0, width - 1);
+  return (1.0f - fraction) * texels[i0][component] + fraction * texels[i1][component];
+}
+
+/** The GLSL node's extrapolate_if_needed: the table's edge value plus the slope outside [0, 1]. */
+float curves_lut_extrapolate(float parameter, float value, float start_slope, float end_slope)
+{
+  if (parameter < 0.0f) {
+    return value + parameter * start_slope;
+  }
+  if (parameter > 1.0f) {
+    return value + (parameter - 1.0f) * end_slope;
+  }
+  return value;
+}
+
+}  // namespace
+
+void paint_layer_curves_lut_eval(const Span<float4> texels, const int width, float rgb[3])
+{
+  /* The layout #paint_layer_curves_lut_build writes: row 1's four texels are the per-curve slopes
+   * and ranges, indexed by the curve map (R, G, B, combined). */
+  const int row = width;
+  const float4 start_slopes = texels[row + 0];
+  const float4 end_slopes = texels[row + 1];
+  const float4 range_minimums = texels[row + 2];
+  const float4 range_dividers = texels[row + 3];
+
+  /* First the combined curve, its alpha component, on all three channels; then each channel's own
+   * curve. This is the RGB Curves node's `curves_combined_rgb`, the function the CPU applies. */
+  for (const int channel : IndexRange(3)) {
+    const float parameter = (rgb[channel] - range_minimums[3]) * range_dividers[3];
+    float combined = curves_lut_component(texels, width, parameter, 3);
+    combined = curves_lut_extrapolate(parameter, combined, start_slopes[3], end_slopes[3]);
+
+    const float channel_parameter = (combined - range_minimums[channel]) *
+                                    range_dividers[channel];
+    float value = curves_lut_component(texels, width, channel_parameter, channel);
+    rgb[channel] = curves_lut_extrapolate(
+        channel_parameter, value, start_slopes[channel], end_slopes[channel]);
+  }
+}
+
+void paint_layer_color_ramp_lut_build(const ColorBand &band,
+                                      Vector<float4> &r_texels,
+                                      int &r_width)
+{
+  /* 2048 samples rather than 1024: an HSV or HSL band is not linear in RGB, and a pair of close
+   * stops can bend it sharply; two thousand samples keep the linear interpolation between them
+   * inside the parity tolerance without a measurable cost (32 KiB). */
+  r_width = 2048;
+  r_texels.resize(r_width);
+  for (const int i : IndexRange(r_width)) {
+    const float value = float(i) / float(r_width - 1);
+    float rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    BKE_colorband_evaluate(&band, value, rgba);
+    r_texels[i] = float4(rgba[0], rgba[1], rgba[2], rgba[3]);
+  }
+}
+
+float paint_layer_color_ramp_lut_eval(const Span<float4> texels,
+                                      const int width,
+                                      const bool constant,
+                                      const bool use_alpha,
+                                      float rgb[3])
+{
+  /* The RGB to BW node's scene-linear Rec.709 luminance, as `paint_layer_color_ramp_apply`. */
+  const float value = clamp_f(
+      0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2], 0.0f, 1.0f);
+  const float index = value * float(width - 1);
+  float4 ramp;
+  if (constant) {
+    /* A CONSTANT band steps at its stops: the nearest sample is that step, no blend across it. */
+    const int nearest = std::clamp(int(index + 0.5f), 0, width - 1);
+    ramp = texels[nearest];
+  }
+  else {
+    const float low = std::floor(index);
+    const int i0 = std::clamp(int(low), 0, width - 1);
+    const int i1 = std::clamp(int(low) + 1, 0, width - 1);
+    ramp = texels[i0] + (texels[i1] - texels[i0]) * (index - low);
+  }
+  copy_v3_v3(rgb, ramp);
+  return use_alpha ? clamp_f(ramp.w, 0.0f, 1.0f) : 1.0f;
 }
 
 uint64_t paint_layer_curves_hash(const CurveMapping &curve_mapping)

@@ -9,6 +9,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_library.hh"
+#include "BKE_paint_layers.hh"
 
 #include "BLI_bounds.hh"
 #include "BLI_math_base.h"
@@ -339,6 +340,9 @@ static void add_preset_button(Block *block,
  * \note Still unsure how this call evolves.
  *
  * \param labeltype: Used for defining which curve-channels to show.
+ * \param live_update: fire the RNA update on every dragged point, not only on the release. An
+ * opt-in for widgets whose data applies cheaply per move; off, the curve redraws while dragging
+ * and updates when the point is released, as every other curve widget does.
  */
 static void curvemap_buttons_layout(Layout *layout,
                                     PointerRNA *ptr,
@@ -348,6 +352,7 @@ static void curvemap_buttons_layout(Layout *layout,
                                     bool neg_slope,
                                     bool tone,
                                     bool presets,
+                                    bool live_update,
                                     const RNAUpdateCb &cb)
 {
   CurveMapping *cumap = static_cast<CurveMapping *>(ptr->data);
@@ -590,6 +595,18 @@ static void curvemap_buttons_layout(Layout *layout,
                1.0f,
                ""));
   curve_but->gradient_type = bg;
+  if (live_update) {
+    /* The opt-in for widgets whose data is cheap to apply per move: the same RNA update the
+     * release runs fires on every dragged point too. The paint-layer curves wrap theirs in the
+     * live scope so the BKE side can tell a drag (node sync only) from the final edit (bake
+     * flags); the release below runs outside of any scope, after "remove doubles" may have
+     * reshaped the curve. */
+    button_curve_live_func_set(curve_but, [cb](bContext &C) {
+      BKE_paint_layers_curves_live_begin();
+      rna_update_cb(C, cb);
+      BKE_paint_layers_curves_live_end();
+    });
+  }
   if (!layout->active()) {
     button_flag_enable(curve_but, BUT_INACTIVE);
   }
@@ -866,7 +883,8 @@ void template_curve_mapping(Layout *layout,
                             bool brush,
                             bool neg_slope,
                             bool tone,
-                            bool presets)
+                            bool presets,
+                            bool live_update)
 {
   PropertyRNA *prop = RNA_struct_find_property(ptr, propname.c_str());
   Block *block = layout->block();
@@ -892,7 +910,7 @@ void template_curve_mapping(Layout *layout,
   block_lock_set(block, (id && !ID_IS_EDITABLE(id)), ERROR_LIBDATA_MESSAGE);
 
   curvemap_buttons_layout(
-      layout, &cptr, type, levels, brush, neg_slope, tone, presets, RNAUpdateCb{*ptr, prop});
+      layout, &cptr, type, levels, brush, neg_slope, tone, presets, live_update, RNAUpdateCb{*ptr, prop});
 
   block_lock_clear(block);
 }

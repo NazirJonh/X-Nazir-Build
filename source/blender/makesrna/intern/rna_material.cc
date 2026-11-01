@@ -3446,22 +3446,24 @@ static bool rna_MaterialPaintLayer_curves_supported_get(PointerRNA *ptr)
 }
 
 /**
- * The mapping is a node's storage in the generated graph, so a point edit has to rebuild the
- * material. The curve template fires the mapping pointer property's own update after every edit of
- * it, so without this one a point drag would redraw nothing until another edit regenerated the
- * tree. The pointer the template hands back is the row's, so the mapping to tag is read off it,
- * like the ramp's band is in #rna_MaterialPaintLayer_kind_ramp_update.
+ * The mapping is a node's storage in the generated graph, so an edit has to reach it: the update
+ * syncs the node in place (#BKE_paint_layers_curves_edited), which during a point drag updates the
+ * node only, and on the release also marks the bake stale. The curve template fires the mapping
+ * pointer property's own update after every edit of it, so without this one a point drag would
+ * redraw nothing until another edit synced the tree. The pointer the template hands back is the
+ * row's, so the mapping to tag is read off it, like the ramp's band is in
+ * #rna_MaterialPaintLayer_kind_ramp_update.
  */
-static void rna_MaterialPaintLayer_kind_curves_update(Main * /*bmain*/,
+static void rna_MaterialPaintLayer_kind_curves_update(Main *bmain,
                                                       Scene * /*scene*/,
                                                       PointerRNA *ptr)
 {
   Material *ma = id_cast<Material *>(ptr->owner_id);
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
-  if (ma == nullptr || layer == nullptr || layer->curves == nullptr) {
+  if (ma == nullptr || bmain == nullptr || layer == nullptr || layer->curves == nullptr) {
     return;
   }
-  BKE_paint_layers_curves_edited(*ma, &layer->curves->curve_mapping);
+  BKE_paint_layers_curves_edited(*bmain, *ma, &layer->curves->curve_mapping);
   DEG_id_tag_update(&ma->id, 0);
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
 }

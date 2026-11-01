@@ -44,6 +44,7 @@
 #include "BKE_subdiv_ccg.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_query.hh"
 
 #include "IMB_colormanagement.hh"
 
@@ -677,6 +678,15 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
 
     /* Store so we know to re-enable when entering sculpt mode. */
     mesh->flag |= ME_SCULPT_DYNAMIC_TOPOLOGY;
+  }
+
+  /* Keep Multires' subdivision descriptor, so object mode doesn't rebuild it: the cached
+   * OpenSubdiv evaluator the sculpt grids took over is handed back to the Multires modifier
+   * before the session frees it. Must run while the sculpt session is alive.
+   * (From the Potassiums/phantom fork, commit 0217e768.) */
+  const Object *ob_eval = DEG_get_evaluated(&depsgraph, &ob);
+  if (ob_eval != nullptr && ob.runtime->sculpt_session != nullptr) {
+    multires_reclaim_sculpt_subdiv(*ob_eval, *ob.runtime->sculpt_session);
   }
 
   /* Custom Face Set colors for Face Sets that no longer exist are kept while sculpting, so that

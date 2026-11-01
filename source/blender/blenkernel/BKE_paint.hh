@@ -16,6 +16,7 @@
 #include "BLI_bounds_types.hh"
 #include "BLI_enum_flags.hh"
 #include "BLI_map.hh"
+#include "BLI_math_base.h"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_offset_indices.hh"
@@ -1218,6 +1219,34 @@ void BKE_sculpt_toolsettings_data_ensure(Main *bmain, Scene *scene);
  */
 bool BKE_sculpt_cursor_addon_active();
 void BKE_sculpt_cursor_addon_active_set(bool active);
+
+/**
+ * The size of the sculpt cursor gizmo in percent of the default, as stored in
+ * #Sculpt.sculpt_cursor_gizmo_size. Single source for the clamp range and the zero handling
+ * (zero comes from files saved before the size existed): used by the RNA accessors of
+ * `sculpt.sculpt_cursor_gizmo_size`, by the transform operator's Scale mode and by the viewport
+ * gizmo, which reads the same value as a 0.25..2.0 factor (percent / 100).
+ */
+constexpr int SCULPT_CURSOR_GIZMO_SIZE_MIN = 25;
+constexpr int SCULPT_CURSOR_GIZMO_SIZE_MAX = 200;
+constexpr int SCULPT_CURSOR_GIZMO_SIZE_DEFAULT = 100;
+
+/** The clamped gizmo size in percent, \a sculpt may be null. */
+inline float BKE_sculpt_cursor_gizmo_size_percent_get(const Sculpt *sculpt)
+{
+  return (!sculpt || sculpt->sculpt_cursor_gizmo_size == 0) ?
+             float(SCULPT_CURSOR_GIZMO_SIZE_DEFAULT) :
+             float(sculpt->sculpt_cursor_gizmo_size);
+}
+
+/** Clamp and store the gizmo size in percent, \a sculpt may be null. */
+inline void BKE_sculpt_cursor_gizmo_size_percent_set(Sculpt *sculpt, const float percent)
+{
+  if (sculpt != nullptr) {
+    sculpt->sculpt_cursor_gizmo_size = uint8_t(
+        clamp_i(int(roundf(percent)), SCULPT_CURSOR_GIZMO_SIZE_MIN, SCULPT_CURSOR_GIZMO_SIZE_MAX));
+  }
+}
 
 void BKE_sculpt_sync_face_visibility_to_grids(const Mesh &mesh, SubdivCCG &subdiv_ccg);
 

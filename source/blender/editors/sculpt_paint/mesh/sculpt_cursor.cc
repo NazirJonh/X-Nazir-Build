@@ -10,6 +10,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
@@ -56,6 +57,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_prototypes.hh"
 
 #include "sculpt_intern.hh"
 
@@ -182,11 +184,7 @@ bool gizmo_size_is_world(const Scene &scene)
 float gizmo_size_get(const Scene &scene)
 {
   const Sculpt *sculpt = scene.toolsettings ? scene.toolsettings->sculpt : nullptr;
-  /* Zero comes from files saved before the size existed. */
-  if (!sculpt || sculpt->sculpt_cursor_gizmo_size == 0) {
-    return 1.0f;
-  }
-  return float(sculpt->sculpt_cursor_gizmo_size) / 100.0f;
+  return BKE_sculpt_cursor_gizmo_size_percent_get(sculpt) / 100.0f;
 }
 
 CursorState state_get(const Scene &scene, const Object &ob)
@@ -485,12 +483,14 @@ void SCULPT_OT_cursor_set(wmOperatorType *ot)
 }
 
 /* ================================================================
- * Operator for Transform sculpt cursor (move/rotate)
+ * Operator for Transform sculpt cursor (move/rotate/scale)
  * ================================================================ */
 
 enum eSculptCursorTransformMode {
   SCULPT_CURSOR_TRANSFORM_TRANSLATE = 0,
   SCULPT_CURSOR_TRANSFORM_ROTATE = 1,
+  /** Cursor gizmo size scaling (#SCALE, \c S while dragging). */
+  SCULPT_CURSOR_TRANSFORM_SCALE = 2,
 };
 
 struct SculptCursorTransformData {
@@ -505,6 +505,11 @@ struct SculptCursorTransformData {
   float2 initial_mouse;
   float2 last_mouse;
   bool constraint_axis[3];
+
+  /** Typed numeric input for the active mode (see `ED_numinput.hh`). */
+  NumInput num_input;
+  /** Cursor gizmo size in percent when the drag started (for \c SCALE). */
+  float initial_gizmo_size = 100.0f;
 };
 
 static int sculpt_cursor_constraint_axis_index(const bool constraint_axis[3]);
@@ -563,11 +568,173 @@ static float sculpt_cursor_snap_angle(float angle, float snap_increment)
   return roundf(angle / snap_increment) * snap_increment;
 }
 
+/** Cursor gizmo size as stored percent (see #BKE_sculpt_cursor_gizmo_size_percent_get). */
+static float sculpt_cursor_gizmo_size_percent_get(const Scene &scene)
+{
+  return BKE_sculpt_cursor_gizmo_size_percent_get(scene.toolsettings ? scene.toolsettings->sculpt :
+                                                                       nullptr);
+}
+
+/**
+ * Set the cursor gizmo size in percent through the RNA property: #RNA_property_update publishes it
+ * on the message bus, which is what the viewport gizmo group refreshes on
+ * (#gizmogroup_message_subscribe in view3d_gizmo_sculpt_cursor.cc). A plain DNA write would leave
+ * the gizmo at the old size until some unrelated refresh happens.
+ */
+static void sculpt_cursor_gizmo_size_percent_set(bContext *C, Scene &scene, const float percent)
+{
+  Sculpt *sculpt = scene.toolsettings ? scene.toolsettings->sculpt : nullptr;
+  if (sculpt == nullptr) {
+    return;
+  }
+  PointerRNA sculpt_ptr = RNA_pointer_create_discrete(&scene.id, RNA_Sculpt, sculpt);
+  PropertyRNA *prop = RNA_struct_find_property(&sculpt_ptr, "sculpt_cursor_gizmo_size");
+  if (prop == nullptr) {
+    return;
+  }
+  RNA_property_float_set(&sculpt_ptr, prop, percent / 100.0f);
+  RNA_property_update(C, &sculpt_ptr, prop);
+}
+
+static void sculpt_cursor_num_input_init(SculptCursorTransformData &data,
+                                         const Scene &scene,
+                                         const eSculptCursorTransformMode mode)
+{
+  initNumInput(&data.num_input);
+  data.num_input.idx_max = 0;
+  data.num_input.unit_sys = scene.unit.system;
+  switch (mode) {
+    case SCULPT_CURSOR_TRANSFORM_TRANSLATE:
+      data.num_input.unit_type[0] = B_UNIT_LENGTH;
+      break;
+    case SCULPT_CURSOR_TRANSFORM_ROTATE:
+      data.num_input.unit_type[0] = B_UNIT_ROTATION;
+      data.num_input.unit_use_radians = (scene.unit.system_rotation == USER_UNIT_ROT_RADIANS);
+      break;
+    case SCULPT_CURSOR_TRANSFORM_SCALE:
+      /* Typed as a percentage of the size the drag started from. */
+      data.num_input.unit_type[0] = B_UNIT_NONE;
+      data.num_input.val_flag[0] |= NUM_NO_NEGATIVE;
+      break;
+  }
+}
+
+static bool sculpt_cursor_num_input_apply_translate(bContext *C,
+                                                    SculptCursorTransformData &data,
+                                                    Object &ob,
+                                                    const float value)
+{
+  float current_world_pos[3];
+  copy_v3_v3(current_world_pos, data.current.location);
+  mul_m4_v3(ob.object_to_world().ptr(), current_world_pos);
+  float dir[3];
+  sub_v3_v3v3(dir, current_world_pos, data.initial_world_pos);
+  if (is_zero_v3(dir)) {
+    /* Nothing typed a direction yet: move along the view's X axis. */
+    ARegion *region = CTX_wm_region(C);
+    RegionView3D *rv3d = region ? static_cast<RegionView3D *>(region->regiondata) : nullptr;
+    if (rv3d) {
+      copy_v3_v3(dir, rv3d->viewinv[0]);
+    }
+    else {
+      copy_v3_fl(dir, 1.0f);
+    }
+  }
+  normalize_v3(dir);
+  float new_world_pos[3];
+  madd_v3_v3v3fl(new_world_pos, data.initial_world_pos, dir, value);
+  data.current.location = math::transform_point(ob.world_to_object(), float3(new_world_pos));
+  return true;
+}
+
+static bool sculpt_cursor_num_input_apply_rotate(bContext *C,
+                                                 SculptCursorTransformData &data,
+                                                 Object &ob,
+                                                 const float value)
+{
+  /* Absolute angle, same construction as the axis drags (see
+   * #sculpt_cursor_rotate_around_axis / #sculpt_cursor_rotate_around_view_axis). */
+  const int axis = sculpt_cursor_constraint_axis_index(data.constraint_axis);
+  float new_rot[4];
+  if (axis != -1) {
+    float cursor_mat[3][3];
+    quat_to_mat3(cursor_mat, data.initial.rotation);
+    float axis_local[3];
+    copy_v3_v3(axis_local, cursor_mat[axis]);
+    float delta_quat[4];
+    axis_angle_to_quat(delta_quat, axis_local, value);
+    mul_qt_qtqt(new_rot, delta_quat, data.initial.rotation);
+  }
+  else {
+    ARegion *region = CTX_wm_region(C);
+    RegionView3D *rv3d = region ? static_cast<RegionView3D *>(region->regiondata) : nullptr;
+    float view_axis[3] = {0.0f, 0.0f, 1.0f};
+    if (rv3d) {
+      copy_v3_v3(view_axis, rv3d->viewinv[2]);
+    }
+    float ob_rot[3][3];
+    copy_m3_m4(ob_rot, ob.object_to_world().ptr());
+    normalize_m3(ob_rot);
+    float local_rot[3][3];
+    quat_to_mat3(local_rot, data.initial.rotation);
+    float world_rot[3][3];
+    mul_m3_m3m3(world_rot, ob_rot, local_rot);
+    float delta[3][3];
+    axis_angle_to_mat3(delta, view_axis, value);
+    float new_world_rot[3][3];
+    mul_m3_m3m3(new_world_rot, delta, world_rot);
+    float ob_rot_inv[3][3];
+    invert_m3_m3(ob_rot_inv, ob_rot);
+    float new_local_rot[3][3];
+    mul_m3_m3m3(new_local_rot, ob_rot_inv, new_world_rot);
+    mat3_to_quat(new_rot, new_local_rot);
+  }
+  copy_qt_qt(data.current.rotation, new_rot);
+  return true;
+}
+
+static bool sculpt_cursor_num_input_apply_scale(bContext *C,
+                                                SculptCursorTransformData &data,
+                                                Scene &scene,
+                                                const float value)
+{
+  sculpt_cursor_gizmo_size_percent_set(C, scene, data.initial_gizmo_size * value / 100.0f);
+  return true;
+}
+
+/**
+ * Make the typed value take effect immediately. Translate types the distance along the current
+ * drag direction, rotate the absolute angle from the drag start, scale the percent of the start
+ * size. Returns true when the cursor/scene state changed and the caller should refresh.
+ */
+static bool sculpt_cursor_num_input_apply(bContext *C,
+                                          SculptCursorTransformData &data,
+                                          Object &ob,
+                                          Scene &scene,
+                                          const eSculptCursorTransformMode mode)
+{
+  float value = 0.0f;
+  if (!hasNumInput(&data.num_input) || !applyNumInput(&data.num_input, &value)) {
+    return false;
+  }
+  switch (mode) {
+    case SCULPT_CURSOR_TRANSFORM_TRANSLATE:
+      return sculpt_cursor_num_input_apply_translate(C, data, ob, value);
+    case SCULPT_CURSOR_TRANSFORM_ROTATE:
+      return sculpt_cursor_num_input_apply_rotate(C, data, ob, value);
+    case SCULPT_CURSOR_TRANSFORM_SCALE:
+      return sculpt_cursor_num_input_apply_scale(C, data, scene, value);
+  }
+  return false;
+}
+
 static void sculpt_cursor_transform_header_update(bContext *C,
                                                   wmOperator *op,
                                                   const Object &ob,
                                                   const CursorState &state,
-                                                  const SculptCursorTransformData &data,
+                                                  /* Non-const: #outputNumInput needs a mutable
+                                                   * #NumInput (see the typing branch below). */
+                                                  SculptCursorTransformData &data,
                                                   const float2 *curr_mval = nullptr,
                                                   float snap_increment = 0.0f)
 {
@@ -581,8 +748,31 @@ static void sculpt_cursor_transform_header_update(bContext *C,
   char str[UI_MAX_DRAW_STR];
   str[0] = '\0';
 
-  const eSculptCursorTransformMode mode = eSculptCursorTransformMode(RNA_enum_get(op->ptr, "mode"));
+  const eSculptCursorTransformMode mode = eSculptCursorTransformMode(
+      RNA_enum_get(op->ptr, "mode"));
   const int axis = sculpt_cursor_constraint_axis_index(data.constraint_axis);
+
+  /* While typing, the header shows the input string itself (classic num-input behavior). */
+  if (hasNumInput(&data.num_input)) {
+    char rep[NUM_STR_REP_LEN];
+    outputNumInput(&data.num_input, rep, unit);
+    const char *label;
+    switch (mode) {
+      case SCULPT_CURSOR_TRANSFORM_ROTATE:
+        label = IFACE_("Rotation:");
+        break;
+      case SCULPT_CURSOR_TRANSFORM_SCALE:
+        label = IFACE_("Scale:");
+        break;
+      case SCULPT_CURSOR_TRANSFORM_TRANSLATE:
+      default:
+        label = IFACE_("D:");
+        break;
+    }
+    BLI_snprintf_utf8(str, sizeof(str), "%s %s", label, rep);
+    ED_area_status_text(area, str);
+    return;
+  }
 
   switch (mode) {
     case SCULPT_CURSOR_TRANSFORM_TRANSLATE: {
@@ -603,16 +793,15 @@ static void sculpt_cursor_transform_header_update(bContext *C,
         sculpt_cursor_dist_to_str(dist_str, sizeof(dist_str), double(fabsf(along)), unit);
 
         char axis_text[64];
-        SNPRINTF_UTF8(axis_text,
-                      IFACE_(" along %s"),
-                      sculpt_cursor_constraint_axis_name(axis));
+        SNPRINTF_UTF8(axis_text, IFACE_(" along %s"), sculpt_cursor_constraint_axis_name(axis));
         BLI_snprintf_utf8(str, sizeof(str), "D: %s (%s)%s", val_str, dist_str, axis_text);
       }
       else {
         char dvec_str[3][NUM_STR_REP_LEN];
         char dist_str[NUM_STR_REP_LEN];
         for (int i = 0; i < 3; i++) {
-          sculpt_cursor_dist_to_str(dvec_str[i], sizeof(dvec_str[i]), double(world_delta[i]), unit);
+          sculpt_cursor_dist_to_str(
+              dvec_str[i], sizeof(dvec_str[i]), double(world_delta[i]), unit);
         }
         sculpt_cursor_dist_to_str(dist_str, sizeof(dist_str), double(len_v3(world_delta)), unit);
         BLI_snprintf_utf8(str,
@@ -644,19 +833,47 @@ static void sculpt_cursor_transform_header_update(bContext *C,
 
       if (axis != -1) {
         char axis_text[64];
-        SNPRINTF_UTF8(axis_text,
-                      IFACE_(" along %s"),
-                      sculpt_cursor_constraint_axis_name(axis));
-        BLI_snprintf_utf8(str, sizeof(str), IFACE_("Rotation: %.2f%s"), RAD2DEGF(angle), axis_text);
+        SNPRINTF_UTF8(axis_text, IFACE_(" along %s"), sculpt_cursor_constraint_axis_name(axis));
+        BLI_snprintf_utf8(
+            str, sizeof(str), IFACE_("Rotation: %.2f%s"), RAD2DEGF(angle), axis_text);
       }
       else {
         BLI_snprintf_utf8(str, sizeof(str), IFACE_("Rotation: %.2f"), RAD2DEGF(angle));
       }
       break;
     }
+    case SCULPT_CURSOR_TRANSFORM_SCALE: {
+      BLI_snprintf_utf8(
+          str, sizeof(str), IFACE_("Scale: %.0f%%"), sculpt_cursor_gizmo_size_percent_get(*scene));
+      break;
+    }
   }
 
   ED_area_status_text(area, str);
+}
+
+/**
+ * Feed a key event to the numeric input: the first digit starts it, further keys keep editing the
+ * value, and a complete value takes effect immediately. Returns true when the event was consumed
+ * as input, so the modal handler must not process it any further.
+ */
+static bool sculpt_cursor_transform_num_input_event(bContext *C,
+                                                    wmOperator *op,
+                                                    Object *ob,
+                                                    Scene *scene,
+                                                    const eSculptCursorTransformMode mode,
+                                                    const wmEvent *event)
+{
+  SculptCursorTransformData *data = static_cast<SculptCursorTransformData *>(op->customdata);
+  if (event->val != KM_PRESS || !handleNumInput(C, &data->num_input, event)) {
+    return false;
+  }
+  if (sculpt_cursor_num_input_apply(C, *data, *ob, *scene, mode)) {
+    state_set(*scene, *ob, data->current);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+  }
+  sculpt_cursor_transform_header_update(C, op, *ob, data->current, *data);
+  return true;
 }
 
 static int sculpt_cursor_constraint_axis_index(const bool constraint_axis[3])
@@ -912,6 +1129,10 @@ static wmOperatorStatus sculpt_cursor_transform_invoke(bContext *C,
   data->last_mouse = data->initial_mouse;
   RNA_boolean_get_array(op->ptr, "constraint_axis", data->constraint_axis);
 
+  data->initial_gizmo_size = sculpt_cursor_gizmo_size_percent_get(*scene);
+  sculpt_cursor_num_input_init(
+      *data, *scene, eSculptCursorTransformMode(RNA_enum_get(op->ptr, "mode")));
+
   sculpt_cursor_transform_header_update(C, op, *ob, data->current, *data);
 
   /* Add modal handler */
@@ -935,13 +1156,20 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
 
   eSculptCursorTransformMode mode = eSculptCursorTransformMode(RNA_enum_get(op->ptr, "mode"));
 
+  /* While a value is being typed, the keys drive the numeric input instead of the drag. */
+  if (sculpt_cursor_transform_num_input_event(C, op, ob, scene, mode, event)) {
+    return OPERATOR_RUNNING_MODAL;
+  }
+
   switch (event->type) {
     case MOUSEMOVE: {
+      /* Moving the mouse resumes the drag: drop any typed value (same behavior as the pose
+       * slider). */
+      sculpt_cursor_num_input_init(*data, *scene, mode);
       const float2 current_mouse = float2(float(event->mval[0]), float(event->mval[1]));
       data->last_mouse = current_mouse;
       const float snap_increment = (mode == SCULPT_CURSOR_TRANSFORM_ROTATE) ?
-                                       sculpt_cursor_rotation_snap_increment(
-                                           C, event->modifier) :
+                                       sculpt_cursor_rotation_snap_increment(C, event->modifier) :
                                        0.0f;
 
       if (mode == SCULPT_CURSOR_TRANSFORM_TRANSLATE) {
@@ -957,7 +1185,7 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
                                                  new_world_pos))
           {
             data->current.location = math::transform_point(ob->world_to_object(),
-                                                            float3(new_world_pos));
+                                                           float3(new_world_pos));
           }
         }
         else {
@@ -965,7 +1193,7 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
           float new_world_pos[3];
           if (sculpt_cursor_translate_free(C, data, current_mouse, new_world_pos)) {
             data->current.location = math::transform_point(ob->world_to_object(),
-                                                            float3(new_world_pos));
+                                                           float3(new_world_pos));
           }
         }
       }
@@ -988,6 +1216,12 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
             copy_qt_qt(data->current.rotation, new_rot);
           }
         }
+      }
+      else if (mode == SCULPT_CURSOR_TRANSFORM_SCALE) {
+        /* Vertical drag up grows the cursor gizmo, down shrinks it; multiplicative in feel
+         * through the factor, with the typed input as the exact alternative. */
+        const float factor = 1.0f + (current_mouse.y - data->initial_mouse.y) / 150.0f;
+        sculpt_cursor_gizmo_size_percent_set(C, *scene, data->initial_gizmo_size * factor);
       }
 
       state_set(*scene, *ob, data->current);
@@ -1049,6 +1283,41 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
       break;
     }
 
+    case 'G':
+    case 'R':
+    case 'S': {
+      if (event->val != KM_PRESS) {
+        break;
+      }
+      eSculptCursorTransformMode new_mode;
+      switch (event->type) {
+        case 'G':
+          new_mode = SCULPT_CURSOR_TRANSFORM_TRANSLATE;
+          break;
+        case 'R':
+          new_mode = SCULPT_CURSOR_TRANSFORM_ROTATE;
+          break;
+        default:
+          BLI_assert(event->type == 'S');
+          new_mode = SCULPT_CURSOR_TRANSFORM_SCALE;
+          break;
+      }
+      if (new_mode == mode) {
+        break;
+      }
+      RNA_enum_set(op->ptr, "mode", new_mode);
+      /* Re-anchor the drag on where the cursor is now, so switching mid-drag continues from
+       * the current state instead of snapping back. */
+      data->initial = data->current;
+      copy_m4_m4(data->initial_world_mat, world_matrix_get(*scene, *ob).ptr());
+      copy_v3_v3(data->initial_world_pos, data->initial_world_mat[3]);
+      data->initial_mouse = data->last_mouse;
+      data->initial_gizmo_size = sculpt_cursor_gizmo_size_percent_get(*scene);
+      sculpt_cursor_num_input_init(*data, *scene, new_mode);
+      sculpt_cursor_transform_header_update(C, op, *ob, data->current, *data);
+      return OPERATOR_RUNNING_MODAL;
+    }
+
     case LEFTMOUSE:
       if (RNA_boolean_get(op->ptr, "release_confirm") && event->val == KM_RELEASE) {
         return sculpt_cursor_transform_finish(C, op);
@@ -1065,6 +1334,7 @@ static wmOperatorStatus sculpt_cursor_transform_modal(bContext *C,
     case RIGHTMOUSE:
       /* Cancel: restore initial state */
       state_set(*scene, *ob, data->initial);
+      sculpt_cursor_gizmo_size_percent_set(C, *scene, data->initial_gizmo_size);
       WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
       sculpt_cursor_transform_header_clear(C);
       MEM_delete(data);
@@ -1083,12 +1353,15 @@ void SCULPT_OT_cursor_transform(wmOperatorType *ot)
   static const EnumPropertyItem mode_items[] = {
       {SCULPT_CURSOR_TRANSFORM_TRANSLATE, "TRANSLATE", 0, "Translate", ""},
       {SCULPT_CURSOR_TRANSFORM_ROTATE, "ROTATE", 0, "Rotate", ""},
+      {SCULPT_CURSOR_TRANSFORM_SCALE, "SCALE", 0, "Scale", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
   ot->name = "Transform Sculpt Cursor";
   ot->idname = "SCULPT_OT_cursor_transform";
-  ot->description = "Transform the sculpt cursor";
+  ot->description =
+      "Transform the sculpt cursor (G, R, S switch the mode while dragging, typing a value "
+      "sets it exactly)";
 
   ot->invoke = sculpt_cursor_transform_invoke;
   ot->modal = sculpt_cursor_transform_modal;

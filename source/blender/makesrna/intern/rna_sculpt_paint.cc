@@ -1536,14 +1536,13 @@ static void rna_Sculpt_sculpt_cursor_gizmo_set(PointerRNA *ptr, int value)
 static float rna_Sculpt_sculpt_cursor_gizmo_size_get(PointerRNA *ptr)
 {
   const Sculpt *sd = static_cast<const Sculpt *>(ptr->data);
-  /* Zero comes from files saved before the size existed. */
-  return (sd->sculpt_cursor_gizmo_size == 0) ? 1.0f : float(sd->sculpt_cursor_gizmo_size) / 100.0f;
+  return BKE_sculpt_cursor_gizmo_size_percent_get(sd) / 100.0f;
 }
 
 static void rna_Sculpt_sculpt_cursor_gizmo_size_set(PointerRNA *ptr, float value)
 {
   Sculpt *sd = static_cast<Sculpt *>(ptr->data);
-  sd->sculpt_cursor_gizmo_size = uint8_t(clamp_i(int(roundf(value * 100.0f)), 25, 200));
+  BKE_sculpt_cursor_gizmo_size_percent_set(sd, value * 100.0f);
 }
 
 /* -------------------------------------------------------------------- */

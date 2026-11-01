@@ -127,6 +127,23 @@ bNode *vector_math_node_add(bNodeTree &tree,
                             NodeOutput a,
                             NodeOutput b);
 
+/**
+ * A Separate XYZ node over the vector \a vector. \a r_xyz receives its three outputs; false, with
+ * nothing left in the tree, when the node cannot be made.
+ */
+bool separate_xyz_node_add(bNodeTree &tree,
+                           layout::LayoutGrid &grid,
+                           Vector<bNode *> &r_nodes,
+                           NodeOutput vector,
+                           NodeOutput r_xyz[3]);
+
+/** A Combine XYZ node over the three scalars \a xyz; empty, with nothing left in the tree, when the
+ * node cannot be made. */
+NodeOutput combine_xyz_node_add(bNodeTree &tree,
+                                layout::LayoutGrid &grid,
+                                Vector<bNode *> &r_nodes,
+                                const NodeOutput xyz[3]);
+
 /** A Mix node in float mode, `mix(A, B, factor)`; null when it cannot be made. */
 bNode *mix_float_node_add(bNodeTree &tree);
 

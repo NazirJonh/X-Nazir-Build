@@ -319,6 +319,7 @@ enum rna_MaterialPaintLayerKindParamType {
   KIND_PARAM_TYPE_INT = 1,
   KIND_PARAM_TYPE_ENUM = 2,
   KIND_PARAM_TYPE_COLOR = 3,
+  KIND_PARAM_TYPE_BOOL = 4,
 };
 
 static const EnumPropertyItem rna_enum_material_paint_layer_kind_param_type_items[] = {
@@ -326,6 +327,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_kind_param_type_item
     {KIND_PARAM_TYPE_INT, "INT", 0, "Integer", "A whole number"},
     {KIND_PARAM_TYPE_ENUM, "ENUM", 0, "Enum", "A choice from the parameter's list"},
     {KIND_PARAM_TYPE_COLOR, "COLOR", 0, "Color", "An RGBA colour"},
+    {KIND_PARAM_TYPE_BOOL, "BOOL", 0, "Boolean", "An on/off checkbox"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -2843,11 +2845,11 @@ static const IDPropertyUIDataInt *rna_kind_param_ui_data_int(const IDProperty *p
 
 /**
  * The label of a kind parameter: its UI data's description, or its stored name when it has none.
- * Float and integer parameters share the #IDPropertyUIData base that holds it.
+ * Float, integer and boolean parameters share the #IDPropertyUIData base that holds it.
  */
 static const char *rna_kind_param_label_text(const IDProperty *prop)
 {
-  if (prop->ui_data != nullptr && ELEM(prop->type, IDP_FLOAT, IDP_INT)) {
+  if (prop->ui_data != nullptr && ELEM(prop->type, IDP_FLOAT, IDP_INT, IDP_BOOLEAN)) {
     const IDPropertyUIData *base = static_cast<const IDPropertyUIData *>(prop->ui_data);
     if (base->description != nullptr) {
       return base->description;
@@ -2877,6 +2879,9 @@ static float rna_MaterialPaintLayerKindParam_value_get(PointerRNA *ptr)
   if (prop->type == IDP_INT) {
     return float(IDP_int_get(prop));
   }
+  if (prop->type == IDP_BOOLEAN) {
+    return float(IDP_bool_get(prop));
+  }
   return 0.0f;
 }
 
@@ -2895,12 +2900,16 @@ static void rna_MaterialPaintLayerKindParam_value_set(PointerRNA *ptr, const flo
     const int high = (ui_data != nullptr) ? ui_data->max : INT_MAX;
     IDP_int_set(prop, std::clamp(int(value), low, high));
   }
+  else if (prop->type == IDP_BOOLEAN) {
+    /* A Boolean has no range to clamp: the write casts onto its two ends. */
+    IDP_bool_set(prop, value != 0.0f);
+  }
   else {
     return;
   }
   /* A float parameter is an input of the row's group: a value edit, never a different graph. An
-   * integer or enum one may switch the shape (the Math filter's operation), so the tree is rebuilt;
-   * correct for both, at the cost of a rebuild for a step-count drag. */
+   * integer, enum or boolean one may switch the shape (the Math filter's operation or Clamp), so
+   * the tree is rebuilt; correct for all of them, at the cost of a rebuild for a step-count drag. */
   if (Material *ma = reinterpret_cast<Material *>(ptr->owner_id)) {
     if (prop->type == IDP_FLOAT) {
       BKE_paint_layers_tag_value_edited(*ma);
@@ -2944,6 +2953,9 @@ static int rna_MaterialPaintLayerKindParam_type_get(PointerRNA *ptr)
     return (ui_data != nullptr && ui_data->enum_items_num > 0) ? KIND_PARAM_TYPE_ENUM :
                                                                  KIND_PARAM_TYPE_INT;
   }
+  if (prop->type == IDP_BOOLEAN) {
+    return KIND_PARAM_TYPE_BOOL;
+  }
   if (prop->type == IDP_ARRAY && prop->subtype == IDP_FLOAT && prop->len == 4) {
     return KIND_PARAM_TYPE_COLOR;
   }
@@ -2986,6 +2998,26 @@ static void rna_MaterialPaintLayerKindParam_int_value_range(PointerRNA *ptr,
   }
   *min = *softmin = ui_data->min;
   *max = *softmax = ui_data->max;
+}
+
+static bool rna_MaterialPaintLayerKindParam_bool_value_get(PointerRNA *ptr)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  return (prop->type == IDP_BOOLEAN) ? IDP_bool_get(prop) : false;
+}
+
+static void rna_MaterialPaintLayerKindParam_bool_value_set(PointerRNA *ptr, const bool value)
+{
+  IDProperty *prop = static_cast<IDProperty *>(ptr->data);
+  if (prop->type != IDP_BOOLEAN) {
+    return;
+  }
+  IDP_bool_set(prop, value);
+  /* A boolean parameter may switch the graph's shape (the Math filter's Clamp is the nodes' own
+   * flag), so the tree is rebuilt rather than value-synced. */
+  if (Material *ma = reinterpret_cast<Material *>(ptr->owner_id)) {
+    BKE_paint_layers_tag_edited(*ma);
+  }
 }
 
 /** The choices of an enum parameter, from its UI data; the caller frees the array itself. */
@@ -4803,6 +4835,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      0,
      "Posterize",
      "Quantize what is below to a whole number of steps per channel"},
+    {MA_PAINT_LAYER_FILTER_MATH,
+     "MATH",
+     0,
+     "Math",
+     "Combine what is below with a constant operand, per channel"},
     {MA_PAINT_LAYER_FILTER_COLOR_ID,
      "COLOR_ID",
      0,
@@ -4953,6 +4990,13 @@ static void rna_def_material_paint_layer_kind_param(BlenderRNA *brna)
                              "rna_MaterialPaintLayerKindParam_int_value_set",
                              "rna_MaterialPaintLayerKindParam_int_value_range");
   RNA_def_property_ui_text(prop, "Integer Value", "Value of an integer parameter, within its range");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "bool_value", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayerKindParam_bool_value_get",
+                                 "rna_MaterialPaintLayerKindParam_bool_value_set");
+  RNA_def_property_ui_text(prop, "Boolean Value", "Value of a boolean parameter");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "enum_value", PROP_ENUM, PROP_NONE);

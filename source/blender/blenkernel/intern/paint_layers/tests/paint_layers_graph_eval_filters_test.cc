@@ -14,6 +14,7 @@
 
 #include "BKE_paint_layers_edit.hh"
 
+#include "../paint_layers_generate_intern.hh"
 #include "../paint_layers_kind.hh"
 
 namespace blender::bke::tests {
@@ -364,6 +365,277 @@ TEST_F(PaintLayersPosterizeTest, the_step_count_is_an_integer_clamped_to_its_ran
   EXPECT_FALSE(paint_layer_kind_param_set(*posterize, PAINT_LAYER_POSTERIZE_STEPS, 8.0f));
 }
 
+class PaintLayersMathTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_math(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_MATH);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+
+  /** One operand for every channel: what the tests that do not care about channels mean. */
+  static void params_set(MaterialPaintLayer &filter, const int operation, const float operand)
+  {
+    params_set_channels(filter, operation, operand, operand, operand);
+  }
+
+  static void params_set_channels(MaterialPaintLayer &filter,
+                                  const int operation,
+                                  const float r,
+                                  const float g,
+                                  const float b)
+  {
+    EXPECT_TRUE(paint_layer_kind_param_int_set(filter, PAINT_LAYER_MATH_OPERATION, operation));
+    EXPECT_TRUE(paint_layer_kind_param_set(filter, PAINT_LAYER_MATH_OPERAND_R, r));
+    EXPECT_TRUE(paint_layer_kind_param_set(filter, PAINT_LAYER_MATH_OPERAND_G, g));
+    EXPECT_TRUE(paint_layer_kind_param_set(filter, PAINT_LAYER_MATH_OPERAND_B, b));
+  }
+
+  static void clamp_set(MaterialPaintLayer &filter, const bool on)
+  {
+    EXPECT_TRUE(paint_layer_kind_param_bool_set(filter, PAINT_LAYER_MATH_CLAMP, on));
+  }
+};
+
+TEST_F(PaintLayersMathTest, every_operation_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *math = add_math(*row, 0.7f);
+  /* One operand per channel, so a per-channel mix-up cannot read as an agreement. */
+  for (const int operation : IndexRange(int(PAINT_LAYER_MATH_OP_LOGARITHM) + 1)) {
+    params_set_channels(*math, operation, 0.5f, 2.0f, 0.25f);
+    expect_graph_matches_cpu(kColor);
+  }
+}
+
+TEST_F(PaintLayersMathTest, clamping_folds_the_result_into_the_unit_range)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 220, 230, 250, 255));
+  MaterialPaintLayer *math = add_math(*row);
+  /* A bright row plus a ninth reads above one everywhere: unclamped both sides read the overshoot,
+   * clamped the node's Use Clamp folds them onto one. */
+  params_set(*math, PAINT_LAYER_MATH_OP_ADD, 0.9f);
+  expect_graph_matches_cpu(kColor);
+  const RGBA unclamped = cpu_pixel(kColor);
+  EXPECT_GT(unclamped.r, 1.0f);
+  EXPECT_GT(unclamped.g, 1.0f);
+  EXPECT_GT(unclamped.b, 1.0f);
+
+  clamp_set(*math, true);
+  expect_graph_matches_cpu(kColor);
+  const RGBA clamped = cpu_pixel(kColor);
+  EXPECT_NEAR(clamped.r, 1.0f, 2e-3f);
+  EXPECT_NEAR(clamped.g, 1.0f, 2e-3f);
+  EXPECT_NEAR(clamped.b, 1.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersMathTest, a_division_by_a_zero_operand_reads_zero_in_that_channel)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *math = add_math(*row);
+  /* The red operand is the zero one, so only the red channel folds to zero. */
+  params_set_channels(*math, PAINT_LAYER_MATH_OP_DIVIDE, 0.0f, 2.0f, 0.5f);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, 0.0f, 2e-3f);
+  EXPECT_GT(after.g, 0.0f);
+  EXPECT_GT(after.b, 0.0f);
+}
+
+TEST_F(PaintLayersMathTest, a_power_of_a_negative_base_under_a_fraction_reads_zero)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *down = add_math(*row);
+  /* The subtract digs every channel below zero; the fractional power of a negative base is the
+   * node's own refusal and reads zero, on both sides. */
+  params_set(*down, PAINT_LAYER_MATH_OP_SUBTRACT, 5.0f);
+  MaterialPaintLayer *power = add_math(*row);
+  params_set(*power, PAINT_LAYER_MATH_OP_POWER, 0.5f);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, 0.0f, 2e-3f);
+  EXPECT_NEAR(after.g, 0.0f, 2e-3f);
+  EXPECT_NEAR(after.b, 0.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersMathTest, a_logarithm_with_a_non_positive_base_reads_zero_in_that_channel)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *math = add_math(*row);
+  /* The red base is the non-positive one, so only the red channel folds to zero. */
+  params_set_channels(*math, PAINT_LAYER_MATH_OP_LOGARITHM, -2.0f, 2.0f, 2.0f);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, 0.0f, 2e-3f);
+  EXPECT_GT(after.g, 0.0f);
+  EXPECT_GT(after.b, 0.0f);
+}
+
+TEST_F(PaintLayersMathTest, a_logarithm_of_a_non_positive_argument_reads_zero)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *down = add_math(*row);
+  /* The subtract digs every channel below zero: a logarithm of it is the node's own refusal. */
+  params_set(*down, PAINT_LAYER_MATH_OP_SUBTRACT, 5.0f);
+  MaterialPaintLayer *log = add_math(*row);
+  params_set(*log, PAINT_LAYER_MATH_OP_LOGARITHM, 2.0f);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, 0.0f, 2e-3f);
+  EXPECT_NEAR(after.g, 0.0f, 2e-3f);
+  EXPECT_NEAR(after.b, 0.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersMathTest, editing_the_operand_is_a_value_edit_both_sides_follow)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *math = add_math(*row);
+  params_set(*math, PAINT_LAYER_MATH_OP_MULTIPLY, 0.5f);
+  expect_graph_matches_cpu(kColor);
+  const RGBA before = graph_pixel(kColor);
+  bNodeTree *tree = ma->paint_layers_tree;
+
+  /* The graph keeps its shape and takes the new value; the CPU composite reads the same one. */
+  params_set(*math, PAINT_LAYER_MATH_OP_MULTIPLY, 0.8f);
+  expect_graph_matches_cpu(kColor);
+  EXPECT_EQ(ma->paint_layers_tree, tree);
+  const RGBA after = graph_pixel(kColor);
+  EXPECT_GT(std::abs(after.g - before.g) + std::abs(after.b - before.b), 1e-3f);
+}
+
+TEST_F(PaintLayersMathTest, the_parameters_are_clamped_to_their_ranges)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *math = add_math(*row);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*math, PAINT_LAYER_MATH_OPERAND_R), 0.0f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*math, PAINT_LAYER_MATH_OPERAND_R, 20.0f));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*math, PAINT_LAYER_MATH_OPERAND_R), 10.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*math, PAINT_LAYER_MATH_OPERAND_G), 0.0f);
+  EXPECT_EQ(paint_layer_kind_param_type(*math, PAINT_LAYER_MATH_OPERATION),
+            PaintLayerKindParamType::Enum);
+  EXPECT_EQ(paint_layer_kind_param_type(*math, PAINT_LAYER_MATH_CLAMP),
+            PaintLayerKindParamType::Bool);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*math, PAINT_LAYER_MATH_OPERATION, 99));
+  EXPECT_EQ(paint_layer_kind_param_int_get(*math, PAINT_LAYER_MATH_OPERATION),
+            PAINT_LAYER_MATH_OP_LOGARITHM);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*math, PAINT_LAYER_MATH_OPERATION, -3));
+  EXPECT_EQ(paint_layer_kind_param_int_get(*math, PAINT_LAYER_MATH_OPERATION),
+            PAINT_LAYER_MATH_OP_ADD);
+  /* The clamp is a Boolean now: a write lands on one of its two ends, and the float value the
+   * composite and the graph read folds it. The integer API is not its writer. */
+  EXPECT_FALSE(paint_layer_kind_param_bool_get(*math, PAINT_LAYER_MATH_CLAMP));
+  EXPECT_TRUE(paint_layer_kind_param_bool_set(*math, PAINT_LAYER_MATH_CLAMP, true));
+  EXPECT_TRUE(paint_layer_kind_param_bool_get(*math, PAINT_LAYER_MATH_CLAMP));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*math, PAINT_LAYER_MATH_CLAMP), 1.0f);
+  EXPECT_FALSE(paint_layer_kind_param_int_set(*math, PAINT_LAYER_MATH_CLAMP, 7));
+  EXPECT_TRUE(paint_layer_kind_param_bool_get(*math, PAINT_LAYER_MATH_CLAMP));
+  EXPECT_TRUE(paint_layer_kind_param_bool_set(*math, PAINT_LAYER_MATH_CLAMP, false));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*math, PAINT_LAYER_MATH_CLAMP), 0.0f);
+}
+
+/** The `.PL Layer <name>` group of the generated tree in \a bmain, or null. */
+static bNodeTree *math_layer_tree_find(Main &bmain, const char *layer_name)
+{
+  char full[96];
+  SNPRINTF(full, ".PL Layer %s", layer_name);
+  for (bNodeTree &tree : bmain.nodetrees) {
+    if (STREQ(tree.id.name + 2, full)) {
+      return &tree;
+    }
+  }
+  return nullptr;
+}
+
+/** How many of \a group's Math nodes run \a operation with the clamp flag \a clamp. */
+static int math_group_count_op(bNodeTree &group, const int operation, const int clamp)
+{
+  int count = 0;
+  for (bNode &node : group.nodes) {
+    if (node.type_legacy == SH_NODE_MATH && node.custom1 == operation &&
+        (node.custom2 & SHD_MATH_CLAMP) == clamp)
+    {
+      count++;
+    }
+  }
+  return count;
+}
+
+TEST_F(PaintLayersMathTest, changing_the_operation_moves_the_hash_and_rebuilds_the_group)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *math = add_math(*row);
+  params_set(*math, PAINT_LAYER_MATH_OP_ADD, 0.5f);
+  expect_graph_matches_cpu(kColor);
+
+  /* The operation decides which Math node each channel's chain is built from, so it is in the
+   * topology hash like the Color Ramp's band: the edit moves the hash and the rebuilt group really
+   * carries the new nodes, which is what keeps a stale shape from shading. */
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t as_add = paint_layers::paint_layers_layer_topology_hash(
+      *ma, *row, wired, forms);
+  bNodeTree *group = math_layer_tree_find(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  ASSERT_EQ(math_group_count_op(*group, NODE_MATH_ADD, 0), 3);
+
+  ASSERT_TRUE(paint_layer_kind_param_int_set(
+      *math, PAINT_LAYER_MATH_OPERATION, PAINT_LAYER_MATH_OP_MULTIPLY));
+  const uint64_t as_multiply = paint_layers::paint_layers_layer_topology_hash(
+      *ma, *row, wired, forms);
+  EXPECT_NE(as_multiply, as_add);
+  expect_graph_matches_cpu(kColor);
+  group = math_layer_tree_find(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(math_group_count_op(*group, NODE_MATH_MULTIPLY, 0), 3);
+  EXPECT_EQ(math_group_count_op(*group, NODE_MATH_ADD, 0), 0);
+
+  /* The operands are inputs: the hash holds and the graph keeps its shape, the values sync. */
+  params_set(*math, PAINT_LAYER_MATH_OP_MULTIPLY, 0.8f);
+  EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), as_multiply);
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersMathTest, turning_the_clamp_on_moves_the_hash_and_sets_the_nodes_flag)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *math = add_math(*row);
+  params_set(*math, PAINT_LAYER_MATH_OP_ADD, 0.5f);
+  expect_graph_matches_cpu(kColor);
+
+  /* The clamp decides whether the scalar Math nodes carry their Use Clamp flag, so it is in the
+   * topology hash with the operation: an edit of it rebuilds the group. */
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t unclamped = paint_layers::paint_layers_layer_topology_hash(
+      *ma, *row, wired, forms);
+  bNodeTree *group = math_layer_tree_find(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  ASSERT_EQ(math_group_count_op(*group, NODE_MATH_ADD, 0), 3);
+  ASSERT_EQ(math_group_count_op(*group, NODE_MATH_ADD, SHD_MATH_CLAMP), 0);
+
+  clamp_set(*math, true);
+  const uint64_t clamped = paint_layers::paint_layers_layer_topology_hash(
+      *ma, *row, wired, forms);
+  EXPECT_NE(clamped, unclamped);
+  expect_graph_matches_cpu(kColor);
+  group = math_layer_tree_find(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(math_group_count_op(*group, NODE_MATH_ADD, SHD_MATH_CLAMP), 3);
+  EXPECT_EQ(math_group_count_op(*group, NODE_MATH_ADD, 0), 0);
+}
+
 class PaintLayersHslTest : public PaintLayersFilterTest {
  public:
   MaterialPaintLayer *add_hsl(MaterialPaintLayer &row, const float opacity = 1.0f)
@@ -499,6 +771,24 @@ TEST_F(PaintLayersAdjustmentTest, brightness_contrast_adjustment_matches_the_cpu
       *bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_BRIGHTNESS, 0.2f));
   EXPECT_TRUE(paint_layer_kind_param_set(
       *bc, PAINT_LAYER_BRIGHTNESS_CONTRAST_CONTRAST, 0.4f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersAdjustmentTest, posterize_and_math_adjustments_match_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *posterize = add_adjustment(MA_PAINT_LAYER_FILTER_POSTERIZE, 0.8f);
+  ASSERT_NE(posterize, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*posterize, PAINT_LAYER_POSTERIZE_STEPS, 6));
+  MaterialPaintLayer *math = add_adjustment(MA_PAINT_LAYER_FILTER_MATH, 0.7f);
+  ASSERT_NE(math, nullptr);
+  EXPECT_TRUE(
+      paint_layer_kind_param_int_set(*math, PAINT_LAYER_MATH_OPERATION, PAINT_LAYER_MATH_OP_SUBTRACT));
+  EXPECT_TRUE(paint_layer_kind_param_set(*math, PAINT_LAYER_MATH_OPERAND_R, 0.2f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*math, PAINT_LAYER_MATH_OPERAND_G, 0.2f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*math, PAINT_LAYER_MATH_OPERAND_B, 0.2f));
 
   expect_graph_matches_cpu(kColor);
 }
@@ -711,6 +1001,27 @@ TEST_F(PaintLayersMaskFilterTest, posterize_in_the_mask_works_on_its_coverage)
   EXPECT_TRUE(paint_layer_kind_param_int_set(*posterize, PAINT_LAYER_POSTERIZE_STEPS, 4));
   expect_graph_matches_cpu(kColor);
   EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 1.0f / 3.0f, 3e-3f);
+}
+
+TEST_F(PaintLayersMaskFilterTest, math_in_the_mask_works_on_its_coverage)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  /* `0.25 * 2 = 0.5`. */
+  MaterialPaintLayer *math = add_mask_filter(*row, MA_PAINT_LAYER_FILTER_MATH);
+  ASSERT_NE(math, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(
+      *math, PAINT_LAYER_MATH_OPERATION, PAINT_LAYER_MATH_OP_MULTIPLY));
+  EXPECT_TRUE(paint_layer_kind_param_set(*math, PAINT_LAYER_MATH_OPERAND_R, 2.0f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*math, PAINT_LAYER_MATH_OPERAND_G, 2.0f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*math, PAINT_LAYER_MATH_OPERAND_B, 2.0f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.5f, 3e-3f);
 }
 
 TEST_F(PaintLayersMaskFilterTest, a_mask_filter_needs_no_channel_and_makes_the_base_mask_itself)

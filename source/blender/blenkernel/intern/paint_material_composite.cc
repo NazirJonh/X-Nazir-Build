@@ -1029,6 +1029,14 @@ static float composite_filter_color(const int16_t filter,
         rgb[k] = paint_layer_posterize_apply(rgb[k], params[PAINT_LAYER_POSTERIZE_STEPS]);
       }
       break;
+    case MA_PAINT_LAYER_FILTER_MATH:
+      for (const int k : IndexRange(3)) {
+        rgb[k] = paint_layer_math_apply(rgb[k],
+                                        int(params[PAINT_LAYER_MATH_OPERATION] + 0.5f),
+                                        params[PAINT_LAYER_MATH_OPERAND_R + k],
+                                        params[PAINT_LAYER_MATH_CLAMP] > 0.5f);
+      }
+      break;
     case MA_PAINT_LAYER_FILTER_COLOR_RAMP:
       if (ramp != nullptr) {
         return paint_layer_color_ramp_apply(

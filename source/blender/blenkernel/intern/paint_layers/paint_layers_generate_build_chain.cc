@@ -798,11 +798,11 @@ NodeOutput value_node_add(bNodeTree &tree,
  * A Separate XYZ node over the vector \a vector. \a r_xyz receives its three outputs; false, with
  * nothing left in the tree, when the node cannot be made.
  */
-static bool separate_xyz_node_add(bNodeTree &tree,
-                                  layout::LayoutGrid &grid,
-                                  Vector<bNode *> &r_nodes,
-                                  const NodeOutput vector,
-                                  NodeOutput r_xyz[3])
+bool separate_xyz_node_add(bNodeTree &tree,
+                           layout::LayoutGrid &grid,
+                           Vector<bNode *> &r_nodes,
+                           const NodeOutput vector,
+                           NodeOutput r_xyz[3])
 {
   bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_SEPXYZ);
   if (node == nullptr) {
@@ -823,6 +823,38 @@ static bool separate_xyz_node_add(bNodeTree &tree,
     r_xyz[i] = {node, outs[i]};
   }
   return true;
+}
+
+/**
+ * A Combine XYZ node over the three scalars \a xyz: each links its own component, so the colour the
+ * scalar Math nodes built per channel comes back a vector. Empty, with nothing left in the tree,
+ * when the node cannot be made.
+ */
+NodeOutput combine_xyz_node_add(bNodeTree &tree,
+                                layout::LayoutGrid &grid,
+                                Vector<bNode *> &r_nodes,
+                                const NodeOutput xyz[3])
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_COMBXYZ);
+  bNodeSocket *ins[3] = {(node != nullptr) ? socket_in(*node, "X") : nullptr,
+                         (node != nullptr) ? socket_in(*node, "Y") : nullptr,
+                         (node != nullptr) ? socket_in(*node, "Z") : nullptr};
+  bNodeSocket *out = (node != nullptr) ? socket_out(*node, "Vector") : nullptr;
+  if (node == nullptr || ins[0] == nullptr || ins[1] == nullptr || ins[2] == nullptr ||
+      out == nullptr || xyz[0].socket == nullptr || xyz[1].socket == nullptr ||
+      xyz[2].socket == nullptr)
+  {
+    if (node != nullptr) {
+      bke::node_remove_node(nullptr, tree, *node, true, false);
+    }
+    return {};
+  }
+  grid.place_extra(*node);
+  r_nodes.append(node);
+  for (const int i : IndexRange(3)) {
+    bke::node_add_link(tree, *xyz[i].node, *xyz[i].socket, *node, *ins[i]);
+  }
+  return {node, out};
 }
 
 /**

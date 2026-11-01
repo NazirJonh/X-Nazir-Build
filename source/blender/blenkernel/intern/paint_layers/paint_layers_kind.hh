@@ -17,6 +17,7 @@
 #include <cstdint>
 
 #include "BLI_function_ref.hh"
+#include "BLI_math_base_safe.h"
 
 #include "DNA_ID.h"
 #include "DNA_material_types.h"
@@ -95,6 +96,8 @@ enum class PaintLayerKindParamType : uint8_t {
   Color,
   /** A ColorBand, kept in #MaterialPaintLayer::ramp rather than in the properties. */
   Ramp,
+  /** An on/off checkbox, stored as an #IDP_BOOLEAN in the row's system properties. */
+  Bool,
 };
 
 /** One choice of an #PaintLayerKindParamType::Enum parameter. */
@@ -235,6 +238,30 @@ enum PaintLayerPosterizeParam : int {
   PAINT_LAYER_POSTERIZE_PARAM_NUM = 1,
 };
 
+/** The operation of the Math filter, the value of its #PAINT_LAYER_MATH_OPERATION parameter. */
+enum PaintLayerMathOperation : int {
+  PAINT_LAYER_MATH_OP_ADD = 0,
+  PAINT_LAYER_MATH_OP_SUBTRACT = 1,
+  PAINT_LAYER_MATH_OP_MULTIPLY = 2,
+  PAINT_LAYER_MATH_OP_DIVIDE = 3,
+  PAINT_LAYER_MATH_OP_MINIMUM = 4,
+  PAINT_LAYER_MATH_OP_MAXIMUM = 5,
+  PAINT_LAYER_MATH_OP_POWER = 6,
+  PAINT_LAYER_MATH_OP_LOGARITHM = 7,
+};
+
+/** The positions of the Math filter's parameters in its schema. */
+enum PaintLayerMathParam : int {
+  PAINT_LAYER_MATH_OPERATION = 0,
+  /** The node's own Use Clamp: the result folds into [0, 1]. */
+  PAINT_LAYER_MATH_CLAMP = 1,
+  /** One operand per colour channel: the value the channel is combined with. */
+  PAINT_LAYER_MATH_OPERAND_R = 2,
+  PAINT_LAYER_MATH_OPERAND_G = 3,
+  PAINT_LAYER_MATH_OPERAND_B = 4,
+  PAINT_LAYER_MATH_PARAM_NUM = 5,
+};
+
 /** The positions of a map-coverage operator's parameters in its schema. */
 enum PaintLayerCoverageParam : int {
   /** How far a sample may differ from a stored colour and still match (max-channel). */
@@ -309,6 +336,50 @@ inline float paint_layer_posterize_apply(const float value, const float steps)
 }
 
 /**
+ * One channel of the Math filter: \a value combined with the constant \a operand by \a operation
+ * (a #PaintLayerMathOperation). POWER and LOGARITHM read the Math node's safe rules through
+ * #safe_powf and #safe_logf, so a negative base under a fractional exponent and a non-positive
+ * logarithm base or argument stay defined; a division by zero reads zero. With \a clamp the result
+ * folds into [0, 1], the node's own Use Clamp, so the CPU composite and the generated node agree.
+ */
+inline float paint_layer_math_apply(const float value,
+                                    const int operation,
+                                    const float operand,
+                                    const bool clamp)
+{
+  float result = value;
+  switch (operation) {
+    case PAINT_LAYER_MATH_OP_ADD:
+      result = value + operand;
+      break;
+    case PAINT_LAYER_MATH_OP_SUBTRACT:
+      result = value - operand;
+      break;
+    case PAINT_LAYER_MATH_OP_MULTIPLY:
+      result = value * operand;
+      break;
+    case PAINT_LAYER_MATH_OP_DIVIDE:
+      result = (operand != 0.0f) ? value / operand : 0.0f;
+      break;
+    case PAINT_LAYER_MATH_OP_MINIMUM:
+      result = std::min(value, operand);
+      break;
+    case PAINT_LAYER_MATH_OP_MAXIMUM:
+      result = std::max(value, operand);
+      break;
+    case PAINT_LAYER_MATH_OP_POWER:
+      result = safe_powf(value, operand);
+      break;
+    case PAINT_LAYER_MATH_OP_LOGARITHM:
+      result = safe_logf(value, operand);
+      break;
+    default:
+      break;
+  }
+  return clamp ? std::clamp(result, 0.0f, 1.0f) : result;
+}
+
+/**
  * The value of the parameter \a index of \a row's kind: the stored one, or the schema's default.
  * A row whose kind has no such parameter reads 0. The storage is the row's system properties, which
  * only this and #paint_layer_kind_param_set touch.
@@ -330,6 +401,10 @@ PaintLayerKindParamType paint_layer_kind_param_type(const MaterialPaintLayer &ro
 /** The integer value of parameter \a index, clamped to the schema's range. */
 int paint_layer_kind_param_int_get(const MaterialPaintLayer &row, int index);
 bool paint_layer_kind_param_int_set(MaterialPaintLayer &row, int index, int value);
+
+/** The boolean value of parameter \a index, or the schema default for an unknown one. */
+bool paint_layer_kind_param_bool_get(const MaterialPaintLayer &row, int index);
+bool paint_layer_kind_param_bool_set(MaterialPaintLayer &row, int index, bool value);
 
 /** The RGBA value of a Color parameter \a index, or the schema default for an unknown one. */
 void paint_layer_kind_param_color_get(const MaterialPaintLayer &row,

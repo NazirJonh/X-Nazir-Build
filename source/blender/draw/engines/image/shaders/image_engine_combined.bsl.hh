@@ -255,6 +255,7 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_HSL 3
 #define COMBINED_FILTER_BRIGHTNESS_CONTRAST 6
 #define COMBINED_FILTER_POSTERIZE 8
+#define COMBINED_FILTER_MATH 9
 
 float levels_channel(float value, float4 p0, float4 p1)
 {
@@ -269,6 +270,51 @@ float levels_channel(float value, float4 p0, float4 p1)
     t = pow(t, inv_gamma);
   }
   return t * (p1.x - p0.w) + p0.w;
+}
+
+/** One channel of the Math filter (the CPU's `paint_layer_math_apply`, the Math node's own rules:
+ * a negative base under a fractional exponent and a non-positive logarithm base or argument read
+ * zero, as does a division by zero). */
+float math_channel(float a, int operation, float b, bool use_clamp)
+{
+  float result = a;
+  if (operation == 1) {
+    result = a - b;
+  }
+  else if (operation == 2) {
+    result = a * b;
+  }
+  else if (operation == 3) {
+    result = (b != 0.0f) ? a / b : 0.0f;
+  }
+  else if (operation == 4) {
+    result = min(a, b);
+  }
+  else if (operation == 5) {
+    result = max(a, b);
+  }
+  else if (operation == 6) {
+    /* The CPU's `safe_powf`: a negative base only carries an integer exponent. GLSL pow refuses
+     * negatives, so the sign goes in by the exponent's parity, the way the node's own shader does. */
+    if (a < 0.0f) {
+      if (b != float(int(b))) {
+        result = 0.0f;
+      }
+      else {
+        float raised = pow(-a, b);
+        result = (mod(abs(b), 2.0f) < 0.5f) ? raised : -raised;
+      }
+    }
+    else {
+      result = pow(a, b);
+    }
+  }
+  else if (operation == 7) {
+    /* The CPU's `safe_logf`: a non-positive base or argument reads zero, and so does a base of
+     * one, whose logarithm divides by zero. */
+    result = (a > 0.0f && b > 0.0f && log2(b) != 0.0f) ? log2(a) / log2(b) : 0.0f;
+  }
+  return use_clamp ? clamp(result, 0.0f, 1.0f) : result;
 }
 
 float3 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1)
@@ -302,6 +348,17 @@ float3 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1)
       /* The CPU's quantization: steps evenly spaced levels over [0, 1], endpoints preserved. */
       float k = max(p0.x - 1.0f, 1.0f);
       result = floor(clamp(rgb, 0.0f, 1.0f) * k + 0.5f) / k;
+      break;
+    }
+    case COMBINED_FILTER_MATH: {
+      /* `op(c, operand_r/g/b)` per channel, the operation and the clamp read from the first
+       * parameters; the operand of each channel is its own. The safe rules are the Math node's
+       * own, the ones the CPU composite follows. */
+      int operation = int(p0.x + 0.5f);
+      bool clamped = p0.y > 0.5f;
+      result = float3(math_channel(rgb.x, operation, p0.z, clamped),
+                      math_channel(rgb.y, operation, p0.w, clamped),
+                      math_channel(rgb.z, operation, p1.x, clamped));
       break;
     }
     default:

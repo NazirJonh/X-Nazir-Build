@@ -61,6 +61,46 @@ static const PaintLayerKindParam posterize_params[] = {
 };
 static_assert(std::size(posterize_params) == PAINT_LAYER_POSTERIZE_PARAM_NUM);
 
+static const PaintLayerKindEnumItem math_operation_items[] = {
+    {PAINT_LAYER_MATH_OP_ADD, "ADD", "Add"},
+    {PAINT_LAYER_MATH_OP_SUBTRACT, "SUBTRACT", "Subtract"},
+    {PAINT_LAYER_MATH_OP_MULTIPLY, "MULTIPLY", "Multiply"},
+    {PAINT_LAYER_MATH_OP_DIVIDE, "DIVIDE", "Divide"},
+    {PAINT_LAYER_MATH_OP_MINIMUM, "MINIMUM", "Minimum"},
+    {PAINT_LAYER_MATH_OP_MAXIMUM, "MAXIMUM", "Maximum"},
+    {PAINT_LAYER_MATH_OP_POWER, "POWER", "Power"},
+    {PAINT_LAYER_MATH_OP_LOGARITHM, "LOGARITHM", "Logarithm"},
+};
+static_assert(int(std::size(math_operation_items)) - 1 == PAINT_LAYER_MATH_OP_LOGARITHM);
+
+static const PaintLayerKindParam math_params[] = {
+    /* The generated node's operation is decided when the graph is built, so an edit of this is a
+     * shape edit and the tree is rebuilt; the operands stay value inputs. */
+    {"operation",
+     "Operation",
+     float(PAINT_LAYER_MATH_OP_ADD),
+     0.0f,
+     float(PAINT_LAYER_MATH_OP_LOGARITHM),
+     PaintLayerKindParamType::Enum,
+     math_operation_items,
+     int(std::size(math_operation_items))},
+    /* The Math nodes' Use Clamp: folding the result into [0, 1] is the shape the graph is built
+     * with, so an edit of it is a shape edit too, not a value the graph reads. A checkbox: the
+     * schema's min/max/default read as the Boolean's two ends. */
+    {"clamp",
+     "Clamp",
+     0.0f,
+     0.0f,
+     1.0f,
+     PaintLayerKindParamType::Bool},
+    /* One operand per colour channel, wide enough to reach a multiply of two: the operands are
+     * plain constants, not gains. */
+    {"operand_r", "R", 0.0f, -10.0f, 10.0f},
+    {"operand_g", "G", 0.0f, -10.0f, 10.0f},
+    {"operand_b", "B", 0.0f, -10.0f, 10.0f},
+};
+static_assert(std::size(math_params) == PAINT_LAYER_MATH_PARAM_NUM);
+
 /* The ramp itself lives in #MaterialPaintLayer::ramp; the schema entry is what tells the row its
  * kind has one and lets the UI find the payload. */
 static const PaintLayerKindEnumItem color_ramp_alpha_items[] = {
@@ -216,6 +256,14 @@ static const PaintLayerKindInfo kinds[] = {
      posterize_params,
      int(std::size(posterize_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_MATH,
+     "Math",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     math_params,
+     int(std::size(math_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* A map-coverage operator: the map of its Base Color record is an external ID Map, so the map
      * is reference-only and a stroke must not turn it into a paint target. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -332,6 +380,21 @@ int paint_layer_kind_param_int_get(const MaterialPaintLayer &row, const int inde
   return std::clamp(IDP_int_get(prop), int(param->min), int(param->max));
 }
 
+bool paint_layer_kind_param_bool_get(const MaterialPaintLayer &row, const int index)
+{
+  const PaintLayerKindParam *param = kind_param_find(row, index);
+  if (param == nullptr || param->type != PaintLayerKindParamType::Bool) {
+    return false;
+  }
+  const IDProperty *prop = (row.system_properties != nullptr) ?
+                               IDP_GetPropertyFromGroup(row.system_properties, param->name) :
+                               nullptr;
+  if (prop == nullptr || prop->type != IDP_BOOLEAN) {
+    return param->default_value != 0.0f;
+  }
+  return IDP_bool_get(prop);
+}
+
 float paint_layer_kind_param_get(const MaterialPaintLayer &row, const int index)
 {
   const PaintLayerKindParam *param = kind_param_find(row, index);
@@ -340,6 +403,11 @@ float paint_layer_kind_param_get(const MaterialPaintLayer &row, const int index)
   }
   if (ELEM(param->type, PaintLayerKindParamType::Int, PaintLayerKindParamType::Enum)) {
     return float(paint_layer_kind_param_int_get(row, index));
+  }
+  if (param->type == PaintLayerKindParamType::Bool) {
+    /* The scalar readers (the composite's filter_params, the group inputs, the GPU uniforms) stay
+     * float: a Boolean reads as 0.0f or 1.0f through the same path. */
+    return float(paint_layer_kind_param_bool_get(row, index));
   }
   if (ELEM(param->type, PaintLayerKindParamType::Color, PaintLayerKindParamType::Ramp)) {
     /* Not a scalar: the UI and the kind's consumer read them through the typed accessors. */
@@ -422,6 +490,25 @@ static IDProperty *kind_param_ensure_int(MaterialPaintLayer &row,
   return prop;
 }
 
+/** The stored boolean property of \a param, made with the schema default as its UI data. */
+static IDProperty *kind_param_ensure_bool(MaterialPaintLayer &row,
+                                          const PaintLayerKindParam &param)
+{
+  IDProperty *group = kind_param_group_ensure(row);
+  IDProperty *existing = IDP_GetPropertyFromGroup(group, param.name);
+  if (existing != nullptr && existing->type == IDP_BOOLEAN) {
+    return existing;
+  }
+  const bool default_on = param.default_value != 0.0f;
+  IDProperty *prop = bke::idprop::create_bool(param.name, default_on).release();
+  IDPropertyUIDataBool *ui_data = reinterpret_cast<IDPropertyUIDataBool *>(
+      IDP_ui_data_ensure(prop));
+  ui_data->base.description = BLI_strdup(param.label);
+  ui_data->default_value = default_on;
+  IDP_ReplaceInGroup(group, prop);
+  return prop;
+}
+
 /** The stored RGBA array of a Color parameter, made at the schema default when it has none. */
 static IDProperty *kind_param_ensure_color(MaterialPaintLayer &row,
                                            const PaintLayerKindParam &param)
@@ -456,6 +543,9 @@ void paint_layer_kind_params_init(MaterialPaintLayer &row)
         case PaintLayerKindParamType::Ramp:
           BKE_paint_layers_ramp_ensure(row);
           break;
+        case PaintLayerKindParamType::Bool:
+          kind_param_ensure_bool(row, param);
+          break;
         case PaintLayerKindParamType::Float:
           kind_param_ensure(row, param);
           break;
@@ -484,6 +574,16 @@ bool paint_layer_kind_param_int_set(MaterialPaintLayer &row, const int index, co
   }
   IDP_int_set(kind_param_ensure_int(row, *param),
               std::clamp(value, int(param->min), int(param->max)));
+  return true;
+}
+
+bool paint_layer_kind_param_bool_set(MaterialPaintLayer &row, const int index, const bool value)
+{
+  const PaintLayerKindParam *param = kind_param_find(row, index);
+  if (param == nullptr || param->type != PaintLayerKindParamType::Bool) {
+    return false;
+  }
+  IDP_bool_set(kind_param_ensure_bool(row, *param), value);
   return true;
 }
 

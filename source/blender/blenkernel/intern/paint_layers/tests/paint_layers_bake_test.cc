@@ -31,6 +31,7 @@
 #include "BKE_object.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_material_composite_surface.hh"
 #include "BKE_scene.hh"
 
@@ -1355,7 +1356,6 @@ TEST_F(PaintLayersBakeTest, a_mask_gradient_item_invalidates_the_parent_bake_and
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed, scene, view_layer));
   EXPECT_FALSE(changed);
 }
-}
 
 TEST_F(PaintLayersBakeTest, an_auto_row_under_a_gradient_correction_bakes_when_left)
 {
@@ -2125,7 +2125,8 @@ TEST_F(PaintLayersBakeTest, a_cancelled_job_writes_nothing_and_lets_go_of_its_re
   /* Cancel after the first channel rendered: one result is held when the notice lands. */
   int polls = 0;
   BKE_paint_layers_bake_job_compute(*job, {}, [&]() { return ++polls > 1; });
-  EXPECT_TRUE(job->cancelled);
+  /* `PaintLayersBakeJob` is private to the bake source, so the cancel is seen through the poll. */
+  EXPECT_GT(polls, 1) << "the cancel notice was polled";
   EXPECT_EQ(BKE_paint_layers_bake_job_retained_bytes(*job), 0)
       << "the held results went with the cancellation";
   EXPECT_FALSE(BKE_paint_layers_bake_job_commit(*job)) << "a cancelled job writes nothing";

@@ -557,6 +557,112 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       layout::frame_add(tree, effect.name, nodes);
       return true;
     }
+    case MA_PAINT_LAYER_FILTER_MATH: {
+      /* `op(c, operand_r/g/b)` per channel, the operation and the clamp read from the row when the
+       * graph is built: an edit of either is a shape edit and rebuilds the tree, the operands stay
+       * value inputs. One scalar Math node per channel, the way Vector Math has no POWER,
+       * LOGARITHM or Use Clamp of its own; each node's zero-on-zero-divisor rule is the CPU's. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_MATH_PARAM_NUM ||
+          (*params)[PAINT_LAYER_MATH_OPERAND_R] == nullptr ||
+          (*params)[PAINT_LAYER_MATH_OPERAND_G] == nullptr ||
+          (*params)[PAINT_LAYER_MATH_OPERAND_B] == nullptr)
+      {
+        return false;
+      }
+      int node_operation = 0;
+      switch (paint_layer_kind_param_int_get(effect, PAINT_LAYER_MATH_OPERATION)) {
+        case PAINT_LAYER_MATH_OP_ADD:
+          node_operation = NODE_MATH_ADD;
+          break;
+        case PAINT_LAYER_MATH_OP_SUBTRACT:
+          node_operation = NODE_MATH_SUBTRACT;
+          break;
+        case PAINT_LAYER_MATH_OP_MULTIPLY:
+          node_operation = NODE_MATH_MULTIPLY;
+          break;
+        case PAINT_LAYER_MATH_OP_DIVIDE:
+          node_operation = NODE_MATH_DIVIDE;
+          break;
+        case PAINT_LAYER_MATH_OP_MINIMUM:
+          node_operation = NODE_MATH_MINIMUM;
+          break;
+        case PAINT_LAYER_MATH_OP_MAXIMUM:
+          node_operation = NODE_MATH_MAXIMUM;
+          break;
+        case PAINT_LAYER_MATH_OP_POWER:
+          node_operation = NODE_MATH_POWER;
+          break;
+        case PAINT_LAYER_MATH_OP_LOGARITHM:
+          node_operation = NODE_MATH_LOGARITHM;
+          break;
+        default:
+          return false;
+      }
+      const bool clamped = paint_layer_kind_param_bool_get(effect, PAINT_LAYER_MATH_CLAMP);
+      bNodeSocket *operand_sockets[3] = {group_input_socket(group, *(*params)[PAINT_LAYER_MATH_OPERAND_R]),
+                                         group_input_socket(group, *(*params)[PAINT_LAYER_MATH_OPERAND_G]),
+                                         group_input_socket(group, *(*params)[PAINT_LAYER_MATH_OPERAND_B])};
+      if (operand_sockets[0] == nullptr || operand_sockets[1] == nullptr ||
+          operand_sockets[2] == nullptr)
+      {
+        return false;
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        for (bNode *node : nodes) {
+          bke::node_remove_node(nullptr, tree, *node, true, false);
+        }
+        return false;
+      };
+
+      NodeOutput channels[3];
+      if (!separate_xyz_node_add(tree, grid_, nodes, content, channels)) {
+        return discard();
+      }
+      NodeOutput operated[3];
+      for (const int i : IndexRange(3)) {
+        operated[i] = math_node_add(tree,
+                                    grid_,
+                                    nodes,
+                                    node_operation,
+                                    channels[i],
+                                    {group.group_input, operand_sockets[i]});
+        if (operated[i].socket == nullptr) {
+          return discard();
+        }
+        if (clamped) {
+          /* The Math node's own Use Clamp: the result folds into [0, 1], what the CPU's clamp
+           * reads. Off leaves the flag at its zero default; the flag is part of the node, so the
+           * clamp is in the topology hash with the operation. */
+          operated[i].node->custom2 = SHD_MATH_CLAMP;
+        }
+      }
+      NodeOutput combined = combine_xyz_node_add(tree, grid_, nodes, operated);
+      if (combined.socket == nullptr) {
+        return discard();
+      }
+
+      bNode *mix = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
+      bNodeSocket *a = (mix != nullptr) ? socket_in(*mix, "A_Color") : nullptr;
+      bNodeSocket *b = (mix != nullptr) ? socket_in(*mix, "B_Color") : nullptr;
+      bNodeSocket *fac = (mix != nullptr) ? socket_in(*mix, "Factor_Float") : nullptr;
+      bNodeSocket *out = (mix != nullptr) ? socket_out(*mix, "Result_Color") : nullptr;
+      if (mix == nullptr || a == nullptr || b == nullptr || fac == nullptr || out == nullptr) {
+        if (mix != nullptr) {
+          bke::node_remove_node(nullptr, tree, *mix, true, false);
+        }
+        return discard();
+      }
+      nodes.append(mix);
+      grid_.place_extra(*mix);
+      bke::node_add_link(tree, *content.node, *content.socket, *mix, *a);
+      bke::node_add_link(tree, *combined.node, *combined.socket, *mix, *b);
+      bke::node_add_link(tree, *strength.node, *strength.socket, *mix, *fac);
+      content = {mix, out};
+      layout::frame_add(tree, effect.name, nodes);
+      return true;
+    }
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
       /* Map-coverage operators only exist in a mask, where #map_coverage_match_add builds them. */

@@ -384,7 +384,8 @@ def draw_material_kind_params(layout, params):
     """The parameters of a row's kind, each drawn as its type asks.
 
     A float draws as a slider, an integer as a number field, an enum as a menu, a color as a
-    picker; the value is whichever property of the parameter carries its type.
+    picker, a boolean as a checkbox; the value is whichever property of the parameter carries its
+    type.
     """
     for param in params:
         _draw_kind_param(layout, param)
@@ -394,10 +395,13 @@ def _draw_kind_param(layout, param):
     """One parameter of a row's kind, drawn as its type asks.
 
     A float draws as a slider, an integer as a number field, an enum as a menu, a color as a
-    picker; the value is whichever property of the parameter carries its type.
+    picker, a boolean as a checkbox; the value is whichever property of the parameter carries its
+    type.
     """
     if param.type == 'ENUM':
         layout.prop(param, "enum_value", text=param.label)
+    elif param.type == 'BOOL':
+        layout.prop(param, "bool_value", text=param.label)
     elif param.type == 'INT':
         layout.prop(param, "int_value", text=param.label)
     elif param.type == 'COLOR':

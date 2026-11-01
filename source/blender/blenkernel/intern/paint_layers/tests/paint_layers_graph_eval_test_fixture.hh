@@ -410,7 +410,20 @@ class GraphInterpreter {
             value = floorf(a);
             break;
           case NODE_MATH_POWER:
-            value = powf(a, b);
+            /* The node's own rule (its CPU eval reads #safe_powf): a negative base only carries an
+             * integer exponent; written out here so the CPU filter is not its own witness. */
+            value = (a < 0.0f && b != int(b)) ? 0.0f : powf(a, b);
+            break;
+          case NODE_MATH_LOGARITHM:
+            /* The node's own rule (its CPU eval reads #safe_logf): a non-positive base or argument
+             * reads zero, and so does a base of one, whose logarithm divides by zero. */
+            value = (a > 0.0f && b > 0.0f && logf(b) != 0.0f) ? logf(a) / logf(b) : 0.0f;
+            break;
+          case NODE_MATH_MINIMUM:
+            value = std::min(a, b);
+            break;
+          case NODE_MATH_MAXIMUM:
+            value = std::max(a, b);
             break;
           case NODE_MATH_LESS_THAN:
             value = (a < b) ? 1.0f : 0.0f;
@@ -430,6 +443,10 @@ class GraphInterpreter {
           }
           default:
             break;
+        }
+        /* Use Clamp folds the result into [0, 1], the node's own flag. */
+        if ((node.custom2 & SHD_MATH_CLAMP) != 0) {
+          value = clamp_f(value, 0.0f, 1.0f);
         }
         return {value, value, value, value};
       }

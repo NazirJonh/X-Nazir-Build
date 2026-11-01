@@ -218,13 +218,28 @@ static void gradient_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &
 }
 
 /**
- * Mix a filter's Color Band: it lives in a ColorRamp node's storage, not in a socket, so a stop or an
- * interpolation edit changes the node itself and the group must be rebuilt, not synced in place.
+ * Mix a filter's payload: what it decides about the nodes rather than reads as a value. A Color
+ * Band lives in a ColorRamp node's storage, not in a socket, so a stop or an interpolation edit
+ * changes the node itself and the group must be rebuilt, not synced in place. The Math filter's
+ * operation and clamp are the same kind of decision: they pick which Math nodes the generator
+ * builds and what flags they carry, so an edit of either is a different graph while the operands
+ * stay value inputs.
  */
-static void filter_ramp_hash_mix(uint64_t &hash, const MaterialPaintLayer &row)
+static void filter_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &row)
 {
   if (row.ramp != nullptr && paint_layer_kind_has_ramp_param(row)) {
     hash = topology_hash_mix(hash, paint_layer_ramp_hash(row.ramp->band));
+  }
+  if (row.kind_subtype == MA_PAINT_LAYER_FILTER_MATH) {
+    /* A salt first, so the operation cannot read like a payload the shape already carries. */
+    hash = topology_hash_mix(hash, 0x700);
+    hash = topology_hash_mix(hash,
+                             uint64_t(paint_layer_kind_param_int_get(
+                                 row, PAINT_LAYER_MATH_OPERATION)));
+    /* The clamp decides whether the scalar Math nodes carry their Use Clamp flag, so it is
+     * structure like the operation; the operands are the nodes' inputs, not the shape. */
+    hash = topology_hash_mix(
+        hash, uint64_t(paint_layer_kind_param_bool_get(row, PAINT_LAYER_MATH_CLAMP)));
   }
 }
 
@@ -246,7 +261,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   /* Which filter an adjustment is decides its nodes; its parameters are inputs. */
   hash = topology_hash_mix(hash, uint64_t(uint16_t(layer.kind_subtype)));
   gradient_payload_hash_mix(hash, layer);
-  filter_ramp_hash_mix(hash, layer);
+  filter_payload_hash_mix(hash, layer);
   hash = topology_hash_mix(hash, paint_layer_blend_shape(layer));
   /* The runtime tier changes which node a participating channel gets (the dynamic group against a
    * static Mix). Mixing its mask here keeps that transition out of #paint_layer_blend_shape, where
@@ -358,7 +373,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, effect) ? 1 : 0);
     mapping_wrap_hash_mix(hash, ma, effect);
     gradient_payload_hash_mix(hash, effect);
-    filter_ramp_hash_mix(hash, effect);
+    filter_payload_hash_mix(hash, effect);
     const bool reads_source = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE);
     if (reads_source) {
       /* A correction that reads a material has nodes that follow its source, as a Material row's
@@ -449,7 +464,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, item) ? 1 : 0);
     mapping_wrap_hash_mix(hash, ma, item);
     gradient_payload_hash_mix(hash, item);
-    filter_ramp_hash_mix(hash, item);
+    filter_payload_hash_mix(hash, item);
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE)) {

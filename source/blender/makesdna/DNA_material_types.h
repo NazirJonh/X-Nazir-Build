@@ -800,6 +800,8 @@ enum eMaterialPaintLayerFilter : int16_t {
   MA_PAINT_LAYER_FILTER_COLOR_RAMP = 7,
   /** Quantize the colour to a whole number of steps per channel. */
   MA_PAINT_LAYER_FILTER_POSTERIZE = 8,
+  /** A per-channel arithmetic operation against a constant operand. */
+  MA_PAINT_LAYER_FILTER_MATH = 9,
 };
 
 /**

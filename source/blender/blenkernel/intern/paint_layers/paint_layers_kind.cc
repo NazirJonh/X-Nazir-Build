@@ -106,6 +106,12 @@ static const PaintLayerKindParam threshold_params[] = {
 };
 static_assert(std::size(threshold_params) == PAINT_LAYER_THRESHOLD_PARAM_NUM);
 
+static const PaintLayerKindParam clamp_params[] = {
+    {"min", "Min", 0.0f, 0.0f, 1.0f},
+    {"max", "Max", 1.0f, 0.0f, 1.0f},
+};
+static_assert(std::size(clamp_params) == PAINT_LAYER_CLAMP_PARAM_NUM);
+
 /* The ramp itself lives in #MaterialPaintLayer::ramp; the schema entry is what tells the row its
  * kind has one and lets the UI find the payload. */
 static const PaintLayerKindEnumItem color_ramp_alpha_items[] = {
@@ -276,6 +282,14 @@ static const PaintLayerKindInfo kinds[] = {
      filter_roles,
      threshold_params,
      int(std::size(threshold_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_CLAMP,
+     "Clamp",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     clamp_params,
+     int(std::size(clamp_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* A map-coverage operator: the map of its Base Color record is an external ID Map, so the map
      * is reference-only and a stroke must not turn it into a paint target. */

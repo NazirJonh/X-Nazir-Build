@@ -257,6 +257,7 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_POSTERIZE 8
 #define COMBINED_FILTER_MATH 9
 #define COMBINED_FILTER_THRESHOLD 10
+#define COMBINED_FILTER_CLAMP 11
 
 float levels_channel(float value, float4 p0, float4 p1)
 {
@@ -368,6 +369,14 @@ float3 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1)
       result = float3(rgb.x > threshold ? 1.0f : 0.0f,
                       rgb.y > threshold ? 1.0f : 0.0f,
                       rgb.z > threshold ? 1.0f : 0.0f);
+      break;
+    }
+    case COMBINED_FILTER_CLAMP: {
+      /* `min(max(c, min), max)` in the Math node's order, which stays defined when min > max. */
+      /* Per component: a vector against a scalar bound is not an overload every backend has. */
+      result = float3(min(max(rgb.x, p0.x), p0.y),
+                      min(max(rgb.y, p0.x), p0.y),
+                      min(max(rgb.z, p0.x), p0.y));
       break;
     }
     default:

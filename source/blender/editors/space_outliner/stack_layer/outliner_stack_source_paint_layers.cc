@@ -420,6 +420,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_THRESHOLD:
       /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
       return {ICON_MOD_THICKNESS, 0};
+    case MA_PAINT_LAYER_FILTER_CLAMP:
+      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
+      return {ICON_RESTRICT_COLOR_ON, 0};
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
       return {ICON_COLOR, paint_glyph::COLORIZE};
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
@@ -524,6 +527,10 @@ static const PaintFilterAddKind paint_filter_add_kinds[] = {
      N_("Threshold"),
      "Turn the active layer's channels into the two states of a comparison",
      MA_PAINT_LAYER_FILTER_THRESHOLD},
+    {"FILTER_CLAMP",
+     N_("Clamp"),
+     "Keep the active layer's channels inside a constant range",
+     MA_PAINT_LAYER_FILTER_CLAMP},
 };
 
 /**

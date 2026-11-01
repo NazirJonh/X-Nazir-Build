@@ -1090,25 +1090,21 @@ TEST_F(PaintLayersDescription, rna_kind_params_carry_their_type)
   EXPECT_FLOAT_EQ(RNA_property_float_get(&clamp_ptr, clamp_float), 1.0f);
 }
 
-TEST_F(PaintLayersDescription, rna_threshold_param_is_a_ranged_float)
+/**
+ * The shape of a ranged-float kind parameter as the generic RNA shows it: the `kind_params` item
+ * \a identifier of \a layer_ptr reads \a default_value as a FLOAT in [0, 1], and a write past the
+ * range clamps into it, in the property and in the row's own storage at \a index.
+ */
+static void rna_expect_ranged_float_param(PointerRNA &layer_ptr,
+                                          const MaterialPaintLayer &layer,
+                                          const char *identifier,
+                                          const float default_value,
+                                          const int index)
 {
-  Material *ma = BKE_material_add(bmain, "RnaThresholdParamMat");
-  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
-  ASSERT_NE(row, nullptr);
-  MaterialPaintLayer *threshold = BKE_paint_layers_filter_add(
-      *ma, row, MA_PAINT_LAYER_FILTER_THRESHOLD);
-  ASSERT_NE(threshold, nullptr);
-
-  /* The kind's one parameter: the collection lists exactly it, as a float. */
-  PointerRNA threshold_ptr = RNA_pointer_create_discrete(
-      &ma->id, RNA_MaterialPaintLayer, threshold);
-  PropertyRNA *params = RNA_struct_find_property(&threshold_ptr, "kind_params");
-  ASSERT_NE(params, nullptr);
-  EXPECT_EQ(RNA_property_collection_length(&threshold_ptr, params), 1);
-
+  PropertyRNA *params = RNA_struct_find_property(&layer_ptr, "kind_params");
+  ASSERT_NE(params, nullptr) << identifier;
   PointerRNA value_ptr;
-  ASSERT_TRUE(
-      RNA_property_collection_lookup_string(&threshold_ptr, params, "threshold", &value_ptr));
+  ASSERT_TRUE(RNA_property_collection_lookup_string(&layer_ptr, params, identifier, &value_ptr));
   const char *type_identifier = nullptr;
   PropertyRNA *type = RNA_struct_find_property(&value_ptr, "type");
   ASSERT_NE(type, nullptr);
@@ -1119,14 +1115,50 @@ TEST_F(PaintLayersDescription, rna_threshold_param_is_a_ranged_float)
   /* The schema's default and range, and a write past the range clamps to it. */
   PropertyRNA *float_value = RNA_struct_find_property(&value_ptr, "value");
   ASSERT_NE(float_value, nullptr);
-  EXPECT_FLOAT_EQ(RNA_property_float_get(&value_ptr, float_value), 0.5f);
+  EXPECT_FLOAT_EQ(RNA_property_float_get(&value_ptr, float_value), default_value);
   float range_min = 0.0f, range_max = 0.0f;
   RNA_property_float_range(&value_ptr, float_value, &range_min, &range_max);
   EXPECT_FLOAT_EQ(range_min, 0.0f);
   EXPECT_FLOAT_EQ(range_max, 1.0f);
   RNA_property_float_set(&value_ptr, float_value, 5.0f);
   EXPECT_FLOAT_EQ(RNA_property_float_get(&value_ptr, float_value), 1.0f);
-  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD), 1.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(layer, index), 1.0f);
+}
+
+TEST_F(PaintLayersDescription, rna_threshold_param_is_a_ranged_float)
+{
+  Material *ma = BKE_material_add(bmain, "RnaThresholdParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *threshold = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_THRESHOLD);
+  ASSERT_NE(threshold, nullptr);
+
+  /* The kind's one parameter: the collection lists exactly it. */
+  PointerRNA threshold_ptr = RNA_pointer_create_discrete(
+      &ma->id, RNA_MaterialPaintLayer, threshold);
+  PropertyRNA *params = RNA_struct_find_property(&threshold_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&threshold_ptr, params), 1);
+  rna_expect_ranged_float_param(
+      threshold_ptr, *threshold, "threshold", 0.5f, PAINT_LAYER_THRESHOLD_THRESHOLD);
+}
+
+TEST_F(PaintLayersDescription, rna_clamp_params_are_ranged_floats)
+{
+  Material *ma = BKE_material_add(bmain, "RnaClampParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *clamp = BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_CLAMP);
+  ASSERT_NE(clamp, nullptr);
+
+  /* The kind's two bounds: the collection lists exactly them, in the schema's order. */
+  PointerRNA clamp_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, clamp);
+  PropertyRNA *params = RNA_struct_find_property(&clamp_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&clamp_ptr, params), 2);
+  rna_expect_ranged_float_param(clamp_ptr, *clamp, "min", 0.0f, PAINT_LAYER_CLAMP_MIN);
+  rna_expect_ranged_float_param(clamp_ptr, *clamp, "max", 1.0f, PAINT_LAYER_CLAMP_MAX);
 }
 
 TEST_F(PaintLayersDescription, rna_paint_layers_collection_is_registered)

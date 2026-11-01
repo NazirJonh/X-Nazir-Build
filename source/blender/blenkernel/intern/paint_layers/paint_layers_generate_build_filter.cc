@@ -656,6 +656,53 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       }
       return true;
     }
+    case MA_PAINT_LAYER_FILTER_CLAMP: {
+      /* `min(max(c, min), max)` per channel, the Math node's Clamp with both bounds as inputs, so
+       * an edit of one is a value and not a different graph. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_CLAMP_PARAM_NUM ||
+          (*params)[PAINT_LAYER_CLAMP_MIN] == nullptr ||
+          (*params)[PAINT_LAYER_CLAMP_MAX] == nullptr)
+      {
+        return false;
+      }
+      bNodeSocket *min_socket = group_input_socket(group, *(*params)[PAINT_LAYER_CLAMP_MIN]);
+      bNodeSocket *max_socket = group_input_socket(group, *(*params)[PAINT_LAYER_CLAMP_MAX]);
+      if (min_socket == nullptr || max_socket == nullptr) {
+        return false;
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      bNode *lower = vector_math_node_add(
+          tree, grid_, nodes, NODE_VECTOR_MATH_MAXIMUM, content, {group.group_input, min_socket});
+      bNode *upper = (lower != nullptr) ?
+                         vector_math_node_add(tree,
+                                              grid_,
+                                              nodes,
+                                              NODE_VECTOR_MATH_MINIMUM,
+                                              {lower, socket_out(*lower, "Vector")},
+                                              {group.group_input, max_socket}) :
+                         nullptr;
+      if (upper == nullptr) {
+        return discard();
+      }
+
+      if (!filter_result_mix_add(tree,
+                                 grid_,
+                                 nodes,
+                                 content,
+                                 {upper, socket_out(*upper, "Vector")},
+                                 strength,
+                                 effect.name))
+      {
+        return discard();
+      }
+      return true;
+    }
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
       /* Map-coverage operators only exist in a mask, where #map_coverage_match_add builds them. */

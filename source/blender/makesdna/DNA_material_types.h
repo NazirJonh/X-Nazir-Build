@@ -804,6 +804,8 @@ enum eMaterialPaintLayerFilter : int16_t {
   MA_PAINT_LAYER_FILTER_MATH = 9,
   /** Turn each channel into the two states of a comparison against a constant. */
   MA_PAINT_LAYER_FILTER_THRESHOLD = 10,
+  /** Keep each channel inside a constant range. */
+  MA_PAINT_LAYER_FILTER_CLAMP = 11,
 };
 
 /**

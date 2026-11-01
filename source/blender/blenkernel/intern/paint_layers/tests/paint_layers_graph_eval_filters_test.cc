@@ -695,6 +695,72 @@ TEST_F(PaintLayersThresholdTest, the_threshold_is_clamped_to_its_range)
       paint_layer_kind_param_get(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD), 0.0f);
 }
 
+class PaintLayersClampTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_clamp(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_CLAMP);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+};
+
+TEST_F(PaintLayersClampTest, clamp_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *clamp = add_clamp(*row, 0.7f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*clamp, PAINT_LAYER_CLAMP_MIN, 0.2f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*clamp, PAINT_LAYER_CLAMP_MAX, 0.8f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersClampTest, a_full_strength_clamp_keeps_the_colour_inside_the_range)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *clamp = add_clamp(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*clamp, PAINT_LAYER_CLAMP_MIN, 0.2f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*clamp, PAINT_LAYER_CLAMP_MAX, 0.8f));
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_GE(after.r, 0.2f - 2e-3f);
+  EXPECT_GE(after.g, 0.2f - 2e-3f);
+  EXPECT_GE(after.b, 0.2f - 2e-3f);
+  EXPECT_LE(after.r, 0.8f + 2e-3f);
+  EXPECT_LE(after.g, 0.8f + 2e-3f);
+  EXPECT_LE(after.b, 0.8f + 2e-3f);
+}
+
+TEST_F(PaintLayersClampTest, the_bounds_are_clamped_to_their_ranges)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *clamp = add_clamp(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*clamp, PAINT_LAYER_CLAMP_MIN, 5.0f));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*clamp, PAINT_LAYER_CLAMP_MIN), 1.0f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*clamp, PAINT_LAYER_CLAMP_MAX, -5.0f));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*clamp, PAINT_LAYER_CLAMP_MAX), 0.0f);
+}
+
+TEST_F(PaintLayersClampTest, a_clamp_with_min_above_max_reads_the_max)
+{
+  /* The node order `min(max(c, min), max)` keeps a well-defined result when the bounds are
+   * crossed: every value folds onto the upper bound itself. */
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *clamp = add_clamp(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*clamp, PAINT_LAYER_CLAMP_MIN, 0.8f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*clamp, PAINT_LAYER_CLAMP_MAX, 0.2f));
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, 0.2f, 2e-3f);
+  EXPECT_NEAR(after.g, 0.2f, 2e-3f);
+  EXPECT_NEAR(after.b, 0.2f, 2e-3f);
+}
+
 class PaintLayersHslTest : public PaintLayersFilterTest {
  public:
   MaterialPaintLayer *add_hsl(MaterialPaintLayer &row, const float opacity = 1.0f)
@@ -859,6 +925,18 @@ TEST_F(PaintLayersAdjustmentTest, threshold_adjustment_matches_the_cpu)
   MaterialPaintLayer *threshold = add_adjustment(MA_PAINT_LAYER_FILTER_THRESHOLD, 0.7f);
   ASSERT_NE(threshold, nullptr);
   EXPECT_TRUE(paint_layer_kind_param_set(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD, 0.4f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersAdjustmentTest, clamp_adjustment_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *clamp = add_adjustment(MA_PAINT_LAYER_FILTER_CLAMP, 0.7f);
+  ASSERT_NE(clamp, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_set(*clamp, PAINT_LAYER_CLAMP_MIN, 0.1f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*clamp, PAINT_LAYER_CLAMP_MAX, 0.9f));
 
   expect_graph_matches_cpu(kColor);
 }
@@ -1133,6 +1211,24 @@ TEST_F(PaintLayersMaskFilterTest, a_threshold_equal_to_the_coverage_passes_nothi
   EXPECT_TRUE(paint_layer_kind_param_set(*threshold, PAINT_LAYER_THRESHOLD_THRESHOLD, 0.25f));
   expect_graph_matches_cpu(kColor);
   EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.0f, 3e-3f);
+}
+
+TEST_F(PaintLayersMaskFilterTest, clamp_in_the_mask_raises_the_coverage_to_its_min)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  /* `min(max(0.25, 0.4), 0.9) = 0.4`. */
+  MaterialPaintLayer *clamp = add_mask_filter(*row, MA_PAINT_LAYER_FILTER_CLAMP);
+  ASSERT_NE(clamp, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_set(*clamp, PAINT_LAYER_CLAMP_MIN, 0.4f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*clamp, PAINT_LAYER_CLAMP_MAX, 0.9f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.4f, 3e-3f);
 }
 
 TEST_F(PaintLayersMaskFilterTest, a_mask_filter_needs_no_channel_and_makes_the_base_mask_itself)

@@ -268,6 +268,13 @@ enum PaintLayerThresholdParam : int {
   PAINT_LAYER_THRESHOLD_PARAM_NUM = 1,
 };
 
+/** The positions of the Clamp filter's parameters in its schema. */
+enum PaintLayerClampParam : int {
+  PAINT_LAYER_CLAMP_MIN = 0,
+  PAINT_LAYER_CLAMP_MAX = 1,
+  PAINT_LAYER_CLAMP_PARAM_NUM = 2,
+};
+
 /** The positions of a map-coverage operator's parameters in its schema. */
 enum PaintLayerCoverageParam : int {
   /** How far a sample may differ from a stored colour and still match (max-channel). */
@@ -393,6 +400,15 @@ inline float paint_layer_math_apply(const float value,
 inline float paint_layer_threshold_apply(const float value, const float threshold)
 {
   return (value > threshold) ? 1.0f : 0.0f;
+}
+
+/**
+ * One channel of the Clamp filter: `min(max(value, min), max)`, the Math node's own Clamp and the
+ * order that keeps a well-defined result when \a min is above \a max.
+ */
+inline float paint_layer_clamp_apply(const float value, const float min, const float max)
+{
+  return std::min(std::max(value, min), max);
 }
 
 /**

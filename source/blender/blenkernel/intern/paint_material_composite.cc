@@ -1042,6 +1042,13 @@ static float composite_filter_color(const int16_t filter,
         rgb[k] = paint_layer_threshold_apply(rgb[k], params[PAINT_LAYER_THRESHOLD_THRESHOLD]);
       }
       break;
+    case MA_PAINT_LAYER_FILTER_CLAMP:
+      for (const int k : IndexRange(3)) {
+        rgb[k] = paint_layer_clamp_apply(rgb[k],
+                                         params[PAINT_LAYER_CLAMP_MIN],
+                                         params[PAINT_LAYER_CLAMP_MAX]);
+      }
+      break;
     case MA_PAINT_LAYER_FILTER_COLOR_RAMP:
       if (ramp != nullptr) {
         return paint_layer_color_ramp_apply(

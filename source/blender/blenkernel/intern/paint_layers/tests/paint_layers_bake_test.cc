@@ -11,17 +11,45 @@
 
 #include "paint_layers_generate_test_fixture.hh"
 
+#include <algorithm>
 #include <cmath>
 
+#include "MEM_guardedalloc.h"
+
+#include "BLI_math_base.h"
+#include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
 #include "BLI_set.hh"
 
+#include "BKE_attribute.hh"
+#include "BKE_appdir.hh"
+#include "BKE_blender.hh"
+#include "BKE_collection.hh"
+#include "BKE_idprop.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_mesh.hh"
+#include "BKE_object.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_material_composite_surface.hh"
+#include "BKE_scene.hh"
+
+#include "DEG_depsgraph.hh"
 
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
+
+#include "BLI_fileops.h"
+#include "BLI_path_utils.hh"
+#include "BLI_string.h"
+#include "BLI_utildefines.h"
+
+#include "BLO_readfile.hh"
+#include "BLO_writefile.hh"
+
+#include "BKE_wm_runtime.hh"
+
+#include "DNA_windowmanager_types.h"
 
 #include "../paint_layers_intern.hh"
 
@@ -29,6 +57,16 @@ namespace blender::bke::tests {
 
 class PaintLayersBakeTest : public PaintLayersGenerateTest {
  public:
+  void SetUp() override
+  {
+    PaintLayersGenerateTest::SetUp();
+    /* A dummy window manager, the way the blend-file loading tests make one: the frame update
+     * notifies image editors by walking bmain->wm and dereferences it without a check, so the
+     * update crashes in a bare test Main that has no window manager of its own. */
+    wmWindowManager *wm = BKE_id_new<wmWindowManager>(bmain, "WMdummy");
+    wm->runtime = MEM_new<bke::WindowManagerRuntime>(__func__);
+  }
+
   /** A Paint row baked on request: Always, so the planner does not wait for it to be heavy. */
   MaterialPaintLayer *add_baked_row(const char *name)
   {
@@ -41,6 +79,121 @@ class PaintLayersBakeTest : public PaintLayersGenerateTest {
   void clear_active() const
   {
     BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  }
+
+  /**
+   * A scene and view layer with one mesh object shaded by \a ma, and an evaluated depsgraph. The
+   * mesh has no UV map, which is the permanent reason an Object/Generated bake must stay live.
+   */
+  Scene *add_scene_with_uvless_object()
+  {
+    Scene *scene = BKE_scene_add(bmain, "BakeScene");
+    ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+    Mesh *mesh = BKE_mesh_add(bmain, "BakeMesh");
+    Object *object = BKE_object_add_only_object(bmain, OB_MESH, "BakeObject");
+    object->data = &mesh->id;
+    id_us_plus(&mesh->id);
+    BKE_object_material_assign(bmain, object, ma, 1, BKE_MAT_ASSIGN_OBDATA);
+    BKE_collection_object_add(bmain, scene->master_collection, object);
+    Depsgraph *depsgraph = BKE_scene_ensure_depsgraph(bmain, scene, view_layer);
+    EXPECT_NE(depsgraph, nullptr);
+    if (depsgraph != nullptr) {
+      BKE_scene_graph_update_for_newframe(depsgraph);
+    }
+    return scene;
+  }
+
+  /** One quad with a unit UV map, shaded by \a ma and linked to \a scene. */
+  Object *add_uv_quad_object(Scene &scene, const char *name)
+  {
+    Object *object = BKE_object_add_only_object(bmain, OB_MESH, name);
+    Mesh *mesh = BKE_mesh_add(bmain, name);
+    object->data = &mesh->id;
+    id_us_plus(&mesh->id);
+
+    Mesh *source = BKE_mesh_new_nomain(4, 0, 1, 4);
+    MutableSpan<float3> positions = source->vert_positions_for_write();
+    positions[0] = float3(0.0f, 0.0f, 0.0f);
+    positions[1] = float3(2.0f, 0.0f, 0.0f);
+    positions[2] = float3(2.0f, 2.0f, 0.0f);
+    positions[3] = float3(0.0f, 2.0f, 0.0f);
+    MutableSpan<int> offsets = source->face_offsets_for_write();
+    offsets[0] = 0;
+    offsets[1] = 4;
+    MutableSpan<int> corners = source->corner_verts_for_write();
+    corners[0] = 0;
+    corners[1] = 1;
+    corners[2] = 2;
+    corners[3] = 3;
+    bke::SpanAttributeWriter<float2> uvs =
+        source->attributes_for_write().lookup_or_add_for_write_span<float2>(
+            "UVMap", bke::AttrDomain::Corner);
+    uvs.span[0] = float2(0.0f, 0.0f);
+    uvs.span[1] = float2(1.0f, 0.0f);
+    uvs.span[2] = float2(1.0f, 1.0f);
+    uvs.span[3] = float2(0.0f, 1.0f);
+    uvs.finish();
+    source->tag_topology_changed();
+    source->tag_positions_changed();
+    BKE_mesh_nomain_to_mesh(source, mesh, object);
+    mesh_ensure_default_uv_map(*mesh);
+
+    BKE_object_material_assign(bmain, object, ma, 1, BKE_MAT_ASSIGN_OBDATA);
+    BKE_collection_object_add(bmain, scene.master_collection, object);
+    return object;
+  }
+
+  void update_scene(Scene &scene)
+  {
+    ViewLayer *view_layer = static_cast<ViewLayer *>(scene.view_layers.first);
+    Depsgraph *depsgraph = BKE_scene_ensure_depsgraph(bmain, &scene, view_layer);
+    ASSERT_NE(depsgraph, nullptr);
+    BKE_scene_graph_update_for_newframe(depsgraph);
+  }
+
+  /** The RGBA bytes of \a image's tile, as the map's own buffer keeps them. */
+  static Vector<uchar> tile_pixel_bytes(Image &image, const int tile = 0)
+  {
+    ImageUser iuser{};
+    iuser.tile = tile;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(&image, tile > 0 ? &iuser : nullptr, &lock);
+    Vector<uchar> pixels;
+    if (ibuf != nullptr) {
+      if (const uchar *data = ibuf->byte_data()) {
+        pixels.extend(data, int64_t(ibuf->x) * ibuf->y * 4);
+      }
+    }
+    BKE_image_release_ibuf(&image, ibuf, lock);
+    return pixels;
+  }
+
+  /** The RGBA floats of \a image's tile, as the map's own buffer keeps them. */
+  static Vector<float> tile_pixel_floats(Image &image, const int tile = 0)
+  {
+    ImageUser iuser{};
+    iuser.tile = tile;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(&image, tile > 0 ? &iuser : nullptr, &lock);
+    Vector<float> pixels;
+    if (ibuf != nullptr && ibuf->float_buffer.data != nullptr) {
+      pixels.extend(ibuf->float_buffer.data, int64_t(ibuf->x) * ibuf->y * 4);
+    }
+    BKE_image_release_ibuf(&image, ibuf, lock);
+    return pixels;
+  }
+
+  /** The common factor of one channel's render: what the coverage map folds out of it. */
+  static void fold_channel_common(Span<float> color,
+                                  Span<float> coverage,
+                                  MutableSpan<float> common)
+  {
+    for (const int64_t i : common.index_range()) {
+      const float content = color[i * 4 + 3];
+      if (content > 0.002f) {
+        common[i] = std::max(common[i], clamp_f(coverage[i] / content, 0.0f, 1.0f));
+      }
+    }
   }
 
   /**
@@ -256,6 +409,13 @@ TEST_F(PaintLayersBakeTest, a_gradient_row_bake_keeps_the_precision_its_channel_
       continue;
     }
     ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, info.channel), nullptr) << info.ui_name;
+    /* A record alone lays nothing for a channel outside the material's set: the set is what the
+     * composite and the bake walk. An image-paint channel is enabled the way a stack that lays it
+     * does, while the ones without such a target (Custom, AO) stay out, which is the report the
+     * measurement below makes for them. */
+    if (info.supports_image_paint) {
+      ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, info.channel, true)) << info.ui_name;
+    }
     const float value[4] = {0.05f, 0.95f, 0.0f, 1.0f};
     ASSERT_TRUE(BKE_paint_layers_channel_set_value(*ma, layer, info.channel, value));
     channels.append(int(info.channel));
@@ -287,8 +447,8 @@ TEST_F(PaintLayersBakeTest, a_gradient_row_bake_keeps_the_precision_its_channel_
         eMaterialPaintChannel(channel));
     Vector<float> pixels(pixel_num * 4);
     if (!evaluate(channel, pixels.as_mutable_span())) {
-      /* A channel with an image-paint target always resolves; one without (Custom, AO) has no map
-       * to bake yet, so it is reported and left out instead of failing the measurement. Height is
+      /* A channel with an image-paint target always resolves; one without (Custom) has no map to
+       * bake yet, so it is reported and left out instead of failing the measurement. Height is
        * not measured here at all (see above). */
       ASSERT_FALSE(info.supports_image_paint) << info.ui_name;
       printf("[paint-layers gradient row bake] precision %s: no stack in this channel\n",
@@ -300,7 +460,16 @@ TEST_F(PaintLayersBakeTest, a_gradient_row_bake_keeps_the_precision_its_channel_
   }
   ASSERT_FALSE(measured.is_empty());
 
-  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  /* Six laid channels put the row's generated graph over the AUTO node budget, so the synchronous
+   * plan leaves it to the worker: the bake goes through the job the way any heavy row is baked. */
+  bool changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job, {}, {});
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
   ASSERT_TRUE(paint_layer_row_substituted(*ma, *layer));
   ASSERT_EQ(layer->bake->size, size);
 
@@ -389,6 +558,10 @@ TEST_F(PaintLayersBakeTest, an_older_byte_gradient_bake_is_rebuilt_as_float)
   ASSERT_NE(old_map, nullptr);
   /* The bake's own map is left to the structure: only the slot is swapped for the old file's. */
   layer->bake->images[PAINT_MATERIAL_CHANNEL_ROUGHNESS] = old_map;
+  /* The rebuild releases the byte map it replaces, so the old data-block is identified before the
+   * plan runs: comparing the slot pointer afterwards would read a freed address the allocator is
+   * free to hand out again for the new map. */
+  const unsigned int old_uid = old_map->id.session_uid;
   layer->bake->hash[0] ^= 0x1u;
   ASSERT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *layer));
 
@@ -397,7 +570,8 @@ TEST_F(PaintLayersBakeTest, an_older_byte_gradient_bake_is_rebuilt_as_float)
   EXPECT_TRUE(changed);
   Image *rebuilt = layer->bake->images[PAINT_MATERIAL_CHANNEL_ROUGHNESS];
   ASSERT_NE(rebuilt, nullptr);
-  EXPECT_NE(rebuilt, old_map) << "a byte map cannot hold the float values the channel needs";
+  EXPECT_NE(rebuilt->id.session_uid, old_uid)
+      << "a byte map cannot hold the float values the channel needs";
   const ImageTile *tile = BKE_image_get_tile(rebuilt, 0);
   ASSERT_NE(tile, nullptr);
   EXPECT_NE(tile->gen_flag & IMA_GEN_FLOAT, 0);
@@ -580,10 +754,11 @@ TEST_F(PaintLayersBakeTest, the_materials_gradient_answer_weights_a_gradient_fol
   clear_active();
   ma->paint_layers_gradient_bake = MA_PAINT_LAYERS_GRADIENT_BAKE_ONLY_COMPLEX;
 
-  /* One Gradient correction keeps the row light: it stays live. */
+  /* One Gradient correction keeps the row light: the space change precreated its canvas, and
+   * "Only Complex Graphs" wants the row live, so the plan's one change is releasing that canvas. */
   bool changed = false;
-  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
-  EXPECT_FALSE(changed);
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
   EXPECT_EQ(row->bake, nullptr);
 
   /* Four more push the row past the node count a plain AUTO row answers to: the row is the heavy
@@ -599,10 +774,14 @@ TEST_F(PaintLayersBakeTest, the_materials_gradient_answer_weights_a_gradient_fol
   EXPECT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *row));
   EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma));
 
-  /* The synchronous planner leaves a heavy row to the worker. */
+  /* The synchronous planner leaves a heavy row to the worker. The fifth correction's space change
+   * made the row a legitimate bake candidate, which precreated its canvas; nothing is baked into
+   * it before the job runs. */
   changed = false;
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
-  EXPECT_EQ(row->bake, nullptr);
+  ASSERT_NE(row->bake, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row))
+      << "the synchronous planner leaves the heavy row to the worker";
 
   PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
   ASSERT_NE(job, nullptr);
@@ -624,7 +803,7 @@ TEST_F(PaintLayersBakeTest, the_materials_gradient_answer_weights_a_gradient_fol
   EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
 }
 
-TEST_F(PaintLayersBakeTest, switching_a_uv_gradient_to_object_releases_its_maps_and_keeps_the_record)
+TEST_F(PaintLayersBakeTest, switching_a_uv_gradient_to_object_keeps_its_maps_without_a_view)
 {
   ma->paint_layers_image_size = 8;
   MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
@@ -640,12 +819,12 @@ TEST_F(PaintLayersBakeTest, switching_a_uv_gradient_to_object_releases_its_maps_
   ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
       *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
   bool changed = false;
-  /* A shared bake no longer describes the 3D row: the planner releases its maps, but the record
-   * stays -- it keeps the mode the user chose. */
-  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
-  EXPECT_TRUE(changed);
+  /* Without a view layer there is no object to judge the 3D row by: the old maps stay, but they
+   * are not substituted. */
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
   ASSERT_NE(layer->bake, nullptr) << "the record keeps the mode the user chose";
-  EXPECT_EQ(layer->bake->coverage, nullptr) << "a stale shared bake is not kept";
+  EXPECT_NE(layer->bake->coverage, nullptr) << "a contextless plan drops nothing";
   EXPECT_EQ(BKE_paint_layers_bake_mode_get(*layer), MA_PAINT_LAYER_BAKE_ALWAYS);
   EXPECT_FALSE(paint_layer_row_substituted(*ma, *layer))
       << "a shared UV bake cannot stand in for a 3D row";
@@ -653,7 +832,7 @@ TEST_F(PaintLayersBakeTest, switching_a_uv_gradient_to_object_releases_its_maps_
   changed = false;
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
-  EXPECT_EQ(layer->bake->coverage, nullptr);
+  EXPECT_NE(layer->bake->coverage, nullptr);
 }
 
 TEST_F(PaintLayersBakeTest, an_object_or_generated_gradient_is_never_shared_baked)
@@ -680,8 +859,13 @@ TEST_F(PaintLayersBakeTest, an_object_or_generated_gradient_is_never_shared_bake
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
   for (MaterialPaintLayer *layer : {object, generated}) {
-    ASSERT_NE(layer->bake, nullptr) << "the mode record stays without maps";
-    EXPECT_EQ(layer->bake->coverage, nullptr) << "no shared maps are made for a 3D gradient";
+    ASSERT_NE(layer->bake, nullptr) << "the row keeps its mode record";
+    /* The per-object canvas is precreated as soon as the space is chosen: one tiled image whose
+     * first tile the bake fills. No shared map is ever made for a 3D gradient, which is what the
+     * refused render below still pins. */
+    EXPECT_NE(layer->bake->coverage, nullptr);
+    EXPECT_EQ(layer->bake->coverage->source, IMA_SRC_TILED);
+    EXPECT_NE(BKE_image_get_tile(layer->bake->coverage, 1001), nullptr);
     EXPECT_EQ(BKE_paint_layers_bake_mode_get(*layer), MA_PAINT_LAYER_BAKE_ALWAYS);
     Vector<float> color(8 * 8 * 4);
     Vector<float> coverage(8 * 8);
@@ -690,7 +874,8 @@ TEST_F(PaintLayersBakeTest, an_object_or_generated_gradient_is_never_shared_bake
                                                    PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                                    8,
                                                    color.data(),
-                                                   coverage.data()));
+                                                   coverage.data()))
+        << "no shared render is made for a 3D gradient";
   }
 }
 
@@ -717,7 +902,11 @@ TEST_F(PaintLayersBakeTest, a_folder_with_a_3d_gradient_is_not_shared_baked)
   ASSERT_NE(folder->bake, nullptr) << "an object-specific child keeps the whole folder live";
   EXPECT_EQ(folder->bake->coverage, nullptr);
   EXPECT_EQ(BKE_paint_layers_bake_mode_get(*folder), MA_PAINT_LAYER_BAKE_ALWAYS);
-  EXPECT_EQ(gradient->bake, nullptr);
+  /* The 3D gradient row precreates its own per-object canvas; it is the folder's record that
+   * keeps no maps, so the folder itself never gets a shared bake. */
+  ASSERT_NE(gradient->bake, nullptr);
+  EXPECT_NE(gradient->bake->coverage, nullptr);
+  EXPECT_EQ(gradient->bake->coverage->source, IMA_SRC_TILED);
 
   Vector<float> color(8 * 8 * 4);
   Vector<float> coverage(8 * 8);
@@ -1134,21 +1323,38 @@ TEST_F(PaintLayersBakeTest, a_mask_gradient_item_invalidates_the_parent_bake_and
   EXPECT_FALSE(changed);
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
 
-  /* A 3D mask item has no shared pixels: the parent stays live. The planner releases the maps the
-   * shared bake left, and the record keeps the ALWAYS mode and its size. */
+  /* A 3D mask item has no shared pixels: the parent stays live. Without a view layer there is
+   * nothing to judge the objects by, so the plan drops nothing yet; the record keeps the ALWAYS
+   * mode, and the maps the shared bake left are kept but no longer stand in. */
   EXPECT_TRUE(BKE_paint_layers_gradient_set_space(
       *ma, *item, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
   changed = false;
-  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  ASSERT_NE(row->bake, nullptr) << "the record keeps the ALWAYS mode";
+  EXPECT_NE(row->bake->coverage, nullptr) << "a contextless plan drops nothing";
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *row));
+  EXPECT_EQ(BKE_paint_layers_bake_mode_get(*row), MA_PAINT_LAYER_BAKE_ALWAYS);
+
+  /* With a view layer the row's object has no UV map, the permanent reason: the stale shared bake
+   * is released, and the record keeps the ALWAYS mode and its size. */
+  Scene *scene = add_scene_with_uvless_object();
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed, scene, view_layer));
   EXPECT_TRUE(changed);
   ASSERT_NE(row->bake, nullptr) << "the record keeps the ALWAYS mode";
   EXPECT_EQ(row->bake->coverage, nullptr) << "a stale shared bake is not kept";
   EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
   EXPECT_FALSE(paint_layer_row_substituted(*ma, *row));
   EXPECT_EQ(BKE_paint_layers_bake_mode_get(*row), MA_PAINT_LAYER_BAKE_ALWAYS);
+
+  /* The settled row has nothing left for the plan to do. */
   changed = false;
-  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed, scene, view_layer));
   EXPECT_FALSE(changed);
+}
 }
 
 TEST_F(PaintLayersBakeTest, an_auto_row_under_a_gradient_correction_bakes_when_left)
@@ -1160,11 +1366,15 @@ TEST_F(PaintLayersBakeTest, an_auto_row_under_a_gradient_correction_bakes_when_l
   ASSERT_NE(effect, nullptr);
   ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
 
-  /* Working on the correction keeps its row live: the bake would fold the Gradient being edited. */
+  /* Working on the correction keeps its row live: the bake would fold the Gradient being edited.
+   * The row still carries the canvas the space change precreated, but the plan bakes nothing into
+   * it while the row is edited. */
   BKE_paint_layers_active_set(*ma, effect->marker);
   EXPECT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
-  EXPECT_EQ(row->bake, nullptr);
+  ASSERT_NE(row->bake, nullptr) << "the precreated canvas stays";
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row))
+      << "the row is not baked while it is being edited";
 
   /* Leaving it is when the row's bake becomes due, AUTO or not: the Gradient folds into the row's
    * cache and stops being evaluated per texel for everything laid over the stack. */
@@ -1269,9 +1479,16 @@ TEST_F(PaintLayersBakeTest, a_switched_off_gradient_correction_costs_the_row_not
 
   clear_active();
   bool changed = false;
+  /* The canvas the correction's space change precreated is not wanted by the light row anymore:
+   * releasing it is the one change the plan makes, and nothing is baked into the row. */
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_EQ(row->bake, nullptr) << "a light AUTO row is evaluated live";
+
+  /* With the record gone the switched-off state costs the plan nothing. */
+  changed = false;
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_FALSE(changed);
-  EXPECT_EQ(row->bake, nullptr) << "a light AUTO row is evaluated live";
 }
 
 TEST_F(PaintLayersBakeTest, a_3d_gradient_correction_keeps_the_row_live_and_undoes_its_bake)
@@ -1294,16 +1511,28 @@ TEST_F(PaintLayersBakeTest, a_3d_gradient_correction_keeps_the_row_live_and_undo
   EXPECT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *row))
       << "a per-object row is rasterized on the main thread, so it always leaves it";
   changed = false;
-  /* No view: the maps the shared bake left are released, and the record keeps the mode; the row
-   * stays live and unsubstituted. */
-  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
-  EXPECT_TRUE(changed);
+  /* Without a view there is nothing to judge the objects by: the plan drops nothing yet, and the
+   * record keeps the mode; the row stays live and unsubstituted. */
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
   ASSERT_NE(row->bake, nullptr);
   EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
   EXPECT_FALSE(paint_layer_row_substituted(*ma, *row));
 
+  /* With a view layer the object has no UV map, the permanent reason: the maps the shared bake
+   * left are released, and the record keeps the mode. */
+  Scene *scene = add_scene_with_uvless_object();
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
   changed = false;
-  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed, scene, view_layer));
+  EXPECT_TRUE(changed);
+  ASSERT_NE(row->bake, nullptr);
+  EXPECT_EQ(row->bake->coverage, nullptr) << "a shared bake is not kept for a 3D row";
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *row));
+
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed, scene, view_layer));
   EXPECT_FALSE(changed);
 }
 
@@ -1356,6 +1585,60 @@ TEST_F(PaintLayersBakeTest, switching_rows_tags_the_material_only_when_a_bake_is
       << "the row left behind is due a bake that folds its Gradient in";
   EXPECT_NE(ma->id.recalc & ID_RECALC_SYNC_TO_EVAL, 0)
       << "the tag is the pair the rest of the module uses";
+}
+
+TEST_F(PaintLayersBakeTest, an_object_gradient_keeps_its_mode_without_a_surface)
+{
+  ma->paint_layers_image_size = 8;
+  Scene *scene = add_scene_with_uvless_object();
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Object", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+
+  for (const int mode : {int(MA_PAINT_LAYER_BAKE_NEVER), int(MA_PAINT_LAYER_BAKE_ALWAYS)}) {
+    ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, mode));
+    bool changed = false;
+    /* A contextless plan cannot judge the objects and must not drop the record. */
+    EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+    EXPECT_EQ(BKE_paint_layers_bake_mode_get(*row), mode);
+    ASSERT_NE(row->bake, nullptr);
+    EXPECT_EQ(row->bake->coverage, nullptr);
+
+    /* With a view but no UV map the reason is permanent: the mode still survives. */
+    EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed, scene, view_layer));
+    EXPECT_EQ(BKE_paint_layers_bake_mode_get(*row), mode);
+    EXPECT_EQ(BKE_paint_layers_bake_object_issue_get(*ma, *row),
+              PAINT_LAYERS_BAKE_OBJECTS_NO_UV);
+    ASSERT_NE(row->bake, nullptr);
+    EXPECT_EQ(row->bake->coverage, nullptr);
+  }
+}
+
+TEST_F(PaintLayersBakeTest, a_failed_surface_does_not_create_a_bake_record)
+{
+  ma->paint_layers_image_size = 8;
+  Scene *scene = add_scene_with_uvless_object();
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Object", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  /* Remove the precreated record to test the planner's own surface gate: a row whose object has no
+   * UV must not get a new record from the plan. */
+  ASSERT_TRUE(BKE_paint_layers_bake_clear(*ma, *row));
+  ASSERT_EQ(row->bake, nullptr);
+
+  bool changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed, scene, view_layer));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(row->bake, nullptr)
+      << "the surface is resolved before the row's bake structure is allocated";
+  EXPECT_EQ(BKE_paint_layers_bake_object_issue_get(*ma, *row),
+            PAINT_LAYERS_BAKE_OBJECTS_NO_UV);
 }
 
 TEST_F(PaintLayersBakeTest, a_shared_gradient_precreates_its_maps_and_never_drops_them)
@@ -1489,6 +1772,8 @@ TEST_F(PaintLayersBakeTest, the_switch_pending_answer_matches_a_walk_over_every_
                                  inner->marker,
                                  outer->marker,
                                  effect->marker};
+  PaintLayersBakeView no_context;
+  no_context.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT;
   for (const bUUID &old_marker : markers) {
     for (const bUUID &new_marker : markers) {
       if (BLI_uuid_equal(old_marker, new_marker)) {
@@ -1505,11 +1790,520 @@ TEST_F(PaintLayersBakeTest, the_switch_pending_answer_matches_a_walk_over_every_
               return true;
             }
             BakeRowRelease release = BakeRowRelease::Keep;
-            expected = bake_row_is_due(*ma, layer, release);
+            expected = bake_row_is_due(*ma, layer, no_context, release);
             return !expected;
           });
       EXPECT_EQ(paint_layers_bake_pending_after_switch(*ma, old_marker, new_marker), expected);
     }
+  }
+}
+
+TEST_F(PaintLayersBakeTest, an_object_gradient_precreates_its_first_tile)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  /* A new Gradient starts in Object space: its maps are one tiled image with tile 1001. */
+  ASSERT_NE(row->bake, nullptr) << "an Object Gradient creates its canvas up front";
+  Image *base = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  Image *coverage = row->bake->coverage;
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(coverage, nullptr);
+  EXPECT_EQ(base->source, IMA_SRC_TILED);
+  EXPECT_EQ(coverage->source, IMA_SRC_TILED);
+  EXPECT_NE(BKE_image_get_tile(base, 1001), nullptr);
+  EXPECT_EQ(BKE_image_get_tile(base, 1002), nullptr);
+  EXPECT_NE(BKE_image_get_tile(coverage, 1001), nullptr)
+      << "the coverage map is tiled when the row is per object";
+}
+
+TEST_F(PaintLayersBakeTest, an_object_gradient_creates_no_maps_in_never_mode_or_above_the_cap)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *never = BKE_paint_layers_gradient_add(
+      *ma, "Never", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(never, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *never, MA_PAINT_LAYER_BAKE_NEVER));
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *never, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  ASSERT_NE(never->bake, nullptr);
+  EXPECT_EQ(never->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  EXPECT_EQ(never->bake->coverage, nullptr);
+  EXPECT_TRUE(BLI_listbase_is_empty(&never->bake->tiles));
+
+  /* The size cap is checked before the record: a row that could never bake gets no structure. */
+  ma->paint_layers_image_size = 8192;
+  MaterialPaintLayer *too_large = BKE_paint_layers_gradient_add(
+      *ma, "Too Large", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(too_large, nullptr);
+  EXPECT_EQ(too_large->bake, nullptr);
+}
+
+TEST_F(PaintLayersBakeTest, removing_an_object_gradient_releases_its_precreated_maps)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(row->bake, nullptr);
+  Image *base = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  Image *coverage = row->bake->coverage;
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(coverage, nullptr);
+  const int base_users = base->id.us;
+  const int coverage_users = coverage->id.us;
+  ASSERT_GT(base_users, 0);
+  ASSERT_GT(coverage_users, 0);
+  const bUUID marker = row->marker;
+
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, row));
+  EXPECT_EQ(BKE_paint_layers_find(*ma, marker), nullptr);
+  EXPECT_EQ(base->id.us, base_users - 1);
+  EXPECT_EQ(coverage->id.us, coverage_users - 1);
+}
+
+TEST_F(PaintLayersBakeTest, removing_a_material_slot_drops_the_stale_tile_index)
+{
+  ma->paint_layers_image_size = 8;
+  Scene *scene = BKE_scene_add(bmain, "BakeScene");
+  Object *object = add_uv_quad_object(*scene, "Object");
+  /* The slot removal checks the object's own slots once the shared one is gone, so the material is
+   * also assigned to the object: an obdata-only assignment never enters the slot array the removal
+   * walks, and the object then keeps its index until the next plan. */
+  BKE_object_material_assign(bmain, object, ma, 1, BKE_MAT_ASSIGN_OBJECT);
+  const std::string path = paint_layers_bake_tile_attribute_path(*ma);
+  IDProperty *properties = IDP_EnsureProperties(&object->id);
+  IDP_AddToGroup(properties, IDP_NewInt(0, path.c_str()));
+  ASSERT_NE(IDP_GetPropertyFromGroup(properties, path.c_str()), nullptr);
+
+  object->actcol = 1;
+  ASSERT_TRUE(BKE_object_material_slot_remove(bmain, object));
+  properties = IDP_GetProperties(&object->id);
+  EXPECT_TRUE(properties == nullptr ||
+              IDP_GetPropertyFromGroup(properties, path.c_str()) == nullptr)
+      << "an object that no longer uses the material keeps no tile index";
+}
+
+TEST_F(PaintLayersBakeTest, a_plan_prunes_tile_indices_of_deleted_materials_only)
+{
+  ma->paint_layers_image_size = 8;
+  Scene *scene = BKE_scene_add(bmain, "BakeScene");
+  Object *object = add_uv_quad_object(*scene, "Object");
+  update_scene(*scene);
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+
+  /* The plan releases a tile index no baked row of a live material justifies anymore, so the live
+   * material's key is made the honest way: one per-object bake, which writes the property itself. */
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Object", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, MA_PAINT_LAYER_BAKE_ALWAYS));
+  clear_active();
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma, scene, view_layer);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job, {}, {});
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+
+  /* A material that is gone by the time the planner walks the view: its key cannot map back. */
+  Material *dead = BKE_material_add(bmain, "DeadTileKey");
+  dead->paint_layers_flag |= MA_PAINT_LAYERED;
+  const std::string dead_path = paint_layers_bake_tile_attribute_path(*dead);
+  BKE_id_delete(bmain, &dead->id);
+  IDProperty *properties = IDP_EnsureProperties(&object->id);
+  IDP_AddToGroup(properties, IDP_NewInt(0, dead_path.c_str()));
+
+  bool changed = false;
+  BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed, scene, view_layer);
+
+  const std::string live_path = paint_layers_bake_tile_attribute_path(*ma);
+  properties = IDP_GetProperties(&object->id);
+  ASSERT_NE(properties, nullptr);
+  EXPECT_EQ(IDP_GetPropertyFromGroup(properties, dead_path.c_str()), nullptr)
+      << "a key no layered material of the main database names is stale";
+  EXPECT_NE(IDP_GetPropertyFromGroup(properties, live_path.c_str()), nullptr)
+      << "a key of a live layered material must stay";
+}
+
+TEST_F(PaintLayersBakeTest, setting_an_object_space_on_a_correction_precreates_the_owner_row)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, row, "Grad", MA_PAINT_LAYER_SOURCE_GENERATOR);
+  ASSERT_NE(effect, nullptr);
+  /* The correction's Gradient belongs to the row's cache, so the correction itself has no
+   * record. */
+  ASSERT_EQ(effect->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_clear(*ma, *row));
+  ASSERT_EQ(row->bake, nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  EXPECT_EQ(effect->bake, nullptr);
+  ASSERT_NE(row->bake, nullptr);
+  Image *base = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(base->source, IMA_SRC_TILED);
+  EXPECT_NE(BKE_image_get_tile(base, 1001), nullptr);
+}
+
+TEST_F(PaintLayersBakeTest, an_object_bake_writes_one_tile_per_object_and_geometry_invalidates_it)
+{
+  ma->paint_layers_image_size = 8;
+  Scene *scene = BKE_scene_add(bmain, "BakeScene");
+  Object *first = add_uv_quad_object(*scene, "First");
+  add_uv_quad_object(*scene, "Second");
+  update_scene(*scene);
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Object", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, MA_PAINT_LAYER_BAKE_ALWAYS));
+  clear_active();
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma, scene, view_layer);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job, {}, {});
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+
+  ASSERT_NE(row->bake, nullptr);
+  EXPECT_EQ(row->bake->object_count, 2);
+  EXPECT_EQ(BLI_listbase_count(&row->bake->tiles), 2);
+  Image *base = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(base->source, IMA_SRC_TILED);
+  EXPECT_NE(BKE_image_get_tile(base, 1001), nullptr);
+  EXPECT_NE(BKE_image_get_tile(base, 1002), nullptr);
+
+  /* Editing one mesh changes its surface identity and invalidates the row. */
+  Mesh *mesh = id_cast<Mesh *>(first->data);
+  mesh->vert_positions_for_write()[0].x += 0.5f;
+  mesh->tag_positions_changed();
+  DEG_id_tag_update(&mesh->id, ID_RECALC_GEOMETRY);
+  update_scene(*scene);
+  BKE_paint_layers_bake_plan_run(*bmain, *ma, nullptr, scene, view_layer);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+}
+
+/**
+ * The maps a job's commit writes are the ones a synchronous bake would: the worker holds its render
+ * in the map's own format -- a byte map's quantized texels, a float map's premultiplied ones -- and
+ * the reference here is that same encoding run by #bake_write_image over the straight render. The
+ * coverage is the common factor the worker folded, quantized the way the coverage map is written.
+ */
+TEST_F(PaintLayersBakeTest, a_job_writes_what_the_maps_own_format_keeps)
+{
+  ma->paint_layers_image_size = 8;
+  Scene *scene = BKE_scene_add(bmain, "BakeScene");
+  Object *object = add_uv_quad_object(*scene, "BakeObject");
+  update_scene(*scene);
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Object", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  /* Metallic is the float channel this generated row lays (a generated row bakes every non-color
+   * channel float; Height keeps a value pair instead of a map, so it renders nothing here). Base
+   * Color stays byte. */
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, row, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  const float metallic_value[4] = {0.75f, 0.75f, 0.75f, 1.0f};
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_value(*ma, row, PAINT_MATERIAL_CHANNEL_METALLIC, metallic_value));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, MA_PAINT_LAYER_BAKE_ALWAYS));
+  clear_active();
+
+  /* The reference, rendered before any cache exists: the same surface the job would rasterize,
+   * through the same render the worker runs. */
+  const int size = 8;
+  Mesh &mesh = *id_cast<Mesh *>(object->data);
+  std::shared_ptr<const PaintMaterialCompositeSurface> surface =
+      BKE_paint_layers_gradient_surface_build(*object, mesh, "UVMap", size, 1, false);
+  ASSERT_NE(surface, nullptr);
+  Vector<float> base_color(size * size * 4);
+  Vector<float> base_coverage(size * size);
+  ASSERT_TRUE(BKE_paint_layers_bake_render_node(*ma,
+                                                *row,
+                                                PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                size,
+                                                base_color.data(),
+                                                base_coverage.data(),
+                                                nullptr,
+                                                surface));
+  Vector<float> metallic_color(size * size * 4);
+  Vector<float> metallic_coverage(size * size);
+  ASSERT_TRUE(BKE_paint_layers_bake_render_node(*ma,
+                                                *row,
+                                                PAINT_MATERIAL_CHANNEL_METALLIC,
+                                                size,
+                                                metallic_color.data(),
+                                                metallic_coverage.data(),
+                                                nullptr,
+                                                surface));
+  /* The common factor the worker folds: the maximum over the channels rendered. */
+  Vector<float> common(size * size, 0.0f);
+  fold_channel_common(base_color, base_coverage, common);
+  fold_channel_common(metallic_color, metallic_coverage, common);
+
+  /* The reference writes, through the same code a synchronous bake runs. */
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *ref_base = BKE_image_add_generated(
+      bmain, size, size, "Ref Base", 32, 0, IMA_GENTYPE_BLANK, black, false, false, false);
+  ASSERT_NE(ref_base, nullptr);
+  bake_write_image(*ref_base, base_color.data(), true, nullptr, 0);
+  Image *ref_metallic = BKE_image_add_generated(
+      bmain, size, size, "Ref Metallic", 32, 1, IMA_GENTYPE_BLANK, black, false, true, false);
+  ASSERT_NE(ref_metallic, nullptr);
+  bake_write_image(*ref_metallic, metallic_color.data(), false, nullptr, 0);
+  Image *ref_coverage = BKE_image_add_generated(
+      bmain, size, size, "Ref Coverage", 32, 0, IMA_GENTYPE_BLANK, black, false, true, false);
+  ASSERT_NE(ref_coverage, nullptr);
+  bake_write_coverage_image(*ref_coverage, common.data(), nullptr, 0);
+
+  /* The job. */
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma, scene, view_layer);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job, {}, {});
+  EXPECT_GT(BKE_paint_layers_bake_job_retained_bytes(*job), 0)
+      << "the worker holds the results for the commit";
+  EXPECT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  EXPECT_EQ(BKE_paint_layers_bake_job_retained_bytes(*job), 0)
+      << "a fully committed job holds no channel buffers";
+  BKE_paint_layers_bake_job_free(*job);
+
+  ASSERT_NE(row->bake, nullptr);
+  Image *base = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  Image *metallic = row->bake->images[PAINT_MATERIAL_CHANNEL_METALLIC];
+  Image *coverage = row->bake->coverage;
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(metallic, nullptr);
+  ASSERT_NE(coverage, nullptr);
+  EXPECT_EQ(tile_pixel_bytes(*base, 1001), tile_pixel_bytes(*ref_base))
+      << "the byte map's texels are the reference's, quantized the same way";
+  EXPECT_EQ(tile_pixel_floats(*metallic, 1001), tile_pixel_floats(*ref_metallic))
+      << "the float map's texels are the reference's, premultiplied the same way";
+  EXPECT_EQ(tile_pixel_bytes(*coverage, 1001), tile_pixel_bytes(*ref_coverage))
+      << "the coverage is the common factor the worker folded, quantized as the map is";
+
+  BKE_id_free(bmain, &ref_base->id);
+  BKE_id_free(bmain, &ref_metallic->id);
+  BKE_id_free(bmain, &ref_coverage->id);
+}
+
+/**
+ * A cancelled job writes nothing, and the results it held are let go the moment the cancellation is
+ * noticed: at 4K they are hundreds of MiB the commit would never read.
+ */
+TEST_F(PaintLayersBakeTest, a_cancelled_job_writes_nothing_and_lets_go_of_its_results)
+{
+  ma->paint_layers_image_size = 8;
+  Scene *scene = BKE_scene_add(bmain, "BakeScene");
+  add_uv_quad_object(*scene, "BakeObject");
+  update_scene(*scene);
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Object", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, MA_PAINT_LAYER_BAKE_ALWAYS));
+  clear_active();
+
+  const size_t memory_before = MEM_get_memory_in_use();
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma, scene, view_layer);
+  ASSERT_NE(job, nullptr);
+  /* Cancel after the first channel rendered: one result is held when the notice lands. */
+  int polls = 0;
+  BKE_paint_layers_bake_job_compute(*job, {}, [&]() { return ++polls > 1; });
+  EXPECT_TRUE(job->cancelled);
+  EXPECT_EQ(BKE_paint_layers_bake_job_retained_bytes(*job), 0)
+      << "the held results went with the cancellation";
+  EXPECT_FALSE(BKE_paint_layers_bake_job_commit(*job)) << "a cancelled job writes nothing";
+  ASSERT_NE(row->bake, nullptr) << "the record the precreated maps keep stays";
+  EXPECT_EQ(row->bake->hash[0], 0) << "no hash stamped: the maps are still nobody's result";
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+
+  BKE_paint_layers_bake_job_free(*job);
+  /* The job's surfaces, results and localized copy are all back; the megabyte of slack is for the
+   * caches the render of the first channel may have warmed around the buffers themselves. */
+  EXPECT_LE(int64_t(MEM_get_memory_in_use()), int64_t(memory_before) + (int64_t(1) << 20));
+}
+
+TEST_F(PaintLayersBakeTest, a_permanently_blocked_object_row_does_not_tag_on_a_switch)
+{
+  ma->paint_layers_image_size = 8;
+  Scene *scene = add_scene_with_uvless_object();
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Object", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *other = add_paint_layer("Other", add_image("Other"));
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  BKE_paint_layers_bake_plan_run(*bmain, *ma, nullptr, scene, view_layer);
+  ASSERT_EQ(BKE_paint_layers_bake_object_issue_get(*ma, *row),
+            PAINT_LAYERS_BAKE_OBJECTS_NO_UV);
+
+  /* Leaving the blocked row changes no object: the permanent reason stays and no tag is due. */
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ma->id.recalc = 0;
+  BKE_paint_layers_active_set(*ma, other->marker);
+  EXPECT_EQ(ma->id.recalc & ID_RECALC_SHADING, 0);
+}
+
+/** Append one tile record to \a layer's bake, as a completed per-object bake would. */
+static MaterialPaintLayerBakeTile *add_bake_tile(MaterialPaintLayer &layer,
+                                                 const uint32_t object_uid,
+                                                 const int tile_number)
+{
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
+  MaterialPaintLayerBakeTile *tile = MEM_new<MaterialPaintLayerBakeTile>(__func__);
+  tile->object_uid = object_uid;
+  tile->tile[0] = (tile_number - 1001) % 10;
+  tile->tile[1] = (tile_number - 1001) / 10;
+  BLI_addtail(&bake->tiles, tile);
+  bake->object_count++;
+  return tile;
+}
+
+TEST_F(PaintLayersBakeTest, a_tiled_bake_round_trips_without_carrying_tiles_to_a_new_session)
+{
+  MaterialPaintLayer *row = add_baked_row("RoundTrip");
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(*row);
+  bake->size = 8;
+  add_bake_tile(*row, 1234, 1001);
+  add_bake_tile(*row, 5678, 1002);
+  ASSERT_EQ(BLI_listbase_count(&bake->tiles), 2);
+
+  char filepath[FILE_MAX];
+  BLI_path_join(
+      filepath, sizeof(filepath), BKE_tempdir_session(), "paint_layers_bake_tiles.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+
+  Material *reloaded = nullptr;
+  for (Material &candidate : bfd->main->materials) {
+    if (STREQ(candidate.id.name + 2, ma->id.name + 2)) {
+      reloaded = &candidate;
+      break;
+    }
+  }
+  ASSERT_NE(reloaded, nullptr);
+  MaterialPaintLayer *reloaded_row = BKE_paint_layers_find(*reloaded, row->marker);
+  ASSERT_NE(reloaded_row, nullptr);
+  ASSERT_NE(reloaded_row->bake, nullptr);
+  /* The file is read without undo: the object uids belong to the old session, so the records go,
+   * while the mode and size the user chose stay. */
+  EXPECT_TRUE(BLI_listbase_is_empty(&reloaded_row->bake->tiles));
+  EXPECT_EQ(reloaded_row->bake->object_count, 0);
+  EXPECT_EQ(BKE_paint_layers_bake_mode_get(*reloaded_row), MA_PAINT_LAYER_BAKE_ALWAYS);
+  EXPECT_EQ(reloaded_row->bake->size, 8);
+
+  BLO_blendfiledata_free(bfd);
+  BLI_delete(filepath, false, false);
+}
+
+TEST_F(PaintLayersBakeTest, copying_a_material_with_tiles_does_not_free_them_twice)
+{
+  MaterialPaintLayer *row = add_baked_row("CopyTiles");
+  ASSERT_NE(row, nullptr);
+  add_bake_tile(*row, 1234, 1001);
+  add_bake_tile(*row, 5678, 1002);
+  MaterialPaintLayerBake *bake = row->bake;
+  ASSERT_NE(bake, nullptr);
+  ASSERT_EQ(BLI_listbase_count(&bake->tiles), 2);
+
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  MaterialPaintLayer *copied = static_cast<MaterialPaintLayer *>(copy->paint_layers.first);
+  ASSERT_NE(copied, nullptr);
+  ASSERT_NE(copied->bake, nullptr);
+  EXPECT_TRUE(BLI_listbase_is_empty(&copied->bake->tiles));
+  EXPECT_EQ(copied->bake->object_count, 0);
+  EXPECT_EQ(BLI_listbase_count(&bake->tiles), 2) << "the original keeps its own records";
+
+  BKE_id_free(bmain, &copy->id);
+  EXPECT_EQ(BLI_listbase_count(&bake->tiles), 2)
+      << "freeing the copy must not free the original's records";
+}
+
+TEST_F(PaintLayersBakeTest, clearing_a_tiled_bake_removes_the_object_tile_index)
+{
+  ma->paint_layers_image_size = 8;
+  Scene *scene = BKE_scene_add(bmain, "BakeScene");
+  Object *first = add_uv_quad_object(*scene, "First");
+  Object *second = add_uv_quad_object(*scene, "Second");
+  update_scene(*scene);
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Object", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, MA_PAINT_LAYER_BAKE_ALWAYS));
+  clear_active();
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma, scene, view_layer);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job, {}, {});
+  ASSERT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+
+  const std::string path = paint_layers_bake_tile_attribute_path(*ma);
+  for (Object *object : {first, second}) {
+    IDProperty *properties = IDP_GetProperties(&object->id);
+    ASSERT_NE(properties, nullptr);
+    ASSERT_NE(IDP_GetPropertyFromGroup(properties, path.c_str()), nullptr);
+  }
+
+  /* Clearing the row drops its tiles; the next plan has no bake left to justify the property. */
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, MA_PAINT_LAYER_BAKE_NEVER));
+  bool changed = false;
+  BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed, scene, view_layer);
+  for (Object *object : {first, second}) {
+    IDProperty *properties = IDP_GetProperties(&object->id);
+    if (properties != nullptr) {
+      EXPECT_EQ(IDP_GetPropertyFromGroup(properties, path.c_str()), nullptr);
+    }
+  }
+}
+
+TEST_F(PaintLayersBakeTest, an_object_row_without_maps_keeps_never_and_always)
+{
+  ma->paint_layers_image_size = 8;
+  Scene *scene = add_scene_with_uvless_object();
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+  MaterialPaintLayer *row = BKE_paint_layers_gradient_add(
+      *ma, "Object", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *row, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+
+  for (const int mode : {int(MA_PAINT_LAYER_BAKE_NEVER), int(MA_PAINT_LAYER_BAKE_ALWAYS)}) {
+    ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *row, mode));
+    bool changed = false;
+    EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed, scene, view_layer));
+    EXPECT_EQ(BKE_paint_layers_bake_mode_get(*row), mode);
+    ASSERT_NE(row->bake, nullptr);
+    EXPECT_EQ(row->bake->coverage, nullptr);
+    EXPECT_TRUE(BLI_listbase_is_empty(&row->bake->tiles));
+    EXPECT_EQ(row->bake->object_count, 0);
   }
 }
 

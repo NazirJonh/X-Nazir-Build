@@ -31,7 +31,9 @@
 #include "BKE_global.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
 #include "DNA_ID.h"
@@ -213,12 +215,26 @@ bool paint_layers_bake_job_start(wmWindowManager &wm, wmWindow *win, Main &bmain
   if (win == nullptr) {
     return false;
   }
-  if (paint_layers_bake_active().contains(ma.id.session_uid) ||
-      !BKE_paint_layers_bake_heavy_pending(ma))
-  {
+  /* The scene and view layer of the window are the objects an Object or Generated row is baked for:
+   * the job rasterizes their surfaces here, on the main thread, and the worker only reads them. */
+  const Scene *scene = WM_window_get_active_scene(win);
+  const ViewLayer *view_layer = WM_window_get_active_view_layer(win);
+  if (paint_layers_bake_active().contains(ma.id.session_uid)) {
     return false;
   }
-  PaintLayersBakeJob *bake = BKE_paint_layers_bake_job_create(bmain, ma);
+  /* A paint or sculpt stroke rewrites the surface every step. Baking it would only be thrown away
+   * by the next step, so the whole heavy pass waits for the stroke to end; the planner then sees
+   * the final geometry and marks the row stale once. */
+  const Paint *paint = BKE_paint_get_active(
+      bmain, const_cast<Scene *>(scene), const_cast<ViewLayer *>(view_layer));
+  if (paint != nullptr && paint->runtime != nullptr && paint->runtime->stroke_active) {
+    return false;
+  }
+  /* Creating the job resolves the view once: this is where an Object or Generated row notices an
+   * edited surface, or releases a cache whose object can no longer supply one, on the depsgraph
+   * update that produced the new geometry. A material with nothing queued returns null and costs
+   * one walk over its rows, no surface. */
+  PaintLayersBakeJob *bake = BKE_paint_layers_bake_job_create(bmain, ma, scene, view_layer);
   if (bake == nullptr) {
     /* Nothing could actually be queued (no size, no localized copy): leave it to the next poll
      * rather than marking the material active. */

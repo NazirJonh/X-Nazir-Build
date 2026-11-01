@@ -2527,6 +2527,14 @@ static bool rna_MaterialPaintLayer_bake_is_valid_get(PointerRNA *ptr)
   return ma != nullptr && BKE_paint_layers_bake_is_valid(*ma, *layer);
 }
 
+static int rna_MaterialPaintLayer_bake_object_issue_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  const Material *ma = rna_MaterialPaintLayer_owner(*ptr, &layer);
+  return ma != nullptr ? BKE_paint_layers_bake_object_issue_get(*ma, *layer) :
+                         PAINT_LAYERS_BAKE_OBJECTS_OK;
+}
+
 static void rna_MaterialPaintLayer_bake_request(PointerRNA ptr)
 {
   MaterialPaintLayer *layer = nullptr;
@@ -5146,6 +5154,45 @@ static const EnumPropertyItem rna_enum_material_paint_layer_bake_mode_items[] = 
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Values match #ePaintLayersBakeObjectIssue. */
+static const EnumPropertyItem rna_enum_material_paint_layer_bake_object_issue_items[] = {
+    {PAINT_LAYERS_BAKE_OBJECTS_OK, "OK", 0, "OK", "The object bake can run"},
+    {PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT,
+     "NO_CONTEXT",
+     0,
+     "No View",
+     "No scene and view layer"},
+    {PAINT_LAYERS_BAKE_OBJECTS_NO_OBJECT,
+     "NO_OBJECT",
+     0,
+     "No Object",
+     "No visible object uses the material"},
+    {PAINT_LAYERS_BAKE_OBJECTS_NO_MESH, "NO_MESH", 0, "No Mesh", "An object has no mesh"},
+    {PAINT_LAYERS_BAKE_OBJECTS_NO_UV, "NO_UV", 0, "No UV", "An object has no UV map"},
+    {PAINT_LAYERS_BAKE_OBJECTS_NO_SIZE, "NO_SIZE", 0, "No Size", "The row has no bake size yet"},
+    {PAINT_LAYERS_BAKE_OBJECTS_TOO_MANY,
+     "TOO_MANY",
+     0,
+     "Too Many Objects",
+     "More than 8 objects use the material"},
+    {PAINT_LAYERS_BAKE_OBJECTS_TOO_LARGE,
+     "TOO_LARGE",
+     0,
+     "Too Large",
+     "Lower the bake size to 4096 or less"},
+    {PAINT_LAYERS_BAKE_OBJECTS_OVER_BUDGET,
+     "OVER_BUDGET",
+     0,
+     "Over Budget",
+     "The 2 GiB cache budget is exceeded"},
+    {PAINT_LAYERS_BAKE_OBJECTS_ANIMATED,
+     "ANIMATED",
+     0,
+     "Animated",
+     "The object's deformation changes over time"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /* The menu form of `bake_size`: a preset size, or zero for "follow the content". */
 static const EnumPropertyItem rna_enum_material_paint_layer_bake_size_preset_items[] = {
     {0, "AUTO", 0, "Auto", "Follow the content of the row"},
@@ -6014,6 +6061,16 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Bake Is Valid", "Whether the stored bake still matches the row's description");
+
+  prop = RNA_def_property(srna, "bake_object_issue", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_bake_object_issue_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_MaterialPaintLayer_bake_object_issue_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Object Bake Issue",
+      "Why an Object or Generated bake cannot run for the current scene and view layer");
 
   func = RNA_def_function(srna, "bake_request", "rna_MaterialPaintLayer_bake_request");
   RNA_def_function_ui_description(func,

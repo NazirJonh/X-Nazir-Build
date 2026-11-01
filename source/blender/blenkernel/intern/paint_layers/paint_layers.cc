@@ -801,6 +801,7 @@ static void paint_layer_release_users(MaterialPaintLayer &layer)
     if (layer.bake->coverage != nullptr) {
       id_us_min(&layer.bake->coverage->id);
     }
+    paint_layers_bake_tiles_clear(*layer.bake);
   }
   for (MaterialPaintLayer &item : layer.mask_stack) {
     paint_layer_release_users(item);
@@ -1157,6 +1158,7 @@ bool BKE_paint_layers_correction_remove(Material &ma, MaterialPaintLayer *effect
   paint_layer_release_users(*effect);
   BLI_remlink(&owner->effects, effect);
   BKE_material_paint_layer_free(effect);
+  paint_layers_bake_tile_indices_clear_all(ma);
   paint_layer_anchor_point_release_broken_bakes(ma);
   BKE_paint_layers_tag_edited(ma);
   return true;
@@ -1178,6 +1180,7 @@ bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
   paint_layer_release_users(*layer);
   BLI_remlink(BKE_paint_layers_owner_list(ma, *layer), layer);
   BKE_material_paint_layer_free(layer);
+  paint_layers_bake_tile_indices_clear_all(ma);
   paint_layer_anchor_point_release_broken_bakes(ma);
 
   BKE_paint_layers_tag_edited(ma);
@@ -1426,6 +1429,7 @@ bool BKE_paint_layers_mask_item_remove(Material &ma, MaterialPaintLayer *item)
   paint_layer_release_users(*item);
   BLI_remlink(&owner->mask_stack, item);
   BKE_material_paint_layer_free(item);
+  paint_layers_bake_tile_indices_clear_all(ma);
   paint_layer_anchor_point_release_broken_bakes(ma);
   BKE_paint_layers_tag_edited(ma);
   return true;
@@ -1667,6 +1671,7 @@ bool BKE_paint_layers_mask_remove(Material &ma, MaterialPaintLayer *layer)
   }
   /* Readers that read a point in the removed mask lost their slice: drop their bakes so a later
    * plan pass cannot keep showing it. */
+  paint_layers_bake_tile_indices_clear_all(ma);
   paint_layer_anchor_point_release_broken_bakes(ma);
   BKE_paint_layers_tag_edited(ma);
   return true;
@@ -1962,6 +1967,7 @@ bool BKE_paint_layers_ungroup(Material &ma, MaterialPaintLayer *folder)
   }
   BLI_remlink(owner, folder);
   BKE_material_paint_layer_free(folder);
+  paint_layers_bake_tile_indices_clear_all(ma);
 
   BKE_paint_layers_tag_edited(ma);
   return true;

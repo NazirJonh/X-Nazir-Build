@@ -2005,41 +2005,65 @@ bool BKE_paint_layers_slice_render(const Material &ma,
  * The live description of \a layer in \a channel, as the evaluator reads one row: what a bake of
  * the row renders. A Pass Through folder has no row of its own to describe.
  */
-static bool composite_bake_entry(const Material &ma,
-                                 const MaterialPaintLayer &layer,
-                                 const int channel,
-                                 PaintMaterialCompositeImageLayer &r_entry,
-                                 const int *slice_rect = nullptr,
-                                 const bool dimensions_only = false)
+static bool composite_bake_entry(
+    const Material &ma,
+    const MaterialPaintLayer &layer,
+    const int channel,
+    PaintMaterialCompositeImageLayer &r_entry,
+    const std::shared_ptr<const PaintMaterialCompositeSurface> &surface = nullptr,
+    const int *slice_rect = nullptr,
+    const bool dimensions_only = false)
 {
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
       (BKE_paint_layers_is_folder(layer) && BKE_paint_layers_folder_is_pass_through(layer)))
   {
     return false;
   }
-  return composite_image_layer_build(
-      ma, layer, channel, 1.0f, false, true, r_entry, nullptr, slice_rect, dimensions_only);
+  /* The surface is a row input of the description, not a stop point: it rides the context
+   * arguments after the size ones. */
+  return composite_image_layer_build(ma,
+                                    layer,
+                                    channel,
+                                    1.0f,
+                                    false,
+                                    true,
+                                    r_entry,
+                                    nullptr,
+                                    slice_rect,
+                                    dimensions_only,
+                                    false,
+                                    surface);
 }
 
-bool BKE_paint_layers_bake_render_node(const Material &ma,
-                                       const MaterialPaintLayer &layer,
-                                       const int channel,
-                                       const int size,
-                                       float *r_color_rgba,
-                                       float *r_coverage_gray,
-                                       const int *dst_rect)
+bool BKE_paint_layers_bake_render_node(
+    const Material &ma,
+    const MaterialPaintLayer &layer,
+    const int channel,
+    const int size,
+    float *r_color_rgba,
+    float *r_coverage_gray,
+    const int *dst_rect,
+    const std::shared_ptr<const PaintMaterialCompositeSurface> &surface)
 {
   if (size <= 0 || r_color_rgba == nullptr || r_coverage_gray == nullptr) {
     return false;
   }
-  /* A row's bake is a shared, object-independent map. An Object/Generated Gradient reads geometry
-   * the map cannot carry, and a folder containing one has the same problem for its whole subtree. */
-  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
+  /* A subtree whose Gradients the bake cannot evaluate is never a cache. */
+  if (!BKE_paint_layers_gradient_subtree_is_bakeable(layer)) {
+    return false;
+  }
+  /* An Object or Generated Gradient reads the geometry of the object it is shaded on, which only
+   * the surface of that object carries: without one the texel's own UV would be the approximate
+   * preview, not a bake, so the render is refused rather than written as a wrong picture. A reader
+   * is exempt: its cache is the slice of the row it points at, rendered by the slice machinery. */
+  if (surface == nullptr && !BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer) &&
+      !paint_layer_kind_reads_anchor_point(layer))
+  {
     return false;
   }
   /* Learn the stack dimensions without rendering or allocating a single nested slice. */
   PaintMaterialCompositeImageLayer dims_entry;
-  if (!composite_bake_entry(ma, layer, channel, dims_entry, nullptr, true)) {
+  if (!composite_bake_entry(ma, layer, channel, dims_entry, surface, nullptr, true)) {
     return false;
   }
   /* The row's content, straight and with its own factor, from the one shared isolated-group
@@ -2083,7 +2107,9 @@ bool BKE_paint_layers_bake_render_node(const Material &ma,
    * why the row is described a second time. */
   const int slice_rect[4] = {area.xmin, area.ymin, area.xmax, area.ymax};
   PaintMaterialCompositeImageLayer entry;
-  if (!composite_bake_entry(ma, layer, channel, entry, dst_rect != nullptr ? slice_rect : nullptr)) {
+  if (!composite_bake_entry(
+          ma, layer, channel, entry, surface, dst_rect != nullptr ? slice_rect : nullptr))
+  {
     return false;
   }
   Vector<float> content_color(int64_t(area_w) * area_h * 4);
@@ -2122,7 +2148,7 @@ bool BKE_paint_layers_row_dimensions(const Material &ma,
 {
   PaintMaterialCompositeImageLayer entry;
   /* Only the size is wanted: nested readers must not render and cache their slices for it. */
-  if (!composite_bake_entry(ma, layer, channel, entry, nullptr, true)) {
+  if (!composite_bake_entry(ma, layer, channel, entry, nullptr, nullptr, true)) {
     return false;
   }
   return BKE_paint_material_composite_stack_dimensions(

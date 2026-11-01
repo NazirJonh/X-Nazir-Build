@@ -12,9 +12,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <utility>
 
 #include "BKE_paint_layers_gradient_surface.hh"
 
@@ -39,6 +41,8 @@
 #include "BKE_customdata.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
+
+#include "DEG_depsgraph_query.hh"
 
 namespace blender {
 
@@ -503,6 +507,7 @@ std::shared_ptr<const PaintMaterialCompositeSurface> BKE_paint_layers_gradient_s
   const int clamped_size = std::clamp(size, bake_surface_size_min, bake_surface_size_max);
   const SurfaceIdentity identity = surface_identity(object, mesh, uv_map_name, clamped_size);
   const double time_start = BLI_time_now_seconds();
+  const size_t memory_start = MEM_get_memory_in_use();
   std::shared_ptr<PaintMaterialCompositeSurface> built = surface_build(mesh,
                                                                        uv_map_name,
                                                                        clamped_size,
@@ -514,20 +519,25 @@ std::shared_ptr<const PaintMaterialCompositeSurface> BKE_paint_layers_gradient_s
                                                                        need_generated);
   /* A diagnostic for the sizes that make a Merge stall: the rasterization is single-threaded and
    * a 4096 surface is hundreds of MiB next to the bake's own strips. Kept on by default like the
-   * other `[paint-layers ...]` traces, and only for the sizes worth measuring. */
+   * other `[paint-layers ...]` traces, and only for the sizes worth measuring. The delta is what
+   * the build itself cost, which the allocator's peak is not: that one is the high-water mark of
+   * the whole process since it started. */
   if (built && clamped_size >= 2048) {
     const double seconds = BLI_time_now_seconds() - time_start;
     const double surface_mib = double(built->positions.size()) * double(sizeof(float3)) /
                                (1024.0 * 1024.0);
     const double generated_mib = double(built->generated_positions.size()) *
                                  double(sizeof(float3)) / (1024.0 * 1024.0);
+    const double delta_mib = double(int64_t(MEM_get_memory_in_use()) - int64_t(memory_start)) /
+                             (1024.0 * 1024.0);
     printf("[paint-layers bake surface] size=%d padding=%d time=%.3fs surface=%.1fMiB "
-           "generated=%.1fMiB peak=%.1fMiB\n",
+           "generated=%.1fMiB delta=%.1fMiB peak=%.1fMiB\n",
            clamped_size,
            padding_texels,
            seconds,
            surface_mib,
            generated_mib,
+           delta_mib,
            double(MEM_get_peak_memory()) / (1024.0 * 1024.0));
   }
   return built;
@@ -558,6 +568,94 @@ void BKE_paint_layers_gradient_surface_cache_clear_for_object(
   for (const uint64_t key : keys) {
     cache.entries.remove(key);
   }
+}
+
+/**
+ * The session uid that names \a object: the original's, since the evaluated copy of an object the
+ * depsgraph made carries none (it reads zero) and two objects would share every key made from it.
+ */
+static uint32_t object_original_uid(const Object &object)
+{
+  const Object *original = DEG_get_original(&object);
+  return (original != nullptr ? original : &object)->id.session_uid;
+}
+
+/** Fold \a bytes of raw data into \a hash, eight bytes at a time. */
+static uint64_t content_hash_mix(uint64_t hash, const void *data, const size_t bytes)
+{
+  const uint8_t *src = static_cast<const uint8_t *>(data);
+  size_t offset = 0;
+  for (; offset + sizeof(uint64_t) <= bytes; offset += sizeof(uint64_t)) {
+    uint64_t word;
+    memcpy(&word, src + offset, sizeof(word));
+    hash = (hash ^ word) * 0x100000001b3ull;
+    hash ^= hash >> 29;
+  }
+  for (; offset < bytes; offset++) {
+    hash = (hash ^ src[offset]) * 0x100000001b3ull;
+  }
+  return hash;
+}
+
+/**
+ * The identity of what a bake of the surface depends on, from the geometry's values alone: the
+ * counts, every position, the topology, the UV layer and the texture space. Nothing here is an
+ * address or a sharing version, so an evaluated mesh that was freed and rebuilt with the same shape
+ * hashes the same.
+ */
+static uint64_t surface_content_hash(const Object &object,
+                                     const Mesh &mesh,
+                                     const char *uv_map_name,
+                                     const int clamped_size)
+{
+  const StringRef uv_name = uv_map_name != nullptr ? uv_map_name : "";
+  uint64_t hash = get_default_hash(uint64_t(object_original_uid(object)), uv_name, clamped_size);
+  hash = get_default_hash(hash, int(mesh.verts_num), int(mesh.corners_num));
+  const Span<float3> positions = mesh.vert_positions();
+  hash = content_hash_mix(hash, positions.data(), size_t(positions.size()) * sizeof(float3));
+  const Span<int> corner_verts = mesh.corner_verts();
+  hash = content_hash_mix(hash, corner_verts.data(), size_t(corner_verts.size()) * sizeof(int));
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  const bke::AttributeReader<float2> uv_attribute = attributes.lookup<float2>(
+      uv_name, bke::AttrDomain::Corner);
+  if (uv_attribute) {
+    const VArraySpan<float2> uv_span(*uv_attribute);
+    hash = content_hash_mix(hash, uv_span.data(), size_t(uv_span.size()) * sizeof(float2));
+  }
+  float3 texspace_location(0.0f);
+  float3 texspace_size(1.0f);
+  BKE_paint_layers_gradient_generated_box_get(&object, mesh, texspace_location, texspace_size);
+  hash = get_default_hash(hash, texspace_location.x, texspace_location.y, texspace_location.z);
+  return get_default_hash(hash, texspace_size.x, texspace_size.y, texspace_size.z);
+}
+
+uint64_t BKE_paint_layers_gradient_surface_identity(const Object &object,
+                                                   const Mesh &mesh,
+                                                   const char *uv_map_name,
+                                                   const int size)
+{
+  const int clamped_size = std::clamp(size, bake_surface_size_min, bake_surface_size_max);
+  /* The address-based key of the preview cache moves whenever the depsgraph rebuilds the evaluated
+   * mesh, which a bake's own tags cause: comparing it would re-bake forever. The key is only the
+   * cheap test of "was the mesh rebuilt"; the value compared is the geometry's content, hashed again
+   * only when the key moved. */
+  const uint64_t pointer_key = surface_identity(object, mesh, uv_map_name, clamped_size).key;
+  static std::mutex content_mutex;
+  static Map<uint32_t, std::pair<uint64_t, uint64_t>> content_cache;
+  {
+    std::lock_guard lock(content_mutex);
+    if (const std::pair<uint64_t, uint64_t> *hit = content_cache.lookup_ptr(
+            object_original_uid(object)))
+    {
+      if (hit->first == pointer_key) {
+        return hit->second;
+      }
+    }
+  }
+  const uint64_t content = surface_content_hash(object, mesh, uv_map_name, clamped_size);
+  std::lock_guard lock(content_mutex);
+  content_cache.add_overwrite(object_original_uid(object), {pointer_key, content});
+  return content;
 }
 
 StringRefNull BKE_paint_layers_gradient_uv_map_name(const Mesh &mesh)

@@ -27,6 +27,7 @@
 #include "BLI_vector.hh"
 
 #include "BKE_paint_layers_target.hh"
+#include "BKE_paint_material_composite_surface.hh"
 
 #include "DNA_listBase.h"
 #include "DNA_uuid_types.h"
@@ -41,6 +42,9 @@ struct MaterialPaintLayerChannel;
 struct MaterialPaintLayerCurvePatch;
 struct MaterialPaintLayerIdColor;
 struct MaterialSourceResolve;
+struct Object;
+struct Scene;
+struct ViewLayer;
 struct Brush;
 struct ReportList;
 enum eMaterialPaintChannel : int8_t;
@@ -2061,6 +2065,44 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
                                                  bool is_child = false);
 
 /**
+ * Why a row standing in for Object or Generated Gradient geometry cannot be baked for the objects
+ * of the current scene and view layer. Such a row reads the geometry of the object it is shaded on,
+ * so its cache describes one object: it stays live until every object the material is shaded on can
+ * supply a surface, and the reason below is what the Bake panel shows beside it.
+ */
+enum ePaintLayersBakeObjectIssue {
+  /** The row can be baked, or its subtree reads no object geometry at all. */
+  PAINT_LAYERS_BAKE_OBJECTS_OK = 0,
+  /** No scene and view layer were handed to the plan, so no object can be found. */
+  PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT,
+  /** No mesh object of the view layer is shaded with the material. */
+  PAINT_LAYERS_BAKE_OBJECTS_NO_OBJECT,
+  /** An object of the material has no mesh to shade. */
+  PAINT_LAYERS_BAKE_OBJECTS_NO_MESH,
+  /** An object of the material has no UV map a surface could be rasterized over. */
+  PAINT_LAYERS_BAKE_OBJECTS_NO_UV,
+  /** The row has no canvas size to bake at yet (no map and no content dimensions). */
+  PAINT_LAYERS_BAKE_OBJECTS_NO_SIZE,
+  /** More objects of the material than one bake serves. */
+  PAINT_LAYERS_BAKE_OBJECTS_TOO_MANY,
+  /**
+   * The cache would pass the 4096 side cap of a non-UV row (the largest surface the bake
+   * rasterizes). The Bake panel says so and points at #BKE_paint_layers_bake_size_set.
+   */
+  PAINT_LAYERS_BAKE_OBJECTS_TOO_LARGE,
+  /** The material's Object/Generated caches would pass the 2 GiB budget. */
+  PAINT_LAYERS_BAKE_OBJECTS_OVER_BUDGET,
+  /** An object's geometry changes over time: a time-dependent modifier, shape keys, or drivers. */
+  PAINT_LAYERS_BAKE_OBJECTS_ANIMATED,
+};
+
+/**
+ * Why \a layer's Object/Generated bake is not running, last read by the planner: one of
+ * #ePaintLayersBakeObjectIssue. #PAINT_LAYERS_BAKE_OBJECTS_OK for a row that needs no surface.
+ */
+int BKE_paint_layers_bake_object_issue_get(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
  * Composite \a layer's subtree for \a channel the way a bake of it would: the isolated-group model
  * -- the straight colour, the content alpha in its fourth component and the coverage it lays by --
  * into \a size x \a size buffers. The planner and the generator's substitution read this one
@@ -2069,15 +2111,21 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
  *
  * \param dst_rect: (x0, y0, x1, y1) in result pixels; when given only that rectangle is computed
  * and written, which is how a partial re-bake touches one changed tile.
+ * \param surface: the UV-to-object-space surface of the object the bake is for. A subtree holding
+ * an Object or Generated Gradient needs it -- the render reads the coordinate of each texel's
+ * surface point -- and is refused without one: the texel's own UV is the approximate preview, not
+ * a bake.
  * \return false when the row has nothing to render in \a channel.
  */
-bool BKE_paint_layers_bake_render_node(const Material &ma,
-                                       const MaterialPaintLayer &layer,
-                                       int channel,
-                                       int size,
-                                       float *r_color_rgba,
-                                       float *r_coverage_gray,
-                                       const int *dst_rect = nullptr);
+bool BKE_paint_layers_bake_render_node(
+    const Material &ma,
+    const MaterialPaintLayer &layer,
+    int channel,
+    int size,
+    float *r_color_rgba,
+    float *r_coverage_gray,
+    const int *dst_rect = nullptr,
+    const std::shared_ptr<const PaintMaterialCompositeSurface> &surface = nullptr);
 
 /** The pixel dimensions of \a layer's content in \a channel, the size a bake defaults to. */
 bool BKE_paint_layers_row_dimensions(const Material &ma,
@@ -2132,8 +2180,37 @@ bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer
 int BKE_paint_layers_folder_level(const Material &ma, const MaterialPaintLayer &layer);
 bool BKE_paint_layers_folder_auto_bake_allowed(const Material &ma, const MaterialPaintLayer &layer);
 
-/** Whether any heavy, not-yet-valid baked row of \a ma waits for a worker. */
-bool BKE_paint_layers_bake_heavy_pending(const Material &ma);
+/**
+ * Bring every light baked row of \a ma current, the synchronous half of the planner: a row that is
+ * due and not heavy is rendered through #BKE_paint_layers_bake_render_node into its service maps,
+ * stamped and subscribed. Callers run this on the main thread after draining the subscription
+ * (#BKE_paint_layers_bake_notice_changes). A heavy row is left to the worker job
+ * (#BKE_paint_layers_bake_job_create).
+ *
+ * \param scene, view_layer: the view the bake is for, normally the evaluated ones the depsgraph
+ * update just produced. An Object or Generated row is baked for the objects of those alone and is
+ * invalidated or released when their surface changes, disappears, loses its UV map, exceeds the
+ * object, size or memory limits, or deforms over time. Without them such a row is left live, and a
+ * cache it carries is kept rather than dropped on the strength of a context the plan does not have.
+ *
+ * \return true when some row was baked or released, so the caller knows the tree needs a rebuild.
+ */
+bool BKE_paint_layers_bake_plan_run(Main &bmain,
+                                    Material &ma,
+                                    bool *r_changed = nullptr,
+                                    const Scene *scene = nullptr,
+                                    const ViewLayer *view_layer = nullptr);
+
+/**
+ * Whether any heavy, not-yet-valid baked row of \a ma waits for a worker.
+ *
+ * \param scene, view_layer: the scene and view layer the bake is for. An Object or Generated row
+ * only counts while they can name the objects the material is shaded on; without them such a row
+ * is never pending (#ePaintLayersBakeObjectIssue).
+ */
+bool BKE_paint_layers_bake_heavy_pending(const Material &ma,
+                                        const Scene *scene = nullptr,
+                                        const ViewLayer *view_layer = nullptr);
 
 /** Release the runtime \a ma's bake keeps outside the file (subscriptions, remembered sizes). */
 void BKE_paint_layers_bake_runtime_free(Material &ma);
@@ -2152,8 +2229,17 @@ void BKE_paint_layers_bake_runtime_owner_transfer(Material &dst, Material &src);
  */
 struct PaintLayersBakeJob;
 
-/** A job for every due heavy row of \a ma, or null when nothing can be queued. Main thread. */
-PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma);
+/**
+ * A job for every due heavy row of \a ma, or null when nothing can be queued. Main thread.
+ *
+ * \param scene, view_layer: the scene and view layer whose objects an Object or Generated row is
+ * baked for. The surfaces are rasterized from their evaluated geometry here, on the main thread,
+ * and the worker only reads them; without a context such a row is not queued.
+ */
+PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
+                                                     Material &ma,
+                                                     const Scene *scene = nullptr,
+                                                     const ViewLayer *view_layer = nullptr);
 
 /**
  * The worker half: reads only the localized copy and shared images. \a report_progress gets 0..1;
@@ -2169,6 +2255,13 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
  * \return true when some row was written, so the caller notifies the shading.
  */
 bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job);
+
+/**
+ * The bytes the job's worker holds for the commit -- the stored channel results plus the common
+ * factors -- at the moment of the call. The commit frees each result as it writes it, so a fully
+ * committed job reads zero; this is the number the bake log's `held=` reports.
+ */
+int64_t BKE_paint_layers_bake_job_retained_bytes(const PaintLayersBakeJob &job);
 
 /** Release the job and its localized copy. */
 void BKE_paint_layers_bake_job_free(PaintLayersBakeJob &job);

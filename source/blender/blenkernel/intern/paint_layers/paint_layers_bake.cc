@@ -20,38 +20,54 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_target.hh"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <utility>
 
 #include "MEM_guardedalloc.h"
 
+#include "BKE_anim_data.hh"
 #include "BKE_global.hh"
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
+#include "BKE_key.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
+#include "BKE_material.hh"
+#include "BKE_mesh.hh"
 #include "BKE_mesh_maps.hh"
+#include "BKE_modifier.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_gradient_surface.hh"
+#include "BKE_paint_material_composite_surface.hh"
 #include "BKE_paint_material_resolve.hh"
+#include "BKE_scene.hh"
 
+#include "BLI_hash.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
 #include "BLI_math_base.h"
+#include "BLI_math_vector.h"
 #include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_string_ref.hh"
 #include "BLI_time.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_query.hh"
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf_types.hh"
@@ -59,7 +75,9 @@
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_node_types.h"
+#include "DNA_scene_types.h"
 #include "DNA_uuid_types.h"
 
 #include "paint_layers_intern.hh"
@@ -153,6 +171,18 @@ struct BakeMaterialRuntime {
     bool partial = false;
   };
   Map<uint64_t, StartedRender> started;
+  /**
+   * The surface identity each Object/Generated row was rendered from, by row marker
+   * (#BKE_paint_layers_gradient_surface_identity). An edit of the geometry or of the UV layer
+   * moves it and the row's bake is stale without any description change; a moved object does not,
+   * since object space is the object's own.
+   */
+  Map<UUID, uint64_t> object_identity;
+  /**
+   * Why an Object/Generated row cannot be baked right now, by row marker
+   * (#ePaintLayersBakeObjectIssue). What the Bake panel shows beside a row that stays live.
+   */
+  Map<UUID, int> object_issue;
 };
 
 Map<uint32_t, BakeMaterialRuntime> &bake_runtime()
@@ -214,6 +244,235 @@ MaterialPaintLayerBake *BKE_paint_layers_bake_struct_ensure(MaterialPaintLayer &
     layer.bake = MEM_new<MaterialPaintLayerBake>(__func__);
   }
   return layer.bake;
+}
+
+/** Drop the per-object tile records of \a bake; the maps and their users are untouched. */
+void paint_layers_bake_tiles_clear(MaterialPaintLayerBake &bake)
+{
+  MaterialPaintLayerBakeTile *tile = static_cast<MaterialPaintLayerBakeTile *>(bake.tiles.first);
+  while (tile != nullptr) {
+    MaterialPaintLayerBakeTile *next = static_cast<MaterialPaintLayerBakeTile *>(tile->next);
+    MEM_delete(tile);
+    tile = next;
+  }
+  BLI_listbase_clear(&bake.tiles);
+  bake.object_count = 0;
+}
+
+static MaterialPaintLayerBakeTile *bake_tile_find(MaterialPaintLayerBake &bake,
+                                                  const uint32_t object_uid)
+{
+  for (MaterialPaintLayerBakeTile &tile : bake.tiles) {
+    if (tile.object_uid == object_uid) {
+      return &tile;
+    }
+  }
+  return nullptr;
+}
+
+static MaterialPaintLayerBakeTile *bake_tile_ensure(MaterialPaintLayerBake &bake,
+                                                    const uint32_t object_uid,
+                                                    const int index)
+{
+  if (MaterialPaintLayerBakeTile *tile = bake_tile_find(bake, object_uid)) {
+    return tile;
+  }
+  MaterialPaintLayerBakeTile *tile = MEM_new<MaterialPaintLayerBakeTile>(__func__);
+  tile->object_uid = object_uid;
+  tile->tile[0] = index % 10;
+  tile->tile[1] = index / 10;
+  BLI_addtail(&bake.tiles, tile);
+  return tile;
+}
+
+/**
+ * Whether \a layer's maps carry a tile for every object the planner last resolved. The shader may
+ * stand in only then: a missing tile would show another object's pixels.
+ */
+static bool bake_tiles_ready(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if (layer.bake == nullptr || layer.bake->object_count <= 0) {
+    return false;
+  }
+  if (BKE_paint_layers_bake_object_issue_get(ma, layer) != PAINT_LAYERS_BAKE_OBJECTS_OK) {
+    return false;
+  }
+  const int tiles = BLI_listbase_count(&layer.bake->tiles);
+  return tiles == layer.bake->object_count;
+}
+
+/** SplitMix64 finalizer: spreads every input bit over the whole word. */
+static uint64_t bake_hash_mix64(uint64_t x)
+{
+  x ^= x >> 30;
+  x *= 0xbf58476d1ce4e5b9ull;
+  x ^= x >> 27;
+  x *= 0x94d049bb133111ebull;
+  x ^= x >> 31;
+  return x;
+}
+
+/**
+ * The object property the generated shader reads as its tile index. Keyed on the material's stable
+ * owner UUID, so two materials sharing an object do not overwrite each other's index.
+ */
+std::string paint_layers_bake_tile_attribute_path(const Material &ma)
+{
+  uint64_t hash = 0x9e3779b97f4a7c15ull;
+  if (!BLI_uuid_is_nil(ma.paint_layers_owner_uid)) {
+    uint64_t words[2];
+    static_assert(sizeof(bUUID) == sizeof(words));
+    memcpy(words, &ma.paint_layers_owner_uid, sizeof(words));
+    hash = bake_hash_mix64(hash ^ words[0]);
+    hash = bake_hash_mix64(hash ^ words[1]);
+  }
+  else {
+    /* A generated material without an owner UUID: the name is the only stable key it has. */
+    for (const char *c = ma.id.name; *c != '\0'; c++) {
+      hash = bake_hash_mix64(hash ^ uint64_t(uint8_t(*c)));
+    }
+  }
+  static const char digits[] = "0123456789abcdef";
+  std::array<char, 17> key;
+  for (int i = 0; i < 16; i++) {
+    key[i] = digits[(hash >> (60 - 4 * i)) & 0xF];
+  }
+  key[16] = '\0';
+  return std::string("paint_layer_bake_tile_") + key.data();
+}
+
+/** Write \a index into \a object's tile property so the shader can offset into its tile. */
+static void bake_tile_object_index_set(const Object &object, const char *path, const int index)
+{
+  const Object *original = DEG_get_original(&object);
+  Object *object_mut = const_cast<Object *>(original != nullptr ? original : &object);
+  IDProperty *properties = IDP_EnsureProperties(&object_mut->id);
+  IDProperty *property = IDP_GetPropertyFromGroup(properties, path);
+  if (property == nullptr) {
+    IDP_AddToGroup(properties, IDP_NewInt(index, path));
+  }
+  else if (property->type == IDP_INT) {
+    if (IDP_int_get(property) == index) {
+      return;
+    }
+    IDP_int_set(property, index);
+  }
+  else {
+    return;
+  }
+  /* The shader reads the property through an Attribute node: let the depsgraph copy it. */
+  DEG_id_tag_update(&object_mut->id, ID_RECALC_SHADING);
+}
+
+/** Remove the tile index \a path left on \a object; no bake of the material reads it any more. */
+static void bake_tile_object_index_remove(const Object &object,
+                                          const char *path,
+                                          const bool tag_update)
+{
+  const Object *original = DEG_get_original(&object);
+  Object *object_mut = const_cast<Object *>(original != nullptr ? original : &object);
+  IDProperty *properties = IDP_GetProperties(&object_mut->id);
+  if (properties == nullptr) {
+    return;
+  }
+  IDProperty *property = IDP_GetPropertyFromGroup(properties, path);
+  if (property == nullptr) {
+    return;
+  }
+  IDP_FreeFromGroup(properties, property);
+  if (tag_update) {
+    /* The shader no longer reads the property: let the depsgraph drop its copy too. */
+    DEG_id_tag_update(&object_mut->id, ID_RECALC_SHADING);
+  }
+}
+
+/** The fixed prefix of the object property the shader reads as its bake tile index. */
+constexpr char BAKE_TILE_PROPERTY_PREFIX[] = "paint_layer_bake_tile_";
+
+/**
+ * Parse a tile-index property name into the 64-bit key \a paint_layers_bake_tile_attribute_path()
+ * encodes after its prefix. Returns false for any other property, so the lazy prune never touches
+ * an unrelated Custom Property.
+ */
+static bool bake_tile_property_hash(const char *name, uint64_t &r_hash)
+{
+  constexpr size_t prefix_len = sizeof(BAKE_TILE_PROPERTY_PREFIX) - 1;
+  if (strncmp(name, BAKE_TILE_PROPERTY_PREFIX, prefix_len) != 0) {
+    return false;
+  }
+  const char *hex = name + prefix_len;
+  if (strlen(hex) != 16) {
+    return false;
+  }
+  uint64_t value = 0;
+  for (int i = 0; i < 16; i++) {
+    const char c = hex[i];
+    int digit;
+    if (c >= '0' && c <= '9') {
+      digit = c - '0';
+    }
+    else if (c >= 'a' && c <= 'f') {
+      digit = c - 'a' + 10;
+    }
+    else {
+      return false;
+    }
+    value = (value << 4) | uint64_t(digit);
+  }
+  r_hash = value;
+  return true;
+}
+
+/** Give every target object its tile index, in the order the bake writes the tiles. */
+static void bake_tile_object_indices_set(const Material &ma,
+                                         const PaintLayersBakeTargets &targets)
+{
+  const std::string path = paint_layers_bake_tile_attribute_path(ma);
+  for (int index = 0; index < targets.objects.size(); index++) {
+    bake_tile_object_index_set(*targets.objects[index].object, path.c_str(), index);
+  }
+}
+
+/** Whether any row of \a ma still carries per-object tile records. */
+static bool bake_material_has_tiles(const Material &ma)
+{
+  bool has_tiles = false;
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+        if (row.bake != nullptr && !BLI_listbase_is_empty(&row.bake->tiles)) {
+          has_tiles = true;
+          return false;
+        }
+        return true;
+      });
+  return has_tiles;
+}
+
+void paint_layers_bake_tile_indices_clear_all(const Material &ma)
+{
+  if (bake_material_has_tiles(ma)) {
+    return;
+  }
+  paint_layers_bake_tile_indices_remove_everywhere(ma);
+}
+
+void paint_layers_bake_tile_index_remove_from_object(Object &object, const Material &ma)
+{
+  const std::string path = paint_layers_bake_tile_attribute_path(ma);
+  bake_tile_object_index_remove(object, path.c_str(), true);
+}
+
+void paint_layers_bake_tile_indices_remove_everywhere(const Material &ma, const bool tag_objects)
+{
+  if (G_MAIN == nullptr) {
+    return;
+  }
+  const std::string path = paint_layers_bake_tile_attribute_path(ma);
+  for (Object &object : G_MAIN->objects) {
+    if (object.type == OB_MESH) {
+      bake_tile_object_index_remove(object, path.c_str(), tag_objects);
+    }
+  }
 }
 
 int BKE_paint_layers_bake_mode_get(const MaterialPaintLayer &layer)
@@ -333,8 +592,10 @@ bool BKE_paint_layers_bake_clear(Material &ma, MaterialPaintLayer &layer)
   }
   if (layer.bake != nullptr) {
     bake_release_users(*layer.bake);
+    paint_layers_bake_tiles_clear(*layer.bake);
     MEM_SAFE_DELETE(layer.bake);
   }
+  paint_layers_bake_tile_indices_clear_all(ma);
   BKE_paint_layers_tag_edited(ma);
   return true;
 }
@@ -359,6 +620,10 @@ bool BKE_paint_layers_bake_set_map(Material &ma,
   if (image != nullptr) {
     id_us_plus(&image->id);
   }
+  /* A manually assigned map is not a set of object tiles: whatever coverage the bake had is
+   * gone. */
+  paint_layers_bake_tiles_clear(*bake);
+  paint_layers_bake_tile_indices_clear_all(ma);
   BKE_paint_layers_tag_edited(ma);
   return true;
 }
@@ -1029,9 +1294,9 @@ bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer
   {
     return false;
   }
-  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
-    /* An Object or Generated Gradient reads per-object geometry: no shared map stands in for the
-     * row, whatever the hash says. */
+  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer) &&
+      !bake_tiles_ready(ma, layer))
+  {
     return false;
   }
   /* The structural hash cannot see pixel edits; the runtime subscription, drained by
@@ -1165,10 +1430,12 @@ bool paint_layer_row_substituted(const Material &ma, const MaterialPaintLayer &l
      * description that decides what it reads. */
     return false;
   }
-  /* Object/Generated Gradients read per-object geometry. Even a stale shared bake must not stand
-   * in for one; the generated graph and the CPU composite both fall back to the live row. A folder
-   * that contains one cannot substitute its cache either. */
-  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
+  /* Object/Generated Gradients read per-object geometry. Their maps are one UDIM image with a tile
+   * per object of the current scene/view layer: only a complete tile set may stand in, and a folder
+   * containing such a row needs the same coverage. */
+  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer) &&
+      !bake_tiles_ready(ma, layer))
+  {
     return false;
   }
   if (layer.bake == nullptr || layer.bake->coverage == nullptr ||
@@ -1260,15 +1527,32 @@ static Image *bake_service_image(Main &bmain,
                                  const int channel,
                                  const int size,
                                  const bool is_color,
-                                 const bool floatbuf)
+                                 const bool floatbuf,
+                                 const int object_num)
 {
+  const bool tiled = object_num > 0;
   Image **slot = bake_service_slot(layer, channel);
   if (*slot != nullptr) {
     int width = 0;
     int height = 0;
     BKE_image_get_size(*slot, nullptr, &width, &height);
-    if (width == size && height == size && bake_image_is_float(**slot) == floatbuf) {
-      return *slot;
+    const bool tiled_ok = ((*slot)->source == IMA_SRC_TILED) == tiled;
+    if (width == size && height == size && bake_image_is_float(**slot) == floatbuf && tiled_ok) {
+      if (!tiled) {
+        return *slot;
+      }
+      /* A precreated per-object map has tile 1001 only: grow it to the number of objects the bake
+       * resolved instead of throwing the canvas away. */
+      bool all_tiles = true;
+      for (int index = 0; index < object_num; index++) {
+        if (!BKE_paint_layers_map_coverage_tile_ensure(**slot, 1001 + index)) {
+          all_tiles = false;
+          break;
+        }
+      }
+      if (all_tiles) {
+        return *slot;
+      }
     }
     /* The map was created at another size (the row's `bake_size` changed) or in another format (a
      * generated row's channel moved to float): the pixel writers index the render buffer by the
@@ -1296,9 +1580,25 @@ static Image *bake_service_image(Main &bmain,
   /* The creation reference is the one the row holds: unlike #BKE_paint_layers_bake_set_map this
    * takes no user of its own. */
   Image *image = BKE_image_add_generated(
-      &bmain, size, size, name, 32, floatbuf, IMA_GENTYPE_BLANK, black, false, !is_color, false);
+      &bmain, size, size, name, 32, floatbuf, IMA_GENTYPE_BLANK, black, false, !is_color, tiled);
   if (image != nullptr) {
     image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    if (tiled) {
+      /* The first tile is created by the image itself; the rest carry the same canvas and format,
+       * because a UDIM image requires every tile to have the same resolution. */
+      for (int index = 1; index < object_num; index++) {
+        ImageTile *tile = BKE_image_add_tile(image, 1001 + index, nullptr);
+        if (tile == nullptr) {
+          continue;
+        }
+        tile->gen_x = size;
+        tile->gen_y = size;
+        tile->gen_type = IMA_GENTYPE_BLANK;
+        tile->gen_flag |= eImage_GenFlag(floatbuf ? IMA_GEN_FLOAT : 0);
+        tile->gen_depth = 32;
+        copy_v4_v4(tile->gen_color, black);
+      }
+    }
     /* A bake is the stack's own read of a row, so the browsers hide it like every other map. */
     BKE_paint_layers_image_mark_internal(*image);
   }
@@ -1320,15 +1620,55 @@ static void bake_image_pixels_changed(Image &image, ImBuf &ibuf)
 }
 
 /**
+ * The float map's storage of one straight-RGBA value: premultiplied by its own alpha, which is what
+ * the composite and the renderer both read.
+ */
+static void bake_pixel_store_float(const float rgba[4], float r_store[4])
+{
+  const float alpha = clamp_f(rgba[3], 0.0f, 1.0f);
+  r_store[0] = rgba[0] * alpha;
+  r_store[1] = rgba[1] * alpha;
+  r_store[2] = rgba[2] * alpha;
+  r_store[3] = alpha;
+}
+
+/**
+ * The byte map's storage of one straight-RGBA value: the colour encoded into the map's colorspace
+ * and quantized, the alpha clamped. Only a colour channel is encoded; a data channel keeps the
+ * scene-linear value quantized as it came.
+ */
+static void bake_pixel_store_byte(const float rgba[4],
+                                  const bool is_color,
+                                  const ColorSpace *colorspace,
+                                  uchar r_store[4])
+{
+  float encoded[4] = {rgba[0], rgba[1], rgba[2], clamp_f(rgba[3], 0.0f, 1.0f)};
+  if (is_color && colorspace != nullptr) {
+    IMB_colormanagement_scene_linear_to_colorspace_v3(encoded, colorspace);
+  }
+  r_store[0] = uchar(clamp_i(int(encoded[0] * 255.0f + 0.5f), 0, 255));
+  r_store[1] = uchar(clamp_i(int(encoded[1] * 255.0f + 0.5f), 0, 255));
+  r_store[2] = uchar(clamp_i(int(encoded[2] * 255.0f + 0.5f), 0, 255));
+  r_store[3] = uchar(clamp_i(int(encoded[3] * 255.0f + 0.5f), 0, 255));
+}
+
+/**
  * Write \a values into \a image, or only into \a rect (x0, y0, x1, y1 in image pixels) when given.
  *
  * The map's own buffer decides the format: a byte map stores the value encoded into its colorspace,
  * a float map stores it as it came, which is what a precise channel of a generated row is for.
+ * Shared with the bake tests, which hold the worker's stored-buffer write to this same encoding.
  */
-static void bake_write_image(Image &image, const float *values, const bool is_color, const int *rect)
+void bake_write_image(Image &image,
+                      const float *values,
+                      const bool is_color,
+                      const int *rect,
+                      const int tile_number /* = 0 */)
 {
+  ImageUser iuser{};
+  iuser.tile = tile_number;
   void *lock = nullptr;
-  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, tile_number > 0 ? &iuser : nullptr, &lock);
   if (ibuf == nullptr) {
     return;
   }
@@ -1349,11 +1689,7 @@ static void bake_write_image(Image &image, const float *values, const bool is_co
     for (int y = y0; y < y1; y++) {
       for (int x = x0; x < x1; x++) {
         const int64_t i = int64_t(y) * width + x;
-        const float alpha = clamp_f(values[i * 4 + 3], 0.0f, 1.0f);
-        floats[i * 4 + 0] = values[i * 4 + 0] * alpha;
-        floats[i * 4 + 1] = values[i * 4 + 1] * alpha;
-        floats[i * 4 + 2] = values[i * 4 + 2] * alpha;
-        floats[i * 4 + 3] = alpha;
+        bake_pixel_store_float(&values[i * 4], &floats[i * 4]);
       }
     }
   }
@@ -1362,18 +1698,63 @@ static void bake_write_image(Image &image, const float *values, const bool is_co
     for (int y = y0; y < y1; y++) {
       for (int x = x0; x < x1; x++) {
         const int64_t i = int64_t(y) * width + x;
-        /* The colour's fourth component carries the row's content alpha. */
-        float rgba[4] = {values[i * 4 + 0],
-                         values[i * 4 + 1],
-                         values[i * 4 + 2],
-                         clamp_f(values[i * 4 + 3], 0.0f, 1.0f)};
-        if (is_color && colorspace != nullptr) {
-          IMB_colormanagement_scene_linear_to_colorspace_v3(rgba, colorspace);
+        bake_pixel_store_byte(&values[i * 4], is_color, colorspace, &pixels[i * 4]);
+      }
+    }
+  }
+  bake_image_pixels_changed(image, *ibuf);
+  BKE_image_release_ibuf(&image, ibuf, lock);
+}
+
+/**
+ * Write a stored buffer -- the per-pixel format #bake_pixel_store_float or #bake_pixel_store_byte
+ * produce, which a worker job holds instead of its straight-RGBA render -- into \a image, or only
+ * into \a rect. No conversion happens here: the values are already the map's own.
+ */
+static void bake_write_stored_image(Image &image,
+                                    const bool stored_float,
+                                    const void *stored,
+                                    const int *rect,
+                                    const int tile_number = 0)
+{
+  ImageUser iuser{};
+  iuser.tile = tile_number;
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, tile_number > 0 ? &iuser : nullptr, &lock);
+  if (ibuf == nullptr) {
+    return;
+  }
+  const int width = ibuf->x;
+  const int x0 = rect != nullptr ? clamp_i(rect[0], 0, width) : 0;
+  const int x1 = rect != nullptr ? clamp_i(rect[2], 0, width) : width;
+  const int y0 = rect != nullptr ? clamp_i(rect[1], 0, ibuf->y) : 0;
+  const int y1 = rect != nullptr ? clamp_i(rect[3], 0, ibuf->y) : ibuf->y;
+  if (stored_float) {
+    if (float *floats = (ibuf->byte_buffer.data == nullptr && ibuf->float_buffer.data != nullptr) ?
+                            ibuf->float_data_for_write() :
+                            nullptr)
+    {
+      const float *values = static_cast<const float *>(stored);
+      for (int y = y0; y < y1; y++) {
+        for (int x = x0; x < x1; x++) {
+          const int64_t i = int64_t(y) * width + x;
+          floats[i * 4 + 0] = values[i * 4 + 0];
+          floats[i * 4 + 1] = values[i * 4 + 1];
+          floats[i * 4 + 2] = values[i * 4 + 2];
+          floats[i * 4 + 3] = values[i * 4 + 3];
         }
-        pixels[i * 4 + 0] = uchar(clamp_i(int(rgba[0] * 255.0f + 0.5f), 0, 255));
-        pixels[i * 4 + 1] = uchar(clamp_i(int(rgba[1] * 255.0f + 0.5f), 0, 255));
-        pixels[i * 4 + 2] = uchar(clamp_i(int(rgba[2] * 255.0f + 0.5f), 0, 255));
-        pixels[i * 4 + 3] = uchar(clamp_i(int(rgba[3] * 255.0f + 0.5f), 0, 255));
+      }
+    }
+  }
+  else if (uchar *pixels = ibuf->byte_data_for_write()) {
+    const uchar *values = static_cast<const uchar *>(stored);
+    for (int y = y0; y < y1; y++) {
+      for (int x = x0; x < x1; x++) {
+        const int64_t i = int64_t(y) * width + x;
+        pixels[i * 4 + 0] = values[i * 4 + 0];
+        pixels[i * 4 + 1] = values[i * 4 + 1];
+        pixels[i * 4 + 2] = values[i * 4 + 2];
+        pixels[i * 4 + 3] = values[i * 4 + 3];
       }
     }
   }
@@ -1382,10 +1763,15 @@ static void bake_write_image(Image &image, const float *values, const bool is_co
 }
 
 /** The coverage map keeps its grey in all three colour channels and is opaque. */
-static void bake_write_coverage_image(Image &image, const float *coverage, const int *rect)
+void bake_write_coverage_image(Image &image,
+                               const float *coverage,
+                               const int *rect,
+                               const int tile_number /* = 0 */)
 {
+  ImageUser iuser{};
+  iuser.tile = tile_number;
   void *lock = nullptr;
-  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, tile_number > 0 ? &iuser : nullptr, &lock);
   if (ibuf == nullptr) {
     return;
   }
@@ -1480,13 +1866,491 @@ bool BKE_paint_layers_folder_auto_bake_allowed(const Material &ma, const Materia
   return BKE_paint_layers_folder_level(ma, layer) >= 2;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Objects of a bake
+ *
+ * An Object or Generated Gradient reads the geometry of the object it is shaded on, so a cache of
+ * such a row describes one object. The objects come from the evaluated depsgraph of the scene and
+ * view layer the bake was started for; nothing here looks at the rest of `bmain`, and every
+ * function runs on the main thread, where evaluated data may be read.
+ * \{ */
+
+/**
+ * How many objects of one material an Object/Generated row serves. One UDIM row of tiles holds
+ * them (1001..1008), so the tile map such an image keeps stays compact.
+ */
+constexpr int PAINT_LAYERS_BAKE_OBJECTS_MAX = 8;
+
+/**
+ * The cache budget of one material's Object/Generated rows, in bytes. A 4K map is the standard
+ * canvas: one object's Base Color and coverage alone are 128 MiB at that side, so the budget has to
+ * hold several of them.
+ */
+constexpr int64_t PAINT_LAYERS_BAKE_OBJECTS_BUDGET = int64_t(2048) * 1024 * 1024;
+
+/**
+ * The largest side an Object/Generated row may be baked at; larger is refused, never reduced. It is
+ * the largest surface #BKE_paint_layers_gradient_surface_build rasterizes.
+ */
+constexpr int PAINT_LAYERS_BAKE_OBJECTS_SIZE_MAX = 4096;
+
+bool paint_layers_bake_subtree_needs_surface(const MaterialPaintLayer &layer)
+{
+  /* A reader's cache is the slice it points at, rendered by the slice machinery, not a bake of
+   * this row's own subtree. */
+  if (paint_layer_kind_reads_anchor_point(layer)) {
+    return false;
+  }
+  /* A row reading a material is laid through the maps rendered from that source; its own graph is
+   * never composited into a bake. */
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    return false;
+  }
+  /* A subtree whose Gradients all read the texel's own UV is one map for every object of the
+   * material; one holding an Object or a Generated Gradient reads geometry a shared map cannot
+   * carry. */
+  return !BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer);
+}
+
+/**
+ * Whether \a object has \a ma in one of its slots, linked to the object or to its data. The
+ * evaluated getter is used because \a object comes from the depsgraph: its mesh may be an edit-mode
+ * copy whose material array the original does not have.
+ *
+ * The slots of an evaluated object name the evaluated (copy-on-eval) materials, while \a ma is the
+ * original of the database, so the slot is compared through its original.
+ */
+static bool bake_object_uses_material(const Object &object, const Material &ma)
+{
+  Object *object_mut = const_cast<Object *>(&object);
+  for (int slot = 0; slot < object.totcol; slot++) {
+    const Material *slot_material = BKE_object_material_get_eval(object_mut, short(slot + 1));
+    if (slot_material == nullptr) {
+      continue;
+    }
+    const Material *original = DEG_get_original(slot_material);
+    if (slot_material == &ma || original == &ma) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether \a object's evaluated mesh is driven by time: an animated armature or shape keys, a
+ * modifier that declares a time dependency (Wave, Ocean, Cloth, Softbody, Dynamic Paint, Geometry
+ * Nodes...), or a particle system.
+ *
+ * Such a row's cache would be stale the frame it landed and would be re-baked every frame, so the
+ * row stays live instead. A posed but still armature is an ordinary edit the surface identity sees.
+ */
+static bool bake_object_deforms_over_time(const Object &object, const Mesh &mesh, Scene *scene)
+{
+  /* The evaluated mesh carries no AnimData of its own: the animation that deforms it lives on the
+   * original datablock. Drivers and NLA tracks are part of #BKE_animdata_id_is_animated. */
+  const Mesh *mesh_original = DEG_get_original(&mesh);
+  if (BKE_animdata_id_is_animated(&(mesh_original != nullptr ? *mesh_original : mesh).id)) {
+    return true;
+  }
+  const Object *original = DEG_get_original(&object);
+  if (const Key *key = BKE_key_from_object(
+          const_cast<Object *>(original != nullptr ? original : &object)))
+  {
+    if (BKE_animdata_id_is_animated(&key->id)) {
+      return true;
+    }
+  }
+  for (const ModifierData &md : object.modifiers) {
+    if (BKE_modifier_depends_ontime(scene, const_cast<ModifierData *>(&md))) {
+      return true;
+    }
+    if (md.type != eModifierType_Armature) {
+      continue;
+    }
+    const ArmatureModifierData &armature = reinterpret_cast<const ArmatureModifierData &>(md);
+    if (armature.object != nullptr &&
+        (BKE_animdata_id_is_animated(&armature.object->id) ||
+         (armature.object->data != nullptr &&
+          BKE_animdata_id_is_animated(armature.object->data))))
+    {
+      return true;
+    }
+  }
+  /* Particles are not a modifier on the object's modifier stack in the legacy system. */
+  if (!BLI_listbase_is_empty(&object.particlesystem)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * The bytes one object's maps cost at \a size: a plane per channel the row lays in, in the format
+ * that channel is baked at, and the shared coverage plane.
+ */
+static int64_t bake_object_cache_bytes(const Material &ma,
+                                       const MaterialPaintLayer &layer,
+                                       const int size)
+{
+  if (size <= 0) {
+    return 0;
+  }
+  const int64_t texels = int64_t(size) * size;
+  int64_t bytes = 0;
+  if (layer.channels != nullptr && layer.channels_num > 0) {
+    /* Only the channels the row lays get a map (the same set the precreation walks); counting the
+     * material's whole channel set would charge a Base Color Gradient for Height and Metallic maps
+     * it never writes, and refuse a bake that costs a fraction of that. */
+    for (const int index : IndexRange(layer.channels_num)) {
+      const int channel = int(layer.channels[index].channel);
+      if (paint_layer_channel_filtered(ma, channel)) {
+        continue;
+      }
+      const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+          eMaterialPaintChannel(channel));
+      bytes += texels * (bake_channel_needs_float(layer, info) ? 16 : 4);
+    }
+  }
+  else {
+    /* A row without channel records (a folder) is charged for every channel it may fold in. */
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      if (paint_layer_channel_filtered(ma, int(info.channel))) {
+        continue;
+      }
+      bytes += texels * (bake_channel_needs_float(layer, info) ? 16 : 4);
+    }
+  }
+  /* The coverage map is one byte RGBA plane whatever the channels are. */
+  return bytes + texels * 4;
+}
+
+/** Whether \a layer's bake record owns any map; a record with none only keeps the mode and size. */
+static bool bake_row_has_maps(const MaterialPaintLayer &layer)
+{
+  if (layer.bake == nullptr) {
+    return false;
+  }
+  if (layer.bake->coverage != nullptr) {
+    return true;
+  }
+  for (const Image *image : layer.bake->images) {
+    if (image != nullptr) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The bytes the Object/Generated caches of \a ma would take with \a layer's row at \a size for
+ * \a objects objects. The row itself is counted at the passed size and count; its current maps, if
+ * any, are replaced rather than added.
+ */
+static int64_t bake_object_budget_bytes(const Material &ma,
+                                        const MaterialPaintLayer &layer,
+                                        const int size,
+                                        const int64_t objects)
+{
+  int64_t bytes = objects * bake_object_cache_bytes(ma, layer, size);
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+        if (&row == &layer || !bake_row_has_maps(row) || row.bake->size <= 0 ||
+            !paint_layers_bake_subtree_needs_surface(row))
+        {
+          return true;
+        }
+        const int row_objects = std::max(1, row.bake->object_count);
+        bytes += int64_t(row_objects) * bake_object_cache_bytes(ma, row, row.bake->size);
+        return true;
+      });
+  return bytes;
+}
+
+uint64_t paint_layers_bake_target_identity(const PaintLayersBakeTarget &target, const int size)
+{
+  return BKE_paint_layers_gradient_surface_identity(
+      *target.object, *target.mesh, target.uv_map_name, size);
+}
+
+/**
+ * Collect the tile-index keys of every layered material in \a bmain once per view pass. The lazy
+ * prune needs this set for every mesh object, and rebuilding the paths per object would make the
+ * pass quadratic in the material count.
+ */
+static void bake_tile_keys_collect(Main &bmain, Set<uint64_t> &r_keys)
+{
+  for (const Material &ma : bmain.materials) {
+    if (!BKE_paint_layers_is_layered(ma)) {
+      continue;
+    }
+    const std::string path = paint_layers_bake_tile_attribute_path(ma);
+    uint64_t key;
+    if (bake_tile_property_hash(path.c_str(), key)) {
+      r_keys.add(key);
+    }
+  }
+}
+
+/**
+ * Remove the tile-index properties of \a object whose material no longer exists. The property is
+ * keyed only by a material UUID, so after a material is deleted nothing can map the key back to it;
+ * the planner's view pass is the one place that already visits every mesh object of the view layer.
+ * Reads the original object: the evaluated copy carries a copied property group, not the one a file
+ * keeps.
+ */
+static void bake_tile_properties_prune(const Object &object, const Set<uint64_t> &keys)
+{
+  const Object *original = DEG_get_original(&object);
+  Object *object_mut = const_cast<Object *>(original != nullptr ? original : &object);
+  IDProperty *properties = IDP_GetProperties(&object_mut->id);
+  if (properties == nullptr || properties->type != IDP_GROUP) {
+    return;
+  }
+  IDProperty *property = static_cast<IDProperty *>(properties->data.group.first);
+  while (property != nullptr) {
+    IDProperty *next = property->next;
+    uint64_t key;
+    if (bake_tile_property_hash(property->name, key) && !keys.contains(key)) {
+      bake_tile_object_index_remove(*object_mut, property->name, true);
+    }
+    property = next;
+  }
+}
+
+void paint_layers_bake_view_resolve(const Material &ma,
+                                    Main *bmain,
+                                    const Scene *scene,
+                                    const ViewLayer *view_layer,
+                                    PaintLayersBakeView &r_view)
+{
+  r_view.objects.clear();
+  r_view.meshes.clear();
+  r_view.issue = PAINT_LAYERS_BAKE_OBJECTS_OK;
+  if (scene == nullptr || view_layer == nullptr) {
+    r_view.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT;
+    return;
+  }
+  Depsgraph *depsgraph = BKE_scene_get_depsgraph(scene, view_layer);
+  if (depsgraph == nullptr) {
+    r_view.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT;
+    return;
+  }
+  /* The keys are collected once for the whole object pass below. */
+  Set<uint64_t> tile_keys;
+  Main *keys_main = (bmain != nullptr) ? bmain : G_MAIN;
+  if (keys_main != nullptr) {
+    bake_tile_keys_collect(*keys_main, tile_keys);
+  }
+  /* The evaluated objects may be edited by a time-dependent modifier while the bake runs: the
+   * surface is built once, so refuse the row before it can go stale on the next frame. */
+  Scene *scene_mut = const_cast<Scene *>(scene);
+
+  int issue = PAINT_LAYERS_BAKE_OBJECTS_OK;
+  DEGObjectIterSettings settings{};
+  settings.depsgraph = depsgraph;
+  settings.flags = DEG_ITER_OBJECT_FLAG_LINKED_DIRECTLY | DEG_ITER_OBJECT_FLAG_LINKED_VIA_SET |
+                   DEG_ITER_OBJECT_FLAG_VISIBLE;
+  DEG_OBJECT_ITER_BEGIN (&settings, object) {
+    if (object->type != OB_MESH) {
+      continue;
+    }
+    r_view.meshes.append(object);
+    /* Drop indices of materials that no longer exist before this object's bake is considered. */
+    bake_tile_properties_prune(*object, tile_keys);
+    if (!bake_object_uses_material(*object, ma)) {
+      continue;
+    }
+    const Mesh *mesh = BKE_object_get_evaluated_mesh(object);
+    if (mesh == nullptr) {
+      issue = PAINT_LAYERS_BAKE_OBJECTS_NO_MESH;
+      break;
+    }
+    const StringRefNull uv_name = BKE_paint_layers_gradient_uv_map_name(*mesh);
+    if (uv_name.is_empty()) {
+      issue = PAINT_LAYERS_BAKE_OBJECTS_NO_UV;
+      break;
+    }
+    if (bake_object_deforms_over_time(*object, *mesh, scene_mut)) {
+      issue = PAINT_LAYERS_BAKE_OBJECTS_ANIMATED;
+      break;
+    }
+    PaintLayersBakeTarget target;
+    target.object = object;
+    target.mesh = mesh;
+    /* The evaluated copies carry no session uid of their own (it reads zero), so two objects would
+     * share one tile; the uid that names an object and its mesh is the original's. */
+    const Object *original_object = DEG_get_original(object);
+    target.object_uid = original_object->id.session_uid;
+    target.mesh_uid = original_object->data != nullptr ?
+                          static_cast<const ID *>(original_object->data)->session_uid :
+                          0;
+    target.uv_map_name = uv_name.c_str();
+    r_view.objects.append(target);
+    if (r_view.objects.size() > PAINT_LAYERS_BAKE_OBJECTS_MAX) {
+      issue = PAINT_LAYERS_BAKE_OBJECTS_TOO_MANY;
+      break;
+    }
+  }
+  DEG_OBJECT_ITER_END;
+
+  if (issue != PAINT_LAYERS_BAKE_OBJECTS_OK) {
+    r_view.objects.clear();
+    r_view.issue = issue;
+    return;
+  }
+  if (r_view.objects.is_empty()) {
+    r_view.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_OBJECT;
+  }
+}
+
+/**
+ * Remove the shader's tile index from the objects of \a scene and \a view_layer once no row of
+ * \a ma has a tile left. The property is keyed on the material, so keeping it would leave an
+ * orphaned Custom Property on objects the material no longer bakes for.
+ */
+static void bake_tile_object_indices_clear(const Material &ma,
+                                           const Scene *scene,
+                                           const ViewLayer *view_layer,
+                                           const PaintLayersBakeView *view)
+{
+  if (bake_material_has_tiles(ma)) {
+    return;
+  }
+  const std::string path = paint_layers_bake_tile_attribute_path(ma);
+  if (view != nullptr && view->issue == PAINT_LAYERS_BAKE_OBJECTS_OK) {
+    /* The caller already resolved every mesh object of the view: no second walk of the depsgraph.
+     * A mesh that no longer uses the material is included: its index is stale by definition. */
+    for (const Object *object : view->meshes) {
+      bake_tile_object_index_remove(*object, path.c_str(), true);
+    }
+    return;
+  }
+  if (scene == nullptr || view_layer == nullptr) {
+    return;
+  }
+  Depsgraph *depsgraph = BKE_scene_get_depsgraph(scene, view_layer);
+  if (depsgraph == nullptr) {
+    return;
+  }
+  DEGObjectIterSettings settings{};
+  settings.depsgraph = depsgraph;
+  settings.flags = DEG_ITER_OBJECT_FLAG_LINKED_DIRECTLY | DEG_ITER_OBJECT_FLAG_LINKED_VIA_SET |
+                   DEG_ITER_OBJECT_FLAG_VISIBLE;
+  DEG_OBJECT_ITER_BEGIN (&settings, object) {
+    if (object->type == OB_MESH) {
+      bake_tile_object_index_remove(*object, path.c_str(), true);
+    }
+  }
+  DEG_OBJECT_ITER_END;
+}
+
+void paint_layers_bake_targets_resolve(const Material &ma,
+                                       const MaterialPaintLayer &layer,
+                                       const PaintLayersBakeView &view,
+                                       const int size,
+                                       PaintLayersBakeTargets &r_targets)
+{
+  r_targets.objects.clear();
+  r_targets.issue = PAINT_LAYERS_BAKE_OBJECTS_OK;
+  if (!paint_layers_bake_subtree_needs_surface(layer)) {
+    /* A UV-only subtree is one map for every object: it needs no surface and no object. */
+    return;
+  }
+  if (view.issue != PAINT_LAYERS_BAKE_OBJECTS_OK) {
+    r_targets.issue = view.issue;
+    return;
+  }
+  if (size <= 0) {
+    /* Nothing to allocate a map at yet; the planner finds no size either. */
+    r_targets.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_SIZE;
+    return;
+  }
+  if (size > PAINT_LAYERS_BAKE_OBJECTS_SIZE_MAX) {
+    /* Refused rather than baked smaller: a resampled cache would be a silent loss of quality. */
+    r_targets.issue = PAINT_LAYERS_BAKE_OBJECTS_TOO_LARGE;
+    return;
+  }
+  if (view.objects.is_empty()) {
+    r_targets.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_OBJECT;
+    return;
+  }
+  r_targets.objects = view.objects;
+
+  /* The budget is one per material, not one per row: every Object/Generated row of the material
+   * holds one cache set per object, and the sum is what the file's caches can grow to. Existing
+   * rows are counted at the size and object count they were baked at, the row being resolved at
+   * the size and object count it is about to use. */
+  if (bake_object_budget_bytes(ma, layer, size, int64_t(view.objects.size())) >
+      PAINT_LAYERS_BAKE_OBJECTS_BUDGET)
+  {
+    r_targets.objects.clear();
+    r_targets.issue = PAINT_LAYERS_BAKE_OBJECTS_OVER_BUDGET;
+  }
+}
+
+/** Record why \a layer's Object/Generated bake is not running, for the Bake panel to show. */
+static void bake_object_issue_record(const Material &ma,
+                                     const MaterialPaintLayer &layer,
+                                     const int issue)
+{
+  std::lock_guard lock(bake_runtime_mutex());
+  BakeMaterialRuntime &runtime = bake_runtime().lookup_or_add(ma.id.session_uid,
+                                                              BakeMaterialRuntime{});
+  runtime.owner = &ma;
+  const UUID marker(layer.marker);
+  const int *stored = runtime.object_issue.lookup_ptr(marker);
+  if (stored != nullptr && *stored == issue) {
+    return;
+  }
+  runtime.object_issue.add_overwrite(marker, issue);
+}
+
+int BKE_paint_layers_bake_object_issue_get(const Material &ma, const MaterialPaintLayer &layer)
+{
+  std::lock_guard lock(bake_runtime_mutex());
+  const BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
+  if (runtime == nullptr) {
+    return PAINT_LAYERS_BAKE_OBJECTS_OK;
+  }
+  return runtime->object_issue.lookup_default(UUID(layer.marker),
+                                              int(PAINT_LAYERS_BAKE_OBJECTS_OK));
+}
+
+/** Remember the surface identity \a layer's maps were rendered from. */
+static void bake_object_identity_record(const Material &ma,
+                                        const MaterialPaintLayer &layer,
+                                        const uint64_t identity)
+{
+  std::lock_guard lock(bake_runtime_mutex());
+  BakeMaterialRuntime &runtime = bake_runtime().lookup_or_add(ma.id.session_uid,
+                                                              BakeMaterialRuntime{});
+  runtime.owner = &ma;
+  runtime.object_identity.add_overwrite(UUID(layer.marker), identity);
+}
+
+/** Forget what \a layer's maps were rendered from: a bake was released, the next one is new. */
+static void bake_object_identity_forget(const Material &ma, const MaterialPaintLayer &layer)
+{
+  std::lock_guard lock(bake_runtime_mutex());
+  BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
+  if (runtime == nullptr) {
+    return;
+  }
+  runtime->object_identity.remove(UUID(layer.marker));
+}
+
+/** \} */
+
 /**
  * Whether \a layer's bake pays per texel rather than per node: a Gradient row itself, or a row a
  * live Gradient is laid over (see #BKE_paint_layers_gradient_subtree_holds_laid_gradient), whose
- * bake folds that Gradient in.
+ * bake folds that Gradient in. Both a shared (UV) and a per-object (Object/Generated) bake have
+ * that cost; only a subtree the bake cannot evaluate at all is left out.
  */
 static bool bake_cost_is_texels(const MaterialPaintLayer &layer)
 {
+  if (!BKE_paint_layers_gradient_subtree_is_bakeable(layer)) {
+    return false;
+  }
   return paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES) ||
          BKE_paint_layers_gradient_subtree_holds_laid_gradient(layer);
 }
@@ -1518,11 +2382,12 @@ static bool bake_gradient_auto_allowed(const Material &ma, const MaterialPaintLa
 
 bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer &layer)
 {
-  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
-    /* An Object or Generated Gradient reads the geometry of the object it is shaded on: a bake of
-     * such a row is rasterized from that geometry before a single texel is composited, so it
-     * always leaves the main thread. The row itself is never a shared candidate; a row it is laid
-     * over pays the same surface cost, since its bake folds the Gradient in. */
+  if (BKE_paint_layers_gradient_subtree_is_bakeable(layer) &&
+      paint_layers_bake_subtree_needs_surface(layer))
+  {
+    /* An Object or Generated row is rasterized from the surface of the objects it serves, which is
+     * main-thread work of its own before a single texel is composited: such a row always leaves the
+     * main thread, whatever its canvas. */
     return true;
   }
   if (bake_subtree_weight(ma, layer) > PAINT_LAYERS_AUTO_BAKE_NODES) {
@@ -1533,7 +2398,7 @@ bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer
      * laid on, and the first bake has no stored size to weigh yet. Left on the main thread it would
      * hitch the moment the user leaves the row. A row a Gradient is laid over pays the same cost,
      * since its bake folds the Gradient in. The material's Gradient answer takes part in the
-     * question: a row whose Gradient the answer keeps live is not heavy for the Gradient's sake. */
+     * question: a row whose Gradient it keeps live is not heavy for the Gradient's sake. */
     const int canvas = int(ma.paint_layers_image_size);
     return canvas <= 0 || canvas >= PAINT_LAYERS_HEAVY_BAKE_SIZE;
   }
@@ -1620,13 +2485,22 @@ static void bake_maps_release(Main &bmain, Material &ma, MaterialPaintLayer &lay
     release_map(image);
   }
   release_map(layer.bake->coverage);
+  /* The per-object tile records describe those maps, and the surface they were rendered from goes
+   * with them: a later bake starts from its own. */
+  paint_layers_bake_tiles_clear(*layer.bake);
+  paint_layers_bake_tile_indices_clear_all(ma);
+  bake_object_identity_forget(ma, layer);
   if (ma.paint_layers_tree != nullptr) {
     DEG_id_tag_update(&ma.paint_layers_tree->id, ID_RECALC_SYNC_TO_EVAL);
   }
 }
 
 /**
- * Free \a layer's bake structure and the service maps only it owns.
+ * Free \a layer's bake maps and, unless the user chose a mode, the record itself.
+ *
+ * The record is the only copy of the mode and size the user chose. An AUTO record may go with its
+ * maps (the size survives in #BakeMaterialRuntime::dropped_size), but an Always or Never one stays,
+ * with no maps and no hash, so releasing a cache never resets the mode.
  */
 static void bake_structure_free(Main &bmain, Material &ma, MaterialPaintLayer &layer)
 {
@@ -1634,6 +2508,14 @@ static void bake_structure_free(Main &bmain, Material &ma, MaterialPaintLayer &l
     return;
   }
   bake_maps_release(bmain, ma, layer);
+  if (layer.bake->mode != MA_PAINT_LAYER_BAKE_AUTO) {
+    layer.bake->hash[0] = 0;
+    layer.bake->hash[1] = 0;
+    layer.bake->source_hash[0] = 0;
+    layer.bake->source_hash[1] = 0;
+    layer.bake->preview_side16 = 0;
+    return;
+  }
   MEM_SAFE_DELETE(layer.bake);
 }
 
@@ -1648,6 +2530,33 @@ static void bake_dropped_size_keep(const Material &ma, const MaterialPaintLayer 
                                                               BakeMaterialRuntime{});
   runtime.owner = &ma;
   runtime.dropped_size.add_overwrite(UUID(layer.marker), layer.bake->size);
+}
+
+/**
+ * Carry out what #bake_row_is_due decided for a row that is not due.
+ * \return true when something was released, so the caller knows the tree needs a rebuild.
+ */
+static bool bake_row_release_apply(Main &bmain,
+                                   Material &ma,
+                                   MaterialPaintLayer &layer,
+                                   const BakeRowRelease release)
+{
+  switch (release) {
+    case BakeRowRelease::FreeStructure:
+      bake_dropped_size_keep(ma, layer);
+      bake_structure_free(bmain, ma, layer);
+      return true;
+    case BakeRowRelease::ReleaseMaps:
+      bake_maps_release(bmain, ma, layer);
+      /* The maps are gone; the record keeping the mode is not. A hash for maps that no longer exist
+       * would vouch for them, so it is dropped too. */
+      layer.bake->hash[0] = 0;
+      layer.bake->hash[1] = 0;
+      return true;
+    case BakeRowRelease::Keep:
+      break;
+  }
+  return false;
 }
 
 /** The bake size an AUTO release remembered for \a layer, or 0 when none was kept. */
@@ -1734,9 +2643,9 @@ void paint_layers_bake_precreate_texture(Material &ma, MaterialPaintLayer &edite
     /* A Never or hidden row never reads a cache; a record for it would be dead weight. */
     return;
   }
-  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
-    /* An Object or Generated Gradient reads per-object geometry: its shared maps would be wrong,
-     * so none are precreated and the row stays live. */
+  const bool shared = BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer);
+  if (!shared && !paint_layers_bake_subtree_needs_surface(layer)) {
+    /* A subtree the bake cannot evaluate at all: no map would ever be read. */
     return;
   }
   if (!bake_gradient_auto_allowed(ma, layer)) {
@@ -1745,6 +2654,15 @@ void paint_layers_bake_precreate_texture(Material &ma, MaterialPaintLayer &edite
   }
   const int size = bake_size_for(ma, layer);
   if (size <= 0) {
+    return;
+  }
+  /* A per-object row is one tiled image. Its tile count is not known before a view layer resolves
+   * the objects, so only the first tile is created here; the bake adds the rest. The size cap and
+   * the material budget are still checked, so a row that can never be baked gets no record. */
+  const int object_num = shared ? 0 : 1;
+  if (!shared && (size > PAINT_LAYERS_BAKE_OBJECTS_SIZE_MAX ||
+                  bake_object_budget_bytes(ma, layer, size, 1) > PAINT_LAYERS_BAKE_OBJECTS_BUDGET))
+  {
     return;
   }
   BKE_paint_layers_bake_struct_ensure(layer)->size = size;
@@ -1763,21 +2681,115 @@ void paint_layers_bake_precreate_texture(Material &ma, MaterialPaintLayer &edite
                        int(info.channel),
                        size,
                        info.is_color,
-                       bake_channel_needs_float(layer, info));
+                       bake_channel_needs_float(layer, info),
+                       object_num);
     any_channel = true;
   }
   /* The coverage map travels with the channel maps: the planner writes it once a channel
    * rendered. */
   if (any_channel) {
-    bake_service_image(*G_MAIN, layer, -1, size, false, false);
+    bake_service_image(*G_MAIN, layer, -1, size, false, false, object_num);
+  }
+}
+
+/**
+ * Why an Object or Generated row cannot be baked for the objects of \a view, recorded for the Bake
+ * panel; #PAINT_LAYERS_BAKE_OBJECTS_OK when it can, or when its subtree reads no object geometry.
+ */
+static int bake_row_object_issue(const Material &ma,
+                                 const MaterialPaintLayer &layer,
+                                 const PaintLayersBakeView &view)
+{
+  if (!paint_layers_bake_subtree_needs_surface(layer)) {
+    /* A row that stopped reading geometry has no Object/Generated reason to show any more. */
+    bake_object_issue_record(ma, layer, PAINT_LAYERS_BAKE_OBJECTS_OK);
+    return PAINT_LAYERS_BAKE_OBJECTS_OK;
+  }
+  PaintLayersBakeTargets targets;
+  paint_layers_bake_targets_resolve(ma, layer, view, bake_size_for(ma, layer), targets);
+  if (targets.issue != PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT) {
+    /* A contextless plan must not replace the reason a real view layer found: the same row is due
+     * checked here from the tagged update, which has no scene to resolve objects with. */
+    bake_object_issue_record(ma, layer, targets.issue);
+  }
+  return targets.issue;
+}
+
+/**
+ * Drop the bakes of the Object/Generated rows whose objects moved under them: an edit of the mesh
+ * or of its UV layer changes the surface a row was rendered from without touching the description,
+ * so the stored hash alone would keep the maps current forever.
+ *
+ * Runs on the main thread from the planner, against the objects the evaluated depsgraph of the
+ * view just produced (the depsgraph re-evaluates the geometry on `ID_RECALC_GEOMETRY` or a modifier
+ * change, which is what brings the new surface here). A moved object moves nothing: object space
+ * and generated space are the object's own. Main thread only.
+ */
+static void bake_object_identities_notice(Material &ma, const PaintLayersBakeView &view)
+{
+  if (view.issue == PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT || !BKE_paint_layers_is_layered(ma)) {
+    return;
+  }
+  bool changed = false;
+  BKE_paint_layers_foreach(
+      ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
+        if (layer.bake == nullptr || layer.bake->mode == MA_PAINT_LAYER_BAKE_NEVER ||
+            !paint_layers_bake_subtree_needs_surface(layer))
+        {
+          return true;
+        }
+        if (layer.bake->object_count == 0 && layer.bake->hash[0] == 0 && layer.bake->hash[1] == 0) {
+          /* Never baked for objects (maps precreated with the Gradient, or released): there is
+           * nothing a changed object could have made stale, and marking it again would tag the
+           * material on every pass, which brings the next pass, without a bake ever starting. */
+          return true;
+        }
+        PaintLayersBakeTargets targets;
+        paint_layers_bake_targets_resolve(ma, layer, view, layer.bake->size, targets);
+        if (targets.issue != PAINT_LAYERS_BAKE_OBJECTS_OK || targets.objects.is_empty()) {
+          /* Nothing to compare: the due path decides what such a row owes (see
+           * #bake_row_is_due), and it records the reason. */
+          return true;
+        }
+        bool stale = int(targets.objects.size()) != layer.bake->object_count;
+        for (const PaintLayersBakeTarget &target : targets.objects) {
+          const MaterialPaintLayerBakeTile *tile = bake_tile_find(*layer.bake, target.object_uid);
+          if (tile == nullptr) {
+            stale = true;
+            break;
+          }
+          const uint64_t identity = paint_layers_bake_target_identity(target, layer.bake->size);
+          if (tile->hash[0] != uint32_t(identity & 0xFFFFFFFFu) ||
+              tile->hash[1] != uint32_t(identity >> 32))
+          {
+            stale = true;
+            break;
+          }
+        }
+        if (stale) {
+          /* The maps describe another surface than the one the view layer now has: they are stale,
+           * and the next plan re-renders the row. Only the bake is invalidated; the generated tree
+           * keeps its shape, so this is not a regeneration and not a user edit. */
+          BKE_paint_layers_bake_request(layer);
+          changed = true;
+        }
+        return true;
+      });
+  if (changed) {
+    ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_CANCELLED;
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
+    DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
   }
 }
 
 /**
  * Whether the planner considers \a layer at all: a Layer row that is not a filter, not a Pass
- * Through folder and not kept live by a mapping or an object mask somewhere inside it.
+ * Through folder and not kept live by a mapping or an object mask somewhere inside it. An Object or
+ * Generated row is only a candidate while \a object_issue says its objects can supply a surface.
  */
-static bool bake_row_is_candidate(const Material &ma, const MaterialPaintLayer &layer)
+static bool bake_row_is_candidate(const Material &ma,
+                                  const MaterialPaintLayer &layer,
+                                  const int object_issue)
 {
   if (paint_layer_kind_reads_anchor_point(layer)) {
     /* A reader owns its slice's cache; a substitution of the row it reads is blocked separately. */
@@ -1791,30 +2803,16 @@ static bool bake_row_is_candidate(const Material &ma, const MaterialPaintLayer &
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     return false;
   }
-  /* Object/Generated Gradients read per-object geometry; a shared row map cannot hold them, and a
-   * folder that contains one (in a child, correction or mask item) would bake the same
-   * object-specific result into a shared map. */
-  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
+  /* A subtree holding a Gradient the bake cannot evaluate is never cached. */
+  if (!BKE_paint_layers_gradient_subtree_is_bakeable(layer)) {
+    return false;
+  }
+  /* An Object or Generated row reads the geometry of each object it is shaded on, so it needs the
+   * object itself: without one, or with one that cannot supply a surface, the row stays live. */
+  if (object_issue != PAINT_LAYERS_BAKE_OBJECTS_OK) {
     return false;
   }
   return !BKE_paint_layers_bake_blocked(ma, layer);
-}
-
-/** Whether \a layer's bake holds any map: only then is there something for a release to drop. */
-static bool bake_maps_present(const MaterialPaintLayer &layer)
-{
-  if (layer.bake == nullptr) {
-    return false;
-  }
-  if (layer.bake->coverage != nullptr) {
-    return true;
-  }
-  for (const Image *image : layer.bake->images) {
-    if (image != nullptr) {
-      return true;
-    }
-  }
-  return false;
 }
 
 /**
@@ -1822,33 +2820,45 @@ static bool bake_maps_present(const MaterialPaintLayer &layer)
  * not the row being edited, with no valid bake, and -- for AUTO -- heavy enough and, for a folder,
  * nested deep enough to be worth a cache.
  *
- * \param r_release: set when the row carries a bake the AUTO rules no longer want, which the
- * caller frees (#BakeRowRelease).
+ * \param view: the view an Object or Generated row is baked for.
+ * \param r_release: set when the row carries a bake the rules no longer want, which the caller
+ * releases (#BakeRowRelease).
  */
 bool bake_row_is_due(const Material &ma,
                      const MaterialPaintLayer &layer,
+                     const PaintLayersBakeView &view,
                      BakeRowRelease &r_release)
 {
   r_release = BakeRowRelease::Keep;
   if (paint_layer_kind_reads_anchor_point(layer)) {
     /* A reader owns a cache only while its effective mode reads one. Switching it back to Live
-     * (Never, or Auto after the slice became light again) releases the maps it no longer reads. */
+     * (Never, or Auto after the slice became light again) releases the maps it no longer reads. A
+     * record with no maps is only the user's mode and size: it is let alone. */
     if (!paint_layer_anchor_point_reader_baked(ma, layer)) {
-      r_release = layer.bake != nullptr ? BakeRowRelease::FreeStructure : BakeRowRelease::Keep;
+      r_release = bake_row_has_maps(layer) ? BakeRowRelease::FreeStructure : BakeRowRelease::Keep;
       return false;
     }
   }
-  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
-    /* An Object or Generated Gradient reads the geometry of the object it is shaded on: the row
-     * stays live, and a shared bake it still carries no longer describes it. The maps are
-     * released -- they would otherwise sit full-size until the row or its bake is deleted -- while
-     * the record stays: it keeps the mode the user chose and the size to bake at if the row
-     * becomes shared again. Once the maps are gone the record is let alone, so the plan has
-     * nothing to report for it again. */
-    r_release = bake_maps_present(layer) ? BakeRowRelease::ReleaseMaps : BakeRowRelease::Keep;
+  /* A subtree whose Gradients the bake cannot evaluate carries nothing worth keeping. The record
+   * itself stays: it holds the mode a user chose even when no map was ever made, and the size to
+   * bake at if the row becomes bakeable again. */
+  if (!BKE_paint_layers_gradient_subtree_is_bakeable(layer)) {
+    r_release = bake_row_has_maps(layer) ? BakeRowRelease::ReleaseMaps : BakeRowRelease::Keep;
     return false;
   }
-  if (!bake_row_is_candidate(ma, layer)) {
+  /* An Object or Generated row whose objects cannot supply a surface -- none in the view layer, no
+   * mesh, no UV map, too many objects, a size or memory over the limits, a deformation that moves
+   * per frame -- keeps no cache: its maps describe one object's geometry and would show it
+   * everywhere. Without a view there is nothing to judge the objects by, so nothing is dropped
+   * then; the maps are released only for a reason a real view layer found. */
+  const int object_issue = bake_row_object_issue(ma, layer, view);
+  if (object_issue != PAINT_LAYERS_BAKE_OBJECTS_OK) {
+    r_release = (object_issue != PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT && bake_row_has_maps(layer)) ?
+                    BakeRowRelease::ReleaseMaps :
+                    BakeRowRelease::Keep;
+    return false;
+  }
+  if (!bake_row_is_candidate(ma, layer, object_issue)) {
     return false;
   }
   const bool folder = BKE_paint_layers_is_folder(layer);
@@ -1956,6 +2966,11 @@ static bool bake_path_to_marker(const PaintLayerList &list,
  * neither marker -- so the walk follows that path instead of the whole material. Going upward from
  * the row left behind, the first ancestor that still holds the new marker ends the question: every
  * one above it holds the new marker too, and is as deferred as it was.
+ *
+ * Answered without a scene: an Object or Generated row cannot be proven due here, since a bake of
+ * it needs the objects of a view layer. The last reason the planner recorded decides instead: a
+ * permanent one (no UV, animated geometry, too many objects, a size or memory overflow) is not
+ * helped by the switch and does not tag the material; anything else may be, and does.
  */
 bool paint_layers_bake_pending_after_switch(const Material &ma,
                                             const bUUID &old_marker,
@@ -1968,12 +2983,46 @@ bool paint_layers_bake_pending_after_switch(const Material &ma,
   if (!bake_path_to_marker(ma.paint_layers, old_marker, path)) {
     return false;
   }
+  PaintLayersBakeView no_context;
+  no_context.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT;
   for (int index = int(path.size()) - 1; index >= 0; index--) {
-    if (BKE_paint_layers_subtree_contains(*path[index], new_marker)) {
+    const MaterialPaintLayer &layer = *path[index];
+    if (BKE_paint_layers_subtree_contains(layer, new_marker)) {
       break;
     }
     BakeRowRelease release = BakeRowRelease::Keep;
-    if (bake_row_is_due(ma, *path[index], release)) {
+    if (paint_layers_bake_subtree_needs_surface(layer) &&
+        BKE_paint_layers_bake_mode_get(layer) != MA_PAINT_LAYER_BAKE_NEVER &&
+        !bake_row_is_hidden(ma, layer) &&
+        bake_row_is_candidate(ma, layer, PAINT_LAYERS_BAKE_OBJECTS_OK))
+    {
+      if (BKE_paint_layers_bake_mode_get(layer) == MA_PAINT_LAYER_BAKE_AUTO &&
+          bake_cost_is_texels(layer) && !bake_gradient_auto_allowed(ma, layer))
+      {
+        /* The material's Gradient answer keeps this row live: the switch changes nothing. */
+        continue;
+      }
+      if (layer.bake != nullptr && BKE_paint_layers_bake_is_valid(ma, layer)) {
+        /* A valid cache owes nothing to the switch; a changed surface is noticed by the plan. */
+        continue;
+      }
+      const int issue = BKE_paint_layers_bake_object_issue_get(ma, layer);
+      if (ELEM(issue,
+               PAINT_LAYERS_BAKE_OBJECTS_NO_UV,
+               PAINT_LAYERS_BAKE_OBJECTS_ANIMATED,
+               PAINT_LAYERS_BAKE_OBJECTS_TOO_MANY,
+               PAINT_LAYERS_BAKE_OBJECTS_TOO_LARGE,
+               PAINT_LAYERS_BAKE_OBJECTS_OVER_BUDGET))
+      {
+        /* The switch changes no object: the reason would be the same after the update. */
+        continue;
+      }
+      if (!bake_row_is_due(ma, layer, no_context, release)) {
+        return true;
+      }
+      continue;
+    }
+    if (bake_row_is_due(ma, layer, no_context, release)) {
       return true;
     }
   }
@@ -1985,13 +3034,18 @@ bool paint_layers_bake_pending_after_switch(const Material &ma,
  *
  * The cost is what the formats decide: at 4K a float RGBA map is 256 MiB against a byte one's 64,
  * so a row that lays in several precise channels is a large allocation and the line says so before
- * the user has to wonder where the memory went.
+ * the user has to wonder where the memory went. \a delta_mib is what the row's bake changed in the
+ * allocator's live total, and \a retained_results with \a retained_mib is what a worker held at the
+ * moment of the report -- the results the commit has not written yet; a synchronous bake holds none.
  */
 static void bake_gradient_row_report(const MaterialPaintLayer &layer,
                                      const int size,
                                      const bool sync,
                                      const double seconds,
-                                     const Span<int> channels)
+                                     const Span<int> channels,
+                                     const double delta_mib,
+                                     const int retained_results,
+                                     const double retained_mib)
 {
   char formats[256] = "";
   double mib = 0.0;
@@ -2008,20 +3062,154 @@ static void bake_gradient_row_report(const MaterialPaintLayer &layer,
   mib += double(size) * double(size) * 4.0 / (1024.0 * 1024.0);
   BLI_strncat(formats, "coverage:byte", sizeof(formats));
   printf("[paint-layers gradient row bake] row \"%s\" size=%d sync=%d time=%.1f ms maps=%.1fMiB "
-         "[%s]\n",
+         "[%s] delta=%.1fMiB held=%d(%.1fMiB)\n",
          layer.name,
          size,
          int(sync),
          seconds * 1000.0,
          mib,
-         formats);
+         formats,
+         delta_mib,
+         retained_results,
+         retained_mib);
   fflush(stdout);
 }
 
-bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
+/**
+ * The surface an Object or Generated bake of \a layer renders through, or null when its subtree
+ * reads no object geometry at all. \a targets is what the caller resolved; the islands are grown
+ * outward so the map's bilinear filtering finds an edge rather than empty texels, and the orco grid
+ * is kept only when a Generated Gradient reads it.
+ */
+static std::shared_ptr<const PaintMaterialCompositeSurface>
+    bake_surface_build(const MaterialPaintLayer &layer,
+                       const PaintLayersBakeTarget &target,
+                       const int size)
+{
+  const int padding = std::clamp(size / 64, 1, 16);
+  return BKE_paint_layers_gradient_surface_build(*target.object,
+                                                *target.mesh,
+                                                target.uv_map_name,
+                                                size,
+                                                padding,
+                                                BKE_paint_layers_gradient_subtree_holds_generated(
+                                                    layer));
+}
+
+/** Whether any row of \a ma reads object geometry, so a view has to be resolved for the plan. */
+static bool bake_any_row_needs_surface(const Material &ma)
+{
+  bool needs = false;
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        needs = paint_layers_bake_subtree_needs_surface(layer);
+        return !needs;
+      });
+  return needs;
+}
+
+/**
+ * Render and write one object's tile of \a layer: its channels into the tiled maps at
+ * \a tile_number, then the shared coverage. The surface is the one object's and the caller drops it
+ * after this call, so only one exists at a time.
+ * \return false when the row has nothing to render in any channel.
+ */
+static bool bake_object_tile_write(
+    Main &bmain,
+    const Material &ma,
+    MaterialPaintLayer &layer,
+    const std::shared_ptr<const PaintMaterialCompositeSurface> &surface,
+    const int size,
+    const int object_num,
+    const int tile_number,
+    const int *rect,
+    const bool reuse_cache,
+    Vector<int> &r_written_channels)
+{
+  Vector<float> color(int64_t(size) * size * 4);
+  Vector<float> coverage(int64_t(size) * size);
+  Vector<float> common(int64_t(size) * size, 0.0f);
+  bool any_channel = false;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    const int channel = int(info.channel);
+    /* A partial re-bake needs the maps to already exist: an image created just now cannot take a
+     * partial write, its untouched region would stay blank. */
+    const int *channel_rect = (rect != nullptr && layer.bake->images[channel] != nullptr) ? rect :
+                                                                                           nullptr;
+    if (!BKE_paint_layers_bake_render_node(
+            ma, layer, channel, size, color.data(), coverage.data(), channel_rect, surface))
+    {
+      continue;
+    }
+    Image *color_image = bake_service_image(bmain,
+                                            layer,
+                                            channel,
+                                            size,
+                                            info.is_color,
+                                            bake_channel_needs_float(layer, info),
+                                            object_num);
+    if (color_image == nullptr) {
+      continue;
+    }
+    bake_write_image(*color_image, color.data(), info.is_color, channel_rect, tile_number);
+    r_written_channels.append(channel);
+    const int ax0 = (channel_rect != nullptr) ? channel_rect[0] : 0;
+    const int ay0 = (channel_rect != nullptr) ? channel_rect[1] : 0;
+    const int ax1 = (channel_rect != nullptr) ? channel_rect[2] : size;
+    const int ay1 = (channel_rect != nullptr) ? channel_rect[3] : size;
+    for (int y = ay0; y < ay1; y++) {
+      for (int x = ax0; x < ax1; x++) {
+        const int64_t i = int64_t(y) * size + x;
+        const float content = color[i * 4 + 3];
+        if (content > 0.002f) {
+          common[i] = std::max(common[i], clamp_f(coverage[i] / content, 0.0f, 1.0f));
+        }
+      }
+    }
+    any_channel = true;
+  }
+  if (!any_channel) {
+    return false;
+  }
+  /* One shared coverage write for all channels; a partial re-bake touches only its rectangle, so
+   * the stored common outside it survives. */
+  if (Image *coverage_image = bake_service_image(
+          bmain, layer, -1, size, false, false, object_num))
+  {
+    bake_write_coverage_image(*coverage_image,
+                              common.data(),
+                              (rect != nullptr && reuse_cache) ? rect : nullptr,
+                              tile_number);
+  }
+  return true;
+}
+
+bool BKE_paint_layers_bake_plan_run(Main &bmain,
+                                    Material &ma,
+                                    bool *r_changed,
+                                    const Scene *scene,
+                                    const ViewLayer *view_layer)
 {
   bool changed = false;
+  PaintLayersBakeView view;
   if (BKE_paint_layers_is_layered(ma)) {
+    /* The objects the view layer just produced are what an Object or Generated row is rendered
+     * from, and every row of the material reads the same list: resolve it once for the whole plan.
+     * An edited mesh or UV layer invalidates its rows here, before anything asks what is due. */
+    const bool any_surface = bake_any_row_needs_surface(ma);
+    if (scene == nullptr || view_layer == nullptr) {
+      view.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT;
+    }
+    else if (any_surface) {
+      paint_layers_bake_view_resolve(ma, &bmain, scene, view_layer, view);
+    }
+    if (any_surface) {
+      /* A row that lost its last tile -- cleared from the UI, or released below -- must not leave
+       * the shader's index property behind on the objects of this view. The resolved objects are
+       * reused; only an unresolvable view walks the depsgraph again. */
+      bake_tile_object_indices_clear(ma, scene, view_layer, &view);
+    }
+    bake_object_identities_notice(ma, view);
     Vector<MaterialPaintLayer *> rows;
     BKE_paint_layers_foreach(ma,
                              [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
@@ -2044,24 +3232,8 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
     for (int index = int(rows.size()) - 1; index >= 0; index--) {
       MaterialPaintLayer &layer = *rows[index];
       BakeRowRelease release = BakeRowRelease::Keep;
-      if (!bake_row_is_due(ma, layer, release)) {
-        switch (release) {
-          case BakeRowRelease::FreeStructure:
-            bake_dropped_size_keep(ma, layer);
-            bake_structure_free(bmain, ma, layer);
-            changed = true;
-            break;
-          case BakeRowRelease::ReleaseMaps:
-            bake_maps_release(bmain, ma, layer);
-            /* The maps a shared bake left are gone; the record keeping the mode is not. A hash for
-             * maps that no longer exist would vouch for them, so it is dropped too. */
-            layer.bake->hash[0] = 0;
-            layer.bake->hash[1] = 0;
-            changed = true;
-            break;
-          case BakeRowRelease::Keep:
-            break;
-        }
+      if (!bake_row_is_due(ma, layer, view, release)) {
+        changed |= bake_row_release_apply(bmain, ma, layer, release);
         continue;
       }
       /* A heavy row leaves the main thread: the worker job picks it up from the same stale signal
@@ -2079,10 +3251,35 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
         /* No map has known dimensions yet: nothing to allocate a bake structure for. */
         continue;
       }
+      PaintLayersBakeTargets targets;
+      paint_layers_bake_targets_resolve(ma, layer, view, size, targets);
+      const bool needs_surface = paint_layers_bake_subtree_needs_surface(layer);
+      if (needs_surface && targets.issue != PAINT_LAYERS_BAKE_OBJECTS_OK) {
+        /* The objects or their surface moved between the plan and this render. */
+        continue;
+      }
+      const int object_num = int(targets.objects.size());
+      /* Build the first surface before the bake record exists: a row whose object cannot supply one
+       * must not be left with an empty, permanently invalid cache. The remaining surfaces are built
+       * one at a time in the loop below, after the previous one was written and released. */
+      std::shared_ptr<const PaintMaterialCompositeSurface> first_surface;
+      if (needs_surface) {
+        first_surface = bake_surface_build(layer, targets.objects[0], size);
+        if (first_surface == nullptr) {
+          continue;
+        }
+      }
+
       /* Every gate has passed and this row renders right now: only here is it safe to allocate the
        * bake structure, so a row nothing ever bakes never carries a permanently invalid one. */
       MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
       bake->size = size;
+      if (needs_surface) {
+        paint_layers_bake_tiles_clear(*bake);
+        bake_tile_object_indices_clear(ma, scene, view_layer, &view);
+        /* The shader reads the tile index from each object; write it before any map is sampled. */
+        bake_tile_object_indices_set(ma, targets);
+      }
 
       /* A changed rectangle may update only that part of an existing cache; a fresh cache needs the
        * whole render. */
@@ -2121,72 +3318,82 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
         rect_ptr = rect;
       }
 
-      Vector<float> color(int64_t(size) * size * 4);
-      Vector<float> coverage(int64_t(size) * size);
-      /* A Gradient row's bake is the whole point of its cache being worth anything, and it is the
-       * one kind whose cost is pure evaluation: report what it cost and at what size. */
       const bool gradient_row = paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES);
       const double gradient_start = gradient_row ? BLI_time_now_seconds() : 0.0;
-      /* The channel-independent row factor `common = mask x opacity`, the max of
-       * `coverage / content` over channels, written once below so channel order cannot matter. A
-       * partial re-bake folds only its rectangle; untouched texels keep the stored common. */
-      Vector<float> common(int64_t(size) * size, 0.0f);
-      bool any_channel = false;
-      /* The channels this bake wrote a map for, for the report of what it allocated. */
+      const size_t gradient_memory_start = gradient_row ? MEM_get_memory_in_use() : 0;
       Vector<int> written_channels;
-      for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-        const int channel = int(info.channel);
-        /* A partial re-bake needs the maps to already exist: an image created just now cannot take a
-         * partial write, its untouched region would stay blank. */
-        const int *channel_rect = (rect_ptr != nullptr && bake->images[channel] != nullptr) ?
-                                      rect_ptr :
-                                      nullptr;
-        if (!BKE_paint_layers_bake_render_node(
-                ma, layer, channel, size, color.data(), coverage.data(), channel_rect))
-        {
-          continue;
-        }
-        Image *color_image = bake_service_image(
-            bmain, layer, channel, size, info.is_color, bake_channel_needs_float(layer, info));
-        if (color_image == nullptr) {
-          continue;
-        }
-        bake_write_image(*color_image, color.data(), info.is_color, channel_rect);
-        if (gradient_row) {
-          written_channels.append(channel);
-        }
-        const int ax0 = (channel_rect != nullptr) ? channel_rect[0] : 0;
-        const int ay0 = (channel_rect != nullptr) ? channel_rect[1] : 0;
-        const int ax1 = (channel_rect != nullptr) ? channel_rect[2] : size;
-        const int ay1 = (channel_rect != nullptr) ? channel_rect[3] : size;
-        for (int y = ay0; y < ay1; y++) {
-          for (int x = ax0; x < ax1; x++) {
-            const int64_t i = int64_t(y) * size + x;
-            const float content = color[i * 4 + 3];
-            if (content > 0.002f) {
-              common[i] = std::max(common[i], clamp_f(coverage[i] / content, 0.0f, 1.0f));
-            }
+      bool any_channel = false;
+      bool all_objects = true;
+      /* The surface is built for one object and dropped before the next: decision 4 of the spec,
+       * the transient canvas never holds every object at once. */
+      for (int object_index = 0; object_index < std::max(1, object_num); object_index++) {
+        std::shared_ptr<const PaintMaterialCompositeSurface> surface;
+        int tile_number = 0;
+        if (object_num > 0) {
+          surface = (object_index == 0 && first_surface != nullptr) ?
+                        first_surface :
+                        bake_surface_build(layer, targets.objects[object_index], size);
+          if (surface == nullptr) {
+            all_objects = false;
+            continue;
           }
+          tile_number = 1001 + object_index;
+        }
+        Vector<int> tile_channels;
+        if (!bake_object_tile_write(bmain,
+                                    ma,
+                                    layer,
+                                    surface,
+                                    size,
+                                    object_num,
+                                    tile_number,
+                                    rect_ptr,
+                                    reuse_cache,
+                                    tile_channels))
+        {
+          all_objects = false;
+          continue;
         }
         any_channel = true;
+        for (const int channel : tile_channels) {
+          if (!written_channels.contains(channel)) {
+            written_channels.append(channel);
+          }
+        }
+        if (object_num > 0) {
+          const PaintLayersBakeTarget &target = targets.objects[object_index];
+          MaterialPaintLayerBakeTile *tile = bake_tile_ensure(
+              *bake, target.object_uid, object_index);
+          const uint64_t identity = paint_layers_bake_target_identity(target, size);
+          tile->hash[0] = uint32_t(identity & 0xFFFFFFFFu);
+          tile->hash[1] = uint32_t(identity >> 32);
+        }
       }
-      if (!any_channel) {
+      if (!any_channel || !all_objects) {
         continue;
       }
-      /* One shared coverage write for all channels; a partial re-bake touches only its rectangle,
-       * so the stored common outside it survives. */
-      if (Image *coverage_image = bake_service_image(bmain, layer, -1, size, false, false)) {
-        bake_write_coverage_image(*coverage_image,
-                                  common.data(),
-                                  (rect_ptr != nullptr && reuse_cache) ? rect_ptr : nullptr);
+      if (needs_surface) {
+        bake->object_count = object_num;
       }
       BKE_paint_layers_bake_finalize(ma, layer);
+      if (object_num > 0) {
+        bake_object_identity_record(
+            ma, layer, paint_layers_bake_target_identity(targets.objects[0], size));
+      }
       if (gradient_row) {
+        /* A synchronous bake writes and drops each channel as it renders, so it holds no results
+         * for a commit, and the delta is the render of the row itself. */
+        const double delta_mib = double(int64_t(MEM_get_memory_in_use()) -
+                                        int64_t(gradient_memory_start)) /
+                                 (1024.0 * 1024.0);
         bake_gradient_row_report(layer,
                                  size,
                                  true,
                                  BLI_time_now_seconds() - gradient_start,
-                                 written_channels);
+                                 written_channels,
+                                 delta_mib,
+                                 0,
+                                 0.0);
       }
       changed = true;
     }
@@ -2204,8 +3411,8 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
     BKE_paint_layers_foreach(
         ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
           if (layer.bake != nullptr && layer.bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
-              bake_row_is_candidate(ma, layer) && !BKE_paint_layers_bake_is_valid(ma, layer) &&
-              !bake_row_is_hidden(ma, layer))
+              bake_row_is_candidate(ma, layer, bake_row_object_issue(ma, layer, view)) &&
+              !BKE_paint_layers_bake_is_valid(ma, layer) && !bake_row_is_hidden(ma, layer))
           {
             pending = true;
           }
@@ -2221,16 +3428,26 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
   return changed;
 }
 
-bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
+bool BKE_paint_layers_bake_heavy_pending(const Material &ma,
+                                         const Scene *scene,
+                                         const ViewLayer *view_layer)
 {
   if (!BKE_paint_layers_is_layered(ma) || (ma.paint_layers_flag & MA_PAINT_LAYERS_BAKE_CANCELLED) != 0) {
     return false;
+  }
+  PaintLayersBakeView view;
+  if (scene == nullptr || view_layer == nullptr) {
+    view.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT;
+  }
+  else if (bake_any_row_needs_surface(ma)) {
+    paint_layers_bake_view_resolve(ma, G_MAIN, scene, view_layer, view);
   }
   bool pending = false;
   BKE_paint_layers_foreach(
       ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
         BakeRowRelease release = BakeRowRelease::Keep;
-        pending = bake_row_is_due(ma, layer, release) && BKE_paint_layers_bake_is_heavy(ma, layer);
+        pending = bake_row_is_due(ma, layer, view, release) &&
+                  BKE_paint_layers_bake_is_heavy(ma, layer);
         return !pending;
       });
   return pending;
@@ -2905,14 +4122,49 @@ struct PaintLayersBakeJob {
   Main *bmain = nullptr;
   Material *material = nullptr;
   uint32_t material_session_uid = 0;
+  /**
+   * The scene and view layer whose objects an Object or Generated row is baked for. Main thread
+   * data, re-read at the commit to check the objects are still the ones the worker rendered; null
+   * for a material none of whose rows reads object geometry.
+   */
+  const Scene *scene = nullptr;
+  const ViewLayer *view_layer = nullptr;
   /** Localized on the main thread at creation so the worker never reads a material being edited. */
   Material *material_copy = nullptr;
 
   struct ChannelResult {
     int channel = 0;
     bool is_color = false;
+    /**
+     * The render stored in its map's own format, not the straight-RGBA render: #color holds a float
+     * map's premultiplied texels and #color_bytes a byte map's quantized ones. This is
+     * #bake_write_image's transformation, done on the worker right after the render -- at 4K the
+     * float4 render is 256 MiB where the byte map's storage is 64, and the job holds every result
+     * until the commit.
+     */
+    bool stored_float = false;
     Vector<float> color;
-    Vector<float> coverage;
+    Vector<uchar> color_bytes;
+  };
+  struct ObjectResult {
+    /** The object of this tile, or zero for a shared (UV) row's single map. */
+    uint32_t object_uid = 0;
+    uint32_t mesh_uid = 0;
+    uint64_t identity = 0;
+    /** UDIM tile number, 0 for a non-tiled map. */
+    int tile_number = 0;
+    /**
+     * The surface of this object, rasterized on the main thread at creation and read-only on the
+     * worker; null for a row reading no object geometry.
+     */
+    std::shared_ptr<const PaintMaterialCompositeSurface> surface;
+    Vector<ChannelResult> channels;
+    /**
+     * The row's common factor (`mask x opacity`), folded from every channel's render as it lands on
+     * the worker. The commit writes it as the coverage map, so the per-channel coverage need not be
+     * held: at 4K that is 64 MiB a channel the job would otherwise keep until the commit.
+     */
+    Vector<float> common;
   };
   struct RowResult {
     bUUID marker = {};
@@ -2924,7 +4176,8 @@ struct PaintLayersBakeJob {
      * anew.
      */
     uint32_t hash[2] = {};
-    Vector<ChannelResult> channels;
+    /** One entry per object tile; a shared (UV) row has one entry with a null surface. */
+    Vector<ObjectResult> objects;
   };
   Vector<RowResult> rows;
   /** The worker stopped early; nothing it produced is written. */
@@ -2932,33 +4185,43 @@ struct PaintLayersBakeJob {
 };
 
 /**
- * The channel-independent row factor: `common = mask x opacity`, recovered from the per-channel
- * renders without a new map. Every channel rendered `coverage = common x content` with its own
- * `content` in the colour alpha. Where that content is present the quotient is the common factor;
- * the maximum over channels does not depend on channel order, and a texel no channel covers keeps
- * zero.
+ * Fold one channel's render into \a common, the channel-independent row factor: `common =
+ * mask x opacity`, recovered from the per-channel renders without a new map. The channel rendered
+ * `coverage = common x content` with its own `content` in the colour alpha. Where that content is
+ * present the quotient is the common factor; the maximum over channels does not depend on channel
+ * order, and a texel no channel covers keeps zero.
  */
-static void bake_common_from_job_channels(Span<PaintLayersBakeJob::ChannelResult> channels,
-                                          const int64_t pixel_num,
-                                          float *r_common)
+static void bake_common_from_channel(Span<float> color,
+                                     Span<float> coverage,
+                                     MutableSpan<float> common)
 {
-  for (int64_t i = 0; i < pixel_num; i++) {
-    float common = 0.0f;
-    for (const PaintLayersBakeJob::ChannelResult &channel : channels) {
-      const float content = channel.color[i * 4 + 3];
-      if (content > 0.002f) {
-        common = std::max(common, clamp_f(channel.coverage[i] / content, 0.0f, 1.0f));
-      }
+  for (const int64_t i : common.index_range()) {
+    const float content = color[i * 4 + 3];
+    if (content > 0.002f) {
+      common[i] = std::max(common[i], clamp_f(coverage[i] / content, 0.0f, 1.0f));
     }
-    r_common[i] = common;
   }
 }
 
-PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
+PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
+                                                     Material &ma,
+                                                     const Scene *scene,
+                                                     const ViewLayer *view_layer)
 {
   if (!BKE_paint_layers_is_layered(ma)) {
     return nullptr;
   }
+  /* The objects the view layer produced are what an Object or Generated row is rendered from, and
+   * every row of the material shares them: resolve the list once and notice every edited surface
+   * against it. */
+  PaintLayersBakeView view;
+  if (scene == nullptr || view_layer == nullptr) {
+    view.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT;
+  }
+  else if (bake_any_row_needs_surface(ma)) {
+    paint_layers_bake_view_resolve(ma, &bmain, scene, view_layer, view);
+  }
+  bake_object_identities_notice(ma, view);
   Vector<MaterialPaintLayer *> rows;
   BKE_paint_layers_foreach(ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
     rows.append(&layer);
@@ -2985,19 +4248,74 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
   for (int index = int(rows.size()) - 1; index >= 0; index--) {
     MaterialPaintLayer &layer = *rows[index];
     BakeRowRelease release = BakeRowRelease::Keep;
-    if (!bake_row_is_due(ma, layer, release) || !BKE_paint_layers_bake_is_heavy(ma, layer)) {
+    if (!bake_row_is_due(ma, layer, view, release)) {
+      /* The row can no longer be served by its maps (no UV, too many objects, an animated
+       * deformation...): this is the pass that has the view layer to judge it by. */
+      bake_row_release_apply(bmain, ma, layer, release);
+      continue;
+    }
+    if (!BKE_paint_layers_bake_is_heavy(ma, layer)) {
       continue;
     }
     const int size = bake_size_for(ma, layer);
     if (size <= 0) {
       continue;
     }
-    /* Every gate has passed and this row is queued right now: only here is it safe to allocate the
-     * bake structure. */
-    BKE_paint_layers_bake_struct_ensure(layer)->size = size;
+
+    /* An Object or Generated row is rendered through the surface of each object it serves, and the
+     * surfaces are rasterized here: the worker reads the grids and never touches the depsgraph. */
+    PaintLayersBakeTargets targets;
+    const bool needs_surface = paint_layers_bake_subtree_needs_surface(layer);
+    if (needs_surface) {
+      paint_layers_bake_targets_resolve(ma, layer, view, size, targets);
+      if (targets.issue != PAINT_LAYERS_BAKE_OBJECTS_OK || targets.objects.is_empty()) {
+        continue;
+      }
+    }
+
+    /* The surfaces are built before the bake record: a row whose objects cannot supply them must
+     * not be left with an empty, permanently invalid cache. The job needs them all, so they stay
+     * here; only the synchronous planner writes and releases one at a time. */
     PaintLayersBakeJob::RowResult row;
     row.marker = layer.marker;
     row.size = size;
+    bool surfaces_ok = true;
+    if (needs_surface) {
+      for (int object_index = 0; object_index < targets.objects.size(); object_index++) {
+        const PaintLayersBakeTarget &target = targets.objects[object_index];
+        std::shared_ptr<const PaintMaterialCompositeSurface> surface = bake_surface_build(
+            layer, target, size);
+        if (surface == nullptr) {
+          surfaces_ok = false;
+          break;
+        }
+        PaintLayersBakeJob::ObjectResult object;
+        object.object_uid = target.object_uid;
+        object.mesh_uid = target.mesh_uid;
+        object.identity = paint_layers_bake_target_identity(target, size);
+        object.tile_number = 1001 + object_index;
+        object.surface = std::move(surface);
+        row.objects.append(std::move(object));
+      }
+    }
+    else {
+      PaintLayersBakeJob::ObjectResult object;
+      row.objects.append(std::move(object));
+    }
+    if (!surfaces_ok) {
+      continue;
+    }
+
+    /* Every gate has passed and this row is queued right now: only here is it safe to allocate the
+     * bake structure. */
+    MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
+    bake->size = size;
+    if (needs_surface) {
+      paint_layers_bake_tiles_clear(*bake);
+      bake_tile_object_indices_clear(ma, scene, view_layer, &view);
+      /* The shader reads the tile index from each object; write it before the worker renders. */
+      bake_tile_object_indices_set(ma, targets);
+    }
     BKE_paint_layers_bake_hash(ma, layer, row.hash);
     job->rows.append(std::move(row));
   }
@@ -3005,6 +4323,8 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
     MEM_delete(job);
     return nullptr;
   }
+  job->scene = scene;
+  job->view_layer = view_layer;
   job->material_copy = id_cast<Material *>(BKE_id_copy_ex(
       nullptr, &ma.id, nullptr, LIB_ID_CREATE_LOCAL | LIB_ID_COPY_LOCALIZE | LIB_ID_COPY_NO_ANIMDATA));
   if (job->material_copy == nullptr) {
@@ -3022,9 +4342,12 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
     return;
   }
   Material &ma = *job.material_copy;
-  /* Every row is weighted by the same fixed channel count, whether or not each channel actually
-   * renders, so progress only ever needs the two totals below. */
-  const int64_t total_pairs = int64_t(job.rows.size()) * BKE_paint_material_channels().size();
+  /* Every object tile is weighted by the same fixed channel count, whether or not each channel
+   * actually renders, so progress only ever needs the two totals below. */
+  int64_t total_pairs = 0;
+  for (const PaintLayersBakeJob::RowResult &row : job.rows) {
+    total_pairs += int64_t(row.objects.size()) * BKE_paint_material_channels().size();
+  }
   int64_t done_pairs = 0;
   const auto report = [&]() {
     if (report_progress) {
@@ -3034,45 +4357,123 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
   for (PaintLayersBakeJob::RowResult &row : job.rows) {
     MaterialPaintLayer *layer = BKE_paint_layers_find(ma, row.marker);
     if (layer == nullptr) {
-      done_pairs += BKE_paint_material_channels().size();
+      done_pairs += int64_t(row.objects.size()) * BKE_paint_material_channels().size();
       report();
       continue;
     }
     const bool gradient_row = paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_GENERATES);
     const double gradient_start = gradient_row ? BLI_time_now_seconds() : 0.0;
-    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-      /* The render of one channel is not interruptible; checking between channels keeps the cancel
-       * button responsive to within one channel's render. */
-      if (is_cancelled && is_cancelled()) {
-        job.cancelled = true;
-        return;
+    const size_t row_memory_start = gradient_row ? MEM_get_memory_in_use() : 0;
+    Vector<int> gradient_channels;
+    for (PaintLayersBakeJob::ObjectResult &object : row.objects) {
+      for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+        /* The render of one channel is not interruptible; checking between channels keeps the
+         * cancel button responsive to within one channel's render. */
+        if (is_cancelled && is_cancelled()) {
+          /* A cancelled job writes nothing, and what it holds is hundreds of MiB at 4K: the results
+           * and the surfaces they were rendered from go now, not at the free. The commit reads no
+           * rows once this mark is set. */
+          job.cancelled = true;
+          job.rows = Vector<PaintLayersBakeJob::RowResult>();
+          return;
+        }
+        const int channel = int(info.channel);
+        Vector<float> color(int64_t(row.size) * row.size * 4);
+        Vector<float> coverage(int64_t(row.size) * row.size);
+        const bool rendered = BKE_paint_layers_bake_render_node(
+            ma, *layer, channel, row.size, color.data(), coverage.data(), nullptr, object.surface);
+        done_pairs++;
+        report();
+        if (!rendered) {
+          continue;
+        }
+        const int64_t pixel_num = int64_t(row.size) * row.size;
+        /* The common factor folds in from the straight render, before the pixels take the map's
+         * own format: a byte one quantizes the alpha the quotient divides by. The per-channel
+         * coverage is not held: the fold-in is the only thing the commit needs it for. */
+        if (object.common.is_empty()) {
+          object.common = Vector<float>(pixel_num, 0.0f);
+        }
+        bake_common_from_channel(color, coverage, object.common);
+        PaintLayersBakeJob::ChannelResult result;
+        result.channel = channel;
+        result.is_color = info.is_color;
+        result.stored_float = bake_channel_needs_float(*layer, info);
+        if (result.stored_float) {
+          result.color = Vector<float>(pixel_num * 4);
+          for (const int64_t i : IndexRange(pixel_num)) {
+            bake_pixel_store_float(&color[i * 4], &result.color[i * 4]);
+          }
+        }
+        else {
+          /* The colorspace a byte map's buffer carries, from the same roles the commit's
+           * #bake_service_image gives one (see #add_ibuf_for_tile): a colour channel is encoded
+           * into the default byte colorspace, a data channel is quantized as it came. Only a
+           * colour channel is encoded here too. */
+          const ColorSpace *byte_colorspace =
+              info.is_color ?
+                  IMB_colormanagement_space_get_named(IMB_colormanagement_role_colorspace_name_get(
+                      COLOR_ROLE_DEFAULT_BYTE)) :
+                  nullptr;
+          result.color_bytes = Vector<uchar>(pixel_num * 4);
+          for (const int64_t i : IndexRange(pixel_num)) {
+            bake_pixel_store_byte(
+                &color[i * 4], info.is_color, byte_colorspace, &result.color_bytes[i * 4]);
+          }
+        }
+        object.channels.append(std::move(result));
+        if (!gradient_channels.contains(channel)) {
+          gradient_channels.append(channel);
+        }
       }
-      const int channel = int(info.channel);
-      Vector<float> color(int64_t(row.size) * row.size * 4);
-      Vector<float> coverage(int64_t(row.size) * row.size);
-      const bool rendered = BKE_paint_layers_bake_render_node(
-          ma, *layer, channel, row.size, color.data(), coverage.data());
-      done_pairs++;
-      report();
-      if (!rendered) {
-        continue;
-      }
-      PaintLayersBakeJob::ChannelResult result;
-      result.channel = channel;
-      result.is_color = info.is_color;
-      result.color = std::move(color);
-      result.coverage = std::move(coverage);
-      row.channels.append(std::move(result));
     }
     if (gradient_row) {
-      Vector<int> channels;
-      for (const PaintLayersBakeJob::ChannelResult &result : row.channels) {
-        channels.append(result.channel);
+      const double delta_mib = double(int64_t(MEM_get_memory_in_use()) -
+                                      int64_t(row_memory_start)) /
+                               (1024.0 * 1024.0);
+      int retained_results = 0;
+      for (const PaintLayersBakeJob::RowResult &held : job.rows) {
+        for (const PaintLayersBakeJob::ObjectResult &held_object : held.objects) {
+          retained_results += held_object.channels.size();
+        }
       }
-      bake_gradient_row_report(
-          *layer, row.size, false, BLI_time_now_seconds() - gradient_start, channels);
+      const double retained_mib = double(BKE_paint_layers_bake_job_retained_bytes(job)) /
+                                  (1024.0 * 1024.0);
+      bake_gradient_row_report(*layer,
+                               row.size,
+                               false,
+                               BLI_time_now_seconds() - gradient_start,
+                               gradient_channels,
+                               delta_mib,
+                               retained_results,
+                               retained_mib);
     }
   }
+}
+
+/**
+ * The scene a job was started for, or null when it (or its view layer) left \a bmain while the
+ * worker ran: the pointers the job kept are then not to be touched.
+ */
+static const Scene *bake_job_scene_get(Main &bmain,
+                                       const Scene *scene,
+                                       const ViewLayer *view_layer)
+{
+  if (scene == nullptr || view_layer == nullptr) {
+    return nullptr;
+  }
+  for (Scene &candidate : bmain.scenes) {
+    if (&candidate != scene) {
+      continue;
+    }
+    for (ViewLayer &layer : candidate.view_layers) {
+      if (&layer == view_layer) {
+        return &candidate;
+      }
+    }
+    break;
+  }
+  return nullptr;
 }
 
 bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
@@ -3098,6 +4499,14 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     return false;
   }
   bool changed = false;
+  const Scene *scene = bake_job_scene_get(bmain, job.scene, job.view_layer);
+  PaintLayersBakeView view;
+  if (scene == nullptr || job.view_layer == nullptr) {
+    view.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT;
+  }
+  else if (bake_any_row_needs_surface(*ma)) {
+    paint_layers_bake_view_resolve(*ma, &bmain, scene, job.view_layer, view);
+  }
   for (PaintLayersBakeJob::RowResult &row : job.rows) {
     MaterialPaintLayer *layer = BKE_paint_layers_find(*ma, row.marker);
     /* The row was removed, its bake dropped or switched off while the worker ran: nothing to
@@ -3106,35 +4515,111 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     {
       continue;
     }
-    bool row_written = false;
-    for (PaintLayersBakeJob::ChannelResult &channel : row.channels) {
-      const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
-          eMaterialPaintChannel(channel.channel));
-      Image *color_image = bake_service_image(bmain,
-                                             *layer,
-                                             channel.channel,
-                                             row.size,
-                                             channel.is_color,
-                                             bake_channel_needs_float(*layer, info));
-      if (color_image == nullptr) {
-        continue;
-      }
-      bake_write_image(*color_image, channel.color.data(), channel.is_color, nullptr);
-      row_written = true;
-    }
-    if (!row_written) {
+    uint32_t current_hash[2];
+    BKE_paint_layers_bake_hash(*ma, *layer, current_hash);
+    if (current_hash[0] != row.hash[0] || current_hash[1] != row.hash[1]) {
+      /* The row changed while the worker ran: the pixels describe the old description, which the
+       * stored hash would label as current. Dropping them leaves the row due for a new render. */
       continue;
     }
-    {
-      const int64_t pixel_num = int64_t(row.size) * row.size;
-      Vector<float> common(pixel_num);
-      bake_common_from_job_channels(row.channels, pixel_num, common.data());
-      if (Image *coverage_image = bake_service_image(bmain, *layer, -1, row.size, false, false)) {
-        bake_write_coverage_image(*coverage_image, common.data(), nullptr);
+    const bool tiled_row = !row.objects.is_empty() && row.objects[0].surface != nullptr;
+    PaintLayersBakeTargets targets;
+    if (tiled_row) {
+      /* The objects or their geometry may have moved while the worker ran: the pixels then describe
+       * surfaces the view layer no longer has, so they are dropped and the row re-bakes. */
+      paint_layers_bake_targets_resolve(*ma, *layer, view, row.size, targets);
+      if (targets.issue != PAINT_LAYERS_BAKE_OBJECTS_OK ||
+          targets.objects.size() != row.objects.size())
+      {
+        continue;
       }
+      bool matches = true;
+      for (int index = 0; index < row.objects.size(); index++) {
+        const PaintLayersBakeJob::ObjectResult &object = row.objects[index];
+        const PaintLayersBakeTarget &target = targets.objects[index];
+        if (target.object_uid != object.object_uid || target.mesh_uid != object.mesh_uid ||
+            paint_layers_bake_target_identity(target, row.size) != object.identity)
+        {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) {
+        continue;
+      }
+      paint_layers_bake_tiles_clear(*layer->bake);
+      bake_tile_object_indices_clear(*ma, scene, job.view_layer, &view);
+      bake_tile_object_indices_set(*ma, targets);
+    }
+    const int object_num = tiled_row ? int(row.objects.size()) : 0;
+    bool row_written = false;
+    bool all_objects = true;
+    for (int object_index = 0; object_index < row.objects.size(); object_index++) {
+      PaintLayersBakeJob::ObjectResult &object = row.objects[object_index];
+      bool object_written = false;
+      for (PaintLayersBakeJob::ChannelResult &channel : object.channels) {
+        const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+            eMaterialPaintChannel(channel.channel));
+        Image *color_image = bake_service_image(bmain,
+                                               *layer,
+                                               channel.channel,
+                                               row.size,
+                                               channel.is_color,
+                                               bake_channel_needs_float(*layer, info),
+                                               object_num);
+        if (color_image == nullptr) {
+          continue;
+        }
+        /* The stored buffer is the map's own format, so this write converts nothing: it puts down
+         * the render the worker held, not its float4. The buffer is freed here and not at the job's
+         * teardown, so the held memory falls as the maps are written. */
+        bake_write_stored_image(
+            *color_image,
+            channel.stored_float,
+            channel.stored_float ? static_cast<const void *>(channel.color.data()) :
+                                   static_cast<const void *>(channel.color_bytes.data()),
+            nullptr,
+            object.tile_number);
+        channel.color = Vector<float>();
+        channel.color_bytes = Vector<uchar>();
+        object_written = true;
+      }
+      if (!object_written) {
+        all_objects = false;
+        continue;
+      }
+      row_written = true;
+      {
+        /* The common factor was folded on the worker as each channel rendered; the per-channel
+         * coverages it came from are gone, which is the point. */
+        if (Image *coverage_image = bake_service_image(
+                bmain, *layer, -1, row.size, false, false, object_num))
+        {
+          bake_write_coverage_image(
+              *coverage_image, object.common.data(), nullptr, object.tile_number);
+        }
+        object.common = Vector<float>();
+      }
+      if (tiled_row) {
+        MaterialPaintLayerBakeTile *tile = bake_tile_ensure(
+            *layer->bake, object.object_uid, object_index);
+        tile->hash[0] = uint32_t(object.identity & 0xFFFFFFFFu);
+        tile->hash[1] = uint32_t(object.identity >> 32);
+      }
+    }
+    if (!row_written || !all_objects) {
+      continue;
+    }
+    if (tiled_row) {
+      layer->bake->object_count = int(row.objects.size());
     }
     layer->bake->hash[0] = row.hash[0];
     layer->bake->hash[1] = row.hash[1];
+    if (tiled_row) {
+      /* The maps are the surfaces': the next plan compares those identities to notice an edit of
+       * the geometry or of the UV layer. */
+      bake_object_identity_record(*ma, *layer, row.objects[0].identity);
+    }
     BKE_paint_layers_bake_subscribe(*ma, *layer);
     changed = true;
   }
@@ -3151,7 +4636,7 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
   BKE_paint_layers_foreach(
       *ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
         pending = layer.bake != nullptr && layer.bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
-                  bake_row_is_candidate(*ma, layer) &&
+                  bake_row_is_candidate(*ma, layer, bake_row_object_issue(*ma, layer, view)) &&
                   !BKE_paint_layers_bake_is_valid(*ma, layer) && !bake_row_is_hidden(*ma, layer);
         return !pending;
       });
@@ -3159,6 +4644,21 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     ma->paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
   }
   return changed;
+}
+
+int64_t BKE_paint_layers_bake_job_retained_bytes(const PaintLayersBakeJob &job)
+{
+  int64_t bytes = 0;
+  for (const PaintLayersBakeJob::RowResult &row : job.rows) {
+    for (const PaintLayersBakeJob::ObjectResult &object : row.objects) {
+      for (const PaintLayersBakeJob::ChannelResult &channel : object.channels) {
+        bytes += channel.color.size() * int64_t(sizeof(float)) +
+                 channel.color_bytes.size() * int64_t(sizeof(uchar));
+      }
+      bytes += object.common.size() * int64_t(sizeof(float));
+    }
+  }
+  return bytes;
 }
 
 void BKE_paint_layers_bake_job_free(PaintLayersBakeJob &job)

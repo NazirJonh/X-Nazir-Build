@@ -1315,6 +1315,7 @@ static void maps_copy(Main &bmain, ListBaseT<MaterialPaintLayer> &rows, Map<Imag
         baked = nullptr;
       }
       row.bake->coverage = nullptr;
+      paint_layers_bake_tiles_clear(*row.bake);
       row.bake->hash[0] = 0;
       row.bake->hash[1] = 0;
     }
@@ -1644,6 +1645,7 @@ void BKE_paint_layers_undo_validate(Main &bmain)
             dangling |= undo_dangling_id_clear(image, live);
           }
           if (dangling) {
+            paint_layers_bake_tiles_clear(*row.bake);
             row.bake->hash[0] = 0;
             row.bake->hash[1] = 0;
           }

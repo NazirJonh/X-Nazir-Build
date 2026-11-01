@@ -534,6 +534,13 @@ class PaintLayersTreeBuilder {
   bNode *image_map_node_add(bNodeTree &tree, Image &image);
 
   /**
+   * The UV coordinate of a tiled bake map: the object's tile index read through an Attribute node
+   * (`SHD_ATTRIBUTE_OBJECT`) added to the UV's X, exactly the UDIM offset rule. Nodes made are
+   * appended to \a r_nodes; empty when one is missing.
+   */
+  NodeOutput bake_tile_uv_add(bNodeTree &tree, Vector<bNode *> &r_nodes);
+
+  /**
    * The mean of \a color's RGB as a float: Separate XYZ, two Adds and a Divide by three, which is
    * what the CPU composite reads of a mask map. The nodes made are appended to \a r_nodes. Empty
    * when a node or socket is missing, in which case nothing was added.

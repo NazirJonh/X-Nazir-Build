@@ -1061,6 +1061,24 @@ enum eMaterialPaintLayerBakeMode : int8_t {
 };
 
 /**
+ * One object's tile in a tiled bake map: which object it is, where its tile lies and the surface
+ * identity it was rendered from. No ID references, so the bake's `foreach_id` is unchanged.
+ */
+struct MaterialPaintLayerBakeTile {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerBakeTile)
+
+  struct MaterialPaintLayerBakeTile *next = nullptr, *prev = nullptr;
+  /** #ID.session_uid of the object the tile was rendered for. */
+  uint32_t object_uid = 0;
+  /** UDIM tile coordinates: tile number is 1001 + tile[0] + 10 * tile[1]. */
+  int tile[2] = {};
+  /** #BKE_paint_layers_gradient_surface_identity, low word first. */
+  uint32_t hash[2] = {};
+  /** Keep the DNA struct a multiple of 8 bytes, as makesdna requires. */
+  char _pad[4] = {};
+};
+
+/**
  * The baked cache of one description row, or null while nothing is baked.
  *
  * Cache, not truth: the description plus its live maps are what the row *is*, and these maps are a
@@ -1099,6 +1117,18 @@ struct MaterialPaintLayerBake {
    * against this on the main thread, where the source's node trees may be read.
    */
   uint32_t source_hash[2] = {};
+  /**
+   * Object/Generated rows only: one record per object the maps carry a UDIM tile for. Empty for a
+   * shared (UV) bake or before the first per-object bake.
+   *
+   * Appended after the fields a file written before the tiled bake already had, so their offsets
+   * and the meaning of an old file's bake record stay unchanged.
+   */
+  ListBaseT<struct MaterialPaintLayerBakeTile> tiles = {nullptr, nullptr};
+  /** Object/Generated rows only: how many objects the current maps cover. */
+  int object_count = 0;
+  /** Keep the DNA struct a multiple of 8 bytes, as makesdna requires. */
+  char _pad_b[4] = {};
 };
 
 /**

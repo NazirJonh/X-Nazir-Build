@@ -40,6 +40,7 @@
 #include "BKE_curves.hh"
 #include "BKE_global.hh"
 #include "BKE_image.hh"
+#include "BKE_main.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
@@ -51,6 +52,7 @@
 #include "GPU_state.hh"
 
 #include "ED_paint_curve_draw.hh"
+#include "ED_paint_layers_bake.hh"
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
 
@@ -1422,6 +1424,19 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
 
   paint_runtime->draw_anchored = false;
   paint_runtime->stroke_active = false;
+
+  /* The pixel edits of the stroke tag the images, but the last of those updates can have run while
+   * the stroke was still active: the heavy planner's job start is skipped then. Run the same
+   * backstop a scene update uses once the stroke is over, so a row left stale by the last dab does
+   * not wait for an unrelated edit to start its bake. */
+  if (!is_cancel && stroke_started_) {
+    Main *bmain = CTX_data_main(C);
+    wmWindowManager *wm = CTX_wm_manager(C);
+    wmWindow *win = CTX_wm_window(C);
+    if (bmain != nullptr && wm != nullptr && win != nullptr) {
+      ed::material_bake::paint_layers_bake_jobs_ensure(*wm, win, *bmain);
+    }
+  }
 
   /* Restore the default cursor if repositioning mode was still active when the stroke ended.
    * If Space (or the remapped hold-key) is still down, lock it until release so leftover

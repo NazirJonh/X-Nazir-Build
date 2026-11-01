@@ -91,6 +91,71 @@ bNode *PaintLayersTreeBuilder::image_map_node_add(bNodeTree &tree, Image &image)
   return map;
 }
 
+NodeOutput PaintLayersTreeBuilder::bake_tile_uv_add(bNodeTree &tree, Vector<bNode *> &r_nodes)
+{
+  Vector<bNode *> created;
+  const auto discard = [&]() {
+    for (bNode *node : created) {
+      bke::node_remove_node(nullptr, tree, *node, true, false);
+    }
+    return NodeOutput{};
+  };
+
+  bNode *attribute = bke::node_add_static_node(nullptr, tree, SH_NODE_ATTRIBUTE);
+  bNode *coord = this->uv_coordinate_ensure(tree);
+  bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+  bNode *add = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineXYZ"_ustr);
+  for (bNode *node : {attribute, separate, add, combine}) {
+    if (node != nullptr) {
+      created.append(node);
+    }
+  }
+  if (attribute == nullptr || coord == nullptr || separate == nullptr || add == nullptr ||
+      combine == nullptr)
+  {
+    return discard();
+  }
+
+  NodeShaderAttribute *attribute_data = static_cast<NodeShaderAttribute *>(attribute->storage);
+  attribute_data->type = SHD_ATTRIBUTE_OBJECT;
+  STRNCPY(attribute_data->name, paint_layers_bake_tile_attribute_path(ma_).c_str());
+  add->custom1 = NODE_MATH_ADD;
+
+  bNodeSocket *attr_out = socket_out(*attribute, "Fac");
+  bNodeSocket *coord_uv = socket_out(*coord, "UV");
+  bNodeSocket *sep_vector = socket_in(*separate, "Vector");
+  bNodeSocket *sep_x = socket_out(*separate, "X");
+  bNodeSocket *sep_y = socket_out(*separate, "Y");
+  bNodeSocket *sep_z = socket_out(*separate, "Z");
+  bNodeSocket *add_a = socket_in(*add, "Value");
+  bNodeSocket *add_b = socket_in(*add, "Value_001");
+  bNodeSocket *add_out = socket_out(*add, "Value");
+  bNodeSocket *com_x = socket_in(*combine, "X");
+  bNodeSocket *com_y = socket_in(*combine, "Y");
+  bNodeSocket *com_z = socket_in(*combine, "Z");
+  bNodeSocket *com_out = socket_out(*combine, "Vector");
+  if (attr_out == nullptr || coord_uv == nullptr || sep_vector == nullptr ||
+      sep_x == nullptr || sep_y == nullptr || sep_z == nullptr || add_a == nullptr ||
+      add_b == nullptr || add_out == nullptr || com_x == nullptr || com_y == nullptr ||
+      com_z == nullptr || com_out == nullptr)
+  {
+    return discard();
+  }
+
+  bke::node_add_link(tree, *coord, *coord_uv, *separate, *sep_vector);
+  bke::node_add_link(tree, *separate, *sep_x, *add, *add_a);
+  bke::node_add_link(tree, *attribute, *attr_out, *add, *add_b);
+  bke::node_add_link(tree, *add, *add_out, *combine, *com_x);
+  bke::node_add_link(tree, *separate, *sep_y, *combine, *com_y);
+  bke::node_add_link(tree, *separate, *sep_z, *combine, *com_z);
+
+  for (bNode *node : created) {
+    r_nodes.append(node);
+  }
+  return {combine, com_out};
+}
+
 NodeOutput PaintLayersTreeBuilder::rgb_mean_nodes_add(bNodeTree &tree,
                                                       const NodeOutput color,
                                                       Vector<bNode *> &r_nodes)
@@ -2565,6 +2630,21 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
     if (color_out == nullptr || alpha_out == nullptr || coverage_out == nullptr) {
       this->nodes_discard(tree, source_nodes);
       return {};
+    }
+    /* A per-object bake is one tiled image: the object's Attribute index offsets the UV into its
+     * own tile. A shared (UV) bake is a plain image and keeps the UV untouched. */
+    if (ctx.baked_color->source == IMA_SRC_TILED) {
+      const NodeOutput tile_uv = this->bake_tile_uv_add(tree, source_nodes);
+      bNodeSocket *color_vector = socket_in(*color_map, "Vector");
+      bNodeSocket *coverage_vector = socket_in(*coverage_map, "Vector");
+      if (tile_uv.node == nullptr || tile_uv.socket == nullptr || color_vector == nullptr ||
+          coverage_vector == nullptr)
+      {
+        this->nodes_discard(tree, source_nodes);
+        return {};
+      }
+      bke::node_add_link(tree, *tile_uv.node, *tile_uv.socket, *color_map, *color_vector);
+      bke::node_add_link(tree, *tile_uv.node, *tile_uv.socket, *coverage_map, *coverage_vector);
     }
     grid_.place(*color_map, layout::Column::Source, 0);
     grid_.place(*coverage_map, layout::Column::Source, 1);

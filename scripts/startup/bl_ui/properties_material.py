@@ -1233,7 +1233,8 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
     live row back until the cache is rendered again. Auto bakes the heavy folders nested in another
     folder that are not being edited, plus any row a Gradient takes part in once it is left -- when
     exactly that happens the material's Bake Gradient setting answers; Always bakes any row once it
-    is not being edited.
+    is not being edited. An Object or Generated row is one tiled map with a tile per object of the
+    current scene and view layer, so it is baked only when every object can supply a surface.
     """
 
     bl_idname = "LAYER_MATERIAL_PT_bake"
@@ -1265,6 +1266,21 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
 
         layout.prop(subject, "bake_mode", text="Mode")
         layout.prop(subject, "bake_size_preset", text="Size")
+
+        issue = subject.bake_object_issue
+        if issue != 'OK':
+            reasons = {
+                'NO_CONTEXT': "Bake needs a scene and view layer",
+                'NO_OBJECT': "No visible object uses this material",
+                'NO_MESH': "An object using this material has no mesh",
+                'NO_UV': "An object using this material has no UV map",
+                'NO_SIZE': "The row has no bake size yet",
+                'TOO_MANY': "More than 8 objects use this material",
+                'TOO_LARGE': "Lower the bake size to 4096 or less",
+                'OVER_BUDGET': "The 2 GiB bake budget is exceeded",
+                'ANIMATED': "The object deforms over time (modifier, shape keys or drivers)",
+            }
+            layout.label(text=reasons.get(issue, "The object bake cannot run"), icon='ERROR')
 
         # What an edited layer that reads another material renders for the Image Editor's composite
         # while it is edited. The settings belong to the material, so they apply to every such layer.

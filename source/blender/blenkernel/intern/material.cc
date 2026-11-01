@@ -85,6 +85,7 @@
 #include "BKE_scene.hh"
 #include "BKE_vfont.hh"
 
+#include "paint_layers/paint_layers_intern.hh"
 #include "paint_layers/paint_layers_kind.hh"
 
 #include "DEG_depsgraph.hh"
@@ -139,8 +140,13 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
   BKE_paint_layers_gradient_free(*layer);
   MEM_SAFE_DELETE(layer->channels);
   layer->channels_num = 0;
-  /* The maps of the bake cache are released like the channel maps, by the generic free pass. */
-  MEM_SAFE_DELETE(layer->bake);
+  /* The maps of the bake cache are released like the channel maps, by the generic free pass; the
+   * tile records are owned nodes with no ID users and go with the bake record. */
+  if (layer->bake != nullptr) {
+    paint_layers_bake_tiles_clear(*layer->bake);
+    MEM_delete(layer->bake);
+    layer->bake = nullptr;
+  }
   /* The payload IDs' users were released by the generic free pass through
    * #paint_layer_dependencies (the pointers are already null by the time this runs); the payload
    * block itself is owned sub-data like the records. */
@@ -221,6 +227,12 @@ static MaterialPaintLayer *material_paint_layer_copy(Main *bmain,
    * users; the generated-tree copy then gives it maps of its own (see maps_copy). */
   dst->bake = (src.bake != nullptr) ? static_cast<MaterialPaintLayerBake *>(MEM_dupalloc(src.bake)) :
                                       nullptr;
+  if (dst->bake != nullptr) {
+    /* The tile records are owned nodes, not flat data: a shallow copy would free them twice. The
+     * copy starts without per-object coverage and the planner fills it in again. */
+    BLI_listbase_clear(&dst->bake->tiles);
+    dst->bake->object_count = 0;
+  }
   /* The generator payload is plain sub-data owned by the row, so the copy gets one of its own. */
   BKE_paint_layers_gradient_copy(*dst, src);
   dst->ramp = (src.ramp != nullptr) ? static_cast<MaterialPaintLayerRamp *>(MEM_dupalloc(src.ramp)) :
@@ -313,6 +325,9 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
   }
   if (layer.bake != nullptr) {
     writer->write_struct(layer.bake);
+    /* The tile records are owned nodes, not flat data of the bake struct: write them as their own
+     * list, in the same order the reader expects. */
+    writer->write_struct_list(&layer.bake->tiles);
   }
   if (layer.gradient != nullptr) {
     writer->write_struct(layer.gradient);
@@ -365,6 +380,11 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
     layer.channels_num = 0;
   }
   BLO_read_struct(reader, MaterialPaintLayerBake, &layer.bake);
+  if (layer.bake != nullptr) {
+    /* The list belongs to the bake struct, so it is read only when that struct was written. An old
+     * file has no list and leaves the pointer null, which the reader accepts. */
+    BLO_read_struct_list(reader, MaterialPaintLayerBakeTile, &layer.bake->tiles);
+  }
   BLO_read_struct(reader, MaterialPaintLayerGradient, &layer.gradient);
   if (BKE_paint_layers_gradient_supported(layer)) {
     /* A generator row written before the payload or its ramp existed (or by a failed allocation):
@@ -379,6 +399,10 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
      * (their buffers survive in the session), so it keeps the hash too. */
     layer.bake->hash[0] = 0;
     layer.bake->hash[1] = 0;
+    /* The tile records name objects by #ID.session_uid, which a new session assigns anew. The maps
+     * they describe are not kept either, so keeping the records would let a stale uid stand for an
+     * unrelated object. A memfile undo stays in the session and keeps them. */
+    paint_layers_bake_tiles_clear(*layer.bake);
   }
   BLO_read_struct(reader, MaterialPaintLayerCurvePatch, &layer.curve_patch);
   BLO_read_struct(reader, IDProperty, &layer.system_properties);
@@ -1872,6 +1896,22 @@ bool BKE_object_material_slot_add(Main *bmain, Object *ob, const bool set_active
 
 /* ****************** */
 
+/**
+ * Whether \a object still has \a ma in any material slot, on the object or on its data. Used
+ * after a slot is removed: only an object that no longer reads the material may lose its tile
+ * index.
+ */
+static bool material_object_still_uses(const Object &object, const Material &ma)
+{
+  Object *object_mut = const_cast<Object *>(&object);
+  for (int slot = 1; slot <= object.totcol; slot++) {
+    if (BKE_object_material_get(object_mut, short(slot)) == &ma) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool BKE_object_material_slot_remove(Main *bmain, Object *ob)
 {
   Material *mao, ***matarar;
@@ -1945,6 +1985,9 @@ bool BKE_object_material_slot_remove(Main *bmain, Object *ob)
         MEM_delete(obt->matbits);
         obt->mat = nullptr;
         obt->matbits = nullptr;
+      }
+      if (mao != nullptr && !material_object_still_uses(*obt, *mao)) {
+        paint_layers_bake_tile_index_remove_from_object(*obt, *mao);
       }
     }
   }

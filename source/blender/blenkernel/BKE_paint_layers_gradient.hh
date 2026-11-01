@@ -136,12 +136,27 @@ bool BKE_paint_layers_gradient_is_shared_bakeable(const MaterialPaintLayer &laye
 bool BKE_paint_layers_gradient_subtree_is_shared_bakeable(const MaterialPaintLayer &layer);
 
 /**
+ * Whether \a layer and everything below it can be cached at all: every Gradient in it is a
+ * supported one with a payload, in whichever space it lies. A UV Gradient is shared between the
+ * objects of the material (#BKE_paint_layers_gradient_subtree_is_shared_bakeable); an Object or a
+ * Generated one reads the surface of each object, so its cache is per object.
+ */
+bool BKE_paint_layers_gradient_subtree_is_bakeable(const MaterialPaintLayer &layer);
+
+/**
  * Whether a Gradient is laid over \a layer with no cache of its own to collapse it: one of the
  * row's corrections or mask items is an enabled Gradient, or a folder below it holds one. A
  * Gradient child row does not count: the child is a bake candidate itself, and its cache already
  * stands in for it. The row itself is not asked either, for the same reason.
  */
 bool BKE_paint_layers_gradient_subtree_holds_laid_gradient(const MaterialPaintLayer &layer);
+
+/**
+ * Whether a Generated Gradient is laid over \a layer -- in the row, one of its corrections or mask
+ * items, or in a folder below it. Only such a subtree reads the texture-space orco grid, which the
+ * surface of a bake then has to carry; a bake without one passes it over.
+ */
+bool BKE_paint_layers_gradient_subtree_holds_generated(const MaterialPaintLayer &layer);
 
 /** Evaluate the ramp at \a t into straight scene-linear RGBA. */
 void BKE_paint_layers_gradient_color(const MaterialPaintLayerGradient &gradient,

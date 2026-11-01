@@ -123,6 +123,51 @@ bool BKE_paint_layers_gradient_subtree_is_shared_bakeable(const MaterialPaintLay
   return true;
 }
 
+bool BKE_paint_layers_gradient_subtree_holds_generated(const MaterialPaintLayer &layer)
+{
+  bool holds = false;
+  gradient_laid_row_foreach(layer, [&](const MaterialPaintLayer &row) {
+    holds = holds || (BKE_paint_layers_gradient_supported(row) && row.gradient != nullptr &&
+                      row.gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED);
+  });
+  /* A folder lays its children, and each of them its own corrections and mask items: a Generated
+   * Gradient anywhere below is one the folder's bake would fold in. */
+  if (holds || !BKE_paint_layers_is_folder(layer)) {
+    return holds;
+  }
+  for (const MaterialPaintLayer &child : layer.children) {
+    if (BKE_paint_layers_gradient_subtree_holds_generated(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool BKE_paint_layers_gradient_subtree_is_bakeable(const MaterialPaintLayer &layer)
+{
+  if (BKE_paint_layers_gradient_supported(layer) && layer.gradient == nullptr) {
+    /* A Gradient row without a payload lays nothing the plan could evaluate; a UV one is refused by
+     * the shared test for the same reason. */
+    return false;
+  }
+  for (const MaterialPaintLayer &child : layer.children) {
+    if (!BKE_paint_layers_gradient_subtree_is_bakeable(child)) {
+      return false;
+    }
+  }
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (!BKE_paint_layers_gradient_subtree_is_bakeable(effect)) {
+      return false;
+    }
+  }
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if (!BKE_paint_layers_gradient_subtree_is_bakeable(item)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool BKE_paint_layers_gradient_subtree_holds_laid_gradient(const MaterialPaintLayer &layer)
 {
   bool holds = false;
@@ -252,7 +297,8 @@ MaterialPaintLayer *BKE_paint_layers_gradient_add(Material &ma,
     }
   }
   /* The source and the record change what the graph builds: the Add's own tag was too early. A
-   * shared (UV) Gradient also creates its maps up front, so its first bake only fills pixels. */
+   * new Gradient starts in Object space: its first tiled cache tile is created now, so the first
+   * bake only fills pixels. A shared UV Gradient creates its plain maps the same way. */
   paint_layers_bake_precreate_texture(ma, *layer);
   BKE_paint_layers_tag_edited(ma);
   return layer;
@@ -611,9 +657,10 @@ bool BKE_paint_layers_gradient_set_space(Material &ma,
   /* The numbers stay as they are and are read in the new space: the source of the coordinate is
    * graph structure, not a value. */
   gradient->space = space;
-  /* The maps belong to the old space: recreate them for the new one now, so the first bake in it
-   * only fills pixels. A Never or hidden row gets no record at all; a correction's maps go to its
-   * owner row, never to the correction itself. */
+  /* The maps belong to the old space: a UV bake is one plain image, an Object or Generated one is
+   * tiled. Recreate them in the new shape now; a per-object row gets its first tile and the bake
+   * adds the rest, a Never or hidden row gets no record at all. A correction's maps go to its owner
+   * row, never to the correction itself. */
   paint_layers_bake_precreate_texture(ma, layer);
   BKE_paint_layers_tag_edited(ma);
   return true;

@@ -88,6 +88,25 @@ BKE_paint_layers_gradient_surface_build(const Object &object,
                                         bool need_generated = true);
 
 /**
+ * The identity a surface is keyed on: the object, the UV map, the resolution and the geometry the
+ * surface would be rasterized from (positions, topology and the UV layer, plus the texture space a
+ * Generated coordinate reads).
+ *
+ * A bake keeps the identity it rendered a row from and compares it with this one, so an edit of
+ * the mesh or of its UV layer invalidates the maps while a moved object does not: object space and
+ * generated space are both the object's own.
+ *
+ * Computed from the geometry's values, never from addresses or sharing versions: the depsgraph
+ * rebuilds the evaluated mesh on every update, and an identity that moved with it would make a bake
+ * (whose own tags cause an update) stale again as soon as it lands. The hash is cached per object
+ * and recomputed only when the mesh was rebuilt.
+ */
+uint64_t BKE_paint_layers_gradient_surface_identity(const Object &object,
+                                                   const Mesh &mesh,
+                                                   const char *uv_map_name,
+                                                   int size);
+
+/**
  * The UV map the generated shader reads as `Texture Coordinate.UV`: the render-active/default map,
  * not the editable active one. Empty when the mesh has no UV map.
  */

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <string>
 #include <utility>
 
 #include "BLI_listbase_iterator.hh"
@@ -53,6 +54,10 @@ struct ImageUser;
 struct ImBuf;
 struct Main;
 struct MaterialPaintLayerBake;
+struct Mesh;
+struct Object;
+struct Scene;
+struct ViewLayer;
 struct bNode;
 struct bNodeSocket;
 
@@ -804,14 +809,18 @@ enum class BakeRowRelease : int8_t {
   FreeStructure,
 };
 
+struct PaintLayersBakeView;
+
 /**
  * Whether \a layer is a row the planner has to bake now: a candidate, not switched off or hidden,
  * not the row being edited, with no valid bake, and -- for AUTO -- heavy enough and, for a folder,
- * nested deep enough to be worth a cache. \a r_release carries a bake the rules no longer want
- * (#BakeRowRelease). Pure: the answer does not depend on the caller.
+ * nested deep enough to be worth a cache. \a view is the view an Object or Generated row is baked
+ * for (an issue of NO_CONTEXT when the caller has no scene). \a r_release carries a bake the rules no longer want
+ * (#BakeRowRelease).
  */
 bool bake_row_is_due(const Material &ma,
                      const MaterialPaintLayer &layer,
+                     const PaintLayersBakeView &view,
                      BakeRowRelease &r_release);
 
 /**
@@ -850,6 +859,23 @@ bool paint_layer_row_baked_channel(const Material &ma,
 void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer);
 
 /**
+ * Write \a values (straight RGBA floats) into \a image, encoding each texel the way the map's own
+ * buffer keeps it -- the transformation the worker job applies to a render before it holds it.
+ * Exposed so the bake tests can hold the job's write to the same code a synchronous bake runs.
+ */
+void bake_write_image(Image &image,
+                      const float *values,
+                      const bool is_color,
+                      const int *rect,
+                      const int tile_number = 0);
+
+/** As #bake_write_image, for the coverage map's grey. Exposed for the bake tests. */
+void bake_write_coverage_image(Image &image,
+                               const float *coverage,
+                               const int *rect,
+                               const int tile_number = 0);
+
+/**
  * Drain \a ma's subscriptions: a pixel edit to a source map marks its row's bake changed, the
  * material stale and its generated graph for a rebuild (the row is no longer substituted).
  */
@@ -865,20 +891,114 @@ bool BKE_paint_layers_bake_changed_region(const Material &ma,
                                           int r_region[4]);
 
 /**
- * Bring every light baked row of \a ma current, the synchronous half of the planner: a row that is
- * due and not heavy is rendered through #BKE_paint_layers_bake_render_node into its service maps,
- * stamped and subscribed. Callers run this on the main thread after draining the subscription
- * (#BKE_paint_layers_bake_notice_changes). A heavy row is left to the worker job
- * (#BKE_paint_layers_bake_job_create).
- *
- * \return true when some row was baked or released, so the caller knows the tree needs a rebuild.
+ * Whether \a layer's subtree reads the geometry of the object it is shaded on: it holds an Object
+ * or a Generated Gradient, so its cache is per object and needs the surface of each.
  */
-bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed = nullptr);
+bool paint_layers_bake_subtree_needs_surface(const MaterialPaintLayer &layer);
 
 /**
- * Create the cache maps a new shared (UV) Gradient will read, before its first bake, so the first
- * bake only fills pixels. \a edited may be the Gradient row itself or a correction or mask item;
- * the maps go to the row that is baked (the item's owner), since an item has no cache of its own.
+ * One object an Object or Generated bake renders for, resolved from the evaluated depsgraph of the
+ * scene and view layer the bake was started for.
+ *
+ * The pointers are evaluated data: they live only while that depsgraph is not updated, and they
+ * never reach the worker -- which reads the surface rasterized from them
+ * (#PaintMaterialCompositeSurface) and nothing else.
+ */
+struct PaintLayersBakeTarget {
+  /** The evaluated object: its object-space and generated coordinates are the shader's. */
+  const Object *object = nullptr;
+  const Mesh *mesh = nullptr;
+  /** #ID.session_uid, stable while the file is open and across the worker. */
+  uint32_t object_uid = 0;
+  uint32_t mesh_uid = 0;
+  /** The UV map the shader reads, borrowed from #mesh. */
+  const char *uv_map_name = nullptr;
+};
+
+/**
+ * The objects of \a ma in one scene and view layer, resolved once per plan, job creation or
+ * commit. Every row of the material reads the same objects: resolving the list per row would walk
+ * the depsgraph again for each of them.
+ */
+struct PaintLayersBakeView {
+  Vector<PaintLayersBakeTarget> objects;
+  /**
+   * Every mesh object of the view, whether or not it uses the material. The tile-index property is
+   * keyed on the material, so a stale index must be removed even after the material left the
+   * object's slots.
+   */
+  Vector<const Object *> meshes;
+  /** #ePaintLayersBakeObjectIssue: why the list is short, or that it is usable. */
+  int issue = PAINT_LAYERS_BAKE_OBJECTS_OK;
+};
+
+struct PaintLayersBakeTargets {
+  Vector<PaintLayersBakeTarget> objects;
+  /** #ePaintLayersBakeObjectIssue: why the list is short, or that it is usable. */
+  int issue = PAINT_LAYERS_BAKE_OBJECTS_OK;
+};
+
+/**
+ * Resolve the mesh objects shaded with \a ma in \a scene and \a view_layer only (never by walking
+ * every object of \a bmain). The same pass drops tile-index properties whose material no longer
+ * exists; the keys of all layered materials of \a bmain are collected once. Main thread; the
+ * targets hold evaluated pointers that live while the depsgraph is not updated. No surface identity
+ * is computed here: it is only needed where a bake is compared with the geometry it was rendered
+ * from.
+ */
+void paint_layers_bake_view_resolve(const Material &ma,
+                                    Main *bmain,
+                                    const Scene *scene,
+                                    const ViewLayer *view_layer,
+                                    PaintLayersBakeView &r_view);
+
+/**
+ * Resolve the targets an Object or Generated bake of \a layer uses from the already resolved
+ * \a view: no object geometry (a UV row) leaves the list empty and the issue OK. \a size is the
+ * row's bake side, checked against the size cap and the material's memory budget.
+ */
+void paint_layers_bake_targets_resolve(const Material &ma,
+                                       const MaterialPaintLayer &layer,
+                                       const PaintLayersBakeView &view,
+                                       int size,
+                                       PaintLayersBakeTargets &r_targets);
+
+/** #BKE_paint_layers_gradient_surface_identity of \a target at \a size. */
+uint64_t paint_layers_bake_target_identity(const PaintLayersBakeTarget &target, int size);
+
+/**
+ * The object property path the generated graph reads with an Attribute node
+ * (`SHD_ATTRIBUTE_OBJECT`) to learn which UDIM tile of the row's bake belongs to the object being
+ * shaded.
+ */
+std::string paint_layers_bake_tile_attribute_path(const Material &ma);
+
+/** Drop \a bake's per-object tile records, e.g. when its maps were cleared or copied. */
+void paint_layers_bake_tiles_clear(MaterialPaintLayerBake &bake);
+
+/**
+ * Remove \a ma's tile-index property from every mesh object in `G_MAIN` once no row of the material
+ * has a tile left. Used where no scene or view layer is at hand (a row removed, a bake cleared from
+ * the UI); the property is keyed on the material, so it is stale on every object by then.
+ */
+void paint_layers_bake_tile_indices_clear_all(const Material &ma);
+
+/** Remove \a ma's tile-index property from \a object, e.g. when its last slot naming \a ma goes. */
+void paint_layers_bake_tile_index_remove_from_object(Object &object, const Material &ma);
+
+/**
+ * Remove \a ma's tile-index property from every mesh object of `G_MAIN`. Used when the material
+ * itself is freed: its key can no longer be looked up, so every copy of it is stale. \a tag_objects
+ * is false when called from ID teardown, where no depsgraph update may be scheduled.
+ */
+void paint_layers_bake_tile_indices_remove_everywhere(const Material &ma,
+                                                      bool tag_objects = true);
+
+/**
+ * Create the cache maps a new Gradient will read, before its first bake: plain maps for a UV
+ * Gradient, the first tile of a tiled map for an Object or Generated one. \a edited may be the
+ * Gradient row itself or a correction or mask item; the maps go to the row that is baked (the
+ * item's owner), since an item has no cache of its own.
  *
  * Called from the gradient edit paths, which run on an original of the local #Main: the guard
  * inside refuses anything else, and the maps are held by the row's DNA bake structure, so the undo

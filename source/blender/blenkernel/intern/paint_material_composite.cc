@@ -729,8 +729,12 @@ float BKE_paint_material_coverage_match(const int16_t map_coverage,
     const float entry_tol = entry.own_tolerance ? max_ff(0.0f, entry.tolerance) : tol;
     const float entry_soft = entry.own_tolerance ? 0.0f : soft;
     /* `1 - smoothstep(tol, tol + soft, dist)`: one inside the tolerance, zero past the falloff. A
-     * zero softness is a hard edge, which #smoothstep already gives for equal edges. */
-    const float entry_match = 1.0f - smoothstep(entry_tol, entry_tol + entry_soft, dist);
+     * zero softness is a hard edge, but #smoothstep with equal edges reads anything at them as
+     * outside, so the inside-of-tolerance half is written out by hand (an exact match at a zero
+     * tolerance must match). */
+    const float entry_match = (dist <= entry_tol) ?
+                                  1.0f :
+                                  1.0f - smoothstep(entry_tol, entry_tol + entry_soft, dist);
     match = max_ff(match, entry_match);
   }
   return match;

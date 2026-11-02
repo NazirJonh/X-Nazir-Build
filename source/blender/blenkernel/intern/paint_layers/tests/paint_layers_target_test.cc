@@ -275,9 +275,15 @@ TEST_F(PaintLayersTargetTest, a_shared_map_is_copied_on_the_first_stroke)
   ASSERT_NE(image, nullptr);
   EXPECT_EQ(image->id.us, 1);
 
-  /* Another row sharing the map: the next stroke must not paint into its pixels. */
-  id_us_plus(&image->id);
+  /* Another row sharing the map: the next stroke must not paint into its pixels. A raw extra
+   * user is not a holder the stack can see (the painted record and the generated graph do not
+   * count), so the second row holds the map through its own channel record. */
+  MaterialPaintLayer *twin = add_active_row("Twin");
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, twin, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, twin, PAINT_MATERIAL_CHANNEL_ROUGHNESS, image));
   ASSERT_EQ(image->id.us, 2);
+  BKE_paint_layers_active_set(*ma, layer->marker);
 
   PaintLayersTarget shared_target;
   ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, shared_target));

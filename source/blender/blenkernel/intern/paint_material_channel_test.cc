@@ -761,9 +761,16 @@ TEST_F(PaintMaterialChannelTest, layered_ensure_copies_a_shared_map_before_the_s
   ASSERT_NE(shared, nullptr);
   ASSERT_EQ(shared->id.us, 1);
 
-  /* Another row shares the map: the next stroke must copy it instead of painting into it. */
-  id_us_plus(&shared->id);
+  /* Another row shares the map: the next stroke must copy it instead of painting into it. A raw
+   * extra user is not a holder the stack can see (the painted record and the generated graph do
+   * not count), so the second row holds the map through its own channel record. */
+  MaterialPaintLayer *twin = BKE_paint_layers_add(*ma, "Twin", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(twin, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *twin);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, twin, PAINT_MATERIAL_CHANNEL_METALLIC, shared));
   ASSERT_EQ(shared->id.us, 2);
+  BKE_paint_layers_active_set(*ma, row->marker);
 
   const PaintMaterialImagesEnsureResult result = BKE_paint_material_images_ensure_writable(
       *bmain, *ob, brush_paint, mode_settings, visible_channels);
@@ -1236,9 +1243,12 @@ TEST_F(PaintMaterialChannelTest, a_partial_alpha_height_texel_decodes_to_its_str
   /* The row's own content, before it blends with anything below: the soft texel straightens to its
    * straight value 0.8 (a straight fill would read 0.8 / 0.25 = 3.2 there). */
   Vector<float> content(int64_t(size) * size * 4);
-  Vector<float> coverage(int64_t(size) * size);
-  ASSERT_TRUE(BKE_paint_material_composite_eval_row_content(
-      layers.first(), content.data(), coverage.data(), &area, int(PAINT_MATERIAL_CHANNEL_HEIGHT)));
+  Vector<float> row_coverage(int64_t(size) * size);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_row_content(layers.first(),
+                                                            content.data(),
+                                                            row_coverage.data(),
+                                                            &area,
+                                                            int(PAINT_MATERIAL_CHANNEL_HEIGHT)));
   const float *cp = content.data() + (int64_t(ty) * size + tx) * 4;
   EXPECT_NEAR(cp[0], 0.8f, 0.02f);
   EXPECT_NEAR(cp[3], 0.25f, 0.02f);
@@ -2823,7 +2833,7 @@ TEST_F(PaintMaterialChannelTest, BrushSyncAfterLoadIsNoOpWhenSyncDisabled)
 
 TEST_F(PaintMaterialChannelTest, LayerTargetModeSetSharesTheMaskBrushWithImagePaint)
 {
-  Scene *scene = id_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "TargetModePairScene"));
+  Scene *scene = BKE_id_new<Scene>(bmain, "TargetModePairScene");
   Sculpt *sculpt_data = MEM_new<Sculpt>(__func__);
   scene->toolsettings->sculpt = sculpt_data;
   Paint &sculpt_paint = sculpt_data->paint;

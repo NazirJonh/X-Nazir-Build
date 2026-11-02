@@ -285,6 +285,11 @@ static void paint_layer_curve_patch_duplicate(Main &bmain,
   }
   if (src.curve_patch->brush != nullptr) {
     payload->brush = id_cast<Brush *>(BKE_id_copy(&bmain, &src.curve_patch->brush->id));
+    /* The copy's fake user would keep an orphan snapshot alive after the copy is gone; the payload
+     * owns its snapshot one to one (see #paint_layer_curve_patch_brush_snapshot_create). */
+    if (payload->brush != nullptr) {
+      id_fake_user_clear(&payload->brush->id);
+    }
   }
 }
 

@@ -406,15 +406,13 @@ TEST(ShapeGeom, AutoHandlesResolveMatchesFlatten)
     }
   }
   const Vector<ShapePolyline> buggy_flat = shape_flatten(buggy_shape, 0.5f);
-  ASSERT_EQ(buggy_flat[0].points.size(), auto_flat[0].points.size());
-  bool differs = false;
-  for (const int i : buggy_flat[0].points.index_range()) {
-    if (math::distance(buggy_flat[0].points[i], auto_flat[0].points[i]) > 1.0f) {
-      differs = true;
-      break;
-    }
-  }
-  EXPECT_TRUE(differs);
+  ASSERT_EQ(buggy_flat.size(), 1);
+  /* The flattening subdivides by the control polygon's length, so the pulled-in curve produces a
+   * different point count than the auto one; the difference that matters is geometric. Both
+   * curves share only their endpoints, so their middles are far apart. */
+  const float2 buggy_mid = buggy_flat[0].points[buggy_flat[0].points.size() / 2];
+  const float2 auto_mid = auto_flat[0].points[auto_flat[0].points.size() / 2];
+  EXPECT_GT(math::distance(buggy_mid, auto_mid), 1.0f);
 }
 
 TEST(ShapeRaster, SubsetOutputsLeaveUnrequestedBuffersEmpty)

@@ -218,6 +218,10 @@ static void paint_layer_curve_patch_copy(Main *bmain,
         BKE_id_copy_ex(bmain, &src.curve_patch->brush->id, nullptr, copy_flag));
     if (payload->brush != nullptr) {
       id_us_min(&payload->brush->id);
+      /* The brush copy carries the stock fake user; the payload owns its snapshot one to one, so
+       * the copy's row is its only user (see
+       * #BKE_paint_layers_curve_patch_brush_snapshot_create). */
+      id_fake_user_clear(&payload->brush->id);
     }
   }
 }

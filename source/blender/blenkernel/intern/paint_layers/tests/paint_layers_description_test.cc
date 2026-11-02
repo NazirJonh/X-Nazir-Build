@@ -15,6 +15,7 @@
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
+#include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
@@ -42,6 +43,7 @@
 #include "BLO_readfile.hh"
 #include "BLO_writefile.hh"
 
+#include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
 #include "DNA_ID.h"
@@ -1059,7 +1061,7 @@ TEST_F(PaintLayersDescription, rna_kind_params_carry_their_type)
   EXPECT_EQ(totitem, PAINT_LAYER_MATH_OP_LOGARITHM + 1);
   EXPECT_STREQ(items[PAINT_LAYER_MATH_OP_MULTIPLY].identifier, "MULTIPLY");
   if (items_free) {
-    MEM_freeN(const_cast<EnumPropertyItem *>(items));
+    MEM_delete(const_cast<EnumPropertyItem *>(items));
   }
 
   RNA_property_enum_set(&op_ptr, enum_value, PAINT_LAYER_MATH_OP_DIVIDE);
@@ -2685,23 +2687,31 @@ TEST_F(PaintLayersDescription, pack_maps_packs_a_modified_assigned_map_and_leave
       bmain, 8, 8, "PackAssignedClean", 24, false, IMA_GENTYPE_BLANK, clear, false, true, false);
   ASSERT_NE(painted, nullptr);
   ASSERT_NE(clean, nullptr);
+  /* A bare row owns no record yet: the map needs one to land in. */
+  ASSERT_NE(
+      BKE_paint_layers_channel_add(*ma, painted_row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_NE(
+      BKE_paint_layers_channel_add(*ma, clean_row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
   ASSERT_TRUE(
       BKE_paint_layers_channel_set_image(*ma, painted_row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, painted));
   ASSERT_TRUE(
       BKE_paint_layers_channel_set_image(*ma, clean_row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, clean));
 
   /* Both now read as textures the user assigned from disk; painting modified one of them. The
-   * names stand for paths only -- nothing here reads from disk. */
+   * names stand for paths only -- nothing here reads from disk. A FILE source with no file on
+   * disk holds no buffer of its own: the modified map gets the painted pixels installed
+   * directly. */
   STRNCPY(painted->filepath, "paint_layers_assigned_painted.png");
   STRNCPY(clean->filepath, "paint_layers_assigned_clean.png");
   painted->source = IMA_SRC_FILE;
   clean->source = IMA_SRC_FILE;
-  void *lock = nullptr;
-  ImBuf *ibuf = BKE_image_acquire_ibuf(painted, nullptr, &lock);
+  ImBuf *ibuf = IMB_allocImBuf(8, 8, ImBufFlags::ByteData);
   ASSERT_NE(ibuf, nullptr);
   ibuf->byte_data_for_write()[0] = 200;
   BKE_image_mark_dirty(painted, ibuf);
-  BKE_image_release_ibuf(painted, ibuf, lock);
+  BKE_image_replace_imbuf(painted, ibuf);
+  /* The image took its own reference; this one is done. */
+  IMB_freeImBuf(ibuf);
 
   /* The assigned maps are project data either way, so the close prompt never offers them; only a
    * modified one needs its pixels embedded. */
@@ -2742,8 +2752,10 @@ TEST_F(PaintLayersDescription, bake_cache_maps_collect_keeps_caches_out_of_the_p
   EXPECT_TRUE(maps.contains(map));
   EXPECT_FALSE(maps.contains(cache));
 
-  /* The planner re-bakes a loaded row (the read clears its hash), so a cache is never packed. */
-  EXPECT_EQ(BKE_paint_layers_pack_maps(*bmain, false, nullptr), 0);
+  /* The planner re-bakes a loaded row (the read clears its hash), so a cache is never packed. The
+   * plain generated map is, like any generated map nothing has touched (a file would reopen it
+   * empty). */
+  EXPECT_EQ(BKE_paint_layers_pack_maps(*bmain, false, nullptr), 1);
   EXPECT_FALSE(BKE_image_has_packedfile(cache));
 }
 

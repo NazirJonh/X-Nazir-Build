@@ -145,6 +145,36 @@ bNodeSocket *PaintLayersTreeBuilder::group_input_socket(
       *group.group_input, SOCK_OUT, UString::from_ptr_noinline(iface.identifier));
 }
 
+/**
+ * The name an effect's generated inputs carry: the row, the effect's kind label, and the effect
+ * instance's marker. The marker keeps two effects of one kind on a row from sharing sockets (the
+ * find-by-name reuse in #layer_group_add_socket would hand the first effect's socket to the
+ * second, whose default write then clobbers the value the first effect's graph reads), while a
+ * rebuild of the same effect still finds its own sockets again.
+ */
+static void effect_input_label(const char *layer_name,
+                               const MaterialPaintLayer &effect,
+                               const char *suffix,
+                               char *r_name,
+                               const size_t name_size)
+{
+  char marker[40];
+  BLI_uuid_format(marker, effect.marker);
+  if (suffix == nullptr || suffix[0] == '\0') {
+    BLI_snprintf(
+        r_name, name_size, "%s %s %s", layer_name, paint_layer_effect_label(effect), marker);
+  }
+  else {
+    BLI_snprintf(r_name,
+                 name_size,
+                 "%s %s %s %s",
+                 layer_name,
+                 paint_layer_effect_label(effect),
+                 suffix,
+                 marker);
+  }
+}
+
 /** Write a default into \a iface and into the instance socket that was built from it. */
 template<typename SocketValueT, typename WriteFn>
 static void group_input_default_write(const LayerGroup &group,
@@ -825,7 +855,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
         continue;
       }
       char base[200];
-      SNPRINTF(base, "%s %s %s", layer_name, paint_layer_effect_label(filter), kind->params[i].label);
+      effect_input_label(layer_name, filter, kind->params[i].label, base, sizeof(base));
       bNodeTreeInterfaceSocket *param = layer_group_value_input(
           group, base, "NodeSocketFloat", ROLE_PARAM, filter.marker, -1);
       if (param != nullptr) {
@@ -842,7 +872,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
   for (const MaterialPaintLayer &effect : layer.effects) {
     filter_params_create(effect, false);
     char effect_label[224];
-    SNPRINTF(effect_label, "%s %s", layer_name, paint_layer_effect_label(effect));
+    effect_input_label(layer_name, effect, nullptr, effect_label, sizeof(effect_label));
     this->mapping_inputs_create(group, effect, effect_label);
     const bool effect_generates = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES);
     if (effect_generates) {
@@ -856,11 +886,9 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
       const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
           eMaterialPaintChannel(channel));
       char base[200];
-      SNPRINTF(base,
-               "%s %s %s Opacity",
-               layer_name,
-               paint_layer_effect_label(effect),
-               info.ui_name);
+      char suffix[96];
+      SNPRINTF(suffix, "%s Opacity", info.ui_name);
+      effect_input_label(layer_name, effect, suffix, base, sizeof(base));
       bNodeTreeInterfaceSocket *opacity = layer_group_value_input(
           group, base, "NodeSocketFloat", ROLE_OPACITY, effect.marker, channel);
       if (opacity != nullptr) {
@@ -886,8 +914,8 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
         const PaintLayerMaterialSource source = paint_layer_material_channel_source(
             ma_, effect, channel);
         if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
-          SNPRINTF(
-              base, "%s %s %s Source", layer_name, paint_layer_effect_label(effect), info.ui_name);
+          SNPRINTF(suffix, "%s Source", info.ui_name);
+          effect_input_label(layer_name, effect, suffix, base, sizeof(base));
           bNodeTreeInterfaceSocket *live = layer_group_value_input(
               group, base, "NodeSocketColor", ROLE_LIVE_CONSTANT, effect.marker, channel);
           if (live != nullptr) {
@@ -903,7 +931,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
       {
         continue;
       }
-      SNPRINTF(base, "%s %s %s", layer_name, paint_layer_effect_label(effect), info.ui_name);
+      effect_input_label(layer_name, effect, info.ui_name, base, sizeof(base));
       bNodeTreeInterfaceSocket *fill = layer_group_value_input(
           group, base, "NodeSocketColor", ROLE_FILL, effect.marker, channel);
       if (fill != nullptr) {
@@ -922,7 +950,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
                                                                                        effect);
       if (lays && coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
         char base[200];
-        SNPRINTF(base, "%s %s Source Coverage", layer_name, paint_layer_effect_label(effect));
+        effect_input_label(layer_name, effect, "Source Coverage", base, sizeof(base));
         bNodeTreeInterfaceSocket *live = layer_group_value_input(
             group, base, "NodeSocketFloat", ROLE_LIVE_COVERAGE, effect.marker, -1);
         if (live != nullptr) {

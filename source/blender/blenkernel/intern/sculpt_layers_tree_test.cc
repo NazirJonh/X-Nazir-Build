@@ -768,6 +768,9 @@ TEST_F(sculpt_layers_tree, tree_copy_deep_copies_masks)
   const int folder_uid = folder->base.uid;
 
   Mesh *copy = BKE_mesh_new_nomain(0, 0, 0, 0);
+  /* A fresh mesh carries the root #mesh_init_data made; #tree_copy asserts it away, so it is
+   * released here rather than overwritten (and leaked). */
+  tree_free(*copy);
   tree_copy(*copy, *mesh);
 
   const Span<SculptLayer *> copied = layers(*root_group(*copy));
@@ -1213,6 +1216,8 @@ TEST_F(sculpt_layers_tree, copy_terminates_on_interleaved_child_lists)
   build_interleaved_mesh(*mesh);
 
   Mesh *copy = BKE_mesh_new_nomain(0, 0, 0, 0);
+  /* As in #tree_copy_deep_copies_masks: release the root the fresh mesh was made with first. */
+  tree_free(*copy);
   tree_copy(*copy, *mesh);
 
   ASSERT_NE(root_group(*copy), nullptr);

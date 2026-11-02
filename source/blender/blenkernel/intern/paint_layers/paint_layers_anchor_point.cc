@@ -562,6 +562,22 @@ static bool anchor_point_source_participates(const Material &ma,
       return true;
     }
   }
+  /* A folder's slice is its isolated subtree, so a child that takes part in the channel is one the
+   * slice answers for — the same walk #row_participates decides the folder's own participation
+   * with, and the same reason the generator hashes a folder-source reader per channel. */
+  if (BKE_paint_layers_is_folder(source)) {
+    for (const MaterialPaintLayer &child : source.children) {
+      if (paint_layer_channel_contributes(ma, child, paint_layer_channel_find(child, channel)) ||
+          paint_layer_adjustment_acts(ma, child, channel) ||
+          paint_layer_row_reads_source(ma, child, channel) ||
+          paint_layer_effects_lay(ma, child, channel) ||
+          anchor_point_source_participates(ma, child, channel))
+      {
+        return true;
+      }
+    }
+    return false;
+  }
   return paint_layer_row_reads_anchor_point(ma, source, channel);
 }
 

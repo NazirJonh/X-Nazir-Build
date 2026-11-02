@@ -81,10 +81,9 @@ class PaintLayersGradientSurface : public PaintLayersTestBase {
     source->tag_topology_changed();
     source->tag_positions_changed();
     BKE_mesh_nomain_to_mesh(source, mesh, object);
-
-    /* Custom texture space, so the expected generated box does not depend on the auto calculation
-     * and matches what the shader's Generated output reads. A flat Z extent exercises the
-     * one-unit fallback. */
+    /* The attribute add above bypasses the hook that names a first UV map the default, which the
+     * space conversions read (the render-active map, like Texture Coordinate.UV). */
+    mesh->uv_maps_default_set("UVMap");
     mesh->texspace_flag = 0;
     mesh->texspace_location[0] = 1.0f;
     mesh->texspace_location[1] = 1.0f;

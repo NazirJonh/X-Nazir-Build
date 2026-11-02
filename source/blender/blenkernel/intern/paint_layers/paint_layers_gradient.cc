@@ -843,16 +843,16 @@ bool gradient_ramp_set_stop_position(Material &ma,
     return false;
   }
   /* The stops are kept sorted. Clamping to both neighbours keeps the order and still lets two
-   * stops share a position, as a ColorRamp allows. */
+   * stops share a position, as a ColorRamp allows. A position that clamps to the one the stop
+   * already holds is accepted as it is: false is for a refused call, not for a no-op. */
   const float lower = (index > 0) ? ramp.data[index - 1].pos : 0.0f;
   const float upper = (index + 1 < ramp.tot) ? ramp.data[index + 1].pos : 1.0f;
   const float clamped = clamp_f(position, lower, upper);
+  ramp.cur = index;
   if (ramp.data[index].pos == clamped) {
-    ramp.cur = index;
-    return false;
+    return true;
   }
   ramp.data[index].pos = clamped;
-  ramp.cur = index;
   /* The ramp lives in the generated ColorRamp node's storage: this is a topology edit. */
   BKE_paint_layers_gradient_ramp_edited(ma, &ramp);
   return true;

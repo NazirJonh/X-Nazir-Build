@@ -64,6 +64,9 @@ TEST_F(PaintLayersContentAlphaTest, a_constant_lays_the_alpha_of_its_value)
   add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
   const float value[4] = {0.9f, 0.1f, 0.2f, 0.5f};
   MaterialPaintLayer *top = add_constant_layer("Top", value);
+  /* A Fill row: its constants travel the group inputs, so the value edit below is value-only. A
+   * Paint row's value alpha gates whether the channel takes part at all, which is topology. */
+  top->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, top, 0.6f));
 
   expect_alpha_matches_cpu(kColor);

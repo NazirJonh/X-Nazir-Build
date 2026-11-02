@@ -1825,7 +1825,8 @@ MaterialPaintLayer *BKE_paint_layers_corrections_bake(Main &bmain,
     }
     char name[192];
     BLI_snprintf(name, sizeof(name), "%s %s", merged_name, info.ui_name);
-    Image *image = paint_layers_map_create(bmain, name, size, info.is_color, fill, tiled);
+    /* A Height map is the continuous float field, like every other maker of a channel map. */
+    Image *image = paint_layers_map_create(bmain, name, size, info.is_color, fill, tiled, info.map_float);
     if (image == nullptr) {
       BKE_report(reports, RPT_ERROR, "Cannot create the baked texture");
       free_baked();
@@ -1851,7 +1852,9 @@ MaterialPaintLayer *BKE_paint_layers_corrections_bake(Main &bmain,
       }
       void *lock = nullptr;
       ImBuf *dst = BKE_image_acquire_ibuf(image, &iuser, &lock);
-      bool ok = dst != nullptr && dst->byte_data_for_write() != nullptr;
+      bool ok = dst != nullptr &&
+                (info.map_float ? dst->float_data_for_write() != nullptr :
+                                  dst->byte_data_for_write() != nullptr);
       for (int y = 0; ok && y < dst->y; y += CORRECTIONS_BAKE_STRIP_ROWS) {
         rcti area;
         BLI_rcti_init(&area, 0, dst->x, y, min_ii(y + CORRECTIONS_BAKE_STRIP_ROWS, dst->y));
@@ -1868,7 +1871,20 @@ MaterialPaintLayer *BKE_paint_layers_corrections_bake(Main &bmain,
         for (const int64_t i : IndexRange(count)) {
           color[i * 4 + 3] = coverage[i];
         }
-        BKE_paint_material_composite_linear_to_byte(color, area, *dst);
+        if (info.map_float) {
+          /* A float map stores scene-linear premultiplied by its coverage, the association every
+           * float reader decodes; a Height map is a data channel, so no colorspace step applies. */
+          float *out = dst->float_data_for_write() + (int64_t(y) * dst->x + area.xmin) * 4;
+          for (int64_t i = 0; i < count; i++) {
+            out[i * 4 + 0] = color[i * 4 + 0] * color[i * 4 + 3];
+            out[i * 4 + 1] = color[i * 4 + 1] * color[i * 4 + 3];
+            out[i * 4 + 2] = color[i * 4 + 2] * color[i * 4 + 3];
+            out[i * 4 + 3] = color[i * 4 + 3];
+          }
+        }
+        else {
+          BKE_paint_material_composite_linear_to_byte(color, area, *dst);
+        }
       }
       if (ok) {
         dst->userflags |= IB_DISPLAY_BUFFER_INVALID;

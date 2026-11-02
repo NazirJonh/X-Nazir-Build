@@ -597,6 +597,13 @@ static std::shared_ptr<ImBuf> composite_height_won_get(
   return mask;
 }
 
+static bool anchor_slice_dimensions(const Material &ma,
+                                    const MaterialPaintLayer &reader,
+                                    const int channel,
+                                    const PaintLayerAnchorPointRef &ref,
+                                    int &r_width,
+                                    int &r_height);
+
 /**
  * Append the content correction \a effect to \a out as the evaluator reads it in \a channel: a filter,
  * or a map, flat colour, source or slice laid by the correction's own blend and opacity. Nothing is
@@ -797,6 +804,17 @@ bool composite_image_layer_build(const Material &ma,
                                        dimensions_only))
     {
       return false;
+    }
+    if (dimensions_only) {
+      /* Sizing only: the buffers stay unrendered, but the slice's side is known and is what the
+       * bake of the reader is rendered at. Carried the way an empty-base row's canvas is, so the
+       * stack's dimensions find the reader without rendering a single nested slice. */
+      int slice_width = 0;
+      int slice_height = 0;
+      if (anchor_slice_dimensions(ma, layer, channel, reader_ref, slice_width, slice_height)) {
+        out.empty_base = true;
+        out.empty_base_size = slice_width;
+      }
     }
     /* Describe-only keeps the reader even where #BKE_paint_layers_slice_render would refuse it for
      * a zero-sized source. The GPU plan captures the slot and the screen-space pass needs no source

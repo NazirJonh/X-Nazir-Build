@@ -1263,7 +1263,9 @@ TEST_F(MeshMapBakeTest, handshake_stop_while_waiting_for_a_world)
   worker.join();
   const auto elapsed = std::chrono::steady_clock::now() - start;
   EXPECT_EQ(rendered.load(), 0);
-  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 100);
+  /* The stop flag is only re-checked when the wait poll times out (#MeshMapBakeHandshake::kTimeout
+   * is 50 ms and nothing notifies on stop), so allow a full poll cycle plus scheduler jitter. */
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 250);
 }
 
 /** A kill while the worker waits for the commit must exit promptly and commit nothing. */

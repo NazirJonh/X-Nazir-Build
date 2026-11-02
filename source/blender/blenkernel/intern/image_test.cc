@@ -381,6 +381,8 @@ TEST_F(ImageTest, paint_selection_mask_freed_when_udim_tile_removed)
 
   ImBuf *mask = BKE_image_paint_selection_mask_get(ima, 1002, 8, 8);
   ASSERT_NE(mask, nullptr);
+  /* A fresh mask is zeroed, and `has_any` means "a selected pixel exists", so mark one. */
+  mask->float_data_for_write()[0] = 1.0f;
   EXPECT_TRUE(BKE_image_paint_selection_mask_has_any(ima));
 
   ASSERT_TRUE(BKE_image_remove_tile(ima, tile_1002));

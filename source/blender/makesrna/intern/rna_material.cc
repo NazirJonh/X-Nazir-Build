@@ -5057,7 +5057,10 @@ static void rna_def_material_paint_layer_kind_param(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "enum_value", PROP_ENUM, PROP_NONE);
-  /* Dynamic items: the placeholder marks the property for the item callback below. */
+  /* Dynamic items: the placeholder marks the property for the item callback below. The items come
+   * from the parameter's own UI data, which reads no context, so the property is marked as
+   * context-free: an itemf is only consulted with a context otherwise. */
+  RNA_def_property_flag(prop, PROP_ENUM_NO_CONTEXT);
   RNA_def_property_enum_items(prop, rna_enum_dummy_NULL_items);
   RNA_def_property_enum_funcs(prop,
                               "rna_MaterialPaintLayerKindParam_int_value_get",

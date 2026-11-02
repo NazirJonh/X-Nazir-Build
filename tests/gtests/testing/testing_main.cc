@@ -8,6 +8,13 @@
 
 #include <stdlib.h>
 
+/* Declared in BLI_cpp_type.hh (blenlib). The full header is not included here on purpose: the
+ * minimal bf_testing_main target does not carry blenlib's transitive include directories. Every
+ * test executable links #bf_blenlib, so the symbol resolves at link time. */
+namespace blender {
+void register_cpp_types();
+}
+
 DEFINE_string(test_assets_dir, "", "tests/files directory containing the test assets.");
 DEFINE_string(test_release_dir, "", "bin/{blender version} directory of the current build.");
 
@@ -44,6 +51,12 @@ int main(int argc, char **argv)
   MEM_use_guarded_allocator();
   MEM_init_memleak_detection();
   MEM_enable_fail_on_memleak();
+  /* Register the basic #CPPType instances (float2, ColorGeometry4f, ...). Without them every
+   * #CPPType is an all-zero object and #CPPType::to_static_type dispatches to the wrong type,
+   * which corrupts memory wherever typed spans are written through the dispatch. Test fixtures
+   * that need the Blender-level types call #BKE_cpp_types_init themselves; this covers the
+   * blenlib-level types for every test binary. The registration is guarded and idempotent. */
+  blender::register_cpp_types();
   testing::InitGoogleTest(&argc, argv);
   BLENDER_GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging(argv[0]);

@@ -200,6 +200,13 @@ MaskLayout mask_layout_for(const bool on_grids,
    * mask the user paints and the composite never reads. See #mask_edit_begin_grids, which derives
    * the same layout from the same two numbers when it opens a session. */
   const int64_t totelem = int64_t(grids_num) * grid_area;
+  /* A product that does not fit in an `int` is refused rather than handed downstream: the mask's
+   * per-block dense ranges (#SculptLayerMask::block_offset, #SculptLayerMask::data_num) stay 32-bit,
+   * so such a mask could never be backed by a dense buffer and would describe a domain the mask
+   * storage cannot represent. Callers treat the zeroed layout as a refusal. */
+  if (totelem > INT_MAX) {
+    return {};
+  }
   return {totelem, grid_area};
 }
 

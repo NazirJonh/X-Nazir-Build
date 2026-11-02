@@ -555,8 +555,14 @@ TEST_F(PaintLayersAnchorPointCompositeTest, bake_not_planned_for_live_reader)
   ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *never, MA_PAINT_LAYER_BAKE_NEVER));
   ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *automatic, MA_PAINT_LAYER_BAKE_AUTO));
   bake_plan();
-  EXPECT_EQ(never->bake, nullptr);
-  EXPECT_EQ(automatic->bake, nullptr) << "a shallow Auto reader stays live";
+  /* The record is the user's mode and size and stays (see #bake_row_is_due); what must not appear
+   * is a cache: no maps are minted for a reader that stays live. */
+  ASSERT_NE(never->bake, nullptr);
+  EXPECT_EQ(never->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  EXPECT_EQ(never->bake->coverage, nullptr);
+  ASSERT_NE(automatic->bake, nullptr);
+  EXPECT_EQ(automatic->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  EXPECT_EQ(automatic->bake->coverage, nullptr) << "a shallow Auto reader stays live";
 }
 
 /** \} */

@@ -19,6 +19,7 @@
 
 #include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
+#include "BLI_fileops.hh"
 
 #include "BLO_readfile.hh"
 #include "BLO_writefile.hh"
@@ -488,8 +489,11 @@ TEST_F(PaintLayersMathTest, a_logarithm_with_a_non_positive_base_reads_zero_in_t
   expect_graph_matches_cpu(kColor);
   const RGBA after = cpu_pixel(kColor);
   EXPECT_NEAR(after.r, 0.0f, 2e-3f);
-  EXPECT_GT(after.g, 0.0f);
-  EXPECT_GT(after.b, 0.0f);
+  /* The green and blue bases are positive, so their channels keep the honest logarithm: the
+   * layer's sub-1 linear values log to a negative number, which is a defined result, not the
+   * node's refusal. Only the non-positive base folds its channel to zero. */
+  EXPECT_LT(after.g, 0.0f);
+  EXPECT_LT(after.b, 0.0f);
 }
 
 TEST_F(PaintLayersMathTest, a_logarithm_of_a_non_positive_argument_reads_zero)
@@ -1814,15 +1818,17 @@ TEST(PaintLayersCurvesLut, lookup_matches_the_filter_for_flat_lift_s_curve_and_e
 
 TEST(PaintLayersColorRampLut, lookup_matches_the_filter_for_every_interpolation_and_colour_mode)
 {
-  const int interpolations[] = {COLBAND_INTERP_LINEAR,
-                                COLBAND_INTERP_EASE,
-                                COLBAND_INTERP_CARDINAL,
-                                COLBAND_INTERP_B_SPLINE,
-                                COLBAND_INTERP_CONSTANT};
-  const int colour_modes[] = {COLBAND_BLEND_RGB, COLBAND_BLEND_HSV, COLBAND_BLEND_HSL};
+  const eColorBand_Interp interpolations[] = {COLBAND_INTERP_LINEAR,
+                                              COLBAND_INTERP_EASE,
+                                              COLBAND_INTERP_CARDINAL,
+                                              COLBAND_INTERP_B_SPLINE,
+                                              COLBAND_INTERP_CONSTANT};
+  const eColorBand_ColorMode colour_modes[] = {COLBAND_BLEND_RGB,
+                                               COLBAND_BLEND_HSV,
+                                               COLBAND_BLEND_HSL};
 
-  for (const int ipotype : interpolations) {
-    for (const int colour_mode : colour_modes) {
+  for (const eColorBand_Interp ipotype : interpolations) {
+    for (const eColorBand_ColorMode colour_mode : colour_modes) {
       ColorBand band = {};
       BKE_colorband_init(&band, true);
       band.ipotype = ipotype;

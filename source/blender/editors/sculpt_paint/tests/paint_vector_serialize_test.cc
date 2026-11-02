@@ -375,6 +375,8 @@ TEST(PaintVectorSerialize, SurfaceAnchorRestoreCoreFollowsPositions)
 
   SurfaceAnchor anchor;
   anchor.surface_uv = float2(0.25f, 0.25f);
+  /* The restore only samples the saved UV when the anchor says it holds a real one. */
+  anchor.has_surface_uv = true;
   ASSERT_TRUE(surface_anchor_restore_from_mesh(uv, tris, corner_verts, positions, anchor));
   EXPECT_NEAR(anchor.co.x, 0.25f, 1e-4f);
   EXPECT_NEAR(anchor.co.y, 0.25f, 1e-4f);
@@ -384,6 +386,7 @@ TEST(PaintVectorSerialize, SurfaceAnchorRestoreCoreFollowsPositions)
   positions[1] = float3(2.0f, 0.0f, 0.0f);
   SurfaceAnchor moved;
   moved.surface_uv = anchor.surface_uv;
+  moved.has_surface_uv = true;
   ASSERT_TRUE(surface_anchor_restore_from_mesh(uv, tris, corner_verts, positions, moved));
   EXPECT_NEAR(moved.co.x, 0.5f, 1e-4f);
   EXPECT_NEAR(moved.co.y, 0.25f, 1e-4f);
@@ -393,6 +396,7 @@ TEST(PaintVectorSerialize, SurfaceAnchorRestoreCoreFollowsPositions)
       float3(0, 0, 0), float3(0, 0, 0), float3(0, 0, 0), float3(1, 1, 0)};
   SurfaceAnchor deg;
   deg.surface_uv = float2(0.25f, 0.25f);
+  deg.has_surface_uv = true;
   EXPECT_FALSE(surface_anchor_restore_from_mesh(uv, tris, corner_verts, degenerate, deg));
 
   /* Ambiguous UV (a second triangle covers the same UV point) -> fallback. */
@@ -408,6 +412,7 @@ TEST(PaintVectorSerialize, SurfaceAnchorRestoreCoreFollowsPositions)
   dup_cv.append(2);
   SurfaceAnchor amb;
   amb.surface_uv = float2(0.25f, 0.25f);
+  amb.has_surface_uv = true;
   EXPECT_FALSE(surface_anchor_restore_from_mesh(dup_uv, dup_tris, dup_cv, positions, amb));
 }
 

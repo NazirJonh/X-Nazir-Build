@@ -236,8 +236,12 @@ TEST_F(PaintLayersMaterialSource, a_duplicate_of_the_row_reads_the_same_source)
   MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *owner, row);
   ASSERT_NE(copy, nullptr);
   EXPECT_EQ(copy->source, MA_PAINT_LAYER_SOURCE_MATERIAL);
-  EXPECT_EQ(copy->material, source);
-  EXPECT_EQ(source->id.us, users_before + 1);
+  /* The duplicate reads a copy of the source, so the two rows keep settings of their own; the
+   * original's source is untouched (see #paint_layer_material_duplicate). Sharing still happens
+   * when the whole owner is copied, which `a_copy_of_the_owner_reads_the_same_source` covers. */
+  EXPECT_NE(copy->material, source);
+  EXPECT_EQ(copy->material->id.us, 1);
+  EXPECT_EQ(source->id.us, users_before);
   EXPECT_EQ(copy->channels_num, 0);
 }
 
@@ -320,7 +324,10 @@ TEST_F(PaintLayersMaterialSource, the_bake_planner_leaves_a_material_row_alone)
   bool changed = false;
   BKE_paint_layers_bake_plan_run(*bmain, *owner, &changed);
   EXPECT_FALSE(changed);
-  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*owner, *row));
+  /* A row with nothing to render is as current as it can be, so the validity check passes it; what
+   * the planner must not do is mint a cache of maps for it. */
+  EXPECT_EQ(row->bake == nullptr ? nullptr : row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR],
+            nullptr);
   EXPECT_EQ(row->bake == nullptr ? nullptr : row->bake->coverage, nullptr);
 }
 

@@ -1321,7 +1321,7 @@ TEST_F(PaintLayersGenerateTest, response_edit_reaches_the_owned_nodes_without_a_
   }
   ASSERT_NE(bump, nullptr);
   ASSERT_NE(normal_map, nullptr);
-  const bNodeSocket *distance_socket = bke::node_find_socket(*bump, SOCK_IN, "Distance");
+  const bNodeSocket *distance_socket = bke::node_find_socket(*bump, SOCK_IN, "Distance"_ustr);
   ASSERT_NE(distance_socket, nullptr);
   const float distance_before = static_cast<const bNodeSocketValueFloat *>(
                                     distance_socket->default_value)
@@ -1329,7 +1329,7 @@ TEST_F(PaintLayersGenerateTest, response_edit_reaches_the_owned_nodes_without_a_
 
   /* A response edit is a value: the owned nodes' sockets take it in place, and no rebuild is
    * asked for. */
-  paint_layers_kept_group_rebuild_count_reset();
+  paint_layers::paint_layers_kept_group_rebuild_count_reset();
   ASSERT_TRUE(BKE_paint_layers_bump_strength_set(*ma, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_bump_distance_set(*ma, 4.0f));
   ASSERT_TRUE(BKE_paint_layers_normal_strength_set(*ma, 0.25f));
@@ -1337,15 +1337,15 @@ TEST_F(PaintLayersGenerateTest, response_edit_reaches_the_owned_nodes_without_a_
   EXPECT_EQ(BKE_paint_layers_bump_distance(*ma), 4.0f);
   EXPECT_EQ(BKE_paint_layers_normal_strength(*ma), 0.25f);
   EXPECT_EQ(static_cast<const bNodeSocketValueFloat *>(
-                bke::node_find_socket(*bump, SOCK_IN, "Strength")->default_value)
+                bke::node_find_socket(*bump, SOCK_IN, "Strength"_ustr)->default_value)
                 ->value,
             0.5f);
   EXPECT_EQ(static_cast<const bNodeSocketValueFloat *>(
-                bke::node_find_socket(*bump, SOCK_IN, "Distance")->default_value)
+                bke::node_find_socket(*bump, SOCK_IN, "Distance"_ustr)->default_value)
                 ->value,
             4.0f);
   EXPECT_EQ(static_cast<const bNodeSocketValueFloat *>(
-                bke::node_find_socket(*normal_map, SOCK_IN, "Strength")->default_value)
+                bke::node_find_socket(*normal_map, SOCK_IN, "Strength"_ustr)->default_value)
                 ->value,
             0.25f);
   EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
@@ -1353,9 +1353,9 @@ TEST_F(PaintLayersGenerateTest, response_edit_reaches_the_owned_nodes_without_a_
   /* A regenerate after the edits keeps the groups (no rebuild was needed) and the values: the
    * description carries them now, the sync writes them back. */
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  EXPECT_EQ(paint_layers_kept_group_rebuild_count(), 0);
+  EXPECT_EQ(paint_layers::paint_layers_kept_group_rebuild_count(), 0);
   EXPECT_EQ(static_cast<const bNodeSocketValueFloat *>(
-                bke::node_find_socket(*bump, SOCK_IN, "Distance")->default_value)
+                bke::node_find_socket(*bump, SOCK_IN, "Distance"_ustr)->default_value)
                 ->value,
             4.0f);
   EXPECT_NE(4.0f, distance_before);
@@ -1381,10 +1381,10 @@ TEST_F(PaintLayersGenerateTest, response_edit_leaves_an_unmarked_bump_alone)
   }
   ASSERT_NE(bump, nullptr);
   IDProperty *marker = IDP_GetPropertyFromGroup(bump->system_properties,
-                                                RESPONSE_NODE_KEY_PROP);
+                                                paint_layers::RESPONSE_NODE_KEY_PROP);
   ASSERT_NE(marker, nullptr);
   IDP_FreeFromGroup(bump->system_properties, marker);
-  const bNodeSocket *strength_socket = bke::node_find_socket(*bump, SOCK_IN, "Strength");
+  const bNodeSocket *strength_socket = bke::node_find_socket(*bump, SOCK_IN, "Strength"_ustr);
   ASSERT_NE(strength_socket, nullptr);
   const float strength_before =
       static_cast<const bNodeSocketValueFloat *>(strength_socket->default_value)->value;
@@ -1401,7 +1401,7 @@ TEST_F(PaintLayersGenerateTest, response_edit_leaves_an_unmarked_bump_alone)
   EXPECT_EQ(BKE_paint_layers_bump_strength(*ma), 0.25f);
   const bNode *owned = BKE_paint_layers_bump_owned_find(*ma);
   ASSERT_NE(owned, nullptr);
-  const bNodeSocket *owned_strength = bke::node_find_socket(*owned, SOCK_IN, "Strength");
+  const bNodeSocket *owned_strength = bke::node_find_socket(*owned, SOCK_IN, "Strength"_ustr);
   ASSERT_NE(owned_strength, nullptr);
   EXPECT_EQ(static_cast<const bNodeSocketValueFloat *>(owned_strength->default_value)->value,
             0.25f);
@@ -1426,7 +1426,7 @@ TEST_F(PaintLayersGenerateTest, response_adoption_reads_a_hand_tuned_node_once)
   }
   ASSERT_NE(bump, nullptr);
   IDProperty *marker = IDP_GetPropertyFromGroup(bump->system_properties,
-                                                RESPONSE_NODE_KEY_PROP);
+                                                paint_layers::RESPONSE_NODE_KEY_PROP);
   ASSERT_NE(marker, nullptr);
   IDP_FreeFromGroup(bump->system_properties, marker);
   static_cast<bNodeSocketValueFloat *>(
@@ -1466,18 +1466,20 @@ TEST_F(PaintLayersGenerateTest, response_never_adopts_a_users_own_bump)
   ASSERT_NE(noise, nullptr);
   bke::node_add_link(*ma->nodetree,
                      *noise,
-                     *bke::node_find_socket(*noise, SOCK_OUT, "Fac"),
+                     *bke::node_find_socket(*noise, SOCK_OUT, "Fac"_ustr),
                      *user_bump,
-                     *bke::node_find_socket(*user_bump, SOCK_IN, "Height"));
-  const bNodeSocket *user_strength = bke::node_find_socket(*user_bump, SOCK_IN, "Strength");
+                     *bke::node_find_socket(*user_bump, SOCK_IN, "Height"_ustr));
+  const bNodeSocket *user_strength = bke::node_find_socket(*user_bump, SOCK_IN, "Strength"_ustr);
   ASSERT_NE(user_strength, nullptr);
   static_cast<bNodeSocketValueFloat *>(user_strength->default_value)->value = 0.75f;
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   /* The marker went to a node the stack built beside it, never to the author's. */
-  EXPECT_EQ(paint_layers::prop_string_get(user_bump->system_properties, RESPONSE_NODE_KEY_PROP),
-            nullptr);
+  EXPECT_EQ(
+      paint_layers::prop_string_get(user_bump->system_properties,
+                                    paint_layers::RESPONSE_NODE_KEY_PROP),
+      nullptr);
   const bNode *owned = BKE_paint_layers_bump_owned_find(*ma);
   ASSERT_NE(owned, nullptr);
   EXPECT_NE(owned, user_bump);
@@ -1487,7 +1489,7 @@ TEST_F(PaintLayersGenerateTest, response_never_adopts_a_users_own_bump)
   EXPECT_FLOAT_EQ(
       static_cast<const bNodeSocketValueFloat *>(user_strength->default_value)->value, 0.75f);
   EXPECT_NE(static_cast<const bNodeSocketValueFloat *>(
-                bke::node_find_socket(*owned, SOCK_IN, "Strength")->default_value)
+                bke::node_find_socket(*owned, SOCK_IN, "Strength"_ustr)->default_value)
                 ->value,
             0.75f);
 }

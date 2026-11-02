@@ -1115,7 +1115,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   /* A value edit changes no structure, so the root's stored hash still matches its description:
    * every group is kept and only the values are written. Nothing is rebuilt, and the groups' nodes
    * (and anything a user put in them) survive. A missing or mismatched stored hash -- a file written
-   * before this feature, or a structural edit -- falls through to a full rebuild. */
+   * before this feature, or a structural edit -- falls through to a full rebuild. A structural edit
+   * is exactly what #MA_PAINT_LAYERS_REGEN names (the value edits tag #BKE_paint_layers_tag_value_edited),
+   * and a flag the last pass did not consume -- #BKE_paint_layers_undo_validate leaves one, its
+   * dangling-id clears being invisible to the hash -- must not be kept over either. */
   const uint64_t root_hash = paint_layers_root_topology_hash(ma, wired_channels);
   uint64_t stored_root = 0;
   /* The kept root also has to still be instantiated in the material: a user can delete the group
@@ -1123,7 +1126,8 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   const bNode *kept_instance = instance_find(ma, ma.paint_layers_owner_uid);
   const bool keep_root = !created_tree && tree_root_hash_get(*tree, stored_root) &&
                          stored_root == root_hash && kept_instance != nullptr &&
-                         kept_instance->id == &tree->id;
+                         kept_instance->id == &tree->id &&
+                         (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) == 0;
 
   bool relations_changed = report.replaced_foreign_tree;
   /* A failed sync means a value input has no socket on its instance (a hand-edited tree), a keyed
@@ -1663,14 +1667,22 @@ void BKE_paint_layers_undo_validate(Main &bmain)
     if (ma.nodetree != nullptr) {
       trees.append(ma.nodetree);
     }
+    bool tree_cleared = false;
     for (bNodeTree *tree : trees) {
-      undo_tree_dangling_clear(*tree, live);
+      if (undo_tree_dangling_clear(*tree, live)) {
+        /* The tree's stored hashes no longer describe the ids it names: a keep decision would hand
+         * the nulled pointers back, so the next pass rebuilds the tree instead. A decode that nulled
+         * the pointers deliberately (#BKE_paint_layers_undo_prepare) cleared the hashes itself. */
+        tree_hash_clear(*tree);
+        tree_cleared = true;
+      }
     }
-    /* Always regenerated: a material the decode re-read takes its flag from the snapshot, which
-     * drops the one #BKE_paint_layers_undo_prepare set, and a tree it kept has had its maps and
-     * groups nulled there, which no dangling check can tell from a deliberately empty pointer. */
-    ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
-    DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+    /* Regenerated only when something was actually cleared: a validate on a current material must
+     * not throw the kept trees away. */
+    if (tree_cleared) {
+      ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+      DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+    }
   }
   /* The pixel-edit subscriptions name images by address: drop the ones the decode freed. */
   BKE_paint_layers_bake_subscriptions_validate(bmain);

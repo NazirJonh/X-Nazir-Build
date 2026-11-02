@@ -396,8 +396,12 @@ std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Mesh &mesh,
         if (has_orco) {
           dst_generated[index] = o0 * w0 + o1 * w1 + o2 * w2;
         }
+        /* Counted once: a texel on a shared edge passes the epsilon of both its triangles, and the
+         * count is what the mask says. */
+        if (dst_valid[index] == 0) {
+          valid_count++;
+        }
         dst_valid[index] = 1;
-        valid_count++;
         valid_min_x = std::min(valid_min_x, x);
         valid_max_x = std::max(valid_max_x, x);
         valid_min_y = std::min(valid_min_y, y);

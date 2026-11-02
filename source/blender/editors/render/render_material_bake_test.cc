@@ -12,7 +12,9 @@
 #include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
+#include "BKE_node_runtime.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generate.hh"
 
 #include "ED_material_bake.hh"
 #include "ED_material_combined.hh"
@@ -61,6 +63,10 @@ class MaterialBakeTest : public bke::BlenderGTestBase {
 
   void TearDown() override
   {
+    /* #BLI_timer_unregister only tags a registration for removal; the block is freed by
+     * #BLI_timer_execute, which a test process never runs. Free the tagged entries so the
+     * debounce timers these tests armed do not report as leaks. */
+    BLI_timer_free();
     BKE_main_free(bmain);
     G_MAIN = nullptr;
   }
@@ -451,17 +457,26 @@ TEST_F(MaterialBakeTest, height_request_follows_include_height)
   Vector<BakeSocketRequest> requests;
   Vector<int> request_channels;
 
-  EXPECT_FALSE(bake_channel_requests_build(
+  /* The stack's Bump rides on the Principled Normal, so the resolve answers Normal as Baked with or
+   * without the Height map: what #include_height decides is whether the Height request joins it. */
+  EXPECT_TRUE(bake_channel_requests_build(
       *layered, resolve, /*include_image_resolution=*/true, requests, request_channels, false));
-  EXPECT_TRUE(request_channels.is_empty());
-
-  ASSERT_TRUE(bake_channel_requests_build(
-      *layered, resolve, /*include_image_resolution=*/true, requests, request_channels, true));
   ASSERT_EQ(requests.size(), 1);
   ASSERT_EQ(request_channels.size(), 1);
-  EXPECT_EQ(request_channels[0], PAINT_MATERIAL_CHANNEL_HEIGHT);
-  EXPECT_TRUE(requests[0].is_color);
-  EXPECT_FALSE(requests[0].encode_vector);
+  EXPECT_EQ(request_channels[0], PAINT_MATERIAL_CHANNEL_NORMAL);
+
+  requests.clear();
+  request_channels.clear();
+  ASSERT_TRUE(bake_channel_requests_build(
+      *layered, resolve, /*include_image_resolution=*/true, requests, request_channels, true));
+  ASSERT_EQ(requests.size(), 2);
+  ASSERT_EQ(request_channels.size(), 2);
+  EXPECT_EQ(request_channels[1], PAINT_MATERIAL_CHANNEL_HEIGHT);
+  /* The Height request reads that Bump's Height input. */
+  EXPECT_EQ(requests[1].source->owner_node().type_legacy, SH_NODE_BUMP);
+  EXPECT_STREQ(requests[1].source->identifier, "Height");
+  EXPECT_TRUE(requests[1].is_color);
+  EXPECT_FALSE(requests[1].encode_vector);
 }
 
 /** The Height map is data: a float buffer in a data colorspace, whatever values land in it. */

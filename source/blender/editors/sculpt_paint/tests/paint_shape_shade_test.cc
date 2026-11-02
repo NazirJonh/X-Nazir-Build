@@ -139,8 +139,9 @@ TEST(ShapeShade, NormalSlopeDirectionAndFlip)
   flipped.flag |= PAINT_SHAPE_NORMAL_FLIP_Y;
   const ChannelWrite dx = shade_channel(
       flipped, sample, ShapePart::Stroke, PAINT_MATERIAL_CHANNEL_NORMAL);
-  EXPECT_FLOAT_EQ(dx.value.x, gl.value.y);
-  EXPECT_FLOAT_EQ(dx.value.y, gl.value.x);
+  /* DirectX mirrors the green channel: X keeps its value, Y negates. */
+  EXPECT_FLOAT_EQ(dx.value.x, gl.value.x);
+  EXPECT_FLOAT_EQ(dx.value.y, -gl.value.y);
 }
 
 TEST(ShapeShade, FillNormalFollowsFillProfile)
@@ -169,7 +170,7 @@ TEST(ShapeShade, HeightNormalLink)
   /* With the height-to-normal link, a profile that does not drive height (coverage mode)
    * leaves the normal flat; switching the profile to height tilts it again. */
   ShapeStyle style = flat_style();
-  style.flag |= PAINT_SHAPE_HEIGHT_NORMAL_LINK;
+  style.flag |= PAINT_SHAPE_USE_PROFILE | PAINT_SHAPE_HEIGHT_NORMAL_LINK;
   style.profile_mode = PAINT_SHAPE_PROFILE_COVERAGE;
   style.fill_channels[PAINT_MATERIAL_CHANNEL_NORMAL].use = true;
   for (const int i : IndexRange(ShapeStyle::PROFILE_TABLE_SIZE)) {
@@ -341,9 +342,11 @@ TEST(ShapeShade, TextureNormalReplacesProfileSlope)
   sample.fill_dir = float2(1.0f, 0.0f);
   const ChannelWrite write = shade_channel(
       style, sample, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_NORMAL);
-  EXPECT_NEAR(write.value.x, 0.5f, 1e-5f);
-  EXPECT_NEAR(write.value.y, 0.0f, 1e-5f);
-  EXPECT_NEAR(write.value.z, 1.0f, 1e-5f);
+  /* The sampler unpacks and normalizes, so the half-strength +X slope arrives at unit length. */
+  const float3 expected = math::normalize(float3(0.5f, 0.0f, 1.0f));
+  EXPECT_NEAR(write.value.x, expected.x, 1e-5f);
+  EXPECT_NEAR(write.value.y, expected.y, 1e-5f);
+  EXPECT_NEAR(write.value.z, expected.z, 1e-5f);
 }
 
 TEST(ShapeShade, TextureCanvasColorAndTint)

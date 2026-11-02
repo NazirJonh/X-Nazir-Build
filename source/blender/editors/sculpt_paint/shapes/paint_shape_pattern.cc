@@ -295,8 +295,9 @@ void pattern_tile_rasterize(const PaintShape &shape,
 
   for (const int dy : IndexRange(copies)) {
     for (const int dx : IndexRange(copies)) {
-      const int sx = dx - 1;
-      const int sy = dy - 1;
+      /* The 3x3 neighborhood centers on the un-shifted copy; a single copy is that center. */
+      const int sx = wrap ? dx - 1 : 0;
+      const int sy = wrap ? dy - 1 : 0;
       /* A shape copy shifted by s tiles reads the same tile at offset -s. */
       const float2 tile_offset_px = float2(-float(sx) * resolution, -float(sy) * resolution);
       const ShapeCoverage cov = shape_rasterize(Span<PaintShape>(&shape, 1), style, rect,

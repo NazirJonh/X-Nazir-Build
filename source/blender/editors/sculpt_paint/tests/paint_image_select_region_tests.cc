@@ -78,6 +78,10 @@ TEST(ImageSelectRegion, MinimaxMatchesFloodFill)
   for (float &value : dist) {
     value = rng.get_float();
   }
+  /* The distance is measured from the clicked pixel, so the seed's own distance is 0 in every
+   * caller. The minimax path includes the seed itself, and a seed above the tolerance would wall
+   * the whole flood off -- a shape the reference (which never gates on the seed) must not see. */
+  dist[0] = 0.0f;
 
   Array<float> dist_quantized(n);
   for (const int64_t i : IndexRange(n)) {

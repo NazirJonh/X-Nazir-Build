@@ -302,7 +302,8 @@ TEST_F(PaintLayersAnchorPointTest, add_point_on_layer_appends_to_effects)
   MaterialPaintLayer *point = BKE_paint_layers_add_with_policy(*ma, params);
   ASSERT_NE(point, nullptr);
   EXPECT_EQ(point->role, MA_PAINT_LAYER_ROLE_EFFECT);
-  EXPECT_EQ(BLI_findindex(&row->effects, point), 2);
+  /* One correction carries the list, so the appended point lands right after it. */
+  EXPECT_EQ(BLI_findindex(&row->effects, point), 1);
   EXPECT_EQ(row->effects.last, point);
 }
 
@@ -1073,10 +1074,15 @@ TEST_F(PaintLayersAnchorPointTest, graph_reader_target_change_rebuilds_group)
   const uint64_t after_target = hash(*reader_row);
   EXPECT_NE(after_target, before) << "the reader group must be rebuilt, not relinked with defaults";
 
-  /* The source row's channel composition decides which taps the reader's group exposes. */
+  /* The source row's channel composition decides which taps the reader's group exposes. A record
+   * with nothing in it takes part nowhere, so the channel is given a value, which is what makes
+   * the source publish a tap for it. */
   ASSERT_NE(BKE_paint_layers_channel_add(
                 *ma, second, PAINT_MATERIAL_CHANNEL_ROUGHNESS),
             nullptr);
+  const float rough[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_value(*ma, second, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough));
   EXPECT_NE(hash(*reader_row), after_target);
 
   /* Values and pixels are inputs, not structure: neither moves the owner row's topology. */

@@ -218,7 +218,9 @@ void paint_vector_from_document(PaintVector &r_pv, const VectorDocument &doc)
         copy_v2_v2(out_point.handle_l, point.handle_left);
         copy_v2_v2(out_point.handle_r, point.handle_right);
         out_point.width_factor = point.width_factor;
-        /* The points array is value-initialized, so only set the bits; nothing to clear. */
+        /* The fresh points carry the DNA default flag (#PAINT_VECTOR_POINT_AUTO_HANDLES), so the
+         * bits are assigned rather than only set. */
+        out_point.flag = 0;
         if (point.corner) {
           out_point.flag |= PAINT_VECTOR_POINT_CORNER;
         }

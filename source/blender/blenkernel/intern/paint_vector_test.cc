@@ -381,8 +381,12 @@ TEST_F(PaintVectorTest, CurvePatchParamsConvertRoundTrip)
 
 TEST_F(PaintVectorTest, CurvePatchParamsDecodeDefaults)
 {
-  PaintVectorCurveParams zeroed{};
-  const bke::CurvePatchParams decoded = BKE_paint_vector_curve_params_decode(zeroed);
+  /* The DNA zero state: data read from a file written before a field existed is zero-filled, not
+   * default-constructed (the DNA mirror's member initializers would give `length_repeat` 1 and a
+   * +Z plane normal). */
+  PaintVectorCurveParams params{};
+  memset(&params, 0, sizeof(params));
+  const bke::CurvePatchParams decoded = BKE_paint_vector_curve_params_decode(params);
   /* The DNA zero state decodes to the source struct's defaults (radius 0, ribbon/fill/curve
    * stamping, no falloff). */
   EXPECT_FLOAT_EQ(decoded.radius, 0.0f);

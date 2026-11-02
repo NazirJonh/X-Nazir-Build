@@ -942,6 +942,10 @@ static Brush *paint_layer_curve_patch_brush_snapshot_create(Main &bmain,
   /* The rename adjusts for uniqueness against the database, so two rows made from the same brush
    * keep two distinct snapshots. */
   BKE_libblock_rename(bmain, snapshot->id, brush_name.c_str());
+  /* The snapshot is the row's private payload: the copy (and a fresh brush) comes with the stock
+   * fake user, which would keep an orphan snapshot in the file after the row is gone. The effect's
+   * reference is its only user, so a removal frees it (see #BKE_paint_layers_curve_patch_brush_set). */
+  id_fake_user_clear(&snapshot->id);
   /* The row's tool IS a Curve Patch brush. Without this the Stroke panel would hide the Curve
    * Patch settings, the tool gates would not treat the brush as a patch, and the session would
    * show the wrong cursor. */
@@ -3745,29 +3749,33 @@ int BKE_paint_layers_pack_maps(const Main &bmain, const bool for_autosave, Repor
     }
 
     /* The pack encodes the buffer the image holds, so it has to be there; a packed file the pack
-     * dropped for want of one would leave the map with nothing at all. */
-    void *lock = nullptr;
-    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+     * dropped for want of one would leave the map with nothing at all. The cache is peeked at
+     * rather than acquired: an acquire of a FILE-source map reloads it from disk, which first
+     * drops the cached buffer — for a painted assigned map that would throw away the very dirty
+     * pixels this pack exists to embed. */
+    ImBuf *ibuf = BKE_image_get_first_ibuf(image);
     const bool has_buffer = ibuf != nullptr;
     if (has_buffer) {
       /* A map's alpha is its coverage; the pack writes as many channels as the color mode names,
        * and maps made with 24 planes would lose it. */
       ibuf->color_mode = ImColorMode::RGBA;
     }
-    BKE_image_release_ibuf(image, ibuf, lock);
+    IMB_freeImBuf(ibuf);
 
     const bool ok = has_buffer && (for_autosave ? BKE_image_autosave_memorypack(image) :
                                                   BKE_image_memorypack(image));
     if (ok) {
       packed_num++;
     }
-    else if (reports != nullptr) {
-      /* The map loses its pixels with this file write: louder than a warning, and the save
-       * surfaces the report banner to the user. */
-      BKE_reportf(reports,
-                  RPT_ERROR,
-                  "Paint layer map \"%s\" could not be packed and will be empty in the file",
-                  image->id.name + 2);
+    else {
+      if (reports != nullptr) {
+        /* The map loses its pixels with this file write: louder than a warning, and the save
+         * surfaces the report banner to the user. */
+        BKE_reportf(reports,
+                    RPT_ERROR,
+                    "Paint layer map \"%s\" could not be packed and will be empty in the file",
+                    image->id.name + 2);
+      }
     }
   }
   return packed_num;

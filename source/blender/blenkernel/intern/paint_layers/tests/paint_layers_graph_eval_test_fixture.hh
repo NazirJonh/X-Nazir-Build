@@ -750,6 +750,9 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
     G_MAIN = bmain;
     ma = BKE_material_add(bmain, "Layered");
     ma->paint_layers_flag |= MA_PAINT_LAYERED;
+    /* The channel set the New Layered Material dialog starts from, Height included: a channel the
+     * set leaves out takes part nowhere, and the height tests read that channel. */
+    BKE_paint_layers_channel_set_mask_set(*ma, BKE_paint_layers_new_material_channel_set());
   }
 
   void TearDown() override

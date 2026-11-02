@@ -1271,7 +1271,7 @@ TEST_F(PaintLayersGraphEvalTest, height_inherit_follows_the_rows_own_blend)
   const float layer = 204.0f / 255.0f;
   /* The row's blend, the effective mode it must report, and the step that mode takes. */
   struct Case {
-    int row_blend;
+    eMaterialPaintLayerBlend row_blend;
     int effective;
     int step;
   };
@@ -1316,7 +1316,7 @@ TEST_F(PaintLayersGraphEvalTest, height_inherit_neutral_rows_are_no_ops_for_ever
   ASSERT_TRUE(BKE_paint_layers_channel_height_blend_set(
       *ma, *top_layer, PAINT_MATERIAL_CHANNEL_HEIGHT, MA_PAINT_LAYER_HEIGHT_BLEND_INHERIT));
 
-  for (const int row_blend : {MA_PAINT_LAYER_BLEND_MIX,
+  for (const eMaterialPaintLayerBlend row_blend : {MA_PAINT_LAYER_BLEND_MIX,
                               MA_PAINT_LAYER_BLEND_ADD,
                               MA_PAINT_LAYER_BLEND_SUBTRACT,
                               MA_PAINT_LAYER_BLEND_MULTIPLY,

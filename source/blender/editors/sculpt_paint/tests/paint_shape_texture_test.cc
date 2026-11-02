@@ -84,8 +84,10 @@ TEST(ShapeTextureCoord, MaskRotation)
   map.angle = float(M_PI_2);
   const ShapeTexFrame frame;
   const ShapeTexCoord coord = shape_texture_coord_mask(map, float2(10.0f, 0.0f), frame);
-  /* R(-90) * (10, 0) = (0, -10) -> uv (0, -1), wrapped to (0, 0). */
-  EXPECT_NEAR(coord.uv.x, 0.0f, 1e-5f);
+  /* R(-90) * (10, 0) = (0, -10) -> uv (0, -1), wrapped to (0, 0). The rotation's cos is not
+   * exactly zero in floats, so the x axis may wrap to either side of its seam (the same texel). */
+  const float x = coord.uv.x > 0.5f ? coord.uv.x - 1.0f : coord.uv.x;
+  EXPECT_NEAR(x, 0.0f, 1e-5f);
   EXPECT_NEAR(coord.uv.y, 0.0f, 1e-5f);
   EXPECT_NEAR(coord.frame_angle, float(M_PI_2), 1e-5f);
 }
@@ -205,11 +207,16 @@ TEST(ShapeTextureCoord, AlongWholeRepeats)
   sample.stroke_len = 200.0f;
   const ShapeTexCoord coord = shape_texture_coord_along(map, sample, frame);
   EXPECT_NEAR(coord.uv.x, 0.0f, 1e-5f);
-  /* The tile length follows from the repeat count: 200 / 7. */
+  /* The tile length follows from the repeat count (200 / 7): half the stroke lands mid-repeat. */
+  ShapeSample sample_mid = sample;
+  sample_mid.stroke_s = 100.0f;
+  const ShapeTexCoord coord_mid = shape_texture_coord_along(map, sample_mid, frame);
+  EXPECT_NEAR(coord_mid.uv.x, 0.5f, 1e-5f);
+  /* The stroke's end sits exactly on the last repeat's seam: the same texel as the start. */
   ShapeSample sample_end = sample;
   sample_end.stroke_s = 200.0f / 7.0f;
   const ShapeTexCoord coord_end = shape_texture_coord_along(map, sample_end, frame);
-  EXPECT_NEAR(coord_end.uv.x, 1.0f, 1e-5f);
+  EXPECT_NEAR(coord_end.uv.x, 0.0f, 1e-5f);
 }
 
 TEST(ShapeTextureCoord, AlongFlipAcross)
@@ -291,15 +298,17 @@ TEST(ShapeTextureSample, NormalRotationAndFlip)
   float pixels[4] = {0.75f, 0.5f, 1.0f, 1.0f};
   channel.float_px = pixels;
 
+  /* The unpacked (0.5, 0, 1) slope, normalized to unit length like every consumer expects. */
+  const float3 expected = math::normalize(float3(0.5f, 0.0f, 1.0f));
   const float3 raw = shape_texture_sample_normal(channel, float2(0.5f, 0.5f), 0.0f);
-  EXPECT_NEAR(raw.x, 0.5f, 1e-5f);
-  EXPECT_NEAR(raw.y, 0.0f, 1e-5f);
-  EXPECT_NEAR(raw.z, 1.0f, 1e-5f);
+  EXPECT_NEAR(raw.x, expected.x, 1e-5f);
+  EXPECT_NEAR(raw.y, expected.y, 1e-5f);
+  EXPECT_NEAR(raw.z, expected.z, 1e-5f);
 
   /* Rotated by 90 degrees, the +X slope becomes +Y. */
   const float3 rotated = shape_texture_sample_normal(channel, float2(0.5f, 0.5f), float(M_PI_2));
   EXPECT_NEAR(rotated.x, 0.0f, 1e-5f);
-  EXPECT_NEAR(rotated.y, 0.5f, 1e-5f);
+  EXPECT_NEAR(rotated.y, expected.x, 1e-5f);
 }
 
 /** \} */

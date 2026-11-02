@@ -1169,6 +1169,17 @@ static float composite_filter_color(const int16_t filter,
                                          params[PAINT_LAYER_CLAMP_MAX]);
       }
       break;
+    case MA_PAINT_LAYER_FILTER_COLOR_BALANCE:
+      /* `pow(max(rgb * A + B, 0), E)` per channel, the folded triples the CPU description, the
+       * graph and the GPU share (#paint_layer_color_balance_fold). No payload pointer: the folded
+       * numbers are all the balance is here. */
+      for (const int k : IndexRange(3)) {
+        rgb[k] = powf(std::max(rgb[k] * params[PAINT_LAYER_COLOR_BALANCE_A + k] +
+                                   params[PAINT_LAYER_COLOR_BALANCE_B + k],
+                               0.0f),
+                      params[PAINT_LAYER_COLOR_BALANCE_E + k]);
+      }
+      break;
     case MA_PAINT_LAYER_FILTER_COLOR_RAMP:
       if (ramp != nullptr) {
         return paint_layer_color_ramp_apply(

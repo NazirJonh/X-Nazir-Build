@@ -199,6 +199,13 @@ inline constexpr const char *ROLE_GRADIENT_TYPE = "gradient_type";
 /** #INPUT_ROLE_PROP value of a Gradient row's repeat mode (a Float input). */
 inline constexpr const char *ROLE_GRADIENT_REPEAT = "gradient_repeat";
 /**
+ * #INPUT_ROLE_PROP value of a Color Balance filter's folded triple (a Vector input holding the
+ * three numbers the MULTIPLY_ADD / MAXIMUM / POWER chain reads: the linear slope, its offset and
+ * the power's exponent). The method the payload carries is not part of the graph — only the folded
+ * A, B and E are — and the position of the triple (#INPUT_PARAM_PROP: 0, 1 or 2) names which one.
+ */
+inline constexpr const char *ROLE_COLOR_BALANCE = "color_balance";
+/**
  * On a source-group wrapper's interface input: the row mapping value relayed into the wrapper.
  * The same three roles travel from the row group into the wrapper instance and down every private
  * group copy on the path to the source's Principled BSDF, so the Mapping nodes built inside the

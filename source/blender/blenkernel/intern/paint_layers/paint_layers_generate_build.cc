@@ -854,6 +854,42 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
       {
         continue;
       }
+      if (kind->params[i].type == PaintLayerKindParamType::ColorBalance) {
+        /* The balance is three vectors of values, not one float: the folded A, B and E triples,
+         * each its own group input so an edit of one is a value and not a different graph. The
+         * method lives in the payload, not in the graph — only the folded numbers reach the
+         * MULTIPLY_ADD / MAXIMUM / POWER chain. A null payload folds the neutral one, the same
+         * thing the ensure would allocate. */
+        static const MaterialPaintLayerColorBalance neutral = {};
+        const MaterialPaintLayerColorBalance &source =
+            (filter.color_balance != nullptr) ? *filter.color_balance : neutral;
+        float folded[PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM];
+        paint_layer_color_balance_fold(source, folded);
+        const struct {
+          const char *suffix;
+          int position;
+        } triples[3] = {
+            {"Balance A", PAINT_LAYER_COLOR_BALANCE_A},
+            {"Balance B", PAINT_LAYER_COLOR_BALANCE_B},
+            {"Balance E", PAINT_LAYER_COLOR_BALANCE_E},
+        };
+        for (const auto &triple : triples) {
+          char base[200];
+          effect_input_label(layer_name, filter, triple.suffix, base, sizeof(base));
+          bNodeTreeInterfaceSocket *balance = layer_group_value_input(
+              group, base, "NodeSocketVector", ROLE_COLOR_BALANCE, filter.marker, -1);
+          if (balance != nullptr) {
+            prop_int_set(balance->properties, INPUT_PARAM_PROP, triple.position);
+            const float value[3] = {folded[triple.position],
+                                    folded[triple.position + 1],
+                                    folded[triple.position + 2]};
+            group_input_vector_default_set(group, *balance, value);
+          }
+          /* Kept even when null, so the builder sees the set is incomplete and builds nothing. */
+          effect_param_inputs_.lookup_or_add_default(&filter).append(balance);
+        }
+        continue;
+      }
       char base[200];
       effect_input_label(layer_name, filter, kind->params[i].label, base, sizeof(base));
       bNodeTreeInterfaceSocket *param = layer_group_value_input(

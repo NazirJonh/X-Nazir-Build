@@ -144,6 +144,18 @@ static void composite_mapping_describe(const Material &ma,
 /** The parameters of \a row's kind in the schema order the evaluator reads them in. */
 template<size_t N> static void composite_filter_params(const MaterialPaintLayer &row, float (&r_params)[N])
 {
+  if (paint_layer_kind_has_color_balance_param(row)) {
+    /* The balance is not a scalar schema: its payload folds into the 12 numbers the composite, the
+     * graph and the GPU share. A null payload reads as the neutral one, the same thing the ensure
+     * would allocate. A caller whose array is shorter would be a shape change, so the fold is
+     * compiled out there rather than written past the array. */
+    if constexpr (N >= PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM) {
+      static const MaterialPaintLayerColorBalance neutral = {};
+      paint_layer_color_balance_fold(row.color_balance != nullptr ? *row.color_balance : neutral,
+                                     r_params);
+    }
+    return;
+  }
   if (const PaintLayerKindInfo *kind = paint_layer_kind_of(row)) {
     for (const int i : IndexRange(std::min(kind->params_num, int(N)))) {
       r_params[i] = paint_layer_kind_param_get(row, i);

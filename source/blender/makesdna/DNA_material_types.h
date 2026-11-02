@@ -834,6 +834,14 @@ enum eMaterialPaintLayerFilter : int16_t {
   MA_PAINT_LAYER_FILTER_CLAMP = 11,
   /** Remap each channel through its own Bézier curve, with black and white levels. */
   MA_PAINT_LAYER_FILTER_CURVES = 12,
+  /** Balance the colour through a lift/gamma/gain (or slope/offset/power) triple per channel. */
+  MA_PAINT_LAYER_FILTER_COLOR_BALANCE = 13,
+};
+
+/** #MaterialPaintLayerColorBalance::method */
+enum eMaterialPaintLayerColorBalanceMethod : int16_t {
+  MA_PAINT_LAYER_COLOR_BALANCE_LGG = 0,
+  MA_PAINT_LAYER_COLOR_BALANCE_ASC_CDL = 1,
 };
 
 /**
@@ -1189,6 +1197,37 @@ struct MaterialPaintLayerCurves {
 };
 
 /**
+ * The balance of a kind that reads one (the Color Balance filter). Kept behind a pointer like the
+ * ramp and the curves, so a row of another kind pays nothing for it. The two methods fold into one
+ * form, `out_i = pow(max(c_i * A_i + B_i, 0), E_i)`, which both the CPU composite and the generated
+ * graph read; the values themselves are stored, not the folded form, so switching the method keeps
+ * both triples intact.
+ */
+struct MaterialPaintLayerColorBalance {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerColorBalance)
+
+  /** #eMaterialPaintLayerColorBalanceMethod. */
+  int16_t method = MA_PAINT_LAYER_COLOR_BALANCE_LGG;
+  /* Pads the struct to a multiple of the pointer size, as every DNA struct must. */
+  char _pad[6] = {};
+  /**
+   * LGG: where the black point rises to; the neutral is zero. Each channel carries its own value,
+   * so the picker can tint the shadows alone.
+   */
+  float lift[3] = {0.0f, 0.0f, 0.0f};
+  /** LGG: the midtones' exponent; the neutral is one. */
+  float gamma[3] = {1.0f, 1.0f, 1.0f};
+  /** LGG: the multiplier the highlights reach; the neutral is one. */
+  float gain[3] = {1.0f, 1.0f, 1.0f};
+  /** ASC CDL: the multiplier, the gain's counterpart; the neutral is one. */
+  float slope[3] = {1.0f, 1.0f, 1.0f};
+  /** ASC CDL: the additive term; the neutral is zero. */
+  float offset[3] = {0.0f, 0.0f, 0.0f};
+  /** ASC CDL: the exponent; the neutral is one. */
+  float power[3] = {1.0f, 1.0f, 1.0f};
+};
+
+/**
  * One row of a layered material's stack, the DNA description of what the material is painted with.
  *
  * The list is stored bottom-to-top. Folders nest through #children, which holds the same type.
@@ -1260,6 +1299,11 @@ struct MaterialPaintLayer {
    * Owned by the row and copied, freed and written with it.
    */
   struct MaterialPaintLayerCurves *curves = nullptr;
+  /**
+   * The balance a kind with a color-balance parameter reads (Color Balance), or null for every
+   * other kind. Owned by the row and copied, freed and written with it.
+   */
+  struct MaterialPaintLayerColorBalance *color_balance = nullptr;
   /**
    * #eMaterialPaintLayerObjectMaskType: whether the row is limited per object (Mesh) or per UDIM
    * tile of each object (UV Tiles). The per-object choices live on the objects

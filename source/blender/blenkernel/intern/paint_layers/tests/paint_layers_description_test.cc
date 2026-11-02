@@ -1166,6 +1166,55 @@ TEST_F(PaintLayersDescription, rna_clamp_params_are_ranged_floats)
   rna_expect_ranged_float_param(clamp_ptr, *clamp, "max", 1.0f, PAINT_LAYER_CLAMP_MAX);
 }
 
+TEST_F(PaintLayersDescription, rna_color_balance_reaches_the_payload)
+{
+  Material *ma = BKE_material_add(bmain, "RnaColorBalanceMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *plain = BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_CLAMP);
+  MaterialPaintLayer *balance_row = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_COLOR_BALANCE);
+  ASSERT_NE(plain, nullptr);
+  ASSERT_NE(balance_row, nullptr);
+
+  PointerRNA plain_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, plain);
+  PropertyRNA *plain_supported = RNA_struct_find_property(&plain_ptr, "color_balance_supported");
+  ASSERT_NE(plain_supported, nullptr);
+  EXPECT_FALSE(RNA_property_boolean_get(&plain_ptr, plain_supported));
+  /* A kind without the parameter keeps its payload null through the pointer's getter too. */
+  EXPECT_EQ(RNA_pointer_get(&plain_ptr, "kind_color_balance").data, nullptr);
+
+  PointerRNA balance_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer,
+                                                       balance_row);
+  PropertyRNA *supported = RNA_struct_find_property(&balance_ptr, "color_balance_supported");
+  ASSERT_NE(supported, nullptr);
+  EXPECT_TRUE(RNA_property_boolean_get(&balance_ptr, supported));
+
+  /* The pointer getter ensures the payload: the read hands back the neutral balance. */
+  PointerRNA payload = RNA_pointer_get(&balance_ptr, "kind_color_balance");
+  ASSERT_NE(payload.data, nullptr);
+  EXPECT_EQ(std::string(RNA_struct_identifier(payload.type)), "MaterialPaintLayerColorBalance");
+
+  PropertyRNA *method = RNA_struct_find_property(&payload, "method");
+  ASSERT_NE(method, nullptr);
+  EXPECT_EQ(RNA_property_type(method), PROP_ENUM);
+  EXPECT_EQ(RNA_property_enum_get(&payload, method), MA_PAINT_LAYER_COLOR_BALANCE_LGG);
+
+  /* The values are plain linear floats a picker writes straight into the payload: a lift of a
+   * quarter per channel lands in the row's own storage. */
+  PropertyRNA *lift = RNA_struct_find_property(&payload, "lift");
+  ASSERT_NE(lift, nullptr);
+  EXPECT_EQ(RNA_property_type(lift), PROP_FLOAT);
+  EXPECT_EQ(RNA_property_array_length(&payload, lift), 3);
+  EXPECT_FLOAT_EQ(RNA_property_float_get_index(&payload, lift, 0), 0.0f);
+  RNA_property_float_set_index(&payload, lift, 1, 0.25f);
+  EXPECT_FLOAT_EQ(balance_row->color_balance->lift[1], 0.25f);
+  float range_min = 0.0f, range_max = 0.0f;
+  RNA_property_float_range(&payload, lift, &range_min, &range_max);
+  EXPECT_FLOAT_EQ(range_min, -1.0f);
+  EXPECT_FLOAT_EQ(range_max, 1.0f);
+}
+
 TEST_F(PaintLayersDescription, rna_paint_layers_collection_is_registered)
 {
   Material *ma = BKE_material_add(bmain, "RnaLayersMat");

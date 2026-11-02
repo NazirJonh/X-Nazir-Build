@@ -260,6 +260,7 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_THRESHOLD 10
 #define COMBINED_FILTER_CLAMP 11
 #define COMBINED_FILTER_CURVES 12
+#define COMBINED_FILTER_COLOR_BALANCE 13
 
 float levels_channel(float value, float4 p0, float4 p1)
 {
@@ -406,9 +407,10 @@ float4 apply_color_ramp(sampler2D lut_tx, float3 rgb, bool use_nearest)
 /**
  * One filter at full strength. `.xyz` is the filtered colour and `.w` the strength multiplier the
  * CPU's `composite_filter_color` returns: a Color Ramp's stop alpha when Affect Alpha is set, one
- * for every other filter and for a ramp that ignores it.
+ * for every other filter and for a ramp that ignores it. The Color Balance reads its exponent
+ * triple from `p2`; every other filter leaves it unused.
  */
-float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, sampler2D lut_tx)
+float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, float4 p2, sampler2D lut_tx)
 {
   float3 result = rgb;
   float strength = 1.0f;
@@ -474,6 +476,17 @@ float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, sampler2D
       result = float3(min(max(rgb.x, p0.x), p0.y),
                       min(max(rgb.y, p0.x), p0.y),
                       min(max(rgb.z, p0.x), p0.y));
+      break;
+    }
+    case COMBINED_FILTER_COLOR_BALANCE: {
+      /* `pow(max(rgb * A + B, 0), E)` per channel, the folded triples the CPU composite reads:
+       * `p0.xyz` is A, `p1.xyz` is B and `p2.xyz` is E (each in the `.xyz` of its own float4, not
+       * laid end to end). Per component: the vectorized pow is not an overload every backend has.
+       */
+      float raised_x = pow(max(rgb.x * p0.x + p1.x, 0.0f), p2.x);
+      float raised_y = pow(max(rgb.y * p0.y + p1.y, 0.0f), p2.y);
+      float raised_z = pow(max(rgb.z * p0.z + p1.z, 0.0f), p2.z);
+      result = float3(raised_x, raised_y, raised_z);
       break;
     }
     case COMBINED_FILTER_CURVES:
@@ -608,6 +621,8 @@ struct MaskResources {
   /** The filter's parameters in its schema order. */
   [[push_constant]] const float4 filter_params_0;
   [[push_constant]] const float4 filter_params_1;
+  /** A Color Balance's exponent triple; unused by every other filter. */
+  [[push_constant]] const float4 filter_params_2;
   /** The grey of an item that has no map. */
   [[push_constant]] const float constant_gray;
   [[push_constant]] const float opacity;
@@ -706,13 +721,13 @@ void mask_comp([[resource_table]] MaskResources &srt,
     if (srt.filter_kind != COMBINED_FILTER_NONE) {
       /* A filter works on the factor so far as a grey. The Color Ramp's strength multiplier is
        * ignored, as the CPU's mask path ignores it: a grey coefficient has no stop alpha. */
-      float grey =
-          apply_filter(srt.filter_kind,
-                       float3(m),
-                       srt.filter_params_0,
-                       srt.filter_params_1,
-                       srt.filter_lut_tx)
-              .x;
+      float grey = apply_filter(srt.filter_kind,
+                                float3(m),
+                                srt.filter_params_0,
+                                srt.filter_params_1,
+                                srt.filter_params_2,
+                                srt.filter_lut_tx)
+                       .x;
       m += (grey - m) * opacity;
     }
     else {
@@ -794,6 +809,8 @@ struct LayerResources {
   /** The adjustment's filter and its parameters in the schema order. */
   [[push_constant]] const float4 filter_params_0;
   [[push_constant]] const float4 filter_params_1;
+  /** A Color Balance's exponent triple; unused by every other filter. */
+  [[push_constant]] const float4 filter_params_2;
   [[push_constant]] const float opacity;
   [[push_constant]] const float lod;
   [[push_constant]] const int flags;
@@ -836,6 +853,7 @@ void layer_comp([[resource_table]] LayerResources &srt,
                                      dst.xyz,
                                      srt.filter_params_0,
                                      srt.filter_params_1,
+                                     srt.filter_params_2,
                                      srt.filter_lut_tx);
       top.xyz = (filtered.w == 1.0f) ? filtered.xyz :
                                       dst.xyz + (filtered.xyz - dst.xyz) * filtered.w;
@@ -924,6 +942,8 @@ struct CorrectionResources {
   [[push_constant]] const float2 mapping_rotation;
   [[push_constant]] const float4 filter_params_0;
   [[push_constant]] const float4 filter_params_1;
+  /** A Color Balance's exponent triple; unused by every other filter. */
+  [[push_constant]] const float4 filter_params_2;
   [[push_constant]] const float opacity;
   [[push_constant]] const float lod;
   [[push_constant]] const int flags;
@@ -951,6 +971,7 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
                                    s.xyz,
                                    srt.filter_params_0,
                                    srt.filter_params_1,
+                                   srt.filter_params_2,
                                    srt.filter_lut_tx);
     s.xyz = s.xyz + (filtered.xyz - s.xyz) * weight * filtered.w;
     imageStore(srt.row_color_img, texel, s);

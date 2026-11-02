@@ -754,6 +754,90 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       }
       return true;
     }
+    case MA_PAINT_LAYER_FILTER_COLOR_BALANCE: {
+      /* `pow(max(c * A + B, 0), E)` per channel: the folded triples the CPU composite reads, fed
+       * from three Vector inputs of the group so an edit of one is a value and not a different
+       * graph. The method the payload carries is not visible here — both fold into the same A, B
+       * and E — and the MULTIPLY_ADD carries the linear part, the MAXIMUM the clamp at zero, and
+       * one scalar POWER per component the exponent from its own triple. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != 3 || (*params)[0] == nullptr ||
+          (*params)[1] == nullptr || (*params)[2] == nullptr)
+      {
+        return false;
+      }
+      bNodeSocket *a_socket = group_input_socket(group, *(*params)[0]);
+      bNodeSocket *b_socket = group_input_socket(group, *(*params)[1]);
+      bNodeSocket *e_socket = group_input_socket(group, *(*params)[2]);
+      if (a_socket == nullptr || b_socket == nullptr || e_socket == nullptr) {
+        return false;
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      /* `c * A + B`: the second operand the helper links is A, the third is linked here. */
+      bNode *scaled = vector_math_node_add(tree,
+                                           grid_,
+                                           nodes,
+                                           NODE_VECTOR_MATH_MULTIPLY_ADD,
+                                           content,
+                                           {group.group_input, a_socket});
+      if (scaled == nullptr) {
+        return discard();
+      }
+      bNodeSocket *scaled_offset = socket_in(*scaled, "Vector_002");
+      if (scaled_offset == nullptr) {
+        return discard();
+      }
+      bke::node_add_link(tree, *group.group_input, *b_socket, *scaled, *scaled_offset);
+
+      /* `max(., 0)`: the CPU composite and the shader clamp before the power, so a negative base
+       * never reaches it. */
+      bNode *lower = vector_math_node_add(tree,
+                                          grid_,
+                                          nodes,
+                                          NODE_VECTOR_MATH_MAXIMUM,
+                                          {scaled, socket_out(*scaled, "Vector")},
+                                          {});
+      if (lower == nullptr) {
+        return discard();
+      }
+      bNodeSocket *lower_zero = socket_in(*lower, "Vector_001");
+      if (lower_zero == nullptr || lower_zero->default_value == nullptr) {
+        return discard();
+      }
+      zero_v3(static_cast<bNodeSocketValueVector *>(lower_zero->default_value)->value);
+
+      NodeOutput clamped[3];
+      if (!separate_xyz_node_add(tree, grid_, nodes, {lower, socket_out(*lower, "Vector")}, clamped))
+      {
+        return discard();
+      }
+      /* The exponents from their own triple, split once for all three channels. */
+      NodeOutput exponents[3];
+      if (!separate_xyz_node_add(tree, grid_, nodes, {group.group_input, e_socket}, exponents)) {
+        return discard();
+      }
+      NodeOutput powered[3];
+      for (const int i : IndexRange(3)) {
+        powered[i] = math_node_add(tree, grid_, nodes, NODE_MATH_POWER, clamped[i], exponents[i]);
+        if (powered[i].socket == nullptr) {
+          return discard();
+        }
+      }
+      NodeOutput combined = combine_xyz_node_add(tree, grid_, nodes, powered);
+      if (combined.socket == nullptr) {
+        return discard();
+      }
+
+      if (!filter_result_mix_add(tree, grid_, nodes, content, combined, strength, effect.name)) {
+        return discard();
+      }
+      return true;
+    }
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
       /* Map-coverage operators only exist in a mask, where #map_coverage_match_add builds them. */

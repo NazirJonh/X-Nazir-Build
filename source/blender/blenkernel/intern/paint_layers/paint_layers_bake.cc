@@ -1231,6 +1231,9 @@ static uint64_t bake_hash_layer(uint64_t h,
   if (layer.curves != nullptr) {
     h = bake_hash_mix(h, paint_layer_curves_hash(layer.curves->curve_mapping));
   }
+  if (layer.color_balance != nullptr) {
+    h = bake_hash_mix(h, paint_layer_color_balance_hash(*layer.color_balance));
+  }
   /* Effects first, then mask items, then children, each in its own storage order. */
   for (const MaterialPaintLayer &effect : layer.effects) {
     h = bake_hash_layer(h, ma, effect, true);

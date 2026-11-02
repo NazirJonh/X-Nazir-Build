@@ -1157,6 +1157,176 @@ TEST_F(PaintLayersCurvesTest, blend_round_trip_rebuilds_and_keeps_the_curves)
   BLI_delete(filepath, false, false);
 }
 
+class PaintLayersColorBalanceTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_balance(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_COLOR_BALANCE);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+
+  /* The LGG triple of the analytic line `0.75 * c + 0.25`: a quarter lift, the gain and the gamma
+   * left neutral, so the folded A is 0.75 and the folded B is 0.25 per channel. */
+  static void set_lift(MaterialPaintLayer &filter)
+  {
+    MaterialPaintLayerColorBalance *balance = BKE_paint_layers_color_balance_ensure(filter);
+    ASSERT_NE(balance, nullptr);
+    balance->method = MA_PAINT_LAYER_COLOR_BALANCE_LGG;
+    copy_v3_fl(balance->lift, 0.25f);
+    copy_v3_fl(balance->gamma, 1.0f);
+    copy_v3_fl(balance->gain, 1.0f);
+  }
+
+  static void set_asc(MaterialPaintLayer &filter,
+                      const float slope,
+                      const float offset,
+                      const float power)
+  {
+    MaterialPaintLayerColorBalance *balance = BKE_paint_layers_color_balance_ensure(filter);
+    ASSERT_NE(balance, nullptr);
+    balance->method = MA_PAINT_LAYER_COLOR_BALANCE_ASC_CDL;
+    copy_v3_fl(balance->slope, slope);
+    copy_v3_fl(balance->offset, offset);
+    copy_v3_fl(balance->power, power);
+  }
+};
+
+TEST_F(PaintLayersColorBalanceTest, color_balance_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *balance = add_balance(*row, 0.7f);
+  set_lift(*balance);
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersColorBalanceTest, the_default_balance_leaves_the_colour_alone)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  add_balance(*row);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, before.r, 2e-3f);
+  EXPECT_NEAR(after.g, before.g, 2e-3f);
+  EXPECT_NEAR(after.b, before.b, 2e-3f);
+}
+
+TEST_F(PaintLayersColorBalanceTest, a_full_strength_lift_reads_an_analytic_line)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  MaterialPaintLayer *balance = add_balance(*row);
+  set_lift(*balance);
+
+  expect_graph_matches_cpu(kColor);
+  /* The neutral gain and gamma leave a linear map: every channel reads exactly `0.75 * c + 0.25`.
+   * The formula the fold makes is the same one the graph and the shader read, so the parity above
+   * pins it on both sides. */
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, 0.75f * before.r + 0.25f, 2e-3f);
+  EXPECT_NEAR(after.g, 0.75f * before.g + 0.25f, 2e-3f);
+  EXPECT_NEAR(after.b, 0.75f * before.b + 0.25f, 2e-3f);
+}
+
+TEST_F(PaintLayersColorBalanceTest, asc_cdl_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *balance = add_balance(*row, 0.8f);
+  set_asc(*balance, 1.3f, 0.05f, 1.15f);
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersColorBalanceTest, color_balance_adjustment_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Adjustment;
+  params.filter = MA_PAINT_LAYER_FILTER_COLOR_BALANCE;
+  MaterialPaintLayer *balance = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(balance, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, balance, 0.8f));
+  set_lift(*balance);
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersColorBalanceTest, color_balance_in_the_mask_weight_0_4375)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  /* The lifted grey of the 0.25 coverage: `0.75 * 0.25 + 0.25 = 0.4375`, the filter working on the
+   * factor so far like every mask filter does. */
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::MaskFilter;
+  params.anchor = row;
+  params.filter = MA_PAINT_LAYER_FILTER_COLOR_BALANCE;
+  MaterialPaintLayer *balance = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(balance, nullptr);
+  set_lift(*balance);
+
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.4375f, 3e-3f);
+}
+
+TEST_F(PaintLayersColorBalanceTest, editing_the_balance_is_a_value_sync)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_balance(*row);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* The balance is the values of three group inputs, not topology: the hash has to stay where it
+   * was, the nodes the group already has keep their identity, and no rebuild is asked for. */
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t before = paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms);
+  bNodeTree *tree = ma->paint_layers_tree;
+
+  MaterialPaintLayerColorBalance *balance = BKE_paint_layers_color_balance_ensure(*filter);
+  ASSERT_NE(balance, nullptr);
+  copy_v3_fl(balance->lift, 0.25f);
+  EXPECT_TRUE(BKE_paint_layers_color_balance_edited(*ma, balance));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  const uint64_t after = paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms);
+  EXPECT_EQ(after, before);
+  EXPECT_EQ(ma->paint_layers_tree, tree) << "a value edit never swaps the tree out";
+
+  /* And both sides read the new values: the group inputs were re-synced in place. */
+  expect_graph_matches_cpu(kColor);
+  const RGBA after_color = cpu_pixel(kColor);
+  const RGBA before_color = {30.0f / 255.0f, 160.0f / 255.0f, 220.0f / 255.0f, 1.0f};
+  EXPECT_GT(std::abs(after_color.r - before_color.r) + std::abs(after_color.g - before_color.g),
+            1e-3f)
+      << "the lift really moved the colour";
+}
+
+TEST_F(PaintLayersColorBalanceTest, color_balance_edited_returns_true_for_own_payload_only)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_balance(*row);
+  MaterialPaintLayerColorBalance *balance = BKE_paint_layers_color_balance_ensure(*filter);
+  ASSERT_NE(balance, nullptr);
+
+  EXPECT_TRUE(BKE_paint_layers_color_balance_edited(*ma, balance));
+  /* The row's mapping is state of its own: no balance owns it, so the edit is not one. */
+  EXPECT_FALSE(BKE_paint_layers_color_balance_edited(*ma, &row->mapping));
+  EXPECT_FALSE(BKE_paint_layers_color_balance_edited(*ma, nullptr));
+}
+
 class PaintLayersHslTest : public PaintLayersFilterTest {
  public:
   MaterialPaintLayer *add_hsl(MaterialPaintLayer &row, const float opacity = 1.0f)

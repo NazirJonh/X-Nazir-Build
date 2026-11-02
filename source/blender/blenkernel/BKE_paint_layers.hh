@@ -121,6 +121,22 @@ void BKE_paint_layers_curves_live_begin();
 /** Close the innermost live-drag scope #BKE_paint_layers_curves_live_begin opened. */
 void BKE_paint_layers_curves_live_end();
 
+/** Whether \a row's kind reads a color balance (the Color Balance filter). */
+bool BKE_paint_layers_color_balance_supported(const MaterialPaintLayer &row);
+
+/**
+ * The row's color balance payload, allocated with the neutral values when it has none. Only a kind
+ * with a Color Balance parameter gets one; returns null for every other kind.
+ */
+struct MaterialPaintLayerColorBalance *BKE_paint_layers_color_balance_ensure(MaterialPaintLayer &row);
+
+/**
+ * Mark \a ma value-edited when \a data is a row's color balance: the balance reaches the generated
+ * tree as group-input values, so no group is rebuilt and the bake flags follow the stack's hash.
+ * Called from the balance RNA update callbacks.
+ */
+bool BKE_paint_layers_color_balance_edited(Material &ma, const void *data);
+
 /**
  * A strictly value-only edit (a row's opacity, a Fill row's constant): the generated tree keeps its
  * nodes and only its values are re-synced, so no shader rebuild happens. Falls back to

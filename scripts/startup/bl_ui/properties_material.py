@@ -17,6 +17,7 @@ from bl_ui.properties_paint_common import (
 
 from bl_ui.properties_material_paint_layers import (
     draw_material_channel_set,
+    draw_material_color_balance,
     draw_material_kind_params,
     draw_material_layer_channels,
     draw_material_layer_height,
@@ -795,6 +796,8 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                     if item.curves_supported:
                         layout.template_curve_mapping(
                             item, "kind_curves", type='COLOR', live_update=True)
+                    if item.color_balance_supported:
+                        draw_material_color_balance(layout, item.kind_color_balance)
                 return
             if item.source == 'ANCHOR_POINT':
                 # A marker publishes a slice and a reader lays one: no map, no channels to choose.
@@ -843,6 +846,8 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 layout.template_color_ramp(layer, "kind_ramp", expand=True)
             if layer.curves_supported:
                 layout.template_curve_mapping(layer, "kind_curves", type='COLOR', live_update=True)
+            if layer.color_balance_supported:
+                draw_material_color_balance(layout, layer.kind_color_balance)
             # The channels it works in, switched like a layer's; Base Color is on to start with.
             layout.separator()
             draw_material_layer_channels(layout, context, owner, layer)

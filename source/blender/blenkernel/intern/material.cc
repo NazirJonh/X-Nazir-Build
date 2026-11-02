@@ -162,6 +162,8 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
     BKE_curvemapping_free_data(&layer->curves->curve_mapping);
     MEM_SAFE_DELETE(layer->curves);
   }
+  /* The balance is plain numbers: no heap data of its own to release first. */
+  MEM_SAFE_DELETE(layer->color_balance);
   /* The ID users of the parameters are released by the generic free pass through
    * #material_paint_layer_foreach_id, like the channel maps. */
   if (layer->system_properties != nullptr) {
@@ -254,6 +256,10 @@ static MaterialPaintLayer *material_paint_layer_copy(Main *bmain,
      * when they were built. */
     BKE_curvemapping_copy_data(&dst->curves->curve_mapping, &src.curves->curve_mapping);
   }
+  dst->color_balance = (src.color_balance != nullptr) ?
+                           static_cast<MaterialPaintLayerColorBalance *>(MEM_dupalloc(
+                               src.color_balance)) :
+                           nullptr;
   /* Like the channel maps, the users of ID parameters are added by the generic copy pass. */
   if (src.system_properties != nullptr) {
     dst->system_properties = IDP_CopyProperty_ex(src.system_properties,
@@ -360,6 +366,9 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
     writer->write_struct(layer.curves);
     BKE_curvemapping_curves_blend_write(writer, &layer.curves->curve_mapping);
   }
+  if (layer.color_balance != nullptr) {
+    writer->write_struct(layer.color_balance);
+  }
   if (layer.system_properties != nullptr) {
     IDP_BlendWrite(writer, layer.system_properties);
   }
@@ -420,6 +429,7 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
     BKE_curvemapping_blend_read(reader, &layer.curves->curve_mapping);
     BKE_curvemapping_init(&layer.curves->curve_mapping);
   }
+  BLO_read_struct(reader, MaterialPaintLayerColorBalance, &layer.color_balance);
   if (layer.bake != nullptr && !BLO_read_data_is_undo(reader)) {
     /* The bake maps are generated images whose pixels the file does not keep, and the pixel-edit
      * subscription that vouches for them is runtime only. A loaded bake therefore proves nothing:

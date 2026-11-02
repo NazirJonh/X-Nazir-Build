@@ -438,8 +438,11 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
    * row's own blend, opacity and mask. Never inside a folder.
    */
   int16_t adjustment_filter = 0;
-  /** The adjustment's parameters in its kind's schema order. */
-  float adjustment_params[8] = {};
+  /**
+   * The adjustment's parameters in its kind's schema order; wide enough for a Color Balance's
+   * folded triples (#PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM), which no scalar schema reaches.
+   */
+  float adjustment_params[12] = {};
   /** The Color Band a ramp filter (Color Ramp) reads, or null for every other filter. */
   const ColorBand *adjustment_ramp = nullptr;
   /** The curve mapping a curves filter (RGB Curves) reads, or null for every other filter. */
@@ -473,8 +476,11 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
    * changes the colour below it by `opacity` and lays no coverage. 0 for a laid correction.
    */
   int16_t filter = 0;
-  /** The filter's parameters in its kind's schema order. */
-  float filter_params[8] = {};
+  /**
+   * The filter's parameters in its kind's schema order; wide enough for a Color Balance's folded
+   * triples (#PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM), which no scalar schema reaches.
+   */
+  float filter_params[12] = {};
   /** The Color Band a ramp filter (Color Ramp) reads, or null. */
   const ColorBand *filter_ramp = nullptr;
   /** The curve mapping a curves filter (RGB Curves) reads, or null. */
@@ -517,7 +523,8 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
 struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   /** See #PaintMaterialCompositeCorrection::filter. */
   int16_t filter = 0;
-  float filter_params[8] = {};
+  /** Wide enough for a Color Balance's folded triples, like the description's own array. */
+  float filter_params[12] = {};
   const ColorBand *filter_ramp = nullptr;
   const CurveMapping *filter_curves = nullptr;
   ImBuf *ibuf = nullptr;
@@ -581,7 +588,8 @@ struct PaintMaterialCompositeMaskItem {
    * so far, `M = lerp(M, f(M), opacity)`. 0 for a laid item.
    */
   int16_t filter = 0;
-  float filter_params[8] = {};
+  /** Wide enough for a Color Balance's folded triples, like the description's own array. */
+  float filter_params[12] = {};
   /** The Color Band a ramp filter (Color Ramp) reads, or null. */
   const ColorBand *filter_ramp = nullptr;
   /** The curve mapping a curves filter (RGB Curves) reads, or null. */
@@ -718,7 +726,8 @@ struct PaintMaterialCompositeMaskBuffer {
   bool invert = false;
   /** See #PaintMaterialCompositeMaskItem::filter. */
   int16_t filter = 0;
-  float filter_params[8] = {};
+  /** Wide enough for a Color Balance's folded triples, like the description's own array. */
+  float filter_params[12] = {};
   const ColorBand *filter_ramp = nullptr;
   const CurveMapping *filter_curves = nullptr;
   /** See #PaintMaterialCompositeMaskItem::map_coverage. */

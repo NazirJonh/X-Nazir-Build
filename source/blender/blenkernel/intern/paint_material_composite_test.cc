@@ -4118,6 +4118,57 @@ TEST_F(PaintLayersCompositeTest, the_gpu_path_lays_color_ramp_and_curves_filters
   EXPECT_TRUE(saw_ramp);
 }
 
+/**
+ * The Color Balance computes its three folded triples from push constants, no table: unlike the
+ * payload filters it costs no LUT and no refusal, in any of its three forms. This pins the absence
+ * of a fallback the shader cannot justify.
+ */
+TEST_F(PaintLayersCompositeTest, the_gpu_path_lays_the_color_balance_filter)
+{
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 255, 0, 0, 255));
+  MaterialPaintLayer *corrected = add_paint_layer(
+      "Corrected", add_solid_image("Corrected", 4, 0, 255, 0, 255));
+  MaterialPaintLayer *balance = BKE_paint_layers_filter_add(
+      *ma, corrected, MA_PAINT_LAYER_FILTER_COLOR_BALANCE, "Balance Correction");
+  ASSERT_NE(balance, nullptr);
+  MaterialPaintLayerColorBalance *payload = BKE_paint_layers_color_balance_ensure(*balance);
+  ASSERT_NE(payload, nullptr);
+  copy_v3_fl(payload->lift, 0.25f);
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Adjustment;
+  params.filter = MA_PAINT_LAYER_FILTER_COLOR_BALANCE;
+  ASSERT_NE(BKE_paint_layers_add_with_policy(*ma, params), nullptr);
+
+  MaterialPaintLayer *masked = add_paint_layer(
+      "Masked", add_solid_image("Masked", 4, 0, 0, 255, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, masked, 1.0f), nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_filter_add(
+                *ma, masked, MA_PAINT_LAYER_FILTER_COLOR_BALANCE, "Balance Mask"),
+            nullptr);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_FALSE(layers.is_empty());
+
+  bool saw_correction = false;
+  bool saw_mask_item = false;
+  for (const PaintMaterialCompositeImageLayer &layer : layers) {
+    EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layer), nullptr);
+    saw_correction |= layer.adjustment_filter == MA_PAINT_LAYER_FILTER_COLOR_BALANCE;
+    for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+      saw_correction |= correction.filter == MA_PAINT_LAYER_FILTER_COLOR_BALANCE;
+    }
+    for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+      saw_mask_item |= item.filter == MA_PAINT_LAYER_FILTER_COLOR_BALANCE;
+    }
+  }
+  /* All three forms are really described, not just tolerated. */
+  EXPECT_TRUE(saw_correction);
+  EXPECT_TRUE(saw_mask_item);
+}
+
 /** \} */
 
 }  // namespace blender::bke::tests

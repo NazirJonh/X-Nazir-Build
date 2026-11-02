@@ -103,6 +103,8 @@ enum class PaintLayerKindParamType : uint8_t {
   Bool,
   /** A CurveMapping, kept in #MaterialPaintLayer::curves rather than in the properties. */
   Curves,
+  /** A #MaterialPaintLayerColorBalance, kept in #MaterialPaintLayer::color_balance. */
+  ColorBalance,
 };
 
 /** One choice of an #PaintLayerKindParamType::Enum parameter. */
@@ -278,6 +280,19 @@ enum PaintLayerClampParam : int {
   PAINT_LAYER_CLAMP_MIN = 0,
   PAINT_LAYER_CLAMP_MAX = 1,
   PAINT_LAYER_CLAMP_PARAM_NUM = 2,
+};
+
+/**
+ * The positions of the Color Balance filter's folded triples in the 12-float layout the CPU
+ * composite, the generated graph and the GPU push constants share: A is the slope of the linear
+ * part, B its offset and E the power's exponent; each lands in the `.xyz` of its own float4.
+ */
+enum PaintLayerColorBalanceParam : int {
+  PAINT_LAYER_COLOR_BALANCE_A = 0,
+  PAINT_LAYER_COLOR_BALANCE_B = 4,
+  PAINT_LAYER_COLOR_BALANCE_E = 8,
+  /** The length the folded array needs; the triples' fourths ([3], [7], [11]) stay unused. */
+  PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM = 12,
 };
 
 /** The positions of a map-coverage operator's parameters in its schema. */
@@ -515,6 +530,45 @@ bool BKE_paint_layers_curves_edited(Main &bmain, Material &ma, const void *data)
 
 /** A hash of the curves' shape, levels and tone, for the bake and composite caches. */
 uint64_t paint_layer_curves_hash(const struct CurveMapping &curve_mapping);
+
+/** Whether \a row's kind has a Color Balance parameter (the Color Balance filter). */
+bool paint_layer_kind_has_color_balance_param(const MaterialPaintLayer &row);
+
+/**
+ * The row's color balance payload, allocated with the neutral values when it has none. Only a kind
+ * with a Color Balance parameter gets one; returns null for every other kind.
+ */
+struct MaterialPaintLayerColorBalance *BKE_paint_layers_color_balance_ensure(MaterialPaintLayer &row);
+
+/** The row's balance, or null when it has no color balance payload. */
+const struct MaterialPaintLayerColorBalance *BKE_paint_layers_color_balance_get(
+    const MaterialPaintLayer &row);
+
+/**
+ * Fold \a balance into the 12 numbers both the CPU composite and the generated graph read: the
+ * per-channel triples of `out_i = pow(max(c_i * A_i + B_i, 0), E_i)` laid at
+ * #PaintLayerColorBalanceParam's positions. The one place that knows the formulas — its callers
+ * are the CPU description, the graph builder and the GPU gather, none of which re-derives them.
+ */
+void paint_layer_color_balance_fold(const MaterialPaintLayerColorBalance &balance,
+                                    float r_params[PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM]);
+
+/**
+ * The Color Balance filter applied to \a rgb in place, at full strength, through the same fold the
+ * CPU composite and the graph read. The C++ reference the parity tests compare against.
+ */
+void paint_layer_color_balance_apply(const MaterialPaintLayerColorBalance &balance, float rgb[3]);
+
+/** A hash of the balance's method and every stored value, for the bake cache. */
+uint64_t paint_layer_color_balance_hash(const MaterialPaintLayerColorBalance &balance);
+
+/**
+ * The row that owns \a data as its color balance marked value-edited: the bake flags and the
+ * composite cache follow the stack's hash, and the generated tree keeps its shape — the balance
+ * reaches it as values of group inputs, so no group is rebuilt. \return true when \a data is a
+ * row's balance, whether or not any tag landed.
+ */
+bool BKE_paint_layers_color_balance_edited(Material &ma, const void *data);
 
 /**
  * The position of the parameter \a name in \a row's kind's schema, or -1 when the kind has no

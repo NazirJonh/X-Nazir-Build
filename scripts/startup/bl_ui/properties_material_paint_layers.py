@@ -392,6 +392,33 @@ def draw_material_kind_params(layout, params):
         _draw_kind_param(layout, param)
 
 
+def draw_material_color_balance(layout, balance):
+    """The balance a Color Balance filter reads: the method, then the triple the method names.
+
+    Both triples stay editable so a switch between the methods never loses the values the other
+    one carries; the inactive one is dimmed rather than hidden, so the user can see what a switch
+    would restore. Every field is a colour picker over the per-channel values, laid out linearly
+    like the data the filter reads.
+    """
+    layout.prop(balance, "method", text="")
+    layout.separator()
+
+    col = layout.column(align=True)
+    col.label(text="Lift / Gamma / Gain")
+    for name in ("lift", "gamma", "gain"):
+        sub = col.column()
+        sub.active = balance.method == 'LGG'
+        sub.prop(balance, name, text="")
+    layout.separator()
+
+    col = layout.column(align=True)
+    col.label(text="ASC CDL")
+    for name in ("slope", "offset", "power"):
+        sub = col.column()
+        sub.active = balance.method == 'ASC_CDL'
+        sub.prop(balance, name, text="")
+
+
 def _draw_kind_param(layout, param):
     """One parameter of a row's kind, drawn as its type asks.
 

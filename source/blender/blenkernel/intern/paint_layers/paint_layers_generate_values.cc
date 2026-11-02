@@ -225,6 +225,30 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
+  if (STREQ(role, ROLE_COLOR_BALANCE)) {
+    /* The folded triple the MULTIPLY_ADD / MAXIMUM / POWER chain reads; the position names which
+     * one (0: A, 4: B, 8: E). The method the payload carries is invisible here — both fold into the
+     * same numbers — and a null payload reads as the neutral one, so the socket keeps the
+     * identity's values. */
+    const int position = prop_int_get(iface.properties, INPUT_PARAM_PROP, -1);
+    if (position < 0 || position + 2 >= PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM ||
+        socket.default_value == nullptr)
+    {
+      return false;
+    }
+    MaterialPaintLayerColorBalance neutral;
+    const MaterialPaintLayerColorBalance &balance = (layer->color_balance != nullptr) ?
+                                                        *layer->color_balance :
+                                                        neutral;
+    float folded[PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM];
+    paint_layer_color_balance_fold(balance, folded);
+    const float value[3] = {folded[position], folded[position + 1], folded[position + 2]};
+    copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
+    if (iface.socket_data != nullptr) {
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);
+    }
+    return true;
+  }
   if (STREQ(role, ROLE_GRADIENT_MIDPOINT) || STREQ(role, ROLE_GRADIENT_TYPE) ||
       STREQ(role, ROLE_GRADIENT_REPEAT))
   {

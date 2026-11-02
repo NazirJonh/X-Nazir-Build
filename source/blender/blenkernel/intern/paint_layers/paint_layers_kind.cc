@@ -123,6 +123,13 @@ static const PaintLayerKindParam curves_params[] = {
     {"curves", "Curves", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Curves},
 };
 
+/* The balance lives in #MaterialPaintLayer::color_balance; the schema entry is what tells the row
+ * its kind has one and lets the UI find the payload. The two methods fold into the same 12 numbers
+ * (#paint_layer_color_balance_fold), so the kind carries no per-method parameters. */
+static const PaintLayerKindParam color_balance_params[] = {
+    {"color_balance", "Color Balance", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::ColorBalance},
+};
+
 /* The ramp itself lives in #MaterialPaintLayer::ramp; the schema entry is what tells the row its
  * kind has one and lets the UI find the payload. */
 static const PaintLayerKindEnumItem color_ramp_alpha_items[] = {
@@ -310,6 +317,14 @@ static const PaintLayerKindInfo kinds[] = {
      curves_params,
      int(std::size(curves_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_COLOR_BALANCE,
+     "Color Balance",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     color_balance_params,
+     int(std::size(color_balance_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* A map-coverage operator: the map of its Base Color record is an external ID Map, so the map
      * is reference-only and a stroke must not turn it into a paint target. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -458,7 +473,8 @@ float paint_layer_kind_param_get(const MaterialPaintLayer &row, const int index)
   if (ELEM(param->type,
            PaintLayerKindParamType::Color,
            PaintLayerKindParamType::Ramp,
-           PaintLayerKindParamType::Curves))
+           PaintLayerKindParamType::Curves,
+           PaintLayerKindParamType::ColorBalance))
   {
     /* Not a scalar: the UI and the kind's consumer read them through the typed accessors. */
     return 0.0f;
@@ -595,6 +611,9 @@ void paint_layer_kind_params_init(MaterialPaintLayer &row)
           break;
         case PaintLayerKindParamType::Curves:
           BKE_paint_layers_curves_ensure(row);
+          break;
+        case PaintLayerKindParamType::ColorBalance:
+          BKE_paint_layers_color_balance_ensure(row);
           break;
         case PaintLayerKindParamType::Bool:
           kind_param_ensure_bool(row, param);
@@ -1104,6 +1123,138 @@ int paint_layer_kind_param_index(const MaterialPaintLayer &row, const char *name
     }
   }
   return -1;
+}
+
+bool paint_layer_kind_has_color_balance_param(const MaterialPaintLayer &row)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+  if (info == nullptr) {
+    return false;
+  }
+  for (const int i : IndexRange(info->params_num)) {
+    if (info->params[i].type == PaintLayerKindParamType::ColorBalance) {
+      return true;
+    }
+  }
+  return false;
+}
+
+MaterialPaintLayerColorBalance *BKE_paint_layers_color_balance_ensure(MaterialPaintLayer &row)
+{
+  if (!paint_layer_kind_has_color_balance_param(row)) {
+    return nullptr;
+  }
+  if (row.color_balance == nullptr) {
+    /* The member initializers of #MaterialPaintLayerColorBalance are the neutral balance: every
+     * method's identity (lift 0, gamma 1, gain 1; slope 1, offset 0, power 1). */
+    row.color_balance = MEM_new<MaterialPaintLayerColorBalance>(__func__);
+  }
+  return row.color_balance;
+}
+
+const MaterialPaintLayerColorBalance *BKE_paint_layers_color_balance_get(
+    const MaterialPaintLayer &row)
+{
+  return row.color_balance;
+}
+
+void paint_layer_color_balance_fold(const MaterialPaintLayerColorBalance &balance,
+                                    float r_params[PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM])
+{
+  /* Both methods fold into one form, `out_i = pow(max(c_i * A_i + B_i, 0), E_i)`, so the CPU
+   * composite, the graph and the GPU read one layout; the triples land in the `.xyz` of the
+   * float4s, which is why the fourths stay unused. A fold of the neutral payload is the identity:
+   * A = 1, B = 0, E = 1. */
+  if (eMaterialPaintLayerColorBalanceMethod(balance.method) ==
+      MA_PAINT_LAYER_COLOR_BALANCE_ASC_CDL)
+  {
+    for (const int i : IndexRange(3)) {
+      r_params[PAINT_LAYER_COLOR_BALANCE_A + i] = balance.slope[i];
+      r_params[PAINT_LAYER_COLOR_BALANCE_B + i] = balance.offset[i];
+      r_params[PAINT_LAYER_COLOR_BALANCE_E + i] = balance.power[i];
+    }
+    return;
+  }
+  /* LGG: `lifted = c (1 - lift) + lift`, then `max(lifted * gain, 0)` and the gamma's power. With
+   * `A = (1 - lift) * gain` and `B = lift * gain` the linear part is `c * A + B`, the same form the
+   * CDL folds into; the gamma is the power's inverse exponent. */
+  for (const int i : IndexRange(3)) {
+    r_params[PAINT_LAYER_COLOR_BALANCE_A + i] = (1.0f - balance.lift[i]) * balance.gain[i];
+    r_params[PAINT_LAYER_COLOR_BALANCE_B + i] = balance.lift[i] * balance.gain[i];
+    r_params[PAINT_LAYER_COLOR_BALANCE_E + i] = 1.0f / std::max(balance.gamma[i], 1e-6f);
+  }
+}
+
+void paint_layer_color_balance_apply(const MaterialPaintLayerColorBalance &balance, float rgb[3])
+{
+  float params[PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM];
+  paint_layer_color_balance_fold(balance, params);
+  for (const int i : IndexRange(3)) {
+    /* The same channel formula the CPU composite's Color Balance case and the generated
+     * MULTIPLY_ADD / MAXIMUM / POWER chain read. */
+    rgb[i] = powf(std::max(rgb[i] * params[PAINT_LAYER_COLOR_BALANCE_A + i] +
+                               params[PAINT_LAYER_COLOR_BALANCE_B + i],
+                           0.0f),
+                  params[PAINT_LAYER_COLOR_BALANCE_E + i]);
+  }
+}
+
+uint64_t paint_layer_color_balance_hash(const MaterialPaintLayerColorBalance &balance)
+{
+  uint64_t hash = 1469598103934665603ull;
+  const auto mix_u32 = [&](const uint32_t value) {
+    hash ^= value;
+    hash *= 1099511628211ull;
+  };
+  const auto mix_float = [&](const float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    mix_u32(bits);
+  };
+  mix_u32(uint32_t(balance.method));
+  for (const float value : balance.lift) {
+    mix_float(value);
+  }
+  for (const float value : balance.gamma) {
+    mix_float(value);
+  }
+  for (const float value : balance.gain) {
+    mix_float(value);
+  }
+  for (const float value : balance.slope) {
+    mix_float(value);
+  }
+  for (const float value : balance.offset) {
+    mix_float(value);
+  }
+  for (const float value : balance.power) {
+    mix_float(value);
+  }
+  return hash;
+}
+
+bool BKE_paint_layers_color_balance_edited(Material &ma, const void *data)
+{
+  if (data == nullptr) {
+    return false;
+  }
+  const auto owns = [&](const MaterialPaintLayer &row) {
+    return row.color_balance != nullptr && data == row.color_balance;
+  };
+  bool found = false;
+  for (MaterialPaintLayer &row : ma.paint_layers) {
+    if (paint_layer_payload_edited_walk(row, owns)) {
+      found = true;
+      break;
+    }
+  }
+  if (found) {
+    /* The balance reaches the generated graph as the values of three group inputs and the
+     * composite stack's hash carries the folded numbers, so the value-only tag is the whole
+     * story: no group is rebuilt, and the bake flags follow the hash. */
+    BKE_paint_layers_tag_value_edited(ma);
+  }
+  return found;
 }
 
 }  // namespace blender

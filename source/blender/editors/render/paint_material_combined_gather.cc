@@ -1385,6 +1385,13 @@ bool combined_preview_gpu_update(const Material &ma,
     float4 adjustment_1 = filter_params != nullptr ?
                               float4(filter_params[4], filter_params[5], filter_params[6], filter_params[7]) :
                               float4(0.0f);
+    /* A Color Balance's exponent triple; zero reads as a disabled filter's unused parameter. */
+    float4 adjustment_2 = filter_params != nullptr ?
+                              float4(filter_params[8],
+                                     filter_params[9],
+                                     filter_params[10],
+                                     filter_params[11]) :
+                              float4(0.0f);
     if (filter_kind == MA_PAINT_LAYER_FILTER_COLOR_RAMP && filter_ramp != nullptr) {
       /* The band's CONSTANT interpolation, which the shader reads from `filter_params_1.x`. */
       adjustment_1.x = color_ramp_is_constant(*filter_ramp) ? 1.0f : 0.0f;
@@ -1401,6 +1408,7 @@ bool combined_preview_gpu_update(const Material &ma,
     }
     GPU_shader_uniform_4fv(layer_shader, "filter_params_0", &adjustment_0.x);
     GPU_shader_uniform_4fv(layer_shader, "filter_params_1", &adjustment_1.x);
+    GPU_shader_uniform_4fv(layer_shader, "filter_params_2", &adjustment_2.x);
 
     /* The previous pass wrote this accumulator through an image. */
     GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
@@ -1452,9 +1460,12 @@ bool combined_preview_gpu_update(const Material &ma,
     }
     float4 params_0(0.0f);
     float4 params_1(0.0f);
+    /* A Color Balance's exponent triple; zero reads as a disabled filter's unused parameter. */
+    float4 params_2(0.0f);
     if (filter_params != nullptr) {
       params_0 = float4(filter_params[0], filter_params[1], filter_params[2], filter_params[3]);
       params_1 = float4(filter_params[4], filter_params[5], filter_params[6], filter_params[7]);
+      params_2 = float4(filter_params[8], filter_params[9], filter_params[10], filter_params[11]);
     }
     if (filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP && filter_ramp != nullptr) {
       params_1.x = color_ramp_is_constant(*filter_ramp) ? 1.0f : 0.0f;
@@ -1473,6 +1484,7 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_shader_uniform_2fv(mask_shader, "mapping_rotation", &mapping_rotation.x);
     GPU_shader_uniform_4fv(mask_shader, "filter_params_0", &params_0.x);
     GPU_shader_uniform_4fv(mask_shader, "filter_params_1", &params_1.x);
+    GPU_shader_uniform_4fv(mask_shader, "filter_params_2", &params_2.x);
     GPU_shader_uniform_1f(mask_shader, "constant_gray", constant_gray);
     GPU_shader_uniform_1f(mask_shader, "opacity", opacity);
     GPU_shader_uniform_1f(mask_shader, "influence", influence);
@@ -1536,6 +1548,11 @@ bool combined_preview_gpu_update(const Material &ma,
                     correction.filter_params[5],
                     correction.filter_params[6],
                     correction.filter_params[7]);
+    /* A Color Balance's exponent triple; zero reads as a disabled filter's unused parameter. */
+    const float4 params_2(correction.filter_params[8],
+                          correction.filter_params[9],
+                          correction.filter_params[10],
+                          correction.filter_params[11]);
     if (correction.filter == MA_PAINT_LAYER_FILTER_COLOR_RAMP && correction.filter_ramp != nullptr)
     {
       params_1.x = color_ramp_is_constant(*correction.filter_ramp) ? 1.0f : 0.0f;
@@ -1556,6 +1573,7 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_shader_uniform_2fv(correction_shader, "mapping_rotation", &mapping_rotation.x);
     GPU_shader_uniform_4fv(correction_shader, "filter_params_0", &params_0.x);
     GPU_shader_uniform_4fv(correction_shader, "filter_params_1", &params_1.x);
+    GPU_shader_uniform_4fv(correction_shader, "filter_params_2", &params_2.x);
     GPU_shader_uniform_1f(correction_shader, "opacity", correction.opacity);
     GPU_shader_uniform_1f(correction_shader, "lod", lod);
     GPU_shader_uniform_1i(correction_shader, "flags", step_flags);

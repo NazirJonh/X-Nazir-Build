@@ -37,6 +37,7 @@
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
+#include "BLI_simd.hh"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
 
@@ -56,6 +57,7 @@
 #include "ED_view3d.hh"
 
 #include "../paint_intern.hh"
+#include "paint_dab_timing.hh"
 #include "paint_material_blend.hh"
 #include "paint_material_source.hh"
 #include "sculpt_intern.hh"
@@ -1093,6 +1095,174 @@ bool sample_direct_layout(const DirectSampleLayout &layout,
   return true;
 }
 
+/* How many texels ahead of the one being sampled the source rows are requested. */
+static constexpr int direct_prefetch_ahead = 8;
+
+#if BLI_HAVE_SSE2
+/**
+ * Request the cache lines of the two image rows a bilinear sample at (\a px, \a py) reads. The
+ * right-hand neighbor usually shares the line and is requested too for the quarter of samples where
+ * it does not. A hint only: a wrong address costs speed, never correctness.
+ */
+static void prefetch_bilinear_footprint(const float *float_pixels,
+                                        const uchar *byte_pixels,
+                                        const int width,
+                                        const int height,
+                                        const float px,
+                                        const float py,
+                                        const bool wrap)
+{
+  /* Also rejects NaN, whose conversion to int is undefined. */
+  if (!(fabsf(px) < 1.0e8f && fabsf(py) < 1.0e8f)) {
+    return;
+  }
+
+  int x = int(floorf(px));
+  int y = int(floorf(py));
+  int y_next = y + 1;
+  if (wrap) {
+    x %= width;
+    x += x < 0 ? width : 0;
+    y %= height;
+    y += y < 0 ? height : 0;
+    y_next = y + 1 == height ? 0 : y + 1;
+  }
+  else {
+    x = math::clamp(x, 0, width - 1);
+    y = math::clamp(y, 0, height - 1);
+    y_next = math::min(y + 1, height - 1);
+  }
+
+  const bool has_right = x + 1 < width;
+  if (float_pixels != nullptr) {
+    const float *row_a = float_pixels + (int64_t(y) * width + x) * 4;
+    const float *row_b = float_pixels + (int64_t(y_next) * width + x) * 4;
+    _mm_prefetch(reinterpret_cast<const char *>(row_a), _MM_HINT_T0);
+    _mm_prefetch(reinterpret_cast<const char *>(row_b), _MM_HINT_T0);
+    if (has_right) {
+      _mm_prefetch(reinterpret_cast<const char *>(row_a + 4), _MM_HINT_T0);
+      _mm_prefetch(reinterpret_cast<const char *>(row_b + 4), _MM_HINT_T0);
+    }
+  }
+  else if (byte_pixels != nullptr) {
+    const uchar *row_a = byte_pixels + (int64_t(y) * width + x) * 4;
+    const uchar *row_b = byte_pixels + (int64_t(y_next) * width + x) * 4;
+    _mm_prefetch(reinterpret_cast<const char *>(row_a), _MM_HINT_T0);
+    _mm_prefetch(reinterpret_cast<const char *>(row_b), _MM_HINT_T0);
+  }
+}
+
+/**
+ * Ask the CPU to load the source rows #sample_direct_layout will read for this texel.
+ *
+ * Sampling a large source (a 2048x2048 float image is 64 MB) is bound by memory latency, not math:
+ * with the image shrunk to 128x128 the same loop runs about five times faster. The texels of a
+ * chunk are independent, so their loads can overlap if they are issued early; the out-of-order
+ * window alone covers only two or three iterations of this loop.
+ *
+ * This is a hint, so it cannot change a result: the arithmetic below mirrors the coordinate math of
+ * #sample_direct_layout and #sample_layout_image only to find the same addresses, and an address
+ * that is a little off costs speed, never correctness. The sampling itself is untouched.
+ */
+static void prefetch_direct_layout(const DirectSampleLayout &layout,
+                                   const float3 &symm_point,
+                                   const float2 &view_point_2d)
+{
+  float tex_x = 0.0f;
+  float tex_y = 0.0f;
+  switch (layout.kind) {
+    case DirectSampleKind::Disabled: {
+      return;
+    }
+    case DirectSampleKind::Area: {
+      float3 point = symm_point;
+      mul_m4_v3(layout.local_mat->ptr(), point);
+      tex_x = point.x * layout.size_x + layout.ofs_x;
+      tex_y = point.y * layout.size_y + layout.ofs_y;
+      break;
+    }
+    case DirectSampleKind::Stencil: {
+      float x = view_point_2d[0] - layout.stencil_pos_x;
+      float y = view_point_2d[1] - layout.stencil_pos_y;
+      apply_direct_sample_rotation(layout, x, y);
+      if (fabsf(x) > layout.stencil_dim_x || fabsf(y) > layout.stencil_dim_y) {
+        /* Sampled as transparent without reading the image. */
+        return;
+      }
+      tex_x = x / layout.stencil_dim_x;
+      tex_y = y / layout.stencil_dim_y;
+      break;
+    }
+    case DirectSampleKind::View:
+    case DirectSampleKind::Random: {
+      float x = (view_point_2d[0] - layout.tex_mouse_x) * layout.invradius;
+      float y = (view_point_2d[1] - layout.tex_mouse_y) * layout.invradius;
+      apply_direct_sample_rotation(layout, x, y);
+      tex_x = x;
+      tex_y = y;
+      break;
+    }
+    case DirectSampleKind::Tiled: {
+      float x = view_point_2d[0] * layout.invradius;
+      float y = view_point_2d[1] * layout.invradius;
+      apply_direct_sample_rotation(layout, x, y);
+      tex_x = x;
+      tex_y = y;
+      break;
+    }
+  }
+  if (layout.ibuf_x <= 0 || layout.ibuf_y <= 0) {
+    return;
+  }
+
+  const float u = (layout.eval_size_x * (tex_x + layout.eval_ofs_x) + 1.0f) * 0.5f;
+  const float v = (layout.eval_size_y * (tex_y + layout.eval_ofs_y) + 1.0f) * 0.5f;
+  prefetch_bilinear_footprint(layout.float_pixels,
+                              layout.byte_pixels,
+                              layout.ibuf_x,
+                              layout.ibuf_y,
+                              u * float(layout.ibuf_x),
+                              v * float(layout.ibuf_y),
+                              layout.wrap);
+}
+#else
+static void prefetch_direct_layout(const DirectSampleLayout & /*layout*/,
+                                   const float3 & /*symm_point*/,
+                                   const float2 & /*view_point_2d*/)
+{
+}
+#endif
+
+/** Start the loads for the first texels of a chunk, so the loop only has to keep ahead of them. */
+static void prefetch_direct_prime(const DirectSampleLayout &layout,
+                                  const Span<TexelSampleContext> contexts,
+                                  const Span<float> factors)
+{
+  if (layout.kind == DirectSampleKind::Disabled) {
+    return;
+  }
+  const int num = int(std::min<int64_t>(direct_prefetch_ahead, contexts.size()));
+  for (const int i : IndexRange(num)) {
+    if (factors[i] != 0.0f) {
+      prefetch_direct_layout(layout, contexts[i].symm_point, contexts[i].view_point_2d);
+    }
+  }
+}
+
+/** Request the loads for the texel #direct_prefetch_ahead iterations after \a i. */
+static void prefetch_direct_ahead(const DirectSampleLayout &layout,
+                                  const Span<TexelSampleContext> contexts,
+                                  const Span<float> factors,
+                                  const int i)
+{
+  const int64_t ahead = int64_t(i) + direct_prefetch_ahead;
+  if (ahead < contexts.size() && factors[ahead] != 0.0f &&
+      layout.kind != DirectSampleKind::Disabled)
+  {
+    prefetch_direct_layout(layout, contexts[ahead].symm_point, contexts[ahead].view_point_2d);
+  }
+}
+
 static void sample_channel_source_with_layout(const DirectSampleLayout &layout,
                                               const ChannelSourceSet &sources,
                                               const ChannelSourceSet::ChannelSource &source,
@@ -1104,18 +1274,15 @@ static void sample_channel_source_with_layout(const DirectSampleLayout &layout,
                                               float *r_value,
                                               float4 &r_rgba)
 {
-  /* TODO(perf): this per-texel sample was the single largest term of a PBR paint dab when it was
-   * last measured (~120-190 ns per texel-channel, roughly half of the per-dab pixel cost), and it
-   * ran on the direct image path below - the legacy #sculpt_apply_texture fallback was never hit.
-   * What is left is the bilinear fetch and its memory access pattern. Ideas, none verified:
-   * - Sample once per texel per *mouse event* rather than once per dab for channels whose mapping
-   *   does not depend on the dab (Stencil, and anything resolved from the texel's own UV).
-   * - For Area mapping the position is `brush_local_mat * texel_position`, i.e. the same lookup
-   *   under a rigid transform per dab; a footprint cached once and re-indexed could reuse most
-   *   fetches.
-   * - Batch several image rows into one gather call. The per-call setup
-   *   (#make_direct_sample_layout_sculpt, #area_local_mat_for) is cheap, so this only pays if call
-   *   overhead turns out to dominate - measure before changing anything here. */
+  /* TODO(perf): the texture sample is the largest CPU term of a PBR dab and it is bound by memory
+   * latency: a 2048x2048 float source costs ~70-100 ns per texel with Area Plane mapping, a 128x128
+   * one ~30 ns. #prefetch_direct_layout already overlaps the loads (about 155 ns before it). Ideas:
+   * - A copy of the source in a tiled/swizzled layout, built once per stroke, so the four taps of
+   *   a bilinear sample share a cache line and a page.
+   * - A larger prefetch window, or requesting every row of a chunk before sampling it.
+   * - Stencil mapping does not follow the brush, so its value for a texel could be kept for the
+   *   whole stroke while the view stays fixed; an Area sample moves with the brush and cannot.
+   * - Sampling once per mouse event does not pay: an event holds only ~1.5 dabs. */
   if (sample_direct_layout(layout, ctx.symm_point, ctx.view_point_2d, r_value, r_rgba)) {
     return;
   }
@@ -1767,6 +1934,64 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                              source.flip_green_channel);
 }
 
+/**
+ * Describe once per stroke how a textured channel will be sampled. The line that matters is
+ * `layout`: 0 means the direct path is not available and every texel goes through the much slower
+ * texture engine (#sculpt_apply_texture). Only compiled in for the opt-in stdout timing.
+ */
+#ifdef DEBUG_PAINT_DAB_TIMING
+static void dab_timer_log_source(const eMaterialPaintChannel channel,
+                                 const ChannelSourceSet::ChannelSource &source,
+                                 const DirectSampleLayout &layout)
+{
+  if (!paint_dab_timer_first_report(&source, int(channel))) {
+    return;
+  }
+  printf(
+      "[pbr-dab-timing] source: channel=%d kind=%d map_mode=%d layout=%d(0=Disabled) pixels=%s "
+      "%dx%d wrap=%d clip=%d rotate=%d alpha_weighted=%d linear_conversion=%d usable=%d\n",
+      int(channel),
+      int(source.kind),
+      int(source.effective_mtex.brush_map_mode),
+      int(layout.kind),
+      layout.float_pixels != nullptr ? "float" : (layout.byte_pixels != nullptr ? "byte" : "none"),
+      layout.ibuf_x,
+      layout.ibuf_y,
+      int(layout.wrap),
+      int(layout.clip),
+      int(layout.rotate),
+      int(layout.alpha_weighted),
+      int(source.do_linear_conversion),
+      int(source.usable));
+  fflush(stdout);
+}
+#else
+static void dab_timer_log_source(const eMaterialPaintChannel /*channel*/,
+                                 const ChannelSourceSet::ChannelSource & /*source*/,
+                                 const DirectSampleLayout & /*layout*/)
+{
+}
+#endif
+
+/**
+ * The timing bucket for the texture loop of a source, so the cost of Area Plane and Stencil
+ * mappings can be read off separately. Only used by the opt-in stdout timing.
+ */
+static ePaintDabTimerStage dab_timer_source_stage(const ChannelSourceKind kind, const MTex &mtex)
+{
+  if (kind == ChannelSourceKind::Baked) {
+    return PAINT_DAB_TIMER_SOURCE_OTHER;
+  }
+  switch (mtex.brush_map_mode) {
+    case MTEX_MAP_MODE_AREA:
+      return PAINT_DAB_TIMER_SOURCE_AREA;
+    case MTEX_MAP_MODE_STENCIL:
+      return PAINT_DAB_TIMER_SOURCE_STENCIL;
+    default:
+      return PAINT_DAB_TIMER_SOURCE_OTHER;
+  }
+}
+
 void ChannelSourceSampler::gather_colors(const eMaterialPaintChannel channel,
                                          const Span<TexelSampleContext> contexts,
                                          const Span<float> factors,
@@ -1776,6 +2001,8 @@ void ChannelSourceSampler::gather_colors(const eMaterialPaintChannel channel,
 {
   BLI_assert(contexts.size() == factors.size());
   BLI_assert(r_colors.size() == contexts.size());
+  PRF_scope_with_name("pbr_paint.source_sampling", ProfileCategory::Editor);
+  const PaintDabTimer sample_timer(PAINT_DAB_TIMER_SOURCE_SAMPLING, contexts.size());
 
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   const float3 fallback = color_channel_fallback(channel, brush_paint_, this->paint(), brush_);
@@ -1796,8 +2023,13 @@ void ChannelSourceSampler::gather_colors(const eMaterialPaintChannel channel,
   const float4x4 *area_local_mat = area_local_mat_for(channel, source);
   const DirectSampleLayout layout = make_direct_sample_layout_sculpt(
       source, ss_, brush_, area_local_mat);
+  dab_timer_log_source(channel, source, layout);
+  const PaintDabTimer texture_timer(dab_timer_source_stage(source.kind, source.effective_mtex),
+                                    contexts.size());
 
+  prefetch_direct_prime(layout, contexts, factors);
   for (const int i : contexts.index_range()) {
+    prefetch_direct_ahead(layout, contexts, factors, i);
     if (factors[i] == 0.0f) {
       r_colors[i] = float3(0.0f);
       continue;
@@ -1831,6 +2063,8 @@ void ChannelSourceSampler::gather_scalars(const eMaterialPaintChannel channel,
 {
   BLI_assert(contexts.size() == factors.size());
   BLI_assert(r_values.size() == contexts.size());
+  PRF_scope_with_name("pbr_paint.source_sampling", ProfileCategory::Editor);
+  const PaintDabTimer sample_timer(PAINT_DAB_TIMER_SOURCE_SAMPLING, contexts.size());
 
   const float2 range = stored_scalar_range(settings_, channel);
   const float fallback = stored_scalar_brush_value(brush_paint_, settings_, channel);
@@ -1852,8 +2086,13 @@ void ChannelSourceSampler::gather_scalars(const eMaterialPaintChannel channel,
   const float4x4 *area_local_mat = area_local_mat_for(channel, source);
   const DirectSampleLayout layout = make_direct_sample_layout_sculpt(
       source, ss_, brush_, area_local_mat);
+  dab_timer_log_source(channel, source, layout);
+  const PaintDabTimer texture_timer(dab_timer_source_stage(source.kind, source.effective_mtex),
+                                    contexts.size());
 
+  prefetch_direct_prime(layout, contexts, factors);
   for (const int i : contexts.index_range()) {
+    prefetch_direct_ahead(layout, contexts, factors, i);
     if (factors[i] == 0.0f) {
       r_values[i] = 0.0f;
       continue;
@@ -1881,6 +2120,8 @@ bool ChannelSourceSampler::gather_source_coverage(const Span<TexelSampleContext>
 {
   BLI_assert(contexts.size() == factors.size());
   BLI_assert(r_coverage.size() == contexts.size());
+  PRF_scope_with_name("pbr_paint.source_sampling", ProfileCategory::Editor);
+  const PaintDabTimer sample_timer(PAINT_DAB_TIMER_SOURCE_SAMPLING, contexts.size());
 
   if (brush_paint_.source_mode != BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL ||
       brush_paint_.material_source_kind != BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER)
@@ -2130,6 +2371,8 @@ void ChannelSourceSampler::gather_tangent_normals_packed(const eMaterialPaintCha
   BLI_assert(channel == PAINT_MATERIAL_CHANNEL_NORMAL);
   BLI_assert(contexts.size() == factors.size());
   BLI_assert(r_packed.size() == contexts.size());
+  PRF_scope_with_name("pbr_paint.source_sampling_normal", ProfileCategory::Editor);
+  const PaintDabTimer sample_timer(PAINT_DAB_TIMER_SOURCE_SAMPLING, contexts.size());
 
   const float3 fallback = color_channel_fallback(channel, brush_paint_, this->paint(), brush_);
   const ChannelSource &source = sources_.source(channel);
@@ -2166,8 +2409,13 @@ void ChannelSourceSampler::gather_tangent_normals_packed(const eMaterialPaintCha
 
   const DirectSampleLayout layout = make_direct_sample_layout_sculpt(
       source, ss_, brush_, area_local_mat);
+  dab_timer_log_source(channel, source, layout);
+  const PaintDabTimer texture_timer(dab_timer_source_stage(source.kind, source.effective_mtex),
+                                    contexts.size());
 
+  prefetch_direct_prime(layout, contexts, factors);
   for (const int i : contexts.index_range()) {
+    prefetch_direct_ahead(layout, contexts, factors, i);
     if (factors[i] == 0.0f) {
       r_packed[i] = float3(0.0f);
       continue;

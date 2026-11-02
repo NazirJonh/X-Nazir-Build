@@ -398,6 +398,30 @@ struct TexelSampleContext {
 
 }  // namespace material
 
+/**
+ * Per-row arrays of the PBR paint row-factor pass for one UDIM tile of one PBVH node, kept between
+ * the dabs of a stroke.
+ *
+ * The pass sizes them to the whole row (up to the map width) although the brush reaches a fraction
+ * of it, and used to allocate, fill and free them on every dab; at 4K that was a few hundred
+ * thousand texels per dab, more than the factor math itself. Reusing the arrays removes the
+ * allocation, and only the span the previous dab wrote has to be cleared again.
+ */
+struct PaintTileRowBuffers {
+  Array<Array<float>> row_factors;
+  Array<Array<material::TexelSampleContext>> row_contexts;
+  /** `[begin, end)` of each row that the previous dab wrote into #row_factors; zeroed on reuse. */
+  Array<int2> written_span;
+  /** Rows whose arrays are already included in #PaintNodeRowBuffers::bytes. */
+  Array<bool> counted;
+};
+
+struct PaintNodeRowBuffers {
+  Vector<PaintTileRowBuffers> tiles;
+  /** Bytes held by #tiles, to keep the stroke's total under a budget. */
+  int64_t bytes = 0;
+};
+
 struct StrokeToggleSettings {
   /**
    * Whether the modifier key that controls inverting brush behavior is active currently.
@@ -957,6 +981,14 @@ struct StrokeCache {
    * stroke that paints with a mode other than Mix. See #paint::image::MaterialStrokeAccum.
    */
   std::unique_ptr<paint::image::MaterialStrokeAccum> material_raster_accum;
+
+  /**
+   * Row-factor arrays reused from dab to dab, indexed by PBVH node index. See
+   * #PaintTileRowBuffers. #image_row_buffers_bytes is their total size, which
+   * #SCULPT_do_paint_brush_image keeps below a fixed budget by dropping a node's buffers.
+   */
+  Vector<PaintNodeRowBuffers> image_row_buffers;
+  int64_t image_row_buffers_bytes = 0;
 
   /**
    * The active row's mask as the strokes sample it, built on the first dab of a stroke (see

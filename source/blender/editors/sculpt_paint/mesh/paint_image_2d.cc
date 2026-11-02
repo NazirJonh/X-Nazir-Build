@@ -120,9 +120,27 @@
 #include "../selection/paint_image_select_intern.hh"
 #include "paint_image_uv_geom.hh"
 #include "paint_image_uv_symmetry.hh"
+#include "paint_dab_timing.hh"
 #include "sculpt_intern.hh"
 
 namespace blender {
+
+/* Opt-in stdout timing of the PBR paint dab (see paint_dab_timing.hh). */
+using ed::sculpt_paint::paint_dab_timer_count_dab;
+using ed::sculpt_paint::paint_dab_timer_count_event;
+using ed::sculpt_paint::paint_dab_timer_first_report;
+using ed::sculpt_paint::paint_dab_timer_stroke_end;
+using ed::sculpt_paint::PaintDabTimer;
+using ed::sculpt_paint::PAINT_DAB_TIMER_DAB_TOTAL;
+using ed::sculpt_paint::PAINT_DAB_TIMER_2D_AP_PREPARE;
+using ed::sculpt_paint::PAINT_DAB_TIMER_2D_AP_COVERAGE;
+using ed::sculpt_paint::PAINT_DAB_TIMER_2D_AP_FILL;
+using ed::sculpt_paint::PAINT_DAB_TIMER_2D_AP_BLEND;
+using ed::sculpt_paint::PAINT_DAB_TIMER_2D_DIRTY;
+using ed::sculpt_paint::PAINT_DAB_TIMER_2D_BRUSH_BUILD;
+using ed::sculpt_paint::PAINT_DAB_TIMER_2D_BRUSH_BLEND;
+using ed::sculpt_paint::PAINT_DAB_TIMER_2D_IMAGE_UPDATE;
+using ed::sculpt_paint::PAINT_DAB_TIMER_2D_REDRAW_NOTIFY;
 
 static float paint_2d_selection_mask_sample(
     const Scene * /*scene*/, const Image *image, int tile_number, int x, int y)
@@ -2417,23 +2435,28 @@ static void paint_2d_do_making_brush(ImagePaintState *s,
         }
       }
 
-      IMB_rectblend(tile->canvas,
-                    &tmpbuf,
-                    frombuf,
-                    mask,
-                    tile->cache.curve_mask_cache.curve_mask,
-                    tile->cache.tex_mask,
-                    mask_max,
-                    region->destx,
-                    region->desty,
-                    origx,
-                    origy,
-                    region->srcx,
-                    region->srcy,
-                    region->width,
-                    region->height,
-                    IMB_BlendMode(blend),
-                    ((s->brush->flag & BRUSH_ACCUMULATE) != 0 && !s->painter->material_erase));
+      /* Threaded by rows. A dab reaches one or two rows of undo tiles, so the parallel loop over
+       * tile rows in the callers leaves most of the cores idle, and this serial blend was about
+       * half of an Area Plane dab (measured with `DEBUG_PAINT_DAB_TIMING`). The rows are
+       * independent, so the result is the same. */
+      IMB_rectblend_threaded(
+          tile->canvas,
+          &tmpbuf,
+          frombuf,
+          mask,
+          tile->cache.curve_mask_cache.curve_mask,
+          tile->cache.tex_mask,
+          mask_max,
+          region->destx,
+          region->desty,
+          origx,
+          origy,
+          region->srcx,
+          region->srcy,
+          region->width,
+          region->height,
+          IMB_BlendMode(blend),
+          ((s->brush->flag & BRUSH_ACCUMULATE) != 0 && !s->painter->material_erase));
     }
   }
 }
@@ -2523,14 +2546,18 @@ static int paint_2d_op(void *state,
 
   /* blend into canvas */
   for (a = 0; a < tot; a++) {
-    ED_imapaint_dirty_region(s->image,
-                             canvas,
-                             &tile->iuser,
-                             region[a].destx,
-                             region[a].desty,
-                             region[a].width,
-                             region[a].height,
-                             true);
+    {
+      const PaintDabTimer dirty_timer(PAINT_DAB_TIMER_2D_DIRTY,
+                                      int64_t(region[a].width) * int64_t(region[a].height));
+      ED_imapaint_dirty_region(s->image,
+                               canvas,
+                               &tile->iuser,
+                               region[a].destx,
+                               region[a].desty,
+                               region[a].width,
+                               region[a].height,
+                               true);
+    }
 
     if (s->do_masking) {
       /* masking, find original pixels tiles from undo buffer to composite over */
@@ -2955,14 +2982,17 @@ static void paint_2d_blend_area_buffer(ImagePaintState *s,
 {
   ImagePaintRegion region;
   paint_2d_set_region(&region, destx, desty, 0, 0, width, height);
-  ED_imapaint_dirty_region(s->image,
-                           tile->canvas,
-                           &tile->iuser,
-                           region.destx,
-                           region.desty,
-                           region.width,
-                           region.height,
-                           true);
+  {
+    const PaintDabTimer dirty_timer(PAINT_DAB_TIMER_2D_DIRTY, int64_t(width) * int64_t(height));
+    ED_imapaint_dirty_region(s->image,
+                             tile->canvas,
+                             &tile->iuser,
+                             region.destx,
+                             region.desty,
+                             region.width,
+                             region.height,
+                             true);
+  }
 
   const float mask_max = BKE_brush_alpha_get(s->paint, s->brush);
   if (s->do_masking) {
@@ -3512,6 +3542,26 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
   const int stride = raster_buf->x;
 
   const bool usable = paint_2d_channel_source_usable_2d(painter, channel);
+#ifdef DEBUG_PAINT_DAB_TIMING
+  if (usable && paint_dab_timer_first_report(painter, 200 + int(channel))) {
+    const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &logged_source =
+        painter->channel_sources->source(channel);
+    printf(
+        "[pbr-dab-timing] 2d source: channel=%d kind=%d map_mode=%d image_direct_sample=%d "
+        "%dx%d %s linear_conversion=%d\n",
+        int(channel),
+        int(logged_source.kind),
+        int(logged_source.effective_mtex.brush_map_mode),
+        int(logged_source.image_direct_sample),
+        logged_source.ibuf != nullptr ? logged_source.ibuf->x : 0,
+        logged_source.ibuf != nullptr ? logged_source.ibuf->y : 0,
+        (logged_source.ibuf != nullptr && logged_source.ibuf->float_data()) ? "float" : "byte",
+        int(logged_source.do_linear_conversion));
+    fflush(stdout);
+  }
+#endif
+  std::optional<PaintDabTimer> fill_timer;
+  fill_timer.emplace(PAINT_DAB_TIMER_2D_AP_FILL, cov.pixels.size());
   /* A constant source has no placement: its colour is the same at every texel. */
   const bool is_constant_source = usable &&
                                   painter->channel_sources->source(channel).kind ==
@@ -3685,6 +3735,8 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
     }
   }
 
+  fill_timer.reset();
+  const PaintDabTimer blend_timer(PAINT_DAB_TIMER_2D_AP_BLEND, int64_t(cov.w) * int64_t(cov.h));
   paint_2d_blend_area_buffer(
       s, tile, cov.x0, cov.y0, raster_buf, triangle_mask, s->blend, cov.w, cov.h);
   return true;
@@ -3876,6 +3928,33 @@ static bool paint_2d_area_plane_prepare(ImagePaintState *s,
   return paint_2d_area_plane_prepare_from_hit(s, mesh, hit, base_size, false, r_geom);
 }
 
+#ifdef DEBUG_PAINT_DAB_TIMING
+/** Describe the canvas of a tile once per stroke, next to the `source:` lines of the 3D path. */
+static void paint_2d_log_canvas(const ImagePaintTile *tile,
+                                const bool is_float,
+                                const bool is_data,
+                                const bool is_srgb)
+{
+  if (!paint_dab_timer_first_report(tile, 100)) {
+    return;
+  }
+  printf("[pbr-dab-timing] 2d canvas: %dx%d %s data=%d srgb=%d\n",
+         tile->canvas->x,
+         tile->canvas->y,
+         is_float ? "float" : "byte",
+         int(is_data),
+         int(is_srgb));
+  fflush(stdout);
+}
+#else
+static void paint_2d_log_canvas(const ImagePaintTile * /*tile*/,
+                                const bool /*is_float*/,
+                                const bool /*is_data*/,
+                                const bool /*is_srgb*/)
+{
+}
+#endif
+
 static void paint_2d_area_plane_apply(ImagePaintState *s,
                                       AreaPlaneDabGeom &geom,
                                       const ed::sculpt_paint::AreaPlaneMesh &mesh)
@@ -3934,6 +4013,7 @@ static void paint_2d_area_plane_apply(ImagePaintState *s,
     const bool is_srgb = (is_float || is_data) ?
                              false :
                              IMB_colormanagement_space_is_srgb(byte_colorspace);
+    paint_2d_log_canvas(tile, is_float, is_data, is_srgb);
     brush_painter_2d_require_imbuf(painter->brush,
                                    tile,
                                    is_float,
@@ -3957,6 +4037,7 @@ static void paint_2d_area_plane_apply(ImagePaintState *s,
     for (int tri_i = 0; tri_i < geom.accepted.size(); tri_i++) {
       const AreaPlaneTriCoverage *tri_cov = &tile_cov->tris[tri_i];
       if (shared_cov == nullptr) {
+        const PaintDabTimer coverage_timer(PAINT_DAB_TIMER_2D_AP_COVERAGE);
         paint_2d_area_plane_build_tri_coverage(tile,
                                                painter,
                                                mesh.triangle(geom.accepted[tri_i]),
@@ -4005,6 +4086,8 @@ static void paint_2d_area_plane_stroke(ImagePaintState *s,
 
   AreaPlaneDabGeom local;
   bool prepared = false;
+  std::optional<PaintDabTimer> prepare_timer;
+  prepare_timer.emplace(PAINT_DAB_TIMER_2D_AP_PREPARE);
   if (dab == nullptr) {
     prepared = paint_2d_area_plane_prepare(s, mesh, uv_center, base_size, local);
   }
@@ -4012,6 +4095,7 @@ static void paint_2d_area_plane_stroke(ImagePaintState *s,
     prepared = paint_2d_area_plane_prepare_from_hit(
         s, mesh, dab->hit, base_size, dab->flipped, local);
   }
+  prepare_timer.reset();
   if (!prepared) {
     return;
   }
@@ -4129,6 +4213,14 @@ static void paint_2d_stroke_single(ImagePaintState *s,
 {
   float new_uv[2], old_uv[2];
   BrushPainter *painter = s->painter;
+  const PaintDabTimer dab_total_timer(PAINT_DAB_TIMER_DAB_TOTAL);
+  /* One dab per channel state; counted when the function leaves, by whichever path. */
+  struct DabCounted {
+    ~DabCounted()
+    {
+      paint_dab_timer_count_dab();
+    }
+  } dab_counted;
 
   /* Resolve the transform before selecting the View or Area Plane path. The latter paints
    * directly from its rasterizer and therefore does not pass through the brush ImBuf builder. */
@@ -4373,6 +4465,7 @@ static void paint_2d_stroke_single(ImagePaintState *s,
       /* OCIO_TODO: float buffers are now always linear, so always use color correction
        *            this should probably be changed when texture painting color space is supported
        */
+      paint_2d_log_canvas(tile, is_float, is_data, is_srgb);
       brush_painter_2d_require_imbuf(painter->brush,
                                      tile,
                                      (ibuf->float_data() != nullptr),
@@ -4381,11 +4474,30 @@ static void paint_2d_stroke_single(ImagePaintState *s,
                                      byte_colorspace,
                                      painter->cache_invert);
 
-      brush_painter_2d_refresh_cache(
-          s, painter, tile, new_coord, iter_mval, pressure, distance, size, shared_state, roll_dab);
+      {
+        const int build_diameter = int(ceilf(size * 2.0f)) + 4;
+        const PaintDabTimer build_timer(PAINT_DAB_TIMER_2D_BRUSH_BUILD,
+                                        int64_t(build_diameter) * int64_t(build_diameter));
+        brush_painter_2d_refresh_cache(s,
+                                       painter,
+                                       tile,
+                                       new_coord,
+                                       iter_mval,
+                                       pressure,
+                                       distance,
+                                       size,
+                                       shared_state,
+                                       roll_dab);
+      }
 
-      if (paint_2d_op(s, tile, old_coord, new_coord)) {
-        tile->need_redraw = true;
+      {
+        const PaintDabTimer blend_timer(PAINT_DAB_TIMER_2D_BRUSH_BLEND,
+                                        tile->cache.ibuf != nullptr ?
+                                            int64_t(tile->cache.ibuf->x) * tile->cache.ibuf->y :
+                                            1);
+        if (paint_2d_op(s, tile, old_coord, new_coord)) {
+          tile->need_redraw = true;
+        }
       }
     }
   }
@@ -5070,7 +5182,10 @@ static void paint_2d_redraw_single(const bContext *C, ImagePaintState *s, bool f
     if (s->tiles[i].need_redraw) {
       ImBuf *ibuf = BKE_image_acquire_ibuf(s->image, &s->tiles[i].iuser, nullptr);
 
-      imapaint_image_update(s->sima, s->image, ibuf, &s->tiles[i].iuser, false);
+      {
+        const PaintDabTimer update_timer(PAINT_DAB_TIMER_2D_IMAGE_UPDATE);
+        imapaint_image_update(s->sima, s->image, ibuf, &s->tiles[i].iuser, false);
+      }
 
       BKE_image_release_ibuf(s->image, ibuf, nullptr);
 
@@ -5080,7 +5195,9 @@ static void paint_2d_redraw_single(const bContext *C, ImagePaintState *s, bool f
     }
   }
 
+  std::optional<PaintDabTimer> notify_timer;
   if (had_redraw) {
+    notify_timer.emplace(PAINT_DAB_TIMER_2D_REDRAW_NOTIFY);
     /* Notify every editor showing this image (not just the current region), so a channel
      * painted while a different image is displayed elsewhere still gets a live update signal. */
     WM_event_add_notifier(C, NC_IMAGE | NA_PAINTING, s->image);
@@ -5137,6 +5254,14 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
    * has consumed it; clearing it in paint_2d_redraw_single() makes extra channels miss their GPU
    * update after the primary channel is processed. */
   ED_imapaint_clear_partial_redraw();
+
+  /* One call is one mouse event; the final one closes the stroke. */
+  if (final) {
+    paint_dab_timer_stroke_end();
+  }
+  else {
+    paint_dab_timer_count_event();
+  }
 }
 
 void paint_2d_stroke_done(void *ps)

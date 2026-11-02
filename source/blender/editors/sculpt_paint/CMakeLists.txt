@@ -299,6 +299,7 @@ set(SRC
 
   mesh/mesh_brush_common.hh
   selection/paint_face_selection_mask.hh
+  mesh/paint_dab_timing.hh
   mesh/paint_hide.hh
   mesh/paint_material_attribute.hh
   mesh/paint_material_blend.hh

@@ -62,6 +62,7 @@
 #include "BKE_paint_layers_target.hh"
 
 #include "mesh_brush_common.hh"
+#include "paint_dab_timing.hh"
 #include "paint_material_blend.hh"
 #include "paint_material_source.hh"
 #include "sculpt_automask.hh"
@@ -224,6 +225,19 @@ void fetch_image_buffers(ImageData &image_data, bke::pbvh::Node & /*node*/, Pixe
 
         const ColorSpace *buffer_colorspace = IMB_colormanagement_space_get_named(
             buffer_colorspace_name);
+#ifdef DEBUG_PAINT_DAB_TIMING
+        /* Once per tile buffer and stroke (the processor is cached): tells which maps pay the
+         * colorspace conversion on read/write and which are the cheap scene-linear ones. */
+        printf("[pbr-dab-timing] map: %s tile=%d %dx%d %s colorspace=%s alpha_mode=%d\n",
+               image_data.image->id.name + 2,
+               int(tile.tile_number),
+               buffer->x,
+               buffer->y,
+               buffer->float_data() ? "float" : "byte",
+               buffer_colorspace_name.c_str(),
+               int(image_data.image->alpha_mode));
+        fflush(stdout);
+#endif
 
         TileColorspaceProcessor processor;
         if (!buffer_colorspace) {
@@ -808,6 +822,8 @@ static void read_paint_range(PaintChannelRangeState &state,
                              const PackedPixelRow &pixel_row,
                              const IndexRange range)
 {
+  PRF_scope_with_name("pbr_paint.read", ProfileCategory::Editor);
+  const PaintDabTimer dab_timer(PAINT_DAB_TIMER_READ, range.size());
   if (!state.float_buffer.is_empty()) {
     state.tls.scene_linear_pixels = read_image_pixels(
         state.float_buffer, state.processors, pixel_row, range, state.image_width);
@@ -935,6 +951,8 @@ static void blend_paint_range(PaintChannelRangeState &state,
                               const PackedPixelRow &pixel_row,
                               const IndexRange range)
 {
+  PRF_scope_with_name("pbr_paint.blend", ProfileCategory::Editor);
+  const PaintDabTimer dab_timer(PAINT_DAB_TIMER_BLEND, range.size());
   if (state.accum != nullptr) {
     accumulate_material_range(state, pixel_row, range);
     return;
@@ -954,6 +972,8 @@ static void write_paint_range(PaintChannelRangeState &state,
                               const PackedPixelRow &pixel_row,
                               const IndexRange range)
 {
+  PRF_scope_with_name("pbr_paint.write", ProfileCategory::Editor);
+  const PaintDabTimer dab_timer(PAINT_DAB_TIMER_WRITE, range.size());
   if (!state.float_buffer.is_empty()) {
     write_image_pixels(state.tls.paint_pixels,
                        state.float_buffer,
@@ -986,6 +1006,9 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
   {
     return false;
   }
+  PRF_scope_with_name("pbr_paint.fused_write", ProfileCategory::Editor);
+  /* This one pass is the read, the blend and the write at once, so all three land in one bucket. */
+  const PaintDabTimer dab_timer(PAINT_DAB_TIMER_FUSED_WRITE, range.size());
   MutableSpan<float4> paint_pixels = state.tls.paint_pixels;
   BLI_assert(paint_pixels.size() == range.size());
   const int start_offset = int(pixel_row.start_image_coordinate.y) * state.image_width +
@@ -1042,22 +1065,14 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
 /**
  * Run the destination part of one prepared paint range.
  *
- * TODO(perf): when this was last measured, writing a channel was the second largest term of a PBR
- * paint dab after the source sampling, and two thirds of it sat in the read side - not the blend
- * (`a_blend` ~0.25 ms) and not the write (~1.5 ms). Channels whose buffer is already scene linear
- * take the one-pass #apply_noop_fused path; the rest pay the colorspace processor plus the
- * straight/premultiplied conversion per texel. Things worth trying, in order of expected payoff:
- * - Store data channels (Roughness/Metallic/Normal, and any mask) as Non-Color, which makes the
- *   processor a no-op and moves them onto the fused path. That is also the correct encoding for
- *   them: converting those maps as color is both slower and wrong.
- * - Merge the dabs of one mouse event into a single write: for Mix the composition is exact as
- *   `beta_total = 1 - prod(1 - beta_i)` and `color_total = sum(c_i * w_i)` with
- *   `w_i = beta_i * prod_{j>i}(1 - beta_j)`, so one read + one write per texel replaces the ~10
- *   that overlapping dabs currently perform. Note this quantizes an 8-bit map once instead of once
- *   per dab, so the result is not bit-identical there (float maps are).
- * - Split the read into unpack / color management / premultiply and batch the color management
- *   over several rows at once; the processor call has a fixed cost that a 100-200 texel row
- *   amortizes poorly.
+ * TODO(perf): measured on 4K maps, the data channels (Non-Color) already take the fused
+ * #apply_noop_fused path at ~18 ns per texel, so they are not an open item. The cost left here is
+ * Base Color (8-bit sRGB): read + blend + write is ~45-65 ns per texel, almost all of it the OCIO
+ * processor plus the straight/premultiplied conversion. Ideas, none done:
+ * - A table-driven sRGB <-> linear path for 8-bit maps in place of the generic processor.
+ * - Run the color management over several rows at once; the processor call has a fixed cost that a
+ *   100-200 texel row amortizes poorly.
+ * - Merging the dabs of a mouse event into one write is not worth it: an event holds ~1.5 dabs.
  */
 static void apply_prepared_paint_range(PaintChannelRangeState &state,
                                        const PackedPixelRow &pixel_row,
@@ -1257,16 +1272,129 @@ struct RowFactorCache {
   Array<int2> row_span;
   /** Indexed like #UDIMTilePixels::pixel_rows; only entries in #valid_rows are populated. */
   Array<Array<float>> row_factors;
-  /** Object-space texel positions, indexed like #row_factors. Only filled when a channel has a
-   * source texture to sample; otherwise left empty so ordinary strokes pay nothing. */
-  Array<Array<float3>> row_positions;
-  /** #material::TexelSampleContext built once per texel from #row_positions, indexed the same
-   * way. #apply_paint_channel is called once per enabled channel and each call used to rebuild
+  /** #material::TexelSampleContext built once per texel, indexed like #row_factors. Only filled
+   * when a channel has a source texture to sample; otherwise left empty so ordinary strokes pay
+   * nothing. #apply_paint_channel is called once per enabled channel and each call used to rebuild
    * this (a view-projection matrix multiply, among other things) per pixel per channel; building
    * it once here and reusing it across every channel's call removes that per-channel repeat. */
   Array<Array<material::TexelSampleContext>> row_contexts;
   Bounds<int2> dirty_bounds = negative_bounds();
 };
+
+/* The most memory the row buffers kept between dabs may hold for one stroke. Past it a node's
+ * buffers are dropped and the next dab allocates them again, which is the behavior without reuse.
+ *
+ * NOTE: the count covers the per-row arrays, once per row, when the row is first written. The outer
+ * arrays (one small header per pixel row of the tile) and the contexts of a row that were allocated
+ * after that first write are not in it, so the real footprint is somewhat larger. */
+static constexpr int64_t row_buffers_budget_bytes = int64_t(256) * 1024 * 1024;
+
+template<typename T> static void row_arrays_grow(Array<Array<T>> &arrays, const int num)
+{
+  if (arrays.size() >= num) {
+    return;
+  }
+  Array<Array<T>> grown(num);
+  for (const int i : arrays.index_range()) {
+    grown[i] = std::move(arrays[i]);
+  }
+  arrays = std::move(grown);
+}
+
+/**
+ * Hand the reusable row arrays of one tile to \a tile_cache.
+ *
+ * The factors of a row are only read inside the span the dab computed, but the arrays have always
+ * been zero outside it, so what the previous dab wrote is cleared here and that stays true.
+ */
+static void row_buffers_acquire(PaintNodeRowBuffers &pool,
+                                const int tile_i,
+                                const int tile_row_num,
+                                const bool needs_positions,
+                                RowFactorCache &tile_cache)
+{
+  if (pool.tiles.size() <= tile_i) {
+    pool.tiles.resize(tile_i + 1);
+  }
+  PaintTileRowBuffers &buffers = pool.tiles[tile_i];
+
+  for (const int row_i : buffers.written_span.index_range()) {
+    const int2 span = buffers.written_span[row_i];
+    if (span.y > span.x && row_i < buffers.row_factors.size() &&
+        span.y <= buffers.row_factors[row_i].size())
+    {
+      buffers.row_factors[row_i].as_mutable_span().slice(span.x, span.y - span.x).fill(0.0f);
+    }
+  }
+  if (buffers.written_span.size() != tile_row_num) {
+    buffers.written_span = Array<int2>(tile_row_num, int2(0));
+    buffers.counted = Array<bool>(tile_row_num, false);
+  }
+  else {
+    buffers.written_span.fill(int2(0));
+  }
+
+  row_arrays_grow(buffers.row_factors, tile_row_num);
+  tile_cache.row_factors = std::move(buffers.row_factors);
+  if (needs_positions) {
+    row_arrays_grow(buffers.row_contexts, tile_row_num);
+    tile_cache.row_contexts = std::move(buffers.row_contexts);
+  }
+}
+
+/**
+ * Take the row arrays back from \a tile_caches once every channel pass of the dab is done, and drop
+ * them again when the stroke holds too much.
+ */
+static void row_buffers_release(PaintNodeRowBuffers &pool,
+                                Array<RowFactorCache> &tile_caches,
+                                int64_t &total_bytes)
+{
+  const PaintDabTimer release_timer(PAINT_DAB_TIMER_ROW_SETUP_ARRAYS);
+  int64_t added = 0;
+  for (const int tile_i : tile_caches.index_range()) {
+    if (tile_i >= pool.tiles.size()) {
+      break;
+    }
+    RowFactorCache &tile_cache = tile_caches[tile_i];
+    PaintTileRowBuffers &buffers = pool.tiles[tile_i];
+    if (!tile_cache.row_factors.is_empty()) {
+      buffers.row_factors = std::move(tile_cache.row_factors);
+    }
+    if (!tile_cache.row_contexts.is_empty()) {
+      buffers.row_contexts = std::move(tile_cache.row_contexts);
+    }
+
+    /* Only rows that got a non-empty span were written into; the rest still hold zeros. A row's
+     * arrays keep their size for the rest of the stroke, so each one is counted once, when it is
+     * first written: walking every array of the tile on every dab cost more than reuse saves. */
+    const int row_num = int(std::min(buffers.written_span.size(), tile_cache.row_span.size()));
+    for (const int row_i : IndexRange(row_num)) {
+      const int2 span = tile_cache.row_span[row_i];
+      if (span.y <= span.x) {
+        continue;
+      }
+      buffers.written_span[row_i] = span;
+      if (buffers.counted[row_i]) {
+        continue;
+      }
+      buffers.counted[row_i] = true;
+      if (row_i < buffers.row_factors.size()) {
+        added += int64_t(buffers.row_factors[row_i].size()) * int64_t(sizeof(float));
+      }
+      if (row_i < buffers.row_contexts.size()) {
+        added += int64_t(buffers.row_contexts[row_i].size()) *
+                 int64_t(sizeof(material::TexelSampleContext));
+      }
+    }
+  }
+  pool.bytes += added;
+  total_bytes += added;
+  if (total_bytes > row_buffers_budget_bytes) {
+    total_bytes -= pool.bytes;
+    pool = PaintNodeRowBuffers();
+  }
+}
 
 static Array<RowFactorCache> compute_paint_row_factors(
     SculptSession &ss,
@@ -1280,9 +1408,11 @@ static Array<RowFactorCache> compute_paint_row_factors(
     const ImageData &layout_image_data,
     const bool needs_baked_target_uv,
     const PaintLayersMaskSampler *mask_sampler,
-    PixelNode &pixel_node)
+    PixelNode &pixel_node,
+    PaintNodeRowBuffers *row_buffers)
 {
-  PRF_scope(ProfileCategory::Editor);
+  PRF_scope_with_name("pbr_paint.row_factors", ProfileCategory::Editor);
+  const PaintDabTimer dab_timer(PAINT_DAB_TIMER_ROW_FACTORS);
   const StrokeCache &cache = *ss.cache;
   /* The standard Texture Mask scales every dab's coverage. A PBR stroke has no sampler in some
    * cases (Erase reads no channel source), so it must be able to request the sample contexts on
@@ -1296,15 +1426,25 @@ static Array<RowFactorCache> compute_paint_row_factors(
    * `cache.material_source_sampler` and `invert` again here could silently diverge from it. */
   const bool needs_positions = active_sampler != nullptr || mask_texture_active;
 
+  std::optional<PaintDabTimer> setup_timer;
+  setup_timer.emplace(PAINT_DAB_TIMER_ROW_SETUP);
+  std::optional<PaintDabTimer> test_timer;
+  test_timer.emplace(PAINT_DAB_TIMER_ROW_SETUP_TEST);
   BitVector<> brush_test = init_uv_primitives_brush_test(
       ss, pbvh_data.vert_tris, pixel_node.uv_primitives.tri_indices, positions);
+  test_timer.reset();
 
+  std::optional<PaintDabTimer> arrays_timer;
+  arrays_timer.emplace(PAINT_DAB_TIMER_ROW_SETUP_ARRAYS);
   Array<RowFactorCache> tile_caches(pixel_node.tiles.size());
+  arrays_timer.reset();
 
   for (const int tile_i : pixel_node.tiles.index_range()) {
     UDIMTilePixels &tile_data = pixel_node.tiles[tile_i];
     RowFactorCache &tile_cache = tile_caches[tile_i];
 
+    std::optional<PaintDabTimer> rows_timer;
+    rows_timer.emplace(PAINT_DAB_TIMER_ROW_SETUP_ROWS);
     tile_cache.valid_rows = IndexMask::from_predicate(
         tile_data.pixel_rows.index_range(), *tile_cache.memory, [&](const int i) {
           const PackedPixelRow &pixel_row = tile_data.pixel_rows[i];
@@ -1316,33 +1456,47 @@ static Array<RowFactorCache> compute_paint_row_factors(
                                                             pixel_row.uv_primitive_index);
         });
 
+    rows_timer.reset();
+
+    arrays_timer.emplace(PAINT_DAB_TIMER_ROW_SETUP_ARRAYS);
     tile_cache.row_changed = Array<bool>(tile_cache.valid_rows.min_array_size(), false);
     tile_cache.row_span = Array<int2>(tile_cache.valid_rows.min_array_size(), int2(0));
-    tile_cache.row_factors.reinitialize(tile_cache.valid_rows.min_array_size());
-    if (needs_positions) {
-      tile_cache.row_positions.reinitialize(tile_cache.valid_rows.min_array_size());
-      tile_cache.row_contexts.reinitialize(tile_cache.valid_rows.min_array_size());
+    if (row_buffers != nullptr) {
+      row_buffers_acquire(
+          *row_buffers, tile_i, int(tile_data.pixel_rows.size()), needs_positions, tile_cache);
     }
+    else {
+      tile_cache.row_factors.reinitialize(tile_cache.valid_rows.min_array_size());
+      if (needs_positions) {
+        tile_cache.row_contexts.reinitialize(tile_cache.valid_rows.min_array_size());
+      }
+    }
+    arrays_timer.reset();
   }
+  setup_timer.reset();
 
   /*
-   * TODO(perf): the row pass below is the last large unexplored term. What was measured before the
-   * timers were removed: with the brush footprint trimmed per row (#paint_row_brush_span) a dab
-   * touches ~98 % useful texels, and the cost splits roughly into positions/contexts (largest CPU
-   * share), distance+hardness, the strength curve, and source sampling (the latter is measured
-   * separately in paint_material_source.cc). Interesting but unverified:
-   * - `row_positions` and `row_contexts` do not depend on the dab, only on geometry and UV layout,
-   *   yet they are rebuilt for every dab of the stroke. Caching them per node for the whole stroke
-   *   (invalidated by the #PixelData layout key) removes that work entirely.
+   * TODO(perf): measured with `DEBUG_PAINT_DAB_TIMING` on a 4K map, a textured dab spends about
+   * a third of this pass on building the per-texel sample contexts (the `row geometry` stage), the
+   * rest on distance/hardness/strength and the serial setup. The brush test and the row arrays are
+   * no longer an issue (the arrays are reused between dabs, see #PaintNodeRowBuffers). Ideas, none
+   * done:
+   * - `row_contexts` depends on the dab only through the stroke's view, plane offset and symmetry
+   *   pass, so a context could be kept in the reused arrays and rebuilt only where the brush
+   *   reaches texels it has not covered yet, keyed by those values. The gain is bounded by the
+   *   context build, roughly a tenth of a dab, and it vanishes while symmetry alternates passes.
    * - The per-row masks (`valid_rows`) are per dab by construction, but the uv-primitive brush
    *   test (#init_uv_primitives_brush_test) could be done once per mouse event for the union of
-   *   the event's dabs instead of once per dab.
+   *   the event's dabs instead of once per dab. It measured at a few microseconds, so not worth it
+   *   on its own.
    * - #paint_row_brush_span only trims the sphere falloff shape; the tube shape needs the projected
    *   distance instead (the current sphere bound is not a superset there), which would extend the
    *   same win to Projected brushes.
    */
 
   threading::EnumerableThreadSpecific<PaintLocalData> all_factor_tls;
+  std::optional<PaintDabTimer> loop_timer;
+  loop_timer.emplace(PAINT_DAB_TIMER_ROW_LOOP);
   for (const int tile_i : pixel_node.tiles.index_range()) {
     UDIMTilePixels &tile_data = pixel_node.tiles[tile_i];
     RowFactorCache &tile_cache = tile_caches[tile_i];
@@ -1359,6 +1513,8 @@ static Array<RowFactorCache> compute_paint_row_factors(
                                           float2(float(layout_buffer->x), float(layout_buffer->y)) :
                                           float2(0.0f);
 
+          std::optional<PaintDabTimer> span_timer;
+          span_timer.emplace(PAINT_DAB_TIMER_ROW_SPAN);
           float3 row_first;
           float3 row_delta;
           paint_row_position_line(positions,
@@ -1370,6 +1526,7 @@ static Array<RowFactorCache> compute_paint_row_factors(
                                   row_delta);
           const IndexRange brush_span = paint_row_brush_span(
               ss, brush, row_first, row_delta, row_size);
+          span_timer.reset();
           /* Exact span, not chunk-aligned: both the factor pass and the channel passes now iterate
            * `brush_span` itself (see #threading::parallel_for below), so nothing outside it is read
            * or written and the undo bounds can be that same span. */
@@ -1385,56 +1542,79 @@ static Array<RowFactorCache> compute_paint_row_factors(
            * factor is zero" is the invariant every consumer of the row relies on. Holding it by
            * construction keeps a consumer that reads the whole row correct in release builds too. */
           Array<float> &row_factors = tile_cache.row_factors[row_i];
-          row_factors = Array<float>(row_size, 0.0f);
-          if (needs_positions) {
-            tile_cache.row_positions[row_i].reinitialize(row_size);
-            tile_cache.row_contexts[row_i].reinitialize(row_size);
+          {
+            const PaintDabTimer alloc_timer(PAINT_DAB_TIMER_ROW_ALLOC, row_size);
+            if (row_factors.size() != row_size) {
+              row_factors = Array<float>(row_size, 0.0f);
+            }
+            if (needs_positions) {
+              if (tile_cache.row_contexts[row_i].size() != row_size) {
+                tile_cache.row_contexts[row_i].reinitialize(row_size);
+              }
+            }
           }
 
           threading::parallel_for(brush_span, 512, [&](const IndexRange range) {
             PaintLocalData &tls = all_factor_tls.local();
 
-            tls.pixel_positions.resize(range.size());
-            calc_pixel_row_positions(positions,
-                                     pbvh_data.vert_tris,
-                                     pixel_node.uv_primitives.tri_indices,
-                                     pixel_node.uv_primitives.delta_barycentric_coords,
-                                     pixel_row,
-                                     range,
-                                     tls.pixel_positions);
-            if (needs_positions) {
-              tile_cache.row_positions[row_i].as_mutable_span().slice(range).copy_from(
-                  tls.pixel_positions);
+            {
+              /* Where each texel sits and the sample context built from it. Timed on its own
+               * (the `row geometry` stage) because it is the part of the pass that does not depend
+               * on the dab; see the `TODO(perf)` above. */
+              const PaintDabTimer row_geometry_timer(PAINT_DAB_TIMER_ROW_GEOMETRY, range.size());
 
-              /* Built once per texel here instead of once per channel in #apply_paint_channel;
-               * see #RowFactorCache::row_contexts. */
-              MutableSpan<material::TexelSampleContext> contexts =
-                  tile_cache.row_contexts[row_i].as_mutable_span().slice(range);
-              for (const int i : range.index_range()) {
-                contexts[i] = material::sculpt_texel_sample_context(ss, tls.pixel_positions[i]);
-                if (layout_size.x > 0.0f && layout_size.y > 0.0f) {
-                  const int texel_x = int(pixel_row.start_image_coordinate.x) +
-                                      int(range.start()) + i;
-                  const int texel_y = int(pixel_row.start_image_coordinate.y);
-                  contexts[i].uv = float2((float(texel_x) + 0.5f) / layout_size.x,
-                                          (float(texel_y) + 0.5f) / layout_size.y);
+              tls.pixel_positions.resize(range.size());
+              calc_pixel_row_positions(positions,
+                                       pbvh_data.vert_tris,
+                                       pixel_node.uv_primitives.tri_indices,
+                                       pixel_node.uv_primitives.delta_barycentric_coords,
+                                       pixel_row,
+                                       range,
+                                       tls.pixel_positions);
+              if (needs_positions) {
+                /* Built once per texel here instead of once per channel in #apply_paint_channel;
+                 * see #RowFactorCache::row_contexts. */
+                MutableSpan<material::TexelSampleContext> contexts =
+                    tile_cache.row_contexts[row_i].as_mutable_span().slice(range);
+                for (const int i : range.index_range()) {
+                  contexts[i] = material::sculpt_texel_sample_context(ss, tls.pixel_positions[i]);
+                  if (layout_size.x > 0.0f && layout_size.y > 0.0f) {
+                    const int texel_x = int(pixel_row.start_image_coordinate.x) +
+                                        int(range.start()) + i;
+                    const int texel_y = int(pixel_row.start_image_coordinate.y);
+                    contexts[i].uv = float2((float(texel_x) + 0.5f) / layout_size.x,
+                                            (float(texel_y) + 0.5f) / layout_size.y);
+                  }
                 }
               }
             }
 
             MutableSpan<float> factors = row_factors.as_mutable_span().slice(range);
-            factors.fill(1.0f);
+            {
+              const PaintDabTimer falloff_timer(PAINT_DAB_TIMER_ROW_FALLOFF, range.size());
+              factors.fill(1.0f);
 
-            tls.distances.resize(range.size());
-            calc_brush_distances(
-                ss, tls.pixel_positions, eBrushFalloffShape(brush.falloff_shape), tls.distances);
-            filter_distances_with_radius(cache.radius, tls.distances, factors);
-            apply_hardness_to_distances(cache, tls.distances);
+              tls.distances.resize(range.size());
+              calc_brush_distances(
+                  ss, tls.pixel_positions, eBrushFalloffShape(brush.falloff_shape), tls.distances);
+              filter_distances_with_radius(cache.radius, tls.distances, factors);
+              apply_hardness_to_distances(cache, tls.distances);
 
-            calc_brush_strength_factors(cache, brush, tls.distances, factors);
-            scale_factors(factors, cache.bstrength);
+              calc_brush_strength_factors(cache, brush, tls.distances, factors);
+              scale_factors(factors, cache.bstrength);
+            }
+            {
+              const PaintDabTimer brush_texture_timer(PAINT_DAB_TIMER_ROW_BRUSH_TEXTURE,
+                                                      range.size());
+              calc_brush_texture_factors(ss, brush, tls.pixel_positions, factors);
+            }
 
-            calc_brush_texture_factors(ss, brush, tls.pixel_positions, factors);
+            /* The three mask sources below only cost anything when one of them is active, so the
+             * timer is not even started otherwise (it would add an empty line to every report). */
+            std::optional<PaintDabTimer> masks_timer;
+            if (mask_texture_active || mask_sampler != nullptr || active_sampler != nullptr) {
+              masks_timer.emplace(PAINT_DAB_TIMER_ROW_MASKS, range.size());
+            }
 
             if (mask_texture_active) {
               /* A second, independent mask on top of the primary texture: its texels cut the
@@ -1532,6 +1712,7 @@ static Array<RowFactorCache> compute_paint_row_factors(
       tile_cache.dirty_bounds = bounds::merge(tile_cache.dirty_bounds, Bounds<int2>(start, end));
     });
   }
+  loop_timer.reset();
 
   return tile_caches;
 }
@@ -1939,12 +2120,12 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
     const UDIMTilePixels &tile = pixel_node.tiles[tile_i];
     const RowFactorCache &tile_cache = tile_caches[tile_i];
     const int cache_row_num = tile_cache.valid_rows.min_array_size();
-    if (tile_cache.row_factors.size() != cache_row_num ||
+    if (tile_cache.row_factors.size() < cache_row_num ||
         tile_cache.row_changed.size() != cache_row_num)
     {
       return false;
     }
-    if (sampler != nullptr && tile_cache.row_contexts.size() != cache_row_num) {
+    if (sampler != nullptr && tile_cache.row_contexts.size() < cache_row_num) {
       return false;
     }
     for (const int dest_i : dests.index_range()) {
@@ -2182,7 +2363,8 @@ static void push_undo_bounds(ImageData &image_data,
                              const PixelNode &pixel_node,
                              const Span<RowFactorCache> tile_caches)
 {
-  PRF_scope(ProfileCategory::Editor);
+  PRF_scope_with_name("pbr_paint.undo_push", ProfileCategory::Editor);
+  const PaintDabTimer dab_timer(PAINT_DAB_TIMER_UNDO_PUSH);
   Image &image = *image_data.image;
   ImageUser &image_user = *image_data.image_user;
   const int margin = math::max(int(image.seam_margin), 0);
@@ -2351,25 +2533,27 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
   if (cache.image_paint_targets.is_empty()) {
     return;
   }
+  /* After the early return, so the total only covers applications that are counted as dabs. */
+  const ed::sculpt_paint::PaintDabTimer dab_total_timer(
+      ed::sculpt_paint::PAINT_DAB_TIMER_DAB_TOTAL);
 
   /*
-   * TODO(perf): this is the per-dab entry point of PBR channel painting, and the place where the
-   * remaining costs live. Measured before the timing instrumentation was removed (single PBVH node,
-   * four channel passes, ~80k texels inside the brush):
-   *   total ~6 ms per dab, of which source sampling ~2.5-3 ms, channel read/blend/write ~2-2.5 ms,
-   *   the row-factor pass ~1.2 ms, the undo tile push ~0.1 ms (with 10-20 ms spikes on dabs that
-   *   capture new tiles).
-   * Candidates, in rough order of expected payoff - all unverified:
-   * - Merge the dabs of one mouse event into a single channel write (exact for Mix, see
-   *   #apply_prepared_paint_range). A stroke emits ~10-20 dabs per event and they overlap almost
-   *   completely, so this removes most of the repeated read/blend/write traffic.
-   * - Cache the row geometry across dabs (see the TODO in #compute_paint_row_factors).
-   * - Deduplicate undo tile captures per stroke: #ED_image_paint_tile_push already returns the
-   *   existing tile, but still takes the undo system's global spin lock each time.
-   * - `target_layout_keys` below re-acquires every tile's ImBuf on every dab; it could be cached on
-   *   #StrokeCache and invalidated with the target set.
-   * Re-measure before and after any of these: the numbers above came from stdout timers that have
-   * since been removed, and the workload depends heavily on canvas size and channel count.
+   * TODO(perf): this is the per-dab entry point of PBR channel painting. Measured with
+   * `DEBUG_PAINT_DAB_TIMING` (4K maps, a brush of ~18k texels, Release build): once a stroke is
+   * warm a dab takes about 0.8 ms wall (1.2-1.4 ms for its first dabs), of which the row-factor
+   * pass is ~35 %, the Area Plane source sampling ~30 %, the three fused data channels ~15 % and
+   * the Base Color read/write ~12 %. What is left, roughly by size:
+   * - Area Plane sampling of a large source is bound by memory latency (~70-100 ns per texel for a
+   *   2048x2048 float image against ~30 ns for a 128x128 one). The rows are prefetched already (see
+   *   #sample_channel_source_with_layout in paint_material_source.cc).
+   * - The serial part of the row-factor pass (the `valid_rows` mask and the per-tile arrays) is
+   *   ~0.08 ms per dab, and the sample contexts of its row loop ~0.1 ms (see the TODO in
+   *   #compute_paint_row_factors).
+   * - The first dab touching a tile copies it for undo, 10-20 ms on a dense canvas (see
+   *   #push_undo_bounds). That is a visible hitch at the start of a stroke, not a per-dab cost.
+   * - The fused data channels (~18 ns per texel each) look memory bound as well.
+   * A mouse event holds only ~1.5 dabs (3.5-4.4 on a fast flick), so anything that merges or
+   * memoizes work per event pays little.
    */
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
@@ -2566,8 +2750,13 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
         continue;
       }
       /* The pixel-node encoding changed, so any cached factors from a previous channel this
-       * dab no longer line up with it. */
+       * dab no longer line up with it. The reusable row arrays belong to the old layout too. */
       factor_caches_valid = false;
+      for (Array<RowFactorCache> &stale : node_factor_caches) {
+        stale = Array<RowFactorCache>();
+      }
+      cache.image_row_buffers.clear();
+      cache.image_row_buffers_bytes = 0;
     }
 
     PixelData &pixel_data = *pbvh.pixels_;
@@ -2686,6 +2875,10 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
           }
         });
       }
+      /* Sized here, serially: the node tasks below each use their own entry. */
+      if (cache.image_row_buffers.size() < pixel_nodes.size()) {
+        cache.image_row_buffers.resize(pixel_nodes.size());
+      }
       node_mask.foreach_index(
           [&](const int i, const int pos) {
             node_factor_caches[pos] = compute_paint_row_factors(ss,
@@ -2701,7 +2894,8 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                                                     active_sampler
                                                                         ->uses_baked_target_uv(),
                                                                 mask_sampler,
-                                                                pixel_nodes[i]);
+                                                                pixel_nodes[i],
+                                                                &cache.image_row_buffers[i]);
           },
           exec_mode::grain_size(1));
       factor_caches_valid = true;
@@ -2825,6 +3019,18 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
 
     target_index += dests.size();
   }
+
+  /* Every channel pass is done with the row arrays: keep them for the next dab. */
+  node_mask.foreach_index([&](const int i, const int pos) {
+    if (i < cache.image_row_buffers.size() && !node_factor_caches[pos].is_empty()) {
+      row_buffers_release(
+          cache.image_row_buffers[i], node_factor_caches[pos], cache.image_row_buffers_bytes);
+    }
+  });
+
+  /* One brush application (dab x symmetry pass). The stage totals printed by
+   * #paint_dab_timer_report divide by this, so the per-dab column is per application. */
+  ed::sculpt_paint::paint_dab_timer_count_dab();
 }
 
 }  // namespace blender

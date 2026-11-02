@@ -131,6 +131,7 @@
 #include "sculpt_filter.hh"
 #include "sculpt_hide.hh"
 #include "../shapes/paint_shape_space.hh"
+#include "paint_dab_timing.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_islands.hh"
 #include "sculpt_multi_object.hh"
@@ -10913,7 +10914,17 @@ void SculptPaintStroke::post_done(bContext *C, const bool is_cancel, const bool 
   }
 }
 
-void SculptPaintStroke::redraw(bool /*final*/) {}
+void SculptPaintStroke::redraw(bool final)
+{
+  /* Stdout timing of the PBR paint dabs: one call is one mouse event, and the final one closes the
+   * stroke. Both collapse to nothing unless DEBUG_PAINT_DAB_TIMING is defined. */
+  if (final) {
+    paint_dab_timer_stroke_end();
+  }
+  else {
+    paint_dab_timer_count_event();
+  }
+}
 
 bool SculptPaintStroke::test_cancel()
 {

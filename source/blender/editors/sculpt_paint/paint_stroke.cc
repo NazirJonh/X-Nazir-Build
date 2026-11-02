@@ -1139,13 +1139,10 @@ static float paint_space_stroke_spacing_variable(ViewContext &vc,
 /*
  * For brushes with stroke spacing enabled, moves mouse in steps towards the final mouse location.
  *
- * TODO(perf): every iteration below runs the whole brush dispatch, and the dabs of one mouse event
- * overlap almost completely - a PBR paint stroke emitted ~10-20 dabs per event, each costing the
- * full pixel pass. Merging them into one application per event would replace ~10 read/write passes
- * per texel with one; the composition needed for it is exact for Mix (see the TODO in
- * #apply_prepared_paint_range, which also notes that 8-bit maps would then quantize once instead of
- * once per dab). Not done here because it needs a per-event accumulator in the paint path, which
- * has not been verified yet.
+ * TODO(perf): every iteration below runs the whole brush dispatch. Measured on 4K PBR strokes
+ * (`DEBUG_PAINT_DAB_TIMING` in sculpt_paint_image.cc), a mouse event emits only ~1.2-2 dabs
+ * (3.5-4.4 on a fast flick, 26 after a long jump), not the 10-20 this note used to assume, so
+ * merging the dabs of an event into one application would save little. Not done.
  */
 int PaintStroke::space_stroke(bContext *C,
                               wmOperator *op,

@@ -63,12 +63,44 @@ const EnumPropertyItem rna_enum_material_paint_channel_items[] = {
      "Scalar alpha channel; also masks writes to other active channels while enabled"},
     {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", "Ambient occlusion channel"},
     {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", "Emission color channel"},
+    {PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
+     "EMISSION_STRENGTH",
+     0,
+     "Emission Strength",
+     "Scalar emission strength multiplying the Emission channel"},
+    {PAINT_MATERIAL_CHANNEL_TRANSMISSION,
+     "TRANSMISSION",
+     0,
+     "Transmission",
+     "Scalar transmission weight"},
+    {PAINT_MATERIAL_CHANNEL_SUBSURFACE,
+     "SUBSURFACE",
+     0,
+     "Subsurface",
+     "Scalar subsurface weight"},
+    {PAINT_MATERIAL_CHANNEL_COAT, "COAT", 0, "Coat", "Scalar coat weight"},
+    {PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS,
+     "COAT_ROUGHNESS",
+     0,
+     "Coat Roughness",
+     "Scalar roughness of the coat layer"},
+    {PAINT_MATERIAL_CHANNEL_SHEEN, "SHEEN", 0, "Sheen", "Scalar sheen weight"},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR_TINT,
+     "SPECULAR_TINT",
+     0,
+     "Specular Tint",
+     "Specular tint color channel"},
+    {PAINT_MATERIAL_CHANNEL_ANISOTROPIC,
+     "ANISOTROPIC",
+     0,
+     "Anisotropic",
+     "Scalar specular anisotropy"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 /* Bit-flag values for #Material.paint_layers_channels: the set is a bitmask keyed by
  * #eMaterialPaintChannel, so each item must be a unique power-of-two bit. This must not reuse
- * #rna_enum_material_paint_channel_items, which stores plain channel indices (0..9). Shared by the
+ * #rna_enum_material_paint_channel_items, which stores plain channel indices. Shared by the
  * material's RNA and #MATERIAL_OT_new_layered's dialog. */
 const EnumPropertyItem rna_enum_material_paint_channel_flag_items[] = {
     {1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
@@ -81,6 +113,14 @@ const EnumPropertyItem rna_enum_material_paint_channel_flag_items[] = {
     {1 << PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
     {1 << PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", ""},
     {1 << PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH, "EMISSION_STRENGTH", 0, "Emission Strength", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_TRANSMISSION, "TRANSMISSION", 0, "Transmission", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SUBSURFACE, "SUBSURFACE", 0, "Subsurface", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_COAT, "COAT", 0, "Coat", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS, "COAT_ROUGHNESS", 0, "Coat Roughness", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SHEEN, "SHEEN", 0, "Sheen", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SPECULAR_TINT, "SPECULAR_TINT", 0, "Specular Tint", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ANISOTROPIC, "ANISOTROPIC", 0, "Anisotropic", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -97,23 +137,44 @@ static const EnumPropertyItem rna_enum_visible_material_paint_channel_items[] = 
     {1 << PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
     {1 << PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", ""},
     {1 << PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH, "EMISSION_STRENGTH", 0, "Emission Strength", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_TRANSMISSION, "TRANSMISSION", 0, "Transmission", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SUBSURFACE, "SUBSURFACE", 0, "Subsurface", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_COAT, "COAT", 0, "Coat", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS, "COAT_ROUGHNESS", 0, "Coat Roughness", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SHEEN, "SHEEN", 0, "Sheen", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SPECULAR_TINT, "SPECULAR_TINT", 0, "Specular Tint", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ANISOTROPIC, "ANISOTROPIC", 0, "Anisotropic", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
 /* The channels whose ramp a gradient tool's gizmo can show, shared by the Gradient tools' Channel
  * popover property and by the operators that select or create that ramp: a colour channel shows
  * the tool's colour ramp, a scalar channel its value ramp. The values match
- * #eMaterialPaintChannel. Normal is absent because a ramp cannot drive a packed tangent. */
+ * #eMaterialPaintChannel and the order follows the channel descriptor table, like every other
+ * channel list. Normal is absent because a ramp cannot drive a packed tangent. */
 const EnumPropertyItem rna_enum_gradient_tool_gizmo_channel_items[] = {
     {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", "Colour ramp"},
     {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metal", "Value ramp"},
     {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Rough", "Value ramp"},
     {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Spec", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_CUSTOM, "CUSTOM", 0, "Custom", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", "Value ramp"},
     {PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", "Value ramp"},
     {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", "Value ramp"},
-    {PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", "Value ramp"},
     {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emit", "Colour ramp"},
-    {PAINT_MATERIAL_CHANNEL_CUSTOM, "CUSTOM", 0, "Custom", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
+     "EMISSION_STRENGTH",
+     0,
+     "Emit Strength",
+     "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_TRANSMISSION, "TRANSMISSION", 0, "Trans", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_SUBSURFACE, "SUBSURFACE", 0, "SSS", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_COAT, "COAT", 0, "Coat", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS, "COAT_ROUGHNESS", 0, "Coat Rough", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_SHEEN, "SHEEN", 0, "Sheen", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR_TINT, "SPECULAR_TINT", 0, "Spec Tint", "Colour ramp"},
+    {PAINT_MATERIAL_CHANNEL_ANISOTROPIC, "ANISOTROPIC", 0, "Aniso", "Value ramp"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1017,6 +1078,24 @@ static int rna_MaterialPaintChannelLayerBinding_channel_get_rna(PointerRNA *ptr)
 static std::optional<std::string> rna_PaintModeSettings_path(const PointerRNA * /*ptr*/)
 {
   return "tool_settings.paint_mode";
+}
+
+/**
+ * The static facts the channel descriptor table decides, for Python UI code that today mirrors
+ * them by hand. Python reaches this through `context.scene.tool_settings.paint_mode`, which every
+ * draw and operator path has; the settings instance itself is irrelevant, the table is global.
+ */
+static void rna_PaintModeSettings_paint_channel_info(PaintModeSettings * /*settings*/,
+                                                     const int channel,
+                                                     bool *r_is_color,
+                                                     bool *r_supports_vertex_paint,
+                                                     bool *r_supports_image_paint)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      static_cast<eMaterialPaintChannel>(channel));
+  *r_is_color = info.is_color;
+  *r_supports_vertex_paint = info.supports_vertex_paint;
+  *r_supports_image_paint = info.supports_image_paint;
 }
 
 static std::optional<std::string> rna_UvSculpt_path(const PointerRNA * /*ptr*/)
@@ -3807,6 +3886,38 @@ static void rna_def_paint_mode(BlenderRNA *brna)
       "Show the object mask of the active layer in the material properties");
   RNA_def_property_update(
       prop, NC_SPACE | ND_SPACE_PROPERTIES, "rna_PaintModeSettings_layer_object_mask_edit_update");
+
+  /* The channel descriptor's facts for Python, so UI code reads the one table instead of mirroring
+   * `is_color` and the supports flags by hand. Not a property of these settings: the table is
+   * global, and the settings are only the instance Python can always reach. */
+  FunctionRNA *func = RNA_def_function(
+      srna, "paint_channel_info", "rna_PaintModeSettings_paint_channel_info");
+  RNA_def_function_ui_description(
+      func,
+      "Static facts of a material paint channel, from the descriptor table "
+      "(is_color, supports_vertex_paint, supports_image_paint)");
+  PropertyRNA *parm = RNA_def_enum(func,
+                                   "channel",
+                                   rna_enum_material_paint_channel_items,
+                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                   "Channel",
+                                   "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(
+      func, "is_color", false, "Is Color", "The channel holds a colour, not data");
+  RNA_def_function_output(func, parm);
+  parm = RNA_def_boolean(func,
+                         "supports_vertex_paint",
+                         false,
+                         "Supports Vertex Paint",
+                         "The channel has a per-vertex representation on the mesh canvas");
+  RNA_def_function_output(func, parm);
+  parm = RNA_def_boolean(func,
+                         "supports_image_paint",
+                         false,
+                         "Supports Image Paint",
+                         "The channel has a Principled socket or row map an image can paint");
+  RNA_def_function_output(func, parm);
 }
 
 static const EnumPropertyItem rna_shape_blend_items[] = {
@@ -5527,6 +5638,14 @@ static void rna_def_image_paint(BlenderRNA *brna)
       {PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", ""},
       {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", ""},
       {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+      {PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH, "EMISSION_STRENGTH", 0, "Emission Strength", ""},
+      {PAINT_MATERIAL_CHANNEL_TRANSMISSION, "TRANSMISSION", 0, "Transmission", ""},
+      {PAINT_MATERIAL_CHANNEL_SUBSURFACE, "SUBSURFACE", 0, "Subsurface", ""},
+      {PAINT_MATERIAL_CHANNEL_COAT, "COAT", 0, "Coat", ""},
+      {PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS, "COAT_ROUGHNESS", 0, "Coat Roughness", ""},
+      {PAINT_MATERIAL_CHANNEL_SHEEN, "SHEEN", 0, "Sheen", ""},
+      {PAINT_MATERIAL_CHANNEL_SPECULAR_TINT, "SPECULAR_TINT", 0, "Specular Tint", ""},
+      {PAINT_MATERIAL_CHANNEL_ANISOTROPIC, "ANISOTROPIC", 0, "Anisotropic", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
 

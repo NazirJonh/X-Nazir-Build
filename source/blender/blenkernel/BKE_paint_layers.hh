@@ -305,7 +305,7 @@ void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &l
  * setters. A caller that must put a channel into the set does so explicitly.
  * This is a read-only view of the description; it never creates a channel record.
  */
-uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma);
+uint32_t BKE_paint_layers_channel_set_mask_get(const Material &ma);
 
 /** Whether \a channel is in \a ma's global paint channel set. */
 bool BKE_paint_layers_channel_in_set(const Material &ma, eMaterialPaintChannel channel);
@@ -340,7 +340,7 @@ bool BKE_paint_layers_channel_set_enable(Material &ma,
  * \return true when the mask was accepted (written, or already the stored one), false when \a mask
  * was empty and the set was left unchanged.
  */
-bool BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask);
+bool BKE_paint_layers_channel_set_mask_set(Material &ma, uint32_t mask);
 
 /**
  * The channel set a fresh stack offers before any set is authored: the build default (Base Color,
@@ -348,7 +348,7 @@ bool BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask);
  * New Layered Material dialog proposes #BKE_paint_layers_new_material_channel_set instead, which
  * adds Height.
  */
-uint16_t BKE_paint_layers_default_channel_set();
+uint32_t BKE_paint_layers_default_channel_set();
 
 /**
  * The channel set a brand-new layered material starts from: the build default plus Height. Only the
@@ -356,7 +356,7 @@ uint16_t BKE_paint_layers_default_channel_set();
  * authored set keeps #BKE_paint_layers_channel_set_mask_get's build default and never gains Height
  * on its own. The extra channel is stored on creation, so a set read back is an authored one.
  */
-uint16_t BKE_paint_layers_new_material_channel_set();
+uint32_t BKE_paint_layers_new_material_channel_set();
 
 /**
  * Give a brand-new layered material the response values a freshly created stack starts from: Bump

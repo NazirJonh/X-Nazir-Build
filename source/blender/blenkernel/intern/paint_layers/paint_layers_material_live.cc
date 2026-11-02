@@ -290,7 +290,7 @@ bool paint_layer_correction_reads_source(const Material &ma,
 
 int paint_layer_mask_source_channel(const MaterialPaintLayer &item)
 {
-  const uint16_t bits = item.mask_source_channels;
+  const uint32_t bits = item.mask_source_channels;
   for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
     if ((bits & (1u << channel)) != 0 && BKE_paint_layers_mask_source_channel_allowed(channel)) {
       return channel;

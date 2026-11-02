@@ -153,7 +153,7 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
   args.empty = empty;
   if (empty) {
     /* The Empty buttons ask which channels the new row should start with; none is the default. */
-    args.channel_mask = uint16_t(RNA_enum_get(op->ptr, "fill_channels"));
+    args.channel_mask = uint32_t(RNA_enum_get(op->ptr, "fill_channels"));
   }
   const int added = outliner_stack_row_add(C, *space_outliner, kind, anchor_ordinal, args);
   return added >= 0 ? OPERATOR_FINISHED : OPERATOR_CANCELLED;

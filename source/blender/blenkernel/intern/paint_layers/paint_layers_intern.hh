@@ -718,13 +718,30 @@ inline bool paint_layer_mask_item_alpha_background(const MaterialPaintLayer &ite
 }
 
 /**
- * The `MA_RAMP_*` blend code a description blend stands for.
+ * The engine blend code a description blend stands for: a `MA_RAMP_*` code for every mode a Mix
+ * node expresses, and a #MA_PAINT_BLEND_* code for the six it does not.
  *
- * The one table the generator's Mix nodes and the CPU's `ramp_blend` both read, so a blend cannot
- * mean two different things. #MA_PAINT_LAYER_BLEND_NORMAL_COMBINE is not a Mix mode and has no ramp
- * code; it answers #MA_RAMP_BLEND, and the Normal channel never reaches this with it.
+ * The one table the generator, the ".PBR Blend" group's `Mode` input and the CPU's
+ * #BKE_paint_material_blend_apply all read, so a blend cannot mean two different things.
+ * #MA_PAINT_LAYER_BLEND_NORMAL_COMBINE is not a Mix mode and has no ramp code; it answers
+ * #MA_RAMP_BLEND, and the Normal channel never reaches this with it.
+ *
+ * NOTE: an extended code is not a valid `NodeShaderMix::blend_type`. A caller wiring a plain Mix
+ * node has to route the mode through the blend group instead, or refuse it;
+ * #BKE_paint_layers_blend_is_extended is the test.
  */
 int BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend blend);
+
+/** Whether \a blend names one of the modes a Mix node cannot express. */
+bool BKE_paint_layers_blend_is_extended(eMaterialPaintLayerBlend blend);
+
+/**
+ * The code-level twin of #BKE_paint_layers_blend_is_extended: whether \a ramp_blend (the output of
+ * #BKE_paint_layers_blend_to_ramp) is one of the extended #eMaterialPaintBlend codes a plain Mix
+ * node cannot hold. Every "is this mode past the Mix node's range" test goes through here, so the
+ * boundary lives in one place.
+ */
+bool paint_blend_code_is_extended(int ramp_blend);
 
 namespace bke::paint_layers {
 

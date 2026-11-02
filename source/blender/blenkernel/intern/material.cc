@@ -39,6 +39,7 @@
 #include "BLI_enum_flags.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_color.h"
+#include "BLI_math_color_blend.h"
 #include "BLI_math_vector.h"
 #include "BLI_set.hh"
 #include "BLI_string.h"
@@ -2665,9 +2666,16 @@ Vector<Image *> BKE_texpaint_slot_canvas_images(const Material *ma)
   return images;
 }
 
+/**
+ * The per-channel Color Burn and Dodge cores live in #BLI_math_color_blend
+ * (#blend_color_burn_channel / #blend_color_dodge_channel): the CPU paint composite reduces Vivid
+ * Light to their full-factor steps against a doubled upper colour, so the two engines share one
+ * formula instead of two that could drift.
+ */
+
 void ramp_blend(int type, float r_col[4], const float fac, const float col[4])
 {
-  float tmp, facm = 1.0f - fac;
+  const float facm = 1.0f - fac;
 
   switch (type) {
     case MA_RAMP_BLEND:
@@ -2751,85 +2759,13 @@ void ramp_blend(int type, float r_col[4], const float fac, const float col[4])
       r_col[2] = max_ff(r_col[2], col[2]) * fac + r_col[2] * facm;
       break;
     case MA_RAMP_DODGE:
-      if (r_col[0] != 0.0f) {
-        tmp = 1.0f - fac * col[0];
-        if (tmp <= 0.0f) {
-          r_col[0] = 1.0f;
-        }
-        else if ((tmp = (r_col[0]) / tmp) > 1.0f) {
-          r_col[0] = 1.0f;
-        }
-        else {
-          r_col[0] = tmp;
-        }
-      }
-      if (r_col[1] != 0.0f) {
-        tmp = 1.0f - fac * col[1];
-        if (tmp <= 0.0f) {
-          r_col[1] = 1.0f;
-        }
-        else if ((tmp = (r_col[1]) / tmp) > 1.0f) {
-          r_col[1] = 1.0f;
-        }
-        else {
-          r_col[1] = tmp;
-        }
-      }
-      if (r_col[2] != 0.0f) {
-        tmp = 1.0f - fac * col[2];
-        if (tmp <= 0.0f) {
-          r_col[2] = 1.0f;
-        }
-        else if ((tmp = (r_col[2]) / tmp) > 1.0f) {
-          r_col[2] = 1.0f;
-        }
-        else {
-          r_col[2] = tmp;
-        }
+      for (const int i : IndexRange(3)) {
+        r_col[i] = blend_color_dodge_channel(r_col[i], 1.0f - fac * col[i]);
       }
       break;
     case MA_RAMP_BURN:
-      tmp = facm + fac * col[0];
-
-      if (tmp <= 0.0f) {
-        r_col[0] = 0.0f;
-      }
-      else if ((tmp = (1.0f - (1.0f - (r_col[0])) / tmp)) < 0.0f) {
-        r_col[0] = 0.0f;
-      }
-      else if (tmp > 1.0f) {
-        r_col[0] = 1.0f;
-      }
-      else {
-        r_col[0] = tmp;
-      }
-
-      tmp = facm + fac * col[1];
-      if (tmp <= 0.0f) {
-        r_col[1] = 0.0f;
-      }
-      else if ((tmp = (1.0f - (1.0f - (r_col[1])) / tmp)) < 0.0f) {
-        r_col[1] = 0.0f;
-      }
-      else if (tmp > 1.0f) {
-        r_col[1] = 1.0f;
-      }
-      else {
-        r_col[1] = tmp;
-      }
-
-      tmp = facm + fac * col[2];
-      if (tmp <= 0.0f) {
-        r_col[2] = 0.0f;
-      }
-      else if ((tmp = (1.0f - (1.0f - (r_col[2])) / tmp)) < 0.0f) {
-        r_col[2] = 0.0f;
-      }
-      else if (tmp > 1.0f) {
-        r_col[2] = 1.0f;
-      }
-      else {
-        r_col[2] = tmp;
+      for (const int i : IndexRange(3)) {
+        r_col[i] = blend_color_burn_channel(r_col[i], facm + fac * col[i]);
       }
       break;
     case MA_RAMP_HUE: {
@@ -2914,6 +2850,9 @@ void ramp_blend(int type, float r_col[4], const float fac, const float col[4])
         r_col[2] = r_col[2] + fac * (2.0f * (col[2]) - 1.0f);
       }
       break;
+    /* The blend codes past #MA_RAMP_EXCLUSION are the paint stack's own (see
+     * #eMaterialPaintBlend): they are applied through #BKE_paint_material_blend_apply, not here,
+     * so this switch stays the Mix node's own arithmetic. */
   }
 }
 

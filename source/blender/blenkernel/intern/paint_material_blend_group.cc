@@ -15,6 +15,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_string.h"
 #include "BLT_translation.hh"
@@ -23,6 +24,7 @@
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
 
+#include "paint_material_blend_group_internal.hh"
 #include "paint_material_composite_internal.hh"
 
 #include <cstring>
@@ -40,36 +42,14 @@ static const char *BLEND_TREE_NAME = ".PBR Blend";
 /** Marker value of the Blend group; see #paint_material_group_has_marker. */
 static constexpr const char *BLEND_MARKER_VALUE = "BLEND";
 
+/** How many branches the group builds: one per Mix-node blend code, plus one cluster per
+ * #eMaterialPaintBlend mode. A group with fewer selects a neighbouring mode silently, so this is
+ * what the build checks against. */
+constexpr int BLEND_BRANCH_EXPECTED = (MA_RAMP_EXCLUSION - MA_RAMP_BLEND + 1) + 6;
+
 bool BKE_paint_material_is_blend_group(const bNode &node)
 {
   return paint_material_group_has_marker(node, BLEND_MARKER_VALUE);
-}
-
-/**
- * One static blend branch: a `ShaderNodeMix` in RGBA mode set to \a ramp_blend.
- *
- * The settings are the ones #mix_node_add in `paint_layers_generate_build_chain.cc` uses, and the
- * same the CPU's `ramp_blend` assumes: the factor is clamped to 0..1, the result is not, so Add
- * can exceed one and only the byte encode finally clamps.
- */
-static bNode *blend_branch_add(bNodeTree &group,
-                               const int ramp_blend,
-                               const float location_x,
-                               const float location_y)
-{
-  bNode *node = bke::node_add_node(nullptr, group, "ShaderNodeMix"_ustr);
-  if (node == nullptr || node->storage == nullptr) {
-    return nullptr;
-  }
-  NodeShaderMix *storage = static_cast<NodeShaderMix *>(node->storage);
-  storage->data_type = SOCK_RGBA;
-  storage->factor_mode = NODE_MIX_MODE_UNIFORM;
-  storage->blend_type = ramp_blend;
-  storage->clamp_factor = true;
-  storage->clamp_result = false;
-  node->location[0] = location_x;
-  node->location[1] = location_y;
-  return node;
 }
 
 bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain)
@@ -118,7 +98,9 @@ bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain)
   auto &mode_data = *static_cast<bNodeSocketValueInt *>(mode->socket_data);
   mode_data.value = 0;
   mode_data.min = MA_RAMP_BLEND;
-  mode_data.max = MA_RAMP_EXCLUSION;
+  /* Past the Mix node's own range: the codes of #eMaterialPaintBlend select the branches built out
+   * of several nodes. The gap in between is the normal combine, which is a group of its own. */
+  mode_data.max = MA_PAINT_BLEND_DARKER_COLOR;
 
   bNode *group_input = bke::node_add_node(nullptr, *group, "NodeGroupInput"_ustr);
   bNode *group_output = bke::node_add_node(nullptr, *group, "NodeGroupOutput"_ustr);
@@ -149,19 +131,52 @@ bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain)
   /* Every mode is built once, side by side, and all of them read the same two colours and factor.
    * The branches are static: a mode change only moves the comparison below, it never rebuilds a
    * node, which is what keeps the group shared and the shader cache stable. */
-  constexpr int branch_count = MA_RAMP_EXCLUSION - MA_RAMP_BLEND + 1;
-  bNode *branches[branch_count] = {};
+  Vector<BlendBranch> branch_list;
   for (int ramp_blend = MA_RAMP_BLEND; ramp_blend <= MA_RAMP_EXCLUSION; ramp_blend++) {
     const int index = ramp_blend - MA_RAMP_BLEND;
-    bNode *branch = blend_branch_add(*group, ramp_blend, -1200.0f, 1080.0f - index * 120.0f);
+    bNode *branch = blend_group_mix_node_rgba_add(
+        *group, ramp_blend, -1200.0f, 1080.0f - index * 120.0f);
     if (branch == nullptr) {
       ok = false;
       break;
     }
-    branches[index] = branch;
-    ok = link(group_input, BLEND_GROUP_ID_A, branch, "A_Color") && ok;
-    ok = link(group_input, BLEND_GROUP_ID_B, branch, "B_Color") && ok;
-    ok = link(group_input, BLEND_GROUP_ID_FACTOR, branch, "Factor_Float") && ok;
+    ok = link(group_input, BLEND_GROUP_ID_A, branch, BLEND_NODE_MIX_A) && ok;
+    ok = link(group_input, BLEND_GROUP_ID_B, branch, BLEND_NODE_MIX_B) && ok;
+    ok = link(group_input, BLEND_GROUP_ID_FACTOR, branch, BLEND_NODE_MIX_FACTOR) && ok;
+    branch_list.append(BlendBranch{ramp_blend, branch, BLEND_NODE_MIX_RESULT});
+  }
+
+  /* The modes a Mix node has no blend type for, one cluster each, below the ramp range and past the
+   * code the normal combine keeps for itself. */
+  struct ExtendedBranch {
+    int mode;
+    int index;
+  };
+  static constexpr ExtendedBranch extended_branches[] = {
+      {MA_PAINT_BLEND_HARD_LIGHT, 0},
+      {MA_PAINT_BLEND_VIVID_LIGHT, 1},
+      {MA_PAINT_BLEND_PIN_LIGHT, 2},
+      {MA_PAINT_BLEND_LINEAR_BURN, 3},
+      {MA_PAINT_BLEND_LIGHTER_COLOR, 4},
+      {MA_PAINT_BLEND_DARKER_COLOR, 5},
+  };
+  for (const ExtendedBranch &entry : extended_branches) {
+    if (!ok) {
+      break;
+    }
+    BlendBranch branch = blend_branch_extended_add(
+        *group,
+        *group_input,
+        FunctionRef<bool(bNode *, const char *, bNode *, const char *)>(link),
+        entry.mode,
+        -1200.0f,
+        -1600.0f - entry.index * 700.0f);
+    if (branch.node == nullptr) {
+      ok = false;
+      break;
+    }
+    branch.code = entry.mode;
+    branch_list.append(branch);
   }
 
   /* Pick the branch the Mode input names. A Math COMPARE against each code makes a 0/1 factor, and
@@ -178,13 +193,30 @@ bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain)
    * If upstream ever removes the legacy node, this dispatcher is the only place that has to change:
    * the fallback is a chain of #SH_NODE_MIX nodes whose factors stay linked (Combine Color + RGB to
    * BW), never a constant, which keeps the disconnect pass from firing. */
-  bNode *accumulator = branches[0];
+  if (ok && branch_list.size() != BLEND_BRANCH_EXPECTED) {
+    /* Every mode of both ranges is built above; a different count means the build stopped early,
+     * and a dispatcher missing a mode would silently select the one below it. */
+    BLI_assert_msg(false, "The .PBR Blend group built fewer branches than it dispatches");
+    ok = false;
+  }
+  if (!ok) {
+    /* A cluster that returned early left its already-added nodes in the tree: the group is dropped
+     * whole here, so a half-built group is never handed to a reader or kept in the file. */
+    BKE_id_free(&bmain, &group->id);
+    return nullptr;
+  }
   /* The branch and the selector are different node types, so their output socket has a different
    * identifier. Kept next to the node instead of guessing it from the type each round. */
-  const char *accumulator_output = "Result_Color";
   float select_x = -900.0f;
   constexpr float select_step_x = 360.0f;
-  for (int ramp_blend = MA_RAMP_BLEND + 1; ok && ramp_blend <= MA_RAMP_EXCLUSION; ramp_blend++) {
+  bNode *accumulator = branch_list[0].node;
+  const char *accumulator_output = branch_list[0].output;
+  for (const int64_t i : IndexRange::from_begin_end(1, branch_list.size())) {
+    if (!ok) {
+      break;
+    }
+    const BlendBranch &branch = branch_list[i];
+    const int code = branch_list[i].code;
     bNode *compare = bke::node_add_node(nullptr, *group, "ShaderNodeMath"_ustr);
     if (compare == nullptr) {
       ok = false;
@@ -195,19 +227,21 @@ bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain)
     compare->location[0] = select_x;
     compare->location[1] = 120;
 
-    bNodeSocket *compare_code = bke::node_find_socket(*compare, SOCK_IN, "Value_001"_ustr);
-    bNodeSocket *compare_epsilon = bke::node_find_socket(*compare, SOCK_IN, "Value_002"_ustr);
+    bNodeSocket *compare_code = bke::node_find_socket(
+        *compare, SOCK_IN, UString::from_ptr_noinline(BLEND_NODE_MATH_B));
+    bNodeSocket *compare_epsilon = bke::node_find_socket(
+        *compare, SOCK_IN, UString::from_ptr_noinline(BLEND_NODE_MATH_C));
     if (compare_code == nullptr || compare_code->default_value == nullptr ||
         compare_epsilon == nullptr || compare_epsilon->default_value == nullptr)
     {
       ok = false;
       break;
     }
-    static_cast<bNodeSocketValueFloat *>(compare_code->default_value)->value = float(ramp_blend);
+    static_cast<bNodeSocketValueFloat *>(compare_code->default_value)->value = float(code);
     static_cast<bNodeSocketValueFloat *>(compare_epsilon->default_value)->value = 0.5f;
     /* Mode is an integer socket; the shader tree converts it implicitly to the float the Math node
      * reads, the same conversion the UI offers when the two are linked by hand. */
-    ok = link(group_input, BLEND_GROUP_ID_MODE, compare, "Value") && ok;
+    ok = link(group_input, BLEND_GROUP_ID_MODE, compare, BLEND_NODE_MATH_A) && ok;
 
     bNode *selector = bke::node_add_node(nullptr, *group, "ShaderNodeMixRGB"_ustr);
     if (selector == nullptr) {
@@ -221,11 +255,11 @@ bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain)
     selector->location[0] = select_x + 160.0f;
     selector->location[1] = 0;
 
-    ok = link(compare, "Value", selector, "Fac") && ok;
-    ok = link(accumulator, accumulator_output, selector, "Color1") && ok;
-    ok = link(branches[ramp_blend - MA_RAMP_BLEND], "Result_Color", selector, "Color2") && ok;
+    ok = link(compare, BLEND_NODE_MATH_VALUE, selector, BLEND_NODE_LEGACY_MIX_FAC) && ok;
+    ok = link(accumulator, accumulator_output, selector, BLEND_NODE_LEGACY_MIX_COLOR1) && ok;
+    ok = link(branch.node, branch.output, selector, BLEND_NODE_LEGACY_MIX_COLOR2) && ok;
     accumulator = selector;
-    accumulator_output = "Color";
+    accumulator_output = BLEND_NODE_LEGACY_MIX_COLOR;
     select_x += select_step_x;
   }
 

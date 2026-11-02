@@ -287,7 +287,9 @@ void style_channels_from_brush(Paint &paint, ShapeStyle &style)
         }
         copy_v3_v3(shape_channel->color, color);
       }
-      else if (i == PAINT_MATERIAL_CHANNEL_EMISSION) {
+      else if (BKE_paint_material_channel_info(eMaterialPaintChannel(i)).is_color) {
+        /* Emission and Specular Tint keep their color in the brush channel's value, like the
+         * unsynced Base Color branch above. */
         copy_v3_v3(shape_channel->color, brush_channel.value);
       }
     }
@@ -504,8 +506,8 @@ std::shared_ptr<const ShapeTexture> texture_from_channel_sources(
     /* Only color channels hold display-referred pixels. A Normal or scalar map is data and must
      * never be gamma-decoded, exactly like the stroke sampler (#finish_color_sample): decoding an
      * sRGB-tagged normal map would tilt every texel and leave the channel with a wrong normal. */
-    const bool decode_to_linear = ELEM(
-        i, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_EMISSION);
+    const bool decode_to_linear = BKE_paint_material_channel_info(eMaterialPaintChannel(i))
+                                      .is_color;
     out.size = int2(ibuf->x, ibuf->y);
     if (ibuf->float_buffer.data != nullptr) {
       /* Float map buffers are already scene linear (or non-color data). */
@@ -1703,9 +1705,9 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
       for (AcquiredWrite &member : acquired) {
         if (member.tile.byte_data && member.tile.byte_colorspace &&
             !member.tile.byte_is_data &&
-            ELEM(member.write->target.channel,
-                 PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                 PAINT_MATERIAL_CHANNEL_EMISSION))
+            member.write->target.channel >= 0 &&
+            BKE_paint_material_channel_info(eMaterialPaintChannel(member.write->target.channel))
+                .is_color)
         {
           for (PaintShapeChannelValue *entry :
                {&member.work_style.stroke_channels[member.write->target.channel],

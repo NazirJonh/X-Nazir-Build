@@ -577,6 +577,14 @@ bool paint_layers_blend_sync(Material &ma, Main &bmain)
       const int blend = mask ? row->blend :
                                BKE_paint_layers_channel_blend_effective(*row, channel);
       const int ramp = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(blend));
+      if (node.type_legacy == SH_NODE_MIX && node.storage != nullptr &&
+          paint_blend_code_is_extended(ramp))
+      {
+        /* A keyed Mix node cannot hold one of the modes past its range: the tree has to be rebuilt
+         * with the shared group, which is the only shape that carries them. */
+        group_ok = false;
+        continue;
+      }
       if (node.type_legacy == SH_NODE_MIX && node.storage != nullptr) {
         NodeShaderMix *storage = static_cast<NodeShaderMix *>(node.storage);
         if (storage->blend_type != ramp) {
@@ -593,7 +601,7 @@ bool paint_layers_blend_sync(Material &ma, Main &bmain)
             node, "Mode", BLEND_GROUP_ID_MODE);
         if (mode_socket == nullptr || mode_socket->type != SOCK_INT ||
             mode_socket->default_value == nullptr || ramp < MA_RAMP_BLEND ||
-            ramp > MA_RAMP_EXCLUSION)
+            ramp > MA_PAINT_BLEND_DARKER_COLOR || ramp == int(CompositeBlend::NormalCombine))
         {
           group_ok = false;
           continue;

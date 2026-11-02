@@ -937,6 +937,10 @@ BrushMaterialPaint *BKE_brush_material_paint_create_default()
   settings->channels[PAINT_MATERIAL_CHANNEL_EMISSION].value[0] = 0.0f;
   settings->channels[PAINT_MATERIAL_CHANNEL_EMISSION].value[1] = 0.0f;
   settings->channels[PAINT_MATERIAL_CHANNEL_EMISSION].value[2] = 0.0f;
+  /* Of the channels added after Emission, only these two start away from zero: the rest take the
+   * zeroed state as their default, which is also their Principled socket's default. */
+  settings->channels[PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS].value[0] = 0.03f;
+  copy_v3_fl(settings->channels[PAINT_MATERIAL_CHANNEL_SPECULAR_TINT].value, 1.0f);
   copy_v3_fl(settings->base_color, 1.0f);
   settings->use_sync_base_color_with_brush = 1;
   settings->use_alpha_map = 0;
@@ -2705,19 +2709,7 @@ static const MTex *brush_radial_preview_mtex(const Brush *br,
   }
   /* Same priority as the cursor overlay, but ignore canvas/visibility so F still previews a
    * source when #PaintModeSettings is not in context (radial control only has the Brush). */
-  static const eMaterialPaintChannel priority[] = {
-      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-      PAINT_MATERIAL_CHANNEL_ALPHA,
-      PAINT_MATERIAL_CHANNEL_METALLIC,
-      PAINT_MATERIAL_CHANNEL_ROUGHNESS,
-      PAINT_MATERIAL_CHANNEL_SPECULAR,
-      PAINT_MATERIAL_CHANNEL_CUSTOM,
-      PAINT_MATERIAL_CHANNEL_HEIGHT,
-      PAINT_MATERIAL_CHANNEL_AO,
-      PAINT_MATERIAL_CHANNEL_EMISSION,
-      PAINT_MATERIAL_CHANNEL_NORMAL,
-  };
-  for (const eMaterialPaintChannel channel : priority) {
+  for (const eMaterialPaintChannel channel : BKE_paint_material_channel_preview_order()) {
     const BrushMaterialPaintChannel &paint_channel = brush_paint.channels[channel];
     if (paint_channel.use == 0 || !BKE_paint_material_channel_has_source(paint_channel)) {
       continue;

@@ -41,6 +41,7 @@
 #include "BKE_library.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
@@ -321,8 +322,10 @@ bool points_update(const bContext &C, LayerGradientGizmoGroup &ggd)
   /* The line and handles show the selected channel's ramp: Base Color by default, or the value
    * ramp of the channel whose eye is on in the Gradient panel. A value ramp reads as grey. */
   const int channel = gizmo_channel_resolve(*target.layer, gradient);
-  const bool scalar_channel = channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
-                              channel != PAINT_MATERIAL_CHANNEL_EMISSION;
+  /* Color channels (Base Color, Emission, Specular Tint) show their real ramp; the resolved
+   * channel always has one and is never Normal, so the descriptor decides grey vs color. */
+  const bool scalar_channel = !BKE_paint_material_channel_info(eMaterialPaintChannel(channel))
+                                   .is_color;
   const ColorBand *ramp = BKE_paint_layers_gradient_channel_ramp_get(*target.layer, channel);
   const bool use_grey = scalar_channel && ramp != nullptr;
   if (ramp == nullptr) {

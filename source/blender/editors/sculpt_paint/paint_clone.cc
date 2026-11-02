@@ -318,8 +318,7 @@ CloneStrokeTargets clone_stroke_targets_build(const Main &bmain,
       if (image == nullptr) {
         continue; /* Missing channel map: skip without aborting whole stroke. */
       }
-      const bool is_data = (ch != PAINT_MATERIAL_CHANNEL_BASE_COLOR) &&
-                           (ch != PAINT_MATERIAL_CHANNEL_EMISSION);
+      const bool is_data = !BKE_paint_material_channel_info(eMaterialPaintChannel(ch)).is_color;
       std::optional<CloneChannelTarget> target = clone_channel_target_build(
           *image, eMaterialPaintChannel(ch), is_data);
       if (!target.has_value()) {

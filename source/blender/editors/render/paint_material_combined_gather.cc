@@ -24,6 +24,7 @@
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_perf_debug.hh"
@@ -247,8 +248,10 @@ static float combined_emission_strength(const Material &ma)
 /** Channels whose values are colours and therefore may need linearizing. */
 static bool combined_channel_is_color(const eMaterialPaintChannel channel)
 {
-  return channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR ||
-         channel == PAINT_MATERIAL_CHANNEL_EMISSION;
+  /* Descriptor-driven rather than a channel list, so the answer stays right for every color
+   * channel. The Combined preview only gathers #combined_shading_channels today (Specular Tint
+   * has no shading path there yet); when that set grows this follows it for free. */
+  return BKE_paint_material_channel_info(channel).is_color;
 }
 
 /**

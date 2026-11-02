@@ -167,6 +167,21 @@ class PaintMaterialCompositeEvalTest : public bke::BlenderGTestBase {
     owned_buffers.clear();
   }
 
+  ImBuf *add_float_buffer(const float r, const float g, const float b, const float a)
+  {
+    ImBuf *ibuf = IMB_allocImBuf(uint(size), uint(size), ImBufFlags::FloatData);
+    ibuf->channels = 4;
+    float *pixels = ibuf->float_data_for_write();
+    for (const int64_t i : IndexRange(int64_t(size) * size)) {
+      pixels[i * 4 + 0] = r;
+      pixels[i * 4 + 1] = g;
+      pixels[i * 4 + 2] = b;
+      pixels[i * 4 + 3] = a;
+    }
+    owned_buffers.append(ibuf);
+    return ibuf;
+  }
+
   ImBuf *add_buffer(const uchar r, const uchar g, const uchar b, const uchar a)
   {
     ImBuf *ibuf = IMB_allocImBuf(uint(size), uint(size), ImBufFlags::ByteData);
@@ -245,6 +260,143 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_multiply_darkens_and_keeps_the_bot
   const std::array<float, 4> result = linear_pixel(stack, 0, 0);
   EXPECT_LT(result[0], 200.0f / 255.0f);
   EXPECT_NEAR(result[3], 1.0f, 1e-5f);
+}
+
+TEST_F(PaintMaterialCompositeEvalTest, linear_extended_blend_modes_match_their_definitions)
+{
+  /* The six modes past the Mix node's range, each against the arithmetic the same file documents
+   * for the GPU branches: the formula at full strength, then mixed over what is below by the
+   * factor. Both engines are checked against this by `paint_layers_graph_eval_test.cc`. */
+  const float below = 64.0f / 255.0f;
+  const float layer = 192.0f / 255.0f;
+
+  struct Expect
+  {
+    CompositeBlend blend;
+    float result;
+  };
+  const Expect cases[] = {
+      /* The layer is over a half, so Hard Light screens and Linear Burn bottoms out. */
+      {CompositeBlend::HardLight, 1.0f - 2.0f * (1.0f - below) * (1.0f - layer)},
+      {CompositeBlend::LinearBurn, below + layer - 1.0f},
+      /* Over a half, Vivid Light dodges the layer pushed past one and Pin Light takes the max. */
+      {CompositeBlend::VividLight, below / (1.0f - (2.0f * layer - 1.0f))},
+      {CompositeBlend::PinLight, 2.0f * layer - 1.0f},
+      /* Equal RGB sums: neither comparison is a win, so what is below stays. */
+      {CompositeBlend::LighterColor, below},
+      {CompositeBlend::DarkerColor, below},
+  };
+
+  for (const Expect &entry : cases) {
+    PaintMaterialCompositeStack stack;
+    stack.width = size;
+    stack.height = size;
+    PaintMaterialCompositeLayer bottom;
+    bottom.color_ibuf = add_buffer(uchar(below * 255.0f),
+                                   uchar(below * 255.0f),
+                                   uchar(below * 255.0f),
+                                   255);
+    make_data(bottom.color_ibuf);
+    stack.layers.append(bottom);
+    PaintMaterialCompositeLayer top;
+    top.color_ibuf = add_buffer(uchar(layer * 255.0f),
+                                 uchar(layer * 255.0f),
+                                 uchar(layer * 255.0f),
+                                 255);
+    make_data(top.color_ibuf);
+    top.blend = entry.blend;
+    stack.layers.append(top);
+
+    const std::array<float, 4> result = linear_pixel(stack, 0, 0);
+    EXPECT_NEAR(result[0], entry.result, 1e-4f) << int(entry.blend);
+    EXPECT_NEAR(result[3], 1.0f, 1e-5f) << int(entry.blend);
+  }
+}
+
+TEST_F(PaintMaterialCompositeEvalTest, linear_extended_blend_boundary_vectors)
+{
+  /* The layer sitting exactly on the 0.5 split of Vivid and Pin Light, swept over below and
+   * factor: the composite must land on #BKE_paint_material_blend_apply -- the CPU statement the
+   * GPU clusters are held to -- to float precision, and Vivid and Pin must be continuous at the
+   * split (both halves agree there, so a per-channel branch crossing it shows no seam). Float
+   * buffers carry the exact halves that the byte images of the graph-parity tests cannot. */
+  const CompositeBlend modes[] = {
+      CompositeBlend::HardLight,
+      CompositeBlend::VividLight,
+      CompositeBlend::PinLight,
+      CompositeBlend::LinearBurn,
+      CompositeBlend::LighterColor,
+      CompositeBlend::DarkerColor,
+  };
+  const float belows[] = {0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
+  const float factors[] = {0.0f, 0.5f, 1.0f};
+
+  for (const CompositeBlend mode : modes) {
+    for (const float below : belows) {
+      /* The continuity of the split itself, on the dispatcher: at a half the layer, four of the
+       * six modes return what is below (Hard Light's halves exchange into an identity, Vivid and
+       * Pin's halves agree, and an equal RGB sum keeps the below colour). Linear Burn keeps
+       * sliding, so it is left out. */
+      if (mode != CompositeBlend::LinearBurn) {
+        float continuous[4] = {below, below, below, 1.0f};
+        const float half[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+        BKE_paint_material_blend_apply(int(mode), continuous, 1.0f, half);
+        EXPECT_NEAR(continuous[0], below, 1e-6f) << "mode " << int(mode);
+        EXPECT_NEAR(continuous[1], below, 1e-6f) << "mode " << int(mode);
+        EXPECT_NEAR(continuous[2], below, 1e-6f) << "mode " << int(mode);
+      }
+
+      for (const float factor : factors) {
+        PaintMaterialCompositeStack stack;
+        stack.width = size;
+        stack.height = size;
+        PaintMaterialCompositeLayer bottom;
+        bottom.color_ibuf = add_float_buffer(below, below, below, 1.0f);
+        stack.layers.append(bottom);
+        PaintMaterialCompositeLayer top;
+        top.color_ibuf = add_float_buffer(0.5f, 0.5f, 0.5f, 1.0f);
+        top.blend = mode;
+        top.opacity = factor;
+        stack.layers.append(top);
+
+        float expected[4] = {below, below, below, 1.0f};
+        BKE_paint_material_blend_apply(int(mode), expected, factor, half);
+        const std::array<float, 4> result = linear_pixel(stack, 0, 0);
+        EXPECT_NEAR(result[0], expected[0], 1e-6f) << "mode " << int(mode) << " below " << below
+                                                   << " factor " << factor;
+        EXPECT_NEAR(result[3], 1.0f, 1e-6f) << "mode " << int(mode) << " below " << below
+                                            << " factor " << factor;
+      }
+    }
+  }
+}
+
+TEST_F(PaintMaterialCompositeEvalTest, linear_color_sum_decides_the_whole_colour_modes)
+{
+  /* Lighter/Darker Color compare the sums of the three channels, not one channel at a time: the
+   * layer wins as a whole even though its red is far below the bottom's. */
+  PaintMaterialCompositeStack stack;
+  stack.width = size;
+  stack.height = size;
+  PaintMaterialCompositeLayer bottom;
+  bottom.color_ibuf = add_buffer(230, 25, 25, 255);
+  make_data(bottom.color_ibuf);
+  stack.layers.append(bottom);
+  PaintMaterialCompositeLayer top;
+  top.color_ibuf = add_buffer(102, 102, 102, 255);
+  make_data(top.color_ibuf);
+  top.blend = CompositeBlend::LighterColor;
+  stack.layers.append(top);
+
+  /* 102 * 3 beats 230 + 25 + 25, so every channel of the layer wins. */
+  const std::array<float, 4> lighter = linear_pixel(stack, 0, 0);
+  EXPECT_NEAR(lighter[0], 102.0f / 255.0f, 1e-4f);
+  EXPECT_NEAR(lighter[2], 102.0f / 255.0f, 1e-4f);
+
+  top.blend = CompositeBlend::DarkerColor;
+  const std::array<float, 4> darker = linear_pixel(stack, 0, 0);
+  EXPECT_NEAR(darker[0], 230.0f / 255.0f, 1e-4f);
+  EXPECT_NEAR(darker[2], 25.0f / 255.0f, 1e-4f);
 }
 
 TEST_F(PaintMaterialCompositeEvalTest, linear_opaque_mix_layer_replaces_what_is_below)

@@ -373,11 +373,11 @@ bool ED_paint_layers_curve_patch_row_maps_ensure(bContext &C,
    * bake renders every enabled record in the material's set. Creating the maps for that same set
    * is what keeps the session's preview and the committed bake showing the same channels; the
    * bake would create whatever is missing right after the commit anyway. */
-  const uint16_t channel_set = BKE_paint_layers_channel_set_mask_get(ma);
+  const uint32_t channel_set = BKE_paint_layers_channel_set_mask_get(ma);
   int created_num = 0;
   auto ensure_channel = [&](const int channel) -> bool {
     if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
-        (channel_set & (uint16_t(1) << channel)) == 0)
+        (channel_set & (uint32_t(1) << channel)) == 0)
     {
       return false;
     }

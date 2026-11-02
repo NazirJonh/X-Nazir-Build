@@ -617,8 +617,12 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
         return {};
       }
     }
+    /* A mask item is blended by a plain Mix node, which has no form for the modes past its range.
+     * The enum keeps those out of a mask's choices; this is what a file or a script that carries
+     * one anyway reads as. */
+    const int item_ramp = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(item.blend));
     bNode *blend = mix_node_add(
-        tree, BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(item.blend)), 0.0f, 0.0f);
+        tree, paint_blend_code_is_extended(item_ramp) ? MA_RAMP_BLEND : item_ramp, 0.0f, 0.0f);
     if (blend == nullptr) {
       discard();
       return {};
@@ -1253,11 +1257,20 @@ BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree,
   /* A blend in the runtime tier uses the shared group: its mode is then a socket value the sync
    * rewrites in place, so scrubbing the mode compiles no new shader. Every blend outside the tier
    * stays the static Mix below, which is also what a saved file is rebuilt to after loading. */
+  /* The modes past the Mix node's range have no static form: the group is their only shape, so a
+   * row carrying one stays in the dynamic tier while the graph exists. */
+  const bool extended = paint_blend_code_is_extended(ramp_blend);
   if (ctx_.blend_group != nullptr && tree.typeinfo != nullptr &&
       tree.typeinfo->group_idname != nullptr &&
       paint_layer_blend_dynamic_eligible(ma_, row, channel) &&
-      paint_layers_blend_tier_is_dynamic(ma_, row.marker, channel))
+      (extended || paint_layers_blend_tier_is_dynamic(ma_, row.marker, channel)))
   {
+    /* Why no budget here: the tier caps nothing by design. An extended mode has no static form, so
+     * it is built into the shared group whether or not the channel is being scrubbed, and every
+     * instance inlines that group's whole branch tree at shader compile. Many extended rows
+     * therefore grow the material's shader linearly with nothing holding it back -- acceptable
+     * while the modes are rare; if a material full of one of them ever compiles slowly, the cap
+     * belongs here (per row) or in a second group only extended rows instance. */
     bNode *instance = bke::node_add_node(nullptr, tree, tree.typeinfo->group_idname);
     if (instance != nullptr) {
       instance->id = &ctx_.blend_group->id;
@@ -1284,11 +1297,12 @@ BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree,
         return {};
       }
       BLI_assert(mode->type == SOCK_INT && mode->default_value != nullptr);
-      /* One branch per MA_RAMP_* code: a code outside the range has no branch to select, so clamp
-       * rather than write a Mode that silently falls through to no blend. */
-      BLI_assert(ramp_blend >= MA_RAMP_BLEND && ramp_blend <= MA_RAMP_EXCLUSION);
+      /* One branch per code the group builds: the Mix node's range, then the modes of
+       * #eMaterialPaintBlend. A code outside both has no branch to select, so clamp rather than
+       * write a Mode that silently falls through to no blend. */
+      BLI_assert(ramp_blend >= MA_RAMP_BLEND && ramp_blend <= MA_PAINT_BLEND_DARKER_COLOR);
       static_cast<bNodeSocketValueInt *>(mode->default_value)->value = std::clamp(
-          ramp_blend, int(MA_RAMP_BLEND), int(MA_RAMP_EXCLUSION));
+          ramp_blend, int(MA_RAMP_BLEND), int(MA_PAINT_BLEND_DARKER_COLOR));
       /* The same key as the static Mix: the sync finds this node by it and only rewrites `Mode`,
        * and the group's node count keeps counting both forms. */
       char marker[UUID_STRING_SIZE];
@@ -1298,6 +1312,14 @@ BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree,
       prop_string_set(instance->system_properties, BLEND_NODE_KEY_PROP, blend_key);
       return blend;
     }
+  }
+
+  if (extended) {
+    /* No group, no static form: an assertion rather than a Mix node that would show a different
+     * mode than the description names. The caller's `blend_group` is only null when the shared
+     * group could not be created at all, which is a build failure of its own. */
+    BLI_assert_msg(false, "A blend mode with no Mix-node form has no group to build in");
+    return {};
   }
 
   bNode *mix = mix_node_add(tree, ramp_blend, 0.0f, 0.0f);

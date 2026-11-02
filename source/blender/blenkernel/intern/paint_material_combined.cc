@@ -65,6 +65,14 @@ float4 BKE_paint_material_combined_default_value(const eMaterialPaintChannel cha
       return float4(0.0f, 0.0f, 0.0f, 1.0f);
     case PAINT_MATERIAL_CHANNEL_CUSTOM:
     case PAINT_MATERIAL_CHANNEL_HEIGHT:
+    case PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH:
+    case PAINT_MATERIAL_CHANNEL_TRANSMISSION:
+    case PAINT_MATERIAL_CHANNEL_SUBSURFACE:
+    case PAINT_MATERIAL_CHANNEL_COAT:
+    case PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS:
+    case PAINT_MATERIAL_CHANNEL_SHEEN:
+    case PAINT_MATERIAL_CHANNEL_SPECULAR_TINT:
+    case PAINT_MATERIAL_CHANNEL_ANISOTROPIC:
       /* Never gathered and never shaded in this preview; the value exists only so the table is
        * total. */
       return float4(0.0f);

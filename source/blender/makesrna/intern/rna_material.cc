@@ -124,6 +124,20 @@ static const EnumPropertyItem rna_enum_material_paint_layer_blend_items[] = {
     {MA_PAINT_LAYER_BLEND_SATURATION, "SATURATION", 0, "Saturation", "Saturation blend"},
     {MA_PAINT_LAYER_BLEND_COLOR, "COLOR", 0, "Color", "Color blend"},
     {MA_PAINT_LAYER_BLEND_VALUE, "VALUE", 0, "Value", "Value blend"},
+    {MA_PAINT_LAYER_BLEND_HARD_LIGHT, "HARD_LIGHT", 0, "Hard Light", "Hard light blend"},
+    {MA_PAINT_LAYER_BLEND_VIVID_LIGHT, "VIVID_LIGHT", 0, "Vivid Light", "Vivid light blend"},
+    {MA_PAINT_LAYER_BLEND_PIN_LIGHT, "PIN_LIGHT", 0, "Pin Light", "Pin light blend"},
+    {MA_PAINT_LAYER_BLEND_LINEAR_BURN, "LINEAR_BURN", 0, "Linear Burn", "Linear burn blend"},
+    {MA_PAINT_LAYER_BLEND_LIGHTER_COLOR,
+     "LIGHTER_COLOR",
+     0,
+     "Lighter Color",
+     "The whole colour with the greater RGB sum wins"},
+    {MA_PAINT_LAYER_BLEND_DARKER_COLOR,
+     "DARKER_COLOR",
+     0,
+     "Darker Color",
+     "The whole colour with the lesser RGB sum wins"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -153,6 +167,20 @@ static const EnumPropertyItem rna_enum_material_paint_layer_channel_blend_items[
     {MA_PAINT_LAYER_BLEND_SATURATION, "SATURATION", 0, "Saturation", "Saturation blend"},
     {MA_PAINT_LAYER_BLEND_COLOR, "COLOR", 0, "Color", "Color blend"},
     {MA_PAINT_LAYER_BLEND_VALUE, "VALUE", 0, "Value", "Value blend"},
+    {MA_PAINT_LAYER_BLEND_HARD_LIGHT, "HARD_LIGHT", 0, "Hard Light", "Hard light blend"},
+    {MA_PAINT_LAYER_BLEND_VIVID_LIGHT, "VIVID_LIGHT", 0, "Vivid Light", "Vivid light blend"},
+    {MA_PAINT_LAYER_BLEND_PIN_LIGHT, "PIN_LIGHT", 0, "Pin Light", "Pin light blend"},
+    {MA_PAINT_LAYER_BLEND_LINEAR_BURN, "LINEAR_BURN", 0, "Linear Burn", "Linear burn blend"},
+    {MA_PAINT_LAYER_BLEND_LIGHTER_COLOR,
+     "LIGHTER_COLOR",
+     0,
+     "Lighter Color",
+     "The whole colour with the greater RGB sum wins"},
+    {MA_PAINT_LAYER_BLEND_DARKER_COLOR,
+     "DARKER_COLOR",
+     0,
+     "Darker Color",
+     "The whole colour with the lesser RGB sum wins"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1377,10 +1405,10 @@ static void rna_Material_paint_layers_channels_set(PointerRNA *ptr, int value)
 {
   Material *ma = id_cast<Material *>(ptr->owner_id);
   /* Ignore empty sets: the set must have at least one channel. */
-  if (uint16_t(value) == 0) {
+  if (uint32_t(value) == 0) {
     return;
   }
-  BKE_paint_layers_channel_set_mask_set(*ma, uint16_t(value));
+  BKE_paint_layers_channel_set_mask_set(*ma, uint32_t(value));
 }
 
 /**
@@ -1444,6 +1472,22 @@ static const char *rna_Material_paint_layers_view_pass_identifier(const int pass
       return "COMPOSITE_ALPHA";
     case PAINT_MATERIAL_CHANNEL_EMISSION:
       return "COMPOSITE_EMISSION";
+    case PAINT_MATERIAL_CHANNEL_SUBSURFACE:
+      return "COMPOSITE_SUBSURFACE";
+    case PAINT_MATERIAL_CHANNEL_SPECULAR_TINT:
+      return "COMPOSITE_SPECULAR_TINT";
+    case PAINT_MATERIAL_CHANNEL_ANISOTROPIC:
+      return "COMPOSITE_ANISOTROPIC";
+    case PAINT_MATERIAL_CHANNEL_TRANSMISSION:
+      return "COMPOSITE_TRANSMISSION";
+    case PAINT_MATERIAL_CHANNEL_COAT:
+      return "COMPOSITE_COAT";
+    case PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS:
+      return "COMPOSITE_COAT_ROUGHNESS";
+    case PAINT_MATERIAL_CHANNEL_SHEEN:
+      return "COMPOSITE_SHEEN";
+    case PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH:
+      return "COMPOSITE_EMISSION_STRENGTH";
     case PAINT_LAYER_MAP_MASK:
       return "COMPOSITE_MASK";
     default:
@@ -1937,7 +1981,15 @@ static const EnumPropertyItem *rna_MaterialPaintLayer_blend_itemf(bContext * /*C
              MA_PAINT_LAYER_BLEND_HUE,
              MA_PAINT_LAYER_BLEND_SATURATION,
              MA_PAINT_LAYER_BLEND_COLOR,
-             MA_PAINT_LAYER_BLEND_VALUE))
+             MA_PAINT_LAYER_BLEND_VALUE,
+             /* A mask item is blended by a plain Mix node rather than by the shared Blend group,
+              * so the modes that node cannot express would be silently read as Mix. */
+             MA_PAINT_LAYER_BLEND_HARD_LIGHT,
+             MA_PAINT_LAYER_BLEND_VIVID_LIGHT,
+             MA_PAINT_LAYER_BLEND_PIN_LIGHT,
+             MA_PAINT_LAYER_BLEND_LINEAR_BURN,
+             MA_PAINT_LAYER_BLEND_LIGHTER_COLOR,
+             MA_PAINT_LAYER_BLEND_DARKER_COLOR))
     {
       continue;
     }
@@ -4843,16 +4895,49 @@ static const EnumPropertyItem rna_enum_material_paint_layer_gradient_gizmo_displ
     {0, nullptr, 0, nullptr, nullptr},
 };
 
-/* Values match #eMaterialPaintChannel: the channels whose ramp the gizmo can show. Normal has no
- * generator channel node, so it is absent. */
+/* Values match #eMaterialPaintChannel: the channels whose ramp the gizmo can show, in the channel
+ * table's order like every other list. Normal has no generator channel node, so it is absent, and
+ * Custom and Height belong to the gradient *tools* (see rna_sculpt_paint.cc), not to a layer. */
 static const EnumPropertyItem rna_enum_material_paint_layer_gradient_gizmo_channel_items[] = {
     {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", "Show the colour ramp"},
     {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metal", "Show the value ramp"},
     {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Rough", "Show the value ramp"},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Spec", "Show the value ramp"},
     {PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", "Show the value ramp"},
     {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", "Show the value ramp"},
     {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emit", "Show the colour ramp"},
-    {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Spec", "Show the value ramp"},
+    {PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
+     "EMISSION_STRENGTH",
+     0,
+     "Emit Strength",
+     "Show the value ramp"},
+    {PAINT_MATERIAL_CHANNEL_TRANSMISSION,
+     "TRANSMISSION",
+     0,
+     "Transmission",
+     "Show the value ramp"},
+    {PAINT_MATERIAL_CHANNEL_SUBSURFACE,
+     "SUBSURFACE",
+     0,
+     "Subsurface",
+     "Show the value ramp"},
+    {PAINT_MATERIAL_CHANNEL_COAT, "COAT", 0, "Coat", "Show the value ramp"},
+    {PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS,
+     "COAT_ROUGHNESS",
+     0,
+     "Coat Rough",
+     "Show the value ramp"},
+    {PAINT_MATERIAL_CHANNEL_SHEEN, "SHEEN", 0, "Sheen", "Show the value ramp"},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR_TINT,
+     "SPECULAR_TINT",
+     0,
+     "Spec Tint",
+     "Show the colour ramp"},
+    {PAINT_MATERIAL_CHANNEL_ANISOTROPIC,
+     "ANISOTROPIC",
+     0,
+     "Anisotropic",
+     "Show the value ramp"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -5415,6 +5500,18 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       {PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", ""},
       {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "Ambient Occlusion", ""},
       {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+      {PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
+       "EMISSION_STRENGTH",
+       0,
+       "Emission Strength",
+       ""},
+      {PAINT_MATERIAL_CHANNEL_TRANSMISSION, "TRANSMISSION", 0, "Transmission", ""},
+      {PAINT_MATERIAL_CHANNEL_SUBSURFACE, "SUBSURFACE", 0, "Subsurface", ""},
+      {PAINT_MATERIAL_CHANNEL_COAT, "COAT", 0, "Coat", ""},
+      {PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS, "COAT_ROUGHNESS", 0, "Coat Roughness", ""},
+      {PAINT_MATERIAL_CHANNEL_SHEEN, "SHEEN", 0, "Sheen", ""},
+      {PAINT_MATERIAL_CHANNEL_SPECULAR_TINT, "SPECULAR_TINT", 0, "Specular Tint", ""},
+      {PAINT_MATERIAL_CHANNEL_ANISOTROPIC, "ANISOTROPIC", 0, "Anisotropic", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
   prop = RNA_def_property(srna, "mask_source_channel", PROP_ENUM, PROP_NONE);

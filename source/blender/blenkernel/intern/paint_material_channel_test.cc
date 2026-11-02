@@ -25,6 +25,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_sync.hh"
@@ -393,6 +394,115 @@ TEST_F(PaintMaterialChannelTest, channel_from_attribute_name)
    * engines would switch shading on ordinary geometry-nodes data. */
   EXPECT_EQ(BKE_paint_material_channel_from_attribute_name("roughness"), std::nullopt);
   EXPECT_EQ(BKE_paint_material_channel_from_attribute_name(""), std::nullopt);
+}
+
+TEST_F(PaintMaterialChannelTest, channel_descriptor_invariants)
+{
+  /* The one statement of which channels are colours: everything keyed on "colour vs data"
+   * (colorspaces, ramps, attribute storage) reads this flag, so its membership is the contract. */
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    EXPECT_EQ(info.is_color,
+              ELEM(info.channel,
+                   PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                   PAINT_MATERIAL_CHANNEL_EMISSION,
+                   PAINT_MATERIAL_CHANNEL_SPECULAR_TINT))
+        << "channel " << info.ui_name;
+    /* A colour channel has a per-vertex (or per-channel) home and a map target; a channel with a
+     * Principled socket can always resolve a map to paint through. */
+    if (info.is_color) {
+      EXPECT_NE(info.attribute_name, nullptr) << "channel " << info.ui_name;
+      EXPECT_TRUE(info.supports_image_paint) << "channel " << info.ui_name;
+    }
+    if (info.socket_name != nullptr) {
+      EXPECT_TRUE(info.supports_image_paint) << "channel " << info.ui_name;
+    }
+  }
+}
+
+TEST_F(PaintMaterialChannelTest, channel_pass_lists_carry_every_channel)
+{
+  /* A channel the pass lists forget is one the user can never select or see; the lists are the
+   * "8 new channels" copied by hand that R2 warned about. The exceptions are the ones the lists
+   * document: Custom has no pass anywhere, Height has no shading pass, and Combined leads the
+   * display list. */
+  const Span<int> view_passes = BKE_paint_layers_view_passes();
+  const Span<int> composite_passes = BKE_paint_material_composite_passes();
+  const Span<int> display_passes = BKE_paint_material_display_passes();
+  const Span<eMaterialPaintChannel> preview_order = BKE_paint_material_channel_preview_order();
+
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.channel != PAINT_MATERIAL_CHANNEL_CUSTOM) {
+      EXPECT_TRUE(view_passes.contains(info.channel)) << "channel " << info.ui_name;
+    }
+    EXPECT_TRUE(preview_order.contains(info.channel)) << "channel " << info.ui_name;
+    if (!ELEM(info.channel, PAINT_MATERIAL_CHANNEL_CUSTOM, PAINT_MATERIAL_CHANNEL_HEIGHT)) {
+      EXPECT_TRUE(composite_passes.contains(info.channel)) << "channel " << info.ui_name;
+      EXPECT_TRUE(display_passes.contains(info.channel)) << "channel " << info.ui_name;
+    }
+  }
+  /* Every list carries each channel once: Combined plus the table plus the mask, with the two
+   * exceptions above taken out of the shading and display lists. */
+  EXPECT_EQ(view_passes.size(), PAINT_MATERIAL_CHANNEL_NUM + 1);
+  EXPECT_EQ(composite_passes.size(), PAINT_MATERIAL_CHANNEL_NUM - 1);
+  EXPECT_EQ(display_passes[0], PAINT_LAYER_PASS_COMBINED);
+  EXPECT_EQ(preview_order.size(), PAINT_MATERIAL_CHANNEL_NUM);
+}
+
+TEST_F(PaintMaterialChannelTest, channel_default_value_matches_the_principled_socket)
+{
+  /* The stored default of every socket-bearing channel has to be the socket's own: the brush
+   * starts where the shader starts, and a disagreement shows up as a material that changes the
+   * moment a stroke enables the channel. Channels without a Principled socket (Custom, Height, AO)
+   * own their defaults elsewhere and are skipped. */
+  Object *ob = add_mesh_object("PrincipledDefaults");
+  Material *ma = add_material_with_principled(*ob, "PrincipledDefaultsMat");
+  bNode *principled = nullptr;
+  for (bNode &node : ma->nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_BSDF_PRINCIPLED) {
+      principled = &node;
+      break;
+    }
+  }
+  ASSERT_NE(principled, nullptr);
+
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.socket_name == nullptr) {
+      continue;
+    }
+    const bNodeSocket *socket = bke::node_find_socket(
+        *principled, SOCK_IN, UString(info.socket_name));
+    ASSERT_NE(socket, nullptr) << "channel " << info.ui_name;
+    ASSERT_NE(socket->default_value, nullptr) << "channel " << info.ui_name;
+    const float stored = BKE_paint_material_channel_default_value(info.channel);
+    switch (socket->type) {
+      case SOCK_FLOAT:
+        EXPECT_FLOAT_EQ(
+            static_cast<const bNodeSocketValueFloat *>(socket->default_value)->value, stored)
+            << "channel " << info.ui_name;
+        break;
+      case SOCK_VECTOR:
+        /* A direction: the stored value is the flat tangent's Z, and the socket's X and Y rest. */
+        if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+          const auto &value = *static_cast<const bNodeSocketValueVector *>(socket->default_value);
+          EXPECT_FLOAT_EQ(value.value[2], stored) << "channel " << info.ui_name;
+          EXPECT_FLOAT_EQ(value.value[0], 0.0f) << "channel " << info.ui_name;
+          EXPECT_FLOAT_EQ(value.value[1], 0.0f) << "channel " << info.ui_name;
+        }
+        break;
+      case SOCK_RGBA: {
+        /* A colour's stored scalar is its neutral: black (0) for Base Color and Emission, white
+         * (1) for Specular Tint. The sockets' defaults are grey, so the red channel stands for
+         * the whole -- assert that, so a tinted default fails loudly instead of comparing half. */
+        const auto &value = *static_cast<const bNodeSocketValueRGBA *>(socket->default_value);
+        EXPECT_FLOAT_EQ(value.value[0], stored) << "channel " << info.ui_name;
+        EXPECT_FLOAT_EQ(value.value[0], value.value[1]) << "channel " << info.ui_name;
+        EXPECT_FLOAT_EQ(value.value[1], value.value[2]) << "channel " << info.ui_name;
+        break;
+      }
+      default:
+        FAIL() << "channel " << info.ui_name << " resolves to an unexpected socket type";
+    }
+  }
 }
 
 TEST_F(PaintMaterialChannelTest, custom_channel_range_clamps_value)
@@ -1912,6 +2022,109 @@ TEST(material_paint_channel, emission_descriptor)
 TEST(material_paint_channel, emission_default_value)
 {
   EXPECT_FLOAT_EQ(BKE_paint_material_channel_default_value(PAINT_MATERIAL_CHANNEL_EMISSION), 0.0f);
+}
+
+/**
+ * The eight channels after Emission are map-only Principled inputs: the same rule the earlier
+ * channels follow, checked against the socket names the Principled declaration uses, because a
+ * typo there reads as a channel that simply never has a map.
+ */
+TEST(material_paint_channel, principled_extension_descriptors)
+{
+  struct Expected {
+    eMaterialPaintChannel channel;
+    const char *socket_name;
+    const char *attribute_name;
+    bool is_color;
+    float default_value;
+  };
+  static const Expected expected[] = {
+      {PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
+       "Emission Strength",
+       "material_emission_strength",
+       false,
+       0.0f},
+      {PAINT_MATERIAL_CHANNEL_TRANSMISSION,
+       "Transmission Weight",
+       "material_transmission",
+       false,
+       0.0f},
+      {PAINT_MATERIAL_CHANNEL_SUBSURFACE,
+       "Subsurface Weight",
+       "material_subsurface",
+       false,
+       0.0f},
+      {PAINT_MATERIAL_CHANNEL_COAT, "Coat Weight", "material_coat", false, 0.0f},
+      {PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS,
+       "Coat Roughness",
+       "material_coat_roughness",
+       false,
+       0.03f},
+      {PAINT_MATERIAL_CHANNEL_SHEEN, "Sheen Weight", "material_sheen", false, 0.0f},
+      {PAINT_MATERIAL_CHANNEL_SPECULAR_TINT,
+       "Specular Tint",
+       "material_specular_tint",
+       true,
+       1.0f},
+      {PAINT_MATERIAL_CHANNEL_ANISOTROPIC,
+       "Anisotropic",
+       "material_anisotropic",
+       false,
+       0.0f},
+  };
+  for (const Expected &want : expected) {
+    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(want.channel);
+    EXPECT_EQ(info.channel, want.channel);
+    EXPECT_STREQ(info.socket_name, want.socket_name);
+    EXPECT_STREQ(info.attribute_name, want.attribute_name);
+    EXPECT_EQ(info.is_color, want.is_color);
+    /* Map-only: the vertex canvas neither creates nor paints these. */
+    EXPECT_FALSE(info.supports_vertex_paint);
+    EXPECT_TRUE(info.supports_image_paint);
+    EXPECT_TRUE(info.stores_image());
+    EXPECT_FALSE(info.supports_layer_paint);
+    EXPECT_FALSE(info.bake_float);
+    EXPECT_FALSE(info.map_float);
+    /* Direct storage, unlike Height's encoded relief. */
+    EXPECT_FLOAT_EQ(info.stored_bias, 0.0f);
+    EXPECT_FLOAT_EQ(info.stored_scale, 1.0f);
+    EXPECT_FLOAT_EQ(info.value_min, 0.0f);
+    EXPECT_FLOAT_EQ(info.value_max, 1.0f);
+    EXPECT_FLOAT_EQ(BKE_paint_material_channel_default_value(want.channel), want.default_value);
+    /* The encode of a channel's own default is inside its range. */
+    EXPECT_FLOAT_EQ(BKE_paint_material_channel_value_encode(
+                        want.channel, BKE_paint_material_channel_default_value(want.channel)),
+                    want.default_value);
+  }
+}
+
+/** The new channels are outside both visibility defaults, so an existing file shows what it showed. */
+TEST(material_paint_channel, principled_extensions_are_not_visible_by_default)
+{
+  EXPECT_EQ(PAINT_MATERIAL_CHANNELS_VISIBLE_DEFAULT & (1 << PAINT_MATERIAL_CHANNEL_COAT), 0);
+  EXPECT_EQ(PAINT_MATERIAL_CHANNELS_SHADER_VISIBLE_DEFAULT &
+                (1 << PAINT_MATERIAL_CHANNEL_TRANSMISSION),
+            0);
+  /* Every channel still has a bit in the "show all" mask. */
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    EXPECT_NE(PAINT_MATERIAL_CHANNELS_VISIBLE_ALL & (1 << channel), 0);
+  }
+}
+
+TEST(material_paint_channel, brush_channel_defaults_are_the_channel_defaults)
+{
+  /* A fresh brush starts each new channel at the value the composite also treats as neutral. */
+  BrushMaterialPaint *settings = BKE_brush_material_paint_create_default();
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (channel < PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH) {
+      continue;
+    }
+    const BrushMaterialPaintChannel &brush_channel = settings->channels[channel];
+    EXPECT_EQ(brush_channel.use, 0);
+    EXPECT_FLOAT_EQ(brush_channel.value[0],
+                    BKE_paint_material_channel_default_value(eMaterialPaintChannel(channel)));
+  }
+  MEM_delete(settings);
 }
 
 TEST_F(PaintMaterialChannelTest, source_mtex_defaults)

@@ -289,9 +289,9 @@ MaterialPaintLayer *BKE_paint_layers_gradient_add(Material &ma,
   BKE_paint_layers_gradient_ensure(*layer);
   /* It starts in the first channel of the material's set, which is Base Color unless the user
    * removed it. Another channel is switched on like a Fill's. */
-  const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
+  const uint32_t set = BKE_paint_layers_channel_set_mask_get(ma);
   for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-    if (channel != PAINT_MATERIAL_CHANNEL_NORMAL && (set & (uint16_t(1) << channel)) != 0) {
+    if (channel != PAINT_MATERIAL_CHANNEL_NORMAL && (set & (uint32_t(1) << channel)) != 0) {
       BKE_paint_layers_channel_add(ma, layer, eMaterialPaintChannel(channel));
       break;
     }

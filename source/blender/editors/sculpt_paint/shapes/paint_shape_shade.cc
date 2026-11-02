@@ -199,7 +199,8 @@ ChannelWrite shade_channel(const ShapeStyle &style,
 
   switch (channel) {
     case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
-    case PAINT_MATERIAL_CHANNEL_EMISSION: {
+    case PAINT_MATERIAL_CHANNEL_EMISSION:
+    case PAINT_MATERIAL_CHANNEL_SPECULAR_TINT: {
       const float4 solid(entry.color[0], entry.color[1], entry.color[2], 1.0f);
       float3 rgb;
       float alpha = 1.0f;
@@ -225,7 +226,14 @@ ChannelWrite shade_channel(const ShapeStyle &style,
     case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
     case PAINT_MATERIAL_CHANNEL_SPECULAR:
     case PAINT_MATERIAL_CHANNEL_AO:
-    case PAINT_MATERIAL_CHANNEL_CUSTOM: {
+    case PAINT_MATERIAL_CHANNEL_CUSTOM:
+    case PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH:
+    case PAINT_MATERIAL_CHANNEL_TRANSMISSION:
+    case PAINT_MATERIAL_CHANNEL_SUBSURFACE:
+    case PAINT_MATERIAL_CHANNEL_COAT:
+    case PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS:
+    case PAINT_MATERIAL_CHANNEL_SHEEN:
+    case PAINT_MATERIAL_CHANNEL_ANISOTROPIC: {
       float scalar = entry.value;
       if (tex.usable) {
         float tex_value = tex.scalar;

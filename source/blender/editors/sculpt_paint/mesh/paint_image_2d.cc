@@ -531,6 +531,17 @@ static bool paint_2d_mask_luminance(const BrushPainter *painter)
 }
 
 /**
+ * True when a channel's texel is a whole colour rather than one scalar replicated across the
+ * channels: every #MaterialPaintChannelInfo::is_color channel, and Normal besides, whose three
+ * components are stored as a colour even though they are a direction.
+ */
+static bool paint_2d_channel_writes_rgb(const int channel)
+{
+  return BKE_paint_material_channel_info(eMaterialPaintChannel(channel)).is_color ||
+         channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+}
+
+/**
  * True when #paint_2d_apply_material_sources will actually overwrite \a rgba's RGB for the
  * painter's active channel, so the brush-texture colorspace encode and Color tint below it
  * must be skipped to avoid being clobbered (or, when this is false, must still run).
@@ -859,10 +870,7 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   /* A luminance mask is sampled decoded and written as grey, so it takes the scalar route. */
   const bool mask_luminance = paint_2d_mask_luminance(painter);
-  const bool is_color = !mask_luminance && ELEM(channel,
-                                                PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                                PAINT_MATERIAL_CHANNEL_EMISSION,
-                                                PAINT_MATERIAL_CHANNEL_NORMAL);
+  const bool is_color = !mask_luminance && paint_2d_channel_writes_rgb(channel);
 
   Array<float3> colors(pixel_num);
   Array<float> coverages(pixel_num);
@@ -1002,10 +1010,8 @@ static void paint_2d_apply_material_sources(const BrushPainter *painter,
     float4 sampled;
     const bool mask_luminance = paint_2d_mask_luminance(painter);
     const bool is_normal = painter->material_channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-    const bool is_color = !mask_luminance && ELEM(painter->material_channel,
-                                                  PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                                  PAINT_MATERIAL_CHANNEL_EMISSION,
-                                                  PAINT_MATERIAL_CHANNEL_NORMAL);
+    const bool is_color = !mask_luminance &&
+                          paint_2d_channel_writes_rgb(painter->material_channel);
     /* Scalar channels read only `intensity`, so the color decode would be wasted; a luminance mask
      * reads the decoded color. */
     float intensity = paint_2d_sample_channel_source(
@@ -2886,10 +2892,7 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
       painter->channel_sources->source(channel);
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   /* Scalar channels read `value` below, so the color conversion and flip are skipped for them. */
-  const bool is_color = ELEM(channel,
-                             PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                             PAINT_MATERIAL_CHANNEL_EMISSION,
-                             PAINT_MATERIAL_CHANNEL_NORMAL);
+  const bool is_color = paint_2d_channel_writes_rgb(channel);
   float value = 0.0f;
   float4 sampled;
   /* The intensity is a luminance of the sampled color, which a color channel never reads. */
@@ -3502,10 +3505,7 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
   /* A luminance mask is decoded per texel in #paint_2d_area_sample_channel_color, so it must not
    * take the batch decode that a color channel gets. */
   const bool is_color = !paint_2d_mask_luminance(painter) &&
-                        ELEM(channel,
-                             PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                             PAINT_MATERIAL_CHANNEL_EMISSION,
-                             PAINT_MATERIAL_CHANNEL_NORMAL);
+                        paint_2d_channel_writes_rgb(channel);
   const bool apply_color_jitter = channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
                                   paint_2d_color_jitter_active(painter);
   const bool has_selection_mask = BKE_image_paint_selection_is_active(s->image);

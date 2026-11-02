@@ -205,6 +205,15 @@ enum eMaterial_RampBlend : int {
   MA_RAMP_EXCLUSION = 18,
 };
 
+/**
+ * The blend codes past the Mix node's own range -- the stack modes a single `ShaderNodeMix` cannot
+ * express -- are runtime-only and live in #BKE_paint_material_composite.hh as
+ * #eMaterialPaintBlend: they continue the #eMaterial_RampBlend numbering (19 is the normal
+ * combine, which has a group of its own) but are not file data and name no Mix blend type, so
+ * they do not belong to a DNA header. No Mix node may hold one, which is why the modes of that
+ * range are built out of the ".PBR Blend" group's own nodes.
+ */
+
 /** #MTex::texco */
 enum eMTex_TexCo : int {
   TEXCO_ORCO = 1 << 0,
@@ -591,6 +600,22 @@ enum eMaterialPaintLayerBlend : int8_t {
    * row-level choice, and never on another channel.
    */
   MA_PAINT_LAYER_BLEND_NORMAL_REPLACE = 20,
+  /**
+   * The four Photoshop-family light modes and the two whole-colour comparisons. A Mix node has no
+   * blend type for any of them, so each is built out of nodes the paint Blend group already knows
+   * (see #eMaterialPaintBlend, where these codes continue the `MA_RAMP_*` range).
+   */
+  MA_PAINT_LAYER_BLEND_HARD_LIGHT = 21,
+  /** Color Burn under a hard base, Color Dodge over a soft one: the two halves pick on 0.5. */
+  MA_PAINT_LAYER_BLEND_VIVID_LIGHT = 22,
+  /** Darken or Lighten, chosen the same way, with the layer's colour pushed to twice or less. */
+  MA_PAINT_LAYER_BLEND_PIN_LIGHT = 23,
+  /** `below + layer - 1`, the multiply of the negatives. */
+  MA_PAINT_LAYER_BLEND_LINEAR_BURN = 24,
+  /** The whole colour with the greater RGB sum wins, rather than one channel at a time. */
+  MA_PAINT_LAYER_BLEND_LIGHTER_COLOR = 25,
+  /** The whole colour with the lesser RGB sum wins. */
+  MA_PAINT_LAYER_BLEND_DARKER_COLOR = 26,
 };
 
 /**
@@ -1102,7 +1127,7 @@ struct MaterialPaintLayerBake {
    * One map per #eMaterialPaintChannel index, or null where the channel is not baked. The literal
    * length is #PAINT_MATERIAL_CHANNEL_NUM, which `paint_layers.cc` static_asserts.
    */
-  struct Image *images[10] = {};
+  struct Image *images[18 /*PAINT_MATERIAL_CHANNEL_NUM*/] = {};
   /** The baked coverage map, or null. */
   struct Image *coverage = nullptr;
   /** #eMaterialPaintLayerBakeMode. */
@@ -1251,16 +1276,19 @@ struct MaterialPaintLayer {
    * The channels of the source material a mask correction that reads a material takes its grey from,
    * as a mask of #eMaterialPaintChannel bits; 0 reads as Base Color. Stored as a mask so that taking
    * the mean of several channels later needs no new field; the lowest bit is read for now.
+   *
+   * Wide enough for every channel index, which a 16-bit mask no longer is. The two bytes that used to
+   * pad it out are absorbed here, so the row keeps its layout and an old file's zeroed pad reads as
+   * the same mask.
    */
-  uint16_t mask_source_channels = 0;
-  char _pad_object_mask[2] = {};
+  uint32_t mask_source_channels = 0;
   /**
    * Per (row, channel) overrides, indexed by #eMaterialPaintChannel. A fixed array so every pair has
    * a value and an RNA path whether or not the row has a #channels record for it; a folder, which
    * holds no records, uses it too. The literal length is #PAINT_MATERIAL_CHANNEL_NUM, which
    * `paint_layers.cc` static_asserts.
    */
-  MaterialPaintLayerChannelSettings channel_settings[10] = {};
+  MaterialPaintLayerChannelSettings channel_settings[18 /*PAINT_MATERIAL_CHANNEL_NUM*/] = {};
   /**
    * The row's baked cache, or null while nothing is baked. Owned by the row (freed, copied and
    * written with it).
@@ -1431,7 +1459,7 @@ struct Material {
    * Cached Principled-socket image resolution for material paint channels.
    * Must be refreshed via #BKE_paint_material_channel_cache_invalidate before using after edits.
    */
-  MaterialPaintChannelCache paint_channel_cache[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
+  MaterialPaintChannelCache paint_channel_cache[/*PAINT_MATERIAL_CHANNEL_NUM*/ 18] = {};
 
   /** Runtime cache for GLSL materials. */
   ListBaseT<LinkData> gpumaterial = {nullptr, nullptr};
@@ -1457,6 +1485,9 @@ struct Material {
   bUUID paint_layers_owner_uid = {};
   /** #eMaterialPaintLayersFlag. */
   eMaterialPaintLayersFlag paint_layers_flag = {};
+  /* The flag above is a short, and this mask wants a 4-byte boundary; the pad is that gap, so no
+   * byte of the struct is left uninitialized by the compiler sliding the field up. */
+  char _pad_paint_channels[2] = {};
   /**
    * #eMaterialPaintChannel bitmask of the material's global paint channel set, one bit per channel
    * (`1 << channel`). Zero means "not set": BKE then derives the set from the union of every layer's
@@ -1464,8 +1495,11 @@ struct Material {
    * an ordinary channel and may be left out of a stored set; an empty stored set is refused by the
    * setters (the derived one is never empty). Leaving a channel out of the set never removes a
    * layer's record or map; adding one never creates them (a record is created lazily).
+   *
+   * Wider than the 16 bits it used to be: #PAINT_MATERIAL_CHANNEL_NUM is past 16 now, so the top
+   * channels had no bit. An old file's value reads unchanged, its two pad bytes being zero.
    */
-  uint16_t paint_layers_channels = 0;
+  uint32_t paint_layers_channels = 0;
   /**
    * Width and height of the maps the stack creates (256..4096). Zero in older files, which then
    * follow #PaintModeSettings::new_channel_image_size.
@@ -1494,9 +1528,9 @@ struct Material {
    * file saved before the setting keeps the behavior it was saved with and no versioning reads it.
    */
   int8_t paint_layers_gradient_bake = 0;
-  /* The four chars, the int16 and the answer above leave the pointer below off its 8-byte
-   * boundary; this is the single pad the trio needs. */
-  char _pad_paint_layers[3] = {};
+  /* The ints and chars above end off the 8-byte boundary the pointer below needs; this pad is the
+   * gap, spelled out so no byte of the struct is left for the compiler to fill silently. */
+  char _pad_paint_layers[7] = {};
   /**
    * Stand-in image for the Image Editor's composite when the stack holds no map at all: the
    * composite is found through an #Image, so a material made of Gradient/Fill/Material rows alone

@@ -57,6 +57,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 
 #include "UI_view2d.hh"
 
@@ -878,6 +879,9 @@ const EnumPropertyItem *paint_layer_gradient_space_items()
 
 const EnumPropertyItem *paint_layer_gradient_value_channel_items()
 {
+  /* Deliberately a subset: the sync copies a *scalar* value ramp's stop layout onto another
+   * scalar's, so only the channels the Gradient panel always shows a value ramp for are offered.
+   * The gizmo-channel picker below takes the shared full list instead of a copy of it. */
   static const EnumPropertyItem items[] = {
       {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metal", "Metallic value ramp"},
       {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Rough", "Roughness value ramp"},
@@ -891,17 +895,10 @@ const EnumPropertyItem *paint_layer_gradient_value_channel_items()
 
 const EnumPropertyItem *paint_layer_gradient_gizmo_channel_items()
 {
-  static const EnumPropertyItem items[] = {
-      {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", "Colour ramp"},
-      {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metal", "Value ramp"},
-      {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Rough", "Value ramp"},
-      {PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", "Value ramp"},
-      {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", "Value ramp"},
-      {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emit", "Colour ramp"},
-      {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Spec", "Value ramp"},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
-  return items;
+  /* The shared gradient-tools list (rna_sculpt_paint.cc) rather than a local copy: same values,
+   * same table order, and a new channel appears here the moment the shared list grows. The
+   * operator refuses a channel that has no ramp to show. */
+  return rna_enum_gradient_tool_gizmo_channel_items;
 }
 
 wmOperatorStatus paint_layer_gradient_set_gizmo_channel_exec(bContext *C, wmOperator *op)

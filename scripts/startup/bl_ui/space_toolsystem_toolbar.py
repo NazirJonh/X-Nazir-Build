@@ -3214,6 +3214,14 @@ class _defs_image_paint_shape:
         'ALPHA',
         'AO',
         'EMISSION',
+        'EMISSION_STRENGTH',
+        'TRANSMISSION',
+        'SUBSURFACE',
+        'COAT',
+        'COAT_ROUGHNESS',
+        'SHEEN',
+        'SPECULAR_TINT',
+        'ANISOTROPIC',
     )
 
     @staticmethod

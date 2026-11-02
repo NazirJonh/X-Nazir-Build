@@ -158,7 +158,7 @@ struct PaintLayerAddParams {
    * the channels the user asked its Add popup to make active. Zero leaves the row inert. Only
    * channels in the material's set are taken; other kinds are unaffected.
    */
-  uint16_t channels = 0;
+  uint32_t channels = 0;
   /** The filter of a #PaintLayerAddKind::Filter Add, an #eMaterialPaintLayerFilter. */
   int16_t filter = 0;
   /** The material a #PaintLayerAddKind::Material, ::CorrectionMaterial or ::MaskCorrectionMaterial

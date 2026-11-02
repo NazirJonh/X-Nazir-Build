@@ -167,7 +167,7 @@ TEST_F(PaintLayersAssetTest, import_rows_can_widen_the_target_channel_set)
 
   EXPECT_EQ(result.skipped_channels, 0);
   EXPECT_TRUE((BKE_paint_layers_channel_set_mask_get(*dst) &
-               (uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT)) != 0);
+               (uint32_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT)) != 0);
   MaterialPaintLayer *copy = static_cast<MaterialPaintLayer *>(dst->paint_layers.first);
   ASSERT_EQ(copy->channels_num, 1);
   EXPECT_EQ(copy->channels[0].channel, PAINT_MATERIAL_CHANNEL_HEIGHT);
@@ -235,7 +235,7 @@ TEST_F(PaintLayersAssetTest, smart_material_create_copies_the_new_material)
   EXPECT_EQ(BKE_paint_layers_asset_type_get(*asset), PaintLayerAssetType::Material);
   EXPECT_EQ(BLI_listbase_count(&asset->paint_layers), 1);
   EXPECT_TRUE((BKE_paint_layers_channel_set_mask_get(*asset) &
-               (uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT)) != 0);
+               (uint32_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT)) != 0);
   const IDProperty *type = IDP_GetPropertyFromGroup(asset->id.properties, "paint_asset_type");
   ASSERT_NE(type, nullptr);
   ASSERT_EQ(type->type, IDP_INT);
@@ -1406,7 +1406,7 @@ TEST_F(PaintLayersAssetTest, smart_asset_insert_refuses_into_a_plain_row_without
   Material *dst = BKE_material_add(bmain, "Dst");
   MaterialPaintLayer *anchor = add_layer(*dst, "Anchor", add_image("DstMap"));
   const int rows_before = BLI_listbase_count(&dst->paint_layers);
-  const uint16_t channels_before = BKE_paint_layers_channel_set_mask_get(*dst);
+  const uint32_t channels_before = BKE_paint_layers_channel_set_mask_get(*dst);
 
   PaintLayerImportResult result;
   EXPECT_FALSE(BKE_paint_layers_asset_insert(

@@ -4013,6 +4013,105 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      true,
      NODE_TEX_IMAGE_SLOT_NONE,
      false},
+    /* The eight channels below all reach the shader through a Principled input, so a map resolves
+     * the same way the painted factors do; none has a per-vertex representation the draw engines
+     * could show, so all eight are map-only like Emission. Their authored range is the socket's own
+     * 0..1, which is also the Principled default range of every one of them, and the storage is
+     * direct: no bias, no scale. */
+    {PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
+     "Emission Strength",
+     "material_emission_strength",
+     "Emission Strength",
+     0.0f,
+     1.0f,
+     false,
+     false,
+     true,
+     NODE_TEX_IMAGE_SLOT_NONE,
+     /* A factor multiplied into a colour, like Alpha: bytes carry it as well as they carry the
+      * emission colour it scales. */
+     false},
+    {PAINT_MATERIAL_CHANNEL_TRANSMISSION,
+     "Transmission",
+     "material_transmission",
+     "Transmission Weight",
+     0.0f,
+     1.0f,
+     false,
+     false,
+     true,
+     NODE_TEX_IMAGE_SLOT_NONE,
+     false},
+    {PAINT_MATERIAL_CHANNEL_SUBSURFACE,
+     "Subsurface",
+     "material_subsurface",
+     "Subsurface Weight",
+     0.0f,
+     1.0f,
+     false,
+     false,
+     true,
+     NODE_TEX_IMAGE_SLOT_NONE,
+     false},
+    {PAINT_MATERIAL_CHANNEL_COAT,
+     "Coat",
+     "material_coat",
+     "Coat Weight",
+     0.0f,
+     1.0f,
+     false,
+     false,
+     true,
+     NODE_TEX_IMAGE_SLOT_NONE,
+     false},
+    {PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS,
+     "Coat Roughness",
+     "material_coat_roughness",
+     "Coat Roughness",
+     0.0f,
+     1.0f,
+     false,
+     false,
+     true,
+     NODE_TEX_IMAGE_SLOT_NONE,
+     /* The coat's own highlight width, and the Principled starts it at 0.03 rather than at half:
+      * the default value is the one place that has to agree with the socket. */
+     false},
+    {PAINT_MATERIAL_CHANNEL_SHEEN,
+     "Sheen",
+     "material_sheen",
+     "Sheen Weight",
+     0.0f,
+     1.0f,
+     false,
+     false,
+     true,
+     NODE_TEX_IMAGE_SLOT_NONE,
+     false},
+    /* The one new color channel: like Emission and Base Color it writes through the generic
+     * color-attribute path, and its map is a byte color map in the material's colorspace. */
+    {PAINT_MATERIAL_CHANNEL_SPECULAR_TINT,
+     "Specular Tint",
+     "material_specular_tint",
+     "Specular Tint",
+     0.0f,
+     1.0f,
+     true,
+     false,
+     true,
+     NODE_TEX_IMAGE_SLOT_NONE,
+     false},
+    {PAINT_MATERIAL_CHANNEL_ANISOTROPIC,
+     "Anisotropic",
+     "material_anisotropic",
+     "Anisotropic",
+     0.0f,
+     1.0f,
+     false,
+     false,
+     true,
+     NODE_TEX_IMAGE_SLOT_NONE,
+     false},
 };
 
 static_assert(ARRAY_SIZE(material_paint_channels) == PAINT_MATERIAL_CHANNEL_NUM,
@@ -4385,6 +4484,25 @@ float BKE_paint_material_channel_default_value(const eMaterialPaintChannel chann
       return 1.0f;
     case PAINT_MATERIAL_CHANNEL_EMISSION:
       return 0.0f;
+    case PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH:
+      return 0.0f;
+    case PAINT_MATERIAL_CHANNEL_TRANSMISSION:
+      return 0.0f;
+    case PAINT_MATERIAL_CHANNEL_SUBSURFACE:
+      return 0.0f;
+    case PAINT_MATERIAL_CHANNEL_COAT:
+      return 0.0f;
+    case PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS:
+      /* The Principled's own start for the coat's roughness, not the half every other factor
+       * channel begins at. */
+      return 0.03f;
+    case PAINT_MATERIAL_CHANNEL_SHEEN:
+      return 0.0f;
+    case PAINT_MATERIAL_CHANNEL_SPECULAR_TINT:
+      /* A white tint leaves the reflection untouched, which is the socket's default. */
+      return 1.0f;
+    case PAINT_MATERIAL_CHANNEL_ANISOTROPIC:
+      return 0.0f;
   }
   BLI_assert_unreachable();
   return 0.0f;
@@ -4468,6 +4586,14 @@ Span<eMaterialPaintChannel> BKE_paint_material_channel_preview_order()
       PAINT_MATERIAL_CHANNEL_HEIGHT,
       PAINT_MATERIAL_CHANNEL_AO,
       PAINT_MATERIAL_CHANNEL_EMISSION,
+      PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
+      PAINT_MATERIAL_CHANNEL_TRANSMISSION,
+      PAINT_MATERIAL_CHANNEL_SUBSURFACE,
+      PAINT_MATERIAL_CHANNEL_COAT,
+      PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS,
+      PAINT_MATERIAL_CHANNEL_SHEEN,
+      PAINT_MATERIAL_CHANNEL_SPECULAR_TINT,
+      PAINT_MATERIAL_CHANNEL_ANISOTROPIC,
       PAINT_MATERIAL_CHANNEL_NORMAL,
   };
   return Span<eMaterialPaintChannel>(priority, ARRAY_SIZE(priority));
@@ -4962,21 +5088,45 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
   return true;
 }
 
-/** The map of \a layer itself that best stands for its look, or null when it has none. */
-static Image *paint_material_layer_display_image(const MaterialPaintLayer &layer)
+/**
+ * The channels whose map best stands for a layer's look, most representative first: Base Color,
+ * then the other created maps, with the tangent-space Normal and the masking Alpha last so a
+ * missing color map does not land the Image Editor on a tangent or mask image.
+ *
+ * The one source for both display pickers (#paint_material_layer_display_image and
+ * #BKE_paint_material_preferred_display_image), so a channel added to the table shows up in the
+ * editor by editing this list alone. Deliberately not
+ * #BKE_paint_material_channel_preview_order, which resolves a *brush preview* and wants Alpha
+ * early and Custom/Height/AO in: Custom and Height have no Principled socket to resolve a map
+ * through, and a display picker falling back to "any map" covers them better than naming them
+ * ahead of a color map.
+ */
+static Span<eMaterialPaintChannel> paint_material_channel_display_order()
 {
-  /* The same order as #BKE_paint_material_preferred_display_image: a colour map before a scalar,
-   * and the tangent-space Normal and Alpha maps last. */
-  static const eMaterialPaintChannel priority[] = {
+  static const eMaterialPaintChannel order[] = {
       PAINT_MATERIAL_CHANNEL_BASE_COLOR,
       PAINT_MATERIAL_CHANNEL_METALLIC,
       PAINT_MATERIAL_CHANNEL_ROUGHNESS,
       PAINT_MATERIAL_CHANNEL_SPECULAR,
       PAINT_MATERIAL_CHANNEL_EMISSION,
+      PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
+      PAINT_MATERIAL_CHANNEL_TRANSMISSION,
+      PAINT_MATERIAL_CHANNEL_SUBSURFACE,
+      PAINT_MATERIAL_CHANNEL_COAT,
+      PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS,
+      PAINT_MATERIAL_CHANNEL_SHEEN,
+      PAINT_MATERIAL_CHANNEL_SPECULAR_TINT,
+      PAINT_MATERIAL_CHANNEL_ANISOTROPIC,
       PAINT_MATERIAL_CHANNEL_NORMAL,
       PAINT_MATERIAL_CHANNEL_ALPHA,
   };
-  for (const eMaterialPaintChannel channel : priority) {
+  return Span<eMaterialPaintChannel>(order, ARRAY_SIZE(order));
+}
+
+/** The map of \a layer itself that best stands for its look, or null when it has none. */
+static Image *paint_material_layer_display_image(const MaterialPaintLayer &layer)
+{
+  for (const eMaterialPaintChannel channel : paint_material_channel_display_order()) {
     for (const int i : IndexRange(layer.channels_num)) {
       if (layer.channels[i].channel == channel && layer.channels[i].image != nullptr) {
         return layer.channels[i].image;
@@ -5087,18 +5237,7 @@ bool BKE_paint_material_composite_canvas_image_is(Main &bmain, const Image &imag
 
 Image *BKE_paint_material_preferred_display_image(Object &ob)
 {
-  /* Base Color first, then the other created maps, Normal and Alpha last so a missing color map
-   * does not land the Image Editor on a tangent or mask image. */
-  static const eMaterialPaintChannel priority[] = {
-      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-      PAINT_MATERIAL_CHANNEL_METALLIC,
-      PAINT_MATERIAL_CHANNEL_ROUGHNESS,
-      PAINT_MATERIAL_CHANNEL_SPECULAR,
-      PAINT_MATERIAL_CHANNEL_EMISSION,
-      PAINT_MATERIAL_CHANNEL_NORMAL,
-      PAINT_MATERIAL_CHANNEL_ALPHA,
-  };
-  for (const eMaterialPaintChannel channel : priority) {
+  for (const eMaterialPaintChannel channel : paint_material_channel_display_order()) {
     Image *image = nullptr;
     ImageUser *iuser = nullptr;
     if (BKE_paint_principled_channel_image_get(ob, channel, &image, &iuser)) {

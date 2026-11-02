@@ -1443,7 +1443,9 @@ static int bake_size_clamp(const int size)
 /** Whether \a channel holds color rather than data, which decides its colorspace. */
 static bool bake_channel_is_color(const eMaterialPaintChannel channel)
 {
-  return ELEM(channel, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_EMISSION);
+  /* Descriptor-driven, so a newly added color channel (Specular Tint) bakes in the right
+   * colorspace without every colorspace site naming it. */
+  return BKE_paint_material_channel_info(channel).is_color;
 }
 
 /**

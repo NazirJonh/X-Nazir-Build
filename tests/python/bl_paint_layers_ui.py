@@ -110,6 +110,35 @@ class PaintLayersUiTest(unittest.TestCase):
         self.material.paint_layers_channels = set()
         self.assertEqual(set(self.material.paint_layers_channels), {'METALLIC', 'ROUGHNESS'})
 
+    def test_channels_after_emission_join_the_set_and_the_row(self):
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.material.paint_layers.active = layer
+        self.material.paint_layers_channels = {'BASE_COLOR', 'COAT', 'SHEEN', 'SPECULAR_TINT'}
+        self.assertEqual(set(self.material.paint_layers_channels),
+                         {'BASE_COLOR', 'COAT', 'SHEEN', 'SPECULAR_TINT'})
+        with bpy.context.temp_override(material=self.material):
+            result = bpy.ops.material.paint_layer_channel_toggle(
+                marker=layer.marker, channel='COAT', enable=True)
+        self.assertEqual(result, {'FINISHED'})
+        self.assertEqual(self.channel_record(layer, 'COAT').state, 'ENABLED')
+        # A new channel takes part with its own settings entry: inherit and full opacity.
+        settings = next(c for c in layer.channel_settings if c.channel == 'COAT')
+        self.assertEqual(settings.blend_type, 'INHERIT')
+        self.assertEqual(settings.opacity, 1.0)
+
+    def test_extended_blend_modes_round_trip(self):
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        for blend in ('HARD_LIGHT', 'VIVID_LIGHT', 'PIN_LIGHT', 'LINEAR_BURN',
+                      'LIGHTER_COLOR', 'DARKER_COLOR'):
+            layer.blend_type = blend
+            self.assertEqual(layer.blend_type, blend)
+        # The per-channel override takes them too, and Inherit puts the row back in charge.
+        settings = next(c for c in layer.channel_settings if c.channel == 'BASE_COLOR')
+        settings.blend_type = 'VIVID_LIGHT'
+        self.assertEqual(settings.blend_type, 'VIVID_LIGHT')
+        settings.blend_type = 'INHERIT'
+        self.assertEqual(settings.blend_type, 'INHERIT')
+
     def test_layer_widget_channels_follow_the_material_set(self):
         from bl_ui.properties_material_paint_layers import material_layer_visible_channels
 

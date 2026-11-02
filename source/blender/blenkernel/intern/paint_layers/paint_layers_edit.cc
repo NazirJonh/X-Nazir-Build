@@ -76,10 +76,10 @@ std::string BKE_paint_layers_unique_default_name(const Material &ma, const Strin
  */
 static void paint_layer_channels_from_mask(Material &ma,
                                            MaterialPaintLayer &layer,
-                                           const uint16_t mask)
+                                           const uint32_t mask)
 {
   for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-    if ((mask & (uint16_t(1) << channel)) == 0) {
+    if ((mask & (uint32_t(1) << channel)) == 0) {
       continue;
     }
     const eMaterialPaintChannel paint_channel = eMaterialPaintChannel(channel);
@@ -325,9 +325,9 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     /* The channels a filter works in are records like a layer's, without a map. It starts in the
      * first channel of the material's set, which is Base Color unless the user removed it: adding
      * Base Color unconditionally would make the adjustment inert in a material without it. */
-    const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
+    const uint32_t set = BKE_paint_layers_channel_set_mask_get(ma);
     for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-      if ((set & (uint16_t(1) << channel)) != 0) {
+      if ((set & (uint32_t(1) << channel)) != 0) {
         BKE_paint_layers_channel_add(ma, created, eMaterialPaintChannel(channel));
         break;
       }

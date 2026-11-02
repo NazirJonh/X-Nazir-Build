@@ -32,6 +32,18 @@ static const EnumPropertyItem rna_enum_bake_paint_channel_items[] = {
     {1 << PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
     {1 << PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
     {1 << PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
+     "EMISSION_STRENGTH",
+     0,
+     "Emission Strength",
+     ""},
+    {1 << PAINT_MATERIAL_CHANNEL_TRANSMISSION, "TRANSMISSION", 0, "Transmission", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SUBSURFACE, "SUBSURFACE", 0, "Subsurface", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_COAT, "COAT", 0, "Coat", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS, "COAT_ROUGHNESS", 0, "Coat Roughness", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SHEEN, "SHEEN", 0, "Sheen", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SPECULAR_TINT, "SPECULAR_TINT", 0, "Specular Tint", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ANISOTROPIC, "ANISOTROPIC", 0, "Anisotropic", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

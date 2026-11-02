@@ -17,6 +17,7 @@ from bl_ui.properties_paint_common import (
     _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS,
     _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X,
     _MATERIAL_PAINT_CHANNEL_UI_ORDER,
+    material_paint_color_channels,
     MaterialPaintChannelView,
     _draw_channel_panel,
 )
@@ -205,7 +206,7 @@ def _layer_channel_view(layer, record, channel_id, name):
     color = None
     scalar = None
     value_panel = None
-    if channel_id in ('BASE_COLOR', 'NORMAL', 'EMISSION'):
+    if channel_id in ('BASE_COLOR', 'NORMAL', 'EMISSION', 'SPECULAR_TINT'):
         color = (record, "color")
     else:
         scalar = (record, "value_scalar")
@@ -616,6 +617,9 @@ def draw_material_layer_channels(layout, context, material, layer):
         return
 
     records = {record.channel: record for record in layer.channels}
+    # The descriptor's colour channels decide which rows show a colour ramp (the generator's eye
+    # and the subpanels below), read through the RNA rather than mirrored here.
+    colour_channels = material_paint_color_channels(context.tool_settings.paint_mode)
 
     flow = layout.grid_flow(row_major=True, columns=0, even_columns=False, even_rows=False,
                             align=False)
@@ -629,7 +633,7 @@ def draw_material_layer_channels(layout, context, material, layer):
             # An eye opens the channel's ramp on the gizmo; exactly one channel can be open. The
             # eye sits right before its channel switch, so the row reads "what the gizmo shows" and
             # "what the row paints" side by side.
-            color_channel = channel_id in {'BASE_COLOR', 'EMISSION'}
+            color_channel = channel_id in colour_channels
             has_ramp = (layer.gradient_ramp is not None if color_channel else
                         record is not None and record.gradient_ramp is not None)
             col.ui_units_x = _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X + 1.3
@@ -691,7 +695,7 @@ def draw_material_layer_channels(layout, context, material, layer):
             header.label(text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id])
             if not panel:
                 continue
-            if channel_id in {'BASE_COLOR', 'EMISSION'}:
+            if channel_id in colour_channels:
                 if layer.gradient_supported and layer.gradient_ramp is not None:
                     panel.template_color_ramp(layer, "gradient_ramp", expand=True)
             else:

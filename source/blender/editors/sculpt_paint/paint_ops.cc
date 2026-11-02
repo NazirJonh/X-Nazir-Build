@@ -1599,7 +1599,9 @@ void PAINT_OT_material_channel_source_image_set(wmOperatorType *ot)
 
 /** Map types that route onto a material paint channel. Keyed by
  * #bUserNameMatchMapType::identifier, which built-in map types never change, so the table stays
- * valid. Map types missing here (Mask, Patterns, Grunge) have no paint channel equivalent. */
+ * valid. Map types missing here (Mask, Patterns, Grunge) have no paint channel equivalent. The
+ * table only needs the channels a *built-in* map type names: identifiers for the newer channels
+ * (or any custom map type named after a channel) fall through to the RNA lookup below. */
 struct PaintChannelFromMapType {
   const char *identifier;
   eMaterialPaintChannel channel;

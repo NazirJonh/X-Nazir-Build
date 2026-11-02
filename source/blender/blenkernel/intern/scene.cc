@@ -191,7 +191,7 @@ static CurveMapping *shape_profile_new_flat()
 
 void BKE_paint_shape_settings_init(PaintShapeSettings *settings)
 {
-  static_assert(PAINT_MATERIAL_CHANNEL_NUM == 10,
+  static_assert(PAINT_MATERIAL_CHANNEL_NUM == 18,
                 "PaintShapeSettings::stroke_channels/fill_channels sizes are spelled as a "
                 "literal for makesdna and must match PAINT_MATERIAL_CHANNEL_NUM");
   static_assert(sizeof(PaintShapeSettings::stroke_channels) / sizeof(PaintShapeChannelValue) ==

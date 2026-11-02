@@ -2322,25 +2322,39 @@ static void rna_BrushMaterialPaintChannel_normal_color_set(PointerRNA *ptr, cons
   }
 }
 
-static void rna_BrushMaterialPaintChannel_emission_color_get(PointerRNA *ptr, float *values)
+/**
+ * The RGB of a color channel's brush value, named for the channel that had it first. Base Color is
+ * left out: its color is #BrushMaterialPaint::base_color, not the entry's own value.
+ */
+static bool rna_BrushMaterialPaintChannel_is_rgb_value_channel(
+    const std::optional<eMaterialPaintChannel> &channel_id)
+{
+  return channel_id && BKE_paint_material_channel_info(*channel_id).is_color &&
+         *channel_id != PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+}
+
+/* The RGB value of a non-Normal colour channel (Emission, Specular Tint), kept in the channel's
+ * own `value` array. Serves both RNA names -- the historical `emission_color` and the
+ * channel-agnostic `channel_color` -- so neither public name breaks. */
+static void rna_BrushMaterialPaintChannel_rgb_value_get(PointerRNA *ptr, float *values)
 {
   const BrushMaterialPaintChannel *channel = static_cast<const BrushMaterialPaintChannel *>(
       ptr->data);
   const std::optional<eMaterialPaintChannel> channel_id =
       rna_BrushMaterialPaintChannel_channel_get(ptr);
-  if (!channel_id || *channel_id != PAINT_MATERIAL_CHANNEL_EMISSION) {
+  if (!rna_BrushMaterialPaintChannel_is_rgb_value_channel(channel_id)) {
     zero_v3(values);
     return;
   }
   copy_v3_v3(values, channel->value);
 }
 
-static void rna_BrushMaterialPaintChannel_emission_color_set(PointerRNA *ptr, const float *values)
+static void rna_BrushMaterialPaintChannel_rgb_value_set(PointerRNA *ptr, const float *values)
 {
   BrushMaterialPaintChannel *channel = static_cast<BrushMaterialPaintChannel *>(ptr->data);
   const std::optional<eMaterialPaintChannel> channel_id =
       rna_BrushMaterialPaintChannel_channel_get(ptr);
-  if (!channel_id || *channel_id != PAINT_MATERIAL_CHANNEL_EMISSION) {
+  if (!rna_BrushMaterialPaintChannel_is_rgb_value_channel(channel_id)) {
     return;
   }
   copy_v3_v3(channel->value, values);
@@ -2348,14 +2362,10 @@ static void rna_BrushMaterialPaintChannel_emission_color_set(PointerRNA *ptr, co
 
 static bool rna_BrushMaterialPaintChannel_is_scalar_channel(const eMaterialPaintChannel channel)
 {
-  return ELEM(channel,
-              PAINT_MATERIAL_CHANNEL_METALLIC,
-              PAINT_MATERIAL_CHANNEL_ROUGHNESS,
-              PAINT_MATERIAL_CHANNEL_SPECULAR,
-              PAINT_MATERIAL_CHANNEL_HEIGHT,
-              PAINT_MATERIAL_CHANNEL_ALPHA,
-              PAINT_MATERIAL_CHANNEL_AO,
-              PAINT_MATERIAL_CHANNEL_CUSTOM);
+  /* The descriptor table is the authority on which channels carry one number rather than a colour;
+   * Normal is the exception that has its own RGB accessor. */
+  return !BKE_paint_material_channel_info(channel).is_color &&
+         channel != PAINT_MATERIAL_CHANNEL_NORMAL;
 }
 
 static void rna_BrushMaterialPaintChannel_scalar_value_range(const eMaterialPaintChannel channel,
@@ -2514,16 +2524,14 @@ static void rna_BrushMaterialPaintChannel_source_mtex_reset_mapping(MTex &mtex)
 }
 
 /**
- * Every material paint channel except Base Color and Emission samples its source image as raw
- * data, so an sRGB-tagged file would be silently gamma-decoded into wrong roughness / metallic /
- * normal values. Force the assigned image to the Non-Color space to prevent that.
+ * Every material paint channel that is not a colour samples its source image as raw data, so an
+ * sRGB-tagged file would be silently gamma-decoded into wrong roughness / metallic / normal values.
+ * Force the assigned image to the Non-Color space to prevent that.
  */
 static void rna_BrushMaterialPaintChannel_source_image_apply_non_color_default(
     Main *bmain, const std::optional<eMaterialPaintChannel> channel_id, Image *image)
 {
-  if (!channel_id ||
-      ELEM(*channel_id, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_EMISSION))
-  {
+  if (!channel_id || BKE_paint_material_channel_info(*channel_id).is_color) {
     return;
   }
   const char *data_name = IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA);
@@ -4559,15 +4567,32 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   prop = RNA_def_property(srna, "emission_color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_array(prop, 3);
   RNA_def_property_float_funcs(prop,
-                               "rna_BrushMaterialPaintChannel_emission_color_get",
-                               "rna_BrushMaterialPaintChannel_emission_color_set",
+                               "rna_BrushMaterialPaintChannel_rgb_value_get",
+                               "rna_BrushMaterialPaintChannel_rgb_value_set",
                                nullptr);
   RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
   RNA_def_property_ui_text(
       prop,
       "Color",
-      "Emission color. Only valid on the Emission channel's entry in BrushMaterialPaint.channels; "
-      "reads as black and ignores writes elsewhere");
+      "Emission color (Specular Tint's too, under its own accessor). Only valid on a color "
+      "channel's entry in BrushMaterialPaint.channels; reads as black and ignores writes "
+      "elsewhere");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  /* The same access under a name that does not predate the second color channel: a panel that
+   * shows whatever channel it is on takes this one. */
+  prop = RNA_def_property(srna, "channel_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_BrushMaterialPaintChannel_rgb_value_get",
+                               "rna_BrushMaterialPaintChannel_rgb_value_set",
+                               nullptr);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
+  RNA_def_property_ui_text(
+      prop,
+      "Color",
+      "The entry's value as a color, for a channel whose value is one (Emission, Specular Tint). "
+      "Reads as black and ignores writes on every other channel");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
 
   prop = RNA_def_property(srna, "value_color", PROP_FLOAT, PROP_COLOR);

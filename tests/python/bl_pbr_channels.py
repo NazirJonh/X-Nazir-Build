@@ -22,6 +22,11 @@ METALLIC_DEFAULT = 0.0
 CUSTOM_CHANNEL_INDEX = 5
 # Fixed attribute name of the metallic channel, from the descriptor table in paint.cc.
 METALLIC_ATTRIBUTE = "material_metallic"
+# PAINT_MATERIAL_CHANNEL_COAT, the first of the channels added after Emission.
+COAT_CHANNEL_INDEX = 13
+COAT_DEFAULT = 0.0
+# PAINT_MATERIAL_CHANNEL_SPECULAR_TINT, the one color channel of that group.
+SPECULAR_TINT_CHANNEL_INDEX = 16
 
 
 def _ensure_active_mesh_object():
@@ -49,6 +54,15 @@ def _find_metallic_image():
     # Channel maps are named "<Channel> TexLayer" (see BKE_paint_principled_channel_image_ensure).
     for image in bpy.data.images:
         if image.name.endswith("Metallic TexLayer"):
+            return image
+    return None
+
+
+def _find_channel_image(channel_id):
+    """The map of one channel, by the name the stack gives it: '<Channel> TexLayer'."""
+    suffix = " %s TexLayer" % channel_id.title().replace('_', ' ')
+    for image in bpy.data.images:
+        if image.name.endswith(suffix):
             return image
     return None
 
@@ -99,6 +113,60 @@ def _paint_stroke(mode='NORMAL'):
             mode=mode,
         )
     assert result == {'FINISHED'}, f"{mode} stroke failed: {result}"
+
+
+def test_coat_channel_paint_writes_its_own_map():
+    """A channel added after Emission paints, and the vertex canvas leaves it out."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    generate_monkey(BackendType.MESH)
+    ob = bpy.context.active_object
+
+    mat = bpy.data.materials.new("PBRCoatTestMat")
+    mat.use_nodes = True
+    ob.data.materials.append(mat)
+
+    paint_mode = bpy.context.tool_settings.paint_mode
+    paint_mode.canvas_source = 'MATERIAL'
+
+    brush = bpy.data.brushes.new("pbr_coat_test", mode='SCULPT')
+    brush.sculpt_brush_type = 'PAINT'
+    brush.strength = 1.0
+    bpy.context.tool_settings.sculpt.brush = brush
+    assert bpy.ops.paint.material_paint_brush_ensure() == {'FINISHED'}
+
+    coat = brush.material_paint.channels[COAT_CHANNEL_INDEX]
+    coat.use = True
+    coat.value = (1.0, 0.0, 0.0)
+    # A scalar channel blends as Mix whatever the entry asks for (BKE_paint_material_channel_blend_mode).
+    coat.blend = 'MULTIPLY'
+
+    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.object.mode_set(mode='SCULPT')
+
+    coat_image = _find_channel_image('COAT')
+    assert coat_image is not None, "coat map was not auto-created on sculpt enter"
+    assert abs(_image_center_grayscale(coat_image) - COAT_DEFAULT) < 1e-4
+
+    context_override = bpy.context.copy()
+    set_view3d_context_override(context_override)
+    stroke = generate_stroke(context_override, (0.4, 0.4), (0.6, 0.6))
+    with bpy.context.temp_override(**context_override):
+        assert bpy.ops.sculpt.brush_stroke(stroke=stroke, override_location=True, mode='NORMAL') == {'FINISHED'}
+
+    assert _image_center_grayscale(coat_image) > 0.5, "coat stroke did not reach the coat map"
+
+    # Map-only: the vertex canvas neither creates nor paints it (supports_vertex_paint is false).
+    paint_mode.canvas_source = 'MATERIAL_PAINT'
+    mesh = ob.data
+    assert ("material_coat" not in {attr.name for attr in mesh.color_attributes}), (
+        "a map-only channel must not gain a vertex attribute"
+    )
+
+    # Specular Tint is the color of the group: its value is an RGB triple, not one number.
+    tint = brush.material_paint.channels[SPECULAR_TINT_CHANNEL_INDEX]
+    tint.use = True
+    tint.channel_color = (0.2, 0.4, 0.6)
+    assert tuple(round(c, 3) for c in tint.channel_color) == (0.2, 0.4, 0.6)
 
 
 def test_vertex_attribute_paint_creates_and_writes_attribute():
@@ -208,7 +276,7 @@ def test_brush_material_paint_lazy_init():
     assert result == {'FINISHED'}, f"ensure operator failed: {result}"
 
     assert brush.material_paint is not None
-    assert len(brush.material_paint.channels) == 10
+    assert len(brush.material_paint.channels) == 18
 
 
 def test_metallic_paint_erase_restores_default():
@@ -712,9 +780,56 @@ class TestMaterialBakeAPI(unittest.TestCase):
         self.assertTrue(img.material_source_is_stale)
 
 
+class TestLayerBlendExtendedModes(unittest.TestCase):
+    """The six blend modes past the Mix node's range.
+
+    Setting each one on a row is a value edit on the shared ".PBR Blend" group; the stack must
+    still composite afterwards (the CPU falls back to the same arithmetic the group builds).
+    """
+
+    NEW_BLENDS = (
+        'HARD_LIGHT',
+        'VIVID_LIGHT',
+        'PIN_LIGHT',
+        'LINEAR_BURN',
+        'LIGHTER_COLOR',
+        'DARKER_COLOR',
+    )
+
+    def _new_layered(self, name):
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        generate_monkey(BackendType.MESH)
+        ob = bpy.context.active_object
+        mat = bpy.data.materials.new(name)
+        ob.data.materials.append(mat)
+        row = mat.paint_layers.new(name="Row")
+        self.assertTrue(mat.is_layered)
+        return mat, row
+
+    def test_extended_blend_set_and_composite(self):
+        mat, row = self._new_layered("ExtendedBlendMat")
+        for blend in self.NEW_BLENDS:
+            row.blend_type = blend
+            self.assertEqual(row.blend_type, blend)
+            self.assertTrue(mat.is_layered)
+            # The stack still answers with the mode on it: a mode the graph could not carry
+            # either falls to a build error or silently reads as Mix, and neither may happen.
+            image = bpy.data.images.new("ExtendedBlendTarget", 8, 8, alpha=True)
+            try:
+                self.assertTrue(mat.paint_layers.composite(channel='BASE_COLOR', image=image))
+            finally:
+                bpy.data.images.remove(image)
+
+        # A mask item blends by a plain Mix node, so the RNA keeps the extended modes out of its
+        # choices entirely (see rna_MaterialPaintLayer_blend_itemf): there is nothing to attempt
+        # at this level. The C fallback for a file that carries one anyway is covered by the
+        # generator tests (the item is built as Mix) and BKE_paint_layers_set_blend's refusal.
+
+
 if __name__ == "__main__":
     test_brush_material_paint_lazy_init()
     test_metallic_paint_erase_restores_default()
+    test_coat_channel_paint_writes_its_own_map()
     test_vertex_attribute_paint_creates_and_writes_attribute()
     test_vertex_attribute_paint_undo_redo()
     test_scalar_channel_ignores_blend_mode()
@@ -727,6 +842,7 @@ if __name__ == "__main__":
     suite.addTests(loader.loadTestsFromTestCase(TestPaintLayerIdCreation))
     suite.addTests(loader.loadTestsFromTestCase(TestPaintLayerIdOldFile))
     suite.addTests(loader.loadTestsFromTestCase(TestLayeredPaintTarget))
+    suite.addTests(loader.loadTestsFromTestCase(TestLayerBlendExtendedModes))
     suite.addTests(loader.loadTestsFromTestCase(TestChannelSourceLifecycle))
     suite.addTests(loader.loadTestsFromTestCase(TestMaterialBakeAPI))
     result = unittest.TextTestRunner(verbosity=2).run(suite)

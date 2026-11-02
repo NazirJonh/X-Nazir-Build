@@ -53,7 +53,9 @@ using ed::material_bake::MaterialBakeToImagesResult;
  *
  * Ambient occlusion and Custom are absent on purpose: the resolver has no Principled input to bake
  * them from, so offering them would only produce empty maps. Height is offered since the stack's
- * own Bump names its map; a material without one skips it as unavailable.
+ * own Bump names its map; a material without one skips it as unavailable. Every other channel
+ * reaches a Principled input through its descriptor's socket name, so the list tracks the table's
+ * socket-bearing channels (an unlisted one would be unbakable from this operator).
  *
  * Height is printed as the stored field, not as the signed relief the slider shows: flat relief is
  * 0.5, the map is float and non-color, and the values are the same 0..1 the stack's own maps hold.
@@ -71,6 +73,18 @@ static const EnumPropertyItem bake_paint_channel_items[] = {
      "Stored height field: 0.5 is flat, values are float data, not a signed relief"},
     {1 << PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
     {1 << PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
+     "EMISSION_STRENGTH",
+     0,
+     "Emission Strength",
+     ""},
+    {1 << PAINT_MATERIAL_CHANNEL_TRANSMISSION, "TRANSMISSION", 0, "Transmission", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SUBSURFACE, "SUBSURFACE", 0, "Subsurface", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_COAT, "COAT", 0, "Coat", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS, "COAT_ROUGHNESS", 0, "Coat Roughness", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SHEEN, "SHEEN", 0, "Sheen", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SPECULAR_TINT, "SPECULAR_TINT", 0, "Specular Tint", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ANISOTROPIC, "ANISOTROPIC", 0, "Anisotropic", ""},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

@@ -1129,6 +1129,32 @@ MINLINE void blend_color_interpolate_float(float dst[4],
   dst[3] = mt * src1[3] + t * src2[3];
 }
 
+MINLINE float blend_color_burn_channel(const float below, const float over)
+{
+  /* The Mix node's Burn branch with the factor already folded into \a over: a black upper colour
+   * burns to black, and the division can only overshoot into the clamps. */
+  if (over <= 0.0f) {
+    return 0.0f;
+  }
+  const float r = 1.0f - (1.0f - below) / over;
+  return (r < 0.0f) ? 0.0f : (r > 1.0f ? 1.0f : r);
+}
+
+MINLINE float blend_color_dodge_channel(const float below, const float over)
+{
+  /* The Mix node's Dodge branch with the factor already folded into \a over: a zero below is left
+   * alone rather than dodged to white, an exhausted over saturates, and the quotient only clamps
+   * at the top (a negative below keeps its sign, as the node's own arithmetic does). */
+  if (below == 0.0f) {
+    return below;
+  }
+  if (over <= 0.0f) {
+    return 1.0f;
+  }
+  const float r = below / over;
+  return (r > 1.0f) ? 1.0f : r;
+}
+
 #  undef EPS_SATURATION
 #  undef EPS_ALPHA
 

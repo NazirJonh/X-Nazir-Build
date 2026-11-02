@@ -1634,12 +1634,12 @@ static float3 color_channel_fallback(const eMaterialPaintChannel channel,
 {
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   const bool is_base_color = channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
-  const bool is_emission = channel == PAINT_MATERIAL_CHANNEL_EMISSION;
-  UNUSED_VARS_NDEBUG(is_emission);
-  /* Base Color and Emission are the non-Normal channels that sample as a color; any other
-   * channel reaching here would need its own fallback rather than silently reusing Base Color's.
-   */
-  BLI_assert(is_normal || is_base_color || is_emission);
+  /* Base Color is the one color channel with a dedicated fallback (the resolved brush/shape
+   * colors); every other color channel (Emission, Specular Tint) keeps its color in the channel's
+   * own value, which the tail below returns. A scalar channel reaching here would need its own
+   * fallback rather than silently reusing one of those. */
+  BLI_assert(is_normal || is_base_color ||
+             BKE_paint_material_channel_info(channel).is_color);
   if (is_normal) {
     return float3(brush_paint.channels[channel].value);
   }
@@ -1661,8 +1661,8 @@ static float3 finish_color_sample(const bool is_normal,
                                   const bool flip_green)
 {
   if (!is_normal) {
-    /* Base Color is the only color channel here; the Normal map below is tangent data and must
-     * never be gamma-decoded. */
+    /* Every color channel (Base Color, Emission, Specular Tint) decodes here; the Normal map
+     * below is tangent data and must never be gamma-decoded. */
     if (do_linear_conversion && decode_linear) {
       float4 decoded = rgba;
       IMB_colormanagement_colorspace_to_scene_linear_v3(decoded, colorspace);

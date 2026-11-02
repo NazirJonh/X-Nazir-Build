@@ -300,6 +300,7 @@ set(SRC
   intern/paint_material_cache_common.cc
   intern/paint_material_combined.cc
   intern/paint_material_blend_group.cc
+  intern/paint_material_blend_group_extended.cc
   intern/paint_material_composite.cc
   intern/paint_material_gradient_group.cc
   intern/paint_material_normal_combine.cc

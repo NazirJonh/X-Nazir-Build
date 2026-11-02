@@ -390,9 +390,16 @@ class MATERIAL_OT_paint_layer_object_mask_refresh_tiles(_PaintLayerOperator):
 
 # Output Texture ##############################################################
 
-# Python cannot read the C++ `is_color` flag of a channel, so the colour channels are mirrored from
-# the channel table in `BKE_paint_material_channel_info`; every other channel is data (Non-Color).
-_OUTPUT_COLOR_CHANNELS = {'BASE_COLOR', 'EMISSION'}
+# Python reads the colour channels from the C++ descriptor through
+# #PaintModeSettings.paint_channel_info (see properties_paint_common), so no mirror is maintained
+# here: every channel the descriptors call colour writes sRGB, every other one Non-Color.
+
+
+def _output_color_channels(context):
+    """The channel identifiers the descriptor table calls colour (``is_color``)."""
+    # Imported here like the module's other bl_ui uses: the UI modules are loaded after this one.
+    from bl_ui.properties_paint_common import material_paint_color_channels
+    return material_paint_color_channels(context.scene.tool_settings.paint_mode)
 
 _OUTPUT_EXTENSIONS = {'PNG': ".png", 'TIFF': ".tif", 'OPEN_EXR': ".exr"}
 
@@ -535,26 +542,26 @@ def _output_find_image(mat, identifier):
     return None
 
 
-def _output_target_image(out, mat, side, identifier, file_name):
+def _output_target_image(out, mat, side, identifier, file_name, color_channels):
     """The image the channel is composited into. Returns the image and whether it was just created."""
     if out.existing_mode == 'UPDATE':
         image = _output_find_image(mat, identifier)
         if image is not None:
             if image.size[0] != side or image.size[1] != side:
                 image.scale(side, side)
-            image.colorspace_settings.name = "sRGB" if identifier in _OUTPUT_COLOR_CHANNELS else "Non-Color"
+            image.colorspace_settings.name = "sRGB" if identifier in color_channels else "Non-Color"
             return image, False
     image = bpy.data.images.new(
         file_name, side, side, alpha=True, float_buffer=(out.color_depth != '8'),
     )
-    image.colorspace_settings.name = "sRGB" if identifier in _OUTPUT_COLOR_CHANNELS else "Non-Color"
+    image.colorspace_settings.name = "sRGB" if identifier in color_channels else "Non-Color"
     if out.existing_mode == 'UPDATE':
         # Marks the image as this channel's output for the next Update Existing run.
         image["paint_layers_output"] = "{:s}|{:s}".format(mat.name, identifier)
     return image, True
 
 
-def _output_write_all(mat, out, side, channels, directory, suffix):
+def _output_write_all(mat, out, side, channels, directory, suffix, color_channels):
     """Composite and write every channel. Returns the written, skipped and failed channel lists."""
     written, skipped, failed = [], [], []
     tmp_scene = None
@@ -577,7 +584,7 @@ def _output_write_all(mat, out, side, channels, directory, suffix):
 
         for identifier in channels:
             file_name = _output_base_name(out, mat, identifier) + suffix
-            image, is_new = _output_target_image(out, mat, side, identifier, file_name)
+            image, is_new = _output_target_image(out, mat, side, identifier, file_name, color_channels)
             try:
                 composited = mat.paint_layers.composite(channel=identifier, image=image)
                 reason = "nothing to composite"
@@ -598,7 +605,7 @@ def _output_write_all(mat, out, side, channels, directory, suffix):
                     # Raw writes a data map untouched; Standard is the plain sRGB encoding a colour
                     # map needs. Neither adds a tone-mapping curve.
                     tmp_scene.view_settings.view_transform = (
-                        'Standard' if identifier in _OUTPUT_COLOR_CHANNELS else 'Raw')
+                        'Standard' if identifier in color_channels else 'Raw')
                     image.save_render(filepath=filepath, scene=tmp_scene)
                     image.filepath_raw = filepath
                 else:
@@ -662,7 +669,8 @@ class MATERIAL_OT_paint_layers_output_render(Operator):
         # pass is put back whatever happens here.
         pass_before = mat.paint_layers_view_pass
         try:
-            written, skipped, failed = _output_write_all(mat, out, side, channels, directory, suffix)
+            written, skipped, failed = _output_write_all(
+                mat, out, side, channels, directory, suffix, _output_color_channels(context))
         finally:
             if mat.paint_layers_view_pass != pass_before:
                 mat.paint_layers_view_pass = pass_before

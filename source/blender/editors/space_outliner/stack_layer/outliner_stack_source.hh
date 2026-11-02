@@ -516,7 +516,7 @@ struct StackAddArgs {
    * reads it as the #eMaterialPaintChannel records an empty Fill should start with; zero means
    * none.
    */
-  uint16_t channel_mask = 0;
+  uint32_t channel_mask = 0;
   /** The data-block a kind with #StackAddKindInfo::source_id_type is made from; null otherwise. */
   ID *source = nullptr;
   /**

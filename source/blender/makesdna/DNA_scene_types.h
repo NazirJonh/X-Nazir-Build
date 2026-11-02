@@ -1228,10 +1228,30 @@ enum eMaterialPaintChannel : int8_t {
   PAINT_MATERIAL_CHANNEL_AO = 8,
   /** Emission color channel (RGB, routes through the generic color-attribute path). */
   PAINT_MATERIAL_CHANNEL_EMISSION = 9,
+  /* The eight channels below were added after the first ten, so every value above keeps its number
+   * and an existing file's per-channel arrays stay in place. All eight are map-only: none is written
+   * into a per-vertex attribute (see #MaterialPaintChannelInfo::supports_vertex_paint), and only
+   * Specular Tint is a color. */
+  /** Emission strength, multiplied by the Emission channel's color. */
+  PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH = 10,
+  /** How much the surface refracts instead of reflecting. */
+  PAINT_MATERIAL_CHANNEL_TRANSMISSION = 11,
+  /** How much light scatters under the surface. */
+  PAINT_MATERIAL_CHANNEL_SUBSURFACE = 12,
+  /** Strength of the clear-coat layer. */
+  PAINT_MATERIAL_CHANNEL_COAT = 13,
+  /** Roughness of the clear-coat layer alone. */
+  PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS = 14,
+  /** Strength of the sheen lobe. */
+  PAINT_MATERIAL_CHANNEL_SHEEN = 15,
+  /** Tint of the specular reflection (RGB, like Emission). */
+  PAINT_MATERIAL_CHANNEL_SPECULAR_TINT = 16,
+  /** Stretching of the specular highlight along the tangent. */
+  PAINT_MATERIAL_CHANNEL_ANISOTROPIC = 17,
 };
 
 /** Number of #eMaterialPaintChannel values. Sizes the per-channel arrays in DNA. */
-#define PAINT_MATERIAL_CHANNEL_NUM 10
+#define PAINT_MATERIAL_CHANNEL_NUM 18
 
 /**
  * Roles an #Image can have inside a PBR paint layer, stored in #Image.paint_layer_channel.
@@ -1742,7 +1762,7 @@ struct PaintShapeChannelValue {
   /** Value for scalar channels (Metallic, Roughness, Specular, AO). Height has no base value:
    * its shape relief is always laid around the neutral mid height. */
   float value = 0.0f;
-  /** Color for color channels (Base Color, Emission). */
+  /** Color for color channels (Base Color, Emission, Specular Tint); unused by the scalar ones. */
   float color[3] = {1.0f, 1.0f, 1.0f};
   /** Height amplitude / Normal strength. */
   float strength = 1.0f;
@@ -1888,8 +1908,8 @@ struct PaintShapeSettings {
   /** Per-channel values for PBR Paint, indexed by #eMaterialPaintChannel.
    * NOTE: the size is spelled as a literal because makesdna does not expand macros; keep in sync
    * with #PAINT_MATERIAL_CHANNEL_NUM (asserted where the arrays are consumed). */
-  PaintShapeChannelValue stroke_channels[10 /*PAINT_MATERIAL_CHANNEL_NUM*/];
-  PaintShapeChannelValue fill_channels[10 /*PAINT_MATERIAL_CHANNEL_NUM*/];
+  PaintShapeChannelValue stroke_channels[18 /*PAINT_MATERIAL_CHANNEL_NUM*/];
+  PaintShapeChannelValue fill_channels[18 /*PAINT_MATERIAL_CHANNEL_NUM*/];
 
   /**
    * Stroke profile: horizontal axis is the across-stroke coordinate t (0 = line center, 1 =
@@ -2334,7 +2354,7 @@ struct PaintModeSettings {
    * #eMaterialPaintChannel (see #PaintGradientValueRamp). Shared by both gradient tools, which
    * paint the same channel maps of the same material.
    */
-  PaintGradientValueRamp gradient_value_ramps[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
+  PaintGradientValueRamp gradient_value_ramps[/*PAINT_MATERIAL_CHANNEL_NUM*/ 18] = {};
 
   /** Selected image when canvas_source=PAINT_CANVAS_SOURCE_IMAGE. */
   Image *canvas_image = nullptr;
@@ -2357,7 +2377,7 @@ struct PaintModeSettings {
    * is an add-on-managed layer redirect on top of their built-in default name (see
    * #MaterialPaintChannelLayerBinding); for #PAINT_MATERIAL_CHANNEL_CUSTOM, which has no built-in
    * name, this slot holds the attribute name Custom paints, configured by the user. */
-  MaterialPaintChannelLayerBinding channel_layer_bindings[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
+  MaterialPaintChannelLayerBinding channel_layer_bindings[/*PAINT_MATERIAL_CHANNEL_NUM*/ 18] = {};
 
   /** Width/height (in pixels) used for newly auto-created per-channel material paint images.
    * \see ePaintNewChannelImageSize. */

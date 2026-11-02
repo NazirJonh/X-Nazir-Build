@@ -124,6 +124,24 @@ MINLINE void blend_color_interpolate_float(float dst[4],
                                            const float src2[4],
                                            float t);
 
+/**
+ * One channel of the Color Burn blend at full factor. \a over is the upper colour already mixed
+ * with the node's factor (`facm + fac * col`, exactly what #ramp_blend computes), so nothing is
+ * weighted here: the result is the burned channel, clamped to 0..1.
+ *
+ * The CPU paint composite reduces Vivid Light to this step against a doubled upper colour, and the
+ * GPU builds the same mode from the Mix node's own Burn branch, so both engines call this one
+ * formula instead of carrying two that could drift.
+ */
+MINLINE float blend_color_burn_channel(const float below, const float over);
+
+/**
+ * One channel of the Color Dodge blend at full factor. \a over is `1 - fac * col`, exactly what
+ * #ramp_blend computes: a burnt-out over returns one and a zero below stays put, like the Mix
+ * node's own branch. See #blend_color_burn_channel for why one formula serves both engines.
+ */
+MINLINE float blend_color_dodge_channel(const float below, const float over);
+
 }  // namespace blender
 
 #if BLI_MATH_DO_INLINE

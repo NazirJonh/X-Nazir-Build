@@ -482,13 +482,13 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
  * \{ */
 
 /** Every channel the branch of \a row takes part in, as a bitmask over #eMaterialPaintChannel. */
-static uint16_t paint_layer_source_channel_mask(const MaterialPaintLayer &row)
+static uint32_t paint_layer_source_channel_mask(const MaterialPaintLayer &row)
 {
-  uint16_t mask = 0;
+  uint32_t mask = 0;
   for (const int i : IndexRange(row.channels_num)) {
     const int channel = row.channels[i].channel;
     if (channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM) {
-      mask |= uint16_t(1) << channel;
+      mask |= uint32_t(1) << channel;
     }
   }
   /* Corrections and children carry content records; mask items deliberately are not walked: their
@@ -533,7 +533,7 @@ static bool paint_layer_source_has_object_mask(const MaterialPaintLayer &row)
  */
 static int paint_layer_prune_foreign_channels(Material &dst, MaterialPaintLayer &row)
 {
-  const uint16_t set = BKE_paint_layers_channel_set_mask_get(dst);
+  const uint32_t set = BKE_paint_layers_channel_set_mask_get(dst);
   int removed = 0;
   for (int i = row.channels_num - 1; i >= 0; i--) {
     const int channel = row.channels[i].channel;
@@ -541,7 +541,7 @@ static int paint_layer_prune_foreign_channels(Material &dst, MaterialPaintLayer 
       BLI_assert_msg(false, "A channel record names a valid paint channel");
       continue;
     }
-    if ((set & (uint16_t(1) << channel)) == 0 &&
+    if ((set & (uint32_t(1) << channel)) == 0 &&
         BKE_paint_layers_channel_remove(dst, &row, eMaterialPaintChannel(channel)))
     {
       removed++;
@@ -662,7 +662,7 @@ bool BKE_paint_layers_import_rows(Main &bmain,
     return false;
   }
 
-  uint16_t source_channels = 0;
+  uint32_t source_channels = 0;
   bool dropped_object_masks = false;
   for (const MaterialPaintLayer *row : rows) {
     if (row == nullptr || !paint_layer_in_stack(src, row)) {

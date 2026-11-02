@@ -715,12 +715,23 @@ static constexpr int view_passes[] = {
     PAINT_MATERIAL_CHANNEL_AO,
     PAINT_MATERIAL_CHANNEL_ALPHA,
     PAINT_MATERIAL_CHANNEL_EMISSION,
+    PAINT_MATERIAL_CHANNEL_SUBSURFACE,
+    PAINT_MATERIAL_CHANNEL_SPECULAR_TINT,
+    PAINT_MATERIAL_CHANNEL_ANISOTROPIC,
+    PAINT_MATERIAL_CHANNEL_TRANSMISSION,
+    PAINT_MATERIAL_CHANNEL_COAT,
+    PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS,
+    PAINT_MATERIAL_CHANNEL_SHEEN,
+    PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
     PAINT_LAYER_MAP_MASK,
 };
 /* Guards the stored indices: Combined has to stay zero, which is what files saved before the
- * preview read as, and reordering an entry needs a versioning step (see the list's declaration). */
+ * preview read as, and reordering an entry needs a versioning step (see the list's declaration).
+ * The eight channels above sit between Emission and the mask because the mask's index moved with
+ * them (#version_paint_layers_view_pass_shift); nothing after this point may be inserted before
+ * them without the same care. */
 static_assert(view_passes[0] == PAINT_LAYER_PASS_COMBINED);
-static_assert(std::size(view_passes) == 11);
+static_assert(std::size(view_passes) == 19);
 static_assert(view_passes[1] == PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
               view_passes[6] == PAINT_MATERIAL_CHANNEL_HEIGHT &&
               view_passes[std::size(view_passes) - 1] == PAINT_LAYER_MAP_MASK);

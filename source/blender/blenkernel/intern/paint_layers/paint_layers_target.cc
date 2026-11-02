@@ -966,10 +966,10 @@ Image *BKE_paint_layers_active_channel_map_ensure(Main &bmain,
 
 int BKE_paint_layers_active_maps_ensure(Main &bmain, Material &ma, const int image_size)
 {
-  const uint16_t channel_set = BKE_paint_layers_channel_set_mask_get(ma);
+  const uint32_t channel_set = BKE_paint_layers_channel_set_mask_get(ma);
   int created = 0;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    if (!info.supports_image_paint || (channel_set & (uint16_t(1) << int(info.channel))) == 0) {
+    if (!info.supports_image_paint || (channel_set & (uint32_t(1) << int(info.channel))) == 0) {
       continue;
     }
     PaintLayersTarget target;

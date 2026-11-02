@@ -33,6 +33,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_paint_vector.hh"
 #include "BKE_report.hh"
 
@@ -587,9 +588,9 @@ void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &l
   /* Every channel the material's set names gets a record. A set that was never authored derives
    * from the layer records and the build default, so this is also how the default reaches a fresh
    * stack: one source of truth instead of a second hard-coded list here. */
-  const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
+  const uint32_t set = BKE_paint_layers_channel_set_mask_get(ma);
   for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-    if ((set & (uint16_t(1) << channel)) == 0) {
+    if ((set & (uint32_t(1) << channel)) == 0) {
       continue;
     }
     const eMaterialPaintChannel paint_channel = eMaterialPaintChannel(channel);
@@ -601,25 +602,25 @@ void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &l
 }
 
 /** The channels a layered material offers before any channel set is authored. Base Color included. */
-static constexpr uint16_t PAINT_LAYERS_DEFAULT_CHANNEL_SET =
-    (uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
-    (uint16_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
-    (uint16_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
-    (uint16_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL) |
-    (uint16_t(1) << PAINT_MATERIAL_CHANNEL_AO);
+static constexpr uint32_t PAINT_LAYERS_DEFAULT_CHANNEL_SET =
+    (uint32_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
+    (uint32_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
+    (uint32_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
+    (uint32_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL) |
+    (uint32_t(1) << PAINT_MATERIAL_CHANNEL_AO);
 
 /** The build default plus Height, the set a stack created through the New Layered Material dialog
  * starts from. Kept apart from #PAINT_LAYERS_DEFAULT_CHANNEL_SET so a file with no authored set
  * (and therefore reading the build default) never gains Height by opening. */
-static constexpr uint16_t PAINT_LAYERS_NEW_MATERIAL_CHANNEL_SET =
-    PAINT_LAYERS_DEFAULT_CHANNEL_SET | (uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT);
+static constexpr uint32_t PAINT_LAYERS_NEW_MATERIAL_CHANNEL_SET =
+    PAINT_LAYERS_DEFAULT_CHANNEL_SET | (uint32_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT);
 
-uint16_t BKE_paint_layers_default_channel_set()
+uint32_t BKE_paint_layers_default_channel_set()
 {
   return PAINT_LAYERS_DEFAULT_CHANNEL_SET;
 }
 
-uint16_t BKE_paint_layers_new_material_channel_set()
+uint32_t BKE_paint_layers_new_material_channel_set()
 {
   return PAINT_LAYERS_NEW_MATERIAL_CHANNEL_SET;
 }
@@ -632,9 +633,9 @@ void BKE_paint_layers_new_material_response_apply(Material &ma)
   ma.paint_layers_normal_strength_delta = 0.0f;
 }
 
-uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma)
+uint32_t BKE_paint_layers_channel_set_mask_get(const Material &ma)
 {
-  uint16_t mask = ma.paint_layers_channels;
+  uint32_t mask = ma.paint_layers_channels;
   if (mask == 0) {
     /* Not authored: the union of the build default and every record any row already carries, so a
      * stack's own channels are never dropped from the set. */
@@ -642,11 +643,11 @@ uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma)
     BKE_paint_layers_foreach(
         ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
           for (const int i : IndexRange(layer.channels_num)) {
-            mask |= uint16_t(uint16_t(1) << int(layer.channels[i].channel));
+            mask |= uint32_t(1) << int(layer.channels[i].channel);
           }
           for (const MaterialPaintLayer &effect : layer.effects) {
             for (const int i : IndexRange(effect.channels_num)) {
-              mask |= uint16_t(uint16_t(1) << int(effect.channels[i].channel));
+              mask |= uint32_t(1) << int(effect.channels[i].channel);
             }
           }
           return true;
@@ -672,18 +673,18 @@ bool BKE_paint_layers_channel_in_set(const Material &ma, const eMaterialPaintCha
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
-  return (BKE_paint_layers_channel_set_mask_get(ma) & (uint16_t(1) << int(channel))) != 0;
+  return (BKE_paint_layers_channel_set_mask_get(ma) & (uint32_t(1) << int(channel))) != 0;
 }
 
 int BKE_paint_layers_channel_clamp_to_set(const Material &ma, const int channel)
 {
-  const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
-  if (channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM && (set & (uint16_t(1) << channel)) != 0)
+  const uint32_t set = BKE_paint_layers_channel_set_mask_get(ma);
+  if (channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM && (set & (uint32_t(1) << channel)) != 0)
   {
     return channel;
   }
   for (const int candidate : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-    if ((set & (uint16_t(1) << candidate)) != 0) {
+    if ((set & (uint32_t(1) << candidate)) != 0) {
       return candidate;
     }
   }
@@ -713,13 +714,13 @@ bool BKE_paint_layers_channel_set_enable(Material &ma,
     return false;
   }
 
-  uint16_t mask = BKE_paint_layers_channel_set_mask_get(ma);
+  uint32_t mask = BKE_paint_layers_channel_set_mask_get(ma);
   if (enabled) {
-    mask |= uint16_t(1) << int(channel);
+    mask |= uint32_t(1) << int(channel);
   }
   else {
     /* Cannot remove the last channel in the set. */
-    const uint16_t new_mask = mask & uint16_t(~(uint16_t(1) << int(channel)));
+    const uint32_t new_mask = mask & ~(uint32_t(1) << int(channel));
     if (new_mask == 0) {
       return false;
     }
@@ -728,7 +729,7 @@ bool BKE_paint_layers_channel_set_enable(Material &ma,
   return BKE_paint_layers_channel_set_mask_set(ma, mask);
 }
 
-bool BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask)
+bool BKE_paint_layers_channel_set_mask_set(Material &ma, uint32_t mask)
 {
   /* A set cannot be empty: there must be at least one channel. */
   if (mask == 0) {
@@ -854,9 +855,9 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
     /* The ramp supplies the colour; the record is the channel switch, as on a Gradient row. */
     effect->kind_subtype = MA_PAINT_LAYER_GENERATOR_GRADIENT;
     BKE_paint_layers_gradient_ensure(*effect);
-    const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
+    const uint32_t set = BKE_paint_layers_channel_set_mask_get(ma);
     for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-      if (channel != PAINT_MATERIAL_CHANNEL_NORMAL && (set & (uint16_t(1) << channel)) != 0) {
+      if (channel != PAINT_MATERIAL_CHANNEL_NORMAL && (set & (uint32_t(1) << channel)) != 0) {
         MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
             ma, effect, eMaterialPaintChannel(channel));
         const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
@@ -1096,9 +1097,9 @@ MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
     BKE_paint_layers_channel_add(ma, effect, eMaterialPaintChannel(owner_channel));
   }
   else {
-    const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
+    const uint32_t set = BKE_paint_layers_channel_set_mask_get(ma);
     for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-      if ((set & (uint16_t(1) << channel)) != 0) {
+      if ((set & (uint32_t(1) << channel)) != 0) {
         BKE_paint_layers_channel_add(ma, effect, eMaterialPaintChannel(channel));
         break;
       }
@@ -2920,8 +2921,41 @@ int BKE_paint_layers_blend_to_ramp(const eMaterialPaintLayerBlend blend)
     case MA_PAINT_LAYER_BLEND_NORMAL_REPLACE:
       /* The Normal channel builds a plain Mix for Replace; the code is never read there. */
       return MA_RAMP_BLEND;
+    case MA_PAINT_LAYER_BLEND_HARD_LIGHT:
+      return MA_PAINT_BLEND_HARD_LIGHT;
+    case MA_PAINT_LAYER_BLEND_VIVID_LIGHT:
+      return MA_PAINT_BLEND_VIVID_LIGHT;
+    case MA_PAINT_LAYER_BLEND_PIN_LIGHT:
+      return MA_PAINT_BLEND_PIN_LIGHT;
+    case MA_PAINT_LAYER_BLEND_LINEAR_BURN:
+      return MA_PAINT_BLEND_LINEAR_BURN;
+    case MA_PAINT_LAYER_BLEND_LIGHTER_COLOR:
+      return MA_PAINT_BLEND_LIGHTER_COLOR;
+    case MA_PAINT_LAYER_BLEND_DARKER_COLOR:
+      return MA_PAINT_BLEND_DARKER_COLOR;
   }
   return MA_RAMP_BLEND;
+}
+
+/** Whether \a blend names one of the modes a Mix node cannot express (see #eMaterialPaintBlend). */
+bool BKE_paint_layers_blend_is_extended(const eMaterialPaintLayerBlend blend)
+{
+  return ELEM(blend,
+              MA_PAINT_LAYER_BLEND_HARD_LIGHT,
+              MA_PAINT_LAYER_BLEND_VIVID_LIGHT,
+              MA_PAINT_LAYER_BLEND_PIN_LIGHT,
+              MA_PAINT_LAYER_BLEND_LINEAR_BURN,
+              MA_PAINT_LAYER_BLEND_LIGHTER_COLOR,
+              MA_PAINT_LAYER_BLEND_DARKER_COLOR);
+}
+
+bool paint_blend_code_is_extended(const int ramp_blend)
+{
+  /* The extended codes are exactly the #eMaterialPaintBlend range: past the Mix node's own and
+   * short of anything after them. #BKE_paint_layers_blend_to_ramp never returns anything outside
+   * #MA_RAMP_BLEND..#MA_PAINT_BLEND_DARKER_COLOR, so the upper bound is only ever a guard against
+   * a caller passing an unrelated code. */
+  return ramp_blend > MA_RAMP_EXCLUSION && ramp_blend <= MA_PAINT_BLEND_DARKER_COLOR;
 }
 
 bool BKE_paint_layers_set_blend(Material &ma,
@@ -2935,6 +2969,12 @@ bool BKE_paint_layers_set_blend(Material &ma,
    * it; a stored value would only ever be a switch the user cannot make effective. Replace belongs
    * to the Normal channel's per-channel setting alone. */
   if (ELEM(blend, MA_PAINT_LAYER_BLEND_NORMAL_COMBINE, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE)) {
+    return false;
+  }
+  /* A mask item is blended by a plain Mix node rather than by the shared Blend group, so the modes
+   * past that node's range have no shape for it; the graph would show Mix while the CPU composite
+   * computed the mode the description names. */
+  if (layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM && BKE_paint_layers_blend_is_extended(blend)) {
     return false;
   }
   if (layer->blend == blend) {
@@ -3161,7 +3201,15 @@ bool BKE_paint_layers_mask_source_channel_allowed(const int channel)
               PAINT_MATERIAL_CHANNEL_SPECULAR,
               PAINT_MATERIAL_CHANNEL_HEIGHT,
               PAINT_MATERIAL_CHANNEL_AO,
-              PAINT_MATERIAL_CHANNEL_EMISSION);
+              PAINT_MATERIAL_CHANNEL_EMISSION,
+              PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
+              PAINT_MATERIAL_CHANNEL_TRANSMISSION,
+              PAINT_MATERIAL_CHANNEL_SUBSURFACE,
+              PAINT_MATERIAL_CHANNEL_COAT,
+              PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS,
+              PAINT_MATERIAL_CHANNEL_SHEEN,
+              PAINT_MATERIAL_CHANNEL_SPECULAR_TINT,
+              PAINT_MATERIAL_CHANNEL_ANISOTROPIC);
 }
 
 int BKE_paint_layers_mask_source_channel_get(const MaterialPaintLayer &item)
@@ -3184,7 +3232,7 @@ bool BKE_paint_layers_mask_source_channel_set(Material &ma, MaterialPaintLayer *
   if (paint_layer_mask_source_channel(*item) == channel && item->mask_source_channels != 0) {
     return true;
   }
-  item->mask_source_channels = uint16_t(1u << channel);
+  item->mask_source_channels = uint32_t(1u << channel);
   /* The maps rendered so far are of the old channel; with none the row is due again. */
   BKE_paint_layers_bake_clear(ma, *item);
   BKE_paint_layers_tag_edited(ma);
@@ -3631,6 +3679,11 @@ void BKE_paint_layers_channel_bottom_color(const eMaterialPaintChannel channel, 
        * default rather than towards zero. */
       r_color[0] = r_color[1] = r_color[2] = 0.5f;
       break;
+    case PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS:
+      /* The same rule as Roughness — fade to the socket's own default, which the coat starts at
+       * 0.03 rather than at a half. */
+      r_color[0] = r_color[1] = r_color[2] = 0.03f;
+      break;
     case PAINT_MATERIAL_CHANNEL_HEIGHT:
       /* The stored neutral that encodes relief 0, never a literal: an empty texel and a flat
        * relief must agree. */
@@ -3646,10 +3699,20 @@ void BKE_paint_layers_channel_bottom_color(const eMaterialPaintChannel channel, 
     case PAINT_MATERIAL_CHANNEL_AO:
       r_color[0] = r_color[1] = r_color[2] = 1.0f;
       break;
+    case PAINT_MATERIAL_CHANNEL_SPECULAR_TINT:
+      /* A white tint is the socket's own default, and the neutral of a multiply-like read. */
+      r_color[0] = r_color[1] = r_color[2] = 1.0f;
+      break;
     case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
     case PAINT_MATERIAL_CHANNEL_METALLIC:
     case PAINT_MATERIAL_CHANNEL_CUSTOM:
     case PAINT_MATERIAL_CHANNEL_EMISSION:
+    case PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH:
+    case PAINT_MATERIAL_CHANNEL_TRANSMISSION:
+    case PAINT_MATERIAL_CHANNEL_SUBSURFACE:
+    case PAINT_MATERIAL_CHANNEL_COAT:
+    case PAINT_MATERIAL_CHANNEL_SHEEN:
+    case PAINT_MATERIAL_CHANNEL_ANISOTROPIC:
       break;
   }
 }

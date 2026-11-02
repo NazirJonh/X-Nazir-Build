@@ -1799,6 +1799,14 @@ _MATERIAL_PAINT_CHANNEL_UI_ORDER = (
     'AO',
     'EMISSION',
     'SPECULAR',
+    'EMISSION_STRENGTH',
+    'TRANSMISSION',
+    'SUBSURFACE',
+    'COAT',
+    'COAT_ROUGHNESS',
+    'SHEEN',
+    'SPECULAR_TINT',
+    'ANISOTROPIC',
 )
 # Channels that can own a Principled paint map on the Material (image) canvas. Height, AO and
 # Custom have no Principled socket, so they cannot be created as maps and are excluded (see
@@ -1812,6 +1820,14 @@ _MATERIAL_PAINT_MAP_CHANNELS = (
     'NORMAL',
     'ALPHA',
     'EMISSION',
+    'EMISSION_STRENGTH',
+    'TRANSMISSION',
+    'SUBSURFACE',
+    'COAT',
+    'COAT_ROUGHNESS',
+    'SHEEN',
+    'SPECULAR_TINT',
+    'ANISOTROPIC',
 )
 # Channels the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color) canvas can store: one float (or
 # color) per vertex has no meaningful representation for a texture-map-only channel. Must match
@@ -1857,7 +1873,42 @@ _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS = {
     'AO': "AO",
     'EMISSION': "Emit",
     'CUSTOM': "Custom",
+    'EMISSION_STRENGTH': "Emit Str",
+    'TRANSMISSION': "Trans",
+    'SUBSURFACE': "SSS",
+    'COAT': "Coat",
+    'COAT_ROUGHNESS': "Coat Rough",
+    'SHEEN': "Sheen",
+    'SPECULAR_TINT': "Spec Tint",
+    'ANISOTROPIC': "Aniso",
 }
+
+
+# Read once from the descriptor through #PaintModeSettings.paint_channel_info (the settings
+# instance is only what Python can always reach; the table is global), so this module and the
+# ones importing from it no longer mirror the colour-channel set by hand.
+_MATERIAL_PAINT_CHANNEL_IS_COLOR = None
+
+
+def material_paint_channel_is_color(paint_mode, channel_id):
+    """Whether the channel holds a colour rather than data (the descriptor's ``is_color``).
+
+    ``paint_mode`` is only the RNA path to the table: any ``PaintModeSettings`` answers the same.
+    """
+    global _MATERIAL_PAINT_CHANNEL_IS_COLOR
+    if _MATERIAL_PAINT_CHANNEL_IS_COLOR is None:
+        _MATERIAL_PAINT_CHANNEL_IS_COLOR = {
+            channel: paint_mode.paint_channel_info(channel)[0]
+            for channel in _MATERIAL_PAINT_CHANNEL_UI_ORDER
+        }
+    return _MATERIAL_PAINT_CHANNEL_IS_COLOR.get(channel_id, False)
+
+
+def material_paint_color_channels(paint_mode):
+    """The channel ids the descriptor table calls colour, as a frozenset."""
+    return frozenset(
+        channel_id for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER
+        if material_paint_channel_is_color(paint_mode, channel_id))
 
 
 def _material_paint_canvas_channels(show_custom, *, layered=False):
@@ -1927,8 +1978,8 @@ def draw_material_paint_channel_toggles(layout, brush, paint, *, show_custom, la
 
 
 # The channels the tools' colour ramp drives; every other scalar channel can paint through its
-# own value ramp instead. Normal is neither: a ramp cannot drive a packed tangent.
-_GRADIENT_TOOL_COLOUR_CHANNEL_IDS = frozenset({'BASE_COLOR', 'EMISSION'})
+# own value ramp instead. Normal is neither: a ramp cannot drive a packed tangent. The set itself
+# is #material_paint_color_channels, read from the descriptor rather than mirrored by hand.
 # Width the gizmo-ramp eye adds to a channel toggle's cell (Blender UI units): the eye sits right
 # before the toggle inside the same cell.
 _GRADIENT_TOOL_CHANNEL_EYE_UI_UNITS_X = 1.3
@@ -1945,7 +1996,7 @@ def _gradient_tool_channel_rows(layout, channels, toggle_ids, ramps, paint_mode)
         if channel is None:
             continue
         record = ramps.get(channel_id)
-        has_ramp = channel_id in _GRADIENT_TOOL_COLOUR_CHANNEL_IDS or (
+        has_ramp = channel_id in material_paint_color_channels(paint_mode) or (
             channel_id != 'NORMAL' and record is not None and record.ramp is not None)
         col = flow.column(align=False)
         col.ui_units_x = (_MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X +
@@ -1969,7 +2020,7 @@ def _gradient_tool_channel_rows(layout, channels, toggle_ids, ramps, paint_mode)
         row.prop(channel, "use", text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id], toggle=True)
 
 
-def _gradient_tool_channel_panels(layout, channels, toggle_ids, ramps,
+def _gradient_tool_channel_panels(layout, channels, toggle_ids, ramps, paint_mode,
                                   color_ramp_owner, color_ramp_prop):
     """Draw a subpanel per enabled channel: its colour ramp or its own value ramp."""
     channel_col = layout.column(align=False)
@@ -1988,7 +2039,7 @@ def _gradient_tool_channel_panels(layout, channels, toggle_ids, ramps,
         header.label(text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id])
         if not panel:
             continue
-        if channel_id in _GRADIENT_TOOL_COLOUR_CHANNEL_IDS:
+        if channel_id in material_paint_color_channels(paint_mode):
             panel.template_color_ramp(color_ramp_owner, color_ramp_prop, expand=True)
             continue
         record = ramps.get(channel_id)
@@ -2031,12 +2082,12 @@ def draw_gradient_tool_channels(layout, context, brush, paint, *, show_custom,
 
     _gradient_tool_channel_rows(layout, channels, toggle_ids, ramps, paint_mode)
     _gradient_tool_channel_panels(
-        layout, channels, toggle_ids, ramps, color_ramp_owner, color_ramp_prop)
+        layout, channels, toggle_ids, ramps, paint_mode, color_ramp_owner, color_ramp_prop)
 
 
 def _material_paint_channel_socket_color(channel_id):
     """Socket color matching Principled BSDF socket colors."""
-    if channel_id in ('BASE_COLOR', 'EMISSION'):
+    if channel_id in ('BASE_COLOR', 'EMISSION', 'SPECULAR_TINT'):
         return _MATERIAL_PAINT_SOCKET_COLOR_RGBA
     if channel_id == 'NORMAL':
         return _MATERIAL_PAINT_SOCKET_COLOR_VECTOR
@@ -2375,12 +2426,26 @@ _MATERIAL_VALUE_POPOVER_TABLE = (
     ('brush', 'ALPHA', "Alpha Value", 'value'),
     ('brush', 'AO', "AO Value", 'value'),
     ('brush', 'SPECULAR', "Specular Value", 'value'),
+    ('brush', 'EMISSION_STRENGTH', "Emission Strength Value", 'value'),
+    ('brush', 'TRANSMISSION', "Transmission Value", 'value'),
+    ('brush', 'SUBSURFACE', "Subsurface Value", 'value'),
+    ('brush', 'COAT', "Coat Value", 'value'),
+    ('brush', 'COAT_ROUGHNESS', "Coat Roughness Value", 'value'),
+    ('brush', 'SHEEN', "Sheen Value", 'value'),
+    ('brush', 'ANISOTROPIC', "Anisotropic Value", 'value'),
     ('brush', 'CUSTOM', "Custom Value", 'value'),
     ('layer', 'METALLIC', "Metallic Value", 'value_scalar'),
     ('layer', 'ROUGHNESS', "Roughness Value", 'value_scalar'),
     ('layer', 'ALPHA', "Alpha Value", 'value_scalar'),
     ('layer', 'AO', "AO Value", 'value_scalar'),
     ('layer', 'SPECULAR', "Specular Value", 'value_scalar'),
+    ('layer', 'EMISSION_STRENGTH', "Emission Strength Value", 'value_scalar'),
+    ('layer', 'TRANSMISSION', "Transmission Value", 'value_scalar'),
+    ('layer', 'SUBSURFACE', "Subsurface Value", 'value_scalar'),
+    ('layer', 'COAT', "Coat Value", 'value_scalar'),
+    ('layer', 'COAT_ROUGHNESS', "Coat Roughness Value", 'value_scalar'),
+    ('layer', 'SHEEN', "Sheen Value", 'value_scalar'),
+    ('layer', 'ANISOTROPIC', "Anisotropic Value", 'value_scalar'),
 )
 
 
@@ -2419,8 +2484,8 @@ def _brush_channel_view(channel, channel_id, material_paint):
         blend = (channel, "blend")
     elif channel_id == 'NORMAL':
         color = (channel, "normal_color")
-    elif channel_id == 'EMISSION':
-        color = (channel, "emission_color")
+    elif channel_id in ('EMISSION', 'SPECULAR_TINT'):
+        color = (channel, "channel_color")
     else:
         scalar = (channel, "value")
         scalar_index = 0
@@ -3231,8 +3296,10 @@ def draw_material_paint_channels(
     # (image) canvas session, so this is an explicit `not show_custom` guard, not just membership in
     # `visible`.
     for channel_id in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'AO', 'ALPHA', 'NORMAL', 'HEIGHT',
-                       'EMISSION', 'SPECULAR'):
-        if show_custom and channel_id in ('NORMAL', 'EMISSION'):
+                       'EMISSION', 'SPECULAR',
+                       'EMISSION_STRENGTH', 'TRANSMISSION', 'SUBSURFACE', 'COAT',
+                       'COAT_ROUGHNESS', 'SHEEN', 'SPECULAR_TINT', 'ANISOTROPIC'):
+        if show_custom and channel_id not in _MATERIAL_PAINT_VERTEX_CHANNELS:
             continue
         if channel_id == 'HEIGHT' and channel_id not in toggle_ids:
             # Height is offered only on a layered material (see #_material_paint_canvas_channels);

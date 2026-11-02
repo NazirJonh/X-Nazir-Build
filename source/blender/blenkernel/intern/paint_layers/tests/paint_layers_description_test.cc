@@ -22,6 +22,7 @@
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_report.hh"
 
 #include "../paint_layers_intern.hh"
@@ -49,6 +50,8 @@
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_node_tree_interface_types.h"
+#include "DNA_node_types.h"
 #include "DNA_scene_types.h"
 
 #include <cmath>
@@ -1387,8 +1390,8 @@ TEST_F(PaintLayersDescription, add_empty_fill_layer_starts_with_the_chosen_chann
   PaintLayerAddParams params;
   params.kind = PaintLayerAddKind::Fill;
   params.empty = true;
-  params.channels = (uint16_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
-                    (uint16_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  params.channels = (uint32_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
+                    (uint32_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS);
   MaterialPaintLayer *fill = BKE_paint_layers_add_with_policy(*ma, params);
   ASSERT_NE(fill, nullptr);
   EXPECT_EQ(fill->channels_num, 2);
@@ -1401,12 +1404,12 @@ TEST_F(PaintLayersDescription, add_empty_fill_layer_skips_a_channel_outside_the_
 {
   Material *ma = BKE_material_add(bmain, "EmptyFillOutsideSetMat");
   ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
-      *ma, uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC)));
+      *ma, uint32_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC)));
 
   PaintLayerAddParams params;
   params.kind = PaintLayerAddKind::Fill;
   params.empty = true;
-  params.channels = uint16_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS;
+  params.channels = uint32_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS;
   MaterialPaintLayer *fill = BKE_paint_layers_add_with_policy(*ma, params);
   ASSERT_NE(fill, nullptr);
   /* The channel is outside the material's set, so the row gets no inert record for it. */
@@ -1448,18 +1451,61 @@ TEST_F(PaintLayersDescription, set_blend_writes_and_refuses_the_internal_normal_
   EXPECT_EQ(layer->blend, MA_PAINT_LAYER_BLEND_MULTIPLY);
 }
 
+TEST_F(PaintLayersDescription, blend_to_ramp_covers_every_description_blend)
+{
+  /* Every description blend must translate to a code an engine reads: a Mix node mode, or one of
+   * the extended paint modes past its range. The code-level and description-level "is extended"
+   * tests must agree, and nothing may land in the gap between the two ranges, which is the normal
+   * combine's. */
+  for (int blend = MA_PAINT_LAYER_BLEND_MIX; blend <= MA_PAINT_LAYER_BLEND_DARKER_COLOR; blend++) {
+    const eMaterialPaintLayerBlend mode = eMaterialPaintLayerBlend(blend);
+    const int ramp = BKE_paint_layers_blend_to_ramp(mode);
+    const bool extended = BKE_paint_layers_blend_is_extended(mode);
+    EXPECT_EQ(paint_blend_code_is_extended(ramp), extended) << "blend " << blend;
+    if (extended) {
+      EXPECT_GE(ramp, MA_PAINT_BLEND_HARD_LIGHT) << "blend " << blend;
+      EXPECT_LE(ramp, MA_PAINT_BLEND_DARKER_COLOR) << "blend " << blend;
+    }
+    else {
+      EXPECT_GE(ramp, MA_RAMP_BLEND) << "blend " << blend;
+      EXPECT_LE(ramp, MA_RAMP_EXCLUSION) << "blend " << blend;
+    }
+  }
+
+  /* The shared ".PBR Blend" group's Mode input is what selects one of those codes at draw time: its
+   * bounds must reach both ends of the two ranges, so no description blend is unreadable. */
+  bNodeTree *group = BKE_paint_material_blend_group_ensure(*bmain);
+  ASSERT_NE(group, nullptr);
+  const bNodeTreeInterfaceSocket *mode_socket = nullptr;
+  for (const bNodeTreeInterfaceItem *item : group->tree_interface.root_panel.items()) {
+    if (item->item_type != NODE_INTERFACE_SOCKET) {
+      continue;
+    }
+    const bNodeTreeInterfaceSocket *socket = reinterpret_cast<const bNodeTreeInterfaceSocket *>(
+        item);
+    if (STREQ(socket->name, "Mode")) {
+      mode_socket = socket;
+      break;
+    }
+  }
+  ASSERT_NE(mode_socket, nullptr);
+  const auto &mode_data = *static_cast<const bNodeSocketValueInt *>(mode_socket->socket_data);
+  EXPECT_EQ(mode_data.min, MA_RAMP_BLEND);
+  EXPECT_EQ(mode_data.max, MA_PAINT_BLEND_DARKER_COLOR);
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Global channel set
  * \{ */
 
 /** The build default: Base Color, Metallic, Roughness, Normal and AO. */
-static uint16_t channel_set_default()
+static uint32_t channel_set_default()
 {
-  return (uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
-         (uint16_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
-         (uint16_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
-         (uint16_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL) |
-         (uint16_t(1) << PAINT_MATERIAL_CHANNEL_AO);
+  return (uint32_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
+         (uint32_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
+         (uint32_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
+         (uint32_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL) |
+         (uint32_t(1) << PAINT_MATERIAL_CHANNEL_AO);
 }
 
 TEST_F(PaintLayersDescription, add_materializes_default_channel_set)
@@ -1492,7 +1538,7 @@ TEST_F(PaintLayersDescription, materialize_freezes_derived_set_and_keeps_records
   EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_SPECULAR));
 
   const int channels_before = layer->channels_num;
-  const uint16_t expected = channel_set_default() | (uint16_t(1) << PAINT_MATERIAL_CHANNEL_SPECULAR);
+  const uint32_t expected = channel_set_default() | (uint32_t(1) << PAINT_MATERIAL_CHANNEL_SPECULAR);
 
   BKE_paint_layers_channels_materialize(*ma);
   EXPECT_EQ(ma->paint_layers_channels, expected);
@@ -1545,7 +1591,7 @@ TEST_F(PaintLayersDescription, material_channel_set_keeps_at_least_one_channel)
 {
   Material *ma = BKE_material_add(bmain, "ChannelSetNeverEmpty");
   ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
-      *ma, uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_BASE_COLOR)));
+      *ma, uint32_t(1) << int(PAINT_MATERIAL_CHANNEL_BASE_COLOR)));
 
   /* The last channel of the set cannot be removed. */
   EXPECT_FALSE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
@@ -1562,7 +1608,7 @@ TEST_F(PaintLayersDescription, channel_add_does_not_widen_the_set)
   MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
   ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
-      *ma, uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)));
+      *ma, uint32_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)));
 
   /* A record outside the set is legal: it stays on the row and becomes visible again when the
    * channel is put back into the set. It must not silently widen the set itself. */
@@ -1577,7 +1623,7 @@ TEST_F(PaintLayersDescription, filter_starts_in_the_first_channel_of_the_set)
   MaterialPaintLayer *bottom = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(bottom, nullptr);
   ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
-      *ma, uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)));
+      *ma, uint32_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)));
 
   /* An adjustment used to start in Base Color, which would leave it inert in a material whose set
    * does not contain Base Color. */
@@ -1617,7 +1663,7 @@ TEST_F(PaintLayersDescription, filter_falls_back_when_the_owners_only_channel_is
   /* The owner's one live channel no longer takes part, so it has no channel to give the filter:
    * the first channel of the set answers instead. */
   ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
-      *ma, uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC)));
+      *ma, uint32_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC)));
 
   MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
       *ma, fill, MA_PAINT_LAYER_FILTER_INVERT);
@@ -1638,9 +1684,9 @@ TEST_F(PaintLayersDescription, filter_with_two_live_owner_channels_uses_the_firs
    * first channel is neither of the owner's. */
   ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
       *ma,
-      (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC)) |
-          (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)) |
-          (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_SPECULAR))));
+      (uint32_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC)) |
+          (uint32_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)) |
+          (uint32_t(1) << int(PAINT_MATERIAL_CHANNEL_SPECULAR))));
 
   MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
       *ma, fill, MA_PAINT_LAYER_FILTER_INVERT);
@@ -2313,7 +2359,7 @@ TEST_F(PaintLayersDescription, issues_report_a_fill_without_base_color_in_the_se
 
   /* Base Color outside the set: both Fill shapes have nothing to lay their colour through. */
   ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
-      ma, uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)));
+      ma, uint32_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)));
   Vector<PaintLayersIssue> issues;
   BKE_paint_layers_issues_get(ma, issues);
   ASSERT_EQ(issues.size(), 2);

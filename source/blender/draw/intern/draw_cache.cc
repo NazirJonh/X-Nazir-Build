@@ -272,8 +272,17 @@ const char *DRW_material_paint_vertex_input_alias(const StringRef attribute_name
     case PAINT_MATERIAL_CHANNEL_ALPHA:
     case PAINT_MATERIAL_CHANNEL_AO:
     case PAINT_MATERIAL_CHANNEL_EMISSION:
+    case PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH:
+    case PAINT_MATERIAL_CHANNEL_TRANSMISSION:
+    case PAINT_MATERIAL_CHANNEL_SUBSURFACE:
+    case PAINT_MATERIAL_CHANNEL_COAT:
+    case PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS:
+    case PAINT_MATERIAL_CHANNEL_SHEEN:
+    case PAINT_MATERIAL_CHANNEL_SPECULAR_TINT:
+    case PAINT_MATERIAL_CHANNEL_ANISOTROPIC:
       /* Base Color travels through the regular color attribute path, Normal is map-only, and
-       * Custom/Height/Alpha/AO/Emission have no dedicated GPU vertex-attribute fast path yet. */
+       * Custom/Height/Alpha/AO/Emission have no dedicated GPU vertex-attribute fast path yet. The
+       * channels after Emission are map-only too, so the vertex canvas never asks for a name. */
       return nullptr;
   }
   return nullptr;

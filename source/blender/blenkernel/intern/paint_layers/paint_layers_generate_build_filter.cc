@@ -761,8 +761,8 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
        * and E — and the MULTIPLY_ADD carries the linear part, the MAXIMUM the clamp at zero, and
        * one scalar POWER per component the exponent from its own triple. */
       Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
-      if (params == nullptr || params->size() != 3 || (*params)[0] == nullptr ||
-          (*params)[1] == nullptr || (*params)[2] == nullptr)
+      if (params == nullptr || params->size() != PAINT_LAYER_COLOR_BALANCE_TRIPLE_NUM ||
+          (*params)[0] == nullptr || (*params)[1] == nullptr || (*params)[2] == nullptr)
       {
         return false;
       }
@@ -841,6 +841,10 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
       /* Map-coverage operators only exist in a mask, where #map_coverage_match_add builds them. */
+      break;
+    case MA_PAINT_LAYER_FILTER_BLUR:
+      /* A neighborhood effect is left out of the live graph (#correction_lay): it never reaches
+       * this builder, and its result has no node chain to name. */
       break;
   }
   return false;

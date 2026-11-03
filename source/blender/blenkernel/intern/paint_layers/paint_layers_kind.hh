@@ -27,6 +27,7 @@
 #include "DNA_scene_types.h"
 
 #include "BKE_lib_query.hh"
+#include "BKE_paint_layers.hh"
 
 namespace blender {
 
@@ -184,6 +185,14 @@ enum PaintLayerKindFlag : uint8_t {
    * to write into; its values are its kind's payload and its channel records' endpoints.
    */
   PAINT_LAYER_KIND_GENERATES = 1 << 6,
+  /**
+   * A neighborhood effect (a Blur): its result reads a neighbourhood of the map, which the live
+   * graph cannot express. It exists only as a correction of a row's colour; the effect cache
+   * computes it for the CPU composite and the bake, and a row that carries one is baked for the
+   * live graph, whatever its bake mode. The kernel reads no ID, so the flag changes no dependency
+   * walk.
+   */
+  PAINT_LAYER_KIND_NEEDS_BAKE = 1 << 7,
 };
 
 struct PaintLayerKindInfo {
@@ -295,6 +304,22 @@ enum PaintLayerColorBalanceParam : int {
   PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM = 12,
 };
 
+/**
+ * The three folded triples the Color Balance filter reads (A: slope/gain, B: offset/lift,
+ * E: power/gamma).
+ */
+struct PaintLayerColorBalanceTriple {
+  const char *suffix;
+  int position;
+};
+inline constexpr int PAINT_LAYER_COLOR_BALANCE_TRIPLE_NUM = 3;
+inline constexpr PaintLayerColorBalanceTriple
+    PAINT_LAYER_COLOR_BALANCE_TRIPLES[PAINT_LAYER_COLOR_BALANCE_TRIPLE_NUM] = {
+        {"Balance A", PAINT_LAYER_COLOR_BALANCE_A},
+        {"Balance B", PAINT_LAYER_COLOR_BALANCE_B},
+        {"Balance E", PAINT_LAYER_COLOR_BALANCE_E},
+};
+
 /** The positions of a map-coverage operator's parameters in its schema. */
 enum PaintLayerCoverageParam : int {
   /** How far a sample may differ from a stored colour and still match (max-channel). */
@@ -302,6 +327,19 @@ enum PaintLayerCoverageParam : int {
   /** The width of the falloff past the tolerance; zero reads as a hard edge. */
   PAINT_LAYER_COVERAGE_SOFTNESS = 1,
   PAINT_LAYER_COVERAGE_PARAM_NUM = 2,
+};
+
+/** The shape of the Blur filter's kernel, the value of its #PAINT_LAYER_BLUR_SHAPE parameter. */
+enum PaintLayerBlurShape : int {
+  PAINT_LAYER_BLUR_BOX = 0,
+  PAINT_LAYER_BLUR_GAUSSIAN = 1,
+};
+
+/** The positions of the Blur filter's parameters in its schema. */
+enum PaintLayerBlurParam : int {
+  PAINT_LAYER_BLUR_SHAPE = 0,
+  PAINT_LAYER_BLUR_RADIUS = 1,
+  PAINT_LAYER_BLUR_PARAM_NUM = 2,
 };
 
 /**
@@ -535,14 +573,16 @@ uint64_t paint_layer_curves_hash(const struct CurveMapping &curve_mapping);
 bool paint_layer_kind_has_color_balance_param(const MaterialPaintLayer &row);
 
 /**
- * The row's color balance payload, allocated with the neutral values when it has none. Only a kind
- * with a Color Balance parameter gets one; returns null for every other kind.
+ * The row's color balance payload, or the neutral one when the row has none.
+ * The neutral payload is owned by this function, so callers never manufacture their own.
  */
-struct MaterialPaintLayerColorBalance *BKE_paint_layers_color_balance_ensure(MaterialPaintLayer &row);
-
-/** The row's balance, or null when it has no color balance payload. */
-const struct MaterialPaintLayerColorBalance *BKE_paint_layers_color_balance_get(
+const MaterialPaintLayerColorBalance &paint_layer_color_balance_or_neutral(
     const MaterialPaintLayer &row);
+
+/**
+ * Copy \a src's color balance into \a dst, allocating a duplicate when \a src owns one.
+ */
+void paint_layer_color_balance_copy(const MaterialPaintLayer &src, MaterialPaintLayer &dst);
 
 /**
  * Fold \a balance into the 12 numbers both the CPU composite and the generated graph read: the
@@ -561,14 +601,6 @@ void paint_layer_color_balance_apply(const MaterialPaintLayerColorBalance &balan
 
 /** A hash of the balance's method and every stored value, for the bake cache. */
 uint64_t paint_layer_color_balance_hash(const MaterialPaintLayerColorBalance &balance);
-
-/**
- * The row that owns \a data as its color balance marked value-edited: the bake flags and the
- * composite cache follow the stack's hash, and the generated tree keeps its shape — the balance
- * reaches it as values of group inputs, so no group is rebuilt. \return true when \a data is a
- * row's balance, whether or not any tag landed.
- */
-bool BKE_paint_layers_color_balance_edited(Material &ma, const void *data);
 
 /**
  * The position of the parameter \a name in \a row's kind's schema, or -1 when the kind has no

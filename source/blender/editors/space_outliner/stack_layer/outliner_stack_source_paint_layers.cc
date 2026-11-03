@@ -427,8 +427,10 @@ static PaintKindLook paint_filter_look(const int16_t filter)
       /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
       return {ICON_RNDCURVE, 0};
     case MA_PAINT_LAYER_FILTER_COLOR_BALANCE:
-      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
+      /* No glyph of its own yet: distinguishes it from the generic filter arrow. */
       return {ICON_COLOR, 0};
+    case MA_PAINT_LAYER_FILTER_BLUR:
+      return {ICON_MOD_SMOOTH, 0};
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
       return {ICON_COLOR, paint_glyph::COLORIZE};
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
@@ -545,6 +547,19 @@ static const PaintFilterAddKind paint_filter_add_kinds[] = {
      N_("Color Balance"),
      "Balance the active layer's colours through lift, gamma and gain (or slope, offset and power)",
      MA_PAINT_LAYER_FILTER_COLOR_BALANCE},
+};
+
+/**
+ * The neighborhood filters the Add Effect menu offers: they read a neighbourhood of the row's map,
+ * which the live graph cannot express, so they exist only as corrections of a row's colour -- the
+ * effect cache computes them and the row is baked for the live graph. No adjustment or mask form
+ * is offered, because neither has a map of the row's to read.
+ */
+static const PaintFilterAddKind paint_effect_add_kinds[] = {
+    {"EFFECT_BLUR",
+     N_("Blur"),
+     "Blur the active layer's colours with a box or gaussian kernel",
+     MA_PAINT_LAYER_FILTER_BLUR},
 };
 
 /**
@@ -1487,6 +1502,13 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
           PaintLayerAddKind::Filter,
           filter.filter,
           PaintLayerAddKind::MaskFilter);
+    }
+    /* The neighborhood effects follow: corrections of a row's colour only, so no adjustment or
+     * mask form of them is offered. */
+    for (const PaintFilterAddKind &filter : paint_effect_add_kinds) {
+      add(effect({filter.identifier, filter.name, filter.description}),
+          PaintLayerAddKind::Filter,
+          filter.filter);
     }
     /* Then the same filters as rows of the stack: an adjustment changes the whole stack below it
      * instead of one layer's colour. */

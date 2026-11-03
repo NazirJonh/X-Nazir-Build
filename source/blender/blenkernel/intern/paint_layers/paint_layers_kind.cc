@@ -9,6 +9,7 @@
 #include <cstring>
 #include <iterator>
 
+#include "BLI_hash.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
 #include <algorithm>
@@ -35,6 +36,8 @@
 #include "paint_layers_kind.hh"
 
 namespace blender {
+
+static_assert(PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM <= PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM);
 
 static const PaintLayerKindParam levels_params[] = {
     {"in_black", "Input Black", 0.0f, 0.0f, 1.0f},
@@ -118,6 +121,29 @@ static const PaintLayerKindParam clamp_params[] = {
 };
 static_assert(std::size(clamp_params) == PAINT_LAYER_CLAMP_PARAM_NUM);
 
+static const PaintLayerKindEnumItem blur_shape_items[] = {
+    {PAINT_LAYER_BLUR_BOX, "BOX", "Box"},
+    {PAINT_LAYER_BLUR_GAUSSIAN, "GAUSSIAN", "Gaussian"},
+};
+static_assert(int(std::size(blur_shape_items)) - 1 == PAINT_LAYER_BLUR_GAUSSIAN);
+
+static const PaintLayerKindParam blur_params[] = {
+    /* The kernel is chosen when the effect is computed, so an edit of this is a shape edit and
+     * the caches rebuild; the radius stays a value next to it. */
+    {"shape",
+     "Shape",
+     float(PAINT_LAYER_BLUR_GAUSSIAN),
+     0.0f,
+     float(PAINT_LAYER_BLUR_GAUSSIAN),
+     PaintLayerKindParamType::Enum,
+     blur_shape_items,
+     int(std::size(blur_shape_items))},
+    /* Whole texels: the kernel's half reach. One box pass carries it; a gaussian spends it over
+     * three. */
+    {"radius", "Radius", 4.0f, 1.0f, 64.0f, PaintLayerKindParamType::Int},
+};
+static_assert(std::size(blur_params) == PAINT_LAYER_BLUR_PARAM_NUM);
+
 /* The curves live in #MaterialPaintLayer::curves, like the ramp's band in its payload. */
 static const PaintLayerKindParam curves_params[] = {
     {"curves", "Curves", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Curves},
@@ -178,6 +204,10 @@ static constexpr uint8_t all_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LA
 static constexpr uint8_t filter_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER) |
                                         paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
                                         paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM);
+
+/* A neighborhood effect only corrects a row's colour: the map it reads is the row's own, and an
+ * adjustment or a mask item has no map of the row's for it to read. */
+static constexpr uint8_t effect_only_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT);
 
 /* A map-coverage operator only exists as an item of a row's mask; it is never a row or a content
  * correction of its own. */
@@ -325,6 +355,17 @@ static const PaintLayerKindInfo kinds[] = {
      color_balance_params,
      int(std::size(color_balance_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    /* A neighborhood effect reads a neighbourhood of the row's map, which the live graph cannot
+     * express: it exists only as a correction of a row's colour, the effect cache computes it, and
+     * a row that carries one is baked for the live graph. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_BLUR,
+     "Blur",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     blur_params,
+     int(std::size(blur_params)),
+     uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
     /* A map-coverage operator: the map of its Base Color record is an external ID Map, so the map
      * is reference-only and a stroke must not turn it into a paint target. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -347,9 +388,10 @@ static const PaintLayerKindInfo kinds[] = {
      PAINT_LAYER_KIND_MAP_COVERAGE,
      true},
     /* TODO: Gradient Map filter, needs a ColorBand parameter. */
-    /* TODO: Blur filter, needs the row bake (Phase 3). */
-    /* TODO: Sharpen filter, needs the row bake (Phase 3). */
-    /* TODO: Edge Detect filter, needs the row bake (Phase 3). */
+    /* TODO: Sharpen filter, a neighborhood effect like Blur. */
+    /* TODO: Edge Detect filter, a neighborhood effect like Blur. */
+    /* TODO: Emboss filter, a neighborhood effect like Blur. */
+    /* TODO: Erode/Dilate filter, a neighborhood effect like Blur. */
     /* An Anchor Point is an inert marker inside a row: it publishes the content after the
      * corrections above it (or the mask after the mask items above it) and lays nothing itself. It
      * has no parameters and no channel records. */
@@ -1139,6 +1181,16 @@ bool paint_layer_kind_has_color_balance_param(const MaterialPaintLayer &row)
   return false;
 }
 
+bool BKE_paint_layers_kind_needs_bake(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_NEEDS_BAKE);
+}
+
+bool BKE_paint_layers_color_balance_supported(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_color_balance_param(row);
+}
+
 MaterialPaintLayerColorBalance *BKE_paint_layers_color_balance_ensure(MaterialPaintLayer &row)
 {
   if (!paint_layer_kind_has_color_balance_param(row)) {
@@ -1152,10 +1204,19 @@ MaterialPaintLayerColorBalance *BKE_paint_layers_color_balance_ensure(MaterialPa
   return row.color_balance;
 }
 
-const MaterialPaintLayerColorBalance *BKE_paint_layers_color_balance_get(
+const MaterialPaintLayerColorBalance &paint_layer_color_balance_or_neutral(
     const MaterialPaintLayer &row)
 {
-  return row.color_balance;
+  static const MaterialPaintLayerColorBalance neutral = {};
+  return (row.color_balance != nullptr) ? *row.color_balance : neutral;
+}
+
+void paint_layer_color_balance_copy(const MaterialPaintLayer &src, MaterialPaintLayer &dst)
+{
+  dst.color_balance = (src.color_balance != nullptr) ?
+                          static_cast<MaterialPaintLayerColorBalance *>(
+                              MEM_dupalloc(src.color_balance)) :
+                          nullptr;
 }
 
 void paint_layer_color_balance_fold(const MaterialPaintLayerColorBalance &balance,
@@ -1201,17 +1262,10 @@ void paint_layer_color_balance_apply(const MaterialPaintLayerColorBalance &balan
 
 uint64_t paint_layer_color_balance_hash(const MaterialPaintLayerColorBalance &balance)
 {
-  uint64_t hash = 1469598103934665603ull;
-  const auto mix_u32 = [&](const uint32_t value) {
-    hash ^= value;
-    hash *= 1099511628211ull;
-  };
+  uint64_t hash = get_default_hash(uint32_t(balance.method));
   const auto mix_float = [&](const float value) {
-    uint32_t bits;
-    memcpy(&bits, &value, sizeof(bits));
-    mix_u32(bits);
+    hash = get_default_hash(hash, value);
   };
-  mix_u32(uint32_t(balance.method));
   for (const float value : balance.lift) {
     mix_float(value);
   }

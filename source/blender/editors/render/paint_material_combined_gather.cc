@@ -71,6 +71,10 @@
 
 namespace blender::ed::material_combined {
 
+/* filter_params_0/1/2 pack 3 float4s (12 floats) for shader uniforms; wide enough for all
+ * filter payloads including a Color Balance's 3 folded triples. */
+static_assert(PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM >= 3 * 4);
+
 /* -------------------------------------------------------------------- */
 /** \name Interactive Gradient Drag
  * \{ */

@@ -256,10 +256,7 @@ static MaterialPaintLayer *material_paint_layer_copy(Main *bmain,
      * when they were built. */
     BKE_curvemapping_copy_data(&dst->curves->curve_mapping, &src.curves->curve_mapping);
   }
-  dst->color_balance = (src.color_balance != nullptr) ?
-                           static_cast<MaterialPaintLayerColorBalance *>(MEM_dupalloc(
-                               src.color_balance)) :
-                           nullptr;
+  paint_layer_color_balance_copy(src, *dst);
   /* Like the channel maps, the users of ID parameters are added by the generic copy pass. */
   if (src.system_properties != nullptr) {
     dst->system_properties = IDP_CopyProperty_ex(src.system_properties,
@@ -430,6 +427,9 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
     BKE_curvemapping_init(&layer.curves->curve_mapping);
   }
   BLO_read_struct(reader, MaterialPaintLayerColorBalance, &layer.color_balance);
+  if (layer.color_balance == nullptr && paint_layer_kind_has_color_balance_param(layer)) {
+    BKE_paint_layers_color_balance_ensure(layer);
+  }
   if (layer.bake != nullptr && !BLO_read_data_is_undo(reader)) {
     /* The bake maps are generated images whose pixels the file does not keep, and the pixel-edit
      * subscription that vouches for them is runtime only. A loaded bake therefore proves nothing:
@@ -564,6 +564,7 @@ static void material_free_data(ID *id)
   if ((material->id.tag & ID_TAG_COPIED_ON_EVAL) == 0) {
     BKE_paint_material_composite_cache_free_material(*material);
     BKE_paint_layers_slice_cache_free_material(*material);
+    BKE_paint_layers_effect_cache_free_material(*material);
     /* Legitimate from here because the Combined cache lives in this module too. */
     BKE_paint_material_combined_cache_free_material(*material);
     /* The shared canvas-wide selection owner is keyed on the session UID like the caches above,

@@ -124,6 +124,17 @@ void BKE_paint_layers_slice_cache_free_all();
 void BKE_paint_layers_slice_cache_free_material(const Material &ma);
 
 /**
+ * Drop every cached neighborhood-effect buffer (a Blur's result). The cache owns float canvases of
+ * its own (256 MiB per effect at 4K), so it has to be emptied before the leak check at exit, and
+ * with the rest of the session when a file is loaded: its entries name materials of the file going
+ * away.
+ */
+void BKE_paint_layers_effect_cache_free_all();
+
+/** Drop the cached effect buffers of \a ma, keyed by its session UID like the slices are. */
+void BKE_paint_layers_effect_cache_free_material(const Material &ma);
+
+/**
  * Composite \a channel of \a ma into \a r_dst, which must be byte RGBA of the stack's dimensions.
  *
  * The result is encoded in \a r_dst's own colorspace; a buffer that names none gets the channel's

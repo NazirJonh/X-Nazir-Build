@@ -2415,7 +2415,20 @@ bool BKE_paint_layers_bake_row_is_deferred(const Material &ma, const MaterialPai
 {
   /* The active row and its ancestors stay live: the user is editing inside them, and the bake
    * catches up once the active marker leaves the subtree. */
-  return BKE_paint_layers_subtree_contains(layer, ma.active_layer_marker);
+  if (!BKE_paint_layers_subtree_contains(layer, ma.active_layer_marker)) {
+    return false;
+  }
+  /* A neighborhood effect (a Blur) has no live form: while it is the active correction the row
+   * would show nothing of it until the user leaves, so its row is baked under the debounce like an
+   * edit of any other value. Only the row that carries the effect: an ancestor folder stays live. */
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (BLI_uuid_equal(effect.marker, ma.active_layer_marker) &&
+        paint_layer_effect_is_neighborhood(effect))
+    {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** Depth-first search for \a target; true when found with it or an ancestor not enabled. */
@@ -2462,35 +2475,58 @@ static bool bake_row_is_hidden(const Material &ma, const MaterialPaintLayer &lay
 }
 
 /**
- * Release the maps \a layer's bake holds. A map whose last user was the bake is deleted; one still
- * named by the generated tree keeps that other user and is simply detached, because freeing it
- * there would leave the tree's node with a dangling pointer. The caller tags
- * #MA_PAINT_LAYERS_REGEN, so the rebuild that follows drops the node before anything is evaluated.
+ * Release one bake map. A map whose last user was the bake is deleted; one still named by the
+ * generated tree keeps that other user and is simply detached, because freeing it there would leave
+ * the tree's node with a dangling pointer. The caller tags #MA_PAINT_LAYERS_REGEN, so the rebuild
+ * that follows drops the node before anything is evaluated.
  */
+static void bake_map_release(Main &bmain, Image *&slot)
+{
+  Image *image = slot;
+  if (image == nullptr) {
+    return;
+  }
+  slot = nullptr;
+  /* A synchronous service map is handed to the bake with the creation reference and no extra
+   * user (unlike #BKE_paint_layers_bake_set_map); only decrement when the bake holds one. */
+  if (image->id.us > 0) {
+    id_us_min(&image->id);
+  }
+  if (image->id.us == 0 && ID_FAKE_USERS(&image->id) == 0) {
+    BKE_id_free(&bmain, &image->id);
+  }
+}
+
+/**
+ * Release the maps of \a layer's bake in the channels a render just left out. A channel the row no
+ * longer takes part in (switched off, or a record the row no longer lays) is not rendered again, so
+ * its map from an earlier bake would otherwise stand in for the row and show what the row stopped
+ * laying. The caller tags #MA_PAINT_LAYERS_REGEN, as for #bake_maps_release.
+ */
+static void bake_stale_channel_maps_release(Main &bmain,
+                                            MaterialPaintLayer &layer,
+                                            const Span<int> written_channels)
+{
+  if (layer.bake == nullptr) {
+    return;
+  }
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (!written_channels.contains(channel)) {
+      bake_map_release(bmain, layer.bake->images[channel]);
+    }
+  }
+}
+
+/** Release the maps \a layer's bake holds, as #bake_map_release does for each. */
 static void bake_maps_release(Main &bmain, Material &ma, MaterialPaintLayer &layer)
 {
   if (layer.bake == nullptr) {
     return;
   }
-  const auto release_map = [&](Image *&slot) {
-    Image *image = slot;
-    if (image == nullptr) {
-      return;
-    }
-    slot = nullptr;
-    /* A synchronous service map is handed to the bake with the creation reference and no extra
-     * user (unlike #BKE_paint_layers_bake_set_map); only decrement when the bake holds one. */
-    if (image->id.us > 0) {
-      id_us_min(&image->id);
-    }
-    if (image->id.us == 0 && ID_FAKE_USERS(&image->id) == 0) {
-      BKE_id_free(&bmain, &image->id);
-    }
-  };
   for (Image *&image : layer.bake->images) {
-    release_map(image);
+    bake_map_release(bmain, image);
   }
-  release_map(layer.bake->coverage);
+  bake_map_release(bmain, layer.bake->coverage);
   /* The per-object tile records describe those maps, and the surface they were rendered from goes
    * with them: a later bake starts from its own. */
   paint_layers_bake_tiles_clear(*layer.bake);
@@ -2892,22 +2928,29 @@ bool bake_row_is_due(const Material &ma,
   }
   const bool cheap_live = mode == MA_PAINT_LAYER_BAKE_AUTO &&
                           (paint_layer_kind_reads_anchor_point(layer) || gradient_texels);
-  if (!folder && mode == MA_PAINT_LAYER_BAKE_AUTO && !cheap_live)
+  /* A row that carries a neighborhood effect (a Blur) is baked whatever its AUTO gates say: the
+   * live graph cannot express the effect, so the bake is what the graph samples instead. The gates
+   * below keep every other rule -- the blockers bind through #bake_row_is_candidate, NEVER and the
+   * deferred and hidden rows stand. */
+  const bool needs_bake = paint_layer_row_needs_bake(layer);
+  if (!folder && mode == MA_PAINT_LAYER_BAKE_AUTO && !cheap_live && !needs_bake)
   {
     /* AUTO caches subgraphs: a folder is the heavy thing, a single row is already one map per
      * channel and a cache of it would only double its memory. Always is the way to ask for a row
      * to be baked; a cache carried from an earlier Always keeps standing in while it is valid and
-     * is released once it is not. */
+     * is released once it is not. A neighborhood effect asks the same without the mode: the live
+     * graph cannot express it. */
     r_release = (layer.bake != nullptr && !BKE_paint_layers_bake_is_valid(ma, layer)) ?
                     BakeRowRelease::FreeStructure :
                     BakeRowRelease::Keep;
     return false;
   }
   if (folder && mode == MA_PAINT_LAYER_BAKE_AUTO &&
-      !BKE_paint_layers_folder_auto_bake_allowed(ma, layer))
+      !BKE_paint_layers_folder_auto_bake_allowed(ma, layer) && !needs_bake)
   {
     /* A folder in the stack root stays live for responsiveness; a bake it carried from before the
-     * rule is released. A manual ALWAYS is the user's and is left alone. */
+     * rule is released. A manual ALWAYS is the user's and is left alone. A neighborhood effect on
+     * the folder asks for the bake the same way it does on a row. */
     r_release = (layer.bake != nullptr) ? BakeRowRelease::FreeStructure : BakeRowRelease::Keep;
     return false;
   }
@@ -2917,13 +2960,14 @@ bool bake_row_is_due(const Material &ma,
   if (BKE_paint_layers_bake_row_is_deferred(ma, layer) || bake_row_is_hidden(ma, layer)) {
     return false;
   }
-  if (mode == MA_PAINT_LAYER_BAKE_AUTO && !cheap_live &&
+  if (mode == MA_PAINT_LAYER_BAKE_AUTO && !cheap_live && !needs_bake &&
       bake_subtree_weight(ma, layer) <= PAINT_LAYERS_AUTO_BAKE_NODES)
   {
     /* A light subtree is cheaper live; a bake carried over from when it was heavy is released. A
      * reader is exempt: its bake is the slice cache the depth rules asked for, not a cache of a
      * subtree, so a light row deep in a chain still gets one. Neither has a map the live path could
-     * read instead, which is the whole reason the exemption is safe. */
+     * read instead, which is the whole reason the exemption is safe. A neighborhood effect is
+     * exempt the same way: its bake is what the live graph samples. */
     r_release = (layer.bake != nullptr) ? BakeRowRelease::FreeStructure : BakeRowRelease::Keep;
     return false;
   }
@@ -3381,6 +3425,7 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
       if (needs_surface) {
         bake->object_count = object_num;
       }
+      bake_stale_channel_maps_release(bmain, layer, written_channels);
       BKE_paint_layers_bake_finalize(ma, layer);
       if (object_num > 0) {
         bake_object_identity_record(
@@ -4325,6 +4370,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
     BKE_paint_layers_bake_hash(ma, layer, row.hash);
     job->rows.append(std::move(row));
   }
+
   if (job->rows.is_empty()) {
     MEM_delete(job);
     return nullptr;
@@ -4560,6 +4606,7 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     const int object_num = tiled_row ? int(row.objects.size()) : 0;
     bool row_written = false;
     bool all_objects = true;
+    Vector<int> written_channels;
     for (int object_index = 0; object_index < row.objects.size(); object_index++) {
       PaintLayersBakeJob::ObjectResult &object = row.objects[object_index];
       bool object_written = false;
@@ -4588,6 +4635,9 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
             object.tile_number);
         channel.color = Vector<float>();
         channel.color_bytes = Vector<uchar>();
+        if (!written_channels.contains(channel.channel)) {
+          written_channels.append(channel.channel);
+        }
         object_written = true;
       }
       if (!object_written) {
@@ -4619,6 +4669,7 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     if (tiled_row) {
       layer->bake->object_count = int(row.objects.size());
     }
+    bake_stale_channel_maps_release(bmain, *layer, written_channels);
     layer->bake->hash[0] = row.hash[0];
     layer->bake->hash[1] = row.hash[1];
     if (tiled_row) {

@@ -250,6 +250,18 @@ void paint_layer_anchor_point_slice_cache_set_budget(size_t bytes);
 /** The byte budget currently in force; for a test guard that restores it. */
 size_t paint_layer_anchor_point_slice_cache_budget();
 
+/** Bytes the effect cache currently accounts for; for tests of the keying and the eviction. */
+size_t paint_layer_effect_cache_bytes();
+
+/** Number of entries the effect cache holds; for tests of the keying and the eviction. */
+int paint_layer_effect_cache_entry_count();
+
+/** Override the effect cache's byte budget; tests use a small one. */
+void paint_layer_effect_cache_set_budget(size_t bytes);
+
+/** The effect cache's byte budget currently in force; for a test guard that restores it. */
+size_t paint_layer_effect_cache_budget();
+
 /**
  * The maps the slice \a reader reads was rendered from, for the composite cache to subscribe to:
  * the slice hash holds no pixels, so a stroke on the source reaches the cache through these.
@@ -501,6 +513,32 @@ inline bool paint_layer_effect_filters(const Material &ma,
   return paint_layer_effect_is_filter(effect) && !paint_layer_channel_filtered(ma, channel) &&
          channel != PAINT_MATERIAL_CHANNEL_NORMAL &&
          paint_layer_channel_live(paint_layer_channel_find(effect, channel));
+}
+
+/**
+ * Whether the correction \a effect is a neighborhood effect (a Blur): its result reads a
+ * neighbourhood of the row's map, which the live graph cannot express. The effect cache computes
+ * it for the CPU composite and the bake, and a row that carries one is baked for the live graph.
+ */
+inline bool paint_layer_effect_is_neighborhood(const MaterialPaintLayer &effect)
+{
+  return paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_NEEDS_BAKE);
+}
+
+/**
+ * Whether \a row carries a neighborhood effect anywhere in its content corrections. The mask and
+ * the children come with the row's bake either way (a neighborhood kind only ever corrects a
+ * row's colour, so it cannot be a mask item), and it is the row itself that has to be baked for
+ * the live graph to stop building it as nodes.
+ */
+inline bool paint_layer_row_needs_bake(const MaterialPaintLayer &row)
+{
+  for (const MaterialPaintLayer &effect : row.effects) {
+    if (paint_layer_effect_is_neighborhood(effect)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

@@ -860,20 +860,10 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
          * method lives in the payload, not in the graph — only the folded numbers reach the
          * MULTIPLY_ADD / MAXIMUM / POWER chain. A null payload folds the neutral one, the same
          * thing the ensure would allocate. */
-        static const MaterialPaintLayerColorBalance neutral = {};
-        const MaterialPaintLayerColorBalance &source =
-            (filter.color_balance != nullptr) ? *filter.color_balance : neutral;
+        const MaterialPaintLayerColorBalance &source = paint_layer_color_balance_or_neutral(filter);
         float folded[PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM];
         paint_layer_color_balance_fold(source, folded);
-        const struct {
-          const char *suffix;
-          int position;
-        } triples[3] = {
-            {"Balance A", PAINT_LAYER_COLOR_BALANCE_A},
-            {"Balance B", PAINT_LAYER_COLOR_BALANCE_B},
-            {"Balance E", PAINT_LAYER_COLOR_BALANCE_E},
-        };
-        for (const auto &triple : triples) {
+        for (const PaintLayerColorBalanceTriple &triple : PAINT_LAYER_COLOR_BALANCE_TRIPLES) {
           char base[200];
           effect_input_label(layer_name, filter, triple.suffix, base, sizeof(base));
           bNodeTreeInterfaceSocket *balance = layer_group_value_input(
@@ -906,6 +896,13 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     filter_params_create(layer, false);
   }
   for (const MaterialPaintLayer &effect : layer.effects) {
+    /* A neighborhood effect (a Blur) is left out of the live graph (#correction_lay), so it gets
+     * no inputs: its parameters and its opacity would be sockets nothing consumes, dead weight in
+     * the interface and in the topology the hash is taken from. Its parameters reach the bake and
+     * the effect cache through the row's system properties instead. */
+    if (paint_layer_effect_is_neighborhood(effect)) {
+      continue;
+    }
     filter_params_create(effect, false);
     char effect_label[224];
     effect_input_label(layer_name, effect, nullptr, effect_label, sizeof(effect_label));

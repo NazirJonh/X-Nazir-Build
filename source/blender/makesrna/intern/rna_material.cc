@@ -3533,6 +3533,12 @@ static PointerRNA rna_MaterialPaintLayer_kind_curves_get(PointerRNA *ptr)
   return RNA_pointer_create_with_parent(*ptr, RNA_CurveMapping, &curves->curve_mapping);
 }
 
+static bool rna_MaterialPaintLayer_kind_needs_bake_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer != nullptr && BKE_paint_layers_kind_needs_bake(*layer);
+}
+
 static bool rna_MaterialPaintLayer_color_balance_supported_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -3560,35 +3566,14 @@ static void rna_MaterialPaintLayerColorBalance_update(Main * /*bmain*/,
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
 }
 
-/**
- * The pointer property's own update (the getter runs ensure and may allocate the payload): here
- * `ptr->data` is the row itself, not the payload, so no ownership search is made — the value tag
- * covers the whole stack either way.
- */
-static void rna_MaterialPaintLayer_kind_color_balance_update(Main * /*bmain*/,
-                                                             Scene * /*scene*/,
-                                                             PointerRNA *ptr)
-{
-  Material *ma = id_cast<Material *>(ptr->owner_id);
-  if (ma == nullptr || ptr->data == nullptr) {
-    return;
-  }
-  BKE_paint_layers_tag_value_edited(*ma);
-  DEG_id_tag_update(&ma->id, 0);
-  WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
-}
-
 static PointerRNA rna_MaterialPaintLayer_kind_color_balance_get(PointerRNA *ptr)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
-  if (layer == nullptr) {
+  if (layer == nullptr || layer->color_balance == nullptr) {
     return PointerRNA_NULL;
   }
-  MaterialPaintLayerColorBalance *balance = BKE_paint_layers_color_balance_ensure(*layer);
-  if (balance == nullptr) {
-    return PointerRNA_NULL;
-  }
-  return RNA_pointer_create_with_parent(*ptr, RNA_MaterialPaintLayerColorBalance, balance);
+  return RNA_pointer_create_with_parent(
+      *ptr, RNA_MaterialPaintLayerColorBalance, layer->color_balance);
 }
 
 static int rna_MaterialPaintLayer_output_map_get(PointerRNA *ptr)
@@ -5045,6 +5030,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      0,
      "Color Balance",
      "Balance the colours of what is below through lift, gamma and gain (or slope, offset and power)"},
+    {MA_PAINT_LAYER_FILTER_BLUR,
+     "BLUR",
+     0,
+     "Blur",
+     "Blur the colours of what is below with a box or gaussian kernel"},
     {MA_PAINT_LAYER_FILTER_COLOR_ID,
      "COLOR_ID",
      0,
@@ -5513,66 +5503,51 @@ static void rna_def_material_paint_layer_color_balance(BlenderRNA *brna)
 {
   StructRNA *srna = RNA_def_struct(brna, "MaterialPaintLayerColorBalance", nullptr);
   RNA_def_struct_sdna(srna, "MaterialPaintLayerColorBalance");
-  RNA_def_struct_ui_text(srna, "Color Balance",
+  RNA_def_struct_ui_text(srna,
+                         "Color Balance",
                          "The balance a Color Balance filter reads: the two methods fold into the "
                          "same per-channel form, so switching one keeps the other's values");
 
   PropertyRNA *prop = RNA_def_property(srna, "method", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_color_balance_method_items);
   RNA_def_property_ui_text(prop, "Method", "Which triple the filter reads");
-  RNA_def_property_update(prop,
-                          NC_MATERIAL | ND_SHADING_DRAW,
-                          "rna_MaterialPaintLayerColorBalance_update");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING_DRAW, "rna_MaterialPaintLayerColorBalance_update");
 
   /* Linear values, shown by a colour picker: the folded form the CPU composite and the graph read
    * works on these directly, so no display transform sits between the picker and the data. */
-  prop = RNA_def_property(srna, "lift", PROP_FLOAT, PROP_COLOR);
-  RNA_def_property_array(prop, 3);
-  RNA_def_property_range(prop, -1.0f, 1.0f);
-  RNA_def_property_ui_text(prop, "Lift", "Where the black point rises to; zero is neutral");
-  RNA_def_property_update(prop,
-                          NC_MATERIAL | ND_SHADING_DRAW,
-                          "rna_MaterialPaintLayerColorBalance_update");
-
-  prop = RNA_def_property(srna, "gamma", PROP_FLOAT, PROP_COLOR);
-  RNA_def_property_array(prop, 3);
-  RNA_def_property_range(prop, 0.0f, 2.0f);
-  RNA_def_property_ui_text(prop, "Gamma", "The midtones' exponent; one is neutral");
-  RNA_def_property_update(prop,
-                          NC_MATERIAL | ND_SHADING_DRAW,
-                          "rna_MaterialPaintLayerColorBalance_update");
-
-  prop = RNA_def_property(srna, "gain", PROP_FLOAT, PROP_COLOR);
-  RNA_def_property_array(prop, 3);
-  RNA_def_property_range(prop, 0.0f, 2.0f);
-  RNA_def_property_ui_text(prop, "Gain", "The multiplier the highlights reach; one is neutral");
-  RNA_def_property_update(prop,
-                          NC_MATERIAL | ND_SHADING_DRAW,
-                          "rna_MaterialPaintLayerColorBalance_update");
-
-  prop = RNA_def_property(srna, "slope", PROP_FLOAT, PROP_COLOR);
-  RNA_def_property_array(prop, 3);
-  RNA_def_property_range(prop, 0.0f, 2.0f);
-  RNA_def_property_ui_text(prop, "Slope", "The multiplier, the ASC CDL's gain; one is neutral");
-  RNA_def_property_update(prop,
-                          NC_MATERIAL | ND_SHADING_DRAW,
-                          "rna_MaterialPaintLayerColorBalance_update");
-
-  prop = RNA_def_property(srna, "offset", PROP_FLOAT, PROP_COLOR);
-  RNA_def_property_array(prop, 3);
-  RNA_def_property_range(prop, -1.0f, 1.0f);
-  RNA_def_property_ui_text(prop, "Offset", "The additive term, the ASC CDL's lift; zero is neutral");
-  RNA_def_property_update(prop,
-                          NC_MATERIAL | ND_SHADING_DRAW,
-                          "rna_MaterialPaintLayerColorBalance_update");
-
-  prop = RNA_def_property(srna, "power", PROP_FLOAT, PROP_COLOR);
-  RNA_def_property_array(prop, 3);
-  RNA_def_property_range(prop, 0.0f, 2.0f);
-  RNA_def_property_ui_text(prop, "Power", "The exponent, the ASC CDL's gamma; one is neutral");
-  RNA_def_property_update(prop,
-                          NC_MATERIAL | ND_SHADING_DRAW,
-                          "rna_MaterialPaintLayerColorBalance_update");
+  struct ColorBalanceProp {
+    const char *identifier;
+    float soft_min;
+    float soft_max;
+    float hard_min;
+    float hard_max;
+    const char *ui_name;
+    const char *ui_description;
+  };
+  static const ColorBalanceProp props[] = {
+      {"lift", -1.0f, 1.0f, -10.0f, 10.0f, "Lift",
+       "Where the black point rises to; zero is neutral"},
+      {"gamma", 0.0f, 2.0f, 0.0f, 10.0f, "Gamma",
+       "The midtones' exponent; one is neutral"},
+      {"gain", 0.0f, 2.0f, 0.0f, 10.0f, "Gain",
+       "The multiplier the highlights reach; one is neutral"},
+      {"slope", 0.0f, 2.0f, 0.0f, 10.0f, "Slope",
+       "The multiplier, the ASC CDL's gain; one is neutral"},
+      {"offset", -1.0f, 1.0f, -10.0f, 10.0f, "Offset",
+       "The additive term, the ASC CDL's lift; zero is neutral"},
+      {"power", 0.0f, 2.0f, 0.0f, 10.0f, "Power",
+       "The exponent, the ASC CDL's gamma; one is neutral"},
+  };
+  for (const ColorBalanceProp &p : props) {
+    prop = RNA_def_property(srna, p.identifier, PROP_FLOAT, PROP_COLOR);
+    RNA_def_property_array(prop, 3);
+    RNA_def_property_range(prop, p.hard_min, p.hard_max);
+    RNA_def_property_ui_range(prop, p.soft_min, p.soft_max, 0.01, 3);
+    RNA_def_property_ui_text(prop, p.ui_name, p.ui_description);
+    RNA_def_property_update(
+        prop, NC_MATERIAL | ND_SHADING_DRAW, "rna_MaterialPaintLayerColorBalance_update");
+  }
 }
 
 static void rna_def_material_paint_layer(BlenderRNA *brna)
@@ -6212,22 +6187,25 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                           NC_MATERIAL | ND_SHADING_DRAW,
                           "rna_MaterialPaintLayer_kind_curves_update");
 
-  prop = RNA_def_property(srna, "color_balance_supported", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_color_balance_supported_get", nullptr);
+  prop = RNA_def_property(srna, "kind_needs_bake", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_kind_needs_bake_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop, "Has Color Balance", "Whether the row's kind reads a color balance");
+  RNA_def_property_ui_text(prop,
+                           "Needs Bake",
+                           "Whether the row's kind is rendered into a map instead of built live");
+
+  prop = RNA_def_property(srna, "color_balance_supported", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_MaterialPaintLayer_color_balance_supported_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Has Color Balance", "Whether the row's kind reads a color balance");
 
   prop = RNA_def_property(srna, "kind_color_balance", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "MaterialPaintLayerColorBalance");
   RNA_def_property_pointer_funcs(
       prop, "rna_MaterialPaintLayer_kind_color_balance_get", nullptr, nullptr, nullptr);
-  RNA_def_property_ui_text(prop, "Color Balance",
-                           "The balance a Color Balance filter reads");
-  /* The pointer's own update: the getter may allocate the payload, and the values it now carries
-   * reach the graph through the value sync, not through a rebuild. */
-  RNA_def_property_update(prop,
-                          NC_MATERIAL | ND_SHADING_DRAW,
-                          "rna_MaterialPaintLayer_kind_color_balance_update");
+  RNA_def_property_ui_text(prop, "Color Balance", "The balance a Color Balance filter reads");
 
   prop = RNA_def_property(srna, "output_map", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_output_map_items);

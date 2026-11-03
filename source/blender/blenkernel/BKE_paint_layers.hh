@@ -121,6 +121,12 @@ void BKE_paint_layers_curves_live_begin();
 /** Close the innermost live-drag scope #BKE_paint_layers_curves_live_begin opened. */
 void BKE_paint_layers_curves_live_end();
 
+/**
+ * Whether \a row's kind is a neighborhood effect (a Blur): the live graph cannot express it, so the
+ * row is baked for it once the user leaves the row or asks for the update.
+ */
+bool BKE_paint_layers_kind_needs_bake(const MaterialPaintLayer &row);
+
 /** Whether \a row's kind reads a color balance (the Color Balance filter). */
 bool BKE_paint_layers_color_balance_supported(const MaterialPaintLayer &row);
 

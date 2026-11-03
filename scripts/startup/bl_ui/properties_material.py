@@ -25,6 +25,7 @@ from bl_ui.properties_material_paint_layers import (
     draw_material_mask_item,
     draw_material_smart_asset_expose,
     draw_material_smart_asset_rows,
+    draw_material_update_now,
 )
 from bl_operators.material_paint_layers import (
     mesh_map_objects_for_material,
@@ -842,6 +843,8 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         if layer.source == 'FILTER':
             layout.separator()
             draw_material_kind_params(layout, layer.kind_params)
+            if layer.kind_needs_bake:
+                draw_material_update_now(layout, owner)
             if layer.ramp_supported:
                 layout.template_color_ramp(layer, "kind_ramp", expand=True)
             if layer.curves_supported:

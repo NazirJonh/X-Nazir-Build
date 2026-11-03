@@ -836,6 +836,12 @@ enum eMaterialPaintLayerFilter : int16_t {
   MA_PAINT_LAYER_FILTER_CURVES = 12,
   /** Balance the colour through a lift/gamma/gain (or slope/offset/power) triple per channel. */
   MA_PAINT_LAYER_FILTER_COLOR_BALANCE = 13,
+  /**
+   * Blur the colours below with a box or gaussian kernel. A neighborhood filter: its result reads
+   * a neighbourhood of the map, so it exists only as a correction of a row, the effect cache
+   * computes it, and the row is baked for the live graph.
+   */
+  MA_PAINT_LAYER_FILTER_BLUR = 14,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

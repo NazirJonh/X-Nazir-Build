@@ -25,6 +25,7 @@
 #include "BLI_math_base.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
+#include "BLI_task.hh"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
@@ -146,14 +147,11 @@ template<size_t N> static void composite_filter_params(const MaterialPaintLayer 
 {
   if (paint_layer_kind_has_color_balance_param(row)) {
     /* The balance is not a scalar schema: its payload folds into the 12 numbers the composite, the
-     * graph and the GPU share. A null payload reads as the neutral one, the same thing the ensure
-     * would allocate. A caller whose array is shorter would be a shape change, so the fold is
-     * compiled out there rather than written past the array. */
-    if constexpr (N >= PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM) {
-      static const MaterialPaintLayerColorBalance neutral = {};
-      paint_layer_color_balance_fold(row.color_balance != nullptr ? *row.color_balance : neutral,
-                                     r_params);
-    }
+     * graph and the GPU share. A caller whose array is shorter would truncate parameters, so
+     * compilation fails if N is too small. */
+    static_assert(N >= PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM,
+                  "filter_params array is too short for the Color Balance fold");
+    paint_layer_color_balance_fold(paint_layer_color_balance_or_neutral(row), r_params);
     return;
   }
   if (const PaintLayerKindInfo *kind = paint_layer_kind_of(row)) {
@@ -616,6 +614,15 @@ static bool anchor_slice_dimensions(const Material &ma,
                                     int &r_width,
                                     int &r_height);
 
+/** The effect cache, defined beside the slice cache it shares the machinery of. */
+static uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int channel);
+static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
+                                                            const MaterialPaintLayer &row,
+                                                            const MaterialPaintLayer &effect,
+                                                            const int channel,
+                                                            const bool describe_only,
+                                                            Vector<Image *> *r_images);
+
 /**
  * Append the content correction \a effect to \a out as the evaluator reads it in \a channel: a filter,
  * or a map, flat colour, source or slice laid by the correction's own blend and opacity. Nothing is
@@ -623,6 +630,7 @@ static bool anchor_slice_dimensions(const Material &ma,
  */
 static void composite_effect_append(
     const Material &ma,
+    const MaterialPaintLayer *owner_row,
     const MaterialPaintLayer &effect,
     const int channel,
     const float pass_through_scale,
@@ -632,6 +640,32 @@ static void composite_effect_append(
     const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface,
     PaintMaterialCompositeImageLayer &out)
 {
+  if (paint_layer_effect_is_neighborhood(effect)) {
+    /* A neighborhood effect reads the row's own content, so it needs the row it hangs on: the
+     * standalone corrections-row description has none and leaves it out. */
+    if (owner_row == nullptr || !paint_layer_effect_filters(ma, effect, channel)) {
+      return;
+    }
+    /* A neighborhood effect carries its result as a map the effect cache computed: the kind and
+     * the parameters travel like a filter's, the buffer beside them. In describe_only only the
+     * kind is known -- the buffer is not computed, and the combined preview falls back to the CPU
+     * when it sees the kind. */
+    PaintMaterialCompositeCorrection effect_correction;
+    effect_correction.filter = effect.kind_subtype;
+    composite_filter_params(effect, effect_correction.filter_params);
+    effect_correction.effect_hash = paint_layer_effect_hash(effect, channel);
+    effect_correction.effect_color = paint_layer_effect_buffer_get(
+        ma, *owner_row, effect, channel, describe_only, &effect_correction.effect_images);
+    if (!describe_only && effect_correction.effect_color == nullptr) {
+      /* The input could not be rendered: the correction is left out, as the generator leaves it
+       * out of the live graph. */
+      return;
+    }
+    effect_correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
+                                pass_through_scale;
+    out.content_corrections.append(effect_correction);
+    return;
+  }
   if (paint_layer_effect_filters(ma, effect, channel)) {
     PaintMaterialCompositeCorrection filter;
     filter.filter = effect.kind_subtype;
@@ -914,6 +948,7 @@ bool composite_image_layer_build(const Material &ma,
       break;
     }
     composite_effect_append(ma,
+                            &layer,
                             effect,
                             channel,
                             pass_through_scale,
@@ -1879,6 +1914,518 @@ static std::shared_ptr<ImBuf> anchor_slice_buffer_clone(const ImBuf &source)
   return std::shared_ptr<ImBuf>(copy, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Paint Layer Effect Cache
+ *
+ * A neighborhood effect (a Blur) cannot be built as nodes, and its result is not a pointwise
+ * function of one texel: the whole input map is read. The cache holds the result, one float buffer
+ * per (material, row, channel, parameters), with the input rendered through the same description
+ * the bake renders -- the row's content up to the effect, before its mask and opacity -- and the
+ * kernel applied over it. Freshness follows the slice cache: the entry remembers the version of
+ * every map the input was rendered from, and any edit of one recomputes the whole buffer (a
+ * neighborhood reads past an edited rectangle, so a region update would have to carry a halo; a
+ * recompute is the simple correct thing until that is wanted).
+ * \{ */
+
+/** One cached effect: the result buffer, keyed by the material, the effect, the channel and the
+ * parameters. */
+struct EffectCacheKey {
+  uint32_t material_uid = 0;
+  /**
+   * The marker of the effect itself, not of the row it hangs on: a marker is unique within the
+   * material, so two effects of one row -- two Blurs with the same parameters -- key apart, and a
+   * re-added effect (a new marker) cannot be served a dead instance's result.
+   */
+  bUUID effect_marker = {};
+  int channel = 0;
+  /** The effect kind and its parameters; the input's pixels are the sources' versions below. */
+  uint64_t hash = 0;
+};
+
+/** Whether \a a and \a b name the same effect instance, whatever its parameters say. */
+static bool paint_layer_effect_key_same_effect(const EffectCacheKey &a, const EffectCacheKey &b)
+{
+  return a.material_uid == b.material_uid && BLI_uuid_equal(a.effect_marker, b.effect_marker) &&
+         a.channel == b.channel;
+}
+
+static bool paint_layer_effect_key_equal(const EffectCacheKey &a, const EffectCacheKey &b)
+{
+  return paint_layer_effect_key_same_effect(a, b) && a.hash == b.hash;
+}
+
+struct EffectCacheEntry {
+  EffectCacheKey key;
+  int width = 0;
+  int height = 0;
+  std::shared_ptr<ImBuf> color;
+  /** The maps the input was rendered from, with the versions they had. */
+  Vector<AnchorSliceSource> synced;
+  size_t bytes = 0;
+};
+
+/**
+ * Total memory the effect cache may hold: a 4K RGBA float buffer is 256 MiB per effect, and this
+ * cache stands beside the slice cache (4 GiB) and the composite cache, whose working sets overlap
+ * on the same strokes. One GiB holds a couple of recent effects at 4K and the small ones at lower
+ * sizes; an entry evicted between two evaluations is computed whole again, and an entry larger than
+ * the budget is never cached.
+ */
+constexpr size_t PAINT_LAYER_EFFECT_CACHE_BYTES = size_t(1024) * 1024 * 1024;
+
+/** The live budget; only tests override it, to make eviction observable without 4K fixtures. */
+static size_t g_paint_effect_cache_budget = PAINT_LAYER_EFFECT_CACHE_BYTES;
+
+/** The cache owns references only; dropping an entry simply releases them. */
+struct EffectCache {
+  Vector<EffectCacheEntry> entries;
+  size_t total_bytes = 0;
+};
+
+static EffectCache g_paint_effect_cache;
+/**
+ * Guards the container and the byte count only. A bake job computes effects on a worker thread
+ * while the main thread describes the composite, and both reach the cache. It is never held while
+ * an effect computes, so the input's own nested renders cannot deadlock on it.
+ */
+static std::mutex g_paint_effect_cache_mutex;
+
+/**
+ * A description hash of the effect: the kind and the parameters in its schema order. The input's
+ * pixels are not part of it -- the sources' versions stand in for those -- so an edit of a value
+ * moves it and an edit of a map does not.
+ */
+static uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int channel)
+{
+  uint64_t hash = 1469598103934665603ull;
+  const auto mix_u32 = [&](const uint32_t value) {
+    hash ^= value;
+    hash *= 1099511628211ull;
+  };
+  const auto mix_float = [&](const float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    mix_u32(bits);
+  };
+  mix_u32(uint32_t(effect.kind_subtype));
+  mix_u32(uint32_t(channel));
+  float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
+  composite_filter_params(effect, params);
+  for (const float param : params) {
+    mix_float(param);
+  }
+  return hash;
+}
+
+/** The input of the effect: the row's content up to it, before the row's opacity, mask and blend. */
+static bool paint_layer_effect_input_describe(const Material &ma,
+                                              const MaterialPaintLayer &row,
+                                              const MaterialPaintLayer &effect,
+                                              const int channel,
+                                              const bool dimensions_only,
+                                              PaintMaterialCompositeImageLayer &r_entry)
+{
+  r_entry = PaintMaterialCompositeImageLayer{};
+  if (!composite_image_layer_build(ma,
+                                   row,
+                                   channel,
+                                   1.0f,
+                                   false,
+                                   true,
+                                   r_entry,
+                                   &effect.marker,
+                                   nullptr,
+                                   dimensions_only,
+                                   false,
+                                   nullptr,
+                                   nullptr))
+  {
+    return false;
+  }
+  /* The input is the row's content before its opacity, mask, object mask and blend: only what the
+   * corrections below the effect left. */
+  r_entry.mask_items.clear();
+  r_entry.mask_image = nullptr;
+  r_entry.mask_iuser = nullptr;
+  r_entry.mask_from_alpha = false;
+  r_entry.mask_influence = 0.0f;
+  r_entry.opacity = 1.0f;
+  r_entry.enabled = true;
+  return true;
+}
+
+/** Every map the described input reads, once each and none of them null. */
+static void paint_layer_effect_entry_images(const PaintMaterialCompositeImageLayer &layer,
+                                            Vector<Image *> &r_images)
+{
+  const auto add = [&](Image *image) {
+    if (image != nullptr && image->runtime != nullptr && !r_images.contains(image)) {
+      r_images.append(image);
+    }
+  };
+  add(layer.color_image);
+  add(layer.mask_image);
+  for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+    add(correction.image);
+    add(correction.anchor_point_coverage_image);
+    for (Image *image : correction.anchor_point_images) {
+      add(image);
+    }
+  }
+  for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+    add(item.image);
+    add(item.coverage_image);
+    for (Image *image : item.anchor_point_images) {
+      add(image);
+    }
+  }
+  for (const PaintMaterialCompositeImageLayer &child : layer.children) {
+    paint_layer_effect_entry_images(child, r_images);
+  }
+}
+
+/**
+ * One horizontal box pass over the RGB of \a buffer, edges clamped, alpha untouched. Rows run in
+ * parallel; each keeps a scratch copy of itself, since the sliding window reads behind the texel
+ * the pass has already written.
+ */
+static void paint_layer_effect_blur_pass_h(ImBuf &buffer, const int radius)
+{
+  const int width = buffer.x;
+  const int height = buffer.y;
+  float *pixels = buffer.float_data_for_write();
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    Vector<float> row(int64_t(width) * 4);
+    for (const int y : range) {
+      float *dst = pixels + int64_t(y) * width * 4;
+      memcpy(row.data(), dst, size_t(width) * sizeof(float[4]));
+      float sum[3] = {0.0f, 0.0f, 0.0f};
+      int lo = 0;
+      int hi = -1;
+      for (const int x : IndexRange(width)) {
+        const int new_hi = std::min(x + radius, width - 1);
+        for (int k = hi + 1; k <= new_hi; k++) {
+          sum[0] += row[int64_t(k) * 4 + 0];
+          sum[1] += row[int64_t(k) * 4 + 1];
+          sum[2] += row[int64_t(k) * 4 + 2];
+        }
+        hi = new_hi;
+        const int new_lo = std::max(x - radius, 0);
+        for (int k = lo; k < new_lo; k++) {
+          sum[0] -= row[int64_t(k) * 4 + 0];
+          sum[1] -= row[int64_t(k) * 4 + 1];
+          sum[2] -= row[int64_t(k) * 4 + 2];
+        }
+        lo = new_lo;
+        const float inv = 1.0f / float(hi - lo + 1);
+        dst[int64_t(x) * 4 + 0] = sum[0] * inv;
+        dst[int64_t(x) * 4 + 1] = sum[1] * inv;
+        dst[int64_t(x) * 4 + 2] = sum[2] * inv;
+      }
+    }
+  });
+}
+
+/**
+ * One vertical box pass over the RGB of \a buffer, edges clamped, alpha untouched.
+ *
+ * The pass walks the buffer row by row with one sliding sum per column, instead of walking it
+ * column by column: a column walk of a 4K float buffer strided by a row is a cache miss per texel,
+ * where the row walk reads and writes each line once. The window adds rows below the one being
+ * written but subtracts rows above it, which the pass has already overwritten, so a small ring
+ * keeps the originals of those. The sum is sequential in y, so the pass stays single-threaded; the
+ * horizontal pass above carries the parallelism.
+ */
+static void paint_layer_effect_blur_pass_v(ImBuf &buffer, const int radius)
+{
+  const int width = buffer.x;
+  const int height = buffer.y;
+  float *pixels = buffer.float_data_for_write();
+  Vector<float> sums(int64_t(width) * 3, 0.0f);
+  /* The window drops row `k` once `y - radius > k`, but row `k` was overwritten when the pass wrote
+   * it. The originals of the rows still to be dropped are kept in a ring: a row is saved just before
+   * it is written and read back `radius + 1` rows later, so `radius + 2` slots never collide. */
+  const int ring_num = radius + 2;
+  Vector<float> ring(int64_t(ring_num) * width * 3);
+  int lo = 0;
+  int hi = -1;
+  for (const int y : IndexRange(height)) {
+    const int new_hi = std::min(y + radius, height - 1);
+    for (int k = hi + 1; k <= new_hi; k++) {
+      const float *src = pixels + int64_t(k) * width * 4;
+      for (const int x : IndexRange(width)) {
+        float *s = sums.data() + int64_t(x) * 3;
+        s[0] += src[int64_t(x) * 4 + 0];
+        s[1] += src[int64_t(x) * 4 + 1];
+        s[2] += src[int64_t(x) * 4 + 2];
+      }
+    }
+    hi = new_hi;
+    const int new_lo = std::max(y - radius, 0);
+    for (int k = lo; k < new_lo; k++) {
+      const float *original = ring.data() + int64_t(k % ring_num) * width * 3;
+      for (const int x : IndexRange(width)) {
+        float *s = sums.data() + int64_t(x) * 3;
+        s[0] -= original[int64_t(x) * 3 + 0];
+        s[1] -= original[int64_t(x) * 3 + 1];
+        s[2] -= original[int64_t(x) * 3 + 2];
+      }
+    }
+    lo = new_lo;
+    const float inv = 1.0f / float(hi - lo + 1);
+    float *dst = pixels + int64_t(y) * width * 4;
+    float *saved = ring.data() + int64_t(y % ring_num) * width * 3;
+    for (const int x : IndexRange(width)) {
+      saved[int64_t(x) * 3 + 0] = dst[int64_t(x) * 4 + 0];
+      saved[int64_t(x) * 3 + 1] = dst[int64_t(x) * 4 + 1];
+      saved[int64_t(x) * 3 + 2] = dst[int64_t(x) * 4 + 2];
+    }
+    for (const int x : IndexRange(width)) {
+      const float *s = sums.data() + int64_t(x) * 3;
+      dst[int64_t(x) * 4 + 0] = s[0] * inv;
+      dst[int64_t(x) * 4 + 1] = s[1] * inv;
+      dst[int64_t(x) * 4 + 2] = s[2] * inv;
+    }
+  }
+}
+
+/** A box blur of \a radius over the RGB of \a buffer, one pass per axis. */
+static void paint_layer_effect_blur_box(ImBuf &buffer, const int radius)
+{
+  const int r = std::clamp(radius, 1, std::max(buffer.x, buffer.y));
+  paint_layer_effect_blur_pass_h(buffer, r);
+  paint_layer_effect_blur_pass_v(buffer, r);
+}
+
+/** The kernel of \a effect over \a buffer in place, at full strength, RGB only. */
+static void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
+{
+  switch (eMaterialPaintLayerFilter(effect.kind_subtype)) {
+    case MA_PAINT_LAYER_FILTER_BLUR: {
+      const int radius = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BLUR_RADIUS);
+      if (paint_layer_kind_param_int_get(effect, PAINT_LAYER_BLUR_SHAPE) ==
+          PAINT_LAYER_BLUR_BOX)
+      {
+        paint_layer_effect_blur_box(buffer, radius);
+      }
+      else {
+        /* Three box passes approximate a gaussian; the radius reads as the per-pass half reach. */
+        const int pass = std::max(radius / 2, 1);
+        paint_layer_effect_blur_box(buffer, pass);
+        paint_layer_effect_blur_box(buffer, pass);
+        paint_layer_effect_blur_box(buffer, pass);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+/** Render the input of \a effect and apply its kernel, into a buffer of the input's own size. */
+static bool paint_layer_effect_compute(const Material &ma,
+                                       const MaterialPaintLayer &row,
+                                       const MaterialPaintLayer &effect,
+                                       const int channel,
+                                       std::shared_ptr<ImBuf> &r_color,
+                                       Vector<AnchorSliceSource> &r_synced)
+{
+  PaintMaterialCompositeImageLayer entry;
+  if (!paint_layer_effect_input_describe(ma, row, effect, channel, false, entry)) {
+    return false;
+  }
+  int width = 0;
+  int height = 0;
+  if (!BKE_paint_material_composite_stack_dimensions(
+          Span<PaintMaterialCompositeImageLayer>(&entry, 1), width, height) ||
+      width <= 0 || height <= 0)
+  {
+    return false;
+  }
+  std::shared_ptr<ImBuf> color = anchor_slice_buffer_new(width, height);
+  if (color == nullptr) {
+    return false;
+  }
+  Vector<float> coverage(int64_t(width) * height);
+  if (!BKE_paint_material_composite_eval_row_content(
+          entry, color->float_data_for_write(), coverage.data(), nullptr, channel))
+  {
+    return false;
+  }
+  paint_layer_effect_kernel_apply(*color, effect);
+  /* The versions are taken after the render: an edit that landed while it ran is read next time. */
+  Vector<Image *> images;
+  paint_layer_effect_entry_images(entry, images);
+  r_synced = anchor_slice_sources_snapshot(images);
+  r_color = std::move(color);
+  return true;
+}
+
+/** Drop every cached effect buffer, releasing the canvases (a static would outlive the leak check). */
+static void paint_layer_effect_cache_clear()
+{
+  std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
+  g_paint_effect_cache.entries.clear_and_shrink();
+  g_paint_effect_cache.total_bytes = 0;
+}
+
+void BKE_paint_layers_effect_cache_free_all()
+{
+  paint_layer_effect_cache_clear();
+}
+
+void BKE_paint_layers_effect_cache_free_material(const Material &ma)
+{
+  std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
+  for (int i = int(g_paint_effect_cache.entries.size()) - 1; i >= 0; i--) {
+    if (g_paint_effect_cache.entries[i].key.material_uid == ma.id.session_uid) {
+      g_paint_effect_cache.total_bytes -= g_paint_effect_cache.entries[i].bytes;
+      g_paint_effect_cache.entries.remove(i);
+    }
+  }
+}
+
+size_t paint_layer_effect_cache_bytes()
+{
+  std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
+  return g_paint_effect_cache.total_bytes;
+}
+
+void paint_layer_effect_cache_set_budget(const size_t bytes)
+{
+  std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
+  g_paint_effect_cache_budget = bytes;
+}
+
+size_t paint_layer_effect_cache_budget()
+{
+  std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
+  return g_paint_effect_cache_budget;
+}
+
+int paint_layer_effect_cache_entry_count()
+{
+  std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
+  return int(g_paint_effect_cache.entries.size());
+}
+
+/** Evict least-recently-used entries from the front until \a incoming fits in the budget. */
+static void paint_layer_effect_cache_enforce_budget(const size_t incoming)
+{
+  while (!g_paint_effect_cache.entries.is_empty() &&
+         g_paint_effect_cache.total_bytes + incoming > g_paint_effect_cache_budget)
+  {
+    g_paint_effect_cache.total_bytes -= g_paint_effect_cache.entries[0].bytes;
+    g_paint_effect_cache.entries.remove(0);
+  }
+}
+
+/**
+ * The result of the neighborhood \a effect on \a row's content in \a channel, as a float RGBA
+ * buffer at the input's size, scene linear, the input's content alpha in the fourth component.
+ * Cached; the kernel and the input's maps decide when it is computed again.
+ *
+ * \param describe_only: learn nothing but the maps the input reads (into \a r_images) -- the
+ *        combined preview asks for this, since it falls back to the CPU for these kinds anyway.
+ * \param r_images: the maps the input was rendered from; the composite cache subscribes to them,
+ *        so a stroke on any of them reaches it even though the effect reads no Image of its own.
+ * \return null when the input could not be rendered or \a describe_only was asked.
+ */
+static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
+                                                            const MaterialPaintLayer &row,
+                                                            const MaterialPaintLayer &effect,
+                                                            const int channel,
+                                                            const bool describe_only,
+                                                            Vector<Image *> *r_images)
+{
+  /* The maps the input reads and its size, described without rendering anything: the maps go to
+   * the composite cache's subscriptions, the size decides hits. */
+  PaintMaterialCompositeImageLayer dims_entry;
+  Vector<Image *> images;
+  int width = 0;
+  int height = 0;
+  if (!paint_layer_effect_input_describe(ma, row, effect, channel, true, dims_entry) ||
+      !BKE_paint_material_composite_stack_dimensions(
+          Span<PaintMaterialCompositeImageLayer>(&dims_entry, 1), width, height) ||
+      width <= 0 || height <= 0)
+  {
+    return {};
+  }
+  paint_layer_effect_entry_images(dims_entry, images);
+  if (r_images != nullptr) {
+    *r_images = images;
+  }
+  if (describe_only) {
+    return {};
+  }
+
+  const EffectCacheKey key{ma.id.session_uid,
+                           effect.marker,
+                           channel,
+                           paint_layer_effect_hash(effect, channel)};
+  {
+    std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
+    for (int i = 0; i < int(g_paint_effect_cache.entries.size()); i++) {
+      EffectCacheEntry &entry = g_paint_effect_cache.entries[i];
+      if (!paint_layer_effect_key_equal(entry.key, key)) {
+        continue;
+      }
+      if (entry.width != width || entry.height != height) {
+        break;
+      }
+      rcti region;
+      if (anchor_slice_changes(entry.synced, images, region) != ePixelChange::None) {
+        break;
+      }
+      /* Move to the back: the vector is the LRU order. The buffers go out before the entry goes
+       * back, so the caller keeps them alive through its own reference whatever the cache does
+       * next. */
+      EffectCacheEntry hit = std::move(entry);
+      g_paint_effect_cache.entries.remove(i);
+      std::shared_ptr<ImBuf> color = hit.color;
+      g_paint_effect_cache.entries.append(std::move(hit));
+      return color;
+    }
+  }
+
+  /* The compute runs outside the mutex: the input's own renders -- a nested slice, or a nested
+   * effect taking this same mutex -- must not deadlock against it. */
+  std::shared_ptr<ImBuf> color;
+  Vector<AnchorSliceSource> synced;
+  if (!paint_layer_effect_compute(ma, row, effect, channel, color, synced)) {
+    return {};
+  }
+  const size_t bytes = anchor_slice_color_bytes(color.get());
+
+  std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
+  /* An entry of the same effect with other parameters is stale -- the description can only ever ask
+   * for the parameters the effect carries now -- so it is replaced rather than kept until the LRU
+   * evicts it. A buffer still shared with a live description keeps its pixels through its own
+   * reference. */
+  for (int i = int(g_paint_effect_cache.entries.size()) - 1; i >= 0; i--) {
+    if (paint_layer_effect_key_same_effect(g_paint_effect_cache.entries[i].key, key)) {
+      g_paint_effect_cache.total_bytes -= g_paint_effect_cache.entries[i].bytes;
+      g_paint_effect_cache.entries.remove(i);
+      break;
+    }
+  }
+  if (bytes <= g_paint_effect_cache_budget) {
+    paint_layer_effect_cache_enforce_budget(bytes);
+    EffectCacheEntry entry;
+    entry.key = key;
+    entry.width = color->x;
+    entry.height = color->y;
+    entry.color = color;
+    entry.synced = std::move(synced);
+    entry.bytes = bytes;
+    g_paint_effect_cache.total_bytes += bytes;
+    g_paint_effect_cache.entries.append(std::move(entry));
+  }
+  return color;
+}
+
+/** \} */
+
 bool BKE_paint_layers_slice_render(const Material &ma,
                                    const MaterialPaintLayer &reader,
                                    const int channel,
@@ -2252,6 +2799,12 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
      * coverage map the GPU correction pass does not read. */
     if (correction.anchor_point_coverage_image != nullptr) {
       return "a baked Anchor Point correction is read (no coverage map on the GPU)";
+    }
+    /* A neighborhood effect (a Blur) has no pointwise shader branch: its result is a map the effect
+     * cache computes on the CPU, so the whole stack falls back rather than shading without it.
+     * Gated on the opacity that decides the CPU lays it too. */
+    if (correction.opacity > 0.0f && correction.filter == MA_PAINT_LAYER_FILTER_BLUR) {
+      return "a Blur correction is read";
     }
   }
   return nullptr;
@@ -2683,7 +3236,7 @@ bool BKE_paint_layers_corrections_row_describe(const Material &ma,
   for (const MaterialPaintLayer *effect : corrections) {
     const int64_t before = r_row.content_corrections.size();
     composite_effect_append(
-        ma, *effect, channel, 1.0f, nullptr, false, false, context_surface, r_row);
+        ma, nullptr, *effect, channel, 1.0f, nullptr, false, false, context_surface, r_row);
     if (r_row.content_corrections.size() == before) {
       continue;
     }

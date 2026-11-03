@@ -665,6 +665,8 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
   ed::brush_layer_source::brush_layer_source_bake_invalidate(nullptr);
   BKE_paint_material_composite_cache_free_all();
   BKE_paint_layers_slice_cache_free_all();
+  /* Owns float canvases of its own, dropped with the other caches before the leak check. */
+  BKE_paint_layers_effect_cache_free_all();
   BKE_paint_material_combined_cache_free_all();
   ED_space_image_gpu_combined_stand_in_free();
   ED_outliner_rendered_previews_free();

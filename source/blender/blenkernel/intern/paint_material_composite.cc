@@ -1434,6 +1434,25 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
    * which is the plain blend by `f` where `a` is one, and what the generator builds node by node. */
   Vector<float> correction_storage;
   for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
+    if (correction.effect_color != nullptr) {
+      /* A neighborhood effect (a Blur) carries its result as a map the effect cache computed,
+       * mixed into the colour like a filter is, `c = lerp(c, effect(c), opacity)`. The coverage
+       * and the content alpha stay as they are. */
+      const float weight = clamp_f(correction.opacity, 0.0f, 1.0f);
+      if (weight <= 0.0f) {
+        continue;
+      }
+      correction_storage.resize(count * 4);
+      composite_decode_tile(correction.effect_color, nullptr, tile, correction_storage.data());
+      for (int64_t i = 0; i < count; i++) {
+        float *s = r_color + i * 4;
+        const float *filtered = correction_storage.data() + i * 4;
+        for (const int k : IndexRange(3)) {
+          s[k] += (filtered[k] - s[k]) * weight;
+        }
+      }
+      continue;
+    }
     if (correction.filter != 0) {
       /* A filter changes the colour and leaves the coverage and the content alpha as they are:
        * `c = lerp(c, f(c), opacity)`, the Mix the generator builds. */
@@ -1786,6 +1805,11 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
   }
   for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
     if (correction.ibuf != nullptr && !composite_ibuf_is_rgba(correction.ibuf, width, height)) {
+      return false;
+    }
+    if (correction.effect_color != nullptr &&
+        !composite_ibuf_is_rgba(correction.effect_color, width, height))
+    {
       return false;
     }
     if (correction.anchor_point_slice != nullptr &&
@@ -2824,6 +2848,8 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       buffer.filter = correction.filter;
       buffer.filter_ramp = correction.filter_ramp;
       buffer.filter_curves = correction.filter_curves;
+      /* A neighborhood effect's result is owned by the description; the evaluation borrows it. */
+      buffer.effect_color = correction.effect_color.get();
       std::copy(std::begin(correction.filter_params),
                 std::end(correction.filter_params),
                 std::begin(buffer.filter_params));
@@ -3416,6 +3442,11 @@ uint64_t BKE_paint_material_composite_stack_hash(
       if (correction.filter_curves != nullptr) {
         hash = get_default_hash(hash, paint_layer_curves_hash(*correction.filter_curves));
       }
+      if (correction.effect_hash != 0) {
+        /* A neighborhood effect's result depends on the input's pixels, which the gathered images
+         * watch; the hash carries the kind and the parameters. */
+        hash = get_default_hash(hash, correction.effect_hash);
+      }
       hash = get_default_hash(hash, correction.anchor_point_hash);
       hash = composite_mapping_hash(get_default_hash(hash, correction.mapping.enabled),
                                     correction.mapping);
@@ -3631,6 +3662,9 @@ static void composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>
       r_images.append(correction.image);
       r_images.append(correction.anchor_point_coverage_image);
       r_images.extend(correction.anchor_point_images);
+      /* A neighborhood effect reads the row's maps through the effect cache, no Image of its own:
+       * its input's maps are carried so a stroke on one reaches the cache. */
+      r_images.extend(correction.effect_images);
     }
     if (layer.is_folder) {
       /* The images a folder holds are read through it, so a stroke deep inside still reaches the

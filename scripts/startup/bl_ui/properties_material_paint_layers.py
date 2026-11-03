@@ -393,30 +393,34 @@ def draw_material_kind_params(layout, params):
 
 
 def draw_material_color_balance(layout, balance):
-    """The balance a Color Balance filter reads: the method, then the triple the method names.
+    """The balance a Color Balance filter reads: the method as two buttons, then its three colors.
 
-    Both triples stay editable so a switch between the methods never loses the values the other
-    one carries; the inactive one is dimmed rather than hidden, so the user can see what a switch
-    would restore. Every field is a colour picker over the per-channel values, laid out linearly
-    like the data the filter reads.
+    Only the triple of the active method is drawn; the other one keeps its values, so a switch
+    between the methods never loses them. Every field is a colour picker over the per-channel
+    values, named in front of it.
     """
-    layout.prop(balance, "method", text="")
-    layout.separator()
+    if balance is None:
+        return
+    row = layout.row(align=True)
+    row.prop(balance, "method", expand=True)
 
+    names = ("lift", "gamma", "gain") if balance.method == 'LGG' else ("slope", "offset", "power")
     col = layout.column(align=True)
-    col.label(text="Lift / Gamma / Gain")
-    for name in ("lift", "gamma", "gain"):
-        sub = col.column()
-        sub.active = balance.method == 'LGG'
-        sub.prop(balance, name, text="")
-    layout.separator()
+    for name in names:
+        col.prop(balance, name)
 
-    col = layout.column(align=True)
-    col.label(text="ASC CDL")
-    for name in ("slope", "offset", "power"):
-        sub = col.column()
-        sub.active = balance.method == 'ASC_CDL'
-        sub.prop(balance, name, text="")
+
+def draw_material_update_now(layout, owner):
+    """The button, and the state, of the render a neighborhood effect (Blur) waits for.
+
+    The effect cannot be built live, so its row is rendered once the user leaves the row; this
+    asks for the render at once.
+    """
+    layout.context_pointer_set("material", owner)
+    row = layout.row(align=True)
+    if owner.paint_layers_is_stale:
+        row.label(text="Updating...", icon='TIME')
+    row.operator("material.paint_layers_bake_now", text="Update Now", icon='FILE_REFRESH')
 
 
 def _draw_kind_param(layout, param):

@@ -164,6 +164,12 @@ void BKE_paint_material_blend_apply(int code,
                                     const float col[4]);
 
 /**
+ * The maximum number of scalar parameters any filter's fold can produce.
+ * Wide enough for a Color Balance's folded triples.
+ */
+inline constexpr int PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM = 12;
+
+/**
  * A flat colour standing in for a map, scene linear.
  *
  * A channel with no map reduces to a constant; carrying it here rather than manufacturing a
@@ -442,7 +448,7 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
    * The adjustment's parameters in its kind's schema order; wide enough for a Color Balance's
    * folded triples (#PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM), which no scalar schema reaches.
    */
-  float adjustment_params[12] = {};
+  float adjustment_params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
   /** The Color Band a ramp filter (Color Ramp) reads, or null for every other filter. */
   const ColorBand *adjustment_ramp = nullptr;
   /** The curve mapping a curves filter (RGB Curves) reads, or null for every other filter. */
@@ -480,11 +486,24 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
    * The filter's parameters in its kind's schema order; wide enough for a Color Balance's folded
    * triples (#PAINT_LAYER_COLOR_BALANCE_FOLDED_NUM), which no scalar schema reaches.
    */
-  float filter_params[12] = {};
+  float filter_params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
   /** The Color Band a ramp filter (Color Ramp) reads, or null. */
   const ColorBand *filter_ramp = nullptr;
   /** The curve mapping a curves filter (RGB Curves) reads, or null. */
   const CurveMapping *filter_curves = nullptr;
+  /**
+   * The result of a neighborhood filter (a Blur) the effect cache computed: a float RGBA buffer at
+   * the stack's dimensions, scene linear. Owned by this description (see
+   * #PaintMaterialCompositeImageLayer::anchor_point_color); null for every other correction.
+   */
+  std::shared_ptr<ImBuf> effect_color = nullptr;
+  /**
+   * The maps the effect's input was rendered from. The effect reads no Image of its own, so the
+   * composite cache subscribes to these to see a stroke on the row's map.
+   */
+  Vector<Image *> effect_images;
+  /** A description hash of the effect's kind and parameters, folded into the stack hash. */
+  uint64_t effect_hash = 0;
   Image *image = nullptr;
   /** Null selects the default #ImageUser. */
   const ImageUser *iuser = nullptr;
@@ -524,9 +543,11 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   /** See #PaintMaterialCompositeCorrection::filter. */
   int16_t filter = 0;
   /** Wide enough for a Color Balance's folded triples, like the description's own array. */
-  float filter_params[12] = {};
+  float filter_params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
   const ColorBand *filter_ramp = nullptr;
   const CurveMapping *filter_curves = nullptr;
+  /** Borrowed from #PaintMaterialCompositeCorrection::effect_color, which keeps it alive. */
+  ImBuf *effect_color = nullptr;
   ImBuf *ibuf = nullptr;
   /** Colorspace name of #ibuf's own buffer, or null for scene linear. */
   const char *colorspace_name = nullptr;
@@ -589,7 +610,7 @@ struct PaintMaterialCompositeMaskItem {
    */
   int16_t filter = 0;
   /** Wide enough for a Color Balance's folded triples, like the description's own array. */
-  float filter_params[12] = {};
+  float filter_params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
   /** The Color Band a ramp filter (Color Ramp) reads, or null. */
   const ColorBand *filter_ramp = nullptr;
   /** The curve mapping a curves filter (RGB Curves) reads, or null. */
@@ -727,7 +748,7 @@ struct PaintMaterialCompositeMaskBuffer {
   /** See #PaintMaterialCompositeMaskItem::filter. */
   int16_t filter = 0;
   /** Wide enough for a Color Balance's folded triples, like the description's own array. */
-  float filter_params[12] = {};
+  float filter_params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
   const ColorBand *filter_ramp = nullptr;
   const CurveMapping *filter_curves = nullptr;
   /** See #PaintMaterialCompositeMaskItem::map_coverage. */

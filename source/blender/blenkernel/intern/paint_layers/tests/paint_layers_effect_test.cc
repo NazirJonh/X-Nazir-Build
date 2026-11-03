@@ -3,19 +3,22 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /** \file
- * Neighborhood effects (Blur): the effect cache computes them for the CPU composite and for the
- * bake, and a row that carries one is baked for the live graph, which samples the bake instead.
- * The tests read the composite and the bake maps, so both sides of that hand-over are covered,
- * along with the invariants of the kernel on flat and edged inputs and the cache's keying,
- * eviction and describe-only passes.
+ * Neighborhood effects (Blur, Sharpen, High Pass, Edge Detect, Emboss, Erode / Dilate): the effect
+ * cache computes them for the CPU composite and for the bake, and a row that carries one is baked
+ * for the live graph, which samples the bake instead. The tests read the composite and the bake
+ * maps, so both sides of that hand-over are covered, along with the invariants of the kernels on
+ * flat and edged inputs and the cache's keying, eviction and describe-only passes.
  *
  * The fixture lives in `paint_layers_generate_test_fixture.hh`.
  */
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 #include "MEM_guardedalloc.h"
+
+#include "BLI_math_color.h"
 
 #include "paint_layers_generate_test_fixture.hh"
 
@@ -154,6 +157,48 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
   {
     return BKE_paint_layers_composite_channel(*ma, kColor, dst);
   }
+
+  /** Bake a row carrying \a filter, with \a setup setting the parameters the kind needs, and check
+   * every byte of the bake against the composite. */
+  void expect_bake_matches_composite(const eMaterialPaintLayerFilter filter,
+                                     void (*setup)(MaterialPaintLayer &) = nullptr)
+  {
+    MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+    MaterialPaintLayer *effect = add_effect(*row, filter);
+    ASSERT_NE(effect, nullptr);
+    if (setup != nullptr) {
+      setup(*effect);
+    }
+    clear_active();
+
+    /* The effect alone is no reason for the planner until the row needs it: a row that carries a
+     * neighborhood effect is a candidate and due whatever its mode is. */
+    bool changed = false;
+    ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+    ASSERT_NE(row->bake, nullptr);
+    EXPECT_NE(row->bake->images[kColor], nullptr);
+    EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+    EXPECT_TRUE(paint_layer_row_substituted(*ma, *row));
+
+    /* The bake and the composite run the same description, so the effect lands identically. Both
+     * write bytes in the channel's colorspace, the one form both sides share. */
+    ImBuf *composite = IMB_allocImBuf(8, 8, ImBufFlags::ByteData);
+    ASSERT_NE(composite, nullptr);
+    ASSERT_TRUE(render_channel_bytes(*composite));
+    Image *baked = row->bake->images[kColor];
+    for (const int y : IndexRange(8)) {
+      for (const int x : IndexRange(8)) {
+        EXPECT_NEAR(bake_byte_pixel(*baked, x, y),
+                    int(composite->byte_data()[(int64_t(y) * 8 + x) * 4]),
+                    2)
+            << "the bake and the composite agree, at " << x << "," << y;
+      }
+    }
+    IMB_freeImBuf(composite);
+
+    /* A second pass has nothing left to do. */
+    EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  }
 };
 
 TEST_F(PaintLayersEffectTest, the_blur_of_a_solid_row_is_the_solid)
@@ -223,41 +268,452 @@ TEST_F(PaintLayersEffectTest, a_blur_of_a_horizontal_edge_reads_the_original_row
   EXPECT_NEAR(linear_pixel(pixels, width, 4, 7), 0.0f, 1e-3f);
 }
 
-TEST_F(PaintLayersEffectTest, the_bake_renders_the_blur_the_composite_shows)
+TEST_F(PaintLayersEffectTest, a_sharpen_of_a_solid_row_is_the_solid)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+
+  MaterialPaintLayer *sharpen = add_effect(*row, MA_PAINT_LAYER_FILTER_SHARPEN);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*sharpen, PAINT_LAYER_SHARPEN_RADIUS, 3));
+  ASSERT_TRUE(paint_layer_kind_param_set(*sharpen, PAINT_LAYER_SHARPEN_AMOUNT, 1.0f));
+
+  Vector<float> pixels;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  /* The composite is scene linear, so the comparison is against the row without the effect: a flat
+   * input's detail is zero everywhere, and the unsharp mask adds none of it. */
+  ASSERT_EQ(pixels.size(), before.size());
+  for (int64_t i = 0; i < pixels.size(); i++) {
+    EXPECT_NEAR(pixels[i], before[i], 2e-3f) << "a flat input sharpens to itself, texel " << i;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_zero_amount_sharpen_is_the_identity)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
-  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
-  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
-  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
-  clear_active();
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
 
-  /* The effect alone is no reason for the planner until the row needs it: a row that carries a
-   * neighborhood effect is a candidate and due whatever its mode is. */
-  bool changed = false;
-  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
-  ASSERT_NE(row->bake, nullptr);
-  EXPECT_NE(row->bake->images[kColor], nullptr);
-  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
-  EXPECT_TRUE(paint_layer_row_substituted(*ma, *row));
+  MaterialPaintLayer *sharpen = add_effect(*row, MA_PAINT_LAYER_FILTER_SHARPEN);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*sharpen, PAINT_LAYER_SHARPEN_RADIUS, 1));
+  ASSERT_TRUE(paint_layer_kind_param_set(*sharpen, PAINT_LAYER_SHARPEN_AMOUNT, 0.0f));
 
-  /* The bake and the composite run the same description, so the blur lands identically. Both
-   * write bytes in the channel's colorspace, the one form both sides share. */
-  ImBuf *composite = IMB_allocImBuf(8, 8, ImBufFlags::ByteData);
-  ASSERT_NE(composite, nullptr);
-  ASSERT_TRUE(render_channel_bytes(*composite));
-  Image *baked = row->bake->images[kColor];
-  for (const int y : IndexRange(8)) {
-    for (const int x : IndexRange(8)) {
-      EXPECT_NEAR(bake_byte_pixel(*baked, x, y),
-                  int(composite->byte_data()[(int64_t(y) * 8 + x) * 4]),
-                  2)
-          << "the bake and the composite agree on the blur, at " << x << "," << y;
+  Vector<float> pixels;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  ASSERT_EQ(pixels.size(), before.size());
+  for (int64_t i = 0; i < pixels.size(); i++) {
+    EXPECT_NEAR(pixels[i], before[i], 2e-3f)
+        << "a zero amount adds none of the detail, texel " << i;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_sharpen_pushes_the_edge_apart_by_the_unsharp_formula)
+{
+  /* A mid-contrast pair: at amount 0.5 the unsharp formula must land inside [0, 1] on both sides
+   * of the edge, or the bottom clamp would eat the expectation. The linear values are measured,
+   * not assumed, so the byte encoding drops out. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 150, 110));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+  const float left = linear_pixel(before, width, 0, 4);
+  const float right = linear_pixel(before, width, 7, 4);
+
+  MaterialPaintLayer *sharpen = add_effect(*row, MA_PAINT_LAYER_FILTER_SHARPEN);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*sharpen, PAINT_LAYER_SHARPEN_RADIUS, 1));
+  ASSERT_TRUE(paint_layer_kind_param_set(*sharpen, PAINT_LAYER_SHARPEN_AMOUNT, 0.5f));
+
+  Vector<float> pixels;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  /* A box blur of radius one at the columns beside the edge reads two of one side and one of the
+   * other; the unsharp mask adds half of what the blur removed. */
+  const float expected_light = left + 0.5f * (left - (2.0f * left + right) / 3.0f);
+  const float expected_dark = right + 0.5f * (right - (left + 2.0f * right) / 3.0f);
+  ASSERT_NEAR(expected_light, std::clamp(expected_light, 0.0f, 1.0f), 0.0f)
+      << "the light side of the expectation must not lean on a clamp";
+  ASSERT_NEAR(expected_dark, std::clamp(expected_dark, 0.0f, 1.0f), 0.0f)
+      << "the dark side of the expectation must not lean on a clamp";
+  EXPECT_NEAR(linear_pixel(pixels, width, 3, 4), expected_light, 1e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 4), expected_dark, 1e-3f);
+  /* Far from the edge the blur is the input itself, so nothing is added. */
+  EXPECT_NEAR(linear_pixel(pixels, width, 0, 4), left, 1e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 7, 4), right, 1e-3f);
+}
+
+TEST_F(PaintLayersEffectTest, a_sharpen_never_goes_below_zero)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *sharpen = add_effect(*row, MA_PAINT_LAYER_FILTER_SHARPEN);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*sharpen, PAINT_LAYER_SHARPEN_RADIUS, 1));
+  ASSERT_TRUE(paint_layer_kind_param_set(*sharpen, PAINT_LAYER_SHARPEN_AMOUNT, 2.0f));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  /* The overshoot past one is left as it is (a map may be HDR), but a negative linear colour would
+   * break the blends and the encoding after the effect, so nothing lands below zero. */
+  float minimum = 1.0f;
+  for (const float value : pixels) {
+    minimum = std::min(minimum, value);
+  }
+  EXPECT_GE(minimum, 0.0f) << "the unsharp mask never writes a negative colour";
+}
+
+TEST_F(PaintLayersEffectTest, a_high_pass_of_a_solid_row_is_the_mid_grey)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 160, 160));
+  MaterialPaintLayer *high_pass = add_effect(*row, MA_PAINT_LAYER_FILTER_HIGH_PASS);
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  /* A flat input has no detail to keep: the formula lands on its mid grey exactly, the display
+   * encoding's 0.5 read back in scene linear. */
+  for (const int y : IndexRange(height)) {
+    for (const int x : IndexRange(width)) {
+      EXPECT_NEAR(linear_pixel(pixels, width, x, y), srgb_to_linearrgb(0.5f), 2e-3f)
+          << "the high pass of a flat input is the mid grey, at " << x << "," << y;
     }
   }
-  IMB_freeImBuf(composite);
+}
 
-  /* A second pass has nothing left to do. */
-  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+TEST_F(PaintLayersEffectTest, a_zero_contrast_high_pass_is_the_mid_grey)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *high_pass = add_effect(*row, MA_PAINT_LAYER_FILTER_HIGH_PASS);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*high_pass, PAINT_LAYER_HIGH_PASS_RADIUS, 1));
+  ASSERT_TRUE(paint_layer_kind_param_set(*high_pass, PAINT_LAYER_HIGH_PASS_CONTRAST, 0.0f));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (const int y : IndexRange(height)) {
+    for (const int x : IndexRange(width)) {
+      EXPECT_NEAR(linear_pixel(pixels, width, x, y), srgb_to_linearrgb(0.5f), 2e-3f)
+          << "a zero contrast keeps no detail, at " << x << "," << y;
+    }
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_high_pass_keeps_the_edge_against_a_flat_field)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 200, 60));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+  const float left = linear_pixel(before, width, 0, 4);
+  const float right = linear_pixel(before, width, 7, 4);
+
+  MaterialPaintLayer *high_pass = add_effect(*row, MA_PAINT_LAYER_FILTER_HIGH_PASS);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*high_pass, PAINT_LAYER_HIGH_PASS_RADIUS, 1));
+  ASSERT_TRUE(
+      paint_layer_kind_param_set(*high_pass, PAINT_LAYER_HIGH_PASS_CONTRAST, 1.0f));
+
+  Vector<float> pixels;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  /* The encoded mid grey plus the detail the box blur of radius one removed, taken in the display
+   * encoding and read back in linear. The measured linear values drop the byte encoding out. */
+  const auto expected = [](const float value, const float blurred) {
+    return srgb_to_linearrgb(0.5f + linearrgb_to_srgb(value) - linearrgb_to_srgb(blurred));
+  };
+  const float expected_light = expected(left, (2.0f * left + right) / 3.0f);
+  const float expected_dark = expected(right, (left + 2.0f * right) / 3.0f);
+  EXPECT_GT(expected_light, srgb_to_linearrgb(0.5f));
+  EXPECT_LT(expected_dark, srgb_to_linearrgb(0.5f));
+  EXPECT_NEAR(linear_pixel(pixels, width, 3, 4), expected_light, 1e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 4), expected_dark, 1e-3f);
+  /* The flats carry no detail: they sit on the mid grey. */
+  EXPECT_NEAR(linear_pixel(pixels, width, 0, 4), srgb_to_linearrgb(0.5f), 1e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 7, 4), srgb_to_linearrgb(0.5f), 1e-3f);
+}
+
+TEST_F(PaintLayersEffectTest, an_edge_detect_of_a_solid_row_is_black)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 160, 160));
+  MaterialPaintLayer *edge = add_effect(*row, MA_PAINT_LAYER_FILTER_EDGE_DETECT);
+
+  /* A flat area has no gradient: the Sobel magnitude is zero everywhere, whatever the grey. */
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (const int y : IndexRange(height)) {
+    for (const int x : IndexRange(width)) {
+      EXPECT_NEAR(linear_pixel(pixels, width, x, y), 0.0f, 2e-3f)
+          << "the edge detect of a flat input is black, at " << x << "," << y;
+    }
+  }
+}
+
+TEST_F(PaintLayersEffectTest, an_edge_detect_outlines_a_hard_edge_at_full_strength)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *edge = add_effect(*row, MA_PAINT_LAYER_FILTER_EDGE_DETECT);
+
+  /* A full-range step reaches exactly one: the two columns beside the edge carry it, the flats
+   * carry nothing. The source is pure black and white, so the linear values are exact. */
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 0, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 2, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 3, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 5, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 7, 4), 0.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersEffectTest, two_edge_detects_of_one_row_key_apart_by_their_marker)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  add_effect(*row, MA_PAINT_LAYER_FILTER_EDGE_DETECT);
+  add_effect(*row, MA_PAINT_LAYER_FILTER_EDGE_DETECT);
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  /* A marker is unique within the material, so two effects of one row key apart even with the same
+   * kind and parameters. */
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 2)
+      << "two Edge Detects of one row hold two entries, keyed by their markers";
+}
+
+TEST_F(PaintLayersEffectTest, an_emboss_of_a_solid_row_is_the_solid)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+
+  /* The kernel's weights sum to one, so a flat colour is its own result. */
+  MaterialPaintLayer *emboss = add_effect(*row, MA_PAINT_LAYER_FILTER_EMBOSS);
+  Vector<float> pixels;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  ASSERT_EQ(pixels.size(), before.size());
+  for (int64_t i = 0; i < pixels.size(); i++) {
+    EXPECT_NEAR(pixels[i], before[i], 2e-3f) << "an emboss of a flat input is the input, texel "
+                                             << i;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, an_emboss_lights_the_white_side_of_a_hard_edge)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *emboss = add_effect(*row, MA_PAINT_LAYER_FILTER_EMBOSS);
+
+  /* Along a vertical edge the kernel reads `-3a + b + 3c` per column (rows are uniform): the white
+   * interior stays one, the two edge columns fall below zero and clamp, the black side stays
+   * zero. The source is pure black and white, so the linear values are exact. */
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 0, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 1, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 2, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 3, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 5, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 7, 4), 0.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersEffectTest, an_erode_and_a_dilate_leave_a_solid_alone)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+
+  /* The extreme of a square window leaves a flat input alone, both ways round. */
+  MaterialPaintLayer *morph = add_effect(*row, MA_PAINT_LAYER_FILTER_ERODE_DILATE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*morph, PAINT_LAYER_ERODE_DILATE_RADIUS, 2));
+  Vector<float> pixels;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  ASSERT_EQ(pixels.size(), before.size());
+  for (int64_t i = 0; i < pixels.size(); i++) {
+    EXPECT_NEAR(pixels[i], before[i], 2e-3f) << "a flat input keeps its extremes, texel " << i;
+  }
+
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*morph, PAINT_LAYER_ERODE_DILATE_MODE,
+                                             PAINT_LAYER_ERODE_DILATE_DILATE));
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (int64_t i = 0; i < pixels.size(); i++) {
+    EXPECT_NEAR(pixels[i], before[i], 2e-3f) << "a dilate of a flat input is the input, texel "
+                                             << i;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, an_erode_shrinks_the_bright_side_and_a_dilate_grows_it)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *morph = add_effect(*row, MA_PAINT_LAYER_FILTER_ERODE_DILATE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*morph, PAINT_LAYER_ERODE_DILATE_RADIUS, 2));
+
+  /* Radius two over the white|black edge: the window spans five texels, so the erode keeps the
+   * white only where five whites fit (two columns) and the dilate reaches two columns past the
+   * edge. The clamped border windows count the repeats. The source is pure black and white, so
+   * the linear values are exact. */
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 0, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 1, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 2, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 7, 4), 0.0f, 2e-3f);
+
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*morph, PAINT_LAYER_ERODE_DILATE_MODE,
+                                             PAINT_LAYER_ERODE_DILATE_DILATE));
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 0, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 5, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 6, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 7, 4), 0.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersEffectTest, changing_the_erode_dilate_mode_moves_the_result_and_reuses_the_entry)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *morph = add_effect(*row, MA_PAINT_LAYER_FILTER_ERODE_DILATE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*morph, PAINT_LAYER_ERODE_DILATE_RADIUS, 2));
+
+  Vector<float> erode_pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(erode_pixels, width, height));
+  ASSERT_EQ(paint_layer_effect_cache_entry_count(), 1);
+  EXPECT_NEAR(linear_pixel(erode_pixels, width, 0, 4), 1.0f, 1e-3f);
+  EXPECT_NEAR(linear_pixel(erode_pixels, width, 2, 4), 0.0f, 1e-3f);
+
+  /* The direction is part of what the effect computes: a different result, keyed by the mode the
+   * same way the radius is. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*morph, PAINT_LAYER_ERODE_DILATE_MODE,
+                                             PAINT_LAYER_ERODE_DILATE_DILATE));
+  Vector<float> dilate_pixels;
+  ASSERT_TRUE(render_channel(dilate_pixels, width, height));
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1)
+      << "the new mode replaced the entry, it did not add one";
+  bool differs = false;
+  for (int64_t i = 0; i < dilate_pixels.size(); i++) {
+    if (std::abs(dilate_pixels[i] - erode_pixels[i]) > 1e-3f) {
+      differs = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(differs) << "a dilate of the same radius grows what the erode shrinks";
+}
+
+TEST_F(PaintLayersEffectTest, an_erode_dilate_along_rows_mirrors_its_columns_result)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0, true));
+  MaterialPaintLayer *morph = add_effect(*row, MA_PAINT_LAYER_FILTER_ERODE_DILATE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*morph, PAINT_LAYER_ERODE_DILATE_RADIUS, 2));
+
+  /* The edge runs along x, so the vertical pass sees the step the horizontal pass sees in the
+   * columns test: the same reads, by row. */
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 0), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 1), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 2), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 7), 0.0f, 2e-3f);
+
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*morph, PAINT_LAYER_ERODE_DILATE_MODE,
+                                             PAINT_LAYER_ERODE_DILATE_DILATE));
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 0), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 5), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 6), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 7), 0.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersEffectTest, the_bake_renders_the_blur_the_composite_shows)
+{
+  expect_bake_matches_composite(
+      MA_PAINT_LAYER_FILTER_BLUR, [](MaterialPaintLayer &effect) {
+        EXPECT_TRUE(paint_layer_kind_param_int_set(
+            effect, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+        EXPECT_TRUE(paint_layer_kind_param_int_set(effect, PAINT_LAYER_BLUR_RADIUS, 2));
+      });
+}
+
+TEST_F(PaintLayersEffectTest, the_bake_renders_the_sharpen_the_composite_shows)
+{
+  expect_bake_matches_composite(
+      MA_PAINT_LAYER_FILTER_SHARPEN, [](MaterialPaintLayer &effect) {
+        EXPECT_TRUE(paint_layer_kind_param_int_set(effect, PAINT_LAYER_SHARPEN_RADIUS, 2));
+      });
+}
+
+TEST_F(PaintLayersEffectTest, the_bake_renders_the_high_pass_the_composite_shows)
+{
+  expect_bake_matches_composite(
+      MA_PAINT_LAYER_FILTER_HIGH_PASS, [](MaterialPaintLayer &effect) {
+        EXPECT_TRUE(paint_layer_kind_param_int_set(effect, PAINT_LAYER_HIGH_PASS_RADIUS, 2));
+      });
+}
+
+TEST_F(PaintLayersEffectTest, the_bake_renders_the_edge_detect_the_composite_shows)
+{
+  expect_bake_matches_composite(MA_PAINT_LAYER_FILTER_EDGE_DETECT);
+}
+
+TEST_F(PaintLayersEffectTest, the_bake_renders_the_emboss_the_composite_shows)
+{
+  expect_bake_matches_composite(MA_PAINT_LAYER_FILTER_EMBOSS);
+}
+
+TEST_F(PaintLayersEffectTest, the_bake_renders_the_erode_dilate_the_composite_shows)
+{
+  expect_bake_matches_composite(
+      MA_PAINT_LAYER_FILTER_ERODE_DILATE, [](MaterialPaintLayer &effect) {
+        EXPECT_TRUE(paint_layer_kind_param_int_set(effect, PAINT_LAYER_ERODE_DILATE_RADIUS, 2));
+      });
+}
+
+TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_for_each_added_neighborhood_effect)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+
+  /* Each neighborhood kind refuses the combined preview by its own reason, without the effect
+   * having been computed for the describe-only pass. */
+  const std::pair<eMaterialPaintLayerFilter, const char *> reasons[] = {
+      {MA_PAINT_LAYER_FILTER_SHARPEN, "a Sharpen correction is read"},
+      {MA_PAINT_LAYER_FILTER_HIGH_PASS, "a High Pass correction is read"},
+      {MA_PAINT_LAYER_FILTER_EDGE_DETECT, "an Edge Detect correction is read"},
+      {MA_PAINT_LAYER_FILTER_EMBOSS, "an Emboss correction is read"},
+      {MA_PAINT_LAYER_FILTER_ERODE_DILATE, "an Erode / Dilate correction is read"},
+  };
+  for (const auto &[filter, reason] : reasons) {
+    MaterialPaintLayer *effect = add_effect(*row, filter);
+    ASSERT_NE(effect, nullptr);
+
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    ASSERT_TRUE(
+        BKE_paint_layers_composite_image_layers(*ma, kColor, layers, /*describe_only=*/true));
+    ASSERT_FALSE(layers.is_empty());
+    EXPECT_STREQ(BKE_paint_layers_gpu_unsupported_reason(layers[0], false), reason);
+    EXPECT_EQ(paint_layer_effect_cache_entry_count(), 0)
+        << "a describe-only pass computes nothing";
+
+    /* The effect leaves with its reason read, so the next kind is described alone too. */
+    EXPECT_TRUE(BKE_paint_layers_correction_remove(*ma, effect));
+  }
 }
 
 TEST_F(PaintLayersEffectTest, editing_the_blur_invalidates_the_bake_and_the_cache_key)

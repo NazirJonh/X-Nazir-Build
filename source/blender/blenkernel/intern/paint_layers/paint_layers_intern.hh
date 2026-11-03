@@ -526,6 +526,16 @@ inline bool paint_layer_effect_is_neighborhood(const MaterialPaintLayer &effect)
 }
 
 /**
+ * The same question for a bare #eMaterialPaintLayerFilter subtype, as a composite description
+ * carries it: a filter cell knows its subtype but not the row it came from.
+ */
+inline bool paint_layer_filter_is_neighborhood(const int16_t filter)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
+  return info != nullptr && (info->flags & PAINT_LAYER_KIND_NEEDS_BAKE) != 0;
+}
+
+/**
  * Whether \a row carries a neighborhood effect anywhere in its content corrections. The mask and
  * the children come with the row's bake either way (a neighborhood kind only ever corrects a
  * row's colour, so it cannot be a mask item), and it is the row itself that has to be baked for
@@ -1191,6 +1201,18 @@ void paint_layer_branch_duplicate(Main &bmain,
                                   const MaterialPaintLayer &src,
                                   PaintLayerMarkerMap *r_map = nullptr,
                                   const PaintLayerCopyOptions &options = {});
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Neighborhood effect kernels
+ * \{ */
+
+/** A private copy of \a source, for an update of a buffer someone else still reads. */
+std::shared_ptr<ImBuf> paint_layer_anchor_slice_buffer_clone(const ImBuf &source);
+
+/** The kernel of \a effect over \a buffer in place, at full strength, RGB only. */
+void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &effect);
 
 /** \} */
 

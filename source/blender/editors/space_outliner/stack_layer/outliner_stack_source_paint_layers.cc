@@ -431,6 +431,16 @@ static PaintKindLook paint_filter_look(const int16_t filter)
       return {ICON_COLOR, 0};
     case MA_PAINT_LAYER_FILTER_BLUR:
       return {ICON_MOD_SMOOTH, 0};
+    case MA_PAINT_LAYER_FILTER_SHARPEN:
+      return {ICON_SHARPCURVE, 0};
+    case MA_PAINT_LAYER_FILTER_HIGH_PASS:
+      return {ICON_FILTER, 0};
+    case MA_PAINT_LAYER_FILTER_EDGE_DETECT:
+      return {ICON_MOD_EDGESPLIT, 0};
+    case MA_PAINT_LAYER_FILTER_EMBOSS:
+      return {ICON_MOD_BEVEL, 0};
+    case MA_PAINT_LAYER_FILTER_ERODE_DILATE:
+      return {ICON_MOD_THICKNESS, 0};
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
       return {ICON_COLOR, paint_glyph::COLORIZE};
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
@@ -560,6 +570,26 @@ static const PaintFilterAddKind paint_effect_add_kinds[] = {
      N_("Blur"),
      "Blur the active layer's colours with a box or gaussian kernel",
      MA_PAINT_LAYER_FILTER_BLUR},
+    {"EFFECT_SHARPEN",
+     N_("Sharpen"),
+     "Sharpen the active layer's colours around the details a blur removes",
+     MA_PAINT_LAYER_FILTER_SHARPEN},
+    {"EFFECT_HIGH_PASS",
+     N_("High Pass"),
+     "Keep the active layer's details above a blurred copy of them",
+     MA_PAINT_LAYER_FILTER_HIGH_PASS},
+    {"EFFECT_EDGE_DETECT",
+     N_("Edge Detect"),
+     "Outline the active layer's edges with the Sobel gradient magnitude",
+     MA_PAINT_LAYER_FILTER_EDGE_DETECT},
+    {"EFFECT_EMBOSS",
+     N_("Emboss"),
+     "Emboss the active layer's colours with a diagonal lighting kernel",
+     MA_PAINT_LAYER_FILTER_EMBOSS},
+    {"EFFECT_ERODE_DILATE",
+     N_("Erode / Dilate"),
+     "Shrink or grow the bright regions of the active layer by the kernel's radius",
+     MA_PAINT_LAYER_FILTER_ERODE_DILATE},
 };
 
 /**

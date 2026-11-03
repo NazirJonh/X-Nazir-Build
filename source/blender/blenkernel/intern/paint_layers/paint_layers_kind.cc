@@ -144,6 +144,63 @@ static const PaintLayerKindParam blur_params[] = {
 };
 static_assert(std::size(blur_params) == PAINT_LAYER_BLUR_PARAM_NUM);
 
+static const PaintLayerKindParam sharpen_params[] = {
+    /* Whole texels: the half reach of the box the detail is read against. */
+    {"radius", "Radius", 2.0f, 1.0f, 64.0f, PaintLayerKindParamType::Int},
+    /* The unsharp weight: how much of what the blur removed comes back. */
+    {"amount", "Amount", 0.5f, 0.0f, 2.0f},
+};
+static_assert(std::size(sharpen_params) == PAINT_LAYER_SHARPEN_PARAM_NUM);
+
+static const PaintLayerKindEnumItem high_pass_output_items[] = {
+    {PAINT_LAYER_HIGH_PASS_OUTPUT_COLOR, "COLOR", "Color"},
+    {PAINT_LAYER_HIGH_PASS_OUTPUT_GRAYSCALE, "GRAYSCALE", "Grayscale"},
+};
+static_assert(int(std::size(high_pass_output_items)) - 1 == PAINT_LAYER_HIGH_PASS_OUTPUT_GRAYSCALE);
+
+static const PaintLayerKindParam high_pass_params[] = {
+    /* Whole texels: the half reach of the box the detail is read against. Wider than the other
+     * neighborhood kinds, since a high pass keeps only what is finer than this reach and a 4K map
+     * needs a reach of hundreds of texels to keep its larger shapes. */
+    {"radius", "Radius", 4.0f, 1.0f, 256.0f, PaintLayerKindParamType::Int},
+    /* How much of the detail survives: one keeps it all, zero flattens to the mid grey, above one
+     * boosts it (the detail is small against the grey it sits on). */
+    {"contrast", "Contrast", 1.0f, 0.0f, 10.0f},
+    /* Grayscale takes the row's luminance before the filter, for a black and white detail map. It
+     * comes last so the positions of the parameters of an older file stay as they were. */
+    {"output",
+     "Output",
+     float(PAINT_LAYER_HIGH_PASS_OUTPUT_COLOR),
+     0.0f,
+     float(PAINT_LAYER_HIGH_PASS_OUTPUT_GRAYSCALE),
+     PaintLayerKindParamType::Enum,
+     high_pass_output_items,
+     int(std::size(high_pass_output_items))},
+};
+static_assert(std::size(high_pass_params) == PAINT_LAYER_HIGH_PASS_PARAM_NUM);
+
+static const PaintLayerKindEnumItem erode_dilate_mode_items[] = {
+    {PAINT_LAYER_ERODE_DILATE_ERODE, "ERODE", "Erode"},
+    {PAINT_LAYER_ERODE_DILATE_DILATE, "DILATE", "Dilate"},
+};
+static_assert(int(std::size(erode_dilate_mode_items)) - 1 == PAINT_LAYER_ERODE_DILATE_DILATE);
+
+static const PaintLayerKindParam erode_dilate_params[] = {
+    /* The direction is part of what the effect computes, so an edit of it is a shape edit and the
+     * caches re-key; the kernel reads no node either way. */
+    {"mode",
+     "Mode",
+     float(PAINT_LAYER_ERODE_DILATE_ERODE),
+     0.0f,
+     float(PAINT_LAYER_ERODE_DILATE_DILATE),
+     PaintLayerKindParamType::Enum,
+     erode_dilate_mode_items,
+     int(std::size(erode_dilate_mode_items))},
+    /* The half reach of the square window: the extreme is taken over (2r+1)^2 texels. */
+    {"radius", "Radius", 2.0f, 1.0f, 64.0f, PaintLayerKindParamType::Int},
+};
+static_assert(std::size(erode_dilate_params) == PAINT_LAYER_ERODE_DILATE_PARAM_NUM);
+
 /* The curves live in #MaterialPaintLayer::curves, like the ramp's band in its payload. */
 static const PaintLayerKindParam curves_params[] = {
     {"curves", "Curves", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Curves},
@@ -366,6 +423,50 @@ static const PaintLayerKindInfo kinds[] = {
      blur_params,
      int(std::size(blur_params)),
      uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_SHARPEN,
+     "Sharpen",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     sharpen_params,
+     int(std::size(sharpen_params)),
+     uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_HIGH_PASS,
+     "High Pass",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     high_pass_params,
+     int(std::size(high_pass_params)),
+     uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    /* The Sobel gradient magnitude: a full-range step reads as one, a flat area as zero. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_EDGE_DETECT,
+     "Edge Detect",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     nullptr,
+     0,
+     uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    /* A diagonal 3x3 lighting kernel: a flat colour is its own result, an edge takes the light. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_EMBOSS,
+     "Emboss",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     nullptr,
+     0,
+     uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    /* The extreme of a square window per channel: min and max are separable, so the kernel is one
+     * pass per axis like the box blur's. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_ERODE_DILATE,
+     "Erode / Dilate",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     erode_dilate_params,
+     int(std::size(erode_dilate_params)),
+     uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
     /* A map-coverage operator: the map of its Base Color record is an external ID Map, so the map
      * is reference-only and a stroke must not turn it into a paint target. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -388,10 +489,6 @@ static const PaintLayerKindInfo kinds[] = {
      PAINT_LAYER_KIND_MAP_COVERAGE,
      true},
     /* TODO: Gradient Map filter, needs a ColorBand parameter. */
-    /* TODO: Sharpen filter, a neighborhood effect like Blur. */
-    /* TODO: Edge Detect filter, a neighborhood effect like Blur. */
-    /* TODO: Emboss filter, a neighborhood effect like Blur. */
-    /* TODO: Erode/Dilate filter, a neighborhood effect like Blur. */
     /* An Anchor Point is an inert marker inside a row: it publishes the content after the
      * corrections above it (or the mask after the mask items above it) and lays nothing itself. It
      * has no parameters and no channel records. */

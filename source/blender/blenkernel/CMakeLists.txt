@@ -276,6 +276,7 @@ set(SRC
   intern/paint_layers/paint_layers_composite.cc
   intern/paint_layers/paint_layers_composite_height.cc
   intern/paint_layers/paint_layers_composite_intern.hh
+  intern/paint_layers/paint_layers_effect_kernels.cc
   intern/paint_layers/paint_layers_edit.cc
   intern/paint_layers/paint_layers_gradient.cc
   intern/paint_layers/paint_layers_gradient_surface.cc
@@ -909,6 +910,7 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_map_coverage_test.cc
     intern/paint_layers/tests/paint_layers_material_bake_test.cc
     intern/paint_layers/tests/paint_layers_material_source_test.cc
+    intern/paint_layers/tests/paint_layers_neighborhood_kind_test.cc
     intern/paint_layers/tests/paint_layers_object_mask_test.cc
     intern/paint_layers/tests/paint_layers_refactor_test.cc
     intern/paint_layers/tests/paint_layers_target_test.cc

@@ -14,6 +14,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fmt/format.h>
+#include <string>
+#include <unordered_map>
 #include <functional>
 #include <iterator>
 #include <memory>
@@ -1904,16 +1907,6 @@ static bool anchor_slice_region_is_exact(const Material &ma,
   return true;
 }
 
-/** A private copy of \a source, for an update of a buffer someone else still reads. */
-static std::shared_ptr<ImBuf> anchor_slice_buffer_clone(const ImBuf &source)
-{
-  ImBuf *copy = IMB_dupImBuf(&source);
-  if (copy == nullptr) {
-    return {};
-  }
-  return std::shared_ptr<ImBuf>(copy, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
-}
-
 /* -------------------------------------------------------------------- */
 /** \name Paint Layer Effect Cache
  *
@@ -2081,144 +2074,6 @@ static void paint_layer_effect_entry_images(const PaintMaterialCompositeImageLay
   }
   for (const PaintMaterialCompositeImageLayer &child : layer.children) {
     paint_layer_effect_entry_images(child, r_images);
-  }
-}
-
-/**
- * One horizontal box pass over the RGB of \a buffer, edges clamped, alpha untouched. Rows run in
- * parallel; each keeps a scratch copy of itself, since the sliding window reads behind the texel
- * the pass has already written.
- */
-static void paint_layer_effect_blur_pass_h(ImBuf &buffer, const int radius)
-{
-  const int width = buffer.x;
-  const int height = buffer.y;
-  float *pixels = buffer.float_data_for_write();
-  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
-    Vector<float> row(int64_t(width) * 4);
-    for (const int y : range) {
-      float *dst = pixels + int64_t(y) * width * 4;
-      memcpy(row.data(), dst, size_t(width) * sizeof(float[4]));
-      float sum[3] = {0.0f, 0.0f, 0.0f};
-      int lo = 0;
-      int hi = -1;
-      for (const int x : IndexRange(width)) {
-        const int new_hi = std::min(x + radius, width - 1);
-        for (int k = hi + 1; k <= new_hi; k++) {
-          sum[0] += row[int64_t(k) * 4 + 0];
-          sum[1] += row[int64_t(k) * 4 + 1];
-          sum[2] += row[int64_t(k) * 4 + 2];
-        }
-        hi = new_hi;
-        const int new_lo = std::max(x - radius, 0);
-        for (int k = lo; k < new_lo; k++) {
-          sum[0] -= row[int64_t(k) * 4 + 0];
-          sum[1] -= row[int64_t(k) * 4 + 1];
-          sum[2] -= row[int64_t(k) * 4 + 2];
-        }
-        lo = new_lo;
-        const float inv = 1.0f / float(hi - lo + 1);
-        dst[int64_t(x) * 4 + 0] = sum[0] * inv;
-        dst[int64_t(x) * 4 + 1] = sum[1] * inv;
-        dst[int64_t(x) * 4 + 2] = sum[2] * inv;
-      }
-    }
-  });
-}
-
-/**
- * One vertical box pass over the RGB of \a buffer, edges clamped, alpha untouched.
- *
- * The pass walks the buffer row by row with one sliding sum per column, instead of walking it
- * column by column: a column walk of a 4K float buffer strided by a row is a cache miss per texel,
- * where the row walk reads and writes each line once. The window adds rows below the one being
- * written but subtracts rows above it, which the pass has already overwritten, so a small ring
- * keeps the originals of those. The sum is sequential in y, so the pass stays single-threaded; the
- * horizontal pass above carries the parallelism.
- */
-static void paint_layer_effect_blur_pass_v(ImBuf &buffer, const int radius)
-{
-  const int width = buffer.x;
-  const int height = buffer.y;
-  float *pixels = buffer.float_data_for_write();
-  Vector<float> sums(int64_t(width) * 3, 0.0f);
-  /* The window drops row `k` once `y - radius > k`, but row `k` was overwritten when the pass wrote
-   * it. The originals of the rows still to be dropped are kept in a ring: a row is saved just before
-   * it is written and read back `radius + 1` rows later, so `radius + 2` slots never collide. */
-  const int ring_num = radius + 2;
-  Vector<float> ring(int64_t(ring_num) * width * 3);
-  int lo = 0;
-  int hi = -1;
-  for (const int y : IndexRange(height)) {
-    const int new_hi = std::min(y + radius, height - 1);
-    for (int k = hi + 1; k <= new_hi; k++) {
-      const float *src = pixels + int64_t(k) * width * 4;
-      for (const int x : IndexRange(width)) {
-        float *s = sums.data() + int64_t(x) * 3;
-        s[0] += src[int64_t(x) * 4 + 0];
-        s[1] += src[int64_t(x) * 4 + 1];
-        s[2] += src[int64_t(x) * 4 + 2];
-      }
-    }
-    hi = new_hi;
-    const int new_lo = std::max(y - radius, 0);
-    for (int k = lo; k < new_lo; k++) {
-      const float *original = ring.data() + int64_t(k % ring_num) * width * 3;
-      for (const int x : IndexRange(width)) {
-        float *s = sums.data() + int64_t(x) * 3;
-        s[0] -= original[int64_t(x) * 3 + 0];
-        s[1] -= original[int64_t(x) * 3 + 1];
-        s[2] -= original[int64_t(x) * 3 + 2];
-      }
-    }
-    lo = new_lo;
-    const float inv = 1.0f / float(hi - lo + 1);
-    float *dst = pixels + int64_t(y) * width * 4;
-    float *saved = ring.data() + int64_t(y % ring_num) * width * 3;
-    for (const int x : IndexRange(width)) {
-      saved[int64_t(x) * 3 + 0] = dst[int64_t(x) * 4 + 0];
-      saved[int64_t(x) * 3 + 1] = dst[int64_t(x) * 4 + 1];
-      saved[int64_t(x) * 3 + 2] = dst[int64_t(x) * 4 + 2];
-    }
-    for (const int x : IndexRange(width)) {
-      const float *s = sums.data() + int64_t(x) * 3;
-      dst[int64_t(x) * 4 + 0] = s[0] * inv;
-      dst[int64_t(x) * 4 + 1] = s[1] * inv;
-      dst[int64_t(x) * 4 + 2] = s[2] * inv;
-    }
-  }
-}
-
-/** A box blur of \a radius over the RGB of \a buffer, one pass per axis. */
-static void paint_layer_effect_blur_box(ImBuf &buffer, const int radius)
-{
-  const int r = std::clamp(radius, 1, std::max(buffer.x, buffer.y));
-  paint_layer_effect_blur_pass_h(buffer, r);
-  paint_layer_effect_blur_pass_v(buffer, r);
-}
-
-/** The kernel of \a effect over \a buffer in place, at full strength, RGB only. */
-static void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
-{
-  switch (eMaterialPaintLayerFilter(effect.kind_subtype)) {
-    case MA_PAINT_LAYER_FILTER_BLUR: {
-      const int radius = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BLUR_RADIUS);
-      if (paint_layer_kind_param_int_get(effect, PAINT_LAYER_BLUR_SHAPE) ==
-          PAINT_LAYER_BLUR_BOX)
-      {
-        paint_layer_effect_blur_box(buffer, radius);
-      }
-      else {
-        /* Three box passes approximate a gaussian; the radius reads as the per-pass half reach. */
-        const int pass = std::max(radius / 2, 1);
-        paint_layer_effect_blur_box(buffer, pass);
-        paint_layer_effect_blur_box(buffer, pass);
-        paint_layer_effect_blur_box(buffer, pass);
-      }
-      break;
-    }
-    default:
-      break;
   }
 }
 
@@ -2516,10 +2371,10 @@ bool BKE_paint_layers_slice_render(const Material &ma,
     color = std::move(held.color);
     coverage = std::move(held.coverage);
     if (color.use_count() > 1) {
-      color = anchor_slice_buffer_clone(*color);
+      color = paint_layer_anchor_slice_buffer_clone(*color);
     }
     if (coverage.use_count() > 1) {
-      coverage = anchor_slice_buffer_clone(*coverage);
+      coverage = paint_layer_anchor_slice_buffer_clone(*coverage);
     }
     if (color != nullptr && coverage != nullptr) {
       int rx0, ry0, rx1, ry1;
@@ -2736,6 +2591,27 @@ bool BKE_paint_layers_row_dimensions(const Material &ma,
       Span<PaintMaterialCompositeImageLayer>(&entry, 1), r_width, r_height);
 }
 
+/**
+ * The fallback reason a neighborhood effect gives: its kind's name, with the article a name in
+ * English takes. The text is built from the registry rather than listing every effect a second
+ * time, and cached so the returned pointer stays valid like a literal.
+ */
+static const char *paint_layer_neighborhood_reason(const PaintLayerKindInfo &kind)
+{
+  /* One string per kind, so two reasons held at once never share storage; the map's nodes keep
+   * their address while it grows. */
+  static thread_local std::unordered_map<const PaintLayerKindInfo *, std::string> reasons;
+  auto it = reasons.find(&kind);
+  if (it == reasons.end()) {
+    const bool vowel = ELEM(kind.name[0], 'A', 'E', 'I', 'O', 'U');
+    it = reasons
+             .emplace(&kind,
+                      fmt::format("{} {} correction is read", vowel ? "an" : "a", kind.name))
+             .first;
+  }
+  return it->second.c_str();
+}
+
 const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialCompositeImageLayer &layer,
                                                     const bool mask_slice)
 {
@@ -2800,11 +2676,16 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
     if (correction.anchor_point_coverage_image != nullptr) {
       return "a baked Anchor Point correction is read (no coverage map on the GPU)";
     }
-    /* A neighborhood effect (a Blur) has no pointwise shader branch: its result is a map the effect
-     * cache computes on the CPU, so the whole stack falls back rather than shading without it.
-     * Gated on the opacity that decides the CPU lays it too. */
-    if (correction.opacity > 0.0f && correction.filter == MA_PAINT_LAYER_FILTER_BLUR) {
-      return "a Blur correction is read";
+    /* A neighborhood effect has no pointwise shader branch: its result is a map the effect cache
+     * computes on the CPU, so the whole stack falls back rather than shading without it. The
+     * registry's #PAINT_LAYER_KIND_NEEDS_BAKE flag decides, so a new one needs no edit here. Gated
+     * on the opacity that decides the CPU lays it too. */
+    if (correction.opacity > 0.0f && paint_layer_filter_is_neighborhood(correction.filter)) {
+      const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
+                                                             correction.filter);
+      if (kind != nullptr) {
+        return paint_layer_neighborhood_reason(*kind);
+      }
     }
   }
   return nullptr;

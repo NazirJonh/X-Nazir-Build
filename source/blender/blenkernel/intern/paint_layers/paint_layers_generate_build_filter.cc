@@ -842,9 +842,11 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
       /* Map-coverage operators only exist in a mask, where #map_coverage_match_add builds them. */
       break;
-    case MA_PAINT_LAYER_FILTER_BLUR:
+    default:
       /* A neighborhood effect is left out of the live graph (#correction_lay): it never reaches
-       * this builder, and its result has no node chain to name. */
+       * this builder, and its result has no node chain to name. The registry decides, so a new one
+       * needs no case here; a new pointwise filter still has to add its own. */
+      BLI_assert(!paint_layer_effect_is_neighborhood(effect));
       break;
   }
   return false;

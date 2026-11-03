@@ -842,6 +842,23 @@ enum eMaterialPaintLayerFilter : int16_t {
    * computes it, and the row is baked for the live graph.
    */
   MA_PAINT_LAYER_FILTER_BLUR = 14,
+  /** Sharpen the colours below around the details a blur removes (unsharp masking). */
+  MA_PAINT_LAYER_FILTER_SHARPEN = 15,
+  /** Keep the details below above a blurred copy of them. */
+  MA_PAINT_LAYER_FILTER_HIGH_PASS = 16,
+  /**
+   * Outline the edges below with the Sobel operator's gradient magnitude, per channel. A
+   * neighborhood filter like the Blur: only a correction of a row, the effect cache computes it,
+   * and the row is baked for the live graph.
+   */
+  MA_PAINT_LAYER_FILTER_EDGE_DETECT = 17,
+  /** Emboss the colours below with a diagonal 3x3 lighting kernel; a flat colour stays as it is. */
+  MA_PAINT_LAYER_FILTER_EMBOSS = 18,
+  /**
+   * Erode or dilate the colours below: the minimum or maximum of a square neighbourhood per
+   * channel, by the kernel's radius. A neighborhood filter like the Blur.
+   */
+  MA_PAINT_LAYER_FILTER_ERODE_DILATE = 19,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

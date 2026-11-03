@@ -342,6 +342,44 @@ enum PaintLayerBlurParam : int {
   PAINT_LAYER_BLUR_PARAM_NUM = 2,
 };
 
+/** The positions of the Sharpen filter's parameters in its schema. */
+enum PaintLayerSharpenParam : int {
+  PAINT_LAYER_SHARPEN_RADIUS = 0,
+  PAINT_LAYER_SHARPEN_AMOUNT = 1,
+  PAINT_LAYER_SHARPEN_PARAM_NUM = 2,
+};
+
+/** The value of the High Pass filter's #PAINT_LAYER_HIGH_PASS_OUTPUT. */
+enum PaintLayerHighPassOutput : int {
+  /** The detail of each colour channel. */
+  PAINT_LAYER_HIGH_PASS_OUTPUT_COLOR = 0,
+  /** The detail of the luminance, the same grey in all three channels. */
+  PAINT_LAYER_HIGH_PASS_OUTPUT_GRAYSCALE = 1,
+};
+
+/** The positions of the High Pass filter's parameters in its schema. */
+enum PaintLayerHighPassParam : int {
+  PAINT_LAYER_HIGH_PASS_RADIUS = 0,
+  PAINT_LAYER_HIGH_PASS_CONTRAST = 1,
+  PAINT_LAYER_HIGH_PASS_OUTPUT = 2,
+  PAINT_LAYER_HIGH_PASS_PARAM_NUM = 3,
+};
+
+/** The direction of the Erode/Dilate kernel, the value of its #PAINT_LAYER_ERODE_DILATE_MODE. */
+enum PaintLayerErodeDilateMode : int {
+  /** The minimum of the neighbourhood: the bright regions shrink. */
+  PAINT_LAYER_ERODE_DILATE_ERODE = 0,
+  /** The maximum of the neighbourhood: the bright regions grow. */
+  PAINT_LAYER_ERODE_DILATE_DILATE = 1,
+};
+
+/** The positions of the Erode/Dilate filter's parameters in its schema. */
+enum PaintLayerErodeDilateParam : int {
+  PAINT_LAYER_ERODE_DILATE_MODE = 0,
+  PAINT_LAYER_ERODE_DILATE_RADIUS = 1,
+  PAINT_LAYER_ERODE_DILATE_PARAM_NUM = 2,
+};
+
 /**
  * The HSL filter applied to \a rgb in place, at full strength: the Hue/Saturation/Value node's
  * function (hue shifted by `hue - 0.5` turns, saturation clamped to one, value scaled, result not

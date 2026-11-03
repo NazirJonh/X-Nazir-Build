@@ -58,6 +58,9 @@ static void dial_drag_finish(bContext *C, wmOperator *op, const bool restore_sta
   }
 
   WM_cursor_modal_restore(CTX_wm_window(C));
+  /* Paired with the #WM_paint_cursor_suppress_push in #dial_drag_invoke: with the drag done, the
+   * paint cursors (brush outline, Shift+click line hint) return, drawn by the redraw below. */
+  WM_paint_cursor_suppress_pop();
   ED_area_status_text(CTX_wm_area(C), nullptr);
   if (data->dial != nullptr) {
     BLI_dial_free(data->dial);
@@ -100,6 +103,14 @@ wmOperatorStatus dial_drag_invoke(bContext *C,
   if (WM_cursor_modal_is_set_ok(win)) {
     WM_cursor_modal_set(win, params.horizontal ? WM_CURSOR_X_MOVE : WM_CURSOR_NSEW_SCROLL);
   }
+
+  /* The drag owns the feedback while it runs -- the header shows the angle, and the light itself
+   * is turning -- so the paint cursors (the brush outline, the Shift+click line hint) would only
+   * draw over it. Handed back by #dial_drag_finish, like the modal cursor above. */
+  WM_paint_cursor_suppress_push();
+  /* Erase the paint cursors already on screen: without a move event no redraw drops them, so a
+   * press held still would keep showing them for the whole drag. */
+  WM_paint_cursor_tag_redraw(win, region);
 
   op->customdata = data;
   dial_drag_update_header(C, params, data->initial_angle);

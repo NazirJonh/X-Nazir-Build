@@ -38,6 +38,11 @@ from bl_ui.properties_grease_pencil_common import (
 from bl_ui.space_toolsystem_common import (
     ToolActivePanelHelper,
 )
+# Shared with the toolbar panels that step aside in the Paint group; one definition, so the two
+# modules can never drift apart on which group the paint controls belong to.
+from bl_ui.space_view3d_toolbar import (
+    _sculpt_paint_group_is_paint,
+)
 from bpy.app.translations import (
     pgettext_iface as iface_,
     pgettext_rpt as rpt_,
@@ -142,16 +147,6 @@ def _sculpt_paint_tool_is_paint(context, tool=None):
             'CLONE',
         }
     return bool(tool.use_paint_canvas)
-
-
-def _sculpt_paint_group_is_paint(context):
-    """Whether the Sculpt toolbar shows the Paint group (`Workspace.sculpt_paint_tool_display`).
-
-    Mirrors `ED_paint_curve_sculpt_tool_display_is_paint()`, the isolate operator's poll. The group
-    is what decides, not the brush type: the drawing brushes also sit in the Sculpt group.
-    """
-    workspace = getattr(context, "workspace", None)
-    return workspace is not None and workspace.sculpt_paint_tool_display == 'PAINT'
 
 
 # Material Symbols "all_out" (U+E90B); the UI font fallback draws it as an icon glyph.
@@ -2249,13 +2244,17 @@ class VIEW3D_MT_editor_menus(Menu):
             elif mesh.use_paint_mask_vertex and mode_string in {'PAINT_WEIGHT', 'PAINT_VERTEX'}:
                 layout.menu("VIEW3D_MT_select_paint_mask_vertex")
         elif mode_string == 'SCULPT':
-            # Selection-mask tools for texture painting on image / material canvases.
-            paint_mode = tool_settings.paint_mode
-            if paint_mode.canvas_source in {'IMAGE', 'MATERIAL'}:
-                layout.menu("VIEW3D_MT_select_image_paint")
-            # Face selection masking for sculpt painting (color attribute / image canvases).
-            if obj is not None and obj.type == 'MESH' and obj.data.use_paint_mask:
-                layout.menu("VIEW3D_MT_select_paint_mask")
+            # Both menus paint-selection UI: they belong to the Paint group of the Sculpt toolbar,
+            # so the Sculpt group shows neither of them (matching the Paint Mask header button,
+            # which the C++ header template hides the same way).
+            if _sculpt_paint_group_is_paint(context):
+                # Selection-mask tools for texture painting on image / material canvases.
+                paint_mode = tool_settings.paint_mode
+                if paint_mode.canvas_source in {'IMAGE', 'MATERIAL'}:
+                    layout.menu("VIEW3D_MT_select_image_paint")
+                # Face selection masking for sculpt painting (color attribute / image canvases).
+                if obj is not None and obj.type == 'MESH' and obj.data.use_paint_mask:
+                    layout.menu("VIEW3D_MT_select_paint_mask")
         elif mode_string not in {
                 'SCULPT', 'SCULPT_CURVES', 'PAINT_GREASE_PENCIL', 'SCULPT_GREASE_PENCIL', 'WEIGHT_GREASE_PENCIL',
                 'VERTEX_GREASE_PENCIL',
@@ -8920,9 +8919,14 @@ def sculpt_face_selection_mask_controls_visible(context):
     mask controls are only offered for the Sculpt tools that consume the mask (Paint, Smear, Blur,
     Texture Fill and the Mask by Color / Color Gradient operator tools), and they stay reachable while the masking
     is enabled so it can be turned off again. Kept in sync with the Paint Mask button drawn by
-    ``uiTemplatePaintModeSelection()`` in the 3D View header."""
+    ``uiTemplatePaintModeSelection()`` in the 3D View header.
+
+    Only for the Paint group of the Sculpt toolbar: the Sculpt group hides the mask button too, so
+    the overlay's Face Selection control follows it."""
     ob = context.active_object
     if ob is None or ob.type != 'MESH':
+        return False
+    if not _sculpt_paint_group_is_paint(context):
         return False
     if ob.data.use_paint_mask:
         return True

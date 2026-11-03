@@ -24,6 +24,8 @@
 
 #include "DEG_depsgraph.hh"
 
+#include "ED_paint_curve_draw.hh"
+
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
@@ -124,7 +126,23 @@ static void uiTemplatePaintModeSelection(ui::Layout *layout, bContext *C)
     /* Sculpt painting (color attribute / image canvases) supports the face selection mask to
      * restrict strokes to selected faces; vertex masking and bone selection are not used. Only
      * the tools that consume the mask show the toggle -- but the toggle always stays reachable
-     * while the masking is enabled, so it can be turned off again. */
+     * while the masking is enabled, so it can be turned off again.
+     *
+     * All of this belongs to the Paint group of the Sculpt Mode toolbar: while the toolbar shows
+     * the Sculpt group there is no face-selection painting to mask, so the toggle stays hidden.
+     * Reaching the Paint group restores it, which is where masking enabled earlier can be
+     * switched off again.
+     *
+     * NOTE: the display group is deliberately not folded into
+     * #BKE_paint_sculpt_face_selection_mask_supported below. The group lives in
+     * #bke::WorkSpaceRuntime, so folding it in would widen a public BKE signature for one caller,
+     * which needs agreement upstream; the overlay resolves the same group on its own where it has
+     * the context (`overlay_instance.cc`). */
+    if (!ed::sculpt_paint::ED_paint_curve_sculpt_tool_display_is_paint(C)) {
+      /* The Paint Mask button is all this branch draws, so a Sculpt group can simply leave the
+       * template: the texture/weight/vertex paint branches below don't apply to Sculpt Mode. */
+      return;
+    }
     const bool mask_enabled = RNA_boolean_get(&meshptr, "use_paint_mask");
     const bToolRef *active_tool = WM_toolsystem_ref_from_context(C);
     const char *active_tool_idname = active_tool != nullptr ? active_tool->idname : nullptr;

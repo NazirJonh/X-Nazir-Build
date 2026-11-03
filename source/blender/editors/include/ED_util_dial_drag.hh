@@ -50,6 +50,11 @@ constexpr float DIAL_DRAG_SNAP_DEGREES = 15.0f;
 /**
  * Operator callbacks for a dial drag. Use from `invoke`, `modal` and `cancel`; the drag ends when
  * the button that started it is released (confirm) or Escape is pressed (restore the start angle).
+ *
+ * While the drag runs, the paint cursors (the brush outline, the Shift+click line hint) are
+ * suppressed: the drag owns the feedback, and a brush cursor would only draw over the angle it
+ * turns. #dial_drag_invoke suppresses them and #dial_drag_cancel / a terminal #dial_drag_modal
+ * bring them back.
  */
 wmOperatorStatus dial_drag_invoke(bContext *C,
                                   wmOperator *op,

@@ -275,7 +275,10 @@ class TEXTURE_UL_texpaintslots(UIList):
 def _sculpt_paint_group_is_paint(context):
     """Whether the Sculpt toolbar shows the Paint group (`Workspace.sculpt_paint_tool_display`).
 
-    Dyntopo and Remesh belong to the sculpting tools, so their panels step aside in that group.
+    Mirrors `ED_paint_curve_sculpt_tool_display_is_paint()`, the gate shared by every paint control:
+    the header's Paint Mask button, the layered-material isolate poll, the overlay's Face Selection
+    control and the Select menu. The group decides, not the brush type: the drawing brushes also sit
+    in the Sculpt group, so Dyntopo and Remesh step aside in the Paint group the same way.
     """
     workspace = getattr(context, "workspace", None)
     return workspace is not None and workspace.sculpt_paint_tool_display == 'PAINT'

@@ -5833,6 +5833,12 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             tool_id = cls._tool_id_display_default[display]
             if not activate_by_id(context, 'VIEW_3D', tool_id):
                 return False
+        # `on_tool_activated` follows only tools exclusive to one group; when the tool of the
+        # group is shared by both, the stored group would stay behind and the Paint-only controls
+        # (header Paint Mask button, Select menus, overlay) would keep showing in the Sculpt group.
+        workspace = getattr(context, "workspace", None)
+        if workspace is not None and workspace.sculpt_paint_tool_display != display:
+            workspace.sculpt_paint_tool_display = display
         return True
 
     def draw(self, context):

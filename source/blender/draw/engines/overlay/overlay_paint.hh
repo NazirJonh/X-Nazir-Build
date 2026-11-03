@@ -98,8 +98,13 @@ class Paints : Overlay {
     if (paint_ctx_mode_ == CTX_MODE_SCULPT) {
       /* The face-selection display is only meaningful for the painting tools that consume the
        * face selection mask; mesh-deforming tools hide it. The engine resolves this in
-       * #State::sculpt_face_selection_mask_supported. */
-      sculpt_face_mask_tool_ok_ = state.sculpt_face_selection_mask_supported;
+       * #State::sculpt_face_selection_mask_supported.
+       * The Paint display group gates it as well, so the mask shows in the viewport exactly where
+       * its Paint Mask button is reachable: in the Sculpt group the button is hidden, and a veil
+       * that cannot be switched off there is noise. The mesh keeps `use_paint_mask`, so coming
+       * back to the Paint group restores the display. */
+      sculpt_face_mask_tool_ok_ = state.sculpt_face_selection_mask_supported &&
+                                  state.sculpt_tool_display_paint;
     }
 
     /* Init in any case to release the data. */

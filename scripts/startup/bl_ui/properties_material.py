@@ -19,6 +19,7 @@ from bl_ui.properties_material_paint_layers import (
     draw_material_channel_mixer,
     draw_material_channel_set,
     draw_material_color_balance,
+    draw_material_color_match,
     draw_material_kind_params,
     draw_material_layer_channels,
     draw_material_layer_height,
@@ -791,6 +792,8 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 layout.separator()
                 if item.is_map_coverage:
                     draw_material_mask_coverage_item(layout, context, item)
+                elif item.color_match_supported:
+                    draw_material_color_match(layout, item.kind_params)
                 else:
                     draw_material_kind_params(layout, item.kind_params)
                     if item.ramp_supported:
@@ -845,7 +848,10 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         # A filter has no map or channel records: what it is told is the parameters of its kind.
         if layer.source == 'FILTER':
             layout.separator()
-            draw_material_kind_params(layout, layer.kind_params)
+            if layer.color_match_supported:
+                draw_material_color_match(layout, layer.kind_params)
+            else:
+                draw_material_kind_params(layout, layer.kind_params)
             if layer.kind_needs_bake:
                 draw_material_update_now(layout, owner)
             if layer.ramp_supported:

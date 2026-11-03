@@ -860,6 +860,24 @@ enum eMaterialPaintLayerFilter : int16_t {
    */
   MA_PAINT_LAYER_FILTER_ERODE_DILATE = 19,
   /**
+   * Bleed a coloured glow off the row's own light: the content's luminance, choked by the spread,
+   * blurred by the width and screened over the colour under the effect's opacity. A neighborhood
+   * filter like the Blur.
+   */
+  MA_PAINT_LAYER_FILTER_GLOW = 20,
+  /**
+   * Lay a distance ramp from the row's content borders inward: a bevel the source chooses the
+   * borders by (the content's alpha or its luminance), the corner type shapes (round or angular)
+   * and the smooth blur softens. A neighborhood filter like the Blur.
+   */
+  MA_PAINT_LAYER_FILTER_BEVEL = 21,
+  /**
+   * Grade every colour from a source colour to a target one (the input's own average or a picked
+   * colour), with an optional per-texel color variation on top. A CPU-computed effect: the source
+   * average is a statistic of the whole map.
+   */
+  MA_PAINT_LAYER_FILTER_COLOR_MATCH = 22,
+  /**
    * Scale the colours below by a power of two, shift them and raise the result to a gamma: what an
    * exposure control does to an image, per channel, in scene linear.
    */

@@ -78,11 +78,13 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
     BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
   }
 
-  /** An opaque 8x8 byte image, grey: \a left on the left half, \a right on the right one. */
+  /** An opaque 8x8 byte image, grey: \a left on the left half, \a right on the right one. The
+   * right half's alpha is \a alpha_right, so a transparent half can hand a kernel a real border. */
   Image *add_shade_image(const char *name,
                          const uchar left,
                          const uchar right,
-                         const bool split_rows = false)
+                         const bool split_rows = false,
+                         const uchar alpha_right = 255)
   {
     const int size = 8;
     const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -95,12 +97,13 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
     for (const int y : IndexRange(size)) {
       for (const int x : IndexRange(size)) {
         /* With \a split_rows the edge runs along x: the top half is \a left, the bottom \a right. */
-        const uchar value = ((split_rows ? y : x) < size / 2) ? left : right;
+        const bool right_half = (split_rows ? y : x) >= size / 2;
+        const uchar value = right_half ? right : left;
         uchar *p = pixels + (int64_t(y) * size + x) * 4;
         p[0] = value;
         p[1] = value;
         p[2] = value;
-        p[3] = 255;
+        p[3] = right_half ? alpha_right : 255;
       }
     }
     BKE_image_release_ibuf(image, ibuf, lock);
@@ -1047,6 +1050,280 @@ TEST_F(PaintLayersEffectTest, every_pointwise_kind_has_a_shader_branch_or_refuse
     }
     BKE_paint_layers_effect_cache_free_all();
   }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Glow, Bevel and Color Match
+ * \{ */
+
+TEST_F(PaintLayersEffectTest, a_glow_at_zero_opacity_changes_nothing)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+
+  MaterialPaintLayer *glow = add_effect(*row, MA_PAINT_LAYER_FILTER_GLOW);
+  ASSERT_TRUE(paint_layer_kind_param_set(*glow, PAINT_LAYER_GLOW_OPACITY, 0.0f));
+  Vector<float> after;
+  ASSERT_TRUE(render_channel(after, width, height));
+  for (const int x : IndexRange(width)) {
+    EXPECT_NEAR(linear_pixel(after, width, x, 4), linear_pixel(before, width, x, 4), 2e-3f);
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_precise_glow_bleeds_the_bright_side_over_the_dark_one)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *glow = add_effect(*row, MA_PAINT_LAYER_FILTER_GLOW);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*glow, PAINT_LAYER_GLOW_MODE, PAINT_LAYER_GLOW_PRECISE));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*glow, PAINT_LAYER_GLOW_WIDTH, 2));
+
+  /* One box pass of reach two over the white left half (columns 0..3): the first dark column sees
+   * two of its five window texels lit, the next one a single one, the third none. The glow screens
+   * white under the colour, so the dark side takes exactly the window's lit share and the bright
+   * side stays white. */
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 0, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 3, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 4), 0.4f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 5, 4), 0.2f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 6, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 7, 4), 0.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersEffectTest, changing_the_glows_color_moves_the_result_and_reuses_the_entry)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *glow = add_effect(*row, MA_PAINT_LAYER_FILTER_GLOW);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*glow, PAINT_LAYER_GLOW_WIDTH, 2));
+
+  Vector<float> white_pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(white_pixels, width, height));
+  ASSERT_EQ(paint_layer_effect_cache_entry_count(), 1);
+
+  /* The colour reads as zero in the scalar fold the hash runs the parameters through, so it joins
+   * the hash on its own: a different result, keyed by the colour the same way the width is. */
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(paint_layer_kind_param_color_set(*glow, PAINT_LAYER_GLOW_COLOR, red));
+  Vector<float> red_pixels;
+  ASSERT_TRUE(render_channel(red_pixels, width, height));
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1)
+      << "the new colour replaced the entry, it did not add one";
+  bool differs = false;
+  for (const int64_t i : red_pixels.index_range()) {
+    if (std::abs(red_pixels[i] - white_pixels[i]) > 1e-3f) {
+      differs = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(differs) << "a red glow tints what a white one bleaches";
+}
+
+TEST_F(PaintLayersEffectTest, changing_the_color_match_target_moves_the_result_and_reuses_the_entry)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 128));
+  MaterialPaintLayer *match = add_effect(*row, MA_PAINT_LAYER_FILTER_COLOR_MATCH);
+
+  Vector<float> before_pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before_pixels, width, height));
+  ASSERT_EQ(paint_layer_effect_cache_entry_count(), 1);
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, kColor, layers));
+  const uint64_t before_hash = BKE_paint_material_composite_stack_hash(layers);
+
+  /* The target reads as zero in the scalar fold the hash runs the parameters through, so it joins
+   * the hash on its own: a different result, keyed by the colour the same way a Glow's is. The grey
+   * half is what shows the shift: pure black and white are fixed points of the HSL grade, their
+   * luma pins them, so a black/white row would not move under a red target. */
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(
+      paint_layer_kind_param_color_set(*match, PAINT_LAYER_COLOR_MATCH_TARGET_COLOR, red));
+  Vector<float> after_pixels;
+  ASSERT_TRUE(render_channel(after_pixels, width, height));
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1)
+      << "the new target replaced the entry, it did not add one";
+  bool differs = false;
+  for (const int64_t i : after_pixels.index_range()) {
+    if (std::abs(after_pixels[i] - before_pixels[i]) > 1e-3f) {
+      differs = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(differs) << "a red target shifts what a grey one matched";
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, kColor, layers));
+  EXPECT_NE(BKE_paint_material_composite_stack_hash(layers), before_hash)
+      << "the stack hash carries the effect's colour";
+}
+
+TEST_F(PaintLayersEffectTest, the_glow_at_a_max_spread_keeps_a_narrow_sharp_mask)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 128));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+
+  MaterialPaintLayer *glow = add_effect(*row, MA_PAINT_LAYER_FILTER_GLOW);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*glow, PAINT_LAYER_GLOW_MODE, PAINT_LAYER_GLOW_PRECISE));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*glow, PAINT_LAYER_GLOW_WIDTH, 1));
+  /* The luminance is clamped to [0, 1], so a spread of one would choke the mask to nothing; the
+   * schema stops the slider at 0.99, and a request for one clamps down to it. */
+  ASSERT_TRUE(paint_layer_kind_param_set(*glow, PAINT_LAYER_GLOW_SPREAD, 1.0f));
+  EXPECT_NEAR(paint_layer_kind_param_get(*glow, PAINT_LAYER_GLOW_SPREAD), 0.99f, 1e-6f);
+
+  /* At the maximum the mask keeps only the brightest texels: the white half glows over the edge
+   * into the grey one, while the grey half -- which a spread of zero would have lit at its own
+   * luminance -- stays out of the mask. Not the fully choked glow a spread of one would be. */
+  Vector<float> after;
+  ASSERT_TRUE(render_channel(after, width, height));
+  ASSERT_EQ(after.size(), before.size());
+  bool differs = false;
+  for (const int64_t i : after.index_range()) {
+    if (std::abs(after[i] - before[i]) > 1e-3f) {
+      differs = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(differs) << "a spread of 0.99 still lays a glow";
+  EXPECT_GT(std::abs(linear_pixel(after, width, 4, 4) - linear_pixel(before, width, 4, 4)), 2e-3f)
+      << "the glow bleeds over the bright edge into the first grey column";
+  EXPECT_NEAR(linear_pixel(after, width, 3, 4), linear_pixel(before, width, 3, 4), 2e-3f)
+      << "the bright side keeps its light";
+  EXPECT_NEAR(linear_pixel(after, width, 5, 4), linear_pixel(before, width, 5, 4), 2e-3f)
+      << "the grey beyond the one-texel reach is untouched";
+}
+
+TEST_F(PaintLayersEffectTest, a_bevel_of_an_opaque_row_is_one_everywhere)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 0, 0));
+  add_effect(*row, MA_PAINT_LAYER_FILTER_BEVEL);
+
+  /* The shade images are opaque and the buffer's edge is not a border: no seed, the ramp is full. */
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (const int y : IndexRange(height)) {
+    for (const int x : IndexRange(width)) {
+      EXPECT_NEAR(linear_pixel(pixels, width, x, y), 1.0f, 2e-3f) << x << "," << y;
+    }
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_bevel_ramps_from_a_transparent_border)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 255, false, 0));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+
+  MaterialPaintLayer *bevel = add_effect(*row, MA_PAINT_LAYER_FILTER_BEVEL);
+  ASSERT_TRUE(
+      paint_layer_kind_param_int_set(*bevel, PAINT_LAYER_BEVEL_CORNER, PAINT_LAYER_BEVEL_ANGULAR));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*bevel, PAINT_LAYER_BEVEL_DISTANCE, 2));
+
+  /* The right half is transparent, so the border runs along column 4: the angular ramp of the
+   * distance two is one two texels in and a half beside the border, and the transparent side keeps
+   * what it showed before -- the alpha the kernel leaves alone. */
+  Vector<float> pixels;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (const int y : IndexRange(height)) {
+    EXPECT_NEAR(linear_pixel(pixels, width, 0, y), 1.0f, 2e-3f);
+    EXPECT_NEAR(linear_pixel(pixels, width, 1, y), 1.0f, 2e-3f);
+    EXPECT_NEAR(linear_pixel(pixels, width, 2, y), 1.0f, 2e-3f);
+    EXPECT_NEAR(linear_pixel(pixels, width, 3, y), 0.5f, 2e-3f);
+    for (const int x : IndexRange(4, 4)) {
+      EXPECT_NEAR(linear_pixel(pixels, width, x, y), linear_pixel(before, width, x, y), 2e-3f)
+          << "the transparent side keeps its bottom, at " << x << "," << y;
+    }
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_bevel_of_a_luminance_source_ramps_from_the_dark)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *bevel = add_effect(*row, MA_PAINT_LAYER_FILTER_BEVEL);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*bevel, PAINT_LAYER_BEVEL_SOURCE,
+                                             PAINT_LAYER_BEVEL_SOURCE_LUMINANCE));
+  ASSERT_TRUE(
+      paint_layer_kind_param_int_set(*bevel, PAINT_LAYER_BEVEL_CORNER, PAINT_LAYER_BEVEL_ANGULAR));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*bevel, PAINT_LAYER_BEVEL_DISTANCE, 2));
+
+  /* The source is the luminance now: the dark half is the border the ramp rises from, with the
+   * same angular steps the alpha source walks, and the row is opaque so the composite shows it all. */
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (const int y : IndexRange(height)) {
+    EXPECT_NEAR(linear_pixel(pixels, width, 0, y), 1.0f, 2e-3f);
+    EXPECT_NEAR(linear_pixel(pixels, width, 2, y), 1.0f, 2e-3f);
+    EXPECT_NEAR(linear_pixel(pixels, width, 3, y), 0.5f, 2e-3f);
+    EXPECT_NEAR(linear_pixel(pixels, width, 4, y), 0.0f, 2e-3f);
+    EXPECT_NEAR(linear_pixel(pixels, width, 7, y), 0.0f, 2e-3f);
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_color_match_of_a_solid_row_lands_on_the_target)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
+  MaterialPaintLayer *match = add_effect(*row, MA_PAINT_LAYER_FILTER_COLOR_MATCH);
+  const float target[4] = {0.8f, 0.2f, 0.1f, 1.0f};
+  ASSERT_TRUE(paint_layer_kind_param_color_set(*match, PAINT_LAYER_COLOR_MATCH_TARGET_COLOR, target));
+
+  /* The source is the input's own average, so every texel of a solid input is the source and the
+   * grade puts it exactly on the target. */
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 2, 2), target[0], 5e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 6, 5), target[0], 5e-3f);
+}
+
+TEST_F(PaintLayersEffectTest, a_color_match_averages_only_where_there_is_content)
+{
+  /* The left half is grey with content, the right half is white with no alpha: the average the
+   * source reads is the grey alone, since a transparent texel brings no weight -- a plain mean of
+   * the map would be pulled toward the white and the left half would miss the target. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 255, false, 0));
+  MaterialPaintLayer *match = add_effect(*row, MA_PAINT_LAYER_FILTER_COLOR_MATCH);
+  const float target[4] = {0.8f, 0.2f, 0.1f, 1.0f};
+  ASSERT_TRUE(paint_layer_kind_param_color_set(*match, PAINT_LAYER_COLOR_MATCH_TARGET_COLOR,
+                                               target));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (const int y : IndexRange(height)) {
+    EXPECT_NEAR(linear_pixel(pixels, width, 0, y), target[0], 5e-3f);
+    EXPECT_NEAR(linear_pixel(pixels, width, 3, y), target[0], 5e-3f);
+  }
+}
+
+TEST_F(PaintLayersEffectTest, the_bake_renders_the_glow_the_composite_shows)
+{
+  expect_bake_matches_composite(MA_PAINT_LAYER_FILTER_GLOW, [](MaterialPaintLayer &effect) {
+    EXPECT_TRUE(paint_layer_kind_param_int_set(effect, PAINT_LAYER_GLOW_WIDTH, 2));
+  });
+}
+
+TEST_F(PaintLayersEffectTest, the_bake_renders_the_color_match_the_composite_shows)
+{
+  expect_bake_matches_composite(MA_PAINT_LAYER_FILTER_COLOR_MATCH);
 }
 
 /** \} */

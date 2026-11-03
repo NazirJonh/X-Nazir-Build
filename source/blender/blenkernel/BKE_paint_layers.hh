@@ -146,6 +146,9 @@ bool BKE_paint_layers_color_balance_edited(Material &ma, const void *data);
 /** Whether \a row's kind reads a channel-mixer matrix (the Channel Mixer filter). */
 bool BKE_paint_layers_channel_mixer_supported(const MaterialPaintLayer &row);
 
+/** Whether \a row's kind is a Color Match grade, which draws its parameters through its own hook. */
+bool BKE_paint_layers_color_match_supported(const MaterialPaintLayer &row);
+
 /**
  * The row's channel-mixer payload, allocated with the neutral matrix (identity, zero constants) when
  * it has none. Only a kind with a Channel Mixer parameter gets one; returns null for every other

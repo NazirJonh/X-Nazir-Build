@@ -263,6 +263,13 @@ static bool composite_row_source_describe(const Material &ma,
     if (isolating || !paint_layer_adjustment_acts(ma, layer, channel)) {
       return false;
     }
+    /* A NEEDS_BAKE kind computes itself against the row's own bake through the effect cache, which
+     * an adjustment has no path to: a corrupted row of one is left out, not silently described with
+     * the parameters the cache never sees -- those carry no colour. */
+    BLI_assert(!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_NEEDS_BAKE));
+    if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_NEEDS_BAKE)) {
+      return false;
+    }
     out.adjustment_filter = layer.kind_subtype;
     composite_filter_params(layer, out.adjustment_params);
     out.adjustment_ramp = BKE_paint_layers_ramp_get(layer);
@@ -490,7 +497,14 @@ static void composite_mask_items_describe(
       continue;
     }
     if (paint_layer_effect_is_filter(mask)) {
-      /* A filter changes the coverage so far; it owns no map or grey and no record. */
+      /* A filter changes the coverage so far; it owns no map or grey and no record. A NEEDS_BAKE
+       * kind computes itself only through its row's effect cache, which a mask item has no path
+       * to: a corrupted item of one is skipped, not silently described with the parameters the
+       * cache never sees -- those carry no colour. */
+      BLI_assert(!paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_NEEDS_BAKE));
+      if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_NEEDS_BAKE)) {
+        continue;
+      }
       PaintMaterialCompositeMaskItem filter;
       filter.opacity = BKE_paint_layers_effective_opacity(mask);
       filter.filter = mask.kind_subtype;
@@ -2019,6 +2033,19 @@ static uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const 
   composite_filter_params(effect, params);
   for (const float param : params) {
     mix_float(param);
+  }
+  /* A Color parameter reads as zero in the scalar fold above, so its channels join the hash here;
+   * otherwise a Glow's or a Color Match's colour edit would keep the cached result. */
+  if (const PaintLayerKindInfo *kind = paint_layer_kind_of(effect)) {
+    for (const int i : IndexRange(kind->params_num)) {
+      if (kind->params[i].type == PaintLayerKindParamType::Color) {
+        float color[4];
+        paint_layer_kind_param_color_get(effect, i, color);
+        for (const float component : color) {
+          mix_float(component);
+        }
+      }
+    }
   }
   return hash;
 }

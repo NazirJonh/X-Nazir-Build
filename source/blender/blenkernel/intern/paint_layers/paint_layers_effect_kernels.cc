@@ -6,7 +6,8 @@
  * \ingroup bke
  *
  * The image kernels of the CPU-computed effects: a Blur's box passes, an Erode / Dilate's
- * sliding-window extremum, and the 3x3 Sobel and Emboss convolutions. They read and write a whole
+ * sliding-window extremum, the 3x3 Sobel and Emboss convolutions, a Glow's blurred luminance, a
+ * Bevel's distance transform and a Color Match's grade. They read and write a whole
  * #ImBuf and know nothing about the composite, the description or the cache; the CPU composite and
  * the bake both reach them through #paint_layer_effect_kernel_apply.
  */
@@ -199,22 +200,33 @@ static void paint_layer_effect_unsharp_apply(ImBuf &buffer, const int radius, Op
   });
 }
 
-/** The scene-linear luminance of each texel of \a buffer written to all three colour channels. */
-static void paint_layer_effect_to_luminance(ImBuf &buffer)
+/**
+ * Run \a op over the RGB of \a buffer, one texel at a time, in place: rows run in parallel, and
+ * \a op receives the texel's column, row and pointer and writes its three colour channels. Alpha is
+ * untouched. The one frame the per-texel effects write their result through.
+ */
+template<typename Op> static void paint_layer_effect_map_rgb(ImBuf &buffer, Op op)
 {
   const int width = buffer.x;
   float *pixels = buffer.float_data_for_write();
   threading::parallel_for(IndexRange(buffer.y), 64, [&](const IndexRange range) {
     for (const int y : range) {
-      float *dst = pixels + int64_t(y) * width * 4;
+      float *row = pixels + int64_t(y) * width * 4;
       for (const int x : IndexRange(width)) {
-        float *texel = dst + int64_t(x) * 4;
-        const float luminance = IMB_colormanagement_get_luminance(texel);
-        texel[0] = luminance;
-        texel[1] = luminance;
-        texel[2] = luminance;
+        op(x, y, row + int64_t(x) * 4);
       }
     }
+  });
+}
+
+/** The scene-linear luminance of each texel of \a buffer written to all three colour channels. */
+static void paint_layer_effect_to_luminance(ImBuf &buffer)
+{
+  paint_layer_effect_map_rgb(buffer, [](const int /*x*/, const int /*y*/, float *texel) {
+    const float luminance = IMB_colormanagement_get_luminance(texel);
+    texel[0] = luminance;
+    texel[1] = luminance;
+    texel[2] = luminance;
   });
 }
 
@@ -547,6 +559,237 @@ static void paint_layer_effect_noise_apply(ImBuf &buffer, const MaterialPaintLay
   });
 }
 
+/** Three box passes, a gaussian approximation; the radius reads as the per-pass half reach. */
+static void paint_layer_effect_blur_soft(ImBuf &buffer, const int radius)
+{
+  const int pass = std::max(radius / 2, 1);
+  paint_layer_effect_blur_box(buffer, pass);
+  paint_layer_effect_blur_box(buffer, pass);
+  paint_layer_effect_blur_box(buffer, pass);
+}
+
+/**
+ * The Glow kernel over \a buffer in place: the content's luminance, choked by the spread, blurred
+ * by the width and screened under the colour at the opacity. The glow bleeds off the content's own
+ * light, so the bright areas of a row spill over its dark ones; the source is the colour
+ * management's scene-linear luminance, the one the High Pass and the Noise read. Alpha is untouched.
+ */
+static void paint_layer_effect_glow_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
+{
+  const int mode = paint_layer_kind_param_int_get(effect, PAINT_LAYER_GLOW_MODE);
+  const int width = paint_layer_kind_param_int_get(effect, PAINT_LAYER_GLOW_WIDTH);
+  const float spread = paint_layer_kind_param_get(effect, PAINT_LAYER_GLOW_SPREAD);
+  const float opacity = paint_layer_kind_param_get(effect, PAINT_LAYER_GLOW_OPACITY);
+  float color[4];
+  paint_layer_kind_param_color_get(effect, PAINT_LAYER_GLOW_COLOR, color);
+  if (opacity <= 0.0f) {
+    return;
+  }
+
+  std::shared_ptr<ImBuf> glow = paint_layer_anchor_slice_buffer_clone(buffer);
+  if (glow == nullptr) {
+    return;
+  }
+  const int tile_width = buffer.x;
+  const float choke_den = std::max(1.0f - spread, 1e-6f);
+  paint_layer_effect_map_rgb(*glow, [&](const int /*x*/, const int /*y*/, float *texel) {
+    const float luma = clamp_f(IMB_colormanagement_get_luminance(texel), 0.0f, 1.0f);
+    const float m = clamp_f((luma - spread) / choke_den, 0.0f, 1.0f);
+    texel[0] = m;
+    texel[1] = m;
+    texel[2] = m;
+  });
+
+  /* One box pass is precise; three soften into a gaussian falloff. */
+  if (mode == PAINT_LAYER_GLOW_PRECISE) {
+    paint_layer_effect_blur_box(*glow, width);
+  }
+  else {
+    paint_layer_effect_blur_soft(*glow, width);
+  }
+
+  /* Screened under the colour, `out = c + glow * (1 - c)`: a black texel under the glow lands
+   * exactly on the colour, a lit one keeps its light, and the result stays bounded where the colour
+   * is. */
+  const float *glow_data = glow->float_buffer.data;
+  paint_layer_effect_map_rgb(buffer, [&](const int x, const int y, float *texel) {
+    const float m = glow_data[(int64_t(y) * tile_width + x) * 4] * opacity;
+    for (const int c : IndexRange(3)) {
+      texel[c] += color[c] * m * (1.0f - texel[c]);
+    }
+  });
+}
+
+/**
+ * The Bevel kernel over \a buffer in place: the distance of each texel from the content's border,
+ * normalized by the distance parameter and clamped to [0, 1], written to all three colour channels,
+ * then softened by a box blur of the smooth radius. The source parameter says what a border is: the
+ * content's alpha below one half, or its luminance below one half -- the same scene-linear
+ * luminance the Glow and the Noise read, so an opaque row bevels by the dark side of its paint. A
+ * row with no border is one everywhere. Alpha is untouched.
+ *
+ * The distance is a two-pass chamfer transform. The round corner type walks sides at 3 and
+ * diagonals at 4 (an approximation of the Euclidean distance, hence the 1/3 normalization); the
+ * angular one is the chessboard walk, which keeps corners square. An interior texel reads its
+ * neighbours through the row pointers alone; only the edge rows and columns pay for the clamped
+ * read, which was the pass's whole cost on a 4K map.
+ */
+static void paint_layer_effect_bevel_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
+{
+  const int distance = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_DISTANCE);
+  const bool luminance = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_SOURCE) ==
+                         PAINT_LAYER_BEVEL_SOURCE_LUMINANCE;
+  const bool angular = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_CORNER) ==
+                       PAINT_LAYER_BEVEL_ANGULAR;
+  const int smooth = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_SMOOTH);
+  const float side = angular ? 1.0f : 3.0f;
+  const float diagonal = angular ? 1.0f : 4.0f;
+  const float normalize = angular ? 1.0f : 1.0f / 3.0f;
+  constexpr float UNSEEN = 1e12f;
+
+  const int width = buffer.x;
+  const int height = buffer.y;
+  const int64_t count = int64_t(width) * height;
+  const float *source = buffer.float_data();
+  Vector<float> dist(count);
+  for (const int64_t i : IndexRange(count)) {
+    const float *texel = source + i * 4;
+    const float interior = luminance ? IMB_colormanagement_get_luminance(texel) : texel[3];
+    dist[i] = (interior >= 0.5f) ? UNSEEN : 0.0f;
+  }
+  /* The buffer's edge is not a border: a neighbour past it is read as the edge texel itself. */
+  const auto at = [&](const int x, const int y) {
+    return dist[int64_t(std::clamp(y, 0, height - 1)) * width + std::clamp(x, 0, width - 1)];
+  };
+  for (const int y : IndexRange(height)) {
+    float *row = dist.data() + int64_t(y) * width;
+    const float *above = (y > 0) ? row - width : row;
+    for (const int x : IndexRange(width)) {
+      if (y == 0 || x == 0 || x == width - 1) {
+        row[x] = std::min({row[x],
+                           at(x - 1, y) + side,
+                           at(x, y - 1) + side,
+                           at(x - 1, y - 1) + diagonal,
+                           at(x + 1, y - 1) + diagonal});
+      }
+      else {
+        row[x] = std::min({row[x],
+                           row[x - 1] + side,
+                           above[x] + side,
+                           above[x - 1] + diagonal,
+                           above[x + 1] + diagonal});
+      }
+    }
+  }
+  for (int y = height - 1; y >= 0; y--) {
+    float *row = dist.data() + int64_t(y) * width;
+    const float *below = (y < height - 1) ? row + width : row;
+    for (int x = width - 1; x >= 0; x--) {
+      if (y == height - 1 || x == 0 || x == width - 1) {
+        row[x] = std::min({row[x],
+                           at(x + 1, y) + side,
+                           at(x, y + 1) + side,
+                           at(x + 1, y + 1) + diagonal,
+                           at(x - 1, y + 1) + diagonal});
+      }
+      else {
+        row[x] = std::min({row[x],
+                           row[x + 1] + side,
+                           below[x] + side,
+                           below[x + 1] + diagonal,
+                           below[x - 1] + diagonal});
+      }
+    }
+  }
+
+  const float reach = float(std::max(distance, 1));
+  paint_layer_effect_map_rgb(buffer, [&](const int x, const int y, float *texel) {
+    const float value = clamp_f(dist[int64_t(y) * width + x] * normalize / reach, 0.0f, 1.0f);
+    texel[0] = value;
+    texel[1] = value;
+    texel[2] = value;
+  });
+  if (smooth > 0) {
+    paint_layer_effect_blur_box(buffer, smooth);
+  }
+}
+
+/** One thread's running total of the average: the alpha-weighted sums and the weight they divide
+ * by. Doubles, so a 4K map's accumulation stays far past the float precision of its pixels. */
+struct PaintLayerAverageRun {
+  double sum[3] = {0.0, 0.0, 0.0};
+  double weight = 0.0;
+};
+
+/** The alpha-weighted average RGB of \a buffer; black when it holds no content. Rows accumulate in
+ * parallel and the totals reduce in the order the threads finish in, which moves the sum by a
+ * fraction of its last double digit -- far under anything a colour shows. */
+static void paint_layer_effect_color_average(const ImBuf &buffer, float r_average[3])
+{
+  const float *pixels = buffer.float_data();
+  const int width = buffer.x;
+  const PaintLayerAverageRun total = threading::parallel_reduce(
+      IndexRange(buffer.y),
+      64,
+      PaintLayerAverageRun{},
+      [&](const IndexRange range, const PaintLayerAverageRun &identity) {
+        PaintLayerAverageRun run = identity;
+        for (const int y : range) {
+          const float *row = pixels + int64_t(y) * width * 4;
+          for (const int x : IndexRange(width)) {
+            const float *texel = row + int64_t(x) * 4;
+            if (texel[3] > 0.0f) {
+              for (const int c : IndexRange(3)) {
+                run.sum[c] += double(texel[c]) * texel[3];
+              }
+              run.weight += texel[3];
+            }
+          }
+        }
+        return run;
+      },
+      [](const PaintLayerAverageRun &a, const PaintLayerAverageRun &b) {
+        PaintLayerAverageRun out;
+        for (const int c : IndexRange(3)) {
+          out.sum[c] = a.sum[c] + b.sum[c];
+        }
+        out.weight = a.weight + b.weight;
+        return out;
+      });
+  for (const int c : IndexRange(3)) {
+    r_average[c] = (total.weight > 0.0) ? float(total.sum[c] / total.weight) : 0.0f;
+  }
+}
+
+/**
+ * The Color Match kernel over \a buffer in place: the source colour (the input's own average, or
+ * the picked one) graded to the target colour, with the optional variation on top. Alpha is
+ * untouched.
+ */
+static void paint_layer_effect_color_match_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
+{
+  float source[4];
+  float target[4];
+  paint_layer_kind_param_color_get(effect, PAINT_LAYER_COLOR_MATCH_SOURCE_COLOR, source);
+  paint_layer_kind_param_color_get(effect, PAINT_LAYER_COLOR_MATCH_TARGET_COLOR, target);
+  if (!paint_layer_kind_param_bool_get(effect, PAINT_LAYER_COLOR_MATCH_SOURCE_PICKED)) {
+    paint_layer_effect_color_average(buffer, source);
+  }
+  const bool variation_on = paint_layer_kind_param_bool_get(effect,
+                                                            PAINT_LAYER_COLOR_MATCH_VARIATION);
+  PaintLayerColorMatchVariation variation;
+  if (variation_on) {
+    variation.hue = paint_layer_kind_param_get(effect, PAINT_LAYER_COLOR_MATCH_VARIATION_HUE);
+    variation.chroma = paint_layer_kind_param_get(effect,
+                                                  PAINT_LAYER_COLOR_MATCH_VARIATION_CHROMA);
+    variation.luma = paint_layer_kind_param_get(effect, PAINT_LAYER_COLOR_MATCH_VARIATION_LUMA);
+  }
+
+  paint_layer_effect_map_rgb(buffer, [&](const int x, const int y, float *texel) {
+    paint_layer_color_match_apply(source, target, variation, x, y, texel);
+  });
+}
+
 void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
 {
   switch (eMaterialPaintLayerFilter(effect.kind_subtype)) {
@@ -558,11 +801,7 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &ef
         paint_layer_effect_blur_box(buffer, radius);
       }
       else {
-        /* Three box passes approximate a gaussian; the radius reads as the per-pass half reach. */
-        const int pass = std::max(radius / 2, 1);
-        paint_layer_effect_blur_box(buffer, pass);
-        paint_layer_effect_blur_box(buffer, pass);
-        paint_layer_effect_blur_box(buffer, pass);
+        paint_layer_effect_blur_soft(buffer, radius);
       }
       break;
     }
@@ -612,6 +851,15 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &ef
     }
     case MA_PAINT_LAYER_FILTER_NOISE:
       paint_layer_effect_noise_apply(buffer, effect);
+      break;
+    case MA_PAINT_LAYER_FILTER_GLOW:
+      paint_layer_effect_glow_apply(buffer, effect);
+      break;
+    case MA_PAINT_LAYER_FILTER_BEVEL:
+      paint_layer_effect_bevel_apply(buffer, effect);
+      break;
+    case MA_PAINT_LAYER_FILTER_COLOR_MATCH:
+      paint_layer_effect_color_match_apply(buffer, effect);
       break;
     default:
       break;

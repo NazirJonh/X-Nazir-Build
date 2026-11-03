@@ -459,6 +459,90 @@ enum PaintLayerErodeDilateParam : int {
   PAINT_LAYER_ERODE_DILATE_PARAM_NUM = 2,
 };
 
+/** The kernel of the Glow filter, the value of its #PAINT_LAYER_GLOW_MODE parameter. */
+enum PaintLayerGlowMode : int {
+  /** Three box passes: a soft, gaussian-like falloff. */
+  PAINT_LAYER_GLOW_SOFT = 0,
+  /** One box pass: a hard-edged falloff. */
+  PAINT_LAYER_GLOW_PRECISE = 1,
+};
+
+/** The positions of the Glow filter's parameters in its schema. */
+enum PaintLayerGlowParam : int {
+  PAINT_LAYER_GLOW_MODE = 0,
+  /** Whole texels: the kernel's half reach. */
+  PAINT_LAYER_GLOW_WIDTH = 1,
+  /** The luminance the glow starts at: a higher value chokes the source to its bright core. */
+  PAINT_LAYER_GLOW_SPREAD = 2,
+  PAINT_LAYER_GLOW_OPACITY = 3,
+  PAINT_LAYER_GLOW_COLOR = 4,
+  PAINT_LAYER_GLOW_PARAM_NUM = 5,
+};
+
+/** What the Bevel filter reads its border from, the value of its #PAINT_LAYER_BEVEL_SOURCE
+ * parameter. */
+enum PaintLayerBevelSource : int {
+  /** The content's own alpha: a row painted edge to edge has no border and is one everywhere. */
+  PAINT_LAYER_BEVEL_SOURCE_ALPHA = 0,
+  /** The scene-linear luminance, the one the Glow and the Noise read: the dark side of the content
+   * is the border the ramp rises from. */
+  PAINT_LAYER_BEVEL_SOURCE_LUMINANCE = 1,
+};
+
+/** The corner metric of the Bevel filter, the value of its #PAINT_LAYER_BEVEL_CORNER parameter. */
+enum PaintLayerBevelCorner : int {
+  /** The chamfer 3-4 walk: an approximation of the Euclidean distance that rounds the corners. */
+  PAINT_LAYER_BEVEL_ROUND = 0,
+  /** The chessboard walk: the corners stay square. */
+  PAINT_LAYER_BEVEL_ANGULAR = 1,
+};
+
+/** The positions of the Bevel filter's parameters in its schema. */
+enum PaintLayerBevelParam : int {
+  PAINT_LAYER_BEVEL_SOURCE = 0,
+  /** Whole texels the ramp takes to rise from the border to one. */
+  PAINT_LAYER_BEVEL_DISTANCE = 1,
+  PAINT_LAYER_BEVEL_CORNER = 2,
+  /** Whole texels of the box blur laid over the finished ramp; zero leaves it as it is. */
+  PAINT_LAYER_BEVEL_SMOOTH = 3,
+  PAINT_LAYER_BEVEL_PARAM_NUM = 4,
+};
+
+/** The positions of the Color Match filter's parameters in its schema. */
+enum PaintLayerColorMatchParam : int {
+  /** On: the source colour is the picked one; off: the average of the input itself. */
+  PAINT_LAYER_COLOR_MATCH_SOURCE_PICKED = 0,
+  PAINT_LAYER_COLOR_MATCH_SOURCE_COLOR = 1,
+  PAINT_LAYER_COLOR_MATCH_TARGET_COLOR = 2,
+  /** On: a per-texel jitter of the three amounts below is laid over the grade. */
+  PAINT_LAYER_COLOR_MATCH_VARIATION = 3,
+  /** The jitter's reach in turns of hue. */
+  PAINT_LAYER_COLOR_MATCH_VARIATION_HUE = 4,
+  PAINT_LAYER_COLOR_MATCH_VARIATION_CHROMA = 5,
+  PAINT_LAYER_COLOR_MATCH_VARIATION_LUMA = 6,
+  PAINT_LAYER_COLOR_MATCH_PARAM_NUM = 7,
+};
+
+/** The per-texel jitter a Color Match lays over the grade: the reach in turns of hue and in shares
+ * of chroma and luma. Zero amounts leave the jitter out. */
+struct PaintLayerColorMatchVariation {
+  float hue = 0.0f;
+  float chroma = 0.0f;
+  float luma = 0.0f;
+};
+
+/**
+ * The Color Match grade applied to one texel \a rgb in place: each HSL component moves by the
+ * target's difference from the source's, then the variation jitters it from a hash of the texel
+ * (\a x, \a y). Zero amounts leave the jitter out.
+ */
+void paint_layer_color_match_apply(const float source_color[3],
+                                   const float target_color[3],
+                                   const PaintLayerColorMatchVariation &variation,
+                                   int x,
+                                   int y,
+                                   float rgb[3]);
+
 /** The positions of the Exposure filter's parameters in its schema. */
 enum PaintLayerExposureParam : int {
   /** The power of two the colour is scaled by: one stop per unit. */

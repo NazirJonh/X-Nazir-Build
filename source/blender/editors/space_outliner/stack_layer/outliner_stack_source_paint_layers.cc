@@ -454,6 +454,12 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_NOISE:
       /* No glyph of its own yet: the particle-point icon names a scatter of grains. */
       return {ICON_PARTICLE_POINT, 0};
+    case MA_PAINT_LAYER_FILTER_GLOW:
+      return {ICON_LIGHT, 0};
+    case MA_PAINT_LAYER_FILTER_BEVEL:
+      return {ICON_MOD_BEVEL, 0};
+    case MA_PAINT_LAYER_FILTER_COLOR_MATCH:
+      return {ICON_NODE_COMPOSITING, 0};
     case MA_PAINT_LAYER_FILTER_NORMAL_CONVERT:
       /* No glyph of its own yet: the vertex-normals icon names what the filter converts. */
       return {ICON_NORMALS_VERTEX, 0};
@@ -628,6 +634,18 @@ static const PaintFilterAddKind paint_effect_add_kinds[] = {
      N_("Noise"),
      "Lay a grain (gaussian, uniform, speckle or salt and pepper) over the active layer's colours",
      MA_PAINT_LAYER_FILTER_NOISE},
+    {"EFFECT_GLOW",
+     N_("Glow"),
+     "Bleed a coloured glow off the active layer's own light",
+     MA_PAINT_LAYER_FILTER_GLOW},
+    {"EFFECT_BEVEL",
+     N_("Bevel"),
+     "Lay a distance ramp from the borders of the active layer's content inward",
+     MA_PAINT_LAYER_FILTER_BEVEL},
+    {"EFFECT_COLOR_MATCH",
+     N_("Color Match"),
+     "Grade the active layer's colours from a source colour to a target one",
+     MA_PAINT_LAYER_FILTER_COLOR_MATCH},
 };
 
 /**
@@ -663,7 +681,10 @@ static bool paint_filter_is_new(const int16_t filter)
               MA_PAINT_LAYER_FILTER_DEBAND,
               MA_PAINT_LAYER_FILTER_NORMAL_CONVERT,
               MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
-              MA_PAINT_LAYER_FILTER_NOISE);
+              MA_PAINT_LAYER_FILTER_NOISE,
+              MA_PAINT_LAYER_FILTER_GLOW,
+              MA_PAINT_LAYER_FILTER_BEVEL,
+              MA_PAINT_LAYER_FILTER_COLOR_MATCH);
 }
 
 /** The row of one content correction, hung off the row \a owner_ordinal names. */

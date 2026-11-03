@@ -249,6 +249,103 @@ static const PaintLayerKindParam blur_params[] = {
 };
 static_assert(std::size(blur_params) == PAINT_LAYER_BLUR_PARAM_NUM);
 
+static const PaintLayerKindEnumItem glow_mode_items[] = {
+    {PAINT_LAYER_GLOW_SOFT, "SOFT", "Soft"},
+    {PAINT_LAYER_GLOW_PRECISE, "PRECISE", "Precise"},
+};
+static_assert(int(std::size(glow_mode_items)) - 1 == PAINT_LAYER_GLOW_PRECISE);
+
+static const PaintLayerKindParam glow_params[] = {
+    {"mode",
+     "Mode",
+     float(PAINT_LAYER_GLOW_SOFT),
+     0.0f,
+     float(PAINT_LAYER_GLOW_PRECISE),
+     PaintLayerKindParamType::Enum,
+     glow_mode_items,
+     int(std::size(glow_mode_items))},
+    {"width", "Width", 8.0f, 1.0f, 64.0f, PaintLayerKindParamType::Int},
+    /* The source luminance is clamped to [0, 1], so at a spread of one the mask would be zero
+     * everywhere: the slider stops one step below, where the mask is the narrow, sharp remnant of
+     * the brightest texels. */
+    {"spread", "Spread", 0.0f, 0.0f, 0.99f},
+    {"opacity", "Opacity", 1.0f, 0.0f, 1.0f},
+    {"color",
+     "Color",
+     0.0f,
+     0.0f,
+     1.0f,
+     PaintLayerKindParamType::Color,
+     nullptr,
+     0,
+     {1.0f, 1.0f, 1.0f, 1.0f}},
+};
+static_assert(std::size(glow_params) == PAINT_LAYER_GLOW_PARAM_NUM);
+
+static const PaintLayerKindEnumItem bevel_corner_items[] = {
+    {PAINT_LAYER_BEVEL_ROUND, "ROUND", "Round"},
+    {PAINT_LAYER_BEVEL_ANGULAR, "ANGULAR", "Angular"},
+};
+static_assert(int(std::size(bevel_corner_items)) - 1 == PAINT_LAYER_BEVEL_ANGULAR);
+
+static const PaintLayerKindEnumItem bevel_source_items[] = {
+    {PAINT_LAYER_BEVEL_SOURCE_ALPHA, "ALPHA", "Alpha"},
+    {PAINT_LAYER_BEVEL_SOURCE_LUMINANCE, "LUMINANCE", "Luminance"},
+};
+static_assert(int(std::size(bevel_source_items)) - 1 == PAINT_LAYER_BEVEL_SOURCE_LUMINANCE);
+
+static const PaintLayerKindParam bevel_params[] = {
+    {"source",
+     "Source",
+     float(PAINT_LAYER_BEVEL_SOURCE_ALPHA),
+     0.0f,
+     float(PAINT_LAYER_BEVEL_SOURCE_LUMINANCE),
+     PaintLayerKindParamType::Enum,
+     bevel_source_items,
+     int(std::size(bevel_source_items))},
+    {"distance", "Distance", 4.0f, 1.0f, 64.0f, PaintLayerKindParamType::Int},
+    {"corner",
+     "Corner Type",
+     float(PAINT_LAYER_BEVEL_ROUND),
+     0.0f,
+     float(PAINT_LAYER_BEVEL_ANGULAR),
+     PaintLayerKindParamType::Enum,
+     bevel_corner_items,
+     int(std::size(bevel_corner_items))},
+    {"smooth", "Smooth Blur", 0.0f, 0.0f, 64.0f, PaintLayerKindParamType::Int},
+};
+static_assert(std::size(bevel_params) == PAINT_LAYER_BEVEL_PARAM_NUM);
+
+static const PaintLayerKindParam color_match_params[] = {
+    /* Checkboxes, not enums: a choice that only picks which value the kernel reads is a value edit,
+     * not a shape edit. */
+    {"source_picked", "Picked Source", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Bool},
+    {"source_color",
+     "Source",
+     0.0f,
+     0.0f,
+     1.0f,
+     PaintLayerKindParamType::Color,
+     nullptr,
+     0,
+     {0.5f, 0.5f, 0.5f, 1.0f}},
+    {"target_color",
+     "Target",
+     0.0f,
+     0.0f,
+     1.0f,
+     PaintLayerKindParamType::Color,
+     nullptr,
+     0,
+     {0.5f, 0.5f, 0.5f, 1.0f}},
+    {"variation", "Color Variation", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Bool},
+    /* Turns of hue: half a turn is the whole circle either way. */
+    {"variation_hue", "Hue", 0.0f, 0.0f, 0.5f},
+    {"variation_chroma", "Chroma", 0.0f, 0.0f, 1.0f},
+    {"variation_luma", "Luma", 0.0f, 0.0f, 1.0f},
+};
+static_assert(std::size(color_match_params) == PAINT_LAYER_COLOR_MATCH_PARAM_NUM);
+
 static const PaintLayerKindParam exposure_params[] = {
     /* Stops of light: one unit doubles the colour, so it reads as an exposure compensation. */
     {"exposure", "Exposure", 0.0f, -5.0f, 5.0f},
@@ -411,6 +508,41 @@ float paint_layer_deband_noise(int x, int y, int seed, int channel, int pass)
 {
   /* Two passes per channel: the salt keeps them and the three channels apart. */
   return paint_layer_texel_hash_uniform(x, y, seed, uint32_t(channel * 2 + pass));
+}
+
+void paint_layer_color_match_apply(const float source_color[3],
+                                   const float target_color[3],
+                                   const PaintLayerColorMatchVariation &variation,
+                                   const int x,
+                                   const int y,
+                                   float rgb[3])
+{
+  /* The grade in HSL: each component of the texel moves by the target's difference from the
+   * source's, so a texel of the source's colour lands exactly on the target. */
+  float source_hsl[3], target_hsl[3], texel_hsl[3];
+  rgb_to_hsl_v(source_color, source_hsl);
+  rgb_to_hsl_v(target_color, target_hsl);
+  rgb_to_hsl_v(rgb, texel_hsl);
+
+  float hue = texel_hsl[0] + (target_hsl[0] - source_hsl[0]);
+  hue -= floorf(hue);
+  float chroma = clamp_f(texel_hsl[1] + (target_hsl[1] - source_hsl[1]), 0.0f, 1.0f);
+  float luma = clamp_f(texel_hsl[2] + (target_hsl[2] - source_hsl[2]), 0.0f, 1.0f);
+
+  if (variation.hue > 0.0f || variation.chroma > 0.0f || variation.luma > 0.0f) {
+    /* A hash of the texel keeps the jitter stable between evaluations; the salts keep the three
+     * components independent of each other. */
+    const auto jitter = [&](const uint32_t salt) {
+      return paint_layer_texel_hash_uniform(x, y, 0, salt) * 2.0f - 1.0f;
+    };
+    hue += jitter(1) * variation.hue;
+    hue -= floorf(hue);
+    chroma = clamp_f(chroma + jitter(2) * variation.chroma, 0.0f, 1.0f);
+    luma = clamp_f(luma + jitter(3) * variation.luma, 0.0f, 1.0f);
+  }
+
+  const float hsl[3] = {hue, chroma, luma};
+  hsl_to_rgb_v(hsl, rgb);
 }
 
 /**
@@ -728,6 +860,38 @@ static const PaintLayerKindInfo kinds[] = {
      erode_dilate_params,
      int(std::size(erode_dilate_params)),
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    /* A glow screens its colour under the content, so it stays bounded where the colour is. Its
+     * source is choked to [0, 1] by the same bound: an HDR texel above one does not brighten the
+     * glow, unlike the open-topped Sharpen and High Pass. The same clamp zeros the mask at a
+     * spread of one, so the slider stops at 0.99: the maximum keeps the narrow, sharp remnant over
+     * the brightest texels instead of choking the glow away. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_GLOW,
+     "Glow",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     glow_params,
+     int(std::size(glow_params)),
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    /* A bevel replaces the colour with a distance ramp from the content's borders: its alpha, or
+     * its luminance when the source says so -- an opaque row bevels by the dark side of its paint. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_BEVEL,
+     "Bevel",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     bevel_params,
+     int(std::size(bevel_params)),
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    /* The source average is a statistic of the whole map, which the live graph cannot express. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_COLOR_MATCH,
+     "Color Match",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     color_match_params,
+     int(std::size(color_match_params)),
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
     /* The gamma leaves a non-positive value alone and has no upper bound, so an HDR value above
      * one passes through: only the negative side is clamped. The same policy as Sharpen and High
      * Pass. */
@@ -863,7 +1027,18 @@ const PaintLayerKindInfo *paint_layer_kind_find(const int8_t source, const int16
 bool paint_layer_kind_role_allowed(const MaterialPaintLayer &row)
 {
   const PaintLayerKindInfo *info = paint_layer_kind_of(row);
-  return info != nullptr && (info->allowed_roles & paint_layer_role_bit(row.role)) != 0;
+  if (info == nullptr || (info->allowed_roles & paint_layer_role_bit(row.role)) == 0) {
+    return false;
+  }
+  /* A NEEDS_BAKE kind computes itself against the row's own bake through the effect cache, which
+   * only an effect reaches: a row or a mask item of one would be described from the parameters
+   * alone, and those carry no colour. */
+  if ((info->flags & PAINT_LAYER_KIND_NEEDS_BAKE) != 0 &&
+      row.role != MA_PAINT_LAYER_ROLE_EFFECT)
+  {
+    return false;
+  }
+  return true;
 }
 
 /** The schema entry \a index of \a row's kind, or null when the kind has no such parameter. */
@@ -1699,6 +1874,12 @@ bool paint_layer_kind_has_channel_mixer_param(const MaterialPaintLayer &row)
 bool BKE_paint_layers_channel_mixer_supported(const MaterialPaintLayer &row)
 {
   return paint_layer_kind_has_channel_mixer_param(row);
+}
+
+bool BKE_paint_layers_color_match_supported(const MaterialPaintLayer &row)
+{
+  return row.source == MA_PAINT_LAYER_SOURCE_FILTER &&
+         row.kind_subtype == MA_PAINT_LAYER_FILTER_COLOR_MATCH;
 }
 
 MaterialPaintLayerChannelMixer *BKE_paint_layers_channel_mixer_ensure(MaterialPaintLayer &row)

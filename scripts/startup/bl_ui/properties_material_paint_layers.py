@@ -444,6 +444,24 @@ def draw_material_channel_mixer(layout, mixer):
     col.prop(mixer, "constants", text="")
 
 
+def draw_material_color_match(layout, params):
+    """The parameters of a Color Match row, with the ones a switch silences left out.
+
+    The Source colour matters only when it is the picked one, and the variation's three amounts
+    only when the variation is on; the parameters are found by name, the way the kind's schema
+    names them.
+    """
+    hidden = set()
+    for param in params:
+        if param.name == "source_picked" and not param.bool_value:
+            hidden.add("source_color")
+        elif param.name == "variation" and not param.bool_value:
+            hidden.update(("variation_hue", "variation_chroma", "variation_luma"))
+    for param in params:
+        if param.name not in hidden:
+            _draw_kind_param(layout, param)
+
+
 def _draw_kind_param(layout, param):
     """One parameter of a row's kind, drawn as its type asks.
 

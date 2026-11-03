@@ -207,7 +207,10 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
                              "EFFECT_EDGE_DETECT",
                              "EFFECT_EMBOSS",
                              "EFFECT_ERODE_DILATE",
-                             "EFFECT_NOISE"})
+                             "EFFECT_NOISE",
+                             "EFFECT_GLOW",
+                             "EFFECT_BEVEL",
+                             "EFFECT_COLOR_MATCH"})
   {
     EXPECT_TRUE(kinds[at(effect)].is_effect) << effect;
   }

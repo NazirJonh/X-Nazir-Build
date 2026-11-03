@@ -3572,6 +3572,12 @@ static bool rna_MaterialPaintLayer_channel_mixer_supported_get(PointerRNA *ptr)
   return layer != nullptr && BKE_paint_layers_channel_mixer_supported(*layer);
 }
 
+static bool rna_MaterialPaintLayer_color_match_supported_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer != nullptr && BKE_paint_layers_color_match_supported(*layer);
+}
+
 /**
  * The matrix is a value of the generated graph (four group inputs), not a node's storage: the edit
  * marks the material value-edited (#BKE_paint_layers_channel_mixer_edited finds the owning row), so
@@ -5154,6 +5160,21 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "Channel Mixer",
      "Mix the colour channels: each output channel is a weighted sum of the input ones plus a "
      "constant"},
+    {MA_PAINT_LAYER_FILTER_GLOW,
+     "GLOW",
+     0,
+     "Glow",
+     "Bleed a coloured glow off the light of what is below"},
+    {MA_PAINT_LAYER_FILTER_BEVEL,
+     "BEVEL",
+     0,
+     "Bevel",
+     "Lay a distance ramp from the borders of what is below inward"},
+    {MA_PAINT_LAYER_FILTER_COLOR_MATCH,
+     "COLOR_MATCH",
+     0,
+     "Color Match",
+     "Grade the colours of what is below from a source colour to a target one"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -6364,6 +6385,11 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Channel Mixer Supported", "Whether the kind reads a channel-mixer matrix");
+
+  prop = RNA_def_property(srna, "color_match_supported", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_color_match_supported_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Color Match Supported", "Whether the kind is a Color Match grade");
 
   prop = RNA_def_property(srna, "kind_channel_mixer", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "MaterialPaintLayerChannelMixer");

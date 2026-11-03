@@ -122,7 +122,7 @@ void BKE_paint_layers_curves_live_begin();
 void BKE_paint_layers_curves_live_end();
 
 /**
- * Whether \a row's kind is a neighborhood effect (a Blur): the live graph cannot express it, so the
+ * Whether \a row's kind is CPU-computed (a Blur, a Noise): the live graph cannot express it, so the
  * row is baked for it once the user leaves the row or asks for the update.
  */
 bool BKE_paint_layers_kind_needs_bake(const MaterialPaintLayer &row);
@@ -142,6 +142,23 @@ struct MaterialPaintLayerColorBalance *BKE_paint_layers_color_balance_ensure(Mat
  * Called from the balance RNA update callbacks.
  */
 bool BKE_paint_layers_color_balance_edited(Material &ma, const void *data);
+
+/** Whether \a row's kind reads a channel-mixer matrix (the Channel Mixer filter). */
+bool BKE_paint_layers_channel_mixer_supported(const MaterialPaintLayer &row);
+
+/**
+ * The row's channel-mixer payload, allocated with the neutral matrix (identity, zero constants) when
+ * it has none. Only a kind with a Channel Mixer parameter gets one; returns null for every other
+ * kind.
+ */
+struct MaterialPaintLayerChannelMixer *BKE_paint_layers_channel_mixer_ensure(MaterialPaintLayer &row);
+
+/**
+ * Mark \a ma value-edited when \a data is a row's channel mixer: the matrix reaches the generated
+ * tree as group-input values, so no group is rebuilt and the bake flags follow the stack's hash.
+ * Called from the mixer RNA update callbacks.
+ */
+bool BKE_paint_layers_channel_mixer_edited(Material &ma, const void *data);
 
 /**
  * A strictly value-only edit (a row's opacity, a Fill row's constant): the generated tree keeps its

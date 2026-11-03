@@ -15,6 +15,7 @@
 #include <algorithm>
 
 #include "BLI_math_base.h"
+#include "BLI_hash.h"
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
@@ -29,6 +30,8 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_material_composite.hh"
+
+#include "BLO_read_write.hh"
 
 #include "DEG_depsgraph.hh"
 
@@ -54,6 +57,8 @@ static const PaintLayerKindParam hsl_params[] = {
     {"hue", "Hue", 0.5f, 0.0f, 1.0f},
     {"saturation", "Saturation", 1.0f, 0.0f, 2.0f},
     {"value", "Value", 1.0f, 0.0f, 2.0f},
+    /* The vibrance lifts the muted colours away from their grey; zero leaves the filter as it was. */
+    {"vibrance", "Vibrance", 0.0f, -1.0f, 1.0f},
 };
 static_assert(std::size(hsl_params) == PAINT_LAYER_HSL_PARAM_NUM);
 
@@ -69,6 +74,106 @@ static const PaintLayerKindParam posterize_params[] = {
     {"steps", "Steps", 4.0f, 2.0f, 64.0f, PaintLayerKindParamType::Int},
 };
 static_assert(std::size(posterize_params) == PAINT_LAYER_POSTERIZE_PARAM_NUM);
+
+static const PaintLayerKindParam invert_params[] = {
+    /* One turns the channel all the way to its complement, so the defaults keep the invert the
+     * unparameterised filter always was: an old material reads the same without a stored row. */
+    {"amount_r", "Amount R", 1.0f, 0.0f, 1.0f},
+    {"amount_g", "Amount G", 1.0f, 0.0f, 1.0f},
+    {"amount_b", "Amount B", 1.0f, 0.0f, 1.0f},
+};
+static_assert(std::size(invert_params) == PAINT_LAYER_INVERT_PARAM_NUM);
+
+static const PaintLayerKindEnumItem deband_mode_items[] = {
+    {PAINT_LAYER_DEBAND_DEBAND, "DEBAND", "Deband"},
+    {PAINT_LAYER_DEBAND_DITHER, "DITHER", "Dither"},
+};
+static_assert(int(std::size(deband_mode_items)) - 1 == PAINT_LAYER_DEBAND_DITHER);
+
+static const PaintLayerKindParam deband_params[] = {
+    /* The mode is chosen when the graph is built, so an edit of this is a shape edit; the noise
+     * the two modes share stays values beside it. */
+    {"mode",
+     "Mode",
+     float(PAINT_LAYER_DEBAND_DEBAND),
+     0.0f,
+     float(PAINT_LAYER_DEBAND_DITHER),
+     PaintLayerKindParamType::Enum,
+     deband_mode_items,
+     int(std::size(deband_mode_items))},
+    /* Whole bits: eight is where a byte image sits, sixteen leaves the colour alone. */
+    {"bits", "Bits", 8.0f, 4.0f, 16.0f, PaintLayerKindParamType::Int},
+    /* Whole seeds: which pattern of the family the texels read. */
+    {"seed", "Seed", 0.0f, 0.0f, 65535.0f, PaintLayerKindParamType::Int},
+};
+static_assert(std::size(deband_params) == PAINT_LAYER_DEBAND_PARAM_NUM);
+
+static const PaintLayerKindEnumItem noise_type_items[] = {
+    {PAINT_LAYER_NOISE_GAUSSIAN, "GAUSSIAN", "Gaussian"},
+    {PAINT_LAYER_NOISE_UNIFORM, "UNIFORM", "Uniform"},
+    {PAINT_LAYER_NOISE_SPECKLE, "SPECKLE", "Speckle"},
+    {PAINT_LAYER_NOISE_SALT_PEPPER, "SALT_PEPPER", "Salt & Pepper"},
+};
+static_assert(int(std::size(noise_type_items)) - 1 == PAINT_LAYER_NOISE_SALT_PEPPER);
+
+static const PaintLayerKindParam noise_params[] = {
+    /* The family is chosen when the effect is computed; the amounts the families share stay values
+     * beside it. */
+    {"type",
+     "Type",
+     float(PAINT_LAYER_NOISE_GAUSSIAN),
+     0.0f,
+     float(PAINT_LAYER_NOISE_SALT_PEPPER),
+     PaintLayerKindParamType::Enum,
+     noise_type_items,
+     int(std::size(noise_type_items))},
+    /* A sigma in colour: half keeps the grain heavy, zero lays none at all. */
+    {"intensity", "Intensity", 0.05f, 0.0f, 0.5f},
+    /* Through the luminance or over the colour, as the addon's noise_color starts. A checkbox. */
+    {"monochrome", "Monochrome", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Bool},
+    /* Whole seeds: which pattern of the family the texels read. */
+    {"seed", "Seed", 0.0f, 0.0f, 65535.0f, PaintLayerKindParamType::Int},
+};
+static_assert(std::size(noise_params) == PAINT_LAYER_NOISE_PARAM_NUM);
+
+static const PaintLayerKindEnumItem normal_convert_mode_items[] = {
+    {PAINT_LAYER_NORMAL_CONVERT_DX_TO_GL, "DX_TO_GL", "DirectX to OpenGL"},
+    {PAINT_LAYER_NORMAL_CONVERT_GL_TO_DX, "GL_TO_DX", "OpenGL to DirectX"},
+    {PAINT_LAYER_NORMAL_CONVERT_REBUILD_Z, "REBUILD_Z", "Rebuild Z"},
+    {PAINT_LAYER_NORMAL_CONVERT_CLEAR_Z, "CLEAR_Z", "Clear Z"},
+    {PAINT_LAYER_NORMAL_CONVERT_LINEAR_TO_SRGB, "LINEAR_TO_SRGB", "Linear to sRGB"},
+    {PAINT_LAYER_NORMAL_CONVERT_SRGB_TO_LINEAR, "SRGB_TO_LINEAR", "sRGB to Linear"},
+};
+static_assert(int(std::size(normal_convert_mode_items)) - 1 ==
+              PAINT_LAYER_NORMAL_CONVERT_SRGB_TO_LINEAR);
+
+static const PaintLayerKindEnumItem normal_convert_normalize_items[] = {
+    {0, "OFF", "Off"},
+    {1, "ON", "On"},
+};
+static_assert(int(std::size(normal_convert_normalize_items)) - 1 == 1);
+
+static const PaintLayerKindParam normal_convert_params[] = {
+    /* The mode is chosen when the graph is built, so an edit of this is a shape edit; so is the
+     * normalize, which adds nodes to the chain. */
+    {"mode",
+     "Mode",
+     float(PAINT_LAYER_NORMAL_CONVERT_DX_TO_GL),
+     0.0f,
+     float(PAINT_LAYER_NORMAL_CONVERT_SRGB_TO_LINEAR),
+     PaintLayerKindParamType::Enum,
+     normal_convert_mode_items,
+     int(std::size(normal_convert_mode_items))},
+    {"normalize",
+     "Normalize",
+     1.0f,
+     0.0f,
+     1.0f,
+     PaintLayerKindParamType::Enum,
+     normal_convert_normalize_items,
+     int(std::size(normal_convert_normalize_items))},
+};
+static_assert(std::size(normal_convert_params) == PAINT_LAYER_NORMAL_CONVERT_PARAM_NUM);
 
 static const PaintLayerKindEnumItem math_operation_items[] = {
     {PAINT_LAYER_MATH_OP_ADD, "ADD", "Add"},
@@ -144,6 +249,16 @@ static const PaintLayerKindParam blur_params[] = {
 };
 static_assert(std::size(blur_params) == PAINT_LAYER_BLUR_PARAM_NUM);
 
+static const PaintLayerKindParam exposure_params[] = {
+    /* Stops of light: one unit doubles the colour, so it reads as an exposure compensation. */
+    {"exposure", "Exposure", 0.0f, -5.0f, 5.0f},
+    /* Scene linear, not a factor: what the scaled colour rises or falls by. */
+    {"offset", "Offset", 0.0f, -0.5f, 0.5f},
+    /* Never zero, and one leaves a colour above one alone: the power is one over it. */
+    {"gamma", "Gamma", 1.0f, 0.1f, 9.99f},
+};
+static_assert(std::size(exposure_params) == PAINT_LAYER_EXPOSURE_PARAM_NUM);
+
 static const PaintLayerKindParam sharpen_params[] = {
     /* Whole texels: the half reach of the box the detail is read against. */
     {"radius", "Radius", 2.0f, 1.0f, 64.0f, PaintLayerKindParamType::Int},
@@ -213,6 +328,17 @@ static const PaintLayerKindParam color_balance_params[] = {
     {"color_balance", "Color Balance", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::ColorBalance},
 };
 
+/* The matrix lives in #MaterialPaintLayer::channel_mixer; the schema entry is what tells the row
+ * its kind has one. The monochrome switch is a plain Bool of the schema: it is folded into the 12
+ * numbers (#paint_layer_channel_mixer_fold) the graph and the GPU read, so it is a value edit like
+ * the matrix and is deliberately not an Enum, which would reach the topology hash and rebuild a
+ * tree whose shape the fold has already settled. */
+static const PaintLayerKindParam channel_mixer_params[] = {
+    {"mixer", "Channel Mixer", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::ChannelMixer},
+    {"monochrome", "Monochrome", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Bool},
+};
+static_assert(std::size(channel_mixer_params) == PAINT_LAYER_CHANNEL_MIXER_PARAM_NUM);
+
 /* The ramp itself lives in #MaterialPaintLayer::ramp; the schema entry is what tells the row its
  * kind has one and lets the UI find the payload. */
 static const PaintLayerKindEnumItem color_ramp_alpha_items[] = {
@@ -251,6 +377,136 @@ void paint_layer_hsl_apply(float rgb[3], const float params[PAINT_LAYER_HSL_PARA
   for (int i = 0; i < 3; i++) {
     rgb[i] = std::max(rgb[i], 0.0f);
   }
+  /* The vibrance lifts the channels away from their Rec.709 grey, most where the colour is least
+   * saturated, and clamps below zero like the HSV branch above. The same coefficients the RGB to BW
+   * node reads, so the graph and this agree. */
+  const float vibrance = params[PAINT_LAYER_HSL_VIBRANCE];
+  if (vibrance != 0.0f) {
+    const float max_c = std::max(rgb[0], std::max(rgb[1], rgb[2]));
+    const float min_c = std::min(rgb[0], std::min(rgb[1], rgb[2]));
+    const float sat = (max_c > 1e-6f) ? (max_c - min_c) / max_c : 0.0f;
+    const float boost = vibrance * (1.0f - sat);
+    const float gray = 0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2];
+    for (int i = 0; i < 3; i++) {
+      rgb[i] = std::max(rgb[i] + (rgb[i] - gray) * boost, 0.0f);
+    }
+  }
+}
+
+float paint_layer_texel_hash_uniform(const int x,
+                                     const int y,
+                                     const int seed,
+                                     const uint32_t salt)
+{
+  /* A BLI 2D hash over the texel: the salt sits in the first argument's multiples, and the seed's
+   * own stride never meets it below the largest salt, so two seeds never share a pattern. The
+   * result is a half-open uniform in [0, 1). The one generator every texel-noise family reads, so
+   * their sequences cannot drift apart. */
+  const uint32_t noise = BLI_hash_int_2d(uint32_t(x) + salt * 7919u + uint32_t(seed) * 6151u,
+                                         uint32_t(y));
+  return float(noise) / 4294967296.0f;
+}
+
+float paint_layer_deband_noise(int x, int y, int seed, int channel, int pass)
+{
+  /* Two passes per channel: the salt keeps them and the three channels apart. */
+  return paint_layer_texel_hash_uniform(x, y, seed, uint32_t(channel * 2 + pass));
+}
+
+/**
+ * The addon widens its two-uniform difference by this factor. A plain TPDF spans exactly one
+ * quantization step; the extra half reaches across the neighbouring boundary often enough to break
+ * the band up without raising the visible grain as much as a whole extra step would.
+ */
+static constexpr float PAINT_LAYER_DEBAND_NOISE_SCALE = 1.5f;
+
+void paint_layer_deband_apply(float rgb[3],
+                              const float params[PAINT_LAYER_DEBAND_PARAM_NUM],
+                              const int texel_xy[2])
+{
+  /* The addon's TPDF: two independent uniforms make a triangular density of the step's own width,
+   * one noise pair per channel and texel, as its per-pixel randoms are. */
+  const int x = (texel_xy != nullptr) ? texel_xy[0] : 0;
+  const int y = (texel_xy != nullptr) ? texel_xy[1] : 0;
+  const int seed = int(params[PAINT_LAYER_DEBAND_SEED]);
+  const int mode = int(params[PAINT_LAYER_DEBAND_MODE]);
+  const int levels = (1 << int(params[PAINT_LAYER_DEBAND_BITS])) - 1;
+  const float step = 1.0f / float(levels);
+  for (int k = 0; k < 3; k++) {
+    const float u1 = paint_layer_deband_noise(x, y, seed, k, 1);
+    const float u2 = paint_layer_deband_noise(x, y, seed, k, 2);
+    const float noise = (u1 - u2) * step;
+    if (mode == PAINT_LAYER_DEBAND_DITHER) {
+      rgb[k] = clamp_f(
+          floorf(rgb[k] * float(levels) + (u1 - u2) + 0.5f) / float(levels), 0.0f, 1.0f);
+    }
+    else {
+      rgb[k] = clamp_f(rgb[k] + noise * PAINT_LAYER_DEBAND_NOISE_SCALE, 0.0f, 1.0f);
+    }
+  }
+}
+
+float paint_layer_noise_uniform(int x, int y, int seed, int channel, int pass)
+{
+  /* The same family the Deband pair reads, with three passes to a channel instead of two. */
+  return paint_layer_texel_hash_uniform(x, y, seed, uint32_t(channel * 3 + pass));
+}
+
+float paint_layer_noise_gaussian(int x, int y, int seed, int channel, float intensity)
+{
+  /* Three uniforms sum to a bell whose spread the scale sets: the one fixed function the kernel
+   * and the tests both call, so they cannot disagree. */
+  const float u1 = paint_layer_noise_uniform(x, y, seed, channel, 1);
+  const float u2 = paint_layer_noise_uniform(x, y, seed, channel, 2);
+  const float u3 = paint_layer_noise_uniform(x, y, seed, channel, 3);
+  return (u1 + u2 + u3 - 1.5f) * intensity * 2.0f;
+}
+
+void paint_layer_normal_convert_apply(float rgb[3],
+                                      const float params[PAINT_LAYER_NORMAL_CONVERT_PARAM_NUM])
+{
+  const int mode = int(params[PAINT_LAYER_NORMAL_CONVERT_MODE]);
+  switch (mode) {
+    case PAINT_LAYER_NORMAL_CONVERT_DX_TO_GL:
+    case PAINT_LAYER_NORMAL_CONVERT_GL_TO_DX:
+      rgb[1] = 1.0f - rgb[1];
+      break;
+    case PAINT_LAYER_NORMAL_CONVERT_REBUILD_Z: {
+      /* The two encoded xy, decoded; the blue the unit length leaves, encoded again. */
+      const float vx = rgb[0] * 2.0f - 1.0f;
+      const float vy = rgb[1] * 2.0f - 1.0f;
+      const float z = sqrtf(std::max(1.0f - vx * vx - vy * vy, 0.0f));
+      rgb[2] = (z + 1.0f) * 0.5f;
+      break;
+    }
+    case PAINT_LAYER_NORMAL_CONVERT_CLEAR_Z:
+      rgb[2] = 0.0f;
+      break;
+    case PAINT_LAYER_NORMAL_CONVERT_LINEAR_TO_SRGB:
+      /* The IEC 61966-2.1 broken line, with the same constants the Math nodes of the graph carry. */
+      for (int k = 0; k < 3; k++) {
+        rgb[k] = (rgb[k] <= 0.0031308f) ? rgb[k] * 12.92f :
+                                          1.055f * powf(rgb[k], 1.0f / 2.4f) - 0.055f;
+      }
+      break;
+    case PAINT_LAYER_NORMAL_CONVERT_SRGB_TO_LINEAR:
+      for (int k = 0; k < 3; k++) {
+        rgb[k] = (rgb[k] <= 0.04045f) ? rgb[k] / 12.92f : powf((rgb[k] + 0.055f) / 1.055f, 2.4f);
+      }
+      break;
+    default:
+      break;
+  }
+  if (int(params[PAINT_LAYER_NORMAL_CONVERT_NORMALIZE]) != 0) {
+    const float vx = rgb[0] * 2.0f - 1.0f;
+    const float vy = rgb[1] * 2.0f - 1.0f;
+    const float vz = rgb[2] * 2.0f - 1.0f;
+    /* A zero vector has no direction: the floor keeps the division finite. */
+    const float len = std::max(sqrtf(vx * vx + vy * vy + vz * vz), 1e-10f);
+    rgb[0] = (vx / len) * 0.5f + 0.5f;
+    rgb[1] = (vy / len) * 0.5f + 0.5f;
+    rgb[2] = (vz / len) * 0.5f + 0.5f;
+  }
 }
 
 static constexpr uint8_t all_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER) |
@@ -262,7 +518,7 @@ static constexpr uint8_t filter_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE
                                         paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
                                         paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM);
 
-/* A neighborhood effect only corrects a row's colour: the map it reads is the row's own, and an
+/* A CPU-computed effect only corrects a row's colour: the map it reads is the row's own, and an
  * adjustment or a mask item has no map of the row's for it to read. */
 static constexpr uint8_t effect_only_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT);
 
@@ -329,8 +585,8 @@ static const PaintLayerKindInfo kinds[] = {
      "Invert",
      PaintLayerKindCategory::Operator,
      filter_roles,
-     nullptr,
-     0,
+     invert_params,
+     int(std::size(invert_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_LEVELS,
@@ -412,9 +668,10 @@ static const PaintLayerKindInfo kinds[] = {
      color_balance_params,
      int(std::size(color_balance_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
-    /* A neighborhood effect reads a neighbourhood of the row's map, which the live graph cannot
-     * express: it exists only as a correction of a row's colour, the effect cache computes it, and
-     * a row that carries one is baked for the live graph. */
+    /* A CPU-computed effect: either it reads a neighbourhood of the row's map (a Blur), which the
+     * live graph cannot express, or its sequence is not the graph's (a Noise). It exists only as a
+     * correction of a row's colour, the effect cache computes it, and a row that carries one is
+     * baked for the live graph. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_BLUR,
      "Blur",
@@ -422,7 +679,9 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      blur_params,
      int(std::size(blur_params)),
-     uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same
+     * open-above-one policy as Exposure and High Pass, unlike Noise and Channel Mixer. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_SHARPEN,
      "Sharpen",
@@ -430,7 +689,9 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      sharpen_params,
      int(std::size(sharpen_params)),
-     uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    /* The detail is a difference against a blurred copy, so an HDR value above one stays above it;
+     * only the negative side is clamped. The same open-above-one policy as Exposure and Sharpen. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_HIGH_PASS,
      "High Pass",
@@ -438,7 +699,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      high_pass_params,
      int(std::size(high_pass_params)),
-     uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
     /* The Sobel gradient magnitude: a full-range step reads as one, a flat area as zero. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_EDGE_DETECT,
@@ -447,7 +708,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      nullptr,
      0,
-     uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
     /* A diagonal 3x3 lighting kernel: a flat colour is its own result, an edge takes the light. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_EMBOSS,
@@ -456,7 +717,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      nullptr,
      0,
-     uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
     /* The extreme of a square window per channel: min and max are separable, so the kernel is one
      * pass per axis like the box blur's. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -466,7 +727,66 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      erode_dilate_params,
      int(std::size(erode_dilate_params)),
-     uint8_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    /* The gamma leaves a non-positive value alone and has no upper bound, so an HDR value above
+     * one passes through: only the negative side is clamped. The same policy as Sharpen and High
+     * Pass. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_EXPOSURE,
+     "Exposure",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     exposure_params,
+     int(std::size(exposure_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    /* A pointwise per-texel dither: it reads a texel's coordinates for its noise, so the combined
+     * preview falls back to the CPU (which walks the texels) rather than a shader branch. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_DEBAND,
+     "Deband / Dither",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     deband_params,
+     int(std::size(deband_params)),
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NO_GPU_BRANCH)},
+    /* A grain is part of the texture: the shader graph's White Noise and the CPU hash are two
+     * different sequences, so the noise is an effect the cache computes once and the bake carries,
+     * and no live graph, adjustment or mask form exists for it. The kernel clips its result to
+     * [0, 1] like the addon's own clip, so a Noise trims an HDR map; Exposure, Sharpen and High
+     * Pass, whose maths has no upper bound, only clip below zero. Kept for parity with the
+     * addon. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_NOISE,
+     "Noise",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     noise_params,
+     int(std::size(noise_params)),
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    /* A Normal Convert reads the encoding as numbers, not as a direction: the one filter a Normal
+     * channel carries, by its own flag. The combined preview has no branch for it. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_NORMAL_CONVERT,
+     "Normal Convert",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     normal_convert_params,
+     int(std::size(normal_convert_params)),
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NORMAL_SAFE |
+              PAINT_LAYER_KIND_NO_GPU_BRANCH)},
+    /* A Channel Mixer reads the colour as numbers in a matrix; its payload is the matrix, its
+     * monochrome a plain Bool. The combined preview shader has a branch for it, like Color
+     * Balance. Its apply clips the result to [0, 1] exactly as the addon's `np.clip` does, so an
+     * HDR value is trimmed; the filters whose maths stays open above one (Exposure, Sharpen,
+     * High Pass) do not clip there. Kept for parity with the addon. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
+     "Channel Mixer",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     channel_mixer_params,
+     int(std::size(channel_mixer_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* A map-coverage operator: the map of its Base Color record is an external ID Map, so the map
      * is reference-only and a stroke must not turn it into a paint target. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -613,7 +933,8 @@ float paint_layer_kind_param_get(const MaterialPaintLayer &row, const int index)
            PaintLayerKindParamType::Color,
            PaintLayerKindParamType::Ramp,
            PaintLayerKindParamType::Curves,
-           PaintLayerKindParamType::ColorBalance))
+           PaintLayerKindParamType::ColorBalance,
+           PaintLayerKindParamType::ChannelMixer))
   {
     /* Not a scalar: the UI and the kind's consumer read them through the typed accessors. */
     return 0.0f;
@@ -753,6 +1074,9 @@ void paint_layer_kind_params_init(MaterialPaintLayer &row)
           break;
         case PaintLayerKindParamType::ColorBalance:
           BKE_paint_layers_color_balance_ensure(row);
+          break;
+        case PaintLayerKindParamType::ChannelMixer:
+          BKE_paint_layers_channel_mixer_ensure(row);
           break;
         case PaintLayerKindParamType::Bool:
           kind_param_ensure_bool(row, param);
@@ -900,18 +1224,24 @@ bool BKE_paint_layers_ramp_edited(Material &ma, const void *data)
   return found;
 }
 
-bool paint_layer_kind_has_ramp_param(const MaterialPaintLayer &row)
+bool paint_layer_kind_has_payload_param(const MaterialPaintLayer &row,
+                                        const PaintLayerKindParamType type)
 {
   const PaintLayerKindInfo *info = paint_layer_kind_of(row);
   if (info == nullptr) {
     return false;
   }
   for (const int i : IndexRange(info->params_num)) {
-    if (info->params[i].type == PaintLayerKindParamType::Ramp) {
+    if (info->params[i].type == type) {
       return true;
     }
   }
   return false;
+}
+
+bool paint_layer_kind_has_ramp_param(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_payload_param(row, PaintLayerKindParamType::Ramp);
 }
 
 MaterialPaintLayerRamp *BKE_paint_layers_ramp_ensure(MaterialPaintLayer &row)
@@ -976,16 +1306,7 @@ uint64_t paint_layer_ramp_hash(const ColorBand &band)
 
 bool paint_layer_kind_has_curves_param(const MaterialPaintLayer &row)
 {
-  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
-  if (info == nullptr) {
-    return false;
-  }
-  for (const int i : IndexRange(info->params_num)) {
-    if (info->params[i].type == PaintLayerKindParamType::Curves) {
-      return true;
-    }
-  }
-  return false;
+  return paint_layer_kind_has_payload_param(row, PaintLayerKindParamType::Curves);
 }
 
 MaterialPaintLayerCurves *BKE_paint_layers_curves_ensure(MaterialPaintLayer &row)
@@ -1266,16 +1587,7 @@ int paint_layer_kind_param_index(const MaterialPaintLayer &row, const char *name
 
 bool paint_layer_kind_has_color_balance_param(const MaterialPaintLayer &row)
 {
-  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
-  if (info == nullptr) {
-    return false;
-  }
-  for (const int i : IndexRange(info->params_num)) {
-    if (info->params[i].type == PaintLayerKindParamType::ColorBalance) {
-      return true;
-    }
-  }
-  return false;
+  return paint_layer_kind_has_payload_param(row, PaintLayerKindParamType::ColorBalance);
 }
 
 bool BKE_paint_layers_kind_needs_bake(const MaterialPaintLayer &row)
@@ -1290,15 +1602,10 @@ bool BKE_paint_layers_color_balance_supported(const MaterialPaintLayer &row)
 
 MaterialPaintLayerColorBalance *BKE_paint_layers_color_balance_ensure(MaterialPaintLayer &row)
 {
-  if (!paint_layer_kind_has_color_balance_param(row)) {
-    return nullptr;
-  }
-  if (row.color_balance == nullptr) {
-    /* The member initializers of #MaterialPaintLayerColorBalance are the neutral balance: every
-     * method's identity (lift 0, gamma 1, gain 1; slope 1, offset 0, power 1). */
-    row.color_balance = MEM_new<MaterialPaintLayerColorBalance>(__func__);
-  }
-  return row.color_balance;
+  /* The member initializers of #MaterialPaintLayerColorBalance are the neutral balance: every
+   * method's identity (lift 0, gamma 1, gain 1; slope 1, offset 0, power 1). */
+  return static_cast<MaterialPaintLayerColorBalance *>(
+      paint_layer_payload_ensure(row, PaintLayerKindParamType::ColorBalance));
 }
 
 const MaterialPaintLayerColorBalance &paint_layer_color_balance_or_neutral(
@@ -1306,14 +1613,6 @@ const MaterialPaintLayerColorBalance &paint_layer_color_balance_or_neutral(
 {
   static const MaterialPaintLayerColorBalance neutral = {};
   return (row.color_balance != nullptr) ? *row.color_balance : neutral;
-}
-
-void paint_layer_color_balance_copy(const MaterialPaintLayer &src, MaterialPaintLayer &dst)
-{
-  dst.color_balance = (src.color_balance != nullptr) ?
-                          static_cast<MaterialPaintLayerColorBalance *>(
-                              MEM_dupalloc(src.color_balance)) :
-                          nullptr;
 }
 
 void paint_layer_color_balance_fold(const MaterialPaintLayerColorBalance &balance,
@@ -1386,11 +1685,290 @@ uint64_t paint_layer_color_balance_hash(const MaterialPaintLayerColorBalance &ba
 
 bool BKE_paint_layers_color_balance_edited(Material &ma, const void *data)
 {
+  /* The balance reaches the generated graph as the values of three group inputs and the composite
+   * stack's hash carries the folded numbers, so the registry's value-only tag is the whole story:
+   * no group is rebuilt, and the bake flags follow the hash. */
+  return paint_layer_payload_edited(ma, data, PaintLayerKindParamType::ColorBalance);
+}
+
+bool paint_layer_kind_has_channel_mixer_param(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_payload_param(row, PaintLayerKindParamType::ChannelMixer);
+}
+
+bool BKE_paint_layers_channel_mixer_supported(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_channel_mixer_param(row);
+}
+
+MaterialPaintLayerChannelMixer *BKE_paint_layers_channel_mixer_ensure(MaterialPaintLayer &row)
+{
+  /* The member initializers of #MaterialPaintLayerChannelMixer are the neutral matrix: the identity
+   * rows and zero constants. */
+  return static_cast<MaterialPaintLayerChannelMixer *>(
+      paint_layer_payload_ensure(row, PaintLayerKindParamType::ChannelMixer));
+}
+
+const MaterialPaintLayerChannelMixer *BKE_paint_layers_channel_mixer_get(
+    const MaterialPaintLayer &row)
+{
+  return row.channel_mixer;
+}
+
+void paint_layer_channel_mixer_fold(const MaterialPaintLayerChannelMixer &mixer,
+                                    const bool monochrome,
+                                    float r_params[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM])
+{
+  const float *rows[3] = {mixer.red_row, mixer.green_row, mixer.blue_row};
+  /* The addon's monochrome reads one grey from the red row and the mean of the constants; folding
+   * it here keeps the CPU, the graph and the GPU on one layout with no branch of their own. */
+  const float mean_constant = (mixer.constants[0] + mixer.constants[1] + mixer.constants[2]) /
+                              3.0f;
+  for (const int k : IndexRange(3)) {
+    const float *row = monochrome ? rows[0] : rows[k];
+    const int base = PAINT_LAYER_CHANNEL_MIXER_ROW_R + 4 * k;
+    r_params[base + 0] = row[0];
+    r_params[base + 1] = row[1];
+    r_params[base + 2] = row[2];
+    r_params[base + 3] = monochrome ? mean_constant : mixer.constants[k];
+  }
+}
+
+void paint_layer_channel_mixer_vector_get(
+    const float folded[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM], const int index, float r_vec[3])
+{
+  BLI_assert(index >= 0 && index < PAINT_LAYER_CHANNEL_MIXER_VECTOR_NUM);
+  const PaintLayerChannelMixerVector &vector = PAINT_LAYER_CHANNEL_MIXER_VECTORS[index];
+  if (vector.position == PAINT_LAYER_CHANNEL_MIXER_CONSTANTS) {
+    /* The constants sit in the `.w` of the three rows, a stride of four apart. */
+    r_vec[0] = folded[PAINT_LAYER_CHANNEL_MIXER_CONSTANTS];
+    r_vec[1] = folded[PAINT_LAYER_CHANNEL_MIXER_CONSTANTS + 4];
+    r_vec[2] = folded[PAINT_LAYER_CHANNEL_MIXER_CONSTANTS + 8];
+    return;
+  }
+  r_vec[0] = folded[vector.position];
+  r_vec[1] = folded[vector.position + 1];
+  r_vec[2] = folded[vector.position + 2];
+}
+
+void paint_layer_channel_mixer_apply(const float params[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM],
+                                     float rgb[3])
+{
+  const float in[3] = {rgb[0], rgb[1], rgb[2]};
+  for (const int k : IndexRange(3)) {
+    float row[3];
+    paint_layer_channel_mixer_vector_get(params, k, row);
+    const float constant = params[PAINT_LAYER_CHANNEL_MIXER_CONSTANTS + 4 * k];
+    /* Clamped into [0, 1] like the addon's result; the fold does not clamp, so every consumer does
+     * it itself. */
+    rgb[k] = std::clamp(
+        row[0] * in[0] + row[1] * in[1] + row[2] * in[2] + constant, 0.0f, 1.0f);
+  }
+}
+
+uint64_t paint_layer_channel_mixer_hash(const MaterialPaintLayerChannelMixer &mixer)
+{
+  uint64_t hash = 1469598103934665603ull;
+  const auto mix_float = [&](const float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    hash ^= bits;
+    hash *= 1099511628211ull;
+  };
+  for (const float value : mixer.red_row) {
+    mix_float(value);
+  }
+  for (const float value : mixer.green_row) {
+    mix_float(value);
+  }
+  for (const float value : mixer.blue_row) {
+    mix_float(value);
+  }
+  for (const float value : mixer.constants) {
+    mix_float(value);
+  }
+  return hash;
+}
+
+bool BKE_paint_layers_channel_mixer_edited(Material &ma, const void *data)
+{
+  /* The matrix reaches the generated graph as the values of four group inputs and the composite
+   * stack's hash carries the folded numbers, so the registry's value-only tag is the whole story:
+   * no group is rebuilt, and the bake flags follow the hash. */
+  return paint_layer_payload_edited(ma, data, PaintLayerKindParamType::ChannelMixer);
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Kind payload registry
+ * \{ */
+
+namespace {
+
+template<typename T> void *payload_create()
+{
+  return MEM_new<T>(__func__);
+}
+
+template<typename T> void payload_destroy(void *payload)
+{
+  MEM_delete(static_cast<T *>(payload));
+}
+
+template<typename T> void *payload_copy(const void *payload)
+{
+  return MEM_dupalloc(static_cast<const T *>(payload));
+}
+
+template<typename T> void payload_write(BlendWriter *writer, const void *payload)
+{
+  writer->write_struct(static_cast<const T *>(payload));
+}
+
+template<typename T> void payload_read(BlendDataReader *reader, void **slot)
+{
+  BLO_read_struct(reader, T, slot);
+}
+
+uint64_t payload_color_balance_hash(const void *payload)
+{
+  return paint_layer_color_balance_hash(
+      *static_cast<const MaterialPaintLayerColorBalance *>(payload));
+}
+
+uint64_t payload_channel_mixer_hash(const void *payload)
+{
+  return paint_layer_channel_mixer_hash(
+      *static_cast<const MaterialPaintLayerChannelMixer *>(payload));
+}
+
+void payload_value_edited(Material &ma)
+{
+  BKE_paint_layers_tag_value_edited(ma);
+}
+
+}  // namespace
+
+static const PaintLayerPayloadInfo payload_infos[] = {
+    {PaintLayerKindParamType::ColorBalance,
+     offsetof(MaterialPaintLayer, color_balance),
+     payload_create<MaterialPaintLayerColorBalance>,
+     payload_destroy<MaterialPaintLayerColorBalance>,
+     payload_copy<MaterialPaintLayerColorBalance>,
+     payload_color_balance_hash,
+     payload_write<MaterialPaintLayerColorBalance>,
+     payload_read<MaterialPaintLayerColorBalance>,
+     payload_value_edited},
+    {PaintLayerKindParamType::ChannelMixer,
+     offsetof(MaterialPaintLayer, channel_mixer),
+     payload_create<MaterialPaintLayerChannelMixer>,
+     payload_destroy<MaterialPaintLayerChannelMixer>,
+     payload_copy<MaterialPaintLayerChannelMixer>,
+     payload_channel_mixer_hash,
+     payload_write<MaterialPaintLayerChannelMixer>,
+     payload_read<MaterialPaintLayerChannelMixer>,
+     payload_value_edited},
+};
+
+const PaintLayerPayloadInfo *paint_layer_payload_info(const PaintLayerKindParamType type)
+{
+  for (const PaintLayerPayloadInfo &info : payload_infos) {
+    if (info.type == type) {
+      return &info;
+    }
+  }
+  return nullptr;
+}
+
+/** The address of the payload pointer \a info describes in \a row, for the read and copy passes. */
+static void **payload_slot(MaterialPaintLayer &row, const PaintLayerPayloadInfo &info)
+{
+  return reinterpret_cast<void **>(reinterpret_cast<char *>(&row) + info.offset);
+}
+
+static const void *payload_slot_get(const MaterialPaintLayer &row,
+                                    const PaintLayerPayloadInfo &info)
+{
+  return *reinterpret_cast<const void *const *>(reinterpret_cast<const char *>(&row) +
+                                                info.offset);
+}
+
+void *paint_layer_payload_ensure(MaterialPaintLayer &row, const PaintLayerKindParamType type)
+{
+  const PaintLayerPayloadInfo *info = paint_layer_payload_info(type);
+  if (info == nullptr || !paint_layer_kind_has_payload_param(row, type)) {
+    return nullptr;
+  }
+  void **slot = payload_slot(row, *info);
+  if (*slot == nullptr) {
+    *slot = info->create();
+  }
+  return *slot;
+}
+
+void paint_layer_payload_free(MaterialPaintLayer &row)
+{
+  for (const PaintLayerPayloadInfo &info : payload_infos) {
+    void **slot = payload_slot(row, info);
+    if (*slot != nullptr) {
+      info.destroy(*slot);
+      *slot = nullptr;
+    }
+  }
+}
+
+void paint_layer_payload_copy(const MaterialPaintLayer &src, MaterialPaintLayer &dst)
+{
+  for (const PaintLayerPayloadInfo &info : payload_infos) {
+    const void *payload = payload_slot_get(src, info);
+    *payload_slot(dst, info) = (payload != nullptr) ? info.copy(payload) : nullptr;
+  }
+}
+
+uint64_t paint_layer_payload_hash(const MaterialPaintLayer &row)
+{
+  uint64_t hash = 1469598103934665603ull;
+  for (const PaintLayerPayloadInfo &info : payload_infos) {
+    if (const void *payload = payload_slot_get(row, info)) {
+      hash ^= info.hash(payload);
+      hash *= 1099511628211ull;
+    }
+  }
+  return hash;
+}
+
+void paint_layer_payload_write(BlendWriter &writer, const MaterialPaintLayer &layer)
+{
+  for (const PaintLayerPayloadInfo &info : payload_infos) {
+    if (const void *payload = payload_slot_get(layer, info)) {
+      info.write(&writer, payload);
+    }
+  }
+}
+
+void paint_layer_payload_read(BlendDataReader &reader, MaterialPaintLayer &layer)
+{
+  for (const PaintLayerPayloadInfo &info : payload_infos) {
+    void **slot = payload_slot(layer, info);
+    info.read(&reader, slot);
+    if (*slot == nullptr && paint_layer_kind_has_payload_param(layer, info.type)) {
+      *slot = info.create();
+    }
+  }
+}
+
+bool paint_layer_payload_edited(Material &ma,
+                                const void *data,
+                                const PaintLayerKindParamType type)
+{
   if (data == nullptr) {
     return false;
   }
+  const PaintLayerPayloadInfo *info = paint_layer_payload_info(type);
+  if (info == nullptr) {
+    return false;
+  }
   const auto owns = [&](const MaterialPaintLayer &row) {
-    return row.color_balance != nullptr && data == row.color_balance;
+    return payload_slot_get(row, *info) == data;
   };
   bool found = false;
   for (MaterialPaintLayer &row : ma.paint_layers) {
@@ -1399,13 +1977,12 @@ bool BKE_paint_layers_color_balance_edited(Material &ma, const void *data)
       break;
     }
   }
-  if (found) {
-    /* The balance reaches the generated graph as the values of three group inputs and the
-     * composite stack's hash carries the folded numbers, so the value-only tag is the whole
-     * story: no group is rebuilt, and the bake flags follow the hash. */
-    BKE_paint_layers_tag_value_edited(ma);
+  if (found && info->edited != nullptr) {
+    info->edited(ma);
   }
   return found;
 }
+
+/** \} */
 
 }  // namespace blender

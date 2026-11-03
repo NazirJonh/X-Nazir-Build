@@ -244,6 +244,21 @@ static void filter_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &ro
     hash = topology_hash_mix(
         hash, uint64_t(paint_layer_kind_param_bool_get(row, PAINT_LAYER_MATH_CLAMP)));
   }
+  /* Every Enum parameter of a filter picks which nodes the generator builds (a Deband's mode, a
+   * Normal Convert's mode), unlike the float and integer values the graph reads as inputs. A
+   * CPU-computed kind never reaches the live graph, so its choices (a Blur's shape) must not
+   * rebuild it. */
+  if (row.source == MA_PAINT_LAYER_SOURCE_FILTER) {
+    const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+    if (info != nullptr && (info->flags & PAINT_LAYER_KIND_NEEDS_BAKE) == 0) {
+      for (const int i : IndexRange(info->params_num)) {
+        if (info->params[i].type == PaintLayerKindParamType::Enum) {
+          hash = topology_hash_mix(hash, 0x701 + uint64_t(i));
+          hash = topology_hash_mix(hash, uint64_t(paint_layer_kind_param_get(row, i)));
+        }
+      }
+    }
+  }
 }
 
 uint64_t paint_layers_layer_topology_hash(const Material &ma,

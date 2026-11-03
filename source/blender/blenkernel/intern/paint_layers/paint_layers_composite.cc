@@ -157,6 +157,19 @@ template<size_t N> static void composite_filter_params(const MaterialPaintLayer 
     paint_layer_color_balance_fold(paint_layer_color_balance_or_neutral(row), r_params);
     return;
   }
+  if (paint_layer_kind_has_channel_mixer_param(row)) {
+    /* The matrix folds into the same 12-float layout, the monochrome switch included, so a null
+     * payload reads as the neutral identity matrix. No payload pointer travels with the filter: the
+     * composite, the graph and the GPU read these numbers alone. */
+    if constexpr (N >= PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM) {
+      static const MaterialPaintLayerChannelMixer neutral = {};
+      paint_layer_channel_mixer_fold(
+          row.channel_mixer != nullptr ? *row.channel_mixer : neutral,
+          paint_layer_kind_param_bool_get(row, PAINT_LAYER_CHANNEL_MIXER_MONOCHROME),
+          r_params);
+    }
+    return;
+  }
   if (const PaintLayerKindInfo *kind = paint_layer_kind_of(row)) {
     for (const int i : IndexRange(std::min(kind->params_num, int(N)))) {
       r_params[i] = paint_layer_kind_param_get(row, i);
@@ -643,13 +656,13 @@ static void composite_effect_append(
     const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface,
     PaintMaterialCompositeImageLayer &out)
 {
-  if (paint_layer_effect_is_neighborhood(effect)) {
-    /* A neighborhood effect reads the row's own content, so it needs the row it hangs on: the
+  if (paint_layer_effect_is_cpu_computed(effect)) {
+    /* A CPU-computed effect reads the row's own content, so it needs the row it hangs on: the
      * standalone corrections-row description has none and leaves it out. */
     if (owner_row == nullptr || !paint_layer_effect_filters(ma, effect, channel)) {
       return;
     }
-    /* A neighborhood effect carries its result as a map the effect cache computed: the kind and
+    /* A CPU-computed effect carries its result as a map the effect cache computed: the kind and
      * the parameters travel like a filter's, the buffer beside them. In describe_only only the
      * kind is known -- the buffer is not computed, and the combined preview falls back to the CPU
      * when it sees the kind. */
@@ -1910,14 +1923,14 @@ static bool anchor_slice_region_is_exact(const Material &ma,
 /* -------------------------------------------------------------------- */
 /** \name Paint Layer Effect Cache
  *
- * A neighborhood effect (a Blur) cannot be built as nodes, and its result is not a pointwise
- * function of one texel: the whole input map is read. The cache holds the result, one float buffer
- * per (material, row, channel, parameters), with the input rendered through the same description
- * the bake renders -- the row's content up to the effect, before its mask and opacity -- and the
- * kernel applied over it. Freshness follows the slice cache: the entry remembers the version of
- * every map the input was rendered from, and any edit of one recomputes the whole buffer (a
- * neighborhood reads past an edited rectangle, so a region update would have to carry a halo; a
- * recompute is the simple correct thing until that is wanted).
+ * A CPU-computed effect (a Blur, a Noise) cannot be built as nodes, and its result is not a
+ * pointwise function of one texel: the whole input map is read. The cache holds the result, one
+ * float buffer per (material, row, channel, parameters), with the input rendered through the same
+ * description the bake renders -- the row's content up to the effect, before its mask and opacity
+ * -- and the kernel applied over it. Freshness follows the slice cache: the entry remembers the
+ * version of every map the input was rendered from, and any edit of one recomputes the whole
+ * buffer (a neighbourhood reads past an edited rectangle, so a region update would have to carry a
+ * halo; a recompute is the simple correct thing until that is wanted).
  * \{ */
 
 /** One cached effect: the result buffer, keyed by the material, the effect, the channel and the
@@ -2176,7 +2189,7 @@ static void paint_layer_effect_cache_enforce_budget(const size_t incoming)
 }
 
 /**
- * The result of the neighborhood \a effect on \a row's content in \a channel, as a float RGBA
+ * The result of the CPU-computed \a effect on \a row's content in \a channel, as a float RGBA
  * buffer at the input's size, scene linear, the input's content alpha in the fourth component.
  * Cached; the kernel and the input's maps decide when it is computed again.
  *
@@ -2592,11 +2605,11 @@ bool BKE_paint_layers_row_dimensions(const Material &ma,
 }
 
 /**
- * The fallback reason a neighborhood effect gives: its kind's name, with the article a name in
+ * The fallback reason a CPU-computed effect gives: its kind's name, with the article a name in
  * English takes. The text is built from the registry rather than listing every effect a second
  * time, and cached so the returned pointer stays valid like a literal.
  */
-static const char *paint_layer_neighborhood_reason(const PaintLayerKindInfo &kind)
+static const char *paint_layer_cpu_computed_reason(const PaintLayerKindInfo &kind)
 {
   /* One string per kind, so two reasons held at once never share storage; the map's nodes keep
    * their address while it grows. */
@@ -2610,6 +2623,17 @@ static const char *paint_layer_neighborhood_reason(const PaintLayerKindInfo &kin
              .first;
   }
   return it->second.c_str();
+}
+
+/**
+ * Whether the combined preview shader has no branch for the pointwise \a filter: the registry's
+ * #PAINT_LAYER_KIND_NO_GPU_BRANCH flag says so, so a new kind is marked where it is described and
+ * cannot be silently shaded as a no-op here.
+ */
+static bool gpu_filter_lacks_branch(const int16_t filter)
+{
+  const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
+  return kind != nullptr && (kind->flags & PAINT_LAYER_KIND_NO_GPU_BRANCH) != 0;
 }
 
 const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialCompositeImageLayer &layer,
@@ -2676,17 +2700,25 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
     if (correction.anchor_point_coverage_image != nullptr) {
       return "a baked Anchor Point correction is read (no coverage map on the GPU)";
     }
-    /* A neighborhood effect has no pointwise shader branch: its result is a map the effect cache
+    /* A CPU-computed effect has no pointwise shader branch: its result is a map the effect cache
      * computes on the CPU, so the whole stack falls back rather than shading without it. The
      * registry's #PAINT_LAYER_KIND_NEEDS_BAKE flag decides, so a new one needs no edit here. Gated
      * on the opacity that decides the CPU lays it too. */
-    if (correction.opacity > 0.0f && paint_layer_filter_is_neighborhood(correction.filter)) {
+    if (correction.opacity > 0.0f && paint_layer_filter_is_cpu_computed(correction.filter)) {
       const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
                                                              correction.filter);
       if (kind != nullptr) {
-        return paint_layer_neighborhood_reason(*kind);
+        return paint_layer_cpu_computed_reason(*kind);
       }
     }
+    if (correction.opacity > 0.0f && gpu_filter_lacks_branch(correction.filter)) {
+      return "a correction filter the preview shader has no branch for is read";
+    }
+  }
+  /* An adjustment row has no per-kind refusal above, so a filter without a shader branch would
+   * otherwise be shaded as a silent no-op. */
+  if (gpu_filter_lacks_branch(layer.adjustment_filter)) {
+    return "an adjustment filter the preview shader has no branch for is read";
   }
   return nullptr;
 }

@@ -350,7 +350,7 @@ MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
     item_copy->curves = static_cast<MaterialPaintLayerCurves *>(MEM_dupalloc(item.curves));
     BKE_curvemapping_copy_data(&item_copy->curves->curve_mapping, &item.curves->curve_mapping);
   }
-  paint_layer_color_balance_copy(item, *item_copy);
+  paint_layer_payload_copy(item, *item_copy);
   if (r_map != nullptr) {
     r_map->append({item.marker, item_copy->marker});
   }
@@ -408,7 +408,7 @@ void paint_layer_branch_duplicate(Main &bmain,
     dst.curves = static_cast<MaterialPaintLayerCurves *>(MEM_dupalloc(src.curves));
     BKE_curvemapping_copy_data(&dst.curves->curve_mapping, &src.curves->curve_mapping);
   }
-  paint_layer_color_balance_copy(src, dst);
+  paint_layer_payload_copy(src, dst);
 
   /* The mask and the corrections go with their row, with maps of their own for the same reason as
    * the channel maps. */

@@ -1455,11 +1455,11 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
                                             NodeOutput *content_alpha)
 {
   if (paint_layer_effect_is_filter(effect)) {
-    if (paint_layer_effect_is_neighborhood(effect)) {
-      /* A neighborhood effect (a Blur) reads a neighbourhood of the row's map, which no chain of
-       * nodes expresses: the correction is left out of the live tree, and the row is baked for it
-       * (the planner forces a row that carries one). Until the bake lands the row shows without
-       * the effect, the way an unbaked heavy row shows without its weight. */
+    if (paint_layer_effect_is_cpu_computed(effect)) {
+      /* A CPU-computed effect reads its result outside the graph (a Blur's neighbourhood, a Noise's
+       * hash), which no chain of nodes expresses: the correction is left out of the live tree, and
+       * the row is baked for it (the planner forces a row that carries one). Until the bake lands
+       * the row shows without the effect, the way an unbaked heavy row shows without its weight. */
       return false;
     }
     /* A filter lays no coverage and no content alpha: those stay as the row has them. */

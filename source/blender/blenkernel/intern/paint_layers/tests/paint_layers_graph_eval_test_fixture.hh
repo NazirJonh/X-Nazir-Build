@@ -39,6 +39,7 @@
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_material_composite.hh"
 
+#include "BLI_hash.h"
 #include "BLI_index_range.hh"
 #include <algorithm>
 
@@ -288,6 +289,20 @@ class GraphInterpreter {
       case SH_NODE_TEX_COORD:
         /* The reference texel's centre in UV space. */
         return {(float(x) + 0.5f) / kGridSize, (float(y) + 0.5f) / kGridSize, 0.0f, 1.0f};
+      case SH_NODE_TEX_WHITE_NOISE: {
+        /* The deband's hash family at the reference texel, the W carrying which pass reads: a
+         * noise stable for the texel, of the same shape the CPU composite lays. The shader itself
+         * hashes the UV, so the parity between the graph and the CPU stays a tolerance and no
+         * closer; the exact pair is the CPU's own to answer. */
+        const RGBA vector = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+        const float w = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "W"_ustr)).r;
+        const uint32_t noise = BLI_hash_int_2d(
+            uint32_t(x) + uint32_t(int(w) + 1) * 7919u,
+            uint32_t(y) + uint32_t(int(vector.r * kGridSize)) * 6151u);
+        const float value = float(noise) / 4294967296.0f;
+        return {value, value, value, 1.0f};
+      }
       case SH_NODE_MAPPING: {
         const RGBA vector = eval_socket(
             *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
@@ -421,6 +436,9 @@ class GraphInterpreter {
              * reads zero, and so does a base of one, whose logarithm divides by zero. */
             value = (a > 0.0f && b > 0.0f && logf(b) != 0.0f) ? logf(a) / logf(b) : 0.0f;
             break;
+          case NODE_MATH_SQRT:
+            value = sqrtf(a);
+            break;
           case NODE_MATH_MINIMUM:
             value = std::min(a, b);
             break;
@@ -488,6 +506,13 @@ class GraphInterpreter {
             return value > 0.0f ? 1.0f : (value < 0.0f ? -1.0f : 0.0f);
           };
           return {sign(vector.r), sign(vector.g), sign(vector.b), 1.0f};
+        }
+        if (node.custom1 == NODE_VECTOR_MATH_DOT_PRODUCT) {
+          /* The scalar output of the node, carried in every component. */
+          const RGBA other = eval_socket(
+              *bke::node_find_socket(mutable_node, SOCK_IN, "Vector_001"_ustr));
+          const float dot = vector.r * other.r + vector.g * other.g + vector.b * other.b;
+          return {dot, dot, dot, dot};
         }
         if (node.custom1 == NODE_VECTOR_MATH_MULTIPLY_ADD) {
           const RGBA scale = eval_socket(

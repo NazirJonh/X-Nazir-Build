@@ -423,6 +423,27 @@ def draw_material_update_now(layout, owner):
     row.operator("material.paint_layers_bake_now", text="Update Now", icon='FILE_REFRESH')
 
 
+def draw_material_channel_mixer(layout, mixer):
+    """The matrix a Channel Mixer filter reads: one row per output channel, then the constants.
+
+    Each row holds how much of the input red, green and blue its output channel takes; the
+    constants are added to the outputs last. The monochrome switch is a parameter of the kind and
+    is drawn with the others by draw_material_kind_params.
+    """
+    col = layout.column(align=True)
+    col.label(text="Red Output")
+    col.prop(mixer, "red_row", text="")
+    col = layout.column(align=True)
+    col.label(text="Green Output")
+    col.prop(mixer, "green_row", text="")
+    col = layout.column(align=True)
+    col.label(text="Blue Output")
+    col.prop(mixer, "blue_row", text="")
+    col = layout.column(align=True)
+    col.label(text="Constants")
+    col.prop(mixer, "constants", text="")
+
+
 def _draw_kind_param(layout, param):
     """One parameter of a row's kind, drawn as its type asks.
 

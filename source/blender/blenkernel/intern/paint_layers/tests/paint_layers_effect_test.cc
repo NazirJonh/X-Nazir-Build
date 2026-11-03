@@ -25,6 +25,8 @@
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_wm_runtime.hh"
 
+#include "BLI_set.hh"
+
 #include "IMB_imbuf.hh"
 
 #include "DNA_windowmanager_types.h"
@@ -109,7 +111,7 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
   {
     MaterialPaintLayer *effect = BKE_paint_layers_filter_add(*ma, &row, filter);
     EXPECT_NE(effect, nullptr);
-    EXPECT_EQ(effect->role, MA_PAINT_LAYER_ROLE_EFFECT) << "a neighborhood effect is a correction";
+    EXPECT_EQ(effect->role, MA_PAINT_LAYER_ROLE_EFFECT) << "a CPU-computed effect is a correction";
     return effect;
   }
 
@@ -172,7 +174,7 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
     clear_active();
 
     /* The effect alone is no reason for the planner until the row needs it: a row that carries a
-     * neighborhood effect is a candidate and due whatever its mode is. */
+     * CPU-computed effect is a candidate and due whatever its mode is. */
     bool changed = false;
     ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
     ASSERT_NE(row->bake, nullptr);
@@ -686,11 +688,11 @@ TEST_F(PaintLayersEffectTest, the_bake_renders_the_erode_dilate_the_composite_sh
       });
 }
 
-TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_for_each_added_neighborhood_effect)
+TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_for_each_added_cpu_computed_effect)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
 
-  /* Each neighborhood kind refuses the combined preview by its own reason, without the effect
+  /* Each CPU-computed kind refuses the combined preview by its own reason, without the effect
    * having been computed for the describe-only pass. */
   const std::pair<eMaterialPaintLayerFilter, const char *> reasons[] = {
       {MA_PAINT_LAYER_FILTER_SHARPEN, "a Sharpen correction is read"},
@@ -837,5 +839,216 @@ TEST_F(PaintLayersEffectTest, the_budget_bounds_what_the_cache_keeps)
   EXPECT_EQ(paint_layer_effect_cache_bytes(), 0);
   paint_layer_effect_cache_set_budget(saved_budget);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Noise
+ * \{ */
+
+TEST_F(PaintLayersEffectTest, a_noise_at_zero_intensity_changes_nothing)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_set(*noise, PAINT_LAYER_NOISE_INTENSITY, 0.0f));
+
+  Vector<float> pixels;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  ASSERT_EQ(pixels.size(), before.size());
+  for (const int64_t i : pixels.index_range()) {
+    EXPECT_NEAR(pixels[i], before[i], 1e-6f) << "no intensity lays no grain, texel " << i;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, the_same_seed_lays_the_same_grain_and_the_cache_replaces_its_entry)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 99));
+
+  Vector<float> first;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(first, width, height));
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1);
+  /* The same seed computes the same grain: the second render serves the entry the first filled. */
+  Vector<float> again;
+  ASSERT_TRUE(render_channel(again, width, height));
+  ASSERT_EQ(again.size(), first.size());
+  for (const int64_t i : again.index_range()) {
+    EXPECT_NEAR(again[i], first[i], 0.0f) << "the grain is stable for the seed, texel " << i;
+  }
+
+  /* Another seed is another pattern: the key moves, the entry is replaced, not added to. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 100));
+  Vector<float> other;
+  ASSERT_TRUE(render_channel(other, width, height));
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 1)
+      << "the new seed replaced the entry, it did not add one";
+  float moved = 0.0f;
+  for (const int64_t i : other.index_range()) {
+    moved = std::max(moved, std::abs(other[i] - first[i]));
+  }
+  EXPECT_GT(moved, 1e-3f) << "a different seed lays a different grain";
+}
+
+TEST_F(PaintLayersEffectTest, salt_and_pepper_moves_only_to_black_and_white)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(
+      *noise, PAINT_LAYER_NOISE_TYPE, PAINT_LAYER_NOISE_SALT_PEPPER));
+  /* The ceiling of the intensity: a quarter of the uniforms read salt, a quarter pepper, and the
+   * rest stay. */
+  ASSERT_TRUE(paint_layer_kind_param_set(*noise, PAINT_LAYER_NOISE_INTENSITY, 0.5f));
+
+  Vector<float> pixels;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  ASSERT_EQ(pixels.size(), before.size());
+  int salted = 0;
+  int peppered = 0;
+  for (const int64_t i : pixels.index_range()) {
+    const bool salt = std::abs(pixels[i]) <= 1e-6f;
+    const bool pepper = std::abs(pixels[i] - 1.0f) <= 1e-6f;
+    const bool stayed = std::abs(pixels[i] - before[i]) <= 1e-6f;
+    EXPECT_TRUE(salt || pepper || stayed)
+        << "a salt and pepper grain only makes black or white, texel " << i;
+    salted += salt;
+    peppered += pepper;
+  }
+  EXPECT_GT(salted, 0) << "a grey flat row has texels the salt takes";
+  EXPECT_GT(peppered, 0) << "a grey flat row has texels the pepper takes";
+}
+
+TEST_F(PaintLayersEffectTest, the_bake_renders_the_noise_the_composite_shows)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 5));
+  clear_active();
+
+  /* The bake and the composite run the same description, so the grain lands identically. Both
+   * write bytes in the channel's colorspace, the one form both sides share. */
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(row->bake, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+
+  ImBuf *composite = IMB_allocImBuf(8, 8, ImBufFlags::ByteData);
+  ASSERT_NE(composite, nullptr);
+  ASSERT_TRUE(render_channel_bytes(*composite));
+  Image *baked = row->bake->images[kColor];
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      EXPECT_NEAR(bake_byte_pixel(*baked, x, y),
+                  int(composite->byte_data()[(int64_t(y) * 8 + x) * 4]),
+                  2)
+          << "the bake and the composite agree on the grain, at " << x << "," << y;
+    }
+  }
+  IMB_freeImBuf(composite);
+}
+
+TEST_F(PaintLayersEffectTest, a_noise_is_described_only_and_the_combined_preview_falls_back)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  ASSERT_NE(add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE), nullptr);
+
+  /* The shader carries no grain branch, and a describe-only pass computes nothing for it. */
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, kColor, layers, /*describe_only=*/true));
+  ASSERT_FALSE(layers.is_empty());
+  EXPECT_STREQ(BKE_paint_layers_gpu_unsupported_reason(layers[0], false),
+               "a Noise correction is read");
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 0) << "a describe-only pass computes nothing";
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name GPU Guard
+ * \{ */
+
+TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_before_reading_a_deband)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  ASSERT_NE(BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_DEBAND), nullptr);
+
+  /* The shader cannot repeat the hash of the texel: the described stack names a reason, without
+   * the noise having been computed for it. */
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, kColor, layers, /*describe_only=*/true));
+  ASSERT_FALSE(layers.is_empty());
+  EXPECT_NE(BKE_paint_layers_gpu_unsupported_reason(layers[0], false), nullptr);
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 0) << "a describe-only pass computes nothing";
+}
+
+TEST_F(PaintLayersEffectTest, every_pointwise_kind_has_a_shader_branch_or_refuses_the_preview)
+{
+  /* The kinds the combined shader has a branch for. A kind added to the registry and missing both
+   * here and in the refusals fails below instead of being shaded as a silent no-op. */
+  const Set<int> shaded = {MA_PAINT_LAYER_FILTER_INVERT,
+                           MA_PAINT_LAYER_FILTER_LEVELS,
+                           MA_PAINT_LAYER_FILTER_HSL,
+                           MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST,
+                           MA_PAINT_LAYER_FILTER_COLOR_RAMP,
+                           MA_PAINT_LAYER_FILTER_POSTERIZE,
+                           MA_PAINT_LAYER_FILTER_MATH,
+                           MA_PAINT_LAYER_FILTER_THRESHOLD,
+                           MA_PAINT_LAYER_FILTER_CLAMP,
+                           MA_PAINT_LAYER_FILTER_CURVES,
+                           MA_PAINT_LAYER_FILTER_COLOR_BALANCE,
+                           MA_PAINT_LAYER_FILTER_EXPOSURE,
+                           MA_PAINT_LAYER_FILTER_CHANNEL_MIXER};
+  constexpr uint8_t both_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
+                                 paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER);
+  MaterialPaintLayer *previous = nullptr;
+  for (const int filter : IndexRange(1, 63)) {
+    const PaintLayerKindInfo *info = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
+                                                           int16_t(filter));
+    /* A CPU-computed kind refuses by its flag; a mask-only one is never a correction. */
+    if (info == nullptr || (info->flags & PAINT_LAYER_KIND_NEEDS_BAKE) != 0 ||
+        (info->allowed_roles & both_roles) != both_roles)
+    {
+      continue;
+    }
+    SCOPED_TRACE(info->name);
+    clear_active();
+    /* The rows of the earlier kinds are switched off, so only this kind's row can refuse. */
+    if (previous != nullptr) {
+      ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, previous, false));
+    }
+    MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+    previous = row;
+    ASSERT_NE(BKE_paint_layers_filter_add(*ma, row, eMaterialPaintLayerFilter(filter)), nullptr);
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    ASSERT_TRUE(
+        BKE_paint_layers_composite_image_layers(*ma, kColor, layers, /*describe_only=*/true));
+    ASSERT_FALSE(layers.is_empty());
+    const char *reason = nullptr;
+    for (const PaintMaterialCompositeImageLayer &layer : layers) {
+      if (reason == nullptr) {
+        reason = BKE_paint_layers_gpu_unsupported_reason(layer, false);
+      }
+    }
+    if (shaded.contains(filter)) {
+      EXPECT_EQ(reason, nullptr);
+    }
+    else {
+      EXPECT_NE(reason, nullptr);
+    }
+    BKE_paint_layers_effect_cache_free_all();
+  }
+}
+
+/** \} */
 
 }  // namespace blender::bke::tests

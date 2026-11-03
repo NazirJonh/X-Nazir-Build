@@ -1125,13 +1125,12 @@ static float composite_filter_color(const int16_t filter,
                                     const float *params,
                                     const ColorBand *ramp,
                                     const CurveMapping *curves,
+                                    const int texel_xy[2],
                                     float rgb[3])
 {
   switch (filter) {
     case MA_PAINT_LAYER_FILTER_INVERT:
-      for (const int k : IndexRange(3)) {
-        rgb[k] = fabsf(rgb[k] - 1.0f);
-      }
+      paint_layer_invert_apply(rgb, params);
       break;
     case MA_PAINT_LAYER_FILTER_HSL:
       paint_layer_hsl_apply(rgb, params);
@@ -1148,6 +1147,20 @@ static float composite_filter_color(const int16_t filter,
       for (const int k : IndexRange(3)) {
         rgb[k] = paint_layer_posterize_apply(rgb[k], params[PAINT_LAYER_POSTERIZE_STEPS]);
       }
+      break;
+    case MA_PAINT_LAYER_FILTER_EXPOSURE:
+      paint_layer_exposure_apply(rgb, params);
+      break;
+    case MA_PAINT_LAYER_FILTER_DEBAND:
+      paint_layer_deband_apply(rgb, params, texel_xy);
+      break;
+    case MA_PAINT_LAYER_FILTER_NORMAL_CONVERT:
+      paint_layer_normal_convert_apply(rgb, params);
+      break;
+    case MA_PAINT_LAYER_FILTER_CHANNEL_MIXER:
+      /* The folded matrix (#paint_layer_channel_mixer_fold, monochrome included), clamped into
+       * [0, 1] like the addon's result. No payload pointer: the 12 numbers are the whole input. */
+      paint_layer_channel_mixer_apply(params, rgb);
       break;
     case MA_PAINT_LAYER_FILTER_MATH:
       for (const int k : IndexRange(3)) {
@@ -1204,6 +1217,9 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
                                           const PaintMaterialCompositeTexel &texel)
 {
   float mask_factor = 1.0f;
+  /* The texel this mask reads: a per-texel filter (Deband) wants its position, the others ignore
+   * it. The mask eval is one pixel, so it is computed once here. */
+  const int mask_texel_xy[2] = {texel.x, texel.y};
   for (const int item_i : items.index_range()) {
     const PaintMaterialCompositeMaskBuffer &item = items[item_i];
     if (item.opacity <= 0.0f) {
@@ -1237,7 +1253,8 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
       float grey[3] = {mask_factor, mask_factor, mask_factor};
       /* The strength multiplier is ignored: a grey coefficient has no stop alpha to apply. */
       composite_filter_color(
-          item.filter, item.filter_params, item.filter_ramp, item.filter_curves, grey);
+          item.filter, item.filter_params, item.filter_ramp, item.filter_curves, mask_texel_xy,
+          grey);
       mask_factor += (grey[0] - mask_factor) * opacity;
       continue;
     }
@@ -1435,7 +1452,7 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
   Vector<float> correction_storage;
   for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
     if (correction.effect_color != nullptr) {
-      /* A neighborhood effect (a Blur) carries its result as a map the effect cache computed,
+      /* A CPU-computed effect (a Blur) carries its result as a map the effect cache computed,
        * mixed into the colour like a filter is, `c = lerp(c, effect(c), opacity)`. The coverage
        * and the content alpha stay as they are. */
       const float weight = clamp_f(correction.opacity, 0.0f, 1.0f);
@@ -1460,13 +1477,17 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       if (weight <= 0.0f) {
         continue;
       }
+      const int tile_width = BLI_rcti_size_x(&tile);
       for (int64_t i = 0; i < count; i++) {
+        /* The texel's canvas position: a per-texel filter (Deband) reads it for its noise. */
+        const int texel_xy[2] = {tile.xmin + int(i % tile_width), tile.ymin + int(i / tile_width)};
         float *s = r_color + i * 4;
         float filtered[3] = {s[0], s[1], s[2]};
         const float strength_mul = composite_filter_color(correction.filter,
                                                           correction.filter_params,
                                                           correction.filter_ramp,
                                                           correction.filter_curves,
+                                                          texel_xy,
                                                           filtered);
         for (const int k : IndexRange(3)) {
           s[k] += (filtered[k] - s[k]) * weight * strength_mul;
@@ -1975,6 +1996,8 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
           /* The adjustment's colour is the stack so far, filtered; its row then lays it as any
            * other, by its blend, opacity and mask. */
           for (int64_t i = 0; i < count; i++) {
+            /* The texel's canvas position, as the correction path reads it for a per-texel filter. */
+            const int texel_xy[2] = {tile.xmin + int(i % tw), tile.ymin + int(i / tw)};
             float *c = color_storage.data() + i * 4;
             copy_v4_v4(c, tile_dst + i * 4);
             float filtered[3] = {c[0], c[1], c[2]};
@@ -1982,6 +2005,7 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
                                                               layer.adjustment_params,
                                                               layer.adjustment_ramp,
                                                               layer.adjustment_curves,
+                                                              texel_xy,
                                                               filtered);
             /* Applied in full unless the ramp's stop alpha lowers it; `c[3]` is left as it is. */
             for (const int k : IndexRange(3)) {
@@ -2848,7 +2872,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       buffer.filter = correction.filter;
       buffer.filter_ramp = correction.filter_ramp;
       buffer.filter_curves = correction.filter_curves;
-      /* A neighborhood effect's result is owned by the description; the evaluation borrows it. */
+      /* A CPU-computed effect's result is owned by the description; the evaluation borrows it. */
       buffer.effect_color = correction.effect_color.get();
       std::copy(std::begin(correction.filter_params),
                 std::end(correction.filter_params),
@@ -3443,7 +3467,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
         hash = get_default_hash(hash, paint_layer_curves_hash(*correction.filter_curves));
       }
       if (correction.effect_hash != 0) {
-        /* A neighborhood effect's result depends on the input's pixels, which the gathered images
+        /* A CPU-computed effect's result depends on the input's pixels, which the gathered images
          * watch; the hash carries the kind and the parameters. */
         hash = get_default_hash(hash, correction.effect_hash);
       }
@@ -3662,7 +3686,7 @@ static void composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>
       r_images.append(correction.image);
       r_images.append(correction.anchor_point_coverage_image);
       r_images.extend(correction.anchor_point_images);
-      /* A neighborhood effect reads the row's maps through the effect cache, no Image of its own:
+      /* A CPU-computed effect reads the row's maps through the effect cache, no Image of its own:
        * its input's maps are carried so a stroke on one reaches the cache. */
       r_images.extend(correction.effect_images);
     }

@@ -143,92 +143,79 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   const StackEditor *editor = source().editor();
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
-  /* The order #StackEditor::row_add dispatches by index, looked up by the name the Add shows: a
-   * kind inserted above another must not move every expectation below it. */
+  /* The count is the only absolute assertion beyond the stable head: every new filter the Add
+   * offers shifts the indices the dispatch reads, so the rest are resolved by identifier (see
+   * #kind_index) -- a filter added here or by another package cannot silently renumber them. */
   ASSERT_FALSE(kinds.is_empty());
-  const auto kind_at = [&](const StringRefNull identifier) -> const StackAddKindInfo * {
+  EXPECT_EQ(kinds[0].identifier, "PAINT");
+  EXPECT_FALSE(kinds[0].takes_color);
+  EXPECT_EQ(kinds[1].identifier, "FILL");
+  EXPECT_TRUE(kinds[1].takes_color);
+  EXPECT_TRUE(kinds[1].color_optional) << "a Fill starts with a colour or empty";
+  EXPECT_EQ(kinds[2].identifier, "FOLDER");
+  EXPECT_EQ(kinds[3].identifier, "CORRECTION");
+  EXPECT_FALSE(kinds[3].takes_color);
+  EXPECT_EQ(kinds[4].identifier, "CORRECTION_FILL");
+  EXPECT_TRUE(kinds[4].takes_color);
+  EXPECT_FALSE(kinds[4].color_optional) << "only a Fill layer itself has the Empty variant";
+  EXPECT_EQ(kinds[5].identifier, "MASK_CORRECTION");
+  EXPECT_FALSE(kinds[5].takes_color);
+  EXPECT_EQ(kinds[6].identifier, "MASK_CORRECTION_FILL");
+  EXPECT_FALSE(kinds[6].takes_color) << "a mask lays one grey: the Add makes it and asks nothing";
+  EXPECT_EQ(kinds[7].identifier, "FILTER_INVERT");
+  EXPECT_FALSE(kinds[7].takes_color);
+  EXPECT_TRUE(kinds[7].is_effect);
+  EXPECT_EQ(kinds[8].identifier, "FILTER_LEVELS");
+  EXPECT_TRUE(kinds[8].is_effect);
+  EXPECT_EQ(kinds[9].identifier, "FILTER_HSL");
+  EXPECT_TRUE(kinds[9].is_effect);
+  EXPECT_EQ(kinds[10].identifier, "FILTER_BRIGHTNESS_CONTRAST");
+  EXPECT_TRUE(kinds[10].is_effect);
+  EXPECT_EQ(kinds[11].identifier, "FILTER_COLOR_RAMP");
+  EXPECT_TRUE(kinds[11].is_effect);
+  EXPECT_EQ(kinds[12].identifier, "FILTER_POSTERIZE");
+  EXPECT_TRUE(kinds[12].is_effect);
+  EXPECT_EQ(kinds[13].identifier, "FILTER_MATH");
+  EXPECT_TRUE(kinds[13].is_effect);
+  EXPECT_EQ(kinds[14].identifier, "FILTER_THRESHOLD");
+  EXPECT_TRUE(kinds[14].is_effect);
+  EXPECT_EQ(kinds[15].identifier, "FILTER_CLAMP");
+  EXPECT_TRUE(kinds[15].is_effect);
+  EXPECT_EQ(kinds[16].identifier, "FILTER_CURVES");
+  EXPECT_TRUE(kinds[16].is_effect);
+  EXPECT_EQ(kinds[17].identifier, "FILTER_COLOR_BALANCE");
+  EXPECT_TRUE(kinds[17].is_effect);
+  /* Every kind past the head is found by identifier; `at` also fails the test if it is missing. */
+  const auto at = [&](const char *identifier) {
     const int index = kind_index(kinds, identifier);
-    EXPECT_GE(index, 0) << identifier;
-    return index >= 0 ? &kinds[index] : nullptr;
-  };
-  const auto position = [&](const StringRefNull identifier) {
-    const int index = kind_index(kinds, identifier);
-    EXPECT_GE(index, 0) << identifier;
+    EXPECT_GE(index, 0) << identifier << " is not offered";
     return index;
   };
-  const auto expect_effect = [&](const StringRefNull identifier, const bool is_effect) {
-    const StackAddKindInfo *kind = kind_at(identifier);
-    ASSERT_NE(kind, nullptr);
-    EXPECT_EQ(kind->is_effect, is_effect) << identifier;
-  };
-
-  /* The rows of the stack come first. */
-  const StackAddKindInfo *paint = kind_at("PAINT");
-  ASSERT_NE(paint, nullptr);
-  EXPECT_FALSE(paint->takes_color);
-  const StackAddKindInfo *fill = kind_at("FILL");
-  ASSERT_NE(fill, nullptr);
-  EXPECT_TRUE(fill->takes_color);
-  EXPECT_TRUE(fill->color_optional) << "a Fill starts with a colour or empty";
-  ASSERT_NE(kind_at("FOLDER"), nullptr);
-  const StackAddKindInfo *correction = kind_at("CORRECTION");
-  ASSERT_NE(correction, nullptr);
-  EXPECT_FALSE(correction->takes_color);
-  const StackAddKindInfo *correction_fill = kind_at("CORRECTION_FILL");
-  ASSERT_NE(correction_fill, nullptr);
-  EXPECT_TRUE(correction_fill->takes_color);
-  EXPECT_FALSE(correction_fill->color_optional)
-      << "only a Fill layer itself has the Empty variant";
-  const StackAddKindInfo *mask_correction = kind_at("MASK_CORRECTION");
-  ASSERT_NE(mask_correction, nullptr);
-  EXPECT_FALSE(mask_correction->takes_color);
-  const StackAddKindInfo *mask_correction_fill = kind_at("MASK_CORRECTION_FILL");
-  ASSERT_NE(mask_correction_fill, nullptr);
-  EXPECT_FALSE(mask_correction_fill->takes_color)
-      << "a mask lays one grey: the Add makes it and asks nothing";
-
-  /* The pointwise filters of a row. */
-  const StackAddKindInfo *invert = kind_at("FILTER_INVERT");
-  ASSERT_NE(invert, nullptr);
-  EXPECT_FALSE(invert->takes_color);
-  EXPECT_TRUE(invert->is_effect);
-  for (const char *identifier : {"FILTER_LEVELS",
-                                 "FILTER_HSL",
-                                 "FILTER_BRIGHTNESS_CONTRAST",
-                                 "FILTER_COLOR_RAMP",
-                                 "FILTER_POSTERIZE",
-                                 "FILTER_MATH",
-                                 "FILTER_THRESHOLD",
-                                 "FILTER_CLAMP",
-                                 "FILTER_CURVES",
-                                 "FILTER_COLOR_BALANCE"})
+  /* The filters as corrections of a row's colour. */
+  for (const char *filter : {"FILTER_EXPOSURE",
+                             "FILTER_DEBAND",
+                             "FILTER_NORMAL_CONVERT",
+                             "FILTER_CHANNEL_MIXER"})
   {
-    expect_effect(identifier, true);
+    EXPECT_TRUE(kinds[at(filter)].is_effect) << filter;
+    EXPECT_FALSE(kinds[at(filter)].takes_color) << filter;
   }
-
-  /* The neighborhood effects follow: corrections of a row only, no adjustment or mask form. */
-  const char *neighborhood[] = {"EFFECT_BLUR",
-                                "EFFECT_SHARPEN",
-                                "EFFECT_HIGH_PASS",
-                                "EFFECT_EDGE_DETECT",
-                                "EFFECT_EMBOSS",
-                                "EFFECT_ERODE_DILATE"};
-  for (const char *identifier : neighborhood) {
-    const StackAddKindInfo *kind = kind_at(identifier);
-    ASSERT_NE(kind, nullptr);
-    EXPECT_TRUE(kind->is_effect) << identifier;
-    EXPECT_FALSE(kind->takes_color) << identifier;
+  /* The CPU-computed effects follow: corrections of a row only, no adjustment or mask form. */
+  for (const char *effect : {"EFFECT_BLUR",
+                             "EFFECT_SHARPEN",
+                             "EFFECT_HIGH_PASS",
+                             "EFFECT_EDGE_DETECT",
+                             "EFFECT_EMBOSS",
+                             "EFFECT_ERODE_DILATE",
+                             "EFFECT_NOISE"})
+  {
+    EXPECT_TRUE(kinds[at(effect)].is_effect) << effect;
   }
-  for (const int i : IndexRange(int(std::size(neighborhood)) - 1)) {
-    EXPECT_LT(position(neighborhood[i]), position(neighborhood[i + 1]))
-        << "the neighborhood effects keep the registry's order";
-  }
-
-  /* The same filters again as rows of the stack, in the same order. */
-  const StackAddKindInfo *adjustment = kind_at("ADJUSTMENT_INVERT");
-  ASSERT_NE(adjustment, nullptr);
-  EXPECT_FALSE(adjustment->is_effect);
-  for (const char *identifier : {"ADJUSTMENT_LEVELS",
+  EXPECT_EQ(kind_index(kinds, "ADJUSTMENT_NOISE"), -1) << "a CPU-computed effect has no row form";
+  EXPECT_EQ(kind_index(kinds, "MASK_FILTER_NOISE"), -1) << "nor a mask form";
+  /* The same filters again as rows of the stack (adjustments): an adjustment is not an effect. */
+  for (const char *adjustment : {"ADJUSTMENT_INVERT",
+                                 "ADJUSTMENT_LEVELS",
                                  "ADJUSTMENT_HSL",
                                  "ADJUSTMENT_BRIGHTNESS_CONTRAST",
                                  "ADJUSTMENT_COLOR_RAMP",
@@ -237,74 +224,55 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
                                  "ADJUSTMENT_THRESHOLD",
                                  "ADJUSTMENT_CLAMP",
                                  "ADJUSTMENT_CURVES",
-                                 "ADJUSTMENT_COLOR_BALANCE"})
+                                 "ADJUSTMENT_COLOR_BALANCE",
+                                 "ADJUSTMENT_EXPOSURE",
+                                 "ADJUSTMENT_DEBAND",
+                                 "ADJUSTMENT_NORMAL_CONVERT",
+                                 "ADJUSTMENT_CHANNEL_MIXER"})
   {
-    expect_effect(identifier, false);
+    EXPECT_FALSE(kinds[at(adjustment)].is_effect) << adjustment;
   }
-
   /* And as corrections of the mask, in no channel. */
-  for (const char *identifier : {"MASK_FILTER_INVERT",
-                                 "MASK_FILTER_LEVELS",
-                                 "MASK_FILTER_HSL",
-                                 "MASK_FILTER_BRIGHTNESS_CONTRAST",
-                                 "MASK_FILTER_COLOR_RAMP",
-                                 "MASK_FILTER_POSTERIZE",
-                                 "MASK_FILTER_MATH",
-                                 "MASK_FILTER_THRESHOLD",
-                                 "MASK_FILTER_CLAMP",
-                                 "MASK_FILTER_CURVES",
-                                 "MASK_FILTER_COLOR_BALANCE"})
+  EXPECT_TRUE(kinds[at("MASK_FILTER_INVERT")].is_effect);
+  EXPECT_FALSE(kinds[at("MASK_FILTER_HSL")].takes_color);
+  for (const char *mask : {"MASK_FILTER_LEVELS",
+                           "MASK_FILTER_HSL",
+                           "MASK_FILTER_BRIGHTNESS_CONTRAST",
+                           "MASK_FILTER_COLOR_RAMP",
+                           "MASK_FILTER_POSTERIZE",
+                           "MASK_FILTER_MATH",
+                           "MASK_FILTER_THRESHOLD",
+                           "MASK_FILTER_CLAMP",
+                           "MASK_FILTER_CURVES",
+                           "MASK_FILTER_COLOR_BALANCE",
+                           "MASK_FILTER_EXPOSURE",
+                           "MASK_FILTER_DEBAND",
+                           "MASK_FILTER_NORMAL_CONVERT",
+                           "MASK_FILTER_CHANNEL_MIXER"})
   {
-    expect_effect(identifier, true);
+    EXPECT_NE(kind_index(kinds, mask), -1) << mask;
   }
-  /* The map-driven filters follow, only as corrections of the mask. */
-  expect_effect("MASK_FILTER_COLOR_ID", true);
-  expect_effect("MASK_FILTER_UV_ISLAND", true);
-
-  /* Last, so no index above moves: the kind a dropped material is made into. */
-  const StackAddKindInfo *material = kind_at("MATERIAL");
-  ASSERT_NE(material, nullptr);
-  EXPECT_EQ(material->source_id_type, ID_MA);
-  EXPECT_FALSE(material->is_effect);
-  const StackAddKindInfo *correction_material = kind_at("CORRECTION_MATERIAL");
-  ASSERT_NE(correction_material, nullptr);
-  EXPECT_EQ(correction_material->source_id_type, ID_MA);
-  EXPECT_TRUE(correction_material->is_effect) << "listed with the other corrections";
-  const StackAddKindInfo *mask_correction_material = kind_at("MASK_CORRECTION_MATERIAL");
-  ASSERT_NE(mask_correction_material, nullptr);
-  EXPECT_EQ(mask_correction_material->source_id_type, ID_MA);
-  EXPECT_TRUE(mask_correction_material->is_effect);
-
-  /* The marker and the three places its reader can land are last, so no index above moves. */
-  expect_effect("ANCHOR_POINT", true);
-  expect_effect("ANCHOR_POINT_LAYER", false);
-  expect_effect("ANCHOR_POINT_CORRECTION", true);
-  expect_effect("ANCHOR_POINT_MASK_CORRECTION", true);
-
-  /* Last of all: a procedural Gradient layer, a row of the stack rather than a correction, then
-   * the same generator in its two correction roles. */
-  const StackAddKindInfo *gradient = kind_at("GRADIENT");
-  ASSERT_NE(gradient, nullptr);
-  EXPECT_FALSE(gradient->is_effect);
-  EXPECT_FALSE(gradient->takes_color);
-  expect_effect("CORRECTION_GRADIENT", true);
-  expect_effect("MASK_CORRECTION_GRADIENT", true);
-
-  /* Then the Curve Patch, only ever an effect of a layer. */
-  expect_effect("CURVE_PATCH_CORRECTION", true);
-
-  /* The groups keep their relative order. */
-  EXPECT_LT(position("PAINT"), position("FILL"));
-  EXPECT_LT(position("FOLDER"), position("CORRECTION"));
-  EXPECT_LT(position("MASK_CORRECTION_FILL"), position("FILTER_INVERT"));
-  EXPECT_LT(position("FILTER_COLOR_BALANCE"), position("EFFECT_BLUR"));
-  EXPECT_LT(position("EFFECT_ERODE_DILATE"), position("ADJUSTMENT_INVERT"));
-  EXPECT_LT(position("ADJUSTMENT_COLOR_BALANCE"), position("MASK_FILTER_INVERT"));
-  EXPECT_LT(position("MASK_FILTER_COLOR_BALANCE"), position("MASK_FILTER_COLOR_ID"));
-  EXPECT_LT(position("MASK_FILTER_UV_ISLAND"), position("MATERIAL"));
-  EXPECT_LT(position("MASK_CORRECTION_MATERIAL"), position("ANCHOR_POINT"));
-  EXPECT_LT(position("ANCHOR_POINT_MASK_CORRECTION"), position("GRADIENT"));
-  EXPECT_LT(position("MASK_CORRECTION_GRADIENT"), position("CURVE_PATCH_CORRECTION"));
+  /* The map-driven filters, only as corrections of the mask. */
+  EXPECT_TRUE(kinds[at("MASK_FILTER_COLOR_ID")].is_effect);
+  EXPECT_TRUE(kinds[at("MASK_FILTER_UV_ISLAND")].is_effect);
+  /* The kind a dropped material is made into, and the marker and its readers, and the gradient
+   * generator and the Curve Patch: each is offered once per role it can take. */
+  EXPECT_EQ(kinds[at("MATERIAL")].source_id_type, ID_MA);
+  EXPECT_FALSE(kinds[at("MATERIAL")].is_effect);
+  EXPECT_EQ(kinds[at("CORRECTION_MATERIAL")].source_id_type, ID_MA);
+  EXPECT_TRUE(kinds[at("CORRECTION_MATERIAL")].is_effect) << "listed with the other corrections";
+  EXPECT_EQ(kinds[at("MASK_CORRECTION_MATERIAL")].source_id_type, ID_MA);
+  EXPECT_TRUE(kinds[at("MASK_CORRECTION_MATERIAL")].is_effect);
+  EXPECT_TRUE(kinds[at("ANCHOR_POINT")].is_effect);
+  EXPECT_FALSE(kinds[at("ANCHOR_POINT_LAYER")].is_effect);
+  EXPECT_TRUE(kinds[at("ANCHOR_POINT_CORRECTION")].is_effect);
+  EXPECT_TRUE(kinds[at("ANCHOR_POINT_MASK_CORRECTION")].is_effect);
+  EXPECT_FALSE(kinds[at("GRADIENT")].is_effect);
+  EXPECT_FALSE(kinds[at("GRADIENT")].takes_color);
+  EXPECT_TRUE(kinds[at("CORRECTION_GRADIENT")].is_effect);
+  EXPECT_TRUE(kinds[at("MASK_CORRECTION_GRADIENT")].is_effect);
+  /* The Curve Patch, only ever an effect of a layer. */
+  EXPECT_TRUE(kinds[at("CURVE_PATCH_CORRECTION")].is_effect);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, glyph_constants_stay_in_step_with_space_outliner)
@@ -346,9 +314,44 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
     }
     return -1;
   };
+  const auto is_new = [](const Vector<StackEffectMenuKind> &kinds, const char *identifier) {
+    for (const StackEffectMenuKind &entry : kinds) {
+      if (entry.info.identifier == identifier) {
+        return entry.is_new;
+      }
+    }
+    return false;
+  };
 
   const Vector<StackEffectMenuKind> content = kinds_for(PAINT_LAYER_TARGET_CONTENT);
   const Vector<StackEffectMenuKind> mask = kinds_for(PAINT_LAYER_TARGET_MASK);
+
+  /* The newer filters are listed in the "New Effects" submenu and nothing else is, so no entry
+   * appears in both lists. */
+  for (const char *identifier : {"FILTER_EXPOSURE",
+                                 "FILTER_DEBAND",
+                                 "FILTER_NORMAL_CONVERT",
+                                 "FILTER_CHANNEL_MIXER",
+                                 "EFFECT_NOISE",
+                                 "EFFECT_SHARPEN",
+                                 "EFFECT_HIGH_PASS",
+                                 "EFFECT_EDGE_DETECT",
+                                 "EFFECT_EMBOSS",
+                                 "EFFECT_ERODE_DILATE"})
+  {
+    EXPECT_TRUE(is_new(content, identifier)) << identifier;
+  }
+  for (const char *identifier : {"FILTER_INVERT",
+                                 "FILTER_LEVELS",
+                                 "FILTER_COLOR_BALANCE",
+                                 "EFFECT_BLUR",
+                                 "ANCHOR_POINT",
+                                 "CORRECTION_MATERIAL",
+                                 "CURVE_PATCH_CORRECTION"})
+  {
+    EXPECT_TRUE(has_identifier(content, identifier)) << identifier;
+    EXPECT_FALSE(is_new(content, identifier)) << identifier;
+  }
 
   /* One line per thing: in the content mode a mask twin is not offered, in the mask mode the line
    * resolves to its own twin. */

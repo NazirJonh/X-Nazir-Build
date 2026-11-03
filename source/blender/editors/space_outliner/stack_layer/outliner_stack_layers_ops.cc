@@ -504,13 +504,26 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
 void OUTLINER_OT_stack_layer_effect_add(wmOperatorType *ot)
 {
   /* The same operation as the Add, with the same properties and body; only the offered kinds
-   * differ, so the header's Effects dropdown can list the corrections as a plain enum menu. */
+   * differ, so the header's Effects dropdown can list the corrections. */
   OUTLINER_OT_stack_layer_add(ot);
   ot->name = "Add Effect";
   ot->idname = "OUTLINER_OT_stack_layer_effect_add";
   ot->description = "Add a correction to the active layer or its mask";
   PropertyRNA *prop = RNA_struct_type_find_property(ot->srna, "type");
   RNA_def_enum_funcs(prop, stack_effect_type_itemf);
+}
+
+void OUTLINER_OT_stack_layer_effect_add_new(wmOperatorType *ot)
+{
+  /* The same again for the "New Effects" submenu. A second operator rather than a property of the
+   * first: the enum an operator validates `type` against is its own, so a submenu cannot narrow a
+   * shared one without a script that names a kind having to know which group it sits in. */
+  OUTLINER_OT_stack_layer_add(ot);
+  ot->name = "Add New Effect";
+  ot->idname = "OUTLINER_OT_stack_layer_effect_add_new";
+  ot->description = "Add one of the newer corrections to the active layer or its mask";
+  PropertyRNA *prop = RNA_struct_type_find_property(ot->srna, "type");
+  RNA_def_enum_funcs(prop, stack_effect_new_type_itemf);
 }
 
 /**

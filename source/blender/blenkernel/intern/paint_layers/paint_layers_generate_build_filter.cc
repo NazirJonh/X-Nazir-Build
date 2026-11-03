@@ -91,55 +91,133 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
 
   switch (eMaterialPaintLayerFilter(effect.kind_subtype)) {
     case MA_PAINT_LAYER_FILTER_INVERT: {
-      /* `lerp(c, |c - 1|, opacity)`: Difference against white is `1 - c` on [0, 1] and stays
-       * symmetric beyond it, which is the formula the CPU composite applies. */
-      bNode *mix = mix_node_add(tree, MA_RAMP_DIFF, 0.0f, 0.0f);
-      bNodeSocket *a = (mix != nullptr) ? socket_in(*mix, "A_Color") : nullptr;
-      bNodeSocket *b = (mix != nullptr) ? socket_in(*mix, "B_Color") : nullptr;
-      bNodeSocket *fac = (mix != nullptr) ? socket_in(*mix, "Factor_Float") : nullptr;
-      bNodeSocket *out = (mix != nullptr) ? socket_out(*mix, "Result_Color") : nullptr;
-      if (a == nullptr || b == nullptr || fac == nullptr || out == nullptr ||
-          b->default_value == nullptr)
+      /* `out_k = c_k + (|c_k - 1| - c_k) * f_k`: Difference against white is `1 - c` on [0, 1] and
+       * stays symmetric beyond it, the three amounts ride in as one vector, and the opacity is the
+       * final mix's own factor. Every parameter an input of the group, so an edit of one is a value
+       * and not a different graph. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_INVERT_PARAM_NUM) {
+        return false;
+      }
+      NodeOutput param[PAINT_LAYER_INVERT_PARAM_NUM];
+      for (const int i : IndexRange(PAINT_LAYER_INVERT_PARAM_NUM)) {
+        if ((*params)[i] == nullptr) {
+          return false;
+        }
+        param[i] = {group.group_input, group_input_socket(group, *(*params)[i])};
+        if (param[i].socket == nullptr) {
+          return false;
+        }
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      /* The complement itself, not a mix towards it: the Difference sits at full factor, so the
+       * per-channel amounts -- not the node -- decide how far each channel turns. */
+      bNode *diff = mix_node_add(tree, MA_RAMP_DIFF, 0.0f, 0.0f);
+      bNodeSocket *a = (diff != nullptr) ? socket_in(*diff, "A_Color") : nullptr;
+      bNodeSocket *b = (diff != nullptr) ? socket_in(*diff, "B_Color") : nullptr;
+      bNodeSocket *fac = (diff != nullptr) ? socket_in(*diff, "Factor_Float") : nullptr;
+      bNodeSocket *diff_out = (diff != nullptr) ? socket_out(*diff, "Result_Color") : nullptr;
+      if (a == nullptr || b == nullptr || fac == nullptr || diff_out == nullptr ||
+          b->default_value == nullptr || fac->default_value == nullptr)
       {
-        if (mix != nullptr) {
-          bke::node_remove_node(nullptr, tree, *mix, true, false);
+        if (diff != nullptr) {
+          bke::node_remove_node(nullptr, tree, *diff, true, false);
         }
         return false;
       }
       const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
       copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(b->default_value)->value, white);
+      static_cast<bNodeSocketValueFloat *>(fac->default_value)->value = 1.0f;
+      grid_.place_extra(*diff);
+      nodes.append(diff);
+      bke::node_add_link(tree, *content.node, *content.socket, *diff, *a);
+
+      /* The distance from the colour to its complement, scaled by the amount and added back: a
+       * lerp of the colour towards the complement, per channel. */
+      const NodeOutput amounts = combine_xyz_node_add(tree, grid_, nodes, param);
+      bNode *distance = vector_math_node_add(
+          tree, grid_, nodes, NODE_VECTOR_MATH_SUBTRACT, {diff, diff_out}, content);
+      bNode *lerped = (distance != nullptr) ?
+                          vector_math_node_add(tree,
+                                               grid_,
+                                               nodes,
+                                               NODE_VECTOR_MATH_MULTIPLY_ADD,
+                                               {distance, socket_out(*distance, "Vector")},
+                                               amounts) :
+                          nullptr;
+      if (amounts.socket == nullptr || distance == nullptr || lerped == nullptr) {
+        return discard();
+      }
+      bNodeSocket *base_in = socket_in(*lerped, "Vector_002");
+      if (base_in == nullptr) {
+        return discard();
+      }
+      bke::node_add_link(tree, *content.node, *content.socket, *lerped, *base_in);
+
+      bNode *mix = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
+      bNodeSocket *mix_a = (mix != nullptr) ? socket_in(*mix, "A_Color") : nullptr;
+      bNodeSocket *mix_b = (mix != nullptr) ? socket_in(*mix, "B_Color") : nullptr;
+      bNodeSocket *mix_fac = (mix != nullptr) ? socket_in(*mix, "Factor_Float") : nullptr;
+      bNodeSocket *mix_out = (mix != nullptr) ? socket_out(*mix, "Result_Color") : nullptr;
+      if (mix == nullptr || mix_a == nullptr || mix_b == nullptr || mix_fac == nullptr ||
+          mix_out == nullptr)
+      {
+        if (mix != nullptr) {
+          bke::node_remove_node(nullptr, tree, *mix, true, false);
+        }
+        return discard();
+      }
+      nodes.append(mix);
       grid_.place_extra(*mix);
-      bke::node_add_link(tree, *content.node, *content.socket, *mix, *a);
-      bke::node_add_link(tree, *strength.node, *strength.socket, *mix, *fac);
-      content = {mix, out};
-      Vector<bNode *> framed;
-      framed.append(mix);
-      layout::frame_add(tree, effect.name, framed);
+      bke::node_add_link(tree, *content.node, *content.socket, *mix, *mix_a);
+      bke::node_add_link(tree, *lerped, *socket_out(*lerped, "Vector"), *mix, *mix_b);
+      bke::node_add_link(tree, *strength.node, *strength.socket, *mix, *mix_fac);
+      content = {mix, mix_out};
+      layout::frame_add(tree, effect.name, nodes);
       return true;
     }
     case MA_PAINT_LAYER_FILTER_HSL: {
-      /* One Hue/Saturation/Value node: the parameters feed its inputs and the filter's opacity its
-       * own factor, so the node mixes the result with the colour it read. */
+      /* A Hue/Saturation/Value node at full strength, then the vibrance lift, then the opacity:
+       * the node's own factor would mix before the vibrance saw the colour, while the CPU applies
+       * the whole filter first and blends it by the strength after. At a zero vibrance the lift
+       * reads the colour back, so the tree is fixed and an edit of any parameter is a value edit. */
       Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
       if (params == nullptr || params->size() != PAINT_LAYER_HSL_PARAM_NUM) {
         return false;
       }
+      NodeOutput param[PAINT_LAYER_HSL_PARAM_NUM];
+      for (const int i : IndexRange(PAINT_LAYER_HSL_PARAM_NUM)) {
+        if ((*params)[i] == nullptr) {
+          return false;
+        }
+        param[i] = {group.group_input, group_input_socket(group, *(*params)[i])};
+        if (param[i].socket == nullptr) {
+          return false;
+        }
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
       bNode *hsv = bke::node_add_static_node(nullptr, tree, SH_NODE_HUE_SAT);
       bNodeSocket *color_in = (hsv != nullptr) ? socket_in(*hsv, "Color") : nullptr;
-      bNodeSocket *fac_in = (hsv != nullptr) ? socket_in(*hsv, "Fac") : nullptr;
       bNodeSocket *color_out = (hsv != nullptr) ? socket_out(*hsv, "Color") : nullptr;
-      const char *const names[PAINT_LAYER_HSL_PARAM_NUM] = {"Hue", "Saturation", "Value"};
-      bool linked = color_in != nullptr && fac_in != nullptr && color_out != nullptr;
-      for (const int i : IndexRange(PAINT_LAYER_HSL_PARAM_NUM)) {
+      const char *const names[3] = {"Hue", "Saturation", "Value"};
+      bool linked = color_in != nullptr && color_out != nullptr;
+      for (const int i : IndexRange(3)) {
         bNodeSocket *param_in = linked ? socket_in(*hsv, names[i]) : nullptr;
-        bNodeSocket *param_out = ((*params)[i] != nullptr) ?
-                                     group_input_socket(group, *(*params)[i]) :
-                                     nullptr;
-        if (param_in == nullptr || param_out == nullptr) {
+        if (param_in == nullptr) {
           linked = false;
           break;
         }
-        bke::node_add_link(tree, *group.group_input, *param_out, *hsv, *param_in);
+        bke::node_add_link(tree, *param[i].node, *param[i].socket, *hsv, *param_in);
       }
       if (!linked) {
         if (hsv != nullptr) {
@@ -147,13 +225,135 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
         }
         return false;
       }
+      /* The node's own factor stays at its default of one: the mix to the colour it read is the
+       * final mix's job. */
       grid_.place_extra(*hsv);
+      nodes.append(hsv);
       bke::node_add_link(tree, *content.node, *content.socket, *hsv, *color_in);
-      bke::node_add_link(tree, *strength.node, *strength.socket, *hsv, *fac_in);
-      content = {hsv, color_out};
-      Vector<bNode *> framed;
-      framed.append(hsv);
-      layout::frame_add(tree, effect.name, framed);
+
+      /* The vibrance: `rgb + (rgb - gray) * vibrance * (1 - (max - min) / max)`, the gray the RGB
+       * to BW node's own luminance, then the clamp below zero the HSV branch applies. */
+      bNode *bw = bke::node_add_static_node(nullptr, tree, SH_NODE_RGBTOBW);
+      NodeOutput xyz[3];
+      bool lifted = bw != nullptr;
+      if (lifted) {
+        nodes.append(bw);
+        grid_.place_extra(*bw);
+        bNodeSocket *bw_color = socket_in(*bw, "Color");
+        bNodeSocket *bw_val = socket_out(*bw, "Val");
+        lifted = bw_color != nullptr && bw_val != nullptr;
+        if (lifted) {
+          bke::node_add_link(tree, *hsv, *color_out, *bw, *bw_color);
+        }
+      }
+      if (lifted) {
+        lifted = separate_xyz_node_add(tree, grid_, nodes, {hsv, color_out}, xyz);
+      }
+      const NodeOutput gray = {bw, (bw != nullptr) ? socket_out(*bw, "Val") : nullptr};
+      const NodeOutput max_xy = lifted ?
+                                    math_node_add(tree, grid_, nodes, NODE_MATH_MAXIMUM, xyz[0], xyz[1]) :
+                                    NodeOutput{};
+      const NodeOutput max_c = (max_xy.socket != nullptr) ?
+                                   math_node_add(tree, grid_, nodes, NODE_MATH_MAXIMUM, max_xy, xyz[2]) :
+                                   NodeOutput{};
+      const NodeOutput min_xy = lifted ?
+                                    math_node_add(tree, grid_, nodes, NODE_MATH_MINIMUM, xyz[0], xyz[1]) :
+                                    NodeOutput{};
+      const NodeOutput min_c = (min_xy.socket != nullptr) ?
+                                   math_node_add(tree, grid_, nodes, NODE_MATH_MINIMUM, min_xy, xyz[2]) :
+                                   NodeOutput{};
+      const NodeOutput span = (max_c.socket != nullptr && min_c.socket != nullptr) ?
+                                  math_node_add(tree, grid_, nodes, NODE_MATH_SUBTRACT, max_c, min_c) :
+                                  NodeOutput{};
+      /* A black reads as unsaturated: the divide hands back zero where the max is zero, and the
+       * difference from the grey shrinks with it. */
+      const NodeOutput sat = (span.socket != nullptr) ?
+                                 math_node_add(tree, grid_, nodes, NODE_MATH_DIVIDE, span, max_c) :
+                                 NodeOutput{};
+      const NodeOutput rest = (sat.socket != nullptr) ?
+                                  math_node_add(tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, sat, 1.0f) :
+                                  NodeOutput{};
+      const NodeOutput boost = (rest.socket != nullptr) ?
+                                   math_node_add(tree,
+                                                 grid_,
+                                                 nodes,
+                                                 NODE_MATH_MULTIPLY,
+                                                 param[PAINT_LAYER_HSL_VIBRANCE],
+                                                 rest) :
+                                   NodeOutput{};
+      NodeOutput gray_components[3] = {gray, gray, gray};
+      const NodeOutput gray_vec = lifted ?
+                                     combine_xyz_node_add(tree, grid_, nodes, gray_components) :
+                                     NodeOutput{};
+      bNode *diff = (gray_vec.socket != nullptr) ?
+                        vector_math_node_add(tree,
+                                             grid_,
+                                             nodes,
+                                             NODE_VECTOR_MATH_SUBTRACT,
+                                             {hsv, color_out},
+                                             gray_vec) :
+                        nullptr;
+      NodeOutput boost_components[3] = {boost, boost, boost};
+      const NodeOutput boost_vec = (boost.socket != nullptr) ?
+                                       combine_xyz_node_add(tree, grid_, nodes, boost_components) :
+                                       NodeOutput{};
+      bNode *moved = (diff != nullptr && boost_vec.socket != nullptr) ?
+                         vector_math_node_add(tree,
+                                              grid_,
+                                              nodes,
+                                              NODE_VECTOR_MATH_MULTIPLY_ADD,
+                                              {diff, socket_out(*diff, "Vector")},
+                                              boost_vec) :
+                         nullptr;
+      if (moved != nullptr) {
+        bNodeSocket *moved_base = socket_in(*moved, "Vector_002");
+        if (moved_base == nullptr) {
+          return discard();
+        }
+        bke::node_add_link(tree, *hsv, *color_out, *moved, *moved_base);
+      }
+      bNode *clamped = (moved != nullptr) ?
+                           vector_math_node_add(tree,
+                                                grid_,
+                                                nodes,
+                                                NODE_VECTOR_MATH_MAXIMUM,
+                                                {moved, socket_out(*moved, "Vector")},
+                                                {}) :
+                           nullptr;
+      if (clamped != nullptr) {
+        bNodeSocket *zero_b = socket_in(*clamped, "Vector_001");
+        if (zero_b == nullptr || zero_b->default_value == nullptr) {
+          return discard();
+        }
+        copy_v3_fl(static_cast<bNodeSocketValueVector *>(zero_b->default_value)->value, 0.0f);
+      }
+      if (gray.socket == nullptr || max_xy.socket == nullptr || max_c.socket == nullptr ||
+          min_xy.socket == nullptr || min_c.socket == nullptr || span.socket == nullptr ||
+          sat.socket == nullptr || rest.socket == nullptr || boost.socket == nullptr ||
+          gray_vec.socket == nullptr || diff == nullptr || boost_vec.socket == nullptr ||
+          moved == nullptr || clamped == nullptr)
+      {
+        return discard();
+      }
+
+      bNode *mix = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
+      bNodeSocket *a = (mix != nullptr) ? socket_in(*mix, "A_Color") : nullptr;
+      bNodeSocket *b = (mix != nullptr) ? socket_in(*mix, "B_Color") : nullptr;
+      bNodeSocket *fac = (mix != nullptr) ? socket_in(*mix, "Factor_Float") : nullptr;
+      bNodeSocket *out = (mix != nullptr) ? socket_out(*mix, "Result_Color") : nullptr;
+      if (mix == nullptr || a == nullptr || b == nullptr || fac == nullptr || out == nullptr) {
+        if (mix != nullptr) {
+          bke::node_remove_node(nullptr, tree, *mix, true, false);
+        }
+        return discard();
+      }
+      nodes.append(mix);
+      grid_.place_extra(*mix);
+      bke::node_add_link(tree, *content.node, *content.socket, *mix, *a);
+      bke::node_add_link(tree, *clamped, *socket_out(*clamped, "Vector"), *mix, *b);
+      bke::node_add_link(tree, *strength.node, *strength.socket, *mix, *fac);
+      content = {mix, out};
+      layout::frame_add(tree, effect.name, nodes);
       return true;
     }
     case MA_PAINT_LAYER_FILTER_LEVELS: {
@@ -838,15 +1038,552 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       }
       return true;
     }
+    case MA_PAINT_LAYER_FILTER_EXPOSURE: {
+      /* `lerp(c, (c * 2^exposure + offset)^(1 / gamma), opacity)`: the function the CPU composite
+       * applies, every parameter an input of the group so an edit of one is a value and not a
+       * different graph. The stop scale is a power of a constant two, and the Gamma node leaves a
+       * non-positive value as it is -- which is also what keeps a colour above one above one at the
+       * default gamma, so the filter brightens an HDR map instead of clipping what it holds. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_EXPOSURE_PARAM_NUM) {
+        return false;
+      }
+      NodeOutput param[PAINT_LAYER_EXPOSURE_PARAM_NUM];
+      for (const int i : IndexRange(PAINT_LAYER_EXPOSURE_PARAM_NUM)) {
+        if ((*params)[i] == nullptr) {
+          return false;
+        }
+        param[i] = {group.group_input, group_input_socket(group, *(*params)[i])};
+        if (param[i].socket == nullptr) {
+          return false;
+        }
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      const NodeOutput two = value_node_add(tree, grid_, nodes, 2.0f);
+      const NodeOutput scale = math_node_add(
+          tree, grid_, nodes, NODE_MATH_POWER, two, param[PAINT_LAYER_EXPOSURE_EXPOSURE]);
+      const NodeOutput inv_gamma = math_node_add(
+          tree, grid_, nodes, NODE_MATH_DIVIDE, {}, param[PAINT_LAYER_EXPOSURE_GAMMA], 1.0f);
+      if (scale.socket == nullptr || inv_gamma.socket == nullptr) {
+        return discard();
+      }
+      bNode *shifted = vector_math_node_add(
+          tree, grid_, nodes, NODE_VECTOR_MATH_MULTIPLY_ADD, content, scale);
+      bNodeSocket *offset_in = (shifted != nullptr) ? socket_in(*shifted, "Vector_002") : nullptr;
+      if (offset_in == nullptr) {
+        return discard();
+      }
+      bke::node_add_link(tree,
+                         *param[PAINT_LAYER_EXPOSURE_OFFSET].node,
+                         *param[PAINT_LAYER_EXPOSURE_OFFSET].socket,
+                         *shifted,
+                         *offset_in);
+
+      bNode *gamma = bke::node_add_static_node(nullptr, tree, SH_NODE_GAMMA);
+      if (gamma == nullptr) {
+        return discard();
+      }
+      nodes.append(gamma);
+      grid_.place_extra(*gamma);
+      bNodeSocket *gamma_color = socket_in(*gamma, "Color");
+      bNodeSocket *gamma_exponent = socket_in(*gamma, "Gamma");
+      bNodeSocket *gamma_out = socket_out(*gamma, "Color");
+      if (gamma_color == nullptr || gamma_exponent == nullptr || gamma_out == nullptr) {
+        return discard();
+      }
+      bke::node_add_link(
+          tree, *shifted, *socket_out(*shifted, "Vector"), *gamma, *gamma_color);
+      bke::node_add_link(
+          tree, *inv_gamma.node, *inv_gamma.socket, *gamma, *gamma_exponent);
+
+      if (!filter_result_mix_add(tree,
+                                 grid_,
+                                 nodes,
+                                 content,
+                                 {gamma, gamma_out},
+                                 strength,
+                                 effect.name))
+      {
+        return discard();
+      }
+      return true;
+    }
+    case MA_PAINT_LAYER_FILTER_DEBAND: {
+      /* Two White Noise lookups of the same texel, one seed apart, make the triangular pair: their
+       * difference is the signed noise of one quantization step, which the Deband lays under the
+       * colour and the Dither under a rounding to whole levels. The shader hashes the UV and the
+       * CPU composite the texel it walks, so the two agree to a tolerance and no closer -- which
+       * is also why the combined pass falls back to the CPU, where the texel has coordinates. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_DEBAND_PARAM_NUM ||
+          (*params)[PAINT_LAYER_DEBAND_SEED] == nullptr ||
+          (*params)[PAINT_LAYER_DEBAND_BITS] == nullptr)
+      {
+        return false;
+      }
+      const NodeOutput seed{group.group_input,
+                            group_input_socket(group, *(*params)[PAINT_LAYER_DEBAND_SEED])};
+      const NodeOutput bits{group.group_input,
+                            group_input_socket(group, *(*params)[PAINT_LAYER_DEBAND_BITS])};
+      if (seed.socket == nullptr || bits.socket == nullptr) {
+        return false;
+      }
+      /* The mode picks the nodes below, so it is read here and an edit of it rebuilds the tree
+       * (it is part of the topology hash). */
+      const int mode = int(paint_layer_kind_param_get(effect, PAINT_LAYER_DEBAND_MODE));
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      bNode *texcoord = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_COORD);
+      if (texcoord != nullptr) {
+        nodes.append(texcoord);
+        grid_.place_extra(*texcoord);
+      }
+      bNode *noise_nodes[2] = {bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_WHITE_NOISE),
+                               bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_WHITE_NOISE)};
+      for (bNode *noise_node : noise_nodes) {
+        if (noise_node != nullptr) {
+          nodes.append(noise_node);
+          grid_.place_extra(*noise_node);
+        }
+      }
+      if (texcoord == nullptr || noise_nodes[0] == nullptr || noise_nodes[1] == nullptr) {
+        return discard();
+      }
+      /* Four dimensions: the position carries the texel and the W the pass's own seed. */
+      noise_nodes[0]->custom1 = 4;
+      noise_nodes[1]->custom1 = 4;
+      bNodeSocket *texcoord_out = socket_out(*texcoord, "Generated");
+      bNode *seed_b_node = math_constant_node_add(tree, grid_, nodes, NODE_MATH_ADD, seed, 1.0f);
+      if (texcoord_out == nullptr || seed_b_node == nullptr) {
+        return discard();
+      }
+      const NodeOutput seeds[2] = {seed, {seed_b_node, socket_out(*seed_b_node, "Value")}};
+      NodeOutput noise_value[2];
+      for (const int i : IndexRange(2)) {
+        bNodeSocket *vector_in = socket_in(*noise_nodes[i], "Vector");
+        bNodeSocket *w_in = socket_in(*noise_nodes[i], "W");
+        bNodeSocket *value_out = socket_out(*noise_nodes[i], "Value");
+        if (vector_in == nullptr || w_in == nullptr || value_out == nullptr ||
+            seeds[i].socket == nullptr)
+        {
+          return discard();
+        }
+        bke::node_add_link(tree, *texcoord, *texcoord_out, *noise_nodes[i], *vector_in);
+        bke::node_add_link(tree, *seeds[i].node, *seeds[i].socket, *noise_nodes[i], *w_in);
+        noise_value[i] = {noise_nodes[i], value_out};
+      }
+
+      /* The signed noise of one step, and the step itself: `levels = 2^bits - 1`. */
+      const NodeOutput diff = math_node_add(
+          tree, grid_, nodes, NODE_MATH_SUBTRACT, noise_value[0], noise_value[1]);
+      const NodeOutput two = value_node_add(tree, grid_, nodes, 2.0f);
+      const NodeOutput pow2 = math_node_add(tree, grid_, nodes, NODE_MATH_POWER, two, bits);
+      bNode *levels_node = (pow2.socket != nullptr) ?
+                               math_constant_node_add(
+                                   tree, grid_, nodes, NODE_MATH_SUBTRACT, pow2, 1.0f) :
+                               nullptr;
+      if (diff.socket == nullptr || levels_node == nullptr) {
+        return discard();
+      }
+      const NodeOutput levels{levels_node, socket_out(*levels_node, "Value")};
+      const NodeOutput diff_xyz[3] = {diff, diff, diff};
+      const NodeOutput levels_xyz[3] = {levels, levels, levels};
+      const NodeOutput diff_vec = combine_xyz_node_add(tree, grid_, nodes, diff_xyz);
+      const NodeOutput levels_vec = combine_xyz_node_add(tree, grid_, nodes, levels_xyz);
+      if (diff_vec.socket == nullptr || levels_vec.socket == nullptr) {
+        return discard();
+      }
+
+      bNode *quantized = nullptr;
+      if (mode == PAINT_LAYER_DEBAND_DITHER) {
+        /* `floor(c * levels + noise + 0.5) / levels`: the Posterize chain with the noise beside
+         * the half. */
+        bNode *scaled = vector_math_node_add(
+            tree, grid_, nodes, NODE_VECTOR_MATH_MULTIPLY_ADD, content, levels_vec);
+        bNodeSocket *noise_in = (scaled != nullptr) ? socket_in(*scaled, "Vector_002") : nullptr;
+        if (noise_in == nullptr) {
+          return discard();
+        }
+        bke::node_add_link(tree, *diff_vec.node, *diff_vec.socket, *scaled, *noise_in);
+        bNode *shifted = vector_math_node_add(tree,
+                                              grid_,
+                                              nodes,
+                                              NODE_VECTOR_MATH_ADD,
+                                              {scaled, socket_out(*scaled, "Vector")},
+                                              {});
+        bNodeSocket *half = (shifted != nullptr) ? socket_in(*shifted, "Vector_001") : nullptr;
+        if (half == nullptr || half->default_value == nullptr) {
+          return discard();
+        }
+        copy_v3_fl(static_cast<bNodeSocketValueVector *>(half->default_value)->value, 0.5f);
+        bNode *floored = vector_math_node_add(tree,
+                                              grid_,
+                                              nodes,
+                                              NODE_VECTOR_MATH_FLOOR,
+                                              {shifted, socket_out(*shifted, "Vector")},
+                                              {});
+        quantized = (floored != nullptr) ?
+                        vector_math_node_add(tree,
+                                             grid_,
+                                             nodes,
+                                             NODE_VECTOR_MATH_DIVIDE,
+                                             {floored, socket_out(*floored, "Vector")},
+                                             levels_vec) :
+                        nullptr;
+      }
+      else {
+        /* `c + noise * 1.5 / levels`: the triangular pair reaches one and a half steps either way. */
+        const NodeOutput scale = math_node_add(
+            tree, grid_, nodes, NODE_MATH_DIVIDE, {}, levels, 1.5f);
+        const NodeOutput scale_xyz[3] = {scale, scale, scale};
+        const NodeOutput scale_vec = (scale.socket != nullptr) ?
+                                         combine_xyz_node_add(tree, grid_, nodes, scale_xyz) :
+                                         NodeOutput{};
+        bNode *shifted = (scale_vec.socket != nullptr) ?
+                             vector_math_node_add(tree,
+                                                  grid_,
+                                                  nodes,
+                                                  NODE_VECTOR_MATH_MULTIPLY_ADD,
+                                                  diff_vec,
+                                                  scale_vec) :
+                             nullptr;
+        bNodeSocket *base_in = (shifted != nullptr) ? socket_in(*shifted, "Vector_002") : nullptr;
+        if (base_in == nullptr) {
+          return discard();
+        }
+        bke::node_add_link(tree, *content.node, *content.socket, *shifted, *base_in);
+        quantized = shifted;
+      }
+      if (quantized == nullptr) {
+        return discard();
+      }
+      /* The CPU clamps the result into [0, 1], so the clamps are set explicitly. */
+      bNode *lower = vector_math_node_add(tree,
+                                          grid_,
+                                          nodes,
+                                          NODE_VECTOR_MATH_MAXIMUM,
+                                          {quantized, socket_out(*quantized, "Vector")},
+                                          {});
+      bNode *upper = (lower != nullptr) ?
+                         vector_math_node_add(tree,
+                                              grid_,
+                                              nodes,
+                                              NODE_VECTOR_MATH_MINIMUM,
+                                              {lower, socket_out(*lower, "Vector")},
+                                              {}) :
+                         nullptr;
+      bNodeSocket *lower_b = (lower != nullptr) ? socket_in(*lower, "Vector_001") : nullptr;
+      bNodeSocket *upper_b = (upper != nullptr) ? socket_in(*upper, "Vector_001") : nullptr;
+      if (lower_b == nullptr || lower_b->default_value == nullptr || upper_b == nullptr ||
+          upper_b->default_value == nullptr)
+      {
+        return discard();
+      }
+      zero_v3(static_cast<bNodeSocketValueVector *>(lower_b->default_value)->value);
+      copy_v3_fl(static_cast<bNodeSocketValueVector *>(upper_b->default_value)->value, 1.0f);
+
+      if (!filter_result_mix_add(tree,
+                                 grid_,
+                                 nodes,
+                                 content,
+                                 {upper, socket_out(*upper, "Vector")},
+                                 strength,
+                                 effect.name))
+      {
+        return discard();
+      }
+      return true;
+    }
+    case MA_PAINT_LAYER_FILTER_NORMAL_CONVERT: {
+      /* The mode's conversion over the encoded channels, the optional normalize on top, and the
+       * opacity last. Both the mode and the normalize are read when the graph is built -- an edit
+       * of either is a shape edit (the enum hash) and the tree is rebuilt -- while the CPU
+       * composite and the graph carry the same constants, so the pair stays the one broken line. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_NORMAL_CONVERT_PARAM_NUM) {
+        return false;
+      }
+      const int mode = int(paint_layer_kind_param_get(effect, PAINT_LAYER_NORMAL_CONVERT_MODE));
+      const bool normalize =
+          int(paint_layer_kind_param_get(effect, PAINT_LAYER_NORMAL_CONVERT_NORMALIZE)) != 0;
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+      /* The scalar Math helpers, null-propagating so a chain checks its result once at the end. */
+      const auto constant_op = [&](const int operation, const NodeOutput a, const float b) {
+        bNode *node = (a.socket != nullptr) ?
+                          math_constant_node_add(tree, grid_, nodes, operation, a, b) :
+                          nullptr;
+        return NodeOutput{node, (node != nullptr) ? socket_out(*node, "Value") : nullptr};
+      };
+      const auto binary_op = [&](const int operation, const NodeOutput a, const NodeOutput b) {
+        return (a.socket != nullptr && b.socket != nullptr) ?
+                   math_node_add(tree, grid_, nodes, operation, a, b) :
+                   NodeOutput{};
+      };
+      /* One channel through the IEC 61966-2.1 broken line: the linear piece under the threshold,
+       * the power piece over it, mixed by the comparison. The power reads a non-negative base, so
+       * a value past the range cannot make it NaN (the CPU leaves a negative one on the linear
+       * piece, which is the one place the pair differs, and only outside [0, 1]). */
+      const auto srgb_channel = [&](const NodeOutput x, const bool encode) {
+        const NodeOutput base = constant_op(NODE_MATH_MAXIMUM, x, 0.0f);
+        NodeOutput low_piece;
+        NodeOutput high_piece;
+        float threshold = 0.0f;
+        if (encode) {
+          low_piece = constant_op(NODE_MATH_MULTIPLY, base, 12.92f);
+          const NodeOutput exponent = value_node_add(tree, grid_, nodes, 1.0f / 2.4f);
+          const NodeOutput powered = binary_op(NODE_MATH_POWER, base, exponent);
+          high_piece = constant_op(
+              NODE_MATH_SUBTRACT, constant_op(NODE_MATH_MULTIPLY, powered, 1.055f), 0.055f);
+          threshold = 0.0031308f;
+        }
+        else {
+          low_piece = constant_op(NODE_MATH_DIVIDE, base, 12.92f);
+          const NodeOutput ratio = constant_op(
+              NODE_MATH_DIVIDE, constant_op(NODE_MATH_ADD, base, 0.055f), 1.055f);
+          const NodeOutput exponent = value_node_add(tree, grid_, nodes, 2.4f);
+          high_piece = binary_op(NODE_MATH_POWER, ratio, exponent);
+          threshold = 0.04045f;
+        }
+        const NodeOutput threshold_value = value_node_add(tree, grid_, nodes, threshold);
+        const NodeOutput under = binary_op(NODE_MATH_LESS_THAN, base, threshold_value);
+        const NodeOutput over = (under.socket != nullptr) ?
+                                    math_node_add(
+                                        tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, under, 1.0f) :
+                                    NodeOutput{};
+        return binary_op(NODE_MATH_ADD,
+                         binary_op(NODE_MATH_MULTIPLY, low_piece, under),
+                         binary_op(NODE_MATH_MULTIPLY, high_piece, over));
+      };
+
+      NodeOutput converted;
+      if (ELEM(mode, PAINT_LAYER_NORMAL_CONVERT_DX_TO_GL, PAINT_LAYER_NORMAL_CONVERT_GL_TO_DX)) {
+        /* `g = 1 - g`: the one flip, whichever way the convention goes. */
+        NodeOutput xyz[3];
+        if (!separate_xyz_node_add(tree, grid_, nodes, content, xyz)) {
+          return discard();
+        }
+        const NodeOutput flipped = math_node_add(
+            tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, xyz[1], 1.0f);
+        const NodeOutput out_xyz[3] = {xyz[0], flipped, xyz[2]};
+        converted = (flipped.socket != nullptr) ?
+                        combine_xyz_node_add(tree, grid_, nodes, out_xyz) :
+                        NodeOutput{};
+      }
+      else if (mode == PAINT_LAYER_NORMAL_CONVERT_REBUILD_Z) {
+        /* `v = 2c - 1`, `z = sqrt(max(1 - x² - y², 0))`, `b = (z + 1) / 2`: the unit length the
+         * two channels leave. */
+        bNode *decoded = vector_math_node_add(
+            tree, grid_, nodes, NODE_VECTOR_MATH_MULTIPLY_ADD, content, {});
+        bNodeSocket *two = (decoded != nullptr) ? socket_in(*decoded, "Vector_001") : nullptr;
+        bNodeSocket *minus = (decoded != nullptr) ? socket_in(*decoded, "Vector_002") : nullptr;
+        if (two == nullptr || two->default_value == nullptr || minus == nullptr ||
+            minus->default_value == nullptr)
+        {
+          return discard();
+        }
+        copy_v3_fl(static_cast<bNodeSocketValueVector *>(two->default_value)->value, 2.0f);
+        copy_v3_fl(static_cast<bNodeSocketValueVector *>(minus->default_value)->value, -1.0f);
+        NodeOutput xyz[3];
+        if (!separate_xyz_node_add(
+                tree, grid_, nodes, {decoded, socket_out(*decoded, "Vector")}, xyz))
+        {
+          return discard();
+        }
+        const NodeOutput xx = binary_op(NODE_MATH_MULTIPLY, xyz[0], xyz[0]);
+        const NodeOutput yy = binary_op(NODE_MATH_MULTIPLY, xyz[1], xyz[1]);
+        const NodeOutput sum = binary_op(NODE_MATH_ADD, xx, yy);
+        const NodeOutput rest = (sum.socket != nullptr) ?
+                                    math_node_add(
+                                        tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, sum, 1.0f) :
+                                    NodeOutput{};
+        const NodeOutput root = constant_op(
+            NODE_MATH_SQRT, constant_op(NODE_MATH_MAXIMUM, rest, 0.0f), 0.0f);
+        const NodeOutput encoded = constant_op(
+            NODE_MATH_ADD, constant_op(NODE_MATH_MULTIPLY, root, 0.5f), 0.5f);
+        const NodeOutput out_xyz[3] = {xyz[0], xyz[1], encoded};
+        converted = (encoded.socket != nullptr) ?
+                        combine_xyz_node_add(tree, grid_, nodes, out_xyz) :
+                        NodeOutput{};
+      }
+      else if (mode == PAINT_LAYER_NORMAL_CONVERT_CLEAR_Z) {
+        /* The two-channel form: the blue dropped, red and green as they are. */
+        NodeOutput xyz[3];
+        if (!separate_xyz_node_add(tree, grid_, nodes, content, xyz)) {
+          return discard();
+        }
+        const NodeOutput zero = value_node_add(tree, grid_, nodes, 0.0f);
+        const NodeOutput out_xyz[3] = {xyz[0], xyz[1], zero};
+        converted = (zero.socket != nullptr) ? combine_xyz_node_add(tree, grid_, nodes, out_xyz) :
+                                               NodeOutput{};
+      }
+      else {
+        NodeOutput xyz[3];
+        if (!separate_xyz_node_add(tree, grid_, nodes, content, xyz)) {
+          return discard();
+        }
+        const bool encode = mode == PAINT_LAYER_NORMAL_CONVERT_LINEAR_TO_SRGB;
+        NodeOutput out_xyz[3];
+        for (const int k : IndexRange(3)) {
+          out_xyz[k] = srgb_channel(xyz[k], encode);
+          if (out_xyz[k].socket == nullptr) {
+            return discard();
+          }
+        }
+        converted = combine_xyz_node_add(tree, grid_, nodes, out_xyz);
+      }
+      if (converted.socket == nullptr) {
+        return discard();
+      }
+      if (normalize) {
+        /* The result decoded, brought back to unit length and encoded again: the one step the
+         * modes share, and the one the CPU floors at a tiny length. */
+        bNode *decoded = vector_math_node_add(
+            tree, grid_, nodes, NODE_VECTOR_MATH_MULTIPLY_ADD, converted, {});
+        bNode *brought = (decoded != nullptr) ?
+                             vector_math_node_add(tree,
+                                                  grid_,
+                                                  nodes,
+                                                  NODE_VECTOR_MATH_NORMALIZE,
+                                                  {decoded, socket_out(*decoded, "Vector")},
+                                                  {}) :
+                             nullptr;
+        bNode *encoded = (brought != nullptr) ?
+                             vector_math_node_add(tree,
+                                                  grid_,
+                                                  nodes,
+                                                  NODE_VECTOR_MATH_MULTIPLY_ADD,
+                                                  {brought, socket_out(*brought, "Vector")},
+                                                  {}) :
+                             nullptr;
+        bNodeSocket *two = (decoded != nullptr) ? socket_in(*decoded, "Vector_001") : nullptr;
+        bNodeSocket *minus = (decoded != nullptr) ? socket_in(*decoded, "Vector_002") : nullptr;
+        bNodeSocket *half = (encoded != nullptr) ? socket_in(*encoded, "Vector_001") : nullptr;
+        bNodeSocket *shift = (encoded != nullptr) ? socket_in(*encoded, "Vector_002") : nullptr;
+        if (two == nullptr || minus == nullptr || half == nullptr || shift == nullptr ||
+            two->default_value == nullptr || minus->default_value == nullptr ||
+            half->default_value == nullptr || shift->default_value == nullptr)
+        {
+          return discard();
+        }
+        copy_v3_fl(static_cast<bNodeSocketValueVector *>(two->default_value)->value, 2.0f);
+        copy_v3_fl(static_cast<bNodeSocketValueVector *>(minus->default_value)->value, -1.0f);
+        copy_v3_fl(static_cast<bNodeSocketValueVector *>(half->default_value)->value, 0.5f);
+        copy_v3_fl(static_cast<bNodeSocketValueVector *>(shift->default_value)->value, 0.5f);
+        converted = {encoded, socket_out(*encoded, "Vector")};
+      }
+
+      if (!filter_result_mix_add(tree, grid_, nodes, content, converted, strength, effect.name)) {
+        return discard();
+      }
+      return true;
+    }
+    case MA_PAINT_LAYER_FILTER_CHANNEL_MIXER: {
+      /* `clamp(dot(row_k, c) + constant_k, 0, 1)` per output channel: the folded matrix the CPU
+       * composite reads (monochrome already in the rows), fed from four Vector inputs of the group
+       * -- the three rows and the constants -- so an edit of any of them is a value and not a
+       * different graph. The clamp is explicit: the fold has none and the addon's result is clipped
+       * into [0, 1]. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != 4) {
+        return false;
+      }
+      bNodeSocket *input_sockets[4];
+      for (const int i : IndexRange(4)) {
+        input_sockets[i] = ((*params)[i] != nullptr) ? group_input_socket(group, *(*params)[i]) :
+                                                       nullptr;
+        if (input_sockets[i] == nullptr) {
+          return false;
+        }
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      /* The constants split once for the three channels. */
+      NodeOutput constants[3];
+      if (!separate_xyz_node_add(
+              tree, grid_, nodes, {group.group_input, input_sockets[3]}, constants))
+      {
+        return discard();
+      }
+      NodeOutput sums[3];
+      for (const int k : IndexRange(3)) {
+        bNode *dot = vector_math_node_add(tree,
+                                          grid_,
+                                          nodes,
+                                          NODE_VECTOR_MATH_DOT_PRODUCT,
+                                          content,
+                                          {group.group_input, input_sockets[k]});
+        bNodeSocket *dot_out = (dot != nullptr) ? socket_out(*dot, "Value") : nullptr;
+        if (dot_out == nullptr) {
+          return discard();
+        }
+        sums[k] = math_node_add(tree, grid_, nodes, NODE_MATH_ADD, {dot, dot_out}, constants[k]);
+        if (sums[k].socket == nullptr) {
+          return discard();
+        }
+      }
+      const NodeOutput combined = combine_xyz_node_add(tree, grid_, nodes, sums);
+      if (combined.socket == nullptr) {
+        return discard();
+      }
+
+      bNode *lower = vector_math_node_add(
+          tree, grid_, nodes, NODE_VECTOR_MATH_MAXIMUM, combined, {});
+      bNode *upper = (lower != nullptr) ?
+                         vector_math_node_add(tree,
+                                              grid_,
+                                              nodes,
+                                              NODE_VECTOR_MATH_MINIMUM,
+                                              {lower, socket_out(*lower, "Vector")},
+                                              {}) :
+                         nullptr;
+      bNodeSocket *lower_b = (lower != nullptr) ? socket_in(*lower, "Vector_001") : nullptr;
+      bNodeSocket *upper_b = (upper != nullptr) ? socket_in(*upper, "Vector_001") : nullptr;
+      if (lower_b == nullptr || lower_b->default_value == nullptr || upper_b == nullptr ||
+          upper_b->default_value == nullptr)
+      {
+        return discard();
+      }
+      zero_v3(static_cast<bNodeSocketValueVector *>(lower_b->default_value)->value);
+      copy_v3_fl(static_cast<bNodeSocketValueVector *>(upper_b->default_value)->value, 1.0f);
+
+      if (!filter_result_mix_add(tree,
+                                 grid_,
+                                 nodes,
+                                 content,
+                                 {upper, socket_out(*upper, "Vector")},
+                                 strength,
+                                 effect.name))
+      {
+        return discard();
+      }
+      return true;
+    }
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
       /* Map-coverage operators only exist in a mask, where #map_coverage_match_add builds them. */
       break;
     default:
-      /* A neighborhood effect is left out of the live graph (#correction_lay): it never reaches
+      /* A CPU-computed effect is left out of the live graph (#correction_lay): it never reaches
        * this builder, and its result has no node chain to name. The registry decides, so a new one
        * needs no case here; a new pointwise filter still has to add its own. */
-      BLI_assert(!paint_layer_effect_is_neighborhood(effect));
+      BLI_assert(!paint_layer_effect_is_cpu_computed(effect));
       break;
   }
   return false;

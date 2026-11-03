@@ -477,6 +477,8 @@ struct StackAddKindInfo {
  */
 struct StackEffectMenuKind {
   int kind = 0;
+  /** Listed under the "New Effects" submenu instead of the main Add Effect list. */
+  bool is_new = false;
   StackAddKindInfo info;
 };
 
@@ -1237,7 +1239,10 @@ class StackEditor {
     add_kinds(kinds);
     for (const int64_t index : kinds.index_range()) {
       if (kinds[index].is_effect) {
-        r_kinds.append({int(index), std::move(kinds[index])});
+        StackEffectMenuKind menu;
+        menu.kind = int(index);
+        menu.info = std::move(kinds[index]);
+        r_kinds.append(std::move(menu));
       }
     }
   }

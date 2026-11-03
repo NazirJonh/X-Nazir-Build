@@ -252,6 +252,38 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
+  if (STREQ(role, ROLE_CHANNEL_MIXER)) {
+    /* One of the matrix's four vectors: a row (position 0, 4 or 8) or the constants (position 3).
+     * The monochrome switch is folded in here too, so flipping it is a value edit like the matrix
+     * itself, and a null payload reads as the neutral identity. */
+    const int position = prop_int_get(iface.properties, INPUT_PARAM_PROP, -1);
+    if (socket.default_value == nullptr) {
+      return false;
+    }
+    int vector_index = -1;
+    for (const int i : IndexRange(PAINT_LAYER_CHANNEL_MIXER_VECTOR_NUM)) {
+      if (PAINT_LAYER_CHANNEL_MIXER_VECTORS[i].position == position) {
+        vector_index = i;
+        break;
+      }
+    }
+    if (vector_index < 0) {
+      return false;
+    }
+    static const MaterialPaintLayerChannelMixer neutral = {};
+    float folded[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM];
+    paint_layer_channel_mixer_fold(
+        layer->channel_mixer != nullptr ? *layer->channel_mixer : neutral,
+        paint_layer_kind_param_bool_get(*layer, PAINT_LAYER_CHANNEL_MIXER_MONOCHROME),
+        folded);
+    float value[3];
+    paint_layer_channel_mixer_vector_get(folded, vector_index, value);
+    copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
+    if (iface.socket_data != nullptr) {
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);
+    }
+    return true;
+  }
   if (STREQ(role, ROLE_GRADIENT_MIDPOINT) || STREQ(role, ROLE_GRADIENT_TYPE) ||
       STREQ(role, ROLE_GRADIENT_REPEAT))
   {

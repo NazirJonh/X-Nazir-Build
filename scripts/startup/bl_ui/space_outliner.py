@@ -95,10 +95,9 @@ class OUTLINER_HT_tool_header(Header):
                               'GRADIENT', "Add Gradient Layer")
             # Corrections hang on the selected layer or on its mask; one menu holds them all.
             row = layout.row(align=True)
-            # An enum menu button: it opens a real menu of the correction kinds and shows the
-            # dropdown arrow, unlike a popover, whose entries are panel buttons.
-            row.operator_menu_enum("outliner.stack_layer_effect_add", "type", text="",
-                                   icon='SHADERFX')
+            # The corrections, with the newer ones in a "New Effects" submenu. A plain `menu`
+            # rather than an enum button: an enum button cannot hold a submenu.
+            row.menu("OUTLINER_MT_stack_layer_effect_add", text="", icon='SHADERFX')
 
             # Only the add is here, as a menu of the starting masks; switching a mask off and
             # taking it away live in the row's context menu, while its slot is the one showing.
@@ -125,6 +124,19 @@ class OUTLINER_HT_tool_header(Header):
 
         row = layout.row(align=True)
         row.operator("outliner.stack_layer_remove", text="", icon='TRASH')
+
+
+class OUTLINER_MT_stack_layer_effect_add(Menu):
+    bl_label = "Add Effect"
+
+    def draw(self, _context):
+        layout = self.layout
+        # The original corrections stay in the list, as they always were; the newer ones are a
+        # submenu of their own operator, so the two lists never repeat an entry.
+        layout.operator_enum("outliner.stack_layer_effect_add", "type")
+        layout.separator()
+        layout.operator_menu_enum(
+            "outliner.stack_layer_effect_add_new", "type", text="New Effects", icon='SOLO_ON')
 
 
 class OUTLINER_MT_stack_layer_mask_add(Menu):
@@ -352,11 +364,10 @@ class OUTLINER_MT_context_menu(Menu):
             if (space.stack_layers_view == 'STACK' and
                     space.stack_source == 'PAINT_MATERIAL'):
                 layout.menu("OUTLINER_MT_stack_layer_mask_add", icon='MOD_MASK')
-                # The same contextual enum menu the header draws: one line per thing, resolved
+                # The same contextual grouped menu the header draws: one line per thing, resolved
                 # to the active target. Keeping it here as well would be a second vocabulary.
-                layout.operator_menu_enum(
-                    "outliner.stack_layer_effect_add", "type",
-                    text="Add Effect", icon='SHADERFX')
+                layout.menu("OUTLINER_MT_stack_layer_effect_add",
+                            text="Add Effect", icon='SHADERFX')
                 if bpy.ops.outliner.stack_layer_use_as_brush_source.poll():
                     layout.menu("OUTLINER_MT_stack_layer_advanced")
                 # Switching the mask off and taking it away act on the mask being worked on: the
@@ -928,6 +939,7 @@ class OUTLINER_PT_options_filter(Panel):
 classes = (
     OUTLINER_HT_header,
     OUTLINER_HT_tool_header,
+    OUTLINER_MT_stack_layer_effect_add,
     OUTLINER_MT_stack_layer_mask_add,
     OUTLINER_OT_stack_layer_mask_add,
     OUTLINER_MT_stack_layer_advanced,

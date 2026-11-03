@@ -361,10 +361,20 @@ static void stack_add_kind_item_add(EnumPropertyItem *&items,
  * The Effects menu asks the editor for its own folded view (#StackEditor::effect_menu_kinds), so
  * an editor whose vocabulary repeats a correction per target can offer one line per thing. Its
  * identifiers are that view's resolved role, not the stable name of the full list: the Effects
- * menu is UI, and scripts name a kind through `stack_layer_add`.
+ * menu is UI, and scripts name a kind through `stack_layer_add`. The newer corrections are listed
+ * by their own operator (the "New Effects" submenu), so the two views never share an entry.
  */
+enum class StackAddKindsView {
+  /** The full, stable list of kinds. */
+  All,
+  /** The Effects menu's folded view, without the entries of the "New Effects" submenu. */
+  Effects,
+  /** Only the entries of the "New Effects" submenu. */
+  NewEffects,
+};
+
 static const EnumPropertyItem *stack_add_kinds_itemf(bContext *C,
-                                                     const bool effects_only,
+                                                     const StackAddKindsView view,
                                                      bool *r_free)
 {
   EnumPropertyItem *items = nullptr;
@@ -377,10 +387,13 @@ static const EnumPropertyItem *stack_add_kinds_itemf(bContext *C,
      * button, and assigning `type` from Python then fails on every redraw. The operator's own poll
      * is what refuses to run without an editable owner. */
     if (const StackEditor *editor = source.editor()) {
-      if (effects_only) {
+      if (view != StackAddKindsView::All) {
         Vector<StackEffectMenuKind> effect_kinds;
         editor->effect_menu_kinds(*C, effect_kinds);
         for (const StackEffectMenuKind &entry : effect_kinds) {
+          if (entry.is_new != (view == StackAddKindsView::NewEffects)) {
+            continue;
+          }
           stack_add_kind_item_add(items, items_num, entry.kind, entry.info);
         }
       }
@@ -403,15 +416,23 @@ const EnumPropertyItem *stack_add_type_itemf(bContext *C,
                                              PropertyRNA * /*prop*/,
                                              bool *r_free)
 {
-  return stack_add_kinds_itemf(C, false, r_free);
+  return stack_add_kinds_itemf(C, StackAddKindsView::All, r_free);
 }
 
 const EnumPropertyItem *stack_effect_type_itemf(bContext *C,
-                                                PointerRNA * /*ptr*/,
+                                                PointerRNA *ptr,
                                                 PropertyRNA * /*prop*/,
                                                 bool *r_free)
 {
-  return stack_add_kinds_itemf(C, true, r_free);
+  return stack_add_kinds_itemf(C, StackAddKindsView::Effects, r_free);
+}
+
+const EnumPropertyItem *stack_effect_new_type_itemf(bContext *C,
+                                                    PointerRNA * /*ptr*/,
+                                                    PropertyRNA * /*prop*/,
+                                                    bool *r_free)
+{
+  return stack_add_kinds_itemf(C, StackAddKindsView::NewEffects, r_free);
 }
 
 /** The same question every mutating stack operator asks: is there a stack here to remove from,

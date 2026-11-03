@@ -880,6 +880,43 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
         }
         continue;
       }
+      if (kind->params[i].type == PaintLayerKindParamType::ChannelMixer) {
+        /* The matrix is four vectors of values: the three rows and the constants, each its own
+         * group input so an edit of one is a value and not a different graph. The monochrome switch
+         * is folded into them (#paint_layer_channel_mixer_fold), so it gets no input of its own --
+         * the Bool schema entry after this one is skipped below. A null payload folds the neutral
+         * matrix, the same thing the ensure would allocate. */
+        static const MaterialPaintLayerChannelMixer neutral = {};
+        float folded[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM];
+        paint_layer_channel_mixer_fold(
+            (filter.channel_mixer != nullptr) ? *filter.channel_mixer : neutral,
+            paint_layer_kind_param_bool_get(filter, PAINT_LAYER_CHANNEL_MIXER_MONOCHROME),
+            folded);
+        for (const int vector_index : IndexRange(PAINT_LAYER_CHANNEL_MIXER_VECTOR_NUM)) {
+          const PaintLayerChannelMixerVector &vector =
+              PAINT_LAYER_CHANNEL_MIXER_VECTORS[vector_index];
+          char base[200];
+          effect_input_label(layer_name, filter, vector.suffix, base, sizeof(base));
+          bNodeTreeInterfaceSocket *input = layer_group_value_input(
+              group, base, "NodeSocketVector", ROLE_CHANNEL_MIXER, filter.marker, -1);
+          if (input != nullptr) {
+            prop_int_set(input->properties, INPUT_PARAM_PROP, vector.position);
+            float value[3];
+            paint_layer_channel_mixer_vector_get(folded, vector_index, value);
+            group_input_vector_default_set(group, *input, value);
+          }
+          /* Kept even when null, so the builder sees the set is incomplete and builds nothing. */
+          effect_param_inputs_.lookup_or_add_default(&filter).append(input);
+        }
+        continue;
+      }
+      if (kind->params[i].type == PaintLayerKindParamType::Bool &&
+          filter.kind_subtype == MA_PAINT_LAYER_FILTER_CHANNEL_MIXER)
+      {
+        /* The Channel Mixer's monochrome: folded into the matrix inputs above, so an input of its
+         * own would be dead. */
+        continue;
+      }
       char base[200];
       effect_input_label(layer_name, filter, kind->params[i].label, base, sizeof(base));
       bNodeTreeInterfaceSocket *param = layer_group_value_input(
@@ -896,11 +933,11 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     filter_params_create(layer, false);
   }
   for (const MaterialPaintLayer &effect : layer.effects) {
-    /* A neighborhood effect (a Blur) is left out of the live graph (#correction_lay), so it gets
-     * no inputs: its parameters and its opacity would be sockets nothing consumes, dead weight in
-     * the interface and in the topology the hash is taken from. Its parameters reach the bake and
-     * the effect cache through the row's system properties instead. */
-    if (paint_layer_effect_is_neighborhood(effect)) {
+    /* A CPU-computed effect (a Blur, a Noise) is left out of the live graph (#correction_lay), so
+     * it gets no inputs: its parameters and its opacity would be sockets nothing consumes, dead
+     * weight in the interface and in the topology the hash is taken from. Its parameters reach the
+     * bake and the effect cache through the row's system properties instead. */
+    if (paint_layer_effect_is_cpu_computed(effect)) {
       continue;
     }
     filter_params_create(effect, false);

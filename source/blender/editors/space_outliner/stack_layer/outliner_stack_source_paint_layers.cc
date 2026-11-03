@@ -434,17 +434,32 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_SHARPEN:
       return {ICON_SHARPCURVE, 0};
     case MA_PAINT_LAYER_FILTER_HIGH_PASS:
-      return {ICON_FILTER, 0};
+      return {ICON_MOD_WIREFRAME, 0};
     case MA_PAINT_LAYER_FILTER_EDGE_DETECT:
       return {ICON_MOD_EDGESPLIT, 0};
     case MA_PAINT_LAYER_FILTER_EMBOSS:
       return {ICON_MOD_BEVEL, 0};
     case MA_PAINT_LAYER_FILTER_ERODE_DILATE:
-      return {ICON_MOD_THICKNESS, 0};
+      return {ICON_MOD_MULTIRES, 0};
     case MA_PAINT_LAYER_FILTER_COLOR_ID:
       return {ICON_COLOR, paint_glyph::COLORIZE};
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
       return {ICON_UV_ISLANDSEL, paint_glyph::SELECT_ALL};
+    case MA_PAINT_LAYER_FILTER_EXPOSURE:
+      /* No glyph of its own yet: the filter icon names a tone scale without a colour of its own. */
+      return {ICON_FILTER, 0};
+    case MA_PAINT_LAYER_FILTER_DEBAND:
+      /* No glyph of its own yet: the image-data icon names a quantization of the pixels. */
+      return {ICON_IMAGE_DATA, 0};
+    case MA_PAINT_LAYER_FILTER_NOISE:
+      /* No glyph of its own yet: the particle-point icon names a scatter of grains. */
+      return {ICON_PARTICLE_POINT, 0};
+    case MA_PAINT_LAYER_FILTER_NORMAL_CONVERT:
+      /* No glyph of its own yet: the vertex-normals icon names what the filter converts. */
+      return {ICON_NORMALS_VERTEX, 0};
+    case MA_PAINT_LAYER_FILTER_CHANNEL_MIXER:
+      /* No glyph of its own yet: the RGB icon names the channels the filter mixes. */
+      return {ICON_IMAGE_RGB, 0};
   }
   return {ICON_ARROW_LEFTRIGHT, 0};
 }
@@ -557,13 +572,32 @@ static const PaintFilterAddKind paint_filter_add_kinds[] = {
      N_("Color Balance"),
      "Balance the active layer's colours through lift, gamma and gain (or slope, offset and power)",
      MA_PAINT_LAYER_FILTER_COLOR_BALANCE},
+    {"FILTER_EXPOSURE",
+     N_("Exposure"),
+     "Scale the active layer's colours by a power of two, shift them and raise the result to a gamma",
+     MA_PAINT_LAYER_FILTER_EXPOSURE},
+    {"FILTER_DEBAND",
+     N_("Deband / Dither"),
+     "Break the active layer's bands up with a triangular noise, or round its colours to fewer bits",
+     MA_PAINT_LAYER_FILTER_DEBAND},
+    {"FILTER_NORMAL_CONVERT",
+     N_("Normal Convert"),
+     "Convert the active layer's normal encoding: flip the green, rebuild or clear the blue, or "
+     "move the channels between linear and sRGB",
+     MA_PAINT_LAYER_FILTER_NORMAL_CONVERT},
+    {"FILTER_CHANNEL_MIXER",
+     N_("Channel Mixer"),
+     "Mix the active layer's colour channels: each output is a weighted sum of the inputs plus a "
+     "constant",
+     MA_PAINT_LAYER_FILTER_CHANNEL_MIXER},
 };
 
 /**
- * The neighborhood filters the Add Effect menu offers: they read a neighbourhood of the row's map,
- * which the live graph cannot express, so they exist only as corrections of a row's colour -- the
- * effect cache computes them and the row is baked for the live graph. No adjustment or mask form
- * is offered, because neither has a map of the row's to read.
+ * The CPU-computed filters the Add Effect menu offers: either they read a neighbourhood of the
+ * row's map (a Blur) or their sequence is not the graph's (a Noise), so they exist only as
+ * corrections of a row's colour -- the effect cache computes them and the row is baked for the
+ * live graph. No adjustment or mask form is offered, because neither has a map of the row's to
+ * read.
  */
 static const PaintFilterAddKind paint_effect_add_kinds[] = {
     {"EFFECT_BLUR",
@@ -590,6 +624,10 @@ static const PaintFilterAddKind paint_effect_add_kinds[] = {
      N_("Erode / Dilate"),
      "Shrink or grow the bright regions of the active layer by the kernel's radius",
      MA_PAINT_LAYER_FILTER_ERODE_DILATE},
+    {"EFFECT_NOISE",
+     N_("Noise"),
+     "Lay a grain (gaussian, uniform, speckle or salt and pepper) over the active layer's colours",
+     MA_PAINT_LAYER_FILTER_NOISE},
 };
 
 /**
@@ -606,6 +644,27 @@ static const PaintFilterAddKind paint_coverage_add_kinds[] = {
      "Keep the active layer's mask only on the UV islands captured from the Image Editor",
      MA_PAINT_LAYER_FILTER_UV_ISLAND},
 };
+
+/**
+ * Whether a filter is listed in the "New Effects" submenu of the Add Effect menu instead of the main
+ * list. The submenu holds the filters added after the original set, so the main list keeps the
+ * place the older ones have always had; a filter not named here stays in the main list rather than
+ * disappearing from the menu.
+ */
+static bool paint_filter_is_new(const int16_t filter)
+{
+  return ELEM(eMaterialPaintLayerFilter(filter),
+              MA_PAINT_LAYER_FILTER_SHARPEN,
+              MA_PAINT_LAYER_FILTER_HIGH_PASS,
+              MA_PAINT_LAYER_FILTER_EDGE_DETECT,
+              MA_PAINT_LAYER_FILTER_EMBOSS,
+              MA_PAINT_LAYER_FILTER_ERODE_DILATE,
+              MA_PAINT_LAYER_FILTER_EXPOSURE,
+              MA_PAINT_LAYER_FILTER_DEBAND,
+              MA_PAINT_LAYER_FILTER_NORMAL_CONVERT,
+              MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
+              MA_PAINT_LAYER_FILTER_NOISE);
+}
 
 /** The row of one content correction, hung off the row \a owner_ordinal names. */
 StackRow paint_correction_row_build(const Material &material,
@@ -1533,7 +1592,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
           filter.filter,
           PaintLayerAddKind::MaskFilter);
     }
-    /* The neighborhood effects follow: corrections of a row's colour only, so no adjustment or
+    /* The CPU-computed effects follow: corrections of a row's colour only, so no adjustment or
      * mask form of them is offered. */
     for (const PaintFilterAddKind &filter : paint_effect_add_kinds) {
       add(effect({filter.identifier, filter.name, filter.description}),
@@ -2487,6 +2546,8 @@ class PaintLayersStackSource final : public StackSource,
       }
       StackEffectMenuKind menu;
       menu.kind = int(index);
+      menu.is_new = ELEM(entry.kind, PaintLayerAddKind::Filter, PaintLayerAddKind::MaskFilter) &&
+                    paint_filter_is_new(entry.filter);
       menu.info = entry.info;
       if (entry.menu_name != nullptr) {
         /* Untranslated, like every name in the table: the itemf translates it. */

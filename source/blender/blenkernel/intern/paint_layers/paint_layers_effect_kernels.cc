@@ -5,7 +5,7 @@
 /** \file
  * \ingroup bke
  *
- * The image kernels of the neighborhood effects: a Blur's box passes, an Erode / Dilate's
+ * The image kernels of the CPU-computed effects: a Blur's box passes, an Erode / Dilate's
  * sliding-window extremum, and the 3x3 Sobel and Emboss convolutions. They read and write a whole
  * #ImBuf and know nothing about the composite, the description or the cache; the CPU composite and
  * the bake both reach them through #paint_layer_effect_kernel_apply.
@@ -17,6 +17,7 @@
 #include <memory>
 
 #include "BLI_index_range.hh"
+#include "BLI_math_base.h"
 #include "BLI_math_color.h"
 #include "BLI_task.hh"
 #include "BLI_vector.hh"
@@ -481,6 +482,71 @@ static void paint_layer_effect_emboss(ImBuf &buffer)
   });
 }
 
+/**
+ * The Noise kernel over \a buffer in place: a grain of the type's family, at the intensity, from
+ * the seed, per channel or through the colour management's scene-linear luminance. It is a function
+ * of the texel and the seed alone, so the bake and the preview compute the same grain and the rows
+ * can run in parallel. Alpha stays as it is: the contract of a noisy alpha is not settled, so it is
+ * not offered.
+ *
+ * The luminance is `IMB_colormanagement_get_luminance`, the same one the High Pass reads, so the
+ * two agree in a non-Rec.709 working space; the combined preview's shader keeps its own Rec.709
+ * weights, which is an existing divergence of that path and not of the CPU kernel.
+ */
+static void paint_layer_effect_noise_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
+{
+  const int type = paint_layer_kind_param_int_get(effect, PAINT_LAYER_NOISE_TYPE);
+  const float intensity = paint_layer_kind_param_get(effect, PAINT_LAYER_NOISE_INTENSITY);
+  const bool monochrome = paint_layer_kind_param_bool_get(effect, PAINT_LAYER_NOISE_MONOCHROME);
+  const int seed = paint_layer_kind_param_int_get(effect, PAINT_LAYER_NOISE_SEED);
+
+  const auto offset = [&](const int channel, const int x, const int y) {
+    return (type == PAINT_LAYER_NOISE_UNIFORM) ?
+               (paint_layer_noise_uniform(x, y, seed, channel, 1) * 2.0f - 1.0f) * intensity :
+               paint_layer_noise_gaussian(x, y, seed, channel, intensity);
+  };
+
+  const int width = buffer.x;
+  const int height = buffer.y;
+  float *pixels = buffer.float_data_for_write();
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    for (const int y : range) {
+      for (const int x : IndexRange(width)) {
+        float *p = pixels + (int64_t(y) * width + x) * 4;
+        if (type == PAINT_LAYER_NOISE_SALT_PEPPER) {
+          /* A salted channel reads black, a peppered one white, and the rest stay as they are: the
+           * amount is the intensity, half to each side. */
+          const float reach = intensity * 0.5f;
+          for (const int k : IndexRange(3)) {
+            const float u = paint_layer_noise_uniform(x, y, seed, k, 1);
+            p[k] = (u < reach) ? 0.0f : ((u > 1.0f - reach) ? 1.0f : p[k]);
+          }
+          continue;
+        }
+        if (!monochrome) {
+          for (const int k : IndexRange(3)) {
+            const float n = offset(k, x, y);
+            p[k] = (type == PAINT_LAYER_NOISE_SPECKLE) ? clamp_f(p[k] * (1.0f + n), 0.0f, 1.0f) :
+                                                         clamp_f(p[k] + n, 0.0f, 1.0f);
+          }
+          continue;
+        }
+        /* One noise per texel, laid through the luminance: the colour follows it, so the grain is
+         * the same grey the eye reads. */
+        const float lum = IMB_colormanagement_get_luminance(p);
+        const float n = offset(0, x, y);
+        const float moved = (type == PAINT_LAYER_NOISE_SPECKLE) ?
+                                clamp_f(lum * (1.0f + n), 0.0f, 1.0f) :
+                                clamp_f(lum + n, 0.0f, 1.0f);
+        const float delta = moved - lum;
+        p[0] += delta;
+        p[1] += delta;
+        p[2] += delta;
+      }
+    }
+  });
+}
+
 void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
 {
   switch (eMaterialPaintLayerFilter(effect.kind_subtype)) {
@@ -544,6 +610,9 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &ef
       paint_layer_effect_erode_dilate(buffer, erode, radius);
       break;
     }
+    case MA_PAINT_LAYER_FILTER_NOISE:
+      paint_layer_effect_noise_apply(buffer, effect);
+      break;
     default:
       break;
   }

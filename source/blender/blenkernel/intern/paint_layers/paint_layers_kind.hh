@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 
 #include "BLI_function_ref.hh"
@@ -30,6 +31,9 @@
 #include "BKE_paint_layers.hh"
 
 namespace blender {
+
+struct BlendDataReader;
+struct BlendWriter;
 
 enum class PaintLayerDependencyKind : uint8_t {
   /* A channel's paint map. */
@@ -106,6 +110,28 @@ enum class PaintLayerKindParamType : uint8_t {
   Curves,
   /** A #MaterialPaintLayerColorBalance, kept in #MaterialPaintLayer::color_balance. */
   ColorBalance,
+  /** A #MaterialPaintLayerChannelMixer, kept in #MaterialPaintLayer::channel_mixer. */
+  ChannelMixer,
+};
+
+/**
+ * The lifecycle of one kind of row payload (a color balance, a channel mixer): where the row's
+ * pointer lives, and how to create, copy, hash, write and read the value behind it. The registry in
+ * `paint_layers_kind.cc` is the one list a consumer walks, so a new payload is an entry there and a
+ * kind's schema entry, not a branch in every copy, file and bake path.
+ */
+struct PaintLayerPayloadInfo {
+  PaintLayerKindParamType type;
+  /** Offset of the payload pointer in #MaterialPaintLayer, from `offsetof`. */
+  size_t offset;
+  void *(*create)();
+  void (*destroy)(void *payload);
+  void *(*copy)(const void *payload);
+  uint64_t (*hash)(const void *payload);
+  void (*write)(BlendWriter *writer, const void *payload);
+  void (*read)(BlendDataReader *reader, void **slot);
+  /** How an edit of the payload tags the material; null for a payload with no value edit. */
+  void (*edited)(Material &ma);
 };
 
 /** One choice of an #PaintLayerKindParamType::Enum parameter. */
@@ -139,7 +165,7 @@ struct PaintLayerKindParam {
 };
 
 /** What a kind is, as far as the rules shared by the generator and the CPU stack care. */
-enum PaintLayerKindFlag : uint8_t {
+enum PaintLayerKindFlag : uint16_t {
   /**
    * The kind lays the value it stores while it has no map (a Fill): a live record alone makes it
    * take part, as a correction it lays its flat colour, as a mask item its flat grey.
@@ -186,13 +212,26 @@ enum PaintLayerKindFlag : uint8_t {
    */
   PAINT_LAYER_KIND_GENERATES = 1 << 6,
   /**
-   * A neighborhood effect (a Blur): its result reads a neighbourhood of the map, which the live
-   * graph cannot express. It exists only as a correction of a row's colour; the effect cache
-   * computes it for the CPU composite and the bake, and a row that carries one is baked for the
-   * live graph, whatever its bake mode. The kernel reads no ID, so the flag changes no dependency
-   * walk.
+   * A CPU-computed effect: the live graph cannot reproduce its result, so the effect cache computes
+   * it for the CPU composite and the bake, and a row that carries one is baked for the live graph,
+   * whatever its bake mode. A Blur is one because it reads a neighbourhood the graph has no node
+   * for; a Noise is another because the graph's White Noise and the CPU hash are different
+   * sequences. Such a kind exists only as a correction of a row's colour. The kernel reads no ID,
+   * so the flag changes no dependency walk.
    */
   PAINT_LAYER_KIND_NEEDS_BAKE = 1 << 7,
+  /**
+   * A filter that reads the encoding of a Normal channel as numbers, not as a direction (a Normal
+   * Convert): the one filter such a channel may carry, where every other filter would corrupt the
+   * vector. Past the eighth bit, which is why the flags are 16 bits wide.
+   */
+  PAINT_LAYER_KIND_NORMAL_SAFE = 1 << 8,
+  /**
+   * A pointwise filter the combined preview shader has no branch for (a Deband, which needs the
+   * texel coordinates, or a Normal Convert). The gather refuses the GPU path and falls back to the
+   * CPU, so a new such kind cannot be silently shaded as a no-op.
+   */
+  PAINT_LAYER_KIND_NO_GPU_BRANCH = 1 << 9,
 };
 
 struct PaintLayerKindInfo {
@@ -207,7 +246,7 @@ struct PaintLayerKindInfo {
   const PaintLayerKindParam *params = nullptr;
   int params_num = 0;
   /** #PaintLayerKindFlag bits. */
-  uint8_t flags = 0;
+  uint16_t flags = 0;
   /**
    * Whether the kind's map may be a stroke target. A #PAINT_LAYER_KIND_MAP_COVERAGE kind whose map
    * is reference-only (Color ID: an external ID Map) reports false, so the target resolve and the UI
@@ -231,7 +270,9 @@ enum PaintLayerHslParam : int {
   PAINT_LAYER_HSL_HUE = 0,
   PAINT_LAYER_HSL_SATURATION = 1,
   PAINT_LAYER_HSL_VALUE = 2,
-  PAINT_LAYER_HSL_PARAM_NUM = 3,
+  /** The lift the muted colours get, in the addon's -100..100 scaled to -1..1: zero is no-op. */
+  PAINT_LAYER_HSL_VIBRANCE = 3,
+  PAINT_LAYER_HSL_PARAM_NUM = 4,
 };
 
 /** The positions of the Brightness/Contrast filter's parameters in its schema. */
@@ -320,6 +361,44 @@ inline constexpr PaintLayerColorBalanceTriple
         {"Balance E", PAINT_LAYER_COLOR_BALANCE_E},
 };
 
+/** The positions of the Channel Mixer filter's parameters in its schema. */
+enum PaintLayerChannelMixerParam : int {
+  /** The payload: #MaterialPaintLayerChannelMixer, behind the row's own pointer. */
+  PAINT_LAYER_CHANNEL_MIXER_MIXER = 0,
+  /** On: a grey from the red row and the constants' mean. */
+  PAINT_LAYER_CHANNEL_MIXER_MONOCHROME = 1,
+  PAINT_LAYER_CHANNEL_MIXER_PARAM_NUM = 2,
+};
+
+/**
+ * The layout of the Channel Mixer's folded 12 floats, shared by the CPU composite, the generated
+ * graph and the GPU push constants: the three rows in the `.xyz` of the three float4s (positions
+ * 0, 4, 8) and the three constants in their `.w` (3, 7, 11), the output channel k reading row k.
+ */
+enum PaintLayerChannelMixerFolded : int {
+  PAINT_LAYER_CHANNEL_MIXER_ROW_R = 0,
+  PAINT_LAYER_CHANNEL_MIXER_ROW_G = 4,
+  PAINT_LAYER_CHANNEL_MIXER_ROW_B = 8,
+  /** The position of the first constant: the `.w` of the red row's float4. */
+  PAINT_LAYER_CHANNEL_MIXER_CONSTANTS = 3,
+  /** The length the folded array needs; the constant of row k sits at `3 + 4 * k`. */
+  PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM = 12,
+};
+
+/** One vector a Channel Mixer input carries: a row, or the three constants. */
+struct PaintLayerChannelMixerVector {
+  const char *suffix;
+  int position;
+};
+inline constexpr int PAINT_LAYER_CHANNEL_MIXER_VECTOR_NUM = 4;
+inline constexpr PaintLayerChannelMixerVector
+    PAINT_LAYER_CHANNEL_MIXER_VECTORS[PAINT_LAYER_CHANNEL_MIXER_VECTOR_NUM] = {
+        {"Mixer R", PAINT_LAYER_CHANNEL_MIXER_ROW_R},
+        {"Mixer G", PAINT_LAYER_CHANNEL_MIXER_ROW_G},
+        {"Mixer B", PAINT_LAYER_CHANNEL_MIXER_ROW_B},
+        {"Mixer Constants", PAINT_LAYER_CHANNEL_MIXER_CONSTANTS},
+};
+
 /** The positions of a map-coverage operator's parameters in its schema. */
 enum PaintLayerCoverageParam : int {
   /** How far a sample may differ from a stored colour and still match (max-channel). */
@@ -380,12 +459,146 @@ enum PaintLayerErodeDilateParam : int {
   PAINT_LAYER_ERODE_DILATE_PARAM_NUM = 2,
 };
 
+/** The positions of the Exposure filter's parameters in its schema. */
+enum PaintLayerExposureParam : int {
+  /** The power of two the colour is scaled by: one stop per unit. */
+  PAINT_LAYER_EXPOSURE_EXPOSURE = 0,
+  /** What the scaled colour rises or falls by, in scene linear. */
+  PAINT_LAYER_EXPOSURE_OFFSET = 1,
+  /** The power every positive value is raised to, read as one over it. */
+  PAINT_LAYER_EXPOSURE_GAMMA = 2,
+  PAINT_LAYER_EXPOSURE_PARAM_NUM = 3,
+};
+
+/** The positions of the Invert filter's parameters in its schema. */
+enum PaintLayerInvertParam : int {
+  /** How far the red channel turns to its complement: one is the whole way, zero none of it. */
+  PAINT_LAYER_INVERT_AMOUNT_R = 0,
+  /** The same for green. */
+  PAINT_LAYER_INVERT_AMOUNT_G = 1,
+  /** The same for blue. */
+  PAINT_LAYER_INVERT_AMOUNT_B = 2,
+  PAINT_LAYER_INVERT_PARAM_NUM = 3,
+};
+
+/** The two modes of the Deband filter. */
+enum PaintLayerDebandMode : int {
+  /** A triangular noise under the quantization step, breaking the bands up. */
+  PAINT_LAYER_DEBAND_DEBAND = 0,
+  /** The colour rounded to fewer bits, the same triangular noise on top. */
+  PAINT_LAYER_DEBAND_DITHER = 1,
+};
+
+/** The positions of the Deband filter's parameters in its schema. */
+enum PaintLayerDebandParam : int {
+  PAINT_LAYER_DEBAND_MODE = 0,
+  /** Whole bits the colour keeps: 16 is the identity's neighbourhood, 4 the coarsest. */
+  PAINT_LAYER_DEBAND_BITS = 1,
+  /** Which pattern of the hash family the texels read. */
+  PAINT_LAYER_DEBAND_SEED = 2,
+  PAINT_LAYER_DEBAND_PARAM_NUM = 3,
+};
+
 /**
  * The HSL filter applied to \a rgb in place, at full strength: the Hue/Saturation/Value node's
  * function (hue shifted by `hue - 0.5` turns, saturation clamped to one, value scaled, result not
  * below zero), so the CPU composite and the generated node agree.
  */
 void paint_layer_hsl_apply(float rgb[3], const float params[PAINT_LAYER_HSL_PARAM_NUM]);
+
+/**
+ * One uniform in [0, 1) of a texel hash family: \a salt separates the passes and the channels, the
+ * seed moves the pattern, and the texel's coordinates are where the noise lives. The one generator
+ * the Deband and Noise filters both read.
+ */
+float paint_layer_texel_hash_uniform(int x, int y, int seed, uint32_t salt);
+
+/**
+ * One uniform of the Deband filter's triangular pair, from #paint_layer_texel_hash_uniform: the
+ * salt keeps the two passes and the three channels apart.
+ */
+float paint_layer_deband_noise(int x, int y, int seed, int channel, int pass);
+
+/**
+ * The Deband/Dither filter applied to \a rgb in place at the texel \a texel_xy: a triangular
+ * (difference of two uniforms) noise of one quantization step, either under the colour itself or
+ * under a rounding to `bits` levels, clamped to [0, 1] as the addon's clip does. A texel pointer of
+ * null reads the origin, the stand-in for the callers that have no position.
+ */
+void paint_layer_deband_apply(float rgb[3],
+                              const float params[PAINT_LAYER_DEBAND_PARAM_NUM],
+                              const int texel_xy[2]);
+
+/** The Noise filter's families. */
+enum PaintLayerNoiseType : int {
+  /** A sum of three uniforms, scaled so the spread reads as the intensity. */
+  PAINT_LAYER_NOISE_GAUSSIAN = 0,
+  /** One uniform, signed and scaled. */
+  PAINT_LAYER_NOISE_UNIFORM = 1,
+  /** The gaussian noise as a factor of the colour itself. */
+  PAINT_LAYER_NOISE_SPECKLE = 2,
+  /** The channels the uniform puts under the intensity's half read as black, the ones over the
+   * other end as white, and the rest stay as they are. */
+  PAINT_LAYER_NOISE_SALT_PEPPER = 3,
+};
+
+/** The positions of the Noise filter's parameters in its schema. */
+enum PaintLayerNoiseParam : int {
+  PAINT_LAYER_NOISE_TYPE = 0,
+  /** The spread of the noise, in colour: the sigma of the gaussian family, the reach of the rest. */
+  PAINT_LAYER_NOISE_INTENSITY = 1,
+  /** On: the noise moves the scene-linear luminance and the colour follows it. */
+  PAINT_LAYER_NOISE_MONOCHROME = 2,
+  PAINT_LAYER_NOISE_SEED = 3,
+  PAINT_LAYER_NOISE_PARAM_NUM = 4,
+};
+
+/**
+ * One uniform in [0, 1) of the Noise filter, from the same hash family the Deband pair reads: the
+ * salt keeps the three passes and the channels apart, the seed moves the pattern, and the texel is
+ * where the noise lives.
+ */
+float paint_layer_noise_uniform(int x, int y, int seed, int channel, int pass);
+
+/**
+ * The gaussian noise of one texel channel: three uniforms of #paint_layer_noise_uniform summed,
+ * centred and scaled, so the spread of the answer reads as \a intensity. The one function the
+ * effect kernel and the tests both call, so they cannot disagree.
+ */
+float paint_layer_noise_gaussian(int x, int y, int seed, int channel, float intensity);
+
+/** The Normal Convert filter's modes, over the encoded [0, 1] channels. */
+enum PaintLayerNormalConvertMode : int {
+  /** The DirectX green flipped into the OpenGL one: `g = 1 - g`. */
+  PAINT_LAYER_NORMAL_CONVERT_DX_TO_GL = 0,
+  /** The same flip the other way. */
+  PAINT_LAYER_NORMAL_CONVERT_GL_TO_DX = 1,
+  /** A two-channel map's blue rebuilt from the other two: `z = sqrt(max(1 - x² - y², 0))`. */
+  PAINT_LAYER_NORMAL_CONVERT_REBUILD_Z = 2,
+  /** The blue channel dropped, leaving the two-channel form. */
+  PAINT_LAYER_NORMAL_CONVERT_CLEAR_Z = 3,
+  /** The scene-linear values encoded as sRGB, the IEC 61966-2.1 broken line. */
+  PAINT_LAYER_NORMAL_CONVERT_LINEAR_TO_SRGB = 4,
+  /** The sRGB values decoded to scene linear, the same broken line backwards. */
+  PAINT_LAYER_NORMAL_CONVERT_SRGB_TO_LINEAR = 5,
+};
+
+/** The positions of the Normal Convert filter's parameters in its schema. */
+enum PaintLayerNormalConvertParam : int {
+  PAINT_LAYER_NORMAL_CONVERT_MODE = 0,
+  /** On: the result decoded, brought back to unit length and encoded again. */
+  PAINT_LAYER_NORMAL_CONVERT_NORMALIZE = 1,
+  PAINT_LAYER_NORMAL_CONVERT_PARAM_NUM = 2,
+};
+
+/**
+ * The Normal Convert filter applied to \a rgb in place, over the encoded channels: the mode's
+ * conversion, then the optional normalize, which decodes, brings the vector back to unit length
+ * (a length under 1e-10 stands for it) and encodes again. Alpha is not part of \a rgb and so
+ * stays untouched.
+ */
+void paint_layer_normal_convert_apply(float rgb[3],
+                                      const float params[PAINT_LAYER_NORMAL_CONVERT_PARAM_NUM]);
 
 /** The Levels of a filter value: the same function for every consumer that applies it on the CPU. */
 inline float paint_layer_levels_apply(const float value, const float params[PAINT_LAYER_LEVELS_PARAM_NUM])
@@ -405,6 +618,39 @@ inline float paint_layer_levels_apply(const float value, const float params[PAIN
   }
   return t * (params[PAINT_LAYER_LEVELS_OUT_WHITE] - params[PAINT_LAYER_LEVELS_OUT_BLACK]) +
          params[PAINT_LAYER_LEVELS_OUT_BLACK];
+}
+
+/**
+ * The Invert filter applied to \a rgb in place, each channel by its own strength: the channel moves
+ * from its colour to `|c - 1|` -- the complement on [0, 1], the same distance past it, which is what
+ * the Difference mix against white and the CPU composite both read. The default of every amount is
+ * one, so a row without stored parameters inverts the whole way as the unparameterised filter always
+ * did. Alpha is not part of \a rgb and so stays untouched.
+ */
+inline void paint_layer_invert_apply(float rgb[3],
+                                     const float params[PAINT_LAYER_INVERT_PARAM_NUM])
+{
+  for (int k = 0; k < 3; k++) {
+    rgb[k] += (std::fabs(rgb[k] - 1.0f) - rgb[k]) * params[k];
+  }
+}
+
+/**
+ * The Exposure filter applied to \a rgb in place: the colour scaled by `2^exposure`, shifted by the
+ * offset, then raised to one over the gamma. The power is the Gamma node's own function -- a
+ * non-positive value is left as it is -- so a default gamma leaves a colour above one above one:
+ * the filter brightens an HDR map instead of clipping what it already holds. Alpha is not part of
+ * \a rgb and so stays untouched.
+ */
+inline void paint_layer_exposure_apply(
+    float rgb[3], const float params[PAINT_LAYER_EXPOSURE_PARAM_NUM])
+{
+  const float scale = powf(2.0f, params[PAINT_LAYER_EXPOSURE_EXPOSURE]);
+  const float exponent = 1.0f / params[PAINT_LAYER_EXPOSURE_GAMMA];
+  for (int i = 0; i < 3; i++) {
+    const float scaled = rgb[i] * scale + params[PAINT_LAYER_EXPOSURE_OFFSET];
+    rgb[i] = (scaled > 0.0f) ? powf(scaled, exponent) : scaled;
+  }
 }
 
 /**
@@ -607,6 +853,47 @@ bool BKE_paint_layers_curves_edited(Main &bmain, Material &ma, const void *data)
 /** A hash of the curves' shape, levels and tone, for the bake and composite caches. */
 uint64_t paint_layer_curves_hash(const struct CurveMapping &curve_mapping);
 
+/* -------------------------------------------------------------------- */
+/** \name Kind payload registry
+ *
+ * One list owns every pointer payload a kind keeps outside #MaterialPaintLayer::system_properties
+ * (a color balance, a channel mixer). The consumers walk it instead of naming each payload, so a
+ * third payload is a #PaintLayerPayloadInfo entry and a schema entry of its kind.
+ * \{ */
+
+/** Whether \a row's kind has a parameter of \a type (a payload kind has exactly one). */
+bool paint_layer_kind_has_payload_param(const MaterialPaintLayer &row,
+                                        PaintLayerKindParamType type);
+
+/** The registry entry of \a type, or null when no payload of that type is registered. */
+const PaintLayerPayloadInfo *paint_layer_payload_info(PaintLayerKindParamType type);
+
+/** The row's payload of \a type, created with its neutral defaults when it has none. */
+void *paint_layer_payload_ensure(MaterialPaintLayer &row, PaintLayerKindParamType type);
+
+/** Free every registered payload \a row holds and clear its pointer. */
+void paint_layer_payload_free(MaterialPaintLayer &row);
+
+/** Copy every registered payload of \a src into \a dst, allocating a duplicate of each. */
+void paint_layer_payload_copy(const MaterialPaintLayer &src, MaterialPaintLayer &dst);
+
+/** A hash of every payload \a row holds, for the bake and composite caches. */
+uint64_t paint_layer_payload_hash(const MaterialPaintLayer &row);
+
+/** Write every payload \a row holds, in registry order, each as its own DNA struct. */
+void paint_layer_payload_write(BlendWriter &writer, const MaterialPaintLayer &layer);
+
+/** Read every payload of \a layer, giving a kind that supports one its defaults when absent. */
+void paint_layer_payload_read(BlendDataReader &reader, MaterialPaintLayer &layer);
+
+/**
+ * Tag \a ma when \a data is the payload of \a type of any row, its mask items, effects or children,
+ * through the registry entry's edit rule. Returns whether the payload was found.
+ */
+bool paint_layer_payload_edited(Material &ma, const void *data, PaintLayerKindParamType type);
+
+/** \} */
+
 /** Whether \a row's kind has a Color Balance parameter (the Color Balance filter). */
 bool paint_layer_kind_has_color_balance_param(const MaterialPaintLayer &row);
 
@@ -616,11 +903,6 @@ bool paint_layer_kind_has_color_balance_param(const MaterialPaintLayer &row);
  */
 const MaterialPaintLayerColorBalance &paint_layer_color_balance_or_neutral(
     const MaterialPaintLayer &row);
-
-/**
- * Copy \a src's color balance into \a dst, allocating a duplicate when \a src owns one.
- */
-void paint_layer_color_balance_copy(const MaterialPaintLayer &src, MaterialPaintLayer &dst);
 
 /**
  * Fold \a balance into the 12 numbers both the CPU composite and the generated graph read: the
@@ -639,6 +921,43 @@ void paint_layer_color_balance_apply(const MaterialPaintLayerColorBalance &balan
 
 /** A hash of the balance's method and every stored value, for the bake cache. */
 uint64_t paint_layer_color_balance_hash(const MaterialPaintLayerColorBalance &balance);
+
+/** Whether \a row's kind has a Channel Mixer parameter (the Channel Mixer filter). */
+bool paint_layer_kind_has_channel_mixer_param(const MaterialPaintLayer &row);
+
+/** The row's matrix, or null when it has no channel-mixer payload. */
+const struct MaterialPaintLayerChannelMixer *BKE_paint_layers_channel_mixer_get(
+    const MaterialPaintLayer &row);
+
+/**
+ * Fold \a mixer into the 12 numbers the CPU composite, the generated graph and the GPU read, laid
+ * at #PaintLayerChannelMixerFolded's positions: `out_k = dot(row_k, c) + constant_k`. With
+ * \a monochrome all three rows are the red row and all three constants their mean, so the three
+ * outputs are one grey -- the addon's monochrome, `gray = red_row . c + mean(constants)`. The one
+ * place that knows the formulas; its callers never re-derive them.
+ */
+void paint_layer_channel_mixer_fold(const MaterialPaintLayerChannelMixer &mixer,
+                                    bool monochrome,
+                                    float r_params[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM]);
+
+/**
+ * The three numbers of the \a index-th vector of #PAINT_LAYER_CHANNEL_MIXER_VECTORS out of the
+ * folded layout: a row's three neighbours, or the three constants, which sit in the `.w` of the
+ * three rows four floats apart. The one place the layout's stride is written for its readers.
+ */
+void paint_layer_channel_mixer_vector_get(
+    const float folded[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM], int index, float r_vec[3]);
+
+/**
+ * The folded matrix applied to \a rgb in place and clamped to [0, 1], as the addon's result is
+ * (`np.clip(result, 0, 1)`, in both of its branches). The C++ reference the parity tests compare
+ * against.
+ */
+void paint_layer_channel_mixer_apply(const float params[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM],
+                                     float rgb[3]);
+
+/** A hash of every stored value of the matrix, for the bake cache. */
+uint64_t paint_layer_channel_mixer_hash(const MaterialPaintLayerChannelMixer &mixer);
 
 /**
  * The position of the parameter \a name in \a row's kind's schema, or -1 when the kind has no

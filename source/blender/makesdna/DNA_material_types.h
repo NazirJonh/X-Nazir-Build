@@ -859,6 +859,34 @@ enum eMaterialPaintLayerFilter : int16_t {
    * channel, by the kernel's radius. A neighborhood filter like the Blur.
    */
   MA_PAINT_LAYER_FILTER_ERODE_DILATE = 19,
+  /**
+   * Scale the colours below by a power of two, shift them and raise the result to a gamma: what an
+   * exposure control does to an image, per channel, in scene linear.
+   */
+  MA_PAINT_LAYER_FILTER_EXPOSURE = 23,
+  /**
+   * Lay a triangular noise of one quantization step under the colour (Deband) or round it to whole
+   * levels with the same noise (Dither): a per-texel dither that breaks a band into visible steps.
+   */
+  MA_PAINT_LAYER_FILTER_DEBAND = 24,
+  /**
+   * Lay a grain over the colours of a row (gaussian, uniform, speckle or salt and pepper). A
+   * CPU-computed effect like #MA_PAINT_LAYER_FILTER_BLUR, though it reads no neighbours: the effect
+   * cache computes it and the row is baked for the live graph, since the graph's noise and the CPU
+   * hash are different sequences.
+   */
+  MA_PAINT_LAYER_FILTER_NOISE = 25,
+  /**
+   * Convert the encoding of a normal map: flip its green between DirectX and OpenGL, rebuild or
+   * clear its blue, or move its channels between linear and sRGB. The one filter a Normal channel
+   * may carry (#PAINT_LAYER_KIND_NORMAL_SAFE), since it reads the channels as numbers.
+   */
+  MA_PAINT_LAYER_FILTER_NORMAL_CONVERT = 26,
+  /**
+   * Mix the colour channels: each output channel is a weighted sum of the input ones plus a
+   * constant (a 3x3 matrix and three constants), optionally as a single grey.
+   */
+  MA_PAINT_LAYER_FILTER_CHANNEL_MIXER = 27,
 };
 
 /** #MaterialPaintLayerColorBalance::method */
@@ -1251,6 +1279,27 @@ struct MaterialPaintLayerColorBalance {
 };
 
 /**
+ * The matrix of a kind that reads one (the Channel Mixer filter). Kept behind a pointer like the
+ * color balance, so a row of any other kind pays nothing for it. Each output channel is the dot
+ * product of its row with the input colour plus its constant, in scene linear; the monochrome
+ * switch is a schema parameter of the kind, not stored here. The neutral is the identity matrix
+ * with zero constants. The graph and the composite read the folded form
+ * (#paint_layer_channel_mixer_fold), never this struct.
+ */
+struct MaterialPaintLayerChannelMixer {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerChannelMixer)
+
+  /** How much of the input red, green and blue the output red takes. */
+  float red_row[3] = {1.0f, 0.0f, 0.0f};
+  /** The same for the output green. */
+  float green_row[3] = {0.0f, 1.0f, 0.0f};
+  /** The same for the output blue. */
+  float blue_row[3] = {0.0f, 0.0f, 1.0f};
+  /** What each output channel (red, green, blue) rises or falls by. */
+  float constants[3] = {0.0f, 0.0f, 0.0f};
+};
+
+/**
  * One row of a layered material's stack, the DNA description of what the material is painted with.
  *
  * The list is stored bottom-to-top. Folders nest through #children, which holds the same type.
@@ -1327,6 +1376,11 @@ struct MaterialPaintLayer {
    * other kind. Owned by the row and copied, freed and written with it.
    */
   struct MaterialPaintLayerColorBalance *color_balance = nullptr;
+  /**
+   * The matrix a kind with a channel-mixer parameter reads (Channel Mixer), or null for every other
+   * kind. Owned by the row and copied, freed and written with it.
+   */
+  struct MaterialPaintLayerChannelMixer *channel_mixer = nullptr;
   /**
    * #eMaterialPaintLayerObjectMaskType: whether the row is limited per object (Mesh) or per UDIM
    * tile of each object (UV Tiles). The per-object choices live on the objects

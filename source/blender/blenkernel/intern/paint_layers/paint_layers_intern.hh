@@ -503,24 +503,27 @@ inline bool paint_layer_effect_is_filter(const MaterialPaintLayer &effect)
  * Whether the filter \a effect (a correction or an adjustment) changes the colour in \a channel.
  * The channels a filter works in are the live records of its row, the same switches a layer has:
  * the record carries no map, only the choice. A tangent normal is not a colour a per-channel
- * function may touch, so Normal is left alone whatever the record says. The one rule for the
- * generator, the CPU adapter and the topology hash.
+ * function may touch, so Normal is left alone whatever the record says -- except by a filter that
+ * reads the encoding as numbers (#PAINT_LAYER_KIND_NORMAL_SAFE, a Normal Convert). The one rule for
+ * the generator, the CPU adapter and the topology hash.
  */
 inline bool paint_layer_effect_filters(const Material &ma,
                                        const MaterialPaintLayer &effect,
                                        const int channel)
 {
   return paint_layer_effect_is_filter(effect) && !paint_layer_channel_filtered(ma, channel) &&
-         channel != PAINT_MATERIAL_CHANNEL_NORMAL &&
+         (channel != PAINT_MATERIAL_CHANNEL_NORMAL ||
+          paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_NORMAL_SAFE)) &&
          paint_layer_channel_live(paint_layer_channel_find(effect, channel));
 }
 
 /**
- * Whether the correction \a effect is a neighborhood effect (a Blur): its result reads a
- * neighbourhood of the row's map, which the live graph cannot express. The effect cache computes
- * it for the CPU composite and the bake, and a row that carries one is baked for the live graph.
+ * Whether the correction \a effect is CPU-computed: the live graph cannot reproduce its result,
+ * either because it reads a neighbourhood of the row's map (a Blur) or because its sequence is not
+ * the graph's (a Noise). The effect cache computes it for the CPU composite and the bake, and a row
+ * that carries one is baked for the live graph.
  */
-inline bool paint_layer_effect_is_neighborhood(const MaterialPaintLayer &effect)
+inline bool paint_layer_effect_is_cpu_computed(const MaterialPaintLayer &effect)
 {
   return paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_NEEDS_BAKE);
 }
@@ -529,22 +532,22 @@ inline bool paint_layer_effect_is_neighborhood(const MaterialPaintLayer &effect)
  * The same question for a bare #eMaterialPaintLayerFilter subtype, as a composite description
  * carries it: a filter cell knows its subtype but not the row it came from.
  */
-inline bool paint_layer_filter_is_neighborhood(const int16_t filter)
+inline bool paint_layer_filter_is_cpu_computed(const int16_t filter)
 {
   const PaintLayerKindInfo *info = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
   return info != nullptr && (info->flags & PAINT_LAYER_KIND_NEEDS_BAKE) != 0;
 }
 
 /**
- * Whether \a row carries a neighborhood effect anywhere in its content corrections. The mask and
- * the children come with the row's bake either way (a neighborhood kind only ever corrects a
- * row's colour, so it cannot be a mask item), and it is the row itself that has to be baked for
- * the live graph to stop building it as nodes.
+ * Whether \a row carries a CPU-computed effect anywhere in its content corrections. The mask and
+ * the children come with the row's bake either way (such a kind only ever corrects a row's colour,
+ * so it cannot be a mask item), and it is the row itself that has to be baked for the live graph to
+ * stop building it as nodes.
  */
 inline bool paint_layer_row_needs_bake(const MaterialPaintLayer &row)
 {
   for (const MaterialPaintLayer &effect : row.effects) {
-    if (paint_layer_effect_is_neighborhood(effect)) {
+    if (paint_layer_effect_is_cpu_computed(effect)) {
       return true;
     }
   }

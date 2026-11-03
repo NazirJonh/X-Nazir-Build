@@ -919,11 +919,16 @@ const EnumPropertyItem *stack_add_type_itemf(bContext *C,
                                              PointerRNA * /*ptr*/,
                                              PropertyRNA * /*prop*/,
                                              bool *r_free);
-/** As #stack_add_type_itemf, listing only the corrections: what the Effects menu offers. */
+/** As #stack_add_type_itemf, listing only the corrections the main Add Effect list offers. */
 const EnumPropertyItem *stack_effect_type_itemf(bContext *C,
                                                 PointerRNA * /*ptr*/,
                                                 PropertyRNA * /*prop*/,
                                                 bool *r_free);
+/** The corrections of the "New Effects" submenu: the ones #stack_effect_type_itemf leaves out. */
+const EnumPropertyItem *stack_effect_new_type_itemf(bContext *C,
+                                                    PointerRNA * /*ptr*/,
+                                                    PropertyRNA * /*prop*/,
+                                                    bool *r_free);
 wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_add_invoke(bContext *C, wmOperator *op, const wmEvent *event);
 bool stack_row_add_poll(bContext *C);
@@ -1121,6 +1126,7 @@ void OUTLINER_OT_stack_layer_mask_image(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_mask_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_effect_add_new(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_duplicate(wmOperatorType *ot);

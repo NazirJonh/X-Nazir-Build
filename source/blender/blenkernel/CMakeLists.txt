@@ -910,7 +910,7 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_map_coverage_test.cc
     intern/paint_layers/tests/paint_layers_material_bake_test.cc
     intern/paint_layers/tests/paint_layers_material_source_test.cc
-    intern/paint_layers/tests/paint_layers_neighborhood_kind_test.cc
+    intern/paint_layers/tests/paint_layers_filter_kinds_test.cc
     intern/paint_layers/tests/paint_layers_object_mask_test.cc
     intern/paint_layers/tests/paint_layers_refactor_test.cc
     intern/paint_layers/tests/paint_layers_target_test.cc

@@ -1231,9 +1231,9 @@ static uint64_t bake_hash_layer(uint64_t h,
   if (layer.curves != nullptr) {
     h = bake_hash_mix(h, paint_layer_curves_hash(layer.curves->curve_mapping));
   }
-  if (layer.color_balance != nullptr) {
-    h = bake_hash_mix(h, paint_layer_color_balance_hash(*layer.color_balance));
-  }
+  /* The folded numbers reach every stack hash through the filter parameters, but the bake reads the
+   * payloads directly, so a matrix or balance is part of what the baked map was made from. */
+  h = bake_hash_mix(h, paint_layer_payload_hash(layer));
   /* Effects first, then mask items, then children, each in its own storage order. */
   for (const MaterialPaintLayer &effect : layer.effects) {
     h = bake_hash_layer(h, ma, effect, true);
@@ -2418,12 +2418,13 @@ bool BKE_paint_layers_bake_row_is_deferred(const Material &ma, const MaterialPai
   if (!BKE_paint_layers_subtree_contains(layer, ma.active_layer_marker)) {
     return false;
   }
-  /* A neighborhood effect (a Blur) has no live form: while it is the active correction the row
-   * would show nothing of it until the user leaves, so its row is baked under the debounce like an
-   * edit of any other value. Only the row that carries the effect: an ancestor folder stays live. */
+  /* A CPU-computed effect (a Blur, a Noise) has no live form: while it is the active correction the
+   * row would show nothing of it until the user leaves, so its row is baked under the debounce like
+   * an edit of any other value. Only the row that carries the effect: an ancestor folder stays
+   * live. */
   for (const MaterialPaintLayer &effect : layer.effects) {
     if (BLI_uuid_equal(effect.marker, ma.active_layer_marker) &&
-        paint_layer_effect_is_neighborhood(effect))
+        paint_layer_effect_is_cpu_computed(effect))
     {
       return false;
     }
@@ -2928,17 +2929,17 @@ bool bake_row_is_due(const Material &ma,
   }
   const bool cheap_live = mode == MA_PAINT_LAYER_BAKE_AUTO &&
                           (paint_layer_kind_reads_anchor_point(layer) || gradient_texels);
-  /* A row that carries a neighborhood effect (a Blur) is baked whatever its AUTO gates say: the
-   * live graph cannot express the effect, so the bake is what the graph samples instead. The gates
-   * below keep every other rule -- the blockers bind through #bake_row_is_candidate, NEVER and the
-   * deferred and hidden rows stand. */
+  /* A row that carries a CPU-computed effect is baked whatever its AUTO gates say: the live graph
+   * cannot express the effect, so the bake is what the graph samples instead. The gates below keep
+   * every other rule -- the blockers bind through #bake_row_is_candidate, NEVER and the deferred
+   * and hidden rows stand. */
   const bool needs_bake = paint_layer_row_needs_bake(layer);
   if (!folder && mode == MA_PAINT_LAYER_BAKE_AUTO && !cheap_live && !needs_bake)
   {
     /* AUTO caches subgraphs: a folder is the heavy thing, a single row is already one map per
      * channel and a cache of it would only double its memory. Always is the way to ask for a row
      * to be baked; a cache carried from an earlier Always keeps standing in while it is valid and
-     * is released once it is not. A neighborhood effect asks the same without the mode: the live
+     * is released once it is not. A CPU-computed effect asks the same without the mode: the live
      * graph cannot express it. */
     r_release = (layer.bake != nullptr && !BKE_paint_layers_bake_is_valid(ma, layer)) ?
                     BakeRowRelease::FreeStructure :
@@ -2949,7 +2950,7 @@ bool bake_row_is_due(const Material &ma,
       !BKE_paint_layers_folder_auto_bake_allowed(ma, layer) && !needs_bake)
   {
     /* A folder in the stack root stays live for responsiveness; a bake it carried from before the
-     * rule is released. A manual ALWAYS is the user's and is left alone. A neighborhood effect on
+     * rule is released. A manual ALWAYS is the user's and is left alone. A CPU-computed effect on
      * the folder asks for the bake the same way it does on a row. */
     r_release = (layer.bake != nullptr) ? BakeRowRelease::FreeStructure : BakeRowRelease::Keep;
     return false;
@@ -2966,7 +2967,7 @@ bool bake_row_is_due(const Material &ma,
     /* A light subtree is cheaper live; a bake carried over from when it was heavy is released. A
      * reader is exempt: its bake is the slice cache the depth rules asked for, not a cache of a
      * subtree, so a light row deep in a chain still gets one. Neither has a map the live path could
-     * read instead, which is the whole reason the exemption is safe. A neighborhood effect is
+     * read instead, which is the whole reason the exemption is safe. A CPU-computed effect is
      * exempt the same way: its bake is what the live graph samples. */
     r_release = (layer.bake != nullptr) ? BakeRowRelease::FreeStructure : BakeRowRelease::Keep;
     return false;

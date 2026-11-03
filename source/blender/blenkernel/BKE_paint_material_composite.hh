@@ -492,8 +492,8 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   /** The curve mapping a curves filter (RGB Curves) reads, or null. */
   const CurveMapping *filter_curves = nullptr;
   /**
-   * The result of a neighborhood filter (a Blur) the effect cache computed: a float RGBA buffer at
-   * the stack's dimensions, scene linear. Owned by this description (see
+   * The result of a CPU-computed filter (a Blur, a Noise) the effect cache computed: a float
+   * RGBA buffer at the stack's dimensions, scene linear. Owned by this description (see
    * #PaintMaterialCompositeImageLayer::anchor_point_color); null for every other correction.
    */
   std::shared_ptr<ImBuf> effect_color = nullptr;

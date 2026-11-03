@@ -3566,6 +3566,62 @@ static void rna_MaterialPaintLayerColorBalance_update(Main * /*bmain*/,
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
 }
 
+static bool rna_MaterialPaintLayer_channel_mixer_supported_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer != nullptr && BKE_paint_layers_channel_mixer_supported(*layer);
+}
+
+/**
+ * The matrix is a value of the generated graph (four group inputs), not a node's storage: the edit
+ * marks the material value-edited (#BKE_paint_layers_channel_mixer_edited finds the owning row), so
+ * the tree keeps its nodes and only the group inputs are re-synced.
+ */
+static void rna_MaterialPaintLayerChannelMixer_update(Main * /*bmain*/,
+                                                      Scene * /*scene*/,
+                                                      PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayerChannelMixer *mixer = static_cast<MaterialPaintLayerChannelMixer *>(ptr->data);
+  if (ma == nullptr || mixer == nullptr) {
+    return;
+  }
+  BKE_paint_layers_channel_mixer_edited(*ma, mixer);
+  DEG_id_tag_update(&ma->id, 0);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
+}
+
+/**
+ * The pointer property's own update: here
+ * `ptr->data` is the row itself, not the payload, so no ownership search is made -- the value tag
+ * covers the whole stack either way.
+ */
+static void rna_MaterialPaintLayer_kind_channel_mixer_update(Main * /*bmain*/,
+                                                             Scene * /*scene*/,
+                                                             PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (ma == nullptr || ptr->data == nullptr) {
+    return;
+  }
+  BKE_paint_layers_tag_value_edited(*ma);
+  DEG_id_tag_update(&ma->id, 0);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
+}
+
+static PointerRNA rna_MaterialPaintLayer_kind_channel_mixer_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (layer == nullptr) {
+    return PointerRNA_NULL;
+  }
+  if (layer->channel_mixer == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(
+      *ptr, RNA_MaterialPaintLayerChannelMixer, layer->channel_mixer);
+}
+
 static PointerRNA rna_MaterialPaintLayer_kind_color_balance_get(PointerRNA *ptr)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
@@ -5070,6 +5126,34 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      0,
      "UV Island",
      "Keep the coverage on the UV islands captured from the Image Editor selection"},
+    {MA_PAINT_LAYER_FILTER_EXPOSURE,
+     "EXPOSURE",
+     0,
+     "Exposure",
+     "Scale what is below by a power of two, shift it and raise the result to a gamma"},
+    {MA_PAINT_LAYER_FILTER_DEBAND,
+     "DEBAND",
+     0,
+     "Deband / Dither",
+     "Break the bands of what is below up with a triangular noise of one quantization step, or "
+     "round it to fewer bits with that noise on top"},
+    {MA_PAINT_LAYER_FILTER_NOISE,
+     "NOISE",
+     0,
+     "Noise",
+     "Lay a gaussian, uniform, speckle or salt and pepper grain over the colours of what is below"},
+    {MA_PAINT_LAYER_FILTER_NORMAL_CONVERT,
+     "NORMAL_CONVERT",
+     0,
+     "Normal Convert",
+     "Convert the encoding of a normal map: flip its green, rebuild or clear its blue, or move its "
+     "channels between linear and sRGB"},
+    {MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
+     "CHANNEL_MIXER",
+     0,
+     "Channel Mixer",
+     "Mix the colour channels: each output channel is a weighted sum of the input ones plus a "
+     "constant"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -5573,6 +5657,49 @@ static void rna_def_material_paint_layer_color_balance(BlenderRNA *brna)
     RNA_def_property_update(
         prop, NC_MATERIAL | ND_SHADING_DRAW, "rna_MaterialPaintLayerColorBalance_update");
   }
+}
+
+static void rna_def_material_paint_layer_channel_mixer(BlenderRNA *brna)
+{
+  StructRNA *srna = RNA_def_struct(brna, "MaterialPaintLayerChannelMixer", nullptr);
+  RNA_def_struct_sdna(srna, "MaterialPaintLayerChannelMixer");
+  RNA_def_struct_ui_text(srna,
+                         "Channel Mixer",
+                         "The matrix a Channel Mixer filter reads: each output channel is a "
+                         "weighted sum of the input channels plus a constant");
+
+  /* The addon's -200..200 percent, as the fractions the matrix stores. */
+  PropertyRNA *prop = RNA_def_property(srna, "red_row", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, -2.0f, 2.0f);
+  RNA_def_property_ui_text(
+      prop, "Red Output", "How much of the input red, green and blue the output red takes");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING_DRAW, "rna_MaterialPaintLayerChannelMixer_update");
+
+  prop = RNA_def_property(srna, "green_row", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, -2.0f, 2.0f);
+  RNA_def_property_ui_text(
+      prop, "Green Output", "How much of the input red, green and blue the output green takes");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING_DRAW, "rna_MaterialPaintLayerChannelMixer_update");
+
+  prop = RNA_def_property(srna, "blue_row", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, -2.0f, 2.0f);
+  RNA_def_property_ui_text(
+      prop, "Blue Output", "How much of the input red, green and blue the output blue takes");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING_DRAW, "rna_MaterialPaintLayerChannelMixer_update");
+
+  prop = RNA_def_property(srna, "constants", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, -2.0f, 2.0f);
+  RNA_def_property_ui_text(
+      prop, "Constants", "What the output red, green and blue each rise or fall by");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING_DRAW, "rna_MaterialPaintLayerChannelMixer_update");
 }
 
 static void rna_def_material_paint_layer(BlenderRNA *brna)
@@ -6231,6 +6358,23 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_pointer_funcs(
       prop, "rna_MaterialPaintLayer_kind_color_balance_get", nullptr, nullptr, nullptr);
   RNA_def_property_ui_text(prop, "Color Balance", "The balance a Color Balance filter reads");
+
+  prop = RNA_def_property(srna, "channel_mixer_supported", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_channel_mixer_supported_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Channel Mixer Supported", "Whether the kind reads a channel-mixer matrix");
+
+  prop = RNA_def_property(srna, "kind_channel_mixer", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerChannelMixer");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_MaterialPaintLayer_kind_channel_mixer_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Channel Mixer", "The matrix a Channel Mixer filter reads");
+  /* The pointer's own update: the getter may allocate the payload, and the values it now carries
+   * reach the graph through the value sync, not through a rebuild. */
+  RNA_def_property_update(prop,
+                          NC_MATERIAL | ND_SHADING_DRAW,
+                          "rna_MaterialPaintLayer_kind_channel_mixer_update");
 
   prop = RNA_def_property(srna, "output_map", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_output_map_items);
@@ -8289,6 +8433,7 @@ void RNA_def_material(BlenderRNA *brna)
   rna_def_material_paint_layer_id_color(brna);
   rna_def_material_paint_layer_curve_patch(brna);
   rna_def_material_paint_layer_color_balance(brna);
+  rna_def_material_paint_layer_channel_mixer(brna);
   rna_def_material_paint_layer(brna);
   rna_def_material_paint_layer_channel(brna);
   rna_def_material_paint_layer_channel_settings(brna);

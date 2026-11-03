@@ -379,6 +379,183 @@ TEST_F(PaintLayersPosterizeTest, the_step_count_is_an_integer_clamped_to_its_ran
   EXPECT_FALSE(paint_layer_kind_param_set(*posterize, PAINT_LAYER_POSTERIZE_STEPS, 8.0f));
 }
 
+class PaintLayersExposureTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_exposure(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_EXPOSURE);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+
+  /** An exposure adjustment on top of the stack, or null when refused. */
+  MaterialPaintLayer *add_adjustment(const float opacity = 1.0f)
+  {
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::Adjustment;
+    params.filter = MA_PAINT_LAYER_FILTER_EXPOSURE;
+    MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+    if (row != nullptr) {
+      EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, row, opacity));
+    }
+    return row;
+  }
+
+  /** An exposure filter in the mask of \a row, or null when refused. */
+  MaterialPaintLayer *add_mask_filter(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::MaskFilter;
+    params.anchor = &row;
+    params.filter = MA_PAINT_LAYER_FILTER_EXPOSURE;
+    MaterialPaintLayer *item = BKE_paint_layers_add_with_policy(*ma, params);
+    if (item != nullptr) {
+      EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, item, opacity));
+    }
+    return item;
+  }
+
+  static void params_set(MaterialPaintLayer &filter,
+                         const float exposure,
+                         const float offset,
+                         const float gamma)
+  {
+    EXPECT_TRUE(paint_layer_kind_param_set(filter, PAINT_LAYER_EXPOSURE_EXPOSURE, exposure));
+    EXPECT_TRUE(paint_layer_kind_param_set(filter, PAINT_LAYER_EXPOSURE_OFFSET, offset));
+    EXPECT_TRUE(paint_layer_kind_param_set(filter, PAINT_LAYER_EXPOSURE_GAMMA, gamma));
+  }
+};
+
+TEST_F(PaintLayersExposureTest, exposure_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *exposure = add_exposure(*row, 0.7f);
+  params_set(*exposure, 1.0f, 0.05f, 1.8f);
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersExposureTest, default_parameters_leave_the_colour_alone)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  add_exposure(*row);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, before.r, 2e-3f);
+  EXPECT_NEAR(after.g, before.g, 2e-3f);
+  EXPECT_NEAR(after.b, before.b, 2e-3f);
+}
+
+TEST_F(PaintLayersExposureTest, a_stop_doubles_the_colour_and_an_hdr_texel_stays_above_one)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  MaterialPaintLayer *exposure = add_exposure(*row);
+  /* One stop doubles, and the gamma of one is the Gamma node's own no-op: a channel past one is
+   * not clipped, which is what keeps the filter and its graph the same function. */
+  params_set(*exposure, 1.0f, 0.0f, 1.0f);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, 2.0f * before.r, 2e-3f);
+  EXPECT_NEAR(after.g, 2.0f * before.g, 2e-3f);
+  EXPECT_NEAR(after.b, 2.0f * before.b, 2e-3f);
+  EXPECT_GT(after.b, 1.0f) << "a doubled texel above one stays above one, not clipped";
+}
+
+TEST_F(PaintLayersExposureTest, a_gamma_raises_a_mid_tone_towards_one)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  MaterialPaintLayer *exposure = add_exposure(*row);
+  /* A gamma of two raises every positive channel to a half power; read the expectation off the
+   * measured linear colour, never off a guessed encoding, so the check is the power law itself. */
+  params_set(*exposure, 0.0f, 0.0f, 2.0f);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, powf(before.r, 0.5f), 2e-3f);
+  EXPECT_NEAR(after.g, powf(before.g, 0.5f), 2e-3f);
+  EXPECT_NEAR(after.b, powf(before.b, 0.5f), 2e-3f);
+}
+
+TEST_F(PaintLayersExposureTest, editing_a_parameter_is_a_value_edit_both_sides_follow)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *exposure = add_exposure(*row);
+  params_set(*exposure, 0.5f, 0.0f, 1.0f);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const RGBA before = graph_pixel(kColor);
+
+  /* The graph keeps its shape and takes the new value; the CPU composite reads the same one. A
+   * float parameter is a value input, so the topology hash and the tree must not move. */
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t hash_before = paint_layers::paint_layers_layer_topology_hash(
+      *ma, *row, wired, forms);
+  bNodeTree *tree = ma->paint_layers_tree;
+
+  EXPECT_TRUE(paint_layer_kind_param_set(*exposure, PAINT_LAYER_EXPOSURE_GAMMA, 2.5f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_EQ(ma->paint_layers_tree, tree) << "a value edit never swaps the tree out";
+  const uint64_t hash_after = paint_layers::paint_layers_layer_topology_hash(
+      *ma, *row, wired, forms);
+  EXPECT_EQ(hash_after, hash_before) << "a value edit is not a shape edit";
+  const RGBA after = graph_pixel(kColor);
+  EXPECT_GT(std::abs(after.g - before.g) + std::abs(after.b - before.b), 1e-3f);
+}
+
+TEST_F(PaintLayersExposureTest, a_parameter_is_clamped_to_its_range)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *exposure = add_exposure(*row);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*exposure, PAINT_LAYER_EXPOSURE_GAMMA), 1.0f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*exposure, PAINT_LAYER_EXPOSURE_EXPOSURE, -7.0f));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*exposure, PAINT_LAYER_EXPOSURE_EXPOSURE), -5.0f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*exposure, PAINT_LAYER_EXPOSURE_EXPOSURE, 7.0f));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*exposure, PAINT_LAYER_EXPOSURE_EXPOSURE), 5.0f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*exposure, PAINT_LAYER_EXPOSURE_OFFSET, 2.0f));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*exposure, PAINT_LAYER_EXPOSURE_OFFSET), 0.5f);
+  /* The gamma never reaches zero: one over it is what the filter raises to, so the range guards it. */
+  EXPECT_TRUE(paint_layer_kind_param_set(*exposure, PAINT_LAYER_EXPOSURE_GAMMA, 0.0f));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*exposure, PAINT_LAYER_EXPOSURE_GAMMA), 0.1f);
+  EXPECT_FALSE(paint_layer_kind_param_set(*exposure, 99, 1.0f));
+}
+
+TEST_F(PaintLayersExposureTest, exposure_adjustment_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *adjustment = add_adjustment(0.8f);
+  ASSERT_NE(adjustment, nullptr);
+  params_set(*adjustment, -1.0f, 0.1f, 0.7f);
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersExposureTest, exposure_in_the_mask_works_on_its_coverage)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  /* One stop doubles the coverage: 0.25 becomes 0.5, still inside the range a mask reads. */
+  MaterialPaintLayer *item = add_mask_filter(*row);
+  ASSERT_NE(item, nullptr);
+  params_set(*item, 1.0f, 0.0f, 1.0f);
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.5f, 3e-3f);
+}
+
 class PaintLayersMathTest : public PaintLayersFilterTest {
  public:
   MaterialPaintLayer *add_math(MaterialPaintLayer &row, const float opacity = 1.0f)
@@ -1336,6 +1513,18 @@ class PaintLayersHslTest : public PaintLayersFilterTest {
     EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
     return filter;
   }
+
+  /** An HSL filter in the mask of \a row, or null when refused. */
+  MaterialPaintLayer *add_mask_hsl(MaterialPaintLayer &row)
+  {
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::MaskFilter;
+    params.anchor = &row;
+    params.filter = MA_PAINT_LAYER_FILTER_HSL;
+    MaterialPaintLayer *item = BKE_paint_layers_add_with_policy(*ma, params);
+    EXPECT_NE(item, nullptr);
+    return item;
+  }
 };
 
 TEST_F(PaintLayersHslTest, hsl_over_a_row_matches_the_cpu)
@@ -1375,6 +1564,92 @@ TEST_F(PaintLayersHslTest, zero_saturation_makes_the_colour_grey_and_a_value_edi
   const RGBA grey = cpu_pixel(kColor);
   EXPECT_NEAR(grey.r, grey.g, 2e-3f);
   EXPECT_NEAR(grey.g, grey.b, 2e-3f);
+}
+
+TEST_F(PaintLayersHslTest, a_grey_and_a_fully_saturated_colour_lift_nothing)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  /* A grey has nothing to lift away from its own grey, and a pure red sits at saturation one
+   * already, where the boost the vibrance reads is zero: neither moves. */
+  MaterialPaintLayer *grey_row = add_layer("Grey", add_solid_image("Grey", 128, 128, 128, 255));
+  MaterialPaintLayer *grey_hsl = add_hsl(*grey_row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*grey_hsl, PAINT_LAYER_HSL_VIBRANCE, 1.0f));
+  expect_graph_matches_cpu(kColor);
+  const RGBA grey_after = cpu_pixel(kColor);
+  const float grey_lum = (grey_after.r + grey_after.g + grey_after.b) / 3.0f;
+  EXPECT_NEAR(grey_after.r, grey_lum, 2e-3f) << "a grey stays a grey";
+
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, grey_row, false));
+  MaterialPaintLayer *red_row = add_layer("Red", add_solid_image("Red", 255, 0, 0, 255));
+  const RGBA red_before = cpu_pixel(kColor);
+  MaterialPaintLayer *red_hsl = add_hsl(*red_row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*red_hsl, PAINT_LAYER_HSL_VIBRANCE, 1.0f));
+  expect_graph_matches_cpu(kColor);
+  const RGBA red_after = cpu_pixel(kColor);
+  EXPECT_NEAR(red_after.r, red_before.r, 2e-3f);
+  EXPECT_NEAR(red_after.g, red_before.g, 2e-3f);
+  EXPECT_NEAR(red_after.b, red_before.b, 2e-3f);
+}
+
+TEST_F(PaintLayersHslTest, vibrance_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *hsl = add_hsl(*row, 0.8f);
+  /* A muted colour lifts; the value moves underneath it, and both sides follow. */
+  EXPECT_TRUE(paint_layer_kind_param_set(*hsl, PAINT_LAYER_HSL_VIBRANCE, 0.6f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*hsl, PAINT_LAYER_HSL_VALUE, 0.9f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersHslTest, a_negative_vibrance_pulls_the_colour_towards_its_grey)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  MaterialPaintLayer *hsl = add_hsl(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*hsl, PAINT_LAYER_HSL_VIBRANCE, -1.0f));
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  /* The lift at a full negative: `boost = -1 * (1 - (max - min) / max)`, the grey the same Rec.709
+   * weights the RGB to BW node reads, clamped at zero where it would fall past it. */
+  const float max_c = std::max(before.r, std::max(before.g, before.b));
+  const float min_c = std::min(before.r, std::min(before.g, before.b));
+  const float boost = -1.0f * (1.0f - (max_c - min_c) / max_c);
+  const float gray = 0.2126f * before.r + 0.7152f * before.g + 0.0722f * before.b;
+  EXPECT_NEAR(after.r, std::max(before.r + (before.r - gray) * boost, 0.0f), 2e-3f);
+  EXPECT_NEAR(after.g, std::max(before.g + (before.g - gray) * boost, 0.0f), 2e-3f);
+  EXPECT_NEAR(after.b, std::max(before.b + (before.b - gray) * boost, 0.0f), 2e-3f);
+}
+
+TEST_F(PaintLayersHslTest, the_vibrance_is_clamped_to_its_range)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *hsl = add_hsl(*row);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*hsl, PAINT_LAYER_HSL_VIBRANCE), 0.0f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*hsl, PAINT_LAYER_HSL_VIBRANCE, 5.0f));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*hsl, PAINT_LAYER_HSL_VIBRANCE), 1.0f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*hsl, PAINT_LAYER_HSL_VIBRANCE, -5.0f));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*hsl, PAINT_LAYER_HSL_VIBRANCE), -1.0f);
+}
+
+TEST_F(PaintLayersHslTest, vibrance_in_the_mask_moves_a_grey_coverage_nothing)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  /* The coverage is one grey: it has no saturation, and the lift away from the grey reads it back.
+   * The filter stays legal in the mask, and the test pins that it moves nothing there. */
+  MaterialPaintLayer *item = add_mask_hsl(*row);
+  ASSERT_NE(item, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_set(*item, PAINT_LAYER_HSL_VIBRANCE, 0.5f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.25f, 3e-3f);
 }
 
 class PaintLayersAdjustmentTest : public PaintLayersFilterTest {
@@ -1844,6 +2119,102 @@ TEST_F(PaintLayersFilterTest, invert_keeps_the_coverage_of_a_translucent_row)
   expect_graph_matches_cpu(kColor);
 }
 
+class PaintLayersInvertTest : public PaintLayersFilterTest {
+ public:
+  /** An invert filter in the mask of \a row, or null when refused. */
+  MaterialPaintLayer *add_mask_invert(MaterialPaintLayer &row)
+  {
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::MaskFilter;
+    params.anchor = &row;
+    params.filter = MA_PAINT_LAYER_FILTER_INVERT;
+    MaterialPaintLayer *item = BKE_paint_layers_add_with_policy(*ma, params);
+    EXPECT_NE(item, nullptr);
+    return item;
+  }
+};
+
+TEST_F(PaintLayersInvertTest, an_amount_changes_only_its_own_channel)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  MaterialPaintLayer *invert = add_invert(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*invert, PAINT_LAYER_INVERT_AMOUNT_R, 1.0f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*invert, PAINT_LAYER_INVERT_AMOUNT_G, 0.0f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*invert, PAINT_LAYER_INVERT_AMOUNT_B, 0.0f));
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, 1.0f - before.r, 2e-3f) << "red turns all the way";
+  EXPECT_NEAR(after.g, before.g, 2e-3f) << "green stays";
+  EXPECT_NEAR(after.b, before.b, 2e-3f) << "blue stays";
+}
+
+TEST_F(PaintLayersInvertTest, zero_amounts_leave_the_colour_alone)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  MaterialPaintLayer *invert = add_invert(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*invert, PAINT_LAYER_INVERT_AMOUNT_R, 0.0f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*invert, PAINT_LAYER_INVERT_AMOUNT_G, 0.0f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*invert, PAINT_LAYER_INVERT_AMOUNT_B, 0.0f));
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, before.r, 2e-3f);
+  EXPECT_NEAR(after.g, before.g, 2e-3f);
+  EXPECT_NEAR(after.b, before.b, 2e-3f);
+}
+
+TEST_F(PaintLayersInvertTest, editing_an_amount_is_a_value_edit)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *invert = add_invert(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*invert, PAINT_LAYER_INVERT_AMOUNT_G, 0.5f));
+  expect_graph_matches_cpu(kColor);
+  bNodeTree *tree = ma->paint_layers_tree;
+
+  /* The graph keeps its shape and takes the new value. */
+  EXPECT_TRUE(paint_layer_kind_param_set(*invert, PAINT_LAYER_INVERT_AMOUNT_G, 0.8f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_EQ(ma->paint_layers_tree, tree);
+}
+
+TEST_F(PaintLayersInvertTest, the_mask_filter_reads_the_red_amount)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  /* The mask works on one grey, so the red amount is the one that reads: the coverage moves the
+   * whole way with `amount_r`, and green and blue have no say in it. */
+  MaterialPaintLayer *item = add_mask_invert(*row);
+  ASSERT_NE(item, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_set(*item, PAINT_LAYER_INVERT_AMOUNT_R, 1.0f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*item, PAINT_LAYER_INVERT_AMOUNT_G, 0.0f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*item, PAINT_LAYER_INVERT_AMOUNT_B, 0.0f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.75f, 3e-3f);
+
+  /* Zeroed, the item stops working on the coverage at all. */
+  EXPECT_TRUE(paint_layer_kind_param_set(*item, PAINT_LAYER_INVERT_AMOUNT_R, 0.0f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.25f, 3e-3f);
+}
+
+TEST_F(PaintLayersInvertTest, an_amount_out_of_the_schema_is_refused)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *invert = add_invert(*row);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*invert, PAINT_LAYER_INVERT_AMOUNT_R), 1.0f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*invert, PAINT_LAYER_INVERT_AMOUNT_R, 2.0f));
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*invert, PAINT_LAYER_INVERT_AMOUNT_R), 1.0f);
+  EXPECT_FALSE(paint_layer_kind_param_set(*invert, 99, 1.0f));
+}
+
 TEST_F(PaintLayersFilterTest, a_filter_after_a_correction_works_on_the_corrected_colour)
 {
   add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
@@ -2058,5 +2429,679 @@ TEST(PaintLayersColorRampLut, lookup_matches_the_filter_for_every_interpolation_
 }
 
 /** \} */
+
+class PaintLayersDebandTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_deband(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_DEBAND);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+
+  /** A deband adjustment on top of the stack, or null when refused. */
+  MaterialPaintLayer *add_adjustment(const float opacity = 1.0f)
+  {
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::Adjustment;
+    params.filter = MA_PAINT_LAYER_FILTER_DEBAND;
+    MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+    if (row != nullptr) {
+      EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, row, opacity));
+    }
+    return row;
+  }
+
+  /** A deband filter in the mask of \a row, or null when refused. */
+  MaterialPaintLayer *add_mask_deband(MaterialPaintLayer &row)
+  {
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::MaskFilter;
+    params.anchor = &row;
+    params.filter = MA_PAINT_LAYER_FILTER_DEBAND;
+    MaterialPaintLayer *item = BKE_paint_layers_add_with_policy(*ma, params);
+    EXPECT_NE(item, nullptr);
+    return item;
+  }
+};
+
+TEST_F(PaintLayersDebandTest, deband_over_a_row_matches_the_cpu_within_the_noise)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *deband = add_deband(*row);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*deband, PAINT_LAYER_DEBAND_BITS, 6));
+
+  /* The graph's uniforms and the CPU's hash never agree texel for texel: each stays inside the
+   * triangular pair's reach of one and a half steps, so the colours differ by no more than twice
+   * that. */
+  const float levels = float((1 << 6) - 1);
+  expect_graph_matches_cpu(kColor, 2.0f * 1.5f / levels);
+}
+
+TEST_F(PaintLayersDebandTest, dither_over_a_row_matches_the_cpu_within_a_level)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *deband = add_deband(*row);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(
+      *deband, PAINT_LAYER_DEBAND_MODE, PAINT_LAYER_DEBAND_DITHER));
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*deband, PAINT_LAYER_DEBAND_BITS, 6));
+
+  /* Each side rounds to a level of its own noise: the answers sit a level apart at most, twice
+   * when both stand on a rounding edge. */
+  const float levels = float((1 << 6) - 1);
+  expect_graph_matches_cpu(kColor, 2.0f / levels);
+}
+
+TEST_F(PaintLayersDebandTest, the_cpu_noise_is_the_hash_it_names)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before_rgba = cpu_pixel(kColor);
+  const float before[3] = {before_rgba.r, before_rgba.g, before_rgba.b};
+  MaterialPaintLayer *deband = add_deband(*row);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*deband, PAINT_LAYER_DEBAND_SEED, 1234));
+
+  const RGBA after_rgba = cpu_pixel(kColor);
+  const float after[3] = {after_rgba.r, after_rgba.g, after_rgba.b};
+  const float levels = float((1 << 8) - 1);
+  const float step = 1.0f / levels;
+  /* The pixel is the reference texel (1, 1): each channel reads its own pair of uniforms, and the
+   * expected value is the very formula the composite applies. */
+  for (const int k : IndexRange(3)) {
+    const float u1 = paint_layer_deband_noise(1, 1, 1234, k, 1);
+    const float u2 = paint_layer_deband_noise(1, 1, 1234, k, 2);
+    EXPECT_GE(u1, 0.0f);
+    EXPECT_LT(u1, 1.0f);
+    const float expected = clamp_f(before[k] + (u1 - u2) * step * 1.5f, 0.0f, 1.0f);
+    EXPECT_NEAR(after[k], expected, 1e-6f) << "channel " << k;
+  }
+}
+
+TEST_F(PaintLayersDebandTest, dither_rounds_to_its_levels)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before_rgba = cpu_pixel(kColor);
+  const float before[3] = {before_rgba.r, before_rgba.g, before_rgba.b};
+  MaterialPaintLayer *deband = add_deband(*row);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(
+      *deband, PAINT_LAYER_DEBAND_MODE, PAINT_LAYER_DEBAND_DITHER));
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*deband, PAINT_LAYER_DEBAND_BITS, 4));
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*deband, PAINT_LAYER_DEBAND_SEED, 7));
+
+  const RGBA after_rgba = cpu_pixel(kColor);
+  const float after[3] = {after_rgba.r, after_rgba.g, after_rgba.b};
+  const float levels = float((1 << 4) - 1);
+  for (const int k : IndexRange(3)) {
+    const float u1 = paint_layer_deband_noise(1, 1, 7, k, 1);
+    const float u2 = paint_layer_deband_noise(1, 1, 7, k, 2);
+    const float expected = clamp_f(
+        floorf(before[k] * levels + (u1 - u2) + 0.5f) / levels, 0.0f, 1.0f);
+    EXPECT_NEAR(after[k], expected, 1e-6f) << "channel " << k;
+    /* The quantized answer sits on the grid the bits name. */
+    EXPECT_NEAR(after[k] * levels, floorf(after[k] * levels + 0.5f), 1e-4f);
+  }
+}
+
+TEST_F(PaintLayersDebandTest, the_same_seed_reads_the_same_noise_and_another_one_does_not)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *deband = add_deband(*row);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*deband, PAINT_LAYER_DEBAND_SEED, 42));
+
+  const RGBA first = cpu_pixel(kColor);
+  const RGBA again = cpu_pixel(kColor);
+  EXPECT_NEAR(first.r, again.r, 0.0f) << "the same seed is the same noise, byte for byte";
+  EXPECT_NEAR(first.g, again.g, 0.0f);
+  EXPECT_NEAR(first.b, again.b, 0.0f);
+
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*deband, PAINT_LAYER_DEBAND_SEED, 43));
+  const RGBA other = cpu_pixel(kColor);
+  EXPECT_GT(std::abs(other.r - first.r) + std::abs(other.g - first.g) +
+                std::abs(other.b - first.b),
+            1e-6f)
+      << "a different seed moves the pattern";
+}
+
+TEST_F(PaintLayersDebandTest, the_integers_are_clamped_and_a_float_write_is_refused)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *deband = add_deband(*row);
+  EXPECT_EQ(paint_layer_kind_param_int_get(*deband, PAINT_LAYER_DEBAND_BITS), 8);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*deband, PAINT_LAYER_DEBAND_BITS, 2));
+  EXPECT_EQ(paint_layer_kind_param_int_get(*deband, PAINT_LAYER_DEBAND_BITS), 4);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*deband, PAINT_LAYER_DEBAND_BITS, 20));
+  EXPECT_EQ(paint_layer_kind_param_int_get(*deband, PAINT_LAYER_DEBAND_BITS), 16);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*deband, PAINT_LAYER_DEBAND_SEED, 70000));
+  EXPECT_EQ(paint_layer_kind_param_int_get(*deband, PAINT_LAYER_DEBAND_SEED), 65535);
+  /* The bits are an integer parameter, not a float one, and no parameter sits past the schema. */
+  EXPECT_FALSE(paint_layer_kind_param_set(*deband, PAINT_LAYER_DEBAND_BITS, 8.0f));
+  EXPECT_FALSE(paint_layer_kind_param_set(*deband, 99, 1.0f));
+}
+
+TEST_F(PaintLayersDebandTest, deband_adjustment_matches_the_cpu_within_the_noise)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *adjustment = add_adjustment(0.8f);
+  ASSERT_NE(adjustment, nullptr);
+
+  const float levels = float((1 << 8) - 1);
+  expect_graph_matches_cpu(kColor, 2.0f * 1.5f / levels);
+}
+
+TEST_F(PaintLayersDebandTest, deband_in_the_mask_stays_within_the_noise_of_its_coverage)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  ASSERT_NE(add_mask_deband(*row), nullptr);
+  const float levels = float((1 << 8) - 1);
+  expect_graph_matches_cpu(kColor, 2.0f * 1.5f / levels);
+  /* The coverage moves no further than the noise's own reach. */
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), 0.25f, 2.0f * 1.5f / levels);
+}
+
+TEST_F(PaintLayersDebandTest, the_mode_is_a_shape_edit_and_the_seed_a_value_edit)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *deband = add_deband(*row);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t as_deband = paint_layers::paint_layers_layer_topology_hash(
+      *ma, *row, wired, forms);
+
+  /* The seed is a value input of the noise nodes: the hash holds. */
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*deband, PAINT_LAYER_DEBAND_SEED, 9));
+  EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), as_deband);
+
+  /* The mode picks the nodes the generator builds, so it moves the hash. */
+  EXPECT_TRUE(paint_layer_kind_param_int_set(
+      *deband, PAINT_LAYER_DEBAND_MODE, PAINT_LAYER_DEBAND_DITHER));
+  EXPECT_NE(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), as_deband);
+}
+
+class PaintLayersNormalConvertTest : public PaintLayersFilterTest {
+ public:
+  /** A Normal channel row over the flat encoded \a r, \a g, \a b. */
+  MaterialPaintLayer *add_normal_row(const float r, const float g, const float b)
+  {
+    const float flat[4] = {r, g, b, 1.0f};
+    Image &normal = *BKE_image_add_generated(
+        bmain, 4, 4, "Normal", 32, false, IMA_GENTYPE_BLANK, flat, false, /*is_data=*/true, false);
+    return add_layer("Row", &normal, PAINT_MATERIAL_CHANNEL_NORMAL);
+  }
+
+  MaterialPaintLayer *add_convert(MaterialPaintLayer &row, const int mode, const int normalize)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_NORMAL_CONVERT);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, 1.0f));
+    EXPECT_TRUE(paint_layer_kind_param_int_set(*filter, PAINT_LAYER_NORMAL_CONVERT_MODE, mode));
+    EXPECT_TRUE(
+        paint_layer_kind_param_int_set(*filter, PAINT_LAYER_NORMAL_CONVERT_NORMALIZE, normalize));
+    return filter;
+  }
+
+  /** An adjustment of \a filter on top of the stack, with a Normal channel record of its own. */
+  MaterialPaintLayer *add_normal_adjustment(const eMaterialPaintLayerFilter filter)
+  {
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::Adjustment;
+    params.filter = filter;
+    MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+    if (row != nullptr) {
+      EXPECT_NE(BKE_paint_layers_channel_add(*ma, row, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
+    }
+    return row;
+  }
+
+  /** The Normal channel's own chain end: decode, unit length, encode again. */
+  static void chain_end(const float in[3], float r_out[3])
+  {
+    const float v[3] = {in[0] * 2.0f - 1.0f, in[1] * 2.0f - 1.0f, in[2] * 2.0f - 1.0f};
+    const float len = std::max(sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]), 1e-10f);
+    for (const int k : IndexRange(3)) {
+      r_out[k] = (v[k] / len) * 0.5f + 0.5f;
+    }
+  }
+};
+
+TEST_F(PaintLayersNormalConvertTest, a_normal_correction_works_in_the_normal_channel)
+{
+  MaterialPaintLayer *row = add_normal_row(0.5f, 0.75f, 1.0f);
+  const RGBA before = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+  add_convert(*row, PAINT_LAYER_NORMAL_CONVERT_DX_TO_GL, 1);
+  /* The one filter the Normal channel carries: the flip happens, and the graph follows. */
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_NORMAL);
+  const RGBA after = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+  EXPECT_NEAR(after.r, before.r, 2e-3f) << "the flip leaves red alone";
+  EXPECT_GT(std::abs(after.g - before.g), 1e-2f) << "the flip moves green";
+}
+
+TEST_F(PaintLayersNormalConvertTest, every_other_filter_still_refuses_the_normal_channel)
+{
+  MaterialPaintLayer *row = add_normal_row(0.5f, 0.75f, 1.0f);
+  const RGBA before = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+
+  /* A correction and an adjustment of any other filter leave the channel as it was: the record
+   * takes part in nothing, the gate lets only a #PAINT_LAYER_KIND_NORMAL_SAFE kind through. */
+  ASSERT_NE(BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_INVERT), nullptr);
+  ASSERT_NE(add_normal_adjustment(MA_PAINT_LAYER_FILTER_INVERT), nullptr);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_NORMAL);
+  const RGBA with_invert = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+  EXPECT_NEAR(with_invert.r, before.r, 2e-3f);
+  EXPECT_NEAR(with_invert.g, before.g, 2e-3f);
+  EXPECT_NEAR(with_invert.b, before.b, 2e-3f);
+}
+
+TEST_F(PaintLayersNormalConvertTest, an_adjustment_works_in_the_normal_channel)
+{
+  add_normal_row(0.5f, 0.75f, 1.0f);
+  const RGBA before = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+  MaterialPaintLayer *convert = add_normal_adjustment(MA_PAINT_LAYER_FILTER_NORMAL_CONVERT);
+  ASSERT_NE(convert, nullptr);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(
+      *convert, PAINT_LAYER_NORMAL_CONVERT_MODE, PAINT_LAYER_NORMAL_CONVERT_DX_TO_GL));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_NORMAL);
+  const RGBA after = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+  EXPECT_GT(std::abs(after.g - before.g), 1e-2f) << "the flip moves the channel's green";
+}
+
+TEST_F(PaintLayersNormalConvertTest, the_modes_take_the_values_of_the_function_and_the_graph_follows)
+{
+  MaterialPaintLayer *row = add_normal_row(0.5f, 0.75f, 1.0f);
+  MaterialPaintLayer *convert = add_convert(*row, PAINT_LAYER_NORMAL_CONVERT_DX_TO_GL, 1);
+  for (const int mode : {PAINT_LAYER_NORMAL_CONVERT_DX_TO_GL,
+                         PAINT_LAYER_NORMAL_CONVERT_GL_TO_DX,
+                         PAINT_LAYER_NORMAL_CONVERT_REBUILD_Z,
+                         PAINT_LAYER_NORMAL_CONVERT_CLEAR_Z})
+  {
+    SCOPED_TRACE(mode);
+    EXPECT_TRUE(paint_layer_kind_param_int_set(*convert, PAINT_LAYER_NORMAL_CONVERT_MODE, mode));
+    /* The chain end runs after every row, so the expectation carries it too. */
+    float converted[3] = {0.5f, 0.75f, 1.0f};
+    const float params[PAINT_LAYER_NORMAL_CONVERT_PARAM_NUM] = {float(mode), 1.0f};
+    paint_layer_normal_convert_apply(converted, params);
+    float expected[3];
+    chain_end(converted, expected);
+    const RGBA pixel = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+    EXPECT_NEAR(pixel.r, expected[0], 2e-3f);
+    EXPECT_NEAR(pixel.g, expected[1], 2e-3f);
+    EXPECT_NEAR(pixel.b, expected[2], 2e-3f);
+    /* A mode edit is a shape edit: the rebuilt graph agrees with the CPU. */
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_NORMAL);
+  }
+
+  /* Both flips, with the normalize off: one flip whichever way it is named. */
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*convert, PAINT_LAYER_NORMAL_CONVERT_NORMALIZE, 0));
+  EXPECT_TRUE(paint_layer_kind_param_int_set(
+      *convert, PAINT_LAYER_NORMAL_CONVERT_MODE, PAINT_LAYER_NORMAL_CONVERT_DX_TO_GL));
+  const RGBA to_gl = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+  EXPECT_TRUE(paint_layer_kind_param_int_set(
+      *convert, PAINT_LAYER_NORMAL_CONVERT_MODE, PAINT_LAYER_NORMAL_CONVERT_GL_TO_DX));
+  const RGBA to_dx = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+  EXPECT_NEAR(to_gl.g, to_dx.g, 1e-6f) << "one flip, whichever way it is named";
+}
+
+TEST_F(PaintLayersNormalConvertTest, the_srgb_pair_matches_the_cpu_and_inverts)
+{
+  MaterialPaintLayer *row = add_normal_row(0.5f, 0.5f, 1.0f);
+  add_convert(*row, PAINT_LAYER_NORMAL_CONVERT_LINEAR_TO_SRGB, 0);
+  /* The broken line is node-built, so the graph carries the same constants the CPU does; the
+   * parity holds to a tolerance and no closer. */
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_NORMAL, 1e-3f);
+  const RGBA encoded = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+  EXPECT_NE(std::abs(encoded.r - 0.5f), 0.0f) << "the encode moves a mid grey";
+
+  /* The decode on top of the encode puts the channel back where it began: the row's normal is
+   * already of unit length, so the channel's own chain end keeps it. */
+  add_convert(*row, PAINT_LAYER_NORMAL_CONVERT_SRGB_TO_LINEAR, 0);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_NORMAL, 1e-3f);
+  const RGBA decoded = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+  EXPECT_NEAR(decoded.r, 0.5f, 2e-3f);
+  EXPECT_NEAR(decoded.g, 0.5f, 2e-3f);
+  EXPECT_NEAR(decoded.b, 1.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersNormalConvertTest, the_apply_function_normalizes_when_asked)
+{
+  /* The flip past unit length is the one output the channel's own chain end would straighten
+   * anyway, so the function itself is what the test reads: asked, it brings the vector back to
+   * unit length; not asked, it leaves the flipped encoding as it is. */
+  float asked[3] = {0.5f, 0.25f, 1.0f};
+  const float params_on[PAINT_LAYER_NORMAL_CONVERT_PARAM_NUM] = {
+      float(PAINT_LAYER_NORMAL_CONVERT_DX_TO_GL), 1.0f};
+  paint_layer_normal_convert_apply(asked, params_on);
+  EXPECT_NEAR(asked[0], 0.5f, 1e-6f);
+  EXPECT_NEAR(asked[1], (0.5f / sqrtf(1.25f)) * 0.5f + 0.5f, 1e-6f);
+  EXPECT_NEAR(asked[2], (1.0f / sqrtf(1.25f)) * 0.5f + 0.5f, 1e-6f);
+
+  float refused[3] = {0.5f, 0.25f, 1.0f};
+  const float params_off[PAINT_LAYER_NORMAL_CONVERT_PARAM_NUM] = {
+      float(PAINT_LAYER_NORMAL_CONVERT_DX_TO_GL), 0.0f};
+  paint_layer_normal_convert_apply(refused, params_off);
+  EXPECT_NEAR(refused[0], 0.5f, 1e-6f);
+  EXPECT_NEAR(refused[1], 0.75f, 1e-6f);
+  EXPECT_NEAR(refused[2], 1.0f, 1e-6f);
+}
+
+TEST_F(PaintLayersNormalConvertTest, the_convert_in_the_mask_works_on_its_coverage)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.25f), nullptr);
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::MaskFilter;
+  params.anchor = row;
+  params.filter = MA_PAINT_LAYER_FILTER_NORMAL_CONVERT;
+  MaterialPaintLayer *item = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(item, nullptr);
+  /* The mask works on one grey and reads the red channel of the answer, so the encode is the one
+   * mode that moves it: the quarter lifted onto the broken line. */
+  EXPECT_TRUE(paint_layer_kind_param_int_set(
+      *item, PAINT_LAYER_NORMAL_CONVERT_MODE, PAINT_LAYER_NORMAL_CONVERT_LINEAR_TO_SRGB));
+  EXPECT_TRUE(paint_layer_kind_param_int_set(*item, PAINT_LAYER_NORMAL_CONVERT_NORMALIZE, 0));
+  expect_graph_matches_cpu(kColor);
+  const float lifted = 1.055f * powf(0.25f, 1.0f / 2.4f) - 0.055f;
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), lifted, 3e-3f);
+}
+
+class PaintLayersChannelMixerTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_mixer(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_CHANNEL_MIXER);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+
+  /** A channel mixer adjustment on top of the stack, or null when refused. */
+  MaterialPaintLayer *add_adjustment(const float opacity = 1.0f)
+  {
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::Adjustment;
+    params.filter = MA_PAINT_LAYER_FILTER_CHANNEL_MIXER;
+    MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+    if (row != nullptr) {
+      EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, row, opacity));
+    }
+    return row;
+  }
+
+  /** A channel mixer filter in the mask of \a row, or null when refused. */
+  MaterialPaintLayer *add_mask_mixer(MaterialPaintLayer &row)
+  {
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::MaskFilter;
+    params.anchor = &row;
+    params.filter = MA_PAINT_LAYER_FILTER_CHANNEL_MIXER;
+    MaterialPaintLayer *item = BKE_paint_layers_add_with_policy(*ma, params);
+    EXPECT_NE(item, nullptr);
+    return item;
+  }
+
+  /** The filter's payload, made on demand. */
+  MaterialPaintLayerChannelMixer *mixer_of(MaterialPaintLayer &filter)
+  {
+    MaterialPaintLayerChannelMixer *mixer = BKE_paint_layers_channel_mixer_ensure(filter);
+    EXPECT_NE(mixer, nullptr);
+    return mixer;
+  }
+};
+
+TEST_F(PaintLayersChannelMixerTest, the_identity_leaves_the_colour_alone)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  add_mixer(*row);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, before.r, 2e-3f);
+  EXPECT_NEAR(after.g, before.g, 2e-3f);
+  EXPECT_NEAR(after.b, before.b, 2e-3f);
+}
+
+TEST_F(PaintLayersChannelMixerTest, a_full_red_weight_moves_the_input_into_the_green)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  MaterialPaintLayer *filter = add_mixer(*row);
+  MaterialPaintLayerChannelMixer *mixer = mixer_of(*filter);
+  /* The addon's `100` on the green row's red slot, in units of one. */
+  mixer->green_row[0] = 1.0f;
+  mixer->green_row[1] = 0.0f;
+  BKE_paint_layers_channel_mixer_edited(*ma, mixer);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, before.r, 2e-3f) << "the red row keeps the input's red";
+  EXPECT_NEAR(after.g, before.r, 2e-3f) << "the green row reads the input's red";
+  EXPECT_NEAR(after.b, before.b, 2e-3f);
+}
+
+TEST_F(PaintLayersChannelMixerTest, a_constant_lifts_every_output_and_the_clamp_holds)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  MaterialPaintLayer *filter = add_mixer(*row);
+  MaterialPaintLayerChannelMixer *mixer = mixer_of(*filter);
+  mixer->constants[0] = 0.25f;
+  mixer->constants[1] = 0.25f;
+  mixer->constants[2] = 0.25f;
+  BKE_paint_layers_channel_mixer_edited(*ma, mixer);
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, std::min(before.r + 0.25f, 1.0f), 2e-3f);
+  EXPECT_NEAR(after.g, std::min(before.g + 0.25f, 1.0f), 2e-3f);
+  /* The blue was already past the clamp's reach: the answer stays at one, not above it. */
+  EXPECT_NEAR(after.b, std::min(before.b + 0.25f, 1.0f), 2e-3f);
+  EXPECT_LE(after.b, 1.0f + 1e-6f);
+}
+
+TEST_F(PaintLayersChannelMixerTest, a_negative_result_is_clamped_to_zero)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_mixer(*row);
+  MaterialPaintLayerChannelMixer *mixer = mixer_of(*filter);
+  mixer->constants[0] = -2.0f;
+  BKE_paint_layers_channel_mixer_edited(*ma, mixer);
+
+  /* The addon clips both ways, and so do the CPU and the graph. */
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(cpu_pixel(kColor).r, 0.0f, 1e-6f);
+}
+
+TEST_F(PaintLayersChannelMixerTest, monochrome_lays_the_red_row_and_the_mean_constant_as_a_grey)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  const RGBA before = cpu_pixel(kColor);
+  MaterialPaintLayer *filter = add_mixer(*row);
+  MaterialPaintLayerChannelMixer *mixer = mixer_of(*filter);
+  mixer->red_row[0] = 0.5f;
+  mixer->red_row[1] = 0.25f;
+  mixer->red_row[2] = 0.0f;
+  mixer->constants[0] = 0.3f;
+  BKE_paint_layers_channel_mixer_edited(*ma, mixer);
+  EXPECT_TRUE(
+      paint_layer_kind_param_bool_set(*filter, PAINT_LAYER_CHANNEL_MIXER_MONOCHROME, true));
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, after.g, 2e-3f) << "a monochrome mix lays one grey";
+  EXPECT_NEAR(after.g, after.b, 2e-3f);
+  /* The red row over the inputs, the constants' mean (0.3 / 3) under it. */
+  const float grey = std::clamp(0.5f * before.r + 0.25f * before.g + 0.1f, 0.0f, 1.0f);
+  EXPECT_NEAR(after.r, grey, 2e-3f);
+}
+
+TEST_F(PaintLayersChannelMixerTest, the_fold_is_the_identity_for_the_neutral_matrix)
+{
+  const MaterialPaintLayerChannelMixer neutral = {};
+  float folded[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM];
+  paint_layer_channel_mixer_fold(neutral, false, folded);
+  const float expected[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM] = {
+      1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+  for (const int i : IndexRange(PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM)) {
+    EXPECT_FLOAT_EQ(folded[i], expected[i]) << "slot " << i;
+  }
+
+  /* The monochrome fold: three copies of the red row, three copies of the constants' mean. */
+  MaterialPaintLayerChannelMixer mixer;
+  mixer.red_row[0] = 0.2f;
+  mixer.red_row[1] = 0.3f;
+  mixer.red_row[2] = 0.4f;
+  mixer.constants[0] = 0.3f;
+  mixer.constants[1] = 0.6f;
+  mixer.constants[2] = 0.0f;
+  paint_layer_channel_mixer_fold(mixer, true, folded);
+  for (const int k : IndexRange(3)) {
+    EXPECT_FLOAT_EQ(folded[4 * k + 0], 0.2f);
+    EXPECT_FLOAT_EQ(folded[4 * k + 1], 0.3f);
+    EXPECT_FLOAT_EQ(folded[4 * k + 2], 0.4f);
+    EXPECT_FLOAT_EQ(folded[4 * k + 3], 0.3f);
+  }
+}
+
+TEST_F(PaintLayersChannelMixerTest, the_mixer_is_no_scalar_and_monochrome_is_a_boolean)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_mixer(*row);
+  /* The payload is no parameter: a float write to its slot is refused. */
+  EXPECT_FALSE(paint_layer_kind_param_set(*filter, PAINT_LAYER_CHANNEL_MIXER_MIXER, 1.0f));
+  EXPECT_FALSE(paint_layer_kind_param_set(*filter, 99, 1.0f));
+  EXPECT_EQ(paint_layer_kind_param_type(*filter, PAINT_LAYER_CHANNEL_MIXER_MIXER),
+            PaintLayerKindParamType::ChannelMixer);
+  EXPECT_EQ(paint_layer_kind_param_type(*filter, PAINT_LAYER_CHANNEL_MIXER_MONOCHROME),
+            PaintLayerKindParamType::Bool);
+  EXPECT_FALSE(paint_layer_kind_param_bool_get(*filter, PAINT_LAYER_CHANNEL_MIXER_MONOCHROME));
+  EXPECT_TRUE(BKE_paint_layers_channel_mixer_supported(*filter));
+  EXPECT_FALSE(BKE_paint_layers_channel_mixer_supported(*row));
+}
+
+TEST_F(PaintLayersChannelMixerTest, editing_the_matrix_is_a_value_edit_and_only_its_owner_is_edited)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_mixer(*row);
+  MaterialPaintLayerChannelMixer *mixer = mixer_of(*filter);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t before = paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms);
+  bNodeTree *tree = ma->paint_layers_tree;
+
+  mixer->blue_row[0] = 0.4f;
+  mixer->constants[2] = 0.1f;
+  EXPECT_TRUE(BKE_paint_layers_channel_mixer_edited(*ma, mixer));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_EQ(ma->paint_layers_tree, tree) << "a value edit never swaps the tree out";
+  EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), before)
+      << "the payload is not part of the topology";
+  /* Flipping the monochrome switch is a value edit of the same inputs. */
+  EXPECT_TRUE(
+      paint_layer_kind_param_bool_set(*filter, PAINT_LAYER_CHANNEL_MIXER_MONOCHROME, true));
+  EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), before);
+  expect_graph_matches_cpu(kColor);
+
+  /* The walk finds the payload by address and nothing else. */
+  EXPECT_FALSE(BKE_paint_layers_channel_mixer_edited(*ma, &row->mapping));
+  EXPECT_FALSE(BKE_paint_layers_channel_mixer_edited(*ma, nullptr));
+}
+
+TEST_F(PaintLayersChannelMixerTest, the_payload_roundtrips_through_a_file)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_mixer(*row);
+  MaterialPaintLayerChannelMixer *mixer = mixer_of(*filter);
+  mixer->green_row[0] = 0.5f;
+  mixer->blue_row[1] = -1.5f;
+  mixer->constants[0] = 0.25f;
+  const bUUID filter_marker = filter->marker;
+  id_us_plus(&ma->id);
+
+  char filepath[FILE_MAX];
+  BLI_path_join(
+      filepath, sizeof(filepath), BKE_tempdir_session(), "paint_layers_channel_mixer.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+  Material *reloaded = nullptr;
+  for (Material &candidate : bfd->main->materials) {
+    if (STREQ(candidate.id.name + 2, ma->id.name + 2)) {
+      reloaded = &candidate;
+      break;
+    }
+  }
+  ASSERT_NE(reloaded, nullptr);
+  MaterialPaintLayer *reloaded_filter = BKE_paint_layers_find(*reloaded, filter_marker);
+  ASSERT_NE(reloaded_filter, nullptr);
+  const MaterialPaintLayerChannelMixer *reloaded_mixer = BKE_paint_layers_channel_mixer_get(
+      *reloaded_filter);
+  ASSERT_NE(reloaded_mixer, nullptr);
+  EXPECT_NEAR(reloaded_mixer->green_row[0], 0.5f, 0.0f);
+  EXPECT_NEAR(reloaded_mixer->blue_row[1], -1.5f, 0.0f);
+  EXPECT_NEAR(reloaded_mixer->red_row[0], 1.0f, 0.0f) << "the identity slots survive too";
+  EXPECT_NEAR(reloaded_mixer->constants[0], 0.25f, 0.0f);
+  EXPECT_NEAR(reloaded_mixer->constants[1], 0.0f, 0.0f);
+
+  BLO_blendfiledata_free(bfd);
+  BLI_delete(filepath, false, false);
+}
+
+TEST_F(PaintLayersChannelMixerTest, the_mixer_adjustment_and_mask_item_follow_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *adjustment = add_adjustment(0.8f);
+  ASSERT_NE(adjustment, nullptr);
+  MaterialPaintLayerChannelMixer *mixer = mixer_of(*adjustment);
+  mixer->green_row[0] = 1.0f;
+  mixer->green_row[1] = 0.0f;
+  BKE_paint_layers_channel_mixer_edited(*ma, mixer);
+  expect_graph_matches_cpu(kColor);
+
+  MaterialPaintLayer *row = add_layer("Masked", add_solid_image("Masked", 60, 90, 120, 255));
+  const RGBA row_alone_weight_one = cpu_pixel(kColor);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const RGBA bottom = cpu_pixel(kColor);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.5f), nullptr);
+  MaterialPaintLayer *item = add_mask_mixer(*row);
+  ASSERT_NE(item, nullptr);
+  MaterialPaintLayerChannelMixer *item_mixer = mixer_of(*item);
+  item_mixer->constants[0] = 0.25f;
+  BKE_paint_layers_channel_mixer_edited(*ma, item_mixer);
+  expect_graph_matches_cpu(kColor);
+  /* The coverage is a grey read from the red output: the constant lifts it, the clamp holds it. */
+  const float lifted = std::min(0.5f + 0.25f, 1.0f);
+  EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), lifted, 3e-3f);
+}
 
 }  // namespace blender::bke::tests

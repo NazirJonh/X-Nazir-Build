@@ -205,6 +205,7 @@ inline constexpr const char *ROLE_GRADIENT_REPEAT = "gradient_repeat";
  * A, B and E are — and the position of the triple (#INPUT_PARAM_PROP: 0, 1 or 2) names which one.
  */
 inline constexpr const char *ROLE_COLOR_BALANCE = "color_balance";
+inline constexpr const char *ROLE_CHANNEL_MIXER = "channel_mixer";
 /**
  * On a source-group wrapper's interface input: the row mapping value relayed into the wrapper.
  * The same three roles travel from the row group into the wrapper instance and down every private

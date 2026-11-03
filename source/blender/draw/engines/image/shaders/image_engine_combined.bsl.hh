@@ -261,6 +261,8 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_CLAMP 11
 #define COMBINED_FILTER_CURVES 12
 #define COMBINED_FILTER_COLOR_BALANCE 13
+#define COMBINED_FILTER_EXPOSURE 23
+#define COMBINED_FILTER_CHANNEL_MIXER 27
 
 float levels_channel(float value, float4 p0, float4 p1)
 {
@@ -416,7 +418,11 @@ float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, float4 p2
   float strength = 1.0f;
   switch (filter_kind) {
     case COMBINED_FILTER_INVERT:
-      result = abs(rgb - 1.0f);
+      /* `lerp(c, |c - 1|, amount)` per channel; the schema's three amounts ride in `p0.xyz`, each
+       * defaulting to one, so a row without stored parameters inverts the whole way as before. */
+      result = float3(mix(rgb.x, abs(rgb.x - 1.0f), p0.x),
+                      mix(rgb.y, abs(rgb.y - 1.0f), p0.y),
+                      mix(rgb.z, abs(rgb.z - 1.0f), p0.z));
       break;
     case COMBINED_FILTER_LEVELS:
       result = float3(levels_channel(rgb.x, p0, p1),
@@ -424,12 +430,27 @@ float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, float4 p2
                       levels_channel(rgb.z, p0, p1));
       break;
     case COMBINED_FILTER_HSL: {
-      float3 hsv = rgb_to_hsv3(rgb);
-      float turned = hsv.x + p0.x + 0.5f;
-      hsv.x = turned - floor(turned);
-      hsv.y = clamp(hsv.y * p0.y, 0.0f, 1.0f);
-      hsv.z = hsv.z * p0.z;
-      result = max(hsv_to_rgb3(hsv), float3(0.0f));
+      float3 turned_rgb = rgb;
+      {
+        float3 hsv = rgb_to_hsv3(rgb);
+        float turned = hsv.x + p0.x + 0.5f;
+        hsv.x = turned - floor(turned);
+        hsv.y = clamp(hsv.y * p0.y, 0.0f, 1.0f);
+        hsv.z = hsv.z * p0.z;
+        turned_rgb = max(hsv_to_rgb3(hsv), float3(0.0f));
+      }
+      /* The CPU's vibrance on top: the lift away from the Rec.709 grey, most where the colour is
+       * least saturated, clamped below zero like the HSV step. `p0.w` carries it. */
+      float vibrance = p0.w;
+      if (vibrance != 0.0f) {
+        float max_c = max(turned_rgb.x, max(turned_rgb.y, turned_rgb.z));
+        float min_c = min(turned_rgb.x, min(turned_rgb.y, turned_rgb.z));
+        float sat = (max_c > 1e-6f) ? (max_c - min_c) / max_c : 0.0f;
+        float boost = vibrance * (1.0f - sat);
+        float gray = dot(turned_rgb, float3(0.2126f, 0.7152f, 0.0722f));
+        turned_rgb = max(turned_rgb + (turned_rgb - gray) * boost, float3(0.0f));
+      }
+      result = turned_rgb;
       break;
     }
     case COMBINED_FILTER_COLOR_RAMP: {
@@ -492,6 +513,37 @@ float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, float4 p2
     case COMBINED_FILTER_CURVES:
       result = apply_curves(lut_tx, rgb);
       break;
+    case COMBINED_FILTER_EXPOSURE: {
+      /* The CPU's `paint_layer_exposure_apply`: the colour scaled by `2^exposure`, shifted by the
+       * offset, then raised to one over the gamma. A non-positive value is left as it is (the Gamma
+       * node's own rule), so an HDR texel above one stays above one. `p0.x` is exposure, `p0.y` the
+       * offset and `p0.z` the gamma; the gamma never reaches zero (the schema clamps it to 0.1 at
+       * the least), so the reciprocal is safe. Per component: the vectorized pow is not an overload
+       * every backend has. */
+      float scale = pow(2.0f, p0.x);
+      float exponent = 1.0f / p0.z;
+      float shifted_x = rgb.x * scale + p0.y;
+      float shifted_y = rgb.y * scale + p0.y;
+      float shifted_z = rgb.z * scale + p0.y;
+      result = float3(shifted_x > 0.0f ? pow(shifted_x, exponent) : shifted_x,
+                      shifted_y > 0.0f ? pow(shifted_y, exponent) : shifted_y,
+                      shifted_z > 0.0f ? pow(shifted_z, exponent) : shifted_z);
+      break;
+    }
+    case COMBINED_FILTER_CHANNEL_MIXER: {
+      /* `clamp(dot(row_k, rgb) + constant_k, 0, 1)` per output channel, the folded matrix the CPU
+       * composite reads: the rows ride in the `.xyz` of `p0`, `p1` and `p2` and the constants in
+       * their `.w` (the monochrome switch is already folded into them). The dot products are written
+       * out per component and the clamp uses explicit floats: no vector-against-scalar overload is
+       * assumed on every backend. */
+      float mixed_x = p0.x * rgb.x + p0.y * rgb.y + p0.z * rgb.z + p0.w;
+      float mixed_y = p1.x * rgb.x + p1.y * rgb.y + p1.z * rgb.z + p1.w;
+      float mixed_z = p2.x * rgb.x + p2.y * rgb.y + p2.z * rgb.z + p2.w;
+      result = float3(clamp(mixed_x, 0.0f, 1.0f),
+                      clamp(mixed_y, 0.0f, 1.0f),
+                      clamp(mixed_z, 0.0f, 1.0f));
+      break;
+    }
     default:
       break;
   }

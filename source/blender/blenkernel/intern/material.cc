@@ -162,8 +162,8 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
     BKE_curvemapping_free_data(&layer->curves->curve_mapping);
     MEM_SAFE_DELETE(layer->curves);
   }
-  /* The balance is plain numbers: no heap data of its own to release first. */
-  MEM_SAFE_DELETE(layer->color_balance);
+  /* The registered payloads are plain numbers or flat arrays: no heap data of their own. */
+  paint_layer_payload_free(*layer);
   /* The ID users of the parameters are released by the generic free pass through
    * #material_paint_layer_foreach_id, like the channel maps. */
   if (layer->system_properties != nullptr) {
@@ -256,7 +256,7 @@ static MaterialPaintLayer *material_paint_layer_copy(Main *bmain,
      * when they were built. */
     BKE_curvemapping_copy_data(&dst->curves->curve_mapping, &src.curves->curve_mapping);
   }
-  paint_layer_color_balance_copy(src, *dst);
+  paint_layer_payload_copy(src, *dst);
   /* Like the channel maps, the users of ID parameters are added by the generic copy pass. */
   if (src.system_properties != nullptr) {
     dst->system_properties = IDP_CopyProperty_ex(src.system_properties,
@@ -363,9 +363,7 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
     writer->write_struct(layer.curves);
     BKE_curvemapping_curves_blend_write(writer, &layer.curves->curve_mapping);
   }
-  if (layer.color_balance != nullptr) {
-    writer->write_struct(layer.color_balance);
-  }
+  paint_layer_payload_write(*writer, layer);
   if (layer.system_properties != nullptr) {
     IDP_BlendWrite(writer, layer.system_properties);
   }
@@ -426,10 +424,7 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
     BKE_curvemapping_blend_read(reader, &layer.curves->curve_mapping);
     BKE_curvemapping_init(&layer.curves->curve_mapping);
   }
-  BLO_read_struct(reader, MaterialPaintLayerColorBalance, &layer.color_balance);
-  if (layer.color_balance == nullptr && paint_layer_kind_has_color_balance_param(layer)) {
-    BKE_paint_layers_color_balance_ensure(layer);
-  }
+  paint_layer_payload_read(*reader, layer);
   if (layer.bake != nullptr && !BLO_read_data_is_undo(reader)) {
     /* The bake maps are generated images whose pixels the file does not keep, and the pixel-edit
      * subscription that vouches for them is runtime only. A loaded bake therefore proves nothing:

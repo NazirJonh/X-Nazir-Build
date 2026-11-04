@@ -41,6 +41,7 @@
 #include <cmath>
 #include <utility>
 
+#include "BLI_index_range.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
 #include "BLI_span.hh"
@@ -105,6 +106,72 @@ struct ImagePaintSelectionTarget {
    * Base Color default; combined with #is_color_channel above it is informational there. */
   eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 };
+
+/**
+ * One tile's acquired pixel buffer, released when the scope ends. Pins a copy of \a iuser to
+ * \a tile_number, so the early-outs between acquire and release cannot leak the image lock.
+ */
+class ImageSelectTileBuf {
+ private:
+  Image *image_;
+  ImageUser tile_iuser_;
+  void *lock_ = nullptr;
+  ImBuf *ibuf_ = nullptr;
+
+ public:
+  ImageSelectTileBuf(Image &image, const ImageUser &iuser, const int tile_number)
+      : image_(&image), tile_iuser_(iuser)
+  {
+    tile_iuser_.tile = tile_number;
+    ibuf_ = BKE_image_acquire_ibuf(image_, &tile_iuser_, &lock_);
+  }
+  ~ImageSelectTileBuf()
+  {
+    if (ibuf_ != nullptr) {
+      BKE_image_release_ibuf(image_, ibuf_, lock_);
+    }
+  }
+  /* One buffer per scope: copying would release the acquisition twice. */
+  ImageSelectTileBuf(const ImageSelectTileBuf &) = delete;
+  ImageSelectTileBuf &operator=(const ImageSelectTileBuf &) = delete;
+
+  ImBuf *get() const
+  {
+    return ibuf_;
+  }
+  /** The pinned iuser, for the undo pushes that name the tile (they take a mutable one). */
+  ImageUser &tile_iuser()
+  {
+    return tile_iuser_;
+  }
+};
+
+/**
+ * Walk the rows of \a region (exclusive on both upper corners) of a tile, handing \a row_fn the
+ * row's selection weights: `row_fn(int y, Span<float> weights)`, `weights[x - region.xmin]` for
+ * every x of the region. An empty span means the tile has no selection restriction (weight 1.0 for
+ * all). Rows the selection does not touch are skipped.
+ */
+template<typename RowFn>
+inline void image_select_foreach_weighted_row(Image &image,
+                                              const int tile_number,
+                                              const rcti &region,
+                                              RowFn row_fn)
+{
+  const ImagePaintSelectionTileSampler sampler = BKE_image_paint_selection_tile_sampler_get(
+      &image, tile_number);
+  const bool has_weights = !sampler.is_unrestricted();
+  Vector<float> row_weights;
+  if (has_weights) {
+    row_weights.resize(BLI_rcti_size_x(&region));
+  }
+  for (const int y : IndexRange::from_begin_end(region.ymin, region.ymax)) {
+    if (has_weights && !sampler.sample_row(region.xmin, y, row_weights.as_mutable_span())) {
+      continue;
+    }
+    row_fn(y, row_weights.as_span());
+  }
+}
 
 /**
  * Images affected by an Image Paint selection operation.

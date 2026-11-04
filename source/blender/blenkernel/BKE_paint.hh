@@ -2103,6 +2103,13 @@ struct PaintMaterialImageTarget {
 bool BKE_paint_mask_erase_fill_get(Image *image, float r_fill[4]);
 
 /**
+ * Whether a target is the mask map: the one Base Color target of a Mask-mode stroke / selection.
+ * The single place of that rule, shared by the brush engines and the select tools, so none of them
+ * disagrees on which map an erase mixes toward #BKE_paint_mask_erase_fill_get.
+ */
+bool BKE_paint_is_mask_target(bool mask_stroke, eMaterialPaintChannel channel);
+
+/**
  * Collects enabled channels that successfully resolve to a target Image on \a ob - either a
  * Principled Image Texture, or the active row's channel map of a layered material (whose
  * #PaintMaterialImageTarget::iuser is null).

@@ -3598,6 +3598,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_select_move_undo_step);
   WM_operatortype_append(PAINT_OT_image_select_copy);
   WM_operatortype_append(PAINT_OT_image_select_paste);
+  WM_operatortype_append(PAINT_OT_image_select_delete);
   WM_operatortype_append(PAINT_OT_image_select_transform);
   WM_operatortype_append(PAINT_OT_image_select_transform_confirm);
   WM_operatortype_append(PAINT_OT_image_select_transform_cancel);

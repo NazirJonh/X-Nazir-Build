@@ -2908,6 +2908,9 @@ def km_image_paint(params):
         ("paint.image_select_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         # Paste selection.
         ("paint.image_select_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
+        # Delete the selected region from every channel map of the edited layer, like an Erase
+        # stroke. The operator polls false without an active selection, so DEL stays free.
+        ("paint.image_select_delete", {"type": 'DEL', "value": 'PRESS'}, None),
         # Transform selection.
         ("paint.image_select_transform", {"type": 'T', "value": 'PRESS', "ctrl": True, "shift": True}, None),
     ])

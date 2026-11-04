@@ -5718,6 +5718,13 @@ bool BKE_paint_mask_erase_fill_get(Image *image, float r_fill[4])
   return true;
 }
 
+bool BKE_paint_is_mask_target(const bool mask_stroke, const eMaterialPaintChannel channel)
+{
+  /* Other maps of a Mask-mode row erase alpha like any image; there is no generated fill for them
+   * to restore. */
+  return mask_stroke && channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+}
+
 Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     Object &ob,
     PaintModeSettings &mode_settings,

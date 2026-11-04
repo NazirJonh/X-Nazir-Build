@@ -1553,6 +1553,7 @@ void PAINT_OT_image_select_move_cancel(wmOperatorType *ot);
 void PAINT_OT_image_select_move_undo_step(wmOperatorType *ot);
 void PAINT_OT_image_select_copy(wmOperatorType *ot);
 void PAINT_OT_image_select_paste(wmOperatorType *ot);
+void PAINT_OT_image_select_delete(wmOperatorType *ot);
 void PAINT_OT_image_select_transform(wmOperatorType *ot);
 void PAINT_OT_image_select_transform_confirm(wmOperatorType *ot);
 void PAINT_OT_image_select_transform_cancel(wmOperatorType *ot);

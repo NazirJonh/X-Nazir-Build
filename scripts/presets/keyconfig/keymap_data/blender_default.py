@@ -2354,6 +2354,9 @@ def km_image(params):
         # Copy and paste selection.
         ("paint.image_select_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         ("paint.image_select_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
+        # Delete the selection: lives here, not only in "Image Paint", because that keymap is alive
+        # for brush tools only and the select tools are the ones that make a selection.
+        ("paint.image_select_delete", {"type": 'DEL', "value": 'PRESS'}, None),
         *_template_items_image_paint_select_floating(),
         ("paint.image_select_gradient_apply", {"type": 'RET', "value": 'PRESS'}, None),
         ("paint.image_select_gradient_apply", {"type": 'NUMPAD_ENTER', "value": 'PRESS'}, None),
@@ -5306,6 +5309,10 @@ def km_image_paint(params):
         ("paint.image_select_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         # Paste selection.
         ("paint.image_select_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
+        # Delete the selected region from every channel map of the edited layer, like an Erase
+        # stroke. The operator polls false without an active selection (and in every other space),
+        # so DEL stays free for the rest of the keymap.
+        ("paint.image_select_delete", {"type": 'DEL', "value": 'PRESS'}, None),
         *_template_items_context_panel("VIEW3D_PT_paint_texture_context_menu", params.context_menu_event),
         *_template_asset_shelf_popup("VIEW3D_AST_brush_texture_paint", params.spacebar_action),
         *_template_asset_shelf_popup("IMAGE_AST_brush_paint", params.spacebar_action),
@@ -5544,6 +5551,10 @@ def km_sculpt(params):
         # without a copied selection), so the stack layer keys keep working for every other tool.
         ("paint.image_select_view3d_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         ("paint.image_select_view3d_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
+        # Delete the selected region from every channel map of the edited layer, like an Erase
+        # stroke. The operator polls false without an active canvas selection, so DEL keeps whatever
+        # the viewport's other modes bind it to. Works with any Sculpt tool, like in the Image Editor.
+        ("paint.image_select_delete", {"type": 'DEL', "value": 'PRESS'}, None),
         # Stack layer copy/paste. While a material paint brush is active the keys act on the stack
         # layer being worked on; the operators poll false otherwise, so the viewport's own
         # object copy/paste keeps the keys for every other brush.

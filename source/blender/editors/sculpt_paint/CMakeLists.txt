@@ -154,6 +154,7 @@ set(SRC
   selection/paint_image_select_mask.cc
   selection/paint_image_select_gesture.cc
   selection/paint_image_select_curve.cc
+  selection/paint_image_select_delete.cc
   selection/paint_image_select_island_preview.cc
   mesh/paint_image_shape_symmetry.cc
   mesh/paint_image_shape_composite.cc

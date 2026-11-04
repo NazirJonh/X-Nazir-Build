@@ -224,6 +224,8 @@ class IMAGE_MT_select(Menu):
             layout.operator("paint.image_select_copy", text="Copy Selection")
             layout.operator("paint.image_select_paste", text="Paste Selection")
             layout.separator()
+            layout.operator("paint.image_select_delete", text="Delete Selected")
+            layout.separator()
             layout.operator("paint.image_symmetry_edit", text="Edit Canvas Symmetry")
             return
 

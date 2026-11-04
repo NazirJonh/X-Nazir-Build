@@ -5052,9 +5052,9 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
           brush_paint, target.channel, invert);
       float mask_fill[4];
       /* A Mask-mode stroke has one target: the mask map, resolved as Base Color. Same rule as
-       * #ImagePaintTarget::is_mask_target in the Sculpt engine. */
-      const bool is_mask_target = mask_stroke &&
-                                  target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+       * #ImagePaintTarget::is_mask_target in the Sculpt engine, resolved through the shared BKE
+       * helper so the delete tools gate on the very same condition. */
+      const bool is_mask_target = BKE_paint_is_mask_target(mask_stroke, target.channel);
       const bool mask_fill_erase = material_erase && is_mask_target &&
                                    BKE_paint_mask_erase_fill_get(target.image, mask_fill);
       if (material_erase) {

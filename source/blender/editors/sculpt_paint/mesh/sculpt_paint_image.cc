@@ -155,15 +155,14 @@ Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
         target.is_normal_channel = material_target.is_normal_channel;
         target.is_material_channel = true;
         target.channel = material_target.channel;
-        if (mask_stroke && material_target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
-          /* A mask map is the one Base Color target of a Mask-mode stroke. Its generated fill
-           * records the mask's empty state; an opaque one (Black/White Mask) is what erase must
-           * restore. */
-          target.is_mask_target = true;
-          float fill[4];
-          if (BKE_paint_mask_erase_fill_get(material_target.image, fill)) {
-            target.mask_erase_fill = float4(fill);
-          }
+        /* A mask map is the one Base Color target of a Mask-mode stroke. Its generated fill
+         * records the mask's empty state; an opaque one (Black/White Mask) is what erase must
+         * restore. The gate lives in the shared BKE helper, so the delete tools flag the mask
+         * exactly like this engine does. */
+        target.is_mask_target = BKE_paint_is_mask_target(mask_stroke, material_target.channel);
+        float fill[4];
+        if (target.is_mask_target && BKE_paint_mask_erase_fill_get(material_target.image, fill)) {
+          target.mask_erase_fill = float4(fill);
         }
         target.channel_name = BKE_paint_material_channel_info(material_target.channel).ui_name;
         if (material_target.is_color_channel) {

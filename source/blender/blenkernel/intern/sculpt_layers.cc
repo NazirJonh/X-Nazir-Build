@@ -36,6 +36,7 @@
 #include "BLI_map.hh"
 #include "BLI_set.hh"
 #include "BLI_hash.h"
+#include "BLI_path_utils.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
@@ -54,6 +55,18 @@
 static CLG_LogRef LOG = {"bke.sculpt_layers"};
 
 namespace blender::bke::sculpt_layers {
+
+bool debug_perf_enabled()
+{
+  static const bool value = []() {
+    if constexpr (SCULPT_LAYERS_DEBUG_LOG != 0) {
+      return true;
+    }
+    const char *env = BLI_getenv("BLENDER_SCULPT_LAYERS_DEBUG_PERF");
+    return env != nullptr && env[0] == '1' && env[1] == '\0';
+  }();
+  return value;
+}
 
 /* The base shared by both node types. Asserted on its own rather than left to the two asserts below
  * to catch it transitively, because it is the one place a non-trivial member would break every free

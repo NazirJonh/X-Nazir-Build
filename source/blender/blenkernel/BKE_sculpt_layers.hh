@@ -73,6 +73,15 @@ namespace blender::bke::sculpt_layers {
 /** Size in bytes of a single #SculptLayer::data element (one `float3`). */
 inline constexpr int64_t element_size = sizeof(float3);
 
+/**
+ * Run-time gate for the [DEBUG-perf] stroke timing prints (the `SLP_PERF` probes: base-view
+ * build, session-state capture, stroke-record start/end, interactive flush). On when
+ * #SCULPT_LAYERS_DEBUG_LOG was compiled in, or when `BLENDER_SCULPT_LAYERS_DEBUG_PERF=1` is set
+ * in the environment, so stroke profiling does not require a rebuild. The heavier debug blocks
+ * (flush snapshots, invariant validation, mask stats) stay compile-time only.
+ */
+bool debug_perf_enabled();
+
 /* -------------------------------------------------------------------------------------------------
  * The tree. Every node hangs, directly or through folders, off #Mesh::sculpt_layer_root.
  *

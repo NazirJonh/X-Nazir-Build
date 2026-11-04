@@ -506,7 +506,11 @@ bool multiresModifier_reshapeFromCCG(const int tot_level,
  * surface depends on: edge/face/corner counts plus the corner-vertex/corner-edge connectivity.
  * Topology-only edits that leave vertex positions unchanged (edge flips, connectivity changes with
  * equal vertex counts) would otherwise keep the position-only hash and return stale tangent frames.
- * Cheap: the coarse control mesh is small relative to the subdivided grid mesh. */
+ * Cheap: the coarse control mesh is small relative to the subdivided grid mesh.
+ *
+ * Creases and subdivision settings are intentionally not hashed: they are baked into the CCG's
+ * subdiv evaluator, which the frames are evaluated through, so a change there rebuilds the CCG and
+ * the cache together. */
 static uint64_t coarse_mesh_positions_hash(const Mesh &mesh)
 {
   auto fold = [](uint64_t hash, uint64_t bits) {

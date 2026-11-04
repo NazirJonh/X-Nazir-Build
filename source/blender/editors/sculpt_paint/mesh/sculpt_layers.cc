@@ -106,15 +106,17 @@ static CLG_LogRef LOG = {"ed.sculpt_layers"};
 
 namespace blender::ed::sculpt_paint::layers {
 
-/* Master switch for the [DEBUG-perf] stroke instrumentation. Set to 0 to compile out the
- * stroke-end timing probes, the single-node micro-profile and the ns/vertex window so the hot path
- * runs at full speed; 1 keeps the diagnostics. When 0, #SLP_PERF forwards its arguments to an
- * inlined no-op, so the values that exist only to be printed do not trigger "unused variable"
- * warnings. Tied to the module-wide #SCULPT_LAYERS_DEBUG_LOG switch (see `BKE_sculpt_layers.hh`).
+/* Master switch for the [DEBUG-perf] stroke instrumentation. The probes stay compiled in and are
+ * gated at run time (see #bke::sculpt_layers::debug_perf_enabled): #SCULPT_LAYERS_DEBUG_LOG=1 (see
+ * `BKE_sculpt_layers.hh`) or the environment variable BLENDER_SCULPT_LAYERS_DEBUG_PERF=1 turns the
+ * prints on, so stroke profiling does not require a rebuild. The per-stroke cost with the prints
+ * off is the clock reads at the probe sites plus one branch per print, both negligible at stroke
+ * frequency; the heavy invariant validator keeps its own compile-time switch
+ * (#SCULPT_LAYERS_DEBUG_INVARIANT below). Timing probes must go through #slp_perf_now /
+ * #slp_perf_us, never `std::chrono` directly, so a probe site can never bury a clock read in the
+ * arguments that only exist for the print.
  */
 #define SCULPT_LAYERS_DEBUG_PERF SCULPT_LAYERS_DEBUG_LOG
-#if SCULPT_LAYERS_DEBUG_PERF
-#  define SLP_PERF(...) printf(__VA_ARGS__)
 
 using SlpPerfTimePoint = std::chrono::high_resolution_clock::time_point;
 
@@ -127,35 +129,20 @@ inline long long slp_perf_us(const SlpPerfTimePoint a, const SlpPerfTimePoint b)
 {
   return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count();
 }
-#else
-template<typename... Args> inline void slp_perf_discard(const Args &.../*args*/) {}
-#  define SLP_PERF(...) slp_perf_discard(__VA_ARGS__)
 
-/* #SLP_PERF forwards to a *function* in the disabled build, so its arguments are still evaluated:
- * writing the clock reads inline would leave every `now()` call and every elapsed-time computation
- * in the hot path with only the `printf` compiled out. Routing the probes through these two helpers
- * instead collapses them to an empty struct and a constant, which is what actually makes the
- * disabled build free. Timing probes must go through #slp_perf_now / #slp_perf_us, never
- * `std::chrono` directly. */
-struct SlpPerfTimePoint {};
-
-inline SlpPerfTimePoint slp_perf_now()
-{
-  return {};
-}
-
-inline long long slp_perf_us(const SlpPerfTimePoint /*a*/, const SlpPerfTimePoint /*b*/)
-{
-  return 0;
-}
-#endif
+#define SLP_PERF(...) \
+  do { \
+    if (bke::sculpt_layers::debug_perf_enabled()) { \
+      printf(__VA_ARGS__); \
+    } \
+  } while (false)
 
 /* The mesh-invariant validator (#debug_validate_mesh_invariant) is a correctness check, not a perf
  * probe: it rebuilds and compares the whole composed surface, an O(verts) serial pass that on a
- * multi-million vertex mesh costs tens of milliseconds *inside* the stroke-end timing region and so
- * pollutes every measurement. Keep it on its own switch, off by default, so enabling the perf logs
- * does not tax the very path being measured. Flip to 1 only when hunting a canonical-invariant
- * corruption. */
+ * multi-million vertex mesh costs tens of milliseconds *inside* the stroke-end timing region and
+ * so pollutes every measurement. Keep it on its own switch, off by default, so enabling the perf
+ * logs does not tax the very path being measured. Flip to 1 only when hunting a
+ * canonical-invariant corruption. */
 #ifndef SCULPT_LAYERS_DEBUG_INVARIANT
 #  define SCULPT_LAYERS_DEBUG_INVARIANT 0
 #endif
@@ -1487,6 +1474,8 @@ static void base_view_ensure(const Depsgraph &depsgraph, Object &object)
            slp_perf_us(t0, t1));
 
 #if SCULPT_LAYERS_DEBUG_PERF
+  /* Stays compile-time, unlike the runtime-gated probes above: it walks the whole layer tree on
+   * every base-view build, which is not negligible at stroke frequency. */
   /* One-shot census of the tree the composite is built from: how many layers in total, and the
    * largest single folder's layer count. A folder-level composite cache only pays off when some
    * folder holds several layers that stay untouched while the stroke edits elsewhere. */
@@ -2364,7 +2353,7 @@ void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
   if (!grids) {
     debug_validate_mesh_invariant(object, "stroke_begin");
   }
-  SLP_PERF("[DEBUG-perf] stroke_record_begin: grids=%d, rec_active=true, RECORDING\n", grids);
+  SLP_PERF("[DEBUG-perf] stroke_record_begin: grids=%d, rec_active=true, RECORDING\n", int(grids));
 }
 
 void stroke_record_end(const Depsgraph &depsgraph, Object &object)
@@ -7352,7 +7341,7 @@ static void influence_drag_refresh_normals(Object &object,
   pbvh.tag_normals_changed(node_mask);
   SLP_PERF("[DEBUG-perf] influence_drag_refresh_normals: eff=%.4f leaves=%lld\n",
            cur_eff,
-           int64_t(node_mask.size()));
+           static_cast<long long>(node_mask.size()));
 }
 
 static void influence_drag_propagate_sync_group(bContext *C,
@@ -7541,12 +7530,14 @@ static wmOperatorStatus layer_influence_drag_invoke(bContext *C,
   }
   op->customdata = data;
 
-  SLP_PERF("[DEBUG-perf] influence_drag_invoke: gpu_active=%d uid=%d enabled=%d has_data=%d totelem=%d\n",
-           int(data->gpu_active),
-           layer->base.uid,
-           int((layer->base.flag & SCULPT_LAYER_ENABLED) != 0),
-           int(layer->data != nullptr),
-           layer->totelem);
+  SLP_PERF(
+      "[DEBUG-perf] influence_drag_invoke: gpu_active=%d uid=%d enabled=%d has_data=%d "
+      "totelem=%lld\n",
+      int(data->gpu_active),
+      layer->base.uid,
+      int((layer->base.flag & SCULPT_LAYER_ENABLED) != 0),
+      int(layer->data != nullptr),
+      static_cast<long long>(layer->totelem));
 
   /* Capture the pre-drag layer metadata so Ctrl+Z reverts the influence change. */
   undo::push_begin(*CTX_data_scene(C), object, op);

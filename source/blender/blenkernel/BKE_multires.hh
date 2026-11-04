@@ -372,6 +372,42 @@ bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
                                                    const SculptLayer &layer,
                                                    MutableSpan<float3> r_contrib);
 
+/**
+ * One top-level grid element to evaluate base-mesh limit frames at (see
+ * #BKE_multires_sculpt_layer_grid_frames_get).
+ */
+struct MultiresSculptLayerGridElem {
+  int grid_index;
+  /** Row-major position inside the grid at \a top_level: `y * grid_size + x`. */
+  int elem;
+};
+
+/**
+ * Sculpt layers (grid domain): evaluate the *forward* tangent matrix (object displacement = matrix *
+ * tangent displacement) at the listed top-level grid elements. Read-only: unlike the reshape encoding
+ * path this never writes MDisps, paint masks or any other stored data.
+ *
+ * Only the matrix is returned, not the limit position: the composed position a side test or a target
+ * distance compares against belongs to the live CCG, which a grid-domain caller holds already, so
+ * returning the base limit position as well would invite mixing the two spaces.
+ *
+ * The frames depend only on the coarse control mesh, which does not change while sculpting, so a
+ * caller may cache the result across operations.
+ *
+ * \param base_mesh: the object's original (not evaluated) base mesh.
+ * \param top_level: the grid top level the \a elems positions are expressed at.
+ * \param elems: the elements to evaluate.
+ * \param r_tangent_matrices: receives one entry per element of \a elems, in the same order; must
+ * hold at least `elems.size()` elements.
+ * \return false when the reshape context could not be built (bad level / no base mesh data), with
+ * the output span left untouched then; an empty \a elems returns true without work.
+ */
+bool BKE_multires_sculpt_layer_grid_frames_get(Mesh &base_mesh,
+                                               SubdivCCG &subdiv_ccg,
+                                               int top_level,
+                                               const Span<MultiresSculptLayerGridElem> elems,
+                                               MutableSpan<float3x3> r_tangent_matrices);
+
 /* Subdivide multi-res displacement once. */
 
 enum class MultiresSubdivideModeType : int8_t {

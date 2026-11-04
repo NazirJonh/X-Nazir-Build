@@ -164,7 +164,7 @@ inline long long slp_perf_us(const SlpPerfTimePoint /*a*/, const SlpPerfTimePoin
  * Helpers
  */
 
-static Mesh &mesh_of(Object &object)
+Mesh &mesh_of(Object &object)
 {
   return *id_cast<Mesh *>(object.data);
 }
@@ -187,7 +187,7 @@ static int node_prev_uid(const SculptLayerTreeNode &node)
  * copy, so a future change to the blend/mute semantics stays a one-line edit. */
 using bke::sculpt_layers::effective;
 
-static SculptSession *session_of(Object &object)
+SculptSession *session_of(Object &object)
 {
   return object.runtime->sculpt_session;
 }
@@ -2731,7 +2731,7 @@ static bool layers_curve_patch_poll(bContext *C, Object &ob)
   return true;
 }
 
-static bool layers_poll(bContext *C)
+bool layers_poll(bContext *C)
 {
   Object *ob = CTX_data_active_object(C);
   return ob && (ob->mode & OB_MODE_SCULPT) && layers_curve_patch_poll(C, *ob);
@@ -2774,7 +2774,7 @@ static bool layers_object_mode_poll(bContext *C)
 /* UI-only refresh for operations that do not change the combined surface (add / move / select).
  * Operations that do change positions call #commit_layers_change instead, which picks the right
  * update path per PBVH type without an unconditional geometry re-evaluation. */
-static void layers_ui_notify(bContext *C, Object &object)
+void layers_ui_notify(bContext *C, Object &object)
 {
   Mesh &mesh = mesh_of(object);
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &object);
@@ -2824,14 +2824,9 @@ static void group_cascade_resync_with_undo(Object &object, Mesh &mesh)
   }
 }
 
-struct OpContext {
-  Object *object;
-  Depsgraph *depsgraph;
-  Mesh *mesh;
-  bool grids;
-};
+/* #OpContext is declared in `sculpt_intern.hh`. */
 
-static bool op_context_get(bContext *C, wmOperator *op, OpContext &r_ctx)
+bool op_context_get(bContext *C, wmOperator *op, OpContext &r_ctx)
 {
   Object &object = *CTX_data_active_object(C);
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
@@ -6161,6 +6156,95 @@ void SCULPT_OT_layer_clear(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER;
 }
 
+/**
+ * The gather half of #layer_invert_exec's fan-out, split out so an operator that edits a layer's data
+ * can resolve the same set without restating the gates. Behavior is unchanged from the loop this
+ * replaces: the active object is included unconditionally (the caller has already gated it through
+ * #op_context_get), and every other sync-group member is brought up to date and gated exactly as
+ * #op_context_get gates the active object, plus the two find-shaped gates #layer_add_exec has no analog
+ * for — the member must actually hold a layer synced to \a layer, and that layer must itself have data
+ * (a per-member skip rather than an operator abort). \a label prefixes every skip report, so each
+ * operator stays identifiable in the message.
+ */
+Vector<Object *> layer_data_fanout_targets(Depsgraph &depsgraph,
+                                           Main &bmain,
+                                           Object &active_ob,
+                                           SculptLayer &layer,
+                                           const char *label,
+                                           wmOperator *op)
+{
+  Vector<Object *> eligible;
+  eligible.append(&active_ob);
+  for (Object *member : fanout_targets(bmain, active_ob)) {
+    if (member == &active_ob) {
+      continue;
+    }
+    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
+     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
+     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
+     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
+    if (member->runtime->sculpt_session != nullptr) {
+      BKE_sculpt_update_object_for_edit(&depsgraph, member, false);
+    }
+    if (!is_supported(*member)) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "%s: skipping \"%s\" (sculpt layers are not available for this "
+                  "object)",
+                  label,
+                  member->id.name + 2);
+      continue;
+    }
+    /* #node_find_by_sync_uid resolves the SAME layer wherever it sits in the member's own tree;
+     * the member's own active layer is unrelated. A zero #sync_uid (the active layer was never
+     * fanned-out-created) makes every member miss here by design -- see the function's own doc
+     * comment -- which degrades the caller to the single-object behavior it always had. */
+    Mesh &member_mesh = mesh_of(*member);
+    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
+        member_mesh, layer.base.sync_uid);
+    if (!member_node) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "%s: skipping \"%s\" (no layer synced to the active one)",
+                  label,
+                  member->id.name + 2);
+      continue;
+    }
+    /* Defensive: #sync_uid should only ever link a layer to a layer, but the tree is
+     * user-editable, so the kind found is not assumed. */
+    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
+    if (!member_layer) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "%s: skipping \"%s\" (the synced node is a group, not a "
+                  "layer)",
+                  label,
+                  member->id.name + 2);
+      continue;
+    }
+    /* Mirrors the active-object early return: a layer with no allocated data has nothing to
+     * edit. */
+    if (!member_layer->data) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "%s: skipping \"%s\" (the synced layer has no data)",
+                  label,
+                  member->id.name + 2);
+      continue;
+    }
+    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
+      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
+       * while the live CCG still matches the stored layers. */
+      flush_pending_multires_base(*member);
+    }
+    if (mask_edit_refuse_active_session(op, *member)) {
+      continue;
+    }
+    eligible.append(member);
+  }
+  return eligible;
+}
+
 static wmOperatorStatus layer_invert_exec(bContext *C, wmOperator *op)
 {
   OpContext ctx;
@@ -6176,77 +6260,10 @@ static wmOperatorStatus layer_invert_exec(bContext *C, wmOperator *op)
   }
   Main *bmain = CTX_data_main(C);
 
-  /* Gather-then-gate: see #layer_add_exec's own comment for why the fan-out set has to be built
-   * before any undo bracket opens. The active object is included unconditionally; every other
-   * sync-group member is brought up to date and gated exactly as #op_context_get gates the active
-   * object, plus two find-shaped gates #layer_add_exec has no analog for: the member must actually
-   * hold a layer synced to the active one, and that layer must itself have data (mirrors the
-   * active-object early-return above, but as a per-member skip rather than an operator abort). */
-  Vector<Object *> eligible;
-  eligible.append(ctx.object);
-  for (Object *member : fanout_targets(*bmain, *ctx.object)) {
-    if (member == ctx.object) {
-      continue;
-    }
-    /* Mirrors #layer_add_exec's gather loop: guarded on an existing session, since a member that
-     * was never taken into sculpt mode has none, and #BKE_sculpt_update_object_for_edit
-     * unconditionally dereferences it. Refreshed before #is_supported below so a member that IS in
-     * sculpt mode but has not built its PBVH yet is not misreported as unsupported. */
-    if (member->runtime->sculpt_session != nullptr) {
-      BKE_sculpt_update_object_for_edit(ctx.depsgraph, member, false);
-    }
-    if (!is_supported(*member)) {
-      BKE_reportf(op->reports,
-                  RPT_WARNING,
-                  "Invert Sculpt Layer: skipping \"%s\" (sculpt layers are not available for this "
-                  "object)",
-                  member->id.name + 2);
-      continue;
-    }
-    /* #node_find_by_sync_uid resolves the SAME layer wherever it sits in the member's own tree;
-     * the member's own active layer is unrelated. A zero #sync_uid (the active layer was never
-     * fanned-out-created) makes every member miss here by design -- see the function's own doc
-     * comment -- which degrades this operator to the single-object behavior it always had. */
-    Mesh &member_mesh = mesh_of(*member);
-    SculptLayerTreeNode *member_node = bke::sculpt_layers::node_find_by_sync_uid(
-        member_mesh, layer->base.sync_uid);
-    if (!member_node) {
-      BKE_reportf(op->reports,
-                  RPT_WARNING,
-                  "Invert Sculpt Layer: skipping \"%s\" (no layer synced to the active one)",
-                  member->id.name + 2);
-      continue;
-    }
-    /* Defensive: #sync_uid should only ever link a layer to a layer, but the tree is
-     * user-editable, so the kind found is not assumed. */
-    SculptLayer *member_layer = bke::sculpt_layers::node_as_layer(member_node);
-    if (!member_layer) {
-      BKE_reportf(op->reports,
-                  RPT_WARNING,
-                  "Invert Sculpt Layer: skipping \"%s\" (the synced node is a group, not a "
-                  "layer)",
-                  member->id.name + 2);
-      continue;
-    }
-    /* Mirrors the active-object early return: a layer with no allocated data has nothing to
-     * invert. */
-    if (!member_layer->data) {
-      BKE_reportf(op->reports,
-                  RPT_WARNING,
-                  "Invert Sculpt Layer: skipping \"%s\" (the synced layer has no data)",
-                  member->id.name + 2);
-      continue;
-    }
-    if (bke::object::pbvh_get(*member)->type() == bke::pbvh::Type::Grids) {
-      /* Mirrors #op_context_get / #layer_add_exec: consume any pending base sculpt edits first,
-       * while the live CCG still matches the stored layers. */
-      flush_pending_multires_base(*member);
-    }
-    if (mask_edit_refuse_active_session(op, *member)) {
-      continue;
-    }
-    eligible.append(member);
-  }
+  /* Gather-then-gate, before any undo bracket opens: see #layer_data_fanout_targets for the gates a
+   * member has to pass and why the set is built up front. */
+  Vector<Object *> eligible = layer_data_fanout_targets(
+      *ctx.depsgraph, *bmain, *ctx.object, *layer, "Invert Sculpt Layer", op);
 
   session_state_ensure(*ctx.object);
   undo::push_begin_multi_object(*CTX_data_scene(C), op, eligible.as_span());

@@ -217,6 +217,8 @@ set(SRC
   mesh/sculpt_gesture.cc
   mesh/sculpt_hide.cc
   mesh/sculpt_layer_mask_edit.cc
+  mesh/sculpt_layer_mirror.cc
+  mesh/sculpt_layer_mirror_map.cc
   mesh/sculpt_layers.cc
   mesh/sculpt_mask_extract.cc
   mesh/sculpt_mask_init.cc
@@ -327,6 +329,8 @@ set(SRC
   mesh/sculpt_hide.hh
   mesh/sculpt_intern.hh
   mesh/sculpt_islands.hh
+  mesh/sculpt_layer_mirror.hh
+  mesh/sculpt_layer_mirror_map.hh
   mesh/sculpt_multi_object.hh
   mesh/sculpt_paint_material.hh
   mesh/sculpt_paint_shape.hh

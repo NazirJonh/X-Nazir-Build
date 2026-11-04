@@ -75,15 +75,7 @@ namespace blender::ed::sculpt_paint::layers {
  * domains must take the block size as a parameter rather than reach for this one. */
 static constexpr int vert_block_size = SCULPT_LAYER_MASK_VERT_BLOCK;
 
-static SculptSession *session_of(Object &object)
-{
-  return object.runtime->sculpt_session;
-}
-
-static Mesh &mesh_of(Object &object)
-{
-  return *id_cast<Mesh *>(object.data);
-}
+/* #mesh_of and #session_of are declared in `sculpt_intern.hh`, shared with the layer operators. */
 
 /**
  * Flip between the two conventions a session straddles, in place.

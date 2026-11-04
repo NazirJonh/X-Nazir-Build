@@ -2016,6 +2016,11 @@ short domain_for(const Object &object);
  */
 int64_t element_count(const Object &object);
 
+/** The object's mesh data. Layer operators run on the original object, whose data is a #Mesh. */
+Mesh &mesh_of(Object &object);
+/** The object's live sculpt session, or null while it is not in sculpt mode. */
+SculptSession *session_of(Object &object);
+
 /** Initialize per-session layer state. Call when entering sculpt mode. */
 void session_state_ensure(Object &object);
 
@@ -2549,6 +2554,60 @@ enum class MoveLocation : int {
   Into = 2,
 };
 
+/* -------------------------------------------------------------------- */
+/** \name Shared layer-operator plumbing
+ *
+ * The gates and the UI refresh every sculpt layer operator uses. Split out of `sculpt_layers.cc`
+ * so the mirror operator (`sculpt_layer_mirror.cc`) runs exactly the same checks rather than a
+ * paraphrase of them.
+ * \{ */
+
+/** Poll of the sculpt-mode-only layer operators. The two operators the mesh properties panel also
+ * offers in object mode carry a poll of their own, and everything else needs the session and the
+ * PBVH only sculpt mode has. */
+bool layers_poll(bContext *C);
+
+/**
+ * UI-only refresh for operations that do not change the combined surface (add / move / select).
+ * Operations that do change positions call #commit_layers_change instead.
+ */
+void layers_ui_notify(bContext *C, Object &object);
+
+/** What the layer operators act on: the active sculpt object, its depsgraph, mesh data and domain. */
+struct OpContext {
+  Object *object;
+  Depsgraph *depsgraph;
+  Mesh *mesh;
+  bool grids;
+};
+
+/**
+ * Resolve #OpContext for the active object and gate it as every layer operator gates it: bring the
+ * sculpt session up to date, refuse an object layers are not available for, and consume any pending
+ * base sculpt edits on the multires path before the operator can change the layer set. Reports and
+ * returns false when the object is not usable.
+ */
+bool op_context_get(bContext *C, wmOperator *op, OpContext &r_ctx);
+
+/**
+ * \a active_ob followed by every sync-group member that can take a layer-data edit of \a layer: a
+ * member must be supported, hold a layer stamped with \a layer's #SculptLayerTreeNode::sync_uid, and
+ * have that layer be a layer with allocated data. Members are brought up to date and gated as
+ * #op_context_get gates the active object, and each skip reports with \a label as the prefix. A
+ * single-entry result (just \a active_ob) is what an ungrouped layer gives every operator.
+ *
+ * Callers must build the set *before* opening an undo bracket: #push_begin_multi_object and
+ * #finish_multi_object both dereference every listed object's #SculptSession.
+ */
+Vector<Object *> layer_data_fanout_targets(Depsgraph &depsgraph,
+                                           Main &bmain,
+                                           Object &active_ob,
+                                           SculptLayer &layer,
+                                           const char *label,
+                                           wmOperator *op);
+
+/** \} */
+
 /* Operators. */
 void SCULPT_OT_layer_add(wmOperatorType *ot);
 void SCULPT_OT_layer_remove(wmOperatorType *ot);
@@ -2562,6 +2621,7 @@ void SCULPT_OT_layer_bake_to_shape_key(wmOperatorType *ot);
 void SCULPT_OT_layer_bake_and_editmode_enter(wmOperatorType *ot);
 void SCULPT_OT_layer_clear(wmOperatorType *ot);
 void SCULPT_OT_layer_invert(wmOperatorType *ot);
+void SCULPT_OT_layer_mirror_copy(wmOperatorType *ot);
 void SCULPT_OT_layer_validate(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_isolate(wmOperatorType *ot);
 void SCULPT_OT_layer_mask_add(wmOperatorType *ot);

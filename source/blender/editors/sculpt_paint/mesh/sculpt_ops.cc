@@ -72,6 +72,7 @@
 #include "sculpt_flood_fill.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_islands.hh"
+#include "sculpt_layer_mirror.hh"
 #include "sculpt_undo.hh"
 
 #include "RNA_access.hh"
@@ -2304,6 +2305,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(layers::SCULPT_OT_layer_bake_and_editmode_enter);
   WM_operatortype_append(layers::SCULPT_OT_layer_clear);
   WM_operatortype_append(layers::SCULPT_OT_layer_invert);
+  WM_operatortype_append(layers::SCULPT_OT_layer_mirror_copy);
   WM_operatortype_append(layers::SCULPT_OT_layer_validate);
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_isolate);
   WM_operatortype_append(layers::SCULPT_OT_layer_mask_add);
@@ -2367,6 +2369,9 @@ void operatormacros_sculpt()
 void keymap_sculpt(wmKeyConfig *keyconf)
 {
   filter::modal_keymap(keyconf);
+  /* The mirror preview's own modal map, so its keys can be rebound like the mesh filter's and the
+   * expand's. */
+  layers::mirror_copy_modal_keymap(keyconf);
 }
 
 }  // namespace blender::ed::sculpt_paint

@@ -11179,14 +11179,20 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     }
   }
 
-  if (brush_type_is_mask(brush.sculpt_brush_type)) {
+  /* Alt-Mask swaps in the Mask brush only later, in #create_toggle_settings, so at this point
+   * `brush` is still the one the stroke started from: the toggle has to be tested explicitly or a
+   * multires object without a mask layer is painted with an empty #SubdivCCG::masks. */
+  const bool alt_mask_toggle = BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")) ==
+                               BrushSwitchMode::Mask;
+  if (brush_type_is_mask(brush.sculpt_brush_type) || alt_mask_toggle) {
     /* Ensure the grid paint mask layer on EVERY object in the mode, not just the active one --
      * see #ensure_mask_layers (same pattern as #brush_stroke_init's
      * #color::ensure_shared_color_attributes call, above). */
     ViewContext vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
     ensure_mask_layers(
         CTX_data_depsgraph_pointer(C), CTX_data_main(C), &scene, sculpt_mode_objects(vc));
-
+  }
+  if (brush_type_is_mask(brush.sculpt_brush_type)) {
     mask_overlay_check(*C, *op);
   }
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) {

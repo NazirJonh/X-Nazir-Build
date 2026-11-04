@@ -7147,6 +7147,30 @@ def km_sculpt_mesh_filter_modal_map(_params):
     return keymap
 
 
+def km_sculpt_layer_mirror_modal_map(_params):
+    items = []
+    keymap = (
+        "Sculpt Layer Mirror Modal Map",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW', "modal": True},
+        {"items": items},
+    )
+
+    # Keyboard only. The click that picks the source side and the right-click that cancels are
+    # deliberately not bound: the operator has to test them against the 3D viewport rect first, so
+    # that a click landing on a panel cannot confirm or re-aim the mirror.
+    items.extend([
+        ("CONFIRM", {"type": 'RET', "value": 'PRESS', "any": True}, None),
+        ("CONFIRM", {"type": 'NUMPAD_ENTER', "value": 'PRESS', "any": True}, None),
+
+        ("CANCEL", {"type": 'ESC', "value": 'PRESS', "any": True}, None),
+
+        ("TOGGLE_MODE", {"type": 'M', "value": 'PRESS', "any": True}, None),
+        ("TOGGLE_LIMIT", {"type": 'F', "value": 'PRESS', "any": True}, None),
+        ("TOGGLE_MASK", {"type": 'K', "value": 'PRESS', "any": True}, None),
+    ])
+    return keymap
+
+
 def km_curve_patch_edit_modal_map(_params):
     items = []
     keymap = (
@@ -10058,6 +10082,7 @@ def generate_keymaps(params=None):
         km_paint_stroke_modal(params),
         km_sculpt_expand_modal(params),
         km_sculpt_mesh_filter_modal_map(params),
+        km_sculpt_layer_mirror_modal_map(params),
         km_curve_patch_edit_modal_map(params),
         km_curve_pen_modal_map(params),
         km_pen_tool_modal_map(params),

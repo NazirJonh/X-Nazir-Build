@@ -314,6 +314,7 @@ class MESH_MT_sculpt_layer_context_menu(Menu):
         layout.separator()
         layout.operator("sculpt.layer_clear")
         layout.operator("sculpt.layer_invert")
+        layout.operator("sculpt.layer_mirror_copy", icon='MOD_MIRROR')
         layout.separator()
         active = mesh.sculpt_layers_active
         col = layout.column()

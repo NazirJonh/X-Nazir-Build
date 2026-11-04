@@ -1251,6 +1251,61 @@ bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
   return true;
 }
 
+bool BKE_multires_sculpt_layer_grid_frames_get(Mesh &base_mesh,
+                                               SubdivCCG &subdiv_ccg,
+                                               const int top_level,
+                                               const Span<MultiresSculptLayerGridElem> elems,
+                                               const MutableSpan<float3x3> r_tangent_matrices)
+{
+  /* Argument checks before the reshape context is built, so no early exit needs cleanup. */
+  if (top_level <= 0) {
+    return false;
+  }
+  BLI_assert(r_tangent_matrices.size() >= elems.size());
+  if (r_tangent_matrices.size() < elems.size()) {
+    return false;
+  }
+  if (elems.is_empty()) {
+    /* Nothing to evaluate: succeed without building a context, so an empty input is not reported
+     * the same way a context that could not be built is. */
+    return true;
+  }
+
+  MultiresReshapeContext reshape_context;
+  if (!multires_reshape_context_create_from_ccg(
+          &reshape_context, &subdiv_ccg, &base_mesh, top_level))
+  {
+    return false;
+  }
+
+  const int grid_size = reshape_context.top.grid_size;
+  const float grid_size_1_inv = 1.0f / (float(grid_size) - 1.0f);
+
+  /* Pure limit-surface evaluation: no MDisps, paint mask or frame-cache write anywhere (unlike
+   * #multires_reshape_object_grids_to_tangent_displacement_for_grids, which re-encodes stored
+   * displacement). Callers cache the result themselves — the frames depend only on the coarse
+   * control mesh, which is fixed for the lifetime of an operation. */
+  threading::parallel_for(elems.index_range(), 512, [&](const IndexRange range) {
+    for (const int64_t i : range) {
+      const int grid_index = elems[i].grid_index;
+      const int x = elems[i].elem % grid_size;
+      const int y = elems[i].elem / grid_size;
+      GridCoord grid_coord;
+      grid_coord.grid_index = grid_index;
+      grid_coord.u = float(x) * grid_size_1_inv;
+      grid_coord.v = float(y) * grid_size_1_inv;
+      float3 P;
+      float3x3 tangent_matrix;
+      multires_reshape_evaluate_base_mesh_limit_at_grid(
+          &reshape_context, &grid_coord, P, tangent_matrix);
+      r_tangent_matrices[i] = tangent_matrix;
+    }
+  });
+
+  multires_reshape_context_free(&reshape_context);
+  return true;
+}
+
 /** \} */
 
 }  // namespace blender

@@ -1663,13 +1663,22 @@ struct Material {
    */
   int16_t paint_layers_view_pass = 0;
   /**
+   * Index into #BKE_paint_layers_view_passes of the pass the last Sculpt Mode exit parked, same
+   * encoding as #paint_layers_view_pass; zero is Combined, and means nothing is parked. Written by
+   * the mode exit under the Restore Combined on Exit option (which moves the material to Combined
+   * for the time outside the mode), and read back -- if the channel can still be shown -- and
+   * cleared when the object re-enters Sculpt Mode, so the material resumes the view it had.
+   */
+  int16_t paint_layers_view_pass_prev = 0;
+  /**
    * #eMaterialPaintLayersGradientBake: when an AUTO row's Gradient is baked. Zero is Always, so a
    * file saved before the setting keeps the behavior it was saved with and no versioning reads it.
    */
   int8_t paint_layers_gradient_bake = 0;
-  /* The ints and chars above end off the 8-byte boundary the pointer below needs; this pad is the
-   * gap, spelled out so no byte of the struct is left for the compiler to fill silently. */
-  char _pad_paint_layers[7] = {};
+  /* The three int16, the four chars and the bake flag above leave the pointer below off its
+   * 8-byte boundary; this pad is the gap they need, spelled out so no byte of the struct is left
+   * for the compiler to fill silently. */
+  char _pad_paint_layers[5] = {};
   /**
    * Stand-in image for the Image Editor's composite when the stack holds no map at all: the
    * composite is found through an #Image, so a material made of Gradient/Fill/Material rows alone

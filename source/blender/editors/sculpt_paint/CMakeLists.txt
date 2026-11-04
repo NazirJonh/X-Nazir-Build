@@ -88,6 +88,7 @@ set(SRC
   paint_stroke.cc
   paint_stroke_roll.cc
   paint_utils.cc
+  paint_view_pass.cc
   palette.cc
   sculpt_uv.cc
 

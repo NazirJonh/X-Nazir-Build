@@ -1534,21 +1534,11 @@ static const EnumPropertyItem *rna_Material_paint_layers_view_pass_itemf(bContex
       RNA_enum_item_add(&item, &totitem, &pass_item);
     }
 
-    /* Last, after a separator: the checkbox that keeps the pass equal with the Image Editor. An
-     * action item, so Ctrl-Wheel steps over it. */
-    EnumPropertyItem separator{};
-    separator.identifier = "";
-    RNA_enum_item_add(&item, &totitem, &separator);
-
+    /* Last, after a separator: the checkbox that keeps the pass equal with the Image Editor, then
+     * the checkbox that returns the pass to Combined when the object leaves Sculpt Mode. Action
+     * items, so Ctrl-Wheel steps over them. */
     Main *bmain = (C != nullptr) ? CTX_data_main(C) : G_MAIN;
-    EnumPropertyItem sync{};
-    sync.value = RNA_ENUM_VALUE_ACTION;
-    sync.identifier = "SYNC_VIEW_PASS";
-    sync.name = "Sync Views";
-    sync.description = "Show the same paint pass in the 3D Viewport and in the Image Editor";
-    sync.icon = (bmain != nullptr && ED_paint_view_pass_sync_get(*bmain)) ? ICON_CHECKBOX_HLT :
-                                                                            ICON_CHECKBOX_DEHLT;
-    RNA_enum_item_add(&item, &totitem, &sync);
+    ED_paint_view_pass_action_items_add(&item, &totitem, bmain, false);
   }
 
   RNA_enum_item_end(&item, &totitem);
@@ -1564,8 +1554,8 @@ static int rna_Material_paint_layers_view_pass_get(PointerRNA *ptr)
 
 static void rna_Material_paint_layers_view_pass_set(PointerRNA *ptr, int value)
 {
-  if (value == RNA_ENUM_VALUE_ACTION) {
-    ED_paint_view_pass_sync_toggle(*G_MAIN);
+  /* The checkboxes the menu ends with: an action, never a pass to store. */
+  if (ED_paint_view_pass_action_apply(*G_MAIN, value)) {
     return;
   }
   Material *ma = id_cast<Material *>(ptr->owner_id);

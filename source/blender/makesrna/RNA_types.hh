@@ -682,12 +682,47 @@ struct EnumPropertyItem {
 };
 
 /**
- * Value of an enum item that is an action of the menu, such as a checkbox drawn after the real
- * choices, rather than a choice itself. Stepping through the items (Ctrl-Wheel) steps over it, so a
- * wheel turn can never trigger the action. The property's setter receives the value when the item
- * is clicked and is expected to perform the action instead of storing it.
+ * Values of enum items that are actions of a menu -- such as a checkbox drawn after the real
+ * choices -- rather than choices themselves. Stepping through the items (Ctrl-Wheel) steps over
+ * them, so a wheel turn can never trigger an action. The property's setter receives the value when
+ * the item is clicked and is expected to perform the action instead of storing it.
+ *
+ * Actions count up from #RNA_ENUM_VALUE_ACTION_BASE: the `n`th action of a menu is
+ * #RNA_enum_value_action(n). The window below is reserved for them, so adding an action needs no
+ * new constant here and no new branch in the steppers -- the helpers answer for the whole window.
+ * The window sits at the very bottom of the int range; a menu that picks sentinel values of its
+ * own (the canvas menu's missing-channel range, just above -1000) keeps them higher, so an enum
+ * that carries both checks the action first and never confuses the two.
  */
-#define RNA_ENUM_VALUE_ACTION (-2147483647 - 1)
+#define RNA_ENUM_VALUE_ACTION_BASE (-2147483647 - 1)
+
+/** How many actions the window above holds; read through #RNA_enum_value_is_action. */
+constexpr int RNA_ENUM_VALUE_ACTION_NUM = 16;
+
+/** The value of the `n`th action of a menu (0-based). */
+inline int RNA_enum_value_action(const int index)
+{
+  return RNA_ENUM_VALUE_ACTION_BASE + index;
+}
+
+/** Whether an enum item's value is an action of the menu (#RNA_enum_value_action) rather than a
+ * choice, so stepping through the items steps over it. */
+inline bool RNA_enum_value_is_action(const int value)
+{
+  return value <= RNA_ENUM_VALUE_ACTION_BASE + (RNA_ENUM_VALUE_ACTION_NUM - 1);
+}
+
+/** The 0-based position of an action value in the window. Callers pass a value that
+ * #RNA_enum_value_is_action accepted: those are negative, so subtracting the base -- the bottom of
+ * the int range -- cannot overflow. */
+inline int RNA_enum_value_action_index(const int value)
+{
+  return value - RNA_ENUM_VALUE_ACTION_BASE;
+}
+
+/** The first action of a menu: the name the menus were written against, kept so they read the
+ * same. New actions take #RNA_enum_value_action with their index instead. */
+#define RNA_ENUM_VALUE_ACTION RNA_enum_value_action(0)
 
 /**
  * Heading for RNA enum items (shown in the UI).

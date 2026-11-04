@@ -604,6 +604,11 @@ void object_sculpt_mode_enter(Main &bmain,
 
   /* Flush object mode. */
   DEG_id_tag_update(&ob.id, ID_RECALC_SYNC_TO_EVAL);
+
+  /* Bring back the pass the last exit parked, so re-entering the mode resumes the view the
+   * painting had (the View Pass menu's Restore Combined on Exit). The scene is passed, not taken
+   * from the active window: the entry can run for another window's or a background scene. */
+  ED_paint_object_view_pass_recall(bmain, &scene, ob);
 }
 
 void object_sculpt_mode_enter(bContext *C, Depsgraph &depsgraph, ReportList *reports)
@@ -729,6 +734,15 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
 
   /* Flush object mode. */
   DEG_id_tag_update(&ob.id, ID_RECALC_SYNC_TO_EVAL);
+
+  /* Unless the user pinned it (the View Pass menu's Restore Combined on Exit), the pass a stroke
+   * previewed is parked and remembered (brought back by the matching mode entry), and the
+   * material returns to its Combined shading here: the pass scopes painting, and leaving the mode
+   * while the material still shows one channel would carry the preview into renders. Depends on
+   * no session state, so it can sit after the teardown above. The scene is passed, not taken
+   * from the active window: the exit can run from `ed_object_mode_generic_exit_ex` for a
+   * background or other-window scene. */
+  ED_paint_object_view_pass_restore(bmain, &scene, ob);
 }
 
 void object_sculpt_mode_exit(bContext *C, Depsgraph &depsgraph)
@@ -886,6 +900,7 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
     {
       Vector<PointerRNA> selected_objects;
       CTX_data_selected_objects(C, &selected_objects);
+      Vector<Object *> entered_secondaries;
       for (const PointerRNA &ptr : selected_objects) {
         Object *ob = reinterpret_cast<Object *>(ptr.owner_id);
         if (ob == active_ob) {
@@ -902,7 +917,14 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
           continue;
         }
         object_sculpt_mode_enter(bmain, *depsgraph, scene, *ob, false, op->reports);
+        entered_secondaries.append(ob);
       }
+      /* Each secondary's enter recalled the pass parked on its own material, which can leave the
+       * selection on different passes once the materials differ; in the mode the pass is one
+       * common view of all entered objects. Submit the secondaries to the active's view, under
+       * the Restore Combined on Exit option (the callee checks it), before the initial undo push
+       * below so the aligned passes land in it. */
+      ED_paint_object_view_pass_align(bmain, &scene, *active_ob, entered_secondaries);
     }
     ED_paintcurve_refresh_on_sculpt_mode_enter(C);
 
@@ -997,6 +1019,10 @@ static wmOperatorStatus sculpt_selection_enter_sculpt_mode_exec(bContext *C, wmO
     object_sculpt_mode_enter(bmain, *depsgraph, scene, *ob, false, op->reports);
     newly_entered.append(ob);
   }
+
+  /* The objects joining a Sculpt Mode the active is already in take the active's view pass, the
+   * same as at a multi-object entry; before the undo push below so it lands in that step. */
+  ED_paint_object_view_pass_align(bmain, &scene, *active_ob, newly_entered);
 
   if (!newly_entered.is_empty()) {
     wmWindowManager *wm = CTX_wm_manager(C);

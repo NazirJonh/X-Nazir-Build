@@ -2331,6 +2331,12 @@ struct PaintModeSettings {
    */
   char view_pass_sync_off = 0;
   /**
+   * Nonzero when leaving Sculpt Mode keeps the pass a layered material previews, instead of
+   * returning it to Combined so the object is shaded as the material again. Stored negated, so
+   * zero (files saved before the option existed, and a new scene) means "restored".
+   */
+  char view_pass_restore_off = 0;
+  /**
    * Whether the Gradient Layer gizmo's dragged handles move freely instead of snapping to the
    * surface under the cursor, to aim the gradient's direction. Stored negated, so one (a new scene)
    * means "free": snapping is off by default. Files saved before the option existed read zero and
@@ -2347,7 +2353,7 @@ struct PaintModeSettings {
    * scalar channel its value ramp (reading as grey). A viewport aid; no graph rebuild.
    */
   int8_t gradient_gizmo_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
-  char _pad[3] = {};
+  char _pad[2] = {};
 
   /**
    * The value ramps of the gradient tools' scalar material channels, indexed by

@@ -3704,6 +3704,17 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "in the Image Editor");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
+  prop = RNA_def_property(srna, "use_view_pass_restore", PROP_BOOLEAN, PROP_NONE);
+  /* Stored negated, so scenes and files from before the option read as restored. */
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "view_pass_restore_off", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Restore Combined on Exit",
+      "Return the view pass of a layered material to Combined when its object leaves Sculpt Mode, "
+      "so the object is shaded as the material again while outside the mode; the pass comes back "
+      "when the object re-enters Sculpt Mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   static const EnumPropertyItem gradient_tool_mode_items[] = {
       {PAINT_GRADIENT_TOOL_MOVE,
        "MOVE",

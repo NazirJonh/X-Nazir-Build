@@ -2701,25 +2701,6 @@ static bool space_image_layered_maps_get(Material &ma,
 }
 
 /**
- * The last entry of the canvas menu: a checkbox that keeps the pass equal between this editor and
- * the 3D Viewport. It is an action item (#RNA_ENUM_VALUE_ACTION), so Ctrl-Wheel steps over it.
- */
-static void space_image_canvas_sync_item_add(EnumPropertyItem **r_item, int *r_totitem, Main &bmain)
-{
-  EnumPropertyItem separator{};
-  separator.identifier = "";
-  RNA_enum_item_add(r_item, r_totitem, &separator);
-
-  EnumPropertyItem sync{};
-  sync.value = RNA_ENUM_VALUE_ACTION;
-  sync.identifier = "SYNC_VIEW_PASS";
-  sync.name = "Sync Views";
-  sync.description = "Show the same paint pass in the 3D Viewport and in this editor";
-  sync.icon = ED_paint_view_pass_sync_get(bmain) ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT;
-  RNA_enum_item_add(r_item, r_totitem, &sync);
-}
-
-/**
  * Paint-slot images of the active material, deduplicated, in node order: the same set and order
  * #PAINT_OT_material_canvas_cycle steps through, so the `C` / `Shift-C` hotkey and this selector
  * never disagree about what comes next.
@@ -2870,7 +2851,8 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
     }
   }
   if (!has_active_layer) {
-    space_image_canvas_sync_item_add(&item, &totitem, *CTX_data_main(C));
+    /* The checkboxes, after a separator: action items, so Ctrl-Wheel steps over them. */
+    ED_paint_view_pass_action_items_add(&item, &totitem, CTX_data_main(C), true);
     RNA_enum_item_end(&item, &totitem);
     *r_free = true;
     return item;
@@ -2911,7 +2893,8 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
     RNA_enum_item_add(&item, &totitem, &layer_item);
   }
 
-  space_image_canvas_sync_item_add(&item, &totitem, *CTX_data_main(C));
+  /* The checkboxes, after a separator: action items, so Ctrl-Wheel steps over them. */
+  ED_paint_view_pass_action_items_add(&item, &totitem, CTX_data_main(C), true);
   RNA_enum_item_end(&item, &totitem);
   *r_free = true;
 
@@ -2932,8 +2915,9 @@ static int rna_SpaceImageEditor_material_paint_canvas_get(PointerRNA *ptr)
 static void rna_SpaceImageEditor_material_paint_canvas_set(PointerRNA *ptr, int value)
 {
   SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
-  if (value == RNA_ENUM_VALUE_ACTION) {
-    ED_paint_view_pass_sync_toggle(*G_MAIN);
+  /* The checkboxes the menu ends with: an action, never a canvas. The action window sits below the
+   * missing-channel range, so this one branch catches both before the range checks. */
+  if (ED_paint_view_pass_action_apply(*G_MAIN, value)) {
     return;
   }
   if (value <= SPACE_IMAGE_CANVAS_MISSING_BASE) {

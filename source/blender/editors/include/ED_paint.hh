@@ -32,6 +32,7 @@ struct ARegionType;
 struct Brush;
 struct bToolRef;
 struct Depsgraph;
+struct EnumPropertyItem;
 struct Image;
 struct ImageUndoStep;
 struct ImageUser;
@@ -478,8 +479,10 @@ void ED_paint_material_view_pass_apply(Main &bmain, Material &ma);
  */
 bool ED_paint_view_pass_sync_get(Main &bmain);
 
-/** Switch #ED_paint_view_pass_sync_get; turning it on aligns the Image Editors with the 3D
- * Viewport at once. */
+/**
+ * Switch #ED_paint_view_pass_sync_get; turning it on aligns the Image Editors with the 3D
+ * Viewport at once.
+ */
 void ED_paint_view_pass_sync_toggle(Main &bmain);
 
 /**
@@ -487,6 +490,92 @@ void ED_paint_view_pass_sync_toggle(Main &bmain);
  * pass of the material it displays in the 3D Viewport (and every other Image Editor).
  */
 void ED_paint_material_view_pass_from_image(Main &bmain, SpaceImage &sima);
+
+/**
+ * Whether leaving Sculpt Mode returns a layered material's view pass to Combined, so the object is
+ * shaded as the material again instead of through the pass a stroke previewed
+ * (#PaintModeSettings::view_pass_restore_off, read from the active window's scene).
+ */
+bool ED_paint_view_pass_restore_get(Main &bmain);
+
+/**
+ * Switch #ED_paint_view_pass_restore_get. Turning it on restores nothing at once: it only takes
+ * effect at the next mode exit.
+ */
+void ED_paint_view_pass_restore_toggle(Main &bmain);
+
+/**
+ * Append the view pass menu's action items: a separator, then the Sync Views checkbox, then the
+ * Restore Combined on Exit checkbox -- the tail both the material's view pass menu and the Image
+ * Editor's canvas menu show. The descriptions are phrased for \a for_image_editor: the canvas menu
+ * speaks of this editor, where the material menu has none of its own. \a bmain may be null, in
+ * which case the checkboxes draw unchecked. Every item is an action (#RNA_enum_value_action), so
+ * Ctrl-Wheel steps over it; adding a checkbox means appending it here and teaching
+ * #ED_paint_view_pass_action_apply its value.
+ */
+void ED_paint_view_pass_action_items_add(EnumPropertyItem **r_item,
+                                         int *r_totitem,
+                                         Main *bmain,
+                                         bool for_image_editor);
+
+/**
+ * Perform the menu action \a value and return true when it was one (#RNA_enum_value_is_action).
+ * The view pass setters call this first and store nothing when it answers; a false means the value
+ * is a real choice and reaches the material as usual. The actions are the checkboxes
+ * #ED_paint_view_pass_action_items_add appends, so a new one is taught here, right next to them.
+ */
+bool ED_paint_view_pass_action_apply(Main &bmain, int value);
+
+/**
+ * Sculpt Mode of \a ob is leaving: park the pass every layered material of its slots previews and
+ * return it to Combined (#ED_paint_view_pass_restore_get), rebuilding its preview nodes, and put
+ * the Image Editors that follow the 3D Viewport's pass on Combined with it. The parked pass is
+ * remembered in #Material::paint_layers_view_pass_prev, and #ED_paint_object_view_pass_recall
+ * brings it back when the object re-enters the mode, so the material resumes the view it had.
+ * With the option off nothing is parked and nothing is remembered. A material another object still
+ * in the mode previews through is left alone -- Global Sculpt Mode keeps many objects sculpting at
+ * once, and they share materials -- so the pass parks when the leaving object is the last user of
+ * it in the mode, and it parks once at that. Materials already on Combined are left alone too.
+ *
+ * \param scene: The scene the mode switch runs in, where the option lives
+ * (#PaintModeSettings::view_pass_restore_off). Null falls back to the active window's scene, the
+ * one a menu click names: the switch may run for a background window or another file, whose scene
+ * is not the active window's.
+ */
+void ED_paint_object_view_pass_restore(Main &bmain, const Scene *scene, Object &ob);
+
+/**
+ * Sculpt Mode of \a ob is being entered: bring back the pass the last exit parked
+ * (#Material::paint_layers_view_pass_prev), rebuilding the preview nodes and putting the Image
+ * Editors that follow the 3D Viewport's pass on it. A pass the material can no longer show is
+ * dropped: the material stays on Combined. The memory is consumed either way, so a later exit
+ * parks afresh; an exit under the option off forgets its own memory, and so does this entry.
+ *
+ * The pass is the material's, so the recall puts it back for every object sharing the material,
+ * ones outside the mode included: refusing while any of those exists would keep a shared material
+ * parked for good, since an object-mode user is the ordinary case.
+ *
+ * \param scene: The scene the mode switch runs in, where the option lives, as for
+ * #ED_paint_object_view_pass_restore.
+ */
+void ED_paint_object_view_pass_recall(Main &bmain, const Scene *scene, Object &ob);
+
+/**
+ * A multi-object Sculpt entry is done: submit the active (#Object::actcol) material of every
+ * object in \a others -- the ones that entered the mode beside \a active -- to the pass \a
+ * active's own active material shows, so the mode opens on one common view of the selection, the
+ * way it holds while a pass is chosen in the menu. A material the common pass cannot show goes to
+ * Combined; a material \a active previews through is skipped, a shared material being one storage
+ * for all its users; only layered, editable materials move; and whatever pass a moved material
+ * had parked for its own re-entry is spent, so the next exit parks afresh. Runs under the Restore
+ * Combined on Exit option only: with it off every material keeps the pass its own recall brought
+ * back. An empty \a others, or \a active without a layered active material, does nothing -- a
+ * single-object entry has nothing to align with.
+ *
+ * \param scene: The scene the mode switch runs in, where the option lives, as for
+ * #ED_paint_object_view_pass_restore.
+ */
+void ED_paint_object_view_pass_align(Main &bmain, const Scene *scene, Object &active, Span<Object *> others);
 
 /** Store the last used tool in the sculpt session. */
 void ED_paint_brush_type_update_sticky_shading_color(bContext *C, Object *ob);

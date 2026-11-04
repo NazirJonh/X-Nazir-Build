@@ -120,16 +120,12 @@ static bool is_sculpt_brush_shelf_context(const bContext &C, const AssetShelf &s
   return object != nullptr && (object->mode & OB_MODE_SCULPT);
 }
 
-/** Group the user last picked with the toolbar's "Sculpt" / "Paint" buttons, per workspace. Only a
- * fallback for tools that declare no group of their own, so that the shelf keeps showing what the
- * toolbar shows for them. */
+/** Group the toolbar shows in the workspace, resolved from the active tool when it was activated
+ * and kept in sync on tool-system refreshes. For a tool shown in both groups this is the only
+ * declaration that names a single group. */
 static Category stored_category(const bContext &C)
 {
-  const WorkSpace *workspace = CTX_wm_workspace(&C);
-  if (!workspace || !workspace->runtime) {
-    return Category::Any;
-  }
-  switch (workspace->runtime->sculpt_paint_tool_display) {
+  switch (BKE_workspace_sculpt_paint_tool_display_get(CTX_wm_workspace(&C))) {
     case bke::eSculptPaintToolDisplay::Paint:
       return Category::Paint;
     case bke::eSculptPaintToolDisplay::Sculpt:
@@ -143,9 +139,12 @@ Category category_from_shelf(const bContext &C, const AssetShelf &shelf)
   if (!is_sculpt_brush_shelf_context(C, shelf)) {
     return Category::Any;
   }
-  /* Priority: what the active tool declares, then the workspace's stored choice. Tools shown in
-   * both groups declare nothing that names a single one, so they follow the stored choice, which
-   * is what the toolbar shows for them. */
+  /* Priority: what the active tool declares, then the workspace's resolved group. Normally the two
+   * agree, since activating a tool writes the resolved group (see `on_tool_activated`) and a
+   * refresh re-applies it. The tool declaration still wins because the workspace value can lag
+   * before that write, e.g. right after loading a file. Tools shown in both groups declare nothing
+   * that names a single one, so they follow the workspace group, which is what the toolbar shows
+   * for them. */
   Category declared_group = Category::Any;
   int brush_type = 0;
   if (const bToolRef_Runtime *tref_rt = WM_toolsystem_runtime_from_context(&C)) {

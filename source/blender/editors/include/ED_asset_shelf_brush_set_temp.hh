@@ -19,9 +19,10 @@
  *   the tool definition (`_tools_sculpt_display` / `_tools_paint_display` and add-on
  *   `bl_display_group`), so built-in and add-on tools are classified identically everywhere.
  * - #bToolRef_Runtime::brush_type for tools and add-ons that declare only a brush type.
- * - For tools shown in both groups the active tool cannot decide, so the group the user last picked
- *   with the toolbar's "Sculpt" / "Paint" buttons is used, stored per workspace in
- *   #bke::WorkSpaceRuntime::sculpt_paint_tool_display.
+ * - #bke::WorkSpaceRuntime::sculpt_paint_tool_display, the group the toolbar resolved and shows.
+ *   For tools shown in both groups this is the only declaration that names one; for the others it
+ *   normally agrees with the tool declaration, and the declaration wins if the workspace value has
+ *   not been written yet (e.g. right after loading a file).
  *
  * Every one of these lives in the workspace (the tool list of a workspace is
  * #WorkSpace.tools), so two workspaces or windows never interfere.
@@ -99,7 +100,8 @@ Category tool_display_category(eToolDisplayGroup display_group);
 
 /** The group to filter for, from the three declarations the Tool System and the workspace keep,
  * in priority order: \a declared_group wins while it names one group, then \a brush_type, then
- * \a stored_group (the user's last explicit choice, for tools shown in both groups). */
+ * \a stored_group (the group the toolbar resolved; for tools shown in both groups it is the only
+ * declaration that names one). */
 Category resolve_category(Category declared_group, int brush_type, Category stored_group);
 
 /** True when \a library may be offered for \a required (#Category::Any = no filter; folders, being

@@ -3031,6 +3031,28 @@ def km_weight_paint(params):
     return keymap
 
 
+def _template_items_sculpt_paint_select_lasso_gesture(params):
+    """Temporary lasso for the Sculpt Mode Paint selection mask (does not switch the active tool).
+
+    Same left-select convention as `_template_items_sculpt_paint_select_lasso_gesture` in
+    `blender_default.py`: Ctrl+action_mouse adds and Shift+Ctrl subtracts, like the tool lasso.
+    The right-select Alt+Ctrl add combination does not apply here, and the temporary box is not
+    bound because `B` opens the sculpt brush asset shelf in this keymap.
+
+    These entries must stay ahead of the stencil bindings in `km_sculpt`, and
+    `image_paint_selection_view3d_lasso_key_poll` (C++) must stay their exact complement: Paint
+    display and no stencil. Keep this copy in sync with `blender_default.py`.
+    """
+    return [
+        ("paint.image_select_view3d_lasso_key",
+         {"type": params.action_mouse, "value": 'PRESS', "ctrl": True},
+         {"properties": [("mode", 'ADD')]}),
+        ("paint.image_select_view3d_lasso_key",
+         {"type": params.action_mouse, "value": 'PRESS', "shift": True, "ctrl": True},
+         {"properties": [("mode", 'SUB')]}),
+    ]
+
+
 def km_sculpt(params):
     items = []
     keymap = (
@@ -3132,6 +3154,12 @@ def km_sculpt(params):
         ("brush.scale_size", {"type": 'RIGHT_BRACKET', "value": 'PRESS', "repeat": True},
          {"properties": [("scalar", 1.0 / 0.9)]}),
         *_template_paint_radial_control("sculpt", rotation=True),
+        # Paint selection mask: temporary lasso of the Paint toolbar group, ahead of the stencil
+        # bindings on purpose (they share Ctrl-RMB). The operator polls false while the Sculpt
+        # group is shown, there is no valid paint target, or the brush has a stencil, so the
+        # stencil keeps the keys there. The temporary box is not bound here: `B` opens the sculpt
+        # brush asset shelf in this keymap.
+        *_template_items_sculpt_paint_select_lasso_gesture(params),
         # Stencil
         ("brush.stencil_control", {"type": 'RIGHTMOUSE', "value": 'PRESS'},
          {"properties": [("mode", 'TRANSLATION')]}),

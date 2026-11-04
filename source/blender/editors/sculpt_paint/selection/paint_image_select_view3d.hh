@@ -732,6 +732,11 @@ void PAINT_OT_image_select_view3d_lasso(wmOperatorType *ot);
 void PAINT_OT_image_select_view3d_polyline(wmOperatorType *ot);
 void PAINT_OT_image_select_view3d_circle(wmOperatorType *ot);
 
+/* Gesture selections, temporary keymap bindings of the Sculpt keymap (the Paint toolbar display
+ * only, falling through to the sculpt mask keys otherwise). */
+void PAINT_OT_image_select_view3d_box_key(wmOperatorType *ot);
+void PAINT_OT_image_select_view3d_lasso_key(wmOperatorType *ot);
+
 /* Floating tools. */
 void PAINT_OT_image_select_view3d_move(wmOperatorType *ot);
 void PAINT_OT_image_select_view3d_transform(wmOperatorType *ot);

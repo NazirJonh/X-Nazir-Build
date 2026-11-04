@@ -54,19 +54,13 @@ static void rna_window_update_all(Main * /*bmain*/, Scene * /*scene*/, PointerRN
 static int rna_workspace_sculpt_paint_tool_display_get(PointerRNA *ptr)
 {
   const WorkSpace *workspace = static_cast<const WorkSpace *>(ptr->data);
-  if (!workspace->runtime) {
-    return int(bke::eSculptPaintToolDisplay::Sculpt);
-  }
-  return int(workspace->runtime->sculpt_paint_tool_display);
+  return int(BKE_workspace_sculpt_paint_tool_display_get(workspace));
 }
 
 static void rna_workspace_sculpt_paint_tool_display_set(PointerRNA *ptr, int value)
 {
   WorkSpace *workspace = static_cast<WorkSpace *>(ptr->data);
-  if (!workspace->runtime) {
-    return;
-  }
-  workspace->runtime->sculpt_paint_tool_display = bke::eSculptPaintToolDisplay(value);
+  BKE_workspace_sculpt_paint_tool_display_set(workspace, bke::eSculptPaintToolDisplay(value));
 }
 
 /* TEMPORARY: tool last activated in each Sculpt/Paint display group, see
@@ -591,9 +585,10 @@ static void rna_def_workspace(BlenderRNA *brna)
   rna_def_workspace_tools(brna, prop);
 
   /* TEMPORARY: which group of Sculpt Mode tools the toolbar shows, switched by the "Sculpt" /
-   * "Paint" buttons at the top of the toolbar (see VIEW3D_PT_tools_active). The asset shelf reads
-   * it as the fallback for tools that own no brush; a tool that declares a brush type decides the
-   * group on its own. Session-only, not saved. */
+   * "Paint" buttons at the top of the toolbar (see VIEW3D_PT_tools_active). The toolbar resolves
+   * it when a tool is activated (an exclusive tool switches the group, a shared one keeps it) and
+   * refreshes it from the active tool on mode enter and tool-system refresh/undo; C++ readers (the
+   * asset shelf, the paint polls) read the same value. Session-only, not saved. */
   /* `space_toolsystem_toolbar.py` builds its operator items from this enum. */
   static const EnumPropertyItem sculpt_paint_tool_display_items[] = {
       {int(bke::eSculptPaintToolDisplay::Sculpt),

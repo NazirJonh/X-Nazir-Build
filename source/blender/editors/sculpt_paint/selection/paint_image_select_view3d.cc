@@ -18,9 +18,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 
 #include "BLF_api.hh"
 #include "BLT_translation.hh"
@@ -249,6 +251,34 @@ bool image_paint_selection_view3d_tool_poll(bContext *C)
     return session->owner_v3d == CTX_wm_view3d(C);
   }
   return image_paint_selection_view3d_poll(C);
+}
+
+/** The temporary gesture keys of the Sculpt Mode keymap (B, Ctrl-RMB) must only take over the
+ * sculpt mask keys while the toolbar shows the Paint group; failing this makes the keys fall
+ * through the keymap to the sculpt bindings. The workspace's resolved display group is the same
+ * state the toolbar and #paint_sculpt_tool_display_is_paint read. */
+static bool image_paint_selection_view3d_paint_display_poll(bContext *C)
+{
+  if (!image_paint_selection_view3d_tool_poll(C)) {
+    return false;
+  }
+  return paint_sculpt_tool_display_is_paint(C);
+}
+
+/** The lasso also yields its Ctrl-RMB back to #BRUSH_OT_stencil_control while the active brush
+ * has a stencil to control (the two share the binding in the Sculpt keymap).
+ *
+ * \note this condition must stay the complement of `stencil_control_poll`: when the brush uses a
+ * stencil this poll fails and the earlier keymap entry falls through to the stencil control, and
+ * otherwise the stencil poll fails and this one owns the key. */
+static bool image_paint_selection_view3d_lasso_key_poll(bContext *C)
+{
+  if (!image_paint_selection_view3d_paint_display_poll(C)) {
+    return false;
+  }
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  const Brush *brush = BKE_paint_brush(paint);
+  return brush != nullptr && !paint_brush_uses_stencil(*brush);
 }
 
 bool image_paint_selection_view3d_floating_poll(bContext *C)
@@ -1663,6 +1693,18 @@ struct SelectGesture3DData {
   bool move = false;
   /** Modifier keys (#KM_SHIFT / #KM_CTRL) seen since the gesture started. */
   int modifier_seen = 0;
+  /**
+   * Set when a keymap key (B, Ctrl-RMB) invoked the gesture instead of the active select tool's
+   * drag. The mouse button (#0 when the key itself started it) confirms the gesture on release,
+   * and the modifiers that are part of the binding are excluded from the #gesture_apply mode
+   * re-interpretation, which is meant for modifiers the user adds on top of the binding.
+   */
+  struct KeyInvoke {
+    short button = 0;
+    /** #wmEvent::modifier bits (#KM_SHIFT / #KM_CTRL / ...) that belong to the binding. */
+    uint8_t reserved_modifiers = 0;
+  };
+  std::optional<KeyInvoke> key_invoke;
   /* Preview draw callback (region px), registered in the invoke, removed in the finish. */
   ARegionType *owner_region_type = nullptr;
   void *draw_handle = nullptr;
@@ -1966,12 +2008,16 @@ static bool gesture_apply(bContext *C, wmOperator *op, SelectGesture3DData &data
   }
   eSelectOp sel_op = eSelectOp(RNA_enum_get(op->ptr, "mode"));
   /* The keymap only maps Shift / Ctrl held at the press; holding them later (or while moving the
-   * shape with Space) must still extend / subtract. An explicit mode of the tool is kept. */
+   * shape with Space) must still extend / subtract. An explicit mode of the tool is kept. The
+   * modifiers that are part of the keymap binding itself (the temporary lasso always holds Ctrl)
+   * don't count: they would re-interpret its replace mode into a subtract. */
   if (sel_op == SEL_OP_SET) {
-    if (data.modifier_seen & KM_SHIFT) {
+    const int reserved_modifiers = data.key_invoke ? int(data.key_invoke->reserved_modifiers) : 0;
+    const int dynamic_modifiers = data.modifier_seen & ~reserved_modifiers;
+    if (dynamic_modifiers & KM_SHIFT) {
       sel_op = SEL_OP_ADD;
     }
-    else if (data.modifier_seen & KM_CTRL) {
+    else if (dynamic_modifiers & KM_CTRL) {
       sel_op = SEL_OP_SUB;
     }
   }
@@ -2090,6 +2136,47 @@ static void gesture_finish_common(bContext *C, wmOperator *op)
   WM_cursor_modal_restore(CTX_wm_window(C));
 }
 
+/** The mouse button whose release confirms the gesture: the one it was invoked with, or the left
+ * button for the keymap keys that have no mouse button of their own. */
+static short gesture_confirm_button(const SelectGesture3DData &data)
+{
+  if (data.key_invoke && data.key_invoke->button != 0) {
+    return data.key_invoke->button;
+  }
+  return short(LEFTMOUSE);
+}
+
+static bool gesture_is_confirm_release(const SelectGesture3DData &data, const wmEvent &event)
+{
+  return event.val == KM_RELEASE && event.type == gesture_confirm_button(data);
+}
+
+/** A gesture started by a key (B, or a key with no mouse button of its own) has no held button to
+ * finish it, so a right-button press cancels. Tool-invoked gestures and bindings that use the
+ * right button themselves keep the button for their own confirmation. */
+static bool gesture_is_key_invoke_cancel(const SelectGesture3DData &data, const wmEvent &event)
+{
+  return event.val == KM_PRESS && event.type == RIGHTMOUSE && data.key_invoke &&
+         data.key_invoke->button == 0;
+}
+
+/** Confirm the gesture on the release of its button: apply the shape unless it was a click
+ * without a drag. A key-invoked click only cancels, so a stray key press cannot wipe the whole
+ * selection; the tool's plain click deselects. */
+static wmOperatorStatus gesture_confirm(bContext *C, wmOperator *op, SelectGesture3DData &data)
+{
+  Object *ob = CTX_data_active_object(C);
+  const bool simple = data.is_simple_click && !data.key_invoke.has_value();
+  /* A box only has a shape once the drag threshold was crossed; the lasso has no separate flag. */
+  const bool has_shape = (data.kind == GestureKind::Box) ? data.box_valid : !data.is_simple_click;
+  const bool applied = has_shape && ob != nullptr && gesture_apply(C, op, data);
+  gesture_finish_common(C, op);
+  if (simple && ob != nullptr) {
+    view3d_apply_deselect(C, *ob);
+  }
+  return applied || simple ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
 static wmOperatorStatus gesture_invoke_common(bContext *C,
                                               wmOperator *op,
                                               const wmEvent *event,
@@ -2150,6 +2237,28 @@ static wmOperatorStatus gesture_invoke_common(bContext *C,
   return OPERATOR_RUNNING_MODAL;
 }
 
+/** Shared init of the keymap-invoked gestures: the key press has no held selection mouse button,
+ * and the modifiers that matched the binding are not dynamic ones (see #gesture_apply). */
+static void gesture_init_key_invoked(wmOperator *op, const wmEvent &event)
+{
+  auto *data = static_cast<SelectGesture3DData *>(op->customdata);
+  data->key_invoke = SelectGesture3DData::KeyInvoke{
+      short(ELEM(event.type, LEFTMOUSE, RIGHTMOUSE) ? event.type : 0),
+      uint8_t(event.modifier)};
+}
+
+static wmOperatorStatus gesture_invoke_key_common(bContext *C,
+                                                  wmOperator *op,
+                                                  const wmEvent *event,
+                                                  const GestureKind kind)
+{
+  const wmOperatorStatus status = gesture_invoke_common(C, op, event, kind);
+  if (status == OPERATOR_RUNNING_MODAL) {
+    gesture_init_key_invoked(op, *event);
+  }
+  return status;
+}
+
 /** Shared modal tail: confirm on release / cancel, navigation pass-through. */
 static wmOperatorStatus gesture_modal_common(bContext * /*C*/,
                                              wmOperator * /*op*/,
@@ -2204,18 +2313,19 @@ static wmOperatorStatus view3d_select_box_modal(bContext *C, wmOperator *op, con
       break;
     }
     case LEFTMOUSE:
-      if (event->val == KM_RELEASE) {
-        Object *ob = CTX_data_active_object(C);
-        const bool applied = data->box_valid && ob != nullptr &&
-                             gesture_apply(C, op, *data);
-        const bool simple = data->is_simple_click;
+    case RIGHTMOUSE: {
+      /* A tool-invoked box has no #key_invoke, so #gesture_confirm_button is LMB and an RMB
+       * release falls through here untouched, as before the right button was handled. */
+      if (gesture_is_confirm_release(*data, *event)) {
+        return gesture_confirm(C, op, *data);
+      }
+      /* A key-invoked box has no mouse button held: RMB cancels it, like the WM box gestures. */
+      if (gesture_is_key_invoke_cancel(*data, *event)) {
         gesture_finish_common(C, op);
-        if (simple && ob != nullptr) {
-          view3d_apply_deselect(C, *ob);
-        }
-        return applied || simple ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+        return OPERATOR_CANCELLED;
       }
       break;
+    }
     case EVT_ESCKEY:
       if (event->val == KM_PRESS) {
         gesture_finish_common(C, op);
@@ -2236,6 +2346,33 @@ void PAINT_OT_image_select_view3d_box(wmOperatorType *ot)
   ot->invoke = view3d_select_box_invoke;
   ot->modal = view3d_select_box_modal;
   ot->poll = image_paint_selection_view3d_tool_poll;
+  ot->flag = OPTYPE_REGISTER;
+  WM_operator_properties_select_operation_simple(ot);
+}
+
+/* Temporary keymap binding (B): the same gesture as the Box tool, but the poll keeps it to the
+ * Paint toolbar display so the key falls through to the sculpt mask gesture otherwise. */
+static wmOperatorStatus view3d_select_box_key_invoke(bContext *C,
+                                                     wmOperator *op,
+                                                     const wmEvent *event)
+{
+  /* The box anchors at the cursor position of the key press and grows from the following mouse
+   * motion; the first LMB press is not consumed, so a click without motion confirms to nothing
+   * (#gesture_confirm) instead of selecting. */
+  return gesture_invoke_key_common(C, op, event, GestureKind::Box);
+}
+
+void PAINT_OT_image_select_view3d_box_key(wmOperatorType *ot)
+{
+  ot->name = "Box Select (Paint Display)";
+  ot->idname = "PAINT_OT_image_select_view3d_box_key";
+  ot->description =
+      "Select a box region of the paint canvas drawn on the surface, without switching the "
+      "active tool. Only while the Sculpt Mode toolbar shows the Paint group, so the sculpt "
+      "mask keys keep the shortcut otherwise";
+  ot->invoke = view3d_select_box_key_invoke;
+  ot->modal = view3d_select_box_modal;
+  ot->poll = image_paint_selection_view3d_paint_display_poll;
   ot->flag = OPTYPE_REGISTER;
   WM_operator_properties_select_operation_simple(ot);
 }
@@ -2279,15 +2416,13 @@ static wmOperatorStatus view3d_select_lasso_modal(bContext *C,
       break;
     }
     case LEFTMOUSE:
-      if (event->val == KM_RELEASE) {
-        Object *ob = CTX_data_active_object(C);
-        const bool simple = data->is_simple_click;
-        const bool applied = !simple && ob != nullptr && gesture_apply(C, op, *data);
+    case RIGHTMOUSE:
+      if (gesture_is_confirm_release(*data, *event)) {
+        return gesture_confirm(C, op, *data);
+      }
+      if (gesture_is_key_invoke_cancel(*data, *event)) {
         gesture_finish_common(C, op);
-        if (simple && ob != nullptr) {
-          view3d_apply_deselect(C, *ob);
-        }
-        return applied || simple ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+        return OPERATOR_CANCELLED;
       }
       break;
     case EVT_ESCKEY:
@@ -2310,6 +2445,31 @@ void PAINT_OT_image_select_view3d_lasso(wmOperatorType *ot)
   ot->invoke = view3d_select_lasso_invoke;
   ot->modal = view3d_select_lasso_modal;
   ot->poll = image_paint_selection_view3d_tool_poll;
+  ot->flag = OPTYPE_REGISTER;
+  WM_operator_properties_select_operation_simple(ot);
+}
+
+/* Temporary keymap binding (Ctrl-RMB press): the same gesture as the Lasso tool, but the poll
+ * keeps it to the Paint toolbar display (and off the brushes with a stencil), so the key falls
+ * through to the stencil control otherwise. */
+static wmOperatorStatus view3d_select_lasso_key_invoke(bContext *C,
+                                                       wmOperator *op,
+                                                       const wmEvent *event)
+{
+  return gesture_invoke_key_common(C, op, event, GestureKind::Lasso);
+}
+
+void PAINT_OT_image_select_view3d_lasso_key(wmOperatorType *ot)
+{
+  ot->name = "Lasso Select (Paint Display)";
+  ot->idname = "PAINT_OT_image_select_view3d_lasso_key";
+  ot->description =
+      "Select a lasso region of the paint canvas drawn on the surface, without switching the "
+      "active tool. Only while the Sculpt Mode toolbar shows the Paint group and the brush has "
+      "no stencil, so the stencil control keeps the shortcut otherwise";
+  ot->invoke = view3d_select_lasso_key_invoke;
+  ot->modal = view3d_select_lasso_modal;
+  ot->poll = image_paint_selection_view3d_lasso_key_poll;
   ot->flag = OPTYPE_REGISTER;
   WM_operator_properties_select_operation_simple(ot);
 }

@@ -849,6 +849,39 @@ static void toolsystem_ref_link(Main *bmain,
   }
 }
 
+/**
+ * Re-apply the Sculpt/Paint display group the active tool declares. Activating a tool goes through
+ * `on_tool_activated`, which writes the group and owns the notifier; a refresh only re-links the
+ * references, so a restored or otherwise re-initialized tool must update the workspace here too.
+ *
+ * The declaration is the `tool_display_group_from_id` result `tool.setup()` stored in
+ * #bToolRef_Runtime::display_group, so this repeats the toolbar's resolution rather than inventing
+ * another one.
+ */
+static void toolsystem_sync_sculpt_paint_tool_display(WorkSpace *workspace, const bToolRef *tref)
+{
+  if (tref->space_type != SPACE_VIEW3D || tref->mode != CTX_MODE_SCULPT ||
+      tref->runtime == nullptr)
+  {
+    return;
+  }
+  bke::eSculptPaintToolDisplay display = bke::eSculptPaintToolDisplay::Sculpt;
+  switch (tref->runtime->display_group) {
+    case TOOL_DISPLAY_GROUP_SHARED:
+      /* Both groups show the tool: only the current group can decide which one is displayed. */
+      return;
+    case TOOL_DISPLAY_GROUP_PAINT:
+      display = bke::eSculptPaintToolDisplay::Paint;
+      break;
+    case TOOL_DISPLAY_GROUP_SCULPT:
+    case TOOL_DISPLAY_GROUP_NONE:
+      /* A Sculpt Mode tool in neither display list is shown in the Sculpt group, matching
+       * `on_tool_activated` and `_tools_display_extra`. */
+      break;
+  }
+  BKE_workspace_sculpt_paint_tool_display_set(workspace, display);
+}
+
 static void toolsystem_refresh_ref(const bContext *C, WorkSpace *workspace, bToolRef *tref)
 {
   if (tref->runtime == nullptr) {
@@ -857,6 +890,7 @@ static void toolsystem_refresh_ref(const bContext *C, WorkSpace *workspace, bToo
   /* A refresh (mode re-init, startup, and the re-link of every tool after undo) is not a tool
    * change: it may restore data but must not switch the active brush or the paired editor's tool. */
   toolsystem_ref_link(CTX_data_main(C), workspace, tref, false);
+  toolsystem_sync_sculpt_paint_tool_display(workspace, tref);
 }
 void WM_toolsystem_refresh(const bContext *C, WorkSpace *workspace, const bToolKey *tkey)
 {
@@ -1225,6 +1259,11 @@ bool WM_toolsystem_refresh_screen_area(const Main &bmain,
       }
     }
   }
+  if (area->runtime.tool != nullptr) {
+    /* Screen/area (re)initialization and workspace switches resolve the shown tool here, without
+     * going through `on_tool_activated`. Re-apply its display group when it is already known. */
+    toolsystem_sync_sculpt_paint_tool_display(workspace, area->runtime.tool);
+  }
   return !(is_tool_set_prev && (tref_prev == area->runtime.tool));
 }
 
@@ -1520,7 +1559,12 @@ static void wm_toolsystem_update_from_context_view3d_impl(bContext *C, WorkSpace
   bToolKey tkey{};
   tkey.space_type = space_type;
   tkey.mode = WM_toolsystem_mode_from_spacetype(*bmain, scene, view_layer, nullptr, space_type);
-  toolsystem_reinit_ensure_toolref(C, workspace, &tkey, nullptr);
+  if (bToolRef *tref = toolsystem_reinit_ensure_toolref(C, workspace, &tkey, nullptr)) {
+    /* Mode enter re-initializes the tool (and `on_tool_activated` writes the group); re-apply the
+     * declaration here too so the workspace state is right even when the Python tool system is not
+     * available yet (startup). */
+    toolsystem_sync_sculpt_paint_tool_display(workspace, tref);
+  }
 }
 
 void WM_toolsystem_update_from_context_view3d(bContext *C)

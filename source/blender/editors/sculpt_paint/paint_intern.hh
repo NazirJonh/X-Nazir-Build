@@ -904,6 +904,19 @@ bool paint_supports_smooth_stroke(const Brush &brush,
                                   BrushSwitchMode brush_switch_mode,
                                   eBrushStrokeType method);
 bool paint_supports_texture(PaintMode mode);
+/**
+ * True when the brush maps a texture through a stencil (the primary, the material-shared or the
+ * mask texture), i.e. #BRUSH_OT_stencil_control has something to control and owns its drag keys
+ * over other bindings.
+ */
+bool paint_brush_uses_stencil(const Brush &brush);
+
+/**
+ * Whether the Sculpt Mode toolbar shows the Paint display group. Backed by
+ * #bke::WorkSpaceRuntime::sculpt_paint_tool_display, the single resolved value the toolbar writes
+ * when a tool is activated.
+ */
+bool paint_sculpt_tool_display_is_paint(const bContext *C);
 
 /**
  * Called in paint_ops.cc, on each regeneration of key-maps.

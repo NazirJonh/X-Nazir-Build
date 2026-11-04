@@ -5652,9 +5652,6 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _tools_paint_display, context=None)
         if item is not None
     )
-    _tools_sculpt_only_ids = _tools_sculpt_display_ids - _tools_paint_display_ids
-    _tools_paint_only_ids = _tools_paint_display_ids - _tools_sculpt_display_ids
-
     # Default tools per display, also the fallback when the last used tool of the group
     # is not currently available (e.g. the Density tool with dyntopo disabled).
     _tool_id_display_default = {
@@ -5699,7 +5696,9 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         in, None when the tool is in neither display list and nothing was registered for it.
 
         Handed to the tool system by `tool.setup()`, so the asset shelf brush filtering reads the
-        same declaration the toolbar draws from instead of keeping its own list of tools.
+        same declaration the toolbar draws from instead of keeping its own list of tools. The order
+        is the same one `_tools_display_extra` uses: an explicit registration first, then the
+        exclusive display lists, then shared; a tool in neither list defaults to "Sculpt".
         """
         declared = cls._tool_display_from_id_extra.get(idname)
         if declared is not None:
@@ -5762,32 +5761,16 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         return tools, tools_by_anchor
 
     @classmethod
-    def _tool_display_exclusive_from_id(cls, idname):
-        """The display group `idname` is exclusive to, or None when shared or unknown."""
-        if idname in cls._tools_sculpt_only_ids:
-            return 'SCULPT'
-        if idname in cls._tools_paint_only_ids:
-            return 'PAINT'
-        if idname not in cls._tools_sculpt_display_ids and idname not in cls._tools_paint_display_ids:
-            for item in cls._tools_flatten(cls._tools['SCULPT']):
-                if item is not None and item.idname == idname:
-                    return cls._tool_display_from_id_extra.get(idname, 'SCULPT')
-        return None
-
-    @classmethod
     def _tool_display_from_context(cls, context):
-        """The display group to show, following the active tool when it's exclusive to one."""
-        # Stored per workspace: the tools it switches between live in the workspace too, and the
-        # asset shelf reads the same value to filter its brushes.
+        """The display group to show, kept resolved in the workspace.
+
+        Activated tools write it through `on_tool_activated`; a tool-system refresh (mode enter,
+        file load, workspace switch, undo) re-applies the active tool's declaration on the C++ side.
+        """
+        # Stored per workspace: the tools it switches between live in the workspace too, and C++
+        # readers (the paint polls, the paint-curve gate) read the same value.
         workspace = getattr(context, "workspace", None)
-        display = workspace.sculpt_paint_tool_display if workspace is not None else 'SCULPT'
-        tool_active = ToolSelectPanelHelper._tool_active_from_context(context, 'VIEW_3D', 'SCULPT')
-        tool_active_id = getattr(tool_active, "idname", None)
-        if tool_active_id is not None:
-            display_exclusive = cls._tool_display_exclusive_from_id(tool_active_id)
-            if display_exclusive is not None:
-                display = display_exclusive
-        return display
+        return workspace.sculpt_paint_tool_display if workspace is not None else 'SCULPT'
 
     @classmethod
     def tools_from_context_for_display(cls, context):
@@ -5824,9 +5807,13 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             return
         if getattr(context, "mode", None) != 'SCULPT':
             return
-        display = cls._tool_display_exclusive_from_id(item.idname)
-        if display is None:
+        display = cls.tool_display_group_from_id(item.idname)
+        if display == 'SHARED':
+            # Shown in both groups: the tool alone cannot decide which one is displayed.
             return
+        # Tools in neither display group are shown in the "Sculpt" group (see
+        # `_tools_display_extra`), so activating one selects that group.
+        display = display or 'SCULPT'
         workspace = getattr(context, "workspace", None)
         if workspace is not None and workspace.sculpt_paint_tool_display != display:
             # Only on an actual change: this notifies the asset shelf, which rebuilds its whole

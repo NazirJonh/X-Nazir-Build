@@ -664,6 +664,24 @@ void BKE_workspace_active_set(WorkSpaceInstanceHook *hook, WorkSpace *workspace)
   }
 }
 
+bke::eSculptPaintToolDisplay BKE_workspace_sculpt_paint_tool_display_get(
+    const WorkSpace *workspace)
+{
+  if (workspace == nullptr || workspace->runtime == nullptr) {
+    return bke::eSculptPaintToolDisplay::Sculpt;
+  }
+  return workspace->runtime->sculpt_paint_tool_display;
+}
+
+void BKE_workspace_sculpt_paint_tool_display_set(WorkSpace *workspace,
+                                                 bke::eSculptPaintToolDisplay display)
+{
+  if (workspace == nullptr || workspace->runtime == nullptr) {
+    return;
+  }
+  workspace->runtime->sculpt_paint_tool_display = display;
+}
+
 WorkSpaceLayout *BKE_workspace_active_layout_get(const WorkSpaceInstanceHook *hook)
 {
   return hook->act_layout;

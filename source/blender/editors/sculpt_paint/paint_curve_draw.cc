@@ -54,6 +54,8 @@
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
 
+#include "RNA_access.hh"
+
 #include "UI_resources.hh"
 
 #include "WM_api.hh"
@@ -259,22 +261,29 @@ bool ED_paint_curve_is_curves_edit_tool(const char *active_tool_idname)
 
 bool ED_paint_curve_sculpt_tool_display_is_paint(const bContext *C)
 {
-  const WorkSpace *workspace = CTX_wm_workspace(C);
-  return workspace != nullptr && workspace->runtime != nullptr &&
-         workspace->runtime->sculpt_paint_tool_display == bke::eSculptPaintToolDisplay::Paint;
+  return paint_sculpt_tool_display_is_paint(C);
 }
 
 void ED_paint_curve_sculpt_tool_display_set(bContext *C, const bool is_paint)
 {
   WorkSpace *workspace = CTX_wm_workspace(C);
-  if (workspace == nullptr || workspace->runtime == nullptr) {
+  if (workspace == nullptr) {
     return;
   }
-  workspace->runtime->sculpt_paint_tool_display =
+  const bke::eSculptPaintToolDisplay display =
       is_paint ? bke::eSculptPaintToolDisplay::Paint : bke::eSculptPaintToolDisplay::Sculpt;
-  /* The workspace property's RNA setter sends the same notifier; the toolbar and the asset shelf
-   * redraw the switched group from it. */
-  WM_event_add_notifier(C, NC_WINDOW, nullptr);
+  if (BKE_workspace_sculpt_paint_tool_display_get(workspace) == display) {
+    return;
+  }
+  /* Write through RNA so this path uses the property's own update callback (the notifier the
+   * asset shelf rebuilds from) instead of duplicating it. */
+  PointerRNA ptr = RNA_id_pointer_create(&workspace->id);
+  PropertyRNA *prop = RNA_struct_find_property(&ptr, "sculpt_paint_tool_display");
+  if (prop == nullptr) {
+    return;
+  }
+  RNA_property_enum_set(&ptr, prop, int(display));
+  RNA_property_update(C, &ptr, prop);
 }
 
 bool ED_paint_curve_overlay_is_relevant(const Brush *brush,

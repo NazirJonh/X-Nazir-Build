@@ -484,6 +484,60 @@ def _template_items_image_paint_select_lasso_gesture(params):
         ]
 
 
+def _template_items_sculpt_paint_select_box_gesture():
+    """Temporary box for the Sculpt Mode Paint selection mask (does not switch the active tool).
+
+    `B` has no modifier of its own, so the usual box modes apply: plain replaces (the operator's
+    `SET` default), Shift adds and Ctrl subtracts. The lasso below cannot use Ctrl for subtract
+    because Ctrl is part of its binding.
+    """
+    return [
+        ("paint.image_select_view3d_box_key", {"type": 'B', "value": 'PRESS'}, None),
+        ("paint.image_select_view3d_box_key", {"type": 'B', "value": 'PRESS', "shift": True},
+         {"properties": [("mode", 'ADD')]}),
+        ("paint.image_select_view3d_box_key", {"type": 'B', "value": 'PRESS', "ctrl": True},
+         {"properties": [("mode", 'SUB')]}),
+    ]
+
+
+def _template_items_sculpt_paint_select_lasso_gesture(params):
+    """Temporary lasso for the Sculpt Mode Paint selection mask (does not switch the active tool).
+
+    Binds `PRESS` (not `CLICK_DRAG`) so the gesture starts immediately and confirms on the
+    release of the button that started it. Both mouse configurations land on Ctrl+RMB: with
+    right-select it is the select mouse, with left-select the action mouse (plain Ctrl+LMB stays
+    the brush stroke invert). Ctrl belongs to the binding itself and is not re-interpreted by the
+    operator, so the mode keys follow the selection lasso: with right-select plain Ctrl replaces,
+    Shift+Ctrl subtracts and Alt+Ctrl adds (Alt is free there); with left-select Ctrl adds and
+    Shift+Ctrl subtracts, as in `_template_items_select_lasso`.
+
+    These entries must stay ahead of the stencil bindings in `km_sculpt`, and
+    `image_paint_selection_view3d_lasso_key_poll` (C++) must stay their exact complement: Paint
+    display and no stencil. `industry_compatible_data.py` has its own copy for the left-select
+    convention; keep it in sync.
+    """
+    if params.select_mouse == 'RIGHTMOUSE':
+        return [
+            ("paint.image_select_view3d_lasso_key",
+             {"type": params.select_mouse, "value": 'PRESS', "shift": True, "ctrl": True},
+             {"properties": [("mode", 'SUB')]}),
+            ("paint.image_select_view3d_lasso_key",
+             {"type": params.select_mouse, "value": 'PRESS', "ctrl": True, "alt": True},
+             {"properties": [("mode", 'ADD')]}),
+            ("paint.image_select_view3d_lasso_key",
+             {"type": params.select_mouse, "value": 'PRESS', "ctrl": True}, None),
+        ]
+    else:
+        return [
+            ("paint.image_select_view3d_lasso_key",
+             {"type": params.action_mouse, "value": 'PRESS', "shift": True, "ctrl": True},
+             {"properties": [("mode", 'SUB')]}),
+            ("paint.image_select_view3d_lasso_key",
+             {"type": params.action_mouse, "value": 'PRESS', "ctrl": True},
+             {"properties": [("mode", 'ADD')]}),
+        ]
+
+
 def _template_items_image_paint_select_floating():
     """Undo step / commit / discard for a floating Image Paint selection fragment.
 
@@ -5648,6 +5702,10 @@ def km_sculpt(params):
          {"properties": [("mode", 'VALUE'), ("value", 0.0)]}),
         ("paint.mask_flood_fill", {"type": 'I', "value": 'PRESS', "ctrl": True},
          {"properties": [("mode", 'INVERT')]}),
+        # Paint selection mask: temporary box select of the Paint toolbar group, ahead of the
+        # sculpt mask keys on purpose. The operator polls false while the Sculpt group is shown or
+        # there is no valid paint target, so `mask_box_gesture` keeps the keys there.
+        *_template_items_sculpt_paint_select_box_gesture(),
         ("paint.mask_box_gesture", {"type": 'B', "value": 'PRESS'},
          {"properties": [("mode", 'VALUE'), ("value", 0.0)]}),
         # Dynamic topology
@@ -5681,6 +5739,11 @@ def km_sculpt(params):
         # sculpt cursor / moving the stencil everywhere else, and is taken over only while a light
         # drag is possible.
         ("paint.scene_light_rotate", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True}, None),
+        # Paint selection mask: temporary lasso of the Paint toolbar group, ahead of the stencil
+        # bindings on purpose (they share Ctrl-RMB). The operator polls false while the Sculpt
+        # group is shown, there is no valid paint target, or the brush has a stencil, so the
+        # stencil keeps the keys there.
+        *_template_items_sculpt_paint_select_lasso_gesture(params),
         # Stencil
         ("brush.stencil_control", {"type": 'RIGHTMOUSE', "value": 'PRESS'},
          {"properties": [("mode", 'TRANSLATION')]}),

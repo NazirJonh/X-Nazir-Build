@@ -71,6 +71,7 @@
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
+#include "BKE_workspace.hh"
 
 #include "DEG_depsgraph.hh"
 
@@ -248,6 +249,18 @@ static bool brush_primary_stencil_mapping(const Brush *br)
   }
   return br->material_paint != nullptr &&
          br->material_paint->shared_source_mapping.brush_map_mode == MTEX_MAP_MODE_STENCIL;
+}
+
+bool ed::sculpt_paint::paint_brush_uses_stencil(const Brush &brush)
+{
+  return brush_primary_stencil_mapping(&brush) ||
+         brush.mask_mtex.brush_map_mode == MTEX_MAP_MODE_STENCIL;
+}
+
+bool ed::sculpt_paint::paint_sculpt_tool_display_is_paint(const bContext *C)
+{
+  return BKE_workspace_sculpt_paint_tool_display_get(CTX_wm_workspace(C)) ==
+         bke::eSculptPaintToolDisplay::Paint;
 }
 
 static void stencil_set_target(StencilControlData *scd)
@@ -475,8 +488,7 @@ static bool stencil_control_poll(bContext *C)
 
   paint = BKE_paint_get_active_from_context(C);
   br = BKE_paint_brush(paint);
-  return (br && (brush_primary_stencil_mapping(br) ||
-                 br->mask_mtex.brush_map_mode == MTEX_MAP_MODE_STENCIL));
+  return (br && ed::sculpt_paint::paint_brush_uses_stencil(*br));
 }
 
 static void BRUSH_OT_stencil_control(wmOperatorType *ot)
@@ -3621,6 +3633,8 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_select_view3d_lasso);
   WM_operatortype_append(PAINT_OT_image_select_view3d_polyline);
   WM_operatortype_append(PAINT_OT_image_select_view3d_circle);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_box_key);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_lasso_key);
   WM_operatortype_append(PAINT_OT_image_select_view3d_move);
   WM_operatortype_append(PAINT_OT_image_select_view3d_transform);
   WM_operatortype_append(PAINT_OT_image_select_view3d_warp);

@@ -49,8 +49,15 @@ enum class eSculptPaintToolDisplay : int8_t {
 struct WorkSpaceRuntime {
   Vector<WorkSpaceStatusItem> status;
 
-  /** Last explicit Sculpt/Paint group the user picked in this workspace. Only a fallback: while the
-   * active tool declares a display group or a brush type, that declaration decides the group. */
+  /** Sculpt/Paint group the toolbar shows in this workspace. The toolbar resolves it from the
+   * active tool (`on_tool_activated`: an exclusive tool switches the group, a shared one keeps
+   * it) and stores the result here; C++ code that needs the displayed group reads it instead of
+   * repeating the resolution.
+   *
+   * Updated when a tool is activated (toolbar, asset shelf, brush keys), when the tool system
+   * re-initializes a tool (mode enter, file load, workspace switch) and on refresh/undo
+   * (`WM_toolsystem_refresh_active`), where the refreshed tool reference re-applies its declared
+   * group. Session-only, not saved. */
   eSculptPaintToolDisplay sculpt_paint_tool_display = eSculptPaintToolDisplay::Sculpt;
 
   /** Toolbar: the tool last activated in each Sculpt/Paint display group, re-activated when
@@ -202,6 +209,19 @@ WorkSpaceLayout *BKE_workspace_active_layout_for_workspace_get(
     const WorkSpaceInstanceHook *hook, const WorkSpace *workspace) GETTER_ATTRS;
 
 bool BKE_workspace_owner_id_check(const WorkSpace *workspace, const char *owner_id) ATTR_NONNULL();
+
+/**
+ * Sculpt/Paint display group the toolbar shows in \a workspace, #eSculptPaintToolDisplay::Sculpt
+ * when the workspace or its runtime is null.
+ */
+bke::eSculptPaintToolDisplay BKE_workspace_sculpt_paint_tool_display_get(
+    const WorkSpace *workspace);
+/**
+ * Set the Sculpt/Paint display group shown in \a workspace. No notifier: BKE does not send events,
+ * callers in the editor/RNA layer do.
+ */
+void BKE_workspace_sculpt_paint_tool_display_set(WorkSpace *workspace,
+                                                 bke::eSculptPaintToolDisplay display);
 
 void BKE_workspace_id_tag_all_visible(Main *bmain, int tag) ATTR_NONNULL();
 

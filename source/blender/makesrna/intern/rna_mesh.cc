@@ -4073,9 +4073,8 @@ static void rna_def_mesh(BlenderRNA *brna)
   prop = RNA_def_property(srna, "use_mirror_x", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "symmetry", ME_SYMMETRY_X);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
-  /* Symmetry is read from the original mesh only, so don't re-evaluate the mesh (in Sculpt Mode
-   * that rebuilds the evaluated mesh and its draw buffers, a visible hitch when toggling).
-   * (From the Potassiums/phantom fork, commit 0217e768.) */
+  /* All readers use the original mesh (the overlays explicitly go through #DEG_get_original), so
+   * re-evaluating here only rebuilds the sculpt CCG and its draw buffers for no benefit. */
   RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
   RNA_def_property_ui_text(prop, "X", "Enable symmetry in the X axis");
   RNA_def_property_update(prop, 0, "rna_Mesh_update_draw");
@@ -4083,9 +4082,6 @@ static void rna_def_mesh(BlenderRNA *brna)
   prop = RNA_def_property(srna, "use_mirror_y", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "symmetry", ME_SYMMETRY_Y);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
-  /* Symmetry is read from the original mesh only, so don't re-evaluate the mesh (in Sculpt Mode
-   * that rebuilds the evaluated mesh and its draw buffers, a visible hitch when toggling).
-   * (From the Potassiums/phantom fork, commit 0217e768.) */
   RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
   RNA_def_property_ui_text(prop, "Y", "Enable symmetry in the Y axis");
   RNA_def_property_update(prop, 0, "rna_Mesh_update_draw");
@@ -4093,9 +4089,6 @@ static void rna_def_mesh(BlenderRNA *brna)
   prop = RNA_def_property(srna, "use_mirror_z", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "symmetry", ME_SYMMETRY_Z);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
-  /* Symmetry is read from the original mesh only, so don't re-evaluate the mesh (in Sculpt Mode
-   * that rebuilds the evaluated mesh and its draw buffers, a visible hitch when toggling).
-   * (From the Potassiums/phantom fork, commit 0217e768.) */
   RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
   RNA_def_property_ui_text(prop, "Z", "Enable symmetry in the Z axis");
   RNA_def_property_update(prop, 0, "rna_Mesh_update_draw");

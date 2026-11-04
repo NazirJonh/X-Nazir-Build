@@ -12,6 +12,10 @@
 
 namespace blender {
 
+namespace bke::subdiv {
+struct Subdiv;
+}  // namespace bke::subdiv
+
 /* ****************** Type structures for all modifiers ****************** */
 
 extern ModifierTypeInfo modifierType_None;
@@ -101,6 +105,17 @@ extern ModifierTypeInfo modifierType_GreasePencilOutline;
 extern ModifierTypeInfo modifierType_GreasePencilShrinkwrap;
 extern ModifierTypeInfo modifierType_GreasePencilBuild;
 extern ModifierTypeInfo modifierType_GreasePencilTexture;
+
+/* MOD_multires.cc */
+
+/**
+ * Give \a subdiv to the Multires modifier's runtime data. Returns false when the modifier has no
+ * runtime data yet or already owns a descriptor; ownership stays with the caller then.
+ *
+ * This writes runtime data of a possibly evaluated modifier, so it is only valid on the main
+ * thread while the depsgraph is not evaluating.
+ */
+bool MOD_multires_runtime_set_subdiv(ModifierData &md, bke::subdiv::Subdiv *subdiv);
 
 /* MOD_util.cc */
 

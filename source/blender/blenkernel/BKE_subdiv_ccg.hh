@@ -282,6 +282,16 @@ std::unique_ptr<SubdivCCG> BKE_subdiv_to_ccg(bke::subdiv::Subdiv &subdiv,
                                              SubdivCCGMaskEvaluator *mask_evaluator = nullptr);
 
 /**
+ * Give up ownership of the subdivision descriptor, for example to hand it back to the modifier
+ * that created the grids. The descriptor is not freed and the caller becomes its owner.
+ *
+ * The CCG is left without a descriptor and must only be destroyed after this call: most of its
+ * queries dereference #SubdivCCG::subdiv. Callers that keep the CCG in a mesh must therefore
+ * remove it from that mesh in the same step.
+ */
+bke::subdiv::Subdiv *BKE_subdiv_ccg_release_subdiv(SubdivCCG &subdiv_ccg);
+
+/**
  * Helper function, creates Mesh structure which is properly setup to use
  * grids.
  */

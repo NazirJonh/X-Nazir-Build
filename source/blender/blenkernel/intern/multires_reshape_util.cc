@@ -264,6 +264,7 @@ bool multires_reshape_context_create_from_ccg(MultiresReshapeContext *reshape_co
   reshape_context->base_corner_verts = base_mesh->corner_verts();
   reshape_context->base_corner_edges = base_mesh->corner_edges();
 
+  BLI_assert(subdiv_ccg->subdiv != nullptr);
   reshape_context->subdiv = subdiv_ccg->subdiv;
   reshape_context->need_free_subdiv = false;
 

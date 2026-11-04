@@ -450,6 +450,14 @@ SubdivCCG::~SubdivCCG()
   }
 }
 
+Subdiv *BKE_subdiv_ccg_release_subdiv(SubdivCCG &subdiv_ccg)
+{
+  BLI_assert(subdiv_ccg.subdiv != nullptr);
+  Subdiv *subdiv = subdiv_ccg.subdiv;
+  subdiv_ccg.subdiv = nullptr;
+  return subdiv;
+}
+
 CCGKey BKE_subdiv_ccg_key(const SubdivCCG & /*subdiv_ccg*/, int level)
 {
 #ifdef WITH_OPENSUBDIV
@@ -596,6 +604,7 @@ void BKE_subdiv_ccg_recalc_normals(SubdivCCG &subdiv_ccg)
 void BKE_subdiv_ccg_update_normals(SubdivCCG &subdiv_ccg, const IndexMask &face_mask)
 {
 #ifdef WITH_OPENSUBDIV
+  BLI_assert(subdiv_ccg.subdiv != nullptr);
   if (subdiv_ccg.normals.is_empty()) {
     /* Grids don't have normals, can do early output. */
     return;
@@ -1425,6 +1434,7 @@ void BKE_subdiv_ccg_neighbor_coords_get(const SubdivCCG &subdiv_ccg,
                                         SubdivCCGNeighbors &r_neighbors)
 {
 #ifdef WITH_OPENSUBDIV
+  BLI_assert(subdiv_ccg.subdiv != nullptr);
   BLI_assert(coord.grid_index >= 0);
   BLI_assert(coord.grid_index < subdiv_ccg.grids_num);
   BLI_assert(coord.x >= 0);
@@ -1584,6 +1594,7 @@ void BKE_subdiv_ccg_eval_limit_positions(const SubdivCCG &subdiv_ccg,
                                          const int grid_index,
                                          const MutableSpan<float3> r_limit_positions)
 {
+  BLI_assert(subdiv_ccg.subdiv != nullptr);
   SubdivCCGCoord coord{};
   coord.grid_index = grid_index;
   for (const int y : IndexRange(key.grid_size)) {

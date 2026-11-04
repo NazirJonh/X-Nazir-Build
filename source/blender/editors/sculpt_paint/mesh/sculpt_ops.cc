@@ -686,11 +686,11 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
     mesh->flag |= ME_SCULPT_DYNAMIC_TOPOLOGY;
   }
 
-  /* Keep Multires' subdivision descriptor, so object mode doesn't rebuild it: the cached
-   * OpenSubdiv evaluator the sculpt grids took over is handed back to the Multires modifier
-   * before the session frees it. Must run while the sculpt session is alive.
-   * (From the Potassiums/phantom fork, commit 0217e768.) */
-  const Object *ob_eval = DEG_get_evaluated(&depsgraph, &ob);
+  /* Hand the cached OpenSubdiv evaluator back to the Multires modifier so object mode does not
+   * rebuild it. Must run while the sculpt session and its grids are alive; the call also destroys
+   * those grids, since they cannot outlive their descriptor. */
+  BLI_assert(!DEG_is_evaluating(&depsgraph));
+  Object *ob_eval = DEG_get_evaluated(&depsgraph, &ob);
   if (ob_eval != nullptr && ob.runtime->sculpt_session != nullptr) {
     multires_reclaim_sculpt_subdiv(*ob_eval, *ob.runtime->sculpt_session);
   }

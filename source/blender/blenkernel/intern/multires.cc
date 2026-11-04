@@ -26,6 +26,7 @@
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
 #include "BLI_task.h"
+#include "BLI_threads.h"
 #include "BLI_utildefines.h"
 
 #include "BKE_ccg.hh"
@@ -43,6 +44,8 @@
 #include "BKE_subdiv_ccg.hh"
 
 #include "BKE_object.hh"
+
+#include "MOD_modifiertypes.hh"
 
 #include "DEG_depsgraph_query.hh"
 
@@ -289,29 +292,53 @@ void multires_mark_as_modified(Depsgraph *depsgraph,
   multires_ccg_mark_as_modified(subdiv_ccg, flags);
 }
 
-void multires_reclaim_sculpt_subdiv(const Object &object_eval, SculptSession &sculpt_session)
+void multires_reclaim_sculpt_subdiv(Object &object_eval, SculptSession &sculpt_session)
 {
   SubdivCCG *subdiv_ccg = sculpt_session.subdiv_ccg;
   const MultiresModifierData *mmd = sculpt_session.multires_modifier;
   if (subdiv_ccg == nullptr || subdiv_ccg->subdiv == nullptr || mmd == nullptr) {
     return;
   }
-  /* The session may point at the original modifier, while the descriptor is cached on the
-   * evaluated one: find it by its persistent ID. A modifier removed while sculpting isn't found. */
-  const ModifierData *md_eval = nullptr;
-  for (const ModifierData &md : object_eval.modifiers) {
-    if (md.type == eModifierType_Multires && md.persistent_uid == mmd->modifier.persistent_uid) {
-      md_eval = &md;
-      break;
-    }
-  }
-  MultiresRuntimeData *runtime_data = md_eval ? static_cast<MultiresRuntimeData *>(md_eval->runtime)
-                                              : nullptr;
-  if (runtime_data == nullptr || runtime_data->subdiv != nullptr) {
+  if (subdiv_ccg->dirty.coords || subdiv_ccg->dirty.hidden) {
+    /* A failed base flush left edits in the grids that a later depsgraph-driven flush can still
+     * read. Keep the grids (and their descriptor) instead of destroying their only copy. */
     return;
   }
-  runtime_data->subdiv = subdiv_ccg->subdiv;
-  subdiv_ccg->subdiv = nullptr;
+
+  if (object_eval.type != OB_MESH) {
+    return;
+  }
+  Mesh *mesh_eval = BKE_object_get_evaluated_mesh_unchecked(&object_eval);
+  if (mesh_eval == nullptr || mesh_eval->runtime->subdiv_ccg.get() != subdiv_ccg) {
+    return;
+  }
+
+  /* The session may point at the original modifier, while the descriptor is cached on the
+   * evaluated one: find it by its persistent ID. A modifier removed while sculpting isn't found. */
+  ModifierData *md_eval = BKE_modifiers_findby_persistent_uid(&object_eval,
+                                                              mmd->modifier.persistent_uid);
+  if (md_eval == nullptr || md_eval->type != eModifierType_Multires) {
+    return;
+  }
+
+  /* The evaluated modifier's runtime data is written from outside depsgraph evaluation. This is
+   * safe because mode exit runs on the main thread between evaluations, before the mode flag is
+   * cleared and the deferred geometry update is evaluated. */
+  BLI_assert(BLI_thread_is_main());
+
+  bke::subdiv::Subdiv *subdiv = BKE_subdiv_ccg_release_subdiv(*subdiv_ccg);
+  if (!MOD_multires_runtime_set_subdiv(*md_eval, subdiv)) {
+    /* The modifier already rebuilt its descriptor (or has no runtime data yet): keep the session's
+     * descriptor with the CCG so it is freed exactly once, together with the grids. */
+    subdiv_ccg->subdiv = subdiv;
+    return;
+  }
+
+  /* A CCG without a descriptor dereferences null in most of its queries, so it must not outlive
+   * the transfer in the evaluated mesh: destroy it here rather than leave it for undo, bake or draw
+   * to trip over before the next evaluation. */
+  mesh_eval->runtime->subdiv_ccg.reset();
+  sculpt_session.subdiv_ccg = nullptr;
 }
 
 void multires_flush_sculpt_updates(Object *object)

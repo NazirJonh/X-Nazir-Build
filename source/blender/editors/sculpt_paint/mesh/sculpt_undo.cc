@@ -3541,7 +3541,7 @@ static void restore_list_object(bContext *C,
 
     restore_geometry(step_data, object);
     BKE_sculptsession_free_deformMats(&ss);
-    if (SubdivCCG *subdiv_ccg = ss.subdiv_ccg) {
+    if (SubdivCCG *subdiv_ccg = ss.subdiv_ccg; subdiv_ccg && subdiv_ccg->subdiv) {
       refine_subdiv(depsgraph, ss, object, subdiv_ccg->subdiv);
     }
   }

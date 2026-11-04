@@ -46,9 +46,15 @@
 
 #include "DEG_depsgraph_query.hh"
 
+#include "MOD_modifiertypes.hh"
 #include "MOD_ui_common.hh"
 
 namespace blender {
+
+struct MultiresRuntimeData {
+  /* Cached subdivision surface descriptor, with topology and settings. */
+  bke::subdiv::Subdiv *subdiv;
+};
 
 static void init_data(ModifierData *md)
 {
@@ -90,6 +96,16 @@ static MultiresRuntimeData *multires_ensure_runtime(MultiresModifierData *mmd)
     mmd->modifier.runtime = runtime_data;
   }
   return runtime_data;
+}
+
+bool MOD_multires_runtime_set_subdiv(ModifierData &md, bke::subdiv::Subdiv *subdiv)
+{
+  MultiresRuntimeData *runtime_data = static_cast<MultiresRuntimeData *>(md.runtime);
+  if (runtime_data == nullptr || runtime_data->subdiv != nullptr || subdiv == nullptr) {
+    return false;
+  }
+  runtime_data->subdiv = subdiv;
+  return true;
 }
 
 /* Main goal of this function is to give usable subdivision surface descriptor
@@ -169,9 +185,9 @@ static Mesh *multires_as_ccg(MultiresModifierData *mmd,
   bke::subdiv::displacement_attach_from_multires(subdiv, mesh, mmd);
   result = BKE_subdiv_to_ccg_mesh(*subdiv, ccg_settings, *mesh);
 
-  /* NOTE: CCG becomes an owner of Subdiv descriptor, so can not share
-   * this pointer. Not sure if it's needed, but might have a second look
-   * on the ownership model here. */
+  /* NOTE: CCG becomes an owner of the Subdiv descriptor, so the runtime must not keep a second
+   * pointer to it. #multires_reclaim_sculpt_subdiv reverses this transfer on mode exit, and
+   * relies on this field being null until then. */
   MultiresRuntimeData *runtime_data = static_cast<MultiresRuntimeData *>(mmd->modifier.runtime);
   runtime_data->subdiv = nullptr;
 

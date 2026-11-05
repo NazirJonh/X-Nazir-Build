@@ -73,6 +73,18 @@ void composite_image_layers_collect(const Material &ma,
                                     PaintLayersHeightWonCache *height_won_cache = nullptr);
 
 /**
+ * Whether nothing in \a layer moves a texel of a map: no mapping on the row, its corrections or
+ * its mask items, and no reader whose own source would have to be looked into. Every filter and
+ * blend a slice can hold works on the texel it is given, so with this a rectangle edited in a map
+ * is the same rectangle of the slice.
+ *
+ * Shared by the slice cache's region-exact check (`paint_layers_composite.cc`) and the GPU effect's
+ * one (`paint_layers_effect_gpu_plan.cc`): both narrow a dispatch to a rectangle reported on a map
+ * only where the described input remaps no map.
+ */
+bool anchor_slice_layer_is_texel_exact(const PaintMaterialCompositeImageLayer &layer);
+
+/**
  * The Height record's own settings of \a layer in \a channel, as the evaluator reads them.
  *
  * The mode is #BKE_paint_layers_channel_height_blend_effective, so an Inherit row over Add,

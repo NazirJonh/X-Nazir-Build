@@ -1922,37 +1922,6 @@ static bool anchor_slice_render_new(const Material &ma,
 }
 
 /**
- * Whether nothing in \a layer moves a texel of a map: no mapping on the row, its corrections or
- * its mask items, and no reader whose own source would have to be looked into. Every filter and
- * blend a slice can hold works on the texel it is given, so with this a rectangle edited in a map
- * is the same rectangle of the slice.
- */
-static bool anchor_slice_layer_is_texel_exact(const PaintMaterialCompositeImageLayer &layer)
-{
-  if (layer.mapping.enabled || !BLI_uuid_is_nil(layer.anchor_point_reader)) {
-    return false;
-  }
-  for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
-    if (correction.mapping.enabled || !BLI_uuid_is_nil(correction.anchor_point_reader)) {
-      return false;
-    }
-  }
-  for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
-    if (item.mapping.enabled || item.coverage_mapping.enabled ||
-        !BLI_uuid_is_nil(item.anchor_point_reader))
-    {
-      return false;
-    }
-  }
-  for (const PaintMaterialCompositeImageLayer &child : layer.children) {
-    if (!anchor_slice_layer_is_texel_exact(child)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-/**
  * Whether a rectangle reported on one of \a images can be applied to the slice as it is: the slice
  * is described without remapping any map, and no map that was ever edited has another size than the
  * slice. Anything else is a full render, which is always right.
@@ -2008,6 +1977,15 @@ struct EffectCacheKey {
   int channel = 0;
   /** The effect kind and its parameters; the input's pixels are the sources' versions below. */
   uint64_t hash = 0;
+  /**
+   * GPU-only extras (Ф2, З7). The CPU cache leaves both at zero, so they cannot split a CPU key; the
+   * GPU key folds in #chain_hash (the effects that precede this one in the row, whose results feed
+   * this effect's input) and #input_scalar_hash (the input's non-map scalar content -- a flat colour,
+   * an adjustment, a filter's parameters -- that no map version carries). A row of one effect with a
+   * plain map input has both zero, exactly the CPU picture.
+   */
+  uint64_t chain_hash = 0;
+  uint64_t input_scalar_hash = 0;
 };
 
 /** Whether \a a and \a b name the same effect instance, whatever its parameters say. */
@@ -2019,7 +1997,8 @@ static bool paint_layer_effect_key_same_effect(const EffectCacheKey &a, const Ef
 
 static bool paint_layer_effect_key_equal(const EffectCacheKey &a, const EffectCacheKey &b)
 {
-  return paint_layer_effect_key_same_effect(a, b) && a.hash == b.hash;
+  return paint_layer_effect_key_same_effect(a, b) && a.hash == b.hash &&
+         a.chain_hash == b.chain_hash && a.input_scalar_hash == b.input_scalar_hash;
 }
 
 struct EffectCacheEntry {
@@ -2505,6 +2484,8 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
                                                               const int width,
                                                               const int height,
                                                               const Span<Image *> images,
+                                                              const uint64_t chain_hash,
+                                                              const uint64_t input_scalar_hash,
                                                               const PaintLayerEffectGpuHooks &hooks,
                                                               rcti *r_dirty_region,
                                                               void **r_resource)
@@ -2521,7 +2502,9 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
   const EffectCacheKey key{ma.id.session_uid,
                            effect.marker,
                            channel,
-                           paint_layer_effect_hash(effect, channel)};
+                           paint_layer_effect_hash(effect, channel),
+                           chain_hash,
+                           input_scalar_hash};
   const size_t bytes = paint_layer_effect_gpu_entry_bytes(width, height);
 
   std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
@@ -2614,12 +2597,16 @@ void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
                                                const int channel,
                                                const int width,
                                                const int height,
-                                               const Span<Image *> images)
+                                               const Span<Image *> images,
+                                               const uint64_t chain_hash,
+                                               const uint64_t input_scalar_hash)
 {
   const EffectCacheKey key{ma.id.session_uid,
                            effect.marker,
                            channel,
-                           paint_layer_effect_hash(effect, channel)};
+                           paint_layer_effect_hash(effect, channel),
+                           chain_hash,
+                           input_scalar_hash};
   std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
   for (EffectGpuCacheEntry &entry : g_paint_effect_gpu_cache.entries) {
     if (!paint_layer_effect_key_equal(entry.key, key) || entry.width != width ||
@@ -2637,6 +2624,30 @@ void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
   }
   /* The entry was evicted or dropped while the frame was rendering into its texture: nothing to
    * stamp, and the next frame asks again. */
+}
+
+PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &ma,
+                                                              const MaterialPaintLayer &effect,
+                                                              const int channel,
+                                                              const int width,
+                                                              const int height,
+                                                              const Span<Image *> images,
+                                                              const PaintLayerEffectGpuHooks &hooks,
+                                                              rcti *r_dirty_region,
+                                                              void **r_resource)
+{
+  return BKE_paint_layers_effect_gpu_cache_get(
+      ma, effect, channel, width, height, images, 0, 0, hooks, r_dirty_region, r_resource);
+}
+
+void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
+                                               const MaterialPaintLayer &effect,
+                                               const int channel,
+                                               const int width,
+                                               const int height,
+                                               const Span<Image *> images)
+{
+  BKE_paint_layers_effect_gpu_cache_publish(ma, effect, channel, width, height, images, 0, 0);
 }
 
 void BKE_paint_layers_effect_gpu_cache_free_all()

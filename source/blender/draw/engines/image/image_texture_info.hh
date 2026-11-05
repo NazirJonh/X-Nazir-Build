@@ -114,10 +114,14 @@ struct TextureInfo : NonCopyable {
     }
 
     if (should_be_created) {
-      /* Written as well as sampled: the GPU Combined preview shades straight into it. */
+      /* Written as well as sampled: the GPU Combined preview shades straight into it. Readable by
+       * the host as well: the developer GPU verify check reads it back, and GPU_texture_read
+       * refuses textures without HOST_READ. Free in every backend: Vulkan keeps TRANSFER_SRC on
+       * all images anyway, Metal folds HOST_READ into ShaderRead, OpenGL ignores usage. */
       texture.ensure_2d(gpu::TextureFormat::SFLOAT_16_16_16_16,
                         texture_size,
-                        GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE);
+                        GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE |
+                            GPU_TEXTURE_USAGE_HOST_READ);
     }
     need_full_update |= should_be_created;
   }

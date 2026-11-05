@@ -312,6 +312,202 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
                                                     bool mask_slice = false);
 
 /* -------------------------------------------------------------------- */
+/** \name GPU Effect Pass Plan
+ *
+ * The shape a GPU effect pass takes, decided from the effect's kind and parameters alone -- no GPU,
+ * no dispatch, so the gather and the tests read one rule. A #PAINT_LAYER_KIND_GPU_COMPUTED effect is
+ * a list of one or more passes: a pointwise kernel (a Noise) is one pass, a separable one (a Blur) is
+ * a pass per axis, an unsharp-style one (a Sharpen, a High Pass) adds a luminance pre-pass and a
+ * combine tail that reads the original and the blurred copy. The gather runs the plan in order over a
+ * ping-pong pair; a #PaintLayerEffectPass names one dispatch of it. A future reduction pass (a Color
+ * Match's average, Ф3) is one more kind here, with no rewrite of what is below.
+ * \{ */
+
+/**
+ * One dispatch of an effect's GPU pass plan. The values mirror the shader's `COMBINED_PASS_*`
+ * defines one to one; the gather static-asserts the mirror, so renumbering here without the shader
+ * fails the build rather than dispatching the wrong kernel.
+ */
+enum class ePaintLayerEffectPass : uint8_t {
+  /** The whole Noise kernel: one pointwise pass over the input. */
+  Noise = 0,
+  /** Scene-linear luminance to all three channels: a High Pass grayscale pre-pass. */
+  Luminance,
+  /** One horizontal box pass: window `[max(i-r,0), min(i+r,size-1)]`, divide by `hi-lo+1`. */
+  BlurH,
+  /** One vertical box pass, over the result of #BlurH. */
+  BlurV,
+  /** One horizontal min/max pass (a #PAINT_LAYER_KIND of Erode / Dilate). */
+  ExtremumH,
+  /** One vertical min/max pass, over the result of #ExtremumH. */
+  ExtremumV,
+  /** The Sobel 3x3 gradient magnitude of an Edge Detect: taps clamped to the canvas edge. */
+  Edge3x3,
+  /** The Emboss diagonal lighting 3x3: a flat colour is its own result. */
+  Emboss3x3,
+  /** The Sharpen combine tail: the raw detail back on top of the colour, clipped below zero. */
+  UnsharpTail,
+  /** The High Pass combine tail: the detail against the mid grey, through the sRGB curve. */
+  HighPassTail,
+};
+
+/** Which buffer a pass's `input_tx` reads. The gather binds the texture the role names. */
+enum class ePaintLayerEffectPassSource : uint8_t {
+  /** The effect's rendered input canvas. */
+  Input = 0,
+  /** The destination of the pass before this one. */
+  Previous,
+  /** The luminance buffer a grayscale High Pass keeps from its pre-pass. */
+  Luminance,
+};
+
+/** Which buffer a pass's `aux_tx` reads; the passes that read no second buffer name none. */
+enum class ePaintLayerEffectPassAux : uint8_t {
+  None = 0,
+  /** The blurred copy the plan built before this pass (a combine tail's). */
+  Previous,
+  /** The effect's rendered input canvas, the same texture #ePaintLayerEffectPassSource::Input
+   * names. No Ф2 pass reads it, but the tail of a Ф3 effect will, and the role keeps the gather
+   * from guessing. */
+  Original,
+};
+
+/** Which axes a pass's window reaches along, its share of the halo and the region growth. */
+enum ePaintLayerEffectPassAxis : uint8_t {
+  PAINT_LAYER_EFFECT_AXIS_NONE = 0,
+  PAINT_LAYER_EFFECT_AXIS_X = 1 << 0,
+  PAINT_LAYER_EFFECT_AXIS_Y = 1 << 1,
+  PAINT_LAYER_EFFECT_AXIS_XY = PAINT_LAYER_EFFECT_AXIS_X | PAINT_LAYER_EFFECT_AXIS_Y,
+};
+
+/** One pass of the plan: which kernel, which buffers, at what radius, with the parameters it reads. */
+struct PaintLayerEffectPass {
+  ePaintLayerEffectPass kind = ePaintLayerEffectPass::Noise;
+  /** The texture the shader's `input_tx` reads for this pass. */
+  ePaintLayerEffectPassSource source = ePaintLayerEffectPassSource::Input;
+  /** The texture the shader's `aux_tx` reads, or #ePaintLayerEffectPassAux::None. */
+  ePaintLayerEffectPassAux aux = ePaintLayerEffectPassAux::None;
+  /** The window half-reach in texels, already clamped the way the CPU kernel clamps it. */
+  int radius = 0;
+  /** #ExtremumH / #ExtremumV: dilate (maximum) when true, erode (minimum) when false. */
+  bool maximum = false;
+  /**
+   * How far past an edited texel this pass's own output depends on its input, in texels: the
+   * window passes reach their #radius, a 3x3 reaches one, a pointwise pass and a tail reach
+   * nothing. The regions and the halo read this, not #radius, so a pass that only reaches along
+   * one axis widens only that axis (an H pass after a V one does not grow the region's height).
+   */
+  int reach = 0;
+  /** The axes #reach applies along, a #ePaintLayerEffectPassAxis bit set. */
+  uint8_t axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+  /** #UnsharpTail / #HighPassTail: the Sharpen amount or the High Pass contrast, in the effect's
+   * own units. */
+  float aux0 = 0.0f;
+  /** Its position in the plan, so the host can tell the last pass (which writes the cache). */
+  int pass_index = 0;
+  int pass_count = 0;
+};
+
+/**
+ * The passes a filter computes through, in order, from its kind and its parameters in the schema
+ * order (the same order the gather packs into `filter_params`). Pointwise kinds give one pass;
+ * separable kinds give one per axis; unsharp kinds give the blur passes plus a combine tail. Each
+ * pass names its own sources, so the gather runs the plan without knowing the kinds: the first pass
+ * reads #ePaintLayerEffectPassSource::Input, the window passes read the pass before them, a tail
+ * reads the original (a Sharpen) or the luminance buffer (a grayscale High Pass) and the blurred
+ * copy. A kind that is not #PAINT_LAYER_KIND_GPU_COMPUTED gives an empty plan -- the caller refuses
+ * it before this runs. Parameters are read as the shader reads them: integers stored as floats,
+ * rounded back.
+ */
+void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
+                                       const float *params,
+                                       const int width,
+                                       const int height,
+                                       Vector<PaintLayerEffectPass> &r_passes);
+
+/**
+ * The halo -- the reach in input texels of an edit past the edited rectangle that a neighbourhood
+ * kernel reads. Grows the dirty region of the cache so a partial dispatch covers everything the
+ * kernel reads. Computed as the pass plan's convolution: the reaches fold per axis (an H pass adds
+ * to the X reach only, a V pass to the Y one) and the halo is the larger axis total, which keeps
+ * the same numbers the CPU passes' coverage gave -- a box blur reaches `r`, a soft blur three
+ * passes of `max(r/2, 1)`, a Sharpen / High Pass reach their blur `r`, an Erode / Dilate reach `r`,
+ * a 3x3 kernel reaches one. `params` is read in the schema order for the filter and clamped as the
+ * kernel clamps it; a pointwise kind (a Noise) has no halo and gives zero.
+ */
+int BKE_paint_layers_effect_halo(eMaterialPaintLayerFilter filter,
+                                 const float *params,
+                                 const int width,
+                                 const int height);
+
+/**
+ * The dispatch rectangle of every pass of \a passes, in order, into \a r_rects (one entry per
+ * pass). The last pass's rectangle is the input's changed region grown by the plan's whole halo and
+ * clamped to the canvas -- the cached result has to be correct there, or the stale band a
+ * neighbourhood smears past a stroke never clears. A pass before that writes one rectangle more,
+ * by the reach the passes after it still read along each axis (an H pass grows the X side only), so
+ * the next pass samples a neighbourhood its source has already computed. \a extra_input_halo grows
+ * the changed region first, by the halo of the effects that precede this one in the row: their
+ * results are part of this effect's input, so their own halo band re-rendered last frame is part of
+ * what this one has to redo. An empty \a dirty gives empty rectangles (nothing moved, nothing to
+ * compute); the caller renders the whole canvas instead when the region is not exact. Pure, so the
+ * grow / clamp arithmetic is testable without a GPU.
+ */
+void BKE_paint_layers_effect_pass_regions(Span<const PaintLayerEffectPass> passes,
+                                          const rcti &dirty,
+                                          int extra_input_halo,
+                                          const int width,
+                                          const int height,
+                                          MutableSpan<rcti> r_rects);
+
+/**
+ * Whether a rectangle reported on the input's maps can narrow the effect's dispatch: the described
+ * effect's `input_entry` remaps no map (no UV mapping, no live Anchor Point reader between a map and
+ * the canvas), and no map an edit was marked on has another size than the input. Both rules as the
+ * slice cache checks them (see #anchor_slice_region_is_exact); anything else is a full render.
+ */
+bool BKE_paint_layers_effect_region_is_exact(const PaintMaterialCompositeImageLayer &input_entry,
+                                             Span<Image *> images,
+                                             int width,
+                                             int height);
+
+/**
+ * The dispatch rectangle a pass computes: `dirty` grown by `halo`, clamped to the canvas
+ * `[0, width) x [0, height)`. An empty `dirty` stays empty (nothing moved); a full canvas stays
+ * full. Pure, so the intersection / grow / clamp arithmetic is testable without a GPU.
+ */
+void BKE_paint_layers_effect_region_clip(const rcti &dirty,
+                                         int halo,
+                                         int width,
+                                         int height,
+                                         rcti &r_out);
+
+/**
+ * A fingerprint of the effects that precede the effect_marker in a row's content corrections, in order:
+ * each one's marker and its own parameter hash. The result of an earlier effect is part of the input
+ * of a later one, so a change to an earlier effect -- its parameters or its place in the order --
+ * must re-key the later effect's GPU cache entry. The CPU effect hash of a single effect does not
+ * know about the rest of the row; this is the GPU-only half of that (З7). Corrections that are not
+ * effects (their marker is nil) carry no fingerprint here.
+ */
+uint64_t BKE_paint_layers_effect_chain_hash(
+    Span<const PaintMaterialCompositeCorrection> corrections, const bUUID &effect_marker);
+
+/**
+ * A fingerprint of the described effect input's non-map scalar content -- the row's flat colour, its
+ * adjustment filter and parameters, the filters, colours and opacities of the corrections below
+ * the effect, and every gradient generator's payload and Anchor Point reader's slice hash in the
+ * same description: a map version does not carry those, and a change to one alone would otherwise
+ * serve a result computed from the old pixels. Together with the map versions it names everything a
+ * re-render would read; it keys the GPU entry beyond the CPU hash (З7). Pure: it reads the
+ * description only, so it is testable without a GPU.
+ */
+uint64_t BKE_paint_layers_effect_input_scalar_hash(
+    const PaintMaterialCompositeImageLayer &input_entry);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name GPU Effect Result Cache
  *
  * The GPU twin of the CPU effect cache, for the kinds the registry marks
@@ -383,6 +579,12 @@ enum class PaintLayerEffectGpuState : uint8_t {
  *        slice cache checks both, see #anchor_slice_region_is_exact). Until it does, the whole texture
  *        is re-rendered and the rectangle is only carried.
  * \param r_resource: the texture, valid for #Hit and #Render.
+ * \param chain_hash, input_scalar_hash: the two GPU-only fingerprints of #A4 -- an ordered hash of
+ *        the effects that precede this one in the row (whose GPU results feed this effect's input),
+ *        and a hash of the input's non-map scalar content (a flat colour, an adjustment, a filter's
+ *        parameters) that no map version carries. They key the GPU entry beyond the CPU effect hash,
+ *        which knows only this effect's own parameters; pass 0 for an effect with neither. The
+ *        publish below must pass the same two values, so a hit reads on identical content.
  */
 PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &ma,
                                                                const MaterialPaintLayer &effect,
@@ -390,6 +592,8 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
                                                                int width,
                                                                int height,
                                                                Span<Image *> images,
+                                                               uint64_t chain_hash,
+                                                               uint64_t input_scalar_hash,
                                                                const PaintLayerEffectGpuHooks &hooks,
                                                                rcti *r_dirty_region,
                                                                void **r_resource);
@@ -402,6 +606,30 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
  * named: an entry that went away while the frame was rendering (a budget eviction, a re-key) simply
  * stays unpublished, and the next frame asks for it again.
  */
+void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
+                                               const MaterialPaintLayer &effect,
+                                               int channel,
+                                               int width,
+                                               int height,
+                                               Span<Image *> images,
+                                               uint64_t chain_hash,
+                                               uint64_t input_scalar_hash);
+
+/**
+ * Transitional overloads for a caller that keys an effect on its own parameters alone (both
+ * fingerprints zero): the combined preview's gather, until it passes the two fingerprints itself.
+ * They exist so the cache and its callers can land in separate steps and stay buildable; the
+ * gather's step removes them with its last use.
+ */
+PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &ma,
+                                                               const MaterialPaintLayer &effect,
+                                                               int channel,
+                                                               int width,
+                                                               int height,
+                                                               Span<Image *> images,
+                                                               const PaintLayerEffectGpuHooks &hooks,
+                                                               rcti *r_dirty_region,
+                                                               void **r_resource);
 void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
                                                const MaterialPaintLayer &effect,
                                                int channel,

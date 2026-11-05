@@ -275,6 +275,7 @@ set(SRC
   intern/paint_layers/paint_layers_material_live.cc
   intern/paint_layers/paint_layers_composite.cc
   intern/paint_layers/paint_layers_composite_height.cc
+  intern/paint_layers/paint_layers_effect_gpu_plan.cc
   intern/paint_layers/paint_layers_composite_intern.hh
   intern/paint_layers/paint_layers_effect_kernels.cc
   intern/paint_layers/paint_layers_edit.cc

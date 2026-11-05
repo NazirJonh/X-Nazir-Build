@@ -13,6 +13,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <utility>
 
@@ -20,6 +21,7 @@
 
 #include "BLI_math_color.h"
 #include "BLI_rect.h"
+#include "BLI_uuid.h"
 
 #include "paint_layers_generate_test_fixture.hh"
 
@@ -1795,7 +1797,7 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_publishes_a_hit_only_after_a_
   /* A key the cache has never seen makes a texture and asks for it to be filled: the entry is not
    * current until the render is stamped onto it. */
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, no_images, hooks, &region, &resource),
+                *ma, *noise, kColor, 8, 8, no_images, 0, 0, hooks, &region, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_NE(resource, nullptr);
   EXPECT_EQ(g_fake_effect_gpu.made, 1);
@@ -1804,10 +1806,10 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_publishes_a_hit_only_after_a_
   EXPECT_EQ(BLI_rcti_size_x(&region), 8);
   EXPECT_EQ(BLI_rcti_size_y(&region), 8);
 
-  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, no_images);
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, no_images, 0, 0);
   resource = nullptr;
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, no_images, hooks, &region, &resource),
+                *ma, *noise, kColor, 8, 8, no_images, 0, 0, hooks, &region, &resource),
             PaintLayerEffectGpuState::Hit);
   EXPECT_EQ(g_fake_effect_gpu.made, 1) << "the same texture serves the next frame";
   EXPECT_EQ(g_fake_effect_gpu.freed, 0);
@@ -1828,11 +1830,11 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_separates_effects_channels_an
   /* Two effects of one row are two instances: their markers differ, so neither can be served the
    * other's grain. */
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *first, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+                *ma, *first, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
-  BKE_paint_layers_effect_gpu_cache_publish(*ma, *first, kColor, 8, 8, no_images);
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *first, kColor, 8, 8, no_images, 0, 0);
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *second, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+                *ma, *second, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 2);
   EXPECT_EQ(g_fake_effect_gpu.made, 2);
@@ -1841,14 +1843,14 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_separates_effects_channels_an
    * entry rather than waiting for the budget to evict it: the description can only ever ask for the
    * parameters the effect carries now. */
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *first, PAINT_MATERIAL_CHANNEL_ROUGHNESS, 8, 8, no_images, hooks, nullptr,
+                *ma, *first, PAINT_MATERIAL_CHANNEL_ROUGHNESS, 8, 8, no_images, 0, 0, hooks, nullptr,
                 &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 3);
   const int made = g_fake_effect_gpu.made;
   ASSERT_TRUE(paint_layer_kind_param_int_set(*first, PAINT_LAYER_NOISE_SEED, 7));
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *first, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+                *ma, *first, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(g_fake_effect_gpu.made, made + 1);
   EXPECT_EQ(g_fake_effect_gpu.freed, 1) << "the entry of the old seed was dropped, not kept";
@@ -1868,16 +1870,16 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_grows_stale_when_the_input_ma
   void *resource = nullptr;
   rcti region;
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, images, hooks, &region, &resource),
+                *ma, *noise, kColor, 8, 8, images, 0, 0, hooks, &region, &resource),
             PaintLayerEffectGpuState::Render);
-  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, images);
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, images, 0, 0);
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, images, hooks, &region, &resource),
+                *ma, *noise, kColor, 8, 8, images, 0, 0, hooks, &region, &resource),
             PaintLayerEffectGpuState::Hit);
 
   BKE_image_partial_update_mark_full_update(map);
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, images, hooks, &region, &resource),
+                *ma, *noise, kColor, 8, 8, images, 0, 0, hooks, &region, &resource),
             PaintLayerEffectGpuState::Render);
   /* A change that is not a rectangle has no region to name, and the whole canvas is the only safe
    * claim over it. */
@@ -1900,11 +1902,11 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_evicts_to_its_budget)
   EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), 0);
   paint_layer_effect_gpu_cache_set_budget(one_canvas);
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *first, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+                *ma, *first, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), one_canvas);
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *second, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+                *ma, *second, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 1);
   EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), one_canvas);
@@ -1917,7 +1919,7 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_evicts_to_its_budget)
   BKE_paint_layers_effect_gpu_cache_free_all();
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 0);
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *first, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+                *ma, *first, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 1);
   EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), one_canvas);
@@ -1935,13 +1937,13 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_reports_a_texture_it_cannot_m
   /* The caller's answer is to fall back to the CPU for the whole stack, so nothing may be held for an
    * effect that failed: the reason strings of `gpu_combined refused` count on it. */
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+                *ma, *noise, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Failed);
   EXPECT_EQ(resource, nullptr);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 0);
   EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), 0);
   /* A stamp of a render nobody asked for finds no entry and holds nothing. */
-  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, no_images);
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, no_images, 0, 0);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 0);
 }
 
@@ -1953,7 +1955,7 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_drops_a_material_with_its_tex
   const Span<Image *> no_images;
   void *resource = nullptr;
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+                *ma, *noise, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 1);
 
@@ -1962,6 +1964,471 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_drops_a_material_with_its_tex
   BKE_paint_layers_effect_gpu_cache_free_material(*ma);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 0);
   EXPECT_EQ(g_fake_effect_gpu.freed, 1);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name GPU Effect Pass Plan, Region & Key (Ф2)
+ *
+ * The pure half of the GPU effect pass: the pass plan, the neighbourhood halo, the region arithmetic
+ * and the two GPU-only key fingerprints, all decided from the effect's kind, parameters and
+ * description without a GPU. \{ */
+
+TEST_F(PaintLayersEffectTest, the_halo_matches_each_kernels_total_coverage)
+{
+  /* Parameters are packed in each kind's schema order, the same order the gather hands the shader. */
+  const auto blur = [](const int shape, const int radius) {
+    return std::array<float, 2>{float(shape), float(radius)};
+  };
+  const auto sharpen = [](const int radius, const float amount) {
+    return std::array<float, 2>{float(radius), amount};
+  };
+  const auto high_pass = [](const int radius, const float contrast, const int output) {
+    return std::array<float, 3>{float(radius), contrast, float(output)};
+  };
+  const auto erode = [](const int mode, const int radius) {
+    return std::array<float, 2>{float(mode), float(radius)};
+  };
+
+  /* A box blur reaches its radius; a soft blur three passes of `max(radius / 2, 1)`. */
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_BLUR, blur(PAINT_LAYER_BLUR_BOX, 5).data(), 100, 100), 5);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(
+                MA_PAINT_LAYER_FILTER_BLUR, blur(PAINT_LAYER_BLUR_GAUSSIAN, 8).data(), 100, 100),
+            12);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_BLUR,
+                                         blur(PAINT_LAYER_BLUR_GAUSSIAN, 1).data(),
+                                         100,
+                                         100),
+            3) << "a radius of one still spends a pass of max(1/2, 1) = 1, three times";
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_SHARPEN, sharpen(3, 0.5f).data(), 100, 100),
+            3);
+  /* A High Pass clamps its radius to the canvas, as the blur box does. */
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_HIGH_PASS,
+                                         high_pass(200, 1.0f, PAINT_LAYER_HIGH_PASS_OUTPUT_COLOR).data(),
+                                         128,
+                                         128),
+            128);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(
+                MA_PAINT_LAYER_FILTER_ERODE_DILATE, erode(PAINT_LAYER_ERODE_DILATE_ERODE, 6).data(), 100, 100),
+            6);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_EDGE_DETECT, nullptr, 100, 100), 1);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_EMBOSS, nullptr, 100, 100), 1);
+  /* A pointwise kind has no neighbourhood to reach. */
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_NOISE, nullptr, 100, 100), 0);
+}
+
+TEST_F(PaintLayersEffectTest, the_pass_plan_matches_each_kernels_shape)
+{
+  Vector<PaintLayerEffectPass> passes;
+  const std::array<float, 2> box{float(PAINT_LAYER_BLUR_BOX), 5.0f};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_BLUR, box.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 2);
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::BlurH);
+  EXPECT_EQ(passes[0].radius, 5);
+  EXPECT_EQ(passes[1].kind, ePaintLayerEffectPass::BlurV);
+  EXPECT_EQ(passes[1].radius, 5);
+  /* The first pass reads the effect's input and every later one the pass before it; a window pass
+   * reads no second buffer, the ping-pong pair carries the whole plan. */
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[1].source, ePaintLayerEffectPassSource::Previous);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
+  EXPECT_EQ(passes[1].aux, ePaintLayerEffectPassAux::None);
+  /* A window pass reaches its radius, and only along its own axis: an H pass never grows the
+   * region's height, a V one never its width. */
+  EXPECT_EQ(passes[0].reach, 5);
+  EXPECT_EQ(passes[0].axis_mask, PAINT_LAYER_EFFECT_AXIS_X);
+  EXPECT_EQ(passes[1].reach, 5);
+  EXPECT_EQ(passes[1].axis_mask, PAINT_LAYER_EFFECT_AXIS_Y);
+
+  const std::array<float, 2> soft{float(PAINT_LAYER_BLUR_GAUSSIAN), 8.0f};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_BLUR, soft.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 6) << "three box pairs approximate the gaussian";
+  for (const PaintLayerEffectPass &pass : passes) {
+    EXPECT_EQ(pass.radius, 4) << "each pass reaches max(8 / 2, 1)";
+    EXPECT_EQ(pass.reach, 4) << "a window pass reaches its radius";
+  }
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  for (int i = 1; i < int(passes.size()); i++) {
+    EXPECT_EQ(passes[i].source, ePaintLayerEffectPassSource::Previous);
+  }
+
+  const std::array<float, 2> sharpen{2.0f, 0.5f};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_SHARPEN, sharpen.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 3);
+  EXPECT_EQ(passes[2].kind, ePaintLayerEffectPass::UnsharpTail);
+  EXPECT_NEAR(passes[2].aux0, 0.5f, 1e-6f);
+  /* The Sharpen tail reads the original against the blur the plan built, and computes its own texel
+   * only, so it reaches nothing. */
+  EXPECT_EQ(passes[2].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[2].aux, ePaintLayerEffectPassAux::Previous);
+  EXPECT_EQ(passes[2].reach, 0);
+
+  /* A High Pass grayscale prepends the luminance, and its tail reads that buffer instead of the
+   * original: the detail is the luminance's own, taken through the sRGB curve. */
+  const std::array<float, 3> hp_gray{4.0f, 1.0f, float(PAINT_LAYER_HIGH_PASS_OUTPUT_GRAYSCALE)};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_HIGH_PASS, hp_gray.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 4);
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::Luminance);
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[3].kind, ePaintLayerEffectPass::HighPassTail);
+  EXPECT_EQ(passes[3].source, ePaintLayerEffectPassSource::Luminance);
+  EXPECT_EQ(passes[3].aux, ePaintLayerEffectPassAux::Previous);
+  EXPECT_NEAR(passes[3].aux0, 1.0f, 1e-6f);
+
+  /* A High Pass written back as colour needs no luminance: the detail is the colour's own. */
+  const std::array<float, 3> hp_color{4.0f, 1.0f, float(PAINT_LAYER_HIGH_PASS_OUTPUT_COLOR)};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_HIGH_PASS, hp_color.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 3);
+  EXPECT_EQ(passes[2].kind, ePaintLayerEffectPass::HighPassTail);
+  EXPECT_EQ(passes[2].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[2].aux, ePaintLayerEffectPassAux::Previous);
+
+  const std::array<float, 2> erode{float(PAINT_LAYER_ERODE_DILATE_DILATE), 6.0f};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_ERODE_DILATE, erode.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 2);
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::ExtremumH);
+  EXPECT_TRUE(passes[0].maximum) << "dilate takes the maximum";
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[1].source, ePaintLayerEffectPassSource::Previous);
+  EXPECT_EQ(passes[0].reach, 6);
+  EXPECT_EQ(passes[0].axis_mask, PAINT_LAYER_EFFECT_AXIS_X);
+  EXPECT_EQ(passes[1].reach, 6);
+  EXPECT_EQ(passes[1].axis_mask, PAINT_LAYER_EFFECT_AXIS_Y);
+
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_EDGE_DETECT, nullptr, 100, 100, passes);
+  ASSERT_EQ(passes.size(), 1);
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::Edge3x3);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
+  /* The Sobel ring reads one texel past on both axes, so the 3x3 grows the region in both. */
+  EXPECT_EQ(passes[0].reach, 1);
+  EXPECT_EQ(passes[0].axis_mask, PAINT_LAYER_EFFECT_AXIS_XY);
+
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_EMBOSS, nullptr, 100, 100, passes);
+  ASSERT_EQ(passes.size(), 1);
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::Emboss3x3);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
+  EXPECT_EQ(passes[0].reach, 1);
+  EXPECT_EQ(passes[0].axis_mask, PAINT_LAYER_EFFECT_AXIS_XY);
+
+  /* A pointwise effect is one pass that reads no neighbour and no second buffer. */
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_NOISE, nullptr, 100, 100, passes);
+  ASSERT_EQ(passes.size(), 1);
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::Noise);
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
+  EXPECT_EQ(passes[0].reach, 0);
+
+  /* The index and count fields let the host tell which pass writes the cache. */
+  EXPECT_EQ(passes[0].pass_index, 0);
+  EXPECT_EQ(passes[0].pass_count, 1);
+}
+
+TEST_F(PaintLayersEffectTest, the_region_grows_by_the_halo_and_clamps_to_the_canvas)
+{
+  rcti dirty;
+  BLI_rcti_init(&dirty, 10, 20, 10, 20);
+  rcti out;
+  BKE_paint_layers_effect_region_clip(dirty, 5, 100, 100, out);
+  EXPECT_EQ(out.xmin, 5);
+  EXPECT_EQ(out.xmax, 25);
+  EXPECT_EQ(out.ymin, 5);
+  EXPECT_EQ(out.ymax, 25);
+
+  /* A halo past an edge clamps to the canvas rather than reading outside it. */
+  BKE_paint_layers_effect_region_clip(dirty, 500, 100, 100, out);
+  EXPECT_EQ(out.xmin, 0);
+  EXPECT_EQ(out.xmax, 100);
+  EXPECT_EQ(out.ymin, 0);
+  EXPECT_EQ(out.ymax, 100);
+
+  /* Nothing moved: an empty region stays empty (there is nothing to recompute). */
+  rcti empty;
+  BLI_rcti_init(&empty, 0, 0, 0, 0);
+  BKE_paint_layers_effect_region_clip(empty, 5, 100, 100, out);
+  EXPECT_TRUE(BLI_rcti_is_empty(&out));
+}
+
+TEST_F(PaintLayersEffectTest,
+       the_pass_regions_cover_the_dirty_grown_by_the_halo_and_each_pass_feeds_the_next)
+{
+  /* Parameters are packed in each kind's schema order, the same order the gather hands the shader. */
+  const auto blur = [](const int shape, const int radius) {
+    return std::array<float, 2>{float(shape), float(radius)};
+  };
+  const auto sharpen = [](const int radius, const float amount) {
+    return std::array<float, 2>{float(radius), amount};
+  };
+  const auto high_pass = [](const int radius, const float contrast, const int output) {
+    return std::array<float, 3>{float(radius), contrast, float(output)};
+  };
+  const auto erode = [](const int mode, const int radius) {
+    return std::array<float, 2>{float(mode), float(radius)};
+  };
+
+  /* Builds the plan, takes one rectangle per pass and checks the two invariants every plan has: the
+   * last pass's band is what keeps the cache from going stale past a stroke, so it must cover the
+   * dirty rectangle grown by the plan's whole halo and clamped; and every pass before it writes one
+   * rectangle more, by the reach the passes after it still read along each axis, so the next pass
+   * samples a neighbourhood its source has already computed. */
+  const auto plan_and_check = [](const eMaterialPaintLayerFilter filter,
+                                 const float *params,
+                                 const rcti &dirty_rect,
+                                 const int width,
+                                 const int height,
+                                 Vector<PaintLayerEffectPass> &r_passes,
+                                 Vector<rcti> &r_rects) {
+    BKE_paint_layers_effect_pass_plan(filter, params, width, height, r_passes);
+    r_rects.reinitialize(r_passes.size());
+    BKE_paint_layers_effect_pass_regions(Span<const PaintLayerEffectPass>(r_passes.data(), r_passes.size()), dirty_rect, 0, width, height, r_rects.as_mutable_span());
+    rcti whole;
+    BKE_paint_layers_effect_region_clip(
+        dirty_rect, BKE_paint_layers_effect_halo(filter, params, width, height), width, height, whole);
+    EXPECT_LE(r_rects.last().xmin, whole.xmin);
+    EXPECT_LE(r_rects.last().ymin, whole.ymin);
+    EXPECT_GE(r_rects.last().xmax, whole.xmax);
+    EXPECT_GE(r_rects.last().ymax, whole.ymax);
+    for (int p = 0; p < int(r_passes.size()) - 1; p++) {
+      const PaintLayerEffectPass &next = r_passes[p + 1];
+      rcti needed = r_rects[p + 1];
+      if ((next.axis_mask & PAINT_LAYER_EFFECT_AXIS_X) != 0) {
+        needed.xmin = std::max(needed.xmin - next.reach, 0);
+        needed.xmax = std::min(needed.xmax + next.reach, width);
+      }
+      if ((next.axis_mask & PAINT_LAYER_EFFECT_AXIS_Y) != 0) {
+        needed.ymin = std::max(needed.ymin - next.reach, 0);
+        needed.ymax = std::min(needed.ymax + next.reach, height);
+      }
+      EXPECT_LE(r_rects[p].xmin, needed.xmin);
+      EXPECT_LE(r_rects[p].ymin, needed.ymin);
+      EXPECT_GE(r_rects[p].xmax, needed.xmax);
+      EXPECT_GE(r_rects[p].ymax, needed.ymax);
+    }
+  };
+
+  rcti dirty;
+  BLI_rcti_init(&dirty, 40, 60, 40, 60);
+  Vector<PaintLayerEffectPass> passes;
+  Vector<rcti> rects;
+
+  /* Every Ф2 kind through the two generic invariants. */
+  const std::array<float, 2> box = blur(PAINT_LAYER_BLUR_BOX, 5);
+  plan_and_check(MA_PAINT_LAYER_FILTER_BLUR, box.data(), dirty, 100, 100, passes, rects);
+  const std::array<float, 2> soft = blur(PAINT_LAYER_BLUR_GAUSSIAN, 8);
+  plan_and_check(MA_PAINT_LAYER_FILTER_BLUR, soft.data(), dirty, 100, 100, passes, rects);
+  /* The numbers further down are the soft blur's; the kinds after it reuse the same vectors. */
+  const Vector<PaintLayerEffectPass> soft_passes = passes;
+  const Vector<rcti> soft_rects = rects;
+  const std::array<float, 2> sharpen_params = sharpen(3, 0.5f);
+  plan_and_check(MA_PAINT_LAYER_FILTER_SHARPEN, sharpen_params.data(), dirty, 100, 100, passes, rects);
+  const std::array<float, 3> hp_gray = high_pass(4, 1.0f, PAINT_LAYER_HIGH_PASS_OUTPUT_GRAYSCALE);
+  plan_and_check(MA_PAINT_LAYER_FILTER_HIGH_PASS, hp_gray.data(), dirty, 100, 100, passes, rects);
+  /* The radius clamps to the canvas, so a 200 on a 128x128 canvas is a 128: the last band is the
+   * whole canvas either way. */
+  const std::array<float, 3> hp_color = high_pass(200, 1.0f, PAINT_LAYER_HIGH_PASS_OUTPUT_COLOR);
+  plan_and_check(MA_PAINT_LAYER_FILTER_HIGH_PASS, hp_color.data(), dirty, 128, 128, passes, rects);
+  const std::array<float, 2> erode_params = erode(PAINT_LAYER_ERODE_DILATE_DILATE, 6);
+  plan_and_check(MA_PAINT_LAYER_FILTER_ERODE_DILATE,
+                 erode_params.data(),
+                 dirty,
+                 100,
+                 100,
+                 passes,
+                 rects);
+  plan_and_check(MA_PAINT_LAYER_FILTER_EDGE_DETECT, nullptr, dirty, 100, 100, passes, rects);
+  plan_and_check(MA_PAINT_LAYER_FILTER_EMBOSS, nullptr, dirty, 100, 100, passes, rects);
+
+  /* Per axis, in numbers: an H pass does not grow the height because the V passes after it already
+   * do, and the other way around -- the widths and the heights move independently. The gaussian is
+   * three pairs of a reach of 4, so the halo is 12 per axis; the first pass (an H one) widens by the
+   * halo plus the 8 the two H passes after it still read, and heightens by the halo plus the 12 the
+   * three V passes read. */
+  ASSERT_EQ(soft_passes.size(), 6);
+  EXPECT_EQ(soft_rects[0].xmin, 20);
+  EXPECT_EQ(soft_rects[0].xmax, 80);
+  EXPECT_EQ(soft_rects[0].ymin, 16);
+  EXPECT_EQ(soft_rects[0].ymax, 84);
+  /* The last pass is a V one: the dirty grown by the whole halo (12 per axis), clamped. */
+  EXPECT_EQ(soft_rects[5].xmin, 28);
+  EXPECT_EQ(soft_rects[5].xmax, 72);
+  EXPECT_EQ(soft_rects[5].ymin, 28);
+  EXPECT_EQ(soft_rects[5].ymax, 72);
+
+  /* A radius past half the canvas pushes the last band over the whole canvas: there is nothing
+   * outside to read, so every texel is recomputed. */
+  rcti small_dirty;
+  BLI_rcti_init(&small_dirty, 2, 5, 2, 5);
+  const std::array<float, 2> big_blur = blur(PAINT_LAYER_BLUR_BOX, 8);
+  plan_and_check(MA_PAINT_LAYER_FILTER_BLUR, big_blur.data(), small_dirty, 8, 8, passes, rects);
+  EXPECT_EQ(rects.last().xmin, 0);
+  EXPECT_EQ(rects.last().xmax, 8);
+  EXPECT_EQ(rects.last().ymin, 0);
+  EXPECT_EQ(rects.last().ymax, 8);
+  const std::array<float, 3> big_high_pass = high_pass(16, 1.0f, PAINT_LAYER_HIGH_PASS_OUTPUT_COLOR);
+  plan_and_check(MA_PAINT_LAYER_FILTER_HIGH_PASS, big_high_pass.data(), small_dirty, 8, 8, passes, rects);
+  EXPECT_EQ(rects.last().xmin, 0);
+  EXPECT_EQ(rects.last().xmax, 8);
+  EXPECT_EQ(rects.last().ymin, 0);
+  EXPECT_EQ(rects.last().ymax, 8);
+
+  /* The chain halo is the band the earlier effect's own re-render changed: the sharpen's input is
+   * the blur's output, so the blur's halo band re-rendered last frame is part of what the sharpen
+   * has to redo, and its last pass must cover the dirty grown by both halos together (5 + 3 = 8). */
+  Vector<PaintLayerEffectPass> sharpen_passes;
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_SHARPEN, sharpen_params.data(), 100, 100, sharpen_passes);
+  Vector<rcti> chained;
+  chained.reinitialize(sharpen_passes.size());
+  BKE_paint_layers_effect_pass_regions(Span<const PaintLayerEffectPass>(sharpen_passes.data(), sharpen_passes.size()), dirty, 5, 100, 100, chained.as_mutable_span());
+  EXPECT_EQ(chained.last().xmin, 32);
+  EXPECT_EQ(chained.last().xmax, 68);
+  EXPECT_EQ(chained.last().ymin, 32);
+  EXPECT_EQ(chained.last().ymax, 68);
+  /* The same plan without the chain halo is strictly narrower: the 5 texels the blur before it in
+   * the row adds are the whole difference. */
+  Vector<rcti> alone;
+  alone.reinitialize(sharpen_passes.size());
+  BKE_paint_layers_effect_pass_regions(Span<const PaintLayerEffectPass>(sharpen_passes.data(), sharpen_passes.size()), dirty, 0, 100, 100, alone.as_mutable_span());
+  EXPECT_LT(chained.last().xmin, alone.last().xmin);
+  EXPECT_LT(chained.last().ymin, alone.last().ymin);
+  EXPECT_GT(chained.last().xmax, alone.last().xmax);
+  EXPECT_GT(chained.last().ymax, alone.last().ymax);
+
+  /* Nothing moved, nothing to compute: every pass gets an empty rectangle, and the caller renders
+   * the whole canvas instead of dispatching. */
+  rcti moved_not;
+  BLI_rcti_init(&moved_not, 0, 0, 0, 0);
+  BKE_paint_layers_effect_pass_regions(Span<const PaintLayerEffectPass>(sharpen_passes.data(), sharpen_passes.size()), moved_not, 0, 100, 100, chained.as_mutable_span());
+  for (const rcti &rect : chained) {
+    EXPECT_TRUE(BLI_rcti_is_empty(&rect));
+  }
+}
+
+TEST_F(PaintLayersEffectTest, the_chain_hash_tracks_the_effects_before_this_one_in_order)
+{
+  Vector<PaintMaterialCompositeCorrection> corrections;
+  const bUUID marker_a = BLI_uuid_generate_random();
+  const bUUID marker_b = BLI_uuid_generate_random();
+  const bUUID marker_target = BLI_uuid_generate_random();
+
+  PaintMaterialCompositeCorrection effect_a;
+  effect_a.effect_marker = marker_a;
+  effect_a.effect_hash = 111;
+  PaintMaterialCompositeCorrection effect_b;
+  effect_b.effect_marker = marker_b;
+  effect_b.effect_hash = 222;
+  PaintMaterialCompositeCorrection target;
+  target.effect_marker = marker_target;
+  target.effect_hash = 333;
+  corrections.append(effect_a);
+  corrections.append(effect_b);
+  corrections.append(target);
+
+  const Span<const PaintMaterialCompositeCorrection> span(corrections.data(), corrections.size());
+  const uint64_t chain = BKE_paint_layers_effect_chain_hash(span, marker_target);
+  EXPECT_NE(chain, 0u);
+
+  /* A change to an earlier effect -- its parameters -- re-keys the later one. */
+  corrections[0].effect_hash = 112;
+  EXPECT_NE(BKE_paint_layers_effect_chain_hash(span, marker_target), chain);
+
+  /* Swapping the order of the effects before the target re-keys it too. */
+  corrections[0].effect_hash = 111;
+  const uint64_t ordered = BKE_paint_layers_effect_chain_hash(span, marker_target);
+  PaintMaterialCompositeCorrection swapped_a = corrections[0];
+  PaintMaterialCompositeCorrection swapped_b = corrections[1];
+  corrections[0] = swapped_b;
+  corrections[1] = swapped_a;
+  EXPECT_NE(BKE_paint_layers_effect_chain_hash(span, marker_target), ordered);
+
+  /* A non-effect correction (nil marker) adds nothing before the target. */
+  PaintMaterialCompositeCorrection plain;
+  plain.opacity = 1.0f;
+  corrections.clear();
+  corrections.append(plain);
+  corrections.append(target);
+  const Span<const PaintMaterialCompositeCorrection> span2(corrections.data(), corrections.size());
+  const Span<const PaintMaterialCompositeCorrection> none;
+  EXPECT_EQ(BKE_paint_layers_effect_chain_hash(span2, marker_target),
+            BKE_paint_layers_effect_chain_hash(none, marker_target))
+      << "no effect precedes the target, so the fingerprint is the empty fold";
+}
+
+TEST_F(PaintLayersEffectTest, the_input_scalar_hash_sees_a_flat_colour_edit)
+{
+  PaintMaterialCompositeImageLayer entry;
+  entry.has_constant_color = true;
+  entry.constant_color[0] = 0.5f;
+  entry.constant_color[1] = 0.5f;
+  entry.constant_color[2] = 0.5f;
+  entry.constant_color[3] = 1.0f;
+  const uint64_t base = BKE_paint_layers_effect_input_scalar_hash(entry);
+
+  entry.constant_color[0] = 0.6f;
+  EXPECT_NE(BKE_paint_layers_effect_input_scalar_hash(entry), base)
+      << "a flat row colour is part of the effect's input";
+}
+
+TEST_F(PaintLayersEffectTest, the_input_scalar_hash_sees_the_gradient_and_the_reader)
+{
+  /* A live Anchor Point reader is described by its identity, not its pixels: a map version carries
+   * none of it, so the reader's uuid and its slice hash key the GPU entry the way a flat colour
+   * does. */
+  PaintMaterialCompositeImageLayer entry;
+  PaintMaterialCompositeCorrection reader;
+  reader.anchor_point_reader = BLI_uuid_generate_random();
+  reader.anchor_point_hash = 7;
+  entry.content_corrections.append(reader);
+  const uint64_t live = BKE_paint_layers_effect_input_scalar_hash(entry);
+
+  entry.content_corrections[0].anchor_point_hash = 8;
+  const uint64_t rehashed = BKE_paint_layers_effect_input_scalar_hash(entry);
+  EXPECT_NE(rehashed, live) << "the slice hash is the reader's own fingerprint";
+
+  entry.content_corrections[0].anchor_point_reader = {};
+  const uint64_t detached = BKE_paint_layers_effect_input_scalar_hash(entry);
+  EXPECT_NE(detached, live);
+  EXPECT_NE(detached, rehashed) << "no reader is another input, not the live one with new data";
+
+  /* A gradient generator's payload rides the same way: the map version carries none of it, so the
+   * generator and its payload key the GPU entry the way a flat colour does. */
+  PaintMaterialCompositeImageLayer plain;
+  const uint64_t without_gradient = BKE_paint_layers_effect_input_scalar_hash(plain);
+  plain.gradient.enabled = true;
+  plain.gradient.scalar_start = 0.25f;
+  const uint64_t with_gradient = BKE_paint_layers_effect_input_scalar_hash(plain);
+  EXPECT_NE(with_gradient, without_gradient) << "an enabled generator is part of the described input";
+
+  plain.gradient.scalar_start = 0.5f;
+  const uint64_t moved_ends = BKE_paint_layers_effect_input_scalar_hash(plain);
+  EXPECT_NE(moved_ends, with_gradient) << "the scalar ends are the generator's own content";
+
+  plain.gradient.payload.midpoint = 0.3f;
+  EXPECT_NE(BKE_paint_layers_effect_input_scalar_hash(plain), moved_ends)
+      << "the payload's midpoint bends the ramp, so it keys the entry too";
+}
+
+TEST_F(PaintLayersEffectTest, the_gpu_cache_keys_on_the_chain_and_scalar_fingerprints)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  const PaintLayerEffectGpuHooks hooks = fake_gpu_hooks();
+  const Span<Image *> no_images;
+  void *resource = nullptr;
+
+  /* Published under one fingerprint, the same effect is a hit; a different chain or input-scalar
+   * fingerprint is a new key and a re-render (the entry of the old parameters is dropped). */
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *blur, kColor, 8, 8, no_images, 0xAAu, 0xBBu, hooks, nullptr, &resource),
+            PaintLayerEffectGpuState::Render);
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *blur, kColor, 8, 8, no_images, 0xAAu, 0xBBu);
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *blur, kColor, 8, 8, no_images, 0xAAu, 0xBBu, hooks, nullptr, &resource),
+            PaintLayerEffectGpuState::Hit);
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *blur, kColor, 8, 8, no_images, 0xAAu, 0xCCu, hooks, nullptr, &resource),
+            PaintLayerEffectGpuState::Render)
+      << "a different input-scalar fingerprint is a different entry";
 }
 
 /** \} */

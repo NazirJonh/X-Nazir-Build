@@ -1227,10 +1227,12 @@ bool combined_preview_gpu_update(const Material &ma,
   }
   bke::paint_perf::ScopedTimer perf_total("gpu_combined.total");
   /* A CPU shading of the whole canvas per check, so only every so often; of the Combined pass only,
-   * the one the CPU preview can be compared with. */
+   * the one the CPU preview can be compared with. Offset 60, not 0: the first calls are a cold
+   * frame at the workspace switch, before the caches have warmed, and verifying there would compare
+   * a preview that is not what the settled display shows. */
   static int verify_calls = 0;
   gpu_verify_due = pass == PAINT_LAYER_PASS_COMBINED && gpu_verify_enabled() &&
-                   (verify_calls++ % 120) == 0;
+                   (verify_calls++ % 120) == 60;
   /* The channel a channel pass shows, or -1 for the Combined preview, which lays them all. */
   int wanted_channel = -1;
   if (pass != PAINT_LAYER_PASS_COMBINED) {
@@ -3114,6 +3116,19 @@ void combined_preview_gpu_verify(Main &bmain,
     return;
   }
   gpu_verify_due = false;
+
+  /* Reading a texture without HOST_READ usage is refused by the API assert in a debug build and
+   * undefined in the backends, so skip the check rather than read what must not be read. Said once
+   * per session: the check runs every 120th Combined frame, the message would repeat with it. */
+  static bool host_read_missing_reported = false;
+  if ((GPU_texture_usage(output) & GPU_TEXTURE_USAGE_HOST_READ) == 0) {
+    if (!host_read_missing_reported) {
+      host_read_missing_reported = true;
+      printf("[PBR-PERF] gpu_verify: the display texture has no HOST_READ usage, check skipped\n");
+      fflush(stdout);
+    }
+    return;
+  }
 
   const int2 size(GPU_texture_width(output), GPU_texture_height(output));
   Vector<float> gpu_pixels(int64_t(size.x) * size.y * 4);

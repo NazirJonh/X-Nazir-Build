@@ -4771,6 +4771,23 @@ bool BKE_paint_material_mask_alpha_active(const BrushMaterialPaint &brush_paint)
          (brush_paint.mask_flag & BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH) != 0;
 }
 
+std::optional<eMaterialPaintChannel> BKE_paint_material_mask_source_channel(
+    const BrushMaterialPaint &brush_paint)
+{
+  switch (eBrushMaterialPaintMaskSource(brush_paint.mask_source)) {
+    case BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA:
+      if (BKE_paint_material_mask_alpha_active(brush_paint)) {
+        return PAINT_MATERIAL_CHANNEL_ALPHA;
+      }
+      return std::nullopt;
+    case BRUSH_MATERIAL_PAINT_MASK_SOURCE_BASE_COLOR:
+      return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+    case BRUSH_MATERIAL_PAINT_MASK_SOURCE_COVERAGE:
+      break;
+  }
+  return std::nullopt;
+}
+
 float BKE_paint_material_mask_texel_coverage(const float4 &rgba,
                                              const bool use_alpha,
                                              const bool invert)

@@ -1836,6 +1836,16 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
   return intensity;
 }
 
+bool BKE_brush_mask_texture_invert_get(const Brush &brush)
+{
+  return (brush.flag2 & BRUSH_MASK_TEXTURE_INVERT) != 0;
+}
+
+float BKE_brush_mask_tex_coverage_finish(const Brush &brush, const float raw)
+{
+  return BKE_brush_mask_coverage_finish(BKE_brush_mask_texture_invert_get(brush), raw);
+}
+
 float BKE_brush_sample_masktex(
     const Paint *paint, Brush *br, const float2 &point, const int thread, ImagePool *pool)
 {
@@ -1950,7 +1960,19 @@ float BKE_brush_sample_masktex(
 
   CLAMP(intensity, 0.0f, 1.0f);
 
-  return BKE_brush_mask_tex_pressure_apply(*br, *paint, intensity);
+  return BKE_brush_mask_tex_influence_apply(
+      paint,
+      BKE_brush_mask_tex_coverage_finish(
+          *br, BKE_brush_mask_tex_pressure_apply(*br, *paint, intensity)));
+}
+
+float BKE_brush_mask_tex_influence_apply(const Paint *paint, const float coverage)
+{
+  if (paint == nullptr || paint->runtime == nullptr) {
+    return coverage;
+  }
+  /* 1 means no clipping, so a weakened factor pulls the coverage toward it. */
+  return blender::math::interpolate(1.0f, coverage, paint->runtime->mask_influence_random_value);
 }
 
 float BKE_brush_mask_tex_pressure_apply(const Brush &brush, const Paint &paint, float value)
@@ -2140,7 +2162,8 @@ float BKE_brush_mask_tex_area_coverage(const Brush &brush,
                                        const float2 &aspect_correction,
                                        const int thread,
                                        ImagePool *pool,
-                                       const bke::BrushMaskLut *lut)
+                                       const bke::BrushMaskLut *lut,
+                                       const bool apply_influence_random)
 {
   const MTex &mask_mtex = brush.mask_mtex;
   if (mask_mtex.tex == nullptr) {
@@ -2176,7 +2199,11 @@ float BKE_brush_mask_tex_area_coverage(const Brush &brush,
     RE_texture_evaluate(&mask_mtex, co, thread, pool, false, false, &value, rgba);
   }
   value = math::clamp(value - brush.texture_sample_bias, 0.0f, 1.0f);
-  return paint != nullptr ? BKE_brush_mask_tex_pressure_apply(brush, *paint, value) : value;
+  if (paint != nullptr) {
+    value = BKE_brush_mask_tex_pressure_apply(brush, *paint, value);
+  }
+  value = BKE_brush_mask_tex_coverage_finish(brush, value);
+  return apply_influence_random ? BKE_brush_mask_tex_influence_apply(paint, value) : value;
 }
 
 /* -------------------------------------------------------------------- */

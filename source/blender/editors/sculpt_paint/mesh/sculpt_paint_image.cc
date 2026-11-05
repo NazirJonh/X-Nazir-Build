@@ -1652,18 +1652,14 @@ static Array<RowFactorCache> compute_paint_row_factors(
             if (mask_coverage_channel && active_sampler != nullptr) {
               /* A Mask source texture is the stroke's coverage, not its value: the value written
                * stays the brush's, so black texels leave the mask as it was instead of
-               * overwriting it. */
+               * overwriting it. The sampler resolves the Mask Source's invert and its precomputed
+               * coverage once per stroke, so this loop only samples. */
               const Span<material::TexelSampleContext> contexts =
                   tile_cache.row_contexts[row_i].as_span().slice(range);
               const int thread_id = BLI_task_parallel_thread_id(nullptr);
-              const bool is_color = *mask_coverage_channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
               for (const int i : range.index_range()) {
-                const float coverage =
-                    is_color ? BKE_paint_material_mask_luminance(active_sampler->color(
-                                   *mask_coverage_channel, contexts[i], thread_id)) :
-                               active_sampler->scalar(
-                                   *mask_coverage_channel, contexts[i], thread_id);
-                factors[i] *= math::clamp(coverage, 0.0f, 1.0f);
+                factors[i] *= active_sampler->mask_coverage(
+                    *mask_coverage_channel, contexts[i], thread_id);
               }
             }
             else if (active_sampler != nullptr) {

@@ -919,6 +919,7 @@ if(WITH_GTESTS)
     intern/paint_material_combined_test.cc
     intern/paint_material_composite_test.cc
     intern/paint_material_resolve_test.cc
+    intern/paint_strength_random_test.cc
     intern/paint_test.cc
     intern/paint_vector_test.cc
     intern/path_templates_test.cc

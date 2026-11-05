@@ -46,7 +46,7 @@ struct OverlayTexelMode {
   /** #Kind::MaskCoverage: the selected source is the Alpha channel, so use its alpha while the
    * texel is not opaque and luminance otherwise (see #BKE_paint_material_mask_texel_coverage). */
   bool use_alpha = false;
-  /** #Kind::MaskCoverage: the Alpha channel's Source Invert. */
+  /** #Kind::MaskCoverage: the Mask Source's invert (#BrushMaterialPaint.mask_source_invert). */
   bool invert = false;
 
   /** Part of the cached overlay's identity: a change must rebuild the texture. */

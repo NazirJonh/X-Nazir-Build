@@ -648,7 +648,15 @@ def mask_texture_grid_display_mode(context):
     return tool_settings.mask_texture_grid_display_view3d
 
 
-def draw_mask_texture_panel(layout, context, brush, *, is_popover=False, show_grid=True):
+def _slot_row_button(row):
+    """A sub-row beside a slot's two-unit drop row, unaligned so it keeps rounded corners."""
+    button = row.row(align=False)
+    button.scale_y = 2.0
+    return button
+
+
+def draw_mask_texture_panel(layout, context, brush, *, is_popover=False, show_grid=True,
+                            show_invert=True):
     """The Mask slot's texture grid and placement settings.
 
     Shared by the stock Texture Mask panel and the PBR channels panel. The Mask clips the stroke's
@@ -658,6 +666,10 @@ def draw_mask_texture_panel(layout, context, brush, *, is_popover=False, show_gr
     With ``show_grid=False`` only the placement settings are drawn. The PBR panel needs them next
     to the slot row, but must not put the image grid there: it competed with the channel rows for
     image drops.
+
+    ``mask_texture_strength_random`` is deliberately not gated by ``show_invert``: the PBR panel
+    draws Invert itself beside the slot row, but the influence random still belongs to this shared
+    block so the stock panel never loses it.
     """
     if brush is None:
         return None
@@ -682,6 +694,10 @@ def draw_mask_texture_panel(layout, context, brush, *, is_popover=False, show_gr
         col.operator("brush.stencil_reset_transform").mask = True
 
     col.prop(brush, "use_pressure_masking", text="Pressure Masking")
+    if show_invert and mask_tex_slot.texture is not None:
+        col.prop(brush, "use_mask_texture_invert", text="Invert")
+    if mask_tex_slot.texture is not None:
+        col.prop(brush, "mask_texture_strength_random", text="Mask Influence Random", slider=True)
     # angle and texture_angle_source
     if mask_tex_slot.has_texture_angle:
         angle_col = col.column()
@@ -736,9 +752,48 @@ def draw_pbr_mask_slot(layout, context, brush):
     if not panel:
         return
 
-    draw_texture_drop_row(panel, brush.mask_texture_slot, "texture", "Mask")
+    material_paint = brush.material_paint
+    use_grid = material_paint is not None and material_paint.use_mask_grid_source_picker
+    texture = brush.mask_texture_slot.texture
+    broken_image_slot = texture is not None and texture.type == 'IMAGE' and texture.image is None
+
+    if use_grid:
+        # The grid template draws the slot row itself (browse / open / unlink and its own collapse
+        # arrow), exactly like the stock Texture Mask panel, so no second slot row is drawn here.
+        draw_brush_texture_image_grid(
+            panel, brush.mask_texture_slot, mask_texture_grid_display_mode(context),
+            is_popover=False,
+        )
+        if texture is not None:
+            # The template owns its row, so the mirror toggle sits right under it.
+            panel.prop(brush, "use_mask_texture_invert", text="Invert",
+                       icon='ARROW_LEFTRIGHT', toggle=True)
+    else:
+        row = draw_texture_drop_row(panel, brush.mask_texture_slot, "texture", "Mask")
+        # `template_ID_browser` scales its own row to two units, so match it or the buttons would
+        # sit half as tall beside it. Unaligned so they keep their rounded corners.
+        if broken_image_slot:
+            # A texture without an image cannot be sampled; offer a way to drop the broken slot.
+            clear = _slot_row_button(row)
+            clear.label(text="", icon='ERROR')
+            clear.operator("paint.mask_texture_clear", text="", icon='X')
+        if texture is not None:
+            # Same icon toggle in the slot's own row as the channels' Source Invert.
+            invert = _slot_row_button(row)
+            invert.prop(brush, "use_mask_texture_invert", text="", icon='ARROW_LEFTRIGHT',
+                        toggle=True)
+
+    if material_paint is not None and paint_mask_target_active(context):
+        # Shortcuts to the Mask-target stroke settings (same properties as the PBR Paint panel
+        # above); they act on strokes that paint the Mask, not on this clip texture.
+        panel.separator()
+        panel.prop(material_paint, "mask_source")
+        if material_paint.mask_source_has_texture:
+            panel.prop(material_paint, "use_mask_source_invert", text="Invert Source")
+        _draw_material_paint_strength_random(panel, material_paint, mask_stroke=True)
+
     panel.separator()
-    draw_mask_texture_panel(panel, context, brush, show_grid=False)
+    draw_mask_texture_panel(panel, context, brush, show_grid=False, show_invert=False)
 
 
 class TextureMaskPanel(BrushPanel):
@@ -1351,6 +1406,10 @@ class PAINT_MT_material_paint_mask_socket(Menu):
         mask_tex_slot = brush.mask_texture_slot
         layout.prop(mask_tex_slot, "mask_map_mode", text="Mapping")
         layout.prop(brush, "use_pressure_masking", text="Pressure Masking")
+        if brush.material_paint is not None:
+            layout.separator()
+            layout.prop(brush.material_paint, "use_mask_grid_source_picker",
+                        text="Source Picker: Grid")
 
 
 class PAINT_MT_material_layer_channel_socket(Menu):
@@ -2674,8 +2733,7 @@ def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True
         # `template_ID_browser` scales its own row to two units for the paint-slot rows, so match
         # that height here or this button would sit half as tall beside it, with a visible seam.
         # Unaligned so the button keeps its rounded corners, see the row comment above.
-        clear = row.row(align=False)
-        clear.scale_y = 2.0
+        clear = _slot_row_button(row)
         if broken_image_slot:
             # IMAGE texture without an image cannot be sampled. `source_image` already reads as
             # unset in this state, so `template_ID`'s own unlink button never appears; offer an
@@ -2689,10 +2747,11 @@ def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True
     # Layer channels share this drawer but have no inversion; only a brush's Alpha and Height do.
     if (channel.channel in {'ALPHA', 'HEIGHT'} and texture is not None and
             "use_source_invert" in channel.bl_rna.properties):
-        # Inverts the texture itself, so it holds for every read of Alpha (stroke mask and Mask
-        # value alike). Matched to the browser's two-unit row height like the buttons above.
-        invert = row.row(align=False)
-        invert.scale_y = 2.0
+        # Inverts the texture itself, so it holds for every read of this channel as a value. The
+        # Mask Source has its own invert (#use_mask_source_invert on the brush's material paint),
+        # drawn beside the Mask value pair, so the two never have to move together. Matched to the
+        # browser's two-unit row height like the buttons above.
+        invert = _slot_row_button(row)
         invert.prop(channel, "use_source_invert", text="", icon='ARROW_LEFTRIGHT', toggle=True)
 
     if use_grid:
@@ -2701,8 +2760,7 @@ def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True
         # Wrapped in its own row and matched to `template_ID_browser`'s two-unit row height (see
         # the comment above), or the icon would sit top-aligned against the taller browse button.
         # Drawn last (after Clear Source) so it always sits at the row's right edge.
-        toggle = row.row(align=False)
-        toggle.scale_y = 2.0
+        toggle = _slot_row_button(row)
         toggle.prop(
             channel,
             "show_source_grid",
@@ -2729,7 +2787,18 @@ def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True
     # #PAINT_MT_material_paint_channel_socket.
 
 
-def _draw_material_paint_shared_mapping(layout, material_paint, *, show_map_mode=True):
+def _draw_material_paint_strength_random(layout, material_paint, *, mask_stroke):
+    """Draw the one active Strength Random: the Mask variant on a Mask stroke, else the channel one."""
+    layout.prop(
+        material_paint,
+        "mask_strength_random" if mask_stroke else "strength_random",
+        text="Mask Strength Random" if mask_stroke else "Strength Random",
+        slider=True,
+    )
+
+
+def _draw_material_paint_shared_mapping(layout, material_paint, *,
+                                        show_map_mode=True):
     """Mapping shared by every channel's source texture: Mapping mode, Size (X/Y only), Angle.
 
     Drawn once, in the Image Transform Settings panel above the channel toggles, instead of once per
@@ -2738,7 +2807,8 @@ def _draw_material_paint_shared_mapping(layout, material_paint, *, show_map_mode
     to tile together) need identical mapping to stay aligned, so there is deliberately no
     per-channel override and no Offset control.
     Below the texture mapping, Size Random varies the brush dab size itself per stroke step; the
-    value is shared by every channel, since the dab geometry is shared too.
+    value is shared by every channel, since the dab geometry is shared too. Strength Random is drawn
+    by #_draw_material_paint_strength_random where the panel can keep it visible.
 
     \a show_map_mode is false for the Shape tools: their Mask Source texture is placed in the
     shape's own frame, where Area/View projection has no meaning. Size, Angle and the random
@@ -2955,11 +3025,15 @@ def _mask_value_target(context, brush):
 
 
 def draw_mask_alpha_source(layout, context, brush, *, channel=None):
-    """Mask Source and the Alpha source inversion that select what the Mask stroke reads.
+    """Mask Source and its inversion that select what the Mask stroke reads.
 
     Drawn beside the value pair so switching between Alpha and a color-based source does not
     require opening the Brush Material panel. The source choice is shown even when a color-based
-    source currently owns the value. Returns ``True`` when the Alpha pair is the value source.
+    source currently owns the value. The inversion is the Mask Source's own
+    (#BrushMaterialPaint.use_mask_source_invert): it mirrors the coverage of any textured source
+    and never touches the channels' own reads. Whether the source is textured is the resolved
+    ``mask_source_has_texture``, so this panel and the stroke cannot disagree on where the invert
+    applies. Returns ``True`` when the Alpha pair is the value source.
     """
     if channel is None:
         channel = _mask_alpha_channel(context, brush)
@@ -2967,8 +3041,8 @@ def draw_mask_alpha_source(layout, context, brush, *, channel=None):
     if material_paint is None:
         return False
     layout.prop(material_paint, "mask_source")
-    if channel is not None and "use_source_invert" in channel.bl_rna.properties:
-        layout.prop(channel, "use_source_invert", text="Invert Source")
+    if material_paint.mask_source_has_texture:
+        layout.prop(material_paint, "use_mask_source_invert", text="Invert Source")
     return channel is not None
 
 
@@ -3170,6 +3244,8 @@ def draw_material_paint_channels(
     is_mask_target = paint_mask_target_active(context)
     if is_mask_target:
         layout.prop(material_paint, "mask_source")
+        if material_paint.mask_source_has_texture:
+            layout.prop(material_paint, "use_mask_source_invert", text="Invert Source")
     layout.separator()
 
     # Use one aligned grid_flow so channel toggles wrap when the panel is too narrow.
@@ -3234,9 +3310,17 @@ def draw_material_paint_channels(
         header.label(text="Image Transform Settings")
         if panel:
             panel.active = has_source_mapping
+            shape_tool = paint_shape_tool_active(context)
             _draw_material_paint_shared_mapping(
-                panel, material_paint, show_map_mode=not paint_shape_tool_active(context),
+                panel,
+                material_paint,
+                show_map_mode=not shape_tool,
             )
+        layout.separator()
+    if not paint_shape_tool_active(context):
+        # Strength Random does not depend on a source texture or its mapping, so it is drawn
+        # outside the collapsed Image Transform panel where it would otherwise stay hidden.
+        _draw_material_paint_strength_random(layout, material_paint, mask_stroke=is_mask_target)
         layout.separator()
 
     # Wrapped rows of fixed-width toggles; see #_draw_material_paint_channel_toggles.

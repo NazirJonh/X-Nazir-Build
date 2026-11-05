@@ -1870,6 +1870,15 @@ float3 BKE_paint_material_channel_stroke_color_get(
 bool BKE_paint_material_mask_alpha_active(const BrushMaterialPaint &brush_paint);
 
 /**
+ * The channel a Mask stroke reads its source texture from, chosen by
+ * #BrushMaterialPaint::mask_source: Alpha only while #BKE_paint_material_mask_alpha_active,
+ * Base Color always, Coverage never. The editors and RNA share this one rule, so the brush panel
+ * and the stroke cannot disagree about what the Mask Source resolves to.
+ */
+std::optional<eMaterialPaintChannel> BKE_paint_material_mask_source_channel(
+    const BrushMaterialPaint &brush_paint);
+
+/**
  * Scalar value written by a Mask stroke, chosen by #BrushMaterialPaint::mask_source.
  * Alpha reads the Alpha channel value (or its secondary value on invert); the pair is always live
  * for the Erase brush too, whose Mask-mode stroke writes one of the two values. It falls back to

@@ -16,6 +16,7 @@
 #include <optional>
 
 #include "BLI_array.hh"
+#include "BLI_math_base.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_utildefines.h"
@@ -323,14 +324,59 @@ float BKE_brush_sample_tex_3d(const Paint *paint,
                               int thread,
                               ImagePool *pool,
                               bool apply_texture_clip = true);
+/**
+ * Mask Texture coverage at \a point for the legacy (non-Area) mapping modes.
+ *
+ * The result includes the per-dab Mask Influence Random
+ * (#bke::PaintRuntime::mask_influence_random_value), so it depends on stroke state: outside a
+ * stroke, and between dabs, the runtime value is 1.0 and the coverage is the configured one.
+ * Callers that preview the mask while a stroke is running must not use this function (see
+ * #BKE_brush_mask_tex_area_coverage's \a apply_influence_random).
+ */
 float BKE_brush_sample_masktex(
     const Paint *paint, Brush *br, const float2 &point, int thread, ImagePool *pool);
 
 /**
- * Applies #Brush.mask_pressure to a Mask Texture sample. Shared by #BKE_brush_sample_masktex and
- * the PBR stroke paths that sample #Brush.mask_mtex with surface-mapped coordinates.
+ * Applies the RAMP/CUTOFF #Brush.mask_pressure curve to a Mask Texture sample. Shared by
+ * #BKE_brush_sample_masktex and the PBR stroke paths that sample #Brush.mask_mtex with
+ * surface-mapped coordinates. The slot's own invert is applied afterward by
+ * #BKE_brush_mask_tex_coverage_finish.
  */
 float BKE_brush_mask_tex_pressure_apply(const Brush &brush, const Paint &paint, float value);
+
+/**
+ * Weaken the finished Mask coverage by this dab's random factor
+ * (#Brush.mask_texture_strength_random through #bke::PaintRuntime::mask_influence_random_value):
+ * the result blends from 1 (no clipping) to \a coverage. Applied after the slot's invert, so it
+ * scales the mask the stroke actually uses. Returns \a coverage unchanged without a paint runtime.
+ *
+ * This reads per-dab stroke state (#bke::PaintRuntime::mask_influence_random_value), which is 1.0
+ * between dabs and outside a stroke. Any caller outside a stroke therefore sees the unweakened
+ * coverage; a caller that runs during a stroke but must preview the configured mask (the cursor)
+ * passes \a apply_influence_random = false where available instead of relying on that.
+ */
+float BKE_brush_mask_tex_influence_apply(const Paint *paint, float coverage);
+
+/**
+ * The one clamp-then-mirror rule for Mask Texture coverage: clamped to 0..1, then inverted
+ * (`1 - c`) when \a invert is set. Shared by the Mask slot (#Brush.mask_mtex) and the Mask Source
+ * coverage (#material::mask_coverage_finish), so neither path reimplements the formula.
+ */
+inline float BKE_brush_mask_coverage_finish(const bool invert, const float raw)
+{
+  const float clamped = math::clamp(raw, 0.0f, 1.0f);
+  return invert ? 1.0f - clamped : clamped;
+}
+
+/**
+ * Whether the Mask slot (#Brush.mask_mtex) mirrors its coverage: #Brush.use_mask_texture_invert,
+ * stored in #Brush.flag2 as #BRUSH_MASK_TEXTURE_INVERT. Independent of the Mask Source's invert.
+ * Defined in brush.cc so this header does not need the full #Brush definition.
+ */
+bool BKE_brush_mask_texture_invert_get(const Brush &brush);
+
+/** #BKE_brush_mask_coverage_finish applied with the Mask slot's own invert. */
+float BKE_brush_mask_tex_coverage_finish(const Brush &brush, float raw);
 
 namespace bke {
 
@@ -395,6 +441,10 @@ class BrushMaskLut {
  * \param rake_rotation: The slot's rake/random angle the stroke folded into
  * #bke::PaintRuntime::brush_rotation_sec; 0 when there is no stroke.
  * \param aspect_correction: See #BKE_brush_get_aspect_correction for #Brush.mask_mtex.
+ * \param apply_influence_random: When true, applies this dab's
+ * #bke::PaintRuntime::mask_influence_random_value (see #BKE_brush_mask_tex_influence_apply).
+ * Overlay previews pass false: the random factor is per dab and must not make the cursor show a
+ * different mask than the one the user configured.
  * \return 1 when no Mask texture is assigned.
  */
 float BKE_brush_mask_tex_area_coverage(const Brush &brush,
@@ -404,7 +454,8 @@ float BKE_brush_mask_tex_area_coverage(const Brush &brush,
                                        const float2 &aspect_correction,
                                        int thread,
                                        ImagePool *pool,
-                                       const bke::BrushMaskLut *lut = nullptr);
+                                       const bke::BrushMaskLut *lut = nullptr,
+                                       bool apply_influence_random = true);
 
 /**
  * Scale to apply to the texture sampling coordinates so that a non-square image texture keeps its

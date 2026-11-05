@@ -1383,6 +1383,48 @@ static wmOperatorStatus material_channel_source_clear_exec(bContext *C, wmOperat
   return OPERATOR_FINISHED;
 }
 
+/** The Mask texture belongs to the active paint brush, not to the active object. */
+static bool mask_texture_clear_poll(bContext *C)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  return paint != nullptr && BKE_paint_brush(paint) != nullptr;
+}
+
+static wmOperatorStatus mask_texture_clear_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint brush");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Drop the whole Tex, not just its image: this also recovers a broken image texture (its image
+   * was deleted from Main) and clears a procedural texture, neither of which the image-wrapping
+   * browser row can express unsetting on its own. */
+  if (brush->mask_mtex.tex != nullptr) {
+    id_us_min(&brush->mask_mtex.tex->id);
+    brush->mask_mtex.tex = nullptr;
+  }
+
+  BKE_brush_tag_unsaved_changes(brush);
+  /* The cursor overlay caches the mask texture it previews. */
+  BKE_paint_invalidate_overlay_all();
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_mask_texture_clear(wmOperatorType *ot)
+{
+  ot->name = "Clear Mask Texture";
+  ot->idname = "PAINT_OT_mask_texture_clear";
+  ot->description = "Remove the brush's Mask texture";
+  ot->exec = mask_texture_clear_exec;
+  ot->poll = mask_texture_clear_poll;
+  /* Not registered: this is a picker button, so the redo panel it would raise is noise. */
+  ot->flag = OPTYPE_UNDO | OPTYPE_INTERNAL;
+}
+
 void PAINT_OT_material_channel_source_clear(wmOperatorType *ot)
 {
   ot->name = "Clear Source";
@@ -3470,6 +3512,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_stack_layer_copy);
   WM_operatortype_append(PAINT_OT_stack_layer_paste);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);
+  WM_operatortype_append(PAINT_OT_mask_texture_clear);
   WM_operatortype_append(PAINT_OT_material_channel_source_image_set);
   WM_operatortype_append(PAINT_OT_material_paint_channels_assign_images);
   WM_operatortype_append(PAINT_OT_material_canvas_cycle);

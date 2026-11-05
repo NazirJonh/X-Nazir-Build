@@ -258,8 +258,7 @@ static wmOperatorStatus image_select_delete_exec(bContext *C, wmOperator *op)
   /* Every target of a Mask-mode row IS the mask map: the resolvers name it through Base Color
    * and refuse the row's other channels there. The shared BKE rule still decides per target, so
    * a Content-mode target or a mask whose generated fill is not opaque takes the plain erase. */
-  const bool mask_mode = BKE_paint_layers_target_mode(&settings.paint_mode) ==
-                         PaintLayersTargetMode::Mask;
+  const bool mask_mode = BKE_paint_layers_target_is_mask(settings.paint_mode);
 
   Vector<ImageSelectDeletePending> pending;
   const Vector<ImagePaintSelectionTarget> targets = image_select_delete_targets_get(C);

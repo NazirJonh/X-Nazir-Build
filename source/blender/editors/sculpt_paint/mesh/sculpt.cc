@@ -6071,8 +6071,21 @@ void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
                                                   cache.location;
   float feather = calc_symmetry_feather(sd, symm, symm_mesh, feather_location, cache.radius);
 
-  cache.bstrength = forced_bstrength.value_or(
-      brush_strength(sd, cache, feather, paint_mode_settings));
+  /* PBR Strength Random (#BrushMaterialPaint::strength_random via
+   * #PaintRuntime::strength_random_value): scale this step's dab strength. The stroke step draws
+   * the factor once per dab and every channel and symmetry pass of the dab shares it; recomputing
+   * from the base strength each time (instead of accumulating into #StrokeCache::bstrength) keeps
+   * the value pinned to this step. Non-PBR strokes always carry 1.0. A caller-forced strength is
+   * already the final value (a re-stamp with a frozen strength), so randomness must not scale it:
+   * that would weaken an already-final pass and make the result irreproducible. */
+  if (forced_bstrength) {
+    cache.bstrength = *forced_bstrength;
+  }
+  else {
+    const float random = sd.paint.runtime != nullptr ? sd.paint.runtime->strength_random_value :
+                                                       1.0f;
+    cache.bstrength = brush_strength(sd, cache, feather, paint_mode_settings) * random;
+  }
 
   /* `symm` is a bit combination of XYZ -
    * 1 is mirror X; 2 is Y; 3 is XY; 4 is Z; 5 is XZ; 6 is YZ; 7 is XYZ */

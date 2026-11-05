@@ -318,6 +318,16 @@ struct BrushMaterialPaint {
    * #bke::PaintRuntime::size_random_value.
    */
   float size_random = 0.0f;
+  /**
+   * Random strength variation per stroke step, 0..1. Each dab multiplies the stroke strength by
+   * `1 - strength_random * rand`, i.e. only lowers it by up to this fraction; 0 keeps the strength
+   * untouched. Read for every channel a stroke paints except the Mask, which uses
+   * #mask_strength_random instead (a stroke writes either the Mask or channels, never both). The
+   * transient per-dab factor lives in #bke::PaintRuntime::strength_random_value.
+   */
+  float strength_random = 0.0f;
+  /** Same random strength reduction as #strength_random, read while the stroke paints the Mask. */
+  float mask_strength_random = 0.0f;
   /** #eBrushMaterialPaintSourceMode. */
   char source_mode = 0;
   /** #eBrushMaterialPaintSourceLayout. */
@@ -332,10 +342,32 @@ struct BrushMaterialPaint {
    * are switched to the locked default by `versioning_520.cc`.
    */
   char shared_mapping_scale_lock = 1;
-  /* #source_material is pointer-aligned: 4 (size_random) + 2 (modes) + 2 (mask flag) + 1 (scale
-   * lock) + these 3 bytes of padding keep the int + pointer pair below on their natural boundaries
-   * without hidden compiler padding. */
-  char _pad2[3] = {};
+  /**
+   * Inverts the Mask Source texture's coverage (`1 - c`) while the brush paints the Mask. Lives in
+   * former padding, so the struct layout is unchanged. Independent of the channels' own
+   * #BrushMaterialPaintChannel.source_invert, so it covers every source the Mask can select (Alpha
+   * and Base Color alike) without ever touching ordinary - non-Mask - strokes: the mask paths read
+   * it, the per-channel scalar reads never do. Files written before the field existed carry the
+   * Alpha channel's flag here, see `versioning_520.cc`.
+   */
+  char mask_source_invert = 0;
+  /**
+   * #eBrushMaterialPaintSourceSelectMode. UI-only; how the Mask texture is picked in the Mask
+   * panel: Image Browser popover (0) or the inline preview grid. Lives in former padding, so the
+   * struct layout is unchanged.
+   */
+  char mask_source_select_mode = 0;
+  /**
+   * UI-only: collapses the inline preview grid shown when #mask_source_select_mode is Grid.
+   * Stored inverted (hide) so files that predate the field read 0 = shown without a doversion.
+   * Lives in former padding, so the struct layout is unchanged.
+   */
+  char hide_mask_source_grid = 0;
+  /* #source_material is pointer-aligned: 4 (size_random) + 4 (strength_random) + 4
+   * (mask_strength_random) + 2 (modes) + 2 (mask flag) + 1 (scale lock) + 1 (mask source invert)
+   * + 1 (mask source select mode) + 1 (hide mask source grid) keep the int + pointer pair below
+   * on their natural boundaries without hidden compiler padding.
+   */
   /**
    * Side of the square bake buffer in pixels. Deliberately smaller than
    * #PaintModeSettings.new_channel_image_size: this is a scratch buffer several channels of which
@@ -797,6 +829,15 @@ struct Brush {
 
   float mask_stencil_pos[2] = {256, 256};
   float mask_stencil_dimension[2] = {256, 256};
+
+  /**
+   * Random per-dab weakening of the Mask texture's influence, 0..1: each dab scales the slot's
+   * coverage toward "no clipping" by `1 - amount * rand` (0 keeps the mask untouched). The
+   * transient factor lives in #bke::PaintRuntime::mask_influence_random_value. Older files read 0.
+   */
+  float mask_texture_strength_random = 0.0f;
+  /* Keeps the pointers below on their 8-byte boundary. */
+  char _pad_mask_strength_random[4] = {};
 
   struct BrushGpencilSettings *gpencil_settings = nullptr;
   struct BrushCurvesSculptSettings *curves_sculpt_settings = nullptr;

@@ -1418,6 +1418,7 @@ void PAINT_OT_layer_source_make_local(wmOperatorType *ot);
 void PAINT_OT_stack_layer_copy(wmOperatorType *ot);
 void PAINT_OT_stack_layer_paste(wmOperatorType *ot);
 void PAINT_OT_material_channel_source_clear(wmOperatorType *ot);
+void PAINT_OT_mask_texture_clear(wmOperatorType *ot);
 void PAINT_OT_material_channel_source_image_set(wmOperatorType *ot);
 void PAINT_OT_material_paint_channels_assign_images(wmOperatorType *ot);
 void PAINT_OT_material_canvas_cycle(wmOperatorType *ot);

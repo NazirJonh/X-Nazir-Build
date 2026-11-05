@@ -60,6 +60,7 @@
 #include "paint_dab_timing.hh"
 #include "paint_material_blend.hh"
 #include "paint_material_source.hh"
+#include "paint_mask_coverage_cache.hh"
 #include "sculpt_intern.hh"
 
 namespace blender::ed::sculpt_paint::material {
@@ -144,18 +145,8 @@ static bool channel_source_image_direct_ok(const Tex *tex, const MTex *mtex, con
 
 std::optional<eMaterialPaintChannel> mask_source_channel_get(const BrushMaterialPaint &brush_paint)
 {
-  switch (eBrushMaterialPaintMaskSource(brush_paint.mask_source)) {
-    case BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA:
-      if (BKE_paint_material_mask_alpha_active(brush_paint)) {
-        return PAINT_MATERIAL_CHANNEL_ALPHA;
-      }
-      return std::nullopt;
-    case BRUSH_MATERIAL_PAINT_MASK_SOURCE_BASE_COLOR:
-      return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
-    case BRUSH_MATERIAL_PAINT_MASK_SOURCE_COVERAGE:
-      break;
-  }
-  return std::nullopt;
+  /* Thin wrapper over the BKE rule so the RNA brush panel and this module cannot disagree. */
+  return BKE_paint_material_mask_source_channel(brush_paint);
 }
 
 float paint_mask_texture_coverage(const Brush &brush,
@@ -178,7 +169,11 @@ float paint_mask_texture_coverage(const Brush &brush,
     float4 rgba;
     float value = BKE_brush_sample_tex_3d(paint, &brush, &mask_mtex, point, rgba, thread, pool);
     value = math::clamp(value, 0.0f, 1.0f);
-    return paint != nullptr ? BKE_brush_mask_tex_pressure_apply(brush, *paint, value) : value;
+    if (paint != nullptr) {
+      value = BKE_brush_mask_tex_pressure_apply(brush, *paint, value);
+    }
+    return BKE_brush_mask_tex_influence_apply(paint,
+                                              BKE_brush_mask_tex_coverage_finish(brush, value));
   }
 
   const bool region_available = view_point_2d.x >= 0.0f && view_point_2d.y >= 0.0f;
@@ -275,21 +270,32 @@ float mask_source_coverage_at_uv(const ChannelUvSampler &sampler,
   if (!channel || !sampler.has_texture_source(*channel)) {
     return 1.0f;
   }
+  float coverage;
   if (*channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
-    return math::clamp(
+    coverage = math::clamp(
         BKE_paint_material_mask_luminance(sampler.color_at_uv(*channel, uv, thread)), 0.0f, 1.0f);
   }
-  if (*channel == PAINT_MATERIAL_CHANNEL_ALPHA) {
+  else if (*channel == PAINT_MATERIAL_CHANNEL_ALPHA) {
     /* An alpha mask commonly stores its coverage in the image's alpha while RGB is black.
      * Luminance would then be zero over the whole mask. Opaque images (alpha == 1) keep the
      * long-standing intensity path, so grayscale mask images still work. */
     const float alpha = sampler.alpha_at_uv(*channel, uv, thread);
     if (alpha < 0.999f) {
-      const bool invert = brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].source_invert != 0;
-      return BKE_paint_material_mask_texel_coverage(float4(0.0f, 0.0f, 0.0f, alpha), true, invert);
+      coverage = math::clamp(alpha, 0.0f, 1.0f);
+    }
+    else {
+      /* Raw scalar: the channel's own Source Invert must not double with the Mask Source's one
+       * below, so this read skips it (see #ChannelUvSampler::scalar_coverage_at_uv). */
+      coverage = sampler.scalar_coverage_at_uv(*channel, uv, thread);
     }
   }
-  return math::clamp(sampler.scalar_at_uv(*channel, uv, thread), 0.0f, 1.0f);
+  else {
+    coverage = sampler.scalar_coverage_at_uv(*channel, uv, thread);
+  }
+  /* The Mask Source's invert mirrors whatever the selected source reduced to - Alpha and Base
+   * Color alike - and is applied here, once, instead of inside each per-texel branch, through the
+   * module's shared rule (the branches above are already clamped; the second clamp is a no-op). */
+  return mask_coverage_finish(mask_source_invert_get(brush_paint), coverage);
 }
 
 void mask_values_flip(Paint &paint, Brush &brush)
@@ -608,6 +614,7 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
           source.ibuf = bake_ != nullptr ?
                             const_cast<ImBuf *>(bake_->channel_image(info.channel)) :
                             nullptr;
+          source.baked_revision = bake_ != nullptr ? bake_->revision() : 0;
           BKE_paint_material_channel_effective_mtex(brush_paint, channel, source.effective_mtex);
           source.effective_mtex.tex = nullptr;
           source.mtex = &source.effective_mtex;
@@ -979,6 +986,18 @@ static bool sample_layout_image(const DirectSampleLayout &layout,
   const float px = u * float(layout.ibuf_x);
   const float py = v * float(layout.ibuf_y);
 
+  if (layout.coverage_pixels != nullptr) {
+    /* A Mask Source's precomputed coverage: single channel, and the same placement math as the
+     * image branches below - the reduction happened once per source texel, not once per dab. */
+    const float value = interpolate_bilinear_channel_fl(
+        layout.coverage_pixels, layout.ibuf_x, layout.ibuf_y, px, py, layout.wrap);
+    if (r_value != nullptr) {
+      *r_value = value;
+    }
+    r_rgba = float4(value, value, value, 1.0f);
+    return true;
+  }
+
   if (layout.float_pixels != nullptr && layout.alpha_weighted) {
     r_rgba = interpolate_bilinear_alpha_weighted_fl(
         layout.float_pixels, layout.ibuf_x, layout.ibuf_y, px, py, layout.wrap);
@@ -1336,6 +1355,54 @@ static void sample_channel_source(const ChannelSourceSet &sources,
       layout, sources, source, ss, brush, ctx, thread, area_local_mat, r_value, r_rgba);
 }
 
+/**
+ * Where \a tex_x / \a tex_y land in \a source's pixel grid: the placement #ChannelSourceSet
+ * ::sample_image_direct applies (Size / Offset on top of the already mapped coordinates, then the
+ * FLAT mapping to [0, 1], with the #TEX_CLIP bounds checked against the source's texture). Shared
+ * with the coverage read below, whose precomputed grey must land exactly where this sampler puts
+ * the source's colors.
+ *
+ * \param r_px, r_py: pixel coordinates matching #imagewrap's `fx * ibuf->x` (no half-texel
+ *                     offset).
+ * \param r_wrap: whether out-of-grid coordinates repeat rather than clamp (no #Tex, or
+ *                #TEX_REPEAT).
+ * \return false when the placement falls outside #TEX_CLIP bounds; the caller reports an empty
+ *         sample, exactly as #sample_image_direct does.
+ */
+static bool sample_image_direct_placement(const ChannelSourceSet::ChannelSource &source,
+                                          const float tex_x,
+                                          const float tex_y,
+                                          float *r_px,
+                                          float *r_py,
+                                          bool *r_wrap)
+{
+  const MTex *mtex = source.mtex;
+  const Tex *tex = mtex->tex;
+  const ImBuf *ibuf = source.ibuf;
+
+  /* Same placement as #RE_texture_evaluate: size/ofs applied again on top of the already
+   * mapped \a tex_x / \a tex_y, then #do_2d_mapping for #MTEX_FLAT. */
+  const float vx = mtex->size[0] * (tex_x + mtex->ofs[0]);
+  const float vy = mtex->size[1] * (tex_y + mtex->ofs[1]);
+  const float u = (vx + 1.0f) * 0.5f;
+  const float v = (vy + 1.0f) * 0.5f;
+
+  if (tex != nullptr && tex->extend == TEX_CLIP) {
+    const int x = int(math::floor(u * float(ibuf->x)));
+    const int y = int(math::floor(v * float(ibuf->y)));
+    if (x < 0 || y < 0 || x >= ibuf->x || y >= ibuf->y) {
+      return false;
+    }
+  }
+
+  /* Pixel coordinates matching #imagewrap's `fx * ibuf->x` (no half-texel offset). */
+  *r_px = u * float(ibuf->x);
+  *r_py = v * float(ibuf->y);
+  /* Image and Baked have no #Tex, so repeat is their complete extension description. */
+  *r_wrap = tex == nullptr || tex->extend == TEX_REPEAT;
+  return true;
+}
+
 bool ChannelSourceSet::sample_image_direct(const ChannelSource &source,
                                            const float tex_x,
                                            const float tex_y,
@@ -1359,29 +1426,15 @@ bool ChannelSourceSet::sample_image_direct(const ChannelSource &source,
     return false;
   }
 
-  /* Same placement as #RE_texture_evaluate: size/ofs applied again on top of the already
-   * mapped \a tex_x / \a tex_y, then #do_2d_mapping for #MTEX_FLAT. */
-  const float vx = mtex->size[0] * (tex_x + mtex->ofs[0]);
-  const float vy = mtex->size[1] * (tex_y + mtex->ofs[1]);
-  const float u = (vx + 1.0f) * 0.5f;
-  const float v = (vy + 1.0f) * 0.5f;
-
-  if (tex != nullptr && tex->extend == TEX_CLIP) {
-    const int x = int(math::floor(u * float(ibuf->x)));
-    const int y = int(math::floor(v * float(ibuf->y)));
-    if (x < 0 || y < 0 || x >= ibuf->x || y >= ibuf->y) {
-      r_rgba = float4(0.0f);
-      if (r_value != nullptr) {
-        *r_value = 0.0f;
-      }
-      return true;
+  float px, py;
+  bool wrap;
+  if (!sample_image_direct_placement(source, tex_x, tex_y, &px, &py, &wrap)) {
+    r_rgba = float4(0.0f);
+    if (r_value != nullptr) {
+      *r_value = 0.0f;
     }
+    return true;
   }
-
-  /* Pixel coordinates matching #imagewrap's `fx * ibuf->x` (no half-texel offset). */
-  const float px = u * float(ibuf->x);
-  const float py = v * float(ibuf->y);
-  const bool wrap = tex == nullptr || tex->extend == TEX_REPEAT;
 
   if (ibuf->float_data() != nullptr) {
     if (source.alpha_weighted) {
@@ -1402,6 +1455,37 @@ bool ChannelSourceSet::sample_image_direct(const ChannelSource &source,
   if (r_value != nullptr) {
     *r_value = IMB_colormanagement_get_luminance(r_rgba);
   }
+  return true;
+}
+
+bool ChannelSourceSet::sample_image_direct_coverage(const ChannelSource &source,
+                                                    const MaskSourceCoverage &coverage,
+                                                    const float tex_x,
+                                                    const float tex_y,
+                                                    float *r_value,
+                                                    float4 &r_rgba) const
+{
+  if (source.mtex == nullptr || source.ibuf == nullptr || !coverage.matches(*source.ibuf)) {
+    /* No placement to apply, or the grey was not built for this grid: the caller samples the
+     * image itself, exactly as when the source is not directly sampleable. */
+    return false;
+  }
+  float px, py;
+  bool wrap;
+  if (!sample_image_direct_placement(source, tex_x, tex_y, &px, &py, &wrap)) {
+    /* Outside the clip bounds: the same empty grey #sample_image_direct reports. */
+    r_rgba = float4(0.0f);
+    if (r_value != nullptr) {
+      *r_value = 0.0f;
+    }
+    return true;
+  }
+  const float value = interpolate_bilinear_channel_fl(
+      coverage.data().data(), coverage.width(), coverage.height(), px, py, wrap);
+  if (r_value != nullptr) {
+    *r_value = value;
+  }
+  r_rgba = float4(value, value, value, 1.0f);
   return true;
 }
 
@@ -1483,6 +1567,16 @@ ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
       brush_paint_(brush_paint),
       sources_(brush_paint, settings, visible_material_channels, resolve_mask_source)
 {
+  /* A Mask stroke resolves its one source channel here, once per stroke: the invert flag and the
+   * precomputed coverage become members, so a texel loop never re-reads the brush. */
+  if (resolve_mask_source && sources_.is_active()) {
+    const std::optional<eMaterialPaintChannel> mask_channel = mask_source_channel_get(brush_paint);
+    if (mask_channel && sources_.source(*mask_channel).usable) {
+      mask_coverage_channel_ = *mask_channel;
+      mask_invert_ = mask_source_invert_get(brush_paint);
+      mask_coverage_ = mask_source_coverage_cache_get(brush_paint, sources_, settings);
+    }
+  }
 }
 
 bool ChannelSourceSampler::is_active() const
@@ -1511,6 +1605,16 @@ void ChannelSourceSampler::update_area_local_mats(const Object &ob)
       continue;
     }
     area_local_mats_[i] = calc_area_local_mat(ob, source.mtex->rot, plane_normal);
+  }
+  if (mask_coverage_ != nullptr) {
+    /* Rebuild the coverage layout in the same per-dab pass, so a texel loop never builds one: the
+     * layout reads the same mapping state the matrices above do, and #mask_coverage samples
+     * through it as-is. */
+    const ChannelSource &source = sources_.source(*mask_coverage_channel_);
+    DirectSampleLayout layout = make_direct_sample_layout_sculpt(
+        source, ss_, brush_, area_local_mat_for(*mask_coverage_channel_, source));
+    attach_direct_sample_coverage(layout, *mask_coverage_);
+    mask_coverage_layout_ = std::move(layout);
   }
 }
 
@@ -1605,6 +1709,86 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
                         &value,
                         rgba);
   return scalar_source_finish(brush_paint_, channel, range, value);
+}
+
+float ChannelSourceSampler::mask_coverage(const eMaterialPaintChannel channel,
+                                          const TexelSampleContext &ctx,
+                                          const int thread) const
+{
+  const ChannelSource &source = sources_.source(channel);
+  if (source.kind == ChannelSourceKind::Constant) {
+    /* No texture, hence no pattern: the constant's own grey is the same at every texel. Base
+     * Color reads its luminance, Alpha its x - the same reduction the non-constant branches
+     * below apply to a sampled texel. */
+    const float raw = (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) ?
+                          BKE_paint_material_mask_luminance(float3(source.constant_value)) :
+                          source.constant_value.x;
+    return mask_coverage_finish(mask_invert_, raw);
+  }
+  if (!source.usable) {
+    return 1.0f;
+  }
+
+  /* Directly sampleable sources read the precomputed coverage through the same placement the
+   * per-texel path would build, so the mapping (Area / View / Stencil, Size / Offset) still
+   * decides where the buffer is read. The layout itself was built once for this dab by
+   * #update_area_local_mats (see #mask_coverage_layout_), so the loop over the stroke's texels
+   * only samples. The texture bias rides on the sample the same way it rides on #scalar's value
+   * (Area subtracts, the view-relative modes add), which is the scalar convention a coverage read
+   * follows - identical to the color path's own bias handling at the default bias of zero. */
+  if (mask_coverage_ != nullptr && channel == mask_coverage_channel_) {
+    if (mask_coverage_layout_.coverage_pixels != nullptr) {
+      float value;
+      float4 rgba;
+      if (sample_direct_layout(
+              mask_coverage_layout_, ctx.symm_point, ctx.view_point_2d, &value, rgba))
+      {
+        return mask_coverage_finish(mask_invert_, value);
+      }
+    }
+    /* Target UV placement has no layout; the coverage replaces #ChannelSourceSet::sample_baked
+     * stride-for-stride. */
+    if (source.kind == ChannelSourceKind::Baked && source.baked_target_uv && ctx.uv.x >= 0.0f &&
+        mask_coverage_->matches(*source.ibuf))
+    {
+      return mask_coverage_finish(mask_invert_,
+                                  mask_coverage_->sample_unit_wrap(ctx.uv.x, ctx.uv.y));
+    }
+  }
+
+  /* No cache for this source - procedural texture, alpha-weighted layer bake, oversized image:
+   * sample and reduce on the fly, one texel at a time. The channel's own Source Invert is NOT
+   * applied here (unlike #scalar below): the Mask Source's invert is the only mirror a Mask
+   * coverage read applies, and it happens once, in #mask_coverage_finish. */
+  float value;
+  float4 rgba;
+  if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    sample_channel_source(sources_,
+                          source,
+                          ss_,
+                          brush_,
+                          ctx,
+                          thread,
+                          area_local_mat_for(channel, source),
+                          nullptr,
+                          rgba);
+    if (source.do_linear_conversion) {
+      IMB_colormanagement_colorspace_to_scene_linear_v3(rgba, source.colorspace);
+    }
+    value = BKE_paint_material_mask_luminance(float3(rgba.x, rgba.y, rgba.z));
+  }
+  else {
+    sample_channel_source(sources_,
+                          source,
+                          ss_,
+                          brush_,
+                          ctx,
+                          thread,
+                          area_local_mat_for(channel, source),
+                          &value,
+                          rgba);
+  }
+  return mask_coverage_finish(mask_invert_, value);
 }
 
 bool ChannelSourceSampler::needs_linear_conversion(const eMaterialPaintChannel channel) const
@@ -1771,6 +1955,27 @@ float ChannelUvSampler::scalar_at_uv(const eMaterialPaintChannel channel,
   }
   const float2 range = stored_scalar_range(settings_, channel);
   return scalar_source_finish(brush_paint_, channel, range, value);
+}
+
+float ChannelUvSampler::scalar_coverage_at_uv(const eMaterialPaintChannel channel,
+                                              const float2 &uv,
+                                              const int thread) const
+{
+  const ChannelSourceSet::ChannelSource &source = sources_.source(channel);
+  if (source.kind == ChannelSourceKind::Constant) {
+    return math::clamp(source.constant_value.x, 0.0f, 1.0f);
+  }
+  if (!source.usable) {
+    return 1.0f;
+  }
+  float value;
+  float4 rgba;
+  if (!sample_channel_source_at_uv(sources_, source, uv, thread, &value, rgba, unit_uv_space_)) {
+    return 1.0f;
+  }
+  /* No Source Invert here (see the declaration): the Mask Source's invert applies once, where
+   * this raw scalar becomes coverage. */
+  return math::clamp(value, 0.0f, 1.0f);
 }
 
 float ChannelUvSampler::alpha_at_uv(const eMaterialPaintChannel channel,
@@ -2449,25 +2654,10 @@ namespace blender::ed::sculpt_paint::shape {
 
 namespace {
 
-/** FNV-1a over the values that decide what a Mask Source resolves to. */
-class IdentityHasher {
-  uint64_t hash_ = 0xcbf29ce484222325ULL;
-
- public:
-  template<typename T> void mix(const T &value)
-  {
-    uint64_t bits;
-    if constexpr (std::is_floating_point_v<T>) {
-      bits = std::bit_cast<uint32_t>(float(value));
-    }
-    else if constexpr (std::is_pointer_v<T>) {
-      bits = uintptr_t(value);
-    }
-    else {
-      bits = uint64_t(value);
-    }
-    hash_ = (hash_ ^ bits) * 0x100000001b3ULL;
-  }
+/** #material::IdentityHasher extended with the shape mapping, whose placement is part of what a
+ * Mask Source resolves to (see #mask_source_key). */
+struct ShapeMaskHasher : public material::IdentityHasher {
+  using material::IdentityHasher::mix;
 
   void mix(const ShapeMaskMapping &mapping)
   {
@@ -2477,12 +2667,6 @@ class IdentityHasher {
     this->mix(mapping.rotation_random);
     this->mix(mapping.scale_random);
     this->mix(mapping.seed);
-  }
-
-  /** Never zero: zero means "no identity" to the callers. */
-  uint64_t get() const
-  {
-    return hash_ | 1;
   }
 };
 
@@ -2516,10 +2700,11 @@ uint64_t mask_source_signature(const material::ChannelSourceSet &sources,
     return 1;
   }
   const material::ChannelSourceSet::ChannelSource &source = sources.source(*channel);
-  IdentityHasher hasher;
-  /* The channel decides the coverage rule (alpha versus luminance) even over the same image. */
+  ShapeMaskHasher hasher;
+  /* The channel decides the coverage rule (alpha versus luminance) even over the same image, and
+   * the Mask Source's invert mirrors the coverage for every channel it selects. */
   hasher.mix(int(*channel));
-  hasher.mix(brush_paint.channels[*channel].source_invert);
+  hasher.mix(material::mask_source_invert_get(brush_paint));
   hasher.mix(int(source.kind));
   hasher.mix(source.usable);
   hasher.mix(source.image);
@@ -2546,12 +2731,14 @@ uint64_t mask_source_key(const BrushMaterialPaint &brush_paint,
     return 0;
   }
   const BrushMaterialPaintChannel &source = brush_paint.channels[*channel];
-  IdentityHasher hasher;
+  ShapeMaskHasher hasher;
   hasher.mix(int(*channel));
   hasher.mix(brush_paint.source_mode);
   hasher.mix(source.source_mtex.tex);
   hasher.mix(source.source_mtex.tex ? source.source_mtex.tex->ima : nullptr);
-  hasher.mix(source.source_invert);
+  /* The Mask Source's own invert, not the channel's: the shape coverage mirrors through
+   * #mask_source_invert_get for every channel the Mask selects. */
+  hasher.mix(material::mask_source_invert_get(brush_paint));
   hasher.mix(mode_settings.layer_target_mode);
   hasher.mix(paint.visible_material_channels);
   /* Size / Angle / Random are baked into the resolved source's mapping, so a cached source must be

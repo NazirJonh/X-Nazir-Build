@@ -389,13 +389,16 @@ static float load_tex_mask_coverage(const LoadTexData &data,
                                     ImagePool *pool,
                                     const int thread_id)
 {
+  /* Preview the configured mask, not this dab's random weakening. */
   return BKE_brush_mask_tex_area_coverage(*data.br,
                                           data.paint,
                                           float2(x, y),
                                           data.mask_rotation,
                                           data.mask_aspect_correction,
                                           thread_id,
-                                          pool);
+                                          pool,
+                                          nullptr,
+                                          false);
 }
 
 static void load_tex_task_cb_ex(void *__restrict userdata,
@@ -570,8 +573,15 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
       else {
         avg += br->texture_sample_bias;
 
-        /* Clamp to avoid precision overflow. */
-        CLAMP(avg, 0.0f, 1.0f);
+        /* The secondary overlay previews the Mask slot itself, so it follows the slot's invert as
+         * well as its clamp; the primary texture keeps the plain clamp. */
+        if (mtex == &br->mask_mtex) {
+          avg = BKE_brush_mask_tex_coverage_finish(*br, avg);
+        }
+        else {
+          /* Clamp to avoid precision overflow. */
+          CLAMP(avg, 0.0f, 1.0f);
+        }
 
         /* Store as premultiplied RGBA: RGB = avg (intensity), A = avg.
          * This is compatible with GPU_BLEND_ALPHA_PREMULT used in 2D overlay,

@@ -80,6 +80,15 @@ class MaterialSourceBake {
   const ImBuf *channel_image(eMaterialPaintChannel channel) const;
   /** Meaningful only when #resolution is #ChannelResolution::Constant. */
   float4 channel_constant(eMaterialPaintChannel channel) const;
+  /**
+   * Monotonic identity of this bake result, distinct for every bake that lands. Derived caches
+   * that sample #channel_image without owning it key on this, so a fresh bake of the same material
+   * and size cannot be mistaken for the one it replaced.
+   */
+  uint64_t revision() const;
+
+ private:
+  uint64_t revision_ = 0;
 };
 
 /**

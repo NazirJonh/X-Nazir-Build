@@ -146,6 +146,7 @@ set(SRC
   mesh/paint_hide.cc
   mesh/paint_image.cc
   mesh/paint_image_2d.cc
+  mesh/paint_image_2d_mask_coverage.cc
   mesh/paint_image_fill_faces.cc
   mesh/paint_image_mask_filters.cc
   mesh/paint_image_paint_mask_island.cc
@@ -192,6 +193,7 @@ set(SRC
   mesh/paint_material_attribute.cc
   mesh/paint_material_source.cc
   mesh/paint_mask.cc
+  mesh/paint_mask_coverage_cache.cc
   mesh/paint_vertex.cc
   mesh/paint_vertex_color_ops.cc
   mesh/paint_vertex_weight_ops.cc
@@ -312,7 +314,10 @@ set(SRC
   mesh/paint_image_shape_composite.hh
   mesh/paint_image_uv_geom.hh
   mesh/paint_image_uv_symmetry.hh
+  mesh/paint_image_2d_mask_coverage.hh
+  mesh/paint_identity_hash.hh
   mesh/paint_mask.hh
+  mesh/paint_mask_coverage_cache.hh
   mesh/paint_vertex_channel_mask.hh
   mesh/sculpt_automask.hh
   mesh/sculpt_boundary.hh
@@ -412,6 +417,7 @@ if(WITH_GTESTS)
     curves/sculpt_multi_object_test.cc
     mesh/mesh_brush_common_tests.cc
     mesh/paint_gradient_core_tests.cc
+    mesh/paint_mask_coverage_cache_test.cc
     paint_gradient_curve_test.cc
     mesh/paint_test.cc
     tests/paint_image_select_warp_tests.cc

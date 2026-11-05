@@ -869,6 +869,16 @@ MaterialPaintLayer *paint_layers_mask_add_image(bContext &C,
 
 }  // namespace ed::sculpt_paint
 
+/* `paint_mask_coverage_cache.cc` — the Mask Source coverage registry */
+
+namespace ed::sculpt_paint::material {
+
+/** Drop every cached Mask Source coverage (called from #ED_editors_exit, when the file the
+ * entries were keyed on is replaced or wound down). */
+void mask_source_coverage_cache_free_all();
+
+}  // namespace ed::sculpt_paint::material
+
 /* `paint_image_select_view3d.cc` — 3D Viewport overlay for image selection mask */
 
 /** Free 3D image-selection state owned by \a v3d (called from space_view3d). */

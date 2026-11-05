@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 
+#include "BLI_math_base.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
@@ -20,8 +21,11 @@
 #include "BKE_brush.hh"
 #include "BKE_paint_layers_target.hh"
 
+#include "DNA_brush_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
+
+#include "paint_identity_hash.hh"
 
 namespace blender {
 struct ARegion;
@@ -39,6 +43,7 @@ struct Object;
 struct Paint;
 struct PaintModeSettings;
 struct SculptSession;
+struct Tex;
 }  // namespace blender
 
 namespace blender::ocio {
@@ -57,6 +62,7 @@ namespace blender::ed::sculpt_paint::material {
 
 struct TexelSampleContext;
 class ChannelUvSampler;
+class MaskSourceCoverage;
 
 /** Which #MTex::brush_map_mode a #DirectSampleLayout was built for. */
 enum class DirectSampleKind : int8_t {
@@ -128,6 +134,14 @@ struct DirectSampleLayout {
   /** Pinned source image, filled once per chunk when #kind is not Disabled. */
   const float *float_pixels = nullptr;
   const uchar *byte_pixels = nullptr;
+  /**
+   * Precomputed Mask Source coverage (one float per texel of the same grid #float_pixels /
+   * #byte_pixels belong to), set by #attach_direct_sample_coverage in place of the image buffers.
+   * When set, #sample_direct_layout returns this buffer's bilinear sample as the intensity and
+   * leaves the colors grey - the caller reads the scalar only. The mapping fields above still
+   * decide WHERE it is sampled, so the cache key carries no placement.
+   */
+  const float *coverage_pixels = nullptr;
   int ibuf_x = 0;
   int ibuf_y = 0;
   bool wrap = false;
@@ -198,6 +212,30 @@ float scalar_source_finish(const BrushMaterialPaint &brush_paint,
                            const float2 &range,
                            float sampled);
 
+/**
+ * Whether the Mask Source texture's coverage is mirrored (`1 - c` after the 0..1 clamp) while the
+ * brush paints the Mask: #BrushMaterialPaint.mask_source_invert.
+ *
+ * Mask paths only. Unlike the Alpha and Height channels' own #BrushMaterialPaintChannel
+ * .source_invert, this flag is never read by an ordinary - non-Mask - stroke, so a Base Color
+ * source keeps its colors everywhere else. Resolved once per stroke (or painter), never inside a
+ * texel loop.
+ */
+inline bool mask_source_invert_get(const BrushMaterialPaint &brush_paint)
+{
+  return brush_paint.mask_source_invert != 0;
+}
+
+/**
+ * The final coverage of a Mask Source read: clamped and optionally mirrored by
+ * #BKE_brush_mask_coverage_finish, shared by every stroke-side read (sculpt sampler, Image Editor
+ * 2D, UV sampler). The formula itself lives in BKE; this is only the module-local name.
+ */
+inline float mask_coverage_finish(const bool invert, const float raw)
+{
+  return BKE_brush_mask_coverage_finish(invert, raw);
+}
+
 /** The two flat values a Mask operation writes for a primary and an inverted stroke. */
 struct MaskValuePair {
   float primary = 0.0f;
@@ -213,9 +251,11 @@ MaskValuePair mask_value_pair_get(const BrushMaterialPaint &brush_paint,
                                   const Brush &brush);
 
 /**
- * Coverage multiplier a Mask Source texture contributes at \a uv. One is returned when the
+ * Coverage of the brush's Mask Source texture at \a uv. One is returned when the
  * selected source has no usable texture (Coverage, a missing image, or no source at all). A Base
- * Color sample is reduced to its scene-linear luminance, exactly as in the Mask stroke path.
+ * Color sample is reduced to its scene-linear luminance, exactly as in the Mask stroke path, and
+ * the Mask Source's own invert (#mask_source_invert_get) mirrors the result - applied here once,
+ * in the one place this module's coverage rule ends.
  */
 float mask_source_coverage_at_uv(const ChannelUvSampler &sampler,
                                  const BrushMaterialPaint &brush_paint,
@@ -357,6 +397,12 @@ class ChannelSourceSet {
     bool image_direct_sample = false;
     /** Baked channels normally use brush placement; this preserves explicit Target UV placement. */
     bool baked_target_uv = false;
+    /**
+     * #ed::material_bake::MaterialSourceBake::revision of the bake #ibuf belongs to, 0 for every
+     * other kind. Baked buffers have no #Image and hence no #ImageRuntime::pixel_version, so a
+     * derived cache keys on this to notice a replacement.
+     */
+    uint64_t baked_revision = 0;
   };
 
  private:
@@ -397,6 +443,23 @@ class ChannelSourceSet {
                            float tex_y,
                            float *r_value,
                            float4 &r_rgba) const;
+
+  /**
+   * Sample the precomputed #MaskSourceCoverage of \a source at the same (\a tex_x, \a tex_y)
+   * #sample_image_direct takes, through the same placement (#MTEX_FLAT, Size / Offset, clip
+   * bounds, repeat wrap) - the one placement both the colors and the precomputed grey are read
+   * through, so the 2D engine's coverage path cannot drift from this sampler.
+   *
+   * \return false when this source has no placement, no buffer, or a coverage that was not built
+   * for its grid; the caller samples the image itself. A sample inside the placement but outside
+   * #TEX_CLIP reports the empty grey and true, like #sample_image_direct does.
+   */
+  bool sample_image_direct_coverage(const ChannelSource &source,
+                                    const MaskSourceCoverage &coverage,
+                                    float tex_x,
+                                    float tex_y,
+                                    float *r_value,
+                                    float4 &r_rgba) const;
 
   /**
    * Sample a plain image source at \a u, \a v in [0, 1] over the whole image, ignoring the
@@ -459,8 +522,9 @@ class ChannelSourceSampler {
   bool is_active() const;
 
   /**
-   * Recompute #area_local_mats_ for every channel whose source uses #MTEX_MAP_MODE_AREA. Must be
-   * called once per dab (not per stroke), from the same place that rebuilds
+   * Recompute #area_local_mats_ for every channel whose source uses #MTEX_MAP_MODE_AREA, and
+   * rebuild the Mask Source's coverage layout (#mask_coverage_layout_) with it. Must be called
+   * once per dab (not per stroke), from the same place that rebuilds
    * #StrokeCache.brush_local_mat, since both depend on the current dab's location and motion
    * direction. A no-op when #is_active is false.
    */
@@ -491,6 +555,21 @@ class ChannelSourceSampler {
    * overload for every channel, instead of calling the \a position overload once per channel.
    */
   float scalar(eMaterialPaintChannel channel, const TexelSampleContext &ctx, int thread) const;
+
+  /**
+   * Mask Source coverage of \a channel (the one #mask_source_channel_get selects) at \a ctx, in
+   * [0, 1]: the grey a Mask stroke scales its dab by. A Base Color sample is reduced to its
+   * scene-linear luminance, an Alpha sample to the source's intensity, and the stroke's invert
+   * (#mask_source_invert_get) mirrors the result - resolved once per stroke in the constructor,
+   * so a texel loop never touches #BrushMaterialPaintChannel again.
+   *
+   * Directly sampleable sources read the precomputed #MaskSourceCoverage through their layout;
+   * every other kind (constant, texture-engine fallback, alpha-weighted layer bake) samples and
+   * reduces on the fly, exactly as #scalar does for the same source. One is returned for a source
+   * without a usable texture, so an absent Mask never clips.
+   */
+  float mask_coverage(eMaterialPaintChannel channel, const TexelSampleContext &ctx, int thread)
+      const;
 
   /**
    * Target RGB for \a channel at \a position (object space): the sampled color for Base Color,
@@ -638,6 +717,27 @@ class ChannelSourceSampler {
   /** Null unless \a source uses Area Plane mapping, in which case it is the channel's own
    * #area_local_mats_ entry rather than the brush's shared local matrix. */
   const float4x4 *area_local_mat_for(int channel, const ChannelSource &source) const;
+
+  /** The stroke's Mask Source invert (#mask_source_invert_get), resolved once. Only read by
+   * #mask_coverage, and only meaningful when #mask_coverage_channel_ is set. */
+  bool mask_invert_ = false;
+  /** The one channel #mask_source_channel_get selected at construction, when a Mask stroke asked
+   * for its source (resolve_mask_source); unset for every other stroke. */
+  std::optional<eMaterialPaintChannel> mask_coverage_channel_;
+  /** The stroke's precomputed Mask Source coverage, or null (no cacheable source). Fetched once
+   * per stroke in the constructor; the registry it comes from keeps the buffer alive across
+   * strokes, so this is a borrowed view, not the owner. */
+  std::shared_ptr<const MaskSourceCoverage> mask_coverage_;
+  /**
+   * The mask channel's direct-sample layout with #mask_coverage_ attached, rebuilt once per dab
+   * by #update_area_local_mats - the same hook that recomputes #area_local_mats_, because the
+   * layout reads the same per-dab mapping state (the Area matrix, the view-relative brush
+   * rotation and tex mouse). #mask_coverage then only samples through it, so a texel loop never
+   * builds a layout. Left #DirectSampleKind::Disabled - the coverage unattached - whenever there
+   * is no cacheable source or the placement cannot be built, which sends #mask_coverage down its
+   * Target UV and on-the-fly branches exactly as a per-texel build did.
+   */
+  DirectSampleLayout mask_coverage_layout_;
 };
 
 /**
@@ -704,6 +804,14 @@ class ChannelUvSampler {
 
   /** See #ChannelSourceSampler::scalar_at_uv. */
   float scalar_at_uv(eMaterialPaintChannel channel, const float2 &uv, int thread) const;
+
+  /**
+   * Raw 0..1 scalar at \a uv, without the channel's own Source Invert finish. The Mask Source
+   * path uses it for an Alpha texture that carries no usable alpha (an opaque image): its scalar
+   * must reach #mask_source_coverage_at_uv un-inverted, because the Mask Source's own invert is
+   * applied there - applying both would mirror twice.
+   */
+  float scalar_coverage_at_uv(eMaterialPaintChannel channel, const float2 &uv, int thread) const;
 
   /**
    * Alpha channel of the source texel at \a uv, or 1.0 when the source has no texels. Mask Source
@@ -863,8 +971,9 @@ struct ShapeMaskMapping {
 
 /**
  * Identity of everything that decides which images a Mask Source opens and how they are placed,
- * without opening them, the brush included. Zero for a material-backed source (its bake finishes later and swaps the
- * buffers, so a cached resolve would go stale) and when the brush selects no source.
+ * without opening them, the brush included. Zero for a material-backed source (its bake finishes
+ * later and swaps the buffers, so a cached resolve would go stale) and when the brush selects no
+ * source.
  */
 uint64_t mask_source_key(const BrushMaterialPaint &brush_paint,
                          const Brush &brush,

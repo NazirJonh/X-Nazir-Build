@@ -213,6 +213,15 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
 /** The mode a stroke runs in: #PaintModeSettings::layer_target_mode, Content for null. */
 PaintLayersTargetMode BKE_paint_layers_target_mode(const PaintModeSettings *settings);
 
+/** Whether \a settings put a stroke on the Mask map instead of the material channels - the one
+ * rule every stroke-side check shares (the stroke's strength-random pick, the target resolution
+ * of the image engines and the delete tools), so none of them can disagree about what a Mask
+ * stroke reads. */
+inline bool BKE_paint_layers_target_is_mask(const PaintModeSettings &settings)
+{
+  return BKE_paint_layers_target_mode(&settings) == PaintLayersTargetMode::Mask;
+}
+
 /**
  * The layered material \a ob paints into: its active material slot's material, when that material
  * is layered.

@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -100,9 +101,13 @@ namespace blender::ed::material_bake {
 /** \name Baked Result
  * \{ */
 
+/** Every landed bake gets a new value, so a derived cache can tell two generations apart even when
+ * the old buffers were freed and their addresses reused. */
+static std::atomic<uint64_t> g_bake_revision{0};
+
 MaterialSourceBake::MaterialSourceBake(const MaterialSourceResolve &resolve,
                                        std::array<ImBuf *, PAINT_MATERIAL_CHANNEL_NUM> images)
-    : resolve_(resolve), images_(images)
+    : resolve_(resolve), images_(images), revision_(++g_bake_revision)
 {
 }
 
@@ -134,6 +139,11 @@ const ImBuf *MaterialSourceBake::channel_image(const eMaterialPaintChannel chann
 float4 MaterialSourceBake::channel_constant(const eMaterialPaintChannel channel) const
 {
   return resolve_.constants[channel];
+}
+
+uint64_t MaterialSourceBake::revision() const
+{
+  return revision_;
 }
 
 /** \} */

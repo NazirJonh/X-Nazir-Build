@@ -244,6 +244,13 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
    * before a file load), so it never leaks and never holds a dangling window-manager pointer. */
   blender::ui::tag_bar_runtime_free_all();
 
+  /* The Mask Source coverage registry keys on raw image and buffer pointers of the file going
+   * away, so every call here replaces or rewrites the data those keys name: dropping it keeps the
+   * entries from outliving their images. Between strokes an in-place pixel edit is caught by the
+   * key's #ImageRuntime::pixel_version, so this teardown only has to answer for the file itself.
+   * Rebuilding one coverage on the next stroke costs a single extraction. */
+  sculpt_paint::material::mask_source_coverage_cache_free_all();
+
   /* The bake cache is keyed on session UIDs, which are never reused, so every entry for a material
    * of the file being replaced is unreachable from here on. It owns #ImBuf buffers, so dropping it
    * has to be deliberate.

@@ -43,6 +43,7 @@
 #include "BKE_main.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 
 #include "WM_api.hh"
@@ -443,6 +444,24 @@ bool PaintStroke::update(bContext *C,
   const bool do_pbr_size_random = material_paint != nullptr &&
                                   material_paint->size_random > 0.0f &&
                                   paint_supports_dynamic_tex_coords(brush, mode);
+  /* A Mask stroke paints the Mask map instead of the material channels (the same rule that sets
+   * #ImagePaintTarget::is_mask_target and the 2D engine's `is_mask_target`), so it reads
+   * #BrushMaterialPaint::mask_strength_random while every other stroke reads #strength_random.
+   * Only one of the two is active at a time. */
+  const bool pbr_mask_stroke = material_paint != nullptr && scene->toolsettings != nullptr &&
+                               BKE_paint_layers_target_is_mask(scene->toolsettings->paint_mode);
+  const float strength_random_amount =
+      material_paint == nullptr ?
+          0.0f :
+          (pbr_mask_stroke ? material_paint->mask_strength_random :
+                             material_paint->strength_random);
+  const bool do_pbr_strength_random = strength_random_amount > 0.0f &&
+                                      paint_supports_dynamic_tex_coords(brush, mode);
+  /* Mask texture influence random: independent of PBR, it weakens the clip texture of any brush
+   * that has one assigned. */
+  const bool do_mask_influence_random = brush.mask_texture_strength_random > 0.0f &&
+                                        brush.mask_mtex.tex != nullptr &&
+                                        paint_supports_dynamic_tex_coords(brush, mode);
   *r_location_is_set = false;
   /* XXX: Use pressure value from first brush step for brushes which don't
    *      support strokes (grab, thumb). They depends on initial state and
@@ -616,7 +635,10 @@ bool PaintStroke::update(bContext *C,
     }
   }
 
-  if ((do_random || do_random_mask || do_pbr_random_angle || do_pbr_size_random) && !rng_) {
+  if ((do_random || do_random_mask || do_pbr_random_angle || do_pbr_size_random ||
+       do_pbr_strength_random || do_mask_influence_random) &&
+      !rng_)
+  {
     /* Lazy initialization. */
     rng_ = RandomNumberGenerator::from_random_seed();
   }
@@ -658,6 +680,29 @@ bool PaintStroke::update(bContext *C,
   }
   else {
     paint_runtime.size_random_value = 1.0f;
+  }
+
+  if (do_pbr_strength_random) {
+    /* Randomly lower this dab's strength (#BrushMaterialPaint::strength_random, or
+     * #mask_strength_random for a Mask stroke): the factor lands in [1 - amount, 1], so a dab
+     * never exceeds the user Strength. One factor is shared by every channel of this dab, and
+     * each engine multiplies its strength input by it exactly once (#StrokeCache::bstrength for
+     * the sculpt engine, the 2D dab alpha read in paint_image_2d.cc). The draw comes last, after
+     * the size draw, so enabling this cannot shift the Angle/Size sequences. */
+    paint_runtime.strength_random_value = bke::random_reduction_factor(
+        strength_random_amount, rng_->get_float());
+  }
+  else {
+    paint_runtime.strength_random_value = 1.0f;
+  }
+
+  if (do_mask_influence_random) {
+    /* Drawn after the strength draw so enabling it cannot shift the other random sequences. */
+    paint_runtime.mask_influence_random_value = bke::random_reduction_factor(
+        brush.mask_texture_strength_random, rng_->get_float());
+  }
+  else {
+    paint_runtime.mask_influence_random_value = 1.0f;
   }
 
   if (!location_sampled) {
@@ -1395,8 +1440,11 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
     }
   }
 
-  /* The per-dab size random factor must not leak into the next stroke or the cursor. */
+  /* The per-dab size and strength random factors must not leak into the next stroke or the
+   * cursor. */
   paint_runtime->size_random_value = 1.0f;
+  paint_runtime->strength_random_value = 1.0f;
+  paint_runtime->mask_influence_random_value = 1.0f;
 
   /* Still has the live stroke caches/undo data needed to raycast the end point. */
   if (!is_cancel) {

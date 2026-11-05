@@ -92,7 +92,9 @@
 #include "../paint_clone_stroke.hh"
 #include "paint_area_plane_2d.hh"
 #include "paint_material_blend.hh"
+#include "paint_image_2d_mask_coverage.hh"
 #include "paint_material_source.hh"
+#include "paint_mask_coverage_cache.hh"
 
 #include "ED_brush_layer_source.hh"
 #include "ED_image.hh"
@@ -300,6 +302,18 @@ struct BrushPainter {
    * scalar rather than the Alpha destination.
    */
   bool material_mask_source = false;
+  /**
+   * The Mask Source's invert (#material::mask_source_invert_get), resolved once when the painter
+   * picked up its source. Applied where the coverage is consumed, never inside the per-texel
+   * sampler (which keeps returning the raw, un-mirrored grey).
+   */
+  bool mask_source_invert = false;
+  /**
+   * The Mask Source's precomputed coverage, shared across strokes by the module's registry, or
+   * null when the source is not cacheable (procedural texture, layer bake, oversized image) and
+   * the per-texel path stays in charge.
+   */
+  std::shared_ptr<const ed::sculpt_paint::material::MaskSourceCoverage> mask_source_coverage;
   /**
    * Dab-pixel → sample-coordinate mapping for the shared source #MTex, built per dab in
    * #brush_painter_2d_refresh_cache and consumed by #paint_2d_sample_channel_source.
@@ -523,13 +537,6 @@ static bool paint_2d_channel_source_usable_2d(const BrushPainter *painter,
   return source.usable;
 }
 
-/** True when a sampled Base Color has to be reduced to the grey of a Mask value. */
-static bool paint_2d_mask_luminance(const BrushPainter *painter)
-{
-  return painter->material_mask_source &&
-         painter->material_channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
-}
-
 /**
  * True when a channel's texel is a whole colour rather than one scalar replicated across the
  * channels: every #MaterialPaintChannelInfo::is_color channel, and Normal besides, whose three
@@ -629,6 +636,14 @@ static void paint_2d_source_mtex_2d_update(BrushPainter *painter)
         painter->paint->runtime,
         *painter->brush,
         nullptr);
+    if (painter->material_mask_source && painter->mask_source_coverage != nullptr &&
+        channel == painter->material_channel)
+    {
+      /* The Mask Source reads its precomputed coverage through the same placement; a no-op when
+       * the buffer was not built for this source's grid. */
+      ed::sculpt_paint::material::attach_direct_sample_coverage(
+          painter->source_layouts[channel], *painter->mask_source_coverage);
+    }
   }
 }
 
@@ -641,6 +656,9 @@ static void paint_2d_painter_copy_shared_source(BrushPainter *dst, const BrushPa
   for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
     dst->source_mtex_2d[i] = dna::shallow_copy(src->source_mtex_2d[i]);
     dst->source_layouts[i] = src->source_layouts[i];
+    /* The Mask Source coverage belongs to the painter that resolved it: this painter samples its
+     * own channel as a value, which must read the image, not the Mask's grey. */
+    dst->source_layouts[i].coverage_pixels = nullptr;
   }
 }
 
@@ -793,6 +811,60 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
   return paint_2d_alpha_source_invert(painter, channel, intensity);
 }
 
+/**
+ * The 0..1 clamp plus the Mask Source's invert, resolved once per stroke on the painter. See
+ * #BKE_brush_mask_coverage_finish for the rule itself.
+ */
+static float paint_2d_mask_coverage_finish(const BrushPainter *painter, const float raw)
+{
+  return ed::sculpt_paint::material::mask_coverage_finish_2d(painter->mask_source_invert, raw);
+}
+
+/** The source coordinate of a dab-buffer texel for \a source's placement. */
+static float3 paint_2d_source_texco(const BrushPainter *painter,
+                                    const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource
+                                        &source,
+                                    const int x,
+                                    const int y)
+{
+  float3 texco;
+  const BrushImbufMapping &mapping =
+      (source.kind == ed::sculpt_paint::material::ChannelSourceKind::Baked &&
+       source.baked_target_uv) ?
+          painter->source_target_uv_mapping :
+          painter->source_mapping;
+  brush_imbuf_tex_co(mapping, x, y, texco);
+  return texco;
+}
+
+/**
+ * Mask Source coverage at a dab-buffer texel: cache or per-texel sample, decided in the dedicated
+ * module, and returned already clamped and inverted. Callers only apply it.
+ */
+static float paint_2d_mask_source_coverage(const BrushPainter *painter,
+                                           const int x,
+                                           const int y,
+                                           const int thread)
+{
+  const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
+      painter->channel_sources->source(painter->material_channel);
+  ed::sculpt_paint::material::MaskCoverageSample2D params;
+  params.channel = painter->material_channel;
+  params.sources = painter->channel_sources.get();
+  params.source = &source;
+  params.layout = &painter->source_layouts[painter->material_channel];
+  params.coverage = painter->mask_source_coverage.get();
+  params.mtex = &painter->source_mtex_2d[painter->material_channel];
+  params.paint = painter->paint;
+  params.brush = painter->brush;
+  params.pool = painter->channel_sources->pool() != nullptr ? painter->channel_sources->pool() :
+                                                              painter->pool;
+  return paint_2d_mask_coverage_finish(
+      painter,
+      ed::sculpt_paint::material::mask_coverage_sample_2d(
+          params, paint_2d_source_texco(painter, source, x, y), thread));
+}
+
 static bool paint_2d_view_dab_material_batch_enabled(const BrushPainter *painter)
 {
   if (!painter->use_material_channel_color || painter->channel_sources == nullptr) {
@@ -868,9 +940,7 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
   const bool mask_coverage = channel_usable && painter->material_mask_source;
   const bool color_override = channel_usable && !mask_coverage;
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-  /* A luminance mask is sampled decoded and written as grey, so it takes the scalar route. */
-  const bool mask_luminance = paint_2d_mask_luminance(painter);
-  const bool is_color = !mask_luminance && paint_2d_channel_writes_rgb(channel);
+  const bool is_color = paint_2d_channel_writes_rgb(channel);
 
   Array<float3> colors(pixel_num);
   Array<float> coverages(pixel_num);
@@ -885,21 +955,15 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
         float coverage = paint_2d_view_dab_brush_coverage(
             painter, tex_mapping, brush_mtex, is_texbrush, x, y, thread, pool, brush_rgba);
 
-        if (channel_usable) {
+        if (mask_coverage) {
+          coverage *= paint_2d_mask_source_coverage(painter, x, y, thread);
+          colors[i] = float3(brush_rgb[0], brush_rgb[1], brush_rgb[2]);
+        }
+        else if (channel_usable) {
           float4 sampled;
-          float intensity = paint_2d_sample_channel_source(
-              painter, channel, x, y, thread, sampled, mask_luminance);
-          if (mask_luminance) {
-            intensity = math::clamp(
-                BKE_paint_material_mask_luminance(float3(sampled[0], sampled[1], sampled[2])),
-                0.0f,
-                1.0f);
-          }
-          if (mask_coverage) {
-            coverage *= math::clamp(intensity, 0.0f, 1.0f);
-            colors[i] = float3(brush_rgb[0], brush_rgb[1], brush_rgb[2]);
-          }
-          else if (is_color) {
+          const float intensity = paint_2d_sample_channel_source(
+              painter, channel, x, y, thread, sampled, is_color);
+          if (is_color) {
             colors[i] = float3(sampled[0], sampled[1], sampled[2]);
           }
           else {
@@ -1007,27 +1071,17 @@ static void paint_2d_apply_material_sources(const BrushPainter *painter,
 
   if (paint_2d_channel_source_usable_2d(painter, painter->material_channel)) {
     const float coverage = rgba[3];
-    float4 sampled;
-    const bool mask_luminance = paint_2d_mask_luminance(painter);
-    const bool is_normal = painter->material_channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-    const bool is_color = !mask_luminance &&
-                          paint_2d_channel_writes_rgb(painter->material_channel);
-    /* Scalar channels read only `intensity`, so the color decode would be wasted; a luminance mask
-     * reads the decoded color. */
-    float intensity = paint_2d_sample_channel_source(
-        painter, painter->material_channel, x, y, thread, sampled, is_color || mask_luminance);
-    if (mask_luminance) {
-      /* Sampled above in scene-linear; the grey is encoded for the canvas below like any scalar. */
-      intensity = math::clamp(
-          BKE_paint_material_mask_luminance(float3(sampled[0], sampled[1], sampled[2])),
-          0.0f,
-          1.0f);
-    }
     if (painter->material_mask_source) {
       /* Coverage, not value: the brush color already in rgba is what gets written. */
-      rgba[3] = coverage * math::clamp(intensity, 0.0f, 1.0f);
+      rgba[3] = coverage * paint_2d_mask_source_coverage(painter, x, y, thread);
       return;
     }
+    float4 sampled;
+    const bool is_normal = painter->material_channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+    const bool is_color = paint_2d_channel_writes_rgb(painter->material_channel);
+    /* Scalar channels read only `intensity`, so the color decode would be wasted. */
+    const float intensity = paint_2d_sample_channel_source(
+        painter, painter->material_channel, x, y, thread, sampled, is_color);
     if (is_color) {
       /* Randomize Color on the sampled texels - Base Color only, applied while the sample is
        * still scene-linear (the same space the channel-value path jitters in). */
@@ -1898,7 +1952,10 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
       renew_maxmask = true;
     }
     /* explicitly disable partial update even if it has been enabled above */
-    if (brush->mask_pressure) {
+    /* The per-dab influence factor changes the sampled mask like pressure does. */
+    if (brush->mask_pressure || BKE_brush_mask_texture_invert_get(*brush) ||
+        brush->mask_texture_strength_random > 0.0f)
+    {
       do_partial_update_mask = false;
       renew_maxmask = true;
     }
@@ -2152,6 +2209,21 @@ static float paint_2d_ibuf_add_if(
   return w;
 }
 
+/**
+ * The strength this dab paints with: the brush/unified Strength — already folded with pressure
+ * and overlap by the stroke system — times the PBR per-dab strength-random factor
+ * (#BrushMaterialPaint::strength_random / mask_strength_random through
+ * #bke::PaintRuntime::strength_random_value). The stroke step draws the factor once and every
+ * reader of this helper within the same dab shares it; outside a PBR stroke the factor is 1.0, so
+ * the value reduces to #BKE_brush_alpha_get. Every place that derives a dab strength from the
+ * brush alpha must go through this, exactly like the sculpt engine's #StrokeCache::bstrength.
+ */
+static float paint_2d_dab_strength_get(const Paint &paint, const Brush &brush)
+{
+  const float random = paint.runtime != nullptr ? paint.runtime->strength_random_value : 1.0f;
+  return BKE_brush_alpha_get(&paint, &brush) * random;
+}
+
 static void paint_2d_lift_soften(ImagePaintState *s,
                                  ImagePaintTile *tile,
                                  ImBuf *ibuf,
@@ -2230,7 +2302,7 @@ static void paint_2d_lift_soften(ImagePaintState *s,
            * avoid colored speckles appearing in final image, and also to check for threshold. */
           outrgb[0] = outrgb[1] = outrgb[2] = IMB_colormanagement_get_luminance(outrgb);
           if (fabsf(outrgb[0]) > threshold) {
-            float mask = BKE_brush_alpha_get(s->paint, s->brush);
+            float mask = paint_2d_dab_strength_get(*s->paint, *s->brush);
             float alpha = rgba[3];
             rgba[3] = outrgb[3] = mask;
 
@@ -2510,7 +2582,7 @@ static int paint_2d_op(void *state,
   short blend = s->blend;
   const float *offset = image_paint_settings.clone_offset;
   float liftpos[2];
-  float mask_max = BKE_brush_alpha_get(s->paint, s->brush);
+  float mask_max = paint_2d_dab_strength_get(*s->paint, *s->brush);
   int bpos[2], blastpos[2], bliftpos[2];
   int a, tot;
 
@@ -2715,6 +2787,11 @@ static bool paint_2d_use_area_plane(const BrushPainter *painter)
          painter->brush->mtex.brush_map_mode == MTEX_MAP_MODE_AREA;
 }
 
+/**
+ * Sample one channel of a brush-mapped Image / Baked / Mtex source on the Area Plane raster.
+ * Mask coverage no longer comes through here: #mask_coverage_sample_area_2d owns the cache decision
+ * and returns a grey, so this function only reads values and colors.
+ */
 static void paint_2d_sample_area_mtex(
     const BrushPainter *painter,
     const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source,
@@ -2890,14 +2967,49 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
 
   const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
       painter->channel_sources->source(channel);
+  if (painter->material_mask_source && channel == painter->material_channel) {
+    /* The Mask Source is a coverage, not a channel value: read it through the dedicated module so
+     * the cache decision never reaches this color path, and apply its invert exactly once here. */
+    ed::sculpt_paint::material::MaskCoverageSampleArea2D params;
+    params.channel = channel;
+    params.sources = painter->channel_sources.get();
+    params.source = &source;
+    params.coverage = painter->mask_source_coverage.get();
+    /* The Area sampler uses the source's own placement, like the non-Mask Area path; the per-dab
+     * 2D remap only matters to the View path's texture engine. */
+    params.mtex = source.mtex;
+    params.paint = painter->paint;
+    params.brush = painter->brush;
+    params.pool = pool;
+    params.texture_sample_bias = painter->brush->texture_sample_bias;
+    const float raw = ed::sculpt_paint::material::mask_coverage_sample_area_2d(
+        params, local_mat, position, uv, thread);
+    const float grey = ed::sculpt_paint::material::mask_coverage_finish_2d(
+        painter->mask_source_invert, raw);
+    r_rgb = float3(grey);
+    if (encode_canvas) {
+      /* Only the flat-source batch path asks for encoding; the per-texel Mask branch reads the
+       * grey as coverage and never writes it as a color. */
+      paint_2d_area_encode_canvas_rgb(cache, false, r_rgb);
+    }
+    return;
+  }
+
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   /* Scalar channels read `value` below, so the color conversion and flip are skipped for them. */
   const bool is_color = paint_2d_channel_writes_rgb(channel);
   float value = 0.0f;
   float4 sampled;
   /* The intensity is a luminance of the sampled color, which a color channel never reads. */
-  paint_2d_sample_area_mtex(
-      painter, source, local_mat, position, uv, thread, pool, is_color ? nullptr : &value, sampled);
+  paint_2d_sample_area_mtex(painter,
+                            source,
+                            local_mat,
+                            position,
+                            uv,
+                            thread,
+                            pool,
+                            is_color ? nullptr : &value,
+                            sampled);
   const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
   if (is_color && decode_linear && !is_normal && source.do_linear_conversion &&
       (paint_runtime == nullptr || !paint_runtime->do_linear_conversion))
@@ -2907,16 +3019,7 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
   if (is_color && apply_flip && source.flip_green_channel) {
     sampled[1] = 1.0f - sampled[1];
   }
-  if (is_color && paint_2d_mask_luminance(painter)) {
-    /* The caller never batch-decodes a luminance mask (see #paint_2d_area_plane_fill_and_blend), so
-     * the sample is scene-linear here. */
-    const float grey = math::clamp(
-        BKE_paint_material_mask_luminance(float3(sampled[0], sampled[1], sampled[2])),
-        0.0f,
-        1.0f);
-    r_rgb = float3(grey);
-  }
-  else if (is_color) {
+  if (is_color) {
     r_rgb = float3(sampled[0], sampled[1], sampled[2]);
   }
   else {
@@ -2997,7 +3100,7 @@ static void paint_2d_blend_area_buffer(ImagePaintState *s,
                              true);
   }
 
-  const float mask_max = BKE_brush_alpha_get(s->paint, s->brush);
+  const float mask_max = paint_2d_dab_strength_get(*s->paint, *s->brush);
   if (s->do_masking) {
     ushort *saved_curve_mask = tile->cache.curve_mask_cache.curve_mask;
     ushort *saved_tex_mask = tile->cache.tex_mask;
@@ -3502,10 +3605,8 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
   const bool is_alpha_dest = channel == PAINT_MATERIAL_CHANNEL_ALPHA &&
                              !painter->material_mask_source;
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-  /* A luminance mask is decoded per texel in #paint_2d_area_sample_channel_color, so it must not
-   * take the batch decode that a color channel gets. */
-  const bool is_color = !paint_2d_mask_luminance(painter) &&
-                        paint_2d_channel_writes_rgb(channel);
+  /* A Mask painter takes its own branch below, so only channel colors reach the batch decode. */
+  const bool is_color = paint_2d_channel_writes_rgb(channel);
   const bool apply_color_jitter = channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
                                   paint_2d_color_jitter_active(painter);
   const bool has_selection_mask = BKE_image_paint_selection_is_active(s->image);
@@ -3562,8 +3663,10 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
 #endif
   std::optional<PaintDabTimer> fill_timer;
   fill_timer.emplace(PAINT_DAB_TIMER_2D_AP_FILL, cov.pixels.size());
-  /* A constant source has no placement: its colour is the same at every texel. */
-  const bool is_constant_source = usable &&
+  /* A constant source has no placement: its colour is the same at every texel. A Mask painter is
+   * excluded: its constant is a coverage, not a colour, so it takes the Mask branch below and the
+   * brush colour is what gets written. */
+  const bool is_constant_source = usable && !painter->material_mask_source &&
                                   painter->channel_sources->source(channel).kind ==
                                       ed::sculpt_paint::material::ChannelSourceKind::Constant;
   if (!usable || is_constant_source) {
@@ -3641,7 +3744,8 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
                                            sampled);
         const int idx = int(pixel.ly) * stride + int(pixel.lx);
         paint_2d_area_plane_write_rgb(float_data, byte_data, idx, rgb);
-        triangle_mask[idx] = ushort(float(strength) * math::clamp(sampled.x, 0.0f, 1.0f));
+        /* #paint_2d_area_sample_channel_color already applied the one clamp and invert. */
+        triangle_mask[idx] = ushort(float(strength) * sampled.x);
       }
     });
   }
@@ -4546,7 +4650,8 @@ void paint_2d_stroke(void *ps,
       ui::view2d_region_to_view(s->v2d, mval[0], mval[1], &new_uv[0], &new_uv[1]);
       /* The stroke system folds pressure and overlap into the brush alpha before this call, so
        * the alpha is the dab strength, same value the tile pipeline blends with. */
-      const float strength = std::clamp(BKE_brush_alpha_get(s->paint, s->brush), 0.0f, 1.0f);
+      const float strength = std::clamp(
+          paint_2d_dab_strength_get(*s->paint, *s->brush), 0.0f, 1.0f);
 
       /* Symmetry mirrors the dab center through the mesh, the same bridge the regular brush
        * uses: the Area Plane mesh exists exactly when symmetry is on and an object with UVs is
@@ -5039,8 +5144,7 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       }
     }
 
-    const bool mask_stroke = BKE_paint_layers_target_mode(&paint_mode) ==
-                             PaintLayersTargetMode::Mask;
+    const bool mask_stroke = BKE_paint_layers_target_is_mask(paint_mode);
     ImagePaintState *primary = nullptr;
     Vector<ImagePaintState *> extras;
     for (const PaintMaterialImageTarget &target : targets) {
@@ -5126,6 +5230,13 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
         {
           state->painter->material_channel = *mask_channel;
           state->painter->material_mask_source = true;
+          /* Resolved once per stroke: the invert mirrors where the coverage is consumed, and the
+           * coverage buffer - when the source has one - replaces the per-texel reduction. */
+          state->painter->mask_source_invert =
+              ed::sculpt_paint::material::mask_source_invert_get(brush_paint);
+          state->painter->mask_source_coverage =
+              ed::sculpt_paint::material::mask_source_coverage_cache_get(
+                  brush_paint, *channel_sources, paint_mode);
         }
       }
       state->painter->channel_sources = channel_sources;
@@ -5711,6 +5822,7 @@ static bool paint_2d_geometry_fill_commit(const bContext *C,
                                           ImagePaintGeometryFillStrokeCache *cache = nullptr)
 {
   Paint *paint = BKE_paint_get_active_from_context(C);
+  /* A fill is not a dab: the per-dab Strength Random does not apply to it. */
   const float strength = BKE_brush_alpha_get(paint, br);
   const bool mask_mode = paint_image_fill_mask_mode_get(C);
   const std::optional<float> mask_value = paint_image_fill_mask_value_get(C, br, invert);
@@ -7887,6 +7999,7 @@ void paint_2d_bucket_fill(const bContext *C,
   int x_px, y_px;
   uint color_b;
   float color_f[4];
+  /* Bucket fill is not a dab: use the plain brush alpha, without the per-dab Strength Random. */
   float strength = (s && br) ? BKE_brush_alpha_get(paint, br) : 1.0f;
 
   bool do_float;

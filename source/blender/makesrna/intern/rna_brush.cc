@@ -1169,6 +1169,13 @@ static void rna_Brush_size_update(Main *bmain, Scene *scene, PointerRNA *ptr)
   rna_Brush_update(bmain, scene, ptr);
 }
 
+/** The Mask slot is baked into the cursor overlay, so changing its invert has to rebuild it. */
+static void rna_Brush_mask_texture_invert_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  BKE_paint_invalidate_overlay_all();
+  rna_Brush_update(bmain, scene, ptr);
+}
+
 static void rna_Brush_stroke_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   /* #Brush.stroke_method feeds #Brush.drag_kind's classification for Smear (anchored-stroke
@@ -1827,6 +1834,16 @@ static void rna_BrushMaterialPaint_update(Main * /*bmain*/, Scene * /*scene*/, P
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
 }
 
+/* Changing the Mask Source invert changes the coverage the cursor overlay previews, so the
+ * overlay's cached texture has to be rebuilt before the usual panel update. */
+static void rna_BrushMaterialPaint_mask_source_invert_update(Main *bmain,
+                                                             Scene *scene,
+                                                             PointerRNA *ptr)
+{
+  BKE_paint_invalidate_overlay_all();
+  rna_BrushMaterialPaint_update(bmain, scene, ptr);
+}
+
 /* Picking an erase mode applies its stock stroke parameters (falloff, antialiasing)
  * as a one-shot preset; tweaks made afterwards are kept until the mode is picked again. */
 static void rna_Brush_material_paint_erase_mode_update(Main * /*bmain*/,
@@ -2201,27 +2218,17 @@ static int rna_BrushMaterialPaintChannel_name_length(PointerRNA *ptr)
 }
 
 /**
- * What the brush's source material supplies to the channel \a ptr points at.
- *
- * The whole material is resolved to answer for one channel because
- * #BKE_paint_material_source_resolve allocates nothing, and the panel only asks for the channels it
- * is already drawing. Returns false when there is nothing to resolve against, which the callers
- * report as #ChannelUnavailableReason::NoMaterial.
+ * What the brush's source material supplies to \a channel of \a brush_paint, without a
+ * #PointerRNA to go through: the same resolution #rna_BrushMaterialPaintChannel_resolve reports
+ * for the channel's own properties, shared with callers that already know the channel (the Mask
+ * Source's textured flag below) so the two cannot disagree.
  */
-static bool rna_BrushMaterialPaintChannel_resolve(PointerRNA *ptr,
-                                                  ChannelResolution &r_resolution,
-                                                  ChannelUnavailableReason &r_reason)
+static bool rna_BrushMaterialPaintChannel_resolve_data(const Brush *brush,
+                                                       const BrushMaterialPaint &brush_paint,
+                                                       const eMaterialPaintChannel channel,
+                                                       ChannelResolution &r_resolution,
+                                                       ChannelUnavailableReason &r_reason)
 {
-  const std::optional<eMaterialPaintChannel> channel = rna_BrushMaterialPaintChannel_channel_get(
-      ptr);
-  if (!channel) {
-    return false;
-  }
-  const Brush *brush = reinterpret_cast<const Brush *>(ptr->owner_id);
-  if (brush == nullptr || brush->material_paint == nullptr) {
-    return false;
-  }
-  const BrushMaterialPaint &brush_paint = *brush->material_paint;
   if (BKE_paint_material_source_is_layer(brush_paint)) {
     const Material *owner = brush_paint.source_layer_owner;
     if (brush_paint.layer_source_scope == BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW) {
@@ -2242,15 +2249,88 @@ static bool rna_BrushMaterialPaintChannel_resolve(PointerRNA *ptr,
       return true;
     }
     const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(owner);
-    r_resolution = resolve.channels[*channel];
-    r_reason = resolve.reasons[*channel];
+    r_resolution = resolve.channels[channel];
+    r_reason = resolve.reasons[channel];
     return true;
   }
   const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(
-      brush->material_paint->source_material);
-  r_resolution = resolve.channels[*channel];
-  r_reason = resolve.reasons[*channel];
+      brush_paint.source_material);
+  r_resolution = resolve.channels[channel];
+  r_reason = resolve.reasons[channel];
   return true;
+}
+
+/**
+ * What the brush's source material supplies to the channel \a ptr points at.
+ *
+ * The whole material is resolved to answer for one channel because
+ * #BKE_paint_material_source_resolve allocates nothing, and the panel only asks for the channels it
+ * is already drawing. Returns false when there is nothing to resolve against, which the callers
+ * report as #ChannelUnavailableReason::NoMaterial.
+ */
+static bool rna_BrushMaterialPaintChannel_resolve(PointerRNA *ptr,
+                                                  ChannelResolution &r_resolution,
+                                                  ChannelUnavailableReason &r_reason)
+{
+  const std::optional<eMaterialPaintChannel> channel = rna_BrushMaterialPaintChannel_channel_get(
+      ptr);
+  if (!channel) {
+    return false;
+  }
+  const Brush *brush = reinterpret_cast<const Brush *>(ptr->owner_id);
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    return false;
+  }
+  return rna_BrushMaterialPaintChannel_resolve_data(
+      brush, *brush->material_paint, *channel, r_resolution, r_reason);
+}
+
+/**
+ * Whether the Mask Source's channel carries texels for #use_mask_source_invert to mirror, the
+ * stroke-side answer #mask_source_channel_get resolves once per stroke: a flat value - Coverage,
+ * an unresolvable material, a constant, or an empty texture slot - is one grey everywhere and
+ * has nothing to mirror, so the UI hides the toggle for it. Kept beside the channel resolution
+ * above, which reads the same material, so the toggle and the panel cannot disagree.
+ */
+static bool rna_BrushMaterialPaint_mask_source_has_texture_get(PointerRNA *ptr)
+{
+  const Brush *brush = reinterpret_cast<const Brush *>(ptr->owner_id);
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    return false;
+  }
+  const BrushMaterialPaint &brush_paint = *brush->material_paint;
+  /* The channel selection is BKE's rule, not this layer's: the panel must show exactly what the
+   * stroke's #mask_source_channel_get resolves. */
+  const std::optional<eMaterialPaintChannel> mask_channel =
+      BKE_paint_material_mask_source_channel(brush_paint);
+  if (!mask_channel) {
+    return false;
+  }
+  const BrushMaterialPaintChannel &channel = brush_paint.channels[*mask_channel];
+  if (brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
+    /* A material-backed source carries texels when it resolves to an image or a bake; a constant
+     * is one grey everywhere. */
+    ChannelResolution resolution = ChannelResolution::Unavailable;
+    ChannelUnavailableReason reason = ChannelUnavailableReason::NoMaterial;
+    rna_BrushMaterialPaintChannel_resolve_data(
+        brush, brush_paint, *mask_channel, resolution, reason);
+    return ELEM(resolution, ChannelResolution::Image, ChannelResolution::Baked);
+  }
+  return channel.source_mtex.tex != nullptr;
+}
+
+/* The Mask grid's collapse flag is stored inverted (#hide_mask_source_grid), so files that predate
+ * the field read 0 = shown without a doversion; the UI speaks in `show_`. */
+static bool rna_BrushMaterialPaint_show_mask_source_grid_get(PointerRNA *ptr)
+{
+  const BrushMaterialPaint *brush_paint = static_cast<const BrushMaterialPaint *>(ptr->data);
+  return brush_paint->hide_mask_source_grid == 0;
+}
+
+static void rna_BrushMaterialPaint_show_mask_source_grid_set(PointerRNA *ptr, bool value)
+{
+  BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
+  brush_paint->hide_mask_source_grid = value ? 0 : 1;
 }
 
 static int rna_BrushMaterialPaintChannel_material_source_resolution_get(PointerRNA *ptr)
@@ -4868,6 +4948,24 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
                            "factor of up to half this amount around the base size");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
 
+  prop = RNA_def_property(srna, "strength_random", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "strength_random");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop,
+      "Strength Random",
+      "Randomly lower the stroke strength with every stroke step by up to this fraction");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "mask_strength_random", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "mask_strength_random");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop,
+      "Mask Strength Random",
+      "Randomly lower the stroke strength with every Mask stroke step by up to this fraction");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
   prop = RNA_def_property(srna, "base_color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_float_sdna(prop, nullptr, "base_color");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
@@ -4956,6 +5054,48 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Mask Source", "Channel that sets the mask value while painting in Mask mode");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  /* Inverts the Mask Source texture's coverage, whatever channel it selects (Alpha and Base
+   * Color alike). Independent of the channels' own #use_source_invert, so it is never read by an
+   * ordinary - non-Mask - stroke. */
+  prop = RNA_def_property(srna, "use_mask_source_invert", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "mask_source_invert", 1);
+  RNA_def_property_ui_text(prop,
+                           "Invert Source",
+                           "Invert the Mask Source texture's coverage: black covers fully, white "
+                           "not at all");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_mask_source_invert_update");
+
+  /* Read-only resolution of whether the Mask Source has texels to mirror, resolved through the
+   * same material the channel panel reads, so the Invert Source toggle does not re-derive the
+   * source on the Python side. */
+  prop = RNA_def_property(srna, "mask_source_has_texture", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_BrushMaterialPaint_mask_source_has_texture_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Mask Source Has Texture",
+      "The Mask Source resolves to texels, so its coverage can be inverted");
+
+  /* UI-only: how the Mask panel picks the Mask texture. Same field and checkbox pattern as the
+   * channels' #source_select_mode / #use_grid_source_picker, but on the brush's material paint,
+   * since the Mask slot belongs to the brush rather than to one channel. */
+  prop = RNA_def_property(srna, "use_mask_grid_source_picker", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "mask_source_select_mode", BRUSH_MATERIAL_PAINT_SOURCE_SELECT_GRID);
+  RNA_def_property_ui_text(prop,
+                           "Source Picker: Grid",
+                           "Pick the Mask texture from a preview grid shown inside the Mask "
+                           "panel instead of the Image Browser popover");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "show_mask_source_grid", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_BrushMaterialPaint_show_mask_source_grid_get",
+                                 "rna_BrushMaterialPaint_show_mask_source_grid_set");
+  RNA_def_property_ui_text(
+      prop, "Show Mask Source Grid", "Expand the inline preview grid used to pick the Mask texture");
 
   prop = RNA_def_property(srna, "is_mask_default", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_BrushMaterialPaint_is_mask_default_get", nullptr);
@@ -6665,6 +6805,23 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, brush_mask_pressure_items);
   RNA_def_property_ui_text(
       prop, "Mask Pressure Mode", "Pen pressure makes texture influence smaller");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_mask_texture_invert", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag2", BRUSH_MASK_TEXTURE_INVERT);
+  RNA_def_property_ui_text(
+      prop,
+      "Invert Mask Texture",
+      "Invert the Mask Texture coverage (1 - c) after clamping, independent of Mask Source invert");
+  RNA_def_property_update(prop, 0, "rna_Brush_mask_texture_invert_update");
+
+  prop = RNA_def_property(srna, "mask_texture_strength_random", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "mask_texture_strength_random");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "Mask Influence Random",
+                           "Randomly weaken the Mask Texture's clipping with every stroke step by "
+                           "up to this fraction");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "use_inverse_smooth_pressure", PROP_BOOLEAN, PROP_NONE);

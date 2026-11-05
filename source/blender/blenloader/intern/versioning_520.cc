@@ -1115,6 +1115,23 @@ static void version_material_paint_scale_lock_defaults_one(BrushMaterialPaint *m
   }
 }
 
+/**
+ * The Mask Source's invert used to live on the Alpha channel's entry
+ * (#BrushMaterialPaintChannel.source_invert), which also inverted the Alpha texture wherever the
+ * channel was sampled. It is its own #BrushMaterialPaint.mask_source_invert now, covering every
+ * channel the Mask Source can select (Base Color included) without touching ordinary strokes, so
+ * a file whose Alpha entry carried the flag keeps its inverted Mask strokes. OR-ed, not moved:
+ * the Alpha channel's own reads keep their flag.
+ */
+static void version_material_paint_mask_source_invert_one(BrushMaterialPaint *material_paint)
+{
+  if (material_paint == nullptr) {
+    return;
+  }
+  material_paint->mask_source_invert |=
+      material_paint->channels[PAINT_MATERIAL_CHANNEL_ALPHA].source_invert;
+}
+
 static void version_material_paint_scale_lock_defaults(Main &bmain)
 {
   for (Brush &brush : bmain.brushes) {
@@ -2422,6 +2439,29 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
           fd->filesdna, "BrushMaterialPaint", "float", "source_refresh_delay"))
   {
     version_material_paint_layer_source_defaults(*bmain);
+  }
+
+  /* The Mask Source's invert is its own flag now (it lives in bytes that were padding in earlier
+   * files, so those read zero), and the Alpha channel's flag carries the old behavior: fold it in
+   * so a file's inverted Mask strokes stay inverted.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion (see above). */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "BrushMaterialPaint", "char", "mask_source_invert"))
+  {
+    for (Brush &brush : bmain->brushes) {
+      version_material_paint_mask_source_invert_one(brush.material_paint);
+    }
+    for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings == nullptr) {
+        continue;
+      }
+      for (PaintMaterialBrushPreset &preset :
+           scene.toolsettings->paint_mode.material_paint_brush_presets)
+      {
+        version_material_paint_mask_source_invert_one(preset.material_paint);
+      }
+    }
   }
 
   /* NOTE: Fork-only, so it is not keyed on a file subversion (see above). Idempotent: it only

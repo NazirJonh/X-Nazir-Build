@@ -101,8 +101,11 @@ static bool mask_source_resolve(const OverlayPreviewInput &in, PaintCursorContex
   const bool is_alpha = *mask_channel == PAINT_MATERIAL_CHANNEL_ALPHA;
   pcontext.material_preview_texel.kind = OverlayTexelMode::Kind::MaskCoverage;
   pcontext.material_preview_texel.use_alpha = is_alpha;
-  pcontext.material_preview_texel.invert =
-      is_alpha && in.brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].source_invert != 0;
+  /* The Mask Source's own invert, whatever channel it selects - the same flag the stroke's
+   * coverage read mirrors through #material::mask_coverage_finish. The preview itself reduces
+   * with #BKE_paint_material_mask_texel_coverage, the rgba-level twin of that scalar rule, so
+   * the cursor and the stroke stay on one clamp-then-mirror rule. */
+  pcontext.material_preview_texel.invert = material::mask_source_invert_get(in.brush_paint);
 
   if (in.brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
     /* A Mask stroke reads exactly this channel from the bake, regardless of the PBR channel's

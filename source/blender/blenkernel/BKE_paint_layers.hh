@@ -51,6 +51,7 @@ struct ReportList;
 enum eMaterialPaintChannel : int8_t;
 enum eMaterialPaintLayerBlend : int8_t;
 enum eMaterialPaintLayerFilter : int16_t;
+enum eMaterialPaintLayerMapEncoding : int8_t;
 enum eMaterialPaintLayerSource : int8_t;
 
 /* -------------------------------------------------------------------- */

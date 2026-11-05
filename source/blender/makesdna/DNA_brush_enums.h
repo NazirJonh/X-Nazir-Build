@@ -456,6 +456,10 @@ enum eBrushFlags2 : int {
   BRUSH_DISABLE_FACE_SET_WRITE = (1 << 14),
   BRUSH_INSERT_MESH = (1 << 15),
   BRUSH_INSERT_INTO_ACTIVE = (1 << 16),
+  /** Invert the Mask slot's coverage (#Brush.mask_mtex): `1 - c` after the 0..1 clamp. Independent
+   * of the Mask Source's invert and of the channels' Source Invert; read wherever the Mask slot
+   * modulates stroke coverage. Lives in a previously unused bit, so old files read it as off. */
+  BRUSH_MASK_TEXTURE_INVERT = (1 << 17),
 };
 ENUM_OPERATORS(eBrushFlags2)
 

@@ -41,6 +41,19 @@ enum class PaintMode : int8_t {
 };
 
 namespace bke {
+
+/**
+ * The per-dab random reduction factor of the PBR stroke randomness
+ * (#BrushMaterialPaint::strength_random, #BrushMaterialPaint::mask_strength_random and
+ * #Brush::mask_texture_strength_random): with \a random in [0, 1) the result lies in
+ * `[1 - amount, 1]`, so randomness only ever lowers the value and an \a amount of 0 keeps it
+ * untouched. Pure so the stroke code and tests share one definition.
+ */
+inline float random_reduction_factor(const float amount, const float random)
+{
+  return 1.0f - amount * random;
+}
+
 struct PaintRuntime : NonCopyable, NonMovable {
   bool initialized = false;
   uint16_t ob_mode = 0;
@@ -146,6 +159,24 @@ struct PaintRuntime : NonCopyable, NonMovable {
    * method that excludes it, e.g. anchored).
    */
   float size_random_value = 1.0f;
+
+  /**
+   * Transient per-dab #BrushMaterialPaint::strength_random / mask_strength_random factor the
+   * stroke strength is multiplied by. Recomputed on every stroke step; 1.0 means no strength
+   * randomization (feature off, or a stroke method that excludes it, e.g. anchored). One value
+   * serves both variants: a stroke paints either the Mask or the channels, never both, and the
+   * stroke step picks the matching amount when it draws the factor. Cleared in #PaintStroke::done
+   * - cancelled strokes included, the reset runs before the cancel branch - so a stroke's draw
+   * never leaks into the cursor or the next stroke, whichever way the stroke ends.
+   */
+  float strength_random_value = 1.0f;
+
+  /**
+   * Transient per-dab factor of #Brush::mask_texture_strength_random: the Mask texture's coverage
+   * is blended toward 1 by `1 - factor`, so 1.0 leaves the mask untouched. Recomputed on every
+   * stroke step and reset when the stroke ends.
+   */
+  float mask_influence_random_value = 1.0f;
 
   /** Position of mouse, used to sample the texture. */
   float2 tex_mouse = float2(0.0f, 0.0f);

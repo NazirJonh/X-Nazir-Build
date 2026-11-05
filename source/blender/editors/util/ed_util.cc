@@ -268,6 +268,10 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
     BKE_paint_layers_slice_cache_free_all();
     /* The effect cache is keyed on session UIDs the same way and owns float canvases of its own. */
     BKE_paint_layers_effect_cache_free_all();
+    /* And its GPU twin, whose entries own textures: a file being replaced frees the materials they
+     * name, and an entry that can never be hit again would hold that VRAM until the budget evicts
+     * it. */
+    BKE_paint_layers_effect_gpu_cache_free_all();
     /* The per-object Gradient surfaces are keyed on session UIDs too and own tens of megabytes. */
     BKE_paint_layers_gradient_surface_cache_clear();
     /* And the Combined preview derived from them, which owns a float buffer of its own. */

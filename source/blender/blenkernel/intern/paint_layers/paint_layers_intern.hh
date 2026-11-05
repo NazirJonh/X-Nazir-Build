@@ -262,6 +262,18 @@ void paint_layer_effect_cache_set_budget(size_t bytes);
 /** The effect cache's byte budget currently in force; for a test guard that restores it. */
 size_t paint_layer_effect_cache_budget();
 
+/** Bytes the GPU effect cache accounts for; for tests of the keying and the eviction. */
+size_t paint_layer_effect_gpu_cache_bytes();
+
+/** Number of entries the GPU effect cache holds; for tests of the keying and the eviction. */
+int paint_layer_effect_gpu_cache_entry_count();
+
+/** Override the GPU effect cache's byte budget; tests use a small one. */
+void paint_layer_effect_gpu_cache_set_budget(size_t bytes);
+
+/** The GPU effect cache's byte budget currently in force; for a test guard that restores it. */
+size_t paint_layer_effect_gpu_cache_budget();
+
 /**
  * The maps the slice \a reader reads was rendered from, for the composite cache to subscribe to:
  * the slice hash holds no pixels, so a stroke on the source reaches the cache through these.
@@ -529,6 +541,15 @@ inline bool paint_layer_effect_is_cpu_computed(const MaterialPaintLayer &effect)
 }
 
 /**
+ * The same question for an effect row the preview has to answer: a #PAINT_LAYER_KIND_GPU_COMPUTED kind
+ * is one the gather lays an effect pass for, so it must not queue a pass the shader has no case for.
+ */
+inline bool paint_layer_effect_is_gpu_computed(const MaterialPaintLayer &effect)
+{
+  return paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GPU_COMPUTED);
+}
+
+/**
  * The same question for a bare #eMaterialPaintLayerFilter subtype, as a composite description
  * carries it: a filter cell knows its subtype but not the row it came from.
  */
@@ -536,6 +557,18 @@ inline bool paint_layer_filter_is_cpu_computed(const int16_t filter)
 {
   const PaintLayerKindInfo *info = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
   return info != nullptr && (info->flags & PAINT_LAYER_KIND_NEEDS_BAKE) != 0;
+}
+
+/**
+ * Whether the combined preview computes this CPU-computed effect itself: an effect pass lays its
+ * result into the GPU effect cache and the correction pass reads that back, so the stack no longer
+ * falls to the CPU. Every other #PAINT_LAYER_KIND_NEEDS_BAKE kind keeps refusing until its pass
+ * exists, so a phase sets the flag on the kind instead of editing the refusal.
+ */
+inline bool paint_layer_filter_is_gpu_computed(const int16_t filter)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
+  return info != nullptr && (info->flags & PAINT_LAYER_KIND_GPU_COMPUTED) != 0;
 }
 
 /**
@@ -558,7 +591,7 @@ inline bool paint_layer_row_needs_bake(const MaterialPaintLayer &row)
  * Whether \a row's bake holds its *content* alone: the colour of the row after its effects (and of
  * its children, when it is a folder), while its mask, its opacity and its blend stay live over the
  * substituted map. The effect is computed before the mask is laid (see
- * #paint_layer_effect_input_describe), so nothing of the bake depends on the mask: an edit of the
+ * #BKE_paint_layers_effect_input_describe), so nothing of the bake depends on the mask: an edit of the
  * mask, of the opacity or of the visibility must neither move the bake's hash nor subscribe the
  * bake to those maps. Every other row's bake is the whole row as it looks, mask included.
  *

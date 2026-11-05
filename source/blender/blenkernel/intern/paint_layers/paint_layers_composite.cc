@@ -36,6 +36,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_perf_debug.hh"
 #include "BKE_report.hh"
 
 #include "paint_layers_composite_intern.hh"
@@ -684,6 +685,9 @@ static void composite_effect_append(
     effect_correction.filter = effect.kind_subtype;
     composite_filter_params(effect, effect_correction.filter_params);
     effect_correction.effect_hash = paint_layer_effect_hash(effect, channel);
+    /* The GPU path keys its result texture on the effect instance, which a parameter hash cannot do
+     * across rows: name the marker the correction was made from. */
+    effect_correction.effect_marker = effect.marker;
     effect_correction.effect_color = paint_layer_effect_buffer_get(
         ma, *owner_row, effect, channel, describe_only, &effect_correction.effect_images);
     if (!describe_only && effect_correction.effect_color == nullptr) {
@@ -1478,11 +1482,11 @@ struct AnchorSliceCacheKey {
   uint64_t hash = 0;
 };
 
-/** A map a slice was last made from, and the version of its pixels at that time. */
-struct AnchorSliceSource {
-  uint32_t image_uid = 0;
-  uint64_t version = 0;
-};
+/**
+ * A map a slice was last made from, and the version of its pixels at that time. The same pair the
+ * GPU effect cache keys its staleness on (see #PaintLayerEffectSource), so one snapshot serves both.
+ */
+using AnchorSliceSource = PaintLayerEffectSource;
 
 /** The maps the slice of \a reader is rendered from, once each and none of them null. */
 static void anchor_slice_images_get(const Material &ma,
@@ -2094,13 +2098,13 @@ static uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const 
   return hash;
 }
 
-/** The input of the effect: the row's content up to it, before the row's opacity, mask and blend. */
-static bool paint_layer_effect_input_describe(const Material &ma,
-                                              const MaterialPaintLayer &row,
-                                              const MaterialPaintLayer &effect,
-                                              const int channel,
-                                              const bool dimensions_only,
-                                              PaintMaterialCompositeImageLayer &r_entry)
+bool BKE_paint_layers_effect_input_describe(const Material &ma,
+                                            const MaterialPaintLayer &row,
+                                            const MaterialPaintLayer &effect,
+                                            const int channel,
+                                            const bool dimensions_only,
+                                            const bool describe_only,
+                                            PaintMaterialCompositeImageLayer &r_entry)
 {
   r_entry = PaintMaterialCompositeImageLayer{};
   if (!composite_image_layer_build(ma,
@@ -2113,7 +2117,7 @@ static bool paint_layer_effect_input_describe(const Material &ma,
                                    &effect.marker,
                                    nullptr,
                                    dimensions_only,
-                                   false,
+                                   describe_only,
                                    nullptr,
                                    nullptr))
   {
@@ -2131,9 +2135,8 @@ static bool paint_layer_effect_input_describe(const Material &ma,
   return true;
 }
 
-/** Every map the described input reads, once each and none of them null. */
-static void paint_layer_effect_entry_images(const PaintMaterialCompositeImageLayer &layer,
-                                            Vector<Image *> &r_images)
+void BKE_paint_layers_effect_input_images(const PaintMaterialCompositeImageLayer &layer,
+                                          Vector<Image *> &r_images)
 {
   const auto add = [&](Image *image) {
     if (image != nullptr && image->runtime != nullptr && !r_images.contains(image)) {
@@ -2157,7 +2160,7 @@ static void paint_layer_effect_entry_images(const PaintMaterialCompositeImageLay
     }
   }
   for (const PaintMaterialCompositeImageLayer &child : layer.children) {
-    paint_layer_effect_entry_images(child, r_images);
+    BKE_paint_layers_effect_input_images(child, r_images);
   }
 }
 
@@ -2169,34 +2172,49 @@ static bool paint_layer_effect_compute(const Material &ma,
                                        std::shared_ptr<ImBuf> &r_color,
                                        Vector<AnchorSliceSource> &r_synced)
 {
+  /* Timed in two halves because the GPU plan replaces them differently: the kernel is what an
+   * effect pass computes instead, while the input render is what the gather lays with its own
+   * passes. The whole recompute is measured too, so a phase's win is this line stopping to print.
+   * The region is always the full buffer: see the note above the cache this feeds. */
+  bke::paint_perf::ScopedTimer perf_total("effect.cpu.total");
   PaintMaterialCompositeImageLayer entry;
-  if (!paint_layer_effect_input_describe(ma, row, effect, channel, false, entry)) {
-    return false;
-  }
+  std::shared_ptr<ImBuf> color;
   int width = 0;
   int height = 0;
-  if (!BKE_paint_material_composite_stack_dimensions(
-          Span<PaintMaterialCompositeImageLayer>(&entry, 1), width, height) ||
-      width <= 0 || height <= 0)
   {
-    return false;
+    bke::paint_perf::ScopedTimer perf_input("effect.cpu.input");
+    if (!BKE_paint_layers_effect_input_describe(
+            ma, row, effect, channel, /*dimensions_only=*/false, /*describe_only=*/false, entry))
+    {
+      return false;
+    }
+    if (!BKE_paint_material_composite_stack_dimensions(
+            Span<PaintMaterialCompositeImageLayer>(&entry, 1), width, height) ||
+        width <= 0 || height <= 0)
+    {
+      return false;
+    }
+    color = anchor_slice_buffer_new(width, height);
+    if (color == nullptr) {
+      return false;
+    }
+    Vector<float> coverage(int64_t(width) * height);
+    if (!BKE_paint_material_composite_eval_row_content(
+            entry, color->float_data_for_write(), coverage.data(), nullptr, channel))
+    {
+      return false;
+    }
+    perf_input.note("kind=%d size=%dx%d region=full", int(effect.kind_subtype), width, height);
   }
-  std::shared_ptr<ImBuf> color = anchor_slice_buffer_new(width, height);
-  if (color == nullptr) {
-    return false;
-  }
-  Vector<float> coverage(int64_t(width) * height);
-  if (!BKE_paint_material_composite_eval_row_content(
-          entry, color->float_data_for_write(), coverage.data(), nullptr, channel))
-  {
-    return false;
-  }
+  /* The kernel reads the buffer the block above filled and leaves the alpha alone; the scope ends
+   * before it, so the two halves of the recompute are not timed together. */
   paint_layer_effect_kernel_apply(*color, effect);
   /* The versions are taken after the render: an edit that landed while it ran is read next time. */
   Vector<Image *> images;
-  paint_layer_effect_entry_images(entry, images);
+  BKE_paint_layers_effect_input_images(entry, images);
   r_synced = anchor_slice_sources_snapshot(images);
   r_color = std::move(color);
+  perf_total.note("kind=%d size=%dx%d region=full", int(effect.kind_subtype), width, height);
   return true;
 }
 
@@ -2283,14 +2301,15 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
   Vector<Image *> images;
   int width = 0;
   int height = 0;
-  if (!paint_layer_effect_input_describe(ma, row, effect, channel, true, dims_entry) ||
+  if (!BKE_paint_layers_effect_input_describe(
+          ma, row, effect, channel, true, false, dims_entry) ||
       !BKE_paint_material_composite_stack_dimensions(
           Span<PaintMaterialCompositeImageLayer>(&dims_entry, 1), width, height) ||
       width <= 0 || height <= 0)
   {
     return {};
   }
-  paint_layer_effect_entry_images(dims_entry, images);
+  BKE_paint_layers_effect_input_images(dims_entry, images);
   if (r_images != nullptr) {
     *r_images = images;
   }
@@ -2361,6 +2380,315 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
     g_paint_effect_cache.entries.append(std::move(entry));
   }
   return color;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Paint Layer Effect GPU Result Cache
+ *
+ * The GPU twin of the cache above, for the kinds the registry marks #PAINT_LAYER_KIND_GPU_COMPUTED.
+ * The policy and the hooks are documented with the header section they implement; what lives here is
+ * the container, and it holds no GPU type -- the texture is a `void *` the caller's hooks made and
+ * drop, so the keying, the budget and the staleness rule are reachable from the plain effect tests
+ * without a GPU context. The trick is #PaintLayersGpuSlotGuard's, reused.
+ * \{ */
+
+/**
+ * What the GPU effect cache may hold: a 4K RGBA half-float canvas is 128 MiB per effect, so this
+ * keeps four of them at 4K or a dozen at 2K. Deliberately smaller than the CPU effect cache beside
+ * it: these bytes are VRAM, held next to the frame's own accumulators and Anchor Point slots, and an
+ * entry evicted between two frames costs one dispatch -- not the main-thread whole-canvas render an
+ * evicted CPU entry costs.
+ */
+constexpr size_t PAINT_LAYER_EFFECT_GPU_CACHE_BYTES = size_t(512) * 1024 * 1024;
+
+/** The live budget; only tests override it, to make eviction observable without 4K fixtures. */
+static size_t g_paint_effect_gpu_cache_budget = PAINT_LAYER_EFFECT_GPU_CACHE_BYTES;
+
+/** What one canvas costs the cache: the RGBA half float texture the acquire hook is to make. */
+static size_t paint_layer_effect_gpu_entry_bytes(const int width, const int height)
+{
+  /* Four components of two bytes each. */
+  return sizeof(int16_t) * 4 * int64_t(width) * height;
+}
+
+/** One cached GPU effect result, keyed exactly like the CPU buffer of the same effect. */
+struct EffectGpuCacheEntry {
+  EffectCacheKey key;
+  int width = 0;
+  int height = 0;
+  /** The `gpu::Texture *` the hooks made, with the hooks that made it: releasing a texture needs
+   * its owner's deallocator, and an entry outlives the call that acquired it. */
+  void *resource = nullptr;
+  PaintLayerEffectGpuHooks hooks;
+  /** The maps the input was rendered from, with the versions they had. */
+  Vector<AnchorSliceSource> synced;
+  /** Whether a render has been stamped onto this entry yet. An input of no map at all (a row of flat
+   * colour alone) publishes an empty #synced, so emptiness cannot stand for "never rendered". */
+  bool published = false;
+  /** Texels of the input that changed since #synced. A neighbourhood kernel will re-render just
+   * that rectangle grown by its halo; until the region phase does, the whole texture is re-rendered
+   * and the rectangle is only carried. */
+  rcti dirty_region = {0, 0, 0, 0};
+  size_t bytes = 0;
+};
+
+/** The cache owns references only; dropping an entry hands them back to the hooks. */
+struct EffectGpuCache {
+  Vector<EffectGpuCacheEntry> entries;
+  size_t total_bytes = 0;
+};
+
+static EffectGpuCache g_paint_effect_gpu_cache;
+/**
+ * Guards the container and the byte count, as the CPU cache's mutex does. Unlike the CPU cache this
+ * one is also held across the acquire hook, which makes a texture and cannot re-enter the cache; the
+ * dispatch itself is never under it, so a slow GPU cannot block another thread's lookup.
+ */
+static std::mutex g_paint_effect_gpu_cache_mutex;
+
+/** Hand the cache's reference back to whoever made the texture. */
+static void paint_layer_effect_gpu_release(const PaintLayerEffectGpuHooks &hooks, void *resource)
+{
+  if (resource == nullptr) {
+    return;
+  }
+  BLI_assert(hooks.release != nullptr);
+  if (hooks.release != nullptr) {
+    hooks.release(hooks.data, resource);
+  }
+}
+
+/** Evict least-recently-used entries from the front until \a incoming fits in the budget. */
+static void paint_layer_effect_gpu_cache_enforce_budget(const size_t incoming)
+{
+  while (!g_paint_effect_gpu_cache.entries.is_empty() &&
+         g_paint_effect_gpu_cache.total_bytes + incoming > g_paint_effect_gpu_cache_budget)
+  {
+    EffectGpuCacheEntry &front = g_paint_effect_gpu_cache.entries[0];
+    paint_layer_effect_gpu_release(front.hooks, front.resource);
+    g_paint_effect_gpu_cache.total_bytes -= front.bytes;
+    g_paint_effect_gpu_cache.entries.remove(0);
+  }
+}
+
+/**
+ * Drop the entry of the same effect instance with other parameters: the description can only ever
+ * ask for the parameters the effect carries now, so an old result is VRAM held for nothing. A frame
+ * still laying it keeps its own reference, exactly as it does against the eviction above.
+ */
+static void paint_layer_effect_gpu_cache_drop_rekeyed(const EffectCacheKey &key)
+{
+  for (int i = int(g_paint_effect_gpu_cache.entries.size()) - 1; i >= 0; i--) {
+    if (paint_layer_effect_key_same_effect(g_paint_effect_gpu_cache.entries[i].key, key)) {
+      EffectGpuCacheEntry &entry = g_paint_effect_gpu_cache.entries[i];
+      paint_layer_effect_gpu_release(entry.hooks, entry.resource);
+      g_paint_effect_gpu_cache.total_bytes -= entry.bytes;
+      g_paint_effect_gpu_cache.entries.remove(i);
+      break;
+    }
+  }
+}
+
+/** Take the entry out of the LRU front and put it at the back: the vector is the LRU order. */
+static void paint_layer_effect_gpu_cache_touch(const int index)
+{
+  EffectGpuCacheEntry hit = std::move(g_paint_effect_gpu_cache.entries[index]);
+  g_paint_effect_gpu_cache.entries.remove(index);
+  g_paint_effect_gpu_cache.entries.append(std::move(hit));
+}
+
+PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &ma,
+                                                              const MaterialPaintLayer &effect,
+                                                              const int channel,
+                                                              const int width,
+                                                              const int height,
+                                                              const Span<Image *> images,
+                                                              const PaintLayerEffectGpuHooks &hooks,
+                                                              rcti *r_dirty_region,
+                                                              void **r_resource)
+{
+  if (r_resource != nullptr) {
+    *r_resource = nullptr;
+  }
+  if (r_dirty_region != nullptr) {
+    BLI_rcti_init(r_dirty_region, 0, 0, 0, 0);
+  }
+  if (width <= 0 || height <= 0 || hooks.acquire == nullptr) {
+    return PaintLayerEffectGpuState::Failed;
+  }
+  const EffectCacheKey key{ma.id.session_uid,
+                           effect.marker,
+                           channel,
+                           paint_layer_effect_hash(effect, channel)};
+  const size_t bytes = paint_layer_effect_gpu_entry_bytes(width, height);
+
+  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
+  for (int i = 0; i < int(g_paint_effect_gpu_cache.entries.size()); i++) {
+    EffectGpuCacheEntry &entry = g_paint_effect_gpu_cache.entries[i];
+    if (!paint_layer_effect_key_equal(entry.key, key)) {
+      continue;
+    }
+    if (entry.width != width || entry.height != height) {
+      /* Another size is another texel space -- the noise's texel coordinates and a neighbourhood's
+       * radius both read it -- and another texture, so the entry goes and a fresh one is made. */
+      paint_layer_effect_gpu_release(entry.hooks, entry.resource);
+      g_paint_effect_gpu_cache.total_bytes -= entry.bytes;
+      g_paint_effect_gpu_cache.entries.remove(i);
+      break;
+    }
+    if (entry.published) {
+      rcti region;
+      const ePixelChange change = anchor_slice_changes(entry.synced, images, region);
+      if (change == ePixelChange::None) {
+        if (r_resource != nullptr) {
+          *r_resource = entry.resource;
+        }
+        paint_layer_effect_gpu_cache_touch(i);
+        return PaintLayerEffectGpuState::Hit;
+      }
+      /* A change that is not one rectangle -- a reload, a new map in the set, a resized one -- has no
+       * region to name, and the whole canvas is the only safe claim. A rectangle is over-approximated
+       * freely, so a caller may grow it by its halo. */
+      if (change == ePixelChange::Full) {
+        BLI_rcti_init(&region, 0, width, 0, height);
+        entry.dirty_region = region;
+      }
+      else if (BLI_rcti_is_empty(&entry.dirty_region)) {
+        entry.dirty_region = region;
+      }
+      else {
+        BLI_rcti_union(&entry.dirty_region, &region);
+      }
+      if (r_dirty_region != nullptr) {
+        *r_dirty_region = entry.dirty_region;
+      }
+      if (r_resource != nullptr) {
+        *r_resource = entry.resource;
+      }
+      return PaintLayerEffectGpuState::Render;
+    }
+    /* Never published: the texture is there but says nothing yet. */
+    BLI_rcti_init(&entry.dirty_region, 0, width, 0, height);
+    if (r_dirty_region != nullptr) {
+      *r_dirty_region = entry.dirty_region;
+    }
+    if (r_resource != nullptr) {
+      *r_resource = entry.resource;
+    }
+    return PaintLayerEffectGpuState::Render;
+  }
+
+  void *resource = hooks.acquire(hooks.data, width, height);
+  if (resource == nullptr) {
+    return PaintLayerEffectGpuState::Failed;
+  }
+  paint_layer_effect_gpu_cache_drop_rekeyed(key);
+  /* An entry larger than the whole budget is still inserted rather than handed out uncached: the
+   * cache must own the texture to release it, and a caller that keeps it past this frame holds a
+   * reference of its own, so the budget reads as temporarily exceeded -- the same allowance the CPU
+   * cache makes for a buffer a description still references. */
+  paint_layer_effect_gpu_cache_enforce_budget(bytes);
+  EffectGpuCacheEntry entry;
+  entry.key = key;
+  entry.width = width;
+  entry.height = height;
+  entry.resource = resource;
+  entry.hooks = hooks;
+  entry.bytes = bytes;
+  BLI_rcti_init(&entry.dirty_region, 0, width, 0, height);
+  g_paint_effect_gpu_cache.total_bytes += bytes;
+  g_paint_effect_gpu_cache.entries.append(std::move(entry));
+  if (r_dirty_region != nullptr) {
+    BLI_rcti_init(r_dirty_region, 0, width, 0, height);
+  }
+  if (r_resource != nullptr) {
+    *r_resource = resource;
+  }
+  return PaintLayerEffectGpuState::Render;
+}
+
+void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
+                                               const MaterialPaintLayer &effect,
+                                               const int channel,
+                                               const int width,
+                                               const int height,
+                                               const Span<Image *> images)
+{
+  const EffectCacheKey key{ma.id.session_uid,
+                           effect.marker,
+                           channel,
+                           paint_layer_effect_hash(effect, channel)};
+  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
+  for (EffectGpuCacheEntry &entry : g_paint_effect_gpu_cache.entries) {
+    if (!paint_layer_effect_key_equal(entry.key, key) || entry.width != width ||
+        entry.height != height)
+    {
+      continue;
+    }
+    /* Taken after the render, as the CPU cache takes them: an edit that landed while the pass ran is
+     * newer than this entry and costs one more update rather than a stale result that never clears.
+     */
+    entry.synced = anchor_slice_sources_snapshot(images);
+    entry.published = true;
+    BLI_rcti_init(&entry.dirty_region, 0, 0, 0, 0);
+    return;
+  }
+  /* The entry was evicted or dropped while the frame was rendering into its texture: nothing to
+   * stamp, and the next frame asks again. */
+}
+
+void BKE_paint_layers_effect_gpu_cache_free_all()
+{
+  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
+  for (EffectGpuCacheEntry &entry : g_paint_effect_gpu_cache.entries) {
+    paint_layer_effect_gpu_release(entry.hooks, entry.resource);
+  }
+  g_paint_effect_gpu_cache.entries.clear_and_shrink();
+  g_paint_effect_gpu_cache.total_bytes = 0;
+}
+
+void BKE_paint_layers_effect_gpu_cache_free_material(const Material &ma)
+{
+  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
+  for (int i = int(g_paint_effect_gpu_cache.entries.size()) - 1; i >= 0; i--) {
+    if (g_paint_effect_gpu_cache.entries[i].key.material_uid == ma.id.session_uid) {
+      EffectGpuCacheEntry &entry = g_paint_effect_gpu_cache.entries[i];
+      paint_layer_effect_gpu_release(entry.hooks, entry.resource);
+      g_paint_effect_gpu_cache.total_bytes -= entry.bytes;
+      g_paint_effect_gpu_cache.entries.remove(i);
+    }
+  }
+}
+
+size_t paint_layer_effect_gpu_cache_bytes()
+{
+  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
+  return g_paint_effect_gpu_cache.total_bytes;
+}
+
+int paint_layer_effect_gpu_cache_entry_count()
+{
+  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
+  return int(g_paint_effect_gpu_cache.entries.size());
+}
+
+void paint_layer_effect_gpu_cache_set_budget(const size_t bytes)
+{
+  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
+  g_paint_effect_gpu_cache_budget = bytes;
+}
+
+size_t paint_layer_effect_gpu_cache_budget()
+{
+  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
+  return g_paint_effect_gpu_cache_budget;
+}
+
+size_t BKE_paint_layers_effect_gpu_cache_budget()
+{
+  return paint_layer_effect_gpu_cache_budget();
 }
 
 /** \} */
@@ -2725,6 +3053,11 @@ static bool gpu_filter_lacks_branch(const int16_t filter)
   return kind != nullptr && (kind->flags & PAINT_LAYER_KIND_NO_GPU_BRANCH) != 0;
 }
 
+bool BKE_paint_layers_effect_is_gpu_computed(const MaterialPaintLayer &effect)
+{
+  return paint_layer_effect_is_gpu_computed(effect);
+}
+
 const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialCompositeImageLayer &layer,
                                                     const bool mask_slice)
 {
@@ -2791,9 +3124,13 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
     }
     /* A CPU-computed effect has no pointwise shader branch: its result is a map the effect cache
      * computes on the CPU, so the whole stack falls back rather than shading without it. The
-     * registry's #PAINT_LAYER_KIND_NEEDS_BAKE flag decides, so a new one needs no edit here. Gated
-     * on the opacity that decides the CPU lays it too. */
-    if (correction.opacity > 0.0f && paint_layer_filter_is_cpu_computed(correction.filter)) {
+     * registry's #PAINT_LAYER_KIND_NEEDS_BAKE flag decides, so a new one needs no edit here -- except
+     * for a kind the preview now computes on the GPU (#PAINT_LAYER_KIND_GPU_COMPUTED): the gather lays
+     * an effect pass into the GPU result cache and reads the texture as a correction's map, which is
+     * the same picture the CPU cache holds. Gated on the opacity that decides the CPU lays it too. */
+    if (correction.opacity > 0.0f && paint_layer_filter_is_cpu_computed(correction.filter) &&
+        !paint_layer_filter_is_gpu_computed(correction.filter))
+    {
       const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
                                                              correction.filter);
       if (kind != nullptr) {

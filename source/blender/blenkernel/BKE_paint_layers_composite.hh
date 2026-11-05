@@ -244,6 +244,40 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
                                      bool allow_empty_mask = false);
 
 /**
+ * Describe the **input** of a CPU-computed \a effect: the content \a row holds up to the effect's
+ * marker -- its map or flat colour, the corrections below the effect, its children when it is a
+ * folder -- and none of the effect itself. The row's own opacity, mask, object mask and blend are
+ * cleared from the entry: the effect reads the content alone, and its mask and opacity are laid live
+ * over the result, exactly as #BKE_paint_layers_bake_render_node stores them for a row that carries
+ * an effect.
+ *
+ * This is the one description the CPU effect cache renders from (#paint_layer_effect_compute) and
+ * the GPU effect pass lays from, so the two cannot disagree about what an effect is computed on.
+ *
+ * \param dimensions_only: describe only what the input is made of, so a caller finding the size does
+ *        not render (or allocate) a single nested slice. The entry must not be evaluated.
+ * \param describe_only: keep every reader's descriptor and the maps it subscribes to, but render no
+ *        Anchor Point slice and compute no nested effect buffer: the GPU path lays the slices from
+ *        its own slots and the nested effects from its own cache. A CPU caller must leave it false.
+ * \return false when the row cannot be described.
+ */
+bool BKE_paint_layers_effect_input_describe(const Material &ma,
+                                            const MaterialPaintLayer &row,
+                                            const MaterialPaintLayer &effect,
+                                            int channel,
+                                            bool dimensions_only,
+                                            bool describe_only,
+                                            PaintMaterialCompositeImageLayer &r_entry);
+
+/**
+ * Every map the described effect \a layer renders from, once each and none of them null. The effect
+ * owns no map of its own, so a stroke on one of these is what makes its result stale -- the CPU
+ * cache compares their versions, and so does the GPU one.
+ */
+void BKE_paint_layers_effect_input_images(const PaintMaterialCompositeImageLayer &layer,
+                                          Vector<Image *> &r_images);
+
+/**
  * Render the slice \a reader lays in \a channel at the source row's resolution. The buffers are
  * reference counted and outlive the slice cache; \a dst_rect limits a partial render to that
  * rectangle, leaving the rest zero, and is never cached. Used by the developer GPU verification.
@@ -257,6 +291,14 @@ bool BKE_paint_layers_slice_render(const Material &ma,
                                    bool dimensions_only = false);
 
 /**
+ * Whether the combined preview computes \a effect itself, in an effect pass of its own whose result
+ * the GPU effect cache holds. #BKE_paint_layers_gpu_unsupported_reason refuses the stack for a
+ * CPU-computed effect this answers false for, and the gather queues a pass only for the ones it answers
+ * true for, so the refusal, the queue and the shader's own cases stay one rule.
+ */
+bool BKE_paint_layers_effect_is_gpu_computed(const MaterialPaintLayer &effect);
+
+/**
  * Why the GPU Combined preview cannot lay \a layer the way the CPU composite does, or null when it
  * can. Pure: it reads the description only, so it is testable without a GPU. A live Anchor Point
  * slice is supported (the GPU path captures it into a slot); a *baked* correction with a coverage
@@ -268,6 +310,122 @@ bool BKE_paint_layers_slice_render(const Material &ma,
  */
 const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialCompositeImageLayer &layer,
                                                     bool mask_slice = false);
+
+/* -------------------------------------------------------------------- */
+/** \name GPU Effect Result Cache
+ *
+ * The GPU twin of the CPU effect cache, for the kinds the registry marks
+ * #PAINT_LAYER_KIND_GPU_COMPUTED: the combined preview computes the effect in a pass of its own and
+ * keeps the result in a texture, so a stroke on the row's colour costs a dispatch instead of the
+ * whole-canvas render and kernel the CPU path runs on the main thread. What the cache holds is a
+ * texture of the **input's** dimensions and texel space (a Noise is a function of the texel index,
+ * and a bake at another size is a resample of it), in straight scene-linear RGBA on the half float
+ * the preview's own accumulators use.
+ *
+ * The texture is an untyped pointer and the acquire and release steps are hooks the caller supplies,
+ * the way #PaintLayersGpuSlotGuard supplies its release function: the keying, the byte budget, the
+ * eviction order and the staleness rule are then testable without a GPU context, and the cache itself
+ * keeps no `GPU_` dependency.
+ *
+ * A resource the cache hands out is owned by the cache, and the pointer is valid only while the cache
+ * holds its entry: another #BKE_paint_layers_effect_gpu_cache_get (a re-key, another size, a budget
+ * eviction) drops it again, and so do #BKE_paint_layers_effect_gpu_cache_free_all and
+ * #BKE_paint_layers_effect_gpu_cache_free_material. A caller that keeps the texture past that takes
+ * a reference of its own through the resource type it handed the hooks for -- `GPU_texture_ref` for
+ * a `gpu::Texture` -- and releases it the same way, so an eviction cannot pull the texture out from
+ * under a frame that is still laying it.
+ *
+ * One thread renders. The mutex guards the container and is held across the hooks, never across a
+ * dispatch: a caller with real hooks asks on the thread that owns the current GPU context, and every
+ * texture it got is laid on that same thread.
+ * \{ */
+
+/** A map an effect's input was rendered from, with the version of its pixels at that time. */
+struct PaintLayerEffectSource {
+  uint32_t image_uid = 0;
+  uint64_t version = 0;
+};
+
+/** How the GPU effect cache makes and drops the texture it keeps for one entry. Both hooks run with
+ * the cache's mutex held and must not re-enter it: no call to the cache API from a hook. */
+struct PaintLayerEffectGpuHooks {
+  void *data = nullptr;
+  /** Make an RGBA half-float canvas of \a width x \a height readable and writable by a shader.
+   * Null means the GPU cannot take the effect at all, which the caller reads as #Failed. */
+  void *(*acquire)(void *data, int width, int height) = nullptr;
+  /** Drop the cache's reference to a texture it made. */
+  void (*release)(void *data, void *resource) = nullptr;
+};
+
+/** What the cache answered about one effect's GPU result. */
+enum class PaintLayerEffectGpuState : uint8_t {
+  /** The texture holds the result of the current parameters over the current pixels. */
+  Hit = 0,
+  /** \a r_resource names a texture to render into: a new one, or one whose input moved. */
+  Render = 1,
+  /** No texture could be made; the CPU path has to serve this effect. */
+  Failed = 2,
+};
+
+/**
+ * The texture holding \a effect's GPU result, asking for one when the cache has none or the input
+ * has moved since it was last computed.
+ *
+ * \param width, height: the dimensions of the effect's **input**, which are the dimensions of the
+ *        result and the texel space the kernel works in.
+ * \param images: every map the input renders from (see #BKE_paint_layers_effect_input_images); an
+ *        edit of one of these is what makes the entry stale.
+ * \param r_dirty_region: when given, the rectangle of the input that has changed since the entry was
+ *        published, in input texels -- the whole canvas for a fresh entry or a change that is not one
+ *        rectangle. A neighbourhood kernel re-renders that rectangle grown by its halo; a caller that
+ *        narrows a dispatch with it must still satisfy the two rules the cache cannot see, that the
+ *        maps' texel grid is the input's and that nothing between a map and the canvas remaps it (the
+ *        slice cache checks both, see #anchor_slice_region_is_exact). Until it does, the whole texture
+ *        is re-rendered and the rectangle is only carried.
+ * \param r_resource: the texture, valid for #Hit and #Render.
+ */
+PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &ma,
+                                                               const MaterialPaintLayer &effect,
+                                                               int channel,
+                                                               int width,
+                                                               int height,
+                                                               Span<Image *> images,
+                                                               const PaintLayerEffectGpuHooks &hooks,
+                                                               rcti *r_dirty_region,
+                                                               void **r_resource);
+
+/**
+ * Record that the texture of this effect's entry now holds its result over \a images at the versions
+ * they have now. Call it after the render, the way the CPU cache snapshots the sources afterwards: an
+ * edit that landed while the pass ran is then seen as newer than the entry and costs one more update
+ * rather than a result that never matches the screen. Nothing is released here, so the hooks are not
+ * named: an entry that went away while the frame was rendering (a budget eviction, a re-key) simply
+ * stays unpublished, and the next frame asks for it again.
+ */
+void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
+                                               const MaterialPaintLayer &effect,
+                                               int channel,
+                                               int width,
+                                               int height,
+                                               Span<Image *> images);
+
+/**
+ * Drop every cached effect texture. The cache owns textures of its own, so it has to be emptied while
+ * the GPU backend is alive, on the main thread -- the same place the CPU effect cache is dropped --
+ * and its entries name materials of the file going away. A current context is not required of the
+ * caller: a backend given a texture while none is current parks it on its own orphan list and frees
+ * it from the next context that runs, the same terms the image and paint-cursor GPU textures are
+ * freed on.
+ */
+void BKE_paint_layers_effect_gpu_cache_free_all();
+
+/** Drop the cached effect textures of \a ma, keyed by its session UID like the CPU ones are. */
+void BKE_paint_layers_effect_gpu_cache_free_material(const Material &ma);
+
+/** The GPU effect cache's byte budget currently in force, for the gather's perf reporting. */
+size_t BKE_paint_layers_effect_gpu_cache_budget();
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name GPU Anchor Point Capture Plan

@@ -772,6 +772,11 @@ void ED_outliner_rendered_previews_free()
     }
   }
   ed::outliner::g_rendered_previews.clear();
+  /* The sphere templates are statics too: their helper list keeps the heap buffer it grew to
+   * (#Vector::clear keeps the capacity), and its destructor would free it at process exit, after
+   * guardedalloc is gone -- the crash and the unfreed block of the exit log. */
+  ed::outliner::g_stack_sphere_maps.helpers.clear_and_shrink();
+  ed::outliner::g_stack_sphere_constants.helpers.clear_and_shrink();
 }
 
 }  // namespace blender

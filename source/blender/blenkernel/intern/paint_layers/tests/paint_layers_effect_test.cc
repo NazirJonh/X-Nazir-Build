@@ -19,6 +19,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_math_color.h"
+#include "BLI_rect.h"
 
 #include "paint_layers_generate_test_fixture.hh"
 
@@ -52,6 +53,13 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
     return budget;
   }
 
+  /** The GPU effect cache's starting budget, for the same reason. */
+  static size_t default_gpu_budget()
+  {
+    static const size_t budget = paint_layer_effect_gpu_cache_budget();
+    return budget;
+  }
+
   /** The effect cache is process-global: a test starts with none of an earlier one's entries, and
    * with the budget an earlier one may have shrunk for an eviction check put back. */
   void SetUp() override
@@ -63,12 +71,16 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
     wm->runtime = MEM_new<bke::WindowManagerRuntime>(__func__);
     paint_layer_effect_cache_set_budget(default_budget());
     BKE_paint_layers_effect_cache_free_all();
+    paint_layer_effect_gpu_cache_set_budget(default_gpu_budget());
+    BKE_paint_layers_effect_gpu_cache_free_all();
   }
 
   void TearDown() override
   {
     paint_layer_effect_cache_set_budget(default_budget());
     BKE_paint_layers_effect_cache_free_all();
+    paint_layer_effect_gpu_cache_set_budget(default_gpu_budget());
+    BKE_paint_layers_effect_gpu_cache_free_all();
     /* The stroke flag is runtime state a test may have left set; clear it so it cannot leak into
      * the next test. */
     BKE_paint_layers_bake_stroke_active_set(false);
@@ -1704,6 +1716,242 @@ TEST_F(PaintLayersEffectTest, the_bake_renders_the_glow_the_composite_shows)
 TEST_F(PaintLayersEffectTest, the_bake_renders_the_color_match_the_composite_shows)
 {
   expect_bake_matches_composite(MA_PAINT_LAYER_FILTER_COLOR_MATCH);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name GPU Effect Cache
+ *
+ * The policy of the GPU result cache: what one effect instance's texture is keyed on, what makes it
+ * stale, what the budget evicts. The acquire and release hooks hand out plain ints, so none of that
+ * needs a GPU context -- the same trick that keeps #PaintLayersGpuSlotGuard testable. What the hooks
+ * return is never read here, only compared and counted.
+ * \{ */
+
+namespace {
+
+/** A stand-in for the effect textures and the counts of them made and dropped. */
+struct FakeEffectGpu {
+  int made = 0;
+  int freed = 0;
+  /** Set to make the acquire fail, which is how a caller learns the GPU cannot take the effect. */
+  bool refuse = false;
+
+  static void *acquire(void *data, const int /*width*/, const int /*height*/)
+  {
+    FakeEffectGpu &self = *static_cast<FakeEffectGpu *>(data);
+    if (self.refuse) {
+      return nullptr;
+    }
+    self.made++;
+    return new int(self.made);
+  }
+  static void release(void *data, void *resource)
+  {
+    if (resource == nullptr) {
+      return;
+    }
+    static_cast<FakeEffectGpu *>(data)->freed++;
+    delete static_cast<int *>(resource);
+  }
+};
+
+/**
+ * One fake for the whole process: the fixture drops the cache in its tear-down, after a test's own
+ * scope has ended, and an entry releases its resource through the hooks it was made with. A local
+ * fake would already be gone by then.
+ */
+FakeEffectGpu g_fake_effect_gpu;
+
+/** The hooks of the tests, with the counters of one test's flow put back to zero. */
+PaintLayerEffectGpuHooks fake_gpu_hooks()
+{
+  g_fake_effect_gpu = {};
+  return PaintLayerEffectGpuHooks{&g_fake_effect_gpu, FakeEffectGpu::acquire, FakeEffectGpu::release};
+}
+
+}  // namespace
+
+TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_publishes_a_hit_only_after_a_render)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  const PaintLayerEffectGpuHooks hooks = fake_gpu_hooks();
+  const Span<Image *> no_images;
+  void *resource = nullptr;
+  rcti region;
+
+  /* A key the cache has never seen makes a texture and asks for it to be filled: the entry is not
+   * current until the render is stamped onto it. */
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *noise, kColor, 8, 8, no_images, hooks, &region, &resource),
+            PaintLayerEffectGpuState::Render);
+  EXPECT_NE(resource, nullptr);
+  EXPECT_EQ(g_fake_effect_gpu.made, 1);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 1);
+  /* Nothing of a fresh entry has been computed, so the whole canvas is what needs doing. */
+  EXPECT_EQ(BLI_rcti_size_x(&region), 8);
+  EXPECT_EQ(BLI_rcti_size_y(&region), 8);
+
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, no_images);
+  resource = nullptr;
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *noise, kColor, 8, 8, no_images, hooks, &region, &resource),
+            PaintLayerEffectGpuState::Hit);
+  EXPECT_EQ(g_fake_effect_gpu.made, 1) << "the same texture serves the next frame";
+  EXPECT_EQ(g_fake_effect_gpu.freed, 0);
+  /* A hit names no work: the whole cached canvas is current. */
+  EXPECT_TRUE(BLI_rcti_is_empty(&region));
+}
+
+TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_separates_effects_channels_and_parameters)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *first = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  MaterialPaintLayer *second = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_NE(first, second);
+  const PaintLayerEffectGpuHooks hooks = fake_gpu_hooks();
+  const Span<Image *> no_images;
+  void *resource = nullptr;
+
+  /* Two effects of one row are two instances: their markers differ, so neither can be served the
+   * other's grain. */
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *first, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+            PaintLayerEffectGpuState::Render);
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *first, kColor, 8, 8, no_images);
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *second, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+            PaintLayerEffectGpuState::Render);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 2);
+  EXPECT_EQ(g_fake_effect_gpu.made, 2);
+
+  /* Another channel of the same effect is another key, and another set of parameters replaces the
+   * entry rather than waiting for the budget to evict it: the description can only ever ask for the
+   * parameters the effect carries now. */
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *first, PAINT_MATERIAL_CHANNEL_ROUGHNESS, 8, 8, no_images, hooks, nullptr,
+                &resource),
+            PaintLayerEffectGpuState::Render);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 3);
+  const int made = g_fake_effect_gpu.made;
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*first, PAINT_LAYER_NOISE_SEED, 7));
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *first, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+            PaintLayerEffectGpuState::Render);
+  EXPECT_EQ(g_fake_effect_gpu.made, made + 1);
+  EXPECT_EQ(g_fake_effect_gpu.freed, 1) << "the entry of the old seed was dropped, not kept";
+  EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 3);
+}
+
+TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_grows_stale_when_the_input_map_is_edited)
+{
+  Image *map = add_shade_image("Row", 255, 0);
+  MaterialPaintLayer *row = add_paint_layer("Row", map);
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  const PaintLayerEffectGpuHooks hooks = fake_gpu_hooks();
+
+  /* The maps the input renders from are what the entry vouches for: the effect owns no map itself. */
+  Image *source[1] = {map};
+  const Span<Image *> images(source, 1);
+  void *resource = nullptr;
+  rcti region;
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *noise, kColor, 8, 8, images, hooks, &region, &resource),
+            PaintLayerEffectGpuState::Render);
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, images);
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *noise, kColor, 8, 8, images, hooks, &region, &resource),
+            PaintLayerEffectGpuState::Hit);
+
+  BKE_image_partial_update_mark_full_update(map);
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *noise, kColor, 8, 8, images, hooks, &region, &resource),
+            PaintLayerEffectGpuState::Render);
+  /* A change that is not a rectangle has no region to name, and the whole canvas is the only safe
+   * claim over it. */
+  EXPECT_EQ(BLI_rcti_size_x(&region), 8);
+  EXPECT_EQ(BLI_rcti_size_y(&region), 8);
+  EXPECT_EQ(g_fake_effect_gpu.made, 1) << "the texture was kept, only its pixels went stale";
+}
+
+TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_evicts_to_its_budget)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *first = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  MaterialPaintLayer *second = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  const PaintLayerEffectGpuHooks hooks = fake_gpu_hooks();
+  const Span<Image *> no_images;
+  void *resource = nullptr;
+
+  /* One 8x8 RGBA half-float canvas: enough for one entry, so the second pushes the first out. */
+  const size_t one_canvas = size_t(8) * 8 * 4 * sizeof(int16_t);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), 0);
+  paint_layer_effect_gpu_cache_set_budget(one_canvas);
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *first, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+            PaintLayerEffectGpuState::Render);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), one_canvas);
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *second, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+            PaintLayerEffectGpuState::Render);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 1);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), one_canvas);
+  EXPECT_EQ(g_fake_effect_gpu.freed, 1) << "the evicted entry's texture was handed back";
+
+  /* An entry bigger than the whole budget is still held: the cache must own a texture to release it,
+   * and a frame keeps a reference while it renders, so exceeding the budget briefly is what costs
+   * nothing to get wrong. */
+  paint_layer_effect_gpu_cache_set_budget(one_canvas / 2);
+  BKE_paint_layers_effect_gpu_cache_free_all();
+  EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 0);
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *first, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+            PaintLayerEffectGpuState::Render);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 1);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), one_canvas);
+}
+
+TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_reports_a_texture_it_cannot_make)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  const PaintLayerEffectGpuHooks hooks = fake_gpu_hooks();
+  g_fake_effect_gpu.refuse = true;
+  const Span<Image *> no_images;
+  void *resource = reinterpret_cast<void *>(1);
+
+  /* The caller's answer is to fall back to the CPU for the whole stack, so nothing may be held for an
+   * effect that failed: the reason strings of `gpu_combined refused` count on it. */
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *noise, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+            PaintLayerEffectGpuState::Failed);
+  EXPECT_EQ(resource, nullptr);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 0);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), 0);
+  /* A stamp of a render nobody asked for finds no entry and holds nothing. */
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, no_images);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 0);
+}
+
+TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_drops_a_material_with_its_textures)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  const PaintLayerEffectGpuHooks hooks = fake_gpu_hooks();
+  const Span<Image *> no_images;
+  void *resource = nullptr;
+  EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
+                *ma, *noise, kColor, 8, 8, no_images, hooks, nullptr, &resource),
+            PaintLayerEffectGpuState::Render);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 1);
+
+  /* The cache is keyed on a session UID that is never reused, so a freed material's entry could never
+   * be hit again and would hold its canvas until the budget came for it. */
+  BKE_paint_layers_effect_gpu_cache_free_material(*ma);
+  EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 0);
+  EXPECT_EQ(g_fake_effect_gpu.freed, 1);
 }
 
 /** \} */

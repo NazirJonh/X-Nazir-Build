@@ -25,6 +25,8 @@
 
 #include "DNA_material_types.h"
 
+#include "BKE_paint_perf_debug.hh"
+
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
@@ -792,6 +794,13 @@ static void paint_layer_effect_color_match_apply(ImBuf &buffer, const MaterialPa
 
 void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
 {
+  /* Timed apart from the input it is handed: this is the half an effect pass computes instead, so
+   * the line stopping to print in `BLENDER_PBR_PERF` is what a covered kind bought. The region is
+   * always the whole buffer -- a neighbourhood reads past an edited rectangle, and the cache has no
+   * halo to re-render one with yet. */
+  bke::paint_perf::ScopedTimer perf_kernel("effect.cpu.kernel");
+  perf_kernel.note(
+      "kind=%d size=%dx%d region=full", int(effect.kind_subtype), buffer.x, buffer.y);
   switch (eMaterialPaintLayerFilter(effect.kind_subtype)) {
     case MA_PAINT_LAYER_FILTER_BLUR: {
       const int radius = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BLUR_RADIUS);

@@ -232,6 +232,16 @@ enum PaintLayerKindFlag : uint16_t {
    * CPU, so a new such kind cannot be silently shaded as a no-op.
    */
   PAINT_LAYER_KIND_NO_GPU_BRANCH = 1 << 9,
+  /**
+   * A #PAINT_LAYER_KIND_NEEDS_BAKE effect whose result the combined preview computes on the GPU: an
+   * effect pass lays it into the GPU effect cache and the correction pass reads the result back, so
+   * the stack no longer falls to the CPU. Every other such kind (a Blur, a Bevel) still refuses the
+   * GPU path until its pass exists, so a phase adds the flag rather than editing the refusal.
+   *
+   * The flag says nothing about the bake or the live graph: the row is still baked for those, and
+   * the CPU kernel is still what the bake and the render read.
+   */
+  PAINT_LAYER_KIND_GPU_COMPUTED = 1 << 10,
 };
 
 struct PaintLayerKindInfo {

@@ -667,6 +667,9 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
   BKE_paint_layers_slice_cache_free_all();
   /* Owns float canvases of its own, dropped with the other caches before the leak check. */
   BKE_paint_layers_effect_cache_free_all();
+  /* The GPU effect cache owns textures of its own, so it goes with the other caches and before the
+   * GPU backend is destroyed -- the same window in which the image textures are released below. */
+  BKE_paint_layers_effect_gpu_cache_free_all();
   BKE_paint_material_combined_cache_free_all();
   ED_space_image_gpu_combined_stand_in_free();
   ED_outliner_rendered_previews_free();

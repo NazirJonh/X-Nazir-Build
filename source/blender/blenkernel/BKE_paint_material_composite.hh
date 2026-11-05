@@ -502,6 +502,12 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
    * composite cache subscribes to these to see a stroke on the row's map.
    */
   Vector<Image *> effect_images;
+  /**
+   * The marker of the effect row this correction was made from, for a caller that has to name it --
+   * the GPU result cache keys its texture on the effect instance, and a parameter hash cannot tell
+   * two effects with the same parameters on two rows apart. Nil for every other correction.
+   */
+  bUUID effect_marker = {};
   /** A description hash of the effect's kind and parameters, folded into the stack hash. */
   uint64_t effect_hash = 0;
   Image *image = nullptr;

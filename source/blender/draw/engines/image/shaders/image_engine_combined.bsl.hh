@@ -562,7 +562,7 @@ float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, float4 p2
  * `BLI_hash_int_2d` it calls: Jenkins' lookup3 `final` over the two texel coordinates. Every step is
  * uint32 arithmetic with the same constants as the C++, so the sequence cannot drift between the CPU
  * kernel, the bake and this pass; the shifts are never by zero, so no backend's undefined shift rule
- * is reached. Deband and a Color Match's variation read the same family (Ф3), which is why this is a
+ * is reached. Deband and a Color Match's variation read the same family, which is why this is a
  * section of its own rather than part of the noise below.
  * \{ */
 
@@ -601,7 +601,7 @@ uint texel_hash_int_2d(uint kx, uint ky)
  * `paint_layer_texel_hash_uniform`: one uniform in [0, 1) of the texel hash family, the salt keeping
  * the passes and the channels apart and the seed moving the pattern. The coordinates are those of the
  * texture being grained, not a normalized position: the grain is a field over the canvas, so a bake
- * at another resolution shows the same pattern resampled rather than a different one (D6).
+ * at another resolution shows the same pattern resampled rather than a different one.
  */
 float texel_hash_uniform(int2 texel, int seed, uint salt)
 {
@@ -1167,16 +1167,19 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
  * content up to the effect (`input_tx`, at the input's own resolution and texel space, which the
  * gather lays with the passes above) and writes the result the correction pass mixes in. The kernels
  * are ports of `paint_layer_effect_kernel_apply` kept in its order of operations, so
- * `BLENDER_PBR_GPU_VERIFY` compares one number; a neighbourhood kernel will add its own passes here
- * (Ф2) and a reduction another one (Ф3).
+ * `BLENDER_PBR_GPU_VERIFY` compares one number.
+ *
+ * An effect of several passes runs this entry point once per pass of its plan: the host pushes the
+ * pass in `pass_kind`, binds the pass's own source in `input_tx` (a ping-pong buffer of its own for
+ * the middle passes, the luminance buffer for a High Pass tail, or the original for a Sharpen tail)
+ * and the combine tail's blurred copy in `aux_tx`, and clips the dispatch to the rectangle the pass
+ * reads. The separable windows are a direct enumeration
+ * of their clamped window from `input_tx`, matching the CPU kernel's arithmetic and its edge handling
+ * for any radius -- including a High Pass reach of 256, past what a shared-memory tile of one workgroup
+ * could hold. A shared-memory tile for the small radii (and a scan for the large ones) is the measured
+ * optimization the next phase adds behind a radius threshold; the reduction of a Color Match is
+ * another pass kind here.
  * \{ */
-
-/**
- * The kinds this pass computes, as #eMaterialPaintLayerFilter subtypes. A kind carries
- * #PAINT_LAYER_KIND_GPU_COMPUTED for exactly the case it has below, so the refusal of the description
- * and the silence of this switch cannot disagree about what is laid.
- */
-#define COMBINED_EFFECT_NOISE 25
 
 /* The families of the Noise, the value of its first parameter (`PaintLayerNoiseType`). */
 #define COMBINED_NOISE_GAUSSIAN 0
@@ -1259,20 +1262,155 @@ void noise_apply(float3 &rgb, int2 texel, float4 params, float3 luma_coefficient
   rgb = rgb + float3(moved - lum);
 }
 
+/**
+ * The pass kinds of the plan, the values of #PaintLayerEffectPass::kind in
+ * `BKE_paint_layers_composite.hh`. The host runs one dispatch per pass and pushes its kind here; a
+ * pointwise effect (a Noise) is one pass, a separable one (a Blur) is a pass per axis, a 3x3 kernel
+ * (an Edge Detect, an Emboss) is one pass naming its kind, and an unsharp-style one (a Sharpen, a
+ * High Pass) is a luminance pre-pass, a blur and a combine tail -- a Sharpen tail and a High Pass
+ * tail are two kinds, the latter reading the luminance buffer through the sRGB curve.
+ */
+#define COMBINED_PASS_NOISE 0
+#define COMBINED_PASS_LUMINANCE 1
+#define COMBINED_PASS_BLUR_H 2
+#define COMBINED_PASS_BLUR_V 3
+#define COMBINED_PASS_EXTREMUM_H 4
+#define COMBINED_PASS_EXTREMUM_V 5
+#define COMBINED_PASS_EDGE_3X3 6
+#define COMBINED_PASS_EMBOSS_3X3 7
+#define COMBINED_PASS_UNSHARP_TAIL 8
+#define COMBINED_PASS_HIGH_PASS_TAIL 9
+
+/**
+ * The scalar `linearrgb_to_srgb` / `srgb_to_linearrgb` of `BLI_math_color`, ported verbatim (both
+ * branches) with the `effect_` prefix so they cannot collide with the display-encoding helpers of
+ * `gpu_shader_common_color_utils.glsl`. A High Pass takes its detail through them, so the shader and
+ * the CPU kernel must agree on the piecewise curve, including the low-value linear branch.
+ */
+float effect_linearrgb_to_srgb(float c)
+{
+  if (c < 0.0031308f) {
+    return (c < 0.0f) ? 0.0f : c * 12.92f;
+  }
+  return 1.055f * pow(c, 1.0f / 2.4f) - 0.055f;
+}
+
+float effect_srgb_to_linearrgb(float c)
+{
+  if (c < 0.04045f) {
+    return (c < 0.0f) ? 0.0f : c * (1.0f / 12.92f);
+  }
+  return pow((c + 0.055f) * (1.0f / 1.055f), 2.4f);
+}
+
+/** One axis of a box pass over the RGB of the fetched line: window `[max(c-r,0), min(c+r,lim-1)]`,
+ * divided by its actual texel count (`hi - lo + 1`) -- a clamped edge, not a replicated one, exactly
+ * as `paint_layer_effect_blur_pass_h/v`. Alpha is not read here; the caller carries it through. */
+float3 box_blur_axis(sampler2D tx, const int2 texel, const int axis, const int r, const int2 size)
+{
+  const int center = (axis == 0) ? texel.x : texel.y;
+  const int line_at = (axis == 0) ? texel.y : texel.x;
+  const int lim = (axis == 0) ? size.x : size.y;
+  const int lo = max(center - r, 0);
+  const int hi = min(center + r, lim - 1);
+  float3 sum = float3(0.0f);
+  for (int k = lo; k <= hi; k++) {
+    const int2 at = (axis == 0) ? int2(k, line_at) : int2(line_at, k);
+    sum += texelFetch(tx, at, 0).xyz;
+  }
+  return sum / float(hi - lo + 1);
+}
+
+/** One axis of a sliding-window extremum (an Erode / Dilate): the min or max of the same clamped
+ * window, per channel. A min/max of the input is exactly reproducible, so this matches the CPU kernel
+ * to the bit, with no running float to accumulate. */
+float3 extremum_axis(
+    sampler2D tx, const int2 texel, const int axis, const int r, const bool maximum, const int2 size)
+{
+  const int center = (axis == 0) ? texel.x : texel.y;
+  const int line_at = (axis == 0) ? texel.y : texel.x;
+  const int lim = (axis == 0) ? size.x : size.y;
+  const int lo = max(center - r, 0);
+  const int hi = min(center + r, lim - 1);
+  const int2 at0 = (axis == 0) ? int2(lo, line_at) : int2(line_at, lo);
+  float3 acc = texelFetch(tx, at0, 0).xyz;
+  for (int k = lo + 1; k <= hi; k++) {
+    const int2 at = (axis == 0) ? int2(k, line_at) : int2(line_at, k);
+    const float3 v = texelFetch(tx, at, 0).xyz;
+    acc = maximum ? max(acc, v) : min(acc, v);
+  }
+  return acc;
+}
+
+/** A texel of the input clamped to the canvas edge: the 3x3 reads its ring this way, as
+ * `paint_layer_effect_kernel_apply` clamps its 3x3 row and column indices once per tap. */
+float3 fetch_clamped(sampler2D tx, const int2 p, const int2 size)
+{
+  const int2 c = int2(clamp(p.x, 0, size.x - 1), clamp(p.y, 0, size.y - 1));
+  return texelFetch(tx, c, 0).xyz;
+}
+
+/** The Sobel gradient magnitude of one texel's taps, per channel: the two 3x3 gradients, normalized
+ * so a full-range step reads as one and clamped there. The centre tap drops out of both gradients. */
+float3 edge_detect(const float3 t00,
+                   const float3 t01,
+                   const float3 t02,
+                   const float3 t10,
+                   const float3 t12,
+                   const float3 t20,
+                   const float3 t21,
+                   const float3 t22)
+{
+  const float3 gx = (t02 + 2.0f * t12 + t22) - (t00 + 2.0f * t10 + t20);
+  const float3 gy = (t00 + 2.0f * t01 + t02) - (t20 + 2.0f * t21 + t22);
+  return clamp(sqrt(gx * gx + gy * gy) * 0.25f, 0.0f, 1.0f);
+}
+
+/** The Emboss diagonal lighting kernel of one texel's taps, per channel: `[-2 -1 0 / -1 1 1 / 0 1 2]`,
+ * weights summing to one so a flat colour is its own result; clamped to [0, 1]. */
+float3 emboss(const float3 t00,
+              const float3 t01,
+              const float3 t10,
+              const float3 t11,
+              const float3 t12,
+              const float3 t21,
+              const float3 t22)
+{
+  const float3 sum = -2.0f * t00 - t01 - t10 + t11 + t12 + t21 + 2.0f * t22;
+  return clamp(sum, 0.0f, 1.0f);
+}
+
 struct EffectResources {
-  /** The row's content up to the effect, straight scene-linear with the content alpha in `w`. */
+  /** This pass's source: the effect input, a ping-pong buffer, the luminance buffer for a High Pass
+   * tail, or the original for a Sharpen tail. */
   [[sampler(0)]] sampler2D input_tx;
+  /** A combine tail's blurred copy, bound only for #COMBINED_PASS_UNSHARP_TAIL / _HIGH_PASS_TAIL. */
+  [[sampler(1)]] sampler2D aux_tx;
+  /** This pass's destination: a scratch buffer, or the cache texture on the last pass. */
   [[image(0, write, SFLOAT_16_16_16_16)]] image2D result_img;
+  /** The canvas size: the window clamps to it on every pass, whatever the dispatch region is. */
   [[push_constant]] const int2 texture_size;
   /**
-   * The first texel of this dispatch. Only the texels whose input moved are recomputed: what is
-   * outside them keeps the value the cached result already holds, so the pass starts here instead of at
-   * the origin and the guard below still clips to #texture_size.
+   * The first texel of this dispatch. A pass computes only its rectangle (the region for the last
+   * pass, the region grown by the halo for the ones before it); the window still clamps to #texture_size
+   * so it reads the neighbourhood the previous pass left valid over that grown rectangle.
    */
   [[push_constant]] const int2 dispatch_origin;
-  /** A `COMBINED_EFFECT_*` value: which kernel the texel goes through. */
-  [[push_constant]] const int effect_kind;
-  /** The effect's parameters in its kind's schema order, as the correction pass is given them. */
+  /**
+   * One past the last texel of this dispatch's rectangle. The groups are 16x16 and round the
+   * rectangle up, and a texel past it reads a scratch buffer that pass never filled, so it must not
+   * write the cache.
+   */
+  [[push_constant]] const int2 dispatch_end;
+  /** A `COMBINED_PASS_*` value: which kernel this dispatch runs. */
+  [[push_constant]] const int pass_kind;
+  /** The window half-reach in texels, already clamped the way the CPU kernel clamps it. */
+  [[push_constant]] const int radius;
+  /** #COMBINED_PASS_EXTREMUM_H / _V: dilate (maximum) when non-zero, erode (minimum) otherwise. */
+  [[push_constant]] const int maximum;
+  /** #COMBINED_PASS_UNSHARP_TAIL / _HIGH_PASS_TAIL: the Sharpen amount or the High Pass contrast. */
+  [[push_constant]] const float aux0;
+  /** The Noise parameters in its kind's schema order, as the correction pass is given them. */
   [[push_constant]] const float4 filter_params_0;
   /** The working space's luminance weights, which `IMB_colormanagement_get_luminance` reads. */
   [[push_constant]] const float4 luma_coefficients;
@@ -1286,18 +1424,77 @@ void effect_comp([[resource_table]] EffectResources &srt,
                  [[global_invocation_id]] const uint3 global_id)
 {
   const int2 texel = int2(global_id.xy) + srt.dispatch_origin;
-  if (any(greaterThanEqual(texel, srt.texture_size))) {
+  if (any(greaterThanEqual(texel, srt.texture_size)) ||
+      any(greaterThanEqual(texel, srt.dispatch_end)))
+  {
     return;
   }
   const float4 source = texelFetch(srt.input_tx, texel, 0);
   float3 rgb = source.xyz;
-  switch (srt.effect_kind) {
-    case COMBINED_EFFECT_NOISE:
+  switch (srt.pass_kind) {
+    case COMBINED_PASS_NOISE:
       noise_apply(rgb, texel, srt.filter_params_0, srt.luma_coefficients.xyz);
       break;
+    case COMBINED_PASS_LUMINANCE: {
+      const float lum = dot(source.xyz, srt.luma_coefficients.xyz);
+      rgb = float3(lum);
+      break;
+    }
+    case COMBINED_PASS_BLUR_H:
+      rgb = box_blur_axis(srt.input_tx, texel, 0, srt.radius, srt.texture_size);
+      break;
+    case COMBINED_PASS_BLUR_V:
+      rgb = box_blur_axis(srt.input_tx, texel, 1, srt.radius, srt.texture_size);
+      break;
+    case COMBINED_PASS_EXTREMUM_H:
+      rgb = extremum_axis(srt.input_tx, texel, 0, srt.radius, srt.maximum != 0, srt.texture_size);
+      break;
+    case COMBINED_PASS_EXTREMUM_V:
+      rgb = extremum_axis(srt.input_tx, texel, 1, srt.radius, srt.maximum != 0, srt.texture_size);
+      break;
+    case COMBINED_PASS_EDGE_3X3:
+    case COMBINED_PASS_EMBOSS_3X3: {
+      /* Both 3x3 kernels read the same clamped ring of taps, so one fetch block serves both; the
+       * centre tap drops out of the Sobel gradients and the two far corners out of the Emboss. */
+      const float3 t00 = fetch_clamped(srt.input_tx, texel + int2(-1, -1), srt.texture_size);
+      const float3 t01 = fetch_clamped(srt.input_tx, texel + int2(0, -1), srt.texture_size);
+      const float3 t02 = fetch_clamped(srt.input_tx, texel + int2(1, -1), srt.texture_size);
+      const float3 t10 = fetch_clamped(srt.input_tx, texel + int2(-1, 0), srt.texture_size);
+      const float3 t11 = fetch_clamped(srt.input_tx, texel + int2(0, 0), srt.texture_size);
+      const float3 t12 = fetch_clamped(srt.input_tx, texel + int2(1, 0), srt.texture_size);
+      const float3 t20 = fetch_clamped(srt.input_tx, texel + int2(-1, 1), srt.texture_size);
+      const float3 t21 = fetch_clamped(srt.input_tx, texel + int2(0, 1), srt.texture_size);
+      const float3 t22 = fetch_clamped(srt.input_tx, texel + int2(1, 1), srt.texture_size);
+      if (srt.pass_kind == COMBINED_PASS_EMBOSS_3X3) {
+        rgb = emboss(t00, t01, t10, t11, t12, t21, t22);
+      }
+      else {
+        rgb = edge_detect(t00, t01, t02, t10, t12, t20, t21, t22);
+      }
+      break;
+    }
+    case COMBINED_PASS_UNSHARP_TAIL:
+    case COMBINED_PASS_HIGH_PASS_TAIL: {
+      const float3 blurred = texelFetch(srt.aux_tx, texel, 0).xyz;
+      if (srt.pass_kind == COMBINED_PASS_HIGH_PASS_TAIL) {
+        /* A High Pass: the detail against the mid grey, taken in the display encoding. A negative
+         * linear colour would break the blends, so the result is clipped below zero only. */
+        const float dr = effect_linearrgb_to_srgb(source.x) - effect_linearrgb_to_srgb(blurred.x);
+        const float dg = effect_linearrgb_to_srgb(source.y) - effect_linearrgb_to_srgb(blurred.y);
+        const float db = effect_linearrgb_to_srgb(source.z) - effect_linearrgb_to_srgb(blurred.z);
+        rgb = max(float3(effect_srgb_to_linearrgb(0.5f + dr * srt.aux0),
+                         effect_srgb_to_linearrgb(0.5f + dg * srt.aux0),
+                         effect_srgb_to_linearrgb(0.5f + db * srt.aux0)),
+                  float3(0.0f));
+      }
+      else {
+        /* A Sharpen: the detail the blur removed comes back on top of the colour, clipped below. */
+        rgb = max(source.xyz + (source.xyz - blurred.xyz) * srt.aux0, float3(0.0f));
+      }
+      break;
+    }
     default:
-      /* A kind with no case here is not a #PAINT_LAYER_KIND_GPU_COMPUTED one, and the gather refuses
-       * the stack before this pass runs; leaving the texel as it came is the safe reading. */
+      /* An unknown kind leaves the texel as it came: the host only queues a kind the plan filled. */
       break;
   }
   /* No kernel touches the alpha, and the buffer that holds the result carries the content alpha the

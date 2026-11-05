@@ -320,7 +320,7 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
  * a pass per axis, an unsharp-style one (a Sharpen, a High Pass) adds a luminance pre-pass and a
  * combine tail that reads the original and the blurred copy. The gather runs the plan in order over a
  * ping-pong pair; a #PaintLayerEffectPass names one dispatch of it. A future reduction pass (a Color
- * Match's average, Ф3) is one more kind here, with no rewrite of what is below.
+ * Match's average) is one more kind here, with no rewrite of what is below.
  * \{ */
 
 /**
@@ -367,8 +367,8 @@ enum class ePaintLayerEffectPassAux : uint8_t {
   /** The blurred copy the plan built before this pass (a combine tail's). */
   Previous,
   /** The effect's rendered input canvas, the same texture #ePaintLayerEffectPassSource::Input
-   * names. No Ф2 pass reads it, but the tail of a Ф3 effect will, and the role keeps the gather
-   * from guessing. */
+   * names. No pass of the current kinds reads it, but the tail of a future reduction effect will,
+   * and the role keeps the gather from guessing. */
   Original,
 };
 
@@ -483,12 +483,20 @@ void BKE_paint_layers_effect_region_clip(const rcti &dirty,
                                          rcti &r_out);
 
 /**
+ * Whether \a correction stands for an effect row's result: the description builder names the effect
+ * row it was made from in #PaintMaterialCompositeCorrection::effect_marker and leaves the marker nil
+ * for every other kind (a map, a flat colour, a live reader). The one predicate every reader of the
+ * corrections uses, so none of them re-derives "is this an effect" from the fields.
+ */
+bool paint_correction_is_effect(const PaintMaterialCompositeCorrection &correction);
+
+/**
  * A fingerprint of the effects that precede the effect_marker in a row's content corrections, in order:
  * each one's marker and its own parameter hash. The result of an earlier effect is part of the input
  * of a later one, so a change to an earlier effect -- its parameters or its place in the order --
  * must re-key the later effect's GPU cache entry. The CPU effect hash of a single effect does not
- * know about the rest of the row; this is the GPU-only half of that (З7). Corrections that are not
- * effects (their marker is nil) carry no fingerprint here.
+ * know about the rest of the row; this fingerprint is the GPU-only half of that. Corrections that
+ * are not effects (their marker is nil) carry no fingerprint here.
  */
 uint64_t BKE_paint_layers_effect_chain_hash(
     Span<const PaintMaterialCompositeCorrection> corrections, const bUUID &effect_marker);
@@ -499,7 +507,7 @@ uint64_t BKE_paint_layers_effect_chain_hash(
  * the effect, and every gradient generator's payload and Anchor Point reader's slice hash in the
  * same description: a map version does not carry those, and a change to one alone would otherwise
  * serve a result computed from the old pixels. Together with the map versions it names everything a
- * re-render would read; it keys the GPU entry beyond the CPU hash (З7). Pure: it reads the
+ * re-render would read; it keys the GPU entry beyond the CPU hash. Pure: it reads the
  * description only, so it is testable without a GPU.
  */
 uint64_t BKE_paint_layers_effect_input_scalar_hash(
@@ -564,6 +572,22 @@ enum class PaintLayerEffectGpuState : uint8_t {
 };
 
 /**
+ * The two GPU-only fingerprints that key a GPU effect cache entry beyond the CPU effect hash. Both
+ * are read from the description alone, both are zero when they describe nothing (a lone effect on a
+ * plain map input), and the CPU cache leaves them zero so they cannot split a CPU key.
+ */
+struct PaintLayerEffectGpuKeyExtras {
+  /** The ordered fingerprint of the effects that precede this one in its row, whose GPU results
+   * feed its input (see #BKE_paint_layers_effect_chain_hash). */
+  uint64_t chain_hash = 0;
+  /** The fingerprint of the input's non-map scalar content (see
+   * #BKE_paint_layers_effect_input_scalar_hash). */
+  uint64_t input_scalar_hash = 0;
+};
+
+bool operator==(const PaintLayerEffectGpuKeyExtras &a, const PaintLayerEffectGpuKeyExtras &b);
+
+/**
  * The texture holding \a effect's GPU result, asking for one when the cache has none or the input
  * has moved since it was last computed.
  *
@@ -579,12 +603,12 @@ enum class PaintLayerEffectGpuState : uint8_t {
  *        slice cache checks both, see #anchor_slice_region_is_exact). Until it does, the whole texture
  *        is re-rendered and the rectangle is only carried.
  * \param r_resource: the texture, valid for #Hit and #Render.
- * \param chain_hash, input_scalar_hash: the two GPU-only fingerprints of #A4 -- an ordered hash of
- *        the effects that precede this one in the row (whose GPU results feed this effect's input),
- *        and a hash of the input's non-map scalar content (a flat colour, an adjustment, a filter's
- *        parameters) that no map version carries. They key the GPU entry beyond the CPU effect hash,
- *        which knows only this effect's own parameters; pass 0 for an effect with neither. The
- *        publish below must pass the same two values, so a hit reads on identical content.
+ * \param key_extras: the two GPU-only fingerprints -- an ordered hash of the effects that precede
+ *        this one in the row (whose GPU results feed this effect's input), and a hash of the input's
+ *        non-map scalar content (a flat colour, an adjustment, a filter's parameters) that no map
+ *        version carries. They key the GPU entry beyond the CPU effect hash, which knows only this
+ *        effect's own parameters; leave both zero for an effect with neither. The publish below must
+ *        pass the same value, so a hit reads on identical content.
  */
 PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &ma,
                                                                const MaterialPaintLayer &effect,
@@ -592,8 +616,7 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
                                                                int width,
                                                                int height,
                                                                Span<Image *> images,
-                                                               uint64_t chain_hash,
-                                                               uint64_t input_scalar_hash,
+                                                               const PaintLayerEffectGpuKeyExtras &key_extras,
                                                                const PaintLayerEffectGpuHooks &hooks,
                                                                rcti *r_dirty_region,
                                                                void **r_resource);
@@ -612,30 +635,7 @@ void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
                                                int width,
                                                int height,
                                                Span<Image *> images,
-                                               uint64_t chain_hash,
-                                               uint64_t input_scalar_hash);
-
-/**
- * Transitional overloads for a caller that keys an effect on its own parameters alone (both
- * fingerprints zero): the combined preview's gather, until it passes the two fingerprints itself.
- * They exist so the cache and its callers can land in separate steps and stay buildable; the
- * gather's step removes them with its last use.
- */
-PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &ma,
-                                                               const MaterialPaintLayer &effect,
-                                                               int channel,
-                                                               int width,
-                                                               int height,
-                                                               Span<Image *> images,
-                                                               const PaintLayerEffectGpuHooks &hooks,
-                                                               rcti *r_dirty_region,
-                                                               void **r_resource);
-void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
-                                               const MaterialPaintLayer &effect,
-                                               int channel,
-                                               int width,
-                                               int height,
-                                               Span<Image *> images);
+                                               const PaintLayerEffectGpuKeyExtras &key_extras);
 
 /**
  * Drop every cached effect texture. The cache owns textures of its own, so it has to be emptied while

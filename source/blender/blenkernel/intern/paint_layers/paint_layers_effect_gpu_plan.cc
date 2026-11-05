@@ -83,7 +83,7 @@ bool anchor_slice_layer_is_texel_exact(const PaintMaterialCompositeImageLayer &l
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name GPU Effect Pass Plan (Ф2)
+/** \name GPU Effect Pass Plan
  *
  * The pure shape of a GPU effect pass, decided from the effect's kind and parameters alone. The
  * gather runs the plan over a ping-pong scratch pool; a test reads the same numbers to check the
@@ -125,6 +125,29 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
     return r_passes.size() == 1 ? ePaintLayerEffectPassSource::Input :
                                   ePaintLayerEffectPassSource::Previous;
   };
+  /* One horizontal window pass and its vertical twin, both of \a radius: each reads the pass before
+   * it and reaches \a radius along its own axis, so the regions fold per axis. The source is asked
+   * per pass, so the pair's vertical half reads the horizontal one's result. \a maximum is the
+   * Extremum pair's direction; the other window pairs leave it at erode's false. */
+  const auto add_axis_pair = [&](const ePaintLayerEffectPass h_kind,
+                                 const ePaintLayerEffectPass v_kind,
+                                 const int radius,
+                                 const bool maximum = false) {
+    add(h_kind, radius);
+    PaintLayerEffectPass &h = r_passes.last();
+    h.maximum = maximum;
+    h.source = window_source();
+    h.aux = ePaintLayerEffectPassAux::None;
+    h.reach = h.radius;
+    h.axis_mask = PAINT_LAYER_EFFECT_AXIS_X;
+    add(v_kind, radius);
+    PaintLayerEffectPass &v = r_passes.last();
+    v.maximum = maximum;
+    v.source = window_source();
+    v.aux = ePaintLayerEffectPassAux::None;
+    v.reach = v.radius;
+    v.axis_mask = PAINT_LAYER_EFFECT_AXIS_Y;
+  };
   switch (filter) {
     case MA_PAINT_LAYER_FILTER_NOISE: {
       /* A pointwise kernel: it reads its own texel and nothing else. */
@@ -145,38 +168,16 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
       /* Each box pass reads its own clamped radius; a soft blur spends the reach over three pairs. */
       const int pairs = box ? 1 : 3;
       for (int i = 0; i < pairs; i++) {
-        const int pass_radius = effect_pass_clamp_radius(
-            box ? radius : std::max(radius / 2, 1), width, height);
-        add(ePaintLayerEffectPass::BlurH, pass_radius);
-        PaintLayerEffectPass &h = r_passes.last();
-        h.source = window_source();
-        h.aux = ePaintLayerEffectPassAux::None;
-        h.reach = h.radius;
-        h.axis_mask = PAINT_LAYER_EFFECT_AXIS_X;
-        add(ePaintLayerEffectPass::BlurV, pass_radius);
-        PaintLayerEffectPass &v = r_passes.last();
-        v.source = window_source();
-        v.aux = ePaintLayerEffectPassAux::None;
-        v.reach = v.radius;
-        v.axis_mask = PAINT_LAYER_EFFECT_AXIS_Y;
+        add_axis_pair(ePaintLayerEffectPass::BlurH,
+                      ePaintLayerEffectPass::BlurV,
+                      effect_pass_clamp_radius(box ? radius : std::max(radius / 2, 1), width, height));
       }
       break;
     }
     case MA_PAINT_LAYER_FILTER_SHARPEN: {
       const int radius = effect_pass_clamp_radius(
           effect_pass_param_int(params, PAINT_LAYER_SHARPEN_RADIUS), width, height);
-      add(ePaintLayerEffectPass::BlurH, radius);
-      PaintLayerEffectPass &h = r_passes.last();
-      h.source = window_source();
-      h.aux = ePaintLayerEffectPassAux::None;
-      h.reach = h.radius;
-      h.axis_mask = PAINT_LAYER_EFFECT_AXIS_X;
-      add(ePaintLayerEffectPass::BlurV, radius);
-      PaintLayerEffectPass &v = r_passes.last();
-      v.source = window_source();
-      v.aux = ePaintLayerEffectPassAux::None;
-      v.reach = v.radius;
-      v.axis_mask = PAINT_LAYER_EFFECT_AXIS_Y;
+      add_axis_pair(ePaintLayerEffectPass::BlurH, ePaintLayerEffectPass::BlurV, radius);
       /* The tail puts the raw detail back on top of the blurred colour, clipped below zero: it
        * reads the input canvas for the detail and the blurred copy for the base, and the Sharpen
        * amount rides in #aux0. */
@@ -206,18 +207,7 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
         /* The mask is meaningless without a reach. */
         pass.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
       }
-      add(ePaintLayerEffectPass::BlurH, radius);
-      PaintLayerEffectPass &h = r_passes.last();
-      h.source = window_source();
-      h.aux = ePaintLayerEffectPassAux::None;
-      h.reach = h.radius;
-      h.axis_mask = PAINT_LAYER_EFFECT_AXIS_X;
-      add(ePaintLayerEffectPass::BlurV, radius);
-      PaintLayerEffectPass &v = r_passes.last();
-      v.source = window_source();
-      v.aux = ePaintLayerEffectPassAux::None;
-      v.reach = v.radius;
-      v.axis_mask = PAINT_LAYER_EFFECT_AXIS_Y;
+      add_axis_pair(ePaintLayerEffectPass::BlurH, ePaintLayerEffectPass::BlurV, radius);
       /* The tail reads the pre-blur original, which lives in the luminance buffer for a grayscale
        * output and in the raw input otherwise, and the blurred copy; the contrast rides in #aux0.
        * The detail always goes through the sRGB curve, whatever the output is. */
@@ -237,20 +227,7 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
           effect_pass_param_int(params, PAINT_LAYER_ERODE_DILATE_RADIUS), width, height);
       const bool dilate = effect_pass_param_int(params, PAINT_LAYER_ERODE_DILATE_MODE) ==
                           PAINT_LAYER_ERODE_DILATE_DILATE;
-      add(ePaintLayerEffectPass::ExtremumH, radius);
-      PaintLayerEffectPass &h = r_passes.last();
-      h.maximum = dilate;
-      h.source = window_source();
-      h.aux = ePaintLayerEffectPassAux::None;
-      h.reach = h.radius;
-      h.axis_mask = PAINT_LAYER_EFFECT_AXIS_X;
-      add(ePaintLayerEffectPass::ExtremumV, radius);
-      PaintLayerEffectPass &v = r_passes.last();
-      v.maximum = dilate;
-      v.source = window_source();
-      v.aux = ePaintLayerEffectPassAux::None;
-      v.reach = v.radius;
-      v.axis_mask = PAINT_LAYER_EFFECT_AXIS_Y;
+      add_axis_pair(ePaintLayerEffectPass::ExtremumH, ePaintLayerEffectPass::ExtremumV, radius, dilate);
       break;
     }
     case MA_PAINT_LAYER_FILTER_EDGE_DETECT: {
@@ -293,8 +270,9 @@ int BKE_paint_layers_effect_halo(eMaterialPaintLayerFilter filter,
                                  const int height)
 {
   /* One rule decides the halo: the plan. Folding its reaches per axis gives the same numbers the
-   * kernels' coverage gave, and keeps the halo, the per-pass regions and what Ф3 adds growing from
-   * the same numbers, instead of three places reading the same parameters. */
+   * kernels' coverage gave, and keeps the halo, the per-pass regions and the reach of the kinds
+   * still to come growing from the same numbers, instead of three places reading the same
+   * parameters. */
   Vector<PaintLayerEffectPass> passes;
   BKE_paint_layers_effect_pass_plan(filter, params, width, height, passes);
   int reach_x = 0;
@@ -402,6 +380,8 @@ bool BKE_paint_layers_effect_region_is_exact(
   /* Rule (1): a rectangle reported on a map is the same rectangle of the input only where the map
    * has the input's own texel grid. A map no edit was marked on is unchanged, whatever its size. */
   for (const Image *image : images) {
+    /* The images come from the description's own maps, which are never null. */
+    BLI_assert(image != nullptr);
     int image_width = 0;
     int image_height = 0;
     BKE_image_pixel_journal_size(*image, image_width, image_height);
@@ -428,18 +408,12 @@ static uint64_t effect_hash_u64(uint64_t hash, const uint64_t value)
   return fnv1a_mix(hash, value);
 }
 
-/** Fold \a value into the running FNV-1a \a hash, with the blenlib constants. */
-static uint64_t effect_hash_u32(uint64_t hash, const uint32_t value)
-{
-  return fnv1a_mix(hash, value);
-}
-
 /** Fold the bits of \a value into the running FNV-1a \a hash. */
 static uint64_t effect_hash_float(uint64_t hash, const float value)
 {
   uint32_t bits;
   memcpy(&bits, &value, sizeof(bits));
-  return effect_hash_u32(hash, bits);
+  return effect_hash_u64(hash, bits);
 }
 
 /**
@@ -467,7 +441,7 @@ static uint64_t effect_hash_reader(uint64_t hash,
                                    const uint64_t anchor_point_hash)
 {
   hash = effect_hash_uuid(hash, reader);
-  hash = effect_hash_u32(hash, uint32_t(uint8_t(anchor_point_target)));
+  hash = effect_hash_u64(hash, uint32_t(uint8_t(anchor_point_target)));
   return effect_hash_u64(hash, anchor_point_hash);
 }
 
@@ -479,14 +453,14 @@ static uint64_t effect_hash_reader(uint64_t hash,
  */
 static uint64_t effect_hash_gradient(uint64_t hash, const PaintMaterialCompositeGradient &gradient)
 {
-  hash = effect_hash_u32(hash, gradient.color_channel ? 1u : 0u);
-  hash = effect_hash_u32(hash, gradient.scalar_ramp_valid ? 1u : 0u);
+  hash = effect_hash_u64(hash, gradient.color_channel ? 1u : 0u);
+  hash = effect_hash_u64(hash, gradient.scalar_ramp_valid ? 1u : 0u);
   hash = effect_hash_float(hash, gradient.scalar_start);
   hash = effect_hash_float(hash, gradient.scalar_end);
-  hash = effect_hash_u32(hash, uint32_t(gradient.width));
-  hash = effect_hash_u32(hash, uint32_t(gradient.height));
+  hash = effect_hash_u64(hash, uint32_t(gradient.width));
+  hash = effect_hash_u64(hash, uint32_t(gradient.height));
   hash = effect_hash_u64(hash, gradient.surface_key);
-  hash = effect_hash_u32(hash, gradient.approximate ? 1u : 0u);
+  hash = effect_hash_u64(hash, gradient.approximate ? 1u : 0u);
   hash = effect_hash_u64(hash, BKE_paint_layers_gradient_ramp_hash(gradient.scalar_ramp));
   hash = effect_hash_u64(hash, BKE_paint_layers_gradient_ramp_hash(gradient.payload.ramp));
   for (const int i : IndexRange(3)) {
@@ -494,10 +468,10 @@ static uint64_t effect_hash_gradient(uint64_t hash, const PaintMaterialComposite
     hash = effect_hash_float(hash, gradient.payload.end[i]);
   }
   hash = effect_hash_float(hash, gradient.payload.midpoint);
-  hash = effect_hash_u32(hash, uint32_t(uint8_t(gradient.payload.space)));
-  hash = effect_hash_u32(hash, uint32_t(uint8_t(gradient.payload.type)));
-  hash = effect_hash_u32(hash, uint32_t(uint8_t(gradient.payload.repeat)));
-  hash = effect_hash_u32(hash, uint32_t(uint8_t(gradient.payload.distribution)));
+  hash = effect_hash_u64(hash, uint32_t(uint8_t(gradient.payload.space)));
+  hash = effect_hash_u64(hash, uint32_t(uint8_t(gradient.payload.type)));
+  hash = effect_hash_u64(hash, uint32_t(uint8_t(gradient.payload.repeat)));
+  hash = effect_hash_u64(hash, uint32_t(uint8_t(gradient.payload.distribution)));
   return hash;
 }
 
@@ -505,15 +479,15 @@ uint64_t BKE_paint_layers_effect_chain_hash(
     Span<const PaintMaterialCompositeCorrection> corrections, const bUUID &effect_marker)
 {
   /* The same fields as the byte fold it replaces -- each preceding effect's marker and its own
-   * parameter hash, in order -- folded with the blenlib helpers. A non-effect correction (a nil
-   * marker, a zero hash) adds nothing. */
+   * parameter hash, in order -- folded with the blenlib helpers. A non-effect correction adds
+   * nothing. */
   uint64_t hash = fnv1a_offset_basis;
   for (const PaintMaterialCompositeCorrection &correction : corrections) {
     if (BLI_uuid_equal(correction.effect_marker, effect_marker)) {
       /* Only the effects strictly before the target reach its input. */
       break;
     }
-    if (correction.effect_hash == 0 || BLI_uuid_is_nil(correction.effect_marker)) {
+    if (!paint_correction_is_effect(correction)) {
       /* Not an effect correction (a map, a flat colour, a live reader). */
       continue;
     }
@@ -528,13 +502,13 @@ uint64_t BKE_paint_layers_effect_input_scalar_hash(
 {
   uint64_t hash = fnv1a_offset_basis;
   /* The row's own flat colour and adjustment, which no map version carries. */
-  hash = effect_hash_u32(hash, input_entry.has_constant_color ? 1u : 0u);
+  hash = effect_hash_u64(hash, input_entry.has_constant_color ? 1u : 0u);
   if (input_entry.has_constant_color) {
     for (const int c : IndexRange(4)) {
       hash = effect_hash_float(hash, input_entry.constant_color[c]);
     }
   }
-  hash = effect_hash_u32(hash, uint32_t(input_entry.adjustment_filter));
+  hash = effect_hash_u64(hash, uint32_t(input_entry.adjustment_filter));
   if (input_entry.adjustment_filter != 0) {
     for (const float param : input_entry.adjustment_params) {
       hash = effect_hash_float(hash, param);
@@ -547,14 +521,14 @@ uint64_t BKE_paint_layers_effect_input_scalar_hash(
       continue;
     }
     hash = effect_hash_float(hash, correction.opacity);
-    hash = effect_hash_u32(hash, uint32_t(int(correction.blend)));
+    hash = effect_hash_u64(hash, uint32_t(int(correction.blend)));
     if (correction.has_constant_color) {
       for (const int c : IndexRange(4)) {
         hash = effect_hash_float(hash, correction.constant_color[c]);
       }
     }
     if (correction.filter != 0) {
-      hash = effect_hash_u32(hash, uint32_t(correction.filter));
+      hash = effect_hash_u64(hash, uint32_t(correction.filter));
       for (const float param : correction.filter_params) {
         hash = effect_hash_float(hash, param);
       }

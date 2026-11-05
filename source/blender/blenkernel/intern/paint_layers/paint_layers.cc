@@ -372,14 +372,21 @@ static bool paint_layer_owned(const Material &ma, const MaterialPaintLayer *laye
   return owned;
 }
 
-MaterialPaintLayer *BKE_paint_layers_correction_owner(Material &ma, const MaterialPaintLayer &effect)
+const MaterialPaintLayer *BKE_paint_layers_correction_owner(const Material &ma,
+                                                            const MaterialPaintLayer &effect)
 {
   /* Only an effect has a correction owner: a mask item shares the read but not the answer. */
   if (effect.role != MA_PAINT_LAYER_ROLE_EFFECT) {
     return nullptr;
   }
+  return paint_layers_content_owner_read(ma, effect);
+}
+
+MaterialPaintLayer *BKE_paint_layers_correction_owner(Material &ma, const MaterialPaintLayer &effect)
+{
   /* The read answers a row of this same mutable stack, so aliasing it back is safe. */
-  return const_cast<MaterialPaintLayer *>(paint_layers_content_owner_read(ma, effect));
+  return const_cast<MaterialPaintLayer *>(
+      BKE_paint_layers_correction_owner(static_cast<const Material &>(ma), effect));
 }
 
 /** Whether \a layer is a row of \a ma's stack or one of a row's content corrections. */
@@ -1753,22 +1760,22 @@ MaterialPaintLayer *BKE_paint_layers_correction_paste(Main &bmain,
   return copy;
 }
 
-MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
+const MaterialPaintLayer *BKE_paint_layers_find(const Material &ma, const bUUID &marker)
 {
-  MaterialPaintLayer *found = nullptr;
+  const MaterialPaintLayer *found = nullptr;
   BKE_paint_layers_foreach(
-      ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
+      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
         if (BLI_uuid_equal(layer.marker, marker)) {
           found = &layer;
         }
         /* A content correction is addressed by its own marker, like a row. */
-        for (MaterialPaintLayer &effect : layer.effects) {
+        for (const MaterialPaintLayer &effect : layer.effects) {
           if (found == nullptr && BLI_uuid_equal(effect.marker, marker)) {
             found = &effect;
           }
         }
         /* A mask item is too: the generator's mask inputs name the item that owns them. */
-        for (MaterialPaintLayer &item : layer.mask_stack) {
+        for (const MaterialPaintLayer &item : layer.mask_stack) {
           if (found == nullptr && BLI_uuid_equal(item.marker, marker)) {
             found = &item;
           }
@@ -1776,6 +1783,13 @@ MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
         return found == nullptr;
       });
   return found;
+}
+
+MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
+{
+  /* The read answers a row of this same mutable stack, so aliasing it back is safe. */
+  return const_cast<MaterialPaintLayer *>(
+      BKE_paint_layers_find(static_cast<const Material &>(ma), marker));
 }
 
 void BKE_paint_layers_active_set(Material &ma, const bUUID &marker)

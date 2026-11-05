@@ -40,6 +40,7 @@
 #include "BKE_report.hh"
 
 #include "paint_layers_composite_intern.hh"
+#include "paint_layers_effect_cache_intern.hh"
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
 
@@ -645,8 +646,8 @@ static bool anchor_slice_dimensions(const Material &ma,
                                     int &r_width,
                                     int &r_height);
 
-/** The effect cache, defined beside the slice cache it shares the machinery of. */
-static uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int channel);
+/** The effect cache, defined beside the slice cache it shares the machinery of; the hash is
+ * declared with the key in #paint_layers_effect_cache_intern.hh. */
 static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                                                             const MaterialPaintLayer &row,
                                                             const MaterialPaintLayer &effect,
@@ -1502,60 +1503,6 @@ static void anchor_slice_images_get(const Material &ma,
   }
 }
 
-static Vector<AnchorSliceSource> anchor_slice_sources_snapshot(const Span<Image *> images)
-{
-  Vector<AnchorSliceSource> sources;
-  for (const Image *image : images) {
-    sources.append({image->id.session_uid,
-                    image->runtime->pixel_version.load(std::memory_order_relaxed)});
-  }
-  return sources;
-}
-
-/**
- * What happened to the maps of a slice since \a synced was taken: nothing, one rectangle (in
- * \a r_region), or anything. A map the slice did not read before counts as anything.
- */
-static ePixelChange anchor_slice_changes(const Span<AnchorSliceSource> synced,
-                                         const Span<Image *> images,
-                                         rcti &r_region)
-{
-  BLI_rcti_init(&r_region, 0, 0, 0, 0);
-  if (synced.size() != images.size()) {
-    return ePixelChange::Full;
-  }
-  ePixelChange result = ePixelChange::None;
-  for (const Image *image : images) {
-    const AnchorSliceSource *known = nullptr;
-    for (const AnchorSliceSource &source : synced) {
-      if (source.image_uid == image->id.session_uid) {
-        known = &source;
-        break;
-      }
-    }
-    if (known == nullptr) {
-      return ePixelChange::Full;
-    }
-    rcti region;
-    switch (BKE_image_pixel_changes_since(*image, known->version, region)) {
-      case ePixelChange::None:
-        break;
-      case ePixelChange::Full:
-        return ePixelChange::Full;
-      case ePixelChange::Region:
-        if (result == ePixelChange::None) {
-          r_region = region;
-        }
-        else {
-          BLI_rcti_union(&r_region, &region);
-        }
-        result = ePixelChange::Region;
-        break;
-    }
-  }
-  return result;
-}
-
 /**
  * Total memory the slice cache may hold, counted as it is allocated: a colour and a coverage buffer
  * of four floats per pixel each, so one 4K pair is 512 MiB. A composite of the shaded channels
@@ -1964,43 +1911,8 @@ static bool anchor_slice_region_is_exact(const Material &ma,
  * halo; a recompute is the simple correct thing until that is wanted).
  * \{ */
 
-/** One cached effect: the result buffer, keyed by the material, the effect, the channel and the
- * parameters. */
-struct EffectCacheKey {
-  uint32_t material_uid = 0;
-  /**
-   * The marker of the effect itself, not of the row it hangs on: a marker is unique within the
-   * material, so two effects of one row -- two Blurs with the same parameters -- key apart, and a
-   * re-added effect (a new marker) cannot be served a dead instance's result.
-   */
-  bUUID effect_marker = {};
-  int channel = 0;
-  /** The effect kind and its parameters; the input's pixels are the sources' versions below. */
-  uint64_t hash = 0;
-  /**
-   * GPU-only extras (Ф2, З7). The CPU cache leaves both at zero, so they cannot split a CPU key; the
-   * GPU key folds in #chain_hash (the effects that precede this one in the row, whose results feed
-   * this effect's input) and #input_scalar_hash (the input's non-map scalar content -- a flat colour,
-   * an adjustment, a filter's parameters -- that no map version carries). A row of one effect with a
-   * plain map input has both zero, exactly the CPU picture.
-   */
-  uint64_t chain_hash = 0;
-  uint64_t input_scalar_hash = 0;
-};
-
-/** Whether \a a and \a b name the same effect instance, whatever its parameters say. */
-static bool paint_layer_effect_key_same_effect(const EffectCacheKey &a, const EffectCacheKey &b)
-{
-  return a.material_uid == b.material_uid && BLI_uuid_equal(a.effect_marker, b.effect_marker) &&
-         a.channel == b.channel;
-}
-
-static bool paint_layer_effect_key_equal(const EffectCacheKey &a, const EffectCacheKey &b)
-{
-  return paint_layer_effect_key_same_effect(a, b) && a.hash == b.hash &&
-         a.chain_hash == b.chain_hash && a.input_scalar_hash == b.input_scalar_hash;
-}
-
+/** One cached effect: the result buffer, the maps the input was rendered from, the size and the
+ * byte cost, keyed by #EffectCacheKey. */
 struct EffectCacheEntry {
   EffectCacheKey key;
   int width = 0;
@@ -2023,13 +1935,9 @@ constexpr size_t PAINT_LAYER_EFFECT_CACHE_BYTES = size_t(1024) * 1024 * 1024;
 /** The live budget; only tests override it, to make eviction observable without 4K fixtures. */
 static size_t g_paint_effect_cache_budget = PAINT_LAYER_EFFECT_CACHE_BYTES;
 
-/** The cache owns references only; dropping an entry simply releases them. */
-struct EffectCache {
-  Vector<EffectCacheEntry> entries;
-  size_t total_bytes = 0;
-};
-
-static EffectCache g_paint_effect_cache;
+/** The cache owns references only; dropping an entry simply releases them. The release callable of
+ * the shared store is a no-op here: the buffer's last reference dies with the entry. */
+static PaintLayerEffectCacheStore<EffectCacheEntry> g_paint_effect_cache;
 /**
  * Guards the container and the byte count only. A bake job computes effects on a worker thread
  * while the main thread describes the composite, and both reach the cache. It is never held while
@@ -2042,7 +1950,7 @@ static std::mutex g_paint_effect_cache_mutex;
  * pixels are not part of it -- the sources' versions stand in for those -- so an edit of a value
  * moves it and an edit of a map does not.
  */
-static uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int channel)
+uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int channel)
 {
   uint64_t hash = 1469598103934665603ull;
   const auto mix_u32 = [&](const uint32_t value) {
@@ -2075,6 +1983,16 @@ static uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const 
     }
   }
   return hash;
+}
+
+bool operator==(const PaintLayerEffectGpuKeyExtras &a, const PaintLayerEffectGpuKeyExtras &b)
+{
+  return a.chain_hash == b.chain_hash && a.input_scalar_hash == b.input_scalar_hash;
+}
+
+bool paint_correction_is_effect(const PaintMaterialCompositeCorrection &correction)
+{
+  return !BLI_uuid_is_nil(correction.effect_marker);
 }
 
 bool BKE_paint_layers_effect_input_describe(const Material &ma,
@@ -2201,8 +2119,8 @@ static bool paint_layer_effect_compute(const Material &ma,
 static void paint_layer_effect_cache_clear()
 {
   std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
-  g_paint_effect_cache.entries.clear_and_shrink();
-  g_paint_effect_cache.total_bytes = 0;
+  const auto no_release = [](EffectCacheEntry &) {};
+  g_paint_effect_cache.free_all(no_release);
 }
 
 void BKE_paint_layers_effect_cache_free_all()
@@ -2213,12 +2131,8 @@ void BKE_paint_layers_effect_cache_free_all()
 void BKE_paint_layers_effect_cache_free_material(const Material &ma)
 {
   std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
-  for (int i = int(g_paint_effect_cache.entries.size()) - 1; i >= 0; i--) {
-    if (g_paint_effect_cache.entries[i].key.material_uid == ma.id.session_uid) {
-      g_paint_effect_cache.total_bytes -= g_paint_effect_cache.entries[i].bytes;
-      g_paint_effect_cache.entries.remove(i);
-    }
-  }
+  const auto no_release = [](EffectCacheEntry &) {};
+  g_paint_effect_cache.free_material(ma.id.session_uid, no_release);
 }
 
 size_t paint_layer_effect_cache_bytes()
@@ -2243,17 +2157,6 @@ int paint_layer_effect_cache_entry_count()
 {
   std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
   return int(g_paint_effect_cache.entries.size());
-}
-
-/** Evict least-recently-used entries from the front until \a incoming fits in the budget. */
-static void paint_layer_effect_cache_enforce_budget(const size_t incoming)
-{
-  while (!g_paint_effect_cache.entries.is_empty() &&
-         g_paint_effect_cache.total_bytes + incoming > g_paint_effect_cache_budget)
-  {
-    g_paint_effect_cache.total_bytes -= g_paint_effect_cache.entries[0].bytes;
-    g_paint_effect_cache.entries.remove(0);
-  }
 }
 
 /**
@@ -2317,10 +2220,8 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
       /* Move to the back: the vector is the LRU order. The buffers go out before the entry goes
        * back, so the caller keeps them alive through its own reference whatever the cache does
        * next. */
-      EffectCacheEntry hit = std::move(entry);
-      g_paint_effect_cache.entries.remove(i);
-      std::shared_ptr<ImBuf> color = hit.color;
-      g_paint_effect_cache.entries.append(std::move(hit));
+      std::shared_ptr<ImBuf> color = entry.color;
+      g_paint_effect_cache.touch(i);
       return color;
     }
   }
@@ -2339,15 +2240,10 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
    * for the parameters the effect carries now -- so it is replaced rather than kept until the LRU
    * evicts it. A buffer still shared with a live description keeps its pixels through its own
    * reference. */
-  for (int i = int(g_paint_effect_cache.entries.size()) - 1; i >= 0; i--) {
-    if (paint_layer_effect_key_same_effect(g_paint_effect_cache.entries[i].key, key)) {
-      g_paint_effect_cache.total_bytes -= g_paint_effect_cache.entries[i].bytes;
-      g_paint_effect_cache.entries.remove(i);
-      break;
-    }
-  }
+  const auto no_release = [](EffectCacheEntry &) {};
+  g_paint_effect_cache.drop_rekeyed(key, no_release);
   if (bytes <= g_paint_effect_cache_budget) {
-    paint_layer_effect_cache_enforce_budget(bytes);
+    g_paint_effect_cache.enforce_budget(bytes, g_paint_effect_cache_budget, no_release);
     EffectCacheEntry entry;
     entry.key = key;
     entry.width = color->x;
@@ -2359,347 +2255,6 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
     g_paint_effect_cache.entries.append(std::move(entry));
   }
   return color;
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Paint Layer Effect GPU Result Cache
- *
- * The GPU twin of the cache above, for the kinds the registry marks #PAINT_LAYER_KIND_GPU_COMPUTED.
- * The policy and the hooks are documented with the header section they implement; what lives here is
- * the container, and it holds no GPU type -- the texture is a `void *` the caller's hooks made and
- * drop, so the keying, the budget and the staleness rule are reachable from the plain effect tests
- * without a GPU context. The trick is #PaintLayersGpuSlotGuard's, reused.
- * \{ */
-
-/**
- * What the GPU effect cache may hold: a 4K RGBA half-float canvas is 128 MiB per effect, so this
- * keeps four of them at 4K or a dozen at 2K. Deliberately smaller than the CPU effect cache beside
- * it: these bytes are VRAM, held next to the frame's own accumulators and Anchor Point slots, and an
- * entry evicted between two frames costs one dispatch -- not the main-thread whole-canvas render an
- * evicted CPU entry costs.
- */
-constexpr size_t PAINT_LAYER_EFFECT_GPU_CACHE_BYTES = size_t(512) * 1024 * 1024;
-
-/** The live budget; only tests override it, to make eviction observable without 4K fixtures. */
-static size_t g_paint_effect_gpu_cache_budget = PAINT_LAYER_EFFECT_GPU_CACHE_BYTES;
-
-/** What one canvas costs the cache: the RGBA half float texture the acquire hook is to make. */
-static size_t paint_layer_effect_gpu_entry_bytes(const int width, const int height)
-{
-  /* Four components of two bytes each. */
-  return sizeof(int16_t) * 4 * int64_t(width) * height;
-}
-
-/** One cached GPU effect result, keyed exactly like the CPU buffer of the same effect. */
-struct EffectGpuCacheEntry {
-  EffectCacheKey key;
-  int width = 0;
-  int height = 0;
-  /** The `gpu::Texture *` the hooks made, with the hooks that made it: releasing a texture needs
-   * its owner's deallocator, and an entry outlives the call that acquired it. */
-  void *resource = nullptr;
-  PaintLayerEffectGpuHooks hooks;
-  /** The maps the input was rendered from, with the versions they had. */
-  Vector<AnchorSliceSource> synced;
-  /** Whether a render has been stamped onto this entry yet. An input of no map at all (a row of flat
-   * colour alone) publishes an empty #synced, so emptiness cannot stand for "never rendered". */
-  bool published = false;
-  /** Texels of the input that changed since #synced. A neighbourhood kernel will re-render just
-   * that rectangle grown by its halo; until the region phase does, the whole texture is re-rendered
-   * and the rectangle is only carried. */
-  rcti dirty_region = {0, 0, 0, 0};
-  size_t bytes = 0;
-};
-
-/** The cache owns references only; dropping an entry hands them back to the hooks. */
-struct EffectGpuCache {
-  Vector<EffectGpuCacheEntry> entries;
-  size_t total_bytes = 0;
-};
-
-static EffectGpuCache g_paint_effect_gpu_cache;
-/**
- * Guards the container and the byte count, as the CPU cache's mutex does. Unlike the CPU cache this
- * one is also held across the acquire hook, which makes a texture and cannot re-enter the cache; the
- * dispatch itself is never under it, so a slow GPU cannot block another thread's lookup.
- */
-static std::mutex g_paint_effect_gpu_cache_mutex;
-
-/** Hand the cache's reference back to whoever made the texture. */
-static void paint_layer_effect_gpu_release(const PaintLayerEffectGpuHooks &hooks, void *resource)
-{
-  if (resource == nullptr) {
-    return;
-  }
-  BLI_assert(hooks.release != nullptr);
-  if (hooks.release != nullptr) {
-    hooks.release(hooks.data, resource);
-  }
-}
-
-/** Evict least-recently-used entries from the front until \a incoming fits in the budget. */
-static void paint_layer_effect_gpu_cache_enforce_budget(const size_t incoming)
-{
-  while (!g_paint_effect_gpu_cache.entries.is_empty() &&
-         g_paint_effect_gpu_cache.total_bytes + incoming > g_paint_effect_gpu_cache_budget)
-  {
-    EffectGpuCacheEntry &front = g_paint_effect_gpu_cache.entries[0];
-    paint_layer_effect_gpu_release(front.hooks, front.resource);
-    g_paint_effect_gpu_cache.total_bytes -= front.bytes;
-    g_paint_effect_gpu_cache.entries.remove(0);
-  }
-}
-
-/**
- * Drop the entry of the same effect instance with other parameters: the description can only ever
- * ask for the parameters the effect carries now, so an old result is VRAM held for nothing. A frame
- * still laying it keeps its own reference, exactly as it does against the eviction above.
- */
-static void paint_layer_effect_gpu_cache_drop_rekeyed(const EffectCacheKey &key)
-{
-  for (int i = int(g_paint_effect_gpu_cache.entries.size()) - 1; i >= 0; i--) {
-    if (paint_layer_effect_key_same_effect(g_paint_effect_gpu_cache.entries[i].key, key)) {
-      EffectGpuCacheEntry &entry = g_paint_effect_gpu_cache.entries[i];
-      paint_layer_effect_gpu_release(entry.hooks, entry.resource);
-      g_paint_effect_gpu_cache.total_bytes -= entry.bytes;
-      g_paint_effect_gpu_cache.entries.remove(i);
-      break;
-    }
-  }
-}
-
-/** Take the entry out of the LRU front and put it at the back: the vector is the LRU order. */
-static void paint_layer_effect_gpu_cache_touch(const int index)
-{
-  EffectGpuCacheEntry hit = std::move(g_paint_effect_gpu_cache.entries[index]);
-  g_paint_effect_gpu_cache.entries.remove(index);
-  g_paint_effect_gpu_cache.entries.append(std::move(hit));
-}
-
-PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &ma,
-                                                              const MaterialPaintLayer &effect,
-                                                              const int channel,
-                                                              const int width,
-                                                              const int height,
-                                                              const Span<Image *> images,
-                                                              const uint64_t chain_hash,
-                                                              const uint64_t input_scalar_hash,
-                                                              const PaintLayerEffectGpuHooks &hooks,
-                                                              rcti *r_dirty_region,
-                                                              void **r_resource)
-{
-  if (r_resource != nullptr) {
-    *r_resource = nullptr;
-  }
-  if (r_dirty_region != nullptr) {
-    BLI_rcti_init(r_dirty_region, 0, 0, 0, 0);
-  }
-  if (width <= 0 || height <= 0 || hooks.acquire == nullptr) {
-    return PaintLayerEffectGpuState::Failed;
-  }
-  const EffectCacheKey key{ma.id.session_uid,
-                           effect.marker,
-                           channel,
-                           paint_layer_effect_hash(effect, channel),
-                           chain_hash,
-                           input_scalar_hash};
-  const size_t bytes = paint_layer_effect_gpu_entry_bytes(width, height);
-
-  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
-  for (int i = 0; i < int(g_paint_effect_gpu_cache.entries.size()); i++) {
-    EffectGpuCacheEntry &entry = g_paint_effect_gpu_cache.entries[i];
-    if (!paint_layer_effect_key_equal(entry.key, key)) {
-      continue;
-    }
-    if (entry.width != width || entry.height != height) {
-      /* Another size is another texel space -- the noise's texel coordinates and a neighbourhood's
-       * radius both read it -- and another texture, so the entry goes and a fresh one is made. */
-      paint_layer_effect_gpu_release(entry.hooks, entry.resource);
-      g_paint_effect_gpu_cache.total_bytes -= entry.bytes;
-      g_paint_effect_gpu_cache.entries.remove(i);
-      break;
-    }
-    if (entry.published) {
-      rcti region;
-      const ePixelChange change = anchor_slice_changes(entry.synced, images, region);
-      if (change == ePixelChange::None) {
-        if (r_resource != nullptr) {
-          *r_resource = entry.resource;
-        }
-        paint_layer_effect_gpu_cache_touch(i);
-        return PaintLayerEffectGpuState::Hit;
-      }
-      /* A change that is not one rectangle -- a reload, a new map in the set, a resized one -- has no
-       * region to name, and the whole canvas is the only safe claim. A rectangle is over-approximated
-       * freely, so a caller may grow it by its halo. */
-      if (change == ePixelChange::Full) {
-        BLI_rcti_init(&region, 0, width, 0, height);
-        entry.dirty_region = region;
-      }
-      else if (BLI_rcti_is_empty(&entry.dirty_region)) {
-        entry.dirty_region = region;
-      }
-      else {
-        BLI_rcti_union(&entry.dirty_region, &region);
-      }
-      if (r_dirty_region != nullptr) {
-        *r_dirty_region = entry.dirty_region;
-      }
-      if (r_resource != nullptr) {
-        *r_resource = entry.resource;
-      }
-      return PaintLayerEffectGpuState::Render;
-    }
-    /* Never published: the texture is there but says nothing yet. */
-    BLI_rcti_init(&entry.dirty_region, 0, width, 0, height);
-    if (r_dirty_region != nullptr) {
-      *r_dirty_region = entry.dirty_region;
-    }
-    if (r_resource != nullptr) {
-      *r_resource = entry.resource;
-    }
-    return PaintLayerEffectGpuState::Render;
-  }
-
-  void *resource = hooks.acquire(hooks.data, width, height);
-  if (resource == nullptr) {
-    return PaintLayerEffectGpuState::Failed;
-  }
-  paint_layer_effect_gpu_cache_drop_rekeyed(key);
-  /* An entry larger than the whole budget is still inserted rather than handed out uncached: the
-   * cache must own the texture to release it, and a caller that keeps it past this frame holds a
-   * reference of its own, so the budget reads as temporarily exceeded -- the same allowance the CPU
-   * cache makes for a buffer a description still references. */
-  paint_layer_effect_gpu_cache_enforce_budget(bytes);
-  EffectGpuCacheEntry entry;
-  entry.key = key;
-  entry.width = width;
-  entry.height = height;
-  entry.resource = resource;
-  entry.hooks = hooks;
-  entry.bytes = bytes;
-  BLI_rcti_init(&entry.dirty_region, 0, width, 0, height);
-  g_paint_effect_gpu_cache.total_bytes += bytes;
-  g_paint_effect_gpu_cache.entries.append(std::move(entry));
-  if (r_dirty_region != nullptr) {
-    BLI_rcti_init(r_dirty_region, 0, width, 0, height);
-  }
-  if (r_resource != nullptr) {
-    *r_resource = resource;
-  }
-  return PaintLayerEffectGpuState::Render;
-}
-
-void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
-                                               const MaterialPaintLayer &effect,
-                                               const int channel,
-                                               const int width,
-                                               const int height,
-                                               const Span<Image *> images,
-                                               const uint64_t chain_hash,
-                                               const uint64_t input_scalar_hash)
-{
-  const EffectCacheKey key{ma.id.session_uid,
-                           effect.marker,
-                           channel,
-                           paint_layer_effect_hash(effect, channel),
-                           chain_hash,
-                           input_scalar_hash};
-  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
-  for (EffectGpuCacheEntry &entry : g_paint_effect_gpu_cache.entries) {
-    if (!paint_layer_effect_key_equal(entry.key, key) || entry.width != width ||
-        entry.height != height)
-    {
-      continue;
-    }
-    /* Taken after the render, as the CPU cache takes them: an edit that landed while the pass ran is
-     * newer than this entry and costs one more update rather than a stale result that never clears.
-     */
-    entry.synced = anchor_slice_sources_snapshot(images);
-    entry.published = true;
-    BLI_rcti_init(&entry.dirty_region, 0, 0, 0, 0);
-    return;
-  }
-  /* The entry was evicted or dropped while the frame was rendering into its texture: nothing to
-   * stamp, and the next frame asks again. */
-}
-
-PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &ma,
-                                                              const MaterialPaintLayer &effect,
-                                                              const int channel,
-                                                              const int width,
-                                                              const int height,
-                                                              const Span<Image *> images,
-                                                              const PaintLayerEffectGpuHooks &hooks,
-                                                              rcti *r_dirty_region,
-                                                              void **r_resource)
-{
-  return BKE_paint_layers_effect_gpu_cache_get(
-      ma, effect, channel, width, height, images, 0, 0, hooks, r_dirty_region, r_resource);
-}
-
-void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
-                                               const MaterialPaintLayer &effect,
-                                               const int channel,
-                                               const int width,
-                                               const int height,
-                                               const Span<Image *> images)
-{
-  BKE_paint_layers_effect_gpu_cache_publish(ma, effect, channel, width, height, images, 0, 0);
-}
-
-void BKE_paint_layers_effect_gpu_cache_free_all()
-{
-  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
-  for (EffectGpuCacheEntry &entry : g_paint_effect_gpu_cache.entries) {
-    paint_layer_effect_gpu_release(entry.hooks, entry.resource);
-  }
-  g_paint_effect_gpu_cache.entries.clear_and_shrink();
-  g_paint_effect_gpu_cache.total_bytes = 0;
-}
-
-void BKE_paint_layers_effect_gpu_cache_free_material(const Material &ma)
-{
-  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
-  for (int i = int(g_paint_effect_gpu_cache.entries.size()) - 1; i >= 0; i--) {
-    if (g_paint_effect_gpu_cache.entries[i].key.material_uid == ma.id.session_uid) {
-      EffectGpuCacheEntry &entry = g_paint_effect_gpu_cache.entries[i];
-      paint_layer_effect_gpu_release(entry.hooks, entry.resource);
-      g_paint_effect_gpu_cache.total_bytes -= entry.bytes;
-      g_paint_effect_gpu_cache.entries.remove(i);
-    }
-  }
-}
-
-size_t paint_layer_effect_gpu_cache_bytes()
-{
-  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
-  return g_paint_effect_gpu_cache.total_bytes;
-}
-
-int paint_layer_effect_gpu_cache_entry_count()
-{
-  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
-  return int(g_paint_effect_gpu_cache.entries.size());
-}
-
-void paint_layer_effect_gpu_cache_set_budget(const size_t bytes)
-{
-  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
-  g_paint_effect_gpu_cache_budget = bytes;
-}
-
-size_t paint_layer_effect_gpu_cache_budget()
-{
-  std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);
-  return g_paint_effect_gpu_cache_budget;
-}
-
-size_t BKE_paint_layers_effect_gpu_cache_budget()
-{
-  return paint_layer_effect_gpu_cache_budget();
 }
 
 /** \} */

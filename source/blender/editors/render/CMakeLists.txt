@@ -14,6 +14,7 @@ set(INC_SYS
 
 set(SRC
   brush_layer_source_bake.cc
+  paint_material_combined_effects.cc
   paint_material_combined_gather.cc
   render_internal.cc
   render_material_bake.cc
@@ -27,6 +28,7 @@ set(SRC
   render_update.cc
   render_view.cc
 
+  paint_material_combined_effects.hh
   render_intern.hh
   render_material_bake_intern.hh
 )

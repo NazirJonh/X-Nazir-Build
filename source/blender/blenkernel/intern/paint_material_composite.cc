@@ -19,6 +19,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_material_resolve.hh"
@@ -3466,7 +3467,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
       if (correction.filter_curves != nullptr) {
         hash = get_default_hash(hash, paint_layer_curves_hash(*correction.filter_curves));
       }
-      if (correction.effect_hash != 0) {
+      if (paint_correction_is_effect(correction)) {
         /* A CPU-computed effect's result depends on the input's pixels, which the gathered images
          * watch; the hash carries the kind and the parameters. */
         hash = get_default_hash(hash, correction.effect_hash);

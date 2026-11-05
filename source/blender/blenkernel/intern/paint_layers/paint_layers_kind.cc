@@ -811,7 +811,8 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      blur_params,
      int(std::size(blur_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same
      * open-above-one policy as Exposure and High Pass, unlike Noise and Channel Mixer. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -821,7 +822,8 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      sharpen_params,
      int(std::size(sharpen_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* The detail is a difference against a blurred copy, so an HDR value above one stays above it;
      * only the negative side is clamped. The same open-above-one policy as Exposure and Sharpen. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -831,7 +833,8 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      high_pass_params,
      int(std::size(high_pass_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* The Sobel gradient magnitude: a full-range step reads as one, a flat area as zero. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_EDGE_DETECT,
@@ -840,7 +843,8 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      nullptr,
      0,
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* A diagonal 3x3 lighting kernel: a flat colour is its own result, an edge takes the light. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_EMBOSS,
@@ -849,7 +853,8 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      nullptr,
      0,
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* The extreme of a square window per channel: min and max are separable, so the kernel is one
      * pass per axis like the box blur's. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -859,7 +864,8 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      erode_dilate_params,
      int(std::size(erode_dilate_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* A glow screens its colour under the content, so it stays bounded where the colour is. Its
      * source is choked to [0, 1] by the same bound: an HDR texel above one does not brighten the
      * glow, unlike the open-topped Sharpen and High Pass. The same clamp zeros the mask at a

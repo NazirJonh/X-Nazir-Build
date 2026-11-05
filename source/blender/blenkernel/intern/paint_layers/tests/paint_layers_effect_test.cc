@@ -472,7 +472,7 @@ TEST_F(PaintLayersEffectTest, a_sharpen_never_goes_below_zero)
 TEST_F(PaintLayersEffectTest, a_high_pass_of_a_solid_row_is_the_mid_grey)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 160, 160));
-  MaterialPaintLayer *high_pass = add_effect(*row, MA_PAINT_LAYER_FILTER_HIGH_PASS);
+  add_effect(*row, MA_PAINT_LAYER_FILTER_HIGH_PASS);
 
   Vector<float> pixels;
   int width = 0;
@@ -543,7 +543,7 @@ TEST_F(PaintLayersEffectTest, a_high_pass_keeps_the_edge_against_a_flat_field)
 TEST_F(PaintLayersEffectTest, an_edge_detect_of_a_solid_row_is_black)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 160, 160));
-  MaterialPaintLayer *edge = add_effect(*row, MA_PAINT_LAYER_FILTER_EDGE_DETECT);
+  add_effect(*row, MA_PAINT_LAYER_FILTER_EDGE_DETECT);
 
   /* A flat area has no gradient: the Sobel magnitude is zero everywhere, whatever the grey. */
   Vector<float> pixels;
@@ -561,7 +561,7 @@ TEST_F(PaintLayersEffectTest, an_edge_detect_of_a_solid_row_is_black)
 TEST_F(PaintLayersEffectTest, an_edge_detect_outlines_a_hard_edge_at_full_strength)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
-  MaterialPaintLayer *edge = add_effect(*row, MA_PAINT_LAYER_FILTER_EDGE_DETECT);
+  add_effect(*row, MA_PAINT_LAYER_FILTER_EDGE_DETECT);
 
   /* A full-range step reaches exactly one: the two columns beside the edge carry it, the flats
    * carry nothing. The source is pure black and white, so the linear values are exact. */
@@ -602,7 +602,7 @@ TEST_F(PaintLayersEffectTest, an_emboss_of_a_solid_row_is_the_solid)
   ASSERT_TRUE(render_channel(before, width, height));
 
   /* The kernel's weights sum to one, so a flat colour is its own result. */
-  MaterialPaintLayer *emboss = add_effect(*row, MA_PAINT_LAYER_FILTER_EMBOSS);
+  add_effect(*row, MA_PAINT_LAYER_FILTER_EMBOSS);
   Vector<float> pixels;
   ASSERT_TRUE(render_channel(pixels, width, height));
   ASSERT_EQ(pixels.size(), before.size());
@@ -615,7 +615,7 @@ TEST_F(PaintLayersEffectTest, an_emboss_of_a_solid_row_is_the_solid)
 TEST_F(PaintLayersEffectTest, an_emboss_lights_the_white_side_of_a_hard_edge)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
-  MaterialPaintLayer *emboss = add_effect(*row, MA_PAINT_LAYER_FILTER_EMBOSS);
+  add_effect(*row, MA_PAINT_LAYER_FILTER_EMBOSS);
 
   /* Along a vertical edge the kernel reads `-3a + b + 3c` per column (rows are uniform): the white
    * interior stays one, the two edge columns fall below zero and clamp, the black side stays
@@ -794,14 +794,14 @@ TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_for_each_added_cpu
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
 
-  /* Each CPU-computed kind refuses the combined preview by its own reason, without the effect
-   * having been computed for the describe-only pass. */
+  /* The three kinds that stay on the CPU still refuse the combined preview by their own reason, and
+   * a describe-only pass computes none of them. The separable and 3x3 kinds (Blur, Sharpen, High
+   * Pass, Edge Detect, Emboss, Erode / Dilate) now carry #PAINT_LAYER_KIND_GPU_COMPUTED, so they no
+   * longer appear here -- they are covered by the GPU-shade test below. */
   const std::pair<eMaterialPaintLayerFilter, const char *> reasons[] = {
-      {MA_PAINT_LAYER_FILTER_SHARPEN, "a Sharpen correction is read"},
-      {MA_PAINT_LAYER_FILTER_HIGH_PASS, "a High Pass correction is read"},
-      {MA_PAINT_LAYER_FILTER_EDGE_DETECT, "an Edge Detect correction is read"},
-      {MA_PAINT_LAYER_FILTER_EMBOSS, "an Emboss correction is read"},
-      {MA_PAINT_LAYER_FILTER_ERODE_DILATE, "an Erode / Dilate correction is read"},
+      {MA_PAINT_LAYER_FILTER_GLOW, "a Glow correction is read"},
+      {MA_PAINT_LAYER_FILTER_BEVEL, "a Bevel correction is read"},
+      {MA_PAINT_LAYER_FILTER_COLOR_MATCH, "a Color Match correction is read"},
   };
   for (const auto &[filter, reason] : reasons) {
     MaterialPaintLayer *effect = add_effect(*row, filter);
@@ -816,6 +816,38 @@ TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_for_each_added_cpu
         << "a describe-only pass computes nothing";
 
     /* The effect leaves with its reason read, so the next kind is described alone too. */
+    EXPECT_TRUE(BKE_paint_layers_correction_remove(*ma, effect));
+  }
+}
+
+TEST_F(PaintLayersEffectTest, the_phase_two_kinds_are_gpu_computed_and_refuse_no_reason)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+
+  /* Every kind this series moved onto the GPU: the description names no reason to fall back, and the
+   * flag the refusal and the gather's queue both read is set. A describe-only pass still computes
+   * nothing. */
+  const eMaterialPaintLayerFilter gpu_kinds[] = {
+      MA_PAINT_LAYER_FILTER_BLUR,
+      MA_PAINT_LAYER_FILTER_SHARPEN,
+      MA_PAINT_LAYER_FILTER_HIGH_PASS,
+      MA_PAINT_LAYER_FILTER_EDGE_DETECT,
+      MA_PAINT_LAYER_FILTER_EMBOSS,
+      MA_PAINT_LAYER_FILTER_ERODE_DILATE,
+  };
+  for (const eMaterialPaintLayerFilter filter : gpu_kinds) {
+    MaterialPaintLayer *effect = add_effect(*row, filter);
+    ASSERT_NE(effect, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_effect_is_gpu_computed(*effect))
+        << "the registry flags this kind as GPU-computed";
+
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    ASSERT_TRUE(
+        BKE_paint_layers_composite_image_layers(*ma, kColor, layers, /*describe_only=*/true));
+    ASSERT_FALSE(layers.is_empty());
+    EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layers[0], false), nullptr);
+    EXPECT_EQ(paint_layer_effect_cache_entry_count(), 0);
+
     EXPECT_TRUE(BKE_paint_layers_correction_remove(*ma, effect));
   }
 }
@@ -901,14 +933,14 @@ TEST_F(PaintLayersEffectTest, the_radius_is_clamped_and_the_combined_preview_fal
   int height = 0;
   ASSERT_TRUE(render_channel(pixels, width, height));
 
-  /* The combined preview cannot express the effect: the described stack names a reason, without
-   * the effect having been computed for it. */
+  /* A Blur is now a GPU-computed kind: the combined preview names no reason to fall back, and a
+   * describe-only pass still computes nothing on the CPU. The render above made its own entry. */
+  const int entries_before = paint_layer_effect_cache_entry_count();
   Vector<PaintMaterialCompositeImageLayer> layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, kColor, layers, /*describe_only=*/true));
   ASSERT_FALSE(layers.is_empty());
-  EXPECT_STREQ(BKE_paint_layers_gpu_unsupported_reason(layers[0], false),
-               "a Blur correction is read");
-  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 0)
+  EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layers[0], false), nullptr);
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), entries_before)
       << "a describe-only pass computes nothing";
 }
 
@@ -1157,6 +1189,28 @@ TEST_F(PaintLayersEffectTest, a_noise_row_under_a_mask_map_composites_the_same_b
   expect_content_bake_matches_live_row(1.0f, /*use_mask_map=*/true);
 }
 
+/**
+ * Bakes what is due the way the app does: the planner takes the light rows, and the worker job takes
+ * a heavy one. A folder with a child and an effect is heavy by its node weight, so the planner alone
+ * leaves it to the job. True when either of them baked something.
+ */
+static bool bake_folder_to_completion(Main &bmain, Material &ma, bool *r_changed)
+{
+  bool baked = BKE_paint_layers_bake_plan_run(bmain, ma, r_changed);
+  if (BKE_paint_layers_bake_heavy_pending(ma)) {
+    PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(bmain, ma);
+    if (job != nullptr) {
+      BKE_paint_layers_bake_job_compute(*job, {}, {});
+      baked |= BKE_paint_layers_bake_job_commit(*job);
+      BKE_paint_layers_bake_job_free(*job);
+      if (r_changed != nullptr) {
+        *r_changed |= baked;
+      }
+    }
+  }
+  return baked;
+}
+
 TEST_F(PaintLayersEffectTest, a_blurred_folder_keeps_its_bake_when_its_mask_is_painted)
 {
   MaterialPaintLayer *first = add_paint_layer("A", add_shade_image("A", 255, 0));
@@ -1174,7 +1228,7 @@ TEST_F(PaintLayersEffectTest, a_blurred_folder_keeps_its_bake_when_its_mask_is_p
   /* The children are inside the folder's content, each with its own mask; the folder's own mask is
    * the one that stays live over the cache. */
   bool changed = false;
-  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_TRUE(bake_folder_to_completion(*bmain, *ma, &changed));
   ASSERT_NE(folder->bake, nullptr);
   ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
   ASSERT_TRUE(paint_layer_row_substituted(*ma, *folder));
@@ -1302,7 +1356,7 @@ TEST_F(PaintLayersEffectTest, a_stroke_into_a_child_defers_the_blurred_folders_b
   BKE_paint_layers_active_set(*ma, first->marker);
 
   bool changed = false;
-  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_TRUE(bake_folder_to_completion(*bmain, *ma, &changed));
   ASSERT_NE(folder->bake, nullptr);
   ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
 
@@ -1321,7 +1375,7 @@ TEST_F(PaintLayersEffectTest, a_stroke_into_a_child_defers_the_blurred_folders_b
   BKE_paint_layers_bake_stroke_active_set(false);
   EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *folder));
   changed = false;
-  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(bake_folder_to_completion(*bmain, *ma, &changed));
   EXPECT_TRUE(changed);
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
 }
@@ -1797,7 +1851,7 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_publishes_a_hit_only_after_a_
   /* A key the cache has never seen makes a texture and asks for it to be filled: the entry is not
    * current until the render is stamped onto it. */
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, no_images, 0, 0, hooks, &region, &resource),
+                *ma, *noise, kColor, 8, 8, no_images, {}, hooks, &region, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_NE(resource, nullptr);
   EXPECT_EQ(g_fake_effect_gpu.made, 1);
@@ -1806,10 +1860,10 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_publishes_a_hit_only_after_a_
   EXPECT_EQ(BLI_rcti_size_x(&region), 8);
   EXPECT_EQ(BLI_rcti_size_y(&region), 8);
 
-  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, no_images, 0, 0);
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, no_images, {});
   resource = nullptr;
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, no_images, 0, 0, hooks, &region, &resource),
+                *ma, *noise, kColor, 8, 8, no_images, {}, hooks, &region, &resource),
             PaintLayerEffectGpuState::Hit);
   EXPECT_EQ(g_fake_effect_gpu.made, 1) << "the same texture serves the next frame";
   EXPECT_EQ(g_fake_effect_gpu.freed, 0);
@@ -1830,11 +1884,11 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_separates_effects_channels_an
   /* Two effects of one row are two instances: their markers differ, so neither can be served the
    * other's grain. */
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *first, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
+                *ma, *first, kColor, 8, 8, no_images, {}, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
-  BKE_paint_layers_effect_gpu_cache_publish(*ma, *first, kColor, 8, 8, no_images, 0, 0);
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *first, kColor, 8, 8, no_images, {});
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *second, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
+                *ma, *second, kColor, 8, 8, no_images, {}, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 2);
   EXPECT_EQ(g_fake_effect_gpu.made, 2);
@@ -1843,14 +1897,14 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_separates_effects_channels_an
    * entry rather than waiting for the budget to evict it: the description can only ever ask for the
    * parameters the effect carries now. */
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *first, PAINT_MATERIAL_CHANNEL_ROUGHNESS, 8, 8, no_images, 0, 0, hooks, nullptr,
+                *ma, *first, PAINT_MATERIAL_CHANNEL_ROUGHNESS, 8, 8, no_images, {}, hooks, nullptr,
                 &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 3);
   const int made = g_fake_effect_gpu.made;
   ASSERT_TRUE(paint_layer_kind_param_int_set(*first, PAINT_LAYER_NOISE_SEED, 7));
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *first, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
+                *ma, *first, kColor, 8, 8, no_images, {}, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(g_fake_effect_gpu.made, made + 1);
   EXPECT_EQ(g_fake_effect_gpu.freed, 1) << "the entry of the old seed was dropped, not kept";
@@ -1870,16 +1924,16 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_grows_stale_when_the_input_ma
   void *resource = nullptr;
   rcti region;
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, images, 0, 0, hooks, &region, &resource),
+                *ma, *noise, kColor, 8, 8, images, {}, hooks, &region, &resource),
             PaintLayerEffectGpuState::Render);
-  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, images, 0, 0);
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, images, {});
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, images, 0, 0, hooks, &region, &resource),
+                *ma, *noise, kColor, 8, 8, images, {}, hooks, &region, &resource),
             PaintLayerEffectGpuState::Hit);
 
   BKE_image_partial_update_mark_full_update(map);
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, images, 0, 0, hooks, &region, &resource),
+                *ma, *noise, kColor, 8, 8, images, {}, hooks, &region, &resource),
             PaintLayerEffectGpuState::Render);
   /* A change that is not a rectangle has no region to name, and the whole canvas is the only safe
    * claim over it. */
@@ -1902,11 +1956,11 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_evicts_to_its_budget)
   EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), 0);
   paint_layer_effect_gpu_cache_set_budget(one_canvas);
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *first, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
+                *ma, *first, kColor, 8, 8, no_images, {}, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), one_canvas);
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *second, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
+                *ma, *second, kColor, 8, 8, no_images, {}, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 1);
   EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), one_canvas);
@@ -1919,7 +1973,7 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_evicts_to_its_budget)
   BKE_paint_layers_effect_gpu_cache_free_all();
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 0);
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *first, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
+                *ma, *first, kColor, 8, 8, no_images, {}, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 1);
   EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), one_canvas);
@@ -1937,13 +1991,13 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_reports_a_texture_it_cannot_m
   /* The caller's answer is to fall back to the CPU for the whole stack, so nothing may be held for an
    * effect that failed: the reason strings of `gpu_combined refused` count on it. */
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
+                *ma, *noise, kColor, 8, 8, no_images, {}, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Failed);
   EXPECT_EQ(resource, nullptr);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 0);
   EXPECT_EQ(paint_layer_effect_gpu_cache_bytes(), 0);
   /* A stamp of a render nobody asked for finds no entry and holds nothing. */
-  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, no_images, 0, 0);
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *noise, kColor, 8, 8, no_images, {});
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 0);
 }
 
@@ -1955,7 +2009,7 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_drops_a_material_with_its_tex
   const Span<Image *> no_images;
   void *resource = nullptr;
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *noise, kColor, 8, 8, no_images, 0, 0, hooks, nullptr, &resource),
+                *ma, *noise, kColor, 8, 8, no_images, {}, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
   EXPECT_EQ(paint_layer_effect_gpu_cache_entry_count(), 1);
 
@@ -1969,7 +2023,7 @@ TEST_F(PaintLayersEffectTest, the_gpu_effect_cache_drops_a_material_with_its_tex
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name GPU Effect Pass Plan, Region & Key (Ф2)
+/** \name GPU Effect Pass Plan, Region & Key
  *
  * The pure half of the GPU effect pass: the pass plan, the neighbourhood halo, the region arithmetic
  * and the two GPU-only key fingerprints, all decided from the effect's kind, parameters and
@@ -2124,6 +2178,54 @@ TEST_F(PaintLayersEffectTest, the_pass_plan_matches_each_kernels_shape)
   EXPECT_EQ(passes[0].pass_count, 1);
 }
 
+TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
+{
+  /* The loop bound is the last filter enumerator, not a _NUM sentinel (the enum has none): a new
+   * filter past it must extend this loop, or a kind flagged GPU-computed would silently render
+   * nothing. */
+  Set<int> gpu_computed_filters;
+  for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT);
+       filter <= int(MA_PAINT_LAYER_FILTER_CHANNEL_MIXER);
+       filter++)
+  {
+    const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
+    if (kind == nullptr) {
+      continue;
+    }
+    if ((kind->flags & PAINT_LAYER_KIND_GPU_COMPUTED) == 0) {
+      continue;
+    }
+    gpu_computed_filters.add(filter);
+    /* The schema defaults are the parameters the gather would pack, in the same order. */
+    float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
+    for (int i = 0; i < kind->params_num; i++) {
+      params[i] = kind->params[i].default_value;
+    }
+    Vector<PaintLayerEffectPass> passes;
+    BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter(filter), params, 64, 64, passes);
+    EXPECT_FALSE(passes.is_empty())
+        << "a kind flagged GPU-computed must have a pass case in the plan builder";
+    for (const PaintLayerEffectPass &pass : passes) {
+      EXPECT_EQ(pass.pass_count, passes.size());
+      EXPECT_GE(pass.pass_index, 0);
+      EXPECT_LT(pass.pass_index, pass.pass_count);
+      EXPECT_GE(pass.radius, 0);
+      EXPECT_GE(pass.reach, 0);
+    }
+  }
+  /* The six neighbourhood kinds are all flagged GPU-computed: the walk must have found every one of
+   * them, or the flag and the plan builder have drifted apart. The Noise is flagged too, its
+   * pointwise kernel being the one pass the plan names. */
+  EXPECT_FALSE(gpu_computed_filters.is_empty());
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BLUR)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_SHARPEN)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_HIGH_PASS)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_EDGE_DETECT)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_EMBOSS)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_ERODE_DILATE)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_NOISE)));
+}
+
 TEST_F(PaintLayersEffectTest, the_region_grows_by_the_halo_and_clamps_to_the_canvas)
 {
   rcti dirty;
@@ -2211,7 +2313,7 @@ TEST_F(PaintLayersEffectTest,
   Vector<PaintLayerEffectPass> passes;
   Vector<rcti> rects;
 
-  /* Every Ф2 kind through the two generic invariants. */
+  /* Every GPU-computed kind through the two generic invariants. */
   const std::array<float, 2> box = blur(PAINT_LAYER_BLUR_BOX, 5);
   plan_and_check(MA_PAINT_LAYER_FILTER_BLUR, box.data(), dirty, 100, 100, passes, rects);
   const std::array<float, 2> soft = blur(PAINT_LAYER_BLUR_GAUSSIAN, 8);
@@ -2418,15 +2520,17 @@ TEST_F(PaintLayersEffectTest, the_gpu_cache_keys_on_the_chain_and_scalar_fingerp
 
   /* Published under one fingerprint, the same effect is a hit; a different chain or input-scalar
    * fingerprint is a new key and a re-render (the entry of the old parameters is dropped). */
+  const PaintLayerEffectGpuKeyExtras first_key{0xAAu, 0xBBu};
+  const PaintLayerEffectGpuKeyExtras other_scalar{0xAAu, 0xCCu};
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *blur, kColor, 8, 8, no_images, 0xAAu, 0xBBu, hooks, nullptr, &resource),
+                *ma, *blur, kColor, 8, 8, no_images, first_key, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render);
-  BKE_paint_layers_effect_gpu_cache_publish(*ma, *blur, kColor, 8, 8, no_images, 0xAAu, 0xBBu);
+  BKE_paint_layers_effect_gpu_cache_publish(*ma, *blur, kColor, 8, 8, no_images, first_key);
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *blur, kColor, 8, 8, no_images, 0xAAu, 0xBBu, hooks, nullptr, &resource),
+                *ma, *blur, kColor, 8, 8, no_images, first_key, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Hit);
   EXPECT_EQ(BKE_paint_layers_effect_gpu_cache_get(
-                *ma, *blur, kColor, 8, 8, no_images, 0xAAu, 0xCCu, hooks, nullptr, &resource),
+                *ma, *blur, kColor, 8, 8, no_images, other_scalar, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render)
       << "a different input-scalar fingerprint is a different entry";
 }

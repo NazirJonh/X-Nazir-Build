@@ -769,6 +769,9 @@ bool BKE_paint_layers_correction_remove(Material &ma, MaterialPaintLayer *effect
 /** The row that holds \a effect in its #MaterialPaintLayer::effects, or null when it is not a
  * correction of a row of \a ma. */
 MaterialPaintLayer *BKE_paint_layers_correction_owner(Material &ma, const MaterialPaintLayer &effect);
+/** The const twin, for a reader that only looks the owner up. */
+const MaterialPaintLayer *BKE_paint_layers_correction_owner(const Material &ma,
+                                                            const MaterialPaintLayer &effect);
 
 /**
  * Whether #BKE_paint_layers_correction_paste can attach a copy of the content correction or mask
@@ -801,6 +804,8 @@ MaterialPaintLayer *BKE_paint_layers_correction_paste(Main &bmain,
  * \return the row, or null when no row carries \a marker.
  */
 MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker);
+/** The const twin, for a reader that only looks the row up. */
+const MaterialPaintLayer *BKE_paint_layers_find(const Material &ma, const bUUID &marker);
 
 /** The list an Anchor Point or reader is added to: a row of the stack, a row's effects or its mask. */
 enum class PaintLayerAnchorPointList : int8_t {

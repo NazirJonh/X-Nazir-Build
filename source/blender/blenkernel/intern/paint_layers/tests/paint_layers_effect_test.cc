@@ -1352,18 +1352,28 @@ TEST_F(PaintLayersEffectTest, a_stroke_into_the_mask_does_not_defer_a_noise_rows
   EXPECT_FALSE(changed);
 }
 
-TEST_F(PaintLayersEffectTest, a_noise_is_described_only_and_the_combined_preview_falls_back)
+TEST_F(PaintLayersEffectTest, a_noise_is_described_without_a_buffer_and_the_gpu_shades_it)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
-  ASSERT_NE(add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE), nullptr);
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_NE(noise, nullptr);
 
-  /* The shader carries no grain branch, and a describe-only pass computes nothing for it. */
+  /* The grain is a case of the preview's own effect pass, so the description names no reason to fall
+   * back -- and a describe-only pass still computes nothing on the CPU. */
   Vector<PaintMaterialCompositeImageLayer> layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, kColor, layers, /*describe_only=*/true));
   ASSERT_FALSE(layers.is_empty());
-  EXPECT_STREQ(BKE_paint_layers_gpu_unsupported_reason(layers[0], false),
-               "a Noise correction is read");
+  EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layers[0], false), nullptr);
   EXPECT_EQ(paint_layer_effect_cache_entry_count(), 0) << "a describe-only pass computes nothing";
+  EXPECT_TRUE(BKE_paint_layers_effect_is_gpu_computed(*noise));
+
+  /* The correction names the effect instance the GPU cache keys its texture on and carries the
+   * parameter hash of its own, because a description says which *kind* laid a correction but a
+   * caller resolving the row needs the marker: two effects of one row share a kind. */
+  ASSERT_FALSE(layers[0].content_corrections.is_empty());
+  const PaintMaterialCompositeCorrection &correction = layers[0].content_corrections.last();
+  EXPECT_TRUE(BLI_uuid_equal(correction.effect_marker, noise->marker));
+  EXPECT_NE(correction.effect_hash, 0u);
 }
 
 /** \} */

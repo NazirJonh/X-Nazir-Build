@@ -47,6 +47,9 @@
 /* The row reads an Anchor Point slice from a screen-space slot: the colour in `layer_tx`, the
  * coverage in `slot_cov_tx`. */
 #define COMBINED_LAYER_SLOT 524288
+/* The correction is a CPU-computed effect the GPU computed instead: its result is in `effect_tx`, at
+ * the input's own resolution, and is mixed into the row's colour with no coverage of its own. */
+#define COMBINED_LAYER_EFFECT_RESULT 1048576
 
 /* The `CompositeBlend` values, which are the `MA_RAMP_*` codes of the Mix node. */
 #define COMBINED_BLEND_MIX 0
@@ -553,6 +556,63 @@ float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, float4 p2
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Texel Hash
+ *
+ * The grain every texel-noise family reads, ported from `paint_layer_texel_hash_uniform` and the
+ * `BLI_hash_int_2d` it calls: Jenkins' lookup3 `final` over the two texel coordinates. Every step is
+ * uint32 arithmetic with the same constants as the C++, so the sequence cannot drift between the CPU
+ * kernel, the bake and this pass; the shifts are never by zero, so no backend's undefined shift rule
+ * is reached. Deband and a Color Match's variation read the same family (Ф3), which is why this is a
+ * section of its own rather than part of the noise below.
+ * \{ */
+
+/** `rot(x, k)` of `BLI_hash.h`. */
+uint texel_hash_rot(uint x, uint k)
+{
+  return (x << k) | (x >> (32u - k));
+}
+
+/** `BLI_hash_int_2d`: the `final` mix of the two coordinates and the fixed seed. */
+uint texel_hash_int_2d(uint kx, uint ky)
+{
+  uint a = 0xdeadbeefu + (2u << 2u) + 13u;
+  uint b = a;
+  uint c = a;
+  a += kx;
+  b += ky;
+  c ^= b;
+  c -= texel_hash_rot(b, 14u);
+  a ^= c;
+  a -= texel_hash_rot(c, 11u);
+  b ^= a;
+  b -= texel_hash_rot(a, 25u);
+  c ^= b;
+  c -= texel_hash_rot(b, 16u);
+  a ^= c;
+  a -= texel_hash_rot(c, 4u);
+  b ^= a;
+  b -= texel_hash_rot(a, 14u);
+  c ^= b;
+  c -= texel_hash_rot(b, 24u);
+  return c;
+}
+
+/**
+ * `paint_layer_texel_hash_uniform`: one uniform in [0, 1) of the texel hash family, the salt keeping
+ * the passes and the channels apart and the seed moving the pattern. The coordinates are those of the
+ * texture being grained, not a normalized position: the grain is a field over the canvas, so a bake
+ * at another resolution shows the same pattern resampled rather than a different one (D6).
+ */
+float texel_hash_uniform(int2 texel, int seed, uint salt)
+{
+  const uint kx = uint(texel.x) + salt * 7919u + uint(seed) * 6151u;
+  const uint ky = uint(texel.y);
+  return float(texel_hash_int_2d(kx, ky)) / 4294967296.0f;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Map Sampling
  * \{ */
 
@@ -983,6 +1043,8 @@ struct CorrectionResources {
   [[sampler(1)]] sampler2D slot_cov_tx;
   /** A Color Ramp or RGB Curves table, or the gather's placeholder for other filters. */
   [[sampler(2)]] sampler2D filter_lut_tx;
+  /** The result of a GPU effect pass, at the effect input's resolution. */
+  [[sampler(3)]] sampler2D effect_tx;
   [[image(0, read_write, SFLOAT_16_16_16_16)]] image2D row_color_img;
   [[image(1, read_write, SFLOAT_16_16_16_16)]] image2D row_factor_img;
   [[push_constant]] const float4x4 texel_to_uv;
@@ -1017,6 +1079,24 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
   }
 
   float4 s = imageLoad(srt.row_color_img, texel);
+  if ((srt.flags & COMBINED_LAYER_EFFECT_RESULT) != 0) {
+    /* A CPU-computed effect the GPU computed: its result is mixed over the row's colour and nothing
+     * else moves, exactly as the CPU evaluator applies a correction's `effect_color` -- the coverage
+     * and the content alpha stay as they are, since the effect lays no coverage of its own. */
+    const float weight = clamp(srt.opacity, 0.0f, 1.0f);
+    if (weight > 0.0f) {
+      float4 effect = textureLod(srt.effect_tx, uv, 0.0f);
+      /* The result carries the content alpha it was computed on in its fourth component, and the CPU
+       * reads a float canvas of the composite as premultiplied (`composite_decode_tile` straightens
+       * it). The same division here is the same number the CPU mixes with. */
+      if (effect.w > 0.0f) {
+        effect.xyz = effect.xyz / effect.w;
+      }
+      s.xyz = s.xyz + (effect.xyz - s.xyz) * weight;
+    }
+    imageStore(srt.row_color_img, texel, s);
+    return;
+  }
   if (srt.filter_kind != COMBINED_FILTER_NONE) {
     float weight = clamp(srt.opacity, 0.0f, 1.0f);
     float4 filtered = apply_filter(srt.filter_kind,
@@ -1077,6 +1157,153 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
   s.w = ((srt.flags & COMBINED_LAYER_TRACKS_ALPHA) != 0) ? alpha + f * (1.0f - alpha) : a_new;
   imageStore(srt.row_color_img, texel, s);
   imageStore(srt.row_factor_img, texel, float4(a_new));
+}
+
+/** \} */
+/* -------------------------------------------------------------------- */
+/** \name Effect Pass
+ *
+ * One CPU-computed effect, computed here instead of in the effect cache: the pass reads the row's
+ * content up to the effect (`input_tx`, at the input's own resolution and texel space, which the
+ * gather lays with the passes above) and writes the result the correction pass mixes in. The kernels
+ * are ports of `paint_layer_effect_kernel_apply` kept in its order of operations, so
+ * `BLENDER_PBR_GPU_VERIFY` compares one number; a neighbourhood kernel will add its own passes here
+ * (Ф2) and a reduction another one (Ф3).
+ * \{ */
+
+/**
+ * The kinds this pass computes, as #eMaterialPaintLayerFilter subtypes. A kind carries
+ * #PAINT_LAYER_KIND_GPU_COMPUTED for exactly the case it has below, so the refusal of the description
+ * and the silence of this switch cannot disagree about what is laid.
+ */
+#define COMBINED_EFFECT_NOISE 25
+
+/* The families of the Noise, the value of its first parameter (`PaintLayerNoiseType`). */
+#define COMBINED_NOISE_GAUSSIAN 0
+#define COMBINED_NOISE_UNIFORM 1
+#define COMBINED_NOISE_SPECKLE 2
+#define COMBINED_NOISE_SALT_PEPPER 3
+
+/** `paint_layer_noise_uniform`: one uniform of the family, three passes to a channel. */
+float noise_uniform(int2 texel, int seed, int channel, int pass)
+{
+  return texel_hash_uniform(texel, seed, uint(channel * 3 + pass));
+}
+
+/** `paint_layer_noise_gaussian`: three uniforms sum to a bell whose spread the intensity sets. */
+float noise_gaussian(int2 texel, int seed, int channel, float intensity)
+{
+  const float u1 = noise_uniform(texel, seed, channel, 1);
+  const float u2 = noise_uniform(texel, seed, channel, 2);
+  const float u3 = noise_uniform(texel, seed, channel, 3);
+  return (u1 + u2 + u3 - 1.5f) * intensity * 2.0f;
+}
+
+/** The signed offset one channel reads: the gaussian family, or one uniform swung around zero. */
+float noise_offset(int2 texel, int seed, int channel, int type, float intensity)
+{
+  if (type == COMBINED_NOISE_UNIFORM) {
+    return (noise_uniform(texel, seed, channel, 1) * 2.0f - 1.0f) * intensity;
+  }
+  return noise_gaussian(texel, seed, channel, intensity);
+}
+
+/**
+ * One channel of the grain, the way `paint_layer_effect_noise_apply` writes it: salt and pepper
+ * thresholds the uniform, the speckle scales the colour, the rest add to it. The clip at one is the
+ * kernel's, not the encode's: a Noise trims an HDR map where a Sharpen does not.
+ *
+ * The components are written out by name rather than indexed: not every backend overloads a dynamic
+ * subscript of a vector the same way.
+ */
+float noise_channel_apply(float value, int2 texel, int seed, int channel, int type, float intensity)
+{
+  if (type == COMBINED_NOISE_SALT_PEPPER) {
+    /* A salted channel reads black, a peppered one white, and the rest stay as they are: the amount
+     * is the intensity, half to each side. */
+    const float reach = intensity * 0.5f;
+    const float u = noise_uniform(texel, seed, channel, 1);
+    return (u < reach) ? 0.0f : ((u > 1.0f - reach) ? 1.0f : value);
+  }
+  const float n = noise_offset(texel, seed, channel, type, intensity);
+  if (type == COMBINED_NOISE_SPECKLE) {
+    return clamp(value * (1.0f + n), 0.0f, 1.0f);
+  }
+  return clamp(value + n, 0.0f, 1.0f);
+}
+
+/** The Noise kernel of one texel, in place over its three colour channels. */
+void noise_apply(float3 &rgb, int2 texel, float4 params, float3 luma_coefficients)
+{
+  /* The schema order the gather packs: the family, the intensity, the monochrome switch, the seed.
+   * The two integers are stored as floats, so they are read back rounded. */
+  const int type = int(params.x + 0.5f);
+  const float intensity = params.y;
+  const bool monochrome = params.z > 0.5f;
+  const int seed = int(params.w + 0.5f);
+
+  if (type == COMBINED_NOISE_SALT_PEPPER || !monochrome) {
+    /* Salt and pepper is per channel whatever the switch says: the kernel tests the family first. */
+    rgb.x = noise_channel_apply(rgb.x, texel, seed, 0, type, intensity);
+    rgb.y = noise_channel_apply(rgb.y, texel, seed, 1, type, intensity);
+    rgb.z = noise_channel_apply(rgb.z, texel, seed, 2, type, intensity);
+    return;
+  }
+  /* One noise per texel, laid through the luminance: the colour follows it, so the grain is the same
+   * grey the eye reads. The weights are the working space's own, which the CPU kernel reads; the
+   * Rec.709 triple the rest of this file uses would grain a different grey in another space. */
+  const float lum = dot(rgb, luma_coefficients);
+  const float n = noise_offset(texel, seed, 0, type, intensity);
+  const float moved = (type == COMBINED_NOISE_SPECKLE) ? clamp(lum * (1.0f + n), 0.0f, 1.0f) :
+                                                        clamp(lum + n, 0.0f, 1.0f);
+  rgb = rgb + float3(moved - lum);
+}
+
+struct EffectResources {
+  /** The row's content up to the effect, straight scene-linear with the content alpha in `w`. */
+  [[sampler(0)]] sampler2D input_tx;
+  [[image(0, write, SFLOAT_16_16_16_16)]] image2D result_img;
+  [[push_constant]] const int2 texture_size;
+  /**
+   * The first texel of this dispatch. Only the texels whose input moved are recomputed: what is
+   * outside them keeps the value the cached result already holds, so the pass starts here instead of at
+   * the origin and the guard below still clips to #texture_size.
+   */
+  [[push_constant]] const int2 dispatch_origin;
+  /** A `COMBINED_EFFECT_*` value: which kernel the texel goes through. */
+  [[push_constant]] const int effect_kind;
+  /** The effect's parameters in its kind's schema order, as the correction pass is given them. */
+  [[push_constant]] const float4 filter_params_0;
+  /** The working space's luminance weights, which `IMB_colormanagement_get_luminance` reads. */
+  [[push_constant]] const float4 luma_coefficients;
+  /** Whether the fourth component is a content alpha the composite keeps: where it is not, the
+   * buffer the correction pass reads holds one, as `eval_row_content` writes it. */
+  [[push_constant]] const int tracks_alpha;
+};
+
+[[compute, local_size(16, 16)]]
+void effect_comp([[resource_table]] EffectResources &srt,
+                 [[global_invocation_id]] const uint3 global_id)
+{
+  const int2 texel = int2(global_id.xy) + srt.dispatch_origin;
+  if (any(greaterThanEqual(texel, srt.texture_size))) {
+    return;
+  }
+  const float4 source = texelFetch(srt.input_tx, texel, 0);
+  float3 rgb = source.xyz;
+  switch (srt.effect_kind) {
+    case COMBINED_EFFECT_NOISE:
+      noise_apply(rgb, texel, srt.filter_params_0, srt.luma_coefficients.xyz);
+      break;
+    default:
+      /* A kind with no case here is not a #PAINT_LAYER_KIND_GPU_COMPUTED one, and the gather refuses
+       * the stack before this pass runs; leaving the texel as it came is the safe reading. */
+      break;
+  }
+  /* No kernel touches the alpha, and the buffer that holds the result carries the content alpha the
+   * row went in with -- kept or dropped to one, exactly as the CPU's buffer is written. */
+  const float alpha = (srt.tracks_alpha != 0) ? source.w : 1.0f;
+  imageStore(srt.result_img, texel, float4(rgb, alpha));
 }
 
 /** \} */
@@ -1333,6 +1560,7 @@ void shade_comp([[resource_table]] ShadeResources &srt,
 PipelineCompute image_engine_combined_layer(image_engine::combined::layer_comp);
 PipelineCompute image_engine_combined_mask(image_engine::combined::mask_comp);
 PipelineCompute image_engine_combined_correction(image_engine::combined::correction_comp);
+PipelineCompute image_engine_combined_effect(image_engine::combined::effect_comp);
 PipelineCompute image_engine_combined_folder(image_engine::combined::folder_comp);
 PipelineCompute image_engine_combined_display(image_engine::combined::display_comp);
 PipelineCompute image_engine_combined_shade(image_engine::combined::shade_comp);

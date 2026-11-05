@@ -926,7 +926,8 @@ static const PaintLayerKindInfo kinds[] = {
      effect_only_roles,
      noise_params,
      int(std::size(noise_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* A Normal Convert reads the encoding as numbers, not as a direction: the one filter a Normal
      * channel carries, by its own flag. The combined preview has no branch for it. */
     {MA_PAINT_LAYER_SOURCE_FILTER,

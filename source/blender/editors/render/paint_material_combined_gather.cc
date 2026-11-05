@@ -896,6 +896,10 @@ static constexpr int gpu_mask_slot_store = 7;
 static constexpr int gpu_mask_slot = 2048;
 /* The ID map is read at its nearest texel. */
 static constexpr int gpu_map_nearest = 131072;
+/* The correction is a CPU-computed effect the GPU computed: its result is in `effect_tx`. Mirrors the
+ * shader's #COMBINED_LAYER_EFFECT_RESULT.
+ */
+static constexpr int gpu_effect_result = 1048576;
 
 /** A content slice captured for the channel passes: screen-space colour and coverage. */
 struct GpuSliceSlot {
@@ -920,10 +924,78 @@ struct GpuMaskSlot {
   PaintLayersGpuSlotGuard guard;
 };
 
+/** The GPU result of one effect this frame computed, found by the effect and the channel it was made
+ * for. */
+struct GpuEffectResult {
+  bUUID marker;
+  int channel = 0;
+  gpu::Texture *texture = nullptr;
+};
+
+/**
+ * One effect the preview has to have a GPU result for, with everything its pass needs. The stages
+ * below fill the textures in: the cache's result first, then -- only when the cache had none or the
+ * input moved -- the content the effect reads and the kernel's answer.
+ */
+struct GpuEffectJob {
+  const PaintMaterialCompositeCorrection *correction = nullptr;
+  /** The effect row of the description, named by the correction's marker, and the row it corrects. */
+  MaterialPaintLayer *effect = nullptr;
+  MaterialPaintLayer *row = nullptr;
+  int channel = 0;
+  /** The input's size: the result's size, and the texel space the kernel counts in. */
+  int2 input_size = int2(0);
+  /** The cache's texture, referenced for this frame: the effect pass writes it, the correction pass
+   * reads it. */
+  gpu::Texture *result = nullptr;
+  /** The input canvas, held from the pool only while a result is being computed. */
+  gpu::Texture *input = nullptr;
+  /** The maps the input renders from: their versions decide when the result goes stale. */
+  Vector<Image *> images;
+  /** Texels that moved since the cached result; carried for the region re-render of Ф2. */
+  rcti region = {0, 0, 0, 0};
+  /** False when the cache hit and nothing is to be rendered. */
+  bool needs_render = false;
+  /** Whether the input's fourth component is a content alpha the composite keeps. */
+  bool tracks_alpha = false;
+};
+
 /** What a capture job produces: a content pair, a mask rendered as content, or a mask slot. The
  * plan itself lives in BKE, so its ordering and dedup rules are testable without a GPU. */
 using GpuCaptureKind = PaintLayersGpuCaptureKind;
 using GpuCaptureJob = PaintLayersGpuCaptureJob;
+
+/**
+ * The scratch and the geometry of one combined-preview render target: the textures the passes lay a
+ * stack into, the size they work at, and the map from one of their texels to a canvas UV.
+ *
+ * The Image Editor's display pass has a target at the region's resolution, because that is what the
+ * eye is shown at. A GPU effect needs one at the **input's** resolution instead: its kernel is a
+ * function of the input texel -- a Noise hashes the texel coordinates, a Blur's radius counts texels --
+ * so computing it at the screen's would be a different picture from the bake and the render (D6). Both
+ * are laid by the same passes; only the target differs.
+ */
+struct CombinedTarget {
+  /** The row's colour and coverage while its corrections are laid over them. */
+  gpu::Texture *row_color = nullptr;
+  gpu::Texture *row_factor = nullptr;
+  /** The mask factor of the row being laid, rebuilt by one step per item. */
+  gpu::Texture *mask_accum = nullptr;
+  /** Where the stack of one channel ends up: one of the frame's accumulators, or the texture an
+   * effect's content is captured into. */
+  gpu::Texture *dest = nullptr;
+  /** The pre-multiplied colour and coverage of the folders being laid, one pair per nesting level.
+   * Made by the pass that first needs a level, and owned by the target rather than by the frame: a
+   * second target must not share a screen-sized one. */
+  std::array<gpu::Texture *, gpu_folder_levels_max> folder_premul = {};
+  std::array<gpu::Texture *, gpu_folder_levels_max> folder_cover = {};
+  int2 size = int2(0);
+  /** #size divided by the passes' 16x16 workgroup, rounded up. */
+  int2 groups = int2(0);
+  /** Output texel centre to canvas UV, in the two forms the passes push. */
+  float3x3 texel_to_uv = float3x3::identity();
+  float4x4 texel_to_uv_4x4 = float4x4::identity();
+};
 
 /**
  * How much memory the Anchor Point slots may take. A 4K RGBA16F pair is about 132 MiB, so this
@@ -1066,6 +1138,7 @@ static struct {
   gpu::Shader *layer = nullptr;
   gpu::Shader *mask = nullptr;
   gpu::Shader *correction = nullptr;
+  gpu::Shader *effect = nullptr;
   gpu::Shader *folder = nullptr;
   gpu::Shader *display = nullptr;
   gpu::Shader *shade = nullptr;
@@ -1077,10 +1150,16 @@ void combined_preview_gpu_free()
   GPU_SHADER_FREE_SAFE(gpu_shaders.layer);
   GPU_SHADER_FREE_SAFE(gpu_shaders.mask);
   GPU_SHADER_FREE_SAFE(gpu_shaders.correction);
+  GPU_SHADER_FREE_SAFE(gpu_shaders.effect);
   GPU_SHADER_FREE_SAFE(gpu_shaders.folder);
   GPU_SHADER_FREE_SAFE(gpu_shaders.display);
   GPU_SHADER_FREE_SAFE(gpu_shaders.shade);
   gpu_shaders.created = false;
+  /* The GPU effect cache owns textures of its own, which outlive one frame; they have to go while
+   * this engine's context is still current, the same window the shaders above free in. The cache
+   * drops each texture with the hook that made it, so it needs no GPU type to do so.
+   */
+  BKE_paint_layers_effect_gpu_cache_free_all();
 }
 
 bool combined_preview_gpu_pass_supported(const int pass)
@@ -1090,6 +1169,43 @@ bool combined_preview_gpu_pass_supported(const int pass)
                    combined_shading_channels.end(),
                    eMaterialPaintChannel(pass)) != combined_shading_channels.end();
 }
+
+/**
+ * The GPU effect cache's acquire hook: a canvas of the shape the frame's own accumulators have --
+ * half float, read by the correction pass and written by the effect pass. The cache keeps one
+ * reference to what this returns; a frame holding it across a dispatch takes one of its own.
+ */
+static void *effect_gpu_acquire(void * /*data*/, const int width, const int height)
+{
+  gpu::Texture *texture = GPU_texture_create_2d(
+      "combined_effect_result",
+      width,
+      height,
+      1,
+      gpu::TextureFormat::SFLOAT_16_16_16_16,
+      eGPUTextureUsage(GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE),
+      nullptr);
+  if (texture == nullptr) {
+    return nullptr;
+  }
+  /* The result is read at the display's resolution, so a canvas texel is usually covered by several
+   * screen pixels and filtered between them, exactly as a painted map is. */
+  GPU_texture_filter_mode(texture, true);
+  return texture;
+}
+
+/** The cache's release hook: drop its reference, which destroys the texture unless a frame still
+ * holds one. */
+static void effect_gpu_release(void * /*data*/, void *resource)
+{
+  if (resource != nullptr) {
+    GPU_texture_free(static_cast<gpu::Texture *>(resource));
+  }
+}
+
+/** The hooks the GPU effect cache works through for this module's textures. */
+static const PaintLayerEffectGpuHooks effect_gpu_hooks = {
+    /*data=*/nullptr, effect_gpu_acquire, effect_gpu_release};
 
 bool combined_preview_gpu_update(const Material &ma,
                                  const CombinedPreviewLighting &lighting,
@@ -1151,6 +1267,7 @@ bool combined_preview_gpu_update(const Material &ma,
     gpu_shaders.layer = GPU_shader_create_from_info_name("image_engine_combined_layer");
     gpu_shaders.mask = GPU_shader_create_from_info_name("image_engine_combined_mask");
     gpu_shaders.correction = GPU_shader_create_from_info_name("image_engine_combined_correction");
+    gpu_shaders.effect = GPU_shader_create_from_info_name("image_engine_combined_effect");
     gpu_shaders.folder = GPU_shader_create_from_info_name("image_engine_combined_folder");
     gpu_shaders.display = GPU_shader_create_from_info_name("image_engine_combined_display");
     gpu_shaders.shade = GPU_shader_create_from_info_name("image_engine_combined_shade");
@@ -1158,11 +1275,13 @@ bool combined_preview_gpu_update(const Material &ma,
   gpu::Shader *layer_shader = gpu_shaders.layer;
   gpu::Shader *mask_shader = gpu_shaders.mask;
   gpu::Shader *correction_shader = gpu_shaders.correction;
+  gpu::Shader *effect_shader = gpu_shaders.effect;
   gpu::Shader *folder_shader = gpu_shaders.folder;
   gpu::Shader *display_shader = gpu_shaders.display;
   gpu::Shader *shade_shader = gpu_shaders.shade;
   if (layer_shader == nullptr || mask_shader == nullptr || correction_shader == nullptr ||
-      folder_shader == nullptr || display_shader == nullptr || shade_shader == nullptr)
+      effect_shader == nullptr || folder_shader == nullptr || display_shader == nullptr ||
+      shade_shader == nullptr)
   {
     return gpu_refuse("a compute shader failed to compile");
   }
@@ -1191,12 +1310,9 @@ bool combined_preview_gpu_update(const Material &ma,
   /* The colour and coverage of a row while its corrections are laid over it. */
   gpu::Texture *row_color = nullptr;
   gpu::Texture *row_factor = nullptr;
-  /* The pre-multiplied colour and coverage of the folders being laid, one pair per nesting level,
-   * made when a folder first needs them. */
-  std::array<gpu::Texture *, gpu_folder_levels_max> folder_premul;
-  std::array<gpu::Texture *, gpu_folder_levels_max> folder_cover;
-  folder_premul.fill(nullptr);
-  folder_cover.fill(nullptr);
+  /* The display pass's target: filled once its scratch textures are acquired below, and the folder
+   * accumulators it grows are released with the rest by the guard after them. */
+  CombinedTarget screen;
   /* The Color Ramp and RGB Curves tables made for this update, released with the other temporaries.
    * No cache yet: a table is cheap next to the dispatch that reads it, and the payload hash would
    * have to be tracked across frames to make one worth its invalidation rules. */
@@ -1204,6 +1320,9 @@ bool combined_preview_gpu_update(const Material &ma,
   /* Anchor Point slices captured before the channel passes, and the mask slices beside them. */
   Vector<GpuSliceSlot> slice_slots;
   Vector<GpuMaskSlot> mask_slots;
+  /* The effects the preview computes itself, and the results its correction passes read. */
+  Vector<GpuEffectJob> effect_jobs;
+  Vector<GpuEffectResult> effect_results;
   BLI_SCOPED_DEFER([&]() {
     for (gpu::Texture *texture : accum) {
       if (texture != nullptr) {
@@ -1219,12 +1338,12 @@ bool combined_preview_gpu_update(const Material &ma,
     if (row_factor != nullptr) {
       pool.release_texture(row_factor);
     }
-    for (gpu::Texture *texture : folder_premul) {
+    for (gpu::Texture *texture : screen.folder_premul) {
       if (texture != nullptr) {
         pool.release_texture(texture);
       }
     }
-    for (gpu::Texture *texture : folder_cover) {
+    for (gpu::Texture *texture : screen.folder_cover) {
       if (texture != nullptr) {
         pool.release_texture(texture);
       }
@@ -1240,6 +1359,14 @@ bool combined_preview_gpu_update(const Material &ma,
     }
     if (slot_dummy != nullptr) {
       pool.release_texture(slot_dummy);
+    }
+    /* The frame's own reference to each effect result goes last: the cache may evict an entry while
+     * these passes still bind its texture, and a texture is only destroyed when the last reference
+     * goes. */
+    for (const GpuEffectJob &job : effect_jobs) {
+      if (job.result != nullptr) {
+        GPU_texture_free(job.result);
+      }
     }
   });
   mask_accum = pool.acquire_texture_2d(
@@ -1270,6 +1397,12 @@ bool combined_preview_gpu_update(const Material &ma,
   if (slot_dummy == nullptr) {
     return gpu_refuse("the placeholder slot texture could not be allocated");
   }
+  screen.row_color = row_color;
+  screen.row_factor = row_factor;
+  screen.mask_accum = mask_accum;
+  screen.size = size;
+  screen.groups = groups;
+  screen.texel_to_uv = texel_to_uv;
 
   /** Whether a Color Ramp's table steps at its stops instead of interpolating between them. */
   const auto color_ramp_is_constant = [](const ColorBand &band) {
@@ -1326,10 +1459,14 @@ bool combined_preview_gpu_update(const Material &ma,
   texel_to_uv_4x4[0] = float4(texel_to_uv[0].x, texel_to_uv[0].y, 0.0f, 0.0f);
   texel_to_uv_4x4[1] = float4(texel_to_uv[1].x, texel_to_uv[1].y, 0.0f, 0.0f);
   texel_to_uv_4x4[3] = float4(texel_to_uv[2].x, texel_to_uv[2].y, 0.0f, 1.0f);
+  screen.texel_to_uv_4x4 = texel_to_uv_4x4;
 
   int dispatches = 0;
   /* The mip level to read a map at: the texels it has per screen pixel, as a power of two. */
-  const auto map_lod = [&](gpu::Texture *map, const int flags, const float2 &mapping_scale) {
+  const auto map_lod = [&](CombinedTarget &t,
+                           gpu::Texture *map,
+                           const int flags,
+                           const float2 &mapping_scale) {
     if (map == nullptr || (flags & gpu_layer_alpha_coverage) != 0 ||
         (flags & gpu_layer_slot) != 0)
     {
@@ -1340,9 +1477,10 @@ bool combined_preview_gpu_update(const Material &ma,
       return 0.0f;
     }
     const float2 map_size(GPU_texture_width(map), GPU_texture_height(map));
+    const float3x3 &to_uv = t.texel_to_uv;
     float texels_per_pixel = std::max(
-        math::length(float2(texel_to_uv[0].x, texel_to_uv[0].y) * map_size),
-        math::length(float2(texel_to_uv[1].x, texel_to_uv[1].y) * map_size));
+        math::length(float2(to_uv[0].x, to_uv[0].y) * map_size),
+        math::length(float2(to_uv[1].x, to_uv[1].y) * map_size));
     if ((flags & gpu_layer_mapped) != 0) {
       /* A scaled mapping reads the map denser or sparser than the canvas does. */
       texels_per_pixel *= std::max(std::abs(mapping_scale.x), std::abs(mapping_scale.y));
@@ -1350,7 +1488,8 @@ bool combined_preview_gpu_update(const Material &ma,
     return std::max(0.0f, std::log2(std::max(texels_per_pixel, 1e-6f)));
   };
 
-  const auto lay = [&](const int channel_index,
+  const auto lay = [&](CombinedTarget &t,
+                       gpu::Texture *dest,
                        gpu::Texture *map,
                        const int flags,
                        const float4 &layer_color,
@@ -1369,10 +1508,10 @@ bool combined_preview_gpu_update(const Material &ma,
     gpu::Texture *sampled = map != nullptr ? map : dummy;
     gpu::Texture *mask_sampled = mask != nullptr ? mask : dummy;
     gpu::Texture *slot_cov_sampled = slot_coverage != nullptr ? slot_coverage : dummy;
-    const float lod = map_lod(map, flags, mapping_scale);
+    const float lod = map_lod(t, map, flags, mapping_scale);
     GPU_shader_bind(layer_shader);
-    GPU_shader_uniform_mat4(layer_shader, "texel_to_uv", texel_to_uv_4x4.ptr());
-    GPU_shader_uniform_2iv(layer_shader, "texture_size", &size.x);
+    GPU_shader_uniform_mat4(layer_shader, "texel_to_uv", t.texel_to_uv_4x4.ptr());
+    GPU_shader_uniform_2iv(layer_shader, "texture_size", &t.size.x);
     GPU_shader_uniform_4fv(layer_shader, "layer_color", &layer_color.x);
     GPU_shader_uniform_4fv(layer_shader, "init_color", &init_color.x);
     GPU_shader_uniform_2fv(layer_shader, "mapping_offset", &mapping_offset.x);
@@ -1422,15 +1561,15 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_texture_bind(slot_cov_sampled,
                      GPU_shader_get_sampler_binding(layer_shader, "slot_cov_tx"));
     GPU_texture_bind(filter_lut, GPU_shader_get_sampler_binding(layer_shader, "filter_lut_tx"));
-    GPU_texture_image_bind(accum[channel_index],
-                           GPU_shader_get_sampler_binding(layer_shader, "accum_img"));
-    GPU_texture_image_bind(row_color, GPU_shader_get_sampler_binding(layer_shader, "row_color_img"));
-    GPU_texture_image_bind(row_factor,
+    GPU_texture_image_bind(dest, GPU_shader_get_sampler_binding(layer_shader, "accum_img"));
+    GPU_texture_image_bind(t.row_color,
+                           GPU_shader_get_sampler_binding(layer_shader, "row_color_img"));
+    GPU_texture_image_bind(t.row_factor,
                            GPU_shader_get_sampler_binding(layer_shader, "row_factor_img"));
-    GPU_compute_dispatch(layer_shader, uint(groups.x), uint(groups.y), 1);
-    GPU_texture_image_unbind(row_factor);
-    GPU_texture_image_unbind(row_color);
-    GPU_texture_image_unbind(accum[channel_index]);
+    GPU_compute_dispatch(layer_shader, uint(t.groups.x), uint(t.groups.y), 1);
+    GPU_texture_image_unbind(t.row_factor);
+    GPU_texture_image_unbind(t.row_color);
+    GPU_texture_image_unbind(dest);
     GPU_texture_unbind(filter_lut);
     GPU_texture_unbind(slot_cov_sampled);
     GPU_texture_unbind(mask_sampled);
@@ -1440,7 +1579,8 @@ bool combined_preview_gpu_update(const Material &ma,
   };
 
   /* One step of a row's mask factor, into the mask accumulator. */
-  const auto mask_step = [&](const int mode,
+  const auto mask_step = [&](CombinedTarget &t,
+                             const int mode,
                              gpu::Texture *map,
                              const int flags,
                              const float constant_gray,
@@ -1481,8 +1621,8 @@ bool combined_preview_gpu_update(const Material &ma,
     /* A mask map is painted like a layer's: its base level, for the same reason. */
     const float lod = 0.0f;
     GPU_shader_bind(mask_shader);
-    GPU_shader_uniform_mat4(mask_shader, "texel_to_uv", texel_to_uv_4x4.ptr());
-    GPU_shader_uniform_2iv(mask_shader, "texture_size", &size.x);
+    GPU_shader_uniform_mat4(mask_shader, "texel_to_uv", t.texel_to_uv_4x4.ptr());
+    GPU_shader_uniform_2iv(mask_shader, "texture_size", &t.size.x);
     GPU_shader_uniform_2fv(mask_shader, "mapping_offset", &mapping_offset.x);
     GPU_shader_uniform_2fv(mask_shader, "mapping_scale", &mapping_scale.x);
     GPU_shader_uniform_2fv(mask_shader, "mapping_rotation", &mapping_rotation.x);
@@ -1500,13 +1640,13 @@ bool combined_preview_gpu_update(const Material &ma,
 
     GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
-    gpu::Texture *mask_target = mask_source != nullptr ? mask_source : mask_accum;
+    gpu::Texture *mask_target = mask_source != nullptr ? mask_source : t.mask_accum;
     GPU_texture_bind(sampled, GPU_shader_get_sampler_binding(mask_shader, "mask_tx"));
     GPU_texture_bind(filter_lut, GPU_shader_get_sampler_binding(mask_shader, "filter_lut_tx"));
     GPU_texture_image_bind(mask_target, GPU_shader_get_sampler_binding(mask_shader, "mask_img"));
     GPU_texture_image_bind(slot_dst != nullptr ? slot_dst : slot_dummy,
                            GPU_shader_get_sampler_binding(mask_shader, "slot_img"));
-    GPU_compute_dispatch(mask_shader, uint(groups.x), uint(groups.y), 1);
+    GPU_compute_dispatch(mask_shader, uint(t.groups.x), uint(t.groups.y), 1);
     GPU_texture_image_unbind(slot_dst != nullptr ? slot_dst : slot_dummy);
     GPU_texture_image_unbind(mask_target);
     GPU_texture_unbind(filter_lut);
@@ -1516,13 +1656,22 @@ bool combined_preview_gpu_update(const Material &ma,
   };
 
   /* One correction laid over the row's colour and coverage. False when its map has no GPU texture. */
-  const auto correction_step = [&](const PaintMaterialCompositeCorrection &correction,
-                                   const bool tracks_alpha,
-                                   gpu::Texture *slot_color = nullptr,
-                                   gpu::Texture *slot_coverage = nullptr) {
+  const auto correction_step = [&](CombinedTarget &t,
+                                    const PaintMaterialCompositeCorrection &correction,
+                                    const bool tracks_alpha,
+                                    gpu::Texture *slot_color = nullptr,
+                                    gpu::Texture *slot_coverage = nullptr,
+                                    gpu::Texture *effect_result = nullptr) {
     gpu::Texture *map = nullptr;
     int step_flags = tracks_alpha ? gpu_layer_tracks_alpha : 0;
-    if (slot_color != nullptr) {
+    if (effect_result != nullptr) {
+      /* A CPU-computed effect the GPU computed: the result texture is the same buffer the CPU cache
+       * hands the evaluator, at the same size and in the same texel space, so the shader's effect
+       * branch stands in for the correction's map and for its filter at once. */
+      map = effect_result;
+      step_flags |= gpu_effect_result;
+    }
+    else if (slot_color != nullptr) {
       /* A live Anchor Point slice: screen-space, no mapping, coverage in the paired slot. */
       map = slot_color;
       step_flags |= gpu_layer_slot;
@@ -1538,10 +1687,11 @@ bool combined_preview_gpu_update(const Material &ma,
     float2 mapping_offset(0.0f);
     float2 mapping_scale(1.0f);
     float2 mapping_rotation(1.0f, 0.0f);
-    if (map != nullptr && slot_color == nullptr) {
+    if (map != nullptr && slot_color == nullptr && effect_result == nullptr) {
       gpu_mapping_setup(correction.mapping, step_flags, mapping_offset, mapping_scale, mapping_rotation);
     }
-    gpu::Texture *sampled = map != nullptr ? map : dummy;
+    gpu::Texture *sampled = (map != nullptr && effect_result == nullptr) ? map : dummy;
+    gpu::Texture *effect_sampled = effect_result != nullptr ? effect_result : dummy;
     gpu::Texture *slot_sampled = slot_coverage != nullptr ? slot_coverage : dummy;
     const float4 constant_color(correction.constant_color);
     const float4 params_0(correction.filter_params[0],
@@ -1569,8 +1719,8 @@ bool combined_preview_gpu_update(const Material &ma,
     /* A correction map is painted like a layer's: its base level, for the same reason. */
     const float lod = 0.0f;
     GPU_shader_bind(correction_shader);
-    GPU_shader_uniform_mat4(correction_shader, "texel_to_uv", texel_to_uv_4x4.ptr());
-    GPU_shader_uniform_2iv(correction_shader, "texture_size", &size.x);
+    GPU_shader_uniform_mat4(correction_shader, "texel_to_uv", t.texel_to_uv_4x4.ptr());
+    GPU_shader_uniform_2iv(correction_shader, "texture_size", &t.size.x);
     GPU_shader_uniform_4fv(correction_shader, "constant_color", &constant_color.x);
     GPU_shader_uniform_2fv(correction_shader, "mapping_offset", &mapping_offset.x);
     GPU_shader_uniform_2fv(correction_shader, "mapping_scale", &mapping_scale.x);
@@ -1587,26 +1737,30 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
     GPU_texture_bind(sampled, GPU_shader_get_sampler_binding(correction_shader, "correction_tx"));
+    GPU_texture_bind(effect_sampled,
+                     GPU_shader_get_sampler_binding(correction_shader, "effect_tx"));
     GPU_texture_bind(slot_sampled,
                      GPU_shader_get_sampler_binding(correction_shader, "slot_cov_tx"));
     GPU_texture_bind(filter_lut,
                      GPU_shader_get_sampler_binding(correction_shader, "filter_lut_tx"));
-    GPU_texture_image_bind(row_color,
+    GPU_texture_image_bind(t.row_color,
                            GPU_shader_get_sampler_binding(correction_shader, "row_color_img"));
-    GPU_texture_image_bind(row_factor,
+    GPU_texture_image_bind(t.row_factor,
                            GPU_shader_get_sampler_binding(correction_shader, "row_factor_img"));
-    GPU_compute_dispatch(correction_shader, uint(groups.x), uint(groups.y), 1);
-    GPU_texture_image_unbind(row_factor);
-    GPU_texture_image_unbind(row_color);
+    GPU_compute_dispatch(correction_shader, uint(t.groups.x), uint(t.groups.y), 1);
+    GPU_texture_image_unbind(t.row_factor);
+    GPU_texture_image_unbind(t.row_color);
     GPU_texture_unbind(filter_lut);
     GPU_texture_unbind(slot_sampled);
+    GPU_texture_unbind(effect_sampled);
     GPU_texture_unbind(sampled);
     dispatches++;
     return true;
   };
   /* One step of a folder: seed its accumulators, lay a child over them, or resolve them into the
    * row textures as the folder's own row. */
-  const auto folder_step = [&](const int mode,
+  const auto folder_step = [&](CombinedTarget &t,
+                               const int mode,
                                const int level,
                                const int flags,
                                const float opacity,
@@ -1614,8 +1768,8 @@ bool combined_preview_gpu_update(const Material &ma,
                                gpu::Texture *mask) {
     gpu::Texture *mask_sampled = mask != nullptr ? mask : dummy;
     GPU_shader_bind(folder_shader);
-    GPU_shader_uniform_mat4(folder_shader, "texel_to_uv", texel_to_uv_4x4.ptr());
-    GPU_shader_uniform_2iv(folder_shader, "texture_size", &size.x);
+    GPU_shader_uniform_mat4(folder_shader, "texel_to_uv", t.texel_to_uv_4x4.ptr());
+    GPU_shader_uniform_2iv(folder_shader, "texture_size", &t.size.x);
     GPU_shader_uniform_1f(folder_shader, "opacity", opacity);
     GPU_shader_uniform_1i(folder_shader, "flags", flags);
     GPU_shader_uniform_1i(folder_shader, "blend", blend);
@@ -1624,36 +1778,36 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
     GPU_texture_bind(mask_sampled, GPU_shader_get_sampler_binding(folder_shader, "mask_tx"));
-    GPU_texture_image_bind(row_color, GPU_shader_get_sampler_binding(folder_shader, "row_color_img"));
-    GPU_texture_image_bind(row_factor,
+    GPU_texture_image_bind(t.row_color, GPU_shader_get_sampler_binding(folder_shader, "row_color_img"));
+    GPU_texture_image_bind(t.row_factor,
                            GPU_shader_get_sampler_binding(folder_shader, "row_factor_img"));
-    GPU_texture_image_bind(folder_premul[level],
+    GPU_texture_image_bind(t.folder_premul[level],
                            GPU_shader_get_sampler_binding(folder_shader, "premul_img"));
-    GPU_texture_image_bind(folder_cover[level],
+    GPU_texture_image_bind(t.folder_cover[level],
                            GPU_shader_get_sampler_binding(folder_shader, "cover_img"));
-    GPU_compute_dispatch(folder_shader, uint(groups.x), uint(groups.y), 1);
-    GPU_texture_image_unbind(folder_cover[level]);
-    GPU_texture_image_unbind(folder_premul[level]);
-    GPU_texture_image_unbind(row_factor);
-    GPU_texture_image_unbind(row_color);
+    GPU_compute_dispatch(folder_shader, uint(t.groups.x), uint(t.groups.y), 1);
+    GPU_texture_image_unbind(t.folder_cover[level]);
+    GPU_texture_image_unbind(t.folder_premul[level]);
+    GPU_texture_image_unbind(t.row_factor);
+    GPU_texture_image_unbind(t.row_color);
     GPU_texture_unbind(mask_sampled);
     dispatches++;
   };
 
   /* The accumulators of the folders at nesting \a level, made when first needed. */
-  const auto folder_levels_ensure = [&](const int level) {
+  const auto folder_levels_ensure = [&](CombinedTarget &t, const int level) {
     if (level < 0 || level >= gpu_folder_levels_max) {
       return false;
     }
-    if (folder_premul[level] == nullptr) {
-      folder_premul[level] = pool.acquire_texture_2d(
-          size, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, accum_usage, "combined_folder_premul");
+    if (t.folder_premul[level] == nullptr) {
+      t.folder_premul[level] = pool.acquire_texture_2d(
+          t.size, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, accum_usage, "combined_folder_premul");
     }
-    if (folder_cover[level] == nullptr) {
-      folder_cover[level] = pool.acquire_texture_2d(
-          size, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, accum_usage, "combined_folder_cover");
+    if (t.folder_cover[level] == nullptr) {
+      t.folder_cover[level] = pool.acquire_texture_2d(
+          t.size, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, accum_usage, "combined_folder_cover");
     }
-    return folder_premul[level] != nullptr && folder_cover[level] != nullptr;
+    return t.folder_premul[level] != nullptr && t.folder_cover[level] != nullptr;
   };
 
   /* The slots captured before the passes. Linear: there are at most PAINT_LAYER_ANCHOR_POINT_LIMIT
@@ -1675,9 +1829,23 @@ bool combined_preview_gpu_update(const Material &ma,
     return nullptr;
   };
 
+  /* The GPU results of the effects this frame computed, found by the effect's marker and channel:
+   * a correction of a description names the effect it was made from, and the same effect can be laid
+   * in more than one channel. */
+  const auto effect_result_find = [&](const bUUID &marker, const int channel) -> gpu::Texture * {
+    for (const GpuEffectResult &result : effect_results) {
+      if (BLI_uuid_equal(result.marker, marker) && result.channel == channel) {
+        return result.texture;
+      }
+    }
+    return nullptr;
+  };
+
   /* Build the mask factor of \a layer in the mask accumulator: seeded with one, each item laid over
    * it, then the row's own mask map. False when a mask map has no GPU texture. */
-  const auto mask_build = [&](const PaintMaterialCompositeImageLayer &layer, bool &r_has_mask) {
+  const auto mask_build = [&](CombinedTarget &t,
+                              const PaintMaterialCompositeImageLayer &layer,
+                              bool &r_has_mask) {
     r_has_mask = layer.mask_image != nullptr;
     for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
       r_has_mask |= item.opacity > 0.0f;
@@ -1685,7 +1853,8 @@ bool combined_preview_gpu_update(const Material &ma,
     if (!r_has_mask) {
       return true;
     }
-    if (!mask_step(gpu_mask_init,
+    if (!mask_step(t,
+                   gpu_mask_init,
                    nullptr,
                    0,
                    1.0f,
@@ -1708,7 +1877,8 @@ bool combined_preview_gpu_update(const Material &ma,
       if (item.map_coverage != 0) {
         /* The match accumulates over the passes; a missing or unreadable map leaves it at zero, the
          * full restriction the CPU composite gives. */
-        if (!mask_step(gpu_mask_cov_begin,
+        if (!mask_step(t,
+                       gpu_mask_cov_begin,
                        nullptr,
                        0,
                        1.0f,
@@ -1732,7 +1902,8 @@ bool combined_preview_gpu_update(const Material &ma,
           const int map_flags = gpu_layer_has_map | gpu_map_nearest |
                                 (premultiplied ? gpu_layer_premultiplied : 0);
           if (item.map_coverage == MA_PAINT_LAYER_FILTER_UV_ISLAND) {
-            if (!mask_step(gpu_mask_cov_scalar,
+            if (!mask_step(t,
+                           gpu_mask_cov_scalar,
                            coverage_map,
                            map_flags,
                            1.0f,
@@ -1764,7 +1935,8 @@ bool combined_preview_gpu_update(const Material &ma,
                                        0.0f,
                                        0.0f,
                                        0.0f};
-              if (!mask_step(gpu_mask_cov_color,
+              if (!mask_step(t,
+                             gpu_mask_cov_color,
                              coverage_map,
                              map_flags,
                              1.0f,
@@ -1782,7 +1954,8 @@ bool combined_preview_gpu_update(const Material &ma,
             }
           }
         }
-        if (!mask_step(gpu_mask_cov_end,
+        if (!mask_step(t,
+                       gpu_mask_cov_end,
                        nullptr,
                        item_flags,
                        1.0f,
@@ -1829,7 +2002,8 @@ bool combined_preview_gpu_update(const Material &ma,
         }
         item_flags |= gpu_layer_has_map | (premultiplied ? gpu_layer_premultiplied : 0);
       }
-      if (!mask_step(gpu_mask_item,
+      if (!mask_step(t,
+                     gpu_mask_item,
                      item_map,
                      item_flags,
                      item.constant_gray,
@@ -1855,7 +2029,8 @@ bool combined_preview_gpu_update(const Material &ma,
       if (layer.mask_from_alpha) {
         map_flags |= gpu_mask_from_alpha;
       }
-      if (!mask_step(gpu_mask_map,
+      if (!mask_step(t,
+                     gpu_mask_map,
                      mask_map,
                      map_flags,
                      1.0f,
@@ -1874,22 +2049,25 @@ bool combined_preview_gpu_update(const Material &ma,
     return true;
   };
 
-  /* Lay \a layer on channel \a i. \a level is -1 for a row of the stack, which blends onto the
-   * channel's accumulator, and the nesting level of the folder holding it otherwise, whose
-   * accumulators the row then goes into. A folder lays its children into accumulators of its own
-   * first and then goes on as a row that reads them back like a map. Returns false when the GPU
+  /* Lay \a layer on the channel \a channel, into \a t. \a level is -1 for a row of the stack, which
+   * blends onto the target's destination, and the nesting level of the folder holding it otherwise,
+   * whose accumulators the row then goes into. A folder lays its children into accumulators of its
+   * own first and then goes on as a row that reads them back like a map. Returns false when the GPU
    * path has to give up, with the reason already reported.
    *
    * \a capture_color and \a capture_coverage, when given, ask for the row's content before its own
-   * opacity, mask and blend: the slice a reader of a point in this row lays. */
-  std::function<bool(const PaintMaterialCompositeImageLayer &,
+   * opacity, mask and blend: the slice a reader of a point in this row lays, and the input an effect
+   * is computed from. */
+  std::function<bool(CombinedTarget &,
+                     const PaintMaterialCompositeImageLayer &,
                      int,
                      int,
                      gpu::Texture *,
                      gpu::Texture *)>
       row_emit;
-  row_emit = [&](const PaintMaterialCompositeImageLayer &layer,
-                 const int i,
+  row_emit = [&](CombinedTarget &t,
+                 const PaintMaterialCompositeImageLayer &layer,
+                 const int channel,
                  const int level,
                  gpu::Texture *capture_color,
                  gpu::Texture *capture_coverage) {
@@ -1923,7 +2101,7 @@ bool combined_preview_gpu_update(const Material &ma,
        * no slot. */
       /* Slots are keyed by the channel enum, which only equals the index in the shaded set for the
        * first channels. */
-      reader_slot = slice_slot_find(layer.anchor_point_point, int(combined_shading_channels[i]));
+      reader_slot = slice_slot_find(layer.anchor_point_point, channel);
       if (reader_slot == nullptr) {
         return gpu_refuse("an Anchor Point row slice has no captured slot");
       }
@@ -1936,23 +2114,23 @@ bool combined_preview_gpu_update(const Material &ma,
 
     if (layer.is_folder) {
       const int own_level = level + 1;
-      if (!folder_levels_ensure(own_level)) {
+      if (!folder_levels_ensure(t, own_level)) {
         return gpu_refuse("folders are nested too deep for the GPU path");
       }
-      folder_step(gpu_folder_init, own_level, 0, 1.0f, int(CompositeBlend::Mix), nullptr);
+      folder_step(t, gpu_folder_init, own_level, 0, 1.0f, int(CompositeBlend::Mix), nullptr);
       for (const PaintMaterialCompositeImageLayer &child : layer.children) {
-        if (!row_emit(child, i, own_level, nullptr, nullptr)) {
+        if (!row_emit(t, child, channel, own_level, nullptr, nullptr)) {
           return false;
         }
       }
       /* After the children: the mask accumulator is theirs until they are laid. */
-      if (!mask_build(layer, has_mask)) {
+      if (!mask_build(t, layer, has_mask)) {
         return false;
       }
-      folder_step(gpu_folder_resolve, own_level, 0, 1.0f, int(CompositeBlend::Mix), nullptr);
+      folder_step(t, gpu_folder_resolve, own_level, 0, 1.0f, int(CompositeBlend::Mix), nullptr);
     }
     else {
-      if (!mask_build(layer, has_mask)) {
+      if (!mask_build(t, layer, has_mask)) {
         return false;
       }
       /* A row covers by its own alpha when it says so and no mask map takes the alpha's place. */
@@ -1992,7 +2170,8 @@ bool combined_preview_gpu_update(const Material &ma,
         gpu_mapping_setup(layer.mapping, flags, mapping_offset, mapping_scale, mapping_rotation);
       }
       if (row_in_textures) {
-        if (!lay(i,
+        if (!lay(t,
+                 t.dest,
                  map,
                  flags | gpu_layer_row_store,
                  layer_color,
@@ -2030,15 +2209,27 @@ bool combined_preview_gpu_update(const Material &ma,
         gpu::Texture *slot_color = nullptr;
         gpu::Texture *slot_coverage = nullptr;
         if (live_reader) {
-          GpuSliceSlot *slot = slice_slot_find(correction.anchor_point_point,
-                                               int(combined_shading_channels[i]));
+          GpuSliceSlot *slot = slice_slot_find(correction.anchor_point_point, channel);
           if (slot == nullptr) {
             return gpu_refuse("an Anchor Point correction slice has no captured slot");
           }
           slot_color = slot->color;
           slot_coverage = slot->coverage;
         }
-        if (!correction_step(correction, layer.tracks_content_alpha, slot_color, slot_coverage)) {
+        gpu::Texture *effect_result = nullptr;
+        if (correction.effect_hash != 0) {
+          /* A CPU-computed effect: the pass that computes it ran before the stacks, and its texture is
+           * the correction's content now. Nothing found means this frame has no result for the effect
+           * -- the row it sits on was not walked, or a captured slice holds a second effect -- so the
+           * CPU path has to shade the whole stack rather than drop the effect. */
+          effect_result = effect_result_find(correction.effect_marker, channel);
+          if (effect_result == nullptr) {
+            return gpu_refuse("a GPU effect has no computed result for this channel");
+          }
+        }
+        if (!correction_step(
+                t, correction, layer.tracks_content_alpha, slot_color, slot_coverage, effect_result))
+        {
           return gpu_refuse("a correction map has no GPU texture");
         }
       }
@@ -2048,10 +2239,11 @@ bool combined_preview_gpu_update(const Material &ma,
       /* The row's content before its own opacity, mask and blend: what a reader of this point lays.
        * The row textures hold the corrections already, so only a straight copy is needed. */
       GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS | GPU_BARRIER_TEXTURE_UPDATE);
-      GPU_texture_copy(capture_color, row_color);
+      GPU_texture_copy(capture_color, t.row_color);
       /* The coverage slot is grey in rgb and opaque in alpha; the mask store pass does that from
        * the row factor's `x`. */
-      if (!mask_step(gpu_mask_slot_store,
+      if (!mask_step(t,
+                     gpu_mask_slot_store,
                      nullptr,
                      0,
                      1.0f,
@@ -2064,7 +2256,7 @@ bool combined_preview_gpu_update(const Material &ma,
                      nullptr,
                      nullptr,
                      capture_coverage,
-                     row_factor))
+                     t.row_factor))
       {
         return false;
       }
@@ -2074,15 +2266,17 @@ bool combined_preview_gpu_update(const Material &ma,
 
     const int mask_flags = has_mask ? gpu_layer_has_mask : 0;
     if (in_folder) {
-      folder_step(gpu_folder_blend,
+      folder_step(t,
+                  gpu_folder_blend,
                   level,
                   mask_flags,
                   layer.opacity,
                   int(layer.blend),
-                  has_mask ? mask_accum : nullptr);
+                  has_mask ? t.mask_accum : nullptr);
       return true;
     }
-    if (!lay(i,
+    if (!lay(t,
+             t.dest,
              row_in_textures ? nullptr : map,
              (row_in_textures ? gpu_layer_row_use : flags) | mask_flags,
              layer_color,
@@ -2092,7 +2286,7 @@ bool combined_preview_gpu_update(const Material &ma,
              mapping_scale,
              mapping_rotation,
              int(layer.blend),
-             has_mask ? mask_accum : nullptr,
+             has_mask ? t.mask_accum : nullptr,
              int(layer.adjustment_filter),
              layer.adjustment_params,
              layer.adjustment_ramp,
@@ -2193,7 +2387,7 @@ bool combined_preview_gpu_update(const Material &ma,
       const PaintMaterialCompositeImageLayer &entry = job.entry;
       if (job.kind == GpuCaptureKind::MaskItem) {
         bool has_mask = false;
-        if (!mask_build(entry, has_mask)) {
+        if (!mask_build(screen, entry, has_mask)) {
           return false;
         }
         GpuMaskSlot *slot = mask_slot_find(job.point);
@@ -2201,7 +2395,8 @@ bool combined_preview_gpu_update(const Material &ma,
           return gpu_refuse("an Anchor Point mask slot is missing");
         }
         if (has_mask) {
-          if (!mask_step(gpu_mask_slot_store,
+          if (!mask_step(screen,
+                         gpu_mask_slot_store,
                          nullptr,
                          0,
                          1.0f,
@@ -2229,7 +2424,7 @@ bool combined_preview_gpu_update(const Material &ma,
         /* A mask point read as content: the CPU slice is the mask value as opaque grey with full
          * coverage. */
         bool has_mask = false;
-        if (!mask_build(entry, has_mask)) {
+        if (!mask_build(screen, entry, has_mask)) {
           return false;
         }
         GpuSliceSlot *slot = slice_slot_find(job.point, job.channel);
@@ -2237,7 +2432,8 @@ bool combined_preview_gpu_update(const Material &ma,
           return gpu_refuse("an Anchor Point slot is missing");
         }
         if (has_mask) {
-          if (!mask_step(gpu_mask_slot_store,
+          if (!mask_step(screen,
+                         gpu_mask_slot_store,
                          nullptr,
                          0,
                          1.0f,
@@ -2273,11 +2469,280 @@ bool combined_preview_gpu_update(const Material &ma,
                           combined_shading_channels.end(),
                           eMaterialPaintChannel(job.channel)) -
                 combined_shading_channels.begin()));
-        if (!row_emit(entry, emit_index, -1, slot->color, slot->coverage)) {
+        /* A capture never blends onto the destination, but the pass still binds it as an image, so it
+         * is named here the way the channel loop names it for a laid row. */
+        screen.dest = accum[emit_index];
+        if (!row_emit(screen, entry, job.channel, -1, slot->color, slot->coverage)) {
           return false;
         }
       }
     }
+  }
+
+  /* -------------------------------------------------------------------- */
+  /* GPU effects: the content each effect reads, then the effect's own kernel into the cache. This runs
+   * after the Anchor Point captures -- a content render may read their slots -- and before the
+   * channels' stacks, which mix the results in as corrections. */
+  bool effect_chain_too_deep = false;
+  const auto effect_jobs_walk = [&](auto &&self,
+                                   const PaintMaterialCompositeImageLayer &layer,
+                                   const int channel) -> void {
+    int effects_here = 0;
+    for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+      /* An effect correction is the one kind that carries a parameter hash of its own, and the
+       * refusal above already dropped any effect the preview cannot compute itself. */
+      if (correction.opacity <= 0.0f || correction.effect_hash == 0) {
+        continue;
+      }
+      if (++effects_here > 1) {
+        /* Two effects on one row: the second reads the first's result, so the row's chain has to be
+         * laid in order through the cache, which Ф1 does not do. Such a row keeps the CPU path. */
+        effect_chain_too_deep = true;
+        return;
+      }
+      effect_jobs.append(GpuEffectJob{.correction = &correction, .channel = channel});
+    }
+    for (const PaintMaterialCompositeImageLayer &child : layer.children) {
+      self(self, child, channel);
+    }
+  };
+  for (const int i : IndexRange(channels_num)) {
+    if (!has_stack[i] || (wanted_channel >= 0 && i != wanted_channel)) {
+      continue;
+    }
+    for (const PaintMaterialCompositeImageLayer &layer : stacks[i]) {
+      effect_jobs_walk(effect_jobs_walk, layer, channel_enums[i]);
+    }
+  }
+  if (effect_chain_too_deep) {
+    return gpu_refuse("more than one effect is laid by the GPU path in one row");
+  }
+  Material &ma_edit = const_cast<Material &>(ma);
+  for (GpuEffectJob &job : effect_jobs) {
+    /* The description names the effect by its marker but not the row it sits on, and the input has to
+     * be described from both: find them in the material the same way the CPU cache's caller does. */
+    job.effect = BKE_paint_layers_find(ma_edit, job.correction->effect_marker);
+    if (job.effect == nullptr || !BKE_paint_layers_effect_is_gpu_computed(*job.effect)) {
+      return gpu_refuse("a GPU effect row cannot be resolved");
+    }
+    job.row = BKE_paint_layers_correction_owner(ma_edit, *job.effect);
+    if (job.row == nullptr) {
+      return gpu_refuse("a GPU effect has no owner row");
+    }
+  }
+
+  /* The cache first, and each input's size with it: a hit costs no dispatch, and the versions of the
+   * input's maps are read as the frame sees them. */
+  bke::paint_perf::ScopedTimer perf_cache("gpu_effect.cache");
+  int effect_hits = 0;
+  for (GpuEffectJob &job : effect_jobs) {
+    PaintMaterialCompositeImageLayer dims_entry;
+    if (!BKE_paint_layers_effect_input_describe(
+            ma, *job.row, *job.effect, job.channel, true, true, dims_entry))
+    {
+      return gpu_refuse("an effect input cannot be described");
+    }
+    int width = 0;
+    int height = 0;
+    if (!BKE_paint_material_composite_stack_dimensions(
+            Span<PaintMaterialCompositeImageLayer>(&dims_entry, 1), width, height) ||
+        width <= 0 || height <= 0)
+    {
+      return gpu_refuse("an effect input has no dimensions");
+    }
+    job.input_size = int2(width, height);
+    BKE_paint_layers_effect_input_images(dims_entry, job.images);
+    void *resource = nullptr;
+    const PaintLayerEffectGpuState state = BKE_paint_layers_effect_gpu_cache_get(
+        ma, *job.effect, job.channel, width, height, job.images, effect_gpu_hooks, &job.region,
+        &resource);
+    if (state == PaintLayerEffectGpuState::Failed || resource == nullptr) {
+      return gpu_refuse("a GPU effect texture could not be allocated");
+    }
+    job.result = static_cast<gpu::Texture *>(resource);
+    /* A reference of the frame's own: the cache may evict the entry -- or replace it, the effect having
+     * been edited -- while these passes still bind its texture. */
+    GPU_texture_ref(job.result);
+    job.needs_render = state == PaintLayerEffectGpuState::Render;
+    effect_results.append(GpuEffectResult{
+        .marker = job.correction->effect_marker, .channel = job.channel, .texture = job.result});
+    if (!job.needs_render) {
+      effect_hits++;
+    }
+  }
+  perf_cache.note("effects=%d hit=%d render=%d budget=%d MiB",
+                  int(effect_jobs.size()),
+                  effect_hits,
+                  int(effect_jobs.size()) - effect_hits,
+                  int(BKE_paint_layers_effect_gpu_cache_budget() / (1024 * 1024)));
+
+  /* The scratch of the render stages, released when the last dispatch that binds it has been
+   * recorded. */
+  Vector<gpu::Texture *> effect_scratch;
+  BLI_SCOPED_DEFER([&]() {
+    for (gpu::Texture *texture : effect_scratch) {
+      pool.release_texture(texture);
+    }
+  });
+  const auto effect_scratch_acquire = [&](const int2 canvas_size) {
+    gpu::Texture *texture = pool.acquire_texture_2d(canvas_size,
+                                                    1,
+                                                    gpu::TextureFormat::SFLOAT_16_16_16_16,
+                                                    accum_usage,
+                                                    "combined_effect_scratch");
+    if (texture != nullptr) {
+      effect_scratch.append(texture);
+    }
+    return texture;
+  };
+  {
+    bke::paint_perf::ScopedTimer perf_input("gpu_effect.input");
+    int inputs = 0;
+    int2 first_size = int2(0);
+    for (GpuEffectJob &job : effect_jobs) {
+      if (!job.needs_render) {
+        continue;
+      }
+      PaintMaterialCompositeImageLayer entry;
+      if (!BKE_paint_layers_effect_input_describe(
+              ma, *job.row, *job.effect, job.channel, false, true, entry))
+      {
+        return gpu_refuse("an effect input cannot be described");
+      }
+      /* The input's own texel space: a canvas-sized target with an identity mapping, because the
+       * kernel counts texels of the canvas -- the same buffer the CPU cache renders and the bake
+       * resamples from (D6). */
+      const int2 canvas = job.input_size;
+      CombinedTarget effect_target;
+      /* The folder accumulators this target grows are its own: released when the job's scope ends, on
+       * every path out of it, because the pool keeps a texture that is never released until the
+       * context's pool is destroyed. */
+      BLI_SCOPED_DEFER([&]() {
+        for (gpu::Texture *texture : effect_target.folder_premul) {
+          if (texture != nullptr) {
+            pool.release_texture(texture);
+          }
+        }
+        for (gpu::Texture *texture : effect_target.folder_cover) {
+          if (texture != nullptr) {
+            pool.release_texture(texture);
+          }
+        }
+      });
+      effect_target.size = canvas;
+      effect_target.groups = math::divide_ceil(canvas, int2(16));
+      effect_target.texel_to_uv = math::from_scale<float3x3, 2>(1.0f / float2(canvas));
+      effect_target.texel_to_uv_4x4 = float4x4::identity();
+      effect_target.texel_to_uv_4x4[0] = float4(
+          effect_target.texel_to_uv[0].x, effect_target.texel_to_uv[0].y, 0.0f, 0.0f);
+      effect_target.texel_to_uv_4x4[1] = float4(
+          effect_target.texel_to_uv[1].x, effect_target.texel_to_uv[1].y, 0.0f, 0.0f);
+      effect_target.texel_to_uv_4x4[3] = float4(
+          effect_target.texel_to_uv[2].x, effect_target.texel_to_uv[2].y, 0.0f, 1.0f);
+      effect_target.row_color = effect_scratch_acquire(canvas);
+      effect_target.row_factor = effect_scratch_acquire(canvas);
+      effect_target.mask_accum = effect_scratch_acquire(canvas);
+      /* The capture returns before anything blends onto the destination, but the layer pass binds it as
+       * an image all the same: a placeholder of its own keeps it from being the texture the same
+       * dispatch samples. */
+      effect_target.dest = effect_scratch_acquire(int2(1));
+      job.input = effect_scratch_acquire(canvas);
+      if (effect_target.row_color == nullptr || effect_target.row_factor == nullptr ||
+          effect_target.mask_accum == nullptr || effect_target.dest == nullptr ||
+          job.input == nullptr)
+      {
+        return gpu_refuse("an effect input texture could not be allocated");
+      }
+      /* No coverage slot is asked for below: an effect's input has no mask to build, because the
+       * describe clears the row's. Refuse rather than rely on that, since the capture's store step
+       * would otherwise write a canvas of texels into the one-texel placeholder. */
+      if (!entry.mask_items.is_empty() || entry.mask_image != nullptr) {
+        return gpu_refuse("an effect input carries a mask");
+      }
+      if (!row_emit(effect_target, entry, job.channel, -1, job.input, nullptr)) {
+        return false;
+      }
+      /* The alpha the CPU buffer holds when the kernel is done with it: the content alpha where the
+       * channel tracks one, one elsewhere (`eval_row_content`'s rule), because the correction pass
+       * divides the result by it as the CPU evaluator straightens a float buffer. */
+      job.tracks_alpha = entry.tracks_content_alpha ||
+                         job.channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS | GPU_BARRIER_TEXTURE_FETCH);
+      if (inputs == 0) {
+        first_size = canvas;
+      }
+      inputs++;
+    }
+    perf_input.note("effects=%d size=%dx%d", inputs, first_size.x, first_size.y);
+  }
+
+  {
+    bke::paint_perf::ScopedTimer perf_pass("gpu_effect.pass");
+    /* The working space's luminance weights, which `IMB_colormanagement_get_luminance` reads: the
+     * shader's own Rec.709 triple would grain a different grey in another space. */
+    float luma[3];
+    IMB_colormanagement_get_luminance_coefficients(luma);
+    const float4 luma_coefficients(luma[0], luma[1], luma[2], 0.0f);
+    int dispatched = 0;
+    int dispatched_kind = 0;
+    rcti dispatched_region;
+    BLI_rcti_init(&dispatched_region, 0, 0, 0, 0);
+    for (GpuEffectJob &job : effect_jobs) {
+      if (!job.needs_render) {
+        continue;
+      }
+      /* The whole canvas is recomputed in Ф1. The region the cache carries is printed for the
+       * measurement, and will narrow this dispatch once the two rules that make a region trustworthy
+       * exist: the maps' texel grid has to be the input's (a map of another size reports its own
+       * coordinates), and nothing between the map and the canvas may remap it (a UV mapping moves an
+       * edit somewhere else entirely). A neighbourhood kernel adds its halo at the same time (Ф2).
+       */
+      const int2 origin = int2(0);
+      const int2 groups = math::divide_ceil(job.input_size, int2(16));
+      if (groups.x <= 0 || groups.y <= 0) {
+        continue;
+      }
+      GPU_shader_bind(effect_shader);
+      GPU_shader_uniform_2iv(effect_shader, "texture_size", &job.input_size.x);
+      GPU_shader_uniform_2iv(effect_shader, "dispatch_origin", &origin.x);
+      GPU_shader_uniform_1i(effect_shader, "effect_kind", int(job.correction->filter));
+      GPU_shader_uniform_4fv(effect_shader, "filter_params_0", job.correction->filter_params);
+      GPU_shader_uniform_4fv(effect_shader, "luma_coefficients", &luma_coefficients.x);
+      GPU_shader_uniform_1i(effect_shader, "tracks_alpha", job.tracks_alpha ? 1 : 0);
+      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+      GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+      GPU_texture_bind(job.input, GPU_shader_get_sampler_binding(effect_shader, "input_tx"));
+      GPU_texture_image_bind(job.result,
+                             GPU_shader_get_sampler_binding(effect_shader, "result_img"));
+      GPU_compute_dispatch(effect_shader, uint(groups.x), uint(groups.y), 1);
+      GPU_texture_image_unbind(job.result);
+      GPU_texture_unbind(job.input);
+      /* The versions are stamped after the render, so an edit that landed while it ran is newer than
+       * this entry and costs one more update rather than a result that never clears. */
+      BKE_paint_layers_effect_gpu_cache_publish(
+          ma, *job.effect, job.channel, job.input_size.x, job.input_size.y, job.images);
+      dispatched++;
+      dispatches++;
+      /* The note names the last kernel that ran: a phase's effect is counted by kind, and a radius or
+       * a pass count joins it as those kernels arrive (Ф2, Ф3). */
+      dispatched_kind = int(job.correction->filter);
+      if (BLI_rcti_is_empty(&dispatched_region)) {
+        dispatched_region = job.region;
+      }
+      else {
+        BLI_rcti_union(&dispatched_region, &job.region);
+      }
+    }
+    if (dispatched > 0) {
+      /* The correction pass samples the results next. */
+      GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+    }
+    perf_pass.note("effects=%d dispatches=%d kind=%d stale_region=%dx%d",
+                   dispatched,
+                   dispatched,
+                   dispatched_kind,
+                   BLI_rcti_size_x(&dispatched_region),
+                   BLI_rcti_size_y(&dispatched_region));
   }
 
   for (const int i : IndexRange(channels_num)) {
@@ -2290,12 +2755,13 @@ bool combined_preview_gpu_update(const Material &ma,
       BKE_paint_layers_channel_bottom_color(channel, &init_color.x);
     }
     /* Seeds the accumulator: with no opacity the layer below changes nothing. */
-    lay(i, nullptr, gpu_layer_init, float4(0.0f), init_color, 0.0f);
+    screen.dest = accum[i];
+    lay(screen, accum[i], nullptr, gpu_layer_init, float4(0.0f), init_color, 0.0f);
     if (!has_stack[i]) {
       continue;
     }
     for (const PaintMaterialCompositeImageLayer &layer : stacks[i]) {
-      if (!row_emit(layer, i, -1, nullptr, nullptr)) {
+      if (!row_emit(screen, layer, int(channel), -1, nullptr, nullptr)) {
         return false;
       }
     }

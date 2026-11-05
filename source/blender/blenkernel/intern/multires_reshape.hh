@@ -500,4 +500,62 @@ void multires_reshape_apply_base_refine_from_deform(MultiresReshapeContext *resh
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Cached base-mesh limit frames (per grid, on the SubdivCCG)
+ *
+ * The tangent encode and the sculpt-layer contribution both evaluate the base-mesh limit surface at
+ * top-level grid samples — the same per-sample OpenSubdiv evaluation. #SubdivCCG::
+ * multires_layer_frames caches it per grid under a memory cap, invalidated when the coarse mesh
+ * changes or the CCG is rebuilt. These helpers are the shared bookkeeping; callers do the actual
+ * per-sample fill through their own loops.
+ * \{ */
+
+/**
+ * Drop the frames when the coarse mesh moved underneath them (hash mismatch) or the grid count
+ * changed; otherwise the frames are kept exactly as they are. Must run before any read or fill of
+ * the frames.
+ */
+void multires_layer_frames_ensure_valid(SubdivCCG &subdiv_ccg,
+                                        const Mesh &coarse_mesh,
+                                        int grids_num);
+
+/**
+ * Memory footprint of one grid's frames: a position and an inverse tangent matrix per sample of a
+ * `grid_size × grid_size` lattice. The encode and the contribution must agree on it for
+ * #SubdivCCG::multires_layer_frames_bytes to stay meaningful across both.
+ */
+inline int64_t multires_layer_frames_per_grid_bytes(const int grid_size)
+{
+  return int64_t(grid_size) * int64_t(grid_size) * int64_t(sizeof(float3) + sizeof(float3x3));
+}
+
+/**
+ * Stamp \a touched_grids as most-recently-used and choose which of them may be filled under the
+ * memory cap, evicting the least-recently used grids this call did not stamp. The tangent encode
+ * owns the eviction policy. Returns the fill set in \a r_populate_grids (sized \a grids_num) and
+ * keeps #SubdivCCG::multires_layer_frames_bytes in step with it. Callers must run this before
+ * their parallel fill loops, with no other call concurrent on the same #SubdivCCG: the editor paths
+ * run it on the main thread, and the depsgraph-driven flush reaches it through the reshape,
+ * serialized against the editor by the update cycle — so it may run on a worker thread, but never
+ * two at once on one CCG.
+ */
+void multires_layer_frames_plan_populate(SubdivCCG &subdiv_ccg,
+                                         int grids_num,
+                                         int64_t per_grid_bytes,
+                                         blender::Span<int> touched_grids,
+                                         blender::MutableSpan<bool> r_populate_grids);
+
+/**
+ * All-grids form of #multires_layer_frames_plan_populate for "fill while there is room" callers
+ * that consider every grid (the sculpt-layer contribution): all \a grids_num grids are eligible,
+ * nothing is ever stamped or evicted. Saves the per-call materialization of the identity grid
+ * index array on the influence-drag tick path.
+ */
+void multires_layer_frames_plan_populate(SubdivCCG &subdiv_ccg,
+                                         int grids_num,
+                                         int64_t per_grid_bytes,
+                                         blender::MutableSpan<bool> r_populate_grids);
+
+/** \} */
+
 }  // namespace blender

@@ -20,6 +20,9 @@
 #  include "BLI_math_vector.hh"
 #endif
 
+#include <chrono>
+#include <cstdio>
+
 #include "MEM_guardedalloc.h"
 
 #include "DNA_key_types.h"
@@ -38,7 +41,6 @@
 #include "BKE_customdata.hh"
 #include "BKE_mesh_runtime.hh"
 #include "BKE_multires.hh"
-#include "BKE_multires_grid_resample.hh"
 #include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -47,6 +49,29 @@
 #include "DEG_depsgraph_query.hh"
 
 namespace blender {
+
+/* [DEBUG-perf] Timing probes for the contribution path, on the same run-time gate as the SLP_PERF
+ * probes in the editor module (see `BKE_sculpt_layers.hh`): on when #SCULPT_LAYERS_DEBUG_LOG was
+ * compiled in, or when `BLENDER_SCULPT_LAYERS_DEBUG_PERF=1` is set in the environment, so
+ * measuring the per-tick frame-cache costs does not require a rebuild. */
+using SlpPerfTimePoint = std::chrono::high_resolution_clock::time_point;
+
+static SlpPerfTimePoint slp_perf_now()
+{
+  return std::chrono::high_resolution_clock::now();
+}
+
+static long long slp_perf_us(const SlpPerfTimePoint a, const SlpPerfTimePoint b)
+{
+  return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count();
+}
+
+#define SLP_PERF(...) \
+  do { \
+    if (bke::sculpt_layers::debug_perf_enabled()) { \
+      printf(__VA_ARGS__); \
+    } \
+  } while (false)
 
 /* -------------------------------------------------------------------- */
 /** \name Construct/destruct reshape context
@@ -1013,7 +1038,11 @@ void multires_reshape_object_grids_to_tangent_displacement_for_grids(
     for (const int64_t i : range) {
       const int grid_index = grid_indices[i];
       SubdivCCGMultiresLayerFrames *frames = use_cache ? &frame_cache[grid_index] : nullptr;
-      const bool cached = frames != nullptr && !frames->positions.is_empty();
+      /* A cached grid is only valid when its arrays were filled at this pass's own grid area: a
+       * differently-sized array is a different lattice, not a cache (the sculpt-layer contribution
+       * can fill frames for layers that store below the top level). */
+      const bool cached = frames != nullptr &&
+                          frames->positions.size() == int64_t(grid_size) * int64_t(grid_size);
       const bool populate = frames != nullptr && !cached && !populate_grids.is_empty() &&
                             populate_grids[grid_index];
       if (populate) {
@@ -1179,32 +1208,62 @@ bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
     return false;
   }
 
-  /* A CCG finer than the layer's storage level cannot be served: #grid_subsample hands back the
-   * source unchanged when asked to *up*sample, which is shorter than the buffer indexed below. */
+  /* A CCG finer than the layer's storage level cannot be served: the strided read below would
+   * index past the layer's own storage lattice (a downsampled read is what this function defines). */
   if (cur_level > layer.level) {
     multires_reshape_context_free(&reshape_context);
     return false;
   }
 
-  /* Subsample the tangent coefficients from the storage level down to the current CCG level
-   * (exact at the coarse grid points), then transform each coefficient into object space with
-   * the limit-surface tangent matrix — the same frames the displacement evaluator uses. */
+  /* The layer's tangent coefficients live at the storage (top) level; a current-level point
+   * `(x, y)` reads the top-level point `(x * step, y * step)` — an exact index stride, because CCG
+   * grids are nested. The coefficient is read through that stride inline (no materialized
+   * subsampled copy) and transformed into object space with the limit-surface tangent matrix — the
+   * same frames the displacement evaluator uses. */
   const Span<float3> layer_data(static_cast<const float3 *>(layer.data), layer.totelem);
-  const Array<float3> subsampled = bke::grid_subsample(
-      layer_data, layer.level, cur_level, grids_num);
 
   /* The mask lives on the layer's own (top-level) grid domain, while this loop walks the CCG's
-   * current level. #grid_subsample maps a current-level point `(x, y)` to the top-level point
-   * `(x * step, y * step)` — an exact index stride, because CCG grids are nested. Sampling the
-   * mask through that *same* stride is what makes this direction symmetric with the forward one:
-   * the weight applied to a coefficient here is read from the very element the coefficient itself
-   * was read from, so the contribution subtracted on flush is exactly the contribution the
-   * displacement evaluator composed. At the top level `step` is 1 and this degenerates to the
-   * forward path's own `y * grid_size + x`. Any other sampling (interpolating the mask, or
-   * re-cutting it at the CCG level) would leave a residual the base absorbs on every flush. */
+   * current level. Reading the mask through the *same* stride as the coefficient is what makes
+   * this direction symmetric with the forward one: the weight applied to a coefficient here is
+   * read from the very element the coefficient itself was read from, so the contribution subtracted
+   * on flush is exactly the contribution the displacement evaluator composed. At the top level
+   * `step` is 1 and this degenerates to the forward path's own `y * grid_size + x`. Any other
+   * sampling (interpolating the mask, or re-cutting it at the CCG level) would leave a residual
+   * the base absorbs on every flush. */
   const int step = (top_grid_size - 1) / (cur_grid_size - 1);
   const bke::sculpt_layers::CompositeMask masks = bke::sculpt_layers::grid_masks_for_composite(
       layer, layer.totelem, top_grid_size * top_grid_size);
+
+  /* Reuse the cached base-mesh limit frames (see #SubdivCCG::multires_layer_frames): the encode
+   * path fills the very same per-sample evaluation under a shared budget, so a warm grid turns the
+   * OpenSubdiv evaluation below into one 3x3 inversion. The frames are indexed by the storage
+   * level, so a frame applies only when its size matches this layer's storage lattice.
+   *
+   * [DEBUG-perf] The coarse-mesh hash in #multires_layer_frames_ensure_valid is paid on every
+   * contribution call — per layer, per influence-drag tick — so its cost on a dense coarse mesh
+   * decides whether that guard needs caching. Measure by setting
+   * `BLENDER_SCULPT_LAYERS_DEBUG_PERF=1` and dragging a layer influence. */
+  const SlpPerfTimePoint t_frames_ensure = slp_perf_now();
+  multires_layer_frames_ensure_valid(subdiv_ccg, base_mesh, grids_num);
+  SLP_PERF("[DEBUG-perf] contribution frames_ensure_valid: %lld us (coarse %d verts, %d corners)\n",
+           slp_perf_us(t_frames_ensure, slp_perf_now()),
+           base_mesh.verts_num,
+           base_mesh.corners_num);
+  const MutableSpan<SubdivCCGMultiresLayerFrames> frames = subdiv_ccg.multires_layer_frames;
+  const bool use_frames = frames.size() == grids_num;
+
+  /* Fill the frames for grids that are not cached yet only when this pass walks the storage level
+   * itself (stride 1): a lower-level pass evaluates strided samples only, and a frames array
+   * written from those would be incomplete at the top level the encode's cached-read expects. */
+  const bool can_populate = use_frames && cur_level == layer.level;
+  Array<bool> populate_grids;
+  if (can_populate) {
+    const int64_t per_grid_bytes = multires_layer_frames_per_grid_bytes(top_grid_size);
+    populate_grids.reinitialize(grids_num);
+    /* All-grids form: the contribution always considers the whole mesh, so materializing the
+     * identity grid-index array would be a pointless per-tick allocation. */
+    multires_layer_frames_plan_populate(subdiv_ccg, grids_num, per_grid_bytes, populate_grids);
+  }
 
   threading::parallel_for(IndexRange(grids_num), 8, [&](const IndexRange range) {
     for (const int grid_index : range) {
@@ -1216,12 +1275,13 @@ bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
        * forward one: #subtract_sculpt_layers_from_ccg_positions multiplies the result by the
        * layer's effective influence afterwards, giving `(m * 1) * eff`, where the evaluator's
        * collector folds the influence into the same expression as `m * eff`. The difference is a
-       * single rounding step (~1 ulp) and is forced: the influence-drag caller needs this buffer at
-       * influence 1.0 so it can rescale it per tick without recomputing it. It is also dominated by
-       * the residual the surrounding transform already carries — the tangent frames are evaluated
-       * from the limit surface and subsampled per level, so the coefficient this weight multiplies
-       * is itself not bit-identical to the one the displacement evaluator saw. Any exact-cancellation
-       * claim belongs to the mask fold alone, not to this whole product. */
+       * single rounding step (~1 ulp) and is forced: the influence-drag caller needs this buffer
+       * at influence 1.0 so it can rescale it per tick without recomputing it. It is also
+       * dominated by the residual the surrounding transform already carries — the tangent frames
+       * are evaluated from the limit surface and subsampled per level, so the coefficient this
+       * weight multiplies is itself not bit-identical to the one the displacement evaluator saw.
+       * The frames-hit path below adds one more inversion round-trip of the same ulp scale. Any
+       * exact-cancellation claim belongs to the mask fold alone, not to this whole product. */
       const bke::sculpt_layers::MaskBlockWeight weight = bke::sculpt_layers::mask_block_weight(
           masks, grid_index, 1.0f);
       /* Invariant over the grid, so it is answered once here rather than per element. */
@@ -1229,24 +1289,64 @@ bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
         r_contrib.slice(grid_start, cur_grid_area).fill(float3(0.0f));
         continue;
       }
+      const bool grid_frames_cached = use_frames &&
+                                      frames[grid_index].positions.size() ==
+                                          int64_t(top_grid_size) * int64_t(top_grid_size);
+      const bool populate = can_populate && populate_grids[grid_index];
+      if (populate) {
+        /* Allocated here, like the encode path does, since the plan only reserves the budget. */
+        frames[grid_index].positions.reinitialize(int64_t(top_grid_size) * top_grid_size);
+        frames[grid_index].inv_tangent_matrices.reinitialize(int64_t(top_grid_size) *
+                                                             top_grid_size);
+      }
+      const int64_t layer_grid_offset = int64_t(grid_index) * int64_t(top_grid_size) *
+                                        int64_t(top_grid_size);
       for (int y = 0; y < cur_grid_size; y++) {
         for (int x = 0; x < cur_grid_size; x++) {
           const int64_t elem = grid_start + int64_t(y) * cur_grid_size + x;
-          GridCoord grid_coord;
-          grid_coord.grid_index = grid_index;
-          grid_coord.u = float(x) / float(cur_grid_size - 1);
-          grid_coord.v = float(y) / float(cur_grid_size - 1);
-          float3 P;
+          const int top_local = (y * step) * top_grid_size + x * step;
           float3x3 tangent_matrix;
-          multires_reshape_evaluate_base_mesh_limit_at_grid(
-              &reshape_context, &grid_coord, P, tangent_matrix);
-          const int mask_local = (y * step) * top_grid_size + x * step;
-          r_contrib[elem] = math::transform_direction(tangent_matrix, subsampled[elem]) *
-                            bke::sculpt_layers::mask_elem_weight(weight, mask_local);
+          /* Zero-initialized: only the populate path reads it, and populate implies the frames
+           * were empty for this grid (the plan only flags empty ones), so the miss branch ran —
+           * the initializer just keeps -Wmaybe-uninitialized quiet. */
+          float3 P = float3(0.0f);
+          if (grid_frames_cached) {
+            /* Inverting the stored inverse adds the ~1 ulp noted above; a degenerate frame was
+             * stored as a zero matrix (the fill went through the same checked #math::invert, which
+             * zeroes singular input), and inverting the zero matrix yields zeros again — the hit
+             * path degrades exactly like the encode's decode, never to NaN. */
+            tangent_matrix = math::invert(frames[grid_index].inv_tangent_matrices[top_local]);
+          }
+          else {
+            GridCoord grid_coord;
+            grid_coord.grid_index = grid_index;
+            grid_coord.u = float(x) / float(cur_grid_size - 1);
+            grid_coord.v = float(y) / float(cur_grid_size - 1);
+            multires_reshape_evaluate_base_mesh_limit_at_grid(
+                &reshape_context, &grid_coord, P, tangent_matrix);
+          }
+          if (populate) {
+            frames[grid_index].positions[top_local] = P;
+            frames[grid_index].inv_tangent_matrices[top_local] = math::invert(tangent_matrix);
+          }
+          r_contrib[elem] = math::transform_direction(tangent_matrix,
+                                                      layer_data[layer_grid_offset + top_local]) *
+                            bke::sculpt_layers::mask_elem_weight(weight, top_local);
         }
       }
     }
   });
+
+  if (can_populate) {
+    /* Grids skipped by a fully masked block were budgeted by the plan but never filled: return the
+     * bytes, or the cap would fill up with frames that do not exist. */
+    const int64_t per_grid_bytes = multires_layer_frames_per_grid_bytes(top_grid_size);
+    for (const int g : IndexRange(grids_num)) {
+      if (populate_grids[g] && frames[g].positions.is_empty()) {
+        subdiv_ccg.multires_layer_frames_bytes -= per_grid_bytes;
+      }
+    }
+  }
 
   multires_reshape_context_free(&reshape_context);
   return true;

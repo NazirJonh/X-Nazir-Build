@@ -541,6 +541,138 @@ static uint64_t coarse_mesh_positions_hash(const Mesh &mesh)
   return hash;
 }
 
+void multires_layer_frames_ensure_valid(SubdivCCG &subdiv_ccg,
+                                        const Mesh &coarse_mesh,
+                                        const int grids_num)
+{
+  const uint64_t coarse_hash = coarse_mesh_positions_hash(coarse_mesh);
+  if (subdiv_ccg.multires_layer_frames_coarse_hash != coarse_hash ||
+      subdiv_ccg.multires_layer_frames.size() != grids_num)
+  {
+    subdiv_ccg.multires_layer_frames.reinitialize(grids_num);
+    subdiv_ccg.multires_layer_frames_coarse_hash = coarse_hash;
+    subdiv_ccg.multires_layer_frames_bytes = 0;
+    subdiv_ccg.multires_layer_frames_clock = 0;
+  }
+}
+
+/* Memory ceiling for #SubdivCCG::multires_layer_frames: cache everything when the whole mesh's
+ * frames fit under it, otherwise keep the region the brush works on warm by evicting the
+ * least-recently-used grids instead of letting the first grids freeze in forever. */
+static constexpr int64_t multires_layer_frames_max_cache_bytes = int64_t(4) * 1024 * 1024 * 1024;
+
+/* Decide for one still-empty grid whether this call may fill it, and reserve the budget when so.
+ * Shared by both #multires_layer_frames_plan_populate forms: the touched-set form may evict
+ * least-recently-used grids to make room, the all-grids form only fills while there is room. */
+static void multires_layer_frames_plan_populate_grid(SubdivCCG &subdiv_ccg,
+                                                     const int grids_num,
+                                                     const int grid_index,
+                                                     const int64_t per_grid_bytes,
+                                                     const int64_t cap_bytes,
+                                                     const int64_t stroke_clock_base,
+                                                     const bool allow_evict,
+                                                     const MutableSpan<bool> r_populate_grids)
+{
+  MutableSpan<SubdivCCGMultiresLayerFrames> frames = subdiv_ccg.multires_layer_frames;
+  if (grid_index < 0 || grid_index >= grids_num || !frames[grid_index].positions.is_empty()) {
+    return;
+  }
+  if (!allow_evict) {
+    /* Fill-while-there-is-room only: a caller that never evicts must not churn filled grids in
+     * and out of the cache, which the eviction loop below would do once the cap is reached. */
+    if (subdiv_ccg.multires_layer_frames_bytes + per_grid_bytes <= cap_bytes) {
+      r_populate_grids[grid_index] = true;
+      subdiv_ccg.multires_layer_frames_bytes += per_grid_bytes;
+    }
+    return;
+  }
+  /* Free least-recently-used cached grids (never one touched this stroke) until this grid fits. */
+  while (subdiv_ccg.multires_layer_frames_bytes + per_grid_bytes > cap_bytes) {
+    int victim = -1;
+    int64_t oldest = subdiv_ccg.multires_layer_frames_clock + 1;
+    for (const int64_t g : IndexRange(grids_num)) {
+      if (frames[g].positions.is_empty() || frames[g].last_used > stroke_clock_base) {
+        continue;
+      }
+      if (frames[g].last_used < oldest) {
+        oldest = frames[g].last_used;
+        victim = int(g);
+      }
+    }
+    if (victim < 0) {
+      /* The cap cannot hold even this stroke's touched set; encode the rest without caching. */
+      break;
+    }
+    frames[victim].positions = {};
+    frames[victim].inv_tangent_matrices = {};
+    subdiv_ccg.multires_layer_frames_bytes -= per_grid_bytes;
+  }
+  if (subdiv_ccg.multires_layer_frames_bytes + per_grid_bytes <= cap_bytes) {
+    r_populate_grids[grid_index] = true;
+    subdiv_ccg.multires_layer_frames_bytes += per_grid_bytes;
+  }
+}
+
+void multires_layer_frames_plan_populate(SubdivCCG &subdiv_ccg,
+                                         const int grids_num,
+                                         const int64_t per_grid_bytes,
+                                         const Span<int> touched_grids,
+                                         const MutableSpan<bool> r_populate_grids)
+{
+  const int64_t whole_mesh_bytes = int64_t(grids_num) * per_grid_bytes;
+  const int64_t cap_bytes = std::min(multires_layer_frames_max_cache_bytes, whole_mesh_bytes);
+
+  BLI_assert(subdiv_ccg.multires_layer_frames.size() == grids_num);
+  BLI_assert(r_populate_grids.size() == grids_num);
+  r_populate_grids.fill(false);
+
+  /* Recency base for victim selection: anything stamped after this belongs to this stroke and is
+   * protected from its own evictions. The all-grids form below never stamps: touching every grid
+   * in index order would overwrite the usage history that this form picks its victims by. */
+  const int64_t stroke_clock_base = subdiv_ccg.multires_layer_frames_clock;
+  MutableSpan<SubdivCCGMultiresLayerFrames> frames = subdiv_ccg.multires_layer_frames;
+  for (const int grid_index : touched_grids) {
+    if (grid_index >= 0 && grid_index < grids_num) {
+      frames[grid_index].last_used = ++subdiv_ccg.multires_layer_frames_clock;
+    }
+  }
+
+  for (const int grid_index : touched_grids) {
+    multires_layer_frames_plan_populate_grid(subdiv_ccg,
+                                             grids_num,
+                                             grid_index,
+                                             per_grid_bytes,
+                                             cap_bytes,
+                                             stroke_clock_base,
+                                             true,
+                                             r_populate_grids);
+  }
+}
+
+void multires_layer_frames_plan_populate(SubdivCCG &subdiv_ccg,
+                                         const int grids_num,
+                                         const int64_t per_grid_bytes,
+                                         const MutableSpan<bool> r_populate_grids)
+{
+  const int64_t cap_bytes = std::min(multires_layer_frames_max_cache_bytes,
+                                     int64_t(grids_num) * per_grid_bytes);
+
+  BLI_assert(subdiv_ccg.multires_layer_frames.size() == grids_num);
+  BLI_assert(r_populate_grids.size() == grids_num);
+  r_populate_grids.fill(false);
+
+  for (const int grid_index : IndexRange(grids_num)) {
+    multires_layer_frames_plan_populate_grid(subdiv_ccg,
+                                             grids_num,
+                                             grid_index,
+                                             per_grid_bytes,
+                                             cap_bytes,
+                                             subdiv_ccg.multires_layer_frames_clock,
+                                             false,
+                                             r_populate_grids);
+  }
+}
+
 bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
                                                        Mesh *coarse_mesh,
                                                        SubdivCCG *subdiv_ccg,
@@ -674,71 +806,18 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
    * of the coarse mesh (control-cage edit) drops the cache via the hash; a CCG rebuild drops it by
    * freeing the array. */
   {
-    const uint64_t coarse_hash = coarse_mesh_positions_hash(*coarse_mesh);
-    if (subdiv_ccg->multires_layer_frames_coarse_hash != coarse_hash ||
-        subdiv_ccg->multires_layer_frames.size() != num_grids)
-    {
-      subdiv_ccg->multires_layer_frames.reinitialize(num_grids);
-      subdiv_ccg->multires_layer_frames_coarse_hash = coarse_hash;
-      subdiv_ccg->multires_layer_frames_bytes = 0;
-      subdiv_ccg->multires_layer_frames_clock = 0;
-    }
-
-    /* Cache the whole mesh's frames when they fit under the memory ceiling (then no stroke ever
-     * re-evaluates the limit surface); above the ceiling keep it and evict the least-recently
-     * touched grids, so the region the brush is working stays warm instead of the first grids
-     * getting frozen in forever. */
-    const int64_t per_grid_bytes = int64_t(grid_area) *
-                                   int64_t(sizeof(float3) + sizeof(float3x3));
-    constexpr int64_t max_frame_cache_bytes = int64_t(4) * 1024 * 1024 * 1024;
-    const int64_t whole_mesh_bytes = int64_t(num_grids) * per_grid_bytes;
-    const int64_t cap_bytes = std::min(max_frame_cache_bytes, whole_mesh_bytes);
-
-    MutableSpan<SubdivCCGMultiresLayerFrames> frames = subdiv_ccg->multires_layer_frames;
-
-    /* Stamp every touched grid as most-recently-used before choosing victims, so a grid this stroke
-     * still needs can never be evicted (its stamp is newer than #stroke_clock_base). */
-    const int64_t stroke_clock_base = subdiv_ccg->multires_layer_frames_clock;
-    for (const int grid_index : touched_grids) {
-      if (grid_index >= 0 && grid_index < num_grids) {
-        frames[grid_index].last_used = ++subdiv_ccg->multires_layer_frames_clock;
-      }
-    }
-
+    multires_layer_frames_ensure_valid(*subdiv_ccg, *coarse_mesh, num_grids);
+    const int64_t per_grid_bytes = multires_layer_frames_per_grid_bytes(
+        reshape_context.top.grid_size);
     Array<bool> populate_grids(num_grids, false);
-    for (const int grid_index : touched_grids) {
-      if (grid_index < 0 || grid_index >= num_grids || !frames[grid_index].positions.is_empty()) {
-        continue;
-      }
-      /* Free least-recently-used cached grids (never one touched this stroke) until this grid fits. */
-      while (subdiv_ccg->multires_layer_frames_bytes + per_grid_bytes > cap_bytes) {
-        int victim = -1;
-        int64_t oldest = subdiv_ccg->multires_layer_frames_clock + 1;
-        for (const int64_t g : IndexRange(num_grids)) {
-          if (frames[g].positions.is_empty() || frames[g].last_used > stroke_clock_base) {
-            continue;
-          }
-          if (frames[g].last_used < oldest) {
-            oldest = frames[g].last_used;
-            victim = int(g);
-          }
-        }
-        if (victim < 0) {
-          /* The cap cannot hold even this stroke's touched set; encode the rest without caching. */
-          break;
-        }
-        frames[victim].positions = {};
-        frames[victim].inv_tangent_matrices = {};
-        subdiv_ccg->multires_layer_frames_bytes -= per_grid_bytes;
-      }
-      if (subdiv_ccg->multires_layer_frames_bytes + per_grid_bytes <= cap_bytes) {
-        populate_grids[grid_index] = true;
-        subdiv_ccg->multires_layer_frames_bytes += per_grid_bytes;
-      }
-    }
+    multires_layer_frames_plan_populate(
+        *subdiv_ccg, num_grids, per_grid_bytes, touched_grids, populate_grids);
 
     multires_reshape_object_grids_to_tangent_displacement_for_grids(
-        &reshape_context, touched_grids, frames, populate_grids);
+        &reshape_context,
+        touched_grids,
+        subdiv_ccg->multires_layer_frames,
+        populate_grids);
   }
 #if SCULPT_LAYERS_DEBUG_FLUSH
   const auto t_reshape = std::chrono::high_resolution_clock::now();

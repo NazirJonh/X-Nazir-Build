@@ -1076,6 +1076,75 @@ TEST_F(PaintLayersBakeTest, the_generator_reads_the_bake_instead_of_the_row)
   EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, color_map), 0);
 }
 
+/**
+ * A row carrying a CPU-computed effect is built from its bake, and that bake holds the content alone:
+ * the group samples the baked map, keeps reading the row's mask map (the mask is laid live over the
+ * content) and has no input left for the row's own source or for a correction the bake folded in.
+ * An opacity edit is then a value of that shape -- the row stays baked and keeps its mask nodes --
+ * where the same edit of a row baked whole is a different shape.
+ */
+TEST_F(PaintLayersBakeTest, a_content_bake_row_keeps_its_mask_inputs_in_the_graph)
+{
+  Image *source = add_image("Row");
+  MaterialPaintLayer *layer = add_paint_layer("Row", source);
+  ASSERT_NE(BKE_paint_layers_filter_add(*ma, layer, MA_PAINT_LAYER_FILTER_NOISE), nullptr);
+  MaterialPaintLayer *exposure = BKE_paint_layers_filter_add(*ma,
+                                                             layer,
+                                                             MA_PAINT_LAYER_FILTER_EXPOSURE);
+  ASSERT_NE(exposure, nullptr);
+  Image *mask_map = add_image("Mask");
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *layer, *mask_map), nullptr);
+  clear_active();
+
+  /* The name a correction's inputs are given, and the count their absence is read from. */
+  char exposure_label[128];
+  SNPRINTF(exposure_label, "Row %s ", exposure->name);
+  const auto exposure_inputs = [](bNodeTree &tree, const char *prefix) {
+    tree.ensure_interface_cache();
+    int count = 0;
+    for (const bNodeTreeInterfaceSocket *socket : tree.interface_inputs()) {
+      if (socket->name != nullptr && STRPREFIX(socket->name, prefix)) {
+        count++;
+      }
+    }
+    return count;
+  };
+
+  /* Live: the row reads its own map and its mask, and the exposure it lays is a set of inputs. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  bNodeTree *group = layer_tree_find(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, source), 1);
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, mask_map), 1);
+  EXPECT_GT(exposure_inputs(*group, exposure_label), 0)
+      << "a live correction carries its opacity and its parameters as inputs";
+
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_TRUE(paint_layer_row_substituted(*ma, *layer));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  Image *color_map = layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(color_map, nullptr);
+  group = layer_tree_find(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, source), 0)
+      << "the content comes from the cache, not from the row's map";
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, color_map), 1);
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, mask_map), 1)
+      << "the mask stays live over a bake of the content";
+  /* The row's own colour values are gone with its source; the mask's are not. */
+  EXPECT_EQ(exposure_inputs(*group, exposure_label), 0)
+      << "a correction folded into the bake has no input to change it";
+  EXPECT_NE(interface_input_find(*group, "Row Mask Opacity"), nullptr);
+  EXPECT_NE(interface_input_find(*group, "Row Base Color Opacity"), nullptr);
+
+  /* The opacity of a content bake is an input of the shape the group has now: a value, not a new
+   * shape -- unlike the same edit of a row whose bake holds the mask and the opacity as well. */
+  EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, 0.5f));
+  EXPECT_TRUE(BKE_paint_layers_values_sync(*ma)) << "the mask and the map are read as they were";
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *layer));
+}
+
 TEST_F(PaintLayersBakeTest, a_value_sync_of_a_stale_baked_shape_asks_for_a_rebuild)
 {
   MaterialPaintLayer *layer = add_baked_row("Row");

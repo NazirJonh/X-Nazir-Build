@@ -2905,12 +2905,16 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
       eMaterialPaintChannel(channel));
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
   /* A row whose bake stands in is built from the bake's maps alone: it holds nothing it would lay
-   * itself, so it is built like a leaf whatever it is, and none of its corrections or mask. */
+   * itself, so it is built like a leaf whatever it is. A bake of the row's *content* alone (a row
+   * carrying a CPU-computed effect) is the one exception: its mask stays live over the map, exactly
+   * as the CPU composite lays it. */
   Image *baked_color = nullptr;
   const bool substituted = paint_layer_row_baked_channel(ma_, layer, channel, &baked_color);
-  /* The row's mask is exposed once, for the viewport's Mask pass. A baked row already holds its
-   * mask inside the bake, so it keeps no separate mask output. */
-  if (!substituted) {
+  const bool content_bake =
+      substituted && paint_layer_bake_scope(layer, false) == PaintLayerBakeScope::ContentOnly;
+  /* The row's mask is exposed once, for the viewport's Mask pass. A bake of the whole row already
+   * holds its mask inside, so such a row keeps no separate mask output. */
+  if (!substituted || content_bake) {
     this->mask_output_ensure(group, layer);
   }
   /* A Material row is laid like a painted row whose content is what its source supplies in the
@@ -3155,8 +3159,11 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   }
 
   /* The row's mask lays its own factor over the row's, the same for every channel. */
-  /* The bake holds the row's mask too, so it is laid once, not twice. */
-  const NodeOutput mask = substituted ? NodeOutput{} : this->mask_factor_ensure(tree, group, layer);
+  /* The bake of a whole row holds its mask too, so it is laid once, not twice; a bake of the content
+   * alone does not, and the mask is laid here over it. */
+  const NodeOutput mask = (substituted && !content_bake) ?
+                              NodeOutput{} :
+                              this->mask_factor_ensure(tree, group, layer);
   if (mask.node != nullptr) {
     if (factor == nullptr) {
       factor_node = mask.node;

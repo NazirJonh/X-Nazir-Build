@@ -33,6 +33,10 @@ namespace blender {
  * and coverage maps: the bake already holds the row's corrections, mask and opacity, so nothing of
  * them is described again. \a ignore_own_bake describes the live row instead, which is what the
  * bake itself renders from.
+ *
+ * \a scope is what the bake being rendered holds (#PaintLayerBakeScope): a content bake folds
+ * neither its own opacity nor its mask into these pixels -- the substitution lays them live over
+ * the map -- while its corrections stay. A whole-row bake and the live description fold both in.
  */
 bool composite_image_layer_build(const Material &ma,
                                  const MaterialPaintLayer &layer,
@@ -47,7 +51,8 @@ bool composite_image_layer_build(const Material &ma,
                                  const bool describe_only = false,
                                  const std::shared_ptr<const PaintMaterialCompositeSurface>
                                      &context_surface = nullptr,
-                                 PaintLayersHeightWonCache *height_won_cache = nullptr);
+                                 PaintLayersHeightWonCache *height_won_cache = nullptr,
+                                 PaintLayerBakeScope scope = PaintLayerBakeScope::WholeRow);
 
 /**
  * Append the rows of \a list that take part in \a channel to \a r_layers, bottom to top. A folder is

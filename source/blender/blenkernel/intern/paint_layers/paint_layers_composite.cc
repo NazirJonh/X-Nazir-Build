@@ -817,24 +817,41 @@ static void composite_effect_append(
 }
 
 bool composite_image_layer_build(const Material &ma,
-                                        const MaterialPaintLayer &layer,
-                                        const int channel,
-                                        const float pass_through_scale,
-                                        const bool isolating,
-                                        const bool ignore_own_bake,
-                                        PaintMaterialCompositeImageLayer &out,
+                                 const MaterialPaintLayer &layer,
+                                 const int channel,
+                                 const float pass_through_scale,
+                                 const bool isolating,
+                                 const bool ignore_own_bake,
+                                 PaintMaterialCompositeImageLayer &out,
                                  const bUUID *stop_before,
                                  const int *slice_rect,
                                  const bool dimensions_only,
                                  const bool describe_only,
-                                        const std::shared_ptr<const PaintMaterialCompositeSurface>
+                                 const std::shared_ptr<const PaintMaterialCompositeSurface>
                                      &context_surface,
-                                 PaintLayersHeightWonCache *height_won_cache)
+                                 PaintLayersHeightWonCache *height_won_cache,
+                                 const PaintLayerBakeScope scope)
 {
   /* A reader lays the slice its point publishes, described as a substituted row: the slice's
    * colour, its coverage and its content alpha, with the reader's own blend. Its own mapping does
    * not remap the slice. */
   bool reader_live = false;
+  /* The mode the description runs in: which of it a content bake leaves out. One mode where two
+   * flags would have to be kept exclusive by hand. */
+  enum class ContentMode {
+    /** A live row, or a reader over its live slice: the source, the corrections, the mask and the
+     * opacity are all described. */
+    Live,
+    /** The bake render of a content bake: its mask and its opacity are laid live over the map, so
+     * neither is folded into these pixels. */
+    RenderContentBake,
+    /** The description of a row standing in over its content bake: the source and the corrections
+     * are inside the bake, so neither is described again. */
+    SubstituteContentBake,
+  };
+  ContentMode content_mode = scope == PaintLayerBakeScope::ContentOnly ?
+                                 ContentMode::RenderContentBake :
+                                 ContentMode::Live;
   if (paint_layer_kind_reads_anchor_point(layer)) {
     if (!paint_layer_row_reads_anchor_point(ma, layer, channel)) {
       return false;
@@ -920,16 +937,26 @@ bool composite_image_layer_build(const Material &ma,
                                (record != nullptr && record->image != nullptr);
     out.blend = layer_channel_blend(layer, channel);
     composite_height_settings_describe(layer, channel, out);
-    /* The coverage map already holds the row's opacity and mask; only visibility stays live, the
-     * same 0/1 the generated graph multiplies in. */
-    out.opacity = ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) * pass_through_scale;
-    out.enabled = true;
-    out.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
-        eMaterialPaintChannel(channel));
-    return true;
+    /* The coverage map holds what the content covers rather than the mask times the opacity; the
+     * map keeps its place as the pass's mask, since for a row whose colour carries its own alpha
+     * the quotient the bake stored is one wherever the content reaches, so nothing is counted
+     * twice, and a row that carries none is covered by the map alone. */
+    if (paint_layer_bake_scope(layer, false) == PaintLayerBakeScope::ContentOnly) {
+      content_mode = ContentMode::SubstituteContentBake;
+    }
+    else {
+      /* The coverage map already holds the row's opacity and mask; only visibility stays live, the
+       * same 0/1 the generated graph multiplies in. */
+      out.opacity = ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) *
+                    pass_through_scale;
+      out.enabled = true;
+      out.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
+          eMaterialPaintChannel(channel));
+      return true;
+    }
   }
   /* A live reader's slice is described above; every other row describes its own source. */
-  if (!reader_live) {
+  if (!reader_live && content_mode != ContentMode::SubstituteContentBake) {
     if (BKE_paint_layers_is_folder(layer)) {
       Vector<PaintMaterialCompositeImageLayer> children;
       composite_image_layers_collect(ma,
@@ -960,7 +987,12 @@ bool composite_image_layer_build(const Material &ma,
   }
   out.blend = layer_channel_blend(layer, channel);
   composite_height_settings_describe(layer, channel, out);
-  out.opacity = BKE_paint_layers_channel_opacity_effective(layer, channel) * pass_through_scale;
+  /* The content bake holds the row's content alone, so its own opacity -- the visibility with it --
+   * is not folded in: the substitution lays it live over the map. What the row's source gives to the
+   * transparency stays, being part of the content itself. */
+  const float live_opacity = BKE_paint_layers_channel_opacity_effective(layer, channel) *
+                             pass_through_scale;
+  out.opacity = content_mode == ContentMode::RenderContentBake ? 1.0f : live_opacity;
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
         ma, layer, PaintLayerMaterialUse::Composite);
@@ -972,46 +1004,58 @@ bool composite_image_layer_build(const Material &ma,
   out.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
       eMaterialPaintChannel(channel));
   /* The corrections lay over the row's colour, in the order they were added. A correction that
-   * lays nothing in this channel is not carried, as the generator builds nothing for it. */
-  for (const MaterialPaintLayer &effect : layer.effects) {
-    if (stop_before != nullptr && BLI_uuid_equal(effect.marker, *stop_before)) {
-      break;
+   * lays nothing in this channel is not carried, as the generator builds nothing for it. A row
+   * substituted by its content bake has its corrections inside that bake already, and a content
+   * bake renders them, being the content the cache holds. */
+  if (content_mode != ContentMode::SubstituteContentBake) {
+    for (const MaterialPaintLayer &effect : layer.effects) {
+      if (stop_before != nullptr && BLI_uuid_equal(effect.marker, *stop_before)) {
+        break;
+      }
+      composite_effect_append(ma,
+                              &layer,
+                              effect,
+                              channel,
+                              pass_through_scale,
+                              slice_rect,
+                              dimensions_only,
+                              describe_only,
+                              context_surface,
+                              out);
     }
-    composite_effect_append(ma,
-                            &layer,
-                            effect,
-                            channel,
-                            pass_through_scale,
-                            slice_rect,
-                            dimensions_only,
-                            describe_only,
-                            context_surface,
-                            out);
   }
   /* The mask is one for all channels of the row, so the same item reaches every channel's stack,
-   * exactly as the generator reads the one set of mask inputs in every channel chain. */
-  composite_mask_items_describe(ma,
-                               layer,
-                               out.mask_items,
-                               stop_before,
-                               slice_rect,
-                               dimensions_only,
-                               describe_only,
-                               context_surface);
+   * exactly as the generator reads the one set of mask inputs in every channel chain. A content
+   * bake renders none of it: the mask stays live over the map, where its own mapping is read as
+   * well. */
+  if (content_mode != ContentMode::RenderContentBake) {
+    composite_mask_items_describe(ma,
+                                 layer,
+                                 out.mask_items,
+                                 stop_before,
+                                 slice_rect,
+                                 dimensions_only,
+                                 describe_only,
+                                 context_surface);
+  }
   /* Mark the positions the GPU has to capture: a marker is a producer only while at least one
    * reader lays its slice. A content marker sits in the effects, a mask marker in the mask stack. */
-  for (const MaterialPaintLayer &effect : layer.effects) {
-    if (paint_layer_kind_is_anchor_point_marker(effect) &&
-        paint_layer_anchor_point_is_read(ma, effect.marker))
-    {
-      out.anchor_point_content_producers.append(effect.marker);
+  if (content_mode != ContentMode::SubstituteContentBake) {
+    for (const MaterialPaintLayer &effect : layer.effects) {
+      if (paint_layer_kind_is_anchor_point_marker(effect) &&
+          paint_layer_anchor_point_is_read(ma, effect.marker))
+      {
+        out.anchor_point_content_producers.append(effect.marker);
+      }
     }
   }
-  for (const MaterialPaintLayer &item : layer.mask_stack) {
-    if (paint_layer_kind_is_anchor_point_marker(item) &&
-        paint_layer_anchor_point_is_read(ma, item.marker))
-    {
-      out.anchor_point_mask_producers.append(item.marker);
+  if (content_mode != ContentMode::RenderContentBake) {
+    for (const MaterialPaintLayer &item : layer.mask_stack) {
+      if (paint_layer_kind_is_anchor_point_marker(item) &&
+          paint_layer_anchor_point_is_read(ma, item.marker))
+      {
+        out.anchor_point_mask_producers.append(item.marker);
+      }
     }
   }
   return true;
@@ -2480,6 +2524,9 @@ bool BKE_paint_layers_slice_render(const Material &ma,
 /**
  * The live description of \a layer in \a channel, as the evaluator reads one row: what a bake of
  * the row renders. A Pass Through folder has no row of its own to describe.
+ *
+ * \a scope is what the bake holds (#PaintLayerBakeScope): a content bake renders the row's content
+ * alone, its own opacity and its mask left out to be laid live over the map.
  */
 static bool composite_bake_entry(
     const Material &ma,
@@ -2488,7 +2535,8 @@ static bool composite_bake_entry(
     PaintMaterialCompositeImageLayer &r_entry,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &surface = nullptr,
     const int *slice_rect = nullptr,
-    const bool dimensions_only = false)
+    const bool dimensions_only = false,
+    const PaintLayerBakeScope scope = PaintLayerBakeScope::WholeRow)
 {
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
       (BKE_paint_layers_is_folder(layer) && BKE_paint_layers_folder_is_pass_through(layer)))
@@ -2508,7 +2556,9 @@ static bool composite_bake_entry(
                                     slice_rect,
                                     dimensions_only,
                                     false,
-                                    surface);
+                                    surface,
+                                    nullptr,
+                                    scope);
 }
 
 bool BKE_paint_layers_bake_render_node(
@@ -2537,9 +2587,13 @@ bool BKE_paint_layers_bake_render_node(
   {
     return false;
   }
-  /* Learn the stack dimensions without rendering or allocating a single nested slice. */
+  /* Learn the stack dimensions without rendering or allocating a single nested slice. A row
+   * carrying a CPU-computed effect is rendered as its content alone: its mask and its opacity are
+   * laid live over the map the result becomes, so a stroke into the mask never asks for this. */
+  const PaintLayerBakeScope scope = paint_layer_bake_scope(layer, false);
   PaintMaterialCompositeImageLayer dims_entry;
-  if (!composite_bake_entry(ma, layer, channel, dims_entry, surface, nullptr, true)) {
+  if (!composite_bake_entry(ma, layer, channel, dims_entry, surface, nullptr, true, scope))
+  {
     return false;
   }
   /* The row's content, straight and with its own factor, from the one shared isolated-group
@@ -2583,8 +2637,14 @@ bool BKE_paint_layers_bake_render_node(
    * why the row is described a second time. */
   const int slice_rect[4] = {area.xmin, area.ymin, area.xmax, area.ymax};
   PaintMaterialCompositeImageLayer entry;
-  if (!composite_bake_entry(
-          ma, layer, channel, entry, surface, dst_rect != nullptr ? slice_rect : nullptr))
+  if (!composite_bake_entry(ma,
+                            layer,
+                            channel,
+                            entry,
+                            surface,
+                            dst_rect != nullptr ? slice_rect : nullptr,
+                            false,
+                            scope))
   {
     return false;
   }
@@ -2608,7 +2668,9 @@ bool BKE_paint_layers_bake_render_node(
       r_color_rgba[dst * 4 + 1] = content_color[src * 4 + 1];
       r_color_rgba[dst * 4 + 2] = content_color[src * 4 + 2];
       /* The content alpha travels with the colour, so a substituted row reads its own transparency
-       * back instead of turning opaque. */
+       * back instead of turning opaque. Over a content bake the coverage is that same quantity, the
+       * mask and the opacity having been left out: what the quotient below keeps is the texel's
+       * coverage by the content alone. */
       r_color_rgba[dst * 4 + 3] = content_color[src * 4 + 3];
       r_coverage_gray[dst] = content_coverage[src];
     }

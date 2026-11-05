@@ -2138,24 +2138,46 @@ PaintLayersBakeGateAction BKE_paint_layers_bake_gate_decide(bool stale,
  * Hash of the subtree and parameters \a layer's bake depends on, the validity key: two 32-bit
  * words, low first. Pixel edits are not visible here; they arrive through the partial-update
  * subscription and settle as a re-bake of the changed rectangle.
+ *
+ * A row carrying a CPU-computed effect bakes its content alone, so its own mask, its opacity and
+ * its channel opacities are absent from this hash: an edit of them leaves the cache current.
  */
 void BKE_paint_layers_bake_hash(const Material &ma,
                                 const MaterialPaintLayer &layer,
                                 uint32_t r_hash[2]);
 
 /**
+ * What a bake of a row holds, the one question the hash, the subscription, the render, the
+ * substitution and the graph all ask, so they cannot disagree about it. The semantics of the
+ * content answer are #paint_layer_row_bakes_content's.
+ */
+enum class PaintLayerBakeScope {
+  /** The row's own bake of the whole row as it looks, its mask and its opacity included. */
+  WholeRow,
+  /** The row's own bake of its content alone: its mask and its opacity stay live over the map. */
+  ContentOnly,
+  /** A child inside the parent's bake: its mask is part of the picture the cache holds. */
+  Child,
+};
+
+/**
  * Every map \a layer's bake reads: its own channel maps and those of its corrections, mask items
  * and children. A Material row reads the images of its source's node trees when its own bake is
- * the question (\a is_child false), and the maps it shows when it is a child of the row being
- * baked.
+ * the question (\a scope not #PaintLayerBakeScope::Child), and the maps it shows when it is a
+ * child of the row being baked.
  *
  * Shared with consumers that cache a render of the row outside the planner, so a pixel edit marks
  * their cache stale exactly as it would the row's own bake.
+ *
+ * \a scope says what the bake the maps are collected for holds: a content bake renders none of its
+ * own mask, so the mask's maps are no source of that bake and are not collected. A child keeps its
+ * mask as a source either way -- the parent's cache is a picture of the stack as it looks.
  */
 void BKE_paint_layers_bake_collect_source_images(const Material &ma,
                                                  const MaterialPaintLayer &layer,
                                                  Vector<Image *> &r_images,
-                                                 bool is_child = false);
+                                                 PaintLayerBakeScope scope =
+                                                     PaintLayerBakeScope::WholeRow);
 
 /**
  * Why a row standing in for Object or Generated Gradient geometry cannot be baked for the objects
@@ -2201,6 +2223,11 @@ int BKE_paint_layers_bake_object_issue_get(const Material &ma, const MaterialPai
  * into \a size x \a size buffers. The planner and the generator's substitution read this one
  * function's result, so a baked map means one thing. Source maps are composited at their own
  * resolution and nearest-sampled to \a size.
+ *
+ * A row carrying a CPU-computed effect (#paint_layer_row_bakes_content) is rendered as its content
+ * alone: neither its mask nor its opacity is folded in, and the coverage that comes back is the
+ * content's own. The substitution then lays the mask and the opacity live over the map, so an edit
+ * of either re-bakes nothing.
  *
  * \param dst_rect: (x0, y0, x1, y1) in result pixels; when given only that rectangle is computed
  * and written, which is how a partial re-bake touches one changed tile.

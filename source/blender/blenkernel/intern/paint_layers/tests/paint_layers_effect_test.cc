@@ -118,6 +118,48 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
     return effect;
   }
 
+  /** An opaque 8x8 byte image whose grey runs from black at the left edge to white at the right
+   * one: a mask map that makes every texel's coverage different, so a mask folded into a cache
+   * cannot be mistaken for one that was left out of it. */
+  Image *add_ramp_image(const char *name)
+  {
+    const int size = 8;
+    const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    Image *image = BKE_image_add_generated(
+        bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+    image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int y : IndexRange(size)) {
+      for (const int x : IndexRange(size)) {
+        uchar *p = pixels + (int64_t(y) * size + x) * 4;
+        const uchar value = uchar(x * 255 / (size - 1));
+        p[0] = value;
+        p[1] = value;
+        p[2] = value;
+        p[3] = 255;
+      }
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return image;
+  }
+
+  /** Every byte of two channel composites, RGBA, within the given tolerance. */
+  static void expect_bytes_close(const ImBuf &a, const ImBuf &b, const int tolerance)
+  {
+    const uchar *pa = a.byte_data();
+    const uchar *pb = b.byte_data();
+    ASSERT_NE(pa, nullptr);
+    ASSERT_NE(pb, nullptr);
+    for (const int64_t i : IndexRange(int64_t(a.x) * a.y)) {
+      for (const int k : IndexRange(4)) {
+        EXPECT_NEAR(int(pa[i * 4 + k]), int(pb[i * 4 + k]), tolerance)
+            << "texel " << i << " component " << k;
+      }
+    }
+  }
+
   /** The composite of Base Color as straight scene-linear RGBA at the stack's dimensions. */
   bool render_channel(Vector<float> &r_pixels, int &r_width, int &r_height)
   {
@@ -203,6 +245,46 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
 
     /* A second pass has nothing left to do. */
     EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  }
+
+  /**
+   * A row carrying a Noise under a mask of its own, composited live and then composited over its
+   * bake: the same picture either way, within the byte rounding a cache costs. The mask is laid over
+   * the content in both passes -- live because the row is not cached, baked because a content bake
+   * holds no mask -- so a mask of half grey and a mask of a ramp are both read here.
+   */
+  void expect_content_bake_matches_live_row(const float mask_value, const bool use_mask_map)
+  {
+    MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+    MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+    ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 5));
+    if (use_mask_map) {
+      ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+    }
+    else {
+      ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, mask_value), nullptr);
+    }
+    ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, 0.6f));
+    clear_active();
+
+    /* The live pass, with nothing cached: the graph lays the mask over the row's own map. */
+    ImBuf *live = IMB_allocImBuf(8, 8, ImBufFlags::ByteData);
+    ASSERT_NE(live, nullptr);
+    live->channels = 4;
+    ASSERT_TRUE(render_channel_bytes(*live));
+    ASSERT_FALSE(paint_layer_row_substituted(*ma, *row));
+
+    ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+    ASSERT_NE(row->bake, nullptr);
+    ASSERT_TRUE(paint_layer_row_substituted(*ma, *row));
+
+    ImBuf *baked = IMB_allocImBuf(8, 8, ImBufFlags::ByteData);
+    ASSERT_NE(baked, nullptr);
+    baked->channels = 4;
+    ASSERT_TRUE(render_channel_bytes(*baked));
+    expect_bytes_close(*live, *baked, 2);
+    IMB_freeImBuf(live);
+    IMB_freeImBuf(baked);
   }
 };
 
@@ -958,6 +1040,134 @@ TEST_F(PaintLayersEffectTest, the_bake_renders_the_noise_the_composite_shows)
     }
   }
   IMB_freeImBuf(composite);
+}
+
+TEST_F(PaintLayersEffectTest, a_noise_row_is_baked_while_the_row_with_its_base_mask_is_active)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 5));
+
+  /* Adding the base mask makes the row itself the active marker, which must not defer a bake the
+   * live graph cannot replace. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(row->bake, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+}
+
+/**
+ * The mask of a row that carries a CPU-computed effect is no part of its bake: the effect reads the
+ * row's colour before the mask is laid, so the cache holds the content alone and the mask, the
+ * opacity and the blend are laid live over the substituted map. A stroke into the mask therefore
+ * neither moves the bake's hash nor reaches it through the subscription, and the row keeps standing
+ * in -- which is what stops the grain from blinking out and back on every stroke.
+ */
+TEST_F(PaintLayersEffectTest, a_mask_stroke_leaves_a_noise_rows_bake_valid)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 5));
+  /* A mask of its own map, so a stroke into it is a pixel edit of a map a bake could subscribe to.
+   */
+  Image *mask_map = add_ramp_image("Mask");
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *mask_map), nullptr);
+  clear_active();
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(row->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  ASSERT_TRUE(paint_layer_row_substituted(*ma, *row));
+  EXPECT_TRUE(changed);
+
+  /* The stroke: the map says its pixels changed, and the plan is asked what to do about it. */
+  BKE_image_partial_update_mark_full_update(mask_map);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row))
+      << "the mask is live over the content, not a source of the bake";
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *row))
+      << "the row keeps its cache, so the grain does not leave the view";
+
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed)) << "nothing is due";
+  EXPECT_FALSE(changed);
+}
+
+TEST_F(PaintLayersEffectTest, a_noise_seed_rebakes_the_row_while_its_mask_and_opacity_do_not)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 5));
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, row, 1.0f);
+  ASSERT_NE(mask, nullptr);
+  clear_active();
+
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+
+  /* The row's own opacity, and the mask's grey and its opacity: all live over the content, so none
+   * of them asks for a new render. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, 0.4f));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row)) << "the opacity is laid over the map";
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *row));
+  const float grey[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_value(*ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, grey));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, mask, 0.75f));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row)) << "the mask is laid over the map too";
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *row));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma)) << "and nothing is due for it";
+
+  /* A new seed is a new grain, and the grain is what the cache holds: the row is due again. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 6));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *row));
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+}
+
+TEST_F(PaintLayersEffectTest, a_noise_row_under_a_flat_mask_composites_the_same_baked_and_live)
+{
+  expect_content_bake_matches_live_row(0.5f, /*use_mask_map=*/false);
+}
+
+TEST_F(PaintLayersEffectTest, a_noise_row_under_a_mask_map_composites_the_same_baked_and_live)
+{
+  expect_content_bake_matches_live_row(1.0f, /*use_mask_map=*/true);
+}
+
+TEST_F(PaintLayersEffectTest, a_blurred_folder_keeps_its_bake_when_its_mask_is_painted)
+{
+  MaterialPaintLayer *first = add_paint_layer("A", add_shade_image("A", 255, 0));
+  MaterialPaintLayer *second = add_paint_layer("B", add_shade_image("B", 0, 255));
+  MaterialPaintLayer *members[] = {first, second};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 2));
+  ASSERT_NE(folder, nullptr);
+  /* An isolating folder, which is what a folder row of its own is: Pass Through builds no row. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.9f));
+  ASSERT_NE(add_effect(*folder, MA_PAINT_LAYER_FILTER_BLUR), nullptr);
+  Image *mask_map = add_ramp_image("Folder Mask");
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *folder, *mask_map), nullptr);
+  clear_active();
+
+  /* The children are inside the folder's content, each with its own mask; the folder's own mask is
+   * the one that stays live over the cache. */
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(folder->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+  ASSERT_TRUE(paint_layer_row_substituted(*ma, *folder));
+
+  BKE_image_partial_update_mark_full_update(mask_map);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *folder));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed))
+      << "the folder is not re-baked";
 }
 
 TEST_F(PaintLayersEffectTest, a_noise_is_described_only_and_the_combined_preview_falls_back)

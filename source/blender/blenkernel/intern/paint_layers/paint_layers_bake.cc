@@ -15,6 +15,11 @@
  * source map changed since (see #BKE_paint_layers_bake_is_valid). Everything that decides whether a
  * row is substituted goes through #paint_layer_row_substituted, so the generator and the CPU
  * composite cannot disagree about it.
+ *
+ * What the cache holds is the other question (#paint_layer_row_bakes_content), and it has two
+ * answers: a row that carries a CPU-computed effect caches its *content* alone, while every other
+ * row caches the row as it looks. Every layer of that answer reads the one scope
+ * (#paint_layer_bake_scope), so a mask stroke costs a content bake nothing.
  */
 
 #include "BKE_paint_layers.hh"
@@ -800,11 +805,17 @@ void BKE_paint_layers_anchor_point_slice_images(const Material &ma,
  * Every map \a layer's bake reads: its own channel maps and those of its corrections, mask items
  * and children. A Material row reads the images of its source's node trees when its own bake is the
  * question, and the maps it shows when it is a child of the row being baked.
+ *
+ * \a scope says what the bake the maps are collected for holds (#PaintLayerBakeScope): the own
+ * mask of a content bake is laid live over the map and renders into none of its pixels, so the
+ * mask's maps are not sources and a stroke into them must not mark the cache changed. A child
+ * keeps its mask as a source either way -- the parent's cache is a picture of the stack as it
+ * looks.
  */
 void BKE_paint_layers_bake_collect_source_images(const Material &ma,
                                                  const MaterialPaintLayer &layer,
                                                  Vector<Image *> &r_images,
-                                                 const bool is_child)
+                                                 const PaintLayerBakeScope scope)
 {
   if (paint_layer_kind_reads_anchor_point(layer)) {
     Vector<bUUID> visited;
@@ -814,7 +825,7 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
     return;
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
-    if (!is_child) {
+    if (scope != PaintLayerBakeScope::Child) {
       if (layer.material != nullptr && layer.material->nodetree != nullptr) {
         Set<const bNodeTree *> visited;
         bake_source_tree_images(*layer.material->nodetree, visited, r_images);
@@ -833,7 +844,7 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
     bake_collect_live_source_images(ma, layer, r_images);
     /* What a Material row renders is its source alone: its mask, effects and children stay live
      * over the maps, so a stroke on them is no edit of what the render reads. */
-    if (!is_child) {
+    if (scope != PaintLayerBakeScope::Child) {
       return;
     }
   }
@@ -850,13 +861,16 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
     }
   });
   for (const MaterialPaintLayer &effect : layer.effects) {
-    BKE_paint_layers_bake_collect_source_images(ma, effect, r_images, true);
+    BKE_paint_layers_bake_collect_source_images(ma, effect, r_images, PaintLayerBakeScope::Child);
   }
-  for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
-    BKE_paint_layers_bake_collect_source_images(ma, mask_item, r_images, true);
+  if (scope != PaintLayerBakeScope::ContentOnly) {
+    for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
+      BKE_paint_layers_bake_collect_source_images(
+          ma, mask_item, r_images, PaintLayerBakeScope::Child);
+    }
   }
   for (const MaterialPaintLayer &child : layer.children) {
-    BKE_paint_layers_bake_collect_source_images(ma, child, r_images, true);
+    BKE_paint_layers_bake_collect_source_images(ma, child, r_images, PaintLayerBakeScope::Child);
   }
 }
 
@@ -892,7 +906,10 @@ void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
   BakeLayerSubscription entry;
   entry.marker = layer.marker;
   Vector<Image *> images;
-  BKE_paint_layers_bake_collect_source_images(ma, layer, images);
+  /* A row whose bake holds its content alone reads none of its own mask: the mask is live over the
+   * map, so a stroke into it leaves the cache current and the view unblinking. */
+  BKE_paint_layers_bake_collect_source_images(
+      ma, layer, images, paint_layer_bake_scope(layer, false));
   for (Image *image : images) {
     PartialUpdateUser *user = BKE_image_partial_update_create(image);
     bake_subscription_user_drain(*image, user);
@@ -1091,6 +1108,10 @@ static uint64_t bake_hash_layer(uint64_t h,
                                 const MaterialPaintLayer &layer,
                                 const bool is_child)
 {
+  /* A content bake's mask, its opacities and its blend are live over the substituted map, so none
+   * of them may move the hash of what was rendered; a child of another row's cache keeps its mask
+   * inside, being part of the picture that cache holds (#paint_layer_bake_scope). */
+  const PaintLayerBakeScope scope = paint_layer_bake_scope(layer, is_child);
   /* Bumped when what a bake stores changes meaning, so older caches invalidate once. */
   h = bake_hash_mix(h, uint64_t(0x9e3779b97f4a7c15ull));
   h = bake_hash_mix(h, uint8_t(layer.source));
@@ -1136,7 +1157,9 @@ static uint64_t bake_hash_layer(uint64_t h,
                     uint16_t(layer.flag & ~(int(MA_PAINT_LAYER_ENABLED) |
                                             int(MA_PAINT_LAYER_LOCKED))));
   h = bake_hash_mix(h, uint8_t(layer.role));
-  h = bake_hash_float(h, layer.opacity);
+  if (scope != PaintLayerBakeScope::ContentOnly) {
+    h = bake_hash_float(h, layer.opacity);
+  }
   /* Only the fact that the mapping applies: such a row stays live and is never baked
    * (#BKE_paint_layers_bake_blocked), so the slider values must not move the hash. A Material row
    * is rendered and its mapping is applied when its maps are read, so toggling it must not move a
@@ -1171,7 +1194,9 @@ static uint64_t bake_hash_layer(uint64_t h,
     if (is_child) {
       h = bake_hash_mix(h, uint8_t(settings.blend));
     }
-    h = bake_hash_float(h, settings.opacity);
+    if (scope != PaintLayerBakeScope::ContentOnly) {
+      h = bake_hash_float(h, settings.opacity);
+    }
     /* The Height record's own mode and scale are baked into the row's Height result the same way,
      * and the Compare mask reaches every other channel of the row through the stack that renders
      * one -- the whole row's cache is stale without them. The effective mode includes the row's
@@ -1238,8 +1263,12 @@ static uint64_t bake_hash_layer(uint64_t h,
   for (const MaterialPaintLayer &effect : layer.effects) {
     h = bake_hash_layer(h, ma, effect, true);
   }
-  for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
-    h = bake_hash_layer(h, ma, mask_item, true);
+  /* The mask of a content bake is laid live over the map and reaches none of its pixels: a stroke
+   * into it must leave the cache current. */
+  if (scope != PaintLayerBakeScope::ContentOnly) {
+    for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
+      h = bake_hash_layer(h, ma, mask_item, true);
+    }
   }
   for (const MaterialPaintLayer &child : layer.children) {
     h = bake_hash_layer(h, ma, child, true);
@@ -1332,24 +1361,35 @@ void BKE_paint_layers_bake_finalize(Material &ma, MaterialPaintLayer &layer)
   BKE_paint_layers_bake_subscribe(ma, layer);
 }
 
-/** Whether \a layer or anything under it applies a UV mapping: a mapped row stays live. */
-static bool bake_mapping_blocks(const Material &ma, const MaterialPaintLayer &layer)
+/**
+ * Whether \a layer or anything under it applies a UV mapping: a mapped row stays live.
+ *
+ * \a scope is what the bake the question is asked for holds (#PaintLayerBakeScope): the own mask
+ * of a content bake is laid live over the map, where the graph reads a mapped mask as well as the
+ * CPU composite does, so a mapping there is no reason to keep the row out of the bake. Everything
+ * rendered into the cache keeps blocking, and so does the row's own mapping.
+ */
+static bool bake_mapping_blocks(const Material &ma,
+                                const MaterialPaintLayer &layer,
+                                const PaintLayerBakeScope scope)
 {
   if (BKE_paint_layers_mapping_remaps(ma, layer)) {
     return true;
   }
   for (const MaterialPaintLayer &effect : layer.effects) {
-    if (bake_mapping_blocks(ma, effect)) {
+    if (bake_mapping_blocks(ma, effect, PaintLayerBakeScope::Child)) {
       return true;
     }
   }
-  for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
-    if (bake_mapping_blocks(ma, mask_item)) {
-      return true;
+  if (scope != PaintLayerBakeScope::ContentOnly) {
+    for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
+      if (bake_mapping_blocks(ma, mask_item, PaintLayerBakeScope::Child)) {
+        return true;
+      }
     }
   }
   for (const MaterialPaintLayer &child : layer.children) {
-    if (bake_mapping_blocks(ma, child)) {
+    if (bake_mapping_blocks(ma, child, PaintLayerBakeScope::Child)) {
       return true;
     }
   }
@@ -1374,8 +1414,8 @@ bool BKE_paint_layers_bake_blocked(const Material &ma, const MaterialPaintLayer 
   /* A row holding a read Anchor Point (or a folder above one) is never substituted: the cache
    * would swallow the point. A reader whose slice contains an object mask stays live when its mode
    * allows it; the effective-mode helper decides which. */
-  return bake_mapping_blocks(ma, layer) || bake_object_mask_blocks(layer) ||
-         paint_layer_anchor_point_blocks_bake(ma, layer);
+  return bake_mapping_blocks(ma, layer, paint_layer_bake_scope(layer, false)) ||
+         bake_object_mask_blocks(layer) || paint_layer_anchor_point_blocks_bake(ma, layer);
 }
 
 /** \} */
@@ -1824,8 +1864,11 @@ static int bake_subtree_weight(const Material &ma, const MaterialPaintLayer &lay
   for (const MaterialPaintLayer &effect : layer.effects) {
     weight += 4 + bake_subtree_weight(ma, effect) / 2;
   }
-  for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
-    weight += 4 + bake_subtree_weight(ma, mask_item) / 2;
+  /* A content bake leaves the mask live over the substituted map, so the bake pays nothing for it. */
+  if (!paint_layer_row_bakes_content(layer)) {
+    for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
+      weight += 4 + bake_subtree_weight(ma, mask_item) / 2;
+    }
   }
   for (const MaterialPaintLayer &child : layer.children) {
     /* A valid bake stands in for the child's whole subtree in the generated graph, so the parent
@@ -2418,16 +2461,12 @@ bool BKE_paint_layers_bake_row_is_deferred(const Material &ma, const MaterialPai
   if (!BKE_paint_layers_subtree_contains(layer, ma.active_layer_marker)) {
     return false;
   }
-  /* A CPU-computed effect (a Blur, a Noise) has no live form: while it is the active correction the
-   * row would show nothing of it until the user leaves, so its row is baked under the debounce like
-   * an edit of any other value. Only the row that carries the effect: an ancestor folder stays
-   * live. */
-  for (const MaterialPaintLayer &effect : layer.effects) {
-    if (BLI_uuid_equal(effect.marker, ma.active_layer_marker) &&
-        paint_layer_effect_is_cpu_computed(effect))
-    {
-      return false;
-    }
+  /* A CPU-computed effect (a Blur, a Noise) has no live form: whatever marker inside the row is
+   * active -- the effect, the row, or a mask item of it -- the row would show nothing of the effect
+   * until the marker leaves, so its row is baked under the debounce like an edit of any other
+   * value. Only the row that carries the effect: an ancestor folder stays live. */
+  if (paint_layer_row_needs_bake(layer)) {
+    return false;
   }
   return true;
 }
@@ -4242,6 +4281,10 @@ struct PaintLayersBakeJob {
  * `coverage = common x content` with its own `content` in the colour alpha. Where that content is
  * present the quotient is the common factor; the maximum over channels does not depend on channel
  * order, and a texel no channel covers keeps zero.
+ *
+ * A row baked for its content alone rendered no mask and no opacity, so its quotient is the
+ * content's own coverage: what the substitution reads back as the row's mask is then the content,
+ * and the row's mask and opacity are laid live over it.
  */
 static void bake_common_from_channel(Span<float> color,
                                      Span<float> coverage,

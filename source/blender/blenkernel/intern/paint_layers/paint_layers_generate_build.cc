@@ -675,6 +675,10 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
                                                  const MaterialPaintLayer &layer)
 {
   const char *layer_name = layer.name[0] != '\0' ? layer.name : "Layer";
+  /* Set for a row built from a bake of its content alone: the map gives its colour and the alpha of
+   * the row's own source, mapping and corrections are no inputs, while the mask and the opacity are.
+   */
+  bool substituted_content = false;
   /* The Height record's own scale, one input for the whole row: the height modes' chain multiplies
    * the record's distance from the neutral level by it, and a scale edit is then a value. A row
    * built from its bake lays the same chain over its baked map, so the input follows the bake. */
@@ -701,9 +705,14 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     }
   }
   if (paint_layer_row_substituted(ma_, layer)) {
-    /* A row built from its bake has one input per channel it has a map in: its visibility. The
-     * opacity, the mask and the corrections are inside the bake, and its own object mask is applied
-     * by the nodes that read the object, not by an input. */
+    /* A row whose bake holds its content alone keeps its mask, its opacity and its blend live over
+     * the map, so its group is built as a live row's from here on -- only its own source, its
+     * mapping and its corrections have no inputs, being what the bake exists to fold. */
+    const bool content_bake = paint_layer_bake_scope(layer, false) ==
+                              PaintLayerBakeScope::ContentOnly;
+    /* A row built from its bake has one input per channel it has a map in: its opacity, live for a
+     * content bake and the bare visibility for a bake of the whole row. Its own object mask is
+     * applied by the nodes that read the object, not by an input. */
     for (const int channel : wired_channels_) {
       if (!paint_layer_row_baked_channel(ma_, layer, channel, nullptr)) {
         continue;
@@ -715,12 +724,14 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
       bNodeTreeInterfaceSocket *opacity = layer_group_value_input(
           group, base, "NodeSocketFloat", ROLE_OPACITY, layer.marker, channel);
       if (opacity != nullptr) {
-        prop_int_set(opacity->properties, INPUT_SUBSTITUTED_PROP, 1);
+        const float scale = forms_.lookup_default(&layer, {}).pass_through_scale;
+        if (!content_bake) {
+          prop_int_set(opacity->properties, INPUT_SUBSTITUTED_PROP, 1);
+        }
         group_input_default_set(
             group,
             *opacity,
-            ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) *
-                forms_.lookup_default(&layer, {}).pass_through_scale);
+            paint_layer_row_opacity_input_value(layer, channel, scale, !content_bake));
         opacity_inputs_.lookup_or_add_default(&layer).add(channel, opacity);
       }
     }
@@ -731,16 +742,24 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
         this->blend_mix_input_create(group, layer, channel, layer_name);
       }
     }
-    return;
+    if (!content_bake) {
+      return;
+    }
+    substituted_content = true;
   }
-  this->mapping_inputs_create(group, layer, layer_name);
-  const bool generates = paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES);
+  if (!substituted_content) {
+    this->mapping_inputs_create(group, layer, layer_name);
+  }
+  const bool generates = paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES) &&
+                         !substituted_content;
   if (generates) {
     /* The gradient's line and shape are values of the row, shared by all of its channels. */
     this->gradient_line_inputs_create(group, layer, layer_name);
   }
   for (const int channel : wired_channels_) {
-    if (!row_participates(ma_, layer, channel)) {
+    /* The channel values of a live row. A content bake samples its own map instead: its opacity
+     * input was made above, and its colour needs no fill, no source and no mapping. */
+    if (substituted_content || !row_participates(ma_, layer, channel)) {
       continue;
     }
     const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
@@ -750,10 +769,9 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     bNodeTreeInterfaceSocket *opacity = layer_group_value_input(
         group, base, "NodeSocketFloat", ROLE_OPACITY, layer.marker, channel);
     if (opacity != nullptr) {
-      group_input_default_set(group,
-                              *opacity,
-                              BKE_paint_layers_channel_opacity_effective(layer, channel) *
-                                  forms_.lookup_default(&layer, {}).pass_through_scale);
+      const float scale = forms_.lookup_default(&layer, {}).pass_through_scale;
+      group_input_default_set(
+          group, *opacity, paint_layer_row_opacity_input_value(layer, channel, scale, false));
       opacity_inputs_.lookup_or_add_default(&layer).add(channel, opacity);
     }
     /* The alpha model of the channel: a value, so a blend edit never rewires the alpha chain. */
@@ -932,100 +950,104 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
   if (paint_layer_row_is_adjustment(layer)) {
     filter_params_create(layer, false);
   }
-  for (const MaterialPaintLayer &effect : layer.effects) {
-    /* A CPU-computed effect (a Blur, a Noise) is left out of the live graph (#correction_lay), so
-     * it gets no inputs: its parameters and its opacity would be sockets nothing consumes, dead
-     * weight in the interface and in the topology the hash is taken from. Its parameters reach the
-     * bake and the effect cache through the row's system properties instead. */
-    if (paint_layer_effect_is_cpu_computed(effect)) {
-      continue;
-    }
-    filter_params_create(effect, false);
-    char effect_label[224];
-    effect_input_label(layer_name, effect, nullptr, effect_label, sizeof(effect_label));
-    this->mapping_inputs_create(group, effect, effect_label);
-    const bool effect_generates = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES);
-    if (effect_generates) {
-      this->gradient_line_inputs_create(group, effect, effect_label);
-    }
-    for (const int channel : wired_channels_) {
-      const bool filters = paint_layer_effect_filters(ma_, effect, channel);
-      if (!filters && !paint_layer_effect_lays(ma_, effect, channel)) {
+  /* The corrections of a content bake are inside the map the group samples, so they build no nodes
+   * and get no inputs: their parameters reach the bake through the row's own properties. */
+  if (!substituted_content) {
+    for (const MaterialPaintLayer &effect : layer.effects) {
+      /* A CPU-computed effect (a Blur, a Noise) is left out of the live graph (#correction_lay),
+       * so it gets no inputs: its parameters and its opacity would be sockets nothing consumes,
+       * dead weight in the interface and in the topology the hash is taken from. Its parameters
+       * reach the bake and the effect cache through the row's system properties instead. */
+      if (paint_layer_effect_is_cpu_computed(effect)) {
         continue;
       }
-      const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
-          eMaterialPaintChannel(channel));
-      char base[200];
-      char suffix[96];
-      SNPRINTF(suffix, "%s Opacity", info.ui_name);
-      effect_input_label(layer_name, effect, suffix, base, sizeof(base));
-      bNodeTreeInterfaceSocket *opacity = layer_group_value_input(
-          group, base, "NodeSocketFloat", ROLE_OPACITY, effect.marker, channel);
-      if (opacity != nullptr) {
-        group_input_default_set(group,
-                                *opacity,
-                                BKE_paint_layers_channel_opacity_effective(effect, channel) *
-                                    forms_.lookup_default(&effect, {}).pass_through_scale);
-        effect_opacity_inputs_.lookup_or_add_default(&effect).add(channel, opacity);
-      }
-      if (filters) {
-        /* A filter has no colour of its own: its opacity is its only input. */
-        continue;
-      }
+      filter_params_create(effect, false);
+      char effect_label[224];
+      effect_input_label(layer_name, effect, nullptr, effect_label, sizeof(effect_label));
+      this->mapping_inputs_create(group, effect, effect_label);
+      const bool effect_generates = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES);
       if (effect_generates) {
-        /* Both a colour and a scalar channel read a ColorRamp built from the description, exactly
-         * as a Gradient row's do. */
-        continue;
+        this->gradient_line_inputs_create(group, effect, effect_label);
+      }
+      for (const int channel : wired_channels_) {
+        const bool filters = paint_layer_effect_filters(ma_, effect, channel);
+        if (!filters && !paint_layer_effect_lays(ma_, effect, channel)) {
+          continue;
+        }
+        const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+            eMaterialPaintChannel(channel));
+        char base[200];
+        char suffix[96];
+        SNPRINTF(suffix, "%s Opacity", info.ui_name);
+        effect_input_label(layer_name, effect, suffix, base, sizeof(base));
+        bNodeTreeInterfaceSocket *opacity = layer_group_value_input(
+            group, base, "NodeSocketFloat", ROLE_OPACITY, effect.marker, channel);
+        if (opacity != nullptr) {
+          group_input_default_set(group,
+                                  *opacity,
+                                  BKE_paint_layers_channel_opacity_effective(effect, channel) *
+                                      forms_.lookup_default(&effect, {}).pass_through_scale);
+          effect_opacity_inputs_.lookup_or_add_default(&effect).add(channel, opacity);
+        }
+        if (filters) {
+          /* A filter has no colour of its own: its opacity is its only input. */
+          continue;
+        }
+        if (effect_generates) {
+          /* Both a colour and a scalar channel read a ColorRamp built from the description,
+           * exactly as a Gradient row's do. */
+          continue;
+        }
+        if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
+        /* A correction that reads a material has no record: a plain value of its source is an
+         * input, as a Material row's is, filled from the source and kept current by the value
+         * sync, so editing it in the source never rebuilds. */
+          const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+              ma_, effect, channel);
+          if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
+            SNPRINTF(suffix, "%s Source", info.ui_name);
+            effect_input_label(layer_name, effect, suffix, base, sizeof(base));
+            bNodeTreeInterfaceSocket *live = layer_group_value_input(
+                group, base, "NodeSocketColor", ROLE_LIVE_CONSTANT, effect.marker, channel);
+            if (live != nullptr) {
+              group_input_default_set(group, *live, source.constant);
+              live_constant_inputs_.lookup_or_add_default(&effect).add(channel, live);
+            }
+          }
+          continue;
+        }
+        const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
+        if (!paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_FLAT_VALUE) ||
+            record->image != nullptr)
+        {
+          continue;
+        }
+        effect_input_label(layer_name, effect, info.ui_name, base, sizeof(base));
+        bNodeTreeInterfaceSocket *fill = layer_group_value_input(
+            group, base, "NodeSocketColor", ROLE_FILL, effect.marker, channel);
+        if (fill != nullptr) {
+          group_input_default_set(group, *fill, record->value);
+          fill_inputs_.lookup_or_add_default(&effect).add(channel, fill);
+        }
       }
       if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
-        /* A correction that reads a material has no record: a plain value of its source is an
-         * input, as a Material row's is, filled from the source and kept current by the value sync
-         * so editing it in the source never rebuilds. */
-        const PaintLayerMaterialSource source = paint_layer_material_channel_source(
-            ma_, effect, channel);
-        if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
-          SNPRINTF(suffix, "%s Source", info.ui_name);
-          effect_input_label(layer_name, effect, suffix, base, sizeof(base));
-          bNodeTreeInterfaceSocket *live = layer_group_value_input(
-              group, base, "NodeSocketColor", ROLE_LIVE_CONSTANT, effect.marker, channel);
-          if (live != nullptr) {
-            group_input_default_set(group, *live, source.constant);
-            live_constant_inputs_.lookup_or_add_default(&effect).add(channel, live);
-          }
+        /* The transparency of the source, when a plain value, is one input for all the channels
+         * the correction lays in. */
+        bool lays = false;
+        for (const int channel : wired_channels_) {
+          lays |= paint_layer_effect_lays(ma_, effect, channel);
         }
-        continue;
-      }
-      const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
-      if (!paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_FLAT_VALUE) ||
-          record->image != nullptr)
-      {
-        continue;
-      }
-      effect_input_label(layer_name, effect, info.ui_name, base, sizeof(base));
-      bNodeTreeInterfaceSocket *fill = layer_group_value_input(
-          group, base, "NodeSocketColor", ROLE_FILL, effect.marker, channel);
-      if (fill != nullptr) {
-        group_input_default_set(group, *fill, record->value);
-        fill_inputs_.lookup_or_add_default(&effect).add(channel, fill);
-      }
-    }
-    if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
-      /* The transparency of the source, when a plain value, is one input for all the channels the
-       * correction lays in. */
-      bool lays = false;
-      for (const int channel : wired_channels_) {
-        lays |= paint_layer_effect_lays(ma_, effect, channel);
-      }
-      const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(ma_,
-                                                                                       effect);
-      if (lays && coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
-        char base[200];
-        effect_input_label(layer_name, effect, "Source Coverage", base, sizeof(base));
-        bNodeTreeInterfaceSocket *live = layer_group_value_input(
-            group, base, "NodeSocketFloat", ROLE_LIVE_COVERAGE, effect.marker, -1);
-        if (live != nullptr) {
-          group_input_default_set(group, *live, coverage.constant);
-          live_coverage_inputs_.add(&effect, live);
+        const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(ma_,
+                                                                                         effect);
+        if (lays && coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
+          char base[200];
+          effect_input_label(layer_name, effect, "Source Coverage", base, sizeof(base));
+          bNodeTreeInterfaceSocket *live = layer_group_value_input(
+              group, base, "NodeSocketFloat", ROLE_LIVE_COVERAGE, effect.marker, -1);
+          if (live != nullptr) {
+            group_input_default_set(group, *live, coverage.constant);
+            live_coverage_inputs_.add(&effect, live);
+          }
         }
       }
     }

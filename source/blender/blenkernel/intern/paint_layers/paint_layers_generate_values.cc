@@ -85,17 +85,22 @@ bool values_sync_socket(Material &ma,
     if (socket.default_value == nullptr) {
       return false;
     }
-    /* A group built from its row's bake holds the row's visibility alone; one built live holds the
-     * full opacity. If the row's state moved since (a pixel edit made the bake invalid, say) the
-     * group has the wrong shape and cannot be fixed by a value, so the caller rebuilds. */
-    const bool built_baked = prop_int_get(iface.properties, INPUT_SUBSTITUTED_PROP, 0) != 0;
-    if (built_baked != paint_layer_row_substituted(ma, *layer)) {
+    /* A group built from the bake of the whole row holds the row's visibility alone; one built
+     * live, or from a bake of the row's *content* alone, holds the full opacity -- over a content
+     * bake the opacity is laid live, mask and blend with it. If the row's state moved since (a
+     * pixel edit made the bake invalid, or the row changed which of the three shapes it is built
+     * in) the group has the wrong shape and cannot be fixed by a value, so the caller rebuilds. */
+    const bool built_visibility_only = prop_int_get(iface.properties, INPUT_SUBSTITUTED_PROP, 0) !=
+                                       0;
+    const bool visibility_only = paint_layer_row_substituted(ma, *layer) &&
+                                 paint_layer_bake_scope(*layer, false) ==
+                                     PaintLayerBakeScope::WholeRow;
+    if (built_visibility_only != visibility_only) {
       return false;
     }
     const float scale = forms.lookup_default(layer, {}).pass_through_scale;
-    const float value = built_baked ?
-                            ((layer->flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) * scale :
-                            BKE_paint_layers_channel_opacity_effective(*layer, channel) * scale;
+    const float value = paint_layer_row_opacity_input_value(
+        *layer, channel, scale, visibility_only);
     static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
     if (iface.socket_data != nullptr) {
       static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;

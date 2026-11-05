@@ -261,6 +261,96 @@ static void filter_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &ro
   }
 }
 
+/**
+ * The shape of \a layer's mask: one for every channel of the row, so the same nodes reach every
+ * channel chain and the walk needs no channel of its own beyond what a mask item's reader names.
+ *
+ * Shared by the live row and by a row built from a bake of its *content* alone, over which the mask
+ * stays live; a bake of the whole row holds the mask inside and hashes none of it.
+ */
+static void topology_mask_hash_mix(uint64_t &hash,
+                                   const Material &ma,
+                                   const MaterialPaintLayer &layer,
+                                   const Span<int> wired_channels)
+{
+  /* A mask is nodes (an Image Texture and its grey chain against a value input), so its presence
+   * and whether it has a map are structure; its constant, opacity and enabled flag are inputs. */
+  if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
+    hash = topology_hash_mix(hash, 1);
+    /* The inversion is a node of its own. */
+    hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(*mask) ? 1 : 0);
+    hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, *mask) ? 1 : 0);
+    mapping_wrap_hash_mix(hash, ma, *mask);
+    const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+        *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    if (record != nullptr && record->image != nullptr) {
+      topology_hash_string(hash, record->image->id.name);
+    }
+    else {
+      hash = topology_hash_mix(hash, 0);
+    }
+  }
+  else {
+    hash = topology_hash_mix(hash, 0);
+  }
+  /* A mask correction is nodes of its own (a map and its grey chain against a value input, and a
+   * Mix whose mode is a node property), so its place and whether it has a map are structure; its
+   * constant, blend, opacity and enabled flag are inputs. One that lays nothing yet has no nodes. */
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+      continue;
+    }
+    topology_hash_uid(hash, item.marker);
+    if (paint_layer_kind_is_anchor_point_marker(item)) {
+      topology_hash_anchor_point_marker(hash, ma, item, 0x603);
+      continue;
+    }
+    if (paint_layer_kind_reads_anchor_point(item)) {
+      topology_hash_anchor_point_reader(hash, ma, item, wired_channels, 0x606, 0x607, true);
+      continue;
+    }
+    /* A filter item is nodes of its own, and which filter decides them. */
+    hash = topology_hash_mix(hash, uint64_t(uint8_t(item.source)));
+    if (item.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+      /* Which geometry map the row reads is topology: another map is another node. */
+      hash = topology_hash_mix(hash, uint64_t(uint8_t(item.mesh_map_type)));
+    }
+    hash = topology_hash_mix(hash, uint64_t(uint16_t(item.kind_subtype)));
+    /* A map-coverage item builds one comparison per stored colour, so the count is structure; each
+     * colour's value and enabled flag are inputs the graph reads, so they stay out of the hash. */
+    if (paint_layer_kind_is_map_coverage(item)) {
+      hash = topology_hash_mix(hash, 0x300 + uint64_t(item.id_colors.count()));
+      /* Advanced Color ID grows one tolerance input per colour. */
+      hash = topology_hash_mix(hash, paint_layer_mask_item_color_id_advanced(item) ? 1 : 0);
+    }
+    /* The inversion is a node of its own. */
+    hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(item) ? 1 : 0);
+    hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, item) ? 1 : 0);
+    mapping_wrap_hash_mix(hash, ma, item);
+    gradient_payload_hash_mix(hash, item);
+    filter_payload_hash_mix(hash, item);
+    const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+        item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE)) {
+      /* The nodes follow the source, as a Material row's do; the values are inputs. */
+      hash = topology_hash_mix(hash, 0x502);
+      hash = topology_hash_mix(hash,
+                               paint_layer_mask_item_lays(ma, item) ?
+                                   paint_layer_material_live_signature(ma, item) :
+                                   0);
+    }
+    else if (!paint_layer_mask_item_lays(item) || record == nullptr) {
+      hash = topology_hash_mix(hash, 0);
+    }
+    else if (record->image != nullptr) {
+      topology_hash_string(hash, record->image->id.name);
+    }
+    else {
+      hash = topology_hash_mix(hash, 1);
+    }
+  }
+}
+
 uint64_t paint_layers_layer_topology_hash(const Material &ma,
                                           const MaterialPaintLayer &layer,
                                           const Span<int> wired_channels,
@@ -315,10 +405,15 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, 0x800 + uint64_t(uint8_t(height_blend)));
   }
   if (paint_layer_row_substituted(ma, layer)) {
-    /* A baked row is built from its bake's maps alone: which channels have one, which maps, and
-     * whether the live row had a map of its own (its alpha then covers) is structure; the
-     * corrections, the mask and the rest of the description are inside the bake. */
-    hash = topology_hash_mix(hash, 0x400);
+    /* A row built from its bake is built from the bake's maps alone: which channels have one, which
+     * maps, and whether the live row had a map of its own (its alpha then covers) is structure; the
+     * corrections and the rest of the description are inside the bake.
+     *
+     * A row built from a bake of its *content* alone is the exception on the mask: that mask is laid
+     * live over the map, so its nodes are part of the shape here too. */
+    const bool content_bake = paint_layer_bake_scope(layer, false) ==
+                              PaintLayerBakeScope::ContentOnly;
+    hash = topology_hash_mix(hash, content_bake ? 0x401 : 0x400);
     for (const int channel : wired_channels) {
       hash = topology_hash_mix(hash, uint64_t(channel));
       Image *baked = nullptr;
@@ -332,6 +427,9 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
       }
     }
     topology_hash_string(hash, layer.bake->coverage->id.name);
+    if (content_bake) {
+      topology_mask_hash_mix(hash, ma, layer, wired_channels);
+    }
     return hash;
   }
   for (const int channel : wired_channels) {
@@ -429,80 +527,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   }
   /* A mask is nodes (an Image Texture and its grey chain against a value input), so its presence
    * and whether it has a map are structure; its constant, opacity and enabled flag are inputs. */
-  if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
-    hash = topology_hash_mix(hash, 1);
-    /* The inversion is a node of its own. */
-    hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(*mask) ? 1 : 0);
-    hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, *mask) ? 1 : 0);
-    mapping_wrap_hash_mix(hash, ma, *mask);
-    const MaterialPaintLayerChannel *record = paint_layer_channel_find(
-        *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-    if (record != nullptr && record->image != nullptr) {
-      topology_hash_string(hash, record->image->id.name);
-    }
-    else {
-      hash = topology_hash_mix(hash, 0);
-    }
-  }
-  else {
-    hash = topology_hash_mix(hash, 0);
-  }
-  /* A mask correction is nodes of its own (a map and its grey chain against a value input, and a
-   * Mix whose mode is a node property), so its place and whether it has a map are structure; its
-   * constant, blend, opacity and enabled flag are inputs. One that lays nothing yet has no nodes. */
-  for (const MaterialPaintLayer &item : layer.mask_stack) {
-    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
-      continue;
-    }
-    topology_hash_uid(hash, item.marker);
-    if (paint_layer_kind_is_anchor_point_marker(item)) {
-      topology_hash_anchor_point_marker(hash, ma, item, 0x603);
-      continue;
-    }
-    if (paint_layer_kind_reads_anchor_point(item)) {
-      topology_hash_anchor_point_reader(hash, ma, item, wired_channels, 0x606, 0x607, true);
-      continue;
-    }
-    /* A filter item is nodes of its own, and which filter decides them. */
-    hash = topology_hash_mix(hash, uint64_t(uint8_t(item.source)));
-    if (item.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
-      /* Which geometry map the row reads is topology: another map is another node. */
-      hash = topology_hash_mix(hash, uint64_t(uint8_t(item.mesh_map_type)));
-    }
-    hash = topology_hash_mix(hash, uint64_t(uint16_t(item.kind_subtype)));
-    /* A map-coverage item builds one comparison per stored colour, so the count is structure; each
-     * colour's value and enabled flag are inputs the graph reads, so they stay out of the hash. */
-    if (paint_layer_kind_is_map_coverage(item)) {
-      hash = topology_hash_mix(hash, 0x300 + uint64_t(item.id_colors.count()));
-      /* Advanced Color ID grows one tolerance input per colour. */
-      hash = topology_hash_mix(hash, paint_layer_mask_item_color_id_advanced(item) ? 1 : 0);
-    }
-    /* The inversion is a node of its own. */
-    hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(item) ? 1 : 0);
-    hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, item) ? 1 : 0);
-    mapping_wrap_hash_mix(hash, ma, item);
-    gradient_payload_hash_mix(hash, item);
-    filter_payload_hash_mix(hash, item);
-    const MaterialPaintLayerChannel *record = paint_layer_channel_find(
-        item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-    if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE)) {
-      /* The nodes follow the source, as a Material row's do; the values are inputs. */
-      hash = topology_hash_mix(hash, 0x502);
-      hash = topology_hash_mix(hash,
-                               paint_layer_mask_item_lays(ma, item) ?
-                                   paint_layer_material_live_signature(ma, item) :
-                                   0);
-    }
-    else if (!paint_layer_mask_item_lays(item) || record == nullptr) {
-      hash = topology_hash_mix(hash, 0);
-    }
-    else if (record->image != nullptr) {
-      topology_hash_string(hash, record->image->id.name);
-    }
-    else {
-      hash = topology_hash_mix(hash, 1);
-    }
-  }
+  topology_mask_hash_mix(hash, ma, layer, wired_channels);
   return hash;
 }
 

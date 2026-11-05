@@ -555,6 +555,58 @@ inline bool paint_layer_row_needs_bake(const MaterialPaintLayer &row)
 }
 
 /**
+ * Whether \a row's bake holds its *content* alone: the colour of the row after its effects (and of
+ * its children, when it is a folder), while its mask, its opacity and its blend stay live over the
+ * substituted map. The effect is computed before the mask is laid (see
+ * #paint_layer_effect_input_describe), so nothing of the bake depends on the mask: an edit of the
+ * mask, of the opacity or of the visibility must neither move the bake's hash nor subscribe the
+ * bake to those maps. Every other row's bake is the whole row as it looks, mask included.
+ *
+ * The one question every layer of the answer asks -- the hash, the subscription, the render, the
+ * substitution and the graph -- so the four cannot disagree about what such a cache holds. Only a
+ * row that is baked for its own sake counts: a child of another row's bake is rendered with its
+ * mask inside, because the parent's cache is a picture of the stack as it looks.
+ */
+inline bool paint_layer_row_bakes_content(const MaterialPaintLayer &row)
+{
+  return paint_layer_row_needs_bake(row);
+}
+
+/**
+ * The scope a bake of \a row is rendered at, with the baking context folded in: a row baked for
+ * its own sake takes #paint_layer_row_bakes_content's answer, while a child of another row's bake
+ * is rendered with its mask inside, being part of the picture that cache holds. Every question
+ * about what a bake holds goes through this one wrapper, so a caller cannot forget the child half
+ * of the answer.
+ */
+inline PaintLayerBakeScope paint_layer_bake_scope(const MaterialPaintLayer &row,
+                                                  const bool is_child)
+{
+  if (is_child) {
+    return PaintLayerBakeScope::Child;
+  }
+  return paint_layer_row_bakes_content(row) ? PaintLayerBakeScope::ContentOnly :
+                                              PaintLayerBakeScope::WholeRow;
+}
+
+/**
+ * The value of a row's opacity input: the row's visibility alone when its group was built from a
+ * bake of the whole row (the bake already holds the opacity), the full effective opacity otherwise
+ * -- a live row's, or a content bake's over which the opacity is laid live. Shared by the input
+ * creation and the value sync, so the two cannot drift apart.
+ */
+inline float paint_layer_row_opacity_input_value(const MaterialPaintLayer &layer,
+                                                 const int channel,
+                                                 const float scale,
+                                                 const bool visibility_only)
+{
+  return (visibility_only ?
+              ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) :
+              BKE_paint_layers_channel_opacity_effective(layer, channel)) *
+         scale;
+}
+
+/**
  * Whether \a row is an adjustment: a filter that is a row of the stack and works on the stack below
  * it, with the row's own opacity, blend and mask, instead of on a row's colour.
  */
@@ -907,6 +959,10 @@ constexpr int PAINT_LAYERS_BAKED_CHILD_WEIGHT = 6;
  * or a Pass Through folder), its mode is not Never, nothing inside it keeps it live (a mapping, an
  * object mask) and the stored bake is valid (#BKE_paint_layers_bake_is_valid). The one test for the
  * generator, the CPU composite and the topology hash.
+ *
+ * What the cache stands in for is a second question, answered by #paint_layer_row_bakes_content: a
+ * row that carries a CPU-computed effect is substituted by its content, with its mask and its
+ * opacity live over the map, while every other row is substituted whole.
  */
 bool paint_layer_row_substituted(const Material &ma, const MaterialPaintLayer &layer);
 

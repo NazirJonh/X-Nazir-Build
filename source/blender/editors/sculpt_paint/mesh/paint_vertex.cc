@@ -2228,6 +2228,19 @@ static wmOperatorStatus vpaint_modal(bContext *C, wmOperator *op, const wmEvent 
   return retval;
 }
 
+static void vpaint_cancel(bContext *C, wmOperator *op)
+{
+  /* An external cancel (a closed window or area) never reaches #vpaint_modal, so without this the
+   * stroke object leaks and #PaintStroke::done never clears the stroke state that defers the bake
+   * of the Stack Layers rows. */
+  VertexPaintStroke *stroke = static_cast<VertexPaintStroke *>(op->customdata);
+  if (stroke != nullptr) {
+    stroke->cancel(C);
+    MEM_delete(stroke);
+    op->customdata = nullptr;
+  }
+}
+
 void PAINT_OT_vertex_paint(wmOperatorType *ot)
 {
   ot->name = "Vertex Paint";
@@ -2236,6 +2249,7 @@ void PAINT_OT_vertex_paint(wmOperatorType *ot)
 
   ot->invoke = vpaint_invoke;
   ot->modal = vpaint_modal;
+  ot->cancel = vpaint_cancel;
   ot->exec = vpaint_exec;
   ot->poll = vertex_paint_poll;
 

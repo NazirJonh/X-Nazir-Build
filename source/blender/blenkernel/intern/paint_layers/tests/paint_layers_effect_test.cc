@@ -69,6 +69,9 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
   {
     paint_layer_effect_cache_set_budget(default_budget());
     BKE_paint_layers_effect_cache_free_all();
+    /* The stroke flag is runtime state a test may have left set; clear it so it cannot leak into
+     * the next test. */
+    BKE_paint_layers_bake_stroke_active_set(false);
     PaintLayersGenerateTest::TearDown();
   }
 
@@ -1168,6 +1171,173 @@ TEST_F(PaintLayersEffectTest, a_blurred_folder_keeps_its_bake_when_its_mask_is_p
   EXPECT_TRUE(paint_layer_row_substituted(*ma, *folder));
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed))
       << "the folder is not re-baked";
+}
+
+TEST_F(PaintLayersEffectTest, a_stroke_keeps_a_noise_rows_bake_deferred_until_it_ends)
+{
+  Image *map = add_shade_image("Row", 40, 200);
+  MaterialPaintLayer *row = add_paint_layer("Row", map);
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 5));
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(row->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+
+  /* The stroke: a pixel edit of the row's own colour map, the marker still inside, the stroke
+   * still running. The effect is computed over the whole canvas, so the row is not re-rendered at
+   * every dab: it stays deferred and shows live, without the effect. */
+  BKE_paint_layers_bake_stroke_active_set(true);
+  BKE_image_partial_update_mark_full_update(map);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  EXPECT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed)) << "the stroke defers the re-bake";
+  EXPECT_FALSE(changed);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row))
+      << "stale: the old bake is kept and not substituted";
+
+  /* The stroke is over: the row is baked once, even while the marker stays inside it. */
+  BKE_paint_layers_bake_stroke_active_set(false);
+  EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+}
+
+TEST_F(PaintLayersEffectTest, a_stroke_outside_the_row_bakes_it_as_usual)
+{
+  Image *map = add_shade_image("Row", 40, 200);
+  MaterialPaintLayer *row = add_paint_layer("Row", map);
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 5));
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(row->bake, nullptr);
+
+  /* A stroke that does not edit inside the row defers nothing: only the row the marker sits in
+   * stays live. */
+  clear_active();
+  BKE_paint_layers_bake_stroke_active_set(true);
+  BKE_image_partial_update_mark_full_update(map);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+}
+
+TEST_F(PaintLayersEffectTest, a_seed_change_bakes_now_even_while_a_stroke_runs)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 5));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(row->bake, nullptr);
+
+  /* A structural edit is what the user asks to see recomputed: it does not wait for a stroke. */
+  BKE_paint_layers_bake_stroke_active_set(true);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 9));
+  EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+}
+
+TEST_F(PaintLayersEffectTest, a_first_bake_happens_even_while_a_stroke_runs)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 5));
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  /* Nothing has been baked yet: the first bake is not deferred by the stroke. */
+  BKE_paint_layers_bake_stroke_active_set(true);
+  bool changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(row->bake, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+}
+
+/**
+ * The bake of a folder that carries a CPU-computed effect folds its children's content in: the
+ * folder's bake subscribes to the maps its children read, so a stroke into a child is a pixel edit
+ * of a source of that bake. While the stroke runs, the folder is not re-rendered at every dab --
+ * it stays deferred and shows live, and the bake catches up once the stroke is over.
+ */
+TEST_F(PaintLayersEffectTest, a_stroke_into_a_child_defers_the_blurred_folders_bake)
+{
+  Image *map_a = add_shade_image("A", 255, 0);
+  Image *map_b = add_shade_image("B", 0, 255);
+  MaterialPaintLayer *first = add_paint_layer("A", map_a);
+  MaterialPaintLayer *second = add_paint_layer("B", map_b);
+  MaterialPaintLayer *members[] = {first, second};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 2));
+  ASSERT_NE(folder, nullptr);
+  /* An isolating folder, which is what a folder row of its own is: Pass Through builds no row. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.9f));
+  ASSERT_NE(add_effect(*folder, MA_PAINT_LAYER_FILTER_BLUR), nullptr);
+  /* The marker sits inside the folder, on the child: the folder is the row being edited. */
+  BKE_paint_layers_active_set(*ma, first->marker);
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(folder->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+
+  /* The stroke: a pixel edit of a map the folder's bake reads through its child. */
+  BKE_paint_layers_bake_stroke_active_set(true);
+  BKE_image_partial_update_mark_full_update(map_a);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  EXPECT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *folder));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed))
+      << "the stroke defers the folder's re-bake";
+  EXPECT_FALSE(changed);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *folder))
+      << "stale: the old bake is kept and not substituted";
+
+  /* The stroke is over: the folder is baked once, while the marker stays inside it. */
+  BKE_paint_layers_bake_stroke_active_set(false);
+  EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *folder));
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+}
+
+TEST_F(PaintLayersEffectTest, a_stroke_into_the_mask_does_not_defer_a_noise_rows_bake)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *noise = add_effect(*row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 5));
+  /* A mask of its own map, so a stroke into it is a pixel edit of a map a bake could subscribe to.
+   */
+  Image *mask_map = add_ramp_image("Mask");
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *mask_map), nullptr);
+  BKE_paint_layers_active_set(*ma, row->marker);
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(row->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+
+  /* The stroke flag alone defers nothing: the mask is laid live over the content and is no source
+   * of the bake, so a stroke into it never reaches the subscription. */
+  BKE_paint_layers_bake_stroke_active_set(true);
+  BKE_image_partial_update_mark_full_update(mask_map);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row))
+      << "the mask is live over the content, not a source of the bake";
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed)) << "nothing is due";
+  EXPECT_FALSE(changed);
 }
 
 TEST_F(PaintLayersEffectTest, a_noise_is_described_only_and_the_combined_preview_falls_back)

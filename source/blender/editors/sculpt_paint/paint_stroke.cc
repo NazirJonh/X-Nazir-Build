@@ -43,6 +43,8 @@
 #include "BKE_main.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 
@@ -1386,6 +1388,12 @@ PaintStroke::PaintStroke(bContext *C, wmOperator *op, int event_type) : event_ty
   /* initialize here */
   paint_runtime->overlap_factor = 1.0;
   paint_runtime->stroke_active = true;
+  /* The bake planner defers the re-bake of rows with a CPU-computed effect while a stroke edits
+   * their pixels. It works from a material alone and cannot read #Paint::runtime, so hand the
+   * stroke state over. The flag is common to every stroke kind -- a sculpt stroke sets it too --
+   * and to all windows and materials at once: only the deferral of CPU-effect rows reads it, so a
+   * stroke that edits no pixel map changes nothing. #done and the destructor clear it. */
+  BKE_paint_layers_bake_stroke_active_set(true);
 
   if (rv3d) {
     rv3d->rflag |= RV3D_PAINTING;
@@ -1429,6 +1437,14 @@ PaintStroke::PaintStroke(bContext *C, wmOperator *op, int event_type) : event_ty
     roll_ = std::make_unique<RollStrokeState>();
     init_roll_cursors();
   }
+}
+
+PaintStroke::~PaintStroke()
+{
+  /* The stroke flag must not outlive the stroke object even on a path that never reached #done,
+   * or the rows with a CPU-computed effect would stay deferred for good. Clearing is idempotent
+   * after #done, which every regular ending runs first. */
+  BKE_paint_layers_bake_stroke_active_set(false);
 }
 
 void PaintStroke::done(bContext *C, const bool is_cancel)
@@ -1479,6 +1495,9 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
 
   paint_runtime->draw_anchored = false;
   paint_runtime->stroke_active = false;
+  /* The deferral of the CPU-effect rows ends with the stroke, whether it finished or was cancelled:
+   * both paths run through #PaintStroke::done. */
+  BKE_paint_layers_bake_stroke_active_set(false);
 
   /* The pixel edits of the stroke tag the images, but the last of those updates can have run while
    * the stroke was still active: the heavy planner's job start is skipped then. Run the same
@@ -1489,6 +1508,11 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
     wmWindowManager *wm = CTX_wm_manager(C);
     wmWindow *win = CTX_wm_window(C);
     if (bmain != nullptr && wm != nullptr && win != nullptr) {
+      /* The stroke kept the rows that carry a CPU-computed effect live instead of recomputing the
+       * effect at every dab. Now that it is over, the planner bakes them once, even while the
+       * active marker stays inside their subtree; the heavy pass below is the same backstop a
+       * scene update runs. */
+      BKE_paint_layers_regenerate_tagged(*bmain);
       ed::material_bake::paint_layers_bake_jobs_ensure(*wm, win, *bmain);
     }
   }

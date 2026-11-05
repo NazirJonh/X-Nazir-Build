@@ -714,7 +714,7 @@ struct PaintStroke : NonCopyable, NonMovable {
   }
 
  protected:
-  ~PaintStroke() = default;
+  ~PaintStroke();
   PaintStroke(bContext *C, wmOperator *op, int event_type);
 
   /**

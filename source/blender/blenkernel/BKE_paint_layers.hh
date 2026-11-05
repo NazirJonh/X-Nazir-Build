@@ -2084,6 +2084,21 @@ bool BKE_paint_layers_bake_scheduled_get(const Material &ma);
 void BKE_paint_layers_bake_scheduled_set(Material &ma, bool scheduled);
 
 /**
+ * Set by the editor's stroke code for the lifetime of a paint or sculpt stroke -- the same lifetime
+ * #Paint::runtime->stroke_active has. The bake planner works from a material alone and cannot reach
+ * the active Paint, so the stroke state is handed over here. While set, a row that carries a
+ * CPU-computed effect and is stale by pixels only stays deferred: the stroke keeps it live instead
+ * of recomputing the whole effect on the main thread at every dab, and the plan bakes it once when
+ * the stroke is over, even while the active marker stays inside the row. Runtime only, never saved.
+ *
+ * The flag is one for the whole process: shared by every stroke kind, every window and every
+ * material, which presumes one stroke at a time -- a deliberate simplification. #PaintStroke::done
+ * and the #PaintStroke destructor clear it, and replacing the file resets it.
+ */
+void BKE_paint_layers_bake_stroke_active_set(bool active);
+bool BKE_paint_layers_bake_stroke_active_get();
+
+/**
  * Append every layered material of \a bmain that has a Material row reading \a source, once each.
  *
  * The render of a row is keyed on the row, not on its source, so an edit of the source reaches the
@@ -2277,7 +2292,10 @@ bool BKE_paint_layers_bake_blocked(const Material &ma, const MaterialPaintLayer 
 
 /**
  * Whether \a layer must stay live right now rather than be baked: it is the active row, or an
- * ancestor of it, so the user is editing inside it and a bake would fight the edit.
+ * ancestor of it, so the user is editing inside it and a bake would fight the edit. A row that
+ * carries a CPU-computed effect also stays deferred while a stroke is editing its pixels: the
+ * effect is computed over the whole canvas, so it is not re-rendered per dab. The bake catches up
+ * once when the stroke is over, even while the marker stays inside the row.
  */
 bool BKE_paint_layers_bake_row_is_deferred(const Material &ma, const MaterialPaintLayer &layer);
 

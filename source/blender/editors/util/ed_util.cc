@@ -28,6 +28,7 @@
 #include "BKE_object_types.hh"
 #include "BKE_packedFile.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_layers_composite.hh"
@@ -274,6 +275,10 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
     /* The paint-layers bake debounce keeps its armed timer and pending set as process-static
      * state: a timer left armed would tick against the next file's #Main, and a pending entry
      * names a material of the file that is going away right here. */
+    /* The stroke flag is process-static state like the debounce: a stroke object that leaked
+     * without its #PaintStroke::done ever running (an operator with no cancel callback) would
+     * leave the rows with a CPU-computed effect deferred in the next file. */
+    BKE_paint_layers_bake_stroke_active_set(false);
     material_bake::paint_layers_bake_debounce_reset();
   }
   else {

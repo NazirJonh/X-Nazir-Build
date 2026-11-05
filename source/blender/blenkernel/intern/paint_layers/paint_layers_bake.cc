@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -206,6 +207,17 @@ std::mutex &bake_runtime_mutex()
 {
   static std::mutex mutex;
   return mutex;
+}
+
+/* Whether a paint or sculpt stroke is running right now. The stroke code in the editors hands the
+ * state over (see #BKE_paint_layers_bake_stroke_active_set): the bake planner works from a material
+ * alone and cannot reach the active Paint without a Scene. Only the deferral of a row with a
+ * CPU-computed effect reads it, so a stroke that edits no pixel map changes nothing. Runtime only,
+ * never saved. */
+std::atomic<bool> &paint_layers_bake_stroke_active()
+{
+  static std::atomic<bool> active = false;
+  return active;
 }
 
 }  // namespace
@@ -573,6 +585,16 @@ void BKE_paint_layers_bake_scheduled_set(Material &ma, const bool scheduled)
   else {
     ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_SCHEDULED;
   }
+}
+
+void BKE_paint_layers_bake_stroke_active_set(const bool active)
+{
+  paint_layers_bake_stroke_active().store(active);
+}
+
+bool BKE_paint_layers_bake_stroke_active_get()
+{
+  return paint_layers_bake_stroke_active().load();
 }
 
 /** Let go of the users \a layer's bake holds; the maps stay in `Main` as orphans if nothing else uses them. */
@@ -1019,9 +1041,12 @@ void BKE_paint_layers_bake_subscriptions_validate(Main &bmain)
   }
 }
 
-bool BKE_paint_layers_bake_changed_region(const Material &ma,
-                                          const MaterialPaintLayer &layer,
-                                          int r_region[4])
+/* The subscription record of \a marker's bake, copied out under the runtime lock; false when the
+ * material has no runtime or the row holds none. A copy, because the entry does not outlive the
+ * lock: #BakeMaterialRuntime::layers is rewritten by #BKE_paint_layers_bake_subscribe. */
+static bool bake_subscription_find(const Material &ma,
+                                   const bUUID &marker,
+                                   BakeLayerSubscription &r_entry)
 {
   std::lock_guard lock(bake_runtime_mutex());
   const BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
@@ -1029,15 +1054,60 @@ bool BKE_paint_layers_bake_changed_region(const Material &ma,
     return false;
   }
   for (const BakeLayerSubscription &entry : runtime->layers) {
-    if (BLI_uuid_equal(entry.marker, layer.marker) && entry.changed && entry.has_region) {
-      r_region[0] = entry.xmin;
-      r_region[1] = entry.xmax;
-      r_region[2] = entry.ymin;
-      r_region[3] = entry.ymax;
+    if (BLI_uuid_equal(entry.marker, marker)) {
+      r_entry = entry;
       return true;
     }
   }
   return false;
+}
+
+bool BKE_paint_layers_bake_changed_region(const Material &ma,
+                                          const MaterialPaintLayer &layer,
+                                          int r_region[4])
+{
+  BakeLayerSubscription entry;
+  if (!bake_subscription_find(ma, layer.marker, entry) || !entry.changed || !entry.has_region) {
+    return false;
+  }
+  r_region[0] = entry.xmin;
+  r_region[1] = entry.xmax;
+  r_region[2] = entry.ymin;
+  r_region[3] = entry.ymax;
+  return true;
+}
+
+/* Whether the row's bake subscription reports pending pixel edits. Unlike
+ * #BKE_paint_layers_bake_changed_region, a full-update mark counts too: it sets
+ * #BakeLayerSubscription::changed with no rectangle (#BKE_paint_layers_bake_notice_changes). */
+static bool bake_row_subscription_changed(const Material &ma, const MaterialPaintLayer &layer)
+{
+  BakeLayerSubscription entry;
+  return bake_subscription_find(ma, layer.marker, entry) && entry.changed;
+}
+
+/* Whether a row that carries a CPU-computed effect waits for the running stroke to end before its
+ * re-bake. The stroke keeps it live -- fresh color, without the effect -- instead of recomputing
+ * the whole-canvas effect at every dab, and the stale bake is not substituted, because the pixels
+ * changed under it. Only a pixel edit waits: a structural change (the seed, the effect's
+ * parameters) and the first bake are what the user asks to see recomputed. The hash, the expensive
+ * check, comes last, so outside a stroke it is not computed at all. */
+static bool bake_content_row_deferred_by_stroke(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if (!BKE_paint_layers_bake_stroke_active_get()) {
+    return false;
+  }
+  /* The first bake has nothing to defer to. */
+  const MaterialPaintLayerBake *bake = layer.bake;
+  if (bake == nullptr || bake->coverage == nullptr) {
+    return false;
+  }
+  if (!bake_row_subscription_changed(ma, layer)) {
+    return false;
+  }
+  uint32_t hash[2];
+  BKE_paint_layers_bake_hash(ma, layer, hash);
+  return hash[0] == bake->hash[0] && hash[1] == bake->hash[1];
 }
 
 /** \} */
@@ -2461,12 +2531,12 @@ bool BKE_paint_layers_bake_row_is_deferred(const Material &ma, const MaterialPai
   if (!BKE_paint_layers_subtree_contains(layer, ma.active_layer_marker)) {
     return false;
   }
-  /* A CPU-computed effect (a Blur, a Noise) has no live form: whatever marker inside the row is
-   * active -- the effect, the row, or a mask item of it -- the row would show nothing of the effect
-   * until the marker leaves, so its row is baked under the debounce like an edit of any other
-   * value. Only the row that carries the effect: an ancestor folder stays live. */
-  if (paint_layer_row_needs_bake(layer)) {
-    return false;
+  if (paint_layer_row_bakes_content(layer)) {
+    /* A CPU-computed effect (a Blur, a Noise) has no live form, but its compute runs over the whole
+     * canvas: while a stroke edits the row's pixels, the row is not re-rendered at every dab, it
+     * waits for the stroke to end -- see #bake_content_row_deferred_by_stroke. Outside a stroke it
+     * is baked under the debounce like an edit of any other value. */
+    return bake_content_row_deferred_by_stroke(ma, layer);
   }
   return true;
 }

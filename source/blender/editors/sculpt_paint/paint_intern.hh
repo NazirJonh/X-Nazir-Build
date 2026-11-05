@@ -527,11 +527,28 @@ struct PaintStroke : NonCopyable, NonMovable {
   bool input_init_ = false;
   /* Shift+click line continuation: start at the previous stroke's end instead of the press. */
   bool line_from_last_ = false;
-  float2 line_start_mouse_ = float2(0.0f, 0.0f);
-  bool line_start_valid_ = false;
-  /* Whether the line's anchor was painted by the previous stroke. A Shift+click that only set the
-   * point leaves it false, so this stroke has to place a dab at the anchor. */
-  bool line_start_painted_ = false;
+
+  /* Everything known about the point a Shift+click line is anchored at (the previous stroke's
+   * end), kept together because every new line feature (axis constraint, vertex snap, ...) adds
+   * another anchor-space fact rather than a standalone flag. */
+  struct LineAnchor {
+    /* Screen-space anchor. The line and the back-toward-anchor guard run through it whenever the
+     * stroke is not on the world-space path below. */
+    float2 mouse = float2(0.0f);
+    /* World-space anchor, valid when the anchor raycast succeeded at stroke start.
+     * #line_progress_project keeps scene-spaced dabs on the 3D line through it (the screen-space
+     * line through #mouse has no meaning for world-distance spacing). */
+    float3 world = float3(0.0f);
+    bool valid = false;
+    bool world_valid = false;
+    /* Whether the anchor was painted by the previous stroke. A Shift+click that only set the
+     * point leaves it false, so this stroke has to place a dab at the anchor. */
+    bool painted = false;
+  };
+  LineAnchor line_anchor_;
+  /* Where the stroke started. While #last_mouse_position still equals it the cursor has not moved,
+   * which #line_switch_from_freehand reads as "Shift came with the click". */
+  float2 press_mouse_ = float2(0.0f);
   /* Whether any dab of this stroke reached the canvas. Decides whether the stroke's end becomes a
    * painted anchor. */
   bool dab_placed_ = false;
@@ -793,7 +810,24 @@ struct PaintStroke : NonCopyable, NonMovable {
                      float2 new_pos,
                      std::optional<float> old_curve_radius = std::nullopt,
                      std::optional<float> new_curve_radius = std::nullopt);
-  int space_stroke(bContext *C, wmOperator *op, float2 final_mouse, float final_pressure);
+  /**
+   * Ray-cast \a mouse onto the canvas and return the hit in world space.
+   * \return false on a miss (\a r_world is untouched).
+   * \note The get_location() + object_to_world() pair repeats across #space_stroke,
+   * #lines_spacing and the stroke starts; migrate those call sites here when they are touched
+   * next.
+   */
+  bool get_world_location(float3 &r_world, const float2 &mouse);
+  /**
+   * For brushes with stroke spacing enabled, move the mouse in steps towards \a final_mouse.
+   * \param pre_hit_world: world-space hit already ray-cast for \a final_mouse by the caller,
+   * sparing the repeated raycast here; std::nullopt ray-casts as usual.
+   */
+  int space_stroke(bContext *C,
+                   wmOperator *op,
+                   float2 final_mouse,
+                   float final_pressure,
+                   std::optional<float3> pre_hit_world = std::nullopt);
 
   void line_end(bContext *C, wmOperator *op, float2 mouse);
   /**
@@ -802,6 +836,25 @@ struct PaintStroke : NonCopyable, NonMovable {
    * \return the number of dabs that were placed.
    */
   int line_stroke_step(bContext *C, wmOperator *op, const float2 &mouse, float pressure);
+  /**
+   * Move the stroke's progress point (the last placed dab) onto the current anchor->cursor line
+   * through \a mouse, keeping its distance from the anchor. With scene spacing and a valid world
+   * anchor this runs on the 3D line and needs \a mouse to ray-cast; otherwise it runs in screen
+   * space.
+   * \param r_world_cursor: receives the world-space position of \a mouse when it was ray-cast, so
+   * the caller can hand it to #space_stroke instead of ray-casting again; std::nullopt otherwise.
+   * \return false when the cursor is not ahead of the progress on the line (or its raycast
+   * missed), meaning the step has nothing to paint.
+   */
+  /**
+   * Turn a running freehand stroke into a Shift+line one when Shift is pressed after the press,
+   * anchoring the line at the last placed dab.
+   * \return true when the stroke was switched.
+   */
+  bool line_switch_from_freehand(const Brush &brush, PaintMode mode);
+  bool line_progress_project(bContext *C,
+                             const float2 &mouse,
+                             std::optional<float3> &r_world_cursor);
   bool curve_end(bContext *C, wmOperator *op);
 
   /** Store the end of this stroke for the next Shift+click line. */

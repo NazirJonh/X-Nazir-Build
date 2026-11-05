@@ -636,6 +636,13 @@ struct PositionUndoStorage : NonMovable {
   TaskPool *compression_task_pool;
   std::atomic<bool> compression_ready = false;
   std::atomic<bool> compression_started = false;
+  /* Restore-phase re-encode (see #restore_compress_fn): an undo/redo swap leaves the swapped-out
+   * "other side" positions decoded here until the background task compresses them back into
+   * #compressed_positions. Bounded by one step's uncompressed positions (the push phase holds the
+   * same magnitude in #nodes_to_compress), and only for the duration of that compression. */
+  Array<Vector<float3>> staged_positions;
+  std::atomic<bool> restore_compression_ready = true;
+  std::atomic<bool> restore_compression_started = false;
   StepData *owner_step_data = nullptr;
 
   explicit PositionUndoStorage(StepData &step_data)
@@ -668,6 +675,17 @@ struct PositionUndoStorage : NonMovable {
     if (!compression_ready.load(std::memory_order_acquire)) {
       BLI_task_pool_work_and_wait(compression_task_pool);
     }
+  }
+
+  void ensure_restore_compression_complete()
+  {
+    if (!restore_compression_started.load(std::memory_order_acquire)) {
+      return;
+    }
+    if (restore_compression_ready.load(std::memory_order_acquire)) {
+      return;
+    }
+    BLI_task_pool_work_and_wait(compression_task_pool);
   }
 
   static void compress_fn(TaskPool * /*pool*/, void *task_data)
@@ -715,6 +733,59 @@ struct PositionUndoStorage : NonMovable {
     data->owner_step_data->undo_size += memory_size;
 
     data->compression_ready.store(true, std::memory_order_release);
+  }
+
+  /* Deferred counterpart of the synchronous re-encode the restores used to run inline: the
+   * swapped-out "other side" positions are compressed here, byte-identically to the inline path,
+   * and the decoded staging is freed as each node is done. Readers of #compressed_positions must
+   * call #ensure_restore_compression_complete first (both restores do, at their top). */
+  static void restore_compress_fn(TaskPool * /*pool*/, void *task_data)
+  {
+#ifdef DEBUG_TIME
+    SCOPED_TIMER_AVERAGED(__func__);
+#endif
+    auto *data = static_cast<PositionUndoStorage *>(task_data);
+    const int nodes_num = data->staged_positions.size();
+
+    struct CompressLocalData {
+      Vector<std::byte> filtered;
+      Vector<std::byte> compressed;
+    };
+    threading::isolate_task([&]() {
+      threading::EnumerableThreadSpecific<CompressLocalData> all_tls;
+      threading::parallel_for(IndexRange(nodes_num), 1, [&](const IndexRange range) {
+        CompressLocalData &local_data = all_tls.local();
+        for (const int i : range) {
+          if (data->staged_positions[i].is_empty()) {
+            continue;
+          }
+          compression::filter_compress<float3>(
+              data->staged_positions[i].as_span(), local_data.filtered, local_data.compressed);
+          data->compressed_positions[i] = local_data.compressed.as_span();
+          data->staged_positions[i].clear_and_shrink();
+        }
+      });
+    });
+
+    data->restore_compression_ready.store(true, std::memory_order_release);
+  }
+
+  /* Swap the just-restored positions out of the restore's thread-local buffer into the staging and
+   * hand the re-encode to the background pool. The buffer contents are exactly what the inline
+   * path used to compress, so the resulting payload is identical. */
+  void restore_compress_defer(Vector<float3> &&positions, const int node_index)
+  {
+    this->staged_positions[node_index] = std::move(positions);
+  }
+
+  void restore_compress_kick()
+  {
+    if (this->staged_positions.is_empty()) {
+      return;
+    }
+    this->restore_compression_started.store(true, std::memory_order_release);
+    this->restore_compression_ready.store(false, std::memory_order_release);
+    BLI_task_pool_push(this->compression_task_pool, restore_compress_fn, this, false, nullptr);
   }
 };
 
@@ -1014,12 +1085,15 @@ static void restore_position_mesh(Object &object,
   std::optional<ShapeKeyData> shape_key_data = ShapeKeyData::from_object(object);
 
   undo_data.ensure_compression_complete();
+  /* The previous restore's background re-encode publishes #compressed_positions; it must be done
+   * before they are read here. */
+  undo_data.ensure_restore_compression_complete();
 
   const int nodes_num = undo_data.unique_verts_nums.size();
+  undo_data.staged_positions.reinitialize(nodes_num);
 
   struct LocalData {
     Vector<std::byte> compress_buffer;
-    Vector<std::byte> filter_buffer;
     Vector<int> indices;
     Vector<float3> positions;
   };
@@ -1087,10 +1161,14 @@ static void restore_position_mesh(Object &object,
 
       modified_verts.fill_indices(verts, true);
 
-      compression::filter_compress<float3>(undo_positions, tls.filter_buffer, tls.compress_buffer);
-      undo_data.compressed_positions[i] = tls.compress_buffer.as_span();
+      /* The swapped-out side stays decoded in the staging and is compressed in the background
+       * (see #restore_compress_fn): the payload is byte-identical to the inline re-encode this
+       * replaces, the undo/redo latency just no longer pays for it. */
+      undo_data.restore_compress_defer(std::move(tls.positions), i);
     }
   });
+
+  undo_data.restore_compress_kick();
 }
 
 static void restore_position_grids(const MutableSpan<float3> positions,
@@ -1099,11 +1177,15 @@ static void restore_position_grids(const MutableSpan<float3> positions,
                                    const MutableSpan<bool> modified_grids)
 {
   PRF_scope(ProfileCategory::Editor);
+  /* The previous restore's background re-encode publishes #compressed_positions; it must be done
+   * before they are read here. (The push phase is already complete: #step_encode waits for it.) */
+  undo_data.ensure_restore_compression_complete();
+
   const int nodes_num = undo_data.compressed_indices.size();
+  undo_data.staged_positions.reinitialize(nodes_num);
 
   struct LocalData {
     Vector<std::byte> compress_buffer;
-    Vector<std::byte> filter_buffer;
     Vector<int> indices;
     Vector<float3> positions;
   };
@@ -1129,10 +1211,14 @@ static void restore_position_grids(const MutableSpan<float3> positions,
 
       modified_grids.fill_indices(grids, true);
 
-      compression::filter_compress<float3>(node_positions, tls.filter_buffer, tls.compress_buffer);
-      undo_data.compressed_positions[i] = tls.compress_buffer.as_span();
+      /* The swapped-out side stays decoded in the staging and is compressed in the background
+       * (see #restore_compress_fn): the payload is byte-identical to the inline re-encode this
+       * replaces, the undo/redo latency just no longer pays for it. */
+      undo_data.restore_compress_defer(std::move(tls.positions), i);
     }
   });
+
+  undo_data.restore_compress_kick();
 }
 
 static void restore_vert_visibility_mesh(Object &object,

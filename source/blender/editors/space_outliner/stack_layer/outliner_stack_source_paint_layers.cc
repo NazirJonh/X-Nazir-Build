@@ -1613,12 +1613,15 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
           filter.filter,
           PaintLayerAddKind::MaskFilter);
     }
-    /* The CPU-computed effects follow: corrections of a row's colour only, so no adjustment or
-     * mask form of them is offered. */
+    /* The CPU-computed effects follow: corrections of a row's colour, or items of its mask while a
+     * mask slot is the one showing. The mask slot of a row is no Outliner row, so the line has to
+     * name the mask form itself: an Add aimed at the row would otherwise land in its colour. No
+     * adjustment form is offered, as it has no map of the row's to read. */
     for (const PaintFilterAddKind &filter : paint_effect_add_kinds) {
       add(effect({filter.identifier, filter.name, filter.description}),
           PaintLayerAddKind::Filter,
-          filter.filter);
+          filter.filter,
+          PaintLayerAddKind::MaskFilter);
     }
     /* Then the same filters as rows of the stack: an adjustment changes the whole stack below it
      * instead of one layer's colour. */
@@ -1639,6 +1642,17 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
       add(with_look(effect({std::string("MASK_") + filter.identifier,
                             std::string("Mask ") + filter.name,
                             "Apply the filter to the active layer's mask coverage"}),
+                    paint_look_for_source(
+                        MA_PAINT_LAYER_SOURCE_FILTER, PaintLookRole::MaskItem, filter.filter)),
+          PaintLayerAddKind::MaskFilter,
+          filter.filter);
+    }
+    /* The mask form of each CPU-computed effect: the effect works on the grey the mask has built up
+     * to it. Folded into the content line by the Effects menu, like the pointwise filters above. */
+    for (const PaintFilterAddKind &filter : paint_effect_add_kinds) {
+      add(with_look(effect({std::string("MASK_") + filter.identifier,
+                            std::string("Mask ") + filter.name,
+                            "Apply the effect to the grey the active layer's mask has built up"}),
                     paint_look_for_source(
                         MA_PAINT_LAYER_SOURCE_FILTER, PaintLookRole::MaskItem, filter.filter)),
           PaintLayerAddKind::MaskFilter,

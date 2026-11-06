@@ -527,7 +527,7 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
    * coverage it lays in #anchor_point_coverage. Owned by this description (see
    * #PaintMaterialCompositeImageLayer::anchor_point_color); null otherwise.
    */
-  std::shared_ptr<ImBuf> anchor_point_slice;
+  std::shared_ptr<ImBuf> grey_buffer;
   std::shared_ptr<ImBuf> anchor_point_coverage;
   /** The reader this correction lays, and whether it reads content or a mask. */
   bUUID anchor_point_reader = {};
@@ -538,8 +538,8 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   Image *anchor_point_coverage_image = nullptr;
   const ImageUser *anchor_point_coverage_iuser = nullptr;
   uint64_t anchor_point_hash = 0;
-  /** See #PaintMaterialCompositeImageLayer::anchor_point_images. */
-  Vector<Image *> anchor_point_images;
+  /** See #PaintMaterialCompositeImageLayer::grey_input_images. */
+  Vector<Image *> grey_input_images;
   /** A Gradient correction's payload; #enabled false for a map or a flat colour. */
   PaintMaterialCompositeGradient gradient;
 };
@@ -561,8 +561,8 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   float opacity = 1.0f;
   /** A MESH_MAP atlas: its alpha is data, so the correction covers by its opacity alone. */
   bool is_mesh_map = false;
-  /** Borrowed from #PaintMaterialCompositeCorrection::anchor_point_slice, which keeps them alive. */
-  ImBuf *anchor_point_slice = nullptr;
+  /** Borrowed from #PaintMaterialCompositeCorrection::grey_buffer, which keeps them alive. */
+  ImBuf *grey_buffer = nullptr;
   ImBuf *anchor_point_coverage = nullptr;
   /** See #PaintMaterialCompositeCorrection::anchor_point_coverage_image. */
   ImBuf *anchor_point_coverage_ibuf = nullptr;
@@ -646,11 +646,19 @@ struct PaintMaterialCompositeMaskItem {
   /** The operator's UV mapping, applied to its map while the buffers are acquired. */
   PaintMaterialCompositeMapping coverage_mapping;
   /**
-   * An Anchor Point slice read as a mask item: the scalar slice as a grey RGBA buffer, owned by this
-   * description (see #PaintMaterialCompositeImageLayer::anchor_point_color). Null for every other
-   * item.
+   * An Anchor Point slice read as a mask item, or a CPU-computed mask effect's grey: the scalar as
+   * a grey RGBA buffer, owned by this description (see #PaintMaterialCompositeImageLayer::
+   * anchor_point_color). The evaluator lays both the same way, a canvas grey by the item's blend,
+   * invert and opacity. Null for every other item.
    */
-  std::shared_ptr<ImBuf> anchor_point_slice;
+  std::shared_ptr<ImBuf> grey_buffer;
+  /**
+   * The CPU-computed kind whose grey this item lays (#PAINT_LAYER_KIND_NEEDS_BAKE), or 0 for
+   * every other item. The grey itself rides #grey_buffer; the field is what the combined
+   * preview's refusal reads, so a stack carrying one falls to the CPU instead of shading the
+   * item as a no-op.
+   */
+  int16_t effect_filter = 0;
   /** The reader this mask item lays, and whether it reads content or a mask. */
   bUUID anchor_point_reader = {};
   int8_t anchor_point_target = 0;
@@ -660,8 +668,8 @@ struct PaintMaterialCompositeMaskItem {
   /** The channel a mask reader of a content point takes its coverage from: the first one the
    * source takes part in (#paint_layer_anchor_point_mask_read_channel). */
   int anchor_point_read_channel = 0;
-  /** See #PaintMaterialCompositeImageLayer::anchor_point_images. */
-  Vector<Image *> anchor_point_images;
+  /** See #PaintMaterialCompositeImageLayer::grey_input_images. */
+  Vector<Image *> grey_input_images;
   /** A Gradient mask item's payload; #enabled false for a map or a constant. */
   PaintMaterialCompositeGradient gradient;
 };
@@ -673,7 +681,7 @@ struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
    * or its mask items) was rendered from. The slice hash does not hold pixels, so the cache has to
    * subscribe to these to see a stroke on the source.
    */
-  Vector<Image *> anchor_point_images;
+  Vector<Image *> grey_input_images;
   /** The reader this layer is, and whether it reads content or a mask. */
   bUUID anchor_point_reader = {};
   int8_t anchor_point_target = 0;
@@ -768,8 +776,8 @@ struct PaintMaterialCompositeMaskBuffer {
   /** See #PaintMaterialCompositeMaskItem::coverage_output. */
   float coverage_output = 1.0f;
   Vector<PaintMaterialCompositeIdColor> coverage_colors;
-  /** Borrowed from #PaintMaterialCompositeMaskItem::anchor_point_slice, which keeps it alive. */
-  ImBuf *anchor_point_slice = nullptr;
+  /** Borrowed from #PaintMaterialCompositeMaskItem::grey_buffer, which keeps it alive. */
+  ImBuf *grey_buffer = nullptr;
   /** A Gradient mask item's payload; #enabled false for a map or a constant. */
   PaintMaterialCompositeGradient gradient;
 };

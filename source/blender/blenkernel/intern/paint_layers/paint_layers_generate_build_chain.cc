@@ -414,7 +414,9 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
     if (!paint_layer_mask_item_lays(ma_, item)) {
       continue;
     }
-    if (paint_layer_effect_is_filter(item)) {
+    /* A CPU-computed effect is no pointwise filter: the graph cannot express it, so it is laid as the
+     * map its bake holds, further down, and lays nothing until that bake stands. */
+    if (paint_layer_effect_is_filter(item) && !paint_layer_mask_item_bakes_effect(item)) {
       /* `M = lerp(M, f(M), opacity)`: the filter works on the coverage so far, as a grey. */
       NodeOutput filtered = current;
       if (this->filter_lay(tree, group, item, -1, filtered)) {
@@ -496,13 +498,25 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
     const bool generates = paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_GENERATES);
     const MaterialPaintLayerChannel *item_record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    /* A CPU-computed mask effect with a fresh bake reads the grey the bake holds, the way a painted
+     * item reads its map. Without one the item lays nothing: the live graph cannot express the
+     * effect, and the bake catches up outside the stroke. */
+    Image *item_effect_bake = paint_layer_mask_effect_bake_map(ma_, item);
+    /* The map the item lays: the effect's baked grey, or the painted record's. One read serves
+     * both, the item's own mapping over it either way. */
+    Image *item_image = item_effect_bake;
+    if (item_image == nullptr && item_record != nullptr) {
+      item_image = item_record->image;
+    }
     bNodeTreeInterfaceSocket **item_opacity_iface = mask_opacity_inputs_.lookup_ptr(&item);
     bNodeSocket *item_opacity = (item_opacity_iface != nullptr) ?
                                     this->group_input_socket(group, **item_opacity_iface) :
                                     nullptr;
-    if ((item_record == nullptr && !from_source && !from_anchor && !generates) ||
-        item_opacity == nullptr)
-    {
+    /* A record carries its flat value even with no map (the value path below), so its bare
+     * presence counts here; the other four are the emitters that answer for the item. */
+    const bool has_map = item_record != nullptr || item_effect_bake != nullptr || from_source ||
+                         from_anchor || generates;
+    if (!has_map || item_opacity == nullptr) {
       continue;
     }
     NodeOutput item_grey;
@@ -569,8 +583,10 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
         nodes.append(item_alpha.node);
       }
     }
-    else if (item_record->image != nullptr) {
-      bNode *item_map = this->image_map_node_add(tree, *item_record->image);
+    else if (item_image != nullptr) {
+      /* A baked effect grey is already canvas grey in the channel's encoding; a painted record's
+       * map reads the same: like a painted item's map, the item's own mapping over it. */
+      bNode *item_map = this->image_map_node_add(tree, *item_image);
       if (item_map == nullptr) {
         discard();
         return {};

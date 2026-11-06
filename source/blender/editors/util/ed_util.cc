@@ -268,6 +268,8 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
     BKE_paint_layers_slice_cache_free_all();
     /* The effect cache is keyed on session UIDs the same way and owns float canvases of its own. */
     BKE_paint_layers_effect_cache_free_all();
+    /* The mask effect cache is keyed on session UIDs the same way. */
+    BKE_paint_layers_mask_effect_cache_free_all();
     /* And its GPU twin, whose entries own textures: a file being replaced frees the materials they
      * name, and an entry that can never be hit again would hold that VRAM until the budget evicts
      * it. A fallback too, if the engine was never torn down. */

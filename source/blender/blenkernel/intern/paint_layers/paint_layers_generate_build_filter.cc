@@ -1580,10 +1580,11 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       /* Map-coverage operators only exist in a mask, where #map_coverage_match_add builds them. */
       break;
     default:
-      /* A CPU-computed effect is left out of the live graph (#correction_lay): it never reaches
-       * this builder, and its result has no node chain to name. The registry decides, so a new one
-       * needs no case here; a new pointwise filter still has to add its own. */
-      BLI_assert(!paint_layer_effect_is_cpu_computed(effect));
+      /* A CPU-computed effect is left out of the live graph: as a correction #correction_lay never
+       * hands it here, and as a mask item the grey it computes is read like a map once its bake
+       * exists -- until then the item lays nothing, so false is its answer too. The registry
+       * decides, so a new one needs no case here. */
+      BLI_assert(!(channel >= 0 && paint_layer_effect_is_cpu_computed(effect)));
       break;
   }
   return false;

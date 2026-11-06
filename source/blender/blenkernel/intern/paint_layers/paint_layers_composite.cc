@@ -444,7 +444,7 @@ static void composite_mask_items_describe(
         }
         item.iuser = nullptr;
         item.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, mask, read_channel);
-        BKE_paint_layers_anchor_point_slice_images(ma, mask, item.anchor_point_images);
+        BKE_paint_layers_anchor_point_slice_images(ma, mask, item.grey_input_images);
       }
       else {
         /* In describe-only mode the reader keeps its descriptor, hash and subscriptions; the
@@ -458,12 +458,12 @@ static void composite_mask_items_describe(
             continue;
           }
           const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, mask);
-          item.anchor_point_slice = (ref.target == PaintLayerAnchorPointTarget::Mask) ?
+          item.grey_buffer = (ref.target == PaintLayerAnchorPointTarget::Mask) ?
                                         std::move(slice_color) :
                                         std::move(slice_coverage);
         }
         item.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, mask, read_channel);
-        BKE_paint_layers_anchor_point_slice_images(ma, mask, item.anchor_point_images);
+        BKE_paint_layers_anchor_point_slice_images(ma, mask, item.grey_input_images);
       }
       item.blend = CompositeBlend(
           BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
@@ -499,12 +499,35 @@ static void composite_mask_items_describe(
       continue;
     }
     if (paint_layer_effect_is_filter(mask)) {
-      /* A filter changes the coverage so far; it owns no map or grey and no record. A NEEDS_BAKE
-       * kind computes itself only through its row's effect cache, which a mask item has no path
-       * to: a corrupted item of one is skipped, not silently described with the parameters the
-       * cache never sees -- those carry no colour. */
-      BLI_assert(!paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_NEEDS_BAKE));
+      /* A filter changes the coverage so far; it owns no map or grey and no record. A CPU-computed
+       * kind lays its own grey instead: the mask effect cache computes the mask built up to the
+       * item with the kernel over it, and the item reads like a painted map with its invert, blend
+       * and opacity. In describe-only the grey is left out and the kind named, so the combined
+       * preview refuses the stack instead of shading the item as a no-op. */
       if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_NEEDS_BAKE)) {
+        PaintMaterialCompositeMaskItem effect;
+        effect.opacity = BKE_paint_layers_effective_opacity(mask);
+        effect.blend = CompositeBlend(
+            BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
+        effect.invert = paint_layer_mask_item_inverted(mask);
+        effect.effect_filter = mask.kind_subtype;
+        /* A fresh bake stands in, the way a substituted row's does: its map is read like a painted
+         * item's, the item's own mapping over it. Without one the grey is computed through the mask
+         * effect cache from the mask built up to the item. */
+        if (Image *bake_map = paint_layer_mask_effect_bake_map(ma, mask)) {
+          effect.image = bake_map;
+          composite_mapping_describe(ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, effect.mapping);
+        }
+        else {
+          effect.grey_buffer = paint_layer_mask_effect_buffer_get(
+              ma, layer, mask, describe_only, &effect.grey_input_images);
+          if (!describe_only && effect.grey_buffer == nullptr) {
+            /* The input could not be rendered: the item is left out, as the generator leaves a
+             * filter it cannot express out of the live graph. */
+            continue;
+          }
+        }
+        r_items.append(effect);
         continue;
       }
       PaintMaterialCompositeMaskItem filter;
@@ -747,7 +770,7 @@ static void composite_effect_append(
           !BKE_paint_layers_slice_render(ma,
                                          effect,
                                          channel,
-                                         &correction.anchor_point_slice,
+                                         &correction.grey_buffer,
                                          &correction.anchor_point_coverage,
                                          slice_rect,
                                          dimensions_only))
@@ -755,7 +778,7 @@ static void composite_effect_append(
         return;
       }
       correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
-      BKE_paint_layers_anchor_point_slice_images(ma, effect, correction.anchor_point_images);
+      BKE_paint_layers_anchor_point_slice_images(ma, effect, correction.grey_input_images);
     }
   }
   else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES)) {
@@ -919,7 +942,7 @@ bool composite_image_layer_build(const Material &ma,
      * size; a caller that later falls back to the CPU rebuilds the full description, which refuses
      * it there. */
     out.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, layer, channel);
-    BKE_paint_layers_anchor_point_slice_images(ma, layer, out.anchor_point_images);
+    BKE_paint_layers_anchor_point_slice_images(ma, layer, out.grey_input_images);
     /* The reader's own corrections and mask go on below like any row's, so a point inside this
      * row slices them too. */
     reader_live = true;
@@ -1399,14 +1422,14 @@ void PaintLayersMaskSampler::tile_acquire(const int tile_number,
   tile.coverage_samples.resize(item_count, nullptr);
   for (const int i : items_.index_range()) {
     const PaintMaterialCompositeMaskItem &item = items_[i];
-    if (item.anchor_point_slice != nullptr) {
+    if (item.grey_buffer != nullptr) {
       /* A slice is already in canvas space and the description keeps its buffer alive: take an
        * ImBuf reference so the tile's destructor can release it like any other acquired map. A
        * slice of another size than the tile is not sampled, as for a painted map below. */
-      if (item.anchor_point_slice->x == ref_width && item.anchor_point_slice->y == ref_height) {
-        IMB_refImBuf(item.anchor_point_slice.get());
-        tile.items[i] = item.anchor_point_slice.get();
-        tile.item_samples[i] = item.anchor_point_slice->float_data();
+      if (item.grey_buffer->x == ref_width && item.grey_buffer->y == ref_height) {
+        IMB_refImBuf(item.grey_buffer.get());
+        tile.items[i] = item.grey_buffer.get();
+        tile.item_samples[i] = item.grey_buffer->float_data();
       }
     }
     else if (item.image != nullptr) {
@@ -2045,14 +2068,14 @@ void BKE_paint_layers_effect_input_images(const PaintMaterialCompositeImageLayer
   for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
     add(correction.image);
     add(correction.anchor_point_coverage_image);
-    for (Image *image : correction.anchor_point_images) {
+    for (Image *image : correction.grey_input_images) {
       add(image);
     }
   }
   for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
     add(item.image);
     add(item.coverage_image);
-    for (Image *image : item.anchor_point_images) {
+    for (Image *image : item.grey_input_images) {
       add(image);
     }
   }
@@ -2109,7 +2132,7 @@ static bool paint_layer_effect_compute(const Material &ma,
   /* The versions are taken after the render: an edit that landed while it ran is read next time. */
   Vector<Image *> images;
   BKE_paint_layers_effect_input_images(entry, images);
-  r_synced = anchor_slice_sources_snapshot(images);
+  r_synced = map_sources_snapshot(images);
   r_color = std::move(color);
   perf_total.note("kind=%d size=%dx%d region=full", int(effect.kind_subtype), width, height);
   return true;
@@ -2203,58 +2226,17 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                            effect.marker,
                            channel,
                            paint_layer_effect_hash(effect, channel)};
-  {
-    std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
-    for (int i = 0; i < int(g_paint_effect_cache.entries.size()); i++) {
-      EffectCacheEntry &entry = g_paint_effect_cache.entries[i];
-      if (!paint_layer_effect_key_equal(entry.key, key)) {
-        continue;
-      }
-      if (entry.width != width || entry.height != height) {
-        break;
-      }
-      rcti region;
-      if (anchor_slice_changes(entry.synced, images, region) != ePixelChange::None) {
-        break;
-      }
-      /* Move to the back: the vector is the LRU order. The buffers go out before the entry goes
-       * back, so the caller keeps them alive through its own reference whatever the cache does
-       * next. */
-      std::shared_ptr<ImBuf> color = entry.color;
-      g_paint_effect_cache.touch(i);
-      return color;
-    }
-  }
-
-  /* The compute runs outside the mutex: the input's own renders -- a nested slice, or a nested
-   * effect taking this same mutex -- must not deadlock against it. */
-  std::shared_ptr<ImBuf> color;
-  Vector<AnchorSliceSource> synced;
-  if (!paint_layer_effect_compute(ma, row, effect, channel, color, synced)) {
-    return {};
-  }
-  const size_t bytes = anchor_slice_color_bytes(color.get());
-
-  std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
-  /* An entry of the same effect with other parameters is stale -- the description can only ever ask
-   * for the parameters the effect carries now -- so it is replaced rather than kept until the LRU
-   * evicts it. A buffer still shared with a live description keeps its pixels through its own
-   * reference. */
-  const auto no_release = [](EffectCacheEntry &) {};
-  g_paint_effect_cache.drop_rekeyed(key, no_release);
-  if (bytes <= g_paint_effect_cache_budget) {
-    g_paint_effect_cache.enforce_budget(bytes, g_paint_effect_cache_budget, no_release);
-    EffectCacheEntry entry;
-    entry.key = key;
-    entry.width = color->x;
-    entry.height = color->y;
-    entry.color = color;
-    entry.synced = std::move(synced);
-    entry.bytes = bytes;
-    g_paint_effect_cache.total_bytes += bytes;
-    g_paint_effect_cache.entries.append(std::move(entry));
-  }
-  return color;
+  return paint_layer_effect_cache_get_or_compute(
+      g_paint_effect_cache,
+      g_paint_effect_cache_mutex,
+      key,
+      width,
+      height,
+      images,
+      g_paint_effect_cache_budget,
+      [&](std::shared_ptr<ImBuf> &r_color, Vector<PaintLayerEffectSource> &r_synced) {
+        return paint_layer_effect_compute(ma, row, effect, channel, r_color, r_synced);
+      });
 }
 
 /** \} */
@@ -2302,7 +2284,7 @@ bool BKE_paint_layers_slice_render(const Material &ma,
   anchor_slice_images_get(ma, reader, images);
   /* Read before anything is rendered: an edit that lands while the slice renders is then seen as
    * newer than the entry, and costs one more update rather than a stale slice. */
-  Vector<AnchorSliceSource> sources_now = anchor_slice_sources_snapshot(images);
+  Vector<AnchorSliceSource> sources_now = map_sources_snapshot(images);
 
   /* An entry that needs work is taken out of the cache while it is worked on, so no other thread
    * can pick up buffers that are being written; it goes back afterwards. */
@@ -2317,7 +2299,7 @@ bool BKE_paint_layers_slice_render(const Material &ma,
       if (!anchor_slice_key_equal(g_anchor_slice_cache.entries[i].key, key)) {
         continue;
       }
-      change = anchor_slice_changes(g_anchor_slice_cache.entries[i].synced, images, region);
+      change = map_sources_changes(g_anchor_slice_cache.entries[i].synced, images, region);
       if (change == ePixelChange::None) {
         /* LRU: move the hit to the newest end. The buffers stay alive through the shared pointers
          * the caller receives, whatever the cache does next. */
@@ -2678,6 +2660,16 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
     }
   }
   for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+    /* A CPU-computed mask effect's grey is computed on the CPU: no pass lays it yet, so the stack
+     * falls back rather than shading the item as a no-op. The field names the kind, so a new one
+     * needs no edit here. */
+    if (item.opacity > 0.0f && item.effect_filter != 0) {
+      const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
+                                                             item.effect_filter);
+      if (kind != nullptr) {
+        return paint_layer_cpu_computed_reason(*kind);
+      }
+    }
     if (item.opacity > 0.0f && item.gradient.enabled) {
       return "a Gradient mask item is not laid by the GPU path";
     }

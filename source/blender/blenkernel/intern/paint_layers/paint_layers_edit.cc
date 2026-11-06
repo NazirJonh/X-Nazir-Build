@@ -63,6 +63,16 @@ std::string BKE_paint_layers_unique_default_name(const Material &ma, const Strin
   return std::string(base) + " " + std::to_string(next);
 }
 
+/** The name a new filter goes by: the caller's own, or the kind's numbered among \a list. */
+static std::string numbered_filter_name(const ListBaseT<MaterialPaintLayer> &list,
+                                        const PaintLayerKindInfo &kind,
+                                        const char *name)
+{
+  return name != nullptr ? std::string(name) :
+                           std::string(kind.name) + " " +
+                               std::to_string(paint_layer_name_number_max(list, kind.name) + 1);
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -263,6 +273,24 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
         ma, owner, name.c_str(), *params.bmain, params.curve_patch_brush);
   }
   if (params.kind == PaintLayerAddKind::Filter) {
+    /* An effect aimed at the mask -- the base mask or one of its items -- is a mask item: it works
+     * on the grey the mask has built up to it, not the row's colour. The kind table allows the same
+     * kinds in both places, so this is a routing decision, not a kind's. The kind names the default
+     * in both places, so it is resolved once here. */
+    const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
+                                                           params.filter);
+    if (kind == nullptr) {
+      return nullptr;
+    }
+    if (params.anchor != nullptr) {
+      if (MaterialPaintLayer *mask_owner = BKE_paint_layers_mask_item_owner(ma, *params.anchor)) {
+        /* Numbered among the mask items of this one row, the way a content correction is numbered
+         * among the corrections of its own. */
+        const std::string name = numbered_filter_name(mask_owner->mask_stack, *kind, params.name);
+        return BKE_paint_layers_mask_filter_add(
+            ma, mask_owner, eMaterialPaintLayerFilter(params.filter), name.c_str());
+      }
+    }
     /* Like a correction, an Add aimed at one means another on the row it hangs on. */
     MaterialPaintLayer *owner = params.anchor;
     if (owner != nullptr) {
@@ -273,17 +301,7 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     if (owner == nullptr) {
       return nullptr;
     }
-    const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
-                                                           params.filter);
-    if (kind == nullptr) {
-      return nullptr;
-    }
-    const std::string name = (params.name != nullptr) ?
-                                 std::string(params.name) :
-                                 std::string(kind->name) + " " +
-                                     std::to_string(
-                                         paint_layer_name_number_max(owner->effects, kind->name) +
-                                         1);
+    const std::string name = numbered_filter_name(owner->effects, *kind, params.name);
     return BKE_paint_layers_filter_add(
         ma, owner, eMaterialPaintLayerFilter(params.filter), name.c_str());
   }
@@ -359,12 +377,7 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     {
       return nullptr;
     }
-    const std::string name = (params.name != nullptr) ?
-                                 std::string(params.name) :
-                                 std::string(kind->name) + " " +
-                                     std::to_string(
-                                         paint_layer_name_number_max(owner->mask_stack, kind->name) +
-                                         1);
+    const std::string name = numbered_filter_name(owner->mask_stack, *kind, params.name);
     return BKE_paint_layers_mask_filter_add(
         ma, owner, eMaterialPaintLayerFilter(params.filter), name.c_str());
   }

@@ -84,7 +84,7 @@ struct PaintLayersHeightWonCache {
  *
  * \param describe_only: describe the stack without rendering any Anchor Point slice: every live
  *        reader keeps its descriptor and the maps its slice subscribes to, but gains no
- *        `anchor_point_color`/`anchor_point_coverage`/`anchor_point_slice` buffer. The GPU
+ *        `anchor_point_color`/`anchor_point_coverage`/`grey_buffer` buffer. The GPU
  *        Combined preview asks for this, since it captures the slices into its own slots; a CPU
  *        caller (the composite, a bake, the Image Editor) must leave it false. The slice cache is
  *        not populated in this mode.
@@ -133,6 +133,16 @@ void BKE_paint_layers_effect_cache_free_all();
 
 /** Drop the cached effect buffers of \a ma, keyed by its session UID like the slices are. */
 void BKE_paint_layers_effect_cache_free_material(const Material &ma);
+
+/**
+ * Drop every cached mask-effect grey (a CPU-computed kind as a mask item). The cache owns float
+ * canvases of its own, so it has to be emptied before the leak check at exit, and with the rest of
+ * the session when a file is loaded: its entries name materials of the file going away.
+ */
+void BKE_paint_layers_mask_effect_cache_free_all();
+
+/** Drop the cached mask-effect greys of \a ma, keyed by its session UID like the slices are. */
+void BKE_paint_layers_mask_effect_cache_free_material(const Material &ma);
 
 /**
  * Composite \a channel of \a ma into \a r_dst, which must be byte RGBA of the stack's dimensions.
@@ -572,13 +582,16 @@ enum class PaintLayerEffectGpuState : uint8_t {
 };
 
 /**
- * The two GPU-only fingerprints that key a GPU effect cache entry beyond the CPU effect hash. Both
- * are read from the description alone, both are zero when they describe nothing (a lone effect on a
- * plain map input), and the CPU cache leaves them zero so they cannot split a CPU key.
+ * The two fingerprints that key an effect cache entry beyond the effect's own hash. Both are read
+ * from the description alone, both are zero when they describe nothing (a lone effect on a plain
+ * map input), and the row effect cache leaves them zero so they cannot split a key; the GPU cache
+ * fills both, and the mask effect cache (CPU) fills the chain half with the mask built up to the
+ * item.
  */
 struct PaintLayerEffectGpuKeyExtras {
   /** The ordered fingerprint of the effects that precede this one in its row, whose GPU results
-   * feed its input (see #BKE_paint_layers_effect_chain_hash). */
+   * feed its input (see #BKE_paint_layers_effect_chain_hash). For a mask effect item, the hash of
+   * the mask built up to it. */
   uint64_t chain_hash = 0;
   /** The fingerprint of the input's non-map scalar content (see
    * #BKE_paint_layers_effect_input_scalar_hash). */

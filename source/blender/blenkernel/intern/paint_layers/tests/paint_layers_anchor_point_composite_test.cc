@@ -277,7 +277,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, corr_reader_always_reads_bake_maps)
   ASSERT_NE(correction, nullptr);
   EXPECT_EQ(correction->image, reader->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
   EXPECT_EQ(correction->anchor_point_coverage_image, reader->bake->coverage);
-  EXPECT_EQ(correction->anchor_point_slice, nullptr);
+  EXPECT_EQ(correction->grey_buffer, nullptr);
   EXPECT_FLOAT_EQ(correction->opacity, 1.0f)
       << "the coverage map already holds the reader's opacity; it is not applied twice";
 
@@ -314,7 +314,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, corr_reader_never_renders_live)
   ASSERT_NE(correction, nullptr);
   EXPECT_EQ(correction->image, nullptr);
   EXPECT_EQ(correction->anchor_point_coverage_image, nullptr);
-  ASSERT_NE(correction->anchor_point_slice, nullptr);
+  ASSERT_NE(correction->grey_buffer, nullptr);
   ASSERT_NE(correction->anchor_point_coverage, nullptr);
 }
 
@@ -482,7 +482,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, baked_and_live_correction_reader_mat
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
   const PaintMaterialCompositeCorrection *described = find_correction_reader(layers, reader->marker);
   ASSERT_NE(described, nullptr);
-  EXPECT_EQ(described->anchor_point_slice, nullptr) << "the description reads the baked maps";
+  EXPECT_EQ(described->grey_buffer, nullptr) << "the description reads the baked maps";
   EXPECT_EQ(described->image, reader->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
   EXPECT_EQ(described->anchor_point_coverage_image, reader->bake->coverage);
 
@@ -529,7 +529,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, baked_and_live_mask_reader_match)
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
   const PaintMaterialCompositeMaskItem *described = find_mask_reader(layers, reader->marker);
   ASSERT_NE(described, nullptr);
-  EXPECT_EQ(described->anchor_point_slice, nullptr) << "the description reads the baked map";
+  EXPECT_EQ(described->grey_buffer, nullptr) << "the description reads the baked map";
   EXPECT_EQ(described->image, reader->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
 
   Vector<float> baked;
@@ -1402,7 +1402,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, composite_cache_sees_source_stroke)
   BKE_paint_material_composite_cache_ensure(
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, hash, &second_revision);
   EXPECT_NE(second_revision, first_revision)
-      << "the reader's slice subscribes to the source map through anchor_point_images";
+      << "the reader's slice subscribes to the source map through grey_input_images";
 }
 
 /** \} */
@@ -1913,7 +1913,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, describe_only_reader_has_descriptor_
   EXPECT_EQ(layer->anchor_point_target, int8_t(PaintLayerAnchorPointTarget::Content));
   EXPECT_EQ(layer->anchor_point_hash,
             paint_layer_anchor_point_slice_hash(*ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
-  EXPECT_FALSE(layer->anchor_point_images.is_empty())
+  EXPECT_FALSE(layer->grey_input_images.is_empty())
       << "a describe-only reader still subscribes to the maps its slice is rendered from";
   EXPECT_EQ(layer->anchor_point_color, nullptr) << "no CPU slice is rendered for the GPU path";
   EXPECT_EQ(layer->anchor_point_coverage, nullptr);
@@ -1970,7 +1970,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, full_description_unchanged_by_descri
       described, reader->marker);
   ASSERT_NE(described_layer, nullptr);
   EXPECT_EQ(described_layer->anchor_point_hash, full_layer->anchor_point_hash);
-  EXPECT_EQ(described_layer->anchor_point_images, full_layer->anchor_point_images);
+  EXPECT_EQ(described_layer->grey_input_images, full_layer->grey_input_images);
   EXPECT_EQ(described_layer->opacity, full_layer->opacity);
   EXPECT_EQ(described_layer->enabled, full_layer->enabled);
   EXPECT_EQ(described_layer->blend, full_layer->blend);

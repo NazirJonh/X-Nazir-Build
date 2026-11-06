@@ -269,9 +269,12 @@ set(SRC
   intern/paint_layers/paint_layers_anchor_point.cc
   intern/paint_layers/paint_layers_asset.cc
   intern/paint_layers/paint_layers_bake.cc
+  intern/paint_layers/paint_layers_bake_mask_effect.cc
+  intern/paint_layers/paint_layers_bake_intern.hh
   intern/paint_layers/paint_layers_copy.cc
   intern/paint_layers/paint_layers_blend_tier.cc
   intern/paint_layers/paint_layers_kind.cc
+  intern/paint_layers/paint_layers_mask_effect.cc
   intern/paint_layers/paint_layers_material_live.cc
   intern/paint_layers/paint_layers_composite.cc
   intern/paint_layers/paint_layers_composite_height.cc

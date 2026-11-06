@@ -1497,7 +1497,7 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       continue;
     }
     if ((correction.ibuf == nullptr && !correction.has_constant_color &&
-         correction.anchor_point_slice == nullptr && !correction.gradient.enabled) ||
+         correction.grey_buffer == nullptr && !correction.gradient.enabled) ||
         correction.opacity <= 0.0f)
     {
       continue;
@@ -1506,10 +1506,10 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     Vector<float> anchor_coverage_tile;
     const float *anchor_slice = nullptr;
     const float *anchor_coverage = nullptr;
-    if (correction.anchor_point_slice != nullptr) {
+    if (correction.grey_buffer != nullptr) {
       anchor_slice_storage.resize(count * 4);
       composite_decode_tile(
-          correction.anchor_point_slice, nullptr, tile, anchor_slice_storage.data());
+          correction.grey_buffer, nullptr, tile, anchor_slice_storage.data());
       anchor_slice = anchor_slice_storage.data();
       if (correction.anchor_point_coverage != nullptr) {
         anchor_coverage_tile.resize(count * 4);
@@ -1819,8 +1819,8 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
     {
       return false;
     }
-    if (item.anchor_point_slice != nullptr &&
-        !composite_mask_ibuf_is_valid(item.anchor_point_slice, width, height))
+    if (item.grey_buffer != nullptr &&
+        !composite_mask_ibuf_is_valid(item.grey_buffer, width, height))
     {
       return false;
     }
@@ -1834,8 +1834,8 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
     {
       return false;
     }
-    if (correction.anchor_point_slice != nullptr &&
-        !composite_ibuf_is_rgba(correction.anchor_point_slice, width, height))
+    if (correction.grey_buffer != nullptr &&
+        !composite_ibuf_is_rgba(correction.grey_buffer, width, height))
     {
       return false;
     }
@@ -2829,11 +2829,11 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         buffer.ibuf = composite_buffer_to_eval_grid(buffer.ibuf, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
-      else if (item.anchor_point_slice != nullptr) {
+      else if (item.grey_buffer != nullptr) {
         /* A slice is already in canvas space and scene linear; the description owns the buffer. A
          * reduced grid reads an owned resample of it, the slice itself staying untouched. */
         buffer.ibuf = composite_buffer_to_eval_grid(
-            item.anchor_point_slice.get(), ref_width, ref_height, r_locks);
+            item.grey_buffer.get(), ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
       buffer.map_coverage = item.map_coverage;
@@ -2865,7 +2865,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
     }
     for (const PaintMaterialCompositeCorrection &correction : image_layer.content_corrections) {
       if (correction.image == nullptr && !correction.has_constant_color && correction.filter == 0 &&
-          correction.anchor_point_slice == nullptr && !correction.gradient.enabled)
+          correction.grey_buffer == nullptr && !correction.gradient.enabled)
       {
         continue;
       }
@@ -2880,11 +2880,11 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
                 std::begin(buffer.filter_params));
       buffer.blend = correction.blend;
       buffer.opacity = correction.opacity;
-      if (correction.anchor_point_slice != nullptr) {
+      if (correction.grey_buffer != nullptr) {
         /* A slice is already in canvas space and scene linear; the description owns both buffers.
          * A reduced grid reads owned resamples of them, the slices staying untouched. */
-        buffer.anchor_point_slice = composite_buffer_to_eval_grid(
-            correction.anchor_point_slice.get(), ref_width, ref_height, r_locks);
+        buffer.grey_buffer = composite_buffer_to_eval_grid(
+            correction.grey_buffer.get(), ref_width, ref_height, r_locks);
         buffer.anchor_point_coverage = composite_buffer_to_eval_grid(
             correction.anchor_point_coverage.get(), ref_width, ref_height, r_locks);
       }
@@ -2921,7 +2921,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         }
       }
       /* The flat colour belongs to the chain above: a slice, a map or a gradient has none. */
-      if (correction.anchor_point_slice == nullptr && correction.image == nullptr &&
+      if (correction.grey_buffer == nullptr && correction.image == nullptr &&
           !correction.gradient.enabled) {
         buffer.has_constant_color = true;
         copy_v4_v4(buffer.constant_color, correction.constant_color);
@@ -3676,17 +3676,17 @@ static void composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>
     r_images.append(layer.mask_image);
     /* An Anchor Point slice carries no pixels in the hash; a stroke on its source reaches the cache
      * through the source's maps. */
-    r_images.extend(layer.anchor_point_images);
+    r_images.extend(layer.grey_input_images);
     for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
       r_images.append(item.image);
-      r_images.extend(item.anchor_point_images);
+      r_images.extend(item.grey_input_images);
       /* A coverage operator reads its own map, so an edit to it must be seen by the cache too. */
       r_images.append(item.coverage_image);
     }
     for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
       r_images.append(correction.image);
       r_images.append(correction.anchor_point_coverage_image);
-      r_images.extend(correction.anchor_point_images);
+      r_images.extend(correction.grey_input_images);
       /* A CPU-computed effect reads the row's maps through the effect cache, no Image of its own:
        * its input's maps are carried so a stroke on one reaches the cache. */
       r_images.extend(correction.effect_images);

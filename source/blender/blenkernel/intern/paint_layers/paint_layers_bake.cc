@@ -8,7 +8,8 @@
  * The row bake of a layered material: the cache key, the service maps the generator and the CPU
  * substitute for a row's live subtree, the planner that fills them and the worker job that does
  * the heavy ones off the main thread. The description and its edits live in `paint_layers.cc`; the
- * helpers both files need are in `paint_layers_intern.hh`.
+ * helpers both files need are in `paint_layers_intern.hh`, the bake's own in
+ * `paint_layers_bake_intern.hh`.
  *
  * A baked row is a *cache*: the description plus its live maps stay what the row is, and the bake is
  * read instead of the subtree only while its stored hash matches the description and no pixel of a
@@ -60,6 +61,7 @@
 #include "BKE_scene.hh"
 
 #include "BLI_hash.hh"
+#include "BLI_function_ref.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
@@ -86,6 +88,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_uuid_types.h"
 
+#include "paint_layers_bake_intern.hh"
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
 
@@ -498,12 +501,15 @@ int BKE_paint_layers_bake_mode_get(const MaterialPaintLayer &layer)
 }
 
 /**
- * Whether \a layer is a row \a ma keeps a bake for: a row of its stack, or a content or mask
- * correction that reads a material, whose maps are rendered from the source like a Material row's.
+ * Whether \a layer is a row \a ma keeps a bake for: a row of its stack, a content or mask
+ * correction that reads a material, whose maps are rendered from the source like a Material row's,
+ * or a mask effect item, whose grey is a cache of its own keyed under the item's marker.
  */
 static bool bake_row_owned(Material &ma, const MaterialPaintLayer &layer)
 {
   return BKE_paint_layers_owner_list(ma, layer) != nullptr ||
+         (paint_layer_mask_item_bakes_effect(layer) &&
+          BKE_paint_layers_mask_item_owner(ma, layer) != nullptr) ||
          ((paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) ||
            paint_layer_kind_reads_anchor_point(layer)) &&
           (BKE_paint_layers_correction_owner(ma, layer) != nullptr ||
@@ -724,10 +730,10 @@ static void bake_collect_slice_images(const Material &ma,
  * for a row that reads a material, the textures that material shows live. A reader also brings the
  * maps of the slice it reads (see #bake_collect_slice_images).
  */
-static void bake_collect_row_maps(const Material &ma,
-                                  const MaterialPaintLayer &row,
-                                  Vector<Image *> &r_images,
-                                  Vector<bUUID> &visited)
+void bake_collect_row_maps(const Material &ma,
+                           const MaterialPaintLayer &row,
+                           Vector<Image *> &r_images,
+                           Vector<bUUID> &visited)
 {
   const auto add = [&](Image *image) {
     if (image != nullptr && !r_images.contains(image)) {
@@ -839,6 +845,14 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
                                                  Vector<Image *> &r_images,
                                                  const PaintLayerBakeScope scope)
 {
+  if (paint_layer_mask_item_bakes_effect(layer)) {
+    /* The grey the item bakes reads the mask built up to it: the base mask's and every item before
+     * it's own maps, a nested reader among them bringing its slice's. */
+    if (const MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, layer)) {
+      BKE_paint_layers_mask_effect_input_images(ma, *owner, layer, r_images);
+    }
+    return;
+  }
   if (paint_layer_kind_reads_anchor_point(layer)) {
     Vector<bUUID> visited;
     bake_collect_slice_images(ma, layer, r_images, visited);
@@ -1080,7 +1094,7 @@ bool BKE_paint_layers_bake_changed_region(const Material &ma,
 /* Whether the row's bake subscription reports pending pixel edits. Unlike
  * #BKE_paint_layers_bake_changed_region, a full-update mark counts too: it sets
  * #BakeLayerSubscription::changed with no rectangle (#BKE_paint_layers_bake_notice_changes). */
-static bool bake_row_subscription_changed(const Material &ma, const MaterialPaintLayer &layer)
+bool bake_row_subscription_changed(const Material &ma, const MaterialPaintLayer &layer)
 {
   BakeLayerSubscription entry;
   return bake_subscription_find(ma, layer.marker, entry) && entry.changed;
@@ -1227,7 +1241,13 @@ static uint64_t bake_hash_layer(uint64_t h,
                     uint16_t(layer.flag & ~(int(MA_PAINT_LAYER_ENABLED) |
                                             int(MA_PAINT_LAYER_LOCKED))));
   h = bake_hash_mix(h, uint8_t(layer.role));
-  if (scope != PaintLayerBakeScope::ContentOnly) {
+  /* Whether the opacity stays live over the cached map rather than being folded into it: a
+   * content-only bake holds the content alone, and a mask effect's grey is cached before its own
+   * opacity -- the reader lays that live over the map. A child is rendered inside the parent's
+   * picture, so the parent's opacity is baked with it. */
+  const bool opacity_is_live_over_map = scope == PaintLayerBakeScope::ContentOnly ||
+                                        (paint_layer_mask_item_bakes_effect(layer) && !is_child);
+  if (!opacity_is_live_over_map) {
     h = bake_hash_float(h, layer.opacity);
   }
   /* Only the fact that the mapping applies: such a row stays live and is never baked
@@ -1315,6 +1335,14 @@ static uint64_t bake_hash_layer(uint64_t h,
      * the subscription's). A cache for one channel therefore follows an edit above its marker. */
     for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
       h = bake_hash_mix(h, paint_layer_anchor_point_slice_hash(ma, layer, channel));
+    }
+  }
+  if (paint_layer_mask_item_bakes_effect(layer)) {
+    /* The grey the item bakes reads the mask built up to it: its description folds in. Zero when
+     * the item is in no mask stack, which folds nothing in -- the mix step stays here, beside the
+     * other hashes. */
+    if (const uint64_t input_hash = bake_mask_effect_input_hash(ma, layer)) {
+      h = bake_hash_mix(h, input_hash);
     }
   }
   /* A kind's parameters (a filter's, a coverage operator's) change the pixels. A ramp filter keeps
@@ -1621,8 +1649,7 @@ static bool bake_image_is_float(Image &image)
  * different format from the row it replaces. Every other row bakes a map it already holds (or a
  * flat value), which is a byte texture like the maps around it.
  */
-static bool bake_channel_needs_float(const MaterialPaintLayer &layer,
-                                     const MaterialPaintChannelInfo &info)
+bool bake_channel_needs_float(const MaterialPaintLayer &layer, const MaterialPaintChannelInfo &info)
 {
   if (info.map_float) {
     return true;
@@ -1638,13 +1665,13 @@ static bool bake_channel_needs_float(const MaterialPaintLayer &layer,
  *                  writers index one buffer or the other, and a byte map read as float (or back)
  *                  would be a different picture.
  */
-static Image *bake_service_image(Main &bmain,
-                                 MaterialPaintLayer &layer,
-                                 const int channel,
-                                 const int size,
-                                 const bool is_color,
-                                 const bool floatbuf,
-                                 const int object_num)
+Image *bake_service_image(Main &bmain,
+                          MaterialPaintLayer &layer,
+                          const int channel,
+                          const int size,
+                          const bool is_color,
+                          const bool floatbuf,
+                          const int object_num)
 {
   const bool tiled = object_num > 0;
   Image **slot = bake_service_slot(layer, channel);
@@ -1769,17 +1796,22 @@ static void bake_pixel_store_byte(const float rgba[4],
 }
 
 /**
- * Write \a values into \a image, or only into \a rect (x0, y0, x1, y1 in image pixels) when given.
+ * Write \a image, or only \a rect (x0, y0, x1, y1 in image pixels) when given, from a source that
+ * fills one row at a time: \a fill_row is called per row with the row's \a y and the buffer's
+ * width, and fills \a width straight RGBA floats into \a r_row. A row scratch is all the source
+ * needs -- a map's width wide, nothing next to the map itself -- so a source that is sampled as it
+ * is written never holds a second copy of the whole picture.
  *
  * The map's own buffer decides the format: a byte map stores the value encoded into its colorspace,
  * a float map stores it as it came, which is what a precise channel of a generated row is for.
  * Shared with the bake tests, which hold the worker's stored-buffer write to this same encoding.
  */
-void bake_write_image(Image &image,
-                      const float *values,
-                      const bool is_color,
-                      const int *rect,
-                      const int tile_number /* = 0 */)
+void bake_write_image_rows(
+    Image &image,
+    const bool is_color,
+    const int *rect,
+    const int tile_number,
+    const FunctionRef<void(const int y, const int width, float *r_row)> fill_row)
 {
   ImageUser iuser{};
   iuser.tile = tile_number;
@@ -1802,24 +1834,47 @@ void bake_write_image(Image &image,
   if (floats != nullptr) {
     /* A float buffer is premultiplied -- the composite and the renderer both read it that way -- so
      * the straight colour it is given is stored multiplied by the alpha that travels with it. */
+    Vector<float> row(int64_t(width) * 4);
     for (int y = y0; y < y1; y++) {
+      fill_row(y, width, row.data());
       for (int x = x0; x < x1; x++) {
         const int64_t i = int64_t(y) * width + x;
-        bake_pixel_store_float(&values[i * 4], &floats[i * 4]);
+        bake_pixel_store_float(&row[x * 4], &floats[i * 4]);
       }
     }
   }
   else if (uchar *pixels = ibuf->byte_data_for_write()) {
     const auto *colorspace = ibuf->byte_buffer.colorspace;
+    Vector<float> row(int64_t(width) * 4);
     for (int y = y0; y < y1; y++) {
+      fill_row(y, width, row.data());
       for (int x = x0; x < x1; x++) {
         const int64_t i = int64_t(y) * width + x;
-        bake_pixel_store_byte(&values[i * 4], is_color, colorspace, &pixels[i * 4]);
+        bake_pixel_store_byte(&row[x * 4], is_color, colorspace, &pixels[i * 4]);
       }
     }
   }
   bake_image_pixels_changed(image, *ibuf);
   BKE_image_release_ibuf(&image, ibuf, lock);
+}
+
+/**
+ * Write \a values into \a image, or only into \a rect (x0, y0, x1, y1 in image pixels) when given.
+ *
+ * The map's own buffer decides the format: a byte map stores the value encoded into its colorspace,
+ * a float map stores it as it came, which is what a precise channel of a generated row is for.
+ * Shared with the bake tests, which hold the worker's stored-buffer write to this same encoding.
+ */
+void bake_write_image(Image &image,
+                      const float *values,
+                      const bool is_color,
+                      const int *rect,
+                      const int tile_number /* = 0 */)
+{
+  bake_write_image_rows(image, is_color, rect, tile_number,
+                        [&](const int y, const int width, float *r_row) {
+    memcpy(r_row, values + int64_t(y) * width * 4, sizeof(float[4]) * size_t(width));
+  });
 }
 
 /**
@@ -2501,6 +2556,12 @@ static bool bake_gradient_auto_allowed(const Material &ma, const MaterialPaintLa
 
 bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer &layer)
 {
+  if (paint_layer_mask_item_bakes_effect(layer)) {
+    /* The worker job renders a row's subtree from a localized copy; a mask effect's grey is the
+     * mask effect cache's compute, which only the main thread reaches. Calling it heavy would leave
+     * it to a job that never picks it up, so after its first bake an edit would not bake it again. */
+    return false;
+  }
   if (BKE_paint_layers_gradient_subtree_is_bakeable(layer) &&
       paint_layers_bake_subtree_needs_surface(layer))
   {
@@ -2526,6 +2587,13 @@ bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer
 
 bool BKE_paint_layers_bake_row_is_deferred(const Material &ma, const MaterialPaintLayer &layer)
 {
+  if (paint_layer_mask_item_bakes_effect(layer)) {
+    /* A CPU-computed mask effect defers the way a row's content effect does: the stroke keeps the
+     * mask live -- fresh, without the effect -- instead of recomputing the whole-canvas grey at
+     * every dab. Which marker is active does not decide it: the subscription only reports the maps
+     * the grey reads, so a stroke into the row's colour never holds it. */
+    return mask_effect_deferred_by_stroke(ma, layer);
+  }
   /* The active row and its ancestors stay live: the user is editing inside them, and the bake
    * catches up once the active marker leaves the subtree. */
   if (!BKE_paint_layers_subtree_contains(layer, ma.active_layer_marker)) {
@@ -2613,9 +2681,9 @@ static void bake_map_release(Main &bmain, Image *&slot)
  * its map from an earlier bake would otherwise stand in for the row and show what the row stopped
  * laying. The caller tags #MA_PAINT_LAYERS_REGEN, as for #bake_maps_release.
  */
-static void bake_stale_channel_maps_release(Main &bmain,
-                                            MaterialPaintLayer &layer,
-                                            const Span<int> written_channels)
+void bake_stale_channel_maps_release(Main &bmain,
+                                     MaterialPaintLayer &layer,
+                                     const Span<int> written_channels)
 {
   if (layer.bake == nullptr) {
     return;
@@ -2754,6 +2822,9 @@ static int bake_size_for(const Material &ma, const MaterialPaintLayer &row)
   if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_GENERATES)) {
     /* A Gradient lays its pixels on the material canvas unless the user chose a side. */
     size = int(ma.paint_layers_image_size);
+  }
+  else if (paint_layer_mask_item_bakes_effect(row)) {
+    size = bake_mask_effect_size_for(ma, row);
   }
   else if (row.bake != nullptr) {
     size = row.bake->size;
@@ -2947,6 +3018,11 @@ static bool bake_row_is_candidate(const Material &ma,
     /* A reader owns its slice's cache; a substitution of the row it reads is blocked separately. */
     return paint_layer_anchor_point_reader_baked(ma, layer);
   }
+  if (paint_layer_mask_item_bakes_effect(layer)) {
+    /* A CPU-computed mask effect owns the grey it lays: the cache is what the live graph reads,
+     * like a reader's, so the mode is its only gate (the due check asks the rest). */
+    return BKE_paint_layers_bake_mode_get(layer) != MA_PAINT_LAYER_BAKE_NEVER;
+  }
   if (layer.role != MA_PAINT_LAYER_ROLE_LAYER || paint_layer_row_is_adjustment(layer)) {
     return false;
   }
@@ -2982,6 +3058,20 @@ bool bake_row_is_due(const Material &ma,
                      BakeRowRelease &r_release)
 {
   r_release = BakeRowRelease::Keep;
+  if (paint_layer_mask_item_bakes_effect(layer)) {
+    /* A CPU-computed mask effect is due like a row that carries one: its grey has no live form the
+     * graph could lay, so the mode is the only standing gate -- NEVER stands, AUTO and ALWAYS bake.
+     * The deferred and hidden checks stand too: a stroke defers the grey the same way it defers a
+     * row's content effect (#BKE_paint_layers_bake_row_is_deferred). */
+    if (BKE_paint_layers_bake_mode_get(layer) == MA_PAINT_LAYER_BAKE_NEVER) {
+      r_release = bake_row_has_maps(layer) ? BakeRowRelease::ReleaseMaps : BakeRowRelease::Keep;
+      return false;
+    }
+    if (layer.bake != nullptr && BKE_paint_layers_bake_is_valid(ma, layer)) {
+      return false;
+    }
+    return !BKE_paint_layers_bake_row_is_deferred(ma, layer) && !bake_row_is_hidden(ma, layer);
+  }
   if (paint_layer_kind_reads_anchor_point(layer)) {
     /* A reader owns a cache only while its effective mode reads one. Switching it back to Live
      * (Never, or Auto after the slice became light again) releases the maps it no longer reads. A
@@ -3380,7 +3470,9 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
                                  }
                                }
                                for (MaterialPaintLayer &item : layer.mask_stack) {
-                                 if (paint_layer_kind_reads_anchor_point(item)) {
+                                 if (paint_layer_kind_reads_anchor_point(item) ||
+                                     paint_layer_mask_item_bakes_effect(item))
+                                 {
                                    rows.append(&item);
                                  }
                                }
@@ -3409,6 +3501,14 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
       const int size = bake_size_for(ma, layer);
       if (size <= 0) {
         /* No map has known dimensions yet: nothing to allocate a bake structure for. */
+        continue;
+      }
+      if (paint_layer_mask_item_bakes_effect(layer)) {
+        /* The item's grey is one map of its own, written whole: a stroke into the mask defers it
+         * (#BKE_paint_layers_bake_row_is_deferred), so no region path is wanted here. */
+        if (bake_mask_effect_row_write(bmain, ma, layer, size)) {
+          changed = true;
+        }
         continue;
       }
       PaintLayersBakeTargets targets;

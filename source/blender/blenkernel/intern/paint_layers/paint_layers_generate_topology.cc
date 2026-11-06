@@ -325,6 +325,12 @@ static void topology_mask_hash_mix(uint64_t &hash,
     }
     /* The inversion is a node of its own. */
     hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(item) ? 1 : 0);
+    if (paint_layer_mask_item_bakes_effect(item)) {
+      /* The item builds as a map read only once its bake stands: the presence of the grey is
+       * topology, the map's pixels are not (those follow the bake's own freshness). */
+      hash = topology_hash_mix(hash,
+                               paint_layer_mask_effect_bake_map(ma, item) != nullptr ? 1 : 0);
+    }
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, item) ? 1 : 0);
     mapping_wrap_hash_mix(hash, ma, item);
     gradient_payload_hash_mix(hash, item);

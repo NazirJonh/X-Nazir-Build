@@ -12,11 +12,14 @@
 #include "paint_layers_generate_test_fixture.hh"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <utility>
 
 #include "MEM_guardedalloc.h"
 
 #include "BLI_math_base.h"
+#include "BLI_math_color.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
 #include "BLI_set.hh"
@@ -66,6 +69,20 @@ class PaintLayersBakeTest : public PaintLayersGenerateTest {
      * update crashes in a bare test Main that has no window manager of its own. */
     wmWindowManager *wm = BKE_id_new<wmWindowManager>(bmain, "WMdummy");
     wm->runtime = MEM_new<bke::WindowManagerRuntime>(__func__);
+  }
+
+  void TearDown() override
+  {
+    /* A bake of a row or mask item that carries a CPU-computed effect leaves the computed grey in
+     * the process-global effect caches; freed here, the way the effect tests free them, so the
+     * leak check at the end of the run sees none of a test's entries. */
+    BKE_paint_layers_effect_cache_free_all();
+    BKE_paint_layers_effect_gpu_cache_free_all();
+    BKE_paint_layers_mask_effect_cache_free_all();
+    /* The stroke flag is runtime state a test may have left set; clear it so it cannot leak into
+     * the next test. */
+    BKE_paint_layers_bake_stroke_active_set(false);
+    PaintLayersGenerateTest::TearDown();
   }
 
   /** A Paint row baked on request: Always, so the planner does not wait for it to be heavy. */
@@ -2376,5 +2393,351 @@ TEST_F(PaintLayersBakeTest, an_object_row_without_maps_keeps_never_and_always)
     EXPECT_EQ(row->bake->object_count, 0);
   }
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Mask effect bakes (a CPU-computed kind as a mask item)
+ * \{ */
+
+namespace {
+
+/** A CPU-computed effect as an item of \a row's mask stack, over its base mask. */
+MaterialPaintLayer *bake_test_add_mask_effect(Material &ma,
+                                              MaterialPaintLayer &row,
+                                              const eMaterialPaintLayerFilter filter)
+{
+  MaterialPaintLayer *effect = BKE_paint_layers_mask_filter_add(ma, &row, filter, nullptr);
+  EXPECT_NE(effect, nullptr);
+  EXPECT_EQ(effect->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  return effect;
+}
+
+/** An 8x8 byte image whose grey runs from black at the left edge to white at the right one. */
+Image *bake_test_add_ramp_image(Main &bmain, const char *name)
+{
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *image = BKE_image_add_generated(
+      &bmain, 8, 8, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  image->alpha_mode = IMA_ALPHA_STRAIGHT;
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+  uchar *pixels = ibuf->byte_data_for_write();
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      uchar *p = pixels + (int64_t(y) * 8 + x) * 4;
+      const uchar value = uchar(x * 255 / 7);
+      p[0] = value;
+      p[1] = value;
+      p[2] = value;
+      p[3] = 255;
+    }
+  }
+  BKE_image_release_ibuf(image, ibuf, lock);
+  return image;
+}
+
+/** The linear red of a bake map's texel, the encoding the bake wrote. */
+float bake_test_map_red(Image &image, const int x, const int y)
+{
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+  const float value = srgb_to_linearrgb(ibuf->byte_data()[(int64_t(y) * ibuf->x + x) * 4] / 255.0f);
+  BKE_image_release_ibuf(&image, ibuf, lock);
+  return value;
+}
+
+/** A \a width x \a height byte image whose grey runs from black at the left edge to white at the
+ * right one: the ramp the rectangular-canvas test needs. */
+Image *bake_test_add_ramp_image_sized(Main &bmain,
+                                      const char *name,
+                                      const int width,
+                                      const int height)
+{
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *image = BKE_image_add_generated(
+      &bmain, width, height, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  image->alpha_mode = IMA_ALPHA_STRAIGHT;
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+  uchar *pixels = ibuf->byte_data_for_write();
+  for (const int y : IndexRange(height)) {
+    for (const int x : IndexRange(width)) {
+      uchar *p = pixels + (int64_t(y) * width + x) * 4;
+      const uchar value = uchar(x * 255 / (width - 1));
+      p[0] = value;
+      p[1] = value;
+      p[2] = value;
+      p[3] = 255;
+    }
+  }
+  BKE_image_release_ibuf(image, ibuf, lock);
+  return image;
+}
+
+}  // namespace
+
+TEST_F(PaintLayersBakeTest, a_mask_effect_item_bakes_the_grey_the_composite_lays)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *bake_test_add_ramp_image(*bmain, "Mask")),
+            nullptr);
+  MaterialPaintLayer *blur = bake_test_add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+  clear_active();
+
+  /* The grey the CPU composite lays before any bake: the describe computes it into the cache. */
+  Vector<float> live(64);
+  {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    const PaintMaterialCompositeMaskItem *laid = nullptr;
+    for (const PaintMaterialCompositeImageLayer &layer : layers) {
+      for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+        if (item.effect_filter == MA_PAINT_LAYER_FILTER_BLUR) {
+          laid = &item;
+        }
+      }
+    }
+    ASSERT_NE(laid, nullptr);
+    ASSERT_NE(laid->grey_buffer, nullptr);
+    for (const int i : IndexRange(64)) {
+      live[i] = laid->grey_buffer->float_data()[i * 4];
+    }
+  }
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  ASSERT_NE(blur->bake, nullptr);
+  ASSERT_NE(blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr)
+      << "the item's grey is a map of its own";
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed)) << "nothing is left due";
+
+  /* The row itself needed no bake: its mask, the item included, is live over its content, so the
+   * item's grey is the only cache the mask effect asked for. */
+  EXPECT_EQ(row->bake, nullptr);
+
+  /* The bake holds the same grey the composite laid, texel for texel, within the byte rounding of
+   * the map's own encoding. The describe reads this map back once the bake stands, so the picture
+   * the composite shows does not move across the bake. */
+  Image *baked = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      /* The map stores the grey encoded into the channel's colorspace; decoding reads the scene
+       * linear value the cache held back. */
+      const float stored_linear = bake_test_map_red(*baked, x, y);
+      EXPECT_NEAR(stored_linear, live[y * 8 + x], 2.0f / 255.0f)
+          << "the bake and the composite agree, at " << x << "," << y;
+    }
+  }
+}
+
+TEST_F(PaintLayersBakeTest, editing_a_mask_effects_parameters_rebakes_it)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *bake_test_add_ramp_image(*bmain, "Mask")),
+            nullptr);
+  MaterialPaintLayer *blur = bake_test_add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  clear_active();
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(blur->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  /* A wider radius is a different grey: the hash moves with the parameter and the item is due. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 3));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  /* The item's own opacity is laid over the grey by the reader: it moves no hash and asks for no
+   * re-bake. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, blur, 0.4f));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur)) << "the opacity is live over the map";
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+}
+
+TEST_F(PaintLayersBakeTest, a_stroke_into_the_base_mask_defers_the_mask_effects_bake_until_it_ends)
+{
+  Image *mask_map = bake_test_add_ramp_image(*bmain, "Mask");
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *mask_map), nullptr);
+  MaterialPaintLayer *blur = bake_test_add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  clear_active();
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(blur->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  /* The stroke: a pixel edit of the base mask's map, the stroke still running. The grey is
+   * computed over the whole canvas, so the item is not re-rendered at every dab: it stays deferred
+   * and the mask shows live, without the effect. */
+  BKE_paint_layers_bake_stroke_active_set(true);
+  BKE_image_partial_update_mark_full_update(mask_map);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  EXPECT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *blur));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed))
+      << "the stroke defers the re-bake";
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur))
+      << "stale: the old grey is kept and not substituted";
+
+  /* The stroke is over: the grey is baked once, while no marker has moved at all. */
+  BKE_paint_layers_bake_stroke_active_set(false);
+  EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *blur));
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+}
+
+TEST_F(PaintLayersBakeTest, a_stroke_into_the_rows_colour_leaves_the_mask_effects_bake_valid)
+{
+  Image *row_map = add_image("Row");
+  MaterialPaintLayer *row = add_paint_layer("Row", row_map);
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *bake_test_add_ramp_image(*bmain, "Mask")),
+            nullptr);
+  MaterialPaintLayer *blur = bake_test_add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  clear_active();
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(blur->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  /* The grey reads the mask, not the row's colour: an edit of the colour map reaches the item
+   * neither through its subscription nor its hash. */
+  BKE_paint_layers_bake_stroke_active_set(true);
+  BKE_image_partial_update_mark_full_update(row_map);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  EXPECT_FALSE(BKE_paint_layers_bake_row_is_deferred(*ma, *blur))
+      << "the colour is no map of the grey";
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed)) << "nothing is due for it";
+  BKE_paint_layers_bake_stroke_active_set(false);
+}
+
+TEST_F(PaintLayersBakeTest, a_mask_effects_bake_frees_its_cache_entry)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *bake_test_add_ramp_image(*bmain, "Mask")),
+            nullptr);
+  MaterialPaintLayer *blur = bake_test_add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+  clear_active();
+
+  /* The describe computes the grey into the cache: the entry is what the preview reads while no
+   * bake stands. */
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(paint_layer_mask_effect_cache_entry_count(), 1);
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(blur->bake, nullptr);
+  ASSERT_NE(blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  /* The bake holds the grey now: the entry was a copy kept for nothing while the bake stands, and
+   * the describe reads the bake's map instead of it. */
+  EXPECT_EQ(paint_layer_mask_effect_cache_entry_count(), 0);
+
+  /* An edit that stales the bake hands the grey back to the cache: the preview does not wait for
+   * the bake to catch up, and it is the same grey the old entry held. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
+  Vector<PaintMaterialCompositeImageLayer> moved_layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, moved_layers));
+  const PaintMaterialCompositeMaskItem *laid = nullptr;
+  for (const PaintMaterialCompositeImageLayer &layer : moved_layers) {
+    for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+      if (item.effect_filter == MA_PAINT_LAYER_FILTER_BLUR) {
+        laid = &item;
+      }
+    }
+  }
+  ASSERT_NE(laid, nullptr);
+  EXPECT_NE(laid->grey_buffer, nullptr) << "the grey is computed while the bake is stale";
+  EXPECT_EQ(paint_layer_mask_effect_cache_entry_count(), 1);
+}
+
+TEST_F(PaintLayersBakeTest, a_mask_effect_over_a_rectangular_mask_stretches_into_the_square_map)
+{
+  /* A 64x32 row map: the grey the effect reads is rectangular, while the bake map is square -- the
+   * side the content's width names, the height stretched into it, the way a row's own bake lays
+   * any source of its proportions into the square map. */
+  MaterialPaintLayer *row = add_paint_layer(
+      "Row", bake_test_add_ramp_image_sized(*bmain, "Row", 64, 32));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *bake_test_add_ramp_image(*bmain, "Mask")),
+            nullptr);
+  MaterialPaintLayer *blur = bake_test_add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+  clear_active();
+
+  /* The grey the composite lays, texel by texel: the base the bake is checked against. */
+  Vector<float> live(64 * 32);
+  {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    const PaintMaterialCompositeMaskItem *laid = nullptr;
+    for (const PaintMaterialCompositeImageLayer &layer : layers) {
+      for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+        if (item.effect_filter == MA_PAINT_LAYER_FILTER_BLUR) {
+          laid = &item;
+        }
+      }
+    }
+    ASSERT_NE(laid, nullptr);
+    ASSERT_NE(laid->grey_buffer, nullptr);
+    for (const int64_t i : IndexRange(64 * 32)) {
+      live[i] = laid->grey_buffer->float_data()[i * 4];
+    }
+  }
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(blur->bake, nullptr);
+  Image *baked = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(baked, nullptr);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(baked, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    EXPECT_EQ(ibuf->x, 64) << "the map's side is the content's width";
+    EXPECT_EQ(ibuf->y, 64) << "the map is square, whatever the grey's proportions";
+    BKE_image_release_ibuf(baked, ibuf, lock);
+  }
+
+  /* The nearest sample per axis, at the corners and the centre: src_x = x (the widths agree),
+   * src_y = y * 32 / 64 = y / 2. */
+  constexpr int grey_width = 64;
+  constexpr int grey_height = 32;
+  const std::array<std::pair<int, int>, 7> probes = {
+      std::make_pair(0, 0),
+      std::make_pair(63, 0),
+      std::make_pair(0, 63),
+      std::make_pair(63, 63),
+      std::make_pair(32, 32),
+      std::make_pair(1, 1),
+      std::make_pair(31, 17),
+  };
+  for (const auto &[x, y] : probes) {
+    const int src_x = min_ii(int(int64_t(x) * grey_width / 64), grey_width - 1);
+    const int src_y = min_ii(int(int64_t(y) * grey_height / 64), grey_height - 1);
+    EXPECT_NEAR(bake_test_map_red(*baked, x, y), live[int64_t(src_y) * grey_width + src_x],
+                2.0f / 255.0f)
+        << "the bake samples the grey per axis, at " << x << "," << y;
+  }
+}
+
+/** \} */
 
 }  // namespace blender::bke::tests

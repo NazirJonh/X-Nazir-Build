@@ -805,6 +805,10 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                         draw_material_color_balance(layout, item.kind_color_balance)
                     if item.channel_mixer_supported:
                         draw_material_channel_mixer(layout, item.kind_channel_mixer)
+                if item.kind_needs_bake:
+                    # A CPU-computed mask effect bakes a grey of its own, like a row's effect does;
+                    # the same button asks the owner row's plan for that bake at once.
+                    draw_material_update_now(layout, owner)
                 return
             if item.source == 'ANCHOR_POINT':
                 # A marker publishes a slice and a reader lays one: no map, no channels to choose.

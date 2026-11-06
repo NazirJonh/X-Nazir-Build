@@ -62,6 +62,13 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
     return budget;
   }
 
+  /** The mask effect cache's starting budget, for the same reason. */
+  static size_t default_mask_budget()
+  {
+    static const size_t budget = paint_layer_mask_effect_cache_budget();
+    return budget;
+  }
+
   /** The effect cache is process-global: a test starts with none of an earlier one's entries, and
    * with the budget an earlier one may have shrunk for an eviction check put back. */
   void SetUp() override
@@ -75,6 +82,8 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
     BKE_paint_layers_effect_cache_free_all();
     paint_layer_effect_gpu_cache_set_budget(default_gpu_budget());
     BKE_paint_layers_effect_gpu_cache_free_all();
+    paint_layer_mask_effect_cache_set_budget(default_mask_budget());
+    BKE_paint_layers_mask_effect_cache_free_all();
   }
 
   void TearDown() override
@@ -83,6 +92,8 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
     BKE_paint_layers_effect_cache_free_all();
     paint_layer_effect_gpu_cache_set_budget(default_gpu_budget());
     BKE_paint_layers_effect_gpu_cache_free_all();
+    paint_layer_mask_effect_cache_set_budget(default_mask_budget());
+    BKE_paint_layers_mask_effect_cache_free_all();
     /* The stroke flag is runtime state a test may have left set; clear it so it cannot leak into
      * the next test. */
     BKE_paint_layers_bake_stroke_active_set(false);
@@ -2533,6 +2544,389 @@ TEST_F(PaintLayersEffectTest, the_gpu_cache_keys_on_the_chain_and_scalar_fingerp
                 *ma, *blur, kColor, 8, 8, no_images, other_scalar, hooks, nullptr, &resource),
             PaintLayerEffectGpuState::Render)
       << "a different input-scalar fingerprint is a different entry";
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Mask effects (a CPU-computed kind as a mask item)
+ * \{ */
+
+namespace {
+
+/** A CPU-computed effect as an item of \a row's mask stack, over its base mask. */
+MaterialPaintLayer *add_mask_effect(Material &ma,
+                                    MaterialPaintLayer &row,
+                                    const eMaterialPaintLayerFilter filter)
+{
+  MaterialPaintLayer *effect = BKE_paint_layers_mask_filter_add(ma, &row, filter, nullptr);
+  EXPECT_NE(effect, nullptr);
+  EXPECT_EQ(effect->role, MA_PAINT_LAYER_ROLE_MASK_ITEM) << "a mask effect is an item of the mask";
+  return effect;
+}
+
+/** The grey the mask effect \a filter lays, read from the composite description; null when the
+ * description lays none. The fixture holds one row, so the first item of the kind is the one. */
+std::shared_ptr<ImBuf> mask_effect_grey(Material &ma, const int16_t filter)
+{
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  if (!BKE_paint_layers_composite_image_layers(ma, kColor, layers)) {
+    return {};
+  }
+  for (const PaintMaterialCompositeImageLayer &layer : layers) {
+    for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+      if (item.effect_filter == filter) {
+        return item.grey_buffer;
+      }
+    }
+  }
+  return {};
+}
+
+/** The grey the mask of \a row has built up to \a effect: the effect's input, canvas grey at the
+ * row's dimensions, the same render the cache's own compute fills from. */
+std::shared_ptr<ImBuf> mask_effect_input_grey(Material &ma,
+                                              MaterialPaintLayer &row,
+                                              MaterialPaintLayer &effect)
+{
+  int width = 0;
+  int height = 0;
+  if (!BKE_paint_layers_row_dimensions(
+          ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, width, height) ||
+      width <= 0 || height <= 0)
+  {
+    return {};
+  }
+  ImBuf *grey = IMB_allocImBuf(width, height, ImBufFlags::FloatData);
+  if (grey == nullptr) {
+    return {};
+  }
+  PaintLayersMaskSampler sampler(ma, row, &effect.marker, false);
+  sampler.tile_acquire(0, width, height);
+  float *pixels = grey->float_data_for_write();
+  for (const int y : IndexRange(height)) {
+    for (const int x : IndexRange(width)) {
+      const float value = sampler.sample(0, x, y);
+      const int64_t index = int64_t(y) * width + x;
+      pixels[index * 4 + 0] = value;
+      pixels[index * 4 + 1] = value;
+      pixels[index * 4 + 2] = value;
+      pixels[index * 4 + 3] = 1.0f;
+    }
+  }
+  return std::shared_ptr<ImBuf>(grey, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
+}
+
+/** One clamped box pass of \a radius over the grey plane \a values, along \a x or \a y. */
+void mask_blur_hand_pass(Vector<float> &values,
+                         const int width,
+                         const int height,
+                         const int radius,
+                         const bool along_x)
+{
+  const int run = along_x ? width : height;
+  const int lines = along_x ? height : width;
+  Vector<float> original(values.size());
+  for (const int line : IndexRange(lines)) {
+    for (const int i : IndexRange(run)) {
+      const int index = along_x ? line * width + i : i * width + line;
+      original[index] = values[index];
+    }
+  }
+  for (const int line : IndexRange(lines)) {
+    for (const int i : IndexRange(run)) {
+      const int lo = std::max(i - radius, 0);
+      const int hi = std::min(i + radius, run - 1);
+      float sum = 0.0f;
+      for (int k = lo; k <= hi; k++) {
+        sum += original[along_x ? line * width + k : k * width + line];
+      }
+      values[along_x ? line * width + i : i * width + line] = sum / float(hi - lo + 1);
+    }
+  }
+}
+
+/** Whether any texel of the two grey buffers differs past \a tolerance. */
+bool mask_grey_differs(const ImBuf &a, const ImBuf &b, const float tolerance)
+{
+  if (a.x != b.x || a.y != b.y) {
+    return true;
+  }
+  for (const int64_t i : IndexRange(int64_t(a.x) * a.y)) {
+    if (std::abs(a.float_data()[i * 4] - b.float_data()[i * 4]) > tolerance) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
+TEST_F(PaintLayersEffectTest, a_mask_blur_is_the_box_blur_of_the_mask_built_up_to_it)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  MaterialPaintLayer *blur = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(laid, nullptr);
+  ASSERT_EQ(laid->x, 8);
+  ASSERT_EQ(laid->y, 8);
+
+  /* The hand box blur of the input, one clamped pass per axis: the maths the kernel runs. */
+  std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *blur);
+  ASSERT_NE(input, nullptr);
+  Vector<float> hand(64);
+  for (const int i : IndexRange(64)) {
+    hand[i] = input->float_data()[i * 4];
+  }
+  mask_blur_hand_pass(hand, 8, 8, 1, true);
+  mask_blur_hand_pass(hand, 8, 8, 1, false);
+
+  const float *laid_px = laid->float_data();
+  for (const int i : IndexRange(64)) {
+    EXPECT_NEAR(laid_px[i * 4], hand[i], 1e-5f) << "texel " << i;
+    /* A grey in, a grey out: the item lays one scalar, and an opaque one. */
+    EXPECT_NEAR(laid_px[i * 4 + 0], laid_px[i * 4 + 1], 1e-6f) << "texel " << i;
+    EXPECT_NEAR(laid_px[i * 4 + 1], laid_px[i * 4 + 2], 1e-6f) << "texel " << i;
+    EXPECT_NEAR(laid_px[i * 4 + 3], 1.0f, 1e-6f) << "texel " << i;
+  }
+  /* The ramp's left edge is a real edge: the blur moved it. */
+  EXPECT_TRUE(mask_grey_differs(*laid, *input, 1e-6f)) << "a blur of a ramp is not the ramp";
+}
+
+TEST_F(PaintLayersEffectTest, a_monochrome_mask_noise_lays_the_kernel_over_the_grey)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  MaterialPaintLayer *noise = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(
+      paint_layer_kind_param_bool_set(*noise, PAINT_LAYER_NOISE_MONOCHROME, true));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 5));
+
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_NE(laid, nullptr);
+  std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *noise);
+  ASSERT_NE(input, nullptr);
+
+  /* The kernel on a private copy of the input is the whole difference: the cache renders the same
+   * grey and applies the same grain. */
+  std::shared_ptr<ImBuf> expected = paint_layer_anchor_slice_buffer_clone(*input);
+  ASSERT_NE(expected, nullptr);
+  paint_layer_effect_kernel_apply(*expected, *noise);
+
+  const float *laid_px = laid->float_data();
+  const float *expected_px = expected->float_data();
+  for (const int i : IndexRange(64)) {
+    for (const int k : IndexRange(4)) {
+      EXPECT_NEAR(laid_px[i * 4 + k], expected_px[i * 4 + k], 1e-6f)
+          << "texel " << i << " ch " << k;
+    }
+    /* A monochrome grain is one delta on all three channels: the result stays grey. */
+    EXPECT_NEAR(laid_px[i * 4 + 0], laid_px[i * 4 + 1], 1e-6f) << "texel " << i;
+    EXPECT_NEAR(laid_px[i * 4 + 1], laid_px[i * 4 + 2], 1e-6f) << "texel " << i;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_mask_effect_reads_the_grey_the_effects_before_it_lay)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  MaterialPaintLayer *blur = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+  MaterialPaintLayer *noise = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_TRUE(paint_layer_kind_param_bool_set(*noise, PAINT_LAYER_NOISE_MONOCHROME, true));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*noise, PAINT_LAYER_NOISE_SEED, 5));
+
+  std::shared_ptr<ImBuf> laid_blur = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(laid_blur, nullptr);
+  std::shared_ptr<ImBuf> laid_noise = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_NE(laid_noise, nullptr);
+
+  /* The noise's input is the blur's laid grey, at full strength and un-inverted by default, so the
+   * kernel over a copy of it is the whole difference. */
+  std::shared_ptr<ImBuf> expected = paint_layer_anchor_slice_buffer_clone(*laid_blur);
+  ASSERT_NE(expected, nullptr);
+  paint_layer_effect_kernel_apply(*expected, *noise);
+  const float *laid_px = laid_noise->float_data();
+  const float *expected_px = expected->float_data();
+  for (const int i : IndexRange(64)) {
+    for (const int k : IndexRange(4)) {
+      EXPECT_NEAR(laid_px[i * 4 + k], expected_px[i * 4 + k], 1e-6f)
+          << "texel " << i << " ch " << k;
+    }
+  }
+
+  /* A parameter of the blur moves the grey the noise reads: the chain fingerprint moves the noise's
+   * key, so the entry re-renders instead of serving the grain of the old input. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 2));
+  std::shared_ptr<ImBuf> moved = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_NOISE);
+  ASSERT_NE(moved, nullptr);
+  EXPECT_TRUE(mask_grey_differs(*laid_noise, *moved, 1e-6f))
+      << "the noise follows the blur it reads";
+}
+
+TEST_F(PaintLayersEffectTest, editing_a_mask_effects_parameters_replaces_its_entry)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  MaterialPaintLayer *blur = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(laid, nullptr);
+  ASSERT_EQ(paint_layer_mask_effect_cache_entry_count(), 1);
+
+  /* A wider radius is a different effect: the entry is replaced, not added to. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 3));
+  std::shared_ptr<ImBuf> moved = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(moved, nullptr);
+  EXPECT_EQ(paint_layer_mask_effect_cache_entry_count(), 1)
+      << "the new parameters replaced the entry, they did not add one";
+  EXPECT_TRUE(mask_grey_differs(*laid, *moved, 1e-6f)) << "a wider blur is a different grey";
+}
+
+TEST_F(PaintLayersEffectTest,
+       an_opacity_edit_of_an_earlier_mask_item_recomputes_the_mask_effects_grey)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask"));
+  ASSERT_NE(item, nullptr);
+  MaterialPaintLayer *blur = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(laid, nullptr);
+
+  /* The grey carries no pixel version of an opacity: the key has to fold the item's settings in, or
+   * the effect keeps serving the grey of the old input. */
+  item->opacity = 0.25f;
+  std::shared_ptr<ImBuf> moved = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(moved, nullptr);
+  EXPECT_TRUE(mask_grey_differs(*laid, *moved, 1e-6f)) << "the blur follows the opacity it reads";
+}
+
+TEST_F(PaintLayersEffectTest,
+       an_opacity_edit_of_the_mask_effect_itself_does_not_move_its_bake_hash)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask"));
+  ASSERT_NE(item, nullptr);
+  MaterialPaintLayer *blur = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+
+  uint32_t hash[2];
+  BKE_paint_layers_bake_hash(*ma, *blur, hash);
+
+  /* The grey is cached before the item's own opacity: the reader lays that live over the map, so
+   * the bake has no reason to run again for it. */
+  blur->opacity = 0.25f;
+  uint32_t moved[2];
+  BKE_paint_layers_bake_hash(*ma, *blur, moved);
+  EXPECT_EQ(hash[0], moved[0]);
+  EXPECT_EQ(hash[1], moved[1]);
+
+  /* An earlier item's opacity is part of what the grey reads, so it does move the hash. */
+  item->opacity = 0.5f;
+  BKE_paint_layers_bake_hash(*ma, *blur, moved);
+  EXPECT_TRUE(hash[0] != moved[0] || hash[1] != moved[1])
+      << "the bake follows the input the grey reads";
+}
+
+TEST_F(PaintLayersEffectTest, every_mask_effect_kind_lays_one_grey)
+{
+  /* Every NEEDS_BAKE kind the mask takes: a grey in must lay a grey out. The kernels that keep
+   * the three channels equal do it themselves; the ones that can colorize are brought back through
+   * the luminance, and the kind table's #PAINT_LAYER_KIND_MASK_NEEDS_LUMA says which. */
+  const eMaterialPaintLayerFilter filters[] = {MA_PAINT_LAYER_FILTER_BLUR,
+                                               MA_PAINT_LAYER_FILTER_SHARPEN,
+                                               MA_PAINT_LAYER_FILTER_HIGH_PASS,
+                                               MA_PAINT_LAYER_FILTER_EDGE_DETECT,
+                                               MA_PAINT_LAYER_FILTER_EMBOSS,
+                                               MA_PAINT_LAYER_FILTER_ERODE_DILATE,
+                                               MA_PAINT_LAYER_FILTER_GLOW,
+                                               MA_PAINT_LAYER_FILTER_BEVEL,
+                                               MA_PAINT_LAYER_FILTER_COLOR_MATCH,
+                                               MA_PAINT_LAYER_FILTER_NOISE};
+  for (const eMaterialPaintLayerFilter filter : filters) {
+    MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+    ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+    add_mask_effect(*ma, *row, filter);
+
+    std::shared_ptr<ImBuf> grey = mask_effect_grey(*ma, filter);
+    ASSERT_NE(grey, nullptr) << "the kind lays a grey, filter " << filter;
+    for (const int64_t i : IndexRange(int64_t(grey->x) * grey->y)) {
+      EXPECT_NEAR(grey->float_data()[i * 4 + 0], grey->float_data()[i * 4 + 1], 1e-6f)
+          << "the red and the green agree, filter " << filter << " texel " << i;
+      EXPECT_NEAR(grey->float_data()[i * 4 + 1], grey->float_data()[i * 4 + 2], 1e-6f)
+          << "the green and the blue agree, filter " << filter << " texel " << i;
+    }
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_stroke_into_the_base_mask_recomputes_the_mask_effects_grey)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  Image *mask_map = add_ramp_image("Mask");
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *mask_map), nullptr);
+  MaterialPaintLayer *blur = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(laid, nullptr);
+  ASSERT_EQ(paint_layer_mask_effect_cache_entry_count(), 1);
+
+  /* The stroke: the base mask's map says its pixels changed, and the effect reads that map, so the
+   * grey is stale and the describe recomputes it into the same entry. */
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(mask_map, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int y : IndexRange(8)) {
+      uchar *p = pixels + (int64_t(y) * 8) * 4;
+      p[0] = 255;
+      p[1] = 255;
+      p[2] = 255;
+      p[3] = 255;
+    }
+    BKE_image_release_ibuf(mask_map, ibuf, lock);
+  }
+  BKE_image_partial_update_mark_full_update(mask_map);
+  std::shared_ptr<ImBuf> moved = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(moved, nullptr);
+  EXPECT_EQ(paint_layer_mask_effect_cache_entry_count(), 1)
+      << "the stroke replaced the entry, it did not add one";
+  EXPECT_TRUE(mask_grey_differs(*laid, *moved, 1e-6f)) << "the grey follows the map it reads";
+}
+
+TEST_F(PaintLayersEffectTest, the_combined_preview_refuses_a_stack_with_a_mask_effect)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, kColor, layers, /*describe_only=*/true));
+  bool found = false;
+  for (const PaintMaterialCompositeImageLayer &layer : layers) {
+    for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+      if (item.effect_filter == MA_PAINT_LAYER_FILTER_BLUR) {
+        found = true;
+        EXPECT_EQ(item.grey_buffer, nullptr) << "describe-only computes no grey";
+      }
+    }
+  }
+  ASSERT_TRUE(found);
+  const char *reason = BKE_paint_layers_gpu_unsupported_reason(layers[0], false);
+  EXPECT_NE(reason, nullptr) << "the GPU path refuses the stack instead of shading a no-op";
 }
 
 /** \} */

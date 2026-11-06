@@ -17,6 +17,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 
 #include "BLI_rect.h"
 #include "BLI_span.hh"
@@ -28,6 +30,7 @@
 #include "BKE_paint_layers_composite.hh"
 
 #include "DNA_image_types.h"
+#include "IMB_imbuf_types.hh"
 
 namespace blender {
 
@@ -37,9 +40,9 @@ namespace blender {
 
 /**
  * The maps of an input, once each, with the version of their pixels now. An edit that lands after
- * this is read by #anchor_slice_changes as newer than whatever was stamped from the snapshot.
+ * this is read by #map_sources_changes as newer than whatever was stamped from the snapshot.
  */
-inline Vector<PaintLayerEffectSource> anchor_slice_sources_snapshot(const Span<Image *> images)
+inline Vector<PaintLayerEffectSource> map_sources_snapshot(const Span<Image *> images)
 {
   Vector<PaintLayerEffectSource> sources;
   for (const Image *image : images) {
@@ -53,7 +56,7 @@ inline Vector<PaintLayerEffectSource> anchor_slice_sources_snapshot(const Span<I
  * What happened to the maps of an input since \a synced was taken: nothing, one rectangle (in
  * \a r_region), or anything. A map the input did not read before counts as anything.
  */
-inline ePixelChange anchor_slice_changes(const Span<PaintLayerEffectSource> synced,
+inline ePixelChange map_sources_changes(const Span<PaintLayerEffectSource> synced,
                                          const Span<Image *> images,
                                          rcti &r_region)
 {
@@ -115,14 +118,22 @@ struct EffectCacheKey {
   /** The effect kind and its parameters; the input's pixels are the sources' versions below. */
   uint64_t hash = 0;
   /**
-   * The GPU-only key halves. The CPU cache leaves both at zero, so they cannot split a CPU key; the
-   * GPU key folds in the chain hash (the effects that precede this one in the row, whose results
-   * feed this effect's input) and the input scalar hash (the input's non-map scalar content -- a
-   * flat colour, an adjustment, a filter's parameters -- that no map version carries). A row of one
-   * effect with a plain map input has both zero, exactly the CPU picture.
+   * The key halves beyond the effect's own parameters. The row effect cache (CPU and GPU alike)
+   * leaves both at zero: what its input is made of rides the maps' versions, so zeros cannot split
+   * a key. The GPU cache folds in the chain hash (the effects that precede this one in the row,
+   * whose results feed this effect's input) and the input scalar hash (the input's non-map scalar
+   * content -- a flat colour, an adjustment, a filter's parameters -- that no map version carries).
+   * The mask effect cache (CPU) uses the chain half for what its input is made of: the mask built
+   * up to the item, which no map version carries either.
    */
   PaintLayerEffectGpuKeyExtras gpu_extras;
 };
+
+/**
+ * The channel marker of a mask effect's entry: outside the channel range, so the grey a mask item
+ * computes can never share an entry with a colour channel of the same row's effects.
+ */
+inline constexpr int PAINT_LAYER_EFFECT_CHANNEL_MASK = -1;
 
 /** Whether \a a and \a b name the same effect instance, whatever its parameters say. */
 inline bool paint_layer_effect_key_same_effect(const EffectCacheKey &a, const EffectCacheKey &b)
@@ -224,6 +235,83 @@ template<typename Entry> struct PaintLayerEffectCacheStore {
     total_bytes = 0;
   }
 };
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Effect cache get or compute
+ * \{ */
+
+/**
+ * The one cycle both effect caches run -- the row's (`paint_layer_effect_buffer_get`) and the mask
+ * item's (`paint_layer_mask_effect_buffer_get`): find a live entry of \a key at \a width x
+ * \a height whose maps have not changed since they were rendered from \a images, or compute one
+ * and insert it. \a compute fills the result and the staleness snapshot of its maps; it runs
+ * outside the mutex, so a nested cache taking \a mutex cannot deadlock against it, and two threads
+ * that miss together may both run it -- a benign duplicate compute, the second result replacing
+ * the first. The returned buffer goes out before the entry goes back, so the caller keeps it
+ * alive through its own reference whatever the cache does next.
+ */
+template<typename Entry, typename Compute>
+std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute(
+    PaintLayerEffectCacheStore<Entry> &store,
+    std::mutex &mutex,
+    const EffectCacheKey &key,
+    const int width,
+    const int height,
+    const Span<Image *> images,
+    const size_t budget,
+    Compute &&compute)
+{
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (int i = 0; i < int(store.entries.size()); i++) {
+      Entry &entry = store.entries[i];
+      if (!paint_layer_effect_key_equal(entry.key, key)) {
+        continue;
+      }
+      if (entry.width != width || entry.height != height) {
+        break;
+      }
+      rcti region;
+      if (map_sources_changes(entry.synced, images, region) != ePixelChange::None) {
+        break;
+      }
+      /* Move to the back: the vector is the LRU order. */
+      std::shared_ptr<ImBuf> color = entry.color;
+      store.touch(i);
+      return color;
+    }
+  }
+
+  std::shared_ptr<ImBuf> color;
+  Vector<PaintLayerEffectSource> synced;
+  if (!compute(color, synced)) {
+    return {};
+  }
+  const size_t bytes = size_t(color->x) * size_t(color->y) * sizeof(float[4]);
+
+  std::lock_guard<std::mutex> lock(mutex);
+  /* An entry of the same effect with other parameters is stale -- the description can only ever ask
+   * for the parameters the effect carries now -- so it is replaced rather than kept until the LRU
+   * evicts it. A buffer still shared with a live description keeps its pixels through its own
+   * reference. */
+  const auto no_release = [](Entry &) {};
+  store.drop_rekeyed(key, no_release);
+  if (bytes <= budget) {
+    store.enforce_budget(bytes, budget, no_release);
+    Entry entry;
+    entry.key = key;
+    entry.width = color->x;
+    entry.height = color->y;
+    entry.color = color;
+    entry.synced = std::move(synced);
+    entry.bytes = bytes;
+    store.total_bytes += bytes;
+    store.entries.append(std::move(entry));
+  }
+  return color;
+}
 
 /** \} */
 

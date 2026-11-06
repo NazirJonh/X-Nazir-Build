@@ -242,6 +242,13 @@ enum PaintLayerKindFlag : uint16_t {
    * the CPU kernel is still what the bake and the render read.
    */
   PAINT_LAYER_KIND_GPU_COMPUTED = 1 << 10,
+  /**
+   * A #PAINT_LAYER_KIND_NEEDS_BAKE kind whose kernel can leave a grey input colored (a Noise off
+   * its monochrome mode, a Glow, a Color Match): laid as a mask item, its result is brought back
+   * through the luminance, so the item lays one grey. The kind table decides, the way it decides
+   * every other property of a kind, so a new kind cannot lay a colored mask silently.
+   */
+  PAINT_LAYER_KIND_MASK_NEEDS_LUMA = 1 << 11,
 };
 
 struct PaintLayerKindInfo {

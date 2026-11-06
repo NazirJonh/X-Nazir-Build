@@ -20,6 +20,7 @@
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
+#include "BLI_span.hh"
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
@@ -53,6 +54,7 @@ struct Image;
 struct ImageUser;
 struct ImBuf;
 struct Main;
+struct MaterialPaintChannelInfo;
 struct MaterialPaintLayerBake;
 struct Mesh;
 struct Object;
@@ -199,6 +201,15 @@ PaintLayerMaterialCoverage paint_layer_material_coverage_source(
 bool paint_layer_row_reads_source(const Material &ma, const MaterialPaintLayer &row, int channel);
 
 /**
+ * A hash of the mask of \a row built up to its item \a stop: every item before it with its blend,
+ * opacity, flags, parameters and maps, in order. The row's own visibility and opacity are left out,
+ * as a slice's are.
+ */
+uint64_t paint_layer_mask_prefix_hash(const Material &ma,
+                                      const MaterialPaintLayer &row,
+                                      const MaterialPaintLayer &stop);
+
+/**
  * A hash of everything a slice is made from: the source row, the corrections or mask items above
  * the marker, values, settings, mappings and the images by session uid. No pixels: an edit to a
  * map does not change it, a change of what the slice is made of does.
@@ -281,6 +292,43 @@ size_t paint_layer_effect_gpu_cache_budget();
 void BKE_paint_layers_anchor_point_slice_images(const Material &ma,
                                                 const MaterialPaintLayer &reader,
                                                 blender::Vector<Image *> &r_images);
+
+/**
+ * The maps the mask built up to the mask effect \a effect of \a row was rendered from: the base
+ * mask's and every mask item before the effect's own, nested readers included. The grey the effect
+ * computes holds no pixels of its own in any key, so a stroke on any of them reaches the caches
+ * through these.
+ */
+void BKE_paint_layers_mask_effect_input_images(const Material &ma,
+                                               const MaterialPaintLayer &row,
+                                               const MaterialPaintLayer &effect,
+                                               blender::Vector<Image *> &r_images);
+
+/**
+ * Whether the mask item \a item carries a CPU-computed effect of its own: an element the mask
+ * effect cache computes a grey for, and the bake plan bakes one into a map of its own, the way it
+ * bakes a reader's slice.
+ */
+inline bool paint_layer_mask_item_bakes_effect(const MaterialPaintLayer &item)
+{
+  return item.role == MA_PAINT_LAYER_ROLE_MASK_ITEM &&
+         paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_NEEDS_BAKE);
+}
+
+/**
+ * The map the mask effect item \a item lays when its bake stands: the grey the bake holds, read
+ * like a painted item's map. Null when the item carries no CPU-computed effect, its bake is stale
+ * or the grey's map is not written yet (the transitional state before the first bake). The one
+ * test for the topology hash, the generator, the CPU composite and the planner, so the four cannot
+ * disagree about whether the item reads a map of its own.
+ */
+inline Image *paint_layer_mask_effect_bake_map(const Material &ma, const MaterialPaintLayer &item)
+{
+  return paint_layer_mask_item_bakes_effect(item) && BKE_paint_layers_bake_is_valid(ma, item) &&
+                 item.bake != nullptr ?
+             item.bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] :
+             nullptr;
+}
 
 /**
  * Whether the content correction \a effect, a correction that reads a material, lays anything in
@@ -1303,8 +1351,63 @@ void paint_layer_branch_duplicate(Main &bmain,
 /** A private copy of \a source, for an update of a buffer someone else still reads. */
 std::shared_ptr<ImBuf> paint_layer_anchor_slice_buffer_clone(const ImBuf &source);
 
+/** The scene-linear luminance of each texel of \a buffer written to all three colour channels. The
+ * mask effects whose kernels can leave the grey colored (a Noise off its monochrome mode, a Glow,
+ * a Color Match) bring their result back through it, so the item lays one grey. */
+void paint_layer_effect_to_luminance(ImBuf &buffer);
+
 /** The kernel of \a effect over \a buffer in place, at full strength, RGB only. */
 void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &effect);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Mask effect (a CPU-computed kind as a mask item)
+ * \{ */
+
+/**
+ * The grey the CPU-computed mask effect \a effect lays over its row's mask: the mask built up to
+ * the item, its kernel applied, one entry per (material, item, parameters) in the mask effect
+ * cache. The buffer is canvas grey at the row's dimensions, scene linear, opaque.
+ *
+ * \param describe_only: learn nothing but the maps the input reads (into \a r_images) -- the
+ *        combined preview refuses these kinds and falls back to the CPU.
+ * \param r_images: the maps the input was rendered from; the caches subscribe to them, so a stroke
+ *        on any of them reaches the entry.
+ * \return null when the input could not be rendered or \a describe_only was asked.
+ */
+std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(const Material &ma,
+                                                          const MaterialPaintLayer &row,
+                                                          const MaterialPaintLayer &effect,
+                                                          const bool describe_only,
+                                                          blender::Vector<Image *> *r_images);
+
+/**
+ * Drop the cache's entry of the mask effect \a effect: its bake holds the grey now, and the entry
+ * is a copy kept for nothing while the bake stands. The cache computes the grey back when the bake
+ * goes stale -- an edit or a stroke -- exactly as it did before the first bake.
+ */
+void paint_layer_mask_effect_cache_drop(const Material &ma,
+                                        const MaterialPaintLayer &row,
+                                        const MaterialPaintLayer &effect);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Mask effect cache test hooks
+ * \{ */
+
+/** Bytes the mask effect cache currently accounts for; for tests of the eviction policy. */
+size_t paint_layer_mask_effect_cache_bytes();
+
+/** Number of entries the mask effect cache holds; for tests of the keying and the eviction. */
+int paint_layer_mask_effect_cache_entry_count();
+
+/** Override the mask effect cache's byte budget; tests use a small one. */
+void paint_layer_mask_effect_cache_set_budget(size_t bytes);
+
+/** The mask effect cache's byte budget currently in force; for a test guard that restores it. */
+size_t paint_layer_mask_effect_cache_budget();
 
 /** \} */
 

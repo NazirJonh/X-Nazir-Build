@@ -1295,6 +1295,16 @@ MaterialPaintLayer *BKE_paint_layers_mask_item_owner(Material &ma, const Materia
   return const_cast<MaterialPaintLayer *>(paint_layers_content_owner_read(ma, item));
 }
 
+const MaterialPaintLayer *BKE_paint_layers_mask_item_owner(const Material &ma,
+                                                           const MaterialPaintLayer &item)
+{
+  /* Only a mask item has a mask owner: an effect shares the read but not the answer. */
+  if (item.role != MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return nullptr;
+  }
+  return paint_layers_content_owner_read(ma, item);
+}
+
 MaterialPaintLayer *BKE_paint_layers_mask_item_add(Material &ma,
                                                    MaterialPaintLayer *layer,
                                                    const eMaterialPaintLayerSource source,
@@ -3831,6 +3841,21 @@ int BKE_paint_layers_pack_maps(const Main &bmain, const bool for_autosave, Repor
      * drops the cached buffer — for a painted assigned map that would throw away the very dirty
      * pixels this pack exists to embed. */
     ImBuf *ibuf = BKE_image_get_first_ibuf(image);
+    if (ibuf == nullptr && generated) {
+      /* Only a GENERATED map falls back to the acquire: with no file on disk there is nothing to
+       * reload, so the acquire just synthesizes the flat buffer the image editor would make on
+       * showing the map, and a map made but never shown or painted still leaves in the file with
+       * its pixels. */
+      void *lock = nullptr;
+      ImBuf *made = BKE_image_acquire_ibuf(image, nullptr, &lock);
+      if (made != nullptr) {
+        made->color_mode = ImColorMode::RGBA;
+      }
+      BKE_image_release_ibuf(image, made, lock);
+      /* The release dropped the acquire's own reference; peek again so the one free below matches
+       * the one take. */
+      ibuf = BKE_image_get_first_ibuf(image);
+    }
     const bool has_buffer = ibuf != nullptr;
     if (has_buffer) {
       /* A map's alpha is its coverage; the pack writes as many channels as the color mode names,

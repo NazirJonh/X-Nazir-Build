@@ -667,6 +667,9 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
   BKE_paint_layers_slice_cache_free_all();
   /* Owns float canvases of its own, dropped with the other caches before the leak check. */
   BKE_paint_layers_effect_cache_free_all();
+  /* The mask effect cache holds float canvases too, and a static destructor that ran after the
+   * allocator's teardown would free them into a dead allocator. */
+  BKE_paint_layers_mask_effect_cache_free_all();
   /* The GPU effect cache owns textures of its own, so it goes with the other caches and before the
    * GPU backend is destroyed -- the same window in which the image textures are released below. A
    * fallback too, if the engine was never torn down. */

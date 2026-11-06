@@ -221,8 +221,9 @@ template<typename Op> static void paint_layer_effect_map_rgb(ImBuf &buffer, Op o
   });
 }
 
-/** The scene-linear luminance of each texel of \a buffer written to all three colour channels. */
-static void paint_layer_effect_to_luminance(ImBuf &buffer)
+/** The scene-linear luminance of each texel of \a buffer written to all three colour channels. The
+ * mask effects whose kernels can leave the grey colored bring their result back through it. */
+void paint_layer_effect_to_luminance(ImBuf &buffer)
 {
   paint_layer_effect_map_rgb(buffer, [](const int /*x*/, const int /*y*/, float *texel) {
     const float luminance = IMB_colormanagement_get_luminance(texel);

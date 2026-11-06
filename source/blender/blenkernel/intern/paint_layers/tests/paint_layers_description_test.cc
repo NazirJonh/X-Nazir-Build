@@ -450,6 +450,141 @@ TEST_F(PaintLayersDescription, add_policy_makes_a_filter_correction_on_the_row_i
   EXPECT_TRUE(issues.is_empty());
 }
 
+TEST_F(PaintLayersDescription, a_filter_added_with_the_base_mask_active_lands_in_the_mask_stack)
+{
+  Material &ma = *BKE_material_add(bmain, "MaskEffectAddMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *base = BKE_paint_layers_mask_base(*row);
+  ASSERT_NE(base, nullptr);
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Filter;
+  params.anchor = base;
+  params.filter = MA_PAINT_LAYER_FILTER_BLUR;
+  MaterialPaintLayer *effect = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(effect, nullptr);
+  EXPECT_EQ(effect->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ(effect->source, MA_PAINT_LAYER_SOURCE_FILTER);
+  EXPECT_EQ(effect->kind_subtype, MA_PAINT_LAYER_FILTER_BLUR);
+  EXPECT_STREQ(effect->name, "Blur 1");
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*effect));
+  /* A mask effect reads a single grey, the coverage built up to it: it owns no channel records. */
+  EXPECT_EQ(effect->channels, nullptr);
+  EXPECT_EQ(effect->channels_num, 0);
+  /* It landed in the mask stack, not in the row's content corrections. */
+  EXPECT_EQ(BLI_listbase_count(&row->mask_stack), 2);
+  EXPECT_EQ(BLI_listbase_count(&row->effects), 0);
+  EXPECT_EQ(BLI_findindex(&row->mask_stack, effect), 1);
+}
+
+TEST_F(PaintLayersDescription, a_filter_added_with_the_row_active_lands_in_the_effects)
+{
+  Material &ma = *BKE_material_add(bmain, "RowEffectAddMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(ma, row, 1.0f), nullptr);
+
+  /* The same Add aimed at the row itself still means the row's colour. */
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Filter;
+  params.anchor = row;
+  params.filter = MA_PAINT_LAYER_FILTER_BLUR;
+  MaterialPaintLayer *effect = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(effect, nullptr);
+  EXPECT_EQ(effect->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_EQ(BLI_listbase_count(&row->effects), 1);
+  EXPECT_EQ(BLI_listbase_count(&row->mask_stack), 1);
+
+  /* And one aimed at that correction means another correction of the same row. */
+  params.anchor = effect;
+  MaterialPaintLayer *second = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(second->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_EQ(BLI_listbase_count(&row->effects), 2);
+  EXPECT_EQ(BLI_listbase_count(&row->mask_stack), 1);
+}
+
+TEST_F(PaintLayersDescription, a_mask_item_effect_keeps_the_stack_order)
+{
+  Material &ma = *BKE_material_add(bmain, "MaskEffectOrderMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *base = BKE_paint_layers_mask_base(*row);
+  ASSERT_NE(base, nullptr);
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Filter;
+  params.anchor = base;
+  params.filter = MA_PAINT_LAYER_FILTER_BLUR;
+  MaterialPaintLayer *blur = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(blur, nullptr);
+
+  /* A painted item between two effects, so the order is worth checking. */
+  MaterialPaintLayer *paint = BKE_paint_layers_mask_item_add(
+      ma, row, MA_PAINT_LAYER_SOURCE_IMAGE, "Mask Paint 1");
+  ASSERT_NE(paint, nullptr);
+
+  /* An Add aimed at the first mask effect means another one on the row that owns it, appended
+   * after what the stack already holds. */
+  params.anchor = blur;
+  params.filter = MA_PAINT_LAYER_FILTER_NOISE;
+  MaterialPaintLayer *noise = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(noise, nullptr);
+  EXPECT_EQ(noise->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_STREQ(noise->name, "Noise 1");
+
+  int index = 0;
+  int blur_index = -1;
+  int paint_index = -1;
+  int noise_index = -1;
+  for (MaterialPaintLayer &item : row->mask_stack) {
+    if (&item == base) {
+      EXPECT_EQ(index, 0);
+    }
+    else if (&item == blur) {
+      blur_index = index;
+    }
+    else if (&item == paint) {
+      paint_index = index;
+    }
+    else if (&item == noise) {
+      noise_index = index;
+    }
+    index++;
+  }
+  EXPECT_EQ(index, 4);
+  EXPECT_EQ(blur_index, 1);
+  EXPECT_EQ(paint_index, 2);
+  EXPECT_EQ(noise_index, 3);
+}
+
+TEST_F(PaintLayersDescription, mask_filter_add_takes_a_cpu_effect_and_refuses_the_unknown)
+{
+  Material &ma = *BKE_material_add(bmain, "MaskFilterAddMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(ma, row, 1.0f), nullptr);
+
+  /* The RNA's mask_filter_add is what the Add Effect menu calls, and every CPU-computed kind is
+   * legal as a mask item: it must take the kinds the mask can bake a grey for. */
+  MaterialPaintLayer *blur = BKE_paint_layers_mask_filter_add(ma, row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(blur, nullptr);
+  EXPECT_EQ(blur->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ(blur->kind_subtype, MA_PAINT_LAYER_FILTER_BLUR);
+  /* The numbering is the Add Effect routing's; the bare call names the item by its kind. */
+  EXPECT_STREQ(blur->name, "Blur");
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*blur));
+
+  /* A kind the registry does not know answers null: no exception, no crash, only the report the
+   * RNA wrapper raises. */
+  EXPECT_EQ(BKE_paint_layers_mask_filter_add(ma, row, eMaterialPaintLayerFilter(999)), nullptr);
+  /* And the mask stack holds only the one effect beside its base. */
+  EXPECT_EQ(BLI_listbase_count(&row->mask_stack), 2);
+}
+
 TEST_F(PaintLayersDescription, maps_collect_reads_nested_rows_once)
 {
   Material *ma = BKE_material_add(bmain, "CollectMat");
@@ -1284,7 +1419,7 @@ TEST_F(PaintLayersDescription, blend_to_ramp_covers_every_description_blend)
   ASSERT_NE(group, nullptr);
   const bNodeTreeInterfaceSocket *mode_socket = nullptr;
   for (const bNodeTreeInterfaceItem *item : group->tree_interface.root_panel.items()) {
-    if (item->item_type != NODE_INTERFACE_SOCKET) {
+    if (item->item_type != NodeTreeInterfaceItemType::Socket) {
       continue;
     }
     const bNodeTreeInterfaceSocket *socket = reinterpret_cast<const bNodeTreeInterfaceSocket *>(

@@ -152,7 +152,7 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
     }
     if (entry.published) {
       rcti region;
-      const ePixelChange change = anchor_slice_changes(entry.synced, images, region);
+      const ePixelChange change = map_sources_changes(entry.synced, images, region);
       if (change == ePixelChange::None) {
         if (r_resource != nullptr) {
           *r_resource = entry.resource;
@@ -245,7 +245,7 @@ void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
     /* Taken after the render, as the CPU cache takes them: an edit that landed while the pass ran is
      * newer than this entry and costs one more update rather than a stale result that never clears.
      */
-    entry.synced = anchor_slice_sources_snapshot(images);
+    entry.synced = map_sources_snapshot(images);
     entry.published = true;
     BLI_rcti_init(&entry.dirty_region, 0, 0, 0, 0);
     return;

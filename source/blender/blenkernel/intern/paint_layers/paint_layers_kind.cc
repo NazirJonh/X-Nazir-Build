@@ -650,9 +650,11 @@ static constexpr uint8_t filter_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE
                                         paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
                                         paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM);
 
-/* A CPU-computed effect only corrects a row's colour: the map it reads is the row's own, and an
- * adjustment or a mask item has no map of the row's for it to read. */
-static constexpr uint8_t effect_only_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT);
+/* A CPU-computed effect corrects a row's colour as an EFFECT, or the mask's coverage as a MASK
+ * ITEM: the mask form reads the grey the mask has built up to it through its own cache, not the
+ * row's, so the same kind is legal in both places and the place decides what its input is. */
+static constexpr uint8_t effect_or_mask_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
+                                                paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM);
 
 /* A map-coverage operator only exists as an item of a row's mask; it is never a row or a content
  * correction of its own. */
@@ -800,15 +802,16 @@ static const PaintLayerKindInfo kinds[] = {
      color_balance_params,
      int(std::size(color_balance_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
-    /* A CPU-computed effect: either it reads a neighbourhood of the row's map (a Blur), which the
-     * live graph cannot express, or its sequence is not the graph's (a Noise). It exists only as a
-     * correction of a row's colour, the effect cache computes it, and a row that carries one is
-     * baked for the live graph. */
+    /* A CPU-computed effect: either it reads a neighbourhood of the map it works on (a Blur), which
+     * the live graph cannot express, or its sequence is not the graph's (a Noise). As an EFFECT it
+     * reads the row's colour and the effect cache computes it, so a row that carries one is baked
+     * for the live graph; as a MASK ITEM it reads the grey the mask has up to it, through the mask
+     * effect's own cache the same way. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_BLUR,
      "Blur",
      PaintLayerKindCategory::Operator,
-     effect_only_roles,
+     effect_or_mask_roles,
      blur_params,
      int(std::size(blur_params)),
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
@@ -819,7 +822,7 @@ static const PaintLayerKindInfo kinds[] = {
      MA_PAINT_LAYER_FILTER_SHARPEN,
      "Sharpen",
      PaintLayerKindCategory::Operator,
-     effect_only_roles,
+     effect_or_mask_roles,
      sharpen_params,
      int(std::size(sharpen_params)),
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
@@ -830,7 +833,7 @@ static const PaintLayerKindInfo kinds[] = {
      MA_PAINT_LAYER_FILTER_HIGH_PASS,
      "High Pass",
      PaintLayerKindCategory::Operator,
-     effect_only_roles,
+     effect_or_mask_roles,
      high_pass_params,
      int(std::size(high_pass_params)),
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
@@ -840,7 +843,7 @@ static const PaintLayerKindInfo kinds[] = {
      MA_PAINT_LAYER_FILTER_EDGE_DETECT,
      "Edge Detect",
      PaintLayerKindCategory::Operator,
-     effect_only_roles,
+     effect_or_mask_roles,
      nullptr,
      0,
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
@@ -850,7 +853,7 @@ static const PaintLayerKindInfo kinds[] = {
      MA_PAINT_LAYER_FILTER_EMBOSS,
      "Emboss",
      PaintLayerKindCategory::Operator,
-     effect_only_roles,
+     effect_or_mask_roles,
      nullptr,
      0,
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
@@ -861,7 +864,7 @@ static const PaintLayerKindInfo kinds[] = {
      MA_PAINT_LAYER_FILTER_ERODE_DILATE,
      "Erode / Dilate",
      PaintLayerKindCategory::Operator,
-     effect_only_roles,
+     effect_or_mask_roles,
      erode_dilate_params,
      int(std::size(erode_dilate_params)),
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
@@ -875,17 +878,18 @@ static const PaintLayerKindInfo kinds[] = {
      MA_PAINT_LAYER_FILTER_GLOW,
      "Glow",
      PaintLayerKindCategory::Operator,
-     effect_only_roles,
+     effect_or_mask_roles,
      glow_params,
      int(std::size(glow_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
     /* A bevel replaces the colour with a distance ramp from the content's borders: its alpha, or
      * its luminance when the source says so -- an opaque row bevels by the dark side of its paint. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_BEVEL,
      "Bevel",
      PaintLayerKindCategory::Operator,
-     effect_only_roles,
+     effect_or_mask_roles,
      bevel_params,
      int(std::size(bevel_params)),
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
@@ -894,10 +898,11 @@ static const PaintLayerKindInfo kinds[] = {
      MA_PAINT_LAYER_FILTER_COLOR_MATCH,
      "Color Match",
      PaintLayerKindCategory::Operator,
-     effect_only_roles,
+     effect_or_mask_roles,
      color_match_params,
      int(std::size(color_match_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
     /* The gamma leaves a non-positive value alone and has no upper bound, so an HDR value above
      * one passes through: only the negative side is clamped. The same policy as Sharpen and High
      * Pass. */
@@ -929,11 +934,11 @@ static const PaintLayerKindInfo kinds[] = {
      MA_PAINT_LAYER_FILTER_NOISE,
      "Noise",
      PaintLayerKindCategory::Operator,
-     effect_only_roles,
+     effect_or_mask_roles,
      noise_params,
      int(std::size(noise_params)),
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_GPU_COMPUTED)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
     /* A Normal Convert reads the encoding as numbers, not as a direction: the one filter a Normal
      * channel carries, by its own flag. The combined preview has no branch for it. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -1037,11 +1042,11 @@ bool paint_layer_kind_role_allowed(const MaterialPaintLayer &row)
   if (info == nullptr || (info->allowed_roles & paint_layer_role_bit(row.role)) == 0) {
     return false;
   }
-  /* A NEEDS_BAKE kind computes itself against the row's own bake through the effect cache, which
-   * only an effect reaches: a row or a mask item of one would be described from the parameters
-   * alone, and those carry no colour. */
+  /* A NEEDS_BAKE kind computes itself through an effect cache: an effect against the row's colour,
+   * a mask item against the grey the mask has built up to it (the mask effect cache). A row of one
+   * would be described from the parameters alone, and those carry no colour. */
   if ((info->flags & PAINT_LAYER_KIND_NEEDS_BAKE) != 0 &&
-      row.role != MA_PAINT_LAYER_ROLE_EFFECT)
+      row.role == MA_PAINT_LAYER_ROLE_LAYER)
   {
     return false;
   }

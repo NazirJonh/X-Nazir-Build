@@ -539,6 +539,10 @@ bool BKE_paint_layers_mask_item_remove(Material &ma, MaterialPaintLayer *item);
  * \a ma. */
 MaterialPaintLayer *BKE_paint_layers_mask_item_owner(Material &ma, const MaterialPaintLayer &item);
 
+/** The const twin, for a reader that only looks the item's row up. */
+const MaterialPaintLayer *BKE_paint_layers_mask_item_owner(const Material &ma,
+                                                          const MaterialPaintLayer &item);
+
 /* -------------------------------------------------------------------- */
 /** \name Color ID colours of a map-coverage mask item
  *

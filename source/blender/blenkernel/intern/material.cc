@@ -560,6 +560,7 @@ static void material_free_data(ID *id)
     BKE_paint_material_composite_cache_free_material(*material);
     BKE_paint_layers_slice_cache_free_material(*material);
     BKE_paint_layers_effect_cache_free_material(*material);
+    BKE_paint_layers_mask_effect_cache_free_material(*material);
     /* The GPU effect cache is keyed on the session UID the same way and its entries own textures,
      * so a freed material's results would otherwise sit in VRAM until the budget evicted them. */
     BKE_paint_layers_effect_gpu_cache_free_material(*material);

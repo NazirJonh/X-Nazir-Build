@@ -506,6 +506,17 @@ static uint64_t anchor_point_hash_row(uint64_t h,
   return h;
 }
 
+uint64_t paint_layer_mask_prefix_hash(const Material &ma,
+                                      const MaterialPaintLayer &row,
+                                      const MaterialPaintLayer &stop)
+{
+  const uint64_t h = anchor_point_hash_uuid(
+      anchor_point_hash_mix(0,
+                            get_default_hash(int(MA_PAINT_LAYER_ROLE_MASK_ITEM), -1)),
+      row.marker);
+  return anchor_point_hash_row(h, ma, row, nullptr, &stop, true, 0);
+}
+
 uint64_t paint_layer_anchor_point_slice_hash(const Material &ma,
                                              const MaterialPaintLayer &reader,
                                              const int channel)

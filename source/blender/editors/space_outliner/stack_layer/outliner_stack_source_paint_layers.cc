@@ -2074,6 +2074,13 @@ class PaintLayersStackSource final : public StackSource,
     return N_("Paint Layers");
   }
 
+  StringRefNull idname() const override
+  {
+    /* The identifier the source's enum item carries: every kind of stack names itself the one
+     * way, and a click on its Focus Stack button addresses it by this. */
+    return "PAINT_MATERIAL";
+  }
+
   bool object_has_stack(const StackReadContext & /*ctx*/, Object &object) const override
   {
     const Material *material = BKE_object_material_get(&object, object.actcol);

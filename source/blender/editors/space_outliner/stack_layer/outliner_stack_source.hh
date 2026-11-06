@@ -1538,11 +1538,12 @@ class StackSource {
   virtual StringRefNull ui_name() const = 0;
 
   /**
-   * The unique name a runtime-registered source registered under, or empty for the built-ins.
+   * The unique name the source is addressed by: a runtime-registered source registered under its
+   * idname, a built-in named after its enum item's identifier.
    *
-   * This is what a file's #SpaceOutliner::stack_source_idname names, what scripts address the
-   * source by, and what a row decorator matches against. The DNA enum only says "custom"; this
-   * says which.
+   * This is what a file's #SpaceOutliner::stack_source_idname names for a custom source, what
+   * scripts address the source by, and what a row decorator matches against. The DNA enum only
+   * says "custom"; this says which.
    */
   virtual StringRefNull idname() const
   {
@@ -1652,6 +1653,20 @@ class StackSource {
    * stack has a recognizable tool or data icon override it.
    */
   virtual int focus_button_icon() const;
+
+  /**
+   * Whether an object that has this source's stack offers the Focus Stack button among the row's
+   * inline icons even when another source is picked.
+   *
+   * True by default: an enabled add-on is the reason the stack exists, and the picked source must
+   * not hide it. A source whose stack sits on a common enough kind of object that the button
+   * would read as clutter on nearly every row -- shape keys -- opts out, and shows the button
+   * only while it is the picked one.
+   */
+  virtual bool shows_focus_button_always() const
+  {
+    return true;
+  }
 
   /**
    * The side effects of choosing a sub-selection, in the data themselves.
@@ -1929,6 +1944,14 @@ bool stack_bridge_callback_active();
 
 /** The registered (non-built-in) source \a idname names, or null. */
 const StackSource *stack_source_custom_find(StringRefNull idname);
+/** The source -- built-in or registered -- that named itself \a idname, or null. Unlike
+ * #stack_source_custom_find this answers for the built-ins too: they carry the identifier their
+ * enum item uses. */
+const StackSource *stack_source_find(StringRefNull idname);
+/** Drop the Python sources' per-frame object-key memos (#StackSourcePython::object_stack_key).
+ * The outliner draw calls this when it starts a new tree build, so each draw pass answers the
+ * key from Python once per object and the rest of the frame reads the memos. */
+void stack_source_python_key_memos_frame_begin();
 
 /** Every source built into this Blender, in the order they are listed to the user. */
 Span<const StackSource *> stack_sources_get();

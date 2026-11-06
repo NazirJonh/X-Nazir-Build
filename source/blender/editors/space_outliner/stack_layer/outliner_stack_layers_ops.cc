@@ -98,6 +98,13 @@ void OUTLINER_OT_stack_layer_focus(wmOperatorType *ot)
                   true,
                   "Enter Edit Mode",
                   "Enter the edit mode the source works in");
+  RNA_def_string(ot->srna,
+                 "source",
+                 nullptr,
+                 64,
+                 "Source",
+                 "Identifier of a registered stack source to switch to first; empty keeps the "
+                 "current one");
 }
 
 void OUTLINER_OT_stack_layers_back(wmOperatorType *ot)

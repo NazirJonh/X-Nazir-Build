@@ -45,8 +45,6 @@
 #include "ED_screen.hh"
 #include "ED_undo.hh"
 
-#include "MEM_guardedalloc.h"
-
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
@@ -87,9 +85,45 @@ wmOperatorStatus stack_focus_exec(bContext *C, wmOperator *op)
   }
   const int sub_index = RNA_int_get(op->ptr, "sub_index");
   const bool enter_edit_mode = RNA_boolean_get(op->ptr, "enter_edit_mode");
-  return outliner_stack_focus_set(C, *space_outliner, *object, sub_index, enter_edit_mode) ?
-             OPERATOR_FINISHED :
-             OPERATOR_CANCELLED;
+  /* Read as a whole string, so the copy into the space's own field on a switch is guarded by one
+   * explicit length check: no registered source carries an idname the field cannot hold anyway. */
+  const std::string source_idname = RNA_string_get(op->ptr, "source");
+  const StackSource *switch_source = nullptr;
+  if (!source_idname.empty()) {
+    if (source_idname.size() < sizeof(space_outliner->stack_source_idname)) {
+      switch_source = stack_source_find(source_idname);
+    }
+    if (switch_source == nullptr) {
+      BKE_report(op->reports, RPT_ERROR, "Stack source is not registered");
+      return OPERATOR_CANCELLED;
+    }
+  }
+  /* The picker switches before the focus is resolved -- the focus is looked up in the rows of
+   * the source switched to. A click that cannot resolve a focus rolls the switch back, so a
+   * failed button leaves the space where it was. */
+  const eSpaceOutliner_StackSource saved_source = space_outliner->stack_source;
+  char saved_source_idname[sizeof(space_outliner->stack_source_idname)];
+  STRNCPY(saved_source_idname, space_outliner->stack_source_idname);
+  if (switch_source != nullptr) {
+    if (switch_source->type() == SO_STACK_SRC_CUSTOM) {
+      space_outliner->stack_source = SO_STACK_SRC_CUSTOM;
+      STRNCPY(space_outliner->stack_source_idname, source_idname.c_str());
+    }
+    else {
+      /* A built-in is addressed by its enum item identifier: the space stores the type and no
+       * idname. */
+      space_outliner->stack_source = switch_source->type();
+      space_outliner->stack_source_idname[0] = '\0';
+    }
+    outliner_stack_rows_invalidate(*space_outliner);
+  }
+  if (!outliner_stack_focus_set(C, *space_outliner, *object, sub_index, enter_edit_mode)) {
+    space_outliner->stack_source = saved_source;
+    STRNCPY(space_outliner->stack_source_idname, saved_source_idname);
+    outliner_stack_rows_invalidate(*space_outliner);
+    return OPERATOR_CANCELLED;
+  }
+  return OPERATOR_FINISHED;
 }
 
 wmOperatorStatus stack_back_exec(bContext *C, wmOperator *op)

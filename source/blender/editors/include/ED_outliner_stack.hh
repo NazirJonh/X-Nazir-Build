@@ -243,6 +243,10 @@ StackSourcePython *outliner_stack_source_python_new(const StackSourceInfo &info)
 /** The idname the module owns for \a source: the string an RNA struct created for it has to point
  * at, since #RNA_def_struct_ptr keeps the pointer instead of copying it. */
 const char *outliner_stack_source_python_idname(const StackSourcePython &source);
+/** Whether  idname is one a built-in source answers to. A registered source may not take it:
+ * the focus button and the decorators address a source by idname, and the built-in would win the
+ * lookup, leaving the registered one unreachable. */
+bool outliner_stack_source_idname_reserved(StringRefNull idname);
 /** The srna the source \a idname's registration created for its subclass, or null when none is
  * registered under the name. */
 StructRNA *outliner_stack_source_python_srna(StringRefNull idname);

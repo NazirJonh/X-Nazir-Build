@@ -89,6 +89,20 @@ class ShapeKeyStackSource final : public StackSource, public StackEditor {
     return N_("Shape Keys");
   }
 
+  StringRefNull idname() const override
+  {
+    /* The identifier the source's enum item carries: every kind of stack names itself the one
+     * way, and a click on its Focus Stack button addresses it by this. */
+    return "SHAPE_KEYS";
+  }
+
+  /* A keyed object is common enough that an always-on Focus Stack button would sit on nearly
+   * every row of a regular scene; this source offers it only while it is the picked one. */
+  bool shows_focus_button_always() const override
+  {
+    return false;
+  }
+
   bool object_has_stack(const StackReadContext & /*ctx*/, Object &object) const override
   {
     const Key *key = BKE_key_from_object(&object);

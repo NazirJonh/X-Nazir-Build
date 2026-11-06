@@ -389,9 +389,25 @@ bool StackSourcePython::object_has_stack(const StackReadContext &ctx, Object &ob
   return has_stack;
 }
 
-std::optional<uint64_t> StackSourcePython::object_stack_key(
-    const StackReadContext & /*ctx*/, const Object &object) const
+std::optional<uint64_t> StackSourcePython::object_stack_key(const StackReadContext &ctx,
+                                                            const Object &object) const
 {
+  /* The key asks the subclass's #has_stack_key for its revision part -- a Python call -- and the
+   * draw asks for it on every object row on every pass, so the answers of one frame are kept
+   * here and dropped when the draw's next tree build starts
+   * (#stack_source_python_key_memos_frame_begin). A file load replaces every object behind the
+   * memos while this source survives it, so the first ask under a different #Main drops them
+   * before it looks anything up, exactly as the answers cache does. */
+  if (ctx.bmain != nullptr) {
+    if (object_stack_key_memo_bmain_ != nullptr && ctx.bmain != object_stack_key_memo_bmain_) {
+      object_stack_key_memo_.clear();
+    }
+    object_stack_key_memo_bmain_ = ctx.bmain;
+  }
+  if (const uint64_t *memo = object_stack_key_memo_.lookup_ptr(&object)) {
+    return *memo;
+  }
+
   /* The identity of the ask, C++-resolved: an object by pointer-carrying session UID (the
    * pointer is the map's own key, the UID is what survives its address being reused), its data
    * by pointer and session UID (a different mesh, or a new mesh at the old mesh's address, must
@@ -408,6 +424,7 @@ std::optional<uint64_t> StackSourcePython::object_stack_key(
    * in as its integer-valued float (see #object_stack_key_source_part). */
   key = object_stack_key_mix(key,
                              uint64_t(object_stack_key_source_part(object)));
+  object_stack_key_memo_.add(&object, key);
   return key;
 }
 
@@ -428,6 +445,39 @@ bool StackSourcePython::object_has_stack_python(Object &object) const
 void StackSourcePython::object_has_stack_cache_clear() const
 {
   object_has_stack_cache_.clear();
+  /* The key memo rides the same events (an undo, a file load, a registry change): an object may be
+   * replaced behind it while its pointer stays. */
+  object_stack_key_memo_.clear();
+}
+
+void StackSourcePython::object_stack_key_memo_clear() const
+{
+  object_stack_key_memo_.clear();
+}
+
+void stack_source_python_key_memos_frame_begin()
+{
+  /* A new draw pass starts a new frame for the keys: each Python source answers its
+   * #object_stack_key from Python once per object for the frame, and the rest of the frame --
+   * the second draw pass, the other askers -- reads the memos. See #object_stack_key_memo_. */
+  for_each_python_source(
+      [](const StackSourcePython &source) { source.object_stack_key_memo_clear(); });
+}
+
+int StackSourcePython::focus_button_icon() const
+{
+  return (info.focus_button_icon_id != 0) ? info.focus_button_icon_id :
+                                            StackSource::focus_button_icon();
+}
+
+std::optional<eObjectMode> StackSourcePython::focus_object_mode() const
+{
+  /* The mode was resolved from the class's #focus_object_mode name once, at registration; the -1
+   * sentinel means it named none (or an unknown one), and the base default (no mode) answers. */
+  if (info.focus_object_mode_id >= 0) {
+    return static_cast<eObjectMode>(info.focus_object_mode_id);
+  }
+  return StackSource::focus_object_mode();
 }
 
 ID *StackSourcePython::owner_get(const StackReadContext & /*ctx*/, const StackFocus &focus) const

@@ -195,6 +195,29 @@ const StackSource *stack_source_custom_find(StringRefNull idname)
   return nullptr;
 }
 
+bool outliner_stack_source_idname_reserved(StringRefNull idname)
+{
+  for (const StackSource *source : stack_sources_builtin_ensure()) {
+    if (source->idname() == idname) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const StackSource *stack_source_find(StringRefNull idname)
+{
+  if (idname.is_empty()) {
+    return nullptr;
+  }
+  for (const StackSource *source : stack_sources_get()) {
+    if (source->idname() == idname) {
+      return source;
+    }
+  }
+  return nullptr;
+}
+
 Span<const StackSource *> stack_sources_get()
 {
   return stack_sources_all_ensure();

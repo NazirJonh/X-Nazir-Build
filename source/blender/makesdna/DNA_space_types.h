@@ -215,6 +215,21 @@ typedef struct StackSourceInfo {
   int icon;
   /** Icon name the registered class gave, resolved into #icon at registration. */
   char icon_name[64];
+  /** Icon of the Focus Stack button, resolved from #focus_button_icon at registration, or 0 for
+   * the source's default. */
+  int focus_button_icon_id;
+  /** Icon name the registered class gave for the Focus Stack button, resolved into
+   * #focus_button_icon_id at registration. */
+  char focus_button_icon[64];
+  /** Object mode a Focus Stack click with 'enter edit mode' switches to, named by the
+   * #eObjectMode identifier ("SCULPT"), or empty to keep the object's current mode. */
+  char focus_object_mode[32];
+  /** #focus_object_mode resolved to an #eObjectMode at registration, so the C side never re-parses
+   * the string. -1 is the sentinel for "no mode" (the string was empty or unknown), which keeps
+   * the object's current mode; a non-negative value is the mode to enter. Note 0 is a real mode
+   * (#OB_MODE_OBJECT), so it cannot stand for "none". Lined up after the 32-byte name, so it is
+   * naturally int-aligned. */
+  int focus_object_mode_id;
   /** Column widths the source asks for, in UI units; fractions are allowed. */
   float value_width;
   float mode_width;
@@ -234,7 +249,8 @@ typedef struct StackSourceInfo {
 /* Pinned as the sum of the fields so an addition that inserts padding (or a platform-dependent
  * field) breaks the build here rather than silently moving what RNA maps onto. */
 static_assert(sizeof(StackSourceInfo) ==
-                  64 + 64 + sizeof(int) + 64 + sizeof(float) * 3 + sizeof(int) * 3,
+                  64 + 64 + sizeof(int) + 64 + sizeof(int) + 64 + 32 + sizeof(int) +
+                      sizeof(float) * 3 + sizeof(int) * 3,
               "StackSourceInfo must stay a padding-free sum of its fixed-size fields");
 
 /**

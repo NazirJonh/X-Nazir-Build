@@ -122,6 +122,15 @@ static StructRNA *rna_OutlinerStackSource_register(Main *bmain,
     return nullptr;
   }
 
+  if (blender::ed::outliner::outliner_stack_source_idname_reserved(dummy_info.idname)) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "%s '%s' is the name of a built-in stack source",
+                error_prefix,
+                dummy_info.idname);
+    return nullptr;
+  }
+
   /* A re-registration of the same idname replaces the previous one, the way a re-registered
    * Python class does; the name check below must see the slot free first. */
   if (StructRNA *previous_srna = blender::ed::outliner::outliner_stack_source_python_srna(
@@ -149,6 +158,46 @@ static StructRNA *rna_OutlinerStackSource_register(Main *bmain,
                   error_prefix,
                   dummy_info.idname,
                   dummy_info.icon_name);
+    }
+  }
+
+  /* Resolve the Focus Stack button's icon the same way: an unknown name reads as no override,
+   * and the source's default answers. */
+  dummy_info.focus_button_icon_id = 0;
+  if (dummy_info.focus_button_icon[0] != '\0') {
+    int icon = 0;
+    if (RNA_enum_value_from_id(rna_enum_icon_items, dummy_info.focus_button_icon, &icon)) {
+      dummy_info.focus_button_icon_id = icon;
+    }
+    else {
+      BKE_reportf(reports,
+                  RPT_WARNING,
+                  "%s '%s': unknown focus button icon '%s'",
+                  error_prefix,
+                  dummy_info.idname,
+                  dummy_info.focus_button_icon);
+    }
+  }
+
+  /* Resolve the Focus Stack mode the class named the same way the icon is, and store the value so
+   * the C side reads it back without re-parsing the string. An empty or unknown name leaves the -1
+   * sentinel (no mode), so focusing keeps the object's current mode. */
+  dummy_info.focus_object_mode_id = -1;
+  if (dummy_info.focus_object_mode[0] != '\0') {
+    int mode = 0;
+    if (RNA_enum_value_from_id(rna_enum_object_mode_items,
+                               dummy_info.focus_object_mode,
+                               &mode))
+    {
+      dummy_info.focus_object_mode_id = mode;
+    }
+    else {
+      BKE_reportf(reports,
+                  RPT_WARNING,
+                  "%s '%s': unknown focus object mode '%s'",
+                  error_prefix,
+                  dummy_info.idname,
+                  dummy_info.focus_object_mode);
     }
   }
 
@@ -424,6 +473,22 @@ static void rna_def_outliner_stack_source(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_REGISTER_OPTIONAL);
   RNA_def_property_ui_text(
       prop, "Supports Row Lock", "Whether the rows carry a painting lock the Options can offer");
+
+  prop = RNA_def_property(srna, "focus_button_icon", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "focus_button_icon");
+  RNA_def_property_flag(prop, PROP_REGISTER_OPTIONAL);
+  RNA_def_property_ui_text(prop,
+                           "Focus Button Icon",
+                           "Icon of the Focus Stack button on the object rows of the View Layer "
+                           "mode, as its identifier; empty keeps the source's default");
+
+  prop = RNA_def_property(srna, "focus_object_mode", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "focus_object_mode");
+  RNA_def_property_flag(prop, PROP_REGISTER_OPTIONAL);
+  RNA_def_property_ui_text(prop,
+                           "Focus Object Mode",
+                           "Object mode a Focus Stack click with 'enter edit mode' switches to, "
+                           "as an identifier like 'SCULPT'; empty keeps the object's mode");
 
   prop = RNA_def_property(srna, "use_sub_selection", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "use_sub_selection", 0);

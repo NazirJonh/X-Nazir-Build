@@ -4155,25 +4155,53 @@ static void outliner_draw_tree_element(ui::Block *block,
       const StackSource &source = *stack_source_for_space(*space_outliner);
       const StackReadContext ctx = {tvc.bmain, tvc.scene, tvc.view_layer};
       /* Buttons are not clipped by overdrawing the way plain icons are (#tselem_draw_icon), so
-       * keep this one clear of the restriction columns. The rect is the full cell: the widget
+       * keep these clear of the restriction columns. The rect is the full cell: the widget
        * centers the icon inside it (#widget_draw_icon), unlike a plain icon draw which insets the
        * glyph by hand. */
-      if (object != nullptr && source.object_has_stack(ctx, *object) && data_icons_end < xmax) {
+      /* One button per source that has a stack here, the picked one first: an object can carry
+       * more than one kind of stack, and each gets its own rather than only the picked source's.
+       * A source that opted out of the always-on button -- shape keys, which would sit on nearly
+       * every keyed object -- shows it only while picked. */
+      Vector<const StackSource *, 4> focus_sources;
+      if (object != nullptr && data_icons_end < xmax) {
+        if (source.object_has_stack(ctx, *object)) {
+          focus_sources.append(&source);
+        }
+        for (const StackSource *candidate : stack_sources_get()) {
+          if (candidate == &source || !candidate->shows_focus_button_always()) {
+            continue;
+          }
+          if (candidate->object_has_stack(ctx, *object)) {
+            focus_sources.append(candidate);
+          }
+        }
+      }
+      int focus_button_x = data_icons_end;
+      for (const StackSource *focus_source : focus_sources) {
+        if (focus_button_x >= xmax) {
+          break;
+        }
         ui::Button *but = uiDefIconButO(block,
                                         ui::ButtonType::But,
                                         "OUTLINER_OT_stack_layer_focus",
                                         wm::OpCallContext::ExecDefault,
-                                        source.focus_button_icon(),
-                                        data_icons_end,
+                                        focus_source->focus_button_icon(),
+                                        focus_button_x,
                                         *starty,
                                         UI_UNIT_X,
                                         UI_UNIT_Y,
                                         TIP_("Show this object's layer stack"));
+        focus_button_x += UI_UNIT_X;
+        /* The click names the source it switches to: every kind of stack answers #idname, and the
+         * picked one's own button passes empty to keep it. */
+        const char *source_name = (focus_source == &source) ? "" :
+                                                             focus_source->idname().c_str();
         PointerRNA *props = ui::button_operator_ptr_ensure(but);
         RNA_string_set(props, "object", object->id.name + 2);
         RNA_string_set(props, "library", ID_IS_LINKED(object) ? object->id.lib->id.name + 2 : "");
         RNA_int_set(props, "sub_index", -1);
         RNA_boolean_set(props, "enter_edit_mode", true);
+        RNA_string_set(props, "source", source_name);
       }
     }
   }
@@ -4769,6 +4797,10 @@ void draw_outliner(const bContext *C, bool do_rebuild)
    * See `USE_OUTLINER_DRAW_CLAMPS_SCROLL_HACK` & #128346 for a full description. */
 
   if (do_rebuild) {
+    /* A new tree build is a new frame for the Python sources' object keys: each is answered from
+     * Python once per object for the frame, and the second draw pass and the other askers read
+     * the memos (see #stack_source_python_key_memos_frame_begin). */
+    stack_source_python_key_memos_frame_begin();
     outliner_build_tree(
         mainvar, workspace, tvc.scene, tvc.view_layer, space_outliner, region); /* Always. */
 

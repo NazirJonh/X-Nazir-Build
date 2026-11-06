@@ -92,6 +92,13 @@ class StackSourcePython final : public StackSource, public StackEditor {
   bool object_has_stack(const StackReadContext &ctx, Object &object) const override;
   std::optional<uint64_t> object_stack_key(const StackReadContext &ctx,
                                            const Object &object) const override;
+  /** The Focus Stack button's icon: the registered class's resolved #focus_button_icon_id, or
+   * the base default when the class named none. */
+  int focus_button_icon() const override;
+  /** The mode a Focus Stack click enters: the registered class's #focus_object_mode resolved to an
+   * #eObjectMode once at registration, or the base default (no mode) when it named none or named
+   * an unknown one. */
+  std::optional<eObjectMode> focus_object_mode() const override;
   ID *owner_get(const StackReadContext &ctx, const StackFocus &focus) const override;
   uint64_t state_hash(const StackReadContext &ctx, const ID &owner) const override;
   bool rows_build(const StackReadContext &ctx,
@@ -183,6 +190,11 @@ class StackSourcePython final : public StackSource, public StackEditor {
    */
   void object_has_stack_cache_clear() const;
 
+  /** Drop the per-frame memos of #object_stack_key (see #object_stack_key_memo_). The outliner
+   * draw calls this when its next tree build starts, so a frame answers the key from Python once
+   * per object; a whole-rows invalidation need not, the memos live one frame either way. */
+  void object_stack_key_memo_clear() const;
+
   /** The static description the subclass registered with. */
   const StackSourceInfo info;
 
@@ -251,6 +263,21 @@ class StackSourcePython final : public StackSource, public StackEditor {
    * file has objects is mostly those. Recomputed from the file each time the bound is exceeded.
    */
   mutable int object_has_stack_cache_size_limit_ = 0;
+
+  /**
+   * The #object_stack_key answers of the current frame, keyed by the object each was asked about.
+   *
+   * The key asks the subclass's #has_stack_key for its revision part -- a Python call -- and the
+   * draw asks for it on every object row on every pass, so the answers of one frame are kept and
+   * the draw drops them when its next tree build starts
+   * (#stack_source_python_key_memos_frame_begin). A key change made mid-frame, by an operator
+   * mutation for one, is picked up no later than the next redraw -- the same window the rows'
+   * own invalidation runs in. Keyed by the object pointer like #object_has_stack_cache_, so a
+   * #Main change drops it the same way.
+   */
+  mutable Map<const Object *, uint64_t> object_stack_key_memo_;
+  /** The #Main the key memos were built against; see #object_has_stack_cache_bmain_. */
+  mutable const Main *object_stack_key_memo_bmain_ = nullptr;
 
   /** The registered subclass: its class object (not owned), its RNA dispatch, the free function
    * that releases the class, its srna. */

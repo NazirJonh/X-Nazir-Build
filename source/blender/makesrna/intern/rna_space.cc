@@ -10,13 +10,17 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
+#include <memory>
 
 /* Global debug flag for RNA space operations - set to false to disable debug output */
 static constexpr bool RNA_SPACE_DEBUG_ENABLED = false;
 
 #include "BLI_math_constants.h"
+#include "BLI_map.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_uuid.h"
+#include "BLI_vector.hh"
 #include "BLT_translation.hh"
 
 #include "BKE_context.hh"
@@ -973,6 +977,166 @@ static const EnumPropertyItem *rna_SpaceOutliner_stack_focus_sub_index_itemf(
 {
   SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
   return ed::outliner::outliner_stack_focus_sub_index_itemf(C, *space_outliner, r_free);
+}
+/* -------------------------------------------------------------------- */
+/** \name Stack Layers: Python-defined sources and decorators
+ *
+ * The registration half of the #OutlinerStackSource and #OutlinerStackRowDecorator RNA types,
+ * and the dynamic enum that lists every known source. The module side lives in
+ * `ED_outliner_stack.hh`.
+ * \{ */
+
+/** The session enum value a registered source is listed under rides with the source itself (see
+ * #StackSourceListItem::session_value): assigned once at registration, it survives the register
+ * and unregister of other sources, where a position in the listing would move and point a value a
+ * script saved at a different source. The built-ins answer their own DNA enum value. */
+
+static int rna_SpaceOutliner_stack_source_get(PointerRNA *ptr)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  if (space_outliner->stack_source != SO_STACK_SRC_CUSTOM) {
+    return space_outliner->stack_source;
+  }
+  /* A registered source: answer the session value its idname registered with. An idname this
+   * session has none of (the script that registered it is gone) answers the bare custom value,
+   * which the item function's missing-source item keeps representable. */
+  blender::Vector<blender::ed::outliner::StackSourceListItem> sources;
+  blender::ed::outliner::outliner_stack_sources_list(sources);
+  for (const blender::ed::outliner::StackSourceListItem &source : sources) {
+    if (source.is_custom &&
+        source.idname == StringRefNull(space_outliner->stack_source_idname))
+    {
+      return source.session_value;
+    }
+  }
+  return SO_STACK_SRC_CUSTOM;
+}
+
+static void rna_SpaceOutliner_stack_source_set(PointerRNA *ptr, int value)
+{
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+  if (value < 0) {
+    return;
+  }
+  if (value <= int(SO_STACK_SRC_CUSTOM)) {
+    if (value == int(SO_STACK_SRC_CUSTOM)) {
+      /* The bare custom value names no source; a script that means a registered one names its
+       * session value, and the UI never offers this one but the missing-source fallback. */
+      return;
+    }
+    space_outliner->stack_source = eSpaceOutliner_StackSource(value);
+    space_outliner->stack_source_idname[0] = '\0';
+    return;
+  }
+  blender::Vector<blender::ed::outliner::StackSourceListItem> sources;
+  blender::ed::outliner::outliner_stack_sources_list(sources);
+  for (const blender::ed::outliner::StackSourceListItem &source : sources) {
+    if (source.is_custom && source.session_value == value) {
+      space_outliner->stack_source = SO_STACK_SRC_CUSTOM;
+      BLI_strncpy(space_outliner->stack_source_idname,
+                  source.idname.c_str(),
+                  sizeof(space_outliner->stack_source_idname));
+      return;
+    }
+  }
+  /* A value no registered source carries (a stale one from a script's earlier session): no
+   * change, the way an unknown built-in value leaves the space alone. */
+}
+
+/** The upper-case identifier a registered source is listed under, from a pool that only grows:
+ * the item array RNA hands out is freed without freeing the strings in it, so every identifier
+ * ever listed has to outlive the call. Keyed on the raw idname -- the copy this replaces compared
+ * the upper-cased key against the raw one, which never matched, so every enum build appended
+ * another entry. The value is held by pointer because the map moves its entries as it grows, and
+ * the identifiers RNA points at have to stay put. */
+static const char *rna_stack_source_identifier(const blender::StringRef idname)
+{
+  static blender::Map<std::string, std::unique_ptr<std::string>> pool;
+  const std::unique_ptr<std::string> *owned = pool.lookup_ptr_as(idname);
+  if (owned != nullptr) {
+    return owned->get()->c_str();
+  }
+  pool.add_as(std::string(idname), std::make_unique<std::string>(idname));
+  std::unique_ptr<std::string> &stored = pool.lookup_as(idname);
+  BLI_str_toupper_ascii(stored->data(), stored->size());
+  return stored->c_str();
+}
+
+/** The display name of a listed source, from a pool of its own for the same reason: the listing the
+ * names come from is a local of the item function and is gone by the time RNA reads the items, so
+ * pointing at its strings showed garbage in the picker. Not upper-cased, unlike the identifiers. */
+static const char *rna_stack_source_name_keep(const blender::StringRef name)
+{
+  static blender::Map<std::string, std::unique_ptr<std::string>> pool;
+  const std::unique_ptr<std::string> *owned = pool.lookup_ptr_as(name);
+  if (owned != nullptr) {
+    return owned->get()->c_str();
+  }
+  pool.add_as(std::string(name), std::make_unique<std::string>(name));
+  return pool.lookup_as(name)->c_str();
+}
+
+static const EnumPropertyItem *rna_SpaceOutliner_stack_source_itemf(bContext * /*C*/,
+                                                                   PointerRNA *ptr,
+                                                                   PropertyRNA * /*prop*/,
+                                                                   bool *r_free)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  blender::Vector<blender::ed::outliner::StackSourceListItem> sources;
+  blender::ed::outliner::outliner_stack_sources_list(sources);
+
+  EnumPropertyItem *items = nullptr;
+  int items_num = 0;
+  bool idname_listed = (space_outliner->stack_source != SO_STACK_SRC_CUSTOM);
+  /* The identifiers come from a pool that only grows: RNA frees the item array without freeing
+   * the strings in it. */
+  for (const blender::ed::outliner::StackSourceListItem &source : sources) {
+    EnumPropertyItem item = {};
+    /* A built-in's value is the DNA enum the source itself answers as, read from the source
+     * rather than assumed from its place in the listing; a registered one's value is the session
+     * value it registered under, which stays with it however the registry changes around it. */
+    item.value = source.is_custom ? source.session_value : int(source.type);
+    if (source.is_custom && source.idname == StringRefNull(space_outliner->stack_source_idname)) {
+      idname_listed = true;
+    }
+    if (source.is_custom) {
+      item.identifier = rna_stack_source_identifier(source.idname);
+    }
+    else {
+      /* The built-ins keep the identifiers scripts and the header compare against
+       * (`space.stack_source == 'PAINT_MATERIAL'`); deriving one from the UI name would read
+       * "PAINT LAYERS" and silently break every such test. */
+      switch (source.type) {
+        case SO_STACK_SRC_PAINT_MATERIAL:
+          item.identifier = "PAINT_MATERIAL";
+          item.icon = ICON_IMAGE_RGB;
+          break;
+        case SO_STACK_SRC_SHAPE_KEYS:
+          item.identifier = "SHAPE_KEYS";
+          item.icon = ICON_SHAPEKEY_DATA;
+          break;
+        default:
+          item.identifier = rna_stack_source_identifier(source.ui_name);
+          break;
+      }
+    }
+    item.name = rna_stack_source_name_keep(source.ui_name);
+    item.description = "";
+    RNA_enum_item_add(&items, &items_num, &item);
+  }
+  if (!idname_listed && space_outliner->stack_source_idname[0] != '\0') {
+    /* The space names a source this session does not have: keep it listed, so the property reads
+     * and writes back instead of falling over on an unknown value. */
+    EnumPropertyItem item = {};
+    item.value = int(SO_STACK_SRC_CUSTOM);
+    item.identifier = rna_stack_source_identifier(space_outliner->stack_source_idname);
+    item.name = rna_stack_source_name_keep(space_outliner->stack_source_idname);
+    item.description = "Not registered in this session";
+    RNA_enum_item_add(&items, &items_num, &item);
+  }
+  RNA_enum_item_end(&items, &items_num);
+  *r_free = true;
+  return items;
 }
 
 static void area_region_from_regiondata(bScreen *screen,
@@ -4960,6 +5124,8 @@ static const EnumPropertyItem *rna_FileAssetSelectParams_import_method_itemf(
   return items;
 }
 
+/** \} */
+
 }  // namespace blender
 
 #else
@@ -5400,20 +5566,6 @@ static void rna_def_space_outliner(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
-  static const EnumPropertyItem stack_source_items[] = {
-      {SO_STACK_SRC_PAINT_MATERIAL,
-       "PAINT_MATERIAL",
-       ICON_IMAGE_RGB,
-       "Paint Layers",
-       "Paint layers of the active material, read from its stack description"},
-      {SO_STACK_SRC_SHAPE_KEYS,
-       "SHAPE_KEYS",
-       ICON_SHAPEKEY_DATA,
-       "Shape Keys",
-       "Shape keys of the active object"},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
-
   static const EnumPropertyItem lib_override_view_mode[] = {
       {SO_LIB_OVERRIDE_VIEW_PROPERTIES,
        "PROPERTIES",
@@ -5458,7 +5610,13 @@ static void rna_def_space_outliner(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "stack_source", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "stack_source");
-  RNA_def_property_enum_items(prop, stack_source_items);
+  /* The items are fully dynamic (built-ins plus registered sources); the dummy sentinel is what
+   * makesrna accepts in place of a static table, the same way the sub-index enum below does. */
+  RNA_def_property_enum_items(prop, rna_enum_dummy_NULL_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_SpaceOutliner_stack_source_get",
+                              "rna_SpaceOutliner_stack_source_set",
+                              "rna_SpaceOutliner_stack_source_itemf");
   RNA_def_property_ui_text(prop, "Stack Source", "Which kind of layer stack to display");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
 

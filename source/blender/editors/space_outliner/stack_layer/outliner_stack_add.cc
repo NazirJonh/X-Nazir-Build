@@ -420,7 +420,7 @@ const EnumPropertyItem *stack_add_type_itemf(bContext *C,
 }
 
 const EnumPropertyItem *stack_effect_type_itemf(bContext *C,
-                                                PointerRNA *ptr,
+                                                PointerRNA * /*ptr*/,
                                                 PropertyRNA * /*prop*/,
                                                 bool *r_free)
 {

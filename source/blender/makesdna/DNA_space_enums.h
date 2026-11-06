@@ -316,6 +316,13 @@ enum eSpaceOutliner_StackSource : short {
   SO_STACK_SRC_PAINT_MATERIAL = 0,
   /** Shape keys of the active object. */
   SO_STACK_SRC_SHAPE_KEYS = 1,
+  /**
+   * A runtime-registered source (a Python-defined #blender::ed::outliner::StackSource subclass or
+   * any other registered one). Which one is named by #SpaceOutliner::stack_source_idname: the DNA
+   * enum has to stay file-stable, while registered sources come and go with the scripts that
+   * register them, so the two travel together -- the enum says "custom", the idname says which.
+   */
+  SO_STACK_SRC_CUSTOM = 2,
 };
 
 /** #SpaceOutliner.outlinevis */

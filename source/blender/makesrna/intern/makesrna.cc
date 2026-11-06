@@ -4076,6 +4076,7 @@ static RNAProcessItem PROCESS_ITEMS[] = {
     {"rna_sculpt_paint.cc", nullptr, RNA_def_sculpt_paint},
     {"rna_sequencer.cc", "rna_sequencer_api.cc", RNA_def_sequencer},
     {"rna_space.cc", "rna_space_api.cc", RNA_def_space},
+    {"rna_space_outliner_stack.cc", nullptr, RNA_def_space_outliner_stack},
     {"rna_speaker.cc", nullptr, RNA_def_speaker},
     {"rna_test.cc", nullptr, RNA_def_test},
     {"rna_text.cc", "rna_text_api.cc", RNA_def_text},

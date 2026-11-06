@@ -14,23 +14,38 @@
 
 #pragma once
 
+#include <string>
+
+#include "BLI_string_ref.hh"
 #include "BLI_uuid.h"
+#include "BLI_vector.hh"
 
 #include "DNA_material_types.h"
+#include "DNA_space_enums.h"
+
+#include "RNA_types.hh"
 
 struct bContext;
 struct EnumPropertyItem;
+struct FunctionRNA;
 struct ID;
 struct Image;
+struct Main;
 struct Material;
 struct MaterialPaintLayer;
+struct PointerRNA;
 struct ScrArea;
 struct SpaceOutliner;
+struct StackRowBuilderData;
+struct StackSourceInfo;
+struct StructRNA;
 
 namespace blender {
-struct Main;
 struct Scene;
 struct ViewLayer;
+namespace ed::outliner {
+class StackSourcePython;
+}  // namespace ed::outliner
 }  // namespace blender
 
 namespace blender::ed::outliner {
@@ -147,4 +162,126 @@ MaterialPaintLayer *outliner_stack_row_mask_add_image(bContext &C,
                                                      MaterialPaintLayer &layer,
                                                      Image &image);
 
+/**
+ * \name Python-defined stack sources
+ *
+ * The registration half of the `bpy.types.OutlinerStackSource` RNA type: what its RNA-side
+ * register function calls, and the narrow vocabulary the module answers. The Python methods
+ * themselves are dispatched by RNA (the way a Python panel's #draw is); this is only the door in
+ * and out of the module.
+ *
+ * \{ */
+
+/**
+ * The RNA functions of the #OutlinerStackSource base type, resolved once by the registration and
+ * handed over: an entry is null when the registered subclass did not answer that verb, which is
+ * how the module knows to refuse it.
+ */
+struct StackSourceFunctionSet {
+  FunctionRNA *has_stack = nullptr;
+  /** The optional cache key the source defines for its #has_stack answers (an integer-valued
+   * float): mixed into #object_stack_key, so a change that can flip the answer re-asks it. */
+  FunctionRNA *has_stack_key = nullptr;
+  FunctionRNA *owner_get = nullptr;
+  FunctionRNA *state_hash = nullptr;
+  FunctionRNA *rows_build = nullptr;
+  FunctionRNA *row_activate = nullptr;
+  FunctionRNA *row_is_active = nullptr;
+};
+
+/** Create the module's half of a registered stack source; ownership passes to the module on
+ * #outliner_stack_source_python_register. */
+StackSourcePython *outliner_stack_source_python_new(const StackSourceInfo &info);
+/** The srna the source \a idname's registration created for its subclass, or null when none is
+ * registered under the name. */
+StructRNA *outliner_stack_source_python_srna(StringRefNull idname);
+/** The subclass srna the source whose description the given info is was registered with, or
+ * null when no registered source owns it (the RNA refinement falls back to the base type). */
+StructRNA *outliner_stack_source_python_refine(const StackSourceInfo *info);
+/** Bind \a source to its registered subclass, store it in \a py_srna's blender-type slot as its
+ * base #StackSource (the same type the unregister reads back), list it, and invalidate every
+ * Outliner's cached rows so the next build sees it. Takes ownership of \a source. */
+void outliner_stack_source_python_register(Main &bmain,
+                                           StackSourcePython *source,
+                                           void *py_class,
+                                           StructCallbackFunc py_call,
+                                           StructFreeFunc py_free,
+                                           StructRNA *py_srna,
+                                           const StackSourceFunctionSet &funcs);
+/** Everything an unregister does: drop the source, release its Python class, free its srna.
+ * False when \a srna does not name a registered source. */
+bool outliner_stack_source_python_unregister(Main &bmain, StructRNA *srna);
+
+/** Invalidate the cached Stack Layers rows of every Outliner in \a bmain. */
+void outliner_stack_rows_invalidate_all(Main &bmain);
+
+/** The widest column a Python source may ask for (#StackSourceInfo's width fields), in UI units:
+ * past this one column would crowd out the row's name. The registration's RNA range and the
+ * column layout's own clamp have to agree on it, so both read it here. */
+constexpr float STACK_SOURCE_COLUMN_WIDTH_MAX = 16.0f;
+/** The most extra icon columns a Python source may reserve (#StackSourceInfo::icon_columns). */
+constexpr int STACK_SOURCE_ICON_COLUMNS_MAX = 8;
+
+/** Every source known, built-ins first, then the registered ones in registration order. The
+ * source picker's enum reads this; \a is_custom marks the entries whose DNA value is
+ * #SO_STACK_SRC_CUSTOM plus an idname rather than a built-in enum value. */
+struct StackSourceListItem {
+  std::string idname;
+  std::string ui_name;
+  bool is_custom = false;
+  /** The DNA enum the source answers as: a built-in's value in the source picker is this, read
+   * from the source rather than assumed from its place in the listing. */
+  eSpaceOutliner_StackSource type = SO_STACK_SRC_NONE;
+  /** For a registered source: the session value scripts and the space property write to select
+   * it. Assigned once at registration, so it stays with the source however the registry changes
+   * around it; meaningless for a built-in, whose value is #type. */
+  int session_value = 0;
+};
+void outliner_stack_sources_list(blender::Vector<StackSourceListItem> &r_items);
+
+/** The RNA type the row builder functions run on; set once by the first registration. */
+void outliner_stack_row_builder_srna_set(StructRNA *srna);
+StructRNA *outliner_stack_row_builder_srna();
+
+/** \} */
+
+
 }  // namespace blender::ed::outliner
+
+namespace blender {
+
+/**
+ * \name Row builder RNA callbacks
+ *
+ * The C half of the `OutlinerStackRowBuilder` RNA type: what a Python #rows_build (or
+ * #decorate_row) call drives. Named by the RNA definition, resolved at link time; the parameter
+ * order follows the RNA function definitions in `rna_space_outliner_stack.cc`. The generated code
+ * declares and calls these unqualified from this namespace, the one every RNA callback lives in,
+ * so they stand here rather than inside the module's own namespace.
+ *
+ * \{ */
+/** Append a row; returns its ordinal, or -1 when the stack is full. */
+int outliner_stack_row_builder_add_row(StackRowBuilderData *builder,
+                                       const char *name,
+                                       const char *icon_name,
+                                       int glyph,
+                                       int depth,
+                                       int parent_ordinal,
+                                       bool can_hold_children,
+                                       bool has_children,
+                                       bool enabled,
+                                       bool locked,
+                                       bool aux_enabled,
+                                       int color_tag,
+                                       bool compact,
+                                       const char *unsupported_reason,
+                                       PointerRNA *value,
+                                       const char *value_prop,
+                                       PointerRNA *mode,
+                                       const char *mode_prop,
+                                       bool value_inherited,
+                                       bool mode_inherited);
+
+/** \} */
+
+}  // namespace blender

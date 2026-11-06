@@ -463,6 +463,9 @@ bool stack_layer_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
     return false;
   }
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return false;
+  }
   ARegion *region = CTX_wm_region(C);
   const bool changed = outliner_flag_set(
       *space_outliner, TSE_HIGHLIGHTED_ANY | TSE_DRAG_ANY, false);

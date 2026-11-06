@@ -94,6 +94,11 @@ static TreeElement *outliner_drop_find(bContext *C, const wmEvent *event)
 {
   ARegion *region = CTX_wm_region(C);
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  /* Drag events are also dispatched from a popup's handler, where the context's space need not be
+   * an Outliner. */
+  if (space_outliner == nullptr) {
+    return nullptr;
+  }
   float fmval[2];
   ui::view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &fmval[0], &fmval[1]);
 
@@ -117,6 +122,11 @@ static TreeElement *outliner_drop_insert_find(bContext *C,
                                               TreeElementInsertType *r_insert_type)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  /* Drag events are also dispatched from a popup's handler, where the context's space need not be
+   * an Outliner. */
+  if (space_outliner == nullptr) {
+    return nullptr;
+  }
   ARegion *region = CTX_wm_region(C);
   TreeElement *te_hovered;
   float view_mval[2];
@@ -356,6 +366,11 @@ static bool allow_parenting_without_modifier_key(SpaceOutliner *space_outliner)
 static bool parent_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  /* Drag events are also dispatched from a popup's handler, where the context's space need not be
+   * an Outliner. */
+  if (space_outliner == nullptr) {
+    return false;
+  }
 
   bool changed = outliner_flag_set(*space_outliner, TSE_DRAG_ANY, false);
   if (changed) {
@@ -505,6 +520,9 @@ void OUTLINER_OT_parent_drop(wmOperatorType *ot)
 static bool parent_clear_poll(bContext *C, wmDrag *drag, const wmEvent *event)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return false;
+  }
 
   if (!allow_parenting_without_modifier_key(space_outliner)) {
     if ((event->modifier & KM_SHIFT) == 0) {
@@ -903,6 +921,9 @@ static bool datastack_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
   }
 
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return false;
+  }
   ARegion *region = CTX_wm_region(C);
   bool changed = outliner_flag_set(*space_outliner, TSE_HIGHLIGHTED_ANY | TSE_DRAG_ANY, false);
 
@@ -1245,6 +1266,9 @@ static bool collection_drop_init(bContext *C, wmDrag *drag, const int xy[2], Col
 static bool collection_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return false;
+  }
   ARegion *region = CTX_wm_region(C);
   bool changed = outliner_flag_set(*space_outliner, TSE_HIGHLIGHTED_ANY | TSE_DRAG_ANY, false);
 

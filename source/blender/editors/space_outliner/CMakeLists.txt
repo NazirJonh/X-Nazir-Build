@@ -40,8 +40,10 @@ set(SRC
   stack_layer/outliner_stack_ui_state.cc
   stack_layer/outliner_stack_dragdrop.cc
   stack_layer/outliner_stack_drop_actions.cc
+  stack_layer/outliner_stack_row_builder.cc
   stack_layer/outliner_stack_source.cc
   stack_layer/outliner_stack_source_paint_layers.cc
+  stack_layer/outliner_stack_source_python.cc
   stack_layer/outliner_stack_slot_clipboard.cc
   stack_layer/outliner_stack_source_shape_keys.cc
   stack_layer/tree_display_stack_layers.cc
@@ -151,6 +153,7 @@ set(SRC
   tree/tree_iterator.hh
   stack_layer/outliner_stack_source.hh
   stack_layer/outliner_stack_source_paint_layers_intern.hh
+  stack_layer/outliner_stack_source_python.hh
   stack_layer/tree_element_stack_layer.hh
 )
 

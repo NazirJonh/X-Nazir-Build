@@ -7,15 +7,22 @@
  *
  * The list of stack kinds the Outliner knows about.
  *
- * Built-in and ordered by hand rather than registered dynamically: the sources are C++ in this
- * module, there is no run-time registration to serve, and a fixed list keeps the DNA enum and the
- * RNA items honest. A Python-side registry, if it is ever wanted, plugs in here without any of the
- * code above #StackSource having to learn about it.
+ * The built-ins are C++ in this module and ordered by hand; runtime-registered sources (a
+ * Python-defined #StackSource subclass, today) are appended after them through
+ * #stack_source_register and named by idname rather than by the DNA enum, whose values have to
+ * stay file-stable.
  */
 
+#include <algorithm>
+
+#include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_idprop.hh"
+
 #include "DNA_space_types.h"
+
+#include "ED_outliner_stack.hh"
 
 #include "UI_resources.hh"
 
@@ -25,7 +32,8 @@ namespace blender::ed::outliner {
 
 namespace {
 
-Span<const StackSource *> stack_sources_ensure()
+/* The built-ins: stateless descriptions created once. */
+Span<const StackSource *> stack_sources_builtin_ensure()
 {
   /* Static storage: the sources are stateless descriptions, and nothing outlives them that could
    * still ask for one during static destruction at exit. */
@@ -45,11 +53,169 @@ Span<const StackSource *> stack_sources_ensure()
   return pointers;
 }
 
+/** One runtime-registered source, with the session value scripts and the space's source property
+ * address it by. The value is assigned once at registration and rides with the source: a position
+ * in this vector would move with every register and unregister around it, and a value a script
+ * saved, or an item listed under, would then silently name a different source. */
+struct RegisteredStackSource {
+  std::unique_ptr<StackSource> source;
+  int session_value = 0;
+};
+
+/* The runtime-registered sources, in registration order. Sources arrive with the scripts that
+ * register them and leave with those scripts' unregister, so this list lives as long as the
+ * session does. */
+Vector<RegisteredStackSource> &stack_sources_runtime()
+{
+  static Vector<RegisteredStackSource> runtime_sources;
+  return runtime_sources;
+}
+
+/* The session value the next registered source takes: monotonic and past #SO_STACK_SRC_CUSTOM,
+ * where the built-ins' DNA enum values end, so it can never collide with a built-in's value nor
+ * repeat within the session. */
+int &stack_source_session_counter()
+{
+  static int counter = int(SO_STACK_SRC_CUSTOM);
+  return counter;
+}
+
+/* Sources parked by an unregistration that arrived from inside a bridge callback into one of
+ * them (a source dropping itself while its own rows_build runs): freeing one now would leave the
+ * callback executing against freed memory, so it waits until the outermost callback ends
+ * (#stack_source_callback_end). */
+Vector<std::unique_ptr<StackSource>> &stack_sources_retired()
+{
+  static Vector<std::unique_ptr<StackSource>> retired;
+  return retired;
+}
+
+int &stack_source_callback_depth()
+{
+  static int depth = 0;
+  return depth;
+}
+
 }  // namespace
+
+/* Declared in the header and called from the Python bridge, so these two cannot live in the
+ * anonymous namespace with the state they touch. */
+void stack_source_callback_begin()
+{
+  stack_source_callback_depth()++;
+}
+
+void stack_source_callback_end()
+{
+  if (--stack_source_callback_depth() == 0) {
+    stack_sources_retired().clear_and_shrink();
+  }
+}
+
+namespace {
+
+/* Bumped on every registration and unregistration, so the combined listing below can tell a
+ * cached copy from a changed registry without rebuilding it on every ask. */
+uint64_t &stack_sources_registry_version()
+{
+  static uint64_t version = 0;
+  return version;
+}
+
+/* Combined listing of every known source: the built-ins, then the registered ones in
+ * registration order. */
+Span<const StackSource *> stack_sources_all_ensure()
+{
+  static Vector<const StackSource *> cached;
+  static uint64_t cached_version = uint64_t(-1);
+  if (cached_version != stack_sources_registry_version()) {
+    cached.clear();
+    cached.extend(stack_sources_builtin_ensure());
+    for (const RegisteredStackSource &registered : stack_sources_runtime()) {
+      cached.append(registered.source.get());
+    }
+    cached_version = stack_sources_registry_version();
+  }
+  return cached;
+}
+
+}  // namespace
+
+void stack_source_register(std::unique_ptr<StackSource> source)
+{
+  BLI_assert(source != nullptr);
+  /* A re-registration of the same idname replaces the previous one, the way a re-registered
+   * Python class does: the scripts own exactly one source per idname. */
+  stack_source_unregister(source->idname());
+  RegisteredStackSource registered;
+  registered.source = std::move(source);
+  registered.session_value = ++stack_source_session_counter();
+  stack_sources_runtime().append(std::move(registered));
+  stack_sources_registry_version()++;
+}
+
+bool stack_source_unregister(StringRefNull idname)
+{
+  Vector<RegisteredStackSource> &runtime_sources = stack_sources_runtime();
+  for (const int64_t index : runtime_sources.index_range()) {
+    if (runtime_sources[index].source->idname() == idname) {
+      if (stack_source_callback_depth() > 0) {
+        /* A bridge callback into a source is running; park instead of free (see
+         * #stack_sources_retired). */
+        stack_sources_retired().append(std::move(runtime_sources[index].source));
+      }
+      runtime_sources.remove(index);
+      stack_sources_registry_version()++;
+      return true;
+    }
+  }
+  return false;
+}
+
+const StackSource *stack_source_custom_find(StringRefNull idname)
+{
+  if (idname.is_empty()) {
+    return nullptr;
+  }
+  for (const RegisteredStackSource &registered : stack_sources_runtime()) {
+    if (registered.source->idname() == idname) {
+      return registered.source.get();
+    }
+  }
+  return nullptr;
+}
 
 Span<const StackSource *> stack_sources_get()
 {
-  return stack_sources_ensure();
+  return stack_sources_all_ensure();
+}
+
+void outliner_stack_sources_list(Vector<StackSourceListItem> &r_items)
+{
+  r_items.clear();
+  /* The built-ins first, then the registered ones in registration order: the same order
+   * #stack_sources_get lists them in. The listing is built from the two containers directly
+   * rather than through that combined cache, because only the entries here carry the session
+   * value a registered source is addressed by. */
+  const Span<const StackSource *> builtins = stack_sources_builtin_ensure();
+  r_items.reserve(builtins.size() + stack_sources_runtime().size());
+  for (const StackSource *source : builtins) {
+    StackSourceListItem item;
+    item.idname = source->idname();
+    item.ui_name = source->ui_name();
+    item.type = source->type();
+    item.is_custom = (item.type == SO_STACK_SRC_CUSTOM);
+    r_items.append(std::move(item));
+  }
+  for (const RegisteredStackSource &registered : stack_sources_runtime()) {
+    StackSourceListItem item;
+    item.idname = registered.source->idname();
+    item.ui_name = registered.source->ui_name();
+    item.type = registered.source->type();
+    item.is_custom = (item.type == SO_STACK_SRC_CUSTOM);
+    item.session_value = registered.session_value;
+    r_items.append(std::move(item));
+  }
 }
 
 int StackSource::focus_button_icon() const
@@ -64,7 +230,13 @@ int StackSource::empty_preview_icon() const
 
 const StackSource *stack_source_get(const eSpaceOutliner_StackSource type)
 {
-  const Span<const StackSource *> sources = stack_sources_ensure();
+  if (type == SO_STACK_SRC_CUSTOM) {
+    /* A caller that only has the enum cannot name a custom source; the space-level resolver
+     * below is the one that reads the idname. Fall through to the built-ins the same way an
+     * unknown value does. */
+    return stack_sources_builtin_ensure().first();
+  }
+  const Span<const StackSource *> sources = stack_sources_all_ensure();
   for (const StackSource *source : sources) {
     if (source->type() == type) {
       return source;
@@ -72,11 +244,19 @@ const StackSource *stack_source_get(const eSpaceOutliner_StackSource type)
   }
   /* A file can name a source this build does not have, the same way it can name a display mode it
    * does not have. Falling back beats returning null to a caller that has a tree to draw. */
-  return sources.first();
+  return stack_sources_builtin_ensure().first();
 }
 
 const StackSource *stack_source_for_space(const SpaceOutliner &space_outliner)
 {
+  if (space_outliner.stack_source == SO_STACK_SRC_CUSTOM) {
+    const StackSource *custom = stack_source_custom_find(space_outliner.stack_source_idname);
+    if (custom != nullptr) {
+      return custom;
+    }
+    /* The script that registered the source is gone (an add-on was disabled, a startup file was
+     * written before it existed). The same fallback an unknown built-in gets. */
+  }
   return stack_source_get(space_outliner.stack_source);
 }
 

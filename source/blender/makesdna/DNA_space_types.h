@@ -189,6 +189,67 @@ struct SpaceProperties {
 /** \name Outliner
  * \{ */
 
+/**
+ * The static description a registered stack source (a #bpy.types.OutlinerStackSource subclass)
+ * carries for the C side, filled in once at registration. Nothing here changes at runtime: the
+ * callbacks below it are what the Python class can answer dynamically, and those ride the RNA
+ * extension of its registered type, not this struct.
+ *
+ * Runtime-only despite living in a DNA header: nothing here is written to a file. It sits with the
+ * DNA types because the RNA type the registration drives is sdna-typed by it
+ * (#RNA_def_struct_sdna), and RNA only maps properties onto DNA-declared structs.
+ *
+ * Being in a DNA header still pulls it into the SDNA, so its layout is constrained: only
+ * fixed-size fields are allowed here. A platform-dependent field (a `long`, a pointer) or one
+ * that lands misaligned (a small char array beside an int) would shift the size the static_assert
+ * below pins. The usual DNA rule of a size that is a multiple of 8 does not apply: nothing here
+ * is written to a file or embedded in another DNA struct, so the exact compiler-computed size is
+ * the guarantee that matters.
+ */
+typedef struct StackSourceInfo {
+  /** Unique registration name, e.g. "sculpt_layers". Names the source in files and scripts. */
+  char idname[64];
+  /** The name the user reads in the source picker. */
+  char ui_name[64];
+  /** Icon the registration resolved from #icon_name, a #BKE_icon_id, or 0 for none. */
+  int icon;
+  /** Icon name the registered class gave, resolved into #icon at registration. */
+  char icon_name[64];
+  /** Column widths the source asks for, in UI units; fractions are allowed. */
+  float value_width;
+  float mode_width;
+  float action_width;
+  /** Extra icon columns (beyond the built-in toggles) the source reserves. */
+  int icon_columns;
+  /** Whether the rows carry a painting lock the Options popup can offer as a column. */
+  int supports_row_lock;
+} StackSourceInfo;
+
+/* Pinned as the sum of the fields so an addition that inserts padding (or a platform-dependent
+ * field) breaks the build here rather than silently moving what RNA maps onto. */
+static_assert(sizeof(StackSourceInfo) ==
+                  64 + 64 + sizeof(int) + 64 + sizeof(float) * 3 + sizeof(int) * 2,
+              "StackSourceInfo must stay a padding-free sum of its fixed-size fields");
+
+/**
+ * Per-call storage the Outliner hands a stack source's Python #rows_build so it can describe
+ * rows back: a handle the builder RNA functions (#OutlinerStackRowBuilder) read. Lives on the
+ * stack of the call that made it.
+ */
+typedef struct StackRowBuilderData {
+  /** The #blender::Vector<StackRow> the rows are appended to. */
+  void *rows_vector;
+  /** The row #add_row last appended. */
+  void *current_row;
+  /** The #blender::ed::outliner::StackSourcePython the call belongs to. */
+  void *source;
+} StackRowBuilderData;
+
+/* Lives on the stack of the call that made it and never reaches a file, so like #StackSourceInfo
+ * it is pinned to its exact size, not to a multiple of 8. */
+static_assert(sizeof(StackRowBuilderData) == sizeof(void *) * 3,
+              "StackRowBuilderData holds three untyped pointers and nothing else");
+
 /** Outliner */
 struct SpaceOutliner {
   SpaceLink *next = nullptr, *prev = nullptr;
@@ -230,6 +291,13 @@ struct SpaceOutliner {
   eSpaceOutliner_StackLayersFlag stack_layers_flag = {};
   /** Which kind of stack #SO_STACK_LAYERS lists. */
   eSpaceOutliner_StackSource stack_source = SO_STACK_SRC_PAINT_MATERIAL;
+  /**
+   * When #stack_source is #SO_STACK_SRC_CUSTOM, the idname of the registered stack source to show
+   * (the same name its #bpy.types.OutlinerStackSource subclass registered under). Empty for every
+   * built-in source. An idname this build does not have (the script that registered it is gone)
+   * falls back the way an unknown built-in does, so nothing here can leave a space without rows.
+   */
+  char stack_source_idname[64] = "";
 
   eSpaceOutliner_Filter filter = {};
   eSpaceOutliner_StateFilter filter_state = SO_FILTER_OB_ALL;

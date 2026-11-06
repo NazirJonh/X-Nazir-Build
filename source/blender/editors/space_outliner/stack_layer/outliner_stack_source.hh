@@ -1453,9 +1453,40 @@ class StackSource {
   virtual StringRefNull ui_name() const = 0;
 
   /**
+   * The unique name a runtime-registered source registered under, or empty for the built-ins.
+   *
+   * This is what a file's #SpaceOutliner::stack_source_idname names and what scripts address
+   * the source by. The DNA enum only says "custom"; this says which.
+   */
+  virtual StringRefNull idname() const
+  {
+    return "";
+  }
+
+  /**
    * Whether \a object contributes a stack of this kind, for the object overview.
    */
   virtual bool object_has_stack(const StackReadContext &ctx, Object &object) const = 0;
+
+  /**
+   * A cache key for this source's #object_has_stack answer on \a object, or #std::nullopt when
+   * the answer must not be cached.
+   *
+   * A source whose answer is a pure function of the object's identity and its data may key it
+   * here; the key has to change whenever the answer can. The default names no key: a source that
+   * does not opt in is called on every ask, exactly as before.
+   *
+   * Pure computation over the object and its data only. No Python, no bContext and no global
+   * lookups belong in here -- the key is evaluated on every #object_has_stack call even on a
+   * cache hit, and anything slow in it is the cache defeated. What the key covers is the
+   * source's own knowledge: an answer that depends on anything the key does not read goes stale
+   * silently.
+   */
+  virtual std::optional<uint64_t> object_stack_key(const StackReadContext & /*ctx*/,
+                                                   const Object & /*object*/) const
+  {
+    return std::nullopt;
+  }
 
   /**
    * The data-block whose preview the object row in the overview shows, or null.
@@ -1737,11 +1768,32 @@ class StackSource {
 std::unique_ptr<StackSource> stack_source_paint_layers_create();
 std::unique_ptr<StackSource> stack_source_shape_keys_create();
 
+/**
+ * Register a runtime-created source (a Python-defined one, today).
+ *
+ * The source stays registered until #stack_source_unregister names it, and is listed after the
+ * built-ins everywhere sources are listed. Registration invalidates the cached rows of every
+ * outliner so the next build sees it.
+ */
+void stack_source_register(std::unique_ptr<StackSource> source);
+/** Unregister the source \a idname names. False when no such source is registered. */
+bool stack_source_unregister(StringRefNull idname);
+
+/** Marks the span of one bridge callback into a registered source. An unregistration from inside
+ * such a callback parks the object until the outermost #stack_source_callback_end, so no callback
+ * ever runs against freed memory. */
+void stack_source_callback_begin();
+void stack_source_callback_end();
+
+/** The registered (non-built-in) source \a idname names, or null. */
+const StackSource *stack_source_custom_find(StringRefNull idname);
+
 /** Every source built into this Blender, in the order they are listed to the user. */
 Span<const StackSource *> stack_sources_get();
 /** The source \a type selects, never null: an unknown type falls back to the first source. */
 const StackSource *stack_source_get(eSpaceOutliner_StackSource type);
-/** The source a space is currently set to. */
+/** The source a space is currently set to: the custom source its idname names for
+ * #SO_STACK_SRC_CUSTOM, the built-in its enum names otherwise. Never null. */
 const StackSource *stack_source_for_space(const SpaceOutliner &space_outliner);
 
 /** The section identifier the space's grouping editor keys its mask content by, or empty. */

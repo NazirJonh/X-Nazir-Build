@@ -212,6 +212,7 @@ void RNA_def_sculpt_paint(BlenderRNA *brna);
 void RNA_def_sequencer(BlenderRNA *brna);
 void RNA_def_fluid(BlenderRNA *brna);
 void RNA_def_space(BlenderRNA *brna);
+void RNA_def_space_outliner_stack(BlenderRNA *brna);
 void RNA_def_speaker(BlenderRNA *brna);
 void RNA_def_test(BlenderRNA *brna);
 void RNA_def_text(BlenderRNA *brna);

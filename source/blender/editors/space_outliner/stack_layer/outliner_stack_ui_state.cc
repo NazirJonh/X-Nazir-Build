@@ -306,6 +306,36 @@ void outliner_stack_row_ui_state_capture_now(SpaceOutliner &space_outliner, cons
   }
 }
 
+bool outliner_stack_row_selection_flush(bContext &C, SpaceOutliner &space_outliner, ID &owner)
+{
+  if (space_outliner.treestore == nullptr) {
+    return false;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(C);
+  outliner_stack_rows_ensure(ctx, space_outliner, owner);
+  const StackSource &source = *stack_source_for_space(space_outliner);
+  bool changed = false;
+  BLI_mempool_iter iter;
+  BLI_mempool_iternew(space_outliner.treestore, &iter);
+  while (const TreeStoreElem *tselem = static_cast<const TreeStoreElem *>(
+             BLI_mempool_iterstep(&iter)))
+  {
+    if (tselem->type != TSE_STACK_LAYER || tselem->id != &owner) {
+      continue;
+    }
+    const StackRow *row = outliner_stack_row_find(space_outliner, int(tselem->nr));
+    if (row == nullptr) {
+      continue;
+    }
+    changed |= source.row_set_selected(
+        C, space_outliner.runtime->stack_focus, owner, *row, (tselem->flag & TSE_SELECTED) != 0);
+  }
+  if (changed) {
+    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, &owner);
+  }
+  return changed;
+}
+
 void outliner_stack_row_ui_state_sync(SpaceOutliner &space_outliner, const ID &owner)
 {
   SpaceOutliner_Runtime &runtime = *space_outliner.runtime;

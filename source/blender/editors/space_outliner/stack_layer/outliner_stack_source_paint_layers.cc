@@ -446,7 +446,7 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_UV_ISLAND:
       return {ICON_UV_ISLANDSEL, paint_glyph::SELECT_ALL};
     case MA_PAINT_LAYER_FILTER_EXPOSURE:
-      /* No glyph of its own yet: the filter icon names a tone scale without a colour of its own. */
+      /* No glyph of its own yet: the filter icon names a tone scale without a color of its own. */
       return {ICON_FILTER, 0};
     case MA_PAINT_LAYER_FILTER_DEBAND:
       /* No glyph of its own yet: the image-data icon names a quantization of the pixels. */
@@ -601,7 +601,7 @@ static const PaintFilterAddKind paint_filter_add_kinds[] = {
 /**
  * The CPU-computed filters the Add Effect menu offers: either they read a neighbourhood of the
  * row's map (a Blur) or their sequence is not the graph's (a Noise), so they exist only as
- * corrections of a row's colour -- the effect cache computes them and the row is baked for the
+ * corrections of a row's color -- the effect cache computes them and the row is baked for the
  * live graph. No adjustment or mask form is offered, because neither has a map of the row's to
  * read.
  */
@@ -770,8 +770,8 @@ StackRow paint_correction_row_build(const Material &material,
 
   /* The slot names the correction's kind rather than previewing its first map, as a Paint layer's
    * slot does: a painted correction still reads as the brush, fill or generator it is, not as the
-   * texture it holds. A Fill correction that lays a colour shows its swatch instead, with the same
-   * rule when the Base Color record is gone or switched off (the correction then lays no colour). */
+   * texture it holds. A Fill correction that lays a color shows its swatch instead, with the same
+   * rule when the Base Color record is gone or switched off (the correction then lays no color). */
   StackRowPreview slot;
   slot.section_id = "CHANNELS";
   slot.icon = look.icon;
@@ -875,7 +875,7 @@ StackRow paint_mask_item_row_build(const Material &material,
   }
 
   /* The slot switches the brush to the mask. A Fill is its grey while it has no map, as a Fill layer
-   * is its colour; a Paint one, and a Fill once painted, is the mask icon the base's slot shows. */
+   * is its color; a Paint one, and a Fill once painted, is the mask icon the base's slot shows. */
   StackRowPreview slot;
   slot.section_id = "MASK";
   slot.label = IFACE_("Mask");
@@ -896,8 +896,8 @@ StackRow paint_mask_item_row_build(const Material &material,
 }
 
 /**
- * The constants a Fill's sphere preview shades with: the flat colour the swatch already shows,
- * plus the metallic and roughness a flat colour cannot. A channel that carries a map hands the
+ * The constants a Fill's sphere preview shades with: the flat color the swatch already shows,
+ * plus the metallic and roughness a flat color cannot. A channel that carries a map hands the
  * map's session UID instead, so the sphere shades with the texture the layer lays down rather than
  * with the constant the record keeps beside it.
  */
@@ -931,7 +931,7 @@ static void paint_fill_sphere_read(const MaterialPaintLayer &layer,
 
 /**
  * Everything the Fill's sphere preview shows, folded into the one value its slot carries: an edit
- * anywhere in it -- a dragged colour, a retuned roughness -- re-renders the sphere. The blend and
+ * anywhere in it -- a dragged color, a retuned roughness -- re-renders the sphere. The blend and
  * the opacity are left out on purpose: they compose the row over the stack and do not change the
  * fill itself, and folding them in would re-render the sphere for every slider drag that leaves
  * it looking the same. The exact float bits are folded rather than their decimal values, so two
@@ -961,14 +961,14 @@ static uint64_t paint_fill_sphere_hash(const MaterialPaintLayer &layer)
 }
 
 /**
- * The neutral base a colourless Fill's sphere preview shades with: the row lays no Base Color of
+ * The neutral base a colorless Fill's sphere preview shades with: the row lays no Base Color of
  * its own, but its other channels still shade the material the sphere stands for.
  */
 constexpr float PAINT_FILL_NEUTRAL_COLOR = 0.8f;
 
 /**
- * The content slot of a Fill row: its own colour as a swatch where it lays one, otherwise the
- * sphere its remaining channels shade. Null when the Fill lays neither -- no colour and no channel
+ * The content slot of a Fill row: its own color as a swatch where it lays one, otherwise the
+ * sphere its remaining channels shade. Null when the Fill lays neither -- no color and no channel
  * records -- so the row shows its plain icon and nothing to open.
  */
 static std::optional<StackRowPreview> paint_fill_slot_build(const Material &material,
@@ -985,7 +985,7 @@ static std::optional<StackRowPreview> paint_fill_slot_build(const Material &mate
   const PaintKindLook look = paint_look_for_source(MA_PAINT_LAYER_SOURCE_CONSTANT,
                                                    PaintLookRole::Content);
   /* The badge the draw puts in the slot's corner: a Fill reads as a Fill whichever of its two
-   * looks -- the colour swatch or the sphere -- answers first. */
+   * looks -- the color swatch or the sphere -- answers first. */
   fill_slot.glyph = look.glyph;
   if (lays_color) {
     fill_slot.is_color_swatch = true;
@@ -1000,7 +1000,7 @@ static std::optional<StackRowPreview> paint_fill_slot_build(const Material &mate
   }
   /* The sphere is the constants shaded -- metallic and roughness included, from the flat values or
    * their maps -- arriving from the preview render. A swatch underneath it is the fill's instant
-   * answer; a Fill with no colour has none and shows the render alone. */
+   * answer; a Fill with no color has none and shows the render alone. */
   paint_fill_sphere_read(
       layer, fill_slot.sphere_metallic, fill_slot.sphere_roughness, fill_slot.sphere_map_uid);
   fill_slot.render_kind = StackRowPreviewRender::Sphere;
@@ -1144,9 +1144,9 @@ void paint_stack_rows_append(const Material &material,
        * paint system itself reads the source: a plain constant or a plain texture of the source's
        * own shades a sphere, and so does the bake where the source is a graph. A graph whose bake
        * is missing or no longer describes the source -- Auto leaves it to the live shader -- has no
-       * map to shade with, and the colour fields would show what the graph no longer is, so the
+       * map to shade with, and the color fields would show what the graph no longer is, so the
        * source's own preview answers instead; its change flag follows the graph's edits. The flat
-       * colour answers wherever neither can; without a source, the placeholder below. */
+       * color answers wherever neither can; without a source, the placeholder below. */
       if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr) {
         StackRowPreview material_slot;
         material_slot.section_id = "CHANNELS";
@@ -1171,8 +1171,8 @@ void paint_stack_rows_append(const Material &material,
           material_slot.color[3] = base[3];
         }
         else {
-          /* The source's own RGB fields are display-referred; the slot's colour is scene linear
-           * like every slot colour. */
+          /* The source's own RGB fields are display-referred; the slot's color is scene linear
+           * like every slot color. */
           const float source_color[4] = {
               layer.material->r, layer.material->g, layer.material->b, layer.material->a};
           srgb_to_linearrgb_v4(material_slot.color, source_color);
@@ -1247,11 +1247,11 @@ void paint_stack_rows_append(const Material &material,
       }
     }
     else if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
-      /* A Fill with a colour of its own is that colour: one swatch with the bucket drawn over it.
+      /* A Fill with a color of its own is that color: one swatch with the bucket drawn over it.
        * With the Base Color record removed, switched off, or outside the material's channel set
-       * the row lays no colour, but its other channels may still carry values and maps -- an image
+       * the row lays no color, but its other channels may still carry values and maps -- an image
        * dropped into Roughness, say. Those shade a material, so the sphere is what previews them:
-       * drawing the map itself as the row's colour would say it lays a colour it does not. */
+       * drawing the map itself as the row's color would say it lays a color it does not. */
       if (std::optional<StackRowPreview> fill_slot = paint_fill_slot_build(material, layer)) {
         row.preview_slots.append(std::move(*fill_slot));
       }
@@ -1596,7 +1596,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                           "A grey map painted over the active layer's mask, in Mask mode"}),
                   paint_look_for_source(MA_PAINT_LAYER_SOURCE_IMAGE, PaintLookRole::MaskItem)),
         PaintLayerAddKind::MaskCorrection);
-    /* No colour to ask for: a mask lays one grey, and the row's own value is where it is picked.
+    /* No color to ask for: a mask lays one grey, and the row's own value is where it is picked.
      * The Add makes the correction white and lets the user lay it in the panel. */
     add(with_look(effect({"MASK_CORRECTION_FILL",
                           N_("Mask Fill Correction"),
@@ -1604,7 +1604,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                   paint_look_for_source(MA_PAINT_LAYER_SOURCE_CONSTANT, PaintLookRole::MaskItem)),
         PaintLayerAddKind::MaskCorrectionFill);
 
-    /* Every filter as a correction of a layer's colour. */
+    /* Every filter as a correction of a layer's color. */
     for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
       add(with_look(effect({filter.identifier, filter.name, filter.description}),
                     paint_look_for_source(
@@ -1613,9 +1613,9 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
           filter.filter,
           PaintLayerAddKind::MaskFilter);
     }
-    /* The CPU-computed effects follow: corrections of a row's colour, or items of its mask while a
+    /* The CPU-computed effects follow: corrections of a row's color, or items of its mask while a
      * mask slot is the one showing. The mask slot of a row is no Outliner row, so the line has to
-     * name the mask form itself: an Add aimed at the row would otherwise land in its colour. No
+     * name the mask form itself: an Add aimed at the row would otherwise land in its color. No
      * adjustment form is offered, as it has no map of the row's to read. */
     for (const PaintFilterAddKind &filter : paint_effect_add_kinds) {
       add(effect({filter.identifier, filter.name, filter.description}),
@@ -1624,7 +1624,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
           PaintLayerAddKind::MaskFilter);
     }
     /* Then the same filters as rows of the stack: an adjustment changes the whole stack below it
-     * instead of one layer's colour. */
+     * instead of one layer's color. */
     for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
       add(with_look({std::string("ADJUSTMENT") + (filter.identifier + std::strlen("FILTER")),
                      std::string(filter.name) + " Adjustment",
@@ -1674,7 +1674,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
     }
 
     /* A layer that shows what another material shows, and the two places a correction can lay it:
-     * the colour and the mask. */
+     * the color and the mask. */
     add(with_look(from_material({"MATERIAL",
                                  N_("Material Layer"),
                                  "A layer that shows what another material shows"},
@@ -1780,7 +1780,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
 
 /**
  * What the Effects menu's corrections lay over right now: the row's mask while a mask slot is the
- * one showing, its colour otherwise. This is the question the folded entries answer.
+ * one showing, its color otherwise. This is the question the folded entries answer.
  */
 static bool paint_effect_menu_target_is_mask(bContext &C)
 {
@@ -1795,7 +1795,7 @@ static bool paint_effect_menu_target_is_mask(bContext &C)
 /** \name Add UI
  *
  * What the paint source adds to the generic Add dialog: the channels an empty Fill starts with,
- * and the palette a Fill colour can be picked from. The dialog itself, its kinds and its colour
+ * and the palette a Fill color can be picked from. The dialog itself, its kinds and its color
  * belong to the Outliner; only the paint vocabulary lives here.
  * \{ */
 
@@ -2213,7 +2213,7 @@ class PaintLayersStackSource final : public StackSource,
             hash = hash * 1000003u ^ uint64_t(paint_image_is_blank(*image) ? 1 : 0);
           }
           else if (effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
-            /* The swatch shows the colour, so an edit of it has to reach the row. */
+            /* The swatch shows the color, so an edit of it has to reach the row. */
             for (const int k : IndexRange(4)) {
               hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(effect.channels[c].value[k]));
             }
@@ -2560,7 +2560,7 @@ class PaintLayersStackSource final : public StackSource,
   }
 
   /**
-   * One line per thing: the corrections that exist over the colour and over the mask are listed
+   * One line per thing: the corrections that exist over the color and over the mask are listed
    * once, and the line resolves to the role the active slot asks for. The emitted #kind is already
    * that role's entry, so #row_add stays a plain "create the kind you were given" verb and a
    * script that names a kind is never reinterpreted by the current target mode.
@@ -2599,7 +2599,7 @@ class PaintLayersStackSource final : public StackSource,
         menu.info.icon = twin.info.icon;
         menu.info.glyph = twin.info.glyph;
         /* What the role asks the Add for is the role's, not the line's: a mask Fill lays one grey,
-         * so the resolved kind carries no colour question while the content Fill keeps its own. */
+         * so the resolved kind carries no color question while the content Fill keeps its own. */
         menu.info.takes_color = twin.info.takes_color;
         menu.info.color_optional = twin.info.color_optional;
       }
@@ -2974,7 +2974,7 @@ class PaintLayersStackSource final : public StackSource,
   /* ---------------------------------------------------------------- */
   /** \name StackGroupingEditor
    *
-   * The mask half and the folder verbs; colour tags arrive with their feature, so their verb keeps
+   * The mask half and the folder verbs; color tags arrive with their feature, so their verb keeps
    * the default that refuses.
    * \{ */
 
@@ -3019,7 +3019,7 @@ class PaintLayersStackSource final : public StackSource,
       BKE_report(CTX_wm_reports(&C), RPT_WARNING, "This layer already has a mask");
       return false;
     }
-    /* The constant is the colour's grey: white shows the row, black hides it until painted in. */
+    /* The constant is the color's grey: white shows the row, black hides it until painted in. */
     const float value = (initial_color != nullptr) ? initial_color[0] : 1.0f;
     if (BKE_paint_layers_mask_add(material, layer, value) == nullptr) {
       return false;
@@ -3797,7 +3797,7 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
   }
   if (created_correction && channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
     /* A Fill correction starts with a Base Color so a fresh one is visible; when the image landed
-     * in another channel that flat colour must not cover the row's Base Color as well. */
+     * in another channel that flat color must not cover the row's Base Color as well. */
     BKE_paint_layers_channel_remove(material, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   }
   /* What the Add wrapper does for a row it made: the cached rows go, the selection and the active

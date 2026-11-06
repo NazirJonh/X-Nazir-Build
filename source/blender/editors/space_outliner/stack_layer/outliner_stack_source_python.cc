@@ -16,6 +16,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
+#include <type_traits>
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
@@ -158,6 +160,89 @@ PointerRNA python_owner_ptr(ID &owner)
   return RNA_id_pointer_create(&owner);
 }
 
+/* A value kind a row verb passes: the RNA parameter is set from the address of one of these, and
+ * read back as exactly that many bytes. */
+template<typename T, typename... Ts>
+inline constexpr bool is_any_of_v = (std::is_same_v<T, Ts> || ...);
+
+/** One named argument a row verb passes: the RNA parameter name and the address of the value the
+ * dispatcher reads it from. The value has to stay put until the call returns, so it is always a
+ * local of the calling method, passed by itself -- the constructor takes the address. The type
+ * check is what keeps a value of the wrong kind (a bool where the RNA parameter is an int, say)
+ * from compiling into a read of the wrong number of bytes. */
+struct PythonCallArg {
+  const char *name;
+  const void *value;
+
+  template<typename T>
+  PythonCallArg(const char *name, const T &value) : name(name), value(&value)
+  {
+    static_assert(is_any_of_v<std::decay_t<T>, int, bool, float, const char *, PointerRNA>,
+                  "A PythonCallArg value is an int, bool, float, const char * or PointerRNA, "
+                  "passed by itself; the address is taken here");
+  }
+};
+
+/**
+ * The one row verb, scoped: context (a null is what the read-only asks pass: the dispatcher falls
+ * back to the global context), the owner, the named arguments, dispatch, read the answer back.
+ * The null-guard on the function is here too, so a source without the verb refuses at one door
+ * instead of repeating the check at every method. \a ret_name names the output parameter to read
+ * and \a fallback is what a subclass that left the return out reads as.
+ */
+template<typename T>
+static T call_row_verb(FunctionRNA *func,
+                       StructCallbackFunc py_call,
+                       const PointerRNA &instance,
+                       bContext *C,
+                       ID &owner,
+                       const char *ret_name,
+                       const T fallback,
+                       const std::initializer_list<PythonCallArg> args)
+{
+  if (func == nullptr) {
+    return fallback;
+  }
+  PythonCall pc(instance, func, py_call);
+  bContext *C_ptr = C;
+  pc.set("context", &C_ptr);
+  PointerRNA owner_ptr = python_owner_ptr(owner);
+  pc.set("owner", &owner_ptr);
+  for (const PythonCallArg &arg : args) {
+    pc.set(arg.name, arg.value);
+  }
+  pc.call(C);
+  if constexpr (std::is_same_v<T, bool>) {
+    return pc.ret_bool(ret_name, fallback);
+  }
+  else {
+    return pc.ret_int(ret_name, fallback);
+  }
+}
+
+/** The bool-answering verbs: the row asks answered with yes/no. */
+static bool call_row_verb_bool(FunctionRNA *func,
+                               StructCallbackFunc py_call,
+                               const PointerRNA &instance,
+                               bContext *C,
+                               ID &owner,
+                               const char *ret_name,
+                               const std::initializer_list<PythonCallArg> args)
+{
+  return call_row_verb(func, py_call, instance, C, owner, ret_name, false, args);
+}
+
+/** The verbs that answer the row's new position (-1 meaning nothing was made). */
+static int call_row_verb_int(FunctionRNA *func,
+                             StructCallbackFunc py_call,
+                             const PointerRNA &instance,
+                             bContext *C,
+                             ID &owner,
+                             const std::initializer_list<PythonCallArg> args)
+{
+  return call_row_verb(func, py_call, instance, C, owner, "new_ordinal", -1, args);
+}
+
 /* One value mixed into an #object_has_stack cache key. The shift-and-add fold spreads low-order
  * changes (a revision moving by one) across the whole word, which is what keeps two states of
  * one object from landing on the same key. */
@@ -215,7 +300,10 @@ float StackSourcePython::object_stack_key_source_part(const Object &object) cons
 /** \name StackSourcePython
  * \{ */
 
-StackSourcePython::StackSourcePython(const StackSourceInfo &info) : info(info) {}
+StackSourcePython::StackSourcePython(const StackSourceInfo &info)
+    : info(info), grouping_adapter_(*this)
+{
+}
 
 StackSourcePython::~StackSourcePython() = default;
 
@@ -252,6 +340,11 @@ StringRefNull StackSourcePython::idname() const
 StringRefNull StackSourcePython::ui_name() const
 {
   return info.ui_name;
+}
+
+bool StackSourcePython::use_sub_selection() const
+{
+  return info.use_sub_selection != 0;
 }
 
 bool StackSourcePython::object_has_stack(const StackReadContext &ctx, Object &object) const
@@ -489,17 +582,13 @@ bool StackSourcePython::row_activate(
     bContext &C, const StackFocus & /*focus*/, ID &owner, int ordinal, const StackRow & /*row*/)
     const
 {
-  if (funcs_.row_activate == nullptr) {
-    return false;
-  }
-  PythonCall pc(instance_ptr(), funcs_.row_activate, py_call_);
-  bContext *C_ptr = &C;
-  pc.set("context", &C_ptr);
-  PointerRNA owner_ptr = python_owner_ptr(owner);
-  pc.set("owner", &owner_ptr);
-  pc.set("ordinal", &ordinal);
-  pc.call(&C);
-  return pc.ret_bool("activated", false);
+  return call_row_verb_bool(funcs_.row_activate,
+                            py_call_,
+                            instance_ptr(),
+                            &C,
+                            owner,
+                            "activated",
+                            {{"ordinal", ordinal}});
 }
 
 bool StackSourcePython::row_is_active(const StackReadContext & /*ctx*/,
@@ -507,18 +596,274 @@ bool StackSourcePython::row_is_active(const StackReadContext & /*ctx*/,
                                       const ID &owner,
                                       const StackRow &row) const
 {
-  if (funcs_.row_is_active == nullptr) {
+  /* The RNA parameter is a 32-bit int; the row's ordinal is 16 bits, so it is widened first. */
+  int ordinal = row.ordinal;
+  return call_row_verb_bool(funcs_.row_is_active,
+                            py_call_,
+                            instance_ptr(),
+                            nullptr,
+                            const_cast<ID &>(owner),
+                            "active",
+                            {{"ordinal", ordinal}});
+}
+
+std::optional<bool> StackSourcePython::row_is_selected(const StackReadContext & /*ctx*/,
+                                                       const StackFocus & /*focus*/,
+                                                       const ID &owner,
+                                                       const StackRow &row) const
+{
+  if (funcs_.row_is_selected == nullptr) {
+    /* Only this verb reads as "the source has no say": selection then belongs to the Outliner. */
+    return std::nullopt;
+  }
+  int ordinal = row.ordinal;
+  return call_row_verb_bool(funcs_.row_is_selected,
+                            py_call_,
+                            instance_ptr(),
+                            nullptr,
+                            const_cast<ID &>(owner),
+                            "selected",
+                            {{"ordinal", ordinal}});
+}
+
+bool StackSourcePython::row_set_selected(bContext &C,
+                                         const StackFocus & /*focus*/,
+                                         ID &owner,
+                                         const StackRow &row,
+                                         const bool select) const
+{
+  int ordinal = row.ordinal;
+  bool select_arg = select;
+  return call_row_verb_bool(funcs_.row_set_selected,
+                            py_call_,
+                            instance_ptr(),
+                            &C,
+                            owner,
+                            "changed",
+                            {{"ordinal", ordinal},
+                             {"select", select_arg}});
+}
+
+bool StackSourcePython::notifier_invalidates(const wmNotifier &notifier) const
+{
+  if (funcs_.notifier_invalidates != nullptr) {
+    PythonCall pc(instance_ptr(), funcs_.notifier_invalidates, py_call_);
+    bContext *C = nullptr;
+    pc.set("context", &C);
+    int category = int(notifier.category);
+    int data = int(notifier.data);
+    int action = int(notifier.action);
+    pc.set("category", &category);
+    pc.set("data", &data);
+    pc.set("action", &action);
+    pc.call(nullptr);
+    return pc.ret_bool("invalidates", false);
+  }
+  /* A transform moves the object without touching its stack; anything else that reaches the
+   * object or its data may have. The state hash decides whether anything really changed, so a
+   * broad answer here only costs a hash recompute. */
+  if (notifier.category == NC_OBJECT && notifier.data == ND_TRANSFORM) {
     return false;
   }
-  PythonCall pc(instance_ptr(), funcs_.row_is_active, py_call_);
+  return ELEM(notifier.category, NC_GEOM, NC_OBJECT);
+}
+
+void StackSourcePython::undo_reset() const
+{
+  /* An undo or redo can restore any object and any mesh tree behind the cached #object_has_stack
+   * answers, so they all go, whether or not the subclass answers the reset itself. */
+  object_has_stack_cache_clear();
+  if (funcs_.undo_reset == nullptr) {
+    return;
+  }
+  PythonCall pc(instance_ptr(), funcs_.undo_reset, py_call_);
   bContext *C = nullptr;
   pc.set("context", &C);
-  PointerRNA owner_ptr = python_owner_ptr(const_cast<ID &>(owner));
-  int ordinal = row.ordinal;
-  pc.set("owner", &owner_ptr);
-  pc.set("ordinal", &ordinal);
   pc.call(nullptr);
-  return pc.ret_bool("active", false);
+}
+
+const StackEditor *StackSourcePython::editor() const
+{
+  return this;
+}
+
+bool StackSourcePython::can_reorder(const ID &owner) const
+{
+  if (funcs_.can_reorder == nullptr) {
+    /* A subclass that names no #can_reorder answers through the verbs it does have: reordering
+     * exists when a #row_move answers. */
+    return funcs_.row_move != nullptr;
+  }
+  BLI_assert(BLI_thread_is_main());
+  PythonCall pc(instance_ptr(), funcs_.can_reorder, py_call_);
+  PointerRNA owner_ptr = python_owner_ptr(const_cast<ID &>(owner));
+  pc.set("owner", &owner_ptr);
+  pc.call(nullptr);
+  return pc.ret_bool("reorderable", false);
+}
+
+int StackSourcePython::row_add(bContext &C,
+                               const StackFocus & /*focus*/,
+                               ID &owner,
+                               int kind,
+                               int ordinal,
+                               const StackAddArgs & /*args*/) const
+{
+  /* The Add dialog's color and data-block inputs have no Python-facing form yet: a kind that
+   * needs them is C++-only for now, and the Python side receives the plain place. */
+  int place = int(StackMovePlace::Above);
+  return call_row_verb_int(funcs_.row_add,
+                           py_call_,
+                           instance_ptr(),
+                           &C,
+                           owner,
+                           {{"kind", kind},
+                            {"ordinal", ordinal},
+                            {"place", place}});
+}
+
+bool StackSourcePython::row_action(bContext &C, ID &owner, int ordinal, const StackRow & /*row*/)
+    const
+{
+  return call_row_verb_bool(
+      funcs_.row_action, py_call_, instance_ptr(), &C, owner, "done", {{"ordinal", ordinal}});
+}
+
+bool StackSourcePython::row_set_enabled(
+    bContext &C, const StackFocus & /*focus*/, ID &owner, int ordinal, bool enable) const
+{
+  return call_row_verb_bool(funcs_.row_set_enabled,
+                            py_call_,
+                            instance_ptr(),
+                            &C,
+                            owner,
+                            "done",
+                            {{"ordinal", ordinal},
+                             {"enable", enable}});
+}
+
+bool StackSourcePython::row_set_locked(
+    bContext &C, const StackFocus & /*focus*/, ID &owner, int ordinal, bool locked) const
+{
+  return call_row_verb_bool(funcs_.row_set_locked,
+                            py_call_,
+                            instance_ptr(),
+                            &C,
+                            owner,
+                            "done",
+                            {{"ordinal", ordinal},
+                             {"locked", locked}});
+}
+
+bool StackSourcePython::row_set_color_tag(bContext &C,
+                                          const StackFocus & /*focus*/,
+                                          ID &owner,
+                                          int ordinal,
+                                          int color_tag) const
+{
+  return call_row_verb_bool(funcs_.row_set_color_tag,
+                            py_call_,
+                            instance_ptr(),
+                            &C,
+                            owner,
+                            "done",
+                            {{"ordinal", ordinal},
+                             {"color_tag", color_tag}});
+}
+
+const StackGroupingEditor *StackSourcePython::grouping() const
+{
+  /* Color tags are the only grouping verb a Python source answers here; a subclass that left the
+   * function out keeps the base's "no grouping half", exactly as a C++ source without one does. */
+  return (funcs_.row_set_color_tag != nullptr) ? &grouping_adapter_ : nullptr;
+}
+
+bool StackSourcePython::StackGroupingAdapter::row_color_tag_set(bContext &C,
+                                                                const StackFocus &focus,
+                                                                ID &owner,
+                                                                int ordinal,
+                                                                int color_tag) const
+{
+  return source_.row_set_color_tag(C, focus, owner, ordinal, color_tag);
+}
+
+int StackSourcePython::row_duplicate(bContext &C,
+                                     const StackFocus & /*focus*/,
+                                     ID &owner,
+                                     int ordinal) const
+{
+  return call_row_verb_int(
+      funcs_.row_duplicate, py_call_, instance_ptr(), &C, owner, {{"ordinal", ordinal}});
+}
+
+bool StackSourcePython::row_rename(bContext &C,
+                                   const StackFocus & /*focus*/,
+                                   ID &owner,
+                                   int ordinal,
+                                   StringRefNull name) const
+{
+  /* A plain string parameter holds a `char *`, so what is handed over is that pointer's address;
+   * the string itself would be read as the pointer, and its first bytes dereferenced. The name is
+   * not copied or trimmed on the way: a plain string parameter is carried as the pointer, so the
+   * caller's string reaches the subclass as it is, whatever its length. */
+  const char *name_ptr = name.c_str();
+  return call_row_verb_bool(funcs_.row_rename,
+                            py_call_,
+                            instance_ptr(),
+                            &C,
+                            owner,
+                            "done",
+                            {{"ordinal", ordinal},
+                             {"name", name_ptr}});
+}
+
+bool StackSourcePython::row_remove(bContext &C,
+                                   const StackFocus & /*focus*/,
+                                   ID &owner,
+                                   int ordinal) const
+{
+  return call_row_verb_bool(
+      funcs_.row_remove, py_call_, instance_ptr(), &C, owner, "done", {{"ordinal", ordinal}});
+}
+
+bool StackSourcePython::row_reorder(bContext &C,
+                                    const StackFocus &focus,
+                                    ID &owner,
+                                    const int from_ordinal,
+                                    const int to_ordinal) const
+{
+  if (funcs_.row_move == nullptr || from_ordinal == to_ordinal) {
+    return false;
+  }
+  /* A reorder names a position, while the Python seam describes a move beside an anchor. Ordinals
+   * grow towards the top of the tree, so landing above the row now at \a to_ordinal moves the row
+   * towards the top and landing below it moves it down. */
+  const StackMovePlace place = (to_ordinal > from_ordinal) ? StackMovePlace::Above :
+                                                             StackMovePlace::Below;
+  return this->row_move(C, focus, owner, from_ordinal, to_ordinal, place, nullptr);
+}
+
+bool StackSourcePython::row_move(bContext &C,
+                                 const StackFocus & /*focus*/,
+                                 ID &owner,
+                                 int from_ordinal,
+                                 int anchor_ordinal,
+                                 StackMovePlace place,
+                                 int *r_ordinal) const
+{
+  int place_i = int(place);
+  const int new_ordinal = call_row_verb_int(funcs_.row_move,
+                                            py_call_,
+                                            instance_ptr(),
+                                            &C,
+                                            owner,
+                                            {{"from_ordinal", from_ordinal},
+                                             {"anchor_ordinal", anchor_ordinal},
+                                             {"place", place_i}});
+  if (r_ordinal != nullptr) {
+    *r_ordinal = new_ordinal;
+  }
+  return new_ordinal >= 0;
 }
 
 char *StackSourcePython::name_buffer_ensure(StringRefNull key, StringRefNull name) const

@@ -60,10 +60,10 @@ static StructRNA *rna_OutlinerStackRowDecorator_refine(PointerRNA *ptr)
   return (srna != nullptr) ? srna : RNA_OutlinerStackRowDecorator;
 }
 
-/* How many optional functions the #OutlinerStackSource RNA type declares, in definition order:
- * the registration walks them once and hands both the set and the have-function flags to the
- * module. */
-constexpr int STACK_SOURCE_FUNC_NUM = 7;
+/* The optional functions the #OutlinerStackSource RNA type declares, in definition order, are the
+ * #STACK_SOURCE_FUNCTION_LIST in ED_outliner_stack.hh: the registration walks them once and hands
+ * both the set and the have-function flags to the module. */
+constexpr int STACK_SOURCE_FUNC_NUM = blender::ed::outliner::STACK_SOURCE_FUNCTION_NUM;
 
 /* One optional function of the base type: its RNA name (what validation and lookup key on) paired
  * with the #StackSourceFunctionSet member it resolves into. The table is in the base type's
@@ -74,14 +74,11 @@ struct StackSourceFuncBinding {
   const char *name;
   FunctionRNA *blender::ed::outliner::StackSourceFunctionSet::*member;
 };
-constexpr StackSourceFuncBinding stack_source_func_bindings[STACK_SOURCE_FUNC_NUM] = {
-    {"has_stack", &blender::ed::outliner::StackSourceFunctionSet::has_stack},
-    {"has_stack_key", &blender::ed::outliner::StackSourceFunctionSet::has_stack_key},
-    {"owner_get", &blender::ed::outliner::StackSourceFunctionSet::owner_get},
-    {"state_hash", &blender::ed::outliner::StackSourceFunctionSet::state_hash},
-    {"rows_build", &blender::ed::outliner::StackSourceFunctionSet::rows_build},
-    {"row_activate", &blender::ed::outliner::StackSourceFunctionSet::row_activate},
-    {"row_is_active", &blender::ed::outliner::StackSourceFunctionSet::row_is_active},
+constexpr StackSourceFuncBinding stack_source_func_bindings[] = {
+#define STACK_SOURCE_FUNC_BINDING(name) \
+  {STRINGIFY(name), &blender::ed::outliner::StackSourceFunctionSet::name},
+    STACK_SOURCE_FUNCTION_LIST(STACK_SOURCE_FUNC_BINDING)
+#undef STACK_SOURCE_FUNC_BINDING
 };
 static_assert(std::size(stack_source_func_bindings) == STACK_SOURCE_FUNC_NUM,
               "the binding table must name every optional function the registration reads");
@@ -105,6 +102,8 @@ static StructRNA *rna_OutlinerStackSource_register(Main *bmain,
    * drop the built-in visibility column, whose layout default is one). Keep in step with
    * #StackColumnLayout, and later additions with the C++ base's non-zero defaults. */
   dummy_info.icon_columns = 1;
+  /* #StackSource::use_sub_selection answers true by default (the built-ins' material picker). */
+  dummy_info.use_sub_selection = 1;
   bool have_function[STACK_SOURCE_FUNC_NUM];
 
   /* The row builder pointers handed to Python have to be typed by its RNA type; the first
@@ -163,6 +162,10 @@ static StructRNA *rna_OutlinerStackSource_register(Main *bmain,
     }
     funcs.*(stack_source_func_bindings[i].member) =
         RNA_struct_find_function(RNA_OutlinerStackSource, stack_source_func_bindings[i].name);
+    /* The class defined the method, so the base type must hold the function its table entry
+     * names: a null here means the list and the rna_def definitions drifted apart (a renamed or
+     * missing definition), which would otherwise read as a silently refused verb. */
+    BLI_assert(funcs.*(stack_source_func_bindings[i].member) != nullptr);
   }
 
   /* #rows_build is the one function a source cannot do without: a source that describes no rows
@@ -421,6 +424,16 @@ static void rna_def_outliner_stack_source(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_REGISTER_OPTIONAL);
   RNA_def_property_ui_text(
       prop, "Supports Row Lock", "Whether the rows carry a painting lock the Options can offer");
+
+  prop = RNA_def_property(srna, "use_sub_selection", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_sub_selection", 0);
+  RNA_def_property_flag(prop, PROP_REGISTER_OPTIONAL);
+  RNA_def_property_ui_text(
+      prop,
+      "Use Sub-Selection",
+      "Whether the header offers the source's sub-selection picker (the material chooser of the "
+      "built-in stacks); a source whose stack always belongs to the object answers false");
+
   /* The dynamic answers: each one is a Python method of the registered subclass. */
   func = RNA_def_function(srna, "has_stack", nullptr);
   RNA_def_function_ui_description(func, "Whether the object has a stack of this kind to show");
@@ -518,6 +531,205 @@ static void rna_def_outliner_stack_source(BlenderRNA *brna)
   parm = RNA_def_int(func, "ordinal", 0, 0, INT16_MAX, "Ordinal", "", 0, INT16_MAX);
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   RNA_def_function_return(func, RNA_def_boolean(func, "active", false, "", ""));
+
+  func = RNA_def_function(srna, "row_is_selected", nullptr);
+  RNA_def_function_ui_description(
+      func,
+      "Whether the row is selected, for a source whose selection lives in its own data; leave the "
+      "method out to leave selection to the Outliner");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_int(func, "ordinal", 0, 0, INT16_MAX, "Ordinal", "", 0, INT16_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_boolean(func, "selected", false, "", ""));
+
+  func = RNA_def_function(srna, "row_set_selected", nullptr);
+  RNA_def_function_ui_description(
+      func, "Write one row's selection into the source's data after the Outliner changed it");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL | FUNC_ALLOW_WRITE);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_int(func, "ordinal", 0, 0, INT16_MAX, "Ordinal", "", 0, INT16_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "select", false, "", "The row is selected");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_boolean(func, "changed", false, "", ""));
+
+  func = RNA_def_function(srna, "can_reorder", nullptr);
+  RNA_def_function_ui_description(
+      func, "Whether the rows of the owner can change places at all");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_boolean(func, "reorderable", false, "", ""));
+
+  func = RNA_def_function(srna, "row_add", nullptr);
+  RNA_def_function_ui_description(
+      func, "Create a row of the given kind relative to the row the ordinal names");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL | FUNC_ALLOW_WRITE);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_int(func, "kind", 0, 0, INT32_MAX, "Kind", "Index into the source's kinds", 0, INT32_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "ordinal", -1, -1, INT16_MAX, "Ordinal", "Row to place relative to", -1, INT16_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func,
+                     "place",
+                     0,
+                     0,
+                     2,
+                     "Place",
+                     "0 above the anchor, 1 below it, 2 inside it",
+                     0,
+                     2);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_int(func, "new_ordinal", -1, -1, INT16_MAX, "", "", -1, INT16_MAX));
+
+  func = RNA_def_function(srna, "row_action", nullptr);
+  RNA_def_function_ui_description(func, "The row's action button was pressed");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL | FUNC_ALLOW_WRITE);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_int(func, "ordinal", 0, 0, INT16_MAX, "Ordinal", "", 0, INT16_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_boolean(func, "done", false, "", ""));
+
+  func = RNA_def_function(srna, "row_set_enabled", nullptr);
+  RNA_def_function_ui_description(func, "Turn the row on or off");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL | FUNC_ALLOW_WRITE);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_int(func, "ordinal", 0, 0, INT16_MAX, "Ordinal", "", 0, INT16_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "enable", true, "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_boolean(func, "done", false, "", ""));
+
+  func = RNA_def_function(srna, "row_set_locked", nullptr);
+  RNA_def_function_ui_description(func, "Protect the row, or lift that protection");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL | FUNC_ALLOW_WRITE);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_int(func, "ordinal", 0, 0, INT16_MAX, "Ordinal", "", 0, INT16_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "locked", true, "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_boolean(func, "done", false, "", ""));
+
+  func = RNA_def_function(srna, "row_set_color_tag", nullptr);
+  RNA_def_function_ui_description(func, "Set the color tag of a group row");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL | FUNC_ALLOW_WRITE);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_int(func, "ordinal", 0, 0, INT16_MAX, "Ordinal", "", 0, INT16_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func,
+                     "color_tag",
+                     0,
+                     0,
+                     8,
+                     "Color Tag",
+                     "Palette index, zero for no tag",
+                     0,
+                     8);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_boolean(func, "done", false, "", ""));
+
+  func = RNA_def_function(srna, "row_duplicate", nullptr);
+  RNA_def_function_ui_description(func, "Copy the row, putting the copy directly above it");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL | FUNC_ALLOW_WRITE);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_int(func, "ordinal", 0, 0, INT16_MAX, "Ordinal", "", 0, INT16_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_int(func, "new_ordinal", -1, -1, INT16_MAX, "", "", -1, INT16_MAX));
+
+  func = RNA_def_function(srna, "row_rename", nullptr);
+  RNA_def_function_ui_description(func, "Rename the row");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL | FUNC_ALLOW_WRITE);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_int(func, "ordinal", 0, 0, INT16_MAX, "Ordinal", "", 0, INT16_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_string(func, "name", nullptr, MAX_NAME, "Name", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_boolean(func, "done", false, "", ""));
+
+  func = RNA_def_function(srna, "row_remove", nullptr);
+  RNA_def_function_ui_description(func, "Take the row out of the stack");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL | FUNC_ALLOW_WRITE);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_int(func, "ordinal", 0, 0, INT16_MAX, "Ordinal", "", 0, INT16_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_boolean(func, "done", false, "", ""));
+
+  func = RNA_def_function(srna, "row_move", nullptr);
+  RNA_def_function_ui_description(
+      func,
+      "Move the row next to the anchor row: above it, below it, or inside it when it holds rows");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL | FUNC_ALLOW_WRITE);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_int(func, "from_ordinal", 0, 0, INT16_MAX, "From", "", 0, INT16_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "anchor_ordinal", -1, -1, INT16_MAX, "Anchor", "", -1, INT16_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "place", 0, 0, 2, "Place", "0 above, 1 below, 2 inside", 0, 2);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_int(func, "new_ordinal", -1, -1, INT16_MAX, "", "", -1, INT16_MAX));
+
+  func = RNA_def_function(srna, "notifier_invalidates", nullptr);
+  RNA_def_function_ui_description(
+      func,
+      "Whether a notifier of the given category is reason enough to re-read the rows; without it "
+      "a broad default answers for the owner's data");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "category", 0, INT32_MIN, INT32_MAX, "Category", "", INT32_MIN, INT32_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "data", 0, INT32_MIN, INT32_MAX, "Data", "", INT32_MIN, INT32_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func, "action", 0, INT32_MIN, INT32_MAX, "Action", "", INT32_MIN, INT32_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_function_return(func, RNA_def_boolean(func, "invalidates", false, "", ""));
+
+  func = RNA_def_function(srna, "undo_reset", nullptr);
+  RNA_def_function_ui_description(
+      func, "Drop runtime state an undo step invalidated, the way a paint target does");
+  RNA_def_function_flag(func, FUNC_REGISTER_OPTIONAL);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  /* The definitions above are the other half of the #STACK_SOURCE_FUNCTION_LIST: one block per
+   * name, in the same order, so the registration's have-function flags line up with the binding
+   * table. A function added to one side only reads as absent at the other, so the count mismatch
+   * is caught here at the definition, before any source can register. */
+  BLI_assert(srna->functions.size() == blender::ed::outliner::STACK_SOURCE_FUNCTION_NUM);
 }
 
 /** The row builder: the handle a #rows_build or #decorate_row call writes rows through. Created

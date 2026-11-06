@@ -2143,6 +2143,7 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
           outliner_stack_row_activate(C, *space_outliner, activate_tselem->nr);
         }
         outliner_stack_row_ui_state_capture_now(*space_outliner, *activate_tselem->id);
+        outliner_stack_row_selection_flush(*C, *space_outliner, *activate_tselem->id);
       }
     }
     else {
@@ -2191,6 +2192,7 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
          * identity-keyed state the rebuild restores from, before a section switch triggers that
          * rebuild. Without this the rebuild would re-apply the previous selection. */
         outliner_stack_row_ui_state_capture_now(*space_outliner, *activate_tselem->id);
+        outliner_stack_row_selection_flush(*C, *space_outliner, *activate_tselem->id);
       }
     }
 

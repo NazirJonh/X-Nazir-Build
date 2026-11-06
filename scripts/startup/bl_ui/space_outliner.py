@@ -27,6 +27,47 @@ GLYPH_BRUSH = 0xE3AE
 _GLYPH_FILL = 0xE997
 _GLYPH_GRADIENT = 0xE3E9
 
+# The add and context menus registered stack sources provide, by source idname. A source module
+# (or an add-on) calls the two helpers below from its own register/unregister; the Stack Layers
+# header and context menu read the active source's entries here.
+_stack_source_menus = {}
+
+
+def stack_source_menu_register(idname, add_menu=None, context_menu=None, header=None,
+                               header_start=None):
+    """Name the menus a registered stack source offers: its Add and its row context menu, and the
+    optional `header(layout, context, space)` that draws the source's own header controls and
+    `header_start(layout, context, space)`, drawn right after the Back button."""
+    _stack_source_menus[idname] = {
+        "add": add_menu,
+        "context": context_menu,
+        "header": header,
+        "header_start": header_start,
+    }
+
+
+def stack_source_menu_unregister(idname):
+    """Drop the menus a source registered; called from its unregister."""
+    _stack_source_menus.pop(idname, None)
+
+
+def _stack_source_menu_for(space, kind):
+    # The menu idname the active source registered for kind, or None. A source this session
+    # has none of (its add-on was disabled) reads as an unregistered one and offers nothing.
+    menus = _stack_source_menus.get(space.stack_source_idname)
+    if menus is not None:
+        return menus.get(kind)
+    return None
+
+
+def _stack_source_header_for(space, kind="header"):
+    # The draw callable the active source registered for its own header controls (`kind` is
+    # "header" or "header_start"), or None.
+    menus = _stack_source_menus.get(space.stack_source_idname)
+    if menus is not None:
+        return menus.get(kind)
+    return None
+
 
 def _stack_add_button(row, glyph, fallback_icon, kind, label):
     # A glyph icon where the font provides one, the built-in icon otherwise (background mode).
@@ -62,6 +103,12 @@ class OUTLINER_HT_tool_header(Header):
             return
 
         layout.operator("outliner.stack_layers_back", text="", icon='BACK')
+
+        # A registered source's controls that belong next to the Back button (a source's mode
+        # toggles, say), before the generic ones.
+        header_start = _stack_source_header_for(space, "header_start")
+        if header_start is not None:
+            header_start(layout, context, space)
         if space.stack_source == 'PAINT_MATERIAL':
             # Which channel's value the rows below show and edit. Width is capped so the dropdown
             # does not stretch to the widest item and crowd the Add buttons.
@@ -113,6 +160,17 @@ class OUTLINER_HT_tool_header(Header):
             layout.separator()
             row = layout.row(align=True)
             row.operator("outliner.stack_layer_group_add", text="", icon='NEWFOLDER')
+        else:
+            # A registered source draws its own header controls when it has them (Add, REC, Solo
+            # and the operations menu, for one that has those verbs). A source without a header
+            # keeps the generic Add button it has always had.
+            header = _stack_source_header_for(space)
+            if header is not None:
+                header(layout, context, space)
+            else:
+                add_menu = _stack_source_menu_for(space, "add")
+                if add_menu is not None:
+                    layout.menu(add_menu, text="", icon='ADD')
 
         if space.show_stack_layer_move_buttons:
             layout.separator()
@@ -241,7 +299,10 @@ class OUTLINER_HT_header(Header):
         elif display_mode == 'STACK_LAYERS' and space.stack_layers_view == 'STACK':
             # The material whose stack is shown, before Pin; the fixed width keeps the header
             # stable whatever the name is.
-            layout.template_enum_menu(space, "stack_focus_sub_index", width=6.0, wrap=False)
+            # A source that has no sub-selection of its own (its stack belongs to the object)
+            # answers so through its use_sub_selection flag: only Pin is offered for it.
+            if space.stack_source_use_sub_selection:
+                layout.template_enum_menu(space, "stack_focus_sub_index", width=6.0, wrap=False)
             layout.prop(
                 space, "use_stack_layer_pin", text="",
                 icon='PINNED' if space.use_stack_layer_pin else 'UNPINNED',
@@ -448,6 +509,13 @@ class OUTLINER_MT_context_menu(Menu):
                         text="Save as Smart Asset",
                         icon='ASSET_MANAGER',
                     )
+                    layout.separator()
+            elif space.stack_layers_view == 'STACK':
+                # A registered source's own operations, under whatever menu it registered.
+                context_menu = _stack_source_menu_for(space, "context")
+                if context_menu is not None:
+                    # The entries themselves, not a submenu: they are the source's own verbs.
+                    layout.menu_contents(context_menu)
                     layout.separator()
             # A tag belongs to a group, not to a particular source: the poll answers for the row
             # the operator would tag, so a source that grows groups gets the swatches too.

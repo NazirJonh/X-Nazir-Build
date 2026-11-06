@@ -125,7 +125,7 @@ void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot)
   ot->description = "Make a stack layer the one the rest of Blender acts on";
   ot->exec = stack_row_activate_exec;
   ot->poll = stack_row_activate_poll;
-  ot->flag = OPTYPE_UNDO | OPTYPE_INTERNAL;
+  ot->flag = OPTYPE_INTERNAL;
 
   RNA_def_int(ot->srna,
               "ordinal",
@@ -152,7 +152,7 @@ void OUTLINER_OT_stack_layer_move(wmOperatorType *ot)
   ot->description = "Change the position of a layer in the stack";
   ot->exec = stack_row_move_exec;
   ot->poll = stack_row_reorder_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_int(ot->srna,
               "ordinal",
@@ -214,8 +214,17 @@ static wmOperatorStatus stack_target_clear_exec(bContext *C, wmOperator * /*op*/
   if (space_outliner == nullptr) {
     return OPERATOR_CANCELLED;
   }
-  return stack_source_for_space(*space_outliner)->target_clear(*C) ? OPERATOR_FINISHED :
-                                                                    OPERATOR_CANCELLED;
+  const StackSource &source = *stack_source_for_space(*space_outliner);
+  if (!source.target_clear(*C)) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The edit reaches the data (the built-ins drop the active row's marker, a change to the
+   * owner), so a built-in gets the undo step the operator's OPTYPE_UNDO used to carry. A Python
+   * source's clear runs through its data's own operators, whose steps already record it. */
+  if (!source.pushes_own_undo_steps()) {
+    ED_undo_push(C, "Clear Stack Target");
+  }
+  return OPERATOR_FINISHED;
 }
 
 /** Whether there is an activated row to stop aiming at; the menu entry leans on this. */
@@ -235,7 +244,7 @@ void OUTLINER_OT_stack_layer_clear_target(wmOperatorType *ot)
   ot->description = "Stop directing edits at the activated stack layer";
   ot->exec = stack_target_clear_exec;
   ot->poll = stack_target_clear_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 }
 
 /**
@@ -304,7 +313,7 @@ void OUTLINER_OT_stack_layer_color_tag_set(wmOperatorType *ot)
   ot->description = "Set the color tag of a layer group folder";
   ot->exec = stack_row_color_tag_set_exec;
   ot->poll = stack_row_color_tag_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_enum(ot->srna, "color", stack_row_color_items, 0, "Color", "Color tag for the group");
   rna_def_stack_row_ordinal(ot, "Group to set color for; -1 uses the selected or active row");
@@ -320,7 +329,7 @@ void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot)
   ot->description = "Turn a layer of the stack on or off";
   ot->exec = stack_row_visibility_toggle_exec;
   ot->poll = stack_row_visibility_toggle_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_int(ot->srna,
               "ordinal",
@@ -341,7 +350,7 @@ void OUTLINER_OT_stack_layer_lock_toggle(wmOperatorType *ot)
   ot->description = "Protect a layer of the stack from painting, or lift that protection";
   ot->exec = stack_row_lock_toggle_exec;
   ot->poll = stack_row_visibility_toggle_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_int(ot->srna,
               "ordinal",
@@ -357,7 +366,7 @@ void OUTLINER_OT_stack_layer_lock_toggle(wmOperatorType *ot)
 
 /**
  * The Add dialog's own choices change what it shows: a palette swatch writes `fill_color` and the
- * inline picker beside it has to follow, and switching from Fill to Empty takes the colour controls
+ * inline picker beside it has to follow, and switching from Fill to Empty takes the color controls
  * away. Redraw the popup on either.
  */
 static void stack_add_props_update(bContext *C,
@@ -429,7 +438,7 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
   ot->invoke = stack_row_add_invoke;
   ot->ui = stack_row_add_ui;
   ot->poll = stack_add_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   /* What the kinds are is the source's own vocabulary, built into items as the menu asks for them;
    * a source that declares none is polled out entirely. */
@@ -453,7 +462,7 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
               "active row, or the top of the stack",
               -1,
               SHRT_MAX);
-  /* Read only by the kinds that asked for a colour; the others leave it at its white default. */
+  /* Read only by the kinds that asked for a color; the others leave it at its white default. */
   static const float fill_color_default[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   PropertyRNA *fill_prop = RNA_def_float_color(ot->srna,
                                                "fill_color",
@@ -467,7 +476,7 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
                                                1.0f);
   RNA_def_property_subtype(fill_prop, PROP_COLOR_GAMMA);
   RNA_def_property_update_runtime_with_context_and_property(fill_prop, stack_add_props_update);
-  /* Only read by a kind with #StackAddKindInfo::color_optional: start the Fill with that colour,
+  /* Only read by a kind with #StackAddKindInfo::color_optional: start the Fill with that color,
    * or with no channels at all. The Add's UI draws it as the two buttons, Fill first. */
   PropertyRNA *fill_mode_prop = RNA_def_enum(
       ot->srna,
@@ -566,7 +575,7 @@ void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot)
   ot->get_description = stack_row_mask_get_description;
   ot->exec = stack_row_mask_exec;
   ot->poll = stack_row_mask_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_int(ot->srna,
               "ordinal",
@@ -596,7 +605,7 @@ void OUTLINER_OT_stack_layer_mask_image(wmOperatorType *ot)
   ot->invoke = stack_row_mask_image_invoke;
   ot->exec = stack_row_mask_image_exec;
   ot->poll = stack_row_mask_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_int(ot->srna,
               "ordinal",
@@ -627,7 +636,7 @@ void OUTLINER_OT_stack_layer_mask_toggle(wmOperatorType *ot)
   ot->exec = stack_row_mask_toggle_exec;
   /* Only while the mask slot is the one showing, so the context menu lists it then and not before. */
   ot->poll = stack_row_mask_section_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_int(ot->srna,
               "ordinal",
@@ -648,7 +657,7 @@ void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot)
   ot->description = "Delete a layer from the stack";
   ot->exec = stack_row_remove_exec;
   ot->poll = stack_row_remove_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_int(ot->srna,
               "ordinal",
@@ -670,7 +679,7 @@ void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot)
   ot->exec = stack_row_rename_exec;
   ot->invoke = stack_row_rename_invoke;
   ot->poll = stack_row_add_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_int(ot->srna,
               "ordinal",
@@ -692,7 +701,7 @@ void OUTLINER_OT_stack_layer_duplicate(wmOperatorType *ot)
   ot->description = "Copy a layer, maps and all, and put the copy above it";
   ot->exec = stack_row_duplicate_exec;
   ot->poll = stack_row_add_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_int(ot->srna,
               "ordinal",
@@ -715,7 +724,7 @@ void OUTLINER_OT_stack_layer_group(wmOperatorType *ot)
       "layer";
   ot->exec = stack_rows_group_exec;
   ot->poll = stack_row_add_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   rna_def_stack_row_ordinal(ot, "Bottom layer of the run; -1 uses the active one");
   RNA_def_int(ot->srna,
@@ -737,7 +746,7 @@ void OUTLINER_OT_stack_layer_group_add(wmOperatorType *ot)
   ot->description = "Add an empty folder above the active layer, to put layers into";
   ot->exec = stack_group_add_exec;
   ot->poll = stack_row_add_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   rna_def_stack_row_ordinal(ot, "Layer to sit above; -1 uses the active row");
   rna_def_stack_row_marker(ot);
@@ -774,7 +783,7 @@ void OUTLINER_OT_stack_layer_ungroup(wmOperatorType *ot)
   ot->description = "Put the layers of a folder back into the stack around it";
   ot->exec = stack_row_ungroup_exec;
   ot->poll = stack_row_ungroup_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   rna_def_stack_row_ordinal(ot, "Folder to unwrap; -1 uses the active row");
   rna_def_stack_row_marker(ot);
@@ -788,7 +797,7 @@ void OUTLINER_OT_stack_layer_merge_down(wmOperatorType *ot)
       "Collapse a layer and the one below it into one folder that composites just the same";
   ot->exec = stack_row_merge_down_exec;
   ot->poll = stack_row_add_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   rna_def_stack_row_ordinal(ot, "Layer to merge into the one below it; -1 uses the active one");
   rna_def_stack_row_marker(ot);
@@ -837,7 +846,7 @@ void OUTLINER_OT_stack_layer_paste(wmOperatorType *ot)
   ot->description = "Paste copied stack layers above the active layer";
   ot->exec = stack_row_paste_exec;
   ot->poll = stack_row_clipboard_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 }
 
 void OUTLINER_OT_stack_layer_mask_copy(wmOperatorType *ot)
@@ -863,7 +872,7 @@ void OUTLINER_OT_stack_layer_mask_paste(wmOperatorType *ot)
   /* Only while a mask is on the clipboard: copying a layer empties it, so Ctrl+V pastes whichever
    * of the two was copied last. */
   ot->poll = stack_row_mask_paste_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   rna_def_stack_row_ordinal(ot, "Layer to paste the mask onto; -1 uses the active one");
   rna_def_stack_row_marker(ot);

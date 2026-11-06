@@ -894,6 +894,28 @@ static void rna_SpaceOutliner_display_mode_update(bContext *C, PointerRNA *ptr)
   }
 }
 
+static void rna_SpaceOutliner_stack_source_idname_get(PointerRNA *ptr, char *value)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  const StringRefNull idname = ed::outliner::outliner_stack_source_idname_get(*space_outliner);
+  const int length = int(idname.size());
+  memcpy(value, idname.c_str(), length + 1);
+}
+
+static int rna_SpaceOutliner_stack_source_idname_length(PointerRNA *ptr)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  return int(ed::outliner::outliner_stack_source_idname_get(*space_outliner).size());
+}
+
+/* Whether the active source wants the header's sub-selection picker: the registered sources answer
+ * through their #use_sub_selection class attribute, the built-ins keep theirs. */
+static bool rna_SpaceOutliner_stack_source_use_sub_selection_get(PointerRNA *ptr)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  return ed::outliner::outliner_stack_source_use_sub_selection(*space_outliner);
+}
+
 static void rna_SpaceOutliner_stack_focus_name_get(PointerRNA *ptr, char *value)
 {
   const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
@@ -5619,6 +5641,27 @@ static void rna_def_space_outliner(BlenderRNA *brna)
                               "rna_SpaceOutliner_stack_source_itemf");
   RNA_def_property_ui_text(prop, "Stack Source", "Which kind of layer stack to display");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "stack_source_idname", PROP_STRING, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_SpaceOutliner_stack_source_idname_get",
+                                "rna_SpaceOutliner_stack_source_idname_length",
+                                nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Stack Source Idname",
+      "Idname of the active stack source: a registered source's bl_idname, or a built-in's own; "
+      "scripts match on this rather than on the display name");
+
+  prop = RNA_def_property(srna, "stack_source_use_sub_selection", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_boolean_funcs(prop, "rna_SpaceOutliner_stack_source_use_sub_selection_get", nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Stack Source Use Sub-Selection",
+      "Whether the active stack source wants the header's sub-selection picker; a source whose "
+      "stack always belongs to the object answers false and the header keeps only Pin");
 
   prop = RNA_def_property(srna, "use_stack_layer_pin", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_PINNED);

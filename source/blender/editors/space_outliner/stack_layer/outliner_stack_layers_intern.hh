@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "ED_undo.hh"
 #include "WM_api.hh"
 #include "WM_types.hh"
 
@@ -23,7 +24,7 @@ namespace blender::ed::outliner {
 constexpr int STACK_MARKER_UNRESOLVED = -2;
 
 /**
- * What a #StackAddKindInfo::color_optional Add creates: a row that lays a colour, or one with no
+ * What a #StackAddKindInfo::color_optional Add creates: a row that lays a color, or one with no
  * channels at all. Fill first, because it is what the Add button means by "Fill".
  */
 enum StackFillMode {
@@ -101,11 +102,15 @@ void stack_row_reveal_attached(SpaceOutliner &space_outliner, int ordinal);
  * already had -- no selection to re-target. \a r_ordinal: when given, receives \a
  * select_ordinal, for a caller that needs the row's new position for something of its own, such
  * as activating it.
+ * \param undo_name: what the step a built-in's edit pushes names ("Add Stack Layer", "Rename
+ * Stack Layer"): the undo log reads it, so it says the edit, not just that one happened. Unused
+ * for a source that pushes its own steps.
  */
 template<typename Fn>
 bool stack_mutate(bContext &C,
                   SpaceOutliner &space_outliner,
                   const bool needs_renumber,
+                  const char *undo_name,
                   Fn &&fn,
                   int *r_ordinal = nullptr)
 {
@@ -128,6 +133,14 @@ bool stack_mutate(bContext &C,
   }
   if (r_ordinal != nullptr) {
     *r_ordinal = select_ordinal;
+  }
+  /* The undo step belongs to whoever owns the mutation: a Python source mutates through its
+   * data's own operators, whose steps already record the change, so a second one here would make
+   * every click cost two undo presses. The built-ins mutate in place and have no step of their
+   * own, so the dispatcher pushes it -- the same step the calling operator's OPTYPE_UNDO used to
+   * push, just tied to the mutation that has actually happened. */
+  if (!source.pushes_own_undo_steps()) {
+    ED_undo_push(&C, undo_name);
   }
   stack_row_edit_finished(C, space_outliner, *owner, select_ordinal, needs_renumber);
   return true;

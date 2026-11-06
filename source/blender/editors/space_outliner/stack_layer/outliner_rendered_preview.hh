@@ -58,7 +58,7 @@ struct RenderedPreview {
    * #RenderedPreviewKind::Id previews. */
   uint32_t id_uid = 0;
   short id_type = 0;
-  /** Scene linear. The Sphere's base colour, and the flat colour that answers wherever nothing
+  /** Scene linear. The Sphere's base color, and the flat color that answers wherever nothing
    * else can (before a render, with no pixels at all). */
   float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   /** What #RenderedPreviewKind::Sphere shades with. */
@@ -72,7 +72,7 @@ struct RenderedPreview {
 
 /**
  * Draw \a preview in \a preview_rect. Returns false when there is nothing to preview at all, so
- * the caller's other looks answer. While pixels are on their way, \a preview's colour stands in.
+ * the caller's other looks answer. While pixels are on their way, \a preview's color stands in.
  */
 bool rendered_preview_draw(const bContext *C,
                            const rctf &preview_rect,

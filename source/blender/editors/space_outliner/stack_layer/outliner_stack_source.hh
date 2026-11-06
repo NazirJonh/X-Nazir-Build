@@ -102,7 +102,7 @@ struct StackSubRow {
 };
 
 /**
- * A rendered preview a slot can ask the draw for, beyond the plain icon, the flat colour and the
+ * A rendered preview a slot can ask the draw for, beyond the plain icon, the flat color and the
  * placeholder.
  *
  * Rendering is the draw's business, the way fetching #id_uid's data-block already is: a visible
@@ -202,14 +202,14 @@ struct StackRowPreview {
   bool is_blank = false;
 
   /**
-   * The slot shows a flat colour rather than a data-block preview or an icon.
+   * The slot shows a flat color rather than a data-block preview or an icon.
    *
-   * A row that *is* a colour -- a fill layer, say -- has no thumbnail to fetch and no icon that
-   * says more than the colour itself does. The colour travels here because it is the row's own
+   * A row that *is* a color -- a fill layer, say -- has no thumbnail to fetch and no icon that
+   * says more than the color itself does. The color travels here because it is the row's own
    * fact, and generic code draws exactly what the slot declares.
    */
   bool is_color_swatch = false;
-  /** The scene linear colour #is_color_swatch draws; meaningless otherwise. */
+  /** The scene linear color #is_color_swatch draws; meaningless otherwise. */
   float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 
   /** Which rendered preview the slot asks the draw for, if any. */
@@ -222,7 +222,7 @@ struct StackRowPreview {
    */
   uint64_t render_hash = 0;
   /** Metallic and roughness the #StackRowPreviewRender::Sphere shading reads; meaningless
-   * otherwise. The base colour it shades with is #color. */
+   * otherwise. The base color it shades with is #color. */
   float sphere_metallic = 0.0f;
   float sphere_roughness = 0.5f;
   /**
@@ -515,10 +515,10 @@ struct StackAddKindInfo {
   int icon = 0;
   /** Material Symbols codepoint drawn instead of #icon, or 0 to use #icon. */
   uint32_t glyph = 0;
-  /** A kind whose creation takes a colour: the Add UI asks for one before calling #row_add. */
+  /** A kind whose creation takes a color: the Add UI asks for one before calling #row_add. */
   bool takes_color = false;
   /**
-   * A kind that may also be added empty: the Add asks whether to lay a colour or start with none.
+   * A kind that may also be added empty: the Add asks whether to lay a color or start with none.
    * Only meaningful together with #takes_color.
    */
   bool color_optional = false;
@@ -594,7 +594,7 @@ struct StackAddArgs {
   /** RGBA, for a kind with #StackAddKindInfo::takes_color; null otherwise. */
   const float *color = nullptr;
   /**
-   * For a kind with #StackAddKindInfo::color_optional: make a row with no colour, rather than one
+   * For a kind with #StackAddKindInfo::color_optional: make a row with no color, rather than one
    * that lays \a color. Ignored by every other kind.
    */
   bool empty = false;
@@ -1156,7 +1156,7 @@ class StackGroupingEditor {
 };
 
 /**
- * An in-progress live edit of a fill row's colour -- a picker drag, most likely -- kept alive
+ * An in-progress live edit of a fill row's color -- a picker drag, most likely -- kept alive
  * across several preview ticks so that undo sees the row's pristine pixels once, not once per
  * tick. Fully opaque to the generic code: what it holds and how it rolls back or folds into
  * history is #StackColorEditor's own business (a paint stack keeps its own pixel-diff record in
@@ -1165,7 +1165,7 @@ class StackGroupingEditor {
 struct StackColorSession;
 
 /**
- * The colour-editing half of a #StackEditor's vocabulary: re-filling a fill row's maps, live,
+ * The color-editing half of a #StackEditor's vocabulary: re-filling a fill row's maps, live,
  * without tying the seam to whatever pixel format or undo system that takes.
  *
  * Split out from #StackEditor for the same reason #StackGroupingEditor is: only a source with
@@ -1206,18 +1206,18 @@ class StackColorEditor {
   }
 
   /**
-   * Re-fill the maps of the fill row at \a ordinal with \a color, and record the colour on it.
+   * Re-fill the maps of the fill row at \a ordinal with \a color, and record the color on it.
    *
    * When \a session is given, the source first captures the row's pristine pixels into it (first
    * touch wins, later calls keep the originals) before writing a byte, so a later
    * #color_session_push_undo or #color_session_restore sees the true pre-picker canvas rather
    * than an intermediate tick. Null means a one-shot call with no session around it.
    *
-   * The fill is a colour rather than a repaint: what the row *stands for* changes with it, which
+   * The fill is a color rather than a repaint: what the row *stands for* changes with it, which
    * is why the source records it and not just the pixels. Sources with no fill rows leave the
    * default.
    *
-   * \return true when the colour was applied, false when the row is not a fill this source can
+   * \return true when the color was applied, false when the row is not a fill this source can
    * re-fill.
    */
   virtual bool row_color_set(bContext & /*C*/,
@@ -1348,7 +1348,7 @@ class StackEditor {
    * \return the ordinal of the new row, or -1 when nothing was created.
    */
   /**
-   * \a args carries what the kind asked for in #StackAddKindInfo -- a colour, a source
+   * \a args carries what the kind asked for in #StackAddKindInfo -- a color, a source
    * data-block -- and defaults to empty for a source whose kinds ask for nothing.
    */
   virtual int row_add(bContext & /*C*/,
@@ -1511,7 +1511,7 @@ class StackEditor {
   }
 
   /**
-   * The colour-editing half of this editor -- re-filling a fill row's maps -- or null when this
+   * The color-editing half of this editor -- re-filling a fill row's maps -- or null when this
    * source's rows have no fill vocabulary at all. The verbs live in #StackColorEditor; a caller
    * asks for it the same way it asks for #grouping, and treats a null the same as a verb that
    * refuses.
@@ -1548,6 +1548,28 @@ class StackSource {
   {
     return "";
   }
+
+  /**
+   * Whether the header offers the source's sub-selection picker (the built-in stacks' material
+   * chooser). A source whose stack always belongs to the object answers false, and the header
+   * keeps only Pin; the built-ins all answer true.
+   */
+  virtual bool use_sub_selection() const
+  {
+    return true;
+  }
+
+  /**
+   * Whether the source's own edits carry undo steps of their making: a Python source mutates
+   * through its data's own operators, whose steps already record each change. The shared edit
+   * dispatcher pushes its step only for a source that answers false here, so a click never costs
+   * two undo presses. The built-ins mutate in place and answer false.
+   */
+  virtual bool pushes_own_undo_steps() const
+  {
+    return false;
+  }
+
   /**
    * Whether \a object contributes a stack of this kind, for the object overview.
    */
@@ -1686,6 +1708,37 @@ class StackSource {
                              const StackFocus &focus,
                              const ID &owner,
                              const StackRow &row) const = 0;
+
+  /**
+   * The row's multiple-selection state, for a source that keeps selection in its own data.
+   *
+   * #nullopt means the source has no opinion and the tree store's selection stands, which is what
+   * every source that leaves selection to the Outliner answers. A source that answers a value has
+   * the tree store's selected and active flags rebuilt from #row_is_selected / #row_is_active on
+   * every build, so a selection made in another editor reaches the rows.
+   */
+  virtual std::optional<bool> row_is_selected(const StackReadContext & /*ctx*/,
+                                              const StackFocus & /*focus*/,
+                                              const ID & /*owner*/,
+                                              const StackRow & /*row*/) const
+  {
+    return std::nullopt;
+  }
+
+  /**
+   * Write one row's selection into the source's data, for a source that answered
+   * #row_is_selected. Called after the Outliner changed its tree-store selection, so the two
+   * stay the same way round. \return whether the data changed.
+   */
+  virtual bool row_set_selected(bContext & /*C*/,
+                                const StackFocus & /*focus*/,
+                                ID & /*owner*/,
+                                const StackRow & /*row*/,
+                                bool /*select*/) const
+  {
+    return false;
+  }
+
   /** Double-click on a sub-row. Sources with no sub-rows need not implement this. */
   virtual bool sub_row_activate(bContext & /*C*/,
                                 const StackFocus & /*focus*/,
@@ -1781,17 +1834,17 @@ class StackSource {
 
   /**
    * Draw whatever this source adds to the Add dialog's own controls, after the generic ones --
-   * a colour, a source data-block -- are laid out.
+   * a color, a source data-block -- are laid out.
    *
-   * The seam owns the two things every Add means: a colour for a kind that takes one, and whether
+   * The seam owns the two things every Add means: a color for a kind that takes one, and whether
    * a kind that may start empty does. What \a empty means beyond that is the source's: the paint
-   * source lists the channels such a row starts with, and offers its palette beside the colour.
+   * source lists the channels such a row starts with, and offers its palette beside the color.
    * A source with nothing to add leaves the no-op default; it still gets the generic Add.
    *
    * \param kind: the kind being added.
    * \param op: the running operator, whose properties are the controls' storage.
    * \param layout: where to lay the extra controls out.
-   * \param empty: the user chose the optional colour kind's empty variant.
+   * \param empty: the user chose the optional color kind's empty variant.
    */
   virtual void add_kind_draw_extra(bContext & /*C*/,
                                    const StackAddKindInfo & /*kind*/,

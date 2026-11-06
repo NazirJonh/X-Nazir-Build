@@ -91,6 +91,19 @@ const EnumPropertyItem *outliner_stack_focus_sub_index_itemf(bContext *C,
                                                              bool *r_free);
 
 /**
+ * The idname of the stack source the space shows: a registered source answers the name it
+ * registered under, a built-in its own ("paint_material"). Read-only: the picker writes
+ * #SpaceOutliner::stack_source, this only reads back what that resolved to.
+ */
+StringRefNull outliner_stack_source_idname_get(const SpaceOutliner &space_outliner);
+/**
+ * Whether the active source wants the header's sub-selection picker (the built-in stacks'
+ * material chooser): a registered source answers through its #use_sub_selection class attribute,
+ * the built-ins keep theirs.
+ */
+bool outliner_stack_source_use_sub_selection(const SpaceOutliner &space_outliner);
+
+/**
  * Follow the active object with the display again, and put it on the object's stack now.
  *
  * Answers a display the user left by hand and the space's own switch, so the option that turns the
@@ -175,26 +188,59 @@ MaterialPaintLayer *outliner_stack_row_mask_add_image(bContext &C,
  * \{ */
 
 /**
+ * The optional functions of the #OutlinerStackSource RNA type, in the base type's definition
+ * order: the one list the #StackSourceFunctionSet members, the registration's binding table
+ * (#stack_source_func_bindings in rna_space_outliner_stack.cc) and the function count are written
+ * from, so a new verb is one line here plus one `RNA_def_function` block in the same position --
+ * the registration's have-function flags arrive in this order, and `rna_def_outliner_stack_source`
+ * asserts its count against #STACK_SOURCE_FUNCTION_NUM. #has_stack_key is the optional cache key
+ * the source defines for its #has_stack answers (an integer-valued float), mixed into
+ * #object_stack_key.
+ */
+#define STACK_SOURCE_FUNCTION_LIST(X) \
+  X(has_stack) \
+  X(has_stack_key) \
+  X(owner_get) \
+  X(state_hash) \
+  X(rows_build) \
+  X(row_activate) \
+  X(row_is_active) \
+  X(row_is_selected) \
+  X(row_set_selected) \
+  X(can_reorder) \
+  X(row_add) \
+  X(row_action) \
+  X(row_set_enabled) \
+  X(row_set_locked) \
+  X(row_set_color_tag) \
+  X(row_duplicate) \
+  X(row_rename) \
+  X(row_remove) \
+  X(row_move) \
+  X(notifier_invalidates) \
+  X(undo_reset)
+
+#define STACK_SOURCE_FUNCTION_COUNT_ADD(name) +1
+/** How many verbs #STACK_SOURCE_FUNCTION_LIST names. */
+constexpr int STACK_SOURCE_FUNCTION_NUM =
+    0 STACK_SOURCE_FUNCTION_LIST(STACK_SOURCE_FUNCTION_COUNT_ADD);
+#undef STACK_SOURCE_FUNCTION_COUNT_ADD
+
+/**
  * The RNA functions of the #OutlinerStackSource base type, resolved once by the registration and
  * handed over: an entry is null when the registered subclass did not answer that verb, which is
  * how the module knows to refuse it.
  */
 struct StackSourceFunctionSet {
-  FunctionRNA *has_stack = nullptr;
-  /** The optional cache key the source defines for its #has_stack answers (an integer-valued
-   * float): mixed into #object_stack_key, so a change that can flip the answer re-asks it. */
-  FunctionRNA *has_stack_key = nullptr;
-  FunctionRNA *owner_get = nullptr;
-  FunctionRNA *state_hash = nullptr;
-  FunctionRNA *rows_build = nullptr;
-  FunctionRNA *row_activate = nullptr;
-  FunctionRNA *row_is_active = nullptr;
+#define STACK_SOURCE_FUNCTION_FIELD(name) FunctionRNA *name = nullptr;
+  STACK_SOURCE_FUNCTION_LIST(STACK_SOURCE_FUNCTION_FIELD)
+#undef STACK_SOURCE_FUNCTION_FIELD
 };
 
 /** Create the module's half of a registered stack source; ownership passes to the module on
  * #outliner_stack_source_python_register. */
 StackSourcePython *outliner_stack_source_python_new(const StackSourceInfo &info);
-/** The idname the module owns for  source: the string an RNA struct created for it has to point
+/** The idname the module owns for \a source: the string an RNA struct created for it has to point
  * at, since #RNA_def_struct_ptr keeps the pointer instead of copying it. */
 const char *outliner_stack_source_python_idname(const StackSourcePython &source);
 /** The srna the source \a idname's registration created for its subclass, or null when none is

@@ -143,7 +143,7 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
   float gamma_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
   float linear_color[4];
   RNA_float_get_array(op->ptr, "fill_color", gamma_color);
-  /* The operator's colour is a picker colour (gamma); the description stores scene linear. */
+  /* The operator's color is a picker color (gamma); the description stores scene linear. */
   srgb_to_linearrgb_v4(linear_color, gamma_color);
   const bool empty = kind_info.color_optional &&
                      RNA_enum_get(op->ptr, "fill_mode") == STACK_FILL_MODE_EMPTY;
@@ -194,7 +194,7 @@ static const char *stack_add_source_collection_name(const short idcode)
 }
 
 /**
- * The Add's invoke: a kind whose creation takes a colour opens the color picker first, a kind made
+ * The Add's invoke: a kind whose creation takes a color opens the color picker first, a kind made
  * from a data-block the call names none of opens the search for it, the rest run straight through.
  * A confirm dialog rather than a redo popup: every change in a redo popup re-runs the whole add.
  */
@@ -236,7 +236,7 @@ wmOperatorStatus stack_row_add_invoke(bContext *C, wmOperator *op, const wmEvent
 }
 
 /**
- * The Fill's colour, all in one place: the button showing what is assigned, the inline picker and
+ * The Fill's color, all in one place: the button showing what is assigned, the inline picker and
  * the RGBA sliders. Every control edits the operator's `fill_color`, so they all follow each other
  * through #stack_add_props_update. A source with a palette of its own adds it through
  * #StackSource::add_kind_draw_extra.
@@ -248,7 +248,7 @@ static void stack_add_fill_color_draw(wmOperator &op)
     return;
   }
   op.layout->prop(op.ptr, prop, RNA_NO_INDEX, 0, UI_ITEM_NONE, IFACE_("Fill Color"), ICON_NONE);
-  /* A visible row between the label/colour button and the picker below it. The explicit line type
+  /* A visible row between the label/color button and the picker below it. The explicit line type
    * is what guarantees a separator row outside a menu block, where the default is only a spacer. */
   op.layout->separator(1.0f, ui::LayoutSeparatorType::Line);
   ui::template_color_picker(op.layout, op.ptr, "fill_color", true, false, false, true);
@@ -260,10 +260,10 @@ static void stack_add_fill_color_draw(wmOperator &op)
 }
 
 /**
- * Only the choices the kind asks for are the user's here: a colour for a kind that takes one, the
+ * Only the choices the kind asks for are the user's here: a color for a kind that takes one, the
  * source data-block for a kind made from one. The anchor, the kind and the marker are what the
  * button that placed the call already decided. Anything more specific -- an empty row's channels,
- * a palette beside the colour -- is the source's, drawn through
+ * a palette beside the color -- is the source's, drawn through
  * #StackSource::add_kind_draw_extra.
  */
 void stack_row_add_ui(bContext *C, wmOperator *op)
@@ -277,7 +277,7 @@ void stack_row_add_ui(bContext *C, wmOperator *op)
   }
   bool empty = false;
   if (kind_info.color_optional) {
-    /* Fill or empty, in that order; the colour below belongs to Fill only. */
+    /* Fill or empty, in that order; the color below belongs to Fill only. */
     op->layout->prop(op->ptr, "fill_mode", ui::ITEM_R_EXPAND, std::nullopt, ICON_NONE);
     op->layout->separator();
     empty = RNA_enum_get(op->ptr, "fill_mode") != STACK_FILL_MODE_FILL;
@@ -498,6 +498,7 @@ int outliner_stack_row_add(bContext *C,
       *C,
       space_outliner,
       true,
+      "Add Stack Layer",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
@@ -530,6 +531,7 @@ bool outliner_stack_row_remove(bContext *C, SpaceOutliner &space_outliner, const
       *C,
       space_outliner,
       true,
+      "Remove Stack Layer",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,

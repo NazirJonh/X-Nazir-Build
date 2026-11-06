@@ -160,14 +160,14 @@ void stack_preview_empty_draw(const rctf &preview_rect, const int icon, const fl
 }
 
 /**
- * The flat-colour swatch of a row that *is* a colour -- a Fill layer: the colour itself at preview
+ * The flat-color swatch of a row that *is* a color -- a Fill layer: the color itself at preview
  * size, framed the way the empty-texture placeholder is.
  */
 void stack_preview_color_draw(const rctf &preview_rect,
                               const float color[4],
                               const float alpha_fac)
 {
-  /* The slot carries scene linear; the UI draws display colours. */
+  /* The slot carries scene linear; the UI draws display colors. */
   float swatch[4];
   linearrgb_to_srgb_v4(swatch, color);
   swatch[3] *= alpha_fac;
@@ -567,7 +567,7 @@ class StackScopedBlockEmboss {
 
 /**
  * Dim a column button whose value is the inherited default rather than an override. The control
- * stays fully editable; only the text colour changes.
+ * stays fully editable; only the text color changes.
  */
 static void stack_column_dim(ui::Button *button)
 {

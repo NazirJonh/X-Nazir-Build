@@ -223,12 +223,18 @@ typedef struct StackSourceInfo {
   int icon_columns;
   /** Whether the rows carry a painting lock the Options popup can offer as a column. */
   int supports_row_lock;
+  /**
+   * Whether the header offers the source's sub-selection picker (the built-in stacks' material
+   * chooser). A source whose stack always belongs to the object answers false, and the header
+   * keeps only Pin.
+   */
+  int use_sub_selection;
 } StackSourceInfo;
 
 /* Pinned as the sum of the fields so an addition that inserts padding (or a platform-dependent
  * field) breaks the build here rather than silently moving what RNA maps onto. */
 static_assert(sizeof(StackSourceInfo) ==
-                  64 + 64 + sizeof(int) + 64 + sizeof(float) * 3 + sizeof(int) * 2,
+                  64 + 64 + sizeof(int) + 64 + sizeof(float) * 3 + sizeof(int) * 3,
               "StackSourceInfo must stay a padding-free sum of its fixed-size fields");
 
 /**

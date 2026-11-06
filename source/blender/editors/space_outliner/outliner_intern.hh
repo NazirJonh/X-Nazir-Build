@@ -720,6 +720,17 @@ void outliner_stack_row_ui_state_sync(SpaceOutliner &space_outliner, const ID &o
  */
 void outliner_stack_row_ui_state_capture_now(SpaceOutliner &space_outliner, const ID &owner);
 /**
+ * Write the tree store's selection back into a source that keeps its own, one row at a time.
+ *
+ * The Outliner's tree store is what the user clicked; a source whose #row_is_selected answered the
+ * build keeps selection in its data instead, so the two are made the same way round here, right
+ * after the generic selection code has settled the flags. Sends the same redraw a data change does,
+ * which also refreshes the Properties tree.
+ *
+ * \return whether the source's data changed.
+ */
+bool outliner_stack_row_selection_flush(bContext &C, SpaceOutliner &space_outliner, ID &owner);
+/**
  * Drop the #stack_row_ui_state entries seen at neither of the last two builds -- a row removed
  * from the stack has nobody left to remember.
  *

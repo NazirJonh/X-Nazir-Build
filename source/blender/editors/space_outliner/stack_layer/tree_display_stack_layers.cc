@@ -13,6 +13,8 @@
 
 #include "BKE_layer.hh"
 
+#include <optional>
+
 #include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_map.hh"
@@ -75,6 +77,34 @@ static void stack_row_ui_state_apply(SpaceOutliner_Runtime &runtime,
   }
 }
 
+/**
+ * Hand a source that keeps selection in its own data the last word over the state the tree store
+ * remembered: an active layer or a selection changed in another editor (the Properties tree,
+ * a layer operator) has to reach the row on this rebuild, where the tree store still speaks for the
+ * previous one. A source with no #row_is_selected callback has no opinion and keeps the tree store's
+ * state untouched.
+ */
+static void stack_row_source_state_apply(const StackReadContext &ctx,
+                                         const StackFocus &focus,
+                                         ID &owner,
+                                         const StackSource &source,
+                                         TreeElement *layer,
+                                         const StackRow &row)
+{
+  const std::optional<bool> selected = source.row_is_selected(ctx, focus, owner, row);
+  if (!selected.has_value()) {
+    return;
+  }
+  TreeStoreElem *layer_tselem = TREESTORE(layer);
+  layer_tselem->flag &= ~(TSE_SELECTED | TSE_ACTIVE);
+  if (*selected) {
+    layer_tselem->flag |= TSE_SELECTED;
+  }
+  if (source.row_is_active(ctx, focus, owner, row)) {
+    layer_tselem->flag |= TSE_ACTIVE;
+  }
+}
+
 TreeDisplayStackLayersObjects::TreeDisplayStackLayersObjects(SpaceOutliner &space_outliner)
     : AbstractTreeDisplay(space_outliner)
 {
@@ -118,6 +148,7 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
     outliner_stack_rows_invalidate(space_outliner_);
     return tree;
   }
+  const StackSource &source = *stack_source_for_space(space_outliner_);
   /* What the user did with the rows the last build listed sits in the tree store, keyed by their
    * old ordinals; read it into the identity-keyed map before the rows are re-read underneath it,
    * so the build below can hand it back however the ordinals moved. */
@@ -193,6 +224,12 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
       }
     }
     stack_row_ui_state_apply(runtime, seen, layer, row);
+    stack_row_source_state_apply(ctx,
+                                 space_outliner_.runtime->stack_focus,
+                                 *owner,
+                                 source,
+                                 layer,
+                                 row);
     if (!row.supported || !show_sub_rows) {
       continue;
     }
@@ -279,6 +316,12 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
       BLI_insertlinkbefore(&(*parent_element)->subtree, first_content, layer);
     }
     stack_row_ui_state_apply(runtime, seen, layer, row);
+    stack_row_source_state_apply(ctx,
+                                 space_outliner_.runtime->stack_focus,
+                                 *owner,
+                                 source,
+                                 layer,
+                                 row);
   }
   outliner_stack_row_ui_state_prune(runtime, std::move(seen));
   return tree;

@@ -295,4 +295,14 @@ const StackSource *stack_source_for_space(const SpaceOutliner &space_outliner)
   return stack_source_get(space_outliner.stack_source);
 }
 
+StringRefNull outliner_stack_source_idname_get(const SpaceOutliner &space_outliner)
+{
+  return stack_source_for_space(space_outliner)->idname();
+}
+
+bool outliner_stack_source_use_sub_selection(const SpaceOutliner &space_outliner)
+{
+  return stack_source_for_space(space_outliner)->use_sub_selection();
+}
+
 }  // namespace blender::ed::outliner

@@ -108,8 +108,28 @@ wmOperatorStatus stack_row_activate_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
   const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
-  return outliner_stack_row_activate(C, *space_outliner, ordinal) ? OPERATOR_FINISHED :
-                                                                    OPERATOR_CANCELLED;
+  /* The step active before the activation: a source whose activation records an undo step of its
+   * own -- a branch of its own, or an operator it ran -- moves it, and the push below must not
+   * add a second one. The pointer, not the step count: at the undo limit a push drops an old
+   * step before it appends the new one, so a recorded step can leave the count unchanged. */
+  UndoStack *ustack = ED_undo_stack_get();
+  UndoStep *step_before = (ustack != nullptr) ? ustack->step_active : nullptr;
+  if (!outliner_stack_row_activate(C, *space_outliner, ordinal)) {
+    return OPERATOR_CANCELLED;
+  }
+  /* Activating a row changes data (the active paint layer, the object's active shape key), so a
+   * built-in gets the undo step the operator's OPTYPE_UNDO used to carry. The push lives in this
+   * operator rather than in the shared #outliner_stack_row_activate: that path also runs after an
+   * edit (the Add activates the row it just made) and on a plain click, where a second step would
+   * double-bill the edit's undo or record a click that was never an undoable change. A source
+   * that answers #StackSource::pushes_own_undo_steps is never pushed for, and a step its
+   * activation already recorded is not doubled: the active step named it. */
+  if (ustack != nullptr && ustack->step_active == step_before &&
+      !stack_source_for_space(*space_outliner)->pushes_own_undo_steps())
+  {
+    ED_undo_push(C, "Activate Stack Layer");
+  }
+  return OPERATOR_FINISHED;
 }
 
 /**
@@ -295,7 +315,7 @@ wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
   const bool add = RNA_boolean_get(op->ptr, "add");
-  /* The seam takes a fill colour, so a third kind of mask is a new item on this menu, not a new
+  /* The seam takes a fill color, so a third kind of mask is a new item on this menu, not a new
    * parameter carried through every layer between here and the description. */
   const bool black = RNA_enum_get(op->ptr, "initial_color") == 1;
   const float initial_color[4] = {black ? 0.0f : 1.0f,
@@ -306,6 +326,7 @@ wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op)
       *C,
       *space_outliner,
       false,
+      add ? "Add Stack Mask" : "Remove Stack Mask",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
@@ -434,6 +455,7 @@ wmOperatorStatus stack_row_mask_image_exec(bContext *C, wmOperator *op)
       *C,
       *space_outliner,
       false,
+      "Set Stack Mask Image",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
@@ -459,6 +481,7 @@ wmOperatorStatus stack_row_mask_toggle_exec(bContext *C, wmOperator *op)
       *C,
       *space_outliner,
       false,
+      "Toggle Stack Mask",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
@@ -576,6 +599,7 @@ bool outliner_stack_row_reorder(bContext *C,
   return stack_mutate(*C,
                       space_outliner,
                       true,
+                      "Move Stack Layer",
                       [&](const StackSource & /*source*/,
                           const StackEditor &editor,
                           const StackFocus &focus,
@@ -607,6 +631,7 @@ bool outliner_stack_row_move(bContext *C,
       *C,
       space_outliner,
       true,
+      "Move Stack Layer",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
@@ -642,6 +667,7 @@ bool outliner_stack_row_set_enabled(bContext *C,
   return stack_mutate(*C,
                       space_outliner,
                       false,
+                      enable ? "Show Stack Layer" : "Hide Stack Layer",
                       [&](const StackSource & /*source*/,
                           const StackEditor &editor,
                           const StackFocus &focus,
@@ -662,6 +688,7 @@ bool outliner_stack_row_set_locked(bContext *C,
   return stack_mutate(*C,
                       space_outliner,
                       false,
+                      locked ? "Lock Stack Layer" : "Unlock Stack Layer",
                       [&](const StackSource & /*source*/,
                           const StackEditor &editor,
                           const StackFocus &focus,
@@ -684,6 +711,7 @@ bool outliner_stack_row_color_tag_set(bContext *C,
       *C,
       space_outliner,
       false,
+      "Set Stack Color Tag",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
@@ -727,6 +755,7 @@ wmOperatorStatus stack_rows_group_exec(bContext *C, wmOperator *op)
       *C,
       *space_outliner,
       true,
+      "Group Stack Layers",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
@@ -752,6 +781,7 @@ wmOperatorStatus stack_group_add_exec(bContext *C, wmOperator *op)
       *C,
       *space_outliner,
       true,
+      "Add Stack Group",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
@@ -781,6 +811,7 @@ wmOperatorStatus stack_row_ungroup_exec(bContext *C, wmOperator *op)
       *C,
       *space_outliner,
       true,
+      "Ungroup Stack Layers",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
@@ -805,6 +836,7 @@ wmOperatorStatus stack_row_merge_down_exec(bContext *C, wmOperator *op)
       *C,
       *space_outliner,
       true,
+      "Merge Stack Layer Down",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
@@ -916,6 +948,7 @@ wmOperatorStatus stack_corrections_bake_exec(bContext *C, wmOperator *op)
       *C,
       *space_outliner,
       true,
+      "Bake Stack Corrections",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
@@ -955,6 +988,7 @@ wmOperatorStatus stack_row_duplicate_exec(bContext *C, wmOperator *op)
       *C,
       *space_outliner,
       true,
+      "Duplicate Stack Layer",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
@@ -1026,6 +1060,7 @@ bool outliner_stack_row_rename(bContext *C,
       *C,
       space_outliner,
       false,
+      "Rename Stack Layer",
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,

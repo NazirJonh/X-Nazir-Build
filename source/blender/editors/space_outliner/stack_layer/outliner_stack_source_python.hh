@@ -48,7 +48,7 @@ namespace blender::ed::outliner {
  * dynamic answers are RNA calls into the subclass. A source whose subclass left a method out
  * refuses that verb, the same way a C++ source that left an editor method at its default does.
  */
-class StackSourcePython final : public StackSource {
+class StackSourcePython final : public StackSource, public StackEditor {
  public:
   explicit StackSourcePython(const StackSourceInfo &info);
   ~StackSourcePython() override;
@@ -82,6 +82,13 @@ class StackSourcePython final : public StackSource {
   eSpaceOutliner_StackSource type() const override;
   StringRefNull idname() const override;
   StringRefNull ui_name() const override;
+  bool use_sub_selection() const override;
+  /** The subclass's mutations go through its data's own operators (the add-on delegates every
+   * change to one), which push the undo steps; the dispatcher adds none. */
+  bool pushes_own_undo_steps() const override
+  {
+    return true;
+  }
   bool object_has_stack(const StackReadContext &ctx, Object &object) const override;
   std::optional<uint64_t> object_stack_key(const StackReadContext &ctx,
                                            const Object &object) const override;
@@ -101,8 +108,60 @@ class StackSourcePython final : public StackSource {
                      const StackFocus &focus,
                      const ID &owner,
                      const StackRow &row) const override;
+  std::optional<bool> row_is_selected(const StackReadContext &ctx,
+                                      const StackFocus &focus,
+                                      const ID &owner,
+                                      const StackRow &row) const override;
+  bool row_set_selected(bContext &C,
+                        const StackFocus &focus,
+                        ID &owner,
+                        const StackRow &row,
+                        bool select) const override;
+  bool notifier_invalidates(const wmNotifier &notifier) const override;
+  void undo_reset() const override;
+  const StackEditor *editor() const override;
+
+  /* ---- StackEditor ---- */
+  bool can_reorder(const ID &owner) const override;
+  int row_add(bContext &C,
+              const StackFocus &focus,
+              ID &owner,
+              int kind,
+              int ordinal,
+              const StackAddArgs &args) const override;
+  bool row_action(bContext &C, ID &owner, int ordinal, const StackRow &row) const override;
+  bool row_set_enabled(
+      bContext &C, const StackFocus &focus, ID &owner, int ordinal, bool enable) const override;
+  bool row_set_locked(
+      bContext &C, const StackFocus &focus, ID &owner, int ordinal, bool locked) const override;
+  int row_duplicate(bContext &C, const StackFocus &focus, ID &owner, int ordinal) const override;
+  bool row_rename(bContext &C,
+                  const StackFocus &focus,
+                  ID &owner,
+                  int ordinal,
+                  StringRefNull name) const override;
+  bool row_remove(bContext &C, const StackFocus &focus, ID &owner, int ordinal) const override;
+  bool row_reorder(bContext &C,
+                   const StackFocus &focus,
+                   ID &owner,
+                   int from_ordinal,
+                   int to_ordinal) const override;
+  bool row_move(bContext &C,
+                const StackFocus &focus,
+                ID &owner,
+                int from_ordinal,
+                int anchor_ordinal,
+                StackMovePlace place,
+                int *r_ordinal) const override;
+  const StackGroupingEditor *grouping() const override;
 
   /* ---- Python-facing helpers the row builder uses ---- */
+
+  /** One call into the registered subclass's #row_set_color_tag. This is the grouping adapter's
+   * implementation, not a #StackEditor verb: color tags belong to #StackGroupingEditor, and only
+   * a source that registered the function gets the adapter that reaches this. */
+  bool row_set_color_tag(
+      bContext &C, const StackFocus &focus, ID &owner, int ordinal, int color_tag) const;
 
   /** The storage the row's rename field types into, keyed by the row's stable key. The buffer is
    * at least #MAX_NAME bytes, is filled with \a name, and outlives the rebuild that asked for it;
@@ -132,6 +191,24 @@ class StackSourcePython final : public StackSource {
   float object_stack_key_source_part(const Object &object) const;
 
  private:
+  /** The grouping half a Python source may answer: only the color-tag verb is wired, and only a
+   * subclass that defined its own `row_set_color_tag` gets this editor at all. */
+  class StackGroupingAdapter final : public StackGroupingEditor {
+   public:
+    explicit StackGroupingAdapter(const StackSourcePython &source) : source_(source) {}
+
+    bool row_color_tag_set(bContext &C,
+                           const StackFocus &focus,
+                           ID &owner,
+                           int ordinal,
+                           int color_tag) const override;
+
+   private:
+    const StackSourcePython &source_;
+  };
+
+  StackGroupingAdapter grouping_adapter_;
+
   /** The pointer the subclass methods run on: this source's description, typed by the subclass
    * srna, so the Python `self` reads the registered properties of its own class. */
   PointerRNA instance_ptr() const;

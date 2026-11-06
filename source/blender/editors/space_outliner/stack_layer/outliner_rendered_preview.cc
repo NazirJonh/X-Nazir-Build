@@ -201,7 +201,7 @@ static void rendered_previews_evict()
 struct StackSphereTemplate {
   Material *material = nullptr;
   bNode *principled = nullptr;
-  /** The texture and separate-colour nodes of the render in flight; empty between renders. */
+  /** The texture and separate-color nodes of the render in flight; empty between renders. */
   Vector<bNode *> helpers;
 };
 
@@ -274,8 +274,8 @@ static StackSphereTemplate *stack_sphere_template_ensure(StackSphereTemplate &tm
 }
 
 /**
- * Re-shade the constants template with what a Fill's slot shows. The socket colours are scene
- * linear -- the space the slot's colour already travels in -- so they take it as it comes; a
+ * Re-shade the constants template with what a Fill's slot shows. The socket colors are scene
+ * linear -- the space the slot's color already travels in -- so they take it as it comes; a
  * material's own RGB fields are display-referred and would have needed the conversion.
  */
 static void stack_sphere_constants_values_set(const StackSphereTemplate &tmplate,
@@ -323,9 +323,9 @@ static void stack_sphere_helpers_clear(StackSphereTemplate &tmplate)
 /**
  * Wire the maps template for what a Material row's slot shows, replacing whatever the previous
  * render left wired. A channel with a map reads it through a texture node; the scalar channels
- * go by way of a Separate Color node, because a texture's colour output cannot reach a float
+ * go by way of a Separate Color node, because a texture's color output cannot reach a float
  * input directly. A channel without a map is left unlinked, so the socket's constant answers
- * with what the slot carries: the source's resolved colour, metallic and roughness.
+ * with what the slot carries: the source's resolved color, metallic and roughness.
  */
 static void stack_sphere_maps_values_set(const bContext *C,
                                          StackSphereTemplate &tmplate,
@@ -349,7 +349,7 @@ static void stack_sphere_maps_values_set(const bContext *C,
                        nullptr;
     if (image == nullptr) {
       /* No map for the channel: the socket's constant answers. The constants template writes
-       * this same way, with the same colours and the same resolved scalars. */
+       * this same way, with the same colors and the same resolved scalars. */
       if (i == 0) {
         if (principled_in->default_value != nullptr) {
           copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(principled_in->default_value)->value,

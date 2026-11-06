@@ -54,7 +54,7 @@ void curve_patch_undo_push(CurvePatchSession &patch)
   patch.doc.undo_step_current = int(patch.doc.undo_steps.size()) - 1;
 }
 
-static void curve_patch_undo_restore(bContext &C, Object &ob, CurvePatchSession &patch)
+static void curve_patch_undo_restore(bContext &C, CurvePatchSession &patch)
 {
   const CurvePatchEditStep &step = patch.doc.undo_steps[patch.doc.undo_step_current];
   /* Resized rather than rebuilt: only the three snapshotted fields are restored, so each patch
@@ -74,8 +74,8 @@ static void curve_patch_undo_restore(bContext &C, Object &ob, CurvePatchSession 
   curve_patch_layer_mirror_vector(patch);
 
   curve_patch_edit_status_set(&C, patch);
-  curve_patch_restore_and_restamp(C, ob, patch);
-  curve_patch_tag_viewports_redraw_after_edit(C, ob, patch);
+  curve_patch_restore_and_restamp(C, patch);
+  curve_patch_tag_viewports_redraw_after_edit(C, patch);
 }
 
 /* Returns false when there is nothing left to undo, i.e. the session is back at the state the
@@ -85,24 +85,26 @@ static void curve_patch_undo_restore(bContext &C, Object &ob, CurvePatchSession 
  * later state instead, so "already at 0" no longer means "back at the start" -- it means the
  * session simply cannot recall anything earlier, and the caller must NOT cancel the patch over
  * that. The step is a no-op in that case; there is nothing further back to restore. */
-bool curve_patch_undo_step_back(bContext &C, Object &ob, CurvePatchSession &patch)
+/* \a ob is kept in the public signatures for the modal's call shape; the restore itself resolves
+ * the session's own targets and needs no object. */
+bool curve_patch_undo_step_back(bContext &C, Object & /*ob*/, CurvePatchSession &patch)
 {
   if (patch.doc.undo_step_current <= 0) {
     /* An effect of the Stack Layers has no patch to cancel: running out of history just stops. */
     return patch.doc.undo_anchor_trimmed || patch.layer_material != nullptr;
   }
   patch.doc.undo_step_current--;
-  curve_patch_undo_restore(C, ob, patch);
+  curve_patch_undo_restore(C, patch);
   return true;
 }
 
-void curve_patch_undo_step_forward(bContext &C, Object &ob, CurvePatchSession &patch)
+void curve_patch_undo_step_forward(bContext &C, Object & /*ob*/, CurvePatchSession &patch)
 {
   if (patch.doc.undo_step_current + 1 >= int(patch.doc.undo_steps.size())) {
     return;
   }
   patch.doc.undo_step_current++;
-  curve_patch_undo_restore(C, ob, patch);
+  curve_patch_undo_restore(C, patch);
 }
 
 }  // namespace blender::ed::sculpt_paint

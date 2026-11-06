@@ -342,6 +342,43 @@ class TestCurvePatchApply(unittest.TestCase):
         for original, current in zip(before, restored):
             self.assertAlmostEqual((original - current).length, 0.0, places=5)
 
+    def test_apply_per_object_across_two_meshes(self):
+        """Multi-object parity the headless path can express today: one apply call PER object.
+        Both meshes stamp the same curve in their own local space, and each object's commit is its
+        own undo step. The interactive anchor entry is what folds the targets of one session into
+        a single Ctrl+Z.
+        """
+        object_mode_ensure()
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=48, y_subdivisions=48, size=4.0,
+                                        location=(8.0, 0.0, 0.0))
+        second_ob = active_object_get()
+        self.extra_names.append(second_ob.name)
+        active_object_set(second_ob)
+        bpy.ops.object.mode_set(mode='SCULPT')
+        active_object_set(self.mesh_ob)
+        bpy.ops.ed.undo_push()
+
+        before_first = vertex_positions(self.mesh_ob)
+        before_second = vertex_positions(second_ob)
+
+        self.assertEqual({'FINISHED'}, bpy.ops.sculpt.curve_patch_apply())
+        self.assertEqual({'FINISHED'},
+                         bpy.ops.sculpt.curve_patch_apply(object=second_ob.name))
+
+        moved_first = sum(1 for a, b in zip(before_first, vertex_positions(self.mesh_ob))
+                          if (a - b).length > 1e-6)
+        moved_second = sum(1 for a, b in zip(before_second, vertex_positions(second_ob))
+                           if (a - b).length > 1e-6)
+        self.assertGreater(moved_first, 0, "the primary mesh was not stamped")
+        self.assertGreater(moved_second, 0, "the second mesh was not stamped")
+
+        # Per-object steps: undoing once reverts the LAST commit (the second mesh), leaving the
+        # first one's relief in place.
+        bpy.ops.ed.undo()
+        restored_second = vertex_positions(second_ob)
+        for original, current in zip(before_second, restored_second):
+            self.assertAlmostEqual((original - current).length, 0.0, places=5)
+
     def test_apply_with_an_image_texture(self):
         """Guards the one blocker that is invisible without a texture: the sampler reads image
         texels through the session's `ImagePool` (`SculptSession::tex_pool_ensure`), which a brush

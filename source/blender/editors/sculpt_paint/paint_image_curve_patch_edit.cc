@@ -330,7 +330,8 @@ class ImageScreenAdapter : public CurvePatchScreenAdapter {
                         const int point_index,
                         const float3 initial[3],
                         const float2 &mval_start,
-                        const float2 &mval_now) const override
+                        const float2 &mval_now,
+                        const bool /*add_target_modifier*/) const override
   {
     const int start[2] = {int(mval_start.x), int(mval_start.y)};
     const int now[2] = {int(mval_now.x), int(mval_now.y)};

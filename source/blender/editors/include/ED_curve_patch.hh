@@ -92,6 +92,23 @@ void ED_curve_patch_overlay_data_get(const ed::sculpt_paint::CurvePatchSession *
 void ED_curve_patch_overlay_data_get(const Object *ob, CurvePatchOverlayData &r_data);
 
 /**
+ * Fill \a r_data with the curves \a ob's own Curve Patch target draws, in \a ob's OWN local
+ * space: the document for the session's owner object, that object's mirror of the document for a
+ * secondary target. Empty when \a ob carries no target of a live session.
+ *
+ * A multi-object session publishes its one session pointer on every stamped object, so the
+ * overlay can resolve per-object curves (the object matrices differ) from the same call shape the
+ * single-object path uses.
+ */
+void ED_curve_patch_overlay_data_get_target(const Object *ob, CurvePatchOverlayData &r_data);
+
+/** The object the session's DOCUMENT lives on (null session: null). Editing/projection always uses
+ * this object's space, even when a secondary target is the active object. Mutable: the session's
+ * owner is an original Object a caller may have to act on (the Transform system resolves its
+ * projection through it). */
+Object *ED_curve_patch_session_owner(const ed::sculpt_paint::CurvePatchSession *session);
+
+/**
  * Fill \a r_data from the ACTIVE stack row of \a ob's active material (passive preview, no
  * session): the control curves of every Curve Patch item in the row's PaintVector, `active_index`
  * the row's stored active item. Empty when there is no object, its active row is not a Curve Patch

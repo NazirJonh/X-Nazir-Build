@@ -51,9 +51,7 @@ wmKeyMap *curve_patch_edit_modal_keymap(wmKeyConfig *keyconf);
 void curve_patch_edit_status_set(bContext *C, const CurvePatchSession &patch);
 
 void curve_patch_tag_overlay_redraw_all(bContext *C);
-void curve_patch_tag_viewports_redraw_after_edit(bContext &C,
-                                                 Object &ob,
-                                                 const CurvePatchSession &patch);
+void curve_patch_tag_viewports_redraw_after_edit(bContext &C, const CurvePatchSession &patch);
 
 void curve_patch_sync_view_context(bContext *C,
                                    ScrArea *area,

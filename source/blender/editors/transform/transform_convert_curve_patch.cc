@@ -51,6 +51,27 @@ namespace blender::ed::transform {
 /** \name Curve Patch Transform Creation
  * \{ */
 
+/** The object whose space the DOCUMENT lives in. A secondary target can be the active object
+ * while the session edits the owner's document; projecting through the secondary's matrix would
+ * transform the wrong point on screen. */
+static Object *curve_patch_transform_object(TransInfo *t)
+{
+  BKE_view_layer_synced_ensure(*t->bmain, t->scene, t->view_layer);
+  Object *ob = BKE_view_layer_active_object_get(t->view_layer);
+  if (ob == nullptr) {
+    return nullptr;
+  }
+  const ed::sculpt_paint::CurvePatchSession *patch_session = ED_curve_patch_session_get(*ob);
+  Object *owner =
+      patch_session != nullptr ? ED_curve_patch_session_owner(patch_session) : nullptr;
+  if (owner == nullptr) {
+    return ob;
+  }
+  /* The document's owner is not in the current view layer; transforming the active secondary
+   * in its own space would move the document's point by the wrong matrix. */
+  return BKE_view_layer_base_find(t->view_layer, owner) != nullptr ? owner : nullptr;
+}
+
 static void createTransCurvePatchVerts(bContext * /*C*/, TransInfo *t)
 {
   TransDataContainer *tc = TRANS_DATA_CONTAINER_FIRST_SINGLE(t);
@@ -60,8 +81,7 @@ static void createTransCurvePatchVerts(bContext * /*C*/, TransInfo *t)
     return;
   }
 
-  BKE_view_layer_synced_ensure(*t->bmain, t->scene, t->view_layer);
-  Object *ob = BKE_view_layer_active_object_get(t->view_layer);
+  Object *ob = curve_patch_transform_object(t);
   if (ob == nullptr) {
     return;
   }
@@ -139,8 +159,7 @@ static void flushTransCurvePatch(TransInfo *t)
     return;
   }
 
-  BKE_view_layer_synced_ensure(*t->bmain, t->scene, t->view_layer);
-  Object *ob = BKE_view_layer_active_object_get(t->view_layer);
+  Object *ob = curve_patch_transform_object(t);
   if (ob == nullptr) {
     return;
   }
@@ -274,8 +293,7 @@ static void specialAfterTransCurvePatch(bContext * /*C*/, TransInfo *t)
     return;
   }
 
-  BKE_view_layer_synced_ensure(*t->bmain, t->scene, t->view_layer);
-  Object *ob = BKE_view_layer_active_object_get(t->view_layer);
+  Object *ob = curve_patch_transform_object(t);
   if (ob == nullptr) {
     return;
   }

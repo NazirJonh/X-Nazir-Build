@@ -12,8 +12,8 @@
  *
  * Everything the interactive path measures from user input is passed in instead. That is the whole
  * difference between the two -- the session, the sampler, the effects and the undo step are shared
- * verbatim with `SCULPT_OT_curve_patch_edit`, because the Stage 0 measurement found no missing
- * architecture here, only missing values.
+ * verbatim with `SCULPT_OT_curve_patch_edit`, because the interactive path was found to lack no
+ * architecture for this, only values.
  */
 
 #include "BLI_math_vector_types.hh"

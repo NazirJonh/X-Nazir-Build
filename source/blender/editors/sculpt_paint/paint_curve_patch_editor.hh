@@ -107,13 +107,18 @@ class CurvePatchScreenAdapter {
    * start` and `initial` are the cursor and the point's three positions as they were when the drag
    * began -- applying the delta to those rather than to the live values keeps a long drag from
    * accumulating rounding drift.
+   *
+   * `add_target_modifier` (Shift) asks the 3D adapter to drop the point onto ANOTHER Sculpt Mode
+   * object, making that object a session target on the way. The flat (Image) canvas has no other
+   * object to target and IGNORES the flag -- its drag is always the plain UV delta.
    */
   virtual void drag_point_apply(bContext &C,
                                 bke::CurvesGeometry &curve,
                                 int point_index,
                                 const float3 initial[3],
                                 const float2 &mval_start,
-                                const float2 &mval_now) const = 0;
+                                const float2 &mval_now,
+                                bool add_target_modifier) const = 0;
 
   /** Put one Bezier tangent handle under the cursor. The core has already promoted a computed
    * handle type to Align, so this may recompute handles freely. */

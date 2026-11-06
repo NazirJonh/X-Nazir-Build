@@ -82,8 +82,7 @@ void curve_patch_prepare_brush_for_headless(Paint &paint, Brush &brush)
  * (see #SculptSession::tex_pool_ensure). */
 static void curve_patch_apply_release(SculptSession &ss)
 {
-  MEM_delete(ss.cache);
-  ss.cache = nullptr;
+  curve_patch_stroke_cache_free(&ss, ss.cache);
 }
 
 /* Stand in for the `StrokeCache` an interactive patch inherits from its anchor stroke. Only the
@@ -131,8 +130,8 @@ void curve_patch_apply_cache_init(StrokeCache &cache,
   cache.accum = effect_type == CurvePatchEffectType::Image;
   if (effect_type == CurvePatchEffectType::Image) {
     /* `ImageColorEffect` reaches its canvas exclusively through this handle and silently does
-     * nothing without it -- a blocker the Stage 0 measurement never hit, because it measured
-     * relief. */
+     * nothing without it -- a blocker the headless apply's own measurement never hit, because it
+     * exercised relief. */
     cache.image_paint_targets = paint::image::init_image_paint_targets(
         ob, paint_mode_settings, &brush, sd.paint.visible_material_channels);
   }
@@ -264,17 +263,17 @@ bool curve_patch_apply(const Scene &scene,
   /* The interactive paths call this after aborting the spawning stroke's undo transaction. Nothing
    * opened a transaction here, so the hook runs before the only re-stamp instead -- which is what
    * puts the pre-patch canvas tiles into the image effect's undo step at all. */
-  session->effect->session_undo_begin();
+  session->effect().session_undo_begin();
 
   curve_patch_restore_and_restamp(
-      scene, depsgraph, sd, paint_mode_settings, ob, *session, reports);
+      scene, depsgraph, sd, paint_mode_settings, *session, reports);
 
   /* `invalidated` means the element count changed underneath the session, which cannot happen in a
    * single synchronous call -- checked anyway, because committing in that state writes a stale
    * snapshot into an unrelated mesh. */
-  const bool applied = !session->apply.invalidated;
+  const bool applied = session->has_valid_target();
   if (applied) {
-    curve_patch_finish_commit(scene, depsgraph, ob, *session);
+    curve_patch_finish_commit(scene, depsgraph, *session);
   }
 
   /* Cache first, then the session -- the order #curve_patch_commit_on_session_end established, and
@@ -286,12 +285,9 @@ bool curve_patch_apply(const Scene &scene,
 
   if (applied && effect_type != CurvePatchEffectType::Image) {
     /* No viewport flush was issued (a caller with no window manager has nothing to repaint), so
-     * the ID is tagged here instead -- the same pair #curve_patch_discard_on_session_end places.
-     * The image canvas is excluded because it is not the mesh that changed; `ImageColorEffect`
-     * marks its own image dirty as it writes. */
-    Mesh &mesh = *id_cast<Mesh *>(ob.data);
-    BKE_mesh_batch_cache_dirty_tag(&mesh, BKE_MESH_BATCH_DIRTY_ALL);
-    DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+     * the ID is tagged here instead. The image canvas is excluded because it is not the mesh that
+     * changed; `ImageColorEffect` marks its own image dirty as it writes. */
+    curve_patch_tag_target_mesh_dirty(ob);
   }
 
   return applied;

@@ -7,6 +7,7 @@
  * Implements the Sculpt Mode Brushes.
  */
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -7807,11 +7808,8 @@ class ScopedStrokeObjectOverride {
 
 /* A Curve Patch is a stroke method layered on an ordinary sculpt brush; the Roll stroke method
  * with "Edit After Stroke" bridges into the same editor. Both hand off to
- * #SCULPT_OT_curve_patch_edit in #SculptPaintStroke::done(), which is single-object: the session,
- * its effect snapshot and its commit undo step are all keyed to one mesh. So the stroke that
- * spawns it is confined to one object -- the one under the anchor click -- rather than run as a
- * multi-object stroke whose other objects would leak their #StrokeCache and keep an un-undoable
- * anchor dab (see the Curve Patch multi-object design doc). */
+ * #SCULPT_OT_curve_patch_edit in #SculptPaintStroke::done(). The anchor entry may take over the
+ * stroke's per-object caches for its secondary targets; the Roll bridge stays single-object. */
 static bool stroke_method_is_curve_patch_target(const Brush *brush)
 {
   if (brush == nullptr) {
@@ -7954,7 +7952,9 @@ struct SculptPaintStroke final : public PaintStroke {
   /** Free `SculptSession::cache` for every #MultiObjectStrokeContext.mode_objects member except
    * \a keep. Used on the Curve Patch handoff early-returns in #done, where the normal free loop is
    * skipped; a no-op when the set has been confined to one object (see
-   * #stroke_method_is_curve_patch_target). */
+   * #stroke_method_is_curve_patch_target). A cache taken over by a published Curve Patch session
+   * (the session is published on that object) is skipped: it belongs to the session now, and the
+   * session's own teardown frees it. */
   void free_stroke_caches_except(Object *keep);
 
   /** Make \a target the scene's active object so the Curve Patch modal editor -- which resolves
@@ -9622,12 +9622,18 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
       }
     }
 
-    /* Curve Patch (and Roll + "Edit After Stroke") is single-object: pin this stroke to the mesh
-     * under the anchor click so #stroke_cache_init below creates exactly one #StrokeCache and the
-     * multi-object apply / undo / layer-recording paths degenerate to single-object. Resolved with
-     * the same front-most raycast #stroke_cache_init itself uses (`sculpt.cc`). Must run before
-     * `ob` is bound below: every later use of `ob` in this function (layer recording, undo begin)
-     * has to follow the narrowed #this->object, not the pre-narrowing active one. */
+    /* Curve Patch (and Roll + "Edit After Stroke") anchors on the mesh under the click: the
+     * session's document lives in ITS local space, so `this->object` / `vc.obact` follow the hit
+     * either way. Resolved with the same front-most raycast #stroke_cache_init itself uses
+     * (`sculpt.cc`). Must run before `ob` is bound below: every later use of `ob` in this function
+     * (layer recording, undo begin) has to follow the pinned #this->object, not the pre-pinning
+     * active one.
+     *
+     * Curve Patch anchors single-object: the stroke is narrowed to the object under the click, so
+     * the anchor dab and the session it publishes never touch another Sculpt Mode object. Further
+     * targets join only through the explicit Shift+drag gesture in the modal editor
+     * (#curve_patch_session_add_target). The ROLL bridge stays single-object for the same reason:
+     * its handoff edits one contour on one mesh. */
     if (mval && stroke_method_is_curve_patch_target(this->brush)) {
       Object *hit_ob = nullptr;
       float hit_co[3];
@@ -10459,8 +10465,10 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
 static void curve_patch_handoff_to_editor(bContext *C, SculptSession &ss)
 {
   BKE_undosys_step_push_init_abort(ED_undo_stack_get());
-  if (ss.curve_patch_session->effect) {
-    ss.curve_patch_session->effect->session_undo_begin();
+  if (ss.curve_patch_session != nullptr && ss.curve_patch_session->has_primary_effect()) {
+    /* Exactly one owner per session opens the session-level undo step (the image canvas's), even
+     * with secondary Image targets -- they push tiles into it without opening anything. */
+    ss.curve_patch_session->effect().session_undo_begin();
   }
   WM_operator_name_call(
       C, "SCULPT_OT_curve_patch_edit", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
@@ -10550,11 +10558,14 @@ void SculptPaintStroke::free_stroke_caches_except(Object *keep)
       continue;
     }
     SculptSession &ss_iter = *object_ptr->runtime->sculpt_session;
-    if (ss_iter.cache) {
-      face_set::face_set_color_stroke_cache_clear(*ss_iter.cache);
-      MEM_delete(ss_iter.cache);
-      ss_iter.cache = nullptr;
+    /* A Curve Patch session it owns keeps its object's cache alive (the session's teardown frees
+     * it). A member of THIS stroke never carries one -- the stroke was narrowed to \a keep -- but
+     * an object left over in #mode_objects from a session still live on it must not have its
+     * session-owned cache freed from under that session. */
+    if (ss_iter.curve_patch_session != nullptr) {
+      continue;
     }
+    curve_patch_stroke_cache_free(&ss_iter, ss_iter.cache);
   }
 }
 
@@ -10609,9 +10620,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
         this->object->runtime->sculpt_session->cache != nullptr)
     {
       SculptSession &ss_active = *this->object->runtime->sculpt_session;
-      face_set::face_set_color_stroke_cache_clear(*ss_active.cache);
-      MEM_delete(ss_active.cache);
-      ss_active.cache = nullptr;
+      curve_patch_stroke_cache_free(&ss_active, ss_active.cache);
     }
     this->layer_recording_finish(true, false, BKE_paint_brush(&sd.paint));
     brush_exit_tex(sd);
@@ -10714,8 +10723,8 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
       bke::brush::supports_curve_patch(*brush))
   {
     if (ss.bm) {
-      /* Dynamic Topology is explicitly out of scope for Stage 1 (see design doc): live re-stamp
-       * relies on stable vertex indices for `ReliefEffect::orig_positions_`, which dyntopo's
+      /* Dynamic Topology is explicitly out of scope: live re-stamp relies on stable vertex
+       * indices for `ReliefEffect::orig_positions_`, which dyntopo's
        * BMesh remeshing can invalidate mid-edit. Fall through to the normal teardown below instead
        * of starting the modal editor — the anchor stroke's own dab still applied normally, it
        * just isn't editable afterward. */
@@ -10724,32 +10733,34 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
                  "Curve Patch is not supported with Dynamic Topology");
     }
     else {
-      /* Hand off to the Curve Patch modal editor: keep `ss.cache` alive (re-stamp needs it, see
-       * Stage 03). */
-      if (curve_patch_start_from_anchor(*this->depsgraph, ob, sd, *brush, this->vc)) {
+      /* Hand off to the Curve Patch modal editor single-object. The stroke was narrowed to the
+       * clicked object in #test_start, and the session starts on exactly that one participant:
+       * secondary targets join only through the modal's Shift+drag gesture, never from the anchor
+       * stroke. The primary's cache stays alive because every re-stamp needs it. */
+      if (curve_patch_start_from_anchor(*this->depsgraph, ob, sd, *brush, this->vc))
+      {
         /* Make the clicked object the real active object so the modal editor (which works through
          * #CTX_data_active_object) drives the session just published on it. */
         if (!this->activate_curve_patch_target(ob)) {
           /* Could not resolve the target base: unwind the session rather than launch the modal on
-           * a non-active object, and fall through to a normal single-object teardown. */
+           * a non-active object, and fall through to a normal teardown. */
           curve_patch_discard_on_session_end(ob);
           this->free_stroke_caches_except(&ob);
-          BLI_assert(this->multi_.mode_objects.size() == 1);
           stroke_undo_end(this->uses_image_undo_);
           return;
         }
-        /* The editor owns the session now, and the mesh is back at its pre-stroke state
-         * (`restore_from_undo_step_if_necessary()` inside the call above). */
+        /* The editor owns the session now, and every participant's mesh is back at its pre-stroke
+         * state (`restore_from_undo_step_if_necessary()` inside the call above). The anchor
+         * session is single-object, so the owner's cache stays alive (owned by the session) and
+         * this call frees whatever other participant still holds one. */
         this->free_stroke_caches_except(&ob);
-        BLI_assert(this->multi_.mode_objects.size() == 1);
         curve_patch_handoff_to_editor(this->vc.C, ss);
         return;
       }
-      /* The start refused (see its own guards) and already freed `ss.cache`. Close the
-       * transaction the ordinary way so whatever the stroke did stays undoable, and return -- the
-       * teardown below would double-free the cache this path has already released. */
+      /* The start refused (see its own guards) and already freed the primary's `ss.cache`. Close
+       * the transaction the ordinary way so whatever the stroke did stays undoable, and return --
+       * the teardown below would double-free the cache this path has already released. */
       this->free_stroke_caches_except(&ob);
-      BLI_assert(this->multi_.mode_objects.size() == 1);
       stroke_undo_end(this->uses_image_undo_);
       return;
     }
@@ -10812,11 +10823,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   for (Object *object_ptr : objects) {
     Object &ob_iter = *object_ptr;
     SculptSession &ss_iter = *ob_iter.runtime->sculpt_session;
-    if (ss_iter.cache) {
-      face_set::face_set_color_stroke_cache_clear(*ss_iter.cache);
-      MEM_delete(ss_iter.cache);
-      ss_iter.cache = nullptr;
-    }
+    curve_patch_stroke_cache_free(&ss_iter, ss_iter.cache);
   }
 
   /* Clear status bar message set during stroke. */
@@ -11309,11 +11316,8 @@ static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
     {
       BKE_report(op->reports, RPT_ERROR, "Close the sculpt layer mask session to sculpt geometry");
       /* No stroke exists to free the cache #brush_stroke_init just created. */
-      if (ss->cache != nullptr) {
-        face_set::face_set_color_stroke_cache_clear(*ss->cache);
-        MEM_delete(ob->runtime->sculpt_session->cache);
-        ob->runtime->sculpt_session->cache = nullptr;
-      }
+      curve_patch_stroke_cache_free(ob->runtime->sculpt_session,
+                                    ob->runtime->sculpt_session->cache);
       return OPERATOR_CANCELLED;
     }
   }

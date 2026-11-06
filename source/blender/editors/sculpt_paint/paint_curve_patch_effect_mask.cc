@@ -57,18 +57,15 @@ class MaskEffect : public CurvePatchEffect {
     return UpdateType::Mask;
   }
   int64_t element_num(Object &ob) const override;
-  void restore(Object &ob, const CurvePatchSession &patch) override;
-  void begin_restamp(const Depsgraph &depsgraph, Object &ob, CurvePatchSession &patch) override;
+  void restore(CurvePatchTargetState &target) override;
+  void begin_restamp(const Depsgraph &depsgraph, CurvePatchTargetState &target) override;
   void apply_pass(const Depsgraph &depsgraph,
-                  Object &ob,
                   const Brush &brush,
-                  CurvePatchSession &patch,
+                  CurvePatchTargetState &target,
                   const CurvePatchItem &item) override;
-  void end_restamp(Object &ob, CurvePatchSession &patch) override;
-  void commit(const Scene &scene,
-              const Depsgraph &depsgraph,
-              Object &ob,
-              const CurvePatchSession &patch) override;
+  void end_restamp(CurvePatchTargetState &target) override;
+  bool commit_has_content(const CurvePatchTargetState &target) const override;
+  void commit_push_nodes(const Depsgraph &depsgraph, CurvePatchTargetState &target) override;
   void preview_swap(Object &ob) override;
   int64_t snapshot_size() const override
   {
@@ -93,15 +90,16 @@ int64_t MaskEffect::element_num(Object &ob) const
   return 0;
 }
 
-void MaskEffect::restore(Object &ob, const CurvePatchSession &patch)
+void MaskEffect::restore(CurvePatchTargetState &target)
 {
+  Object &ob = target.ob;
   if (orig_masks_.is_empty()) {
     return;
   }
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   IndexMaskMemory memory;
-  const IndexMask node_mask = IndexMask::from_bits(patch.apply.last_restamp_nodes, memory);
+  const IndexMask node_mask = IndexMask::from_bits(target.apply.last_restamp_nodes, memory);
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
       Mesh &mesh = *id_cast<Mesh *>(ob.data);
@@ -139,9 +137,7 @@ void MaskEffect::restore(Object &ob, const CurvePatchSession &patch)
   pbvh.tag_masks_changed(node_mask);
 }
 
-void MaskEffect::begin_restamp(const Depsgraph & /*depsgraph*/,
-                               Object & /*ob*/,
-                               CurvePatchSession & /*patch*/)
+void MaskEffect::begin_restamp(const Depsgraph & /*depsgraph*/, CurvePatchTargetState & /*target*/)
 {
   /* Nothing to prepare. Relief recomputes vertex normals here because it invalidates them by
    * moving vertices and reads them back as its write direction; a mask changes an attribute only,
@@ -159,11 +155,11 @@ static float mask_from_sample(const float original, const float value, const boo
 }
 
 void MaskEffect::apply_pass(const Depsgraph &depsgraph,
-                            Object &ob,
                             const Brush &brush,
-                            CurvePatchSession &patch,
+                            CurvePatchTargetState &target,
                             const CurvePatchItem &item)
 {
+  Object &ob = target.ob;
   SculptSession &ss = *ob.runtime->sculpt_session;
   const CurvePatchStrokeContext ctx = curve_patch_stroke_context_from_cache(*ss.cache);
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
@@ -201,7 +197,7 @@ void MaskEffect::apply_pass(const Depsgraph &depsgraph,
        * its snapshot itself, which keeps symmetry passes independent from earlier writes. */
       const CurvePatchSourceGeometry source{positions, normals, nullptr};
       const CurvePatchSampler sampler(
-          item, patch.doc.texture, ctx, brush, source, Span<float>(), ss.tex_pool_ensure());
+          item, target.texture, ctx, brush, source, Span<float>(), ss.tex_pool_ensure());
       MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
 
       node_mask.foreach_index(
@@ -236,7 +232,7 @@ void MaskEffect::apply_pass(const Depsgraph &depsgraph,
         for (const MaskWrite &write : local.writes) {
           orig_masks_.lookup_or_add(write.index, write.original);
           const float blended = curve_patch_blend_across_passes(
-              patch.apply, write.index, write.weight, write.value);
+              target.apply, write.index, write.weight, write.value);
           masks.span[write.index] = mask_from_sample(
               write.original, blended, ctx.bstrength > 0.0f);
         }
@@ -246,7 +242,7 @@ void MaskEffect::apply_pass(const Depsgraph &depsgraph,
           exec_mode::grain_size(1));
       masks.finish();
       pbvh.tag_masks_changed(tag_mask);
-      curve_patch_record_touched_nodes(patch.apply, tag_mask);
+      curve_patch_record_touched_nodes(target.apply, tag_mask);
       return;
     }
     case bke::pbvh::Type::Grids: {
@@ -272,7 +268,7 @@ void MaskEffect::apply_pass(const Depsgraph &depsgraph,
       const CurvePatchSourceGeometry source{
           positions, normals, nullptr, /*indices_are_mesh_verts*/ false};
       const CurvePatchSampler sampler(
-          item, patch.doc.texture, ctx, brush, source, Span<float>(), ss.tex_pool_ensure());
+          item, target.texture, ctx, brush, source, Span<float>(), ss.tex_pool_ensure());
       const BitVector<> grid_keep = curve_patch_cull_grids(
           item, ctx, pbvh, subdiv_ccg, key, positions, node_mask, max_radius);
       MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
@@ -314,7 +310,7 @@ void MaskEffect::apply_pass(const Depsgraph &depsgraph,
         for (const MaskWrite &write : local.writes) {
           orig_masks_.lookup_or_add(write.index, write.original);
           const float blended = curve_patch_blend_across_passes(
-              patch.apply, write.index, write.weight, write.value);
+              target.apply, write.index, write.weight, write.value);
           masks[write.index] = mask_from_sample(write.original, blended, ctx.bstrength > 0.0f);
         }
       }
@@ -322,7 +318,7 @@ void MaskEffect::apply_pass(const Depsgraph &depsgraph,
           [&](const int node) { bke::pbvh::node_update_mask_grids(key, masks, nodes[node]); },
           exec_mode::grain_size(1));
       pbvh.tag_masks_changed(tag_mask);
-      curve_patch_record_touched_nodes(patch.apply, tag_mask);
+      curve_patch_record_touched_nodes(target.apply, tag_mask);
       return;
     }
     case bke::pbvh::Type::BMesh:
@@ -331,7 +327,7 @@ void MaskEffect::apply_pass(const Depsgraph &depsgraph,
   }
 }
 
-void MaskEffect::end_restamp(Object & /*ob*/, CurvePatchSession & /*patch*/)
+void MaskEffect::end_restamp(CurvePatchTargetState & /*target*/)
 {
   /* Nothing to finish. There is no smoothing counterpart -- that would be the Mask Smooth tool,
    * which `bke::brush::supports_curve_patch()` deliberately keeps out of Curve Patch for want of a
@@ -339,25 +335,29 @@ void MaskEffect::end_restamp(Object & /*ob*/, CurvePatchSession & /*patch*/)
    * #update_type. */
 }
 
-void MaskEffect::commit(const Scene &scene,
-                        const Depsgraph &depsgraph,
-                        Object &ob,
-                        const CurvePatchSession &patch)
+bool MaskEffect::commit_has_content(const CurvePatchTargetState &target) const
 {
-  if (orig_masks_.is_empty()) {
-    return;
-  }
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(target.ob);
+  return pbvh != nullptr && pbvh->type() != bke::pbvh::Type::BMesh &&
+         !orig_masks_.is_empty();
+}
+
+void MaskEffect::commit_push_nodes(const Depsgraph &depsgraph, CurvePatchTargetState &target)
+{
+  /* The shared step was already opened / extended by the commit orchestrator; this stores this
+   * target's data into it and closes nothing. */
+  Object &ob = target.ob;
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   IndexMaskMemory memory;
-  const IndexMask node_mask = IndexMask::from_bits(patch.apply.all_touched_nodes, memory);
+  const IndexMask node_mask = IndexMask::from_bits(target.apply.all_touched_nodes, memory);
 
   /* Flattened once, up front. `undo::push_nodes()` stores whatever the target currently holds, and
    * at commit time that is the PAINTED state, so the originals have to be swapped in across the
    * push and swapped back out after it. Materializing the keys and values instead of walking
    * `orig_masks_` twice is what removes the unstated "both passes see the same `Map` iteration
    * order" contract, and it lets both pbvh types share one primitive -- the same shape
-   * `ColorEffect::commit()` gets for free from `color::swap_gathered_colors()`. */
+   * `ColorEffect::commit_push_nodes()` gets for free from `color::swap_gathered_colors()`. */
   Array<int> indices(orig_masks_.size());
   Array<float> values(orig_masks_.size());
   int i = 0;
@@ -382,7 +382,6 @@ void MaskEffect::commit(const Scene &scene,
         return;
       }
       swap_masks(masks.span);
-      undo::push_begin_ex(scene, ob, "Curve Patch Mask");
       undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::Mask);
       swap_masks(masks.span);
       masks.finish();
@@ -394,7 +393,6 @@ void MaskEffect::commit(const Scene &scene,
         return;
       }
       swap_masks(masks);
-      undo::push_begin_ex(scene, ob, "Curve Patch Mask");
       undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::Mask);
       swap_masks(masks);
       break;
@@ -404,7 +402,8 @@ void MaskEffect::commit(const Scene &scene,
       return;
   }
 
-  undo::push_end_ex(ob, false);
+  /* The shared step is parked (never forced) by the commit orchestrator once every target has
+   * stored its data -- a Mask target never wants a face-set step after it. */
 }
 
 void MaskEffect::preview_swap(Object &ob)

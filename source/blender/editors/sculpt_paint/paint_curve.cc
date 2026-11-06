@@ -449,7 +449,11 @@ static bool paintcurve_raycast_active_object(
                                                       vc_mut,
                                                       base,
                                                       float2(mval[0], mval[1]),
-                                                      false);
+                                                      false,
+                                                      /*resolve_hit_object=*/false);
+    /* No front-most-object redirect: the caller reads the hit as `vc.obact`'s local space, so a
+     * ray that silently switched to another sculpt-mode object would return that object's
+     * coordinates (the point would jump to an unrelated place on the active mesh). */
     if (!gi.has_value()) {
       return false;
     }

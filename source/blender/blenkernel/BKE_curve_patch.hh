@@ -1080,6 +1080,25 @@ void curve_patch_frames_build(const CurvePatchSpline &spline,
  * geometry, otherwise it wraps the relief it just applied and a feedback loop appears.
  * \{ */
 
+/**
+ * Orientation filter a multi-object session raises on its shrinkwrap: a nearest triangle whose
+ * normal dots below this with the sample's reference normal is not a candidate. Chosen as "facing
+ * steeply away" rather than exactly coplanar so the wrap still follows gently curving surfaces and
+ * small normal-map-like relief; tuned by hand against a curve straddling two sculpt objects, where
+ * the plain nearest-point wrap folded samples down onto the first mesh's side faces. At or below
+ * -1 the filter is off (the single-object behavior).
+ */
+constexpr float CURVE_PATCH_SHRINKWRAP_MIN_NORMAL_DOT = 0.3f;
+
+/**
+ * Fraction of #curve_patch_surface_shrinkwrap's `max_dist` a sample may sit to the SIDE of its
+ * reference normal (past the oriented filter above) and still be pulled in; farther than that it
+ * is left where the user put it. Half the reach keeps the pull local to the neighborhood the
+ * reference normal names -- the same "dragging onto distant geometry is worse than leaving it"
+ * rule the reach radius itself follows, restricted to the lateral direction.
+ */
+constexpr float CURVE_PATCH_SHRINKWRAP_MAX_LATERAL_FRACTION = 0.5f;
+
 struct CurvePatchSurfaceSnapshot {
   Array<float3> positions;
   /** Vertex normals as of the snapshot. The orientation culling has to compare against THESE: the
@@ -1098,6 +1117,19 @@ struct CurvePatchSurfaceSnapshot {
   BVHTreeFromMesh bvh;
   bool ready = false;
 
+  /**
+   * Orientation filter of #curve_patch_surface_shrinkwrap: a nearest triangle whose normal makes a
+   * smaller dot product than this with the sample's reference normal is not a candidate, and a
+   * sample whose nearest candidate lies farther to the SIDE of it than
+   * #CURVE_PATCH_SHRINKWRAP_MAX_LATERAL_FRACTION of the reach is left where it is. Values at or
+   * below -1 disable both (the single-object behavior). A session with MORE THAN ONE target raises
+   * it to #CURVE_PATCH_SHRINKWRAP_MIN_NORMAL_DOT so that a curve running off the edge of one mesh
+   * onto its neighbor is not folded down onto the first mesh's side faces; a single-object session
+   * keeps it off, so the same document shrinks differently in the two modes -- deliberate, to
+   * leave the single-object behavior untouched.
+   */
+  float min_normal_dot = -1.0f;
+
   void clear();
 };
 
@@ -1115,7 +1147,8 @@ bool curve_patch_surface_snapshot_build(const Mesh &mesh, CurvePatchSurfaceSnaps
 void curve_patch_surface_shrinkwrap(const CurvePatchSurfaceSnapshot &snapshot,
                                     float max_dist,
                                     MutableSpan<float3> positions,
-                                    MutableSpan<float3> r_normals);
+                                    MutableSpan<float3> r_normals,
+                                    Span<float3> reference_normals = {});
 
 /**
  * Fills the zero (invalid) normals by interpolating between the nearest valid neighbours; writes

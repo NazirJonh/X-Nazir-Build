@@ -39,11 +39,14 @@
 #include "BLI_assert.h"
 #include "BLI_bit_span_ops.hh"
 #include "BLI_bit_vector.hh"
+#include "BLI_bounds_types.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
+#include "BLI_string_ref.hh"
 #include "BLI_utildefines.h"
-#include "BLI_math_base.h"
+#include "BLI_virtual_array.hh"
+#include "BLI_math_base.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_rand.hh"
 #include "BLI_time.h"
@@ -52,6 +55,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_query.hh"
 
 #include "ED_curve_patch.hh"
 #include "ED_paint.hh"
@@ -80,38 +84,47 @@
 namespace blender::ed::sculpt_paint {
 
 
-static bool curve_patch_apply_target_changed(Object &ob, const CurvePatchSession &session)
+/* Per-target staleness guard, hoisted here from the effects' own copies: something retopologized
+ * THIS target's object while the patch was live -- see `CurvePatchApplyState::element_num`. Bail
+ * before touching positions: the snapshot's keys no longer name the elements they were taken from.
+ * `faces_num` / `corners_num` catch edits that keep `verts_num` (Triangulate, Poke, some remesh).
+ * Deliberately one predicate per TARGET (`CurvePatchObjectTarget::apply`), not per session: one
+ * broken object must not stop the others from restoring, re-stamping and committing. */
+bool curve_patch_apply_target_changed(Object &ob, const CurvePatchObjectTarget &target)
 {
-  if (session.effect->element_num(ob) != session.apply.element_num) {
+  if (target.effect->element_num(ob) != target.apply.element_num) {
     return true;
   }
-  if (session.apply.faces_num < 0) {
+  if (target.apply.faces_num < 0) {
     return false;
   }
   const Mesh *mesh = BKE_object_get_original_mesh(&ob);
   if (mesh == nullptr) {
     return true;
   }
-  return int64_t(mesh->faces_num) != session.apply.faces_num ||
-         int64_t(mesh->corners_num) != session.apply.corners_num;
+  return int64_t(mesh->faces_num) != target.apply.faces_num ||
+         int64_t(mesh->corners_num) != target.apply.corners_num;
 }
 
-void curve_patch_restore_only(Object &ob, const CurvePatchSession &session)
+void curve_patch_restore_only(CurvePatchSession &session)
 {
   /* Hoisted here from the three effects' own copies. It has to live at this level, not in
    * `curve_patch_restore_and_restamp()`: mode exit (#curve_patch_discard_on_session_end) and the
    * modal's Esc branch both restore WITHOUT re-stamping first, so neither has raised
-   * `CurvePatchApplyState::invalidated` even when the mesh changed underneath the session. Writing
+   * `CurvePatchApplyState::invalidated` even when the mesh changed underneath a target. Writing
    * the snapshot back in that state would put stale values into an unrelated mesh. */
-  if (curve_patch_apply_target_changed(ob, session)) {
-    return;
-  }
-  session.effect->restore(ob, session);
-  /* Deliberately paired with the restore rather than placed next to the re-stamp: an effect may
-   * only change its destinations once the old ones hold their pristine content again. Both
-   * callers of this function want that -- the re-stamp so it writes where the user is now
-   * looking, and the restore-only paths (Esc, mode exit) so the next one starts consistent. */
-  session.effect->sync_targets(ob);
+  session.for_each_usable_target([&](CurvePatchObjectTarget &target) {
+    if (curve_patch_apply_target_changed(*target.ob, target)) {
+      return;
+    }
+    CurvePatchTargetState state = session.target_state(target);
+    state.effect.restore(state);
+    /* Deliberately paired with the restore rather than placed next to the re-stamp: an effect may
+     * only change its destinations once the old ones hold their pristine content again. Both
+     * callers of this function want that -- the re-stamp so it writes where the user is now
+     * looking, and the restore-only paths (Esc, mode exit) so the next one starts consistent. */
+    state.effect.sync_targets(*target.ob);
+  });
 }
 
 bke::CurvesGeometry curve_patch_control_curve_from_points(const Span<float3> positions,
@@ -203,15 +216,29 @@ static void curve_patch_apply_effect_action(const Depsgraph &depsgraph,
                                             const Brush &brush,
                                             PaintModeSettings & /*paint_mode_settings*/)
 {
-  CurvePatchSession &session = *ob.runtime->sculpt_session->curve_patch_session;
+  /* The session is published on EVERY target's `SculptSession` (one pointer, one owner), so this
+   * callback -- invoked by `do_symmetrical_brush_actions()` with the object of the CURRENT pass --
+   * resolves the shared session through `ob` and then looks up the target that object maps to.
+   * Nothing here reads a session-global apply state: `patch_rank`, the accumulator and the node
+   * masks all live on the target. */
+  SculptSession *ss = ob.runtime->sculpt_session;
+  if (ss == nullptr || ss->curve_patch_session == nullptr) {
+    return;
+  }
+  CurvePatchSession &session = *ss->curve_patch_session;
+  CurvePatchObjectTarget *target = session.target_for(ob);
+  if (target == nullptr || target->effect == nullptr) {
+    return;
+  }
   /* The one patch `session_apply()` is stamping: it runs this symmetry pass patch by patch, so the
    * passes of a patch reach the accumulator back to back (see #curve_patch_blend_over). The list
    * shows the topmost curve first, so the stamping order is the reverse of the document's. */
-  const int patch_i = int(session.doc.patches.size()) - 1 - session.apply.patch_rank;
-  if (patch_i < 0 || patch_i >= int(session.doc.patches.size())) {
+  const Span<CurvePatchItem> items = session.items_for(*target);
+  const int patch_i = int(items.size()) - 1 - target->apply.patch_rank;
+  if (patch_i < 0 || patch_i >= int(items.size())) {
     return;
   }
-  const CurvePatchItem &item = session.doc.patches[patch_i];
+  const CurvePatchItem &item = items[patch_i];
   if (item.params.hidden) {
     return;
   }
@@ -220,32 +247,43 @@ static void curve_patch_apply_effect_action(const Depsgraph &depsgraph,
      * of them is a stray single point. */
     return;
   }
-  session.effect->apply_pass(depsgraph, ob, brush, session, item);
+  CurvePatchTargetState state = session.target_state(*target);
+  state.effect.apply_pass(depsgraph, brush, state, item);
 }
 
-/* Tessellate every patch's control curve, project it onto the shared surface snapshot, and rebuild
- * the structures derived from it. No mesh writes, no PBVH, no reports. */
-static void session_rebuild_geometry(CurvePatchSession &session)
+/* Tessellate every patch's control curve, project it onto the target's surface snapshot, and
+ * rebuild the structures derived from it. No mesh writes, no PBVH, no reports. */
+static void session_rebuild_geometry(CurvePatchSession &session, CurvePatchObjectTarget &target)
 {
-  for (CurvePatchItem &item : session.doc.patches) {
+  const CurvePatchTextureBinding &texture = target.texture ? *target.texture :
+                                                             session.doc.texture;
+  /* With several targets the curve can run off one mesh onto another; the snapshot must then not
+   * fold those samples down onto the first mesh's side faces. A single-object session keeps the
+   * plain nearest-point shrinkwrap, so the same document behaves exactly as it always did there.
+   */
+  const float min_normal_dot = session.targets.size() > 1 ?
+                                   bke::CURVE_PATCH_SHRINKWRAP_MIN_NORMAL_DOT :
+                                   -1.0f;
+  for (CurvePatchItem &item : session.items_for(target)) {
+    item.geometry.surface.min_normal_dot = min_normal_dot;
     bke::curve_patch_build_from_control_curve(item.control_curve,
                                               item.params,
-                                              session.doc.texture.stamp_texture_weights_cdf,
+                                              texture.stamp_texture_weights_cdf,
                                               bke::CurvePatchBuildMode::SurfaceWindowed,
                                               item.geometry);
   }
 }
 
 /* Restore the effect's snapshot, then re-apply the patch through every symmetry pass. */
-static void session_apply(const Scene &scene,
+static bool session_apply(const Scene &scene,
                           const Depsgraph &depsgraph,
                           Sculpt &sd,
                           PaintModeSettings &paint_mode_settings,
-                          Object &ob,
-                          CurvePatchSession &session)
+                          CurvePatchSession &session,
+                          CurvePatchObjectTarget &target)
 {
-  SculptSession &ss = *ob.runtime->sculpt_session;
-  StrokeCache &cache = *ss.cache;
+  Object &ob = *target.ob;
+  StrokeCache &cache = *target.cache;
 
   /* NOTE on `depsgraph`: the interactive caller resolves it with the plain `CTX_data_depsgraph_
    * pointer()`, NOT `CTX_data_ensure_evaluated_depsgraph()`, which is a full
@@ -262,12 +300,19 @@ static void session_apply(const Scene &scene,
    * sharing the flat position array, which the re-stamp's `vert_positions_for_write()` then
    * stranded (see the long comment in #curve_patch_commit_on_session_end). */
 
+  /* The symmetry machinery and the effect read the brush radius and several matrix helpers off
+   * `vc.obact`; for a secondary target those helpers must answer in the SECONDARY's object space,
+   * exactly as the multi-object stroke's own Phase 2 loop scopes each of its iterations. */
+  ScopedObactOverride obact_override(session.view_context, ob);
+
+  CurvePatchTargetState state = session.target_state(target);
+
   /* Effect input preparation, once per restamp and before the first symmetry pass. Relief
    * refreshes the vertex normals here; see `ReliefEffect::begin_restamp()` for why that is needed
    * at all. */
-  session.effect->begin_restamp(depsgraph, ob, session);
+  state.effect.begin_restamp(depsgraph, state);
 
-  /* Whole-session encompassing sphere, in canonical (non-mirrored) object space -- lets
+  /* Whole-target encompassing sphere, in canonical (non-mirrored) object space -- lets
    * `do_symmetrical_brush_actions()`'s existing per-pass node-mask query (driven by
    * `cache.location_symm`/`cache.radius`, set below via `cache.location`/`cache.radius` and
    * transformed per pass by `cache_calc_brushdata_symm()`) cover EVERY patch for the effect
@@ -282,7 +327,7 @@ static void session_apply(const Scene &scene,
   float max_radius = 0.0f;
   float ribbon_end_margin = 0.0f;
   bool any_patch = false;
-  for (const CurvePatchItem &item : session.doc.patches) {
+  for (const CurvePatchItem &item : session.items_for(target)) {
     if (!session_item_is_buildable(item)) {
       continue;
     }
@@ -298,7 +343,7 @@ static void session_apply(const Scene &scene,
     ribbon_end_margin = math::max(ribbon_end_margin, item.geometry.ribbon_end_margin);
   }
   if (!any_patch) {
-    return;
+    return false;
   }
   const float3 bbox_center = (bbox_min + bbox_max) * 0.5f;
   cache.location = bbox_center;
@@ -314,32 +359,33 @@ static void session_apply(const Scene &scene,
    * the effect action below now ORs its own node mask back in, leaving `last_restamp_nodes`
    * describing exactly what this restamp displaced -- ready for the next frame's restore. */
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
-  session.apply.last_restamp_nodes.resize(pbvh.nodes_num());
-  session.apply.last_restamp_nodes.fill(false);
+  target.apply.last_restamp_nodes.resize(pbvh.nodes_num());
+  target.apply.last_restamp_nodes.fill(false);
 
   /* Resized but deliberately NOT filled: this one accumulates across restamps. */
-  session.apply.all_touched_nodes.resize(pbvh.nodes_num());
+  target.apply.all_touched_nodes.resize(pbvh.nodes_num());
 
   /* Reset the cross-pass blend accumulator for THIS restamp too -- see `pass_weight_accum`'s doc
    * comment. Unlike the effect's snapshot, it must not persist across restamps: each restamp's
    * passes blend only against each other, not against a previous drag frame's weights. */
-  session.apply.pass_weight_accum.clear();
+  target.apply.pass_weight_accum.clear();
 
   /* `std::nullopt` (not a frozen value) lets `do_symmetrical_brush_actions()` recompute the
    * strength from the LIVE brush via `brush_strength()` -- so a mid-edit change of the brush's
    * Strength slider is picked up on the next re-stamp. The modal editor
    * (`paint_curve_patch_edit.cc`) watches the slider and triggers a re-stamp when it changes, so
    * this tracks the slider in real time. Radius/axis stay frozen (see
-   * `CurvePatchSession::params`). */
+   * `CurvePatchParams::radius`). */
   /* One symmetry run per patch, bottom of the list first: a patch overlapping another is
    * composited over it, which needs the earlier patch's result on the accumulator before the later
    * one is folded in. Not a restore between patches -- that would erase the earlier contribution. */
-  for (const int rank : session.doc.patches.index_range()) {
-    const CurvePatchItem &item = session.doc.patches[session.doc.patches.size() - 1 - rank];
+  const Span<CurvePatchItem> items = session.items_for(target);
+  for (const int rank : items.index_range()) {
+    const CurvePatchItem &item = items[items.size() - 1 - rank];
     if (item.params.hidden || !session_item_is_buildable(item)) {
       continue;
     }
-    session.apply.patch_rank = rank;
+    target.apply.patch_rank = rank;
     do_symmetrical_brush_actions(depsgraph,
                                  scene,
                                  sd,
@@ -350,7 +396,7 @@ static void session_apply(const Scene &scene,
   }
 
   /* Final-quality smoothing (commit only) and whatever else this target has to close off. */
-  session.effect->end_restamp(ob, session);
+  state.effect.end_restamp(state);
 
   /* A normal interactive stroke calls this once per step (`SculptPaintStroke::update_step()`,
    * `mesh/sculpt.cc`) -- without it, nothing tells the depsgraph the object needs re-shading, sets
@@ -364,8 +410,9 @@ static void session_apply(const Scene &scene,
    * on the `UpdateType::Image` branch. Such a caller tags the ID itself once it is done, the same
    * way #curve_patch_discard_on_session_end does. */
   if (session.view_context.region != nullptr) {
-    flush_update_step(session.view_context, ob, session.effect->update_type());
+    flush_update_step(session.view_context, ob, state.effect.update_type());
   }
+  return true;
 }
 
 /* A separate channel from `CURVE_PATCH_PROFILING`: that one is marked in its own comment as
@@ -403,9 +450,10 @@ static void session_report_diagnostics(const CurvePatchSession &session,
   const double prof_interval_ms = (prof_prev_start > 0.0) ? (t_begin - prof_prev_start) * 1000.0 :
                                                             -1.0;
   prof_prev_start = t_begin;
+  const CurvePatchObjectTarget &primary = session.primary_target();
   IndexMaskMemory prof_memory;
   const int64_t prof_nodes =
-      IndexMask::from_bits(session.apply.last_restamp_nodes, prof_memory).size();
+      IndexMask::from_bits(primary.apply.last_restamp_nodes, prof_memory).size();
   /* `ribbon` covers the spline rebuild plus the ribbon/LUT build -- previously an unaccounted gap
    * between `restore` and `normals`, which made `total` look larger than the sum of its parts. */
   /* `displaced` is how many vertices THIS re-stamp actually wrote (`pass_weight_accum` is cleared
@@ -418,6 +466,8 @@ static void session_report_diagnostics(const CurvePatchSession &session,
    * moved inside #session_apply together with the passes it prepares, and there is no longer a
    * point between them the orchestrator can time from -- reporting a column it cannot measure
    * would be worse than not reporting it. */
+  /* Reported for the PRIMARY target (the one the user is editing on); secondary targets add their
+   * own apply time to the wall-clock columns but are not itemized. */
   printf(
       "[DEBUG-cpatch] total=%.2fms | restore=%.2f ribbon=%.2f apply=%.2f | "
       "nodes=%lld displaced=%lld snapshot=%lld quality=%d lut=%d frames=%d capped=%d "
@@ -427,8 +477,9 @@ static void session_report_diagnostics(const CurvePatchSession &session,
       (t_geometry - t_restore) * 1000.0,
       (t_end - t_geometry) * 1000.0,
       (long long)prof_nodes,
-      (long long)session.effect->displaced_size().value_or(session.apply.pass_weight_accum.size()),
-      (long long)session.effect->snapshot_size(),
+      (long long)session.effect().displaced_size().value_or(
+          primary.apply.pass_weight_accum.size()),
+      (long long)session.effect().snapshot_size(),
       session.active_item().params.final_quality ? 1 : 0,
       session.active_item().geometry.ribbon.res,
       int(session.active_item().geometry.frames.frames.size()),
@@ -440,104 +491,236 @@ static void session_report_diagnostics(const CurvePatchSession &session,
 
 /** A patch added after the session started (Add, Duplicate, an undo that brings one back) has no
  * surface snapshot yet; without it its stamps ignore the surface normals the others use. */
-static void session_surface_ensure(Object &ob, CurvePatchSession &session)
+static void session_surface_ensure(CurvePatchSession &session, CurvePatchObjectTarget &target)
 {
+  BLI_assert(target.ob != nullptr);
+  Object &ob = *target.ob;
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
   if (pbvh == nullptr || pbvh->type() != bke::pbvh::Type::Mesh) {
     return;
   }
   const Mesh &mesh = *BKE_object_get_original_mesh(&ob);
-  for (CurvePatchItem &item : session.doc.patches) {
+  for (CurvePatchItem &item : session.items_for(target)) {
     if (!item.geometry.surface.ready) {
       bke::curve_patch_surface_snapshot_build(mesh, item.geometry.surface);
     }
   }
 }
 
-void curve_patch_restore_and_restamp(const Scene &scene,
-                                     const Depsgraph &depsgraph,
-                                     Sculpt &sd,
-                                     PaintModeSettings &paint_mode_settings,
-                                     Object &ob,
-                                     CurvePatchSession &session,
-                                     ReportList *reports)
+/** Phase 1 of a re-stamp: something retopologized a target's object while the patch was live.
+ * Mark only THAT target: its snapshot keys no longer name the elements they were taken from, while
+ * the other targets can still be restored and committed. Returns whether at least one target can
+ * still be restored, applied or committed. */
+static bool session_validate_targets(CurvePatchSession &session, ReportList *reports)
 {
-  /* Staleness guard, hoisted here from the hand-written copies in the effects: something
-   * retopologized the object while the patch was live -- see `CurvePatchApplyState::element_num`.
-   * Bail before touching positions: the snapshot's keys no longer name the elements they were
-   * taken from. `faces_num` / `corners_num` catch edits that keep `verts_num` (Triangulate, Poke,
-   * some remesh). */
-  if (curve_patch_apply_target_changed(ob, session)) {
-    session.apply.invalidated = true;
-    BKE_report(
-        reports, RPT_WARNING, "Curve Patch canceled: the mesh changed while it was being edited");
-    return;
-  }
+  bool reported_invalidated = false;
+  session.for_each_usable_target([&](CurvePatchObjectTarget &target) {
+    if (curve_patch_apply_target_changed(*target.ob, target)) {
+      target.apply.invalidated = true;
+      if (!reported_invalidated) {
+        reported_invalidated = true;
+        BKE_report(reports,
+                   RPT_WARNING,
+                   "Curve Patch canceled: the mesh changed while it was being edited");
+      }
+    }
+  });
+  return session.has_valid_target();
+}
 
-#if CURVE_PATCH_PROFILING
-  const double prof_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch */
-#endif
-  curve_patch_restore_only(ob, session);
-#if CURVE_PATCH_PROFILING
-  const double prof_t_restore = BLI_time_now_seconds(); /* DEBUG-cpatch */
-#endif
-
-  /* Resolve which textures this restamp samples. Done here, once, on the main thread: the effects'
-   * parallel per-element walk only reads the result. Ahead of the geometry rebuild because the
-   * stamp layout draws each stamp's slot from the weight table resolved here.
-   *
-   * The session owns the only `StrokeCache` for the whole live-edit lifetime, but a sculpt stroke
-   * that leaks through in another viewport (before the modal's pass-through gate was widened)
-   * could tear it down and leave this null -- bail rather than crash. */
-  SculptSession *ss = ob.runtime->sculpt_session;
-  if (!ss || !ss->cache) {
-    return;
-  }
-  StrokeCache &cache = *ss->cache;
-  if (const Brush *tex_brush = BKE_paint_brush_for_read(cache.paint)) {
-    /* The binding is shared by every patch, so it is resolved from the active patch's radius --
-     * the only one whose brush the user is currently looking at. */
+/** Phase 2 of a re-stamp: resolve which textures the primary samples this time, from \a tex_brush
+ * (null when there is no live brush, which clears the binding). Done here, once, on the main
+ * thread: the effects' parallel per-element walk only reads the result. Ahead of the geometry
+ * rebuild because the stamp layout draws each stamp's slot from the weight table resolved here. */
+static void session_resolve_texture_bindings(CurvePatchSession &session, const Brush *tex_brush)
+{
+  if (tex_brush != nullptr) {
+    /* The primary's binding is shared by every patch of the document, so it is resolved from the
+     * active patch's radius -- the only one whose brush the user is currently looking at. Each
+     * secondary gets its own binding in ITS local units in #session_sync_secondary_mirrors (the
+     * ribbon caps are lengths). */
     curve_patch_texture_binding_from_brush(
         *tex_brush, session.active_item().params.radius, session.doc.texture);
   }
   else {
     curve_patch_texture_binding_clear(session.doc.texture);
   }
+}
 
-  session_surface_ensure(ob, session);
-  session_rebuild_geometry(session);
-  session_report_frame_cap(reports, session);
-#if CURVE_PATCH_PROFILING
-  const double prof_t_geometry = BLI_time_now_seconds(); /* DEBUG-cpatch */
-#endif
-  const bool any_buildable = std::any_of(
-      session.doc.patches.begin(), session.doc.patches.end(), session_item_is_buildable);
-  if (!any_buildable) {
-    /* The mesh has already been restored above; flush so the viewport shows that, rather than the
-     * relief from the previous re-stamp, until the next event arrives. Guarded exactly as the
-     * normal end-of-restamp flush is: a headless session has no region to redraw, and
-     * `flush_update_step()` dereferences `vc.region` unconditionally. */
-    if (session.view_context.region != nullptr) {
-      flush_update_step(session.view_context, ob, session.effect->update_type());
+/** Phase 3 of a re-stamp: carry the document into each secondary's own space (curve + params + its
+ * own texture binding) and gate only the later build/apply on reach. The mirror is updated even
+ * out of reach because the overlay draws a secondary's curves from it. */
+static void session_sync_secondary_mirrors(CurvePatchSession &session,
+                                           const CurvePatchWorldStamp &world_stamp,
+                                           const Brush *tex_brush,
+                                           ReportList *reports)
+{
+  if (session.targets.size() > 1) {
+    session.doc.revision = curve_patch_document_content_revision(session.doc);
+  }
+  session.for_each_usable_target([&](CurvePatchObjectTarget &target) {
+    if (target.is_primary) {
+      return;
     }
+    target.in_reach = curve_patch_target_in_reach(
+        *target.ob, world_stamp.center, world_stamp.reach_radius);
+    curve_patch_target_mirror_sync(session, target, reports);
+    if (!target.texture) {
+      target.texture = std::make_unique<CurvePatchTextureBinding>();
+    }
+    if (tex_brush != nullptr && session.doc.has_active_item()) {
+      curve_patch_texture_binding_from_brush(
+          *tex_brush,
+          target.mirror_items[session.doc.active_patch].params.radius,
+          *target.texture);
+    }
+    else {
+      curve_patch_texture_binding_clear(*target.texture);
+    }
+  });
+}
+
+/** Phase 4a of a re-stamp: the primary's own geometry, rebuilt before the secondaries sync -- the
+ * order the single-object path established, and what the `CURVE_PATCH_PROFILING` columns measure.
+ */
+static void session_rebuild_primary(CurvePatchSession &session, ReportList *reports)
+{
+  CurvePatchObjectTarget &primary = session.primary_target();
+  if (!primary.is_usable()) {
+    return;
+  }
+  primary.in_reach = true;
+  session_surface_ensure(session, primary);
+  session_rebuild_geometry(session, primary);
+  session_report_frame_cap(reports, session);
+}
+
+/** Phase 4b of a re-stamp: rebuild and apply for every target in reach. The primary applies
+ * exactly as the single-object path always did; a secondary applies against its own mirror,
+ * surface snapshots and cache. */
+static void session_apply_all_targets(const Scene &scene,
+                                      const Depsgraph &depsgraph,
+                                      Sculpt &sd,
+                                      PaintModeSettings &paint_mode_settings,
+                                      CurvePatchSession &session)
+{
+  CurvePatchObjectTarget &primary = session.primary_target();
+  if (primary.is_usable()) {
+    primary.applied_this_restamp = session_apply(
+        scene, depsgraph, sd, paint_mode_settings, session, primary);
+  }
+  session.for_each_usable_target([&](CurvePatchObjectTarget &target) {
+    if (target.is_primary || !target.in_reach) {
+      return;
+    }
+    session_surface_ensure(session, target);
+    session_rebuild_geometry(session, target);
+    target.applied_this_restamp =
+        session_apply(scene, depsgraph, sd, paint_mode_settings, session, target);
+  });
+}
+
+/** Phase 5 of a re-stamp: a target that was restored but not applied (out of reach, or no
+ * buildable patch of its own) still changed on screen: flush it once, or the previous stamp stays
+ * visible until an unrelated redraw. */
+static void session_flush_unapplied_targets(CurvePatchSession &session)
+{
+  if (session.view_context.region == nullptr) {
+    return;
+  }
+  session.for_each_usable_target([&](const CurvePatchObjectTarget &target) {
+    if (!target.applied_this_restamp) {
+      flush_update_step(session.view_context, *target.ob, target.effect->update_type());
+    }
+  });
+}
+
+void curve_patch_restore_and_restamp(const Scene &scene,
+                                     const Depsgraph &depsgraph,
+                                     Sculpt &sd,
+                                     PaintModeSettings &paint_mode_settings,
+                                     CurvePatchSession &session,
+                                     ReportList *reports)
+{
+  /* The document lives on the primary's object (the session's owner), so every session-level step
+   * below resolves through it. */
+  CurvePatchObjectTarget &primary = session.primary_target();
+  if (primary.ob == nullptr) {
+    return;
+  }
+  Object &owner = *primary.ob;
+
+  if (!session_validate_targets(session, reports)) {
     return;
   }
 
-  session_apply(scene, depsgraph, sd, paint_mode_settings, ob, session);
+#if CURVE_PATCH_PROFILING
+  const double prof_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch */
+#endif
+  /* Restore every usable target regardless of reach: an object the curve was dragged away from
+   * must lose its previous stamp, or neither Esc nor a later commit could take it back. Only the
+   * geometry rebuild and apply below are gated on reach. */
+  curve_patch_restore_only(session);
+  for (CurvePatchObjectTarget &target : session.targets) {
+    target.applied_this_restamp = false;
+  }
+#if CURVE_PATCH_PROFILING
+  const double prof_t_restore = BLI_time_now_seconds(); /* DEBUG-cpatch */
+#endif
+
+  /* The world-space stamp every secondary derives from the DOCUMENT's control curves, not the
+   * primary's built geometry: a broken primary must not stop the valid secondary targets, and a
+   * curve edit is visible here before the primary rebuild. The document itself stays in the
+   * primary's local space. */
+  const CurvePatchWorldStamp world_stamp = curve_patch_world_stamp_from_primary(owner, session);
+  if (!world_stamp.any_buildable) {
+    /* The meshes have already been restored above; flush so the viewports show that, rather than
+     * the relief from the previous re-stamp, until the next event arrives. */
+    session.for_each_usable_target([&](const CurvePatchObjectTarget &target) {
+      if (session.view_context.region != nullptr) {
+        flush_update_step(session.view_context, *target.ob, target.effect->update_type());
+      }
+    });
+    return;
+  }
+
+  /* Resolve the brush the bindings sample. The session owns the only `StrokeCache` for the whole
+   * live-edit lifetime, but a sculpt stroke that leaks through in another viewport (before the
+   * modal's pass-through gate was widened) could tear it down and leave this null -- bail rather
+   * than crash. The cache is read off the TARGET (the source of truth), with the owner-side
+   * publication kept as the leak guard: the leaked stroke tears the published pointer down, so a
+   * null on either side means the re-stamp cannot run. */
+  SculptSession *owner_ss = owner.runtime->sculpt_session;
+  if (primary.cache == nullptr || owner_ss == nullptr || owner_ss->cache == nullptr) {
+    return;
+  }
+  const Brush *tex_brush = BKE_paint_brush_for_read(primary.cache->paint);
+  session_resolve_texture_bindings(session, tex_brush);
+
+  session_rebuild_primary(session, reports);
+#if CURVE_PATCH_PROFILING
+  const double prof_t_geometry = BLI_time_now_seconds(); /* DEBUG-cpatch */
+#endif
+
+  session_sync_secondary_mirrors(session, world_stamp, tex_brush, reports);
+
+  session_apply_all_targets(scene, depsgraph, sd, paint_mode_settings, session);
+
+  session_flush_unapplied_targets(session);
+
 #if CURVE_PATCH_PROFILING
   session_report_diagnostics(
       session, prof_t0, prof_t_restore, prof_t_geometry, BLI_time_now_seconds());
 #endif
 }
 
-void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchSession &session)
+void curve_patch_restore_and_restamp(bContext &C, CurvePatchSession &session)
 {
   ToolSettings *tool_settings = CTX_data_tool_settings(&C);
   curve_patch_restore_and_restamp(*CTX_data_scene(&C),
                                   *CTX_data_depsgraph_pointer(&C),
                                   *tool_settings->sculpt,
                                   tool_settings->paint_mode,
-                                  ob,
                                   session,
                                   CTX_wm_reports(&C));
 }
@@ -575,9 +758,31 @@ const char *curve_patch_active_session_message(const bContext &C)
  * #layers::curve_patch_blocks_layer_edit), but polls and RNA editable callbacks are only re-run on
  * redraw. Without this the Properties editor keeps showing them in their old state until the cursor
  * happens to pass over it. */
-static void curve_patch_session_tag_layer_ui(Object &ob)
+void curve_patch_session_tag_layer_ui(Object &ob)
 {
   WM_main_add_notifier(NC_GEOM | ND_DATA, ob.data);
+}
+
+void curve_patch_tag_target_mesh_dirty(Object &ob)
+{
+  if (ob.type != OB_MESH) {
+    return;
+  }
+  Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  BKE_mesh_batch_cache_dirty_tag(&mesh, BKE_MESH_BATCH_DIRTY_ALL);
+  DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+}
+
+void curve_patch_stroke_cache_free(SculptSession *ss, StrokeCache *cache)
+{
+  if (cache == nullptr) {
+    return;
+  }
+  face_set::face_set_color_stroke_cache_clear(*cache);
+  MEM_delete(cache);
+  if (ss != nullptr && ss->cache == cache) {
+    ss->cache = nullptr;
+  }
 }
 
 uint64_t curve_patch_session_serial_next()
@@ -590,13 +795,34 @@ void curve_patch_session_free(Object &ob)
 {
   /* The per-point texture browse target cannot outlive its session; drop the pick with it. */
   curve_patch_point_texture_pick_reset();
-  SculptSession &ss = *ob.runtime->sculpt_session;
-  MEM_delete(ss.cache);
-  ss.cache = nullptr;
-  MEM_delete(ss.curve_patch_session);
-  ss.curve_patch_session = nullptr;
-  ss.free_curve_patch_session = nullptr;
-  curve_patch_session_tag_layer_ui(ob);
+  CurvePatchSession &session = *ob.runtime->sculpt_session->curve_patch_session;
+  /* \a ob may be any published object of the session (a modal event can arrive with a secondary as
+   * the active object); the clears below go through the OWNER, who the document belongs to. */
+  Object &owner = session.owner != nullptr ? *session.owner : ob;
+  SculptSession &owner_ss = *owner.runtime->sculpt_session;
+
+  /* Every target's cache dies with the session, whichever object holds it: the owner's is the
+   * anchor stroke's cache, a secondary's the stroke's own per-object cache taken over at target
+   * creation (or a stand-in). Each object's published pointers are cleared so no target keeps a
+   * dangling session or callback. */
+  for (const CurvePatchObjectTarget &target : session.targets) {
+    SculptSession *target_ss =
+        target.ob != nullptr && target.ob->runtime != nullptr ?
+            target.ob->runtime->sculpt_session :
+            nullptr;
+    curve_patch_stroke_cache_free(target_ss, target.cache);
+    if (target_ss == nullptr) {
+      continue;
+    }
+    target_ss->curve_patch_session = nullptr;
+    target_ss->free_curve_patch_session = nullptr;
+    curve_patch_session_tag_layer_ui(*target.ob);
+  }
+
+  MEM_delete(&session);
+  owner_ss.curve_patch_session = nullptr;
+  owner_ss.free_curve_patch_session = nullptr;
+  curve_patch_session_tag_layer_ui(owner);
 }
 
 bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
@@ -606,32 +832,48 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
     return false;
   }
   CurvePatchSession *session = ss->curve_patch_session;
+  if (session->owner != &ob) {
+    /* A secondary target's session pointer must never tear the SHARED session down: the owner's
+     * own path (or the modal) ends it once, for every target. */
+    return false;
+  }
 
   /* Mirrors the commit branch of `curve_patch_edit_finish()` (`paint_curve_patch_edit.cc`), which
    * cannot be reused directly because it is tied to the modal operator's `customdata`. The modal
    * is left running; it notices the freed session on its next event and tears its own state down
    * through its liveness guard. Keep the two in step when either changes. */
   curve_patch_set_final_quality(session->doc, true);
-  curve_patch_restore_and_restamp(C, ob, *session);
+  curve_patch_restore_and_restamp(C, *session);
   curve_patch_set_final_quality(session->doc, false);
 
   bool committed = false;
-  if (session->apply.invalidated) {
-    /* A foreign operator changed the element count, so nothing can be written -- and
-     * `curve_patch_restore_only()` is a no-op in this state, leaving the mesh as that operator
-     * left it. Same outcome the modal reports as canceled. */
-    curve_patch_restore_only(ob, *session);
-    /* The curves do not depend on the mesh, so an effect of the Stack Layers keeps them. */
+  if (!session->has_valid_target()) {
+    /* Every target's mesh changed underneath it, so nothing can be written -- and
+     * `curve_patch_restore_only()` is a no-op for those targets, leaving each mesh as the foreign
+     * operator left it. The curves do not depend on the mesh, so an effect of the Stack Layers
+     * keeps them. */
+    curve_patch_restore_only(*session);
     curve_patch_layer_commit_document(C, *session);
   }
   else {
-    curve_patch_finish_commit(C, ob, *session);
+    curve_patch_finish_commit(C, *session);
     /* A session entered from a Stack Layers row writes its document back into the row's
      * PaintVector before the session is freed, so leaving Sculpt Mode loses no curve edit. */
     curve_patch_layer_commit_document(C, *session);
-    flush_update_done(&C, ob, UpdateType::Position);
+    session->for_each_usable_target([&](const CurvePatchObjectTarget &target) {
+      flush_update_done(&C, *target.ob, UpdateType::Position);
+    });
     committed = true;
   }
+
+  /* The session and its target list die below. Keep the OBJECT pointers, which stay valid across
+   * the teardown (the mode-exit path owns them), so the evaluated-mesh republish afterwards does
+   * not read freed session memory. */
+  Vector<Object *> target_objects;
+  target_objects.reserve(session->targets.size());
+  session->for_each_usable_target([&](const CurvePatchObjectTarget &target) {
+    target_objects.append(target.ob);
+  });
 
   curve_patch_session_free(ob);
 
@@ -656,10 +898,12 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
    * Order matters twice over. This has to run AFTER the frees above: with `ss->cache` still alive
    * `BKE_sculpt_update_object_before_eval()` takes its keep-PBVH branch and re-copies nothing,
    * whereas a null `cache` makes it free the PBVH so the mesh is genuinely re-copied from the
-   * original. And the tag has to precede the evaluation, or there is nothing for it to act on. */
-  Mesh &mesh = *id_cast<Mesh *>(ob.data);
-  BKE_mesh_batch_cache_dirty_tag(&mesh, BKE_MESH_BATCH_DIRTY_ALL);
-  DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+   * original. And the tag has to precede the evaluation, or there is nothing for it to act on.
+   * Every stamped target is republished, not just the primary: a secondary relief that kept its
+   * preview out of the evaluated mesh would vanish the moment Object Mode drew from it. */
+  for (Object *target_ob : target_objects) {
+    curve_patch_tag_target_mesh_dirty(*target_ob);
+  }
   CTX_data_ensure_evaluated_depsgraph(&C);
 
   return committed;
@@ -668,10 +912,11 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
 void curve_patch_store_on_mode_exit(Object &ob)
 {
   SculptSession *ss = ob.runtime->sculpt_session;
-  if (ss && ss->curve_patch_session) {
+  if (ss && ss->curve_patch_session && ss->curve_patch_session->owner == &ob) {
     /* The pixels of a session that ends without a commit are put back, but the curves of an effect
      * of the Stack Layers are not a preview: they are kept, and the bake is stale. Not part of the
-     * discard itself, which also runs while the object is freed, when the material may be gone. */
+     * discard itself, which also runs while the object is freed, when the material may be gone.
+     * Owner-gated: the document is stored once, not once per published target. */
     curve_patch_layer_store_document(*ss->curve_patch_session);
   }
 }
@@ -682,42 +927,172 @@ void curve_patch_discard_on_session_end(Object &ob)
   if (!ss || !ss->curve_patch_session) {
     return;
   }
+  if (ss->curve_patch_session->owner != &ob) {
+    /* A secondary's session pointer detaches only that target (its own teardown callback). */
+    curve_patch_target_detach_on_session_end(ob);
+    return;
+  }
 
   /* Same order as the cancel branch of `curve_patch_edit_finish()`: put the surface back before
    * anything the restore reads is torn down. Safe even for an invalidated patch -- the
    * element-count guard at the top of `curve_patch_restore_only()` turns it into a no-op. */
-  curve_patch_restore_only(ob, *ss->curve_patch_session);
+  curve_patch_restore_only(*ss->curve_patch_session);
   /* Republish the restored surface for the same reason the commit path does -- see the long
    * comment in #curve_patch_commit_on_session_end -- or the discarded relief keeps being drawn in
    * Object Mode. No forced evaluation is needed here, and none is possible without a `bContext`:
    * unlike the commit, nothing evaluates the graph between the restore and the mode exit's own
    * tag, so there is no flat/stale snapshot to undo -- only the tag to place. */
-  Mesh &mesh = *id_cast<Mesh *>(ob.data);
-  BKE_mesh_batch_cache_dirty_tag(&mesh, BKE_MESH_BATCH_DIRTY_ALL);
-  DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+  ss->curve_patch_session->for_each_usable_target([](const CurvePatchObjectTarget &target) {
+    curve_patch_tag_target_mesh_dirty(*target.ob);
+  });
   /* The patch took ownership of the anchor stroke's `StrokeCache` (see
-   * #curve_patch_begin_editing), so it dies with the session here too. */
+   * #curve_patch_begin_editing), so it dies with the session here too -- along with every other
+   * target's cache. */
   curve_patch_session_free(ob);
+}
+
+bool curve_patch_session_has_commit_content(CurvePatchSession &session)
+{
+  bool has_content = false;
+  session.for_each_usable_target([&](CurvePatchObjectTarget &target) {
+    if (has_content) {
+      return;
+    }
+    CurvePatchTargetState state = session.target_state(target);
+    has_content = state.effect.commit_has_content(state);
+  });
+  return has_content;
 }
 
 void curve_patch_finish_commit(const Scene &scene,
                                const Depsgraph &depsgraph,
-                               Object &ob,
-                               const CurvePatchSession &session)
+                               CurvePatchSession &session)
 {
-  session.effect->commit(scene, depsgraph, ob, session);
+  /* Image canvases keep their own undo system, and a session that displaced nothing has no state
+   * to record. Return before touching the undo stack: an empty step would cost one dead Ctrl+Z. */
+  if (!curve_patch_session_has_commit_content(session)) {
+    return;
+  }
+
+  /* ONE shared sculpt undo step for the whole session: the first target with content opens it,
+   * the rest extend it, and it is parked once at the end. A per-target loop of `push_begin_ex()`
+   * would leave only the last target in the stack. */
+  CurvePatchCommitStep step;
+  struct FaceSetWrite {
+    CurvePatchObjectTarget *target;
+    IndexMask face_mask;
+    IndexMask node_mask;
+    /* `IndexMaskMemory` is a non-movable linear allocator, and the masks above reference it, so
+     * each write owns its memory behind a pointer: a Vector<FaceSetWrite> would need to relocate
+     * the allocator (and would invalidate the masks' storage while doing so). */
+    std::unique_ptr<IndexMaskMemory> memory = std::make_unique<IndexMaskMemory>();
+  };
+  Vector<std::unique_ptr<FaceSetWrite>> face_set_writes;
+  Vector<CurvePatchObjectTarget *> content_targets;
+
+  session.for_each_usable_target([&](CurvePatchObjectTarget &target) {
+    CurvePatchTargetState state = session.target_state(target);
+    if (!state.effect.commit_has_content(state)) {
+      return;
+    }
+    if (!step.open) {
+      undo::push_begin_ex(scene, *target.ob, "Curve Patch");
+      step.open = true;
+    }
+    else {
+      undo::push_begin_add_object(*target.ob);
+    }
+    state.effect.commit_push_nodes(depsgraph, state);
+    content_targets.append(&target);
+  });
+
+  /* Nothing opened a step: an Image canvas owns its own undo system, and a session that displaced
+   * nothing has no state to record. Closing the (non-existent) shared step here would make
+   * `wm_operator_finished()` push an empty step -- one dead Ctrl+Z. */
+  if (!step.open) {
+    return;
+  }
+
+  /* Face sets asked for while the relief is still ON the mesh -- every
+   * `commit_push_nodes()` above has swapped its snapshot back out, so the displaced positions are
+   * current again. Only targets that actually stored content are considered: a face-set write
+   * without a matching node push would have no undo data. The OR over every target decides how
+   * the shared step is closed. */
+  for (CurvePatchObjectTarget *target : content_targets) {
+    CurvePatchTargetState state = session.target_state(*target);
+    std::unique_ptr<FaceSetWrite> write = std::make_unique<FaceSetWrite>();
+    write->target = target;
+    if (state.effect.commit_wants_face_set(
+            state, *write->memory, write->face_mask, write->node_mask))
+    {
+      step.face_set_follows = true;
+      face_set_writes.append(std::move(write));
+    }
+  }
+
+  /* Forced into the stack only when a face-set step follows: that step's `push_begin_ex()` would
+   * free this one out of `ustack->step_init` (the committing operator carries `OPTYPE_UNDO`, so
+   * `wm->op_undo_depth` is non-zero here and a plain parked step is pushed by
+   * `wm_operator_finished()` rather than us). Forcing is safe because the step was opened above
+   * and no foreign code runs in between, so it is always ours.
+   *
+   * When no face-set step follows, the step must stay parked instead: `wm_operator_finished()`
+   * pushes it for us, whereas an already-pushed step leaves `step_init` empty and makes that call
+   * allocate an extra, empty step -- one dead Ctrl+Z before the relief is undone. */
+  undo::push_end_all_ex(false, step.face_set_follows);
+
+  if (face_set_writes.is_empty()) {
+    return;
+  }
+
+  /* One shared face-set step and one shared face set id across every stamped object: the
+   * alternative -- per-target ids in per-target steps -- would cost one Ctrl+Z per object. */
+  bool face_set_step_open = false;
+  for (const std::unique_ptr<FaceSetWrite> &write : face_set_writes) {
+    Object &ob = *write->target->ob;
+    if (!face_set_step_open) {
+      undo::push_begin_ex(scene, ob, "Curve Patch Face Set");
+      face_set_step_open = true;
+    }
+    else {
+      undo::push_begin_add_object(ob);
+    }
+    /* Stored BEFORE the attribute is created (so the step's "before" data is the pre-create
+     * state), exactly as the single-object path ordered it. */
+    undo::push_nodes(depsgraph, ob, write->node_mask, undo::NodeDataFlag::FaceSet);
+    /* Order matters: the attribute has to EXIST before the next available ID is queried. On a
+     * mesh that never had face sets, `find_next_available_id()` reads an empty span and answers 1,
+     * while `ensure_face_sets_mesh()` then creates every face at 1 -- so querying first would put
+     * the whole mesh and this patch in the same set. Creating first makes the answer 2. Same
+     * ordering the trim gesture relies on (`sculpt_trim.cc` creates in `gesture_begin`). */
+    face_set::create_face_sets_mesh(ob);
+  }
+  int shared_face_set_id = 0;
+  for (const std::unique_ptr<FaceSetWrite> &write : face_set_writes) {
+    shared_face_set_id = math::max(shared_face_set_id,
+                                   face_set::find_next_available_id(*write->target->ob));
+  }
+  for (const std::unique_ptr<FaceSetWrite> &write : face_set_writes) {
+    CurvePatchTargetState state = session.target_state(*write->target);
+    state.effect.commit_face_set(state, shared_face_set_id, write->face_mask, write->node_mask);
+  }
+  /* Left parked in `ustack->step_init` on purpose: this is the last step of the committing
+   * operator, so `wm_operator_finished()` pushes it via the operator's own `OPTYPE_UNDO`.
+   * `push_end_all_ex` -- not a per-object `push_end_ex` -- finalizes the FaceSet data of EVERY
+   * object added to this shared step. */
+  undo::push_end_all_ex(false, false);
 }
 
-void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchSession &session)
+void curve_patch_finish_commit(bContext &C, CurvePatchSession &session)
 {
-  curve_patch_finish_commit(*CTX_data_scene(&C), *CTX_data_depsgraph_pointer(&C), ob, session);
+  curve_patch_finish_commit(*CTX_data_scene(&C), *CTX_data_depsgraph_pointer(&C), session);
 
   /* Both commit paths issue their own `flush_update_done(..., UpdateType::Position)` right after
    * calling this, and that call is SHARED with every effect -- but only `UpdateType::Image`
    * reaches the `SPACE_IMAGE` loop in `flush_update_done()`, so with an Image editor open beside
    * the viewport a committed canvas would stay stale there until some unrelated event repainted
    * it. The extra, effect-typed flush is issued here rather than by changing the update type at
-   * those two shared call sites.
+   * those two shared call sites -- per TARGET, since each target's effect can differ in kind.
    *
    * Issuing both is safe: every `UpdateType::Position`-only step (`store_bounds_orig()`,
    * `fake_neighbors_free()`, `BKE_pbvh_bmesh_after_stroke()`) is skipped by the second one, and
@@ -726,12 +1101,16 @@ void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchSession 
    * is idempotent. It is also distinct from the `flush_update_step()` a re-stamp ends with, which
    * only arms the interactive paint-redraw path for the duration of the session.
    *
-   * Skipped when the session wrote nothing: `all_touched_nodes` gains a bit from the first pass
+   * Skipped when the target wrote nothing: `all_touched_nodes` gains a bit from the first pass
    * that writes anything, so a set with no bit raised means there is nothing to repaint. */
-  const UpdateType update_type = session.effect->update_type();
-  if (update_type != UpdateType::Position && bits::any_bit_set(session.apply.all_touched_nodes)) {
-    flush_update_done(&C, ob, update_type);
-  }
+  session.for_each_usable_target([&](const CurvePatchObjectTarget &target) {
+    const UpdateType update_type = target.effect->update_type();
+    if (update_type != UpdateType::Position &&
+        bits::any_bit_set(target.apply.all_touched_nodes))
+    {
+      flush_update_done(&C, *target.ob, update_type);
+    }
+  });
 }
 
 /** \} */
@@ -779,21 +1158,38 @@ bool curve_patch_session_publish(Object &ob,
   }
 
   /* Chosen BEFORE the session is published, so a refusal never leaves a live session whose every
-   * entry point would dereference a null effect. */
-  session.effect = curve_patch_effect_create(effect_type, ob, paint_mode_settings);
-  if (!session.effect) {
+   * entry point would dereference a null effect. One effect instance per TARGET: a single-object
+   * session has exactly one target, and a multi-object session creates one per secondary later
+   * (see #curve_patch_begin_editing). */
+  std::unique_ptr<CurvePatchEffect> effect = curve_patch_effect_create(effect_type,
+                                                                       ob,
+                                                                       paint_mode_settings);
+  if (!effect) {
     return false;
   }
+
+  /* The PRIMARY target: the document stays where it is (its items ARE this target's view), and
+   * the cache the session takes over is the one already published on `ss.cache`. */
+  const int64_t target_index = session.targets.append_and_get_index_as();
+  CurvePatchObjectTarget &target = session.targets[target_index];
+  target.ob = &ob;
+  target.cache = ss.cache;
+  target.effect = std::move(effect);
+  target.is_primary = true;
+  target.use_face_set_on_commit = session.use_face_set_on_commit;
+  session.owner = &ob;
+  session.owns_image_undo_step = effect_type == CurvePatchEffectType::Image;
+  session.effect_type = effect_type;
 
   ss.curve_patch_session = &session;
   ss.free_curve_patch_session = curve_patch_discard_on_session_end;
   curve_patch_session_tag_layer_ui(ob);
-  session.apply.element_num = session.effect->element_num(ob);
-  session.apply.faces_num = -1;
-  session.apply.corners_num = -1;
+  target.apply.element_num = target.effect->element_num(ob);
+  target.apply.faces_num = -1;
+  target.apply.corners_num = -1;
   if (mesh != nullptr) {
-    session.apply.faces_num = mesh->faces_num;
-    session.apply.corners_num = mesh->corners_num;
+    target.apply.faces_num = mesh->faces_num;
+    target.apply.corners_num = mesh->corners_num;
   }
   return true;
 }
@@ -878,7 +1274,7 @@ static bool curve_patch_begin_editing(Object &ob,
   session->use_face_set_on_commit = brush.curve_patch.face_set != 0 ||
                                     face_set::brush_texture_data_mode_is_active(brush);
 
-  /* Stage 1's brush gate should have refused this brush long before a session was started; refuse
+  /* The brush gate should have refused this brush long before a session was started; refuse
    * defensively rather than publishing a session with no effect. Both callers hand this function
    * ownership of `ss.cache` (see their doc comments), so the bail frees it the same way their own
    * Dynamic Topology refusals do -- #curve_patch_session_publish deliberately frees nothing. */
@@ -912,42 +1308,55 @@ static bool curve_patch_begin_editing(Object &ob,
      * is a configuration the user can act on. */
     BKE_report(CTX_wm_reports(vc.C), RPT_WARNING, curve_patch_refusal_message(refusal));
     MEM_delete(session);
-    MEM_delete(ss.cache);
-    ss.cache = nullptr;
+    curve_patch_stroke_cache_free(&ss, ss.cache);
     return false;
   }
+
+  /* Secondary targets never come from the anchor stroke (the stroke is narrowed to the clicked
+   * object before it starts); they join later through the modal's Shift+drag gesture, which calls
+   * #curve_patch_session_add_target. */
 
   /* Stamp the initial curve right away: neither `curve_patch_edit_invoke()` nor
    * `curve_patch_edit_modal()` re-stamps on its own until the user performs a first edit, so
    * without this the mesh would sit pristine with no visible feedback at all until then. */
-  curve_patch_restore_and_restamp(*vc.C, ob, *session);
+  curve_patch_restore_and_restamp(*vc.C, *session);
 
   /* This re-stamp runs nested inside the just-finishing stroke's `PaintStroke::done()`, which
    * clears `RV3D_PAINTING` the instant this call chain returns -- so the fast paint-redraw path
    * `flush_update_step()` set up is torn down before the viewport redraws. Issue the full
    * finished-stroke redraw (tags every viewport and refreshes bounds independently of
-   * `RV3D_PAINTING`) so this first preview reaches the screen immediately. */
-  flush_update_done(vc.C, ob, session->effect->update_type());
+   * `RV3D_PAINTING`) so this first preview reaches the screen immediately -- for every target. */
+  for (const CurvePatchObjectTarget &target : session->targets) {
+    if (target.ob != nullptr) {
+      flush_update_done(vc.C, *target.ob, target.effect->update_type());
+    }
+  }
 
   return true;
 }
 
-bool curve_patch_start_from_anchor(
-    const Depsgraph &depsgraph, Object &ob, Sculpt &sd, const Brush &brush, const ViewContext &vc)
+bool curve_patch_start_from_anchor(const Depsgraph &depsgraph,
+                                   Object &ob,
+                                   Sculpt &sd,
+                                   const Brush &brush,
+                                   const ViewContext &vc)
 {
   SculptSession &ss = *ob.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
 
   /* The anchor stroke's last step already stamped one dab onto the real mesh at the release
-   * location. `ReliefEffect::orig_positions_` below only snapshots a vertex's position the
-   * first time THIS patch's own re-stamp touches it, so if that vertex is still displaced by the
-   * anchor dab right now, the patch would adopt the displaced position as "original" and could
-   * never restore past it -- moving curve points would only ever add on top of that permanently
-   * baked-in bump instead of describing the whole shape from a clean baseline. Restore the mesh
-   * to its pristine pre-stroke state before anything else touches it, while
-   * `ss.curve_patch_session` is still null (see the matching branch in
-   * `restore_from_undo_step_if_necessary()`, `mesh/sculpt.cc`). */
-  restore_from_undo_step_if_necessary(depsgraph, sd, ob);
+   * location. `ReliefEffect::orig_positions_` below only snapshots a vertex's
+   * position the first time THIS patch's own re-stamp touches it, so if that vertex is still
+   * displaced by the anchor dab right now, the patch would adopt the displaced position as
+   * "original" and could never restore past it. Restore the mesh to its pristine
+   * pre-stroke state before anything else touches it, while no `curve_patch_session` is published
+   * anywhere yet (see the matching branch in `restore_from_undo_step_if_necessary()`,
+   * `mesh/sculpt.cc`).
+   * This has to happen before the handoff aborts the stroke's undo transaction: the restore reads
+   * the transaction's per-node data. */
+  if (ss.cache != nullptr) {
+    restore_from_undo_step_if_necessary(depsgraph, sd, ob);
+  }
 
   /* Dynamic Topology has no stable per-vertex index across recomputes (`BMVert`s themselves are
    * created/destroyed as topology changes), which `ReliefEffect::orig_positions_` and the
@@ -959,8 +1368,7 @@ bool curve_patch_start_from_anchor(
    * caller (see this function's own doc comment), so it must be freed here too. */
   if (bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::BMesh) {
     BKE_report(CTX_wm_reports(vc.C), RPT_WARNING, "Curve Patch does not support Dynamic Topology");
-    MEM_delete(ss.cache);
-    ss.cache = nullptr;
+    curve_patch_stroke_cache_free(&ss, ss.cache);
     return false;
   }
 
@@ -1054,8 +1462,13 @@ bool curve_patch_start_from_anchor(
   }
 
   ToolSettings *tool_settings = CTX_data_tool_settings(vc.C);
-  return curve_patch_begin_editing(
-      ob, brush, vc, session, plane_normal, cache.initial_radius, tool_settings->paint_mode);
+  return curve_patch_begin_editing(ob,
+                                   brush,
+                                   vc,
+                                   session,
+                                   plane_normal,
+                                   cache.initial_radius,
+                                   tool_settings->paint_mode);
 }
 
 CurvePatchSession *curve_patch_start_from_layer(bContext &C,
@@ -1160,8 +1573,7 @@ CurvePatchSession *curve_patch_start_from_layer(bContext &C,
     BKE_report(
         CTX_wm_reports(&C), RPT_WARNING, "Curve Patch: this object cannot carry the effect");
     MEM_delete(session);
-    MEM_delete(ss.cache);
-    ss.cache = nullptr;
+    curve_patch_stroke_cache_free(&ss, ss.cache);
     return nullptr;
   }
 
@@ -1180,9 +1592,9 @@ CurvePatchSession *curve_patch_start_from_layer(bContext &C,
 
   /* Nothing opened a stroke transaction, so the effect's undo hook runs before the only re-stamp
    * -- the same order the headless apply uses. */
-  session->effect->session_undo_begin();
-  curve_patch_restore_and_restamp(C, ob, *session);
-  if (session->apply.invalidated) {
+  session->effect().session_undo_begin();
+  curve_patch_restore_and_restamp(C, *session);
+  if (!session->has_valid_target()) {
     /* The target check failed (a stale mesh); publishing would leave a session that cannot
      * restore. Tear down the same way a refused publish does. */
     curve_patch_session_free(ob);
@@ -1209,14 +1621,12 @@ bool roll_start_curve_patch_from_stroke(const Depsgraph &depsgraph,
    * object is left untouched. */
   if (bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::BMesh) {
     BKE_report(CTX_wm_reports(vc.C), RPT_WARNING, "Curve Patch does not support Dynamic Topology");
-    MEM_delete(ss.cache);
-    ss.cache = nullptr;
+    curve_patch_stroke_cache_free(&ss, ss.cache);
     return false;
   }
 
   if (control_positions.size() < 2) {
-    MEM_delete(ss.cache);
-    ss.cache = nullptr;
+    curve_patch_stroke_cache_free(&ss, ss.cache);
     return false;
   }
 
@@ -1257,6 +1667,7 @@ bool roll_start_curve_patch_from_stroke(const Depsgraph &depsgraph,
                                                                   cache.view_normal;
   }
   ToolSettings *tool_settings = CTX_data_tool_settings(vc.C);
+  /* The roll bridge stays single-object: its handoff edits one contour on one mesh. */
   return curve_patch_begin_editing(ob,
                                    brush,
                                    vc,
@@ -1397,6 +1808,44 @@ void ED_curve_patch_overlay_data_get(const ed::sculpt_paint::CurvePatchSession *
 void ED_curve_patch_overlay_data_get(const Object *ob, CurvePatchOverlayData &r_data)
 {
   ED_curve_patch_overlay_data_get(ob ? ED_curve_patch_session_get(*ob) : nullptr, r_data);
+}
+
+Object *ED_curve_patch_session_owner(const ed::sculpt_paint::CurvePatchSession *session)
+{
+  return session != nullptr ? session->owner : nullptr;
+}
+
+void ED_curve_patch_overlay_data_get_target(const Object *ob, CurvePatchOverlayData &r_data)
+{
+  r_data.splines.clear();
+  r_data.active_index = -1;
+  if (ob == nullptr || ob->runtime == nullptr || ob->runtime->sculpt_session == nullptr ||
+      ob->runtime->sculpt_session->curve_patch_session == nullptr)
+  {
+    return;
+  }
+  const ed::sculpt_paint::CurvePatchSession &session =
+      *ob->runtime->sculpt_session->curve_patch_session;
+  if (!session.has_active_item()) {
+    return;
+  }
+  /* The overlay hands in the object of an evaluated view context, whose pointer is never one a
+   * target registered (targets hold the original objects). */
+  const Object *ob_orig = DEG_get_original(ob);
+  const ed::sculpt_paint::CurvePatchObjectTarget *target = session.target_for(*ob_orig);
+  if (target == nullptr || target->is_primary) {
+    /* The owner draws the document itself, exactly as the session-level accessor does. */
+    ED_curve_patch_overlay_data_get(&session, r_data);
+    return;
+  }
+  /* A secondary draws ITS OWN mirror of the document: the same curves carried into this object's
+   * local space (rebuilt on every restamp, whether or not the target is in reach, so the overlay
+   * always has something to draw). Index-parallel to the document, so the active index matches. */
+  r_data.splines.reserve(target->mirror_items.size());
+  for (const ed::sculpt_paint::CurvePatchItem &item : target->mirror_items) {
+    r_data.splines.append(&item.control_curve);
+  }
+  r_data.active_index = session.doc.active_patch;
 }
 
 void ED_curve_patch_overlay_data_get_stack(const Object *ob, CurvePatchOverlayData &r_data)
@@ -1541,7 +1990,7 @@ void ED_curve_patch_session_restamp(bContext &C, Object &ob)
   if (patch == nullptr) {
     return;
   }
-  ed::sculpt_paint::curve_patch_restore_and_restamp(C, ob, *patch);
+  ed::sculpt_paint::curve_patch_restore_and_restamp(C, *patch);
 }
 
 void ED_curve_patch_session_undo_push(Object &ob)
@@ -1561,15 +2010,17 @@ void ED_curve_patch_sessions_preview_swap(Main &bmain)
       continue;
     }
     ed::sculpt_paint::CurvePatchSession &patch = *ss->curve_patch_session;
-    /* A mesh that changed under the session no longer matches the snapshot keys; the same guard
-     * #curve_patch_restore_only applies. Nothing changes between the paired calls, so both make the
-     * same decision. */
-    if (!patch.effect || patch.apply.invalidated ||
-        ed::sculpt_paint::curve_patch_apply_target_changed(ob, patch))
+    /* The session is published on every target, so iterating the objects covers them all; each
+     * object swaps its own target's preview. A mesh that changed under the session no longer
+     * matches the snapshot keys; the same per-target guard `curve_patch_restore_only` applies.
+     * Nothing changes between the paired calls, so both make the same decision. */
+    ed::sculpt_paint::CurvePatchObjectTarget *target = patch.target_for(ob);
+    if (target == nullptr || !target->is_usable() ||
+        ed::sculpt_paint::curve_patch_apply_target_changed(ob, *target))
     {
       continue;
     }
-    patch.effect->preview_swap(ob);
+    target->effect->preview_swap(ob);
   }
 }
 

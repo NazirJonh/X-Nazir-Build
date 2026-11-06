@@ -21,6 +21,7 @@
  */
 
 #include <array>
+#include <cstdint>
 #include <string>
 
 #include "BLI_array.hh"
@@ -181,6 +182,10 @@ struct CurvePatchItem {
  * region -- that is what makes it the state the shared editor can act on.
  */
 struct CurvePatchDocument {
+  /** Content-derived generation of #patches. Secondary targets use it to skip re-deriving their
+   * mirrors when a re-stamp was triggered by something other than a document edit. */
+  uint64_t revision = 0;
+
   /** Every patch this document applies, in creation order. Applied one after another within each
    * symmetry pass; see `curve_patch_apply_effect_action()`.
    *
@@ -275,6 +280,10 @@ struct CurvePatchDocument {
     return this->patches[this->active_patch];
   }
 };
+
+/** Hash every authored field a secondary target mirrors: identity, parameters and the full control
+ * curve (all point and curve attributes). Stored in #CurvePatchDocument::revision by the session. */
+uint64_t curve_patch_document_content_revision(const CurvePatchDocument &document);
 
 /** Return the patch corresponding to a PaintCurve spline, or -1 when no exact match exists. */
 int curve_patch_index_for_source_curve(const CurvePatchDocument &document, int source_curve_index);

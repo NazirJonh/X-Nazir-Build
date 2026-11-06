@@ -9,7 +9,7 @@
  *
  * This lives in the editor layer, not in blenkernel, for two reasons. It has to include
  * `DNA_brush_types.h` and `DNA_texture_types.h`, which would hand the core back the DNA dependency
- * the Stage 1/2 refactor removed; and the brush is not the only producer -- the modal editor's
+ * the earlier core/editor split removed; and the brush is not the only producer -- the modal editor's
  * live poll feeds the same conversion from a partly session-owned state, which is editor business
  * by definition.
  */

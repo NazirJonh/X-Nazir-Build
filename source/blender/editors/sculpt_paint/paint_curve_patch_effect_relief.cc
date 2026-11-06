@@ -64,33 +64,28 @@ class ReliefEffect : public CurvePatchEffect {
     return UpdateType::Position;
   }
   int64_t element_num(Object &ob) const override;
-  void restore(Object &ob, const CurvePatchSession &patch) override;
-  void begin_restamp(const Depsgraph &depsgraph, Object &ob, CurvePatchSession &patch) override;
+  void restore(CurvePatchTargetState &target) override;
+  void begin_restamp(const Depsgraph &depsgraph, CurvePatchTargetState &target) override;
   void apply_pass(const Depsgraph &depsgraph,
-                  Object &ob,
                   const Brush &brush,
-                  CurvePatchSession &patch,
+                  CurvePatchTargetState &target,
                   const CurvePatchItem &item) override;
-  void end_restamp(Object &ob, CurvePatchSession &patch) override;
-  void commit(const Scene &scene,
-              const Depsgraph &depsgraph,
-              Object &ob,
-              const CurvePatchSession &patch) override;
+  void end_restamp(CurvePatchTargetState &target) override;
+  bool commit_has_content(const CurvePatchTargetState &target) const override;
+  bool commit_wants_face_set(CurvePatchTargetState &target,
+                             IndexMaskMemory &memory,
+                             IndexMask &r_face_mask,
+                             IndexMask &r_node_mask) override;
+  void commit_push_nodes(const Depsgraph &depsgraph, CurvePatchTargetState &target) override;
+  void commit_face_set(CurvePatchTargetState &target,
+                       int face_set_id,
+                       const IndexMask &face_mask,
+                       const IndexMask &node_mask) override;
   void preview_swap(Object &ob) override;
   int64_t snapshot_size() const override;
 
  private:
-  void smooth_relief(Object &ob, const CurvePatchSession &patch);
-  void push_position_step(const Scene &scene,
-                          const Depsgraph &depsgraph,
-                          Object &ob,
-                          const CurvePatchSession &patch,
-                          bool force_push);
-  bool face_set_masks(Object &ob,
-                      const CurvePatchSession &patch,
-                      IndexMaskMemory &memory,
-                      IndexMask &r_face_mask,
-                      IndexMask &r_node_mask);
+  void smooth_relief(CurvePatchTargetState &target);
 
   /** Lazily-grown snapshot of original (pre-patch) element positions, keyed by a flat index into
    * whichever position array is authoritative for the object's current `bke::pbvh::Type` -- a
@@ -122,8 +117,9 @@ int64_t ReliefEffect::element_num(Object &ob) const
   return 0;
 }
 
-void ReliefEffect::restore(Object &ob, const CurvePatchSession &patch)
+void ReliefEffect::restore(CurvePatchTargetState &target)
 {
+  Object &ob = target.ob;
   /* No `element_num` check of its own: `curve_patch_restore_only()` performs it for every caller,
    * including the two -- mode exit and Esc-cancel -- that never re-stamp first and so never raise
    * `CurvePatchApplyState::invalidated`. */
@@ -153,7 +149,7 @@ void ReliefEffect::restore(Object &ob, const CurvePatchSession &patch)
      * `orig_positions` (`ReliefEffect::apply_pass()`'s `lookup_or_add` runs unconditionally
      * for the whole grid, before any falloff rejection), so the plain per-entry restore above is
      * already exact and needs no further stitching. Mark the nodes the PREVIOUS restamp displaced
-     * (tracked in `patch.apply.last_restamp_nodes`) dirty so the `bke::pbvh::update_normals()`
+     * (tracked in `target.apply.last_restamp_nodes`) dirty so the `bke::pbvh::update_normals()`
      * call that follows in `curve_patch_restore_and_restamp()` recomputes exactly their normals
      * from these now-correct positions. This is the footprint that just moved away -- the region a
      * "current node mask only" tag would miss, leaving stale normals wherever the touched
@@ -161,7 +157,7 @@ void ReliefEffect::restore(Object &ob, const CurvePatchSession &patch)
      * instead of all nodes is what keeps a restore O(patch footprint) rather than O(whole mesh) on
      * every interactive drag. */
     IndexMaskMemory memory;
-    pbvh.tag_positions_changed(IndexMask::from_bits(patch.apply.last_restamp_nodes, memory));
+    pbvh.tag_positions_changed(IndexMask::from_bits(target.apply.last_restamp_nodes, memory));
     return;
   }
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
@@ -179,7 +175,7 @@ void ReliefEffect::restore(Object &ob, const CurvePatchSession &patch)
    * session by the `corner_tris_cache.freeze()` at sculpt-mode enter). Mirrors sculpt's own
    * `tag_mesh_positions_changed()` fast path (`mesh/sculpt.cc`). */
   IndexMaskMemory memory;
-  pbvh.tag_positions_changed(IndexMask::from_bits(patch.apply.last_restamp_nodes, memory));
+  pbvh.tag_positions_changed(IndexMask::from_bits(target.apply.last_restamp_nodes, memory));
   mesh.tag_positions_changed_no_normals();
 }
 
@@ -192,11 +188,11 @@ void ReliefEffect::restore(Object &ob, const CurvePatchSession &patch)
  * and applies the direct texture-driven relief formula to it directly -- no `sculpt_brush_type`
  * dispatch, no `do_brush_action()` call. */
 void ReliefEffect::apply_pass(const Depsgraph &depsgraph,
-                              Object &ob,
                               const Brush &brush,
-                              CurvePatchSession &patch,
+                              CurvePatchTargetState &target,
                               const CurvePatchItem &item)
 {
+  Object &ob = target.ob;
   SculptSession &ss = *ob.runtime->sculpt_session;
   /* Snapshotted per PASS, not per re-stamp: `do_symmetrical_brush_actions()` rewrites every field
    * of it between the passes it drives. */
@@ -255,7 +251,7 @@ void ReliefEffect::apply_pass(const Depsgraph &depsgraph,
 
   const CurvePatchSourceGeometry source{positions, normals, &orig_positions_};
   const CurvePatchSampler sampler(
-      item, patch.doc.texture, ctx, brush, source, mask, ss.tex_pool_ensure());
+      item, target.texture, ctx, brush, source, mask, ss.tex_pool_ensure());
 
   const float max_radius = curve_patch_max_radius(item.geometry);
 
@@ -278,7 +274,7 @@ void ReliefEffect::apply_pass(const Depsgraph &depsgraph,
    * never has to re-derive it from a `positions` array another pass may have already written to),
    * the raw relief height along the vertex's own normal, and the falloff weight this pass claims
    * the vertex with. PHASE 2 blends `height`/`weight` across every pass that claims the same
-   * vertex within this restamp (see `patch.apply.pass_weight_accum`) rather than letting the last
+   * vertex within this restamp (see `target.apply.pass_weight_accum`) rather than letting the last
    * pass to run unconditionally overwrite an earlier pass's result -- the fix for a patch
    * straddling a mirror/radial symmetry plane, where the direct and mirrored passes can both
    * legitimately claim the same real vertex and previously fought over which one's displacement
@@ -418,7 +414,7 @@ void ReliefEffect::apply_pass(const Depsgraph &depsgraph,
       /* The passes of one patch average (symmetry); a patch stamped later is composited over the
        * earlier ones. See #curve_patch_blend_over. */
       const float blended_height = curve_patch_blend_across_passes(
-          patch.apply, write.idx, write.weight, write.height);
+          target.apply, write.idx, write.weight, write.height);
       positions[write.idx] = write.orig + normals[write.idx] * blended_height;
     }
   }
@@ -450,7 +446,7 @@ void ReliefEffect::apply_pass(const Depsgraph &depsgraph,
 
   /* Deliberately replaces the former `mesh->tag_positions_changed()` here, whose whole-mesh
    * normals-cache invalidation was the dominant cost of the interactive-edit slowdown. */
-  curve_patch_record_touched_nodes(patch.apply, tag_mask);
+  curve_patch_record_touched_nodes(target.apply, tag_mask);
 }
 
 /**
@@ -479,8 +475,9 @@ void ReliefEffect::apply_pass(const Depsgraph &depsgraph,
  * the CCG neighbour API plus a re-stitch afterwards. Not worth carrying until the mesh case is
  * proven.
  */
-void ReliefEffect::smooth_relief(Object &ob, const CurvePatchSession &patch)
+void ReliefEffect::smooth_relief(CurvePatchTargetState &target)
 {
+  Object &ob = target.ob;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   if (pbvh.type() != bke::pbvh::Type::Mesh || orig_positions_.is_empty()) {
     return;
@@ -532,7 +529,7 @@ void ReliefEffect::smooth_relief(Object &ob, const CurvePatchSession &patch)
    * including ones whose nodes the last restamp never touched -- the same reason
    * `CurvePatchApplyState::all_touched_nodes` exists. A narrower tag leaves a fringe node drawing
    * its pre-smoothing positions. */
-  pbvh.tag_positions_changed(IndexMask::from_bits(patch.apply.all_touched_nodes, memory));
+  pbvh.tag_positions_changed(IndexMask::from_bits(target.apply.all_touched_nodes, memory));
   mesh.tag_positions_changed_no_normals();
 }
 
@@ -549,7 +546,9 @@ static float curve_patch_max_displacement(const Span<float3> positions,
 }
 
 /**
- * Record the patch's whole footprint as ONE position undo step.
+ * Store this target's whole relief footprint into the OPEN shared position undo step of its
+ * session (see #CurvePatchCommitStep -- the step itself was opened / extended by the commit
+ * orchestrator, and is parked once for the whole session by it; this method opens nothing).
  *
  * `undo::push_nodes()` stores each node's CURRENT positions as the state to restore, but by the
  * time a patch commits the mesh already carries the finished relief. Recomputing the pristine
@@ -558,12 +557,9 @@ static float curve_patch_max_displacement(const Span<float3> positions,
  * nodes are pushed against it, and the relief is restored from a saved copy -- two passes over the
  * touched elements and no relief evaluation at all.
  */
-void ReliefEffect::push_position_step(const Scene &scene,
-                                      const Depsgraph &depsgraph,
-                                      Object &ob,
-                                      const CurvePatchSession &patch,
-                                      const bool force_push)
+void ReliefEffect::commit_push_nodes(const Depsgraph &depsgraph, CurvePatchTargetState &target)
 {
+  Object &ob = target.ob;
   /* The array `orig_positions` is keyed into, and the same one `ReliefEffect::apply_pass()`
    * writes the relief to -- there is no intermediate buffer on either path. Re-fetched after the
    * layer recording starts, which may recompose the mesh positions into a new buffer. */
@@ -593,10 +589,9 @@ void ReliefEffect::push_position_step(const Scene &scene,
   positions = positions_for_write();
 
   IndexMaskMemory memory;
-  undo::push_begin_ex(scene, ob, "Curve Patch");
   undo::push_nodes(depsgraph,
                    ob,
-                   IndexMask::from_bits(patch.apply.all_touched_nodes, memory),
+                   IndexMask::from_bits(target.apply.all_touched_nodes, memory),
                    undo::NodeDataFlag::Position);
 
   int i = 0;
@@ -604,38 +599,42 @@ void ReliefEffect::push_position_step(const Scene &scene,
     positions[item.key] = relief[i++];
   }
 
-  /* Needs the step's per-node undo data, so it has to precede the `push_end_ex()` below. */
+  /* Needs the step's per-node undo data, so it has to precede the orchestrator's own per-target
+   * work that follows. */
   layers::stroke_record_end_direct_write(depsgraph, ob);
+}
 
-  /* Forced into the stack only when a face-set step follows: that step's `push_begin_ex()` would
-   * free this one out of `ustack->step_init` (this operator carries `OPTYPE_UNDO`, so
-   * `wm->op_undo_depth` is non-zero here and a plain `push_end()` parks rather than pushes).
-   * Forcing is safe because the step was opened a few lines above and no foreign code runs in
-   * between, so it is always ours -- that is why the old `patch_step_is_ours` test is gone.
-   * Precedent for the forced form: `mesh/sculpt_dyntopo.cc`.
-   *
-   * When no face-set step follows, the step MUST stay parked instead: `wm_operator_finished()`
-   * pushes it for us, whereas an already-pushed step leaves `step_init` empty and makes that call
-   * allocate an EXTRA, empty step -- one dead Ctrl+Z press before the relief is undone. */
-  undo::push_end_ex(ob, force_push);
+bool ReliefEffect::commit_has_content(const CurvePatchTargetState &target) const
+{
+  /* Dynamic Topology has no stable element index, so the snapshot cannot describe it and the
+   * write-back would index an unrelated array. The patch is refused before it starts, but keep the
+   * commit safe if that ever changes. */
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(target.ob);
+  return pbvh != nullptr && pbvh->type() != bke::pbvh::Type::BMesh &&
+         !orig_positions_.is_empty();
 }
 
 /**
- * Decide whether the commit will really burn a face set, and if so hand back the masks it needs.
+ * Decide whether this target's commit will really burn a face set, and if so hand back the masks
+ * it needs.
  *
- * Runs BEFORE the position step is closed, because whether that step may be forced into the stack
- * depends on whether a second step follows it -- see `curve_patch_push_position_step()`. Every
- * "no face set after all" outcome is reported as `false` rather than by an early return from the
- * commit, so the position step is still built on those paths.
+ * Runs BEFORE the shared position step is closed, because whether that step may be forced into the
+ * stack depends on whether a second step follows it -- the orchestrator ORs every target's answer
+ * into #CurvePatchCommitStep::face_set_follows. Every "no face set after all" outcome is reported
+ * as `false` rather than by skipping the target, so the position step still covers it.
+ *
+ * Must be called while the relief is still ON the mesh (it measures displacement): the commit
+ * orchestrator asks every target after all `commit_push_nodes()` calls have swapped their
+ * snapshots back out.
  *
  * `memory` must outlive both returned masks.
  */
-bool ReliefEffect::face_set_masks(Object &ob,
-                                  const CurvePatchSession &patch,
-                                  IndexMaskMemory &memory,
-                                  IndexMask &r_face_mask,
-                                  IndexMask &r_node_mask)
+bool ReliefEffect::commit_wants_face_set(CurvePatchTargetState &target,
+                                         IndexMaskMemory &memory,
+                                         IndexMask &r_face_mask,
+                                         IndexMask &r_node_mask)
 {
+  Object &ob = target.ob;
   const SculptSession &ss = *ob.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
 
@@ -656,7 +655,7 @@ bool ReliefEffect::face_set_masks(Object &ob,
   const bool live_wants_face_set = brush != nullptr &&
                                    (brush->curve_patch.face_set != 0 ||
                                     face_set::brush_texture_data_mode_is_active(*brush));
-  const bool frozen_wants_face_set = patch.use_face_set_on_commit;
+  const bool frozen_wants_face_set = target.use_face_set_on_commit;
   const bool wants_face_set = (brush != nullptr) ? live_wants_face_set : frozen_wants_face_set;
   if (!wants_face_set) {
     return false;
@@ -743,7 +742,7 @@ bool ReliefEffect::face_set_masks(Object &ob,
     return false;
   }
 
-  /* Derived from the faces actually being written, NOT from `patch.apply.last_restamp_nodes`. A
+  /* Derived from the faces actually being written, NOT from `target.apply.last_restamp_nodes`. A
    * node enters that set only when one of its OWN unique vertices moved, but a face joins the face
    * mask when any of its corners moved -- and the faces around a vertex are spread across
    * neighboring nodes. A node owning such a face would otherwise be missing here, leaving that
@@ -790,60 +789,19 @@ bool ReliefEffect::face_set_masks(Object &ob,
   return true;
 }
 
-void ReliefEffect::commit(const Scene &scene,
-                          const Depsgraph &depsgraph,
-                          Object &ob,
-                          const CurvePatchSession &patch)
+void ReliefEffect::commit_face_set(CurvePatchTargetState &target,
+                                   const int face_set_id,
+                                   const IndexMask &face_mask,
+                                   const IndexMask &node_mask)
 {
-  /* No `element_num` check of its own: every commit path re-stamps at final quality first, and
-   * that re-stamp's session-level guard sets `CurvePatchApplyState::invalidated`, which both
-   * callers test before reaching this. */
+  Object &ob = target.ob;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
-
-  /* Nothing was ever displaced: there is no state to record and no face set to burn. */
-  if (orig_positions_.is_empty()) {
-    return;
-  }
-  /* Dynamic Topology has no stable element index, so `orig_positions` cannot describe it and the
-   * write-back in `curve_patch_push_position_step()` would index into an unrelated array. The
-   * patch is refused outright at `curve_patch_start_from_anchor()`; guarded anyway so this stays
-   * correct if that ever changes. */
-  if (pbvh.type() == bke::pbvh::Type::BMesh) {
-    return;
-  }
-
-  /* Computed FIRST, because how the position step below has to be closed depends on whether a
-   * face-set step follows it. `memory` is declared out here so it outlives both masks. */
-  IndexMaskMemory memory;
-  IndexMask face_mask;
-  IndexMask node_mask;
-  const bool write_face_set = this->face_set_masks(ob, patch, memory, face_mask, node_mask);
-
-  /* The patch's own undo step, built and closed before anything else can open one. Built on every
-   * path that displaced something, including the ones that burn no face set. */
-  this->push_position_step(scene, depsgraph, ob, patch, write_face_set);
-
-  if (!write_face_set) {
-    return;
-  }
-
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
 
-  /* A Face Set write cannot share the patch's step: a step carries exactly one `undo::Type`, and
-   * appending `FaceSet` to a `Position` step would retype it, silently stripping the position
-   * storage Ctrl+Z needs. The cost is that undoing the commit takes two presses -- face set first,
-   * then relief -- which is the tradeoff that was chosen deliberately. */
-  undo::push_begin_ex(scene, ob, "Curve Patch Face Set");
-  undo::push_nodes(depsgraph, ob, node_mask, undo::NodeDataFlag::FaceSet);
-
-  /* Order matters: the attribute has to EXIST before the next available ID is queried. On a mesh
-   * that never had face sets, `find_next_available_id()` reads an empty span and answers 1, while
-   * `ensure_face_sets_mesh()` then creates every face at 1 -- so querying first would put the
-   * whole mesh and this patch in the same set. Creating first makes the answer 2. Same ordering
-   * the trim gesture relies on (`sculpt_trim.cc` creates in `gesture_begin`). */
-  face_set::create_face_sets_mesh(ob);
-  const int face_set_id = face_set::find_next_available_id(ob);
-
+  /* The attribute already exists and the shared step already holds this target's per-node
+   * FaceSet data (both arranged by the commit orchestrator): what is left is writing the
+   * session-SHARED id over the raised faces, so the multi-object commit leaves one face set
+   * across every stamped object. */
   bke::SpanAttributeWriter<int> face_sets = face_set::ensure_face_sets_mesh(mesh);
   face_mask.foreach_index([&](const int face) { face_sets.span[face] = face_set_id; },
                           exec_mode::grain_size(4096));
@@ -855,16 +813,11 @@ void ReliefEffect::commit(const Scene &scene,
   /* `ensure_face_sets_mesh()` hands back an open writer -- unlike `create_face_sets_mesh()`, it
    * MUST be finished explicitly (see `sculpt_face_set.hh`). */
   face_sets.finish();
-
-  /* Left parked in `ustack->step_init` on purpose: this is the last step of the operator, so
-   * `wm_operator_finished()` pushes it via the operator's own `OPTYPE_UNDO`. */
-  undo::push_end(ob);
 }
 
-void ReliefEffect::begin_restamp(const Depsgraph &depsgraph,
-                                 Object &ob,
-                                 CurvePatchSession & /*patch*/)
+void ReliefEffect::begin_restamp(const Depsgraph &depsgraph, CurvePatchTargetState &target)
 {
+  Object &ob = target.ob;
   /* A normal interactive stroke keeps the vertex-normals #SharedCache fresh via the Paint BVH
    * draw engine between dabs; this recompute runs synchronously with no redraw in between, so it
    * must refresh normals itself before reading `mesh.vert_normals()` inside the relief action
@@ -872,7 +825,7 @@ void ReliefEffect::begin_restamp(const Depsgraph &depsgraph,
   bke::pbvh::update_normals(depsgraph, ob, *bke::object::pbvh_get(ob));
 }
 
-void ReliefEffect::end_restamp(Object &ob, CurvePatchSession &patch)
+void ReliefEffect::end_restamp(CurvePatchTargetState &target)
 {
   /* Commit only: soften the finished profile once every symmetry pass has contributed.
    * Deliberately after `do_symmetrical_brush_actions()` rather than inside the relief action --
@@ -880,8 +833,8 @@ void ReliefEffect::end_restamp(Object &ob, CurvePatchSession &patch)
    *
    * The `flush_update_step()` that used to close this function is issued by the session now, from
    * #update_type -- all three effects wanted it, differing only in the kind. */
-  if (patch.active_item().params.final_quality) {
-    this->smooth_relief(ob, patch);
+  if (target.active_item().params.final_quality) {
+    this->smooth_relief(target);
   }
 }
 
@@ -918,9 +871,8 @@ std::optional<CurvePatchEffectType> curve_patch_effect_type_for_brush(
     return std::nullopt;
   }
   if (bke::brush::supports_color(brush)) {
-    /* `supports_color()` is exactly "is this the Paint brush" (`brush.cc:1949`). The single place
-     * the target is chosen -- Stage 2 removed `is_applicable()` so a second predicate could not
-     * drift from this one. */
+    /* `supports_color()` is exactly "is this the Paint brush" (`brush.cc:1949`). This is the
+     * single place the target is chosen, so no second predicate can drift from this one. */
     if (SCULPT_use_image_paint_brush(
             paint_mode_settings, ob, &brush, paint.visible_material_channels))
     {

@@ -388,6 +388,11 @@ class PaintCurveCursor : Overlay {
           handles_.insert_preview = tmp_handles.insert_preview;
         }
       }
+
+      /* Deliberately one curve set, not one per stamped object: every target's local curve is the
+       * same WORLD curve, so drawing a secondary through its own matrix would paint the identical
+       * screen line (and duplicate every handle) a second time. The active object's target -- the
+       * document for the owner, its mirror for a secondary -- is the one copy to draw. */
     }
     else if (ed::sculpt_paint::ED_paint_curve_overlay_draws_brush_curve(
                  brush, state.active_tool_idname, state.is_space_v3d()))
@@ -560,7 +565,7 @@ class PaintCurveCursor : Overlay {
                               const float2 mval_region,
                               const bool is_curves_edit)
   {
-    ED_curve_patch_overlay_data_get(vc.obact, patch_overlay_);
+    ED_curve_patch_overlay_data_get_target(vc.obact, patch_overlay_);
     bool effects_silhouettes = false;
     /* A live Curve Patch session does not gate this: with the Curve Edit tool in the Paint display
      * group the user is choosing among ALL effects, also while one of them is being edited. The

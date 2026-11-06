@@ -788,6 +788,11 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
      * operator (`resume_mode_toggle`), by which point there is no session left and this
      * branch falls through to the ordinary exit. Returning here leaves the mode untouched.
      *
+     * A multi-object session publishes its one session pointer on EVERY stamped object, so the
+     * owner check below is what keeps this loop from asking once per object (or worse, committing
+     * the shared session through a secondary, which it refuses): the session ends ONCE, through
+     * its owner, before the per-object exit loop frees any target's PBVH.
+     *
      * This is the single interception point for every way out of the mode: Tab, the
      * header's mode dropdown and a workspace switch's automatic mode change all reach
      * sculpt-mode exit through this operator (`object_mode_op_string()`,
@@ -797,6 +802,10 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
       if ((ob->mode & mode_flag) == 0 || !ob->runtime->sculpt_session ||
           !ob->runtime->sculpt_session->curve_patch_session)
       {
+        continue;
+      }
+      if (ob->runtime->sculpt_session->curve_patch_session->owner != ob) {
+        /* A secondary's pointer does not own the session. */
         continue;
       }
       if (ob->runtime->sculpt_session->curve_patch_session->layer_material != nullptr) {

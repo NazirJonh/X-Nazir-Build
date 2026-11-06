@@ -1126,7 +1126,12 @@ bool curve_patch_layer_session_blocks_row(const CurvePatchSession &session,
 
 void curve_patch_layer_commit_live_session(bContext &C, Object &ob)
 {
-  curve_patch_commit_on_session_end(C, ob);
+  /* Commit through the session's OWNER: the session-ending commit refuses any object but the
+   * owner, and a modal event can arrive with a secondary target as the active object -- committing
+   * through \a ob then would strand the live session. */
+  const CurvePatchSession *session = ED_curve_patch_session_get(ob);
+  curve_patch_commit_on_session_end(
+      C, session != nullptr && session->owner != nullptr ? *session->owner : ob);
 }
 
 bool curve_patch_layer_session_blocks_row(const Object &ob, const MaterialPaintLayer &row)
@@ -1269,12 +1274,11 @@ static void curve_patch_layer_report_other_effect(wmOperator *op)
  * stack (the modal's Tab / swap-axis path does the same). */
 static void curve_patch_layer_session_changed(bContext &C, CurvePatchSession &session)
 {
-  Object &ob = *CTX_data_active_object(&C);
   curve_patch_layer_active_item_sync(session);
   curve_patch_undo_push(session);
   curve_patch_edit_status_set(&C, session);
-  curve_patch_restore_and_restamp(C, ob, session);
-  curve_patch_tag_viewports_redraw_after_edit(C, ob, session);
+  curve_patch_restore_and_restamp(C, session);
+  curve_patch_tag_viewports_redraw_after_edit(C, session);
 }
 
 /** Add a curve to the live document, placed under the view like the first one, without leaving the
@@ -1285,7 +1289,9 @@ static bool curve_patch_layer_session_curve_add(bContext &C,
                                                 MaterialPaintLayerCurvePatch &payload)
 {
   const ToolSettings *tool_settings = CTX_data_tool_settings(&C);
-  Object &ob = *CTX_data_active_object(&C);
+  /* The seeds are placed in the document's (owner's) object space; the active object can be a
+   * secondary target while this panel action runs. */
+  Object &ob = session.owner != nullptr ? *session.owner : *CTX_data_active_object(&C);
   if (tool_settings == nullptr || tool_settings->sculpt == nullptr) {
     return false;
   }

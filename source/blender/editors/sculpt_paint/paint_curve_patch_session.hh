@@ -7,7 +7,7 @@
 /** \file
  * \ingroup edsculpt
  *
- * Runtime state for one live Curve Patch (see Curve Patch Stroke design doc). Owned by
+ * Runtime state for one live Curve Patch. Owned by
  * `SculptSession::curve_patch_session`, sibling to `StrokeCache`/`filter::Cache`/`expand::Cache`.
  * Created right after the anchor stroke of a `BRUSH_STROKE_CURVE_PATCH` brush finishes; destroyed
  * on commit (Enter) or cancel (Esc). See `paint_curve_patch_session.cc` for the restore-then-
@@ -27,6 +27,7 @@
 #include "BLI_bit_vector.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_map.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -40,6 +41,7 @@
 
 #include "paint_curve_patch_document.hh"
 #include "paint_curve_patch_effect.hh"
+#include "paint_curve_patch_targets.hh"
 
 namespace blender {
 struct Brush;
@@ -53,10 +55,13 @@ struct PaintVector;
 struct ReportList;
 struct Scene;
 struct Sculpt;
+struct SculptSession;
 struct bContext;
 }  // namespace blender
 
 namespace blender::ed::sculpt_paint {
+
+struct StrokeCache;
 
 /** The next value of #CurvePatchSession::serial. Main thread only, like the sessions themselves. */
 uint64_t curve_patch_session_serial_next();
@@ -145,23 +150,307 @@ struct CurvePatchApplyState {
   BitVector<> all_touched_nodes;
 };
 
-/** A live Curve Patch editing session. Published on `SculptSession::curve_patch_session`. */
+/**
+ * One object a live Curve Patch session stamps, with everything describing ITS surface: the
+ * effect instance (one per object -- the snapshots, undo masks and canvas keys of a single effect
+ * describe a single mesh), the per-object bookkeeping against the live mesh, and the `StrokeCache`
+ * the symmetry machinery and the effect read.
+ *
+ * A session always has at least one target, the PRIMARY (`is_primary`, `targets[0]`): the object
+ * the document lives on, whose local space the control curves are authored in. A multi-object
+ * session adds one secondary target per additional object the curve reaches; a secondary mirrors
+ * the document's items into its own local space (see #mirror_items) instead of sharing them.
+ */
+struct CurvePatchObjectTarget {
+  /** The stamped object. Null marks a target detached mid-session (its object was deleted or left
+   * the mode); detached targets are skipped by every loop and removed lazily. */
+  Object *ob = nullptr;
+
+  /** Owned by the session while it lives: the primary's is the anchor stroke's cache taken over
+   * at the handoff, a secondary's the stand-in #curve_patch_session_add_target builds for it (the
+   * non-stroke entry points build the same kind of stand-in for the primary). Freed by the session
+   * teardown on every path. */
+  StrokeCache *cache = nullptr;
+
+  /** What this target writes and how it takes it back. Chosen once at target creation from the
+   * brush and this object's own configuration; never null on a registered target. */
+  std::unique_ptr<CurvePatchEffect> effect;
+
+  /** This target's texture binding, resolved against ITS local radius. Null for the primary, whose
+   * binding is the document's (`CurvePatchSession::doc.texture`); a secondary gets its own because
+   * the ribbon caps are lengths in the target's local units. */
+  std::unique_ptr<CurvePatchTextureBinding> texture;
+
+  /** Per-target bookkeeping against the live mesh (see #CurvePatchApplyState). The staleness
+   * counters and #CurvePatchApplyState::invalidated are per-target: one target whose mesh changed
+   * underneath it is skipped alone, and the others keep restoring / committing. */
+  CurvePatchApplyState apply;
+
+  /** The document's items carried into this target's own local space, SECONDARY targets only. The
+   * primary reads `doc.patches` directly and never duplicates the document.
+   *
+   * Index-parallel to #CurvePatchDocument::patches, which is also the stable identity: a mirror
+   * item at index N always describes the document item at index N. The curve, parameters and
+   * identity fields are re-derived when the document revision or either object matrix changes. */
+  Vector<CurvePatchItem> mirror_items;
+
+  /** Inputs the current #mirror_items were derived from. A re-stamp that changes neither the
+   * document nor either matrix reuses the mirror instead of copying every control curve again. */
+  uint64_t mirror_document_revision = 0;
+  float4x4 mirror_primary_to_world = float4x4::identity();
+  float4x4 mirror_target_world_to_object = float4x4::identity();
+
+  bool is_primary = false;
+
+  /** Whether the curve currently reaches this object (the reach test runs on every restamp). Only
+   * gates the geometry rebuild and the apply: the RESTORE runs for every valid target regardless,
+   * so an object the curve was dragged away from loses its previous stamp. */
+  bool in_reach = false;
+
+  /** Frozen `brush.curve_patch.face_set` request copied from the session at target creation (see
+   * #CurvePatchSession::use_face_set_on_commit). */
+  bool use_face_set_on_commit = false;
+
+  /** Whether the non-uniform-scale approximation was already reported for this target, so a live
+   * drag does not flood the report list on every restamp. */
+  bool reported_nonuniform_scale = false;
+
+  /** Whether the last restamp actually applied this target. Out-of-reach and empty targets are
+   * restored but not applied; they still need a redraw so the restored surface reaches the screen. */
+  bool applied_this_restamp = false;
+
+  /** The single predicate for "this target can still be restored, applied or committed". */
+  bool is_usable() const
+  {
+    return this->ob != nullptr && this->effect != nullptr && this->cache != nullptr &&
+           !this->apply.invalidated;
+  }
+};
+
+/**
+ * The per-target view the effects operate on: what used to be read off #CurvePatchSession (its
+ * apply state, its active item, its texture binding) plus the object the effect is writing. Built
+ * per call from a #CurvePatchObjectTarget by #CurvePatchSession::target_state; nothing here owns
+ * anything.
+ */
+struct CurvePatchTargetState {
+  /** The object this target stamps. */
+  Object &ob;
+  /** The target's own #StrokeCache -- the same one published on `ob.runtime->sculpt_session->cache`
+   * while the session lives. */
+  StrokeCache &cache;
+  /** The effect instance that writes this target. */
+  CurvePatchEffect &effect;
+  /** The target's own bookkeeping (see #CurvePatchApplyState). */
+  CurvePatchApplyState &apply;
+  /** The document items this target stamps: the document's own `patches` for the primary, the
+   * target's mirror for a secondary. Index-parallel to the document. */
+  MutableSpan<CurvePatchItem> items;
+  /** The shared document (active patch index). Never written through here. */
+  const CurvePatchDocument &doc;
+  /** This target's texture binding, in its own local units (see
+   * #CurvePatchObjectTarget::texture). */
+  const CurvePatchTextureBinding &texture;
+  /** Frozen face-set request of this target (see #CurvePatchObjectTarget::use_face_set_on_commit).
+   */
+  bool use_face_set_on_commit = false;
+  /**
+   * Whether this target's effect owns the session-level `ImageUndoStep` (see
+   * #CurvePatchSession::owns_image_undo_step): true for the primary target, false for secondary
+   * Image targets, which push their undo tiles into the step the owner opened without opening or
+   * closing it themselves. Only the Image effect reads it.
+   */
+  bool image_undo_step_owner = true;
+
+  /** The patch the modal editor acts on, of THIS target's items. Asserts the document is
+   * well-formed, like #CurvePatchDocument::active_item. */
+  CurvePatchItem &active_item()
+  {
+    BLI_assert(this->doc.has_active_item());
+    BLI_assert(this->items.index_range().contains(this->doc.active_patch));
+    return this->items[this->doc.active_patch];
+  }
+  const CurvePatchItem &active_item() const
+  {
+    BLI_assert(this->doc.has_active_item());
+    BLI_assert(this->items.index_range().contains(this->doc.active_patch));
+    return this->items[this->doc.active_patch];
+  }
+};
+
+/**
+ * The shared commit-time sculpt undo step of one session (`curve_patch_finish_commit()`'s local
+ * state). ONE step for every target of the session: the first target with content opens it with
+ * `undo::push_begin_ex()`, every later one extends it with `undo::push_begin_add_object()` (the
+ * only way to add an object to the same step -- a second `push_begin_ex()` would free the first's
+ * `step_init`), and one `undo::push_end_all_ex()` parks it for the committing operator's
+ * `OPTYPE_UNDO`, which is what makes the whole multi-object commit one Ctrl+Z. If no target has
+ * content, the step is never opened and `push_end_all_ex()` is never called.
+ */
+struct CurvePatchCommitStep {
+  /** Whether the shared step is currently open in the undo stack's `step_init`. */
+  bool open = false;
+  /** Whether ANY target's commit wants a face-set write, which forces the shared step into the
+   * stack instead of leaving it parked (a face-set step's own `push_begin_ex()` would otherwise
+   * free the parked step). Computed across all targets before the step is closed. */
+  bool face_set_follows = false;
+};
+
+/** A live Curve Patch editing session. Published on `SculptSession::curve_patch_session` -- of the
+ * owner object AND of every secondary target, so the effect action, the overlay and the teardown
+ * callbacks can find the one shared session from any participant. */
 struct CurvePatchSession {
   /** What the user edits: the control curves, the texture binding, the session-local undo stack.
    * Target-independent, so the shared editor can act on it without knowing this session owns it.
-   */
+   *
+   * Stays in the PRIMARY object's local space (the persisted `PaintVector` convention); the
+   * curves the secondary targets stamp are derived on every restamp -- see
+   * #CurvePatchObjectTarget::mirror_items. */
   CurvePatchDocument doc;
 
-  CurvePatchApplyState apply;
+  /** One state per stamped object; the primary -- the object the document lives on and the owner
+   * below -- is `[0]`. The set is NOT fixed: a Shift+drag of a control point onto another Sculpt
+   * Mode object appends that object through #curve_patch_session_add_target. The primary stays at
+   * `[0]`; an added target is appended at the end and owns its own cache. Never hold a reference
+   * or pointer into this vector across an append. */
+  Vector<CurvePatchObjectTarget> targets;
 
-  /** What this session writes, and how it takes it back: the pre-patch snapshot, both application
-   * phases, the restore, the commit-time undo step. Chosen once at session start from the active
-   * brush (see #curve_patch_effect_create); never null on a published session, because
-   * `curve_patch_begin_editing()` refuses to publish one without it.
-   *
-   * The target-agnostic half of a re-stamp -- where the patch reaches and how strongly -- lives in
-   * `paint_curve_patch_sampler.hh` instead and is shared by every effect. */
-  std::unique_ptr<CurvePatchEffect> effect;
+  /** The object this session belongs to: its document, its view context, its layer row. Teardown
+   * (`curve_patch_session_free`, the mode-exit commit, the modal editor) goes through the owner;
+   * the same session pointer published on a secondary only ever detaches that one target. */
+  Object *owner = nullptr;
+
+  /** True once the session-level `ImageUndoStep` was opened through the PRIMARY target's effect
+   * (#CurvePatchEffect::session_undo_begin): exactly one owner per session, even with several
+   * Image targets, because the global image undo stack holds a single in-flight step. Secondary
+   * Image effects push their tiles into that step without opening or closing it (their
+   * #CurvePatchTargetState::image_undo_step_owner is false). */
+  bool owns_image_undo_step = false;
+
+  /** The effect kind every target of this session writes. One kind per SESSION on purpose: the
+   * commit orchestrator builds one shared undo step, and mixing undo systems (an Image target
+   * beside a Relief one) would leave the secondary's pixels with no owner for their step. A
+   * candidate object that would resolve to a different kind is filtered out at target creation
+   * (skip + warn). */
+  CurvePatchEffectType effect_type = CurvePatchEffectType::Relief;
+
+  /** The primary target's effect. Null only on a half-built session (see #curve_patch_session_
+   * publish's refusal contract); every published session has one. */
+  CurvePatchEffect &effect()
+  {
+    BLI_assert(!this->targets.is_empty() && this->targets[0].effect != nullptr);
+    return *this->targets[0].effect;
+  }
+  const CurvePatchEffect &effect() const
+  {
+    BLI_assert(!this->targets.is_empty() && this->targets[0].effect != nullptr);
+    return *this->targets[0].effect;
+  }
+
+  /** The primary target. Asserts the invariant `targets[0].is_primary` every publish maintains. */
+  CurvePatchObjectTarget &primary_target()
+  {
+    BLI_assert(!this->targets.is_empty() && this->targets[0].is_primary);
+    return this->targets[0];
+  }
+  const CurvePatchObjectTarget &primary_target() const
+  {
+    BLI_assert(!this->targets.is_empty() && this->targets[0].is_primary);
+    return this->targets[0];
+  }
+
+  /** Whether the primary target carries its published effect -- the usual "live enough to stamp"
+   * gate for callers that resolve the session from a published pointer and must tolerate a
+   * half-built one (the handoff before the effect exists, a session mid-teardown). */
+  bool has_primary_effect() const
+  {
+    return !this->targets.is_empty() && this->targets[0].effect != nullptr;
+  }
+
+  /** This session's target for \a ob, or null. The owner's target is found by identity; a
+   * secondary by its registered object. Null when \a ob is not stamped by this session. */
+  CurvePatchObjectTarget *target_for(Object &ob)
+  {
+    for (CurvePatchObjectTarget &target : this->targets) {
+      if (target.ob == &ob) {
+        return &target;
+      }
+    }
+    return nullptr;
+  }
+  const CurvePatchObjectTarget *target_for(const Object &ob) const
+  {
+    for (const CurvePatchObjectTarget &target : this->targets) {
+      if (target.ob == &ob) {
+        return &target;
+      }
+    }
+    return nullptr;
+  }
+
+  /** Visit every target that passes #CurvePatchObjectTarget::is_usable. */
+  void for_each_usable_target(const FunctionRef<void(CurvePatchObjectTarget &)> fn)
+  {
+    for (CurvePatchObjectTarget &target : this->targets) {
+      if (target.is_usable()) {
+        fn(target);
+      }
+    }
+  }
+  void for_each_usable_target(const FunctionRef<void(const CurvePatchObjectTarget &)> fn) const
+  {
+    for (const CurvePatchObjectTarget &target : this->targets) {
+      if (target.is_usable()) {
+        fn(target);
+      }
+    }
+  }
+
+  /** The document items \a target stamps: the document's own patches for the primary, the target's
+   * mirror for a secondary. Index-parallel to #CurvePatchDocument::patches either way. */
+  MutableSpan<CurvePatchItem> items_for(CurvePatchObjectTarget &target)
+  {
+    if (target.is_primary) {
+      return this->doc.patches;
+    }
+    return target.mirror_items;
+  }
+  Span<CurvePatchItem> items_for(const CurvePatchObjectTarget &target) const
+  {
+    if (target.is_primary) {
+      return this->doc.patches;
+    }
+    return target.mirror_items;
+  }
+
+  /** Build the per-target view the effect methods take. */
+  CurvePatchTargetState target_state(CurvePatchObjectTarget &target)
+  {
+    BLI_assert(target.ob != nullptr && target.cache != nullptr && target.effect != nullptr);
+    const CurvePatchTextureBinding &texture = target.texture ? *target.texture :
+                                                               this->doc.texture;
+    return CurvePatchTargetState{*target.ob,
+                                 *target.cache,
+                                 *target.effect,
+                                 target.apply,
+                                 this->items_for(target),
+                                 this->doc,
+                                 texture,
+                                 target.use_face_set_on_commit,
+                                 target.is_primary};
+  }
+
+  /** Whether at least one target can still be restored, applied or committed. A broken primary
+   * does not cancel the whole session while a secondary remains usable. */
+  bool has_valid_target() const
+  {
+    for (const CurvePatchObjectTarget &target : this->targets) {
+      if (target.is_usable()) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   /** Owned copy of the anchor stroke's `ViewContext`, set once in `curve_patch_start_from_anchor`.
    * `StrokeCache::vc` is a non-owning pointer that normally points into the interactive stroke's
@@ -169,7 +458,7 @@ struct CurvePatchSession {
    * that stroke's operator has already finished and torn its `ViewContext` down, `StrokeCache::vc`
    * is repointed at this member instead so every `curve_patch_restore_and_restamp()` re-stamp
    * (which reads it via `calc_local_from_screen()`/`cache->vc`) dereferences valid memory for the
-   * whole lifetime of the patch. */
+   * whole lifetime of the patch. Shared by every target's cache. */
   ViewContext view_context = {};
 
   /** Suppresses repeating the window-cap warning: `curve_patch_restore_and_restamp()` runs on
@@ -343,13 +632,15 @@ void curve_patch_restore_and_restamp(const Scene &scene,
                                      const Depsgraph &depsgraph,
                                      Sculpt &sd,
                                      PaintModeSettings &paint_mode_settings,
-                                     Object &ob,
                                      CurvePatchSession &session,
                                      ReportList *reports);
 
 /** #curve_patch_restore_and_restamp with everything resolved from the context. The form every
- * interactive caller wants; the explicit one above exists for callers that have no context. */
-void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchSession &session);
+ * interactive caller wants; the explicit one above exists for callers that have no context. The
+ * session's own primary target names the object whose space the document lives in -- no explicit
+ * object is passed, since a modal event can arrive with a secondary as the active object and the
+ * document must resolve through the owner either way. */
+void curve_patch_restore_and_restamp(bContext &C, CurvePatchSession &session);
 
 /**
  * Record the CURRENT state as a new step on the session's own undo stack (see
@@ -360,13 +651,32 @@ void curve_patch_restore_and_restamp(bContext &C, Object &ob, CurvePatchSession 
  * the Transform system's G/R/S handle drags. */
 void curve_patch_undo_push(CurvePatchSession &patch);
 
-/** Restores every vertex in the effect's snapshot and does *not* re-stamp. Used for Esc-cancel. */
-void curve_patch_restore_only(Object &ob, const CurvePatchSession &session);
+/**
+ * Restores every VALID target's snapshot and does *not* re-stamp. Used for Esc-cancel and for the
+ * session-end discard/commit paths. A target whose mesh changed underneath it (its own
+ * `CurvePatchApplyState::invalidated` guard) is skipped -- writing its snapshot back would put
+ * stale values into an unrelated mesh -- while the other targets still restore.
+ */
+void curve_patch_restore_only(CurvePatchSession &session);
+
+/** Whether \a target's mesh still has the topology its snapshot was keyed against. */
+bool curve_patch_apply_target_changed(Object &ob, const CurvePatchObjectTarget &target);
+
+/** Free one target's stroke cache and clear the SculptSession pointer that published it. */
+void curve_patch_stroke_cache_free(SculptSession *ss, StrokeCache *cache);
+
+/** Tag the layer controls UI so their polling re-evaluates the session lock. */
+void curve_patch_session_tag_layer_ui(Object &ob);
+
+/** Mark a stamped mesh for an evaluated-mesh republish. Non-mesh objects are ignored. */
+void curve_patch_tag_target_mesh_dirty(Object &ob);
 
 /**
- * Commit a live patch, as an Enter-commit would, because the `SculptSession` holding it is about
- * to be destroyed. Returns true when the patch was actually written; no-op returning false when no
- * patch is live. Frees the session and the `SculptSession::cache` it took over.
+ * Commit a live patch -- EVERY target of it -- as an Enter-commit would, because the `SculptSession`
+ * holding the session is about to be destroyed. Returns true when the patch was actually written;
+ * no-op returning false when no patch is live or when \a ob is not the session's owner (a
+ * secondary object's session pointer must never tear the shared session down). Frees the session
+ * and every target's `StrokeCache`.
  *
  * Call from a mode-exit path that still has a `bContext` and has not torn anything down yet -- the
  * final re-stamp needs an evaluated depsgraph, and the undo step this pushes is left parked for
@@ -379,8 +689,10 @@ void curve_patch_restore_only(Object &ob, const CurvePatchSession &session);
 bool curve_patch_commit_on_session_end(bContext &C, Object &ob);
 
 /**
- * Discard a live patch, as an Esc-cancel would, because the `SculptSession` holding it is about to
- * be destroyed. No-op when no patch is live.
+ * Discard a live patch -- EVERY target of it -- as an Esc-cancel would, because the `SculptSession`
+ * holding the session is about to be destroyed. No-op when no patch is live or when \a ob is not
+ * the session's owner (see #curve_patch_commit_on_session_end); the owner's own teardown callback
+ * detaches a single secondary instead.
  *
  * The last-resort counterpart to #curve_patch_commit_on_session_end, for the teardown paths that
  * have no `bContext` to commit through. Deliberately still called on the paths that DO commit
@@ -391,8 +703,10 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob);
  * that modal commits or cancels, but leaving sculpt mode -- and `BKE_object_free` -- destroy the
  * sculpt session without consulting the modal. #SculptSession's destructor cannot `MEM_delete` it:
  * `CurvePatchSession` is an editor type that blenkernel only forward-declares. Publish therefore
- * registers this function on `SculptSession::free_curve_patch_session`, and
- * #BKE_sculptsession_free invokes it whenever the pointer is still live.
+ * registers this function on `SculptSession::free_curve_patch_session` -- on the owner (full
+ * discard) and on every secondary target (detach of that one target, see
+ * #curve_patch_target_detach_on_session_end) -- and #BKE_sculptsession_free invokes it whenever
+ * the pointer is still live.
  *
  * Cancel rather than commit is deliberate. Committing needs a `bContext` to re-stamp and push an
  * undo step, and the session is also freed from paths that have none -- object deletion
@@ -403,12 +717,13 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob);
 void curve_patch_discard_on_session_end(Object &ob);
 
 /**
- * Free `SculptSession::cache` and the Curve Patch session itself, and clear both pointers plus
- * the teardown callback (#SculptSession::free_curve_patch_session). The shared tail of every path
- * that ends a live patch -- the modal's own commit/cancel, #curve_patch_commit_on_session_end,
- * #curve_patch_discard_on_session_end -- once that path's own restore/re-stamp/commit has already
- * run. Requires a published session (`ob.runtime->sculpt_session->curve_patch_session !=
- * nullptr`); callers already checked that to reach this point.
+ * Free every target's `StrokeCache` and the Curve Patch session itself, and clear the published
+ * pointers plus the teardown callbacks (#SculptSession::free_curve_patch_session) of every object
+ * the session was published on. The shared tail of every path that ends a live patch -- the
+ * modal's own commit/cancel, #curve_patch_commit_on_session_end, #curve_patch_discard_on_session_
+ * end -- once that path's own restore/re-stamp/commit has already run. Requires a published
+ * session on \a ob, which must be the session's OWNER; callers already checked that to reach this
+ * point.
  */
 void curve_patch_session_free(Object &ob);
 
@@ -418,36 +733,48 @@ void curve_patch_session_free(Object &ob);
  */
 void curve_patch_store_on_mode_exit(Object &ob);
 
+/** Whether any usable target has data for the shared sculpt undo step. Image canvases keep their
+ * own undo system and relief/color/mask targets with an empty snapshot answer false. */
+bool curve_patch_session_has_commit_content(CurvePatchSession &session);
+
 /**
- * Finish a committed Curve Patch edit: close the patch's position undo step, and -- if the brush's
- * `curve_patch.face_set` flag is set and the relief actually raised anything -- assign a fresh
- * face set to the raised faces in an undo step of its own.
+ * Finish a committed Curve Patch edit: open ONE shared sculpt undo step for the whole session
+ * (#CurvePatchCommitStep), store every valid target's data into it
+ * (#CurvePatchEffect::commit_push_nodes), park it for the calling operator's `OPTYPE_UNDO` -- and,
+ * if the brush's `curve_patch.face_set` flag is set and any relief actually raised anything,
+ * assign ONE shared face set id to the raised faces of every target in a second, shared step.
  *
  * Call ONCE, from the commit branch of `SCULPT_OT_curve_patch_edit`, INSTEAD of a bare
  * `undo::push_end()`, and after the final-quality re-stamp so the threshold is measured against
  * the smoothed profile the user will actually keep. Never called on cancel.
  *
- * Closing the undo step belongs here rather than in the caller because HOW it must be closed
- * depends on whether a face set follows: an undo step carries exactly one `undo::Type`, so the
- * face set needs a second step, and opening one would destroy the position step unless that step
- * was force-pushed first (see the implementation). When no face set follows, the position step
- * must be left parked instead, so that the operator's own `OPTYPE_UNDO` push is the one that files
- * it and the edit costs exactly one Ctrl+Z. That is only knowable after the raised faces have been
- * computed, which is why the implementation computes them before closing the step.
+ * One step per SESSION, not per target: `undo::push_begin_ex()` frees the previous `step_init`, so
+ * a per-target loop of opens would leave only the last target undoable. The first target with
+ * content opens the step (`undo::push_begin_ex`), the rest extend it
+ * (`undo::push_begin_add_object`), and a single `undo::push_end_all_ex(false, false)` parks it --
+ * so the whole multi-object edit costs exactly one Ctrl+Z.
+ *
+ * Closing the shared step belongs here rather than in the caller because HOW it must be closed
+ * depends on whether a face-set step follows: an undo step carries exactly one `undo::Type`, so
+ * the face set needs a second step, and opening one would destroy the position step unless that
+ * step was force-pushed first (see the implementation). When no face set follows, the position
+ * step must be left parked instead, so that the operator's own `OPTYPE_UNDO` push is the one that
+ * files it and the edit costs exactly one Ctrl+Z. That is only knowable after the raised faces
+ * have been computed for every target, which is why the implementation computes them before
+ * closing the step.
  *
  * "Raised" is measured as displacement from the effect's snapshot, thresholded at a fraction of
- * this patch's own maximum displacement -- relative rather than absolute, because displacement is
+ * that target's own maximum displacement -- relative rather than absolute, because displacement is
  * in scene units and would otherwise behave differently on differently scaled objects.
  */
 void curve_patch_finish_commit(const Scene &scene,
                                const Depsgraph &depsgraph,
-                               Object &ob,
-                               const CurvePatchSession &session);
+                               CurvePatchSession &session);
 
-/** #curve_patch_finish_commit plus the finished-stroke redraw an interactive commit needs. The
- * headless form above deliberately issues none: a caller with no window manager has nothing to
- * repaint, and tags the ID itself instead. */
-void curve_patch_finish_commit(bContext &C, Object &ob, const CurvePatchSession &session);
+/** #curve_patch_finish_commit plus the finished-stroke redraw an interactive commit needs, for
+ * every target the session stamped. The headless form above deliberately issues none: a caller
+ * with no window manager has nothing to repaint, and tags the ID itself instead. */
+void curve_patch_finish_commit(bContext &C, CurvePatchSession &session);
 
 /**
  * Plane the patch is projected onto, fitted to the control curve itself.
@@ -462,8 +789,12 @@ float3 curve_patch_plane_normal_from_curve(const bke::CurvesGeometry &curve,
 
 /**
  * Publish a Curve Patch session right after a `BRUSH_STROKE_CURVE_PATCH` anchor stroke finishes.
- * Takes over ownership of the just-finished stroke's `SculptSession::cache`; the caller must not
- * tear that down itself when this is invoked.
+ * Takes over ownership of the just-finished stroke's `SculptSession::cache` of \a ob; the caller
+ * must not tear it down itself when this is invoked. The anchor dab is restored (undone) before
+ * anything is stamped, so a refusal leaves the mesh pristine.
+ *
+ * The session starts single-object: secondary targets join later through the modal's Shift+drag
+ * gesture (#curve_patch_session_add_target), never from the anchor stroke.
  *
  * Returns true when a session was published on the object. The caller is responsible for launching
  * `SCULPT_OT_curve_patch_edit` -- see #curve_patch_begin_editing in `paint_curve_patch_session.cc`
@@ -474,8 +805,8 @@ float3 curve_patch_plane_normal_from_curve(const bke::CurvesGeometry &curve,
  * time it returns that transaction describes no net change, and the caller discards it
  * (`SculptPaintStroke::done()`, `mesh/sculpt.cc`). The editor records its own single undo step
  * when the patch is committed. Leaving a transaction open for the modal's whole lifetime is what
- * let any unrelated undo push in the application adopt or free it. See `paint_curve_patch_edit.cc`
- * (Stage 04) for the modal editor implementation.
+ * let any unrelated undo push in the application adopt or free it. The modal editor lives in
+ * `paint_curve_patch_edit.cc`.
  *
  * When the brush already owns an OBJECT-SPACE paint curve (`use_3d_space`) with at least two points
  * on a spline (as left behind by Stroke Method: Curve), that curve is adopted as the control curve
@@ -483,8 +814,11 @@ float3 curve_patch_plane_normal_from_curve(const bke::CurvesGeometry &curve,
  * never adopted: its points are region pixels, not object-space coordinates, so seeding from the
  * anchor is the only way to get a patch at the click.
  */
-bool curve_patch_start_from_anchor(
-    const Depsgraph &depsgraph, Object &ob, Sculpt &sd, const Brush &brush, const ViewContext &vc);
+bool curve_patch_start_from_anchor(const Depsgraph &depsgraph,
+                                   Object &ob,
+                                   Sculpt &sd,
+                                   const Brush &brush,
+                                   const ViewContext &vc);
 
 /**
  * Publish a Curve Patch session from a persisted Stack Layers row: adopt the curve items of the

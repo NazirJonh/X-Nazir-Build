@@ -5,13 +5,17 @@
 /** \file
  * \ingroup edsculpt
  *
- * What a Curve Patch session writes INSIDE A SCULPT OBJECT, and how it takes it back.
+ * What ONE TARGET of a Curve Patch session writes inside a sculpt object, and how it takes it
+ * back.
  *
- * Not the general abstraction of a Curve Patch target, despite the name: every method here takes
- * an `Object &` and a #CurvePatchSession, `element_num()` is measured against `Mesh::verts_num`,
+ * One effect instance writes one attribute of one target object: every method here operates on a
+ * #CurvePatchTargetState (an `Object &` plus that object's apply state, items and cache -- one
+ * element of `CurvePatchSession::targets`), `element_num()` is measured against `Mesh::verts_num`,
  * `restore()` consumes a PBVH node mask, and `apply_pass()` is driven by
- * `do_symmetrical_brush_actions()`. What varies between these effects is which ATTRIBUTE of one
- * sculpt object is written -- positions, mask, color, texture pixels -- not which target.
+ * `do_symmetrical_brush_actions()`. What varies between these effects is which ATTRIBUTE of that
+ * one sculpt object is written -- positions, mask, color, texture pixels. Multi-object sessions
+ * are not an effect concern: a session holds one effect instance per target, and the session
+ * (`paint_curve_patch_session.hh`) is what fans a re-stamp, a restore and a commit out over them.
  *
  * A new target that is not a sculpt object (the flat canvas is the first) implements
  * #CurvePatchHost instead and writes in whatever way suits it; the seam between the two is one
@@ -30,6 +34,9 @@
 #include <memory>
 #include <optional>
 
+#include "BLI_assert.h"
+#include "BLI_index_mask.hh"
+
 #include "paint_curve_patch_profile.hh"
 
 namespace blender {
@@ -45,14 +52,17 @@ namespace blender::ed::sculpt_paint {
 
 struct CurvePatchItem;
 struct CurvePatchSession;
+/** Per-target view the effects operate on; defined in `paint_curve_patch_session.hh` next to the
+ * target state it views. */
+struct CurvePatchTargetState;
 /* Opaque: defined in `mesh/sculpt_intern.hh`, which this header deliberately does not pull in --
  * only the enumeration's identity is needed here. */
 enum class UpdateType;
 
 /** Which target a Curve Patch session writes to.
  *
- * Split out of the factory so the choice can be stated rather than inferred: the Python API of
- * Stage 5+ selects an effect explicitly, whereas the editor infers it from the active brush. */
+ * Split out of the factory so the choice can be stated rather than inferred: a scripted caller
+ * selects an effect explicitly, whereas the editor infers it from the active brush. */
 enum class CurvePatchEffectType : int8_t {
   Relief = 0,
   Color = 1,
@@ -93,7 +103,7 @@ class CurvePatchEffect {
    * Write the snapshot back. Runs FIRST in every restamp, before the spline rebuild, and
    * consumes the previous restamp's `CurvePatchApplyState::last_restamp_nodes`.
    */
-  virtual void restore(Object &ob, const CurvePatchSession &patch) = 0;
+  virtual void restore(CurvePatchTargetState &target) = 0;
 
   /**
    * Immediately after #restore, before anything is rebuilt or written: adopt whatever the
@@ -116,7 +126,7 @@ class CurvePatchEffect {
    * whatever input the sampler and the write step will read. Relief recomputes vertex normals
    * here; an effect that neither reads nor invalidates them does nothing.
    */
-  virtual void begin_restamp(const Depsgraph &depsgraph, Object &ob, CurvePatchSession &patch) = 0;
+  virtual void begin_restamp(const Depsgraph &depsgraph, CurvePatchTargetState &target) = 0;
 
   /**
    * Both phases for one symmetry pass of ONE patch: gather in parallel, then apply serially.
@@ -124,35 +134,69 @@ class CurvePatchEffect {
    * patch within that pass; the serial half is the sole writer of
    * `CurvePatchApplyState::pass_weight_accum` and of the target data.
    *
-   * `patch` carries what is shared with the whole session (texture binding, apply state); `item`
-   * is the one patch this call writes. The passes of one patch run back to back and average
-   * (symmetry); a patch stamped later, `CurvePatchApplyState::patch_rank` higher, is composited
-   * over the earlier ones -- see #curve_patch_blend_over. Relief and Mask composite a scalar,
-   * Color and Image composite the pre-multiplied color and its coverage, so a lower curve shows
-   * through wherever an upper one is partially transparent.
+   * `target` carries what the whole target shares (its apply state, its items, the document's
+   * texture binding); `item` is the one patch this call writes. The passes of one patch run back
+   * to back and average (symmetry); a patch stamped later, `CurvePatchApplyState::patch_rank`
+   * higher, is composited over the earlier ones -- see #curve_patch_blend_over. Relief and Mask
+   * composite a scalar, Color and Image composite the pre-multiplied color and its coverage, so a
+   * lower curve shows through wherever an upper one is partially transparent.
    */
   virtual void apply_pass(const Depsgraph &depsgraph,
-                          Object &ob,
                           const Brush &brush,
-                          CurvePatchSession &patch,
+                          CurvePatchTargetState &target,
                           const CurvePatchItem &item) = 0;
 
   /** After all passes: whatever finishing work this target needs (relief smooths its profile).
    * The viewport flush that used to live here is issued by the session instead -- see
    * #update_type. */
-  virtual void end_restamp(Object &ob, CurvePatchSession &patch) = 0;
+  virtual void end_restamp(CurvePatchTargetState &target) = 0;
 
   /**
-   * Fold the session into the real undo stack.
-   *
-   * `scene` and `depsgraph` are passed explicitly rather than fetched from a `bContext`: an effect
-   * must be usable from a caller that has no window manager at all, which is what the headless
-   * apply path of Stage 4 needs. Not every implementation reads them.
+   * Whether committing this target has anything to store into the shared sculpt undo step (see
+   * #CurvePatchCommitStep). Drives whether the commit orchestrator opens / extends the step for
+   * this target at all. The image canvas keeps its own undo system and stores nothing here.
    */
-  virtual void commit(const Scene &scene,
-                      const Depsgraph &depsgraph,
-                      Object &ob,
-                      const CurvePatchSession &patch) = 0;
+  virtual bool commit_has_content(const CurvePatchTargetState &target) const = 0;
+
+  /**
+   * Whether this target's commit wants a face-set write, computed BEFORE the shared step opens --
+   * the answer (over every target) decides whether the shared step is forced into the stack or
+   * left parked (see #CurvePatchCommitStep::face_set_follows). Relief only; the returned masks
+   * must stay alive through #commit_face_set via \a memory.
+   */
+  virtual bool commit_wants_face_set(CurvePatchTargetState & /*target*/,
+                                     IndexMaskMemory & /*memory*/,
+                                     IndexMask & /*r_face_mask*/,
+                                     IndexMask & /*r_node_mask*/)
+  {
+    return false;
+  }
+
+  /**
+   * Store this target's undo data into the OPEN shared sculpt undo step of its session (see
+   * #CurvePatchCommitStep). The step is opened / extended by the session's commit orchestrator
+   * (`undo::push_begin_ex` / `undo::push_begin_add_object`) and parked once for the whole session
+   * by `undo::push_end_all_ex(false, false)` -- effects must NOT open or close it themselves.
+   *
+   * \a depsgraph is passed explicitly rather than fetched from a `bContext`: an effect must be
+   * usable from a caller that has no window manager at all, which is what the headless apply path
+   * needs.
+   */
+  virtual void commit_push_nodes(const Depsgraph &depsgraph, CurvePatchTargetState &target) = 0;
+
+  /**
+   * Write this target's raised faces into the OPEN shared face-set undo step, under the
+   * session-shared face set id (every target of the commit writes the SAME id, so the multi-object
+   * commit stays one Ctrl+Z). Relief only; the face-set step itself is opened / parked by the
+   * commit orchestrator, exactly like the position step above.
+   */
+  virtual void commit_face_set(CurvePatchTargetState & /*target*/,
+                               int /*face_set_id*/,
+                               const IndexMask & /*face_mask*/,
+                               const IndexMask & /*node_mask*/)
+  {
+    BLI_assert_unreachable();
+  }
 
   /**
    * Exchange the live preview with the pre-patch snapshot for every snapshotted element of the
@@ -195,7 +239,7 @@ class CurvePatchEffect {
  * any snapshot to key into.
  *
  * Split from #curve_patch_effect_create so a caller can override the choice instead of inferring
- * it: the Python API of Stage 5+ names the effect outright.
+ * it: a scripted caller names the effect outright.
  */
 std::optional<CurvePatchEffectType> curve_patch_effect_type_for_brush(
     const Brush &brush, const Paint &paint, Object &ob, PaintModeSettings &paint_mode_settings);

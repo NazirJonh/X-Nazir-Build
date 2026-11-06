@@ -26,6 +26,7 @@
 
 #include "BLT_translation.hh"
 
+#include "ED_curve_patch.hh"
 #include "ED_screen.hh"
 
 #include "UI_resources.hh"
@@ -60,8 +61,14 @@ static float curve_patch_angle_drag_sign(bContext &C,
   const VArray<float3> normals = *attrs.lookup_or_default<float3>(
       bke::CURVE_PATCH_ATTR_SURFACE_NORMAL, bke::AttrDomain::Point, float3(0.0f, 0.0f, 1.0f));
   float3 normal = normals[point_index];
+  /* The surface normal attribute is stored in the document's (owner's) object space: project it
+   * through the OWNER's matrix, not the active object's -- a modal event can arrive with a
+   * secondary target as the active object, whose matrix would fold the wrong basis in. */
   if (const Object *ob = CTX_data_active_object(&C)) {
-    normal = math::transform_direction(ob->object_to_world(), normal);
+    const blender::ed::sculpt_paint::CurvePatchSession *session = ED_curve_patch_session_get(*ob);
+    const Object *owner =
+        session != nullptr ? ED_curve_patch_session_owner(session) : nullptr;
+    normal = math::transform_direction((owner != nullptr ? owner : ob)->object_to_world(), normal);
   }
   const float3 view_dir(
       -rv3d->viewinv[2][0], -rv3d->viewinv[2][1], -rv3d->viewinv[2][2]);
@@ -651,7 +658,16 @@ bool CurvePatchCurveEditor::drag_apply_move(bContext &C,
   }
 
   if (dragging_point_) {
-    adapter.drag_point_apply(C, curve, active_point, point_initial_, drag_start_mval_, mval);
+    /* Shift turns a point drag into the multi-object targeting gesture in spaces that have other
+     * objects to target (3D Sculpt Mode); the flat canvas ignores the flag. Not Ctrl: that is the
+     * snap-toggle modifier of the surface placement the drag already goes through. */
+    adapter.drag_point_apply(C,
+                             curve,
+                             active_point,
+                             point_initial_,
+                             drag_start_mval_,
+                             mval,
+                             (event.modifier & KM_SHIFT) != 0);
     host.restamp(C);
     return true;
   }

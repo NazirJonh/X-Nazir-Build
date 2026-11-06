@@ -412,10 +412,14 @@ void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
      * Grids/CCG has no snapshot (see #curve_patch_session_publish), so the curve keeps the
      * positions and normals it already has from the control points above. */
     if (r_geometry.surface.ready) {
+      /* The shrinkwrap overwrites the normals, so the orientation filter (multi-object sessions)
+       * reads the control curve's own normals from a copy. */
+      const Array<float3> reference_normals(evaluated_normals);
       curve_patch_surface_shrinkwrap(r_geometry.surface,
                                      params.radius,
                                      evaluated_positions.as_mutable_span(),
-                                     evaluated_normals.as_mutable_span());
+                                     evaluated_normals.as_mutable_span(),
+                                     reference_normals);
       curve_patch_surface_fill_invalid_normals(evaluated_normals.as_mutable_span(),
                                                params.plane_normal);
     }

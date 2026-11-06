@@ -194,23 +194,20 @@ class ImageColorEffect : public CurvePatchEffect {
 
   void session_undo_begin() override;
   int64_t element_num(Object &ob) const override;
-  void restore(Object &ob, const CurvePatchSession &patch) override;
+  void restore(CurvePatchTargetState &target) override;
   void sync_targets(Object &ob) override;
-  void begin_restamp(const Depsgraph &depsgraph, Object &ob, CurvePatchSession &patch) override;
+  void begin_restamp(const Depsgraph &depsgraph, CurvePatchTargetState &target) override;
   void apply_pass(const Depsgraph &depsgraph,
-                  Object &ob,
                   const Brush &brush,
-                  CurvePatchSession &patch,
+                  CurvePatchTargetState &target,
                   const CurvePatchItem &item) override;
   UpdateType update_type() const override
   {
     return UpdateType::Image;
   }
-  void end_restamp(Object &ob, CurvePatchSession &patch) override;
-  void commit(const Scene &scene,
-              const Depsgraph &depsgraph,
-              Object &ob,
-              const CurvePatchSession &patch) override;
+  void end_restamp(CurvePatchTargetState &target) override;
+  bool commit_has_content(const CurvePatchTargetState &target) const override;
+  void commit_push_nodes(const Depsgraph &depsgraph, CurvePatchTargetState &target) override;
   int64_t snapshot_size() const override;
   /* This effect blends through `TileSnapshot::accum`, not the shared map the default counts, so
    * `displaced` would read zero without this. See #painted_slots_. */
@@ -747,8 +744,10 @@ void write_pixel_run(MutableSpan<float4> values,
   }
 }
 
-void ImageColorEffect::restore(Object &ob, const CurvePatchSession & /*patch*/)
+void ImageColorEffect::restore(CurvePatchTargetState &target)
 {
+  Object &ob = target.ob;
+
   /* No `element_num` check of its own -- `curve_patch_restore_only()` performs it for every
    * caller. The canvas check below is NOT redundant with it: a swapped canvas changes no mesh
    * count.
@@ -983,10 +982,10 @@ void ImageColorEffect::sync_targets(Object &ob)
    * re-targeting between `restore()` and the re-stamp is safe. */
 }
 
-void ImageColorEffect::begin_restamp(const Depsgraph &depsgraph,
-                                     Object &ob,
-                                     CurvePatchSession & /*patch*/)
+void ImageColorEffect::begin_restamp(const Depsgraph &depsgraph, CurvePatchTargetState &target)
 {
+  Object &ob = target.ob;
+
   /* Invalidate every tile's cross-pass accumulator for the restamp that starts here, the reset
    * `pass_weight_accum.clear()` performs for the other effects. Bumped BEFORE the early returns
    * below so a restamp that bails cannot leave the next one blending against its leftovers.
@@ -1098,11 +1097,12 @@ struct ChunkWrite {
 };
 
 void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
-                                  Object &ob,
                                   const Brush &brush,
-                                  CurvePatchSession &patch,
+                                  CurvePatchTargetState &target,
                                   const CurvePatchItem &item)
 {
+  Object &ob = target.ob;
+
   /* Guarded the same way `restore()`, `begin_restamp()` and `end_restamp()` are: nothing about the
    * effect interface promises a live session and stroke cache on every call. */
   SculptSession *ss_ptr = ob.runtime->sculpt_session;
@@ -1220,8 +1220,8 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * iteration for Mode=`Image`, one per enabled Principled channel for Mode=`Material`. */
   const StringRef uv_map_name =
       BKE_paint_canvas_uvmap_name_get(paint_mode_settings_, &ob).value_or("");
-  for (paint::image::ImagePaintTarget &target : cache.image_paint_targets) {
-  ImageData &image_data = *target.data;
+  for (paint::image::ImagePaintTarget &paint_target : cache.image_paint_targets) {
+  ImageData &image_data = *paint_target.data;
   if (image_data.image == nullptr) {
     continue;
   }
@@ -1253,16 +1253,18 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * direction and a scalar channel carries a single value, so neither can take an RGB from it.
    * The channel's own SOURCE is a separate mechanism and does reach Normal -- see
    * `target_paints_normal_source`. Resolved per canvas because it is a property of the channel. */
-  const bool target_paints_color = !target.is_normal_channel &&
-                                   (target.is_color_channel || !target.is_material_channel);
-  const eMaterialPaintChannel target_channel = target.channel;
-  const bool target_has_source = target.is_material_channel && channel_sources.has_value() &&
+  const bool target_paints_color = !paint_target.is_normal_channel &&
+                                   (paint_target.is_color_channel ||
+                                    !paint_target.is_material_channel);
+  const eMaterialPaintChannel target_channel = paint_target.channel;
+  const bool target_has_source = paint_target.is_material_channel &&
+                                 channel_sources.has_value() &&
                                  channel_sources->has_usable_source(target_channel);
   /* A Normal source is neither a color nor a scalar: sampling it as either would write a flat
    * grey over the directions the map encodes. It takes its own path, which needs the destination
    * tangent basis per UV primitive -- the same `tri_tangent` / `bitangent_sign` pair
    * `do_paint_pixels()` builds (`mesh/sculpt_paint_image.cc`). */
-  const bool target_paints_normal_source = target.is_normal_channel && target_has_source;
+  const bool target_paints_normal_source = paint_target.is_normal_channel && target_has_source;
   /* Decode a Base Color source once per CHUNK rather than once per pixel.
    *
    * The per-pixel decode goes through `IMB_colormanagement_colorspace_to_scene_linear_v3`, which
@@ -1281,7 +1283,7 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   /* The channel's flat color, used where no source supplies one. Read from the LIVE brush, not
    * from the target's cached override -- see #curve_patch_channel_flat_color. */
   const float3 target_flat_color = curve_patch_channel_flat_color(
-      target, brush, *cache.paint, *paint_mode_settings_, cache.toggle_settings.invert);
+      paint_target, brush, *cache.paint, *paint_mode_settings_, cache.toggle_settings.invert);
   /* Randomize Color, evaluated once per pass: the sampled source texels, the ribbon texture's RGB
    * and the flat channel color all get the same per-dab transform when PHASE 2 picks the final
    * paint color, so a texture-driven stroke randomizes exactly like a value-driven one. The
@@ -1308,10 +1310,23 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   const double prof_undo_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
   prof_fetch_ += prof_undo_t0 - prof_fetch_t0;        /* DEBUG-cpatch-image */
 #endif
-  if (undo_step_open_ && !node_mask.is_empty()) {
-    /* Re-validate before every push: the step opened at session start may have been taken by a
-     * foreign undo push since the last restamp. See #ImageColorEffect::ensure_undo_step_live. */
-    this->ensure_undo_step_live();
+  /* Whose step the tiles below land in, and whether they may be pushed at all. Exactly ONE
+   * Image effect of a multi-object session owns the global `ImageUndoStep`
+   * (#CurvePatchTargetState::image_undo_step_owner): the owner pushes its own tiles and
+   * re-validates the step first (a foreign push may have taken it away since the last restamp).
+   * A secondary NEVER opens, re-opens or closes anything -- it only feeds tiles into the step
+   * while the owner's is the one in flight, which the owner's own re-validation within the same
+   * restamp (the primary target is stamped first) has just established. */
+  const bool push_undo_tiles = !node_mask.is_empty() &&
+                               (undo_step_open_ ? true :
+                                                  (!target.image_undo_step_owner &&
+                                                   ED_image_undo_is_step_active()));
+  if (push_undo_tiles) {
+    if (undo_step_open_) {
+      /* Re-validate before every push: the step opened at session start may have been taken by a
+       * foreign undo push since the last restamp. See #ImageColorEffect::ensure_undo_step_live. */
+      this->ensure_undo_step_live();
+    }
     /* Only nodes this effect has not already captured for THIS canvas: re-pushing a captured tile
      * changes nothing but still serializes on the undo system's global lock. See
      * #undo_pushed_nodes_. The mask is built before the wave so the `Set` is only read here and
@@ -1559,7 +1574,7 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
             const CurvePatchSourceGeometry source{
                 chunk_positions, chunk_normals, nullptr, /*indices_are_mesh_verts*/ false};
             const CurvePatchSampler sampler(
-                item, patch.doc.texture, ctx, brush, source, chunk_mask, tex_pool);
+                item, target.texture, ctx, brush, source, chunk_mask, tex_pool);
 
             /* Destination tangent basis for a Normal source, plus the screen basis a texel with
              * no patch frame falls back to. Constant across a UV primitive, and a chunk never
@@ -1872,7 +1887,7 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   /* Same live resolve as `target_flat_color` above -- a cached override would make a slider
    * edit re-stamp with the old value. */
   const float3 brush_color = curve_patch_channel_flat_color(
-      target, brush, paint_settings, *paint_mode_settings_, cache.toggle_settings.invert);
+      paint_target, brush, paint_settings, *paint_mode_settings_, cache.toggle_settings.invert);
 
   /* A material channel decides how its value composites -- Normal must go through
    * #IMB_BLEND_NORMAL_MIX rather than a plain lerp of the encoded RGB, and a scalar channel may
@@ -1882,11 +1897,11 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * Deliberately NOT `brush.blend` for the plain image canvas: a Curve Patch stamps a shape
    * rather than accumulating dabs, and Mix is the behavior that contract has always had.
    * Only the per-channel modes are honored here. */
-  const IMB_BlendMode blend_mode = (target.is_material_channel &&
+  const IMB_BlendMode blend_mode = (paint_target.is_material_channel &&
                                     brush.material_paint != nullptr) ?
                                        IMB_BlendMode(BKE_paint_material_channel_blend_mode(
                                            *brush.material_paint,
-                                           target.channel,
+                                           paint_target.channel,
                                            cache.toggle_settings.invert)) :
                                        IMB_BLEND_MIX;
 
@@ -2003,12 +2018,13 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                                  brush_color, pixel.tex_color, pixel.tex_valid) :
                                              brush_color);
         const float3 pass_rgb =
-            (target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR || !target.is_material_channel) ?
+            (paint_target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR ||
+             !paint_target.is_material_channel) ?
                 BKE_paint_stroke_color_jitter_apply_color(dab_color_jitter, pass_rgb_raw) :
                 pass_rgb_raw;
         const float4 over = curve_patch_blend_over(
             accum,
-            patch.apply.patch_rank,
+            target.apply.patch_rank,
             pixel.weight,
             float4(pass_rgb * pass_factor, pass_factor));
         /* The color the patches stamped so far leave here, and their coverage of the texel. */
@@ -2142,15 +2158,17 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * `ColorEffect` scopes its own tag to the nodes it actually wrote. */
   IndexMaskMemory tag_memory;
 
-  curve_patch_record_touched_nodes(patch.apply, IndexMask::from_bits(touched, tag_memory));
+  curve_patch_record_touched_nodes(target.apply, IndexMask::from_bits(touched, tag_memory));
 #if CURVE_PATCH_PROFILING
   prof_phase2_ += BLI_time_now_seconds() - prof_phase2_t0; /* DEBUG-cpatch-image */
 #endif
   }
 }
 
-void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
+void ImageColorEffect::end_restamp(CurvePatchTargetState &target)
 {
+  Object &ob = target.ob;
+
   bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
   if (pbvh == nullptr || pbvh->pixels_ == nullptr) {
     return;
@@ -2162,7 +2180,7 @@ void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
   bke::pbvh::pixels::PixelData &pixel_data = bke::pbvh::pixels::data_get(*pbvh);
 
   IndexMaskMemory memory;
-  const IndexMask touched_mask = IndexMask::from_bits(patch.apply.last_restamp_nodes, memory);
+  const IndexMask touched_mask = IndexMask::from_bits(target.apply.last_restamp_nodes, memory);
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh->nodes<bke::pbvh::MeshNode>();
   MutableSpan<bke::pbvh::pixels::PixelNode> pixel_nodes = pixel_data.nodes;
 
@@ -2340,19 +2358,19 @@ void ImageColorEffect::end_restamp(Object &ob, CurvePatchSession &patch)
 #endif
 }
 
-void ImageColorEffect::commit(const Scene & /*scene*/,
-                              const Depsgraph & /*depsgraph*/,
-                              Object & /*ob*/,
-                              const CurvePatchSession & /*patch*/)
+bool ImageColorEffect::commit_has_content(const CurvePatchTargetState & /*target*/) const
 {
-  /* Nothing to do. Every write already landed live in the `ImBuf` during `apply_pass()`, and the
-   * real `ImageUndoStep` was opened by `session_undo_begin()` and had its per-tile "before" data
-   * pushed lazily during the session via `do_push_undo_tile()`. The destructor closes the step --
-   * see its own comment for why that, not `commit()`, is the right place.
-   *
-   * The redraw this used to issue moved to `curve_patch_finish_commit()`, which is where the
-   * `bContext` `flush_update_done()` needs legitimately lives -- see the note there for why an
-   * Image-typed flush is issued on top of the shared Position-typed one. */
+  /* The image canvas stores nothing in the shared sculpt undo step: its own `ImageUndoStep` was
+   * opened by `session_undo_begin()` (the OWNER's effect only) and had its per-tile "before" data
+   * pushed lazily during the session via `do_push_undo_tile()`. The owner's destructor closes the
+   * step -- see its own comment for why that, not the commit, is the right place. */
+  return false;
+}
+
+void ImageColorEffect::commit_push_nodes(const Depsgraph & /*depsgraph*/,
+                                         CurvePatchTargetState & /*target*/)
+{
+  /* Nothing to do -- see #commit_has_content. */
 }
 
 }  // namespace

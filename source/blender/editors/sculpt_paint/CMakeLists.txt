@@ -54,6 +54,7 @@ set(SRC
   paint_curve_patch_params.cc
   paint_curve_patch_sampler.cc
   paint_curve_patch_session.cc
+  paint_curve_patch_targets.cc
   paint_curve_topology.cc
   paint_curve_draw.cc
   paint_curve_slide.cc
@@ -271,6 +272,7 @@ set(SRC
   paint_curve_patch_profile.hh
   paint_curve_patch_sampler.hh
   paint_curve_patch_session.hh
+  paint_curve_patch_targets.hh
   paint_intern.hh
   paint_gradient_core.hh
   paint_gradient_curve.hh

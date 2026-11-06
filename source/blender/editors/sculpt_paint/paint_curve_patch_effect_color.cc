@@ -142,22 +142,19 @@ class ColorEffect : public CurvePatchEffect {
               Vector<ScalarTarget> scalar_targets);
 
   int64_t element_num(Object &ob) const override;
-  void restore(Object &ob, const CurvePatchSession &patch) override;
-  void begin_restamp(const Depsgraph &depsgraph, Object &ob, CurvePatchSession &patch) override;
+  void restore(CurvePatchTargetState &target) override;
+  void begin_restamp(const Depsgraph &depsgraph, CurvePatchTargetState &target) override;
   void apply_pass(const Depsgraph &depsgraph,
-                  Object &ob,
                   const Brush &brush,
-                  CurvePatchSession &patch,
+                  CurvePatchTargetState &target,
                   const CurvePatchItem &item) override;
   UpdateType update_type() const override
   {
     return UpdateType::Color;
   }
-  void end_restamp(Object &ob, CurvePatchSession &patch) override;
-  void commit(const Scene &scene,
-              const Depsgraph &depsgraph,
-              Object &ob,
-              const CurvePatchSession &patch) override;
+  void end_restamp(CurvePatchTargetState &target) override;
+  bool commit_has_content(const CurvePatchTargetState &target) const override;
+  void commit_push_nodes(const Depsgraph &depsgraph, CurvePatchTargetState &target) override;
   void preview_swap(Object &ob) override;
   int64_t snapshot_size() const override;
 
@@ -273,8 +270,9 @@ int64_t ColorEffect::snapshot_size() const
   return size;
 }
 
-void ColorEffect::restore(Object &ob, const CurvePatchSession &patch)
+void ColorEffect::restore(CurvePatchTargetState &target)
 {
+  Object &ob = target.ob;
   /* No `element_num` check of its own -- `curve_patch_restore_only()` performs it for every
    * caller. The attribute check below is NOT redundant with it: a same-size replacement changes no
    * count. */
@@ -287,7 +285,7 @@ void ColorEffect::restore(Object &ob, const CurvePatchSession &patch)
   }
   IndexMaskMemory memory;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
-  const IndexMask restamp_mask = IndexMask::from_bits(patch.apply.last_restamp_nodes, memory);
+  const IndexMask restamp_mask = IndexMask::from_bits(target.apply.last_restamp_nodes, memory);
 
   if (has_color_target_) {
     bke::GSpanAttributeWriter colors = this->color_writer(mesh);
@@ -302,7 +300,8 @@ void ColorEffect::restore(Object &ob, const CurvePatchSession &patch)
       }
       /* Swap rather than one-way write: `swap_gathered_colors()` leaves `values` holding what
        * was in the attribute, which this function discards -- but the same call is what
-       * `commit()` relies on for symmetric undo/redo, so both paths use one primitive. */
+       * `commit_push_nodes()` relies on for symmetric undo/redo, so both paths use one primitive.
+       */
       color::swap_gathered_colors(indices, colors.span, values);
       colors.finish();
       pbvh.tag_attribute_changed(restamp_mask, attribute_name_);
@@ -313,24 +312,22 @@ void ColorEffect::restore(Object &ob, const CurvePatchSession &patch)
    * since been deleted or retyped is skipped rather than refused: the other channels' pixels
    * still have to come back, or the next re-stamp would compound on top of them. */
   bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
-  for (ScalarTarget &target : scalar_targets_) {
-    if (target.orig_values.is_empty()) {
+  for (ScalarTarget &scalar : scalar_targets_) {
+    if (scalar.orig_values.is_empty()) {
       continue;
     }
     bke::SpanAttributeWriter<float> attribute = attributes.lookup_for_write_span<float>(
-        target.name);
+        scalar.name);
     if (!attribute) {
       continue;
     }
-    swap_scalar_snapshot(target.orig_values, attribute.span);
+    swap_scalar_snapshot(scalar.orig_values, attribute.span);
     attribute.finish();
-    pbvh.tag_attribute_changed(restamp_mask, target.name);
+    pbvh.tag_attribute_changed(restamp_mask, scalar.name);
   }
 }
 
-void ColorEffect::begin_restamp(const Depsgraph & /*depsgraph*/,
-                                Object & /*ob*/,
-                                CurvePatchSession & /*patch*/)
+void ColorEffect::begin_restamp(const Depsgraph & /*depsgraph*/, CurvePatchTargetState & /*target*/)
 {
   /* Relief recomputes vertex normals here because it invalidates them by moving vertices, and
    * because it reads them both as its write direction and as the sampler's orientation cull.
@@ -339,11 +336,11 @@ void ColorEffect::begin_restamp(const Depsgraph & /*depsgraph*/,
 }
 
 void ColorEffect::apply_pass(const Depsgraph &depsgraph,
-                             Object &ob,
                              const Brush &brush,
-                             CurvePatchSession &patch,
+                             CurvePatchTargetState &target,
                              const CurvePatchItem &item)
 {
+  Object &ob = target.ob;
   SculptSession &ss = *ob.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
   /* Snapshotted per PASS, not per re-stamp: `do_symmetrical_brush_actions()` rewrites every field
@@ -378,7 +375,7 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
    * are already pristine and `CurvePatchSampler` can read them directly. */
   const CurvePatchSourceGeometry source{positions, normals, nullptr};
   const CurvePatchSampler sampler(
-      item, patch.doc.texture, ctx, brush, source, mask, ss.tex_pool_ensure());
+      item, target.texture, ctx, brush, source, mask, ss.tex_pool_ensure());
 
   const float max_radius = curve_patch_max_radius(item.geometry);
 
@@ -574,12 +571,12 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
        * color they leave and `over.w` their coverage of the element. A curve stamped over another
        * keeps the lower curve's color wherever its own coverage is partial. */
       const float4 over = curve_patch_blend_over(
-          patch.apply, write.idx, write.weight, float4(paint_rgb * pass_factor, pass_factor));
+          target.apply, write.idx, write.weight, float4(paint_rgb * pass_factor, pass_factor));
       const float factor = over.w;
 
       /* The original alpha is carried through untouched, textured or not: `BKE_brush_color_get()`
-       * returns a `float3`, so writing an alpha would invent data the brush never specified (the
-       * Stage 3 invariant). Mix is from the pre-patch original, not from a previous patch's write.
+       * returns a `float3`, so writing an alpha would invent data the brush never specified. Mix
+       * is from the pre-patch original, not from a previous patch's write.
        */
       float4 mixed;
       if (blend_mode == IMB_BLEND_MIX) {
@@ -636,36 +633,36 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
    * packing, and cannot overflow the way a multiplied key would on a dense mesh. */
   if (!scalar_targets_.is_empty()) {
     bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
-    for (ScalarTarget &target : scalar_targets_) {
+    for (ScalarTarget &scalar : scalar_targets_) {
       bke::SpanAttributeWriter<float> attribute = attributes.lookup_for_write_span<float>(
-          target.name);
+          scalar.name);
       if (!attribute) {
         /* Deleted or retyped since the session started. */
         continue;
       }
       const float2 range = BKE_paint_material_channel_range(*paint_mode_settings_,
-                                                            target.channel);
+                                                            scalar.channel);
       /* Erasing pulls the channel back to its neutral value; the blend mode that goes with that
        * is already decided by #BKE_paint_material_channel_blend_mode. Mirrors
        * `do_paint_material_brush()`. */
       const float target_value = cache.toggle_settings.invert ?
-                                     BKE_paint_material_channel_default_value(target.channel) :
+                                     BKE_paint_material_channel_default_value(scalar.channel) :
                                      BKE_paint_material_channel_value(*brush.material_paint,
                                                                       *paint_mode_settings_,
-                                                                      target.channel);
+                                                                      scalar.channel);
       const IMB_BlendMode channel_blend = IMB_BlendMode(BKE_paint_material_channel_blend_mode(
-          *brush.material_paint, target.channel, cache.toggle_settings.invert));
+          *brush.material_paint, scalar.channel, cache.toggle_settings.invert));
       const MutableSpan<float> values = attribute.span;
       for (LocalData &local : all_tls) {
         for (const ScalarWrite &write : local.scalar_writes) {
           if (write.vert < 0 || write.vert >= values.size()) {
             continue;
           }
-          const float orig = target.orig_values.lookup_or_add(write.vert, values[write.vert]);
+          const float orig = scalar.orig_values.lookup_or_add(write.vert, values[write.vert]);
           const float pass_factor = curve_patch_color_mix_factor(
               write.value, write.tex_color, write.tex_valid, strength);
           const float4 over = curve_patch_blend_over(
-              patch.apply,
+              target.apply,
               -(write.vert + 1),
               write.weight,
               float4(target_value * pass_factor, 0.0f, 0.0f, pass_factor));
@@ -677,33 +674,39 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
         }
       }
       attribute.finish();
-      pbvh.tag_attribute_changed(tag_mask, target.name);
+      pbvh.tag_attribute_changed(tag_mask, scalar.name);
     }
   }
 
-  curve_patch_record_touched_nodes(patch.apply, tag_mask);
+  curve_patch_record_touched_nodes(target.apply, tag_mask);
 }
 
-void ColorEffect::end_restamp(Object & /*ob*/, CurvePatchSession & /*patch*/)
+void ColorEffect::end_restamp(CurvePatchTargetState & /*target*/)
 {
   /* Nothing to finish. There is no smoothing counterpart -- `ReliefEffect::smooth_relief()`
    * averages displacement VECTORS, which has no color analogue worth inventing -- and the viewport
    * flush is issued by the session now, from #update_type. */
 }
 
-void ColorEffect::commit(const Scene &scene,
-                         const Depsgraph &depsgraph,
-                         Object &ob,
-                         const CurvePatchSession &patch)
+bool ColorEffect::commit_has_content(const CurvePatchTargetState &target) const
 {
-  /* No `element_num` check of its own -- see `ReliefEffect::commit()`. */
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(target.ob);
+  if (pbvh == nullptr || pbvh->type() == bke::pbvh::Type::BMesh) {
+    return false;
+  }
   bool any_scalar = false;
-  for (const ScalarTarget &target : scalar_targets_) {
-    any_scalar |= !target.orig_values.is_empty();
+  for (const ScalarTarget &scalar : scalar_targets_) {
+    any_scalar |= !scalar.orig_values.is_empty();
   }
-  if (orig_colors_.is_empty() && !any_scalar) {
-    return;
-  }
+  return !orig_colors_.is_empty() || any_scalar;
+}
+
+void ColorEffect::commit_push_nodes(const Depsgraph &depsgraph, CurvePatchTargetState &target)
+{
+  /* No `element_num` check of its own -- see `ReliefEffect::commit_push_nodes()`. The shared step
+   * was already opened / extended by the commit orchestrator; this stores this target's data into
+   * it and closes nothing. */
+  Object &ob = target.ob;
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
   const bool push_color = has_color_target_ && this->attribute_matches(mesh) &&
                           !orig_colors_.is_empty();
@@ -723,10 +726,10 @@ void ColorEffect::commit(const Scene &scene,
 
   /* `undo::push_nodes()` stores whatever the attribute currently holds, and at commit time that is
    * the painted state. Swap the originals in, push, swap the painted colors back -- the same trick
-   * `ReliefEffect::push_position_step()` uses, except `swap_gathered_colors()` IS a swap, so the
+   * `ReliefEffect::commit_push_nodes()` uses, except `swap_gathered_colors()` IS a swap, so the
    * round trip is two calls with no temporary of our own. */
   IndexMaskMemory memory;
-  const IndexMask undo_mask = IndexMask::from_bits(patch.apply.all_touched_nodes, memory);
+  const IndexMask undo_mask = IndexMask::from_bits(target.apply.all_touched_nodes, memory);
   bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
   /* Held open across the push: the swap below has to be undone through the SAME spans, and
    * reopening them would re-fetch arrays the push may have reallocated. */
@@ -736,18 +739,18 @@ void ColorEffect::commit(const Scene &scene,
    * the two cannot be indexed by the same running number as `scalar_targets_`. */
   Vector<int> scalar_written;
   for (const int target_i : scalar_targets_.index_range()) {
-    ScalarTarget &target = scalar_targets_[target_i];
-    if (target.orig_values.is_empty()) {
+    ScalarTarget &scalar = scalar_targets_[target_i];
+    if (scalar.orig_values.is_empty()) {
       continue;
     }
     bke::SpanAttributeWriter<float> attribute = attributes.lookup_for_write_span<float>(
-        target.name);
+        scalar.name);
     if (!attribute) {
       continue;
     }
-    swap_scalar_snapshot(target.orig_values, attribute.span);
+    swap_scalar_snapshot(scalar.orig_values, attribute.span);
     scalar_writers.append(std::move(attribute));
-    scalar_names.append(target.name);
+    scalar_names.append(scalar.name);
     scalar_written.append(target_i);
   }
   if (push_color) {
@@ -762,7 +765,6 @@ void ColorEffect::commit(const Scene &scene,
     const StringRef color_name = attribute_name_;
     const Span<StringRef> color_names = push_color ? Span<StringRef>(&color_name, 1) :
                                                      Span<StringRef>();
-    undo::push_begin_ex(scene, ob, "Curve Patch Material");
     undo::push_nodes(depsgraph,
                      ob,
                      undo_mask,
@@ -770,7 +772,6 @@ void ColorEffect::commit(const Scene &scene,
                      {scalar_names.as_span(), color_names, {}});
   }
   else {
-    undo::push_begin_ex(scene, ob, "Curve Patch Color");
     undo::push_nodes(depsgraph, ob, undo_mask, undo::NodeDataFlag::Color);
   }
   if (push_color) {
@@ -783,10 +784,8 @@ void ColorEffect::commit(const Scene &scene,
     scalar_writers[i].finish();
   }
 
-  /* `false`, never forced: unlike relief there is no face-set step to follow, so the step must
-   * stay parked in `ustack->step_init` for `wm_operator_finished()`. Forcing it here would cost
-   * the user one dead Ctrl+Z before the color is undone. */
-  undo::push_end_ex(ob, false);
+  /* The shared step is parked (never forced) by the commit orchestrator once every target has
+   * stored its data -- a Color target never wants a face-set step after it. */
 }
 
 void ColorEffect::preview_swap(Object &ob)
@@ -813,16 +812,16 @@ void ColorEffect::preview_swap(Object &ob)
   }
 
   bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
-  for (ScalarTarget &target : scalar_targets_) {
-    if (target.orig_values.is_empty()) {
+  for (ScalarTarget &scalar : scalar_targets_) {
+    if (scalar.orig_values.is_empty()) {
       continue;
     }
     bke::SpanAttributeWriter<float> attribute = attributes.lookup_for_write_span<float>(
-        target.name);
+        scalar.name);
     if (!attribute) {
       continue;
     }
-    swap_scalar_snapshot(target.orig_values, attribute.span);
+    swap_scalar_snapshot(scalar.orig_values, attribute.span);
     attribute.finish();
   }
 }

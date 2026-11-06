@@ -5,8 +5,8 @@
 /** \file
  * \ingroup edsculpt
  *
- * Modal operator for editing a live Curve Patch control curve (see design doc). Started
- * automatically right after a `BRUSH_STROKE_CURVE_PATCH` anchor stroke finishes (Stage 05).
+ * Modal operator for editing a live Curve Patch control curve. Started automatically right after
+ * a `BRUSH_STROKE_CURVE_PATCH` anchor stroke finishes.
  *
  * A single, persistent modal operator (`SCULPT_OT_curve_patch_edit`) owns every event for the
  * whole live-edit session -- point/handle/segment/radius drag, insert, delete, texture-axis
@@ -112,6 +112,7 @@
 #include "paint_curve_patch_host.hh"
 #include "paint_curve_patch_live.hh"
 #include "paint_curve_patch_session.hh"
+#include "paint_curve_patch_targets.hh"
 #include "paint_curve_patch_layer.hh"
 #include "paint_session_confirm.hh"
 #include "paint_image_curve_patch.hh"
@@ -190,6 +191,9 @@ struct CurvePatchEditOpData {
    * it is created lazily on the first MOUSEMOVE that reaches that level and freed when the drag
    * ends -- creating one per mouse move would rebuild the snap BVH on every event. */
   PaintCurveSnapContext *snap_ctx = nullptr;
+  /* Objects the current Shift+drag already tried and refused. Keeps the compatibility warning to
+   * one per object per drag instead of one per MOUSEMOVE. Cleared when a new drag starts. */
+  Vector<const Object *> add_target_refused;
 };
 
 /** Release the drag-scoped snap context, if one was created. Safe to call repeatedly. */
@@ -204,14 +208,25 @@ static void curve_patch_edit_snap_ctx_free(CurvePatchEditOpData &data)
 
 static CurvePatchSession &patch_cache_of(bContext *C)
 {
+  /* Deliberately the ACTIVE object: the session is published on every target, so whichever
+   * participant is active resolves the same shared session -- the callers want the session, not a
+   * specific object. */
   Object &ob = *CTX_data_active_object(C);
   return *ob.runtime->sculpt_session->curve_patch_session;
+}
+
+/** The object the session's DOCUMENT lives on. Editing always projects through the owner, even
+ * when a secondary target is the active object: the curve positions are the owner's local space,
+ * and a secondary's mirror is the same world curve. */
+static Object &curve_patch_edit_object(bContext *C, CurvePatchSession &patch)
+{
+  return patch.owner != nullptr ? *patch.owner : *CTX_data_active_object(C);
 }
 
 /* `sculpt_mode_poll()` alone only confirms Sculpt Mode is active -- it says nothing about whether
  * a live Curve Patch exists. Without this extra check, this operator is directly invocable (F3
  * search, a stray keymap entry, `bpy.ops.sculpt.curve_patch_edit()`) any time the user is in
- * Sculpt Mode, independent of whether Stage 05's anchor-stroke flow has ever started one --
+ * Sculpt Mode, independent of whether the anchor-stroke flow has ever started one --
  * `patch_cache_of()` would then dereference a null `curve_patch_session` on the very first event.
  */
 static bool curve_patch_edit_poll(bContext *C)
@@ -219,6 +234,8 @@ static bool curve_patch_edit_poll(bContext *C)
   if (!sculpt_mode_poll(C)) {
     return false;
   }
+  /* Deliberately the ACTIVE object: the operator is invoked onto whatever participant the user is
+   * looking at, and the session is published on every target. */
   const Object *ob = CTX_data_active_object(C);
   return ob && ob->runtime->sculpt_session && ob->runtime->sculpt_session->curve_patch_session;
 }
@@ -301,19 +318,31 @@ void curve_patch_tag_overlay_redraw_all(bContext *C)
  * handshake -- the same reason #curve_patch_finish_commit issues a second effect-typed flush.
  * Without that second call, Texture Paint (Draw brush / image canvas) keeps a stale GPU preview
  * after moving points or segments even though the ImBuf was already re-stamped. */
-void curve_patch_tag_viewports_redraw_after_edit(bContext &C,
-                                                 Object &ob,
-                                                 const CurvePatchSession &patch)
+void curve_patch_tag_viewports_redraw_after_edit(bContext &C, const CurvePatchSession &patch)
 {
   ED_paint_curve_overlay_tag_redraw_all(&C);
-  flush_update_done(&C, ob, UpdateType::Position);
-  if (!patch.effect) {
+  /* Every stamped target, not just the active object: a modal event can arrive with a secondary
+   * as the active object, and a commit/cancel ended the WHOLE session. */
+  for (const CurvePatchObjectTarget &target : patch.targets) {
+    if (target.ob != nullptr) {
+      flush_update_done(&C, *target.ob, UpdateType::Position);
+    }
+  }
+  if (!patch.has_primary_effect()) {
     return;
   }
-  const UpdateType update_type = patch.effect->update_type();
-  const bool touched_any = bits::any_bit_set(patch.apply.all_touched_nodes);
-  if (update_type != UpdateType::Position && touched_any) {
-    flush_update_done(&C, ob, update_type);
+  /* Redraw, not commit: an invalidated target still needs its effect-typed flush even though it
+   * cannot be restored or committed. */
+  for (const CurvePatchObjectTarget &target : patch.targets) {
+    if (target.ob == nullptr || target.effect == nullptr) {
+      continue;
+    }
+    const UpdateType update_type = target.effect->update_type();
+    if (update_type != UpdateType::Position &&
+        bits::any_bit_set(target.apply.all_touched_nodes))
+    {
+      flush_update_done(&C, *target.ob, update_type);
+    }
   }
 }
 
@@ -399,13 +428,13 @@ class SculptCurvePatchHost : public CurvePatchEditorHost {
    * preview. The full flush belongs to #interaction_end. */
   void restamp(bContext &C) override
   {
-    curve_patch_restore_and_restamp(C, ob_, patch_);
+    curve_patch_restore_and_restamp(C, patch_);
     curve_patch_tag_overlay_redraw_all(&C);
   }
 
   void interaction_end(bContext &C) override
   {
-    curve_patch_tag_viewports_redraw_after_edit(C, ob_, patch_);
+    curve_patch_tag_viewports_redraw_after_edit(C, patch_);
   }
 
   void redraw(bContext &C) override
@@ -491,10 +520,14 @@ class SculptScreenAdapter : public CurvePatchScreenAdapter {
    * viewports, and `pick_space_get` hands out a pointer to this. */
   mutable ViewContext vc_ = {};
   PaintCurveSnapContext *&snap_ctx_;
+  Vector<const Object *> &add_target_refused_;
 
  public:
-  SculptScreenAdapter(Object &ob, CurvePatchSession &patch, PaintCurveSnapContext *&snap_ctx)
-      : ob_(ob), patch_(patch), snap_ctx_(snap_ctx)
+  SculptScreenAdapter(Object &ob,
+                      CurvePatchSession &patch,
+                      PaintCurveSnapContext *&snap_ctx,
+                      Vector<const Object *> &add_target_refused)
+      : ob_(ob), patch_(patch), snap_ctx_(snap_ctx), add_target_refused_(add_target_refused)
   {
   }
 
@@ -550,7 +583,8 @@ class SculptScreenAdapter : public CurvePatchScreenAdapter {
                         const int point_index,
                         const float3 initial[3],
                         const float2 &mval_start,
-                        const float2 &mval_now) const override
+                        const float2 &mval_now,
+                        const bool add_target_modifier) const override
   {
     const ViewContext vc = this->view_context_get(C);
     float ob_to_world[4][4];
@@ -566,6 +600,29 @@ class SculptScreenAdapter : public CurvePatchScreenAdapter {
 
     const float mval_init[2] = {mval_start.x, mval_start.y};
     const float mval_curr[2] = {mval_now.x, mval_now.y};
+
+    /* Shift+drag targets the object under the cursor. The document (and therefore this point)
+     * stays in the owner's space, so the multi-object half of the gesture reports the hit back in
+     * that space; all that is left here is to apply it like any other surface snap. */
+    float3 snap_co;
+    float3 snap_no;
+    if (add_target_modifier &&
+        curve_patch_drag_point_onto_other_object(C,
+                                                 patch_,
+                                                 ob_,
+                                                 vc,
+                                                 mval_now,
+                                                 float3(pivot_world),
+                                                 snap_ctx_,
+                                                 add_target_refused_,
+                                                 snap_co,
+                                                 snap_no))
+    {
+      paintcurve_apply_point_surface_snap(curve, point_index, initial, snap_co, snap_no);
+      paintcurve_snap_marker_update(&C, ob_to_world, snap_co);
+      curve.tag_positions_changed();
+      return;
+    }
 
     /* Keep the point on the surface while it is dragged, same as #paintcurve_point_slide_modal.
      * `use_depth_fallback` is off: the depth-buffer level needs a viewport redraw, which would run
@@ -719,7 +776,11 @@ class SculptScreenAdapter : public CurvePatchScreenAdapter {
   ViewContext view_context_get(bContext &C) const
   {
     Depsgraph *depsgraph = CTX_data_depsgraph_pointer(&C);
-    return ED_view3d_viewcontext_init(&C, depsgraph);
+    ViewContext vc = ED_view3d_viewcontext_init(&C, depsgraph);
+    /* The document lives in the owner's object space. If a secondary is the active object, the
+     * context's obact would raycast/snap the wrong mesh -- the curve is still the owner's. */
+    vc.obact = &ob_;
+    return vc;
   }
 };
 
@@ -800,7 +861,7 @@ static void curve_patch_edit_context_menu_open(bContext *C)
    * values are edited through the session RNA: a popup can only invoke operators or edit plain
    * properties, and the custom setters/update callbacks do the restamp. */
   if (curve_patch_active_point_is_valid(patch)) {
-    Object &ob = *CTX_data_active_object(C);
+    Object &ob = curve_patch_edit_object(C, patch);
     PointerRNA session_ptr = RNA_pointer_create_discrete(
         &ob.id, RNA_CurvePatchSession, static_cast<void *>(&patch));
     layout.separator();
@@ -978,14 +1039,14 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C,
       CTX_wm_manager(C), CTX_wm_window(C), TIMER, sync_timer_step);
   CurvePatchSession &patch = patch_cache_of(C);
   /* Seed the live-input watchdog on the document so the first poll does not re-stamp against
-   * defaults (see #CurvePatchLiveInputs). Poll already requires an active object; the checks keep
-   * a missing context from dereferencing null before the liveness guard runs. */
+   * defaults (see #CurvePatchLiveInputs). Captured through the OWNER, which is what the modal's
+   * own poll compares against -- the active object can differ from it the moment a secondary
+   * target is active. */
   if (tool_settings && tool_settings->sculpt) {
     const Sculpt &sd = *tool_settings->sculpt;
     if (const Brush *brush = BKE_paint_brush_for_read(&sd.paint)) {
-      if (const Object *ob = CTX_data_active_object(C)) {
-        patch.doc.last_synced = curve_patch_live_inputs_capture_sculpt(sd.paint, *brush, *ob);
-      }
+      const Object &ob = curve_patch_edit_object(C, patch);
+      patch.doc.last_synced = curve_patch_live_inputs_capture_sculpt(sd.paint, *brush, ob);
     }
   }
   /* Seed the session undo stack with the state the anchor stroke produced. Ctrl+Z walks back to
@@ -1142,7 +1203,9 @@ static bool curve_patch_edit_try_safe_supersede(bContext *C,
     return false;
   }
 
-  curve_patch_commit_on_session_end(*C, *ob);
+  /* Commit through the session's OWNER: the session-ending commit refuses any object but the
+   * owner, and the active object can be a secondary target while this modal runs. */
+  curve_patch_commit_on_session_end(*C, live->owner != nullptr ? *live->owner : *ob);
   curve_patch_edit_teardown(C, op);
   /* Entering this session activated the effect's brush, whose tool is exclusive to the Sculpt
    * display group, so the toolbar has been reading 'SCULPT' since. Switching to the Curve Edit
@@ -1258,15 +1321,20 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   }
 
   CurvePatchSession &patch = patch_cache_of(C);
-  Object &ob = *CTX_data_active_object(C);
+  /* The DOCUMENT lives on the owner. A modal event can arrive while a secondary target is the
+   * active object, and every projection/hit-test/snap below is defined in the document's (owner's)
+   * object space; using the secondary's matrix here would draw its mirror but edit the document
+   * through the wrong basis. The overlay still shows the secondary's mirror, whose world-space
+   * curve is the same one, so the hit positions coincide on screen. */
+  Object &ob = curve_patch_edit_object(C, patch);
 
   /* A pick in the Active Tool curve list only writes `PaintVector::active_item`; the session
    * follows it here, like a Tab press, so the switch needs no exit from the session. */
   bool look_changed = false;
   if (curve_patch_layer_active_item_follow(patch, &look_changed)) {
     curve_patch_edit_status_set(C, patch);
-    curve_patch_restore_and_restamp(*C, ob, patch);
-    curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
+    curve_patch_restore_and_restamp(*C, patch);
+    curve_patch_tag_viewports_redraw_after_edit(*C, patch);
   }
   /* A per-point opacity or opacity-falloff edit restamps from its own RNA update callback (the
    * panel is not the viewport), so all the modal has to do is fold it into the same
@@ -1333,8 +1401,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
           ob.runtime->sculpt_session->tex_pool_invalidate();
         }
         curve_patch_edit_status_set(C, patch);
-        curve_patch_restore_and_restamp(*C, ob, patch);
-        curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
+        curve_patch_restore_and_restamp(*C, patch);
+        curve_patch_tag_viewports_redraw_after_edit(*C, patch);
         if (pending_texture_restamp) {
           /* One history step for the assignment, like every other completed edit. */
           patch.doc.pending_point_texture_restamp = false;
@@ -1357,9 +1425,11 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
    * re-stamp runs inside `curve_patch_edit_finish()`, which reports back whether a commit actually
    * happened so that path can answer `OPERATOR_CANCELLED` on its own.
    *
-   * `curve_patch_restore_only()` is a no-op in this state, so the cancel path leaves the mesh
-   * exactly as the foreign operator left it. */
-  if (patch.apply.invalidated) {
+   * `curve_patch_restore_only()` is a no-op for a target in this state, so the cancel path leaves
+   * that mesh exactly as the foreign operator left it. The modal only ends when NO target is still
+   * usable: one broken secondary is skipped by the restamp on its own guard and does not end the
+   * whole edit. */
+  if (!patch.has_valid_target()) {
     curve_patch_edit_finish(C, op, true);
     return OPERATOR_CANCELLED;
   }
@@ -1428,7 +1498,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
    * re-resolved from the context above every time, and the snap context -- the one piece of drag
    * state the adapter needs to keep -- lives on the operator data and is borrowed. */
   SculptCurvePatchHost host(ob, patch, op->reports);
-  SculptScreenAdapter adapter(ob, patch, data.snap_ctx);
+  SculptScreenAdapter adapter(ob, patch, data.snap_ctx, data.add_target_refused);
 
   /* A running G/R/S owns the modal until it confirms or aborts, so every event goes straight to
    * the core -- ahead of the dispatch below, where Esc would end the whole patch and X would
@@ -1477,8 +1547,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         params.swap_axis = !params.swap_axis;
         curve_patch_undo_push(patch);
         curve_patch_edit_status_set(C, patch);
-        curve_patch_restore_and_restamp(*C, ob, patch);
-        curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
+        curve_patch_restore_and_restamp(*C, patch);
+        curve_patch_tag_viewports_redraw_after_edit(*C, patch);
         break;
       }
       case CURVE_PATCH_MODAL_NEXT_CURVE: {
@@ -1491,8 +1561,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
          * the Active Tool list follow the Tab presses. */
         curve_patch_layer_active_item_sync(patch);
         curve_patch_edit_status_set(C, patch);
-        curve_patch_restore_and_restamp(*C, ob, patch);
-        curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
+        curve_patch_restore_and_restamp(*C, patch);
+        curve_patch_tag_viewports_redraw_after_edit(*C, patch);
         break;
       }
       /* Handled by the shared editing core rather than by `transform.translate` and friends. Those
@@ -1551,6 +1621,10 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
     case LEFTMOUSE:
     case MOUSEMOVE:
     case RIGHTMOUSE: {
+      if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
+        /* Every press starts a fresh gesture: a refused target may be retried next time. */
+        data.add_target_refused.clear();
+      }
       if (event->type == LEFTMOUSE && event->val == KM_PRESS && data.radius_drag_from_key) {
         /* A radius drag started by Alt+S (`CURVE_PATCH_MODAL_RADIUS`) has no mouse button held
          * down the way a click-started drag does, so there is no RELEASE to end it on -- the next
@@ -1731,11 +1805,11 @@ static bool curve_patch_edit_session_finish(bContext *C, const bool is_cancel, O
        * it is painted -- and it is that effect's own destructor, reached through
        * `MEM_delete(patch)` below, that discards the step instead of committing it once this
        * restore has put the pixels back. See #ImageColorEffect's destructor. */
-      curve_patch_restore_only(ob, *patch);
+      curve_patch_restore_only(*patch);
       /* Same full redraw handshake as commit: restore only updates mesh data in memory; without
        * tagging every viewport the relief in other areas/windows stays stale until the cursor
        * happens to move there. */
-      curve_patch_tag_viewports_redraw_after_edit(*C, ob, *patch);
+      curve_patch_tag_viewports_redraw_after_edit(*C, *patch);
     }
     else {
       /* Re-stamp once at final quality BEFORE the undo step is built, so the mesh (and with it the
@@ -1744,7 +1818,7 @@ static bool curve_patch_edit_session_finish(bContext *C, const bool is_cancel, O
        * `CurvePatchApplyState::all_touched_nodes`. See
        * `docs/superpowers/specs/2026-07-18-curve-patch-final-quality-design.md`. */
       curve_patch_set_final_quality(patch->doc, true);
-      curve_patch_restore_and_restamp(*C, ob, *patch);
+      curve_patch_restore_and_restamp(*C, *patch);
       curve_patch_set_final_quality(patch->doc, false);
 
       /* That re-stamp is the last chance to notice that a foreign operator changed the mesh's
@@ -1752,10 +1826,10 @@ static bool curve_patch_edit_session_finish(bContext *C, const bool is_cancel, O
        * function without passing the modal's own check for it. A patch in that state writes
        * nothing: the commit below and the restore above are both no-ops, so report it as
        * canceled rather than finished. */
-      if (!patch->apply.invalidated) {
+      if (patch->has_valid_target()) {
         /* Builds and closes the patch's single position undo step, then optionally writes the face
          * set as a second one -- see `curve_patch_finish_commit()`. */
-        curve_patch_finish_commit(*C, ob, *patch);
+        curve_patch_finish_commit(*C, *patch);
         /* A session entered from a Stack Layers row writes its document back into the row's
          * PaintVector and invalidates the row bake, in one memfile step of its own. */
         curve_patch_layer_commit_document(*C, *patch);
@@ -1763,9 +1837,13 @@ static bool curve_patch_edit_session_finish(bContext *C, const bool is_cancel, O
         /* The re-stamp ends in `flush_update_step()`, which only arms the fast paint-redraw path;
          * that is torn down the instant this operator finishes. Issue the full finished-stroke
          * redraw so the committed positions actually reach the screen -- same reasoning as the
-         * initial preview stamp in `curve_patch_begin_editing()`. The helper above also issues the
-         * effect-specific flush for non-position targets. */
-        flush_update_done(C, ob, UpdateType::Position);
+         * initial preview stamp in `curve_patch_begin_editing()`. `curve_patch_finish_commit()`
+         * above also issues the effect-specific flush for non-position targets, per target. */
+        for (const CurvePatchObjectTarget &target : patch->targets) {
+          if (target.ob != nullptr) {
+            flush_update_done(C, *target.ob, UpdateType::Position);
+          }
+        }
         committed = true;
       }
       else {
@@ -2179,9 +2257,16 @@ bool curve_patch_defer_workspace_change(bContext *C, WorkSpace *workspace_new)
   if (!ob || !ob->runtime->sculpt_session || !ob->runtime->sculpt_session->curve_patch_session) {
     return false;
   }
+  const CurvePatchSession *live = ob->runtime->sculpt_session->curve_patch_session;
 
   PointerRNA props = WM_operator_properties_create("SCULPT_OT_curve_patch_edit_confirm");
   RNA_int_set(&props, "workspace_session_uid", int(workspace_new->id.session_uid));
+  /* The dialog resolves its target by session UID; left at 0 it would take the ACTIVE object,
+   * which can be a secondary target while the modal runs -- pass the OWNER so the commit lands
+   * where the document lives. */
+  RNA_int_set(&props,
+              "object_session_uid",
+              live->owner != nullptr ? int(live->owner->id.session_uid) : 0);
   const wmOperatorStatus status = WM_operator_name_call(
       C, "SCULPT_OT_curve_patch_edit_confirm", wm::OpCallContext::InvokeDefault, &props, nullptr);
   WM_operator_properties_free(&props);
@@ -2221,8 +2306,8 @@ static bool curve_patch_active_point_poll(bContext *C)
 
 static wmOperatorStatus curve_patch_handle_type_set_exec(bContext *C, wmOperator *op)
 {
-  Object &ob = *CTX_data_active_object(C);
   CurvePatchSession &patch = patch_cache_of(C);
+  Object &ob = curve_patch_edit_object(C, patch);
   curve_patch_set_active_handle_type(
       *C, ob, patch, ed::curves::SetHandleType(RNA_enum_get(op->ptr, "type")));
   return OPERATOR_FINISHED;
@@ -2250,8 +2335,8 @@ void SCULPT_OT_curve_patch_handle_type_set(wmOperatorType *ot)
 
 static wmOperatorStatus curve_patch_delete_point_exec(bContext *C, wmOperator *op)
 {
-  Object &ob = *CTX_data_active_object(C);
   CurvePatchSession &patch = patch_cache_of(C);
+  Object &ob = curve_patch_edit_object(C, patch);
   if (!curve_patch_delete_active_point(*C, ob, patch, op->reports)) {
     return OPERATOR_CANCELLED;
   }
@@ -2272,8 +2357,8 @@ void SCULPT_OT_curve_patch_delete_point(wmOperatorType *ot)
 
 static wmOperatorStatus curve_patch_toggle_cyclic_exec(bContext *C, wmOperator * /*op*/)
 {
-  Object &ob = *CTX_data_active_object(C);
   CurvePatchSession &patch = patch_cache_of(C);
+  Object &ob = curve_patch_edit_object(C, patch);
   if (!curve_patch_toggle_cyclic(*C, ob, patch)) {
     return OPERATOR_CANCELLED;
   }
@@ -2296,8 +2381,8 @@ void SCULPT_OT_curve_patch_toggle_cyclic(wmOperatorType *ot)
 
 static wmOperatorStatus curve_patch_switch_direction_exec(bContext *C, wmOperator * /*op*/)
 {
-  Object &ob = *CTX_data_active_object(C);
   CurvePatchSession &patch = patch_cache_of(C);
+  Object &ob = curve_patch_edit_object(C, patch);
   if (!curve_patch_switch_direction(*C, ob, patch)) {
     return OPERATOR_CANCELLED;
   }
@@ -2319,8 +2404,8 @@ void SCULPT_OT_curve_patch_switch_direction(wmOperatorType *ot)
 
 static wmOperatorStatus curve_patch_stamp_reseed_exec(bContext *C, wmOperator * /*op*/)
 {
-  Object &ob = *CTX_data_active_object(C);
   CurvePatchSession &patch = patch_cache_of(C);
+  Object &ob = curve_patch_edit_object(C, patch);
   if (!curve_patch_reseed_stamps(*C, ob, patch)) {
     return OPERATOR_CANCELLED;
   }
@@ -2701,8 +2786,8 @@ static wmOperatorStatus curve_patch_point_texture_set_exec(bContext *C, wmOperat
 
   if (target->session_3d != nullptr && target->ob != nullptr) {
     CurvePatchSession &patch = *target->session_3d;
-    curve_patch_restore_and_restamp(*C, *target->ob, patch);
-    curve_patch_tag_viewports_redraw_after_edit(*C, *target->ob, patch);
+    curve_patch_restore_and_restamp(*C, patch);
+    curve_patch_tag_viewports_redraw_after_edit(*C, patch);
     curve_patch_undo_push(patch);
   }
   else if (target->session_2d != nullptr) {

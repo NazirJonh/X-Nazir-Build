@@ -8,6 +8,10 @@
 
 #include <cstdlib>
 
+#include <memory>
+#include <optional>
+#include <string>
+
 #include "DNA_armature_types.h"
 #include "DNA_gpencil_legacy_types.h"
 #include "DNA_gpencil_modifier_types.h"
@@ -28,6 +32,7 @@
 #include "BKE_deform.hh"
 #include "BKE_gpencil_legacy.h"
 #include "BKE_grease_pencil.hh"
+#include "BKE_idprop.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
@@ -76,42 +81,123 @@
 
 namespace blender::ed::outliner {
 
-static bool outliner_stack_preview_section_from_cursor(const SpaceOutliner &space_outliner,
-                                                        const TreeElement &te,
-                                                        const float view_x,
-                                                        std::string &r_section_id)
+static const StackRowPreview *outliner_stack_preview_slot_from_cursor(
+    const SpaceOutliner &space_outliner,
+    const TreeElement &te,
+    const float view_x,
+    std::string &r_section_id)
 {
   const TreeStoreElem *tselem = TREESTORE(&te);
   if (tselem->type != TSE_STACK_LAYER ||
       (space_outliner.stack_layers_flag & SO_SL_SMALL_ROWS) != 0)
   {
-    return false;
+    return nullptr;
   }
 
   const StackRow *row = outliner_stack_row_find(space_outliner, tselem->nr);
   if (row == nullptr || row->preview_slots.is_empty()) {
-    return false;
+    return nullptr;
   }
 
   /* The same rectangles the draw painted the slots into, read back against the cursor: a hit
-   * names the slot it landed in, and what that slot opens. The rectangles' vertical span is not
-   * consulted -- the caller has already matched the row by its own Y -- so the layout's te.ys,
-   * which the finished draw has written, is as good a line as any here. */
+   * names the slot it landed in, and what that slot opens or runs. The rectangles' vertical span
+   * is not consulted -- the caller has already matched the row by its own Y -- so the layout's
+   * te.ys, which the finished draw has written, is as good a line as any here. */
   for (const int slot_index : row->preview_slots.index_range()) {
     const rctf preview_rect = outliner_stack_row_preview_rect(
         *row, float(te.xs), float(te.ys), slot_index);
     if (view_x < preview_rect.xmin || view_x > preview_rect.xmax) {
       continue;
     }
-    /* A slot without a section does not switch the row's content; the click means only what the
-     * generic selection code makes of it. */
-    if (row->preview_slots[slot_index].section_id.empty()) {
-      return false;
+    const StackRowPreview &slot = row->preview_slots[slot_index];
+    /* A slot that neither opens a section nor runs an operator means only what the generic
+     * selection code makes of the click. */
+    if (slot.section_id.empty() && slot.operator_idname.empty()) {
+      return nullptr;
     }
-    r_section_id = row->preview_slots[slot_index].section_id;
-    return true;
+    r_section_id = slot.section_id;
+    return &slot;
   }
-  return false;
+  return nullptr;
+}
+
+/**
+ * The tail of a click on a stack row that a preview slot drives: the operator and its properties
+ * are copied out of the row model first (making the row active rebuilds the model and frees the
+ * slot \a slot points into), the row is made active unless a range select will say which row ends
+ * up active, the slot's section is framed when it names one, and the slot's operator -- when it
+ * names one -- runs with the row it belongs to. A null \a slot is a plain row click: it still
+ * activates the row and frames the section, and falls through to the generic selection.
+ *
+ * Returns the operator's status when it ran; empty when the click falls through to the generic
+ * selection, which then also owns the row's selection.
+ */
+static std::optional<wmOperatorStatus> stack_preview_slot_run_operator(
+    bContext *C,
+    SpaceOutliner &space_outliner,
+    const StackRowPreview *slot,
+    const int row_ordinal,
+    const std::string &preview_section,
+    const bool activate_row,
+    bool &r_rebuild_tree)
+{
+  /* Copied before the row is activated: activating it re-reads the stack and rebuilds the row
+   * model, which frees the slot \a slot points into. Reading the operator name and properties
+   * from it afterwards ran the operator on freed memory, so the first click on a row that was not
+   * yet active only activated it. */
+  const bool runs_operator = (slot != nullptr) && !slot->operator_idname.empty();
+  std::string slot_operator;
+  OwnedIDProperty slot_properties;
+  if (runs_operator) {
+    slot_operator = slot->operator_idname;
+    if (slot->properties != nullptr) {
+      slot_properties.reset(IDP_CopyProperty(slot->properties.get()));
+    }
+  }
+
+  if (activate_row) {
+    outliner_stack_row_activate(C, space_outliner, row_ordinal);
+  }
+  if (!preview_section.empty()) {
+    const StackRow *row = outliner_stack_row_find(space_outliner, row_ordinal);
+    if (row != nullptr && !row->content_sections.is_empty()) {
+      if (outliner_stack_row_active_section_set(space_outliner, *row, preview_section)) {
+        /* Content sub-rows are built from the active section, so a section switch needs a tree
+         * rebuild rather than only redrawing the current tree. */
+        r_rebuild_tree = true;
+      }
+    }
+    if (outliner_stack_row_preview_activate(
+            C, space_outliner, row_ordinal, preview_section))
+    {
+      r_rebuild_tree = true;
+    }
+  }
+  if (!runs_operator) {
+    return std::nullopt;
+  }
+  /* A slot can be a button: it runs its operator with the row it belongs to, after the row became
+   * the active one and framed itself when it names a section. The generic selection below the
+   * caller is skipped on purpose: it re-activates the row, and activating a layer closes the mask
+   * edit session the operator may just have opened. Selection stays consistent all the same: this
+   * path writes no tree-store state, so the identity-keyed selection the last capture wrote still
+   * describes the tree, and the rebuild inside the activation restored exactly that. */
+  PointerRNA props = WM_operator_properties_create(slot_operator.c_str());
+  if (slot_properties != nullptr) {
+    /* #WM_operator_properties_create gives a pointer without a property group: the group is made
+     * on the first RNA write. Merging into the row's properties is not an RNA write, so it has to
+     * ask for that same group first -- a null #data would silently drop the ordinal and marker
+     * the operator resolves its row by. */
+    IDProperty *group = RNA_struct_system_idprops(&props, true);
+    if (group != nullptr) {
+      IDP_MergeGroup(group, slot_properties.get(), false);
+    }
+  }
+  const wmOperatorStatus status = WM_operator_name_call(
+      C, slot_operator.c_str(), wm::OpCallContext::ExecDefault, &props, nullptr);
+  WM_operator_properties_free(&props);
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+  return (status & OPERATOR_FINISHED) != 0 ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
 }
 
 /* -------------------------------------------------------------------- */
@@ -1999,27 +2085,25 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
          * generic code below rather than repeated here, so a folder can be renamed, grouped or
          * deleted like any other row even though no brush can write into it. */
         std::string preview_section;
-        const bool is_preview_click = outliner_stack_preview_section_from_cursor(
+        const StackRowPreview *preview_slot = outliner_stack_preview_slot_from_cursor(
             *space_outliner, *activate_te, view_mval[0], preview_section);
-        /* A range select keeps the row it started from active, so the data is only activated for
-         * the clicked row once the range has said which row ends up active (see below). */
-        if (!use_range) {
-          outliner_stack_row_activate(C, *space_outliner, activate_tselem->nr);
+        if (preview_slot != nullptr && !preview_slot->operator_idname.empty() &&
+            !preview_slot->enabled)
+        {
+          return OPERATOR_CANCELLED;
         }
-        if (is_preview_click) {
-          const StackRow *row = outliner_stack_row_find(*space_outliner, activate_tselem->nr);
-          if (row != nullptr && !row->content_sections.is_empty()) {
-            if (outliner_stack_row_active_section_set(*space_outliner, *row, preview_section)) {
-              /* Content sub-rows are built from the active section, so a section switch needs a
-               * tree rebuild rather than only redrawing the current tree. */
-              rebuild_tree = true;
-            }
-          }
-          if (outliner_stack_row_preview_activate(
-                  C, *space_outliner, activate_tselem->nr, preview_section))
-          {
-            rebuild_tree = true;
-          }
+        std::optional<wmOperatorStatus> slot_status = stack_preview_slot_run_operator(
+            C,
+            *space_outliner,
+            preview_slot,
+            activate_tselem->nr,
+            preview_section,
+            /* A range select keeps the row it started from active, so the data is only activated
+             * for the clicked row once the range has said which row ends up active (see below). */
+            !use_range,
+            rebuild_tree);
+        if (slot_status.has_value()) {
+          return *slot_status;
         }
       }
       if (space_outliner->stack_layers_view == SO_SL_VIEW_STACK &&

@@ -232,16 +232,31 @@ static_assert(sizeof(StackSourceInfo) ==
               "StackSourceInfo must stay a padding-free sum of its fixed-size fields");
 
 /**
- * Per-call storage the Outliner hands a stack source's Python #rows_build so it can describe
- * rows back: a handle the builder RNA functions (#OutlinerStackRowBuilder) read. Lives on the
- * stack of the call that made it.
+ * The static description a registered row decorator (a #bpy.types.OutlinerStackRowDecorator
+ * subclass) carries for the C side, filled in once at registration. Runtime-only like
+ * #StackSourceInfo, and pinned to its exact size for the same reason.
+ */
+typedef struct StackDecoratorInfo {
+  /** Unique registration name, e.g. "my_addon.paint_buttons". */
+  char idname[64];
+  /** Idname of the stack source whose rows this decorates, or "ANY" for every source. */
+  char source[64];
+} StackDecoratorInfo;
+
+static_assert(sizeof(StackDecoratorInfo) == 64 + 64,
+              "StackDecoratorInfo must stay a padding-free sum of its fixed-size fields");
+
+/**
+ * Per-call storage the Outliner hands a stack source's Python #rows_build (or a decorator's
+ * #decorate_row) so it can describe rows back: a handle the builder RNA functions
+ * (#OutlinerStackRowBuilder) read. Lives on the stack of the call that made it.
  */
 typedef struct StackRowBuilderData {
-  /** The #blender::Vector<StackRow> the rows are appended to. */
+  /** The #blender::Vector<StackRow> rows are appended to, or null in decorator mode. */
   void *rows_vector;
-  /** The row #add_row last appended. */
+  /** The row a decorator edits, or the row #add_row last appended. */
   void *current_row;
-  /** The #blender::ed::outliner::StackSourcePython the call belongs to. */
+  /** The #blender::ed::outliner::StackSourcePython the call belongs to, for name buffers. */
   void *source;
 } StackRowBuilderData;
 

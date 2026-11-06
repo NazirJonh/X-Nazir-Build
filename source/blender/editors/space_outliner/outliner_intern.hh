@@ -127,6 +127,15 @@ struct SpaceOutliner_Runtime {
    */
   Map<int, int> stack_row_index;
   /**
+   * The most buttons any row carries in either button group -- the ones right of the columns, and
+   * the ones before the value column -- whose columns are reserved so the buttons line up down
+   * the list the way the toggles do. Computed once when the rows are rebuilt: the columns are
+   * measured several times a redraw, and walking every row per measure repeats work the rebuild
+   * already did.
+   */
+  int stack_buttons_before_max = 0;
+  int stack_buttons_after_max = 0;
+  /**
    * The data-block #stack_rows was built from, and the source state it was built at.
    *
    * By session UID rather than by address: a UID names the same data for as long as the session
@@ -135,6 +144,11 @@ struct SpaceOutliner_Runtime {
    */
   uint32_t stack_owner_uid = 0;
   uint64_t stack_state_hash = 0;
+  /**
+   * The row-decorator set the rows were built with: a registration or unregistration bumps the
+   * module's version, and the next read re-runs the decorators over the rows.
+   */
+  uint64_t stack_decorators_version = 0;
   bool stack_rows_valid = false;
   /**
    * The rows were re-read since the tree was last built -- an edit's doing -- so the tree store

@@ -5,9 +5,9 @@
 /** \file
  * \ingroup spoutliner
  *
- * Implementation of the Python-defined stack source: the wiring between the #StackSource
- * vocabulary and the registered #bpy.types.OutlinerStackSource subclass's RNA functions, and the
- * row builder plumbing.
+ * Implementation of the Python-defined stack source and row decorator: the wiring between the
+ * #StackSource vocabulary and the registered #bpy.types.OutlinerStackSource subclass's RNA
+ * functions, the row builder plumbing, and the decorator registry.
  */
 
 #include "outliner_stack_source_python.hh"
@@ -40,8 +40,6 @@
 
 #include "ED_outliner_stack.hh"
 
-#include "MEM_guardedalloc.h"
-
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 
@@ -56,19 +54,21 @@ static CLG_LogRef LOG = {"ed.outliner.stack_source_python"};
 
 namespace {
 
-/* Marks the span of a bridge callback into a registered source. An unregistration that arrives
- * from inside such a callback (a source dropping itself while its own rows_build runs) parks the
- * object in its registry's retired list instead of freeing it, so no callback ever executes
- * against freed memory; the parking spots are swept when the outermost callback ends. */
+/* Marks the span of a bridge callback into a registered Python object. An unregistration that
+ * arrives from inside such a callback (a source or a decorator dropping itself, or another one,
+ * while its own rows_build/decorate_row runs) parks the object in its registry's retired list
+ * instead of freeing it, so no callback ever executes against freed memory; the parking spots are
+ * swept when the outermost callback ends. One counter serves both registries, since this guard
+ * always enters both (see #stack_bridge_callback_begin). */
 class BridgeUseGuard {
  public:
   BridgeUseGuard()
   {
-    stack_source_callback_begin();
+    stack_bridge_callback_begin();
   }
   ~BridgeUseGuard()
   {
-    stack_source_callback_end();
+    stack_bridge_callback_end();
   }
 };
 
@@ -217,7 +217,7 @@ float StackSourcePython::object_stack_key_source_part(const Object &object) cons
 
 StackSourcePython::StackSourcePython(const StackSourceInfo &info) : info(info) {}
 
-StackSourcePython::~StackSourcePython() {}
+StackSourcePython::~StackSourcePython() = default;
 
 void StackSourcePython::python_bind(void *py_data,
                                     StructCallbackFunc py_call,
@@ -402,6 +402,7 @@ bool StackSourcePython::rows_build(const StackReadContext & /*ctx*/,
     return false;
   }
   BLI_assert(BLI_thread_is_main());
+  name_buffer_keys_used_.clear();
 
   StackRowBuilderData builder_data{};
   builder_data.rows_vector = &r_rows;
@@ -449,6 +450,10 @@ bool StackSourcePython::rows_build(const StackReadContext & /*ctx*/,
     }
     r_rows[parent_ordinal].has_children = true;
   }
+
+  /* Buffers no build mentioned are rows that went away; free them now that no row points into
+   * them. */
+  name_buffers_prune();
   return true;
 }
 
@@ -478,16 +483,6 @@ bool StackSourcePython::supports_row_lock() const
 {
   /* A static class attribute, not a method: the registration copied it into #info. */
   return info.supports_row_lock != 0;
-}
-
-const char *StackSourcePython::string_intern(StringRefNull text) const
-{
-  const std::unique_ptr<std::string> *owned = interned_strings_.lookup_ptr_as(text);
-  if (owned != nullptr) {
-    return owned->get()->c_str();
-  }
-  interned_strings_.add_as(std::string(text), std::make_unique<std::string>(text));
-  return interned_strings_.lookup_as(text).get()->c_str();
 }
 
 bool StackSourcePython::row_activate(
@@ -526,11 +521,213 @@ bool StackSourcePython::row_is_active(const StackReadContext & /*ctx*/,
   return pc.ret_bool("active", false);
 }
 
+char *StackSourcePython::name_buffer_ensure(StringRefNull key, StringRefNull name) const
+{
+  name_buffer_keys_used_.add(key);
+  const std::unique_ptr<std::array<char, MAX_NAME>> &buffer = name_buffers_.lookup_or_add_cb(
+      key, []() { return std::make_unique<std::array<char, MAX_NAME>>(); });
+  BLI_strncpy_utf8(buffer->data(), name.c_str(), MAX_NAME);
+  return buffer->data();
+}
+
+const char *StackSourcePython::string_intern(StringRefNull text) const
+{
+  const std::unique_ptr<std::string> *owned = interned_strings_.lookup_ptr_as(text);
+  if (owned != nullptr) {
+    return owned->get()->c_str();
+  }
+  interned_strings_.add_as(std::string(text), std::make_unique<std::string>(text));
+  return interned_strings_.lookup_as(text).get()->c_str();
+}
+
+bUUID StackSourcePython::stable_id_from_key(StringRefNull key)
+{
+  /* Two independent FNV-1a passes over the key, spread over the UUID's fields. Deterministic:
+   * the same key is the same identity in every session, which is what lets the identity-keyed
+   * state map (collapsed, selected) follow the row rather than its position. */
+  uint64_t hash_a = 0xcbf29ce484222325ULL;
+  uint64_t hash_b = 0x9e3779b97f4a7c15ULL;
+  for (const char c : key) {
+    hash_a = (hash_a ^ uint64_t(uint8_t(c))) * 0x100000001b3ULL;
+    hash_b = (hash_b ^ uint64_t(uint8_t(c))) * 0xc2b2ae3d27d4eb4fULL;
+  }
+  bUUID uuid;
+  uuid.time_low = uint32_t(hash_a);
+  uuid.time_mid = uint16_t(hash_a >> 32);
+  uuid.time_hi_and_version = uint16_t(hash_a >> 48);
+  uuid.clock_seq_hi_and_reserved = uint8_t(hash_b);
+  uuid.clock_seq_low = uint8_t(hash_b >> 8);
+  const uint64_t node_bits = hash_b >> 16;
+  for (int i = 0; i < 6; i++) {
+    uuid.node[i] = uint8_t(node_bits >> (8 * i));
+  }
+  return uuid;
+}
+
+void StackSourcePython::name_buffers_prune() const
+{
+  Vector<std::string> stale;
+  for (const std::string &key : name_buffers_.keys()) {
+    if (!name_buffer_keys_used_.contains(key)) {
+      stale.append(key);
+    }
+  }
+  /* Popping drops the buffer with it: the owned array dies with the entry. */
+  for (const std::string &key : stale) {
+    name_buffers_.remove(key);
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Row decorators
+ * \{ */
+
+PointerRNA StackRowDecoratorPython::instance_ptr() const
+{
+  return RNA_pointer_create_discrete(nullptr,
+                                     py_srna_,
+                                     const_cast<StackDecoratorInfo *>(&info));
+}
+
+bool StackRowDecoratorPython::matches_source(StringRefNull source_idname) const
+{
+  if (!registered_) {
+    return false;
+  }
+  if (StringRefNull(info.source) == "ANY") {
+    return true;
+  }
+  return StringRefNull(info.source) == source_idname;
+}
+
+void StackRowDecoratorPython::decorate(bContext *C, ID &owner, StackRow &row) const
+{
+  if (!registered_ || decorate_row_ == nullptr) {
+    return;
+  }
+
+  StackRowBuilderData builder_data{};
+  builder_data.rows_vector = nullptr;
+  builder_data.current_row = &row;
+  builder_data.source = nullptr;
+
+  /* The same scoped dispatch every other ask into a registered subclass runs through; the
+   * parameter list it creates is freed on scope exit, so no early return can leak it. */
+  PythonCall pc(instance_ptr(), decorate_row_, py_call_);
+  bContext *C_ptr = C; /* Null is fine: the dispatcher falls back to the global context. */
+  pc.set("context", &C_ptr);
+  PointerRNA owner_ptr = python_owner_ptr(owner);
+  pc.set("owner", &owner_ptr);
+  /* A typed struct-pointer parameter is read as the struct's address, not as a #PointerRNA: handing
+   * it a #PointerRNA made the Python side see its first member (a null owner) and receive None. */
+  StackRowBuilderData *builder_data_ptr = &builder_data;
+  pc.set("row", &builder_data_ptr);
+  pc.call(C);
+}
+
+/* The decorator registry: listed to the rows while they are built, in registration order. */
+static Vector<std::unique_ptr<StackRowDecoratorPython>> &stack_decorators_runtime()
+{
+  static Vector<std::unique_ptr<StackRowDecoratorPython>> decorators;
+  return decorators;
+}
+
+/* Decorators parked by an unregistration that arrived from inside a decorate callback stay in
+ * the registry, retired, until the outermost bridge callback ends (#stack_bridge_callback_end,
+ * which calls this): freeing them now would leave the callback executing against freed memory,
+ * and removing them mid-apply would shift the tail under the apply loop. */
+void stack_decorators_retire_sweep()
+{
+  Vector<std::unique_ptr<StackRowDecoratorPython>> &decorators = stack_decorators_runtime();
+  bool retired_left = true;
+  while (retired_left) {
+    retired_left = false;
+    for (const int64_t index : decorators.index_range()) {
+      if (decorators[index]->retired_) {
+        decorators.remove(index);
+        retired_left = true;
+        break;
+      }
+    }
+  }
+}
+
+static uint64_t &stack_decorators_version_ref()
+{
+  static uint64_t version = 0;
+  return version;
+}
+
+void stack_decorator_register(std::unique_ptr<StackRowDecoratorPython> decorator)
+{
+  BLI_assert(decorator != nullptr);
+  stack_decorator_unregister(decorator->info.idname);
+  stack_decorators_runtime().append(std::move(decorator));
+  stack_decorators_version_ref()++;
+}
+
+bool stack_decorator_unregister(StringRefNull idname)
+{
+  Vector<std::unique_ptr<StackRowDecoratorPython>> &decorators = stack_decorators_runtime();
+  for (const int64_t index : decorators.index_range()) {
+    if (decorators[index]->info.idname == idname) {
+      if (stack_bridge_callback_active()) {
+        /* An unregister from inside a bridge callback -- a decorator dropping itself, most often
+         * -- retires the object instead of removing it: the apply loop is still walking this
+         * vector, and even a parked-but-removed element shifts the tail under it. The sweep when
+         * the outermost callback ends takes it out. */
+        decorators[index]->retire();
+      }
+      else {
+        decorators.remove(index);
+      }
+      stack_decorators_version_ref()++;
+      return true;
+    }
+  }
+  return false;
+}
+
+void stack_decorators_apply(bContext *C,
+                            const StackSource &source,
+                            ID &owner,
+                            MutableSpan<StackRow> rows)
+{
+  if (stack_decorators_runtime().is_empty()) {
+    return;
+  }
+  for (const std::unique_ptr<StackRowDecoratorPython> &decorator : stack_decorators_runtime()) {
+    if (decorator->retired_ || !decorator->matches_source(source.idname())) {
+      continue;
+    }
+    for (StackRow &row : rows) {
+      decorator->decorate(C, owner, row);
+    }
+  }
+}
+
+uint64_t stack_decorators_version()
+{
+  return stack_decorators_version_ref();
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Registration from the RNA side
  * \{ */
+
+const char *outliner_stack_source_python_idname(const StackSourcePython &source)
+{
+  return source.info.idname;
+}
+
+const char *outliner_stack_decorator_idname(const StackRowDecoratorPython &decorator)
+{
+  return decorator.info.idname;
+}
 
 StackSourcePython *outliner_stack_source_python_new(const StackSourceInfo &info)
 {
@@ -560,6 +757,19 @@ StructRNA *outliner_stack_source_python_refine(const StackSourceInfo *info)
     }
   });
   return srna;
+}
+
+StructRNA *outliner_stack_decorator_python_refine(const StackDecoratorInfo *info)
+{
+  if (info == nullptr) {
+    return nullptr;
+  }
+  for (const std::unique_ptr<StackRowDecoratorPython> &decorator : stack_decorators_runtime()) {
+    if (&decorator->info == info) {
+      return decorator->py_srna_get();
+    }
+  }
+  return nullptr;
 }
 
 void outliner_stack_source_python_register(Main &bmain,
@@ -618,6 +828,64 @@ bool outliner_stack_source_python_unregister(Main &bmain, StructRNA *srna)
 
   WM_main_add_notifier(NC_WINDOW, nullptr);
   return true;
+}
+
+StackRowDecoratorPython *outliner_stack_decorator_new(const StackDecoratorInfo &info)
+{
+  return new StackRowDecoratorPython(info);
+}
+
+void outliner_stack_decorator_register(Main &bmain,
+                                       StackRowDecoratorPython *decorator_owned,
+                                       void *py_class,
+                                       StructCallbackFunc py_call,
+                                       StructFreeFunc py_free,
+                                       StructRNA *py_srna,
+                                       FunctionRNA *decorate_row)
+{
+  if (decorator_owned == nullptr) {
+    return;
+  }
+  std::unique_ptr<StackRowDecoratorPython> decorator(decorator_owned);
+  decorator->python_bind(py_class, py_call, py_free, py_srna, decorate_row);
+  stack_decorator_register(std::move(decorator));
+  outliner_stack_rows_invalidate_all(bmain);
+}
+
+bool outliner_stack_decorator_unregister(Main &bmain, StructRNA *srna)
+{
+  const StackRowDecoratorPython *decorator = static_cast<const StackRowDecoratorPython *>(
+      RNA_struct_blender_type_get(srna));
+  if (decorator == nullptr) {
+    return false;
+  }
+  /* Read before the registry drops the object -- the unique_ptr there owns it. */
+  void *py_data = decorator->py_data_get();
+  StructFreeFunc py_free = decorator->py_free_get();
+
+  if (!stack_decorator_unregister(decorator->info.idname)) {
+    return false;
+  }
+  outliner_stack_rows_invalidate_all(bmain);
+
+  ExtensionRNA rna_ext{};
+  rna_ext.data = py_data;
+  rna_ext.free = py_free;
+  RNA_struct_free_extension(srna, &rna_ext);
+  RNA_struct_free(&RNA_blender_rna_get(), srna);
+
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+  return true;
+}
+
+bool outliner_stack_decorator_unregister_by_name(Main &bmain, StringRefNull idname)
+{
+  for (const std::unique_ptr<StackRowDecoratorPython> &decorator : stack_decorators_runtime()) {
+    if (decorator->info.idname == idname && decorator->py_srna_get() != nullptr) {
+      return outliner_stack_decorator_unregister(bmain, decorator->py_srna_get());
+    }
+  }
+  return false;
 }
 
 void outliner_stack_rows_invalidate_all(Main &bmain)

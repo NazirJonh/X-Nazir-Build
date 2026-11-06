@@ -36,6 +36,7 @@ struct MaterialPaintLayer;
 struct PointerRNA;
 struct ScrArea;
 struct SpaceOutliner;
+struct StackDecoratorInfo;
 struct StackRowBuilderData;
 struct StackSourceInfo;
 struct StructRNA;
@@ -44,6 +45,7 @@ namespace blender {
 struct Scene;
 struct ViewLayer;
 namespace ed::outliner {
+class StackRowDecoratorPython;
 class StackSourcePython;
 }  // namespace ed::outliner
 }  // namespace blender
@@ -163,12 +165,12 @@ MaterialPaintLayer *outliner_stack_row_mask_add_image(bContext &C,
                                                      Image &image);
 
 /**
- * \name Python-defined stack sources
+ * \name Python-defined stack sources and row decorators
  *
- * The registration half of the `bpy.types.OutlinerStackSource` RNA type: what its RNA-side
- * register function calls, and the narrow vocabulary the module answers. The Python methods
- * themselves are dispatched by RNA (the way a Python panel's #draw is); this is only the door in
- * and out of the module.
+ * The registration half of the `bpy.types.OutlinerStackSource` and
+ * `bpy.types.OutlinerStackRowDecorator` RNA types: what their RNA-side register functions call,
+ * and the narrow vocabulary the module answers. The Python methods themselves are dispatched by
+ * RNA (the way a Python panel's #draw is); this is only the door in and out of the module.
  *
  * \{ */
 
@@ -192,12 +194,17 @@ struct StackSourceFunctionSet {
 /** Create the module's half of a registered stack source; ownership passes to the module on
  * #outliner_stack_source_python_register. */
 StackSourcePython *outliner_stack_source_python_new(const StackSourceInfo &info);
+/** The idname the module owns for  source: the string an RNA struct created for it has to point
+ * at, since #RNA_def_struct_ptr keeps the pointer instead of copying it. */
+const char *outliner_stack_source_python_idname(const StackSourcePython &source);
 /** The srna the source \a idname's registration created for its subclass, or null when none is
  * registered under the name. */
 StructRNA *outliner_stack_source_python_srna(StringRefNull idname);
 /** The subclass srna the source whose description the given info is was registered with, or
  * null when no registered source owns it (the RNA refinement falls back to the base type). */
 StructRNA *outliner_stack_source_python_refine(const StackSourceInfo *info);
+/** The same, for the decorator the given info names. */
+StructRNA *outliner_stack_decorator_python_refine(const StackDecoratorInfo *info);
 /** Bind \a source to its registered subclass, store it in \a py_srna's blender-type slot as its
  * base #StackSource (the same type the unregister reads back), list it, and invalidate every
  * Outliner's cached rows so the next build sees it. Takes ownership of \a source. */
@@ -211,6 +218,25 @@ void outliner_stack_source_python_register(Main &bmain,
 /** Everything an unregister does: drop the source, release its Python class, free its srna.
  * False when \a srna does not name a registered source. */
 bool outliner_stack_source_python_unregister(Main &bmain, StructRNA *srna);
+
+/** Create the module's half of a registered row decorator; ownership passes to the module on
+ * #outliner_stack_decorator_register. */
+StackRowDecoratorPython *outliner_stack_decorator_new(const StackDecoratorInfo &info);
+/** The same, for a decorator. */
+const char *outliner_stack_decorator_idname(const StackRowDecoratorPython &decorator);
+/** Bind \a decorator to its registered subclass, list it, and invalidate every Outliner's cached
+ * rows so the next build runs it. Takes ownership of \a decorator. */
+void outliner_stack_decorator_register(Main &bmain,
+                                       StackRowDecoratorPython *decorator,
+                                       void *py_class,
+                                       StructCallbackFunc py_call,
+                                       StructFreeFunc py_free,
+                                       StructRNA *py_srna,
+                                       FunctionRNA *decorate_row);
+/** Everything an unregister does, for the decorator \a srna names. */
+bool outliner_stack_decorator_unregister(Main &bmain, StructRNA *srna);
+/** The same, addressed by the idname the decorator registered under; false when none. */
+bool outliner_stack_decorator_unregister_by_name(Main &bmain, StringRefNull idname);
 
 /** Invalidate the cached Stack Layers rows of every Outliner in \a bmain. */
 void outliner_stack_rows_invalidate_all(Main &bmain);
@@ -260,7 +286,50 @@ namespace blender {
  * so they stand here rather than inside the module's own namespace.
  *
  * \{ */
-/** Append a row; returns its ordinal, or -1 when the stack is full. */
+/**
+ * One #outliner_stack_row_builder_add_row call's arguments: what a Python `add_row` names.
+ *
+ * The RNA dispatch hands the builder's entry point its parameters positionally (the generated
+ * bridge cannot build a struct), so the RNA side fills this and the builder reads it: the
+ * parameter list stops growing with every row attribute a source gains, and only the RNA
+ * definition and its bridge ever spell it out.
+ */
+struct StackRowAddArgs {
+  const char *name = nullptr;
+  const char *icon_name = nullptr;
+  int glyph = 0;
+  int depth = 0;
+  /** Ordinal of the enclosing group row, or -1 at the top level. */
+  int parent_ordinal = -1;
+  bool can_hold_children = false;
+  bool has_children = false;
+  bool enabled = true;
+  bool locked = false;
+  bool aux_enabled = true;
+  int color_tag = 0;
+  bool compact = false;
+  const char *stable_key = nullptr;
+  const char *unsupported_reason = nullptr;
+  PointerRNA *value = nullptr;
+  const char *value_prop = nullptr;
+  PointerRNA *mode = nullptr;
+  const char *mode_prop = nullptr;
+  bool value_inherited = false;
+  bool mode_inherited = false;
+};
+
+/** Append a row; returns its ordinal, or -1 when the stack is full or \a builder is in decorator
+ * mode. \a StackRowAddArgs::stable_key names the row's identity: rows built from the same key
+ * keep their collapsed and selected state across rebuilds, and only a keyed row can be renamed in
+ * place. */
+int outliner_stack_row_builder_add_row(StackRowBuilderData *builder,
+                                       const StackRowAddArgs &args);
+
+/** The RNA dispatch's positional entry point for `add_row`: one parameter per RNA parameter,
+ * packed into #StackRowAddArgs for the builder. Defined in the runtime half of
+ * `rna_space_outliner_stack.cc` (the half the generated bridge includes, not the one the
+ * `makesrna` host tool links); declared here so the generated bridge, which runs in this
+ * namespace, sees it. */
 int outliner_stack_row_builder_add_row(StackRowBuilderData *builder,
                                        const char *name,
                                        const char *icon_name,
@@ -274,6 +343,7 @@ int outliner_stack_row_builder_add_row(StackRowBuilderData *builder,
                                        bool aux_enabled,
                                        int color_tag,
                                        bool compact,
+                                       const char *stable_key,
                                        const char *unsupported_reason,
                                        PointerRNA *value,
                                        const char *value_prop,
@@ -281,6 +351,38 @@ int outliner_stack_row_builder_add_row(StackRowBuilderData *builder,
                                        const char *mode_prop,
                                        bool value_inherited,
                                        bool mode_inherited);
+/** Append a button to the row \a row_ordinal names (the row a decorator is editing in decorator
+ * mode). Either \a operator_idname or \a menu_idname has to be set. The draw hands the button's
+ * operator the row's "ordinal" and, when it has an identity, its "marker", read off the row the
+ * button hangs on. */
+bool outliner_stack_row_builder_button_add(StackRowBuilderData *builder,
+                                           int row_ordinal,
+                                           const char *text,
+                                           const char *tooltip,
+                                           const char *icon_name,
+                                           int glyph,
+                                           const char *operator_idname,
+                                           const char *menu_idname,
+                                           bool pressed,
+                                           bool enabled,
+                                           bool before_value,
+                                           bool hover_only,
+                                           const char *int_prop,
+                                           int int_value);
+
+/** Append a preview slot to the row \a row_ordinal names. A slot with \a operator_idname
+ * invokes that operator on click, carrying the row's "ordinal" and, when it has an identity, its
+ * "marker"; one without it only draws the icon, unless it also names a section. */
+bool outliner_stack_row_builder_preview_slot_add(StackRowBuilderData *builder,
+                                                 int row_ordinal,
+                                                 const char *icon_name,
+                                                 int glyph,
+                                                 const char *label,
+                                                 const char *tooltip,
+                                                 const char *operator_idname,
+                                                 const char *section_id,
+                                                 bool enabled,
+                                                 bool keeps_row_icon);
 
 /** \} */
 

@@ -6,10 +6,11 @@
  * \ingroup rna
  *
  * The Outliner's Stack Layers RNA types a Python stack source registers through:
- * #OutlinerStackSource and #OutlinerStackRowBuilder, plus the registration half (refinement, the
- * optional-function table, register/unregister). The SpaceOutliner stack properties and their
- * callbacks stay in rna_space.cc, next to the space's other properties: an RNA property's
- * callbacks have to compile in the translation unit the generated data for that property lives in.
+ * #OutlinerStackSource, #OutlinerStackRowBuilder and #OutlinerStackRowDecorator, plus the
+ * registration half (refinement, the optional-function table, register/unregister). The
+ * SpaceOutliner stack properties and their callbacks stay in rna_space.cc, next to the space's
+ * other properties: an RNA property's callbacks have to compile in the translation unit the
+ * generated data for that property lives in.
  */
 
 #include <cfloat>
@@ -50,6 +51,13 @@ static StructRNA *rna_OutlinerStackSource_refine(PointerRNA *ptr)
   StructRNA *srna = blender::ed::outliner::outliner_stack_source_python_refine(
       static_cast<const StackSourceInfo *>(ptr->data));
   return (srna != nullptr) ? srna : RNA_OutlinerStackSource;
+}
+
+static StructRNA *rna_OutlinerStackRowDecorator_refine(PointerRNA *ptr)
+{
+  StructRNA *srna = blender::ed::outliner::outliner_stack_decorator_python_refine(
+      static_cast<const StackDecoratorInfo *>(ptr->data));
+  return (srna != nullptr) ? srna : RNA_OutlinerStackRowDecorator;
 }
 
 /* How many optional functions the #OutlinerStackSource RNA type declares, in definition order:
@@ -171,8 +179,13 @@ static StructRNA *rna_OutlinerStackSource_register(Main *bmain,
   blender::ed::outliner::StackSourcePython *source =
       blender::ed::outliner::outliner_stack_source_python_new(dummy_info);
 
+  /* The srna keeps the identifier pointer rather than a copy, so it names the module's own copy of
+   * the idname (alive until unregister frees both), never the stack-local #dummy_info: that
+   * dangled once this function returned and left a garbage struct name in `bpy.types`. */
   StructRNA *srna = RNA_def_struct_ptr(
-      &RNA_blender_rna_get(), dummy_info.idname, RNA_OutlinerStackSource);
+      &RNA_blender_rna_get(),
+      blender::ed::outliner::outliner_stack_source_python_idname(*source),
+      RNA_OutlinerStackSource);
   RNA_def_struct_translation_context(srna, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
   RNA_def_struct_flag(srna, STRUCT_NO_IDPROPERTIES);
 
@@ -191,6 +204,134 @@ static bool rna_OutlinerStackSource_unregister(Main *bmain, StructRNA *type)
   return blender::ed::outliner::outliner_stack_source_python_unregister(*bmain, type);
 }
 
+constexpr int STACK_DECORATOR_FUNC_NUM = 1;
+
+static StructRNA *rna_OutlinerStackRowDecorator_register(Main *bmain,
+                                                         ReportList *reports,
+                                                         void *data,
+                                                         const char * /*identifier*/,
+                                                         StructValidateFunc validate,
+                                                         StructCallbackFunc call,
+                                                         StructFreeFunc free)
+{
+  const char *error_prefix = RPT_("Registering outliner stack row decorator:");
+  StackDecoratorInfo dummy_info = {};
+  bool have_function[STACK_DECORATOR_FUNC_NUM];
+
+  if (blender::ed::outliner::outliner_stack_row_builder_srna() == nullptr) {
+    blender::ed::outliner::outliner_stack_row_builder_srna_set(RNA_OutlinerStackRowBuilder);
+  }
+
+  PointerRNA dummy_ptr = RNA_pointer_create_discrete(nullptr,
+                                                     RNA_OutlinerStackRowDecorator,
+                                                     &dummy_info);
+  if (validate(&dummy_ptr, data, have_function) != 0) {
+    return nullptr;
+  }
+
+  if (dummy_info.idname[0] == '\0') {
+    BKE_reportf(reports, RPT_ERROR, "%s 'bl_idname' must be set", error_prefix);
+    return nullptr;
+  }
+  if (dummy_info.source[0] == '\0') {
+    STRNCPY(dummy_info.source, "ANY");
+  }
+
+  /* A re-registration of the same idname replaces the previous one; the name check below must
+   * see the slot free first. */
+  blender::ed::outliner::outliner_stack_decorator_unregister_by_name(*bmain, dummy_info.idname);
+
+  if (!RNA_struct_available_or_report(reports, dummy_info.idname)) {
+    return nullptr;
+  }
+
+  blender::ed::outliner::StackRowDecoratorPython *decorator =
+      blender::ed::outliner::outliner_stack_decorator_new(dummy_info);
+
+  /* Same as for the source: the srna keeps the pointer, so it names the module's copy. */
+  StructRNA *srna = RNA_def_struct_ptr(
+      &RNA_blender_rna_get(),
+      blender::ed::outliner::outliner_stack_decorator_idname(*decorator),
+      RNA_OutlinerStackRowDecorator);
+  RNA_def_struct_translation_context(srna, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+  RNA_def_struct_flag(srna, STRUCT_NO_IDPROPERTIES);
+  /* The slot carries the module's own half as a #StackRowDecoratorPython -- the exact type the
+   * unregister path reads back through #RNA_struct_blender_type_get. The decorator has no base
+   * class, so there is no offset to keep honest; the point of naming the type on both sides is
+   * that a void* only round-trips to the type it was stored as. */
+  RNA_struct_blender_type_set(srna, decorator);
+
+  blender::ed::outliner::outliner_stack_decorator_register(
+      *bmain,
+      decorator,
+      data,
+      call,
+      free,
+      srna,
+      RNA_struct_find_function(RNA_OutlinerStackRowDecorator, "decorate_row"));
+
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+  return srna;
+}
+
+static bool rna_OutlinerStackRowDecorator_unregister(Main *bmain, StructRNA *type)
+{
+  return blender::ed::outliner::outliner_stack_decorator_unregister(*bmain, type);
+}
+
+/* The RNA dispatch hands `add_row` its parameters over positionally, one per RNA parameter; the
+ * builder reads them as one #StackRowAddArgs (see the declaration in ED_outliner_stack.hh). This
+ * packing and the RNA definition below are the only places the list is spelled out, so a new row
+ * attribute touches those two and nothing past them.
+ *
+ * Lives in the runtime half on purpose: the definition half is also compiled into the `makesrna`
+ * host tool, which does not link the editors, so a call into the Outliner module from there is an
+ * unresolved external. The generated bridge includes this half only. */
+int outliner_stack_row_builder_add_row(StackRowBuilderData *builder,
+                                       const char *name,
+                                       const char *icon_name,
+                                       int glyph,
+                                       int depth,
+                                       int parent_ordinal,
+                                       bool can_hold_children,
+                                       bool has_children,
+                                       bool enabled,
+                                       bool locked,
+                                       bool aux_enabled,
+                                       int color_tag,
+                                       bool compact,
+                                       const char *stable_key,
+                                       const char *unsupported_reason,
+                                       PointerRNA *value,
+                                       const char *value_prop,
+                                       PointerRNA *mode,
+                                       const char *mode_prop,
+                                       bool value_inherited,
+                                       bool mode_inherited)
+{
+  StackRowAddArgs args;
+  args.name = name;
+  args.icon_name = icon_name;
+  args.glyph = glyph;
+  args.depth = depth;
+  args.parent_ordinal = parent_ordinal;
+  args.can_hold_children = can_hold_children;
+  args.has_children = has_children;
+  args.enabled = enabled;
+  args.locked = locked;
+  args.aux_enabled = aux_enabled;
+  args.color_tag = color_tag;
+  args.compact = compact;
+  args.stable_key = stable_key;
+  args.unsupported_reason = unsupported_reason;
+  args.value = value;
+  args.value_prop = value_prop;
+  args.mode = mode;
+  args.mode_prop = mode_prop;
+  args.value_inherited = value_inherited;
+  args.mode_inherited = mode_inherited;
+  return outliner_stack_row_builder_add_row(builder, args);
+}
 
 /** \} */
 
@@ -280,7 +421,6 @@ static void rna_def_outliner_stack_source(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_REGISTER_OPTIONAL);
   RNA_def_property_ui_text(
       prop, "Supports Row Lock", "Whether the rows carry a painting lock the Options can offer");
-
   /* The dynamic answers: each one is a Python method of the registered subclass. */
   func = RNA_def_function(srna, "has_stack", nullptr);
   RNA_def_function_ui_description(func, "Whether the object has a stack of this kind to show");
@@ -391,7 +531,8 @@ static void rna_def_outliner_stack_row_builder(BlenderRNA *brna)
   srna = RNA_def_struct(brna, "OutlinerStackRowBuilder", nullptr);
   RNA_def_struct_ui_text(srna,
                          "Outliner Stack Row Builder",
-                         "Describes the rows of a stack while a source's rows_build runs");
+                         "Describes the rows of a stack while a source's rows_build, or a "
+                         "decorator's decorate_row, runs");
   RNA_def_struct_sdna(srna, "StackRowBuilderData");
 
   func = RNA_def_function(srna, "add_row", "outliner_stack_row_builder_add_row");
@@ -430,6 +571,13 @@ static void rna_def_outliner_stack_row_builder(BlenderRNA *brna)
                      0,
                      8);
   parm = RNA_def_boolean(func, "compact", false, "", "Keep the row at the single-unit height");
+  parm = RNA_def_string(func,
+                        "stable_key",
+                        nullptr,
+                        MAX_NAME,
+                        "Stable Key",
+                        "The row's identity: rows built from the same key keep their state "
+                        "across rebuilds, and only a keyed row can be renamed in place");
   /* Optional: the C half defaults it. */
   parm = RNA_def_string(
       func, "unsupported_reason", nullptr, MAX_NAME, "Unsupported Reason", "Why the row has no controls");
@@ -446,12 +594,157 @@ static void rna_def_outliner_stack_row_builder(BlenderRNA *brna)
   parm = RNA_def_boolean(func, "mode_inherited", false, "", "The mode column shows an inherited default");
   RNA_def_function_return(
       func, RNA_def_int(func, "ordinal", -1, -1, INT16_MAX, "Ordinal", "", -1, INT16_MAX));
+
+  func = RNA_def_function(srna, "add_button", "outliner_stack_row_builder_button_add");
+  RNA_def_function_ui_description(
+      func,
+      "Append an icon button to the row: it invokes an operator, or opens a menu. The operator "
+      "properties always carry the row's ordinal and, when it has one, its marker");
+  parm = RNA_def_int(func,
+                     "row_ordinal",
+                     -1,
+                     -1,
+                     INT16_MAX,
+                     "Row",
+                     "Ordinal of the row to add to, -1 for the row just added",
+                     -1,
+                     INT16_MAX);
+  /* Optional: the C half defaults it. */
+  parm = RNA_def_string(func, "text", nullptr, MAX_NAME, "Text", "Label for a menu-style button");
+  /* Optional: the C half defaults it. */
+  parm = RNA_def_string(func, "tooltip", nullptr, MAX_NAME, "Tooltip", "");
+  /* Optional: the C half defaults it. */
+  parm = RNA_def_string(func, "icon", nullptr, 64, "Icon", "Icon identifier, or empty for none");
+  /* Optional: the C half defaults it. */
+  parm = RNA_def_int(func, "glyph", 0, 0, INT32_MAX, "Glyph", "Material Symbols codepoint, or 0", 0, INT32_MAX);
+  parm = RNA_def_string(func, "operator", nullptr, 64, "Operator", "Operator to invoke, or empty");
+  /* Optional: the C half defaults it. */
+  parm = RNA_def_string(func, "menu", nullptr, 64, "Menu", "Menu to open, or empty");
+  /* Optional: the C half defaults it. */
+  parm = RNA_def_boolean(func, "pressed", false, "", "Draw the button pressed");
+  parm = RNA_def_boolean(func, "enabled", true, "", "Draw the button enabled");
+  parm = RNA_def_boolean(func,
+                         "before_value",
+                         false,
+                         "",
+                         "Draw the button in a column before the value column");
+  parm = RNA_def_boolean(func,
+                         "hover_only",
+                         false,
+                         "",
+                         "Draw the button only while the pointer is over the row");
+  parm = RNA_def_string(func,
+                        "int_prop",
+                        nullptr,
+                        64,
+                        "Integer Property",
+                        "Name of one extra integer operator property to set, or empty");
+  parm = RNA_def_int(func,
+                     "int_value",
+                     0,
+                     INT_MIN,
+                     INT_MAX,
+                     "Integer Value",
+                     "Value of the extra integer operator property",
+                     INT_MIN,
+                     INT_MAX);
+  RNA_def_function_return(func, RNA_def_boolean(func, "added", false, "", ""));
+
+  func = RNA_def_function(srna, "add_preview_slot", "outliner_stack_row_builder_preview_slot_add");
+  RNA_def_function_ui_description(
+      func,
+      "Append a preview slot to the row. A slot naming an operator invokes it on click, carrying "
+      "the row's ordinal and, when it has one, its marker");
+  parm = RNA_def_int(func,
+                     "row_ordinal",
+                     -1,
+                     -1,
+                     INT16_MAX,
+                     "Row",
+                     "Ordinal of the row to add to, -1 for the row just added",
+                     -1,
+                     INT16_MAX);
+  /* Optional: the C half defaults it. */
+  parm = RNA_def_string(func, "icon", nullptr, 64, "Icon", "Icon identifier, or empty for none");
+  parm = RNA_def_int(func, "glyph", 0, 0, INT32_MAX, "Glyph", "Material Symbols codepoint, or 0", 0, INT32_MAX);
+  parm = RNA_def_string(func, "label", nullptr, MAX_NAME, "Label", "Label shown in the tooltip");
+  /* Optional: the C half defaults it. */
+  parm = RNA_def_string(func, "tooltip", nullptr, MAX_NAME, "Tooltip", "");
+  /* Optional: the C half defaults it. */
+  parm = RNA_def_string(func,
+                        "operator",
+                        nullptr,
+                        64,
+                        "Operator",
+                        "Operator to invoke on click, or empty");
+  /* Optional: the C half defaults it. */
+  parm = RNA_def_string(func,
+                        "section_id",
+                        nullptr,
+                        64,
+                        "Section",
+                        "Identifier the slot is framed by while it is the one showing, or empty");
+  parm = RNA_def_boolean(func, "enabled", true, "", "Accept clicks on the slot");
+  parm = RNA_def_boolean(func,
+                         "keeps_row_icon",
+                         false,
+                         "",
+                         "Draw the row's own icon ahead of the slot");
+  RNA_def_function_return(func, RNA_def_boolean(func, "added", false, "", ""));
+}
+
+/** The row decorator: a registered subclass that adds buttons to the rows of the source its
+ * `source` names, whichever module registered that source. */
+static void rna_def_outliner_stack_row_decorator(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+  PropertyRNA *parm;
+  FunctionRNA *func;
+
+  srna = RNA_def_struct(brna, "OutlinerStackRowDecorator", nullptr);
+  RNA_def_struct_ui_text(srna,
+                         "Outliner Stack Row Decorator",
+                         "Adds buttons to the rows of a stack source: register a subclass to "
+                         "decorate another add-on's rows");
+  RNA_def_struct_sdna(srna, "StackDecoratorInfo");
+  RNA_def_struct_refine_func(srna, "rna_OutlinerStackRowDecorator_refine");
+  RNA_def_struct_flag(srna, STRUCT_PUBLIC_NAMESPACE_INHERIT);
+  RNA_def_struct_register_funcs(srna,
+                                "rna_OutlinerStackRowDecorator_register",
+                                "rna_OutlinerStackRowDecorator_unregister",
+                                nullptr);
+  RNA_def_struct_translation_context(srna, BLT_I18NCONTEXT_DEFAULT_BPYRNA);
+
+  prop = RNA_def_property(srna, "bl_idname", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "idname");
+  RNA_def_property_flag(prop, PROP_REGISTER);
+  RNA_def_property_ui_text(prop, "ID Name", "Unique name the decorator registers under");
+
+  prop = RNA_def_property(srna, "source", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "source");
+  RNA_def_property_flag(prop, PROP_REGISTER_OPTIONAL);
+  RNA_def_property_ui_text(prop,
+                           "Source",
+                           "Idname of the stack source whose rows this decorates, or 'ANY' for "
+                           "every source");
+
+  func = RNA_def_function(srna, "decorate_row", nullptr);
+  RNA_def_function_ui_description(func, "Add buttons to the row, through the row builder");
+  RNA_def_function_flag(func, FUNC_REGISTER);
+  parm = RNA_def_pointer(func, "context", "Context", "", "");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "owner", "ID", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "row", "OutlinerStackRowBuilder", "", "");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
 }
 
 void RNA_def_space_outliner_stack(BlenderRNA *brna)
 {
   rna_def_outliner_stack_source(brna);
   rna_def_outliner_stack_row_builder(brna);
+  rna_def_outliner_stack_row_decorator(brna);
 }
 
 }  // namespace blender

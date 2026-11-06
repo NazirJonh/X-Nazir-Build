@@ -41,6 +41,7 @@
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
 #include "BLI_utildefines.h"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "BLF_api.hh"
@@ -415,6 +416,94 @@ void outliner_draw_stack_row_icons(ui::Block *block,
       }
     }
 
+    /* The source's own and the decorators' buttons: one unit each, right-aligned against the
+     * built-in toggles. An operator button dims while the row asks for it or the stack is not
+     * editable; a menu-style one is the stock `wm.call_menu` pointed at the idname. */
+    if (!row->buttons.is_empty()) {
+      /* Buttons flagged #StackRowButton::before_value sit in columns of their own at the left edge
+       * of the value column; the rest are right-aligned against the built-in toggles. */
+      int row_buttons = 0;
+      for (const StackRowButton &button : row->buttons) {
+        row_buttons += button.before_value ? 0 : 1;
+      }
+      const int before_x = int(region->v2d.cur.xmax - outliner_right_columns_width(space_outliner));
+      int button_index = 0;
+      int before_index = 0;
+      for (const StackRowButton &button : row->buttons) {
+        int but_x;
+        if (button.before_value) {
+          but_x = before_x + before_index * UI_UNIT_X;
+          before_index++;
+        }
+        else {
+          but_x = icons_x - (row_buttons - button_index) * UI_UNIT_X;
+          button_index++;
+        }
+        /* The column of a hover-only button stays reserved; it is drawn only under the pointer. */
+        if (button.hover_only && (tselem->flag & TSE_HIGHLIGHTED) == 0) {
+          continue;
+        }
+
+        const bool menu_style = !button.menu_idname.empty();
+        const char *opname = menu_style ? "WM_OT_call_menu" : button.operator_idname.c_str();
+        ui::Button *but = uiDefIconButO(block,
+                                        ui::ButtonType::But,
+                                        opname,
+                                        wm::OpCallContext::InvokeDefault,
+                                        (button.glyph != 0) ? BKE_icon_glyph_ensure(button.glyph) :
+                                                              button.icon,
+                                        but_x,
+                                        content_y,
+                                        UI_UNIT_X,
+                                        UI_UNIT_Y,
+                                        button.tooltip.empty() ? "" : TIP_(button.tooltip.c_str()));
+        PointerRNA *opptr = ui::button_operator_ptr_ensure(but);
+        if (menu_style) {
+          RNA_string_set(opptr, "name", button.menu_idname.c_str());
+        }
+        else {
+          /* The row identity the operator resolves the row by, written straight onto the
+           * properties it actually declares: a Python button may target any operator, and one
+           * that declares none of these ends up with no dead data. The #RNA_int_set and
+           * #RNA_string_set wrappers print for a missing property, so the property is found
+           * first -- a merged-in group would instead have planted all of them sight unseen. */
+          if (PropertyRNA *prop = RNA_struct_find_property(opptr, "ordinal")) {
+            RNA_property_int_set(opptr, prop, row->ordinal);
+          }
+          if (!BLI_uuid_is_nil(row->stable_id)) {
+            char marker[UUID_STRING_SIZE];
+            BLI_uuid_format(marker, row->stable_id);
+            if (PropertyRNA *prop = RNA_struct_find_property(opptr, "marker")) {
+              RNA_property_string_set(opptr, prop, marker);
+            }
+          }
+          if (row->stable_key != nullptr && row->stable_key[0] != '\0') {
+            if (PropertyRNA *prop = RNA_struct_find_property(opptr, "stable_key")) {
+              RNA_property_string_set(opptr, prop, row->stable_key);
+            }
+          }
+          if (!button.int_prop.empty()) {
+            if (PropertyRNA *prop = RNA_struct_find_property(opptr, button.int_prop.c_str())) {
+              RNA_property_int_set(opptr, prop, button.int_value);
+            }
+          }
+        }
+        if (button.pressed) {
+          /* A plain button has no flag that draws it pressed: the pushed-state callback is the
+           * stock way a #ButtonType::But reads as on, and the state was decided when the row was
+           * built, so the answer is the constant the row carried. */
+          button_func_pushed_state_set(
+              but, [](const ui::Button & /*button*/) { return true; });
+        }
+        if (!button.enabled) {
+          button_flag_enable(but, ui::BUT_DISABLED);
+        }
+        else if (!can_toggle && !menu_style) {
+          button_flag_enable(but, ui::BUT_INACTIVE);
+        }
+      }
+    }
+
     /* A bare base has no Mix node to mute, so there is nothing to turn off. */
     if (!can_toggle || row->is_bare_base) {
       return;
@@ -699,6 +788,8 @@ struct StackColumnsDraw {
   /** Column widths come in UI units and may be fractional, so they stay floats until the button
    * rects round them to pixels. */
   float column_x;
+  /** Room reserved at the left of the value column for the buttons flagged to sit before it. */
+  float before_width;
   float value_width;
   float mode_width;
   float stacked_width;
@@ -758,8 +849,9 @@ static StackColumnsRowRects stack_columns_row_rects(const StackColumnsDraw &draw
 
   /* Side by side, value keeps its usual place on the left of mode; stacked, both sit in the same
    * single column and each fills the combined width the column was reserved with. */
-  rects.value_x = draw.column_x;
-  rects.mode_x = rects.stacked ? draw.column_x : draw.column_x + draw.value_width;
+  const float values_x = draw.column_x + draw.before_width;
+  rects.value_x = values_x;
+  rects.mode_x = rects.stacked ? values_x : values_x + draw.value_width;
   rects.value_width = rects.stacked ? draw.stacked_width : draw.value_width;
   rects.mode_width = rects.stacked ? draw.stacked_width : draw.mode_width;
   /* A compact row shows one label in that same column: the stacked column's width when the rows
@@ -774,7 +866,7 @@ static StackColumnsRowRects stack_columns_row_rects(const StackColumnsDraw &draw
   else if (rects.stacked) {
     action_offset = draw.stacked_width;
   }
-  rects.action_x = draw.column_x + action_offset;
+  rects.action_x = values_x + action_offset;
   return rects;
 }
 
@@ -865,7 +957,7 @@ static void stack_column_compact_button(bContext *C,
                        "OUTLINER_OT_stack_column_popup",
                        wm::OpCallContext::InvokeDefault,
                        label,
-                       int(draw.column_x),
+                       int(draw.column_x + draw.before_width),
                        rects.value_y,
                        int(rects.compact_width),
                        rects.button_height,
@@ -934,6 +1026,21 @@ static ui::Button *stack_column_mode_button(ui::Block *block,
                        rects.button_height);
 }
 
+/**
+ * The most buttons any row of the space's stack carries: one unit each, reserved between the
+ * value and mode columns and the built-in toggles, so the buttons of every row line up down the
+ * list the way the toggles do. Walked once when the rows were rebuilt (#outliner_stack_rows_ensure
+ * stores the counts); this read is what the several measures per redraw ask.
+ */
+static int stack_row_buttons_max(const SpaceOutliner &space_outliner, const bool before_value)
+{
+  if (space_outliner.runtime == nullptr) {
+    return 0;
+  }
+  const SpaceOutliner_Runtime &runtime = *space_outliner.runtime;
+  return before_value ? runtime.stack_buttons_before_max : runtime.stack_buttons_after_max;
+}
+
 float outliner_stack_columns_width(const SpaceOutliner &space_outliner)
 {
   if (space_outliner.stack_layers_view != SO_SL_VIEW_STACK) {
@@ -967,6 +1074,12 @@ float outliner_stack_columns_width(const SpaceOutliner &space_outliner)
   }
   /* The action column is not one of the two the flags hide. */
   num_columns += max_ff(layout.action_width, 0.0f);
+  /* The source's own and the decorators' buttons: one unit each, however many the widest row
+   * carries. Rows are described before anything measures the columns against them, so an empty
+   * cache reads as none. */
+  num_columns += float(stack_row_buttons_max(space_outliner, false));
+  /* The ones flagged to sit before the value column get columns of their own at its left. */
+  num_columns += float(stack_row_buttons_max(space_outliner, true));
   /* The per-row toggles live to the right of those columns, the way the restriction icons do in
    * the View Layer, rather than trailing the name -- unless the visibility toggle was moved to the
    * tree's own first column, in which case nothing is left to reserve room for. */
@@ -1015,6 +1128,7 @@ void outliner_draw_stack_columns(bContext *C,
 
   /* The margin from the right edge is part of that width; see #outliner_right_columns_width. */
   draw.column_x = region->v2d.cur.xmax - outliner_right_columns_width(space_outliner);
+  draw.before_width = float(stack_row_buttons_max(*space_outliner, true)) * UI_UNIT_X;
   draw.value_width = draw.show_value ? layout.value_width * UI_UNIT_X : 0;
   draw.mode_width = draw.show_mode ? layout.mode_width * UI_UNIT_X : 0;
   draw.stacked_width = max_ff(draw.value_width, draw.mode_width);

@@ -27,6 +27,7 @@
 #include "UI_resources.hh"
 
 #include "outliner_stack_source.hh"
+#include "outliner_stack_source_python.hh"
 
 namespace blender::ed::outliner {
 
@@ -83,14 +84,17 @@ int &stack_source_session_counter()
 /* Sources parked by an unregistration that arrived from inside a bridge callback into one of
  * them (a source dropping itself while its own rows_build runs): freeing one now would leave the
  * callback executing against freed memory, so it waits until the outermost callback ends
- * (#stack_source_callback_end). */
+ * (#stack_bridge_callback_end). */
 Vector<std::unique_ptr<StackSource>> &stack_sources_retired()
 {
   static Vector<std::unique_ptr<StackSource>> retired;
   return retired;
 }
 
-int &stack_source_callback_depth()
+/* One counter for every bridge callback into a registered Python object, source or decorator: a
+ * guard always enters both registries, so two counters would only ever hold the same number (see
+ * the header declaration for what the shared one buys). */
+int &stack_bridge_callback_depth()
 {
   static int depth = 0;
   return depth;
@@ -98,18 +102,24 @@ int &stack_source_callback_depth()
 
 }  // namespace
 
-/* Declared in the header and called from the Python bridge, so these two cannot live in the
- * anonymous namespace with the state they touch. */
-void stack_source_callback_begin()
+void stack_bridge_callback_begin()
 {
-  stack_source_callback_depth()++;
+  stack_bridge_callback_depth()++;
 }
 
-void stack_source_callback_end()
+void stack_bridge_callback_end()
 {
-  if (--stack_source_callback_depth() == 0) {
+  if (--stack_bridge_callback_depth() == 0) {
+    /* The outermost callback ended: nothing is running against either registry anymore, so the
+     * parked sources are freed and the retired decorators leave their registry for good. */
     stack_sources_retired().clear_and_shrink();
+    stack_decorators_retire_sweep();
   }
+}
+
+bool stack_bridge_callback_active()
+{
+  return stack_bridge_callback_depth() > 0;
 }
 
 namespace {
@@ -159,7 +169,7 @@ bool stack_source_unregister(StringRefNull idname)
   Vector<RegisteredStackSource> &runtime_sources = stack_sources_runtime();
   for (const int64_t index : runtime_sources.index_range()) {
     if (runtime_sources[index].source->idname() == idname) {
-      if (stack_source_callback_depth() > 0) {
+      if (stack_bridge_callback_active()) {
         /* A bridge callback into a source is running; park instead of free (see
          * #stack_sources_retired). */
         stack_sources_retired().append(std::move(runtime_sources[index].source));
@@ -226,6 +236,31 @@ int StackSource::focus_button_icon() const
 int StackSource::empty_preview_icon() const
 {
   return ICON_TEXTURE_DATA;
+}
+
+StackRowPreview::StackRowPreview(const StackRowPreview &other)
+    : id_uid(other.id_uid),
+      id_type(other.id_type),
+      icon(other.icon),
+      glyph(other.glyph),
+      label(other.label),
+      tooltip(other.tooltip),
+      operator_idname(other.operator_idname),
+      enabled(other.enabled),
+      properties(other.properties != nullptr ?
+                     OwnedIDProperty(IDP_CopyProperty(other.properties.get())) :
+                     nullptr),
+      section_id(other.section_id),
+      keeps_row_icon(other.keeps_row_icon),
+      is_blank(other.is_blank),
+      is_color_swatch(other.is_color_swatch),
+      render_kind(other.render_kind),
+      render_hash(other.render_hash),
+      sphere_metallic(other.sphere_metallic),
+      sphere_roughness(other.sphere_roughness)
+{
+  std::copy(other.color, other.color + 4, color);
+  std::copy(other.sphere_map_uid, other.sphere_map_uid + 3, sphere_map_uid);
 }
 
 const StackSource *stack_source_get(const eSpaceOutliner_StackSource type)

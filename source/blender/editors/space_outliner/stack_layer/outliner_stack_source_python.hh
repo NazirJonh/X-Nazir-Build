@@ -6,17 +6,19 @@
  * \ingroup spoutliner
  *
  * The Outliner-facing half of a Python-defined stack source: a #StackSource whose every answer
- * comes from a registered #bpy.types.OutlinerStackSource subclass.
+ * comes from a registered #bpy.types.OutlinerStackSource subclass, and the row decorator twin of
+ * it.
  *
  * This module never touches Python itself: the registered subclass's methods are invoked through
  * the RNA extension the registration installed (the same dispatch a Python panel's #draw uses),
  * which takes the GIL for the call. What lives here is the vocabulary wiring -- which RNA function
  * answers which #StackSource question, the row builder the #rows_build callback writes into, and
- * the storage the rows need to outlive a rebuild.
+ * the storage the rows need to outlive a rebuild (rename buffers, interned property names).
  */
 
 #pragma once
 
+#include <array>
 #include <memory>
 
 #include "BLI_map.hh"
@@ -35,7 +37,6 @@
 
 struct bContext;
 struct Main;
-struct ParameterList;
 struct wmNotifier;
 
 namespace blender::ed::outliner {
@@ -101,6 +102,18 @@ class StackSourcePython final : public StackSource {
                      const ID &owner,
                      const StackRow &row) const override;
 
+  /* ---- Python-facing helpers the row builder uses ---- */
+
+  /** The storage the row's rename field types into, keyed by the row's stable key. The buffer is
+   * at least #MAX_NAME bytes, is filled with \a name, and outlives the rebuild that asked for it;
+   * a key no build mentions again has its buffer freed. */
+  char *name_buffer_ensure(StringRefNull key, StringRefNull name) const;
+  /** A string owned as long as the source is: property names and reasons a row carries. */
+  const char *string_intern(StringRefNull text) const;
+  /** The row identity a stable key stands for: a deterministic #bUUID, the same on every rebuild
+   * and in every session as long as the key is the same. */
+  static bUUID stable_id_from_key(StringRefNull key);
+
   /**
    * Drop every cached #object_has_stack answer.
    *
@@ -113,9 +126,6 @@ class StackSourcePython final : public StackSource {
 
   /** The static description the subclass registered with. */
   const StackSourceInfo info;
-
-  /** A string owned as long as the source is: property names and reasons a row carries. */
-  const char *string_intern(StringRefNull text) const;
 
   /** The part of the #object_has_stack cache key the subclass defines through its optional
    * #has_stack_key, as a float; 0 when the source names no key or the read failed. */
@@ -149,7 +159,7 @@ class StackSourcePython final : public StackSource {
    *
    * Main thread only, like every other ask into the registered subclass: the three
    * #object_has_stack call sites are the draw pass, the tree build and the focus follow, and all
-   * three run on the main thread. No lock on purpose: the callers are all main thread.
+   * three run on the main thread. No lock on purpose, exactly as for #name_buffers_.
    */
   mutable Map<const Object *, ObjectHasStackCacheEntry> object_has_stack_cache_;
   /**
@@ -176,9 +186,11 @@ class StackSourcePython final : public StackSource {
   StackSourceFunctionSet funcs_;
 
   /* Rows are rebuilt under a const #rows_build; the storage the rows point into is the source's
-   * own and only grows and shrinks with what the current build used. Keyed on the text itself;
-   * the value is held by pointer because the map moves its entries as it grows, and the
-   * `const char *` a row carries has to stay put. */
+   * own and only grows and shrinks with what the current build used. Keyed on the row's stable
+   * key; the buffer is held by pointer because the map moves its entries as it grows, and the
+   * `char *` a row's rename field types into has to stay put. */
+  mutable Map<std::string, std::unique_ptr<std::array<char, MAX_NAME>>> name_buffers_;
+  mutable Set<std::string> name_buffer_keys_used_;
   mutable Map<std::string, std::unique_ptr<std::string>> interned_strings_;
   /** A state hash stand-in for a source whose subclass answers no #state_hash: it changes on every
    * ask, so the rows are re-read every tree rebuild instead of going silently stale. */
@@ -195,6 +207,102 @@ class StackSourcePython final : public StackSource {
    * until one of the two succeeds again. */
   mutable bool state_hash_error_logged_ = false;
   mutable bool rows_build_error_logged_ = false;
+
+  void name_buffers_prune() const;
 };
+
+/**
+ * A row decorator: a registered #bpy.types.OutlinerStackRowDecorator subclass whose
+ * #decorate_row adds buttons (and nothing else) to the rows of the source its `source` names.
+ */
+class StackRowDecoratorPython {
+ public:
+  explicit StackRowDecoratorPython(const StackDecoratorInfo &info) : info(info) {}
+
+  /** Wire the registered subclass in: the extension the registration created (its class object,
+   * its dispatch, the free function that releases it), the subclass srna, and the #decorate_row
+   * function of the base type. */
+  void python_bind(void *py_data,
+                   StructCallbackFunc py_call,
+                   StructFreeFunc py_free,
+                   StructRNA *py_srna,
+                   FunctionRNA *func)
+  {
+    py_data_ = py_data;
+    py_call_ = py_call;
+    py_free_ = py_free;
+    py_srna_ = py_srna;
+    decorate_row_ = func;
+    registered_ = true;
+  }
+
+  /** Whether this decorator answers \a source_idname's rows: its own `source` names them, or
+   * names every source. */
+  bool matches_source(StringRefNull source_idname) const;
+
+  /** Run the decorator on \a row. Errors the Python side raises are reported there and leave the
+   * row as it was. */
+  void decorate(bContext *C, ID &owner, StackRow &row) const;
+
+  const StackDecoratorInfo info;
+  /** Whether the RNA side finished binding it: a decorator is only listed once it is. */
+  bool registered_ = false;
+  /**
+   * Whether an unregistration from inside a decorate callback named it: the object stays in the
+   * registry until the callback's apply sweep (removing it mid-iteration would invalidate the
+   * loop), but stops matching sources and stops decorating.
+   */
+  bool retired_ = false;
+
+  void retire()
+  {
+    retired_ = true;
+  }
+
+  /** The pieces the RNA-side unregister and the refinement need. */
+  void *py_data_get() const
+  {
+    return py_data_;
+  }
+  StructFreeFunc py_free_get() const
+  {
+    return py_free_;
+  }
+  StructRNA *py_srna_get() const
+  {
+    return py_srna_;
+  }
+
+ private:
+  PointerRNA instance_ptr() const;
+
+  void *py_data_ = nullptr;
+  StructCallbackFunc py_call_ = nullptr;
+  StructFreeFunc py_free_ = nullptr;
+  StructRNA *py_srna_ = nullptr;
+  FunctionRNA *decorate_row_ = nullptr;
+};
+
+/* The decorator registry. Decorators are listed to the rows while they are being built, so a
+ * registration or unregistration also bumps the version #outliner_stack_decorators_version
+ * answers -- the rebuild cache mixes it into its state. */
+void stack_decorator_register(std::unique_ptr<StackRowDecoratorPython> decorator);
+bool stack_decorator_unregister(StringRefNull idname);
+/** Takes every decorator an unregistration inside a bridge callback retired out of the registry;
+ * called by #stack_bridge_callback_end when the outermost callback has ended. */
+void stack_decorators_retire_sweep();
+/** Run every matching decorator over \a rows.
+ *
+ * \a C may be null: the rows are built from #outliner_stack_rows_ensure, which is reached without
+ * a #bContext from RNA reads and notifier flushes as well, so the contract is that a decorator
+ * gets whatever context the session's global one answers -- the same fallback the RNA dispatcher
+ * itself makes for a null context. A decorator that needs the concrete Outliner reads it from the
+ * context window; it has no other handle onto the caller. */
+void stack_decorators_apply(bContext *C,
+                            const StackSource &source,
+                            ID &owner,
+                            MutableSpan<StackRow> rows);
+/** A value that changes whenever the set of registered decorators does. */
+uint64_t stack_decorators_version();
 
 }  // namespace blender::ed::outliner

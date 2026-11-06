@@ -62,6 +62,7 @@
 #include "../outliner_intern.hh"
 #include "../tree/tree_iterator.hh"
 #include "outliner_stack_source.hh"
+#include "outliner_stack_source_python.hh"
 #include "outliner_stack_layers_intern.hh"
 
 namespace blender::ed::outliner {
@@ -477,20 +478,39 @@ void outliner_stack_rows_ensure(const StackReadContext &ctx,
   SpaceOutliner_Runtime &runtime = *space_outliner.runtime;
   const StackSource &source = *stack_source_for_space(space_outliner);
   const uint64_t state_hash = source.state_hash(ctx, owner);
+  const uint64_t decorators_version = stack_decorators_version();
   if (runtime.stack_rows_valid && runtime.stack_owner_uid == owner.session_uid &&
-      runtime.stack_state_hash == state_hash)
+      runtime.stack_state_hash == state_hash &&
+      runtime.stack_decorators_version == decorators_version)
   {
     return;
   }
   runtime.stack_rows.clear();
   source.rows_build(ctx, runtime.stack_focus, owner, runtime.stack_rows);
+  /* The decorators the row built-in buttons come from run over what the source described, in
+   * registration order; the build guard above re-runs them whenever their set changes. */
+  stack_decorators_apply(nullptr, source, owner, runtime.stack_rows);
   /* Rows are addressed by ordinal all over the mode; one map spares every read a walk. */
   runtime.stack_row_index.clear();
   for (const int64_t index : runtime.stack_rows.index_range()) {
     runtime.stack_row_index.add(int(runtime.stack_rows[index].ordinal), int(index));
   }
+  /* The button counts the columns reserve, walked here where the rows are final: the draw measures
+   * the columns several times a redraw, and re-walking the rows per measure would repeat this. */
+  runtime.stack_buttons_before_max = 0;
+  runtime.stack_buttons_after_max = 0;
+  for (const StackRow &row : runtime.stack_rows) {
+    int before = 0;
+    int after = 0;
+    for (const StackRowButton &button : row.buttons) {
+      (button.before_value ? before : after)++;
+    }
+    runtime.stack_buttons_before_max = std::max(runtime.stack_buttons_before_max, before);
+    runtime.stack_buttons_after_max = std::max(runtime.stack_buttons_after_max, after);
+  }
   runtime.stack_owner_uid = owner.session_uid;
   runtime.stack_state_hash = state_hash;
+  runtime.stack_decorators_version = decorators_version;
   runtime.stack_rows_valid = true;
   /* Whatever tree the tree store was last filled by speaks the previous rows' ordinals. */
   runtime.stack_rows_rebuilt_since_build = true;

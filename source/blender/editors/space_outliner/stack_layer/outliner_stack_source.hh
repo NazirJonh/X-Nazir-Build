@@ -42,6 +42,8 @@
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
+#include "BKE_idprop.hh"
+
 #include "DNA_object_enums.h"
 #include "DNA_space_enums.h"
 
@@ -70,6 +72,13 @@ namespace blender::ed::outliner {
 
 /** Number of group colors a #StackRow::color_tag can name; the theme's collection palette size. */
 constexpr int STACK_ROW_COLOR_NUM = 8;
+
+/**
+ * An #IDProperty group a row's preview slot owns: freed with the slot, duplicated on a copy. Rows
+ * are moved around by value as they are built and stored, so the ownership has to ride along --
+ * this is the standard RAII spelling of that, on the deleter #BKE_idprop already provides.
+ */
+using OwnedIDProperty = std::unique_ptr<IDProperty, bke::idprop::IDPropertyDeleter>;
 
 /**
  * A data-block a row is made of: a channel's map for a paint layer, and whatever plays the same
@@ -140,6 +149,28 @@ struct StackRowPreview {
   uint32_t glyph = 0;
   /** Label shown in tooltip, or empty to use the data-block's name. */
   std::string label;
+  /** Tooltip for a slot that draws no rendered preview, or empty to draw none. */
+  std::string tooltip;
+
+  /**
+   * Operator invoked when the slot is clicked, or empty when the click only switches the row's
+   * content section. The operator properties carry the row's "ordinal" and, when the row has an
+   * identity, its "marker", the same convention #StackRowButton follows.
+   */
+  std::string operator_idname;
+  /** Whether an operator slot accepts clicks. */
+  bool enabled = true;
+  /** Operator properties; owned, duplicated on a copy, freed with the slot. */
+  OwnedIDProperty properties;
+
+  /* The properties are owned, so the copy constructor has to duplicate them; everything else can
+   * be the compiler's, and the move has to be spelled out because a user-declared copy
+   * constructor suppresses the implicit one (Vector growth moves). */
+  StackRowPreview() = default;
+  StackRowPreview(const StackRowPreview &other);
+  StackRowPreview(StackRowPreview &&other) noexcept = default;
+  StackRowPreview &operator=(StackRowPreview &&other) noexcept = default;
+  ~StackRowPreview() = default;
 
   /**
    * The #StackContentSection this slot makes active on click, by its identifier, or empty when
@@ -229,6 +260,45 @@ struct StackContentSection {
   Vector<StackSubRow> sub_rows;
 };
 
+/**
+ * One extra button a row shows among the icon columns, to the right of the built-in toggles.
+ *
+ * A source (or a row decorator) fills these; generic code draws and hits nothing else about them.
+ * The button either invokes an operator or opens a menu, whichever idname is set. The operator
+ * properties always carry the row's "ordinal" and, when the row has an identity, its "marker" --
+ * the same convention the built-in row operators follow -- so an operator can resolve back which
+ * row it was pressed on.
+ */
+struct StackRowButton {
+  int icon = 0;
+  /** Material Symbols codepoint drawn instead of #icon, or 0 to use #icon. */
+  uint32_t glyph = 0;
+  /** Label for a menu-style button, or empty to draw icon-only. */
+  std::string text;
+  std::string tooltip;
+  /** Operator to invoke, or empty when #menu_idname names a menu to open. */
+  std::string operator_idname;
+  /** Menu to open on click, or empty when #operator_idname names an operator. */
+  std::string menu_idname;
+  /** Draw the button pressed: the state it toggles is on for this row. */
+  bool pressed = false;
+  bool enabled = true;
+  /** Draw the button in a column of its own before the value column rather than among the
+   * buttons right of the columns. */
+  bool before_value = false;
+  /** Draw the button only while the pointer is over its row, as the Properties tree shows its
+   * drag handle; its column stays reserved either way. */
+  bool hover_only = false;
+  /**
+   * One extra integer the draw sets on the operator's properties under this name, when it
+   * declares one: an operator addressed by a value of its own (a layer's uid) rather than by the
+   * row's ordinal and marker. Empty names none. The row's identity itself is not stored here --
+   * the draw reads it off the row the button hangs on, where it is current.
+   */
+  std::string int_prop;
+  int int_value = 0;
+};
+
 /** One row of a stack, bottom to top. */
 struct StackRow {
   /**
@@ -264,6 +334,13 @@ struct StackRow {
    * share its old ordinal.
    */
   bUUID stable_id = {};
+  /**
+   * The key string the row's identity was built from, interned by the source that gave it, or
+   * null. Unlike the hash in #stable_id it is readable: an operator property carries it, so a
+   * button can name its row to the source in the same terms the build did ("layer_17"),
+   * with no ordinal map to go stale between two spaces.
+   */
+  const char *stable_key = nullptr;
   /**
    * The row is the stack's own base rather than a layer laid over something.
    *
@@ -353,6 +430,14 @@ struct StackRow {
    * layer's channels slot opens its channel textures, its mask slot opens the mask content.
    */
   Vector<StackRowPreview> preview_slots;
+
+  /**
+   * Extra icon buttons the row shows past the built-in toggles, left to right.
+   *
+   * Filled by the source from #rows_build and by every row decorator that matches the source;
+   * see #StackRowButton for what each entry carries and how its click resolves the row.
+   */
+  Vector<StackRowButton> buttons;
 
   /** Property drawn in the value column, typically an opacity or an influence. */
   std::optional<PointerRNA> value_ptr;
@@ -1455,14 +1540,14 @@ class StackSource {
   /**
    * The unique name a runtime-registered source registered under, or empty for the built-ins.
    *
-   * This is what a file's #SpaceOutliner::stack_source_idname names and what scripts address
-   * the source by. The DNA enum only says "custom"; this says which.
+   * This is what a file's #SpaceOutliner::stack_source_idname names, what scripts address the
+   * source by, and what a row decorator matches against. The DNA enum only says "custom"; this
+   * says which.
    */
   virtual StringRefNull idname() const
   {
     return "";
   }
-
   /**
    * Whether \a object contributes a stack of this kind, for the object overview.
    */
@@ -1601,7 +1686,6 @@ class StackSource {
                              const StackFocus &focus,
                              const ID &owner,
                              const StackRow &row) const = 0;
-
   /** Double-click on a sub-row. Sources with no sub-rows need not implement this. */
   virtual bool sub_row_activate(bContext & /*C*/,
                                 const StackFocus & /*focus*/,
@@ -1779,11 +1863,16 @@ void stack_source_register(std::unique_ptr<StackSource> source);
 /** Unregister the source \a idname names. False when no such source is registered. */
 bool stack_source_unregister(StringRefNull idname);
 
-/** Marks the span of one bridge callback into a registered source. An unregistration from inside
- * such a callback parks the object until the outermost #stack_source_callback_end, so no callback
- * ever runs against freed memory. */
-void stack_source_callback_begin();
-void stack_source_callback_end();
+/** Marks the span of one bridge callback into any registered Python object -- a source's or a row
+ * decorator's RNA dispatch. One counter serves both registries, because a guard always enters
+ * both: an unregistration that arrives inside any bridge callback parks its object until the
+ * outermost #stack_bridge_callback_end has swept every retired one of the two kinds. */
+void stack_bridge_callback_begin();
+void stack_bridge_callback_end();
+/** Whether a bridge callback into a registered Python object is running: an unregistration under
+ * this parks its object instead of freeing it, because a callback may still be executing against
+ * it. */
+bool stack_bridge_callback_active();
 
 /** The registered (non-built-in) source \a idname names, or null. */
 const StackSource *stack_source_custom_find(StringRefNull idname);

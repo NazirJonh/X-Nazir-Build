@@ -29,6 +29,7 @@
 #include "BLI_string_utils.hh"
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
+#include "BLI_vector.hh"
 
 #include "BLF_api.hh"
 #include "BLT_translation.hh"
@@ -3653,6 +3654,37 @@ static std::string stack_row_smart_asset_label(const TreeViewContext &tvc,
   return BKE_paint_layers_asset_instance_label(ma, instance_id);
 }
 
+/** A tooltip over a preview slot that draws a plain icon rather than a rendered preview. Only the
+ * sources that put text on a slot get one; the built-in slots leave #StackRowPreview::tooltip
+ * empty. */
+static void stack_preview_slot_tooltip_add(ui::Block *block,
+                                          const rctf &preview_rect,
+                                          const StackRowPreview &slot)
+{
+  if (slot.tooltip.empty()) {
+    return;
+  }
+  ui::Button *but = uiDefIconBut(block,
+                                 ui::ButtonType::Label,
+                                 ICON_NONE,
+                                 int(preview_rect.xmin),
+                                 int(preview_rect.ymin),
+                                 int(BLI_rctf_size_x(&preview_rect)),
+                                 int(BLI_rctf_size_y(&preview_rect)),
+                                 nullptr,
+                                 0.0,
+                                 0.0,
+                                 "");
+  if (but == nullptr) {
+    return;
+  }
+  /* Captured by value: the block is rebuilt every draw, the rows with it. */
+  ui::button_func_tooltip_custom_set_cpp(
+      *but, [tooltip = slot.tooltip](bContext & /*C*/, ui::TooltipData &tip) {
+        ui::tooltip_text_field_add(tip, tooltip, {}, ui::TIP_STYLE_HEADER, ui::TIP_LC_MAIN);
+      });
+}
+
 static void outliner_draw_tree_element(ui::Block *block,
                                        const bContext *C,
                                        const uiFontStyle *fstyle,
@@ -3936,6 +3968,9 @@ static void outliner_draw_tree_element(ui::Block *block,
            * is -- a Material's icon over its sphere, a Fill's bucket over its render. */
           if (slot_rendered) {
             stack_preview_badge_draw(preview_rect, slot_icon);
+          }
+          else if (slot.render_kind == StackRowPreviewRender::None) {
+            stack_preview_slot_tooltip_add(block, preview_rect, slot);
           }
           /* A slot that opens no section is never the one showing: an empty section id would
            * otherwise match the empty answer a row without sections gives, and frame every slot

@@ -314,6 +314,16 @@ int layer_sync_uid_unique(const Main &bmain);
  */
 class SculptLayerGroupRuntime {
  public:
+  /**
+   * Mints #tree_revision_ from the one session-wide counter. Defined out of line so the counter
+   * stays file-private to `sculpt_layers.cc`, next to #tree_revision.
+   *
+   * A value is minted rather than zeroed or copied: the blend-file reader and #tree_copy build a
+   * fresh runtime for a tree that changed wholesale behind the same mesh (a load, an undo, a
+   * #BKE_id_copy), and a cache keyed on the old revision must not match it.
+   */
+  SculptLayerGroupRuntime();
+
   /** Guards #layer_cache_. */
   CacheMutex layer_cache_mutex_;
   /**
@@ -333,6 +343,18 @@ class SculptLayerGroupRuntime {
    * is potentially megabytes per folder.
    */
   SculptLayerMask *chain_mask_ = nullptr;
+
+  /**
+   * Revision of the whole sculpt layer tree the owning group belongs to. Only the root's is ever
+   * read (#tree_revision) or incremented (the module's internal #tree_changed); a non-root
+   * group's stays whatever its allocation minted.
+   *
+   * Runtime-only: never persisted, never written to a .blend (the runtime is written as a null),
+   * and no #Mesh storage in the file. A structural change of the tree is the only thing that
+   * moves it -- a layer's data, influence, flags or masks do not -- so a caller may cache an
+   * answer derived from the tree's *shape* against it and nothing else.
+   */
+  uint64_t tree_revision_;
 
   /** Releases #chain_mask_; defined out of line, where #mask_free is in scope. */
   ~SculptLayerGroupRuntime();
@@ -420,6 +442,23 @@ Span<SculptLayer *> layers(const Mesh &mesh);
 Vector<SculptLayerGroup *> groups(const SculptLayerGroup &group);
 /** #groups over the mesh's whole tree. */
 Vector<SculptLayerGroup *> groups(const Mesh &mesh);
+
+/**
+ * Monotonic revision of \a mesh's whole sculpt layer tree, for callers that cache an answer
+ * derived from the tree's shape.
+ *
+ * Moves on every structural change of the tree -- add, remove, duplicate, a folder added or
+ * removed, any move or reorder -- and on every wholesale rebuild behind the same mesh: a
+ * blend-file read (a file load and an undo alike) and #tree_copy (a #BKE_id_copy, an evaluation
+ * copy). Each #SculptLayerGroupRuntime allocation mints its value from one session-wide counter,
+ * so a rebuilt tree never answers the revision a previous state answered, two meshes never share
+ * one, and the first revision any tree ever reports is 1.
+ *
+ * A structural change is all it tracks: a layer's data, influence, visibility flags, name or
+ * masks move nothing. Cache an answer against this only when the tree's node set and positions
+ * are what the answer depends on.
+ */
+uint64_t tree_revision(const Mesh &mesh);
 
 /* -------------------------------------------------------------------------------------------------
  * Layer management.

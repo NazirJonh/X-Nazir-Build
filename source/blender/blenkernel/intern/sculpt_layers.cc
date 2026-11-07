@@ -9,16 +9,13 @@
 #include "BKE_sculpt_layers.hh"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <climits>
 #include <cstddef>
 #include <cstdio>
 #include <string>
 #include <type_traits>
-
-#if SCULPT_LAYERS_DEBUG_COPY
-#  include <atomic>
-#endif
 
 #include <cstdint>
 
@@ -53,6 +50,15 @@
 #include "BLO_read_write.hh"
 
 static CLG_LogRef LOG = {"bke.sculpt_layers"};
+
+/**
+ * The one counter #SculptLayerGroupRuntime mints its #SculptLayerGroupRuntime::tree_revision_
+ * from: session-wide and monotonic, so a runtime allocated after any other never repeats one of
+ * its values -- that is what makes an undo re-read, a file load and a mesh copy present a
+ * revision no cached answer was keyed on. Allocations happen from evaluation threads too (an
+ * evaluation copy's #tree_copy), hence the atomic.
+ */
+static std::atomic<uint64_t> tree_revision_mint_counter = 0;
 
 namespace blender::bke::sculpt_layers {
 
@@ -172,6 +178,13 @@ void root_group_ensure(Mesh &mesh)
   mesh.sculpt_layer_root = root;
 }
 
+SculptLayerGroupRuntime::SculptLayerGroupRuntime()
+    /* Minted, not zeroed and not copied -- see the class comment. +1 keeps 0 out of the minted
+     * range, so a caller can go on treating 0 as "no tree to key on". */
+    : tree_revision_(tree_revision_mint_counter.fetch_add(1, std::memory_order_relaxed) + 1)
+{
+}
+
 void group_runtime_ensure(SculptLayerGroup &group)
 {
   if (group.runtime == nullptr) {
@@ -227,6 +240,31 @@ void tag_layers_cache_dirty(SculptLayerGroup &group)
   }
 }
 
+/**
+ * The one increment point of #tree_revision. Every path that changes a tree's shape is one of the
+ * six mutators of this module (#add, #remove, #duplicate, #group_add, #group_remove,
+ * #node_move_into), and each of them calls this exactly once; a relink outside them does not
+ * exist today -- the undo payload inserts through #node_move_into, and the blend-file reader
+ * rebuilds the tree into a freshly minted runtime -- and must not appear.
+ *
+ * On the root's runtime, because the revision is a whole-tree fact and the root is the one group
+ * every tree has. #root_group_ensure and the blend reader give the root a runtime before any node
+ * can be linked into it, which the assert keeps an eye on. The ensure below the assert stays
+ * regardless: a release build has no assert, and a root that lost its runtime to a path that
+ * forgot to re-mint would dereference null there. Re-minting is safe as a recovery (the mutators
+ * run on the main thread, never from evaluation threads) and semantically complete: the minted
+ * revision is a value no earlier state of this tree has had, which is all the caches key on.
+ */
+static void tree_changed(Mesh &mesh)
+{
+  SculptLayerGroup &root = *root_group(mesh);
+  BLI_assert_msg(root.runtime != nullptr,
+                 "Root group without a runtime: a mesh-creation or tree-copy path skipped "
+                 "#group_runtime_ensure");
+  group_runtime_ensure(root);
+  root.runtime->tree_revision_++;
+}
+
 Span<SculptLayer *> layers(const SculptLayerGroup &group)
 {
   /* Not allocated on demand: this is const and runs from evaluation threads, so a lazy allocation
@@ -279,6 +317,17 @@ Vector<SculptLayerGroup *> groups(const SculptLayerGroup &group)
 Vector<SculptLayerGroup *> groups(const Mesh &mesh)
 {
   return groups(*root_group(mesh));
+}
+
+uint64_t tree_revision(const Mesh &mesh)
+{
+  /* Read from the Outliner's draw path for every mesh object, including meshes that never had a
+   * tree set up: answer 0 ("no tree to key on") rather than dereference a missing root. */
+  const SculptLayerGroup *root = mesh.sculpt_layer_root;
+  if (root == nullptr || root->runtime == nullptr) {
+    return 0;
+  }
+  return root->runtime->tree_revision_;
 }
 
 /* True when \a group's parent chain closes on itself. */
@@ -1010,7 +1059,7 @@ void node_move_into(Mesh &mesh,
     tag_chain_mask_dirty(*moved_group);
   }
 
-  UNUSED_VARS_NDEBUG(mesh);
+  tree_changed(mesh);
 }
 
 /** \} */
@@ -1087,6 +1136,7 @@ SculptLayer *add(Mesh &mesh,
   layer->base.parent = &root;
   BLI_addtail(&root.children, &layer->base);
   tag_layers_cache_dirty(root);
+  tree_changed(mesh);
   node_name_ensure_unique(layer->base);
 
   if (totelem > 0) {
@@ -1116,6 +1166,7 @@ void remove(Mesh &mesh, SculptLayer &layer)
      * eval paths read. A missed tag here is a use-after-free, not a stale row. */
     tag_layers_cache_dirty(*layer.base.parent);
   }
+  tree_changed(mesh);
   if (layer.data) {
     MEM_delete_void(layer.data);
   }
@@ -1154,6 +1205,7 @@ SculptLayer *duplicate(Mesh &mesh, const SculptLayer &src)
   BLI_insertlinkafter(
       &parent.children, const_cast<SculptLayerTreeNode *>(&src.base), &layer->base);
   tag_layers_cache_dirty(parent);
+  tree_changed(mesh);
   node_name_ensure_unique(layer->base);
   active_set(mesh, layer);
   return layer;
@@ -1216,6 +1268,7 @@ SculptLayerGroup *group_add(Mesh &mesh, const char *name, const int parent_uid)
    * per-call-site argument about what the node happens to contain — and #node_move_into can put
    * layers inside it a moment later. */
   tag_layers_cache_dirty(*parent);
+  tree_changed(mesh);
   node_name_ensure_unique(group->base);
   return group;
 }
@@ -1235,12 +1288,11 @@ void group_remove(Mesh &mesh, SculptLayerGroup &group)
      * applied without that argument. */
     tag_layers_cache_dirty(*group.base.parent);
   }
+  tree_changed(mesh);
   group_runtime_free(group);
   /* Owned by the node, as the runtime is, so it goes with it. */
   mask_free(group.base.mask);
   MEM_delete_void(static_cast<void *>(&group));
-
-  UNUSED_VARS_NDEBUG(mesh);
 }
 
 bool is_stale(const SculptLayer &layer, const int64_t elem_num)

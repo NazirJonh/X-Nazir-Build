@@ -3555,6 +3555,7 @@ static wmOperatorStatus layer_move_to_exec(bContext *C, wmOperator *op)
   Mesh &mesh = *ctx.mesh;
 
   const int anchor_uid = RNA_int_get(op->ptr, "anchor_uid");
+  const int node_uid = RNA_int_get(op->ptr, "node_uid");
   const MoveLocation location = MoveLocation(RNA_enum_get(op->ptr, "location"));
 
   SculptLayerGroup &root = *bke::sculpt_layers::root_group(mesh);
@@ -3604,14 +3605,31 @@ static wmOperatorStatus layer_move_to_exec(bContext *C, wmOperator *op)
     cursor = (location == MoveLocation::After) ? anchor : (anchor ? anchor->prev : nullptr);
   }
 
-  /* Selected nodes, in their current relative order (drag data carries no explicit list — it is
-   * always this same selection, see #SculptLayerDragController::create_drag_data). Falls back to
-   * the active layer so a plain "no selection yet" script call still does something sensible. */
+  /* The nodes to move: the one #node_uid names, or the selection when no uid is named. The
+   * Outliner's row drag names its row, because the alternative — clearing and setting the select
+   * flags from a script — would write flags outside the undo step this operator records, and undo
+   * would then restore the move but not the selection. The Properties tree keeps the
+   * selection-driven path: its drag data carries no explicit list — it is always the same
+   * selection, see #SculptLayerDragController::create_drag_data — and falls back to the active
+   * layer so a plain "no selection yet" script call still does something sensible. */
   Vector<SculptLayerTreeNode *> moved;
-  selected_nodes_gather(root, moved);
-  if (moved.is_empty()) {
-    if (SculptLayer *active = bke::sculpt_layers::active_get(mesh)) {
-      moved.append(&active->base);
+  if (node_uid != 0) {
+    /* The root's uid is 0, which is the "none named" sentinel above, so any resolved uid here is
+     * a row node; a uid that fails to resolve is a stale drag against a row that has since gone,
+     * the same answer a stale #anchor_uid gets below. */
+    SculptLayerTreeNode *named = bke::sculpt_layers::node_find_by_uid(mesh, node_uid);
+    if (named == nullptr) {
+      BKE_report(op->reports, RPT_ERROR, "No sculpt layer or group with that id");
+      return OPERATOR_CANCELLED;
+    }
+    moved.append(named);
+  }
+  else {
+    selected_nodes_gather(root, moved);
+    if (moved.is_empty()) {
+      if (SculptLayer *active = bke::sculpt_layers::active_get(mesh)) {
+        moved.append(&active->base);
+      }
     }
   }
   if (moved.is_empty()) {
@@ -3897,7 +3915,8 @@ void SCULPT_OT_layer_move_to(wmOperatorType *ot)
   };
   ot->name = "Move Sculpt Layer To";
   ot->idname = "SCULPT_OT_layer_move_to";
-  ot->description = "Move the selected sculpt layers and groups next to, or into, another item";
+  ot->description =
+      "Move a named sculpt layer or group, or the selection, next to or into another item";
   ot->exec = layer_move_to_exec;
   ot->poll = layers_poll;
   /* No #OPTYPE_UNDO: the operator pushes its own sculpt undo step; a global push would insert a
@@ -3912,6 +3931,18 @@ void SCULPT_OT_layer_move_to(wmOperatorType *ot)
               INT_MAX,
               "Anchor ID",
               "Uid of the layer or group to move next to (0 = the top level)",
+              0,
+              INT_MAX);
+  /* 0 = move the selection instead. The Outliner's row drag names its single row this way, so the
+   * move touches no select flag: a flag the caller would otherwise have to write itself, outside
+   * the undo step this operator records (see #layer_move_to_exec). */
+  RNA_def_int(ot->srna,
+              "node_uid",
+              0,
+              0,
+              INT_MAX,
+              "Node ID",
+              "Uid of the single layer or group to move (0 = move the current selection)",
               0,
               INT_MAX);
   RNA_def_enum(ot->srna,

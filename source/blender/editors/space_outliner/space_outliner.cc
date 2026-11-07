@@ -278,6 +278,16 @@ static void outliner_main_region_listener(const wmRegionListenerParams *params)
       }
       break;
     case NC_GEOM:
+      if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+          stack_source_for_space(*space_outliner)->notifier_invalidates(*wmn))
+      {
+        /* A rename, a flag flip or a color tag set from another editor leaves the tree revision
+         * the rows' state hashes key on alone, so nothing else would re-read the rows; ask the
+         * source and let it answer for the data category. */
+        outliner_stack_rows_invalidate(*space_outliner);
+        ED_region_tag_redraw(region);
+        break;
+      }
       switch (wmn->data) {
         case ND_VERTEX_GROUP:
           ED_region_tag_redraw(region);

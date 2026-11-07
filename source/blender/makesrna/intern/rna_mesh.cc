@@ -365,6 +365,120 @@ static bool rna_Mesh_sculpt_layers_solo_active_get(PointerRNA *ptr)
   return bke::sculpt_layers::solo_active(*rna_mesh(ptr));
 }
 
+static int rna_Mesh_sculpt_layer_tree_revision_get(PointerRNA *ptr)
+{
+  const Mesh *mesh = rna_mesh(ptr);
+  if (mesh == nullptr) {
+    return 0;
+  }
+  const uint64_t revision = bke::sculpt_layers::tree_revision(*mesh);
+  if (revision == 0) {
+    return 0;
+  }
+  /* Folded into 1..2^24-1: the counter is session-wide and every evaluated copy of a mesh with a
+   * tree takes a value from it, so it outgrows what a Python source can hand back as an exact
+   * float (2^24, see #OutlinerStackSource.has_stack_key) in a long sculpting session. A wrapped
+   * value only has to differ from the previous state of the same mesh, which it does. 0 stays
+   * "no tree". */
+  return int(((revision - 1) % 0xFFFFFF) + 1);
+}
+
+/* The tree collections: a folder's children, layers and folders interleaved in tree order, each
+ * handed out as its own kind. This is what a walk over the tree reads -- the flat collections
+ * above answer "which layers exist", this answers "in what structure". The list is the sibling
+ * order, so the iteration order is the tree order. */
+
+static PointerRNA rna_sculpt_layer_node_ptr(const PointerRNA &parent,
+                                            const SculptLayerTreeNode *node)
+{
+  /* The RNA type globals are StructRNA pointers themselves; the create call wants one mutable. */
+  StructRNA *type = (node->type == SCULPT_LAYER_TREE_NODE_TYPE_GROUP) ?
+                        RNA_SculptLayerGroup :
+                        RNA_SculptLayer;
+  return RNA_pointer_create_with_parent(parent, type, const_cast<SculptLayerTreeNode *>(node));
+}
+
+static void rna_SculptLayerGroup_children_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  /* The iterator wants a mutable list base even though it only reads: the collection is a view
+   * over the folder's own children list, in its own order. */
+  SculptLayerGroup *group = static_cast<SculptLayerGroup *>(ptr->data);
+  rna_iterator_listbase_begin(iter, ptr, &group->children, nullptr);
+}
+
+static PointerRNA rna_SculptLayerGroup_children_get(CollectionPropertyIterator *iter)
+{
+  const SculptLayerTreeNode *node = static_cast<const SculptLayerTreeNode *>(
+      rna_iterator_listbase_get(iter));
+  return rna_sculpt_layer_node_ptr(iter->parent, node);
+}
+
+static int rna_SculptLayerGroup_children_length(PointerRNA *ptr)
+{
+  const SculptLayerGroup *group = static_cast<const SculptLayerGroup *>(ptr->data);
+  return BLI_listbase_count(&group->children);
+}
+
+static bool rna_SculptLayerGroup_children_lookup_int(PointerRNA *ptr,
+                                                    int index,
+                                                    PointerRNA *r_ptr)
+{
+  const SculptLayerGroup *group = static_cast<const SculptLayerGroup *>(ptr->data);
+  const SculptLayerTreeNode *node = static_cast<const SculptLayerTreeNode *>(
+      BLI_findlink(&group->children, index));
+  if (node == nullptr) {
+    return false;
+  }
+  *r_ptr = rna_sculpt_layer_node_ptr(*ptr, node);
+  return true;
+}
+
+/* The mesh's top-level tree: the children of the always-allocated root folder, so a walk can
+ * start at the mesh without the root group being exposed as an editable folder of its own. */
+
+/* The root is allocated with the mesh and by the blend-file reader, but a script reads this for
+ * every mesh it meets (an evaluated copy, a mesh made by an import), where an absent root has to
+ * read as an empty tree rather than a null dereference: #root_group only asserts. */
+static SculptLayerGroup *rna_Mesh_sculpt_layer_tree_root(PointerRNA *ptr)
+{
+  return rna_mesh(ptr)->sculpt_layer_root;
+}
+
+static void rna_Mesh_sculpt_layer_tree_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  SculptLayerGroup *root = rna_Mesh_sculpt_layer_tree_root(ptr);
+  static ListBase empty = {nullptr, nullptr};
+  rna_iterator_listbase_begin(iter, ptr, (root != nullptr) ? &root->children : &empty, nullptr);
+}
+
+static PointerRNA rna_Mesh_sculpt_layer_tree_get(CollectionPropertyIterator *iter)
+{
+  const SculptLayerTreeNode *node = static_cast<const SculptLayerTreeNode *>(
+      rna_iterator_listbase_get(iter));
+  return rna_sculpt_layer_node_ptr(iter->parent, node);
+}
+
+static int rna_Mesh_sculpt_layer_tree_length(PointerRNA *ptr)
+{
+  const SculptLayerGroup *root = rna_Mesh_sculpt_layer_tree_root(ptr);
+  return (root != nullptr) ? BLI_listbase_count(&root->children) : 0;
+}
+
+static bool rna_Mesh_sculpt_layer_tree_lookup_int(PointerRNA *ptr, int index, PointerRNA *r_ptr)
+{
+  const SculptLayerGroup *root = rna_Mesh_sculpt_layer_tree_root(ptr);
+  if (root == nullptr) {
+    return false;
+  }
+  const SculptLayerTreeNode *node = static_cast<const SculptLayerTreeNode *>(
+      BLI_findlink(&root->children, index));
+  if (node == nullptr) {
+    return false;
+  }
+  *r_ptr = rna_sculpt_layer_node_ptr(*ptr, node);
+  return true;
+}
+
 static std::optional<std::string> rna_SculptLayer_path(const PointerRNA *ptr)
 {
   const SculptLayer *layer = static_cast<const SculptLayer *>(ptr->data);
@@ -3557,6 +3671,24 @@ static void rna_def_sculpt_layer(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Name", "Name of the sculpt layer");
   RNA_def_struct_name_property(srna, prop);
 
+  /* Read-only: the uid is the node's identity within the mesh's tree, addressed to the layer
+   * operators by; a script that renames a layer keeps the same one. */
+  prop = RNA_def_property(srna, "uid", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "base.uid");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "UID",
+                           "Unique identifier of the layer within the mesh's sculpt layer tree, "
+                           "as the sculpt layer operators address it");
+
+  /* The folder holding this node, or None for a top-level one (the root folder is never shown).
+   * The inverse of #SculptLayerGroup.children; read-only, since the operators own the structure. */
+  prop = RNA_def_property(srna, "parent", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "base.parent");
+  RNA_def_property_struct_type(prop, "SculptLayerGroup");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Parent", "The folder holding this layer, if any");
+
   prop = RNA_def_property(srna, "influence", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_funcs(
       prop, "rna_SculptLayer_influence_get", "rna_SculptLayer_influence_set", nullptr);
@@ -3660,6 +3792,39 @@ static void rna_def_sculpt_layer_group(BlenderRNA *brna)
   RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_SculptLayerGroup_name_set");
   RNA_def_property_ui_text(prop, "Name", "Name of the sculpt layer group");
   RNA_def_struct_name_property(srna, prop);
+
+  /* Read-only, for the same reason #SculptLayer.uid is. */
+  prop = RNA_def_property(srna, "uid", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "base.uid");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "UID",
+      "Unique identifier of the group within the mesh's sculpt layer tree, as the sculpt layer "
+      "operators address it");
+
+  prop = RNA_def_property(srna, "parent", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "base.parent");
+  RNA_def_property_struct_type(prop, "SculptLayerGroup");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Parent", "The folder holding this group, if any");
+
+  /* The tree: the folder's children, layers and folders interleaved in tree order. */
+  prop = RNA_def_property(srna, "children", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_SculptLayerGroup_children_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_SculptLayerGroup_children_get",
+                                    "rna_SculptLayerGroup_children_length",
+                                    "rna_SculptLayerGroup_children_lookup_int",
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_struct_type(prop, "SculptLayer");
+  RNA_def_property_ui_text(prop,
+                           "Children",
+                           "The layers and folders this group holds, in tree order. Each item is "
+                           "a SculptLayer or a SculptLayerGroup, whichever it is");
 
   prop = RNA_def_property(srna, "influence", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_funcs(
@@ -4258,6 +4423,35 @@ static void rna_def_mesh(BlenderRNA *brna)
                            "Solo Base Active",
                            "Sculpt layers are temporarily hidden to sculpt the base shape "
                            "directly (toggled by the Solo Base operator)");
+
+  prop = RNA_def_property(srna, "sculpt_layer_tree", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Mesh_sculpt_layer_tree_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_Mesh_sculpt_layer_tree_get",
+                                    "rna_Mesh_sculpt_layer_tree_length",
+                                    "rna_Mesh_sculpt_layer_tree_lookup_int",
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_struct_type(prop, "SculptLayer");
+  RNA_def_property_ui_text(prop,
+                           "Sculpt Layer Tree",
+                           "The top of the mesh's sculpt layer tree: the layers and folders the "
+                           "root folder holds, in tree order. Each item is a SculptLayer or a "
+                           "SculptLayerGroup, whichever it is; a group's own children hang off "
+                           "its #children");
+
+  prop = RNA_def_property(srna, "sculpt_layer_tree_revision", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_int_funcs(prop, "rna_Mesh_sculpt_layer_tree_revision_get", nullptr, nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Sculpt Layer Tree Revision",
+      "A counter that changes with every structural change of the layer tree (add, remove, "
+      "duplicate, a folder added or removed, any move) and with every wholesale rebuild (a file "
+      "load, an undo, a copy); scripts cache tree-shaped answers by it. Changes to a layer's "
+      "influence, selection or name do not move it");
 
   /* pointers */
   rna_def_animdata_common(srna);

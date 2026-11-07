@@ -428,7 +428,7 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
     return true;
   }
 
-  void on_activate(bContext & /*C*/) override
+  void on_activate(bContext &C) override
   {
     /* #AbstractViewItem::activate selects the row it activates, but only once the row has taken the
      * active state - which this one refuses (see the constructor). Select it here instead, so that
@@ -436,6 +436,9 @@ class SculptLayerGroupItem : public ui::AbstractTreeViewItem {
      * flags (#SCULPT_OT_layer_move_to, #SCULPT_OT_layer_group_add). Reached on every click thanks
      * to #always_reactivate_on_click, since #set_state_active never reports a change. */
     this->set_selected(true);
+    /* A folder never becomes the active layer, so nothing else announces this click. The Outliner's
+     * Stack Layers source rebuilds its row selection from these flags. */
+    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, &object_->id);
   }
 
   std::optional<bool> should_be_selected() const override
@@ -631,6 +634,9 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
     layer_ref_.object = object;
     layer_ref_.layer = layer;
     uid_ = layer->base.uid;
+    /* Every click may change the multi-selection even when the active layer does not move; the
+     * reactivation hook is what announces that to the Outliner (see #on_activate). */
+    this->always_reactivate_on_click();
   }
 
   void build_row(ui::Layout &row) override
@@ -742,6 +748,9 @@ class SculptLayerItem : public ui::AbstractTreeViewItem {
     RNA_int_set(&props_ptr, "uid", layer_ref_.layer->base.uid);
     WM_operator_name_call_ptr(&C, ot, wm::OpCallContext::ExecDefault, &props_ptr, nullptr);
     WM_operator_properties_free(&props_ptr);
+    /* #SCULPT_OT_layer_select notifies when the active layer changes; a click that only changes
+     * the row selection (the same layer, still active) has to reach the Outliner too. */
+    WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, &layer_ref_.object->id);
   }
 
   std::optional<bool> should_be_selected() const override

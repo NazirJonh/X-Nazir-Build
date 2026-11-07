@@ -24,6 +24,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
 
@@ -55,16 +56,6 @@ float gradient_repeat_apply(const eMaterialPaintLayerGradientRepeat repeat, cons
   return clamp_f(t, 0.0f, 1.0f);
 }
 
-/**
- * Whether \a row takes part by evaluating itself per texel: an enabled generator row, which owns no
- * map a cache could stand in for.
- */
-bool gradient_row_is_live(const MaterialPaintLayer &row)
-{
-  return (row.flag & MA_PAINT_LAYER_ENABLED) != 0 &&
-         paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_GENERATES);
-}
-
 /** The rows laid over \a layer: its corrections and its mask items. */
 template<typename LayerT, typename Fn> void gradient_laid_row_foreach(LayerT &layer, const Fn &fn)
 {
@@ -88,102 +79,11 @@ template<typename LayerT, typename Fn> void gradient_row_foreach(LayerT &layer, 
 
 bool BKE_paint_layers_gradient_supported(const MaterialPaintLayer &layer)
 {
+  /* The subtype is asked for by name, not through the generator table: this is the Gradient
+   * module's own gate. A second generator gets a predicate of its own, and the generic dispatch
+   * keeps reading the table. */
   return layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR &&
          layer.kind_subtype == MA_PAINT_LAYER_GENERATOR_GRADIENT;
-}
-
-bool BKE_paint_layers_gradient_is_shared_bakeable(const MaterialPaintLayer &layer)
-{
-  return BKE_paint_layers_gradient_supported(layer) && layer.gradient != nullptr &&
-         layer.gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_UV;
-}
-
-bool BKE_paint_layers_gradient_subtree_is_shared_bakeable(const MaterialPaintLayer &layer)
-{
-  if (BKE_paint_layers_gradient_supported(layer) &&
-      !BKE_paint_layers_gradient_is_shared_bakeable(layer))
-  {
-    return false;
-  }
-  for (const MaterialPaintLayer &child : layer.children) {
-    if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(child)) {
-      return false;
-    }
-  }
-  for (const MaterialPaintLayer &effect : layer.effects) {
-    if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(effect)) {
-      return false;
-    }
-  }
-  for (const MaterialPaintLayer &item : layer.mask_stack) {
-    if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(item)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool BKE_paint_layers_gradient_subtree_holds_generated(const MaterialPaintLayer &layer)
-{
-  bool holds = false;
-  gradient_laid_row_foreach(layer, [&](const MaterialPaintLayer &row) {
-    holds = holds || (BKE_paint_layers_gradient_supported(row) && row.gradient != nullptr &&
-                      row.gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED);
-  });
-  /* A folder lays its children, and each of them its own corrections and mask items: a Generated
-   * Gradient anywhere below is one the folder's bake would fold in. */
-  if (holds || !BKE_paint_layers_is_folder(layer)) {
-    return holds;
-  }
-  for (const MaterialPaintLayer &child : layer.children) {
-    if (BKE_paint_layers_gradient_subtree_holds_generated(child)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool BKE_paint_layers_gradient_subtree_is_bakeable(const MaterialPaintLayer &layer)
-{
-  if (BKE_paint_layers_gradient_supported(layer) && layer.gradient == nullptr) {
-    /* A Gradient row without a payload lays nothing the plan could evaluate; a UV one is refused by
-     * the shared test for the same reason. */
-    return false;
-  }
-  for (const MaterialPaintLayer &child : layer.children) {
-    if (!BKE_paint_layers_gradient_subtree_is_bakeable(child)) {
-      return false;
-    }
-  }
-  for (const MaterialPaintLayer &effect : layer.effects) {
-    if (!BKE_paint_layers_gradient_subtree_is_bakeable(effect)) {
-      return false;
-    }
-  }
-  for (const MaterialPaintLayer &item : layer.mask_stack) {
-    if (!BKE_paint_layers_gradient_subtree_is_bakeable(item)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool BKE_paint_layers_gradient_subtree_holds_laid_gradient(const MaterialPaintLayer &layer)
-{
-  bool holds = false;
-  gradient_laid_row_foreach(
-      layer, [&](const MaterialPaintLayer &row) { holds = holds || gradient_row_is_live(row); });
-  /* A folder lays its children, and each of them its own corrections and mask items: a Gradient
-   * anywhere below is one the folder's bake would fold in. */
-  if (holds || !BKE_paint_layers_is_folder(layer)) {
-    return holds;
-  }
-  for (const MaterialPaintLayer &child : layer.children) {
-    if (BKE_paint_layers_gradient_subtree_holds_laid_gradient(child)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 void BKE_paint_layers_gradient_init(MaterialPaintLayerGradient &gradient)
@@ -207,22 +107,9 @@ void BKE_paint_layers_gradient_init(MaterialPaintLayerGradient &gradient)
 
 ColorBand *BKE_paint_layers_gradient_channel_ramp_ensure(MaterialPaintLayerChannel &record)
 {
-  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
-      eMaterialPaintChannel(record.channel));
-  if (info.is_color || record.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
-    return nullptr;
-  }
-  if (record.gradient_ramp == nullptr) {
-    record.gradient_ramp = MEM_new<ColorBand>(__func__);
-    BKE_colorband_init(record.gradient_ramp, true);
-    /* Existing files had two ends and no ramp: seed the ramp with them instead of resetting the
-     * channel to black-to-white. */
-    BKE_paint_layers_gradient_channel_ramp_ends_set(*record.gradient_ramp,
-                                                    eMaterialPaintChannel(record.channel),
-                                                    record.value[0],
-                                                    record.value[1]);
-  }
-  return record.gradient_ramp;
+  /* The value ramp belongs to the channel record, not to the Gradient: every generator reads the
+   * same one, so #BKE_paint_layers_generator_channel_ramp_ensure is its only implementation. */
+  return BKE_paint_layers_generator_channel_ramp_ensure(record);
 }
 
 MaterialPaintLayerGradient *BKE_paint_layers_gradient_ensure(MaterialPaintLayer &layer)
@@ -243,7 +130,7 @@ MaterialPaintLayerGradient *BKE_paint_layers_gradient_ensure(MaterialPaintLayer 
    * from the two ends that record kept. */
   if (layer.channels != nullptr) {
     for (const int i : IndexRange(layer.channels_num)) {
-      BKE_paint_layers_gradient_channel_ramp_ensure(layer.channels[i]);
+      BKE_paint_layers_generator_channel_ramp_ensure(layer.channels[i]);
     }
   }
   return layer.gradient;
@@ -271,37 +158,7 @@ MaterialPaintLayer *BKE_paint_layers_gradient_add(Material &ma,
                                                   MaterialPaintLayer *anchor,
                                                   const PaintLayerPlace place)
 {
-  const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_GENERATOR,
-                                                         MA_PAINT_LAYER_GENERATOR_GRADIENT);
-  if (kind == nullptr ||
-      (kind->allowed_roles & paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER)) == 0)
-  {
-    return nullptr;
-  }
-  const std::string default_name = BKE_paint_layers_unique_default_name(ma, "Gradient");
-  MaterialPaintLayer *layer = BKE_paint_layers_add(
-      ma, name != nullptr ? name : default_name.c_str(), anchor, place);
-  if (layer == nullptr) {
-    return nullptr;
-  }
-  layer->source = MA_PAINT_LAYER_SOURCE_GENERATOR;
-  layer->kind_subtype = MA_PAINT_LAYER_GENERATOR_GRADIENT;
-  BKE_paint_layers_gradient_ensure(*layer);
-  /* It starts in the first channel of the material's set, which is Base Color unless the user
-   * removed it. Another channel is switched on like a Fill's. */
-  const uint32_t set = BKE_paint_layers_channel_set_mask_get(ma);
-  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-    if (channel != PAINT_MATERIAL_CHANNEL_NORMAL && (set & (uint32_t(1) << channel)) != 0) {
-      BKE_paint_layers_channel_add(ma, layer, eMaterialPaintChannel(channel));
-      break;
-    }
-  }
-  /* The source and the record change what the graph builds: the Add's own tag was too early. A
-   * new Gradient starts in Object space: its first tiled cache tile is created now, so the first
-   * bake only fills pixels. A shared UV Gradient creates its plain maps the same way. */
-  paint_layers_bake_precreate_texture(ma, *layer);
-  BKE_paint_layers_tag_edited(ma);
-  return layer;
+  return BKE_paint_layers_generator_add(ma, MA_PAINT_LAYER_GENERATOR_GRADIENT, name, anchor, place);
 }
 
 float BKE_paint_layers_gradient_ramp_position(const MaterialPaintLayerGradient &gradient,
@@ -437,16 +294,9 @@ MaterialPaintLayer *BKE_paint_layers_gradient_ramp_row_from_data(Material &ma, c
 
 bool BKE_paint_layers_gradient_ramp_edited(Material &ma, const void *data)
 {
-  MaterialPaintLayer *row = BKE_paint_layers_gradient_ramp_row_from_data(ma, data);
-  if (row == nullptr) {
-    return false;
-  }
-  /* The ramp lives in the ColorRamp node's storage; a stop or an interpolation change is a new
-   * graph, so regeneration is the safe path (and the one that updates the CPU hash). A baked row or
-   * folder that contains one also has to be rendered again. */
-  ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
-  BKE_paint_layers_tag_edited(ma);
-  return true;
+  /* A Gradient's colour band is its payload's, but its scalar channels keep the value ramps every
+   * generator keeps, so the shared scan is the one implementation. */
+  return BKE_paint_layers_generator_ramp_edited(ma, data);
 }
 
 bool BKE_paint_layers_gradient_set_type(Material &ma,
@@ -519,21 +369,12 @@ bool BKE_paint_layers_gradient_set_distribution(
 
 namespace {
 
-/** Shared by the const and mutable getters; \a Layer and \a Ramp carry the constness. */
+/** A Gradient row's colour band or value ramp, through the accessors every generator shares. */
 template<typename Layer, typename Ramp> Ramp *gradient_channel_ramp_find(Layer &layer, int channel)
 {
-  if (!BKE_paint_layers_gradient_supported(layer) || layer.gradient == nullptr ||
-      channel == PAINT_MATERIAL_CHANNEL_NORMAL)
-  {
-    return nullptr;
-  }
-  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
-      eMaterialPaintChannel(channel));
-  if (info.is_color) {
-    return &layer.gradient->ramp;
-  }
-  auto *record = paint_layer_channel_find(layer, channel);
-  return (record != nullptr) ? record->gradient_ramp : nullptr;
+  return BKE_paint_layers_gradient_supported(layer) ?
+             static_cast<Ramp *>(BKE_paint_layers_generator_channel_ramp_get(layer, channel)) :
+             nullptr;
 }
 
 }  // namespace
@@ -554,27 +395,14 @@ void BKE_paint_layers_gradient_channel_ramp_ends_set(ColorBand &ramp,
                                                      const float start,
                                                      const float end)
 {
-  if (ramp.tot <= 0) {
-    return;
-  }
-  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
-  const float first = BKE_paint_material_t_from_value(info.value_min, info.value_max, start);
-  const float last = BKE_paint_material_t_from_value(info.value_min, info.value_max, end);
-  const auto set_grey = [](CBData &stop, const float value) {
-    stop.r = stop.g = stop.b = value;
-    stop.a = 1.0f;
-  };
-  set_grey(ramp.data[0], first);
-  set_grey(ramp.data[ramp.tot - 1], last);
+  BKE_paint_layers_generator_channel_ramp_ends_set(ramp, channel, start, end);
 }
 
 float BKE_paint_layers_gradient_channel_ramp_end_get(const ColorBand &ramp,
                                                      const eMaterialPaintChannel channel,
                                                      const bool end)
 {
-  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
-  const CBData &stop = ramp.data[end ? std::max<int>(ramp.tot - 1, 0) : 0];
-  return BKE_paint_material_value_from_t(info.value_min, info.value_max, stop.r);
+  return BKE_paint_layers_generator_channel_ramp_end_get(ramp, channel, end);
 }
 
 bool BKE_paint_layers_gradient_set_gizmo_channel(Material &ma,
@@ -920,39 +748,20 @@ bool BKE_paint_layers_gradient_set_channel_scalars(Material &ma,
                                                    const float start,
                                                    const float end)
 {
-  if (!gradient_owned(ma, layer) || !std::isfinite(start) || !std::isfinite(end)) {
+  if (!gradient_owned(ma, layer)) {
     return false;
   }
-  MaterialPaintLayerGradient *gradient = BKE_paint_layers_gradient_ensure(layer);
-  if (gradient == nullptr) {
+  if (BKE_paint_layers_gradient_ensure(layer) == nullptr) {
     return false;
   }
-  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
-  if (info.is_color || channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
-    return false;
-  }
-  MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-  if (record == nullptr) {
-    return false;
-  }
-  record->value[0] = clamp_f(start, info.value_min, info.value_max);
-  record->value[1] = clamp_f(end, info.value_min, info.value_max);
-  /* Keep the ramp's outer stops equal to the two ends the RNA properties expose. Its inner stops
-   * stay as the user left them. */
-  if (ColorBand *ramp = BKE_paint_layers_gradient_channel_ramp_ensure(*record)) {
-    BKE_paint_layers_gradient_channel_ramp_ends_set(
-        *ramp, channel, record->value[0], record->value[1]);
-    BKE_paint_layers_gradient_ramp_edited(ma, ramp);
-  }
-  BKE_paint_layers_tag_value_edited(ma);
-  return true;
+  return BKE_paint_layers_generator_set_channel_scalars(ma, layer, channel, start, end);
 }
 
 bool BKE_paint_layers_gradient_sync_channel_ramp(Material &ma,
                                                  MaterialPaintLayer &layer,
                                                  const eMaterialPaintChannel channel)
 {
-  if (!gradient_owned(ma, layer) || layer.gradient == nullptr) {
+  if (!gradient_owned(ma, layer) || !BKE_paint_layers_generator_supported(layer)) {
     return false;
   }
   MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
@@ -963,10 +772,14 @@ bool BKE_paint_layers_gradient_sync_channel_ramp(Material &ma,
   if (ramp == nullptr) {
     return false;
   }
-  const ColorBand &base = layer.gradient->ramp;
-  if (base.tot <= 0) {
+  /* The band the sync copies from is the row's Base Color ramp, whichever kind the row is: the
+   * accessors every generator shares answer for the Gradient payload and the schema kinds alike. */
+  const ColorBand *base_ptr = BKE_paint_layers_generator_channel_ramp_get(
+      layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  if (base_ptr == nullptr || base_ptr->tot <= 0) {
     return false;
   }
+  const ColorBand &base = *base_ptr;
 
   /* Sample the channel's current values at the Base Color positions, so a re-sync keeps a tune the
    * user already made. The old ramp is read before it is replaced. */

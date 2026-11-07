@@ -33,6 +33,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_material_composite_surface.hh"
@@ -319,7 +320,7 @@ TEST_F(PaintLayersBakeTest, a_uv_gradient_can_be_row_baked)
   ASSERT_NE(layer, nullptr);
   ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
       *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
-  EXPECT_TRUE(BKE_paint_layers_gradient_is_shared_bakeable(*layer));
+  EXPECT_TRUE(BKE_paint_layers_generator_is_shared_bakeable(*layer));
   EXPECT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_ALWAYS));
   clear_active();
 
@@ -597,6 +598,54 @@ TEST_F(PaintLayersBakeTest, an_older_byte_gradient_bake_is_rebuilt_as_float)
 }
 
 /**
+ * The float rule reads the channel, not the kind: every generated row's scalar bake carries the
+ * channel's precision, the Noise's as much as the Gradient's. The schema-parameter row goes through
+ * the same bake as the Gradient's, so one kind is enough to pin the rule for all of them.
+ */
+TEST_F(PaintLayersBakeTest, a_noise_row_scalar_bake_is_float)
+{
+  const int size = 16;
+  ma->paint_layers_image_size = size;
+  MaterialPaintLayer *layer = BKE_paint_layers_generator_add(
+      *ma, MA_PAINT_LAYER_GENERATOR_NOISE, "Noise", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  clear_active();
+
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_TRUE(paint_layer_row_substituted(*ma, *layer));
+  Image *baked = layer->bake->images[PAINT_MATERIAL_CHANNEL_ROUGHNESS];
+  ASSERT_NE(baked, nullptr);
+  const ImageTile *tile = BKE_image_get_tile(baked, 0);
+  ASSERT_NE(tile, nullptr);
+  EXPECT_NE(tile->gen_flag & IMA_GEN_FLOAT, 0)
+      << "the noise's ramp of a factor reads as terraces in 8 bits";
+
+  /* The baked map answers what the live row answers, at the bake's own tolerance. */
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, layers));
+  ASSERT_FALSE(layers.is_empty());
+  ASSERT_TRUE(layers[0].gradient.enabled);
+  float live[4];
+  ASSERT_TRUE(
+      BKE_paint_material_generator_sample(layers[0].gradient, size / 2, size / 2, size, size, live));
+  float bottom[4];
+  BKE_paint_layers_channel_bottom_color(PAINT_MATERIAL_CHANNEL_ROUGHNESS, bottom);
+  rcti area;
+  BLI_rcti_init(&area, 0, size, 0, size);
+  Vector<float> pixels(int64_t(size) * size * 4);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers,
+      PaintMaterialCompositeLinearTarget::packed(pixels.as_mutable_span(), area),
+      nullptr,
+      nullptr,
+      bottom));
+  const int64_t centre = (int64_t(size / 2) * size + size / 2) * 4;
+  EXPECT_NEAR(pixels[centre], live[0], 1e-4f);
+}
+
+/**
  * The canvas is what a generated row is baked at, and it is not stored anywhere of its own: a
  * resize has to move the hash, or the row would keep reading a bake of the old size.
  */
@@ -868,7 +917,7 @@ TEST_F(PaintLayersBakeTest, an_object_or_generated_gradient_is_never_shared_bake
       *ma, *generated, MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED));
 
   for (MaterialPaintLayer *layer : {object, generated}) {
-    EXPECT_FALSE(BKE_paint_layers_gradient_is_shared_bakeable(*layer));
+    EXPECT_FALSE(BKE_paint_layers_generator_is_shared_bakeable(*layer));
     EXPECT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_ALWAYS));
   }
   clear_active();
@@ -1520,7 +1569,7 @@ TEST_F(PaintLayersBakeTest, a_row_under_a_gradient_correction_bakes_on_the_worke
       *ma, row, "Grad", MA_PAINT_LAYER_SOURCE_GENERATOR);
   ASSERT_NE(effect, nullptr);
   ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *effect, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
-  EXPECT_TRUE(BKE_paint_layers_gradient_subtree_is_shared_bakeable(*row));
+  EXPECT_TRUE(BKE_paint_layers_generator_subtree_is_shared_bakeable(*row));
   EXPECT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *row))
       << "a bake that folds a Gradient in costs texels, not nodes";
 }

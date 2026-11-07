@@ -3986,9 +3986,9 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      true,
      true,
      NODE_TEX_IMAGE_SLOT_NONE,
-     /* A factor that multiplies a colour, not a colour: 8 bits of alpha is the convention of every
-      * other map in the material. */
-     false},
+     /* A factor the same way as Metallic: a generator's ramp of it is continuous, and 8 bits of it
+      * read as terraces on the edge of a coverage. */
+     true},
     /* AO has no Principled BSDF socket to resolve an image through (same as Custom). */
     {PAINT_MATERIAL_CHANNEL_AO,
      "AO",
@@ -4000,7 +4000,7 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      true,
      false,
      NODE_TEX_IMAGE_SLOT_NONE,
-     false},
+     true},
     /* Emission is a color channel; is_color routes it through the generic color-attribute path. */
     {PAINT_MATERIAL_CHANNEL_EMISSION,
      "Emission",
@@ -4017,7 +4017,11 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      * the same way the painted factors do; none has a per-vertex representation the draw engines
      * could show, so all eight are map-only like Emission. Their authored range is the socket's own
      * 0..1, which is also the Principled default range of every one of them, and the storage is
-     * direct: no bias, no scale. */
+     * direct: no bias, no scale.
+     *
+     * Every factor among them is baked as float (see #MaterialPaintChannelInfo::bake_float): a
+     * generator's ramp of it is continuous, and 256 levels of it read as terraces in the shading.
+     * Only a colour stays byte, as the material's colour maps are. */
     {PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
      "Emission Strength",
      "material_emission_strength",
@@ -4028,9 +4032,7 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      true,
      NODE_TEX_IMAGE_SLOT_NONE,
-     /* A factor multiplied into a colour, like Alpha: bytes carry it as well as they carry the
-      * emission colour it scales. */
-     false},
+     true},
     {PAINT_MATERIAL_CHANNEL_TRANSMISSION,
      "Transmission",
      "material_transmission",
@@ -4041,7 +4043,7 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      true,
      NODE_TEX_IMAGE_SLOT_NONE,
-     false},
+     true},
     {PAINT_MATERIAL_CHANNEL_SUBSURFACE,
      "Subsurface",
      "material_subsurface",
@@ -4052,7 +4054,7 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      true,
      NODE_TEX_IMAGE_SLOT_NONE,
-     false},
+     true},
     {PAINT_MATERIAL_CHANNEL_COAT,
      "Coat",
      "material_coat",
@@ -4063,7 +4065,7 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      true,
      NODE_TEX_IMAGE_SLOT_NONE,
-     false},
+     true},
     {PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS,
      "Coat Roughness",
      "material_coat_roughness",
@@ -4076,7 +4078,7 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      NODE_TEX_IMAGE_SLOT_NONE,
      /* The coat's own highlight width, and the Principled starts it at 0.03 rather than at half:
       * the default value is the one place that has to agree with the socket. */
-     false},
+     true},
     {PAINT_MATERIAL_CHANNEL_SHEEN,
      "Sheen",
      "material_sheen",
@@ -4087,7 +4089,7 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      true,
      NODE_TEX_IMAGE_SLOT_NONE,
-     false},
+     true},
     /* The one new color channel: like Emission and Base Color it writes through the generic
      * color-attribute path, and its map is a byte color map in the material's colorspace. */
     {PAINT_MATERIAL_CHANNEL_SPECULAR_TINT,
@@ -4111,7 +4113,7 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      true,
      NODE_TEX_IMAGE_SLOT_NONE,
-     false},
+     true},
 };
 
 static_assert(ARRAY_SIZE(material_paint_channels) == PAINT_MATERIAL_CHANNEL_NUM,

@@ -25,6 +25,7 @@
 
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_asset.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_target.hh"
 
@@ -1427,7 +1428,7 @@ bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer
   {
     return false;
   }
-  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer) &&
+  if (!BKE_paint_layers_generator_subtree_is_shared_bakeable(layer) &&
       !bake_tiles_ready(ma, layer))
   {
     return false;
@@ -1574,10 +1575,10 @@ bool paint_layer_row_substituted(const Material &ma, const MaterialPaintLayer &l
      * description that decides what it reads. */
     return false;
   }
-  /* Object/Generated Gradients read per-object geometry. Their maps are one UDIM image with a tile
+  /* Object/Generated generators read per-object geometry. Their maps are one UDIM image with a tile
    * per object of the current scene/view layer: only a complete tile set may stand in, and a folder
    * containing such a row needs the same coverage. */
-  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer) &&
+  if (!BKE_paint_layers_generator_subtree_is_shared_bakeable(layer) &&
       !bake_tiles_ready(ma, layer))
   {
     return false;
@@ -2043,7 +2044,7 @@ bool BKE_paint_layers_folder_auto_bake_allowed(const Material &ma, const Materia
 /* -------------------------------------------------------------------- */
 /** \name Objects of a bake
  *
- * An Object or Generated Gradient reads the geometry of the object it is shaded on, so a cache of
+ * An Object or Generated generator reads the geometry of the object it is shaded on, so a cache of
  * such a row describes one object. The objects come from the evaluated depsgraph of the scene and
  * view layer the bake was started for; nothing here looks at the rest of `bmain`, and every
  * function runs on the main thread, where evaluated data may be read.
@@ -2080,10 +2081,10 @@ bool paint_layers_bake_subtree_needs_surface(const MaterialPaintLayer &layer)
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     return false;
   }
-  /* A subtree whose Gradients all read the texel's own UV is one map for every object of the
-   * material; one holding an Object or a Generated Gradient reads geometry a shared map cannot
+  /* A subtree whose generators all read the texel's own UV is one map for every object of the
+   * material; one holding an Object or a Generated pattern reads geometry a shared map cannot
    * carry. */
-  return !BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer);
+  return !BKE_paint_layers_generator_subtree_is_shared_bakeable(layer);
 }
 
 /**
@@ -2516,17 +2517,17 @@ static void bake_object_identity_forget(const Material &ma, const MaterialPaintL
 
 /**
  * Whether \a layer's bake pays per texel rather than per node: a Gradient row itself, or a row a
- * live Gradient is laid over (see #BKE_paint_layers_gradient_subtree_holds_laid_gradient), whose
+ * live Gradient is laid over (see #BKE_paint_layers_generator_subtree_holds_laid_generator), whose
  * bake folds that Gradient in. Both a shared (UV) and a per-object (Object/Generated) bake have
  * that cost; only a subtree the bake cannot evaluate at all is left out.
  */
 static bool bake_cost_is_texels(const MaterialPaintLayer &layer)
 {
-  if (!BKE_paint_layers_gradient_subtree_is_bakeable(layer)) {
+  if (!BKE_paint_layers_generator_subtree_is_bakeable(layer)) {
     return false;
   }
   return paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES) ||
-         BKE_paint_layers_gradient_subtree_holds_laid_gradient(layer);
+         BKE_paint_layers_generator_subtree_holds_laid_generator(layer);
 }
 
 /**
@@ -2535,8 +2536,13 @@ static bool bake_cost_is_texels(const MaterialPaintLayer &layer)
  * user chose on the row itself outranks it -- and "Only Complex Graphs" hands the question to the
  * node-count rules a plain AUTO row answers (#bake_subtree_weight against
  * #PAINT_LAYERS_AUTO_BAKE_NODES), so a light graph stays live and only a heavy one is cached.
+ *
+ * This stays a Gradient-named path, not a generator-table branch: the setting is the Gradient
+ * bake policy the user picked for the material, so the subtype switch below is over the policy's
+ * own answers, not over generator kinds. Which rows are generators at all is the kind schema's
+ * #PAINT_LAYER_KIND_GENERATES flag, read by the callers.
  */
-static bool bake_gradient_auto_allowed(const Material &ma, const MaterialPaintLayer &layer)
+static bool bake_generator_auto_allowed(const Material &ma, const MaterialPaintLayer &layer)
 {
   /* The setting answers only the automatic bake. */
   if (BKE_paint_layers_bake_mode_get(layer) != MA_PAINT_LAYER_BAKE_AUTO) {
@@ -2562,7 +2568,7 @@ bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer
      * it to a job that never picks it up, so after its first bake an edit would not bake it again. */
     return false;
   }
-  if (BKE_paint_layers_gradient_subtree_is_bakeable(layer) &&
+  if (BKE_paint_layers_generator_subtree_is_bakeable(layer) &&
       paint_layers_bake_subtree_needs_surface(layer))
   {
     /* An Object or Generated row is rasterized from the surface of the objects it serves, which is
@@ -2573,12 +2579,12 @@ bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer
   if (bake_subtree_weight(ma, layer) > PAINT_LAYERS_AUTO_BAKE_NODES) {
     return true;
   }
-  if (bake_cost_is_texels(layer) && bake_gradient_auto_allowed(ma, layer)) {
-    /* A Gradient row is cheap by node count and expensive by texels: its cost is the canvas it is
+  if (bake_cost_is_texels(layer) && bake_generator_auto_allowed(ma, layer)) {
+    /* A generator row is cheap by node count and expensive by texels: its cost is the canvas it is
      * laid on, and the first bake has no stored size to weigh yet. Left on the main thread it would
-     * hitch the moment the user leaves the row. A row a Gradient is laid over pays the same cost,
-     * since its bake folds the Gradient in. The material's Gradient answer takes part in the
-     * question: a row whose Gradient it keeps live is not heavy for the Gradient's sake. */
+     * hitch the moment the user leaves the row. A row a generator is laid over pays the same cost,
+     * since its bake folds the pattern in. The material's Gradient answer takes part in the
+     * question: a row whose generator it keeps live is not heavy for that pattern's sake. */
     const int canvas = int(ma.paint_layers_image_size);
     return canvas <= 0 || canvas >= PAINT_LAYERS_HEAVY_BAKE_SIZE;
   }
@@ -2808,7 +2814,7 @@ static int bake_size_from_content(const Material &ma, const MaterialPaintLayer &
 /**
  * The side \a row is baked at: the side the user set (the explicit bit of the bake structure, so it
  * survives a save, a load and an undo), the size it was baked at (or an AUTO release kept), then
- * its content's. A Gradient row has no map of its own, so unless the user chose a side its cache
+ * its content's. A generator row has no map of its own, so unless the user chose a side its cache
  * follows the material canvas.
  */
 static int bake_size_for(const Material &ma, const MaterialPaintLayer &row)
@@ -2820,7 +2826,7 @@ static int bake_size_for(const Material &ma, const MaterialPaintLayer &row)
   }
   int size = 0;
   if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_GENERATES)) {
-    /* A Gradient lays its pixels on the material canvas unless the user chose a side. */
+    /* A generator lays its pixels on the material canvas unless the user chose a side. */
     size = int(ma.paint_layers_image_size);
   }
   else if (paint_layer_mask_item_bakes_effect(row)) {
@@ -2847,7 +2853,7 @@ void paint_layers_bake_precreate_texture(Material &ma, MaterialPaintLayer &edite
   if (G_MAIN == nullptr || !BKE_id_is_in_global_main(&ma.id)) {
     return;
   }
-  /* A correction or a mask item has no cache of its own: its Gradient is folded into the bake of
+  /* A correction or a mask item has no cache of its own: its pattern is folded into the bake of
    * the row it lies over, so that row is the one that gets the maps. */
   MaterialPaintLayer *row = &edited;
   if (BKE_paint_layers_owner_list(ma, edited) == nullptr) {
@@ -2866,13 +2872,13 @@ void paint_layers_bake_precreate_texture(Material &ma, MaterialPaintLayer &edite
     /* A Never or hidden row never reads a cache; a record for it would be dead weight. */
     return;
   }
-  const bool shared = BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer);
+  const bool shared = BKE_paint_layers_generator_subtree_is_shared_bakeable(layer);
   if (!shared && !paint_layers_bake_subtree_needs_surface(layer)) {
     /* A subtree the bake cannot evaluate at all: no map would ever be read. */
     return;
   }
-  if (!bake_gradient_auto_allowed(ma, layer)) {
-    /* The material keeps this Gradient live: the planner would release maps created now. */
+  if (!bake_generator_auto_allowed(ma, layer)) {
+    /* The material keeps this generator live: the planner would release maps created now. */
     return;
   }
   const int size = bake_size_for(ma, layer);
@@ -3031,8 +3037,8 @@ static bool bake_row_is_candidate(const Material &ma,
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     return false;
   }
-  /* A subtree holding a Gradient the bake cannot evaluate is never cached. */
-  if (!BKE_paint_layers_gradient_subtree_is_bakeable(layer)) {
+  /* A subtree holding a generator the bake cannot evaluate is never cached. */
+  if (!BKE_paint_layers_generator_subtree_is_bakeable(layer)) {
     return false;
   }
   /* An Object or Generated row reads the geometry of each object it is shaded on, so it needs the
@@ -3081,10 +3087,10 @@ bool bake_row_is_due(const Material &ma,
       return false;
     }
   }
-  /* A subtree whose Gradients the bake cannot evaluate carries nothing worth keeping. The record
+  /* A subtree whose generators the bake cannot evaluate carries nothing worth keeping. The record
    * itself stays: it holds the mode a user chose even when no map was ever made, and the size to
    * bake at if the row becomes bakeable again. */
-  if (!BKE_paint_layers_gradient_subtree_is_bakeable(layer)) {
+  if (!BKE_paint_layers_generator_subtree_is_bakeable(layer)) {
     r_release = bake_row_has_maps(layer) ? BakeRowRelease::ReleaseMaps : BakeRowRelease::Keep;
     return false;
   }
@@ -3111,15 +3117,15 @@ bool bake_row_is_due(const Material &ma,
   if (folder && BKE_paint_layers_folder_is_pass_through(layer)) {
     return false;
   }
-  /* A Gradient row is cached for the same reason a reader is: it has no map of its own, so its
+  /* A generator row is cached for the same reason a reader is: it has no map of its own, so its
    * cache does not double anything, and it is laid per texel -- the cost a cache exists to avoid.
-   * The AUTO exemptions below name it beside the reader for that reason. A row a Gradient is laid
-   * over is cached the same way: the bake folds the Gradient in, so the stack stops evaluating it
+   * The AUTO exemptions below name it beside the reader for that reason. A row a generator is laid
+   * over is cached the same way: the bake folds the pattern in, so the stack stops evaluating it
    * per texel the moment the active marker leaves the row. Only the AUTO rules read this, so a
    * switch that already said no never pays for the walk over the row's subtree. */
-  const bool gradient_texels = bake_cost_is_texels(layer);
-  if (mode == MA_PAINT_LAYER_BAKE_AUTO && gradient_texels &&
-      !bake_gradient_auto_allowed(ma, layer))
+  const bool generator_texels = bake_cost_is_texels(layer);
+  if (mode == MA_PAINT_LAYER_BAKE_AUTO && generator_texels &&
+      !bake_generator_auto_allowed(ma, layer))
   {
     /* The material's Gradient answer refuses the automatic bake: the row stays live, and a cache
      * the earlier answer left is released with its size remembered. */
@@ -3127,7 +3133,7 @@ bool bake_row_is_due(const Material &ma,
     return false;
   }
   const bool cheap_live = mode == MA_PAINT_LAYER_BAKE_AUTO &&
-                          (paint_layer_kind_reads_anchor_point(layer) || gradient_texels);
+                          (paint_layer_kind_reads_anchor_point(layer) || generator_texels);
   /* A row that carries a CPU-computed effect is baked whatever its AUTO gates say: the live graph
    * cannot express the effect, so the bake is what the graph samples instead. The gates below keep
    * every other rule -- the blockers bind through #bake_row_is_candidate, NEVER and the deferred
@@ -3247,7 +3253,7 @@ bool paint_layers_bake_pending_after_switch(const Material &ma,
         bake_row_is_candidate(ma, layer, PAINT_LAYERS_BAKE_OBJECTS_OK))
     {
       if (BKE_paint_layers_bake_mode_get(layer) == MA_PAINT_LAYER_BAKE_AUTO &&
-          bake_cost_is_texels(layer) && !bake_gradient_auto_allowed(ma, layer))
+          bake_cost_is_texels(layer) && !bake_generator_auto_allowed(ma, layer))
       {
         /* The material's Gradient answer keeps this row live: the switch changes nothing. */
         continue;
@@ -3329,7 +3335,7 @@ static void bake_gradient_row_report(const MaterialPaintLayer &layer,
  * The surface an Object or Generated bake of \a layer renders through, or null when its subtree
  * reads no object geometry at all. \a targets is what the caller resolved; the islands are grown
  * outward so the map's bilinear filtering finds an edge rather than empty texels, and the orco grid
- * is kept only when a Generated Gradient reads it.
+ * is kept only when a Generated generator reads it.
  */
 static std::shared_ptr<const PaintMaterialCompositeSurface>
     bake_surface_build(const MaterialPaintLayer &layer,
@@ -3342,7 +3348,7 @@ static std::shared_ptr<const PaintMaterialCompositeSurface>
                                                 target.uv_map_name,
                                                 size,
                                                 padding,
-                                                BKE_paint_layers_gradient_subtree_holds_generated(
+                                                BKE_paint_layers_generator_subtree_holds_generated(
                                                     layer));
 }
 

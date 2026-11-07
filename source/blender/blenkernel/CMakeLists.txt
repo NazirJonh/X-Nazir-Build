@@ -287,10 +287,14 @@ set(SRC
   intern/paint_layers/paint_layers_gradient.cc
   intern/paint_layers/paint_layers_gradient_surface.cc
   intern/paint_layers/paint_layers_generate_build.cc
+  intern/paint_layers/paint_layers_generator.cc
   intern/paint_layers/paint_layers_generate_build_chain.cc
+  intern/paint_layers/paint_layers_generate_build_generator.cc
   intern/paint_layers/paint_layers_generate_build_height.cc
   intern/paint_layers/paint_layers_generate_build_filter.cc
   intern/paint_layers/paint_layers_generate_build_intern.hh
+  intern/paint_layers/paint_layers_generator_registry.cc
+  intern/paint_layers/paint_layers_kind_generators.cc
   intern/paint_layers/paint_layers_generate_common.cc
   intern/paint_layers/paint_layers_generate_intern.hh
   intern/paint_layers/paint_layers_generate_layout.cc
@@ -309,10 +313,14 @@ set(SRC
   intern/paint_material_blend_group.cc
   intern/paint_material_blend_group_extended.cc
   intern/paint_material_composite.cc
+  intern/paint_material_composite_generator.cc
   intern/paint_material_gradient_group.cc
+  intern/paint_material_grunge_group.cc
   intern/paint_material_normal_combine.cc
   intern/paint_material_resolve.cc
+  intern/paint_material_scratches_group.cc
   intern/paint_material_sync.cc
+  intern/paint_material_weave_group.cc
   intern/paint_runtime.cc
   intern/paint_vector.cc
   intern/particle.cc
@@ -577,6 +585,8 @@ set(SRC
   BKE_paint_layers_composite.hh
   BKE_paint_layers_edit.hh
   BKE_paint_layers_generate.hh
+  BKE_paint_layers_generator.hh
+  BKE_paint_layers_generator_registry.hh
   BKE_paint_layers_gradient.hh
   BKE_paint_layers_graph_heal.hh
   BKE_paint_layers_import.hh
@@ -910,6 +920,7 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_graph_eval_corrections_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_filters_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_formulas_test.cc
+    intern/paint_layers/tests/paint_layers_graph_eval_generator_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_material_row_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_passthrough_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_test.cc

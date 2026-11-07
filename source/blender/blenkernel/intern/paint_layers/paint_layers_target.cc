@@ -35,7 +35,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
-#include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_material_composite.hh"
@@ -286,7 +286,7 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
   if (BKE_paint_layers_lock_blocker(ma, *r_target.mask_item) != nullptr) {
     return PaintLayersTargetStatus::Locked;
   }
-  /* A Gradient mask item produces its grey from nodes; a stroke has no map to write into it. */
+  /* A generator mask item produces its grey from nodes; a stroke has no map to write into it. */
   if (paint_layer_kind_has_flag(*r_target.mask_item, PAINT_LAYER_KIND_GENERATES)) {
     return PaintLayersTargetStatus::RowTakesNoStrokes;
   }
@@ -1364,9 +1364,9 @@ constexpr int CORRECTIONS_BAKE_STRIP_ROWS = 1024;
 /**
  * The corrections of one row to bake, bottom to top. False, with the reason reported, when they
  * cannot be baked as one: they hang on different rows, are not next to each other, or one of them is
- * a kind that has no colour of its own to bake (a filter, an Anchor Point, a marker, or a generator
- * other than the Gradient). A Gradient is baked in every space: a UV line reads the texel's own UV,
- * and an Object or a Generated one reads the surface the bake is handed as its context (see
+ * a kind that has no colour of its own to bake (a filter, an Anchor Point or a marker). A generator
+ * of any kind is baked in every space: a UV pattern reads the texel's own UV, and an Object or a
+ * Generated one reads the surface the bake is handed as its context (see
  * #BKE_paint_layers_corrections_bake).
  */
 static bool corrections_bake_collect(Material &ma,
@@ -1413,16 +1413,14 @@ static bool corrections_bake_collect(Material &ma,
     const char *name = effect->name[0] != '\0' ? effect->name : "Correction";
     /* A filter changes the colour below it, which includes the row's own where the corrections
      * cover nothing: no texture holds that. An Anchor Point is a live link to a slice of the row,
-     * which a bake would freeze, and a marker publishes the row's content up to its place. The
-     * Gradient is the one generator with a colour of its own: the same row description the bake
-     * reads lays its ramp in every space, a 3D line through the surface the bake is handed as its
-     * context (#BKE_paint_layers_corrections_surface_needed). A generator of another kind, should
-     * one appear, stays refused until its bake is defined. */
-    const bool is_gradient = BKE_paint_layers_gradient_supported(*effect);
+     * which a bake would freeze, and a marker publishes the row's content up to its place. A
+     * generator of any kind is accepted: the same row description the composite reads lays its ramp
+     * in every space, a 3D coordinate through the surface the bake is handed as its context
+     * (#BKE_paint_layers_corrections_surface_needed). */
+    const bool generates = paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_GENERATES);
     if (paint_layer_effect_is_filter(*effect) || paint_layer_kind_reads_anchor_point(*effect) ||
         paint_layer_kind_is_anchor_point_marker(*effect) ||
-        (paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_GENERATES) && !is_gradient) ||
-        (!is_gradient &&
+        (!generates &&
          !ELEM(effect->source,
                MA_PAINT_LAYER_SOURCE_IMAGE,
                MA_PAINT_LAYER_SOURCE_CONSTANT,
@@ -1431,7 +1429,7 @@ static bool corrections_bake_collect(Material &ma,
       BKE_reportf(reports,
                   RPT_ERROR,
                   "\"%s\" cannot be baked into a texture: only Paint, Fill, Material and "
-                  "Gradient corrections can",
+                  "generator corrections can",
                   name);
       return false;
     }
@@ -1516,17 +1514,17 @@ static bool corrections_bake_channels(Material &ma,
 }
 
 /**
- * The first correction of the set whose Gradient line reads the surface of an object: an Object or
- * a Generated space, on an enabled correction, that lays in a channel a bake holds. Null when the
- * set has no such correction, so the bake needs no surface context (see
+ * The first correction of the set whose generator pattern reads the surface of an object: an Object
+ * or a Generated space, on an enabled correction, that lays in a channel a bake holds. Null when
+ * the set has no such correction, so the bake needs no surface context (see
  * #BKE_paint_layers_corrections_bake).
  */
-static const MaterialPaintLayer *corrections_bake_surface_gradient(
+static const MaterialPaintLayer *corrections_bake_surface_generator(
     Material &ma, const Span<MaterialPaintLayer *> selected)
 {
   for (const MaterialPaintLayer *effect : selected) {
-    if (!BKE_paint_layers_gradient_supported(*effect) || effect->gradient == nullptr ||
-        effect->gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_UV ||
+    if (!BKE_paint_layers_generator_supported(*effect) ||
+        BKE_paint_layers_generator_space_of(*effect) == MA_PAINT_LAYER_GRADIENT_SPACE_UV ||
         (effect->flag & MA_PAINT_LAYER_ENABLED) == 0)
     {
       continue;
@@ -1549,8 +1547,8 @@ static const MaterialPaintLayer *corrections_bake_surface_gradient(
 static bool corrections_bake_needs_generated(Material &ma, const Span<MaterialPaintLayer *> run)
 {
   for (const MaterialPaintLayer *effect : run) {
-    if (!BKE_paint_layers_gradient_supported(*effect) || effect->gradient == nullptr ||
-        effect->gradient->space != MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED ||
+    if (!BKE_paint_layers_generator_supported(*effect) ||
+        BKE_paint_layers_generator_space_of(*effect) != MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED ||
         (effect->flag & MA_PAINT_LAYER_ENABLED) == 0)
     {
       continue;
@@ -1581,24 +1579,24 @@ static int corrections_bake_surface_padding(const int size)
 bool BKE_paint_layers_corrections_surface_needed(Material &ma,
                                                  const Span<MaterialPaintLayer *> selected)
 {
-  return corrections_bake_surface_gradient(ma, selected) != nullptr;
+  return corrections_bake_surface_generator(ma, selected) != nullptr;
 }
 
 /**
- * The surface context a 3D Gradient line reads: the evaluated object it was drawn in, and that
+ * The surface context a 3D generator pattern reads: the evaluated object it was drawn in, and that
  * object's evaluated mesh. False, with the reason reported, when the bake was handed none -- it
- * cannot invent the object the line was drawn in -- or when the mesh has no UV map the surface
+ * cannot invent the object the pattern was placed in -- or when the mesh has no UV map the surface
  * could be rasterized over.
  */
-static bool corrections_bake_surface_context(const MaterialPaintLayer &gradient,
+static bool corrections_bake_surface_context(const MaterialPaintLayer &generator,
                                              const CorrectionsBakeSurface &surface,
                                              ReportList *reports)
 {
-  const char *name = gradient.name[0] != '\0' ? gradient.name : "Correction";
+  const char *name = generator.name[0] != '\0' ? generator.name : "Correction";
   if (surface.object == nullptr || surface.mesh == nullptr) {
     BKE_reportf(reports,
                 RPT_ERROR,
-                "The Gradient correction \"%s\" is in Object or Generated space: activate a mesh "
+                "The generator correction \"%s\" is in Object or Generated space: activate a mesh "
                 "object that uses this material, with a UV map, and try again",
                 name);
     return false;
@@ -1606,7 +1604,7 @@ static bool corrections_bake_surface_context(const MaterialPaintLayer &gradient,
   if (BKE_paint_layers_gradient_uv_map_name(*surface.mesh).is_empty()) {
     BKE_reportf(reports,
                 RPT_ERROR,
-                "The object \"%s\" has no UV map the Gradient correction \"%s\" could be baked "
+                "The object \"%s\" has no UV map the generator correction \"%s\" could be baked "
                 "over",
                 surface.object->id.name + 2,
                 name);
@@ -1630,11 +1628,11 @@ bool BKE_paint_layers_corrections_bake_precheck(Material &ma,
     BKE_report(reports, RPT_ERROR, "A Paint correction is a texture already");
     return false;
   }
-  /* A 3D Gradient reads the surface of a concrete object, which no later stage can supply. The
+  /* A 3D generator reads the surface of a concrete object, which no later stage can supply. The
    * refusal comes before the channels, and above the Material escape below, so a set holding both
-   * a Material and a 3D Gradient correction is still refused for the missing surface. */
-  if (const MaterialPaintLayer *gradient = corrections_bake_surface_gradient(ma, run)) {
-    if (!corrections_bake_surface_context(*gradient, surface, reports)) {
+   * a Material and a 3D generator correction is still refused for the missing surface. */
+  if (const MaterialPaintLayer *generator = corrections_bake_surface_generator(ma, run)) {
+    if (!corrections_bake_surface_context(*generator, surface, reports)) {
       return false;
     }
   }
@@ -1682,9 +1680,9 @@ MaterialPaintLayer *BKE_paint_layers_corrections_bake(Main &bmain,
   }
   /* Every refusal that needs no canvas comes before a map is created, so a refusal leaves the
    * material exactly as it was. */
-  const MaterialPaintLayer *surface_gradient = corrections_bake_surface_gradient(ma, run);
-  if (surface_gradient != nullptr &&
-      !corrections_bake_surface_context(*surface_gradient, surface, reports))
+  const MaterialPaintLayer *surface_generator = corrections_bake_surface_generator(ma, run);
+  if (surface_generator != nullptr &&
+      !corrections_bake_surface_context(*surface_generator, surface, reports))
   {
     return nullptr;
   }
@@ -1755,16 +1753,16 @@ MaterialPaintLayer *BKE_paint_layers_corrections_bake(Main &bmain,
   /* A map that is not tile 1001 alone has to be tiled, or the other tiles have nowhere to go. */
   const bool tiled = tiles.size() > 1 || tiles[0] != 1001;
 
-  /* A 3D Gradient's surface covers the 0..1 UV square alone: a tile beyond 1001 has no object
-   * coordinate to read, so the merge is refused rather than dropping the line there silently. The
-   * surface is built once, at the canvas the merge writes, and held until every map is done. Its
+  /* A 3D generator's surface covers the 0..1 UV square alone: a tile beyond 1001 has no object
+   * coordinate to read, so the merge is refused rather than dropping the pattern there silently.
+   * The surface is built once, at the canvas the merge writes, and held until every map is done. Its
    * islands are grown outward so the map's bilinear filtering finds an edge, not empty texels. */
   std::shared_ptr<const PaintMaterialCompositeSurface> coordinate_surface;
-  if (surface_gradient != nullptr) {
+  if (surface_generator != nullptr) {
     if (tiled) {
       BKE_report(reports,
                  RPT_ERROR,
-                 "A Gradient correction in Object or Generated space cannot be baked onto UDIM "
+                 "A generator correction in Object or Generated space cannot be baked onto UDIM "
                  "tiles beyond 1001");
       return nullptr;
     }
@@ -1778,17 +1776,17 @@ MaterialPaintLayer *BKE_paint_layers_corrections_bake(Main &bmain,
     if (coordinate_surface == nullptr) {
       BKE_reportf(reports,
                   RPT_ERROR,
-                  "Cannot rasterize the surface of \"%s\" the Gradient correction \"%s\" reads",
+                  "Cannot rasterize the surface of \"%s\" the generator correction \"%s\" reads",
                   surface.object->id.name + 2,
-                  surface_gradient->name[0] != '\0' ? surface_gradient->name : "Correction");
+                  surface_generator->name[0] != '\0' ? surface_generator->name : "Correction");
       return nullptr;
     }
     if (coordinate_surface->width < size) {
-      /* The rasterization is clamped to 4096 while the map can be larger: the line is then sampled
-       * at that resolution everywhere, which is worth telling. */
+      /* The rasterization is clamped to 4096 while the map can be larger: the pattern is then
+       * sampled at that resolution everywhere, which is worth telling. */
       BKE_reportf(reports,
                   RPT_INFO,
-                  "The Gradient surface is sampled at %d px, the map is %d px",
+                  "The generator surface is sampled at %d px, the map is %d px",
                   coordinate_surface->width,
                   size);
     }

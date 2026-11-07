@@ -90,6 +90,16 @@ struct NodeOutput {
   bNodeSocket *socket = nullptr;
 };
 
+/**
+ * What one generator row produces for its group: the float every channel indexes its ramp with,
+ * and -- for the one pattern that lays a colour of its own -- that colour, which replaces the
+ * ramped grey in a colour channel.
+ */
+struct GeneratorFactor {
+  NodeOutput factor;
+  NodeOutput color;
+};
+
 /* -------------------------------------------------------------------- */
 /** \name Math and Mix nodes
  *
@@ -265,6 +275,81 @@ class PaintLayersTreeBuilder {
 
   void build();
 
+  /**
+   * The source the generator of \a ctx's row lays in its channel, dispatched through the generator
+   * table (#BKE_paint_layers_generator_of): the entry's flags gate what the emission need not
+   * answer for -- a channel a generator is flagged out of is skipped before any node is asked for
+   * -- and the entry's emission builds the rest. Empty for a row whose subtype this build does not
+   * know.
+   */
+  KindEmitResult generator_source_emit(const RowEmitContext &ctx);
+
+  /**
+   * What a Gradient row lays in the channel of \a ctx: the row's factor group instance over the
+   * ramp tail every generator shares (#generator_ramp_emit). The generator table reaches this
+   * through #paint_layer_generator_gradient_gpu_emit; it is a member rather than a free function
+   * because the factor and the ramps it shares live in this builder's caches.
+   */
+  KindEmitResult gradient_source_emit(const RowEmitContext &ctx);
+
+  /**
+   * \a layer's instance of the shared group its compound kind's pattern lives in -- the Scratches,
+   * Weave or Grunge graph, one per dimension -- with the placed coordinate in its Coordinate input
+   * and the row group's value inputs in its parameters. Built once and shared by every channel of
+   * the row; nothing is left in \a tree when the group or a socket cannot be made, and nothing is
+   * made for a kind that is not a compound one.
+   */
+  GeneratorFactor generator_compound_factor_ensure(bNodeTree &tree,
+                                                    LayerGroup &group,
+                                                    const MaterialPaintLayer &layer);
+
+  /**
+   * What \a layer's pattern gives \a channel: the factor it indexes a ramp with, and the colour it
+   * lays by itself where the kind has one. Built once and shared by every channel of the row. The
+   * single-node patterns answer with the socket \a factor_socket names -- the Noise, the Checker
+   * and the Wave with `Fac`; the Brick and the Voronoi have answers of their own
+   * (#generator_brick_factor_ensure, #generator_voronoi_factor_ensure). Defined in the generator
+   * build translation unit.
+   */
+  GeneratorFactor generator_pattern_factor_ensure(bNodeTree &tree,
+                                                  LayerGroup &group,
+                                                  const MaterialPaintLayer &layer,
+                                                  const char *factor_socket);
+
+  /**
+   * The Brick pattern's answer: the grey of the colour the node's own mix makes of white bricks
+   * over black mortar, since the Brick answers with a colour rather than a float. Built once and
+   * shared by every channel of the row. Defined in the generator build translation unit.
+   */
+  GeneratorFactor generator_brick_factor_ensure(bNodeTree &tree,
+                                                LayerGroup &group,
+                                                const MaterialPaintLayer &layer);
+
+  /**
+   * The Voronoi pattern's answer, per feature: the N-Sphere Radius socket, the cell colour with a
+   * luminance beside it, or the Distance. Built once and shared by every channel of the row.
+   * Defined in the generator build translation unit.
+   */
+  GeneratorFactor generator_voronoi_factor_ensure(bNodeTree &tree,
+                                                  LayerGroup &group,
+                                                  const MaterialPaintLayer &layer);
+
+  /**
+   * The tail a generator emission shares: the ramp \a channel reads -- the row's colour band for a
+   * colour channel, its own grey value ramp for a scalar one -- linked once to the pattern's
+   * factor and answered as the colour and alpha the row is laid by. The Gradient and the patterns
+   * answer the same shape either way. Defined in the generator build translation unit.
+   */
+  KindEmitResult generator_ramp_emit(const RowEmitContext &ctx, const GeneratorFactor &pattern);
+
+  /**
+   * The emission of a pattern that lays a colour of its own (the Voronoi cell colour): the colour
+   * over a constant-one coverage, the shape the CPU's own-colour branch writes. Defined in the
+   * generator build translation unit.
+   */
+  KindEmitResult generator_own_color_emit(const RowEmitContext &ctx,
+                                          const GeneratorFactor &pattern);
+
  private:
   /** The group of \a layer, created on first use: its tree, its instance and its value inputs. */
   LayerGroup *layer_group_ensure(const MaterialPaintLayer &layer, float location_x, float location_y);
@@ -279,11 +364,31 @@ class PaintLayersTreeBuilder {
   void create_value_inputs(LayerGroup &group, const MaterialPaintLayer &layer);
 
   /**
+   * The value inputs of a generator that is not a Gradient: the placement's three vectors -- the Y
+   * ratio, the turn and the two offsets, over the mapping chain the pattern reads -- and one float
+   * for every parameter the pattern's node takes through a socket of its own. A parameter that
+   * decides which nodes are built gets no input; the topology hash reads it instead. Nothing is
+   * added for a Gradient, whose line comes from its payload, nor for a row that generates nothing.
+   */
+  void generator_inputs_create(LayerGroup &group,
+                               const MaterialPaintLayer &row,
+                               const char *label);
+
+  /**
    * The line and shape inputs of \a row's gradient: start, end, midpoint, type and repeat. Shared
    * by a Gradient row, a Gradient content correction and a Gradient mask item; the label prefixes
    * the socket names so two of them in one group stay distinct.
    */
   void gradient_line_inputs_create(LayerGroup &group,
+                                   const MaterialPaintLayer &row,
+                                   const char *label);
+
+  /**
+   * The value inputs a generating element carries: the gradient's line (#gradient_line_inputs_create)
+   * and the generator's parameters (#generator_inputs_create). Every generating row, effect and
+   * mask item makes the pair, and each half skips the element that reads none of it.
+   */
+  void generator_row_inputs_create(LayerGroup &group,
                                    const MaterialPaintLayer &row,
                                    const char *label);
 
@@ -511,32 +616,6 @@ class PaintLayersTreeBuilder {
                                 KindEmitResult *r_out);
 
   /**
-   * What a Gradient row lays in the channel of \a ctx: the ColorRamp's colour and alpha for a
-   * colour channel, the channel's own grey value ramp for a scalar one. The Factor group instance
-   * is shared by every channel of the row; the colour ramp is shared by the colour channels.
-   */
-  KindEmitResult gradient_source_emit(const RowEmitContext &ctx);
-
-  /**
-   * The row's instance of the shared Gradient Factor group, built on first use and shared by every
-   * channel of the row. Its UV input reads the row group's Texture Coordinate; Start, End, Midpoint,
-   * Type and Repeat read the row group's value inputs. Null while the build context has no gradient
-   * group or a socket is missing.
-   */
-  NodeOutput gradient_factor_ensure(bNodeTree &tree,
-                                    LayerGroup &group,
-                                    const MaterialPaintLayer &layer);
-
-  /**
-   * The ColorRamp node \a channel of a Gradient \a layer reads, built on first use. A colour
-   * channel gets the row's ramp, shared by every colour channel; a scalar channel gets a node of
-   * its own holding the record's grey value ramp. Its ColorBand is a copy; a ramp edit regenerates
-   * the group, so this node is never updated in place (its storage change would need a
-   * node-property tag the value sync does not issue).
-   */
-  bNode *gradient_ramp_ensure(bNodeTree &tree, const MaterialPaintLayer &layer, int channel);
-
-  /**
    * The output of the Material row's source group for \a channel, instancing the group in \a tree
    * once for the row, outside the frames since every channel of the row shares it. Null when the
    * row has no source group or it has no output for the channel; the caller then reads the row's
@@ -654,11 +733,64 @@ class PaintLayersTreeBuilder {
   bNode *uv_coordinate_ensure(bNodeTree &tree);
 
   /**
-   * The Texture Coordinate output matching \a gradient's space: `UV` (Z ignored), `Object` or
-   * `Generated`. Null when the node or its output cannot be created.
+   * The Texture Coordinate output matching a generator's \a space: `UV` (Z ignored), `Object` or
+   * `Generated`. Null when the node or its output cannot be created. Defined in the generator
+   * build translation unit, which is the only reader.
+   */
+  bNodeSocket *generator_coordinate_socket(bNode &coord, int space);
+
+  /**
+   * The Texture Coordinate output matching \a gradient's space, the wrapper the Gradient's factor
+   * group reads through: the payload's space against the shared switch, so the Gradient's graph
+   * keeps the wording of its payload.
    */
   bNodeSocket *gradient_coordinate_socket(bNode &coord,
                                           const MaterialPaintLayerGradient &gradient);
+
+  /**
+   * The nodes in front of a pattern: the space's coordinate, the placement's mapping chain, and
+   * the Vector Math node the seed's constant is added in. Its Vector output is what the pattern
+   * reads; null when a node or one of the row group's placement inputs cannot be made, with every
+   * node it did make left in \a r_nodes_made for the caller to discard. Defined in the generator
+   * build translation unit.
+   */
+  bNode *generator_placed_coordinate_ensure(bNodeTree &tree,
+                                            LayerGroup &group,
+                                            const MaterialPaintLayer &layer,
+                                            int space,
+                                            Vector<bNode *> &r_nodes_made);
+
+  /**
+   * The pattern node of \a layer -- a Noise, a Voronoi, a Checker, a Brick or a Wave -- with the
+   * placed coordinate wired into its Vector and every parameter the node reads through a socket
+   * linked from the row group. Null when a node or a socket cannot be made, with every node made
+   * left in \a r_nodes_made for the caller to discard; which socket is the factor is the caller's
+   * answer. Defined in the generator build translation unit.
+   */
+  bNode *generator_pattern_build(bNodeTree &tree,
+                                 LayerGroup &group,
+                                 const MaterialPaintLayer &layer,
+                                 Vector<bNode *> &r_nodes_made);
+
+  /**
+   * The row's instance of the shared Gradient Factor group, built on first use and shared by every
+   * channel of the row. Its Coordinate input reads the row group's Texture Coordinate; Start, End,
+   * Midpoint, Type and Repeat read the row group's value inputs. Null while the build context has
+   * no gradient group or a socket is missing. Defined in the generator build translation unit.
+   */
+  NodeOutput gradient_factor_ensure(bNodeTree &tree,
+                                    LayerGroup &group,
+                                    const MaterialPaintLayer &layer);
+
+  /**
+   * The ColorRamp node \a channel of a generating \a layer reads, built on first use. A colour
+   * channel gets the row's ramp -- the payload's band for a Gradient, the row's own for the others
+   * -- shared by every colour channel; a scalar channel gets a node of its own holding the
+   * record's grey value ramp. Its ColorBand is a copy; a ramp edit regenerates the group, so this
+   * node is never updated in place (its storage change would need a node-property tag the value
+   * sync does not issue). Defined in the generator build translation unit.
+   */
+  bNode *generator_ramp_ensure(bNodeTree &tree, const MaterialPaintLayer &layer, int channel);
 
   /**
    * Re-orient a tangent-space Normal map that \a row reads through its Mapping: returns the
@@ -736,16 +868,25 @@ class PaintLayersTreeBuilder {
   Vector<AnchorPointTap> anchor_point_taps_;
   /** A Gradient row's Factor group instance, shared by every channel of the row. */
   Map<const MaterialPaintLayer *, NodeOutput> gradient_factors_;
-  /** A Gradient row's ColorRamp node, shared by every colour channel of the row. */
-  Map<const MaterialPaintLayer *, bNode *> gradient_ramps_;
-  /** A Gradient row's scalar channel value ramps, keyed by the row and then the channel. */
-  Map<const MaterialPaintLayer *, Map<int, bNode *>> gradient_scalar_ramps_;
+  /** A pattern row's factor nodes, shared by every channel of the row. */
+  Map<const MaterialPaintLayer *, GeneratorFactor> generator_factors_;
+  /** A generating row's colour ColorRamp node, shared by every colour channel of the row. */
+  Map<const MaterialPaintLayer *, bNode *> generator_ramps_;
+  /** A generating row's scalar channel value ramps, keyed by the row and then the channel. */
+  Map<const MaterialPaintLayer *, Map<int, bNode *>> generator_scalar_ramps_;
   /** A Gradient row's line, midpoint, type and repeat value inputs. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_start_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_end_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_midpoint_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_type_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_repeat_inputs_;
+  /** A generator row's placement vectors, over the mapping chain in front of its pattern node. */
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> generator_offset_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> generator_scale_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> generator_rotation_inputs_;
+  /** Per generator row, the float input of each parameter its pattern node reads through a socket,
+   * keyed by the parameter's position in the kind's schema. */
+  Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> generator_param_inputs_;
   /** The clip factor of a row's UV wrap, built once and shared by every map of the row. */
   Map<const MaterialPaintLayer *, NodeOutput> mapping_clip_masks_;
   /** A row's built mask factor, so the second channel reads the nodes the first one made. */

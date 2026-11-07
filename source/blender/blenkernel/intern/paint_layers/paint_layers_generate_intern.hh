@@ -198,6 +198,16 @@ inline constexpr const char *ROLE_GRADIENT_MIDPOINT = "gradient_midpoint";
 inline constexpr const char *ROLE_GRADIENT_TYPE = "gradient_type";
 /** #INPUT_ROLE_PROP value of a Gradient row's repeat mode (a Float input). */
 inline constexpr const char *ROLE_GRADIENT_REPEAT = "gradient_repeat";
+/** #INPUT_ROLE_PROP value of a generator row's placement offset (a Vector input holding
+ * `offset_x, offset_y, 0`), the first half of the mapping chain its pattern reads. The marker is the
+ * generating row's own, whether a layer, a correction or a mask item. */
+inline constexpr const char *ROLE_GENERATOR_OFFSET = "generator_offset";
+/** #INPUT_ROLE_PROP value of a generator row's placement scale (a Vector input holding
+ * `1, scale_y, 1`): the Y ratio the pattern is sheared by before the turn. */
+inline constexpr const char *ROLE_GENERATOR_SCALE = "generator_scale";
+/** #INPUT_ROLE_PROP value of a generator row's placement turn (a Vector input holding
+ * `0, 0, radians`). The schema stores degrees; the Vector Rotate node reads radians. */
+inline constexpr const char *ROLE_GENERATOR_ROTATION = "generator_rotation";
 /**
  * #INPUT_ROLE_PROP value of a Color Balance filter's folded triple (a Vector input holding the
  * three numbers the MULTIPLY_ADD / MAXIMUM / POWER chain reads: the linear slope, its offset and

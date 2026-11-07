@@ -274,6 +274,14 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_FALSE(kinds[at("GRADIENT")].takes_color);
   EXPECT_TRUE(kinds[at("CORRECTION_GRADIENT")].is_effect);
   EXPECT_TRUE(kinds[at("MASK_CORRECTION_GRADIENT")].is_effect);
+  /* The eight schema-parameter generators take the same three places the Gradient does. */
+  for (const char *generator : {"NOISE", "VORONOI", "CHECKER", "BRICK", "WAVE", "SCRATCHES", "WEAVE", "GRUNGE"}) {
+    const std::string name = generator;
+    EXPECT_FALSE(kinds[at(name.c_str())].is_effect) << name;
+    EXPECT_FALSE(kinds[at(name.c_str())].takes_color) << name;
+    EXPECT_TRUE(kinds[at(("CORRECTION_" + name).c_str())].is_effect) << name;
+    EXPECT_TRUE(kinds[at(("MASK_CORRECTION_" + name).c_str())].is_effect) << name;
+  }
   /* The Curve Patch, only ever an effect of a layer. */
   EXPECT_TRUE(kinds[at("CURVE_PATCH_CORRECTION")].is_effect);
 }
@@ -1397,16 +1405,27 @@ TEST_F(OutlinerStackPaintLayersSourceTest,
 
   Vector<StackAddKindInfo> kinds;
   source().editor()->add_kinds(kinds);
-  ASSERT_GE(kinds.size(), 5u);
+  ASSERT_GE(kinds.size(), 29u);
   /* The tail in order, bound to the end of the list rather than to absolute indexes: every kind
-   * added later shifts the Gradient block, and the test only means to pin the order. */
-  EXPECT_EQ(kinds[kinds.size() - 5].identifier, "ANCHOR_POINT_MASK_CORRECTION")
+   * added later shifts the Gradient block, and the test only means to pin the order. The Gradient
+   * triple is followed by the eight schema-parameter generators, three entries each, and the Curve
+   * Patch closes the list. */
+  const size_t size = kinds.size();
+  EXPECT_EQ(kinds[size - 29].identifier, "ANCHOR_POINT_MASK_CORRECTION")
       << "row_add dispatches by index, last of the Anchor Point kinds";
-  EXPECT_EQ(kinds[kinds.size() - 4].identifier, "GRADIENT")
+  EXPECT_EQ(kinds[size - 28].identifier, "GRADIENT")
       << "the Gradient kind is appended after every other kind";
-  EXPECT_EQ(kinds[kinds.size() - 3].identifier, "CORRECTION_GRADIENT");
-  EXPECT_EQ(kinds[kinds.size() - 2].identifier, "MASK_CORRECTION_GRADIENT");
-  EXPECT_EQ(kinds[kinds.size() - 1].identifier, "CURVE_PATCH_CORRECTION");
+  EXPECT_EQ(kinds[size - 27].identifier, "CORRECTION_GRADIENT");
+  EXPECT_EQ(kinds[size - 26].identifier, "MASK_CORRECTION_GRADIENT");
+  const char *generators[] = {
+      "NOISE", "VORONOI", "CHECKER", "BRICK", "WAVE", "SCRATCHES", "WEAVE", "GRUNGE"};
+  for (int i = 0; i < 8; i++) {
+    const std::string name = generators[i];
+    EXPECT_EQ(kinds[size - 25 + i * 3].identifier, name) << "the generators follow the Gradient in the enum's order";
+    EXPECT_EQ(kinds[size - 24 + i * 3].identifier, "CORRECTION_" + name);
+    EXPECT_EQ(kinds[size - 23 + i * 3].identifier, "MASK_CORRECTION_" + name);
+  }
+  EXPECT_EQ(kinds[size - 1].identifier, "CURVE_PATCH_CORRECTION");
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_marker_after_active_correction)

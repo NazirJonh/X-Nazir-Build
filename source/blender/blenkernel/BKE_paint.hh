@@ -1398,9 +1398,9 @@ struct MaterialPaintChannelInfo {
   char slot_type;
   /**
    * True when a map of this channel needs more than the 8 bits every other material map is stored
-   * in: its values are a continuous quantity a shader reads at full precision, so a generated
-   * (Gradient) row baked into bytes would show its ramp as terraces. Colour channels stay byte,
-   * encoded in their colorspace; a factor that multiplies one (Alpha, AO) does too.
+   * in: its values are a continuous quantity a shader reads at full precision, so a generated row
+   * baked into bytes would show its ramp as terraces. Every factor is such a channel; only a colour
+   * stays byte, encoded in its colorspace.
    *
    * Read only by the bake of a generated row, which is the one row whose pixels are a formula
    * rather than a painted map; every other row's bake is a byte texture like the maps it holds.

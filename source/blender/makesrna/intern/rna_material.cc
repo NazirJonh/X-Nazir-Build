@@ -339,6 +339,56 @@ static const EnumPropertyItem rna_enum_material_paint_layer_anchor_point_target_
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* The pattern a generator row lays, the #eMaterialPaintLayerGenerator codes. The Gradient keeps
+ * its line and ramp in its payload; every other kind reads the parameters of its kind schema, so
+ * the list is what the row's Generator picker offers and what a script switches a row with. Kept
+ * outside #ifdef RNA_RUNTIME like the anchor-point list above: the runtime itemf returns it and
+ * the property definition in the other branch reads it. */
+static const EnumPropertyItem rna_enum_material_paint_layer_generator_items[] = {
+    {MA_PAINT_LAYER_GENERATOR_GRADIENT,
+     "GRADIENT",
+     0,
+     "Gradient",
+     "A colour and coverage ramp along a line or around a point"},
+    {MA_PAINT_LAYER_GENERATOR_NOISE,
+     "NOISE",
+     0,
+     "Noise",
+     "A Perlin-family sum over the placement coordinates, the base of procedural dirt"},
+    {MA_PAINT_LAYER_GENERATOR_VORONOI,
+     "VORONOI",
+     0,
+     "Voronoi",
+     "The cells of scattered points: their distance, their edge, or their own colour"},
+    {MA_PAINT_LAYER_GENERATOR_CHECKER, "CHECKER", 0, "Checker", "The two-colour checkerboard"},
+    {MA_PAINT_LAYER_GENERATOR_BRICK,
+     "BRICK",
+     0,
+     "Brick",
+     "Stacked bricks with a mortar seam, offset and squashed per row"},
+    {MA_PAINT_LAYER_GENERATOR_WAVE,
+     "WAVE",
+     0,
+     "Wave",
+     "Bands or rings along an axis, through a sine, saw or triangle profile"},
+    {MA_PAINT_LAYER_GENERATOR_SCRATCHES,
+     "SCRATCHES",
+     0,
+     "Scratches",
+     "Stretched Voronoi edges thresholded to lines of a chosen width"},
+    {MA_PAINT_LAYER_GENERATOR_WEAVE,
+     "WEAVE",
+     0,
+     "Weave",
+     "Two directions of threads crossing with a chosen over/under step"},
+    {MA_PAINT_LAYER_GENERATOR_GRUNGE,
+     "GRUNGE",
+     0,
+     "Grunge",
+     "Noise modulated by a second, higher-frequency noise and thresholded, dirt in one row"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /* The type of a kind parameter, derived from how its property stores the value. Outside the
  * #RNA_RUNTIME split: the runtime getter reads the values and the definition pass needs the item
  * list for the property. */
@@ -405,6 +455,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_kind_param_type_item
 #  include "BKE_paint.hh"
 #  include "BKE_paint_layers.hh"
 #  include "BKE_paint_layers_asset.hh"
+#  include "BKE_paint_layers_generator.hh"
 #  include "BKE_paint_layers_gradient.hh"
 #  include "BKE_paint_layers_composite.hh"
 #  include "BKE_paint_layers_edit.hh"
@@ -2912,6 +2963,52 @@ static int rna_MaterialPaintLayerKindParam_label_length(PointerRNA *ptr)
   return int(strlen(rna_kind_param_label_text(prop)));
 }
 
+/**
+ * Keep a generator's two scales equal while its Lock Scale is on, as the mapping of a layer does:
+ * the edited axis leads, and turning the lock on takes the X value. The row is found by the address
+ * of the edited property, which has no back pointer; a kind without a `scale_lock` parameter (every
+ * filter) is left alone.
+ */
+static void rna_MaterialPaintLayerKindParam_scale_lock_sync(Material &ma, const IDProperty *edited)
+{
+  IDProperty *group = nullptr;
+  const auto holds = [&](MaterialPaintLayer &row) {
+    if (row.system_properties != nullptr && row.system_properties->type == IDP_GROUP &&
+        BLI_findindex(&row.system_properties->data.group, edited) != -1)
+    {
+      group = row.system_properties;
+    }
+  };
+  BKE_paint_layers_foreach(
+      ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
+        holds(layer);
+        for (MaterialPaintLayer &effect : layer.effects) {
+          holds(effect);
+        }
+        for (MaterialPaintLayer &item : layer.mask_stack) {
+          holds(item);
+        }
+        return group == nullptr;
+      });
+  if (group == nullptr) {
+    return;
+  }
+  const IDProperty *lock = IDP_GetPropertyFromGroup(group, "scale_lock");
+  IDProperty *scale_x = IDP_GetPropertyFromGroup(group, "scale");
+  IDProperty *scale_y = IDP_GetPropertyFromGroup(group, "scale_y");
+  if (lock == nullptr || lock->type != IDP_BOOLEAN || !IDP_bool_get(lock) || scale_x == nullptr ||
+      scale_y == nullptr || scale_x->type != IDP_FLOAT || scale_y->type != IDP_FLOAT)
+  {
+    return;
+  }
+  if (edited == scale_y) {
+    IDP_float_set(scale_x, IDP_float_get(scale_y));
+  }
+  else {
+    IDP_float_set(scale_y, IDP_float_get(scale_x));
+  }
+}
+
 static float rna_MaterialPaintLayerKindParam_value_get(PointerRNA *ptr)
 {
   const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
@@ -2935,6 +3032,11 @@ static void rna_MaterialPaintLayerKindParam_value_set(PointerRNA *ptr, const flo
     const float low = (ui_data != nullptr) ? float(ui_data->min) : -FLT_MAX;
     const float high = (ui_data != nullptr) ? float(ui_data->max) : FLT_MAX;
     IDP_float_set(prop, std::clamp(value, low, high));
+    if (STREQ(prop->name, "scale") || STREQ(prop->name, "scale_y")) {
+      if (Material *ma = reinterpret_cast<Material *>(ptr->owner_id)) {
+        rna_MaterialPaintLayerKindParam_scale_lock_sync(*ma, prop);
+      }
+    }
   }
   else if (prop->type == IDP_INT) {
     const IDPropertyUIDataInt *ui_data = rna_kind_param_ui_data_int(prop);
@@ -3055,6 +3157,11 @@ static void rna_MaterialPaintLayerKindParam_bool_value_set(PointerRNA *ptr, cons
     return;
   }
   IDP_bool_set(prop, value);
+  if (value && STREQ(prop->name, "scale_lock")) {
+    if (Material *ma = reinterpret_cast<Material *>(ptr->owner_id)) {
+      rna_MaterialPaintLayerKindParam_scale_lock_sync(*ma, prop);
+    }
+  }
   /* A boolean parameter may switch the graph's shape (the Math filter's Clamp is the nodes' own
    * flag), so the tree is rebuilt rather than value-synced. */
   if (Material *ma = reinterpret_cast<Material *>(ptr->owner_id)) {
@@ -3162,6 +3269,25 @@ static std::optional<std::string> rna_MaterialPaintLayerKindParam_path(const Poi
     return std::nullopt;
   }
   return fmt::format("{}.kind_params[\"{}\"]", row_path, prop->name);
+}
+
+/**
+ * Whether the UI may draw this parameter: the row's kind reads it under the choices made now. The
+ * collection item is created from its row, so the row is the closest ancestor of the pointer; a
+ * pointer built any other way draws the parameter rather than hiding it.
+ */
+static bool rna_MaterialPaintLayerKindParam_is_active_get(PointerRNA *ptr)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  if (prop == nullptr || ptr->ancestors.is_empty()) {
+    return true;
+  }
+  const AncestorPointerRNA &parent = ptr->ancestors.last();
+  if (parent.type != RNA_MaterialPaintLayer || parent.data == nullptr) {
+    return true;
+  }
+  return BKE_paint_layers_generator_param_is_active(
+      *static_cast<const MaterialPaintLayer *>(parent.data), prop->name);
 }
 
 /**
@@ -3441,6 +3567,62 @@ static int rna_MaterialPaintLayer_filter_type_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
   return (layer->source == MA_PAINT_LAYER_SOURCE_FILTER) ? int(layer->kind_subtype) : 0;
+}
+
+static int rna_MaterialPaintLayer_generator_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (layer->source == MA_PAINT_LAYER_SOURCE_GENERATOR) ? int(layer->kind_subtype) :
+                                                             MA_PAINT_LAYER_GENERATOR_GRADIENT;
+}
+
+static const EnumPropertyItem *rna_MaterialPaintLayer_generator_itemf(bContext * /*C*/,
+                                                                      PointerRNA *ptr,
+                                                                      PropertyRNA * /*prop*/,
+                                                                      bool *r_free)
+{
+  *r_free = false;
+  const MaterialPaintLayer *layer = (ptr != nullptr && ptr->data != nullptr) ?
+                                        static_cast<const MaterialPaintLayer *>(ptr->data) :
+                                        nullptr;
+  if (layer == nullptr || layer->source != MA_PAINT_LAYER_SOURCE_GENERATOR) {
+    /* A row that is not a generator offers no choice: the picker shows its placeholder. */
+    static const EnumPropertyItem none[] = {
+        {MA_PAINT_LAYER_GENERATOR_GRADIENT, "GRADIENT", 0, "Gradient", ""}, {0, nullptr, 0, nullptr, nullptr}};
+    return none;
+  }
+  return rna_enum_material_paint_layer_generator_items;
+}
+
+static void rna_MaterialPaintLayer_generator_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (layer == nullptr || layer->source != MA_PAINT_LAYER_SOURCE_GENERATOR ||
+      int(layer->kind_subtype) == value)
+  {
+    return;
+  }
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    /* The switch keeps the role and the channel records; the kind registry refuses a kind the
+     * role does not allow, which leaves the row as it was. */
+    BKE_paint_layers_generator_kind_set(*ma, *layer, eMaterialPaintLayerGenerator(value));
+  }
+}
+
+static int rna_MaterialPaintLayer_generator_editable(const PointerRNA *ptr,
+                                                     const char ** /*r_info*/)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  /* The callback's return is the effective property flag: #PROP_EDITABLE only for a generator row. */
+  return (layer != nullptr && layer->source == MA_PAINT_LAYER_SOURCE_GENERATOR) ?
+             int(PROP_EDITABLE) :
+             0;
+}
+
+static bool rna_MaterialPaintLayer_generator_supported_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer != nullptr && layer->source == MA_PAINT_LAYER_SOURCE_GENERATOR;
 }
 
 static bool rna_MaterialPaintLayer_ramp_supported_get(PointerRNA *ptr)
@@ -5168,6 +5350,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+
 /* The Output Map of a map-coverage mask item. White and Black are the two states of the item's
  * invert flag; Gradient scales its match by its standard value. */
 static const EnumPropertyItem rna_enum_material_paint_layer_output_map_items[] = {
@@ -5283,6 +5466,18 @@ static void rna_def_material_paint_layer_kind_param(BlenderRNA *brna)
                                 nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Label", "Name the parameter is shown with");
+
+  /* Read-only: the draw-side answer whether the row's kind reads the parameter under the choices
+   * made now. A generator hides the socket its node's signature leaves out (a Minkowski-only
+   * Exponent, the Offset of a noise type that reads none) and the Wave direction its type does not
+   * ask; every other kind draws its parameters whatever the state. */
+  prop = RNA_def_property(srna, "is_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayerKindParam_is_active_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Is Active",
+                           "Whether the row's kind reads this parameter under the choices made "
+                           "now; a generator hides the ones its node's signature leaves out");
 
   prop = RNA_def_property(srna, "value", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_funcs(prop,
@@ -6323,6 +6518,26 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayer_filter_type_get", nullptr, nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Filter Type", "Which filter a filter row is; None for any other row");
+
+  /* The pattern a generator row lays. Setting one switches the row to that kind, keeping the role,
+   * the name and the channel records: the setter refuses a row that is not a generator, and a kind
+   * that does not allow the row's role. */
+  prop = RNA_def_property(srna, "generator", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_generator_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_generator_get",
+                              "rna_MaterialPaintLayer_generator_set",
+                              "rna_MaterialPaintLayer_generator_itemf");
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_generator_editable");
+  RNA_def_property_ui_text(
+      prop, "Generator", "Which pattern this generator row lays");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "generator_supported", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_generator_supported_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Generator Supported", "Whether the row is a procedural generator of any kind");
 
   prop = RNA_def_property(srna, "ramp_supported", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_ramp_supported_get", nullptr);

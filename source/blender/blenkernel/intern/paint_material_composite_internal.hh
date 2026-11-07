@@ -4,7 +4,26 @@
 
 #pragma once
 
+#include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
+
 namespace blender {
+
+struct PaintMaterialCompositeGradient;
+struct PaintMaterialCompositeImageLayer;
+
+/**
+ * How many generator payloads \a image_layers lays (a row, a correction and a mask item each count
+ * one, folders recursed). Defined in `paint_material_composite_generator.cc`, beside the per-texel
+ * sample the count prices.
+ */
+int composite_stack_generator_count(Span<PaintMaterialCompositeImageLayer> image_layers);
+
+/**
+ * Fold a generator payload into \a hash: every parameter moves the composited pixels. Defined in
+ * `paint_material_composite_generator.cc`, beside the sample whose inputs it guards.
+ */
+uint64_t composite_generator_hash(uint64_t hash, const PaintMaterialCompositeGradient &gradient);
 
 struct ID;
 struct Main;
@@ -24,42 +43,11 @@ bNodeTree *paint_material_group_find(Main &bmain, const char *marker_value);
 void paint_material_group_marker_set(bNodeTree &group, const char *marker_value);
 
 /**
- * Interface-socket identifiers of the Normal Combine group, fixed by the creation order in
- * #BKE_paint_material_normal_combine_group_ensure. A group instance inherits these `Socket_N`
- * identifiers verbatim, while its socket *names* ("A", "Result", ...) are display strings and are
- * translated when the "New Data" translation preference is on. #node_find_socket matches
- * identifiers, so a reader of a combine-group instance must ask for these, not for the names.
+ * The interface-socket identifiers the groups above (and the Scratches, Weave and Grunge ones)
+ * answer for live in `paint_layers/paint_material_generator_group_ids.hh`, the light header the
+ * groups' readers share -- this module's own translation units included, which read instances'
+ * sockets by identifier and so include it too.
  */
-constexpr const char *NORMAL_COMBINE_ID_A = "Socket_0";
-constexpr const char *NORMAL_COMBINE_ID_B = "Socket_1";
-constexpr const char *NORMAL_COMBINE_ID_FACTOR = "Socket_2";
-constexpr const char *NORMAL_COMBINE_ID_RESULT = "Socket_3";
-
-/**
- * Interface-socket identifiers of the shared Blend group, fixed by the creation order in
- * #BKE_paint_material_blend_group_ensure: Factor, A, B, Mode and the Result output. The same
- * identifier-versus-name rule as above applies: the generator, the sync and the CPU reader all ask
- * for these, never for the translatable display names.
- */
-constexpr const char *BLEND_GROUP_ID_FACTOR = "Socket_0";
-constexpr const char *BLEND_GROUP_ID_A = "Socket_1";
-constexpr const char *BLEND_GROUP_ID_B = "Socket_2";
-constexpr const char *BLEND_GROUP_ID_MODE = "Socket_3";
-constexpr const char *BLEND_GROUP_ID_RESULT = "Socket_4";
-
-/**
- * Interface-socket identifiers of the shared Gradient Factor group, fixed by the creation order in
- * #BKE_paint_material_gradient_group_ensure: Coordinate (the first socket keeps the legacy `UV`
- * identifier), Start, End, Midpoint, Type, Repeat and the Factor output. The same
- * identifier-versus-name rule as above applies.
- */
-constexpr const char *GRADIENT_GROUP_ID_COORDINATE = "Socket_0";
-constexpr const char *GRADIENT_GROUP_ID_START = "Socket_1";
-constexpr const char *GRADIENT_GROUP_ID_END = "Socket_2";
-constexpr const char *GRADIENT_GROUP_ID_MIDPOINT = "Socket_3";
-constexpr const char *GRADIENT_GROUP_ID_TYPE = "Socket_4";
-constexpr const char *GRADIENT_GROUP_ID_REPEAT = "Socket_5";
-constexpr const char *GRADIENT_GROUP_ID_FACTOR = "Socket_6";
 
 /**
  * Test hooks. Both count work a caller can pay once per stack or, by mistake, once per region of

@@ -20,6 +20,7 @@
 #include "DNA_scene_types.h"
 
 #include "BKE_lib_id.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 
 #include "paint_layers_kind.hh"
@@ -206,14 +207,15 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     return effect;
   }
   if (params.kind == PaintLayerAddKind::Gradient) {
-    return BKE_paint_layers_gradient_add(ma,
-                                         params.name,
-                                         params.anchor,
-                                         params.fill_folder && params.anchor != nullptr &&
-                                                 BKE_paint_layers_is_folder(*params.anchor) &&
-                                                 params.place == PaintLayerPlace::Above ?
-                                             PaintLayerPlace::Into :
-                                             params.place);
+    return BKE_paint_layers_generator_add(ma,
+                                          eMaterialPaintLayerGenerator(params.generator),
+                                          params.name,
+                                          params.anchor,
+                                          params.fill_folder && params.anchor != nullptr &&
+                                                  BKE_paint_layers_is_folder(*params.anchor) &&
+                                                  params.place == PaintLayerPlace::Above ?
+                                              PaintLayerPlace::Into :
+                                              params.place);
   }
   if (params.kind == PaintLayerAddKind::GradientCorrection) {
     /* As any correction: aimed at one, it means another on the row it hangs on. */
@@ -226,14 +228,27 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     if (owner == nullptr) {
       return nullptr;
     }
-    const char *name_base = "Gradient Correction";
-    const std::string name =
-        (params.name != nullptr) ?
-            std::string(params.name) :
-            std::string(name_base) + " " +
-                std::to_string(paint_layer_name_number_max(owner->effects, name_base) + 1);
-    return BKE_paint_layers_correction_add(
+    const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_GENERATOR,
+                                                            params.generator);
+    if (kind == nullptr) {
+      return nullptr;
+    }
+    /* The kind's own name is the base: a Noise correction is numbered among the Noise ones, the
+     * way a Blur effect is numbered among the Blurs. */
+    const std::string name_base = std::string(kind->name) + " Correction";
+    const std::string name = (params.name != nullptr) ?
+                                 std::string(params.name) :
+                                 name_base + " " +
+                                     std::to_string(
+                                         paint_layer_name_number_max(owner->effects,
+                                                                     name_base.c_str()) +
+                                         1);
+    MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
         ma, owner, name.c_str(), MA_PAINT_LAYER_SOURCE_GENERATOR);
+    if (effect != nullptr && params.generator != MA_PAINT_LAYER_GENERATOR_GRADIENT) {
+      BKE_paint_layers_generator_kind_set(ma, *effect, eMaterialPaintLayerGenerator(params.generator));
+    }
+    return effect;
   }
   if (params.kind == PaintLayerAddKind::CorrectionMaterial) {
     /* An Add aimed at a correction means another one on the row it hangs on. */
@@ -465,14 +480,24 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     {
       return nullptr;
     }
-    const char *name_base = "Mask Gradient";
+    const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_GENERATOR,
+                                                           params.generator);
+    if (kind == nullptr) {
+      return nullptr;
+    }
+    const std::string name_base = "Mask " + std::string(kind->name);
     const std::string name =
         (params.name != nullptr) ?
             std::string(params.name) :
-            std::string(name_base) + " " +
-                std::to_string(paint_layer_name_number_max(owner->mask_stack, name_base) + 1);
-    return BKE_paint_layers_mask_item_add(
+            name_base + " " +
+                std::to_string(paint_layer_name_number_max(owner->mask_stack, name_base.c_str()) +
+                               1);
+    MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
         ma, owner, MA_PAINT_LAYER_SOURCE_GENERATOR, name.c_str());
+    if (item != nullptr && params.generator != MA_PAINT_LAYER_GENERATOR_GRADIENT) {
+      BKE_paint_layers_generator_kind_set(ma, *item, eMaterialPaintLayerGenerator(params.generator));
+    }
+    return item;
   }
   if (params.kind == PaintLayerAddKind::Material &&
       (params.source == nullptr ||

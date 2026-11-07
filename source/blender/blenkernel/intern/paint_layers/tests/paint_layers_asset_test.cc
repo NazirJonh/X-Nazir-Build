@@ -19,6 +19,7 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_import.hh"
 
 #include "BLI_index_range.hh"
@@ -2738,6 +2739,47 @@ TEST_F(PaintLayersAssetTest, two_mask_drops_make_two_instances_and_one_reload_le
   ASSERT_EQ(instances.size(), 2);
   EXPECT_EQ(instances[0].number, 1);
   EXPECT_EQ(instances[1].number, 2);
+}
+
+
+TEST_F(PaintLayersAssetTest, smart_asset_exposes_a_generator_schema_and_import_carries_it)
+{
+  /* The Noise generator's parameters live in its kind schema, the way a filter's do, so the
+   * expose reads them and the import marks them without either knowing which kind it walks. */
+  Material *src = BKE_material_add(bmain, "Src");
+  MaterialPaintLayer *row = BKE_paint_layers_generator_add(
+      *src, MA_PAINT_LAYER_GENERATOR_NOISE, "Noise", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(paint_layer_kind_param_set(*row, PAINT_LAYER_GEN_NOISE_DETAIL, 7.0f));
+  const MaterialPaintLayer *source_rows[1] = {row};
+
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                  *src,
+                                  Span<const MaterialPaintLayer *>(source_rows, 1),
+                                  PaintLayerAssetType::Material,
+                                  "SmartNoise");
+  ASSERT_NE(asset, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_asset_params_has(*asset));
+
+  const IDProperty *params = BKE_paint_layers_asset_params_get(*asset);
+  const IDProperty *noise = IDP_GetPropertyFromGroup(params, "Noise");
+  ASSERT_NE(noise, nullptr);
+  const IDProperty *detail = IDP_GetPropertyFromGroup(noise, "detail");
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(IDP_int_get(detail), PAINT_LAYER_GEN_NOISE_DETAIL);
+
+  Material *dst = BKE_material_add(bmain, "Dst");
+  PaintLayerImportParams import;
+  import.flags = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS;
+  PaintLayerImportResult result;
+  ASSERT_TRUE(BKE_paint_layers_import_rows(
+      *bmain, *dst, *asset, asset_top_rows(*asset).as_span(), import, &result));
+  MaterialPaintLayer *copy = result.imported[0];
+  EXPECT_EQ(copy->source, MA_PAINT_LAYER_SOURCE_GENERATOR);
+  EXPECT_EQ(copy->kind_subtype, MA_PAINT_LAYER_GENERATOR_NOISE);
+  /* The authored value traveled with the row, and the panel's marks came back with the copy. */
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*copy, PAINT_LAYER_GEN_NOISE_DETAIL), 7.0f);
+  EXPECT_TRUE(BKE_paint_layers_item_param_is_exposed(*copy, "detail"));
 }
 
 

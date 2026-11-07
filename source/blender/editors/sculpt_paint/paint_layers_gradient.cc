@@ -32,6 +32,7 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_layers_target.hh"
@@ -770,11 +771,15 @@ bool paint_layer_gradient_operator_poll(bContext *C)
  * The row or mask item an operator's buttons were drawn for. The panel can show an item that is
  * not the active one (the base mask while Mask mode edits a layer), so the caller passes its
  * stable marker; without one, the active item is used.
+ *
+ * \a gradient_only keeps the callers that work on the Gradient's own line and needs its payload;
+ * the sync takes any generating row, whose Base Color ramp answers the same question.
  */
 bool paint_layer_gradient_operator_target(bContext *C,
                                           wmOperator *op,
                                           Material *&r_material,
-                                          MaterialPaintLayer *&r_layer)
+                                          MaterialPaintLayer *&r_layer,
+                                          const bool gradient_only = true)
 {
   Object *active_object = CTX_data_active_object(C);
   r_material = (active_object != nullptr) ?
@@ -798,10 +803,16 @@ bool paint_layer_gradient_operator_target(bContext *C,
       r_layer = BKE_paint_layers_active_layer_get(*r_material);
     }
   }
-  if (r_layer == nullptr || !BKE_paint_layers_gradient_supported(*r_layer) ||
-      r_layer->gradient == nullptr)
-  {
-    BKE_report(op->reports, RPT_WARNING, "Select a Gradient layer first");
+  if (gradient_only) {
+    if (r_layer == nullptr || !BKE_paint_layers_gradient_supported(*r_layer) ||
+        r_layer->gradient == nullptr)
+    {
+      BKE_report(op->reports, RPT_WARNING, "Select a Gradient layer first");
+      return false;
+    }
+  }
+  else if (r_layer == nullptr || !BKE_paint_layers_generator_supported(*r_layer)) {
+    BKE_report(op->reports, RPT_WARNING, "Select a generator row first");
     return false;
   }
   return true;
@@ -923,7 +934,9 @@ wmOperatorStatus paint_layer_gradient_sync_channel_exec(bContext *C, wmOperator 
 {
   Material *ma = nullptr;
   MaterialPaintLayer *layer = nullptr;
-  if (!paint_layer_gradient_operator_target(C, op, ma, layer)) {
+  /* Every generator keeps a Base Color band the sync copies from; only the Gradient's other
+   * buttons need the payload itself. */
+  if (!paint_layer_gradient_operator_target(C, op, ma, layer, false)) {
     return OPERATOR_CANCELLED;
   }
   const eMaterialPaintChannel channel = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));

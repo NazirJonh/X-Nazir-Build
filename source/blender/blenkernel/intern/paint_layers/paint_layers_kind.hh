@@ -29,6 +29,7 @@
 
 #include "BKE_lib_query.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generator_registry.hh"
 
 namespace blender {
 
@@ -92,6 +93,16 @@ inline constexpr uint8_t paint_layer_role_bit(const int role)
 {
   return uint8_t(1u << role);
 }
+
+/**
+ * The roles a kind that lays its own colour may take: a row of the stack, a content correction and
+ * a mask item. The kinds that only read or only mask override it in the registry. Shared with the
+ * generator schemas, which live in their own translation unit.
+ */
+inline constexpr uint8_t paint_layer_all_roles =
+    paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER) |
+    paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
+    paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM);
 
 enum class PaintLayerKindParamType : uint8_t {
   /** A float slider, the original and still most common kind. */
@@ -386,6 +397,263 @@ enum PaintLayerChannelMixerParam : int {
   PAINT_LAYER_CHANNEL_MIXER_MONOCHROME = 1,
   PAINT_LAYER_CHANNEL_MIXER_PARAM_NUM = 2,
 };
+
+/**
+ * The slots every generator's schema starts with, ahead of its own parameters: the placement of
+ * the pattern. They are the positions of #eMaterialPaintLayerGeneratorParam, kept here so the code
+ * that reads a placement names them without the DNA prefix.
+ */
+enum PaintLayerGeneratorPlacementParam : int {
+  PAINT_LAYER_GEN_SPACE = MA_PAINT_LAYER_GENERATOR_PARAM_SPACE,
+  PAINT_LAYER_GEN_SCALE = MA_PAINT_LAYER_GENERATOR_PARAM_SCALE,
+  PAINT_LAYER_GEN_SCALE_Y = MA_PAINT_LAYER_GENERATOR_PARAM_SCALE_Y,
+  PAINT_LAYER_GEN_ROTATION = MA_PAINT_LAYER_GENERATOR_PARAM_ROTATION,
+  PAINT_LAYER_GEN_OFFSET_X = MA_PAINT_LAYER_GENERATOR_PARAM_OFFSET_X,
+  PAINT_LAYER_GEN_OFFSET_Y = MA_PAINT_LAYER_GENERATOR_PARAM_OFFSET_Y,
+  PAINT_LAYER_GEN_SEED = MA_PAINT_LAYER_GENERATOR_PARAM_SEED,
+  PAINT_LAYER_GEN_SCALE_LOCK = MA_PAINT_LAYER_GENERATOR_PARAM_SCALE_LOCK,
+  PAINT_LAYER_GEN_PLACEMENT_NUM = MA_PAINT_LAYER_GENERATOR_PARAM_PLACEMENT_NUM,
+};
+
+/** The choices of a generator's #PAINT_LAYER_GEN_SPACE parameter, the codes of its own enum. */
+enum PaintLayerGeneratorSpace : int {
+  PAINT_LAYER_GEN_SPACE_UV = MA_PAINT_LAYER_GRADIENT_SPACE_UV,
+  PAINT_LAYER_GEN_SPACE_OBJECT = MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT,
+  PAINT_LAYER_GEN_SPACE_GENERATED = MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED,
+};
+
+/** The off/on switch every boolean parameter of a generator's schema carries. */
+enum PaintLayerGeneratorSwitch : int {
+  PAINT_LAYER_GEN_OFF = 0,
+  PAINT_LAYER_GEN_ON = 1,
+};
+
+/** The positions of the Noise generator's parameters in its schema; the ramp is last. */
+enum PaintLayerGeneratorNoiseParam : int {
+  /** The octave sum, one of the Noise node's own #eNodeNoiseTexture_Type codes. */
+  PAINT_LAYER_GEN_NOISE_TYPE = PAINT_LAYER_GEN_PLACEMENT_NUM,
+  /** Whether the sum is normalized to 0..1, the Noise node's own switch. */
+  PAINT_LAYER_GEN_NOISE_NORMALIZE,
+  PAINT_LAYER_GEN_NOISE_DETAIL,
+  PAINT_LAYER_GEN_NOISE_ROUGHNESS,
+  PAINT_LAYER_GEN_NOISE_LACUNARITY,
+  PAINT_LAYER_GEN_NOISE_DISTORTION,
+  /** The per-octave offset the ridged, hybrid and hetero-terrain sums read. */
+  PAINT_LAYER_GEN_NOISE_OFFSET,
+  /** The extra multiplier the ridged and hybrid sums read. */
+  PAINT_LAYER_GEN_NOISE_GAIN,
+  /** The colour ramp of a colour channel, in #MaterialPaintLayer::ramp. */
+  PAINT_LAYER_GEN_NOISE_RAMP,
+  PAINT_LAYER_GEN_NOISE_PARAM_NUM,
+};
+static_assert(PAINT_LAYER_GEN_NOISE_PARAM_NUM <= PAINT_LAYER_GENERATOR_PARAM_MAX);
+
+/** The positions of the Voronoi generator's parameters in its schema; the ramp is last. */
+enum PaintLayerGeneratorVoronoiParam : int {
+  /** One of the Voronoi node's own #eNodeVoronoi_Type codes. */
+  PAINT_LAYER_GEN_VORONOI_FEATURE = PAINT_LAYER_GEN_PLACEMENT_NUM,
+  /** The distance metric, a #eNodeVoronoi_Dist code. */
+  PAINT_LAYER_GEN_VORONOI_DISTANCE,
+  PAINT_LAYER_GEN_VORONOI_RANDOMNESS,
+  /** Whether the ramp reads the distance or the cell's own colour. */
+  PAINT_LAYER_GEN_VORONOI_OUTPUT,
+  PAINT_LAYER_GEN_VORONOI_DETAIL,
+  PAINT_LAYER_GEN_VORONOI_ROUGHNESS,
+  PAINT_LAYER_GEN_VORONOI_LACUNARITY,
+  /** The falloff of a smooth F1, the Voronoi node's own smoothing. */
+  PAINT_LAYER_GEN_VORONOI_SMOOTHNESS,
+  /** The Minkowski exponent, read only under that metric. */
+  PAINT_LAYER_GEN_VORONOI_EXPONENT,
+  PAINT_LAYER_GEN_VORONOI_RAMP,
+  PAINT_LAYER_GEN_VORONOI_PARAM_NUM,
+};
+static_assert(PAINT_LAYER_GEN_VORONOI_PARAM_NUM <= PAINT_LAYER_GENERATOR_PARAM_MAX);
+
+/** What the Voronoi generator lays where its ramp would otherwise index. */
+enum PaintLayerGeneratorVoronoiOutput : int {
+  /** The distance through the ramp, the grey the pattern is made of. */
+  PAINT_LAYER_GEN_VORONOI_OUTPUT_VALUE = 0,
+  /** The cell's hashed colour, which no ramp could express. */
+  PAINT_LAYER_GEN_VORONOI_OUTPUT_CELL_COLOR = 1,
+};
+
+/** The positions of the Checker generator's parameters in its schema. */
+enum PaintLayerGeneratorCheckerParam : int {
+  /** The checker has no parameter of its own: the placement is the whole of its schema. */
+  PAINT_LAYER_GEN_CHECKER_RAMP = PAINT_LAYER_GEN_PLACEMENT_NUM,
+  PAINT_LAYER_GEN_CHECKER_PARAM_NUM,
+};
+static_assert(PAINT_LAYER_GEN_CHECKER_PARAM_NUM <= PAINT_LAYER_GENERATOR_PARAM_MAX);
+
+/** The positions of the Brick generator's parameters in its schema; the ramp is last. */
+enum PaintLayerGeneratorBrickParam : int {
+  /** How far a row shifts along X, as a fraction of a brick's width. */
+  PAINT_LAYER_GEN_BRICK_OFFSET = PAINT_LAYER_GEN_PLACEMENT_NUM,
+  /** Every how many rows the shift applies. */
+  PAINT_LAYER_GEN_BRICK_OFFSET_FREQUENCY,
+  /** How much the rows where the shift applies are squashed. */
+  PAINT_LAYER_GEN_BRICK_SQUASH,
+  PAINT_LAYER_GEN_BRICK_SQUASH_FREQUENCY,
+  PAINT_LAYER_GEN_BRICK_MORTAR_SIZE,
+  PAINT_LAYER_GEN_BRICK_MORTAR_SMOOTH,
+  /** Where a brick's tint sits between the two colours of the hash. */
+  PAINT_LAYER_GEN_BRICK_BIAS,
+  PAINT_LAYER_GEN_BRICK_WIDTH,
+  PAINT_LAYER_GEN_BRICK_ROW_HEIGHT,
+  PAINT_LAYER_GEN_BRICK_RAMP,
+  PAINT_LAYER_GEN_BRICK_PARAM_NUM,
+};
+static_assert(PAINT_LAYER_GEN_BRICK_PARAM_NUM <= PAINT_LAYER_GENERATOR_PARAM_MAX);
+
+/** The positions of the Wave generator's parameters in its schema; the ramp is last. */
+enum PaintLayerGeneratorWaveParam : int {
+  /** Bands or rings, a #eNodeWave_Type code. */
+  PAINT_LAYER_GEN_WAVE_TYPE = PAINT_LAYER_GEN_PLACEMENT_NUM,
+  /** The axis the bands run along, a #eNodeWave_BandsDir code. */
+  PAINT_LAYER_GEN_WAVE_BANDS_DIRECTION,
+  /** The axis the rings open around, a #eNodeWave_RingsDir code. */
+  PAINT_LAYER_GEN_WAVE_RINGS_DIRECTION,
+  /** The profile across an iso-line, a #eNodeWave_Profile code. */
+  PAINT_LAYER_GEN_WAVE_PROFILE,
+  PAINT_LAYER_GEN_WAVE_DISTORTION,
+  PAINT_LAYER_GEN_WAVE_DETAIL,
+  PAINT_LAYER_GEN_WAVE_DETAIL_SCALE,
+  PAINT_LAYER_GEN_WAVE_DETAIL_ROUGHNESS,
+  /** Where the wave starts along its direction. */
+  PAINT_LAYER_GEN_WAVE_PHASE_OFFSET,
+  PAINT_LAYER_GEN_WAVE_RAMP,
+  PAINT_LAYER_GEN_WAVE_PARAM_NUM,
+};
+static_assert(PAINT_LAYER_GEN_WAVE_PARAM_NUM <= PAINT_LAYER_GENERATOR_PARAM_MAX);
+
+/** The positions of the Scratches generator's parameters in its schema; the ramp is last. */
+enum PaintLayerGeneratorScratchesParam : int {
+  /** Half the width of a scratch, in the pattern's own units. */
+  PAINT_LAYER_GEN_SCRATCHES_WIDTH = PAINT_LAYER_GEN_PLACEMENT_NUM,
+  /** How far past the width the edge fades; zero is a hard line. */
+  PAINT_LAYER_GEN_SCRATCHES_SOFTEN,
+  /** How much the cells stretch along Y, so an edge becomes a long scratch. */
+  PAINT_LAYER_GEN_SCRATCHES_STRETCH,
+  PAINT_LAYER_GEN_SCRATCHES_RANDOMNESS,
+  PAINT_LAYER_GEN_SCRATCHES_DETAIL,
+  PAINT_LAYER_GEN_SCRATCHES_ROUGHNESS,
+  PAINT_LAYER_GEN_SCRATCHES_LACUNARITY,
+  PAINT_LAYER_GEN_SCRATCHES_RAMP,
+  PAINT_LAYER_GEN_SCRATCHES_PARAM_NUM,
+};
+static_assert(PAINT_LAYER_GEN_SCRATCHES_PARAM_NUM <= PAINT_LAYER_GENERATOR_PARAM_MAX);
+
+/** The positions of the Weave generator's parameters in its schema; the ramp is last. */
+enum PaintLayerGeneratorWeaveParam : int {
+  /** The over/under step of the threads. */
+  PAINT_LAYER_GEN_WEAVE_PATTERN = PAINT_LAYER_GEN_PLACEMENT_NUM,
+  /** The width of a thread within its cell. */
+  PAINT_LAYER_GEN_WEAVE_THREAD_WIDTH,
+  /** The gap left between two threads of the same direction. */
+  PAINT_LAYER_GEN_WEAVE_GAP,
+  /** How far the edge of a thread fades. */
+  PAINT_LAYER_GEN_WEAVE_SOFTEN,
+  /** How far a noise shifts the threads off their grid. */
+  PAINT_LAYER_GEN_WEAVE_JITTER,
+  PAINT_LAYER_GEN_WEAVE_RAMP,
+  PAINT_LAYER_GEN_WEAVE_PARAM_NUM,
+};
+static_assert(PAINT_LAYER_GEN_WEAVE_PARAM_NUM <= PAINT_LAYER_GENERATOR_PARAM_MAX);
+
+/** The over/under step of the Weave generator, the value of its pattern parameter. */
+enum PaintLayerGeneratorWeavePattern : int {
+  /** One over, one under: the cells alternate on every row. */
+  PAINT_LAYER_GEN_WEAVE_PLAIN = 0,
+  /** Two over, two under: the step slides along the rows. */
+  PAINT_LAYER_GEN_WEAVE_TWILL = 1,
+};
+
+/** The positions of the Grunge generator's parameters in its schema; the ramp is last. */
+enum PaintLayerGeneratorGrungeParam : int {
+  /* The base noise is a normalized FBM, which is the shape the patches of dirt have and what the
+   * shared group's node holds in its storage. A node cannot read a choice through a socket, so the
+   * kind has no noise-type, normalize, offset or gain parameter to offer: the four would be sliders
+   * that do nothing. */
+  PAINT_LAYER_GEN_GRUNGE_DETAIL = PAINT_LAYER_GEN_PLACEMENT_NUM,
+  PAINT_LAYER_GEN_GRUNGE_ROUGHNESS,
+  PAINT_LAYER_GEN_GRUNGE_LACUNARITY,
+  PAINT_LAYER_GEN_GRUNGE_DISTORTION,
+  /** How far the second, higher-frequency noise moves the base one. */
+  PAINT_LAYER_GEN_GRUNGE_VARIATION_STRENGTH,
+  /** The scale of that second noise, on top of the generator's own scale. */
+  PAINT_LAYER_GEN_GRUNGE_VARIATION_SCALE,
+  /** Where the patch's edge sits along the modulated noise. */
+  PAINT_LAYER_GEN_GRUNGE_THRESHOLD,
+  /** How far past the threshold the edge fades. */
+  PAINT_LAYER_GEN_GRUNGE_SOFTEN,
+  PAINT_LAYER_GEN_GRUNGE_RAMP,
+  PAINT_LAYER_GEN_GRUNGE_PARAM_NUM,
+};
+static_assert(PAINT_LAYER_GEN_GRUNGE_PARAM_NUM <= PAINT_LAYER_GENERATOR_PARAM_MAX);
+
+/* -------------------------------------------------------------------- */
+/** \name Generator parameters and the nodes they drive
+ *
+ * Which of a generator's parameters are values the group carries as inputs, and which decide the
+ * nodes built -- the same question the generator and the CPU composite answer together. \{ */
+
+/** Bumped whenever the rule below changes what of a pattern generator's parameters is structure, so
+ * a group built under the old rule is rebuilt rather than reused with the wrong shape. */
+constexpr uint64_t PAINT_LAYER_GENERATOR_TOPOLOGY_HASH_VERSION = 0x1;
+
+/** The #eMaterialPaintLayerGenerator a generating row is, or #MA_PAINT_LAYER_GENERATOR_GRADIENT
+ * for a row that generates nothing. */
+int paint_layer_generator_kind_of(const MaterialPaintLayer &row);
+
+/** Whether \a kind is one of the patterns a single shader node makes, as against the Gradient's own
+ * line or a compound pattern built as a shared node group. */
+bool paint_layer_generator_is_single_node(int kind);
+
+/** Whether \a kind is one of the patterns that are a graph of their own -- a shared node group the
+ * row instantiates, whose arithmetic the CPU composite mirrors statement for statement. */
+bool paint_layer_generator_is_compound(int kind);
+
+/** The space a generating row reads its coordinate in: #eMaterialPaintLayerGradientSpace, from the
+ * payload for a Gradient and from the schema's first parameter for every other kind. */
+int paint_layer_generator_space_of(const MaterialPaintLayer &row);
+
+/** Whether \a index is one of the placement parameters the mapping chain's three vector inputs
+ * carry -- the Y ratio, the turn and the two offsets. */
+bool paint_layer_generator_param_is_placement(int index);
+
+/**
+ * The Y ratio of a generator row's placement: its absolute Y scale over its X scale, or one while
+ * Lock Scale is on (see #paint_layer_generator_scale_y_ratio). What the CPU composite and the
+ * generated Scale input both read, so the two cannot shear the pattern differently.
+ */
+float paint_layer_generator_scale_y_ratio(const MaterialPaintLayer &row);
+
+/**
+ * The socket of the pattern's node that \a index drives, or null when the parameter rides no
+ * socket: a placement one, the space, the seed, a choice the node keeps in its storage, or a socket
+ * the node's own signature leaves out for the feature or type chosen now.
+ */
+const char *paint_layer_generator_param_socket(const MaterialPaintLayer &row, int index);
+
+/**
+ * Whether the row's kind still reads the schema parameter \a index under the choices made now: a
+ * conditional socket the node's signature leaves out is dead until the choice comes back (a
+ * Minkowski-only Exponent, the Offset of a noise type that reads none), and the Wave reads only
+ * the direction its type asks. The UI hides the dead ones; the placement, the seed and every
+ * choice the node keeps in its storage are read whatever the state.
+ */
+bool paint_layer_generator_param_is_active(const MaterialPaintLayer &row, int index);
+
+/** Whether an edit of \a index is a value edit: a socket of the pattern's node or the mapping
+ * chain carries it, so no node is added, dropped or reconfigured. */
+bool paint_layer_generator_param_is_value(const MaterialPaintLayer &row, int index);
+
+/** Whether \a row's pattern lays a colour of its own rather than an index into the row's band: the
+ * Voronoi cell colour, the one setting the graph reads off the node's Color socket. The CPU
+ * composite's counterpart is the colour it returns before ever touching the band. */
+bool paint_layer_generator_has_own_color(const MaterialPaintLayer &row);
+
+/** \} */
 
 /**
  * The layout of the Channel Mixer's folded 12 floats, shared by the CPU composite, the generated
@@ -1069,6 +1337,13 @@ int paint_layer_kind_param_index(const MaterialPaintLayer &row, const char *name
 
 /** The kind of \a row, or null when the file names one this build does not know. */
 const PaintLayerKindInfo *paint_layer_kind_find(int8_t source, int16_t subtype);
+
+/**
+ * The kind schemas of the procedural generators, which #paint_layer_kind_find walks right after
+ * the registry's own. Defined in `paint_layers_kind_generators.cc`, beside the generator table the
+ * schemas answer for, so a generator's schema and its descriptor are read together.
+ */
+Span<const PaintLayerKindInfo> paint_layer_kind_generator_kinds();
 
 inline const PaintLayerKindInfo *paint_layer_kind_of(const MaterialPaintLayer &row)
 {

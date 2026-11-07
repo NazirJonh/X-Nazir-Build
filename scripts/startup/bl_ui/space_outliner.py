@@ -140,6 +140,9 @@ class OUTLINER_HT_tool_header(Header):
             # preview slot shows.
             _stack_add_button(row, bpy.app.icons.glyph(_GLYPH_GRADIENT), 'COLORSET_13_VEC',
                               'GRADIENT', "Add Gradient Layer")
+            # The other procedural patterns (Noise, Voronoi, ...): one menu listing the generator
+            # registry, so a new generator shows up here without a button of its own.
+            row.menu("OUTLINER_MT_stack_layer_pattern_add", text="", icon='TEXTURE')
             # Corrections hang on the selected layer or on its mask; one menu holds them all.
             row = layout.row(align=True)
             # The corrections, with the newer ones in a "New Effects" submenu. A plain `menu`
@@ -182,6 +185,23 @@ class OUTLINER_HT_tool_header(Header):
 
         row = layout.row(align=True)
         row.operator("outliner.stack_layer_remove", text="", icon='TRASH')
+
+
+class OUTLINER_MT_stack_layer_pattern_add(Menu):
+    bl_label = "Add Pattern Layer"
+
+    def draw(self, _context):
+        layout = self.layout
+        # The generators are the registry's: the RNA enum is held to it by a test, and each
+        # identifier is also the `type` of the Add kind that lays that pattern as a layer.
+        generators = bpy.types.MaterialPaintLayer.bl_rna.properties["generator"].enum_items
+        for item in generators:
+            if item.identifier == 'GRADIENT':
+                # Has its own button in the header.
+                continue
+            props = layout.operator("outliner.stack_layer_add", text=item.name, icon='TEXTURE')
+            props.type = item.identifier
+            props.label = "Add {:s} Layer".format(item.name)
 
 
 class OUTLINER_MT_stack_layer_effect_add(Menu):
@@ -1007,6 +1027,7 @@ class OUTLINER_PT_options_filter(Panel):
 classes = (
     OUTLINER_HT_header,
     OUTLINER_HT_tool_header,
+    OUTLINER_MT_stack_layer_pattern_add,
     OUTLINER_MT_stack_layer_effect_add,
     OUTLINER_MT_stack_layer_mask_add,
     OUTLINER_OT_stack_layer_mask_add,

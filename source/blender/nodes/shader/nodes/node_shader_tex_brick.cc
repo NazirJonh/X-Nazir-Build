@@ -11,6 +11,7 @@
 
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
+#include "BLI_procedural_texture.hh"
 
 #include "NOD_multi_function.hh"
 
@@ -178,65 +179,6 @@ class BrickFunction : public mf::MultiFunction {
     this->set_signature(&signature);
   }
 
-  /* Fast integer noise. */
-  static float brick_noise(uint n)
-  {
-    n = (n + 1013) & 0x7fffffff;
-    n = (n >> 13) ^ n;
-    const uint nn = (n * (n * n * 60493 + 19990303) + 1376312589) & 0x7fffffff;
-    return 0.5f * (float(nn) / 1073741824.0f);
-  }
-
-  static float smoothstepf(const float f)
-  {
-    const float ff = f * f;
-    return (3.0f * ff - 2.0f * ff * f);
-  }
-
-  static float2 brick(float3 p,
-                      float mortar_size,
-                      float mortar_smooth,
-                      float bias,
-                      float brick_width,
-                      float row_height,
-                      float offset_amount,
-                      int offset_frequency,
-                      float squash_amount,
-                      int squash_frequency)
-  {
-    float offset = 0.0f;
-
-    const int rownum = int(floorf(p.y / row_height));
-
-    if (offset_frequency && squash_frequency) {
-      brick_width *= (rownum % squash_frequency) ? 1.0f : squash_amount;
-      offset = (rownum % offset_frequency) ? 0.0f : (brick_width * offset_amount);
-    }
-
-    const int bricknum = int(floorf((p.x + offset) / brick_width));
-
-    const float x = (p.x + offset) - brick_width * bricknum;
-    const float y = p.y - row_height * rownum;
-
-    const float tint = clamp_f(
-        brick_noise((rownum << 16) + (bricknum & 0xFFFF)) + bias, 0.0f, 1.0f);
-    float min_dist = std::min({x, y, brick_width - x, row_height - y});
-
-    float mortar;
-    if (min_dist >= mortar_size) {
-      mortar = 0.0f;
-    }
-    else if (mortar_smooth == 0.0f) {
-      mortar = 1.0f;
-    }
-    else {
-      min_dist = 1.0f - min_dist / mortar_size;
-      mortar = (min_dist < mortar_smooth) ? smoothstepf(min_dist / mortar_smooth) : 1.0f;
-    }
-
-    return float2(tint, mortar);
-  }
-
   void call(const IndexMask &mask, mf::Params params, mf::Context /*context*/) const override
   {
     const VArray<float3> &vector = params.readonly_single_input<float3>(0, "Vector");
@@ -261,16 +203,16 @@ class BrickFunction : public mf::MultiFunction {
     const bool store_color = !r_color.is_empty();
 
     mask.foreach_index([&](const int64_t i) {
-      const float2 f2 = brick(vector[i] * scale[i],
-                              mortar_size[i],
-                              mortar_smooth[i],
-                              bias[i],
-                              brick_width[i],
-                              row_height[i],
-                              offset_,
-                              offset_freq_,
-                              squash_,
-                              squash_freq_);
+      const float2 f2 = procedural_brick(vector[i] * scale[i],
+                                         mortar_size[i],
+                                         mortar_smooth[i],
+                                         bias[i],
+                                         brick_width[i],
+                                         row_height[i],
+                                         offset_,
+                                         offset_freq_,
+                                         squash_,
+                                         squash_freq_);
 
       float4 color_data, color1, color2, mortar;
       copy_v4_v4(color_data, color1_values[i]);

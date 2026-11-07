@@ -674,9 +674,10 @@ enum eMaterialPaintLayerSource : int8_t {
   /**
    * A procedural generator: it produces its colour and coverage from the shading coordinates
    * instead of a map. The member is #MaterialPaintLayer::kind_subtype
-   * (#eMaterialPaintLayerGenerator) and the parameters live in
-   * #MaterialPaintLayer::gradient. It owns channel records for the channels it takes part in, but no
-   * map: a stroke never writes into it.
+   * (#eMaterialPaintLayerGenerator). The Gradient keeps its parameters in
+   * #MaterialPaintLayer::gradient; every other generator keeps them in its kind's schema, in
+   * #MaterialPaintLayer::system_properties, and holds no payload. It owns channel records for the
+   * channels it takes part in, but no map: a stroke never writes into it.
    */
   MA_PAINT_LAYER_SOURCE_GENERATOR = 7,
   /**
@@ -716,6 +717,61 @@ enum eMaterialPaintLayerAnchorPoint : int16_t {
 enum eMaterialPaintLayerGenerator : int16_t {
   /** A ramp along a line (`linear`) or around a point (`radial`). */
   MA_PAINT_LAYER_GENERATOR_GRADIENT = 1,
+  /**
+   * Perlin-family noise: an fBm, a multifractal, a hybrid, a ridged multifractal or a hetero-terrain
+   * sum over the placement coordinates. The base of procedural dirt.
+   */
+  MA_PAINT_LAYER_GENERATOR_NOISE = 2,
+  /** Voronoi cells: F1, F2, a smooth F1, the distance to an edge, or an n-sphere radius. */
+  MA_PAINT_LAYER_GENERATOR_VORONOI = 3,
+  /** The two-colour checkerboard, one texel per cell of the placement grid. */
+  MA_PAINT_LAYER_GENERATOR_CHECKER = 4,
+  /** Stacked bricks with a mortar seam, offset and squashed per row. */
+  MA_PAINT_LAYER_GENERATOR_BRICK = 5,
+  /** Bands or rings: the stripes a wave profile lays along an axis. */
+  MA_PAINT_LAYER_GENERATOR_WAVE = 6,
+  /**
+   * Random scratches: stretched Voronoi edges, thresholded to a line of a chosen width. A compound
+   * generator, built from a shared node group rather than from one texture node.
+   */
+  MA_PAINT_LAYER_GENERATOR_SCRATCHES = 7,
+  /** Woven threads: two directions of stripes crossing with a chosen over/under step. */
+  MA_PAINT_LAYER_GENERATOR_WEAVE = 8,
+  /**
+   * Smart dirt in one row: noise modulated by a second, higher-frequency noise and thresholded, so
+   * a grunge layer needs four sliders rather than a sub-stack.
+   */
+  MA_PAINT_LAYER_GENERATOR_GRUNGE = 9,
+};
+
+/**
+ * The parameters every generator but the Gradient reads the same way, in the same slots of its
+ * kind's schema: the placement of the pattern in a coordinate space, ahead of the generator's own
+ * parameters. The Gradient is older than this schema and keeps its payload; the codes of
+ * #eMaterialPaintLayerGradientSpace are what the #space parameter of every generator stores.
+ *
+ * The values live in #MaterialPaintLayer::system_properties, so a new generator adds no DNA struct.
+ */
+enum eMaterialPaintLayerGeneratorParam : int {
+  /** #eMaterialPaintLayerGradientSpace: the space the placement is defined in. */
+  MA_PAINT_LAYER_GENERATOR_PARAM_SPACE = 0,
+  /** The scale of the pattern along X. */
+  MA_PAINT_LAYER_GENERATOR_PARAM_SCALE = 1,
+  /**
+   * The scale of the pattern along Y, an absolute value like the X one. While
+   * #MA_PAINT_LAYER_GENERATOR_PARAM_SCALE_LOCK is on the pattern reads the X scale here instead.
+   */
+  MA_PAINT_LAYER_GENERATOR_PARAM_SCALE_Y = 2,
+  /** The rotation of the placement around the space's Z axis, in degrees. */
+  MA_PAINT_LAYER_GENERATOR_PARAM_ROTATION = 3,
+  MA_PAINT_LAYER_GENERATOR_PARAM_OFFSET_X = 4,
+  MA_PAINT_LAYER_GENERATOR_PARAM_OFFSET_Y = 5,
+  /** The hash offset of the coordinate: the same pattern moved to another place. */
+  MA_PAINT_LAYER_GENERATOR_PARAM_SEED = 6,
+  /** Lock Scale, as the mapping of a layer has it: on, the Y scale follows the X one. */
+  MA_PAINT_LAYER_GENERATOR_PARAM_SCALE_LOCK = 7,
+  /** Where a generator's own parameters start in its schema. */
+  MA_PAINT_LAYER_GENERATOR_PARAM_PLACEMENT_NUM = 8,
 };
 
 /** #MaterialPaintLayerGradient::space: the space the gradient's line is defined in. */
@@ -1453,9 +1509,11 @@ struct MaterialPaintLayer {
    */
   bUUID anchor_point_source = {};
   /**
-   * The payload of a generator row (#MA_PAINT_LAYER_SOURCE_GENERATOR), or null for every other
-   * source. Owned by the row (freed, copied and written with it); a pointer rather than a value
-   * because the gradient's #ColorBand would otherwise bloat every row in the file.
+   * The payload of a Gradient row (#MA_PAINT_LAYER_SOURCE_GENERATOR /
+   * #MA_PAINT_LAYER_GENERATOR_GRADIENT), or null for every other source and for every other
+   * generator: a generator whose parameters come from its kind's schema holds none. Owned by the
+   * row (freed, copied and written with it); a pointer rather than a value because the gradient's
+   * #ColorBand would otherwise bloat every row in the file.
    */
   struct MaterialPaintLayerGradient *gradient = nullptr;
   /**

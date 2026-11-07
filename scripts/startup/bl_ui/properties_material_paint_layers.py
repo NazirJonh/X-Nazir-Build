@@ -481,6 +481,69 @@ def _draw_kind_param(layout, param):
         layout.prop(param, "value", text=param.label, slider=True)
 
 
+# The names of the first parameters of every generator's schema, which place the pattern before the
+# pattern's own parameters start. The panel draws them as one section, in this order and by these
+# names, so a schema that renames or reorders the rest keeps drawing.
+_GENERATOR_PLACEMENT_PARAM_NAMES = (
+    "space",
+    "scale",
+    "scale_y",
+    "rotation",
+    "offset_x",
+    "offset_y",
+    "seed",
+    "scale_lock",
+)
+
+
+def draw_material_generator_placement(layout, layer):
+    """The placement of a generator's pattern: the space and the grid it reads its coordinates in.
+
+    The parameters are the first eight of every generator's schema, looked up by name. The space is
+    the parameter's own enum: a switch is an RNA edit, which rebuilds the graph -- the Gradient's
+    space operator converts its line's numbers instead, a payload the patterns do not carry.
+    """
+    params = {param.name: param for param in layer.kind_params}
+    space = params.get("space")
+    if space is not None:
+        layout.prop(space, "enum_value", text="Space", expand=True)
+    scale_x = params.get("scale")
+    scale_y = params.get("scale_y")
+    scale_lock = params.get("scale_lock")
+    if scale_x is not None and scale_y is not None:
+        # Scale X and Y with the lock beside them, as the mapping of a layer draws its scale: locked,
+        # the pattern reads the X value along both axes, so the Y field stays visible but greyed out.
+        row = layout.row(align=True)
+        _draw_kind_param(row, scale_x)
+        sub = row.row(align=True)
+        sub.enabled = scale_lock is None or not scale_lock.bool_value
+        _draw_kind_param(sub, scale_y)
+        if scale_lock is not None:
+            row.prop(scale_lock, "bool_value", text="", icon_only=True,
+                     icon='LOCKED' if scale_lock.bool_value else 'UNLOCKED')
+    for name in _GENERATOR_PLACEMENT_PARAM_NAMES[1:]:
+        if name in {"scale", "scale_y", "scale_lock"}:
+            continue
+        param = params.get(name)
+        if param is not None:
+            _draw_kind_param(layout, param)
+
+
+def draw_material_generator_pattern_params(layout, layer):
+    """The pattern parameters of a generator row, after its placement.
+
+    A parameter the kind does not read under the choices made now is left out (a Minkowski-only
+    Exponent, the Offset of a noise type that reads none): the rule is the graph build's own,
+    answered through the parameter's `is_active` rather than mirrored here.
+    """
+    for param in layer.kind_params:
+        if param.name in _GENERATOR_PLACEMENT_PARAM_NAMES:
+            continue
+        if not param.is_active:
+            continue
+        _draw_kind_param(layout, param)
+
+
 def draw_material_smart_asset_rows(layout, rows):
     """The offered parameters of the given rows: one smart-asset instance's part of the stack.
 
@@ -700,18 +763,27 @@ def draw_material_layer_channels(layout, context, material, layer):
         enabled = record is not None and record.use
         col = flow.column(align=False)
         if is_generator:
-            # An eye opens the channel's ramp on the gizmo; exactly one channel can be open. The
-            # eye sits right before its channel switch, so the row reads "what the gizmo shows" and
-            # "what the row paints" side by side.
+            # A generator lays every channel from ramps: a colour channel from the row's own band,
+            # a scalar one from its record's value ramp. The band a Gradient keeps in its payload;
+            # the schema kinds keep theirs in the row's ramp, which the kind's ramp_supported
+            # answers for.
             color_channel = channel_id in colour_channels
-            has_ramp = (layer.gradient_ramp is not None if color_channel else
-                        record is not None and record.gradient_ramp is not None)
+            if color_channel:
+                if layer.gradient_supported:
+                    has_ramp = layer.gradient_ramp is not None
+                else:
+                    has_ramp = layer.ramp_supported and layer.kind_ramp is not None
+            else:
+                has_ramp = record is not None and record.gradient_ramp is not None
             col.ui_units_x = _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X + 1.3
             row = col.row(align=True)
-            if channel_id != 'NORMAL':
-                # The eye is always in the layout, even before a channel is activated: it is
-                # disabled while there is no ramp to show, and turns into a working eye as soon as
-                # the channel gets its value ramp.
+            if layer.gradient_supported and channel_id != 'NORMAL':
+                # An eye opens the channel's ramp on the Gradient's handles; exactly one channel
+                # can be open. The eye sits right before its channel switch, so the row reads
+                # "what the gizmo shows" and "what the row paints" side by side. It is always in
+                # the layout, even before a channel is activated: it is disabled while there is no
+                # ramp to show, and turns into a working eye as soon as the channel gets its value
+                # ramp.
                 gizmo_shown = has_ramp and layer.gradient_gizmo_channel == channel_id
                 eye_row = row.row(align=True)
                 eye_row.enabled = has_ramp
@@ -723,7 +795,8 @@ def draw_material_layer_channels(layout, context, material, layer):
                 eye.marker = layer.marker
                 eye.channel = channel_id
             else:
-                # Normal has no generator ramp at all; keep its switch in line with the rest.
+                # A pattern has no gizmo to open its ramp on: an empty label keeps its switch in
+                # line with a Gradient's rows.
                 row.label(text="", icon='BLANK1')
             op = row.operator(
                 "material.paint_layer_channel_toggle",
@@ -766,13 +839,20 @@ def draw_material_layer_channels(layout, context, material, layer):
             if not panel:
                 continue
             if channel_id in colour_channels:
-                if layer.gradient_supported and layer.gradient_ramp is not None:
-                    panel.template_color_ramp(layer, "gradient_ramp", expand=True)
+                # The colour band: a Gradient's is its payload's, the schema kinds' is the row's
+                # own, which the kind's ramp_supported answers for.
+                if layer.gradient_supported:
+                    if layer.gradient_ramp is not None:
+                        panel.template_color_ramp(layer, "gradient_ramp", expand=True)
+                elif layer.ramp_supported and layer.kind_ramp is not None:
+                    panel.template_color_ramp(layer, "kind_ramp", expand=True)
             else:
                 # A scalar channel reads its own black-to-white value ramp: as many grey stops as
                 # the gradient needs, each edited with the gradient value slider rather than a
-                # colour picker. Sync Base Color copies the colour ramp's stop layout, so a user can
-                # lay out colours first and then tune each channel's values at the same positions.
+                # colour picker. Sync Base Color copies the colour ramp's stop layout, so a user
+                # can lay out colours first and then tune each channel's values at the same
+                # positions; every generator reads it, its Base Color band being wherever the kind
+                # keeps it.
                 if record.gradient_ramp is not None:
                     # The full template keeps Interpolation and the tools menu (Flip, Distribute,
                     # Eyedropper, Reset) available. Value mode only swaps the active stop's colour

@@ -31,7 +31,9 @@
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
 
+#include "paint_layers/paint_material_generator_group_ids.hh"
 #include "paint_material_composite_internal.hh"
+#include "paint_material_group_builder.hh"
 
 
 namespace blender {
@@ -50,240 +52,6 @@ bool BKE_paint_material_is_gradient_group(const bNode &node)
 {
   return paint_material_group_has_marker(node, GRADIENT_MARKER_VALUE);
 }
-
-namespace {
-
-/** A node and one of its sockets. */
-struct GradientSocket {
-  bNode *node = nullptr;
-  const char *name = nullptr;
-};
-
-class GradientGroupBuilder {
- public:
-  explicit GradientGroupBuilder(bNodeTree &group) : group_(group)
-  {
-    group_input_ = bke::node_add_node(nullptr, group, "NodeGroupInput"_ustr);
-    group_output_ = bke::node_add_node(nullptr, group, "NodeGroupOutput"_ustr);
-    if (group_input_ == nullptr || group_output_ == nullptr) {
-      ok_ = false;
-      return;
-    }
-    group_input_->location[0] = -1800;
-    group_input_->location[1] = 0;
-  }
-
-  bool ok() const
-  {
-    return ok_;
-  }
-
-  bNode *group_input() const
-  {
-    return group_input_;
-  }
-
-  bNode *group_output() const
-  {
-    return group_output_;
-  }
-
-  /** A Math node with \a operation, at the next free column. */
-  bNode *math(const int operation)
-  {
-    bNode *node = bke::node_add_static_node(nullptr, group_, SH_NODE_MATH);
-    if (node == nullptr) {
-      ok_ = false;
-      return nullptr;
-    }
-    node->custom1 = operation;
-    place(node);
-    return node;
-  }
-
-  /** A Vector Math node with \a operation. */
-  bNode *vector_math(const int operation)
-  {
-    bNode *node = bke::node_add_node(nullptr, group_, "ShaderNodeVectorMath"_ustr);
-    if (node == nullptr) {
-      ok_ = false;
-      return nullptr;
-    }
-    node->custom1 = operation;
-    place(node);
-    return node;
-  }
-
-  /** A float Mix node, `mix(A, B, factor)`. */
-  bNode *mix_float()
-  {
-    bNode *node = bke::node_add_node(nullptr, group_, "ShaderNodeMix"_ustr);
-    if (node == nullptr || node->storage == nullptr) {
-      ok_ = false;
-      return nullptr;
-    }
-    NodeShaderMix *storage = static_cast<NodeShaderMix *>(node->storage);
-    storage->data_type = SOCK_FLOAT;
-    storage->factor_mode = NODE_MIX_MODE_UNIFORM;
-    storage->clamp_factor = true;
-    storage->clamp_result = false;
-    place(node);
-    return node;
-  }
-
-  bool link(const GradientSocket from, const GradientSocket to)
-  {
-    if (from.node == nullptr || to.node == nullptr) {
-      ok_ = false;
-      return false;
-    }
-    bNodeSocket *from_socket = bke::node_find_socket(
-        *from.node, SOCK_OUT, UString::from_ptr_noinline(from.name));
-    bNodeSocket *to_socket = bke::node_find_socket(
-        *to.node, SOCK_IN, UString::from_ptr_noinline(to.name));
-    if (from_socket == nullptr || to_socket == nullptr) {
-      ok_ = false;
-      return false;
-    }
-    bke::node_add_link(group_, *from.node, *from_socket, *to.node, *to_socket);
-    return true;
-  }
-
-  /** Link the group's input \a identifier into \a to's \a input. */
-  bool link_input(const char *identifier, bNode *to, const char *input)
-  {
-    return link({group_input_, identifier}, {to, input});
-  }
-
-  /** Set a float input's default; a missing socket is a build error. */
-  bool set_float(bNode *node, const char *input, const float value)
-  {
-    if (node == nullptr) {
-      ok_ = false;
-      return false;
-    }
-    bNodeSocket *socket = bke::node_find_socket(
-        *node, SOCK_IN, UString::from_ptr_noinline(input));
-    if (socket == nullptr || socket->default_value == nullptr) {
-      ok_ = false;
-      return false;
-    }
-    static_cast<bNodeSocketValueFloat *>(socket->default_value)->value = value;
-    return true;
-  }
-
-  /** `a op b` where both are outputs of nodes, one input each. */
-  bNode *binary(const int operation,
-                const GradientSocket a,
-                const GradientSocket b,
-                const char *a_input = "Value",
-                const char *b_input = "Value_001")
-  {
-    bNode *node = math(operation);
-    if (node == nullptr) {
-      return nullptr;
-    }
-    link(a, {node, a_input});
-    link(b, {node, b_input});
-    return node;
-  }
-
-  /** `a op constant` with the constant in the second input. */
-  bNode *binary_const(const int operation,
-                      const GradientSocket a,
-                      const float b,
-                      const char *a_input = "Value",
-                      const char *b_input = "Value_001")
-  {
-    bNode *node = math(operation);
-    if (node == nullptr) {
-      return nullptr;
-    }
-    link(a, {node, a_input});
-    set_float(node, b_input, b);
-    return node;
-  }
-
-  /** `constant op a` with the constant in the first input. */
-  bNode *const_binary(const int operation,
-                      const float a,
-                      const GradientSocket b,
-                      const char *a_input = "Value",
-                      const char *b_input = "Value_001")
-  {
-    bNode *node = math(operation);
-    if (node == nullptr) {
-      return nullptr;
-    }
-    set_float(node, a_input, a);
-    link(b, {node, b_input});
-    return node;
-  }
-
-  /** A Compare node: one when \a value is within \a epsilon of \a target. */
-  bNode *compare(const GradientSocket value, const float target, const float epsilon = 0.5f)
-  {
-    bNode *node = math(NODE_MATH_COMPARE);
-    if (node == nullptr) {
-      return nullptr;
-    }
-    link(value, {node, "Value"});
-    set_float(node, "Value_001", target);
-    set_float(node, "Value_002", epsilon);
-    return node;
-  }
-
-  /** A float mix of \a a and \a b by \a factor. */
-  bNode *mix(const GradientSocket a, const GradientSocket b, const GradientSocket factor)
-  {
-    bNode *node = mix_float();
-    if (node == nullptr) {
-      return nullptr;
-    }
-    link(a, {node, "A_Float"});
-    link(b, {node, "B_Float"});
-    link(factor, {node, "Factor_Float"});
-    return node;
-  }
-
-  /** A Math or Vector Math socket output; Vector Math subtracts on "Vector", the rest on "Value". */
-  static GradientSocket value(const bNode *node)
-  {
-    return {const_cast<bNode *>(node), "Value"};
-  }
-
-  static GradientSocket vector(const bNode *node)
-  {
-    return {const_cast<bNode *>(node), "Vector"};
-  }
-
-  /** The output of a float Mix node. */
-  static GradientSocket result(const bNode *node)
-  {
-    return {const_cast<bNode *>(node), "Result_Float"};
-  }
-
-  /** Put the group output one column after the last node added. */
-  void place_output()
-  {
-    this->place(group_output_);
-  }
-
- private:
-  void place(bNode *node)
-  {
-    node->location[0] = 400.0f + float(column_++) * 180.0f;
-    node->location[1] = 0.0f;
-  }
-
-  bNodeTree &group_;
-  bNode *group_input_ = nullptr;
-  bNode *group_output_ = nullptr;
-  int column_ = 0;
-  bool ok_ = true;
-};
-
-}  // namespace
 
 bNodeTree *BKE_paint_material_gradient_group_ensure(Main &bmain)
 {
@@ -341,7 +109,7 @@ bNodeTree *BKE_paint_material_gradient_group_ensure(Main &bmain)
     data.max = 2.0f;
   }
 
-  GradientGroupBuilder builder(*group);
+  PaintMaterialGroupBuilder builder(*group);
   if (!builder.ok()) {
     BKE_id_free(&bmain, &group->id);
     return nullptr;
@@ -377,7 +145,7 @@ bNodeTree *BKE_paint_material_gradient_group_ensure(Main &bmain)
       builder.value(linear), builder.value(radial), builder.value(type_is_radial));
   /* A degenerate line reads as the start of the ramp on the CPU; the same 0/1 gate here. */
   bNode *line_valid = builder.binary_const(NODE_MATH_GREATER_THAN, {dot_dd, "Value"}, 1e-12f);
-  const GradientSocket t_type = builder.value(
+  const GroupSocket t_type = builder.value(
       builder.binary(NODE_MATH_MULTIPLY, builder.result(type_mix), {line_valid, "Value"}));
 
   /* Repeat: None clamps, Repeat is `frac`, Reflect is `pingpong(t, 1)`. */
@@ -393,7 +161,7 @@ bNodeTree *BKE_paint_material_gradient_group_ensure(Main &bmain)
   bNode *is_reflect = builder.compare({builder.group_input(), GRADIENT_GROUP_ID_REPEAT}, 2.0f);
   bNode *repeat_final = builder.mix(
       builder.result(repeat_mix), builder.value(pingpong), builder.value(is_reflect));
-  const GradientSocket t_rep = builder.result(repeat_final);
+  const GroupSocket t_rep = builder.result(repeat_final);
 
   /* Midpoint: the two cubic Hermite segments of the CPU's remap. */
   bNode *mid_lo = builder.binary_const(NODE_MATH_MAXIMUM,

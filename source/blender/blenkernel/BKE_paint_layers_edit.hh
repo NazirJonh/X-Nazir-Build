@@ -24,6 +24,8 @@
 
 #include "BKE_paint_layers.hh"
 
+#include "DNA_material_types.h"
+
 namespace blender {
 
 struct Brush;
@@ -35,8 +37,10 @@ enum class PaintLayerAddKind : int8_t {
   /** A flat-colour Fill layer. */
   Fill,
   /**
-   * A procedural Gradient layer: a Shader Editor node chain reading the UV, with no maps. The
-   * payload defaults to a linear black-to-white ramp across the unit square.
+   * A procedural generator layer -- the Gradient's ramp along a line, or one of the patterns whose
+   * parameters the kind schema carries (#PaintLayerAddParams::generator). A row built from shader
+   * nodes reading a coordinate, with no maps. The Gradient's payload defaults to a linear
+   * black-to-white ramp across the unit square; the other kinds get their schema defaults.
    */
   Gradient,
   /** An empty folder, made to be filled. */
@@ -102,9 +106,9 @@ enum class PaintLayerAddKind : int8_t {
    * #PaintLayerAddParams::anchor_point_source.
    */
   AnchorPointMaskCorrection,
-  /** A content correction of the anchor row whose source is a procedural Gradient. */
+  /** A content correction of the anchor row whose source is a procedural generator. */
   GradientCorrection,
-  /** A mask correction of the anchor row whose coverage is a procedural Gradient's grey. */
+  /** A mask correction of the anchor row whose coverage is a procedural generator's grey. */
   MaskGradient,
   /**
    * A Curve Patch as a content effect of a row (or of the row an effect hangs on): its stamped
@@ -161,6 +165,14 @@ struct PaintLayerAddParams {
   uint32_t channels = 0;
   /** The filter of a #PaintLayerAddKind::Filter Add, an #eMaterialPaintLayerFilter. */
   int16_t filter = 0;
+  /**
+   * The generator of a #PaintLayerAddKind::Gradient, ::GradientCorrection or ::MaskGradient Add, an
+   * #eMaterialPaintLayerGenerator. The three kinds name the role a generator lands in, not which
+   * pattern it is: a Gradient is the default, and every other generator is the same row with this
+   * field set, which the Add policy answers through #BKE_paint_layers_generator_add and
+   * #BKE_paint_layers_generator_kind_set.
+   */
+  int16_t generator = MA_PAINT_LAYER_GENERATOR_GRADIENT;
   /** The material a #PaintLayerAddKind::Material, ::CorrectionMaterial or ::MaskCorrectionMaterial
    * Add reads. */
   Material *source = nullptr;

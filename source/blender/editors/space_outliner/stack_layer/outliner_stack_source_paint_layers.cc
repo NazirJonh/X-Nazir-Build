@@ -51,6 +51,7 @@
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
+#include "BKE_paint_layers_generator_registry.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_resolve.hh"
@@ -1233,7 +1234,15 @@ void paint_stack_rows_append(const Material &material,
         gradient_slot.section_id = "CHANNELS";
         gradient_slot.glyph = gradient_look.glyph;
         gradient_slot.icon = gradient_look.icon;
-        gradient_slot.label = IFACE_("Gradient");
+        /* The slot reads the pattern, not the source: a Noise row and a Gradient row are told
+         * apart here, the way their parameters are told apart in the schema. The registry entry
+         * names the pattern; a subtype this build does not know reads as the Gradient its default
+         * names, the schema-less row it is. */
+        const char *generator_label = "Gradient";
+        if (const PaintLayerGeneratorInfo *generator = BKE_paint_layers_generator_of(layer)) {
+          generator_label = generator->name;
+        }
+        gradient_slot.label = IFACE_(generator_label);
         row.preview_slots.append(std::move(gradient_slot));
       }
       if (BKE_paint_layers_mask_base(layer) != nullptr ||
@@ -1489,6 +1498,12 @@ struct PaintAddKindEntry {
   /** The #eMaterialPaintLayerFilter of a filter, adjustment or mask filter kind; else unused. */
   int16_t filter = 0;
   /**
+   * The #eMaterialPaintLayerGenerator of a Gradient kind Add; else unused. The three Gradient
+   * kinds name the role a generator lands in; this says which pattern it lays, so one table row
+   * per generator stands where the Gradient's three were.
+   */
+  int16_t generator = MA_PAINT_LAYER_GENERATOR_GRADIENT;
+  /**
    * Index of the entry that lays this effect over the mask, or -1. Resolved while the table is
    * built from the mask kind the content entry names; the mask entry gets #is_mask_twin.
    */
@@ -1515,13 +1530,15 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                          const int16_t filter = 0,
                          const std::optional<PaintLayerAddKind> mask_twin = std::nullopt,
                          const char *menu_name = nullptr,
-                         const bool mask_only = false) {
+                         const bool mask_only = false,
+                         const int16_t generator = MA_PAINT_LAYER_GENERATOR_GRADIENT) {
       PaintAddKindEntry entry;
       entry.info = std::move(info);
       entry.kind = kind;
       entry.filter = filter;
       entry.menu_name = menu_name;
       entry.mask_only = mask_only;
+      entry.generator = generator;
       table.append(std::move(entry));
       if (mask_twin.has_value()) {
         twin_kinds.append(mask_twin);
@@ -1752,6 +1769,57 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                   paint_look_for_source(MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::MaskItem)),
         PaintLayerAddKind::MaskGradient);
 
+    /* The patterns whose parameters the kind schema carries, in the same three places the
+     * Gradient takes: one table row each per role, walked off the generator registry -- the entry
+     * carries the identifier, the name and the description the items show, so a generator added
+     * there needs no row here. The Add resolves every role through the same two kinds, so a
+     * script asks for the index and reads which pattern it bought from the row's own generator
+     * property. The Gradient's own entries above stay hand-built: its line and ramp are a
+     * payload, not schema parameters. */
+    for (const PaintLayerGeneratorInfo &generator : BKE_paint_layers_generator_all()) {
+      if (generator.subtype == MA_PAINT_LAYER_GENERATOR_GRADIENT) {
+        continue;
+      }
+      const int16_t subtype = generator.subtype;
+      const std::string menu_word = generator.name;
+      add(with_look({std::string(generator.identifier),
+                     std::string(generator.menu_name),
+                     std::string(generator.description)},
+                    paint_look_for_source(MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::Content)),
+          PaintLayerAddKind::Gradient,
+          0,
+          std::nullopt,
+          nullptr,
+          false,
+          subtype);
+      add(with_look(effect({std::string("CORRECTION_") + generator.identifier,
+                            menu_word + " Correction",
+                            "A procedural " + menu_word +
+                                " laid over the active target: the layer's colour, or its mask "
+                                "while a mask slot is the one showing"}),
+                    paint_look_for_source(
+                        MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::Content)),
+          PaintLayerAddKind::GradientCorrection,
+          0,
+          PaintLayerAddKind::MaskGradient,
+          /* The mask twin's menu item: the registry's own string, which outlives the table. */
+          generator.name,
+          false,
+          subtype);
+      add(with_look(effect({std::string("MASK_CORRECTION_") + generator.identifier,
+                            std::string("Mask ") + menu_word + " Correction",
+                            "A procedural " + menu_word +
+                                "'s grey laid over the active layer's mask"}),
+                    paint_look_for_source(
+                        MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::MaskItem)),
+          PaintLayerAddKind::MaskGradient,
+          0,
+          std::nullopt,
+          nullptr,
+          false,
+          subtype);
+    }
+
     /* 3D control curves stamped through a brush snapshot of the effect's own. Only an effect: there
      * is no Curve Patch layer. */
     add(with_look(effect({"CURVE_PATCH_CORRECTION",
@@ -1766,7 +1834,9 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
     for (const int64_t twin : twin_rows.index_range()) {
       const PaintAddKindEntry &content = table[twin_rows[twin]];
       for (const int64_t index : table.index_range()) {
-        if (table[index].kind == *twin_kinds[twin] && table[index].filter == content.filter) {
+        if (table[index].kind == *twin_kinds[twin] && table[index].filter == content.filter &&
+            table[index].generator == content.generator)
+        {
           table[twin_rows[twin]].mask_twin = int(index);
           table[index].is_mask_twin = true;
           break;
@@ -2658,6 +2728,9 @@ class PaintLayersStackSource final : public StackSource,
     }
     PaintLayerAddParams params;
     params.filter = entry.filter;
+    /* The pattern a Gradient-kind Add lays: the Gradient's own when the entry is the Gradient's,
+     * one of the schema-parameter kinds for every other generator entry. */
+    params.generator = entry.generator;
     if (reads_material) {
       /* The Add resolved the data-block it names before the call; a kind that needs one is never
        * called without it, but the call is also open to scripts. */

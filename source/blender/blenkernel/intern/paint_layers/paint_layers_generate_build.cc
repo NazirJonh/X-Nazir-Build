@@ -7,7 +7,8 @@
  *
  * The root of the generated tree: the interface, one group per row, and the chain of those groups
  * for every channel the description wires. The nodes inside a row's group are built in
- * `paint_layers_generate_build_chain.cc`.
+ * `paint_layers_generate_build_chain.cc`; a generator row's source is built in
+ * `paint_layers_generate_build_generator.cc`.
  */
 
 #include "BKE_paint_layers_generate.hh"
@@ -19,6 +20,7 @@
 #include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_vector.h"
+#include "BLI_math_constants.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_ustring.hh"
@@ -31,6 +33,7 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_material_composite.hh"
 
@@ -280,21 +283,6 @@ bNode *PaintLayersTreeBuilder::uv_coordinate_ensure(bNodeTree &tree)
     grid_.place_extra(*coord);
   }
   return coord;
-}
-
-bNodeSocket *PaintLayersTreeBuilder::gradient_coordinate_socket(
-    bNode &coord, const MaterialPaintLayerGradient &gradient)
-{
-  switch (eMaterialPaintLayerGradientSpace(gradient.space)) {
-    case MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT:
-      return socket_out(coord, "Object");
-    case MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED:
-      return socket_out(coord, "Generated");
-    case MA_PAINT_LAYER_GRADIENT_SPACE_UV:
-      break;
-  }
-  /* An unknown space is the safe UV default, not a discarded row. */
-  return socket_out(coord, "UV");
 }
 
 /** The socket of \a group_input that stands for \a iface, or null. */
@@ -619,6 +607,86 @@ NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
   return {encode_node, encoded};
 }
 
+void PaintLayersTreeBuilder::generator_row_inputs_create(LayerGroup &group,
+                                                         const MaterialPaintLayer &row,
+                                                         const char *label)
+{
+  /* The line inputs a Gradient row reads and the generator inputs the parametric kinds read: the
+   * pair every generating element (a row, an effect, a mask item) carries, so one call makes both.
+   * Each is a no-op for the element that reads none of it -- a Gradient has no generator
+   * parameters, a Noise no line. */
+  this->gradient_line_inputs_create(group, row, label);
+  this->generator_inputs_create(group, row, label);
+}
+
+void PaintLayersTreeBuilder::generator_inputs_create(LayerGroup &group,
+                                                     const MaterialPaintLayer &row,
+                                                     const char *label)
+{
+  if (paint_layer_generator_kind_of(row) == MA_PAINT_LAYER_GENERATOR_GRADIENT) {
+    return;
+  }
+  /* The three vectors of the mapping chain in front of the pattern: the same rotate-then-scale-then
+   * move the CPU evaluator applies, in the order the chain's own nodes read them. The turn travels as
+   * radians, because that is what a Vector Rotate node turns by. */
+  const float offset_value[3] = {paint_layer_kind_param_get(row, PAINT_LAYER_GEN_OFFSET_X),
+                                 paint_layer_kind_param_get(row, PAINT_LAYER_GEN_OFFSET_Y),
+                                 0.0f};
+  const float scale_value[3] = {1.0f, paint_layer_generator_scale_y_ratio(row), 1.0f};
+  const float rotation_value[3] = {
+      0.0f,
+      0.0f,
+      DEG2RADF(paint_layer_kind_param_get(row, PAINT_LAYER_GEN_ROTATION))};
+  struct PlacementInput {
+    const float *value;
+    const char *suffix;
+    const char *role;
+    Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> *store;
+  };
+  const PlacementInput placement[3] = {
+      {offset_value, "Offset", ROLE_GENERATOR_OFFSET, &generator_offset_inputs_},
+      {scale_value, "Scale", ROLE_GENERATOR_SCALE, &generator_scale_inputs_},
+      {rotation_value, "Rotation", ROLE_GENERATOR_ROTATION, &generator_rotation_inputs_},
+  };
+  for (const PlacementInput &input : placement) {
+    char base[200];
+    SNPRINTF(base, "%s Generator %s", label, input.suffix);
+    bNodeTreeInterfaceSocket *socket = layer_group_value_input(
+        group, base, "NodeSocketVector", input.role, row.marker, -1);
+    if (socket != nullptr) {
+      group_input_vector_default_set(group, *socket, input.value);
+      input.store->add(&row, socket);
+    }
+  }
+
+  /* One float per parameter the pattern's node reads through a socket of its own, at its place in
+   * the schema. The rest decide which nodes the build makes, so the topology hash reads them; a
+   * socket the node's signature leaves out for the feature chosen now gets no input, because there
+   * is nothing to link it to. */
+  const PaintLayerKindInfo *kind = paint_layer_kind_of(row);
+  if (kind == nullptr) {
+    return;
+  }
+  for (const int i : IndexRange(kind->params_num)) {
+    if (paint_layer_generator_param_is_placement(i)) {
+      continue;
+    }
+    if (paint_layer_generator_param_socket(row, i) == nullptr) {
+      continue;
+    }
+    char base[200];
+    SNPRINTF(base, "%s Generator %s", label, kind->params[i].label);
+    bNodeTreeInterfaceSocket *param = layer_group_value_input(
+        group, base, "NodeSocketFloat", ROLE_PARAM, row.marker, -1);
+    if (param != nullptr) {
+      prop_int_set(param->properties, INPUT_PARAM_PROP, i);
+      group_input_default_set(group, *param, paint_layer_kind_param_get(row, i));
+    }
+    /* Kept even when null, so the builder sees the set is incomplete and builds nothing. */
+    generator_param_inputs_.lookup_or_add_default(&row).add(i, param);
+  }
+}
+
 void PaintLayersTreeBuilder::gradient_line_inputs_create(LayerGroup &group,
                                                          const MaterialPaintLayer &row,
                                                          const char *label)
@@ -754,7 +822,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
                          !substituted_content;
   if (generates) {
     /* The gradient's line and shape are values of the row, shared by all of its channels. */
-    this->gradient_line_inputs_create(group, layer, layer_name);
+    this->generator_row_inputs_create(group, layer, layer_name);
   }
   for (const int channel : wired_channels_) {
     /* The channel values of a live row. A content bake samples its own map instead: its opacity
@@ -967,7 +1035,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
       this->mapping_inputs_create(group, effect, effect_label);
       const bool effect_generates = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES);
       if (effect_generates) {
-        this->gradient_line_inputs_create(group, effect, effect_label);
+        this->generator_row_inputs_create(group, effect, effect_label);
       }
       for (const int channel : wired_channels_) {
         const bool filters = paint_layer_effect_filters(ma_, effect, channel);
@@ -1109,7 +1177,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     this->mapping_inputs_create(group, item, base);
     const bool item_generates = paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_GENERATES);
     if (item_generates) {
-      this->gradient_line_inputs_create(group, item, item_name);
+      this->generator_row_inputs_create(group, item, item_name);
     }
     if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE)) {
       /* A mask correction that reads a material has no record: a plain value of its source's Base

@@ -37,7 +37,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
-#include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_layers_target.hh"
@@ -475,8 +475,8 @@ static Material *space_image_composite_material_find(Main &bmain, const Image &i
   return nullptr;
 }
 
-/** Which 3D Gradient spaces a material's rows use, at any depth of the row tree. */
-struct GradientSpaces {
+/** Which 3D spaces a material's generator rows use, at any depth of the row tree. */
+struct GeneratorSpaces {
   bool object = false;
   bool generated = false;
 
@@ -487,22 +487,24 @@ struct GradientSpaces {
 };
 
 /**
- * Collect the 3D Gradient spaces of \a layers.
+ * Collect the 3D generator spaces of \a layers.
  *
  * Folders are the only rows that own children today, but effects and mask items are the same
- * #MaterialPaintLayer type and a future generator role could put a Gradient there, so all three
- * lists are walked. A Gradient row has no nested lists of its own, which ends the recursion.
+ * #MaterialPaintLayer type and a generator can be laid in either, so all three lists are walked. A
+ * generator row has no children of its own, which ends the recursion.
  */
-static void paint_layers_collect_gradient_spaces(const ListBaseT<MaterialPaintLayer> &layers,
-                                                 GradientSpaces &r_spaces)
+static void paint_layers_collect_generator_spaces(const ListBaseT<MaterialPaintLayer> &layers,
+                                                  GeneratorSpaces &r_spaces)
 {
   for (const MaterialPaintLayer &layer : layers) {
-    /* A disabled or non-Gradient generator row contributes no pixels, so it must not force a
-     * surface build or an approximate indicator. */
-    if ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 && layer.gradient != nullptr &&
-        BKE_paint_layers_gradient_supported(layer))
+    /* A disabled generator contributes no pixels, so it must not force a surface build or an
+     * approximate indicator. */
+    if ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 &&
+        BKE_paint_layers_generator_supported(layer))
     {
-      switch (layer.gradient->space) {
+      switch (eMaterialPaintLayerGradientSpace(
+                  BKE_paint_layers_generator_space_of(layer)))
+      {
         case MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT:
           r_spaces.object = true;
           break;
@@ -513,9 +515,9 @@ static void paint_layers_collect_gradient_spaces(const ListBaseT<MaterialPaintLa
           break;
       }
     }
-    paint_layers_collect_gradient_spaces(layer.children, r_spaces);
-    paint_layers_collect_gradient_spaces(layer.effects, r_spaces);
-    paint_layers_collect_gradient_spaces(layer.mask_stack, r_spaces);
+    paint_layers_collect_generator_spaces(layer.children, r_spaces);
+    paint_layers_collect_generator_spaces(layer.effects, r_spaces);
+    paint_layers_collect_generator_spaces(layer.mask_stack, r_spaces);
   }
 }
 
@@ -561,8 +563,8 @@ void ED_space_image_gradient_preview_sync(const bContext &C, SpaceImage &sima)
     return;
   }
   /* A material with no 3D Gradient row has nothing to resolve, and must not build a surface. */
-  GradientSpaces spaces;
-  paint_layers_collect_gradient_spaces(ma->paint_layers, spaces);
+  GeneratorSpaces spaces;
+  paint_layers_collect_generator_spaces(ma->paint_layers, spaces);
   if (!spaces.any()) {
     report(GradientPreviewState::None, "no 3D Gradient row");
     return;

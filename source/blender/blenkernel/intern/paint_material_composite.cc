@@ -20,7 +20,6 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
-#include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -48,6 +47,7 @@
 
 #include "paint_layers/paint_layers_kind.hh"
 
+#include "paint_layers/paint_material_generator_group_ids.hh"
 #include "paint_material_composite_internal.hh"
 
 #include "DNA_image_types.h"
@@ -1265,7 +1265,7 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
     float gradient_rgba[4];
     const float *c = nullptr;
     if (item.gradient.enabled) {
-      BKE_paint_material_gradient_sample(item.gradient,
+      BKE_paint_material_generator_sample(item.gradient,
                                          texel.x,
                                          texel.y,
                                          texel.width > 0 ? texel.width : item.gradient.width,
@@ -1301,63 +1301,6 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
   return mask_factor;
 }
 
-bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &gradient,
-                                        const int x,
-                                        const int y,
-                                        float r_rgba[4])
-{
-  return BKE_paint_material_gradient_sample(
-      gradient, x, y, gradient.width, gradient.height, r_rgba);
-}
-
-bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &gradient,
-                                        const int x,
-                                        const int y,
-                                        const int grid_width,
-                                        const int grid_height,
-                                        float r_rgba[4])
-{
-  const int width = std::max(grid_width, 1);
-  const int height = std::max(grid_height, 1);
-  const float u = (float(x) + 0.5f) / float(width);
-  const float v = (float(y) + 0.5f) / float(height);
-  float3 coordinate;
-  if (gradient.approximate || gradient.surface == nullptr) {
-    /* No surface: the texel's own UV is the coordinate. A UV row always reads this way. */
-    coordinate = float3(u, v, 0.0f);
-  }
-  else if (gradient.payload.space == MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED) {
-    /* Generated reads the texel's orco, which is not the object-space position once a deformer
-     * moved it; #sample_generated prefers the stored CD_ORCO and only falls back to the bbox
-     * normalization. */
-    if (!gradient.surface->sample_generated(float2(u, v), coordinate)) {
-      zero_v4(r_rgba);
-      return false;
-    }
-  }
-  else if (!gradient.surface->sample(float2(u, v), coordinate)) {
-    zero_v4(r_rgba);
-    return false;
-  }
-  const float t = BKE_paint_layers_gradient_factor(gradient.payload, coordinate);
-  if (gradient.color_channel) {
-    BKE_paint_layers_gradient_color(gradient.payload, t, r_rgba);
-  }
-  else if (gradient.scalar_ramp_valid) {
-    /* The channel's grey value ramp: red carries the value, the alpha stays one. */
-    float rgba[4];
-    BKE_colorband_evaluate(&gradient.scalar_ramp, t, rgba);
-    r_rgba[0] = r_rgba[1] = r_rgba[2] = rgba[0];
-    r_rgba[3] = 1.0f;
-  }
-  else {
-    const float value = gradient.scalar_start + (gradient.scalar_end - gradient.scalar_start) * t;
-    r_rgba[0] = r_rgba[1] = r_rgba[2] = value;
-    r_rgba[3] = 1.0f;
-  }
-  return true;
-}
-
 static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
                                    const rcti &tile,
                                    const float *folder_color,
@@ -1380,7 +1323,7 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     for (int ty = 0; ty < BLI_rcti_size_y(&tile); ty++) {
       for (int tx = 0; tx < BLI_rcti_size_x(&tile); tx++) {
         float *p = r_color + (int64_t(ty) * BLI_rcti_size_x(&tile) + tx) * 4;
-        BKE_paint_material_gradient_sample(layer.gradient, tile.xmin + tx, tile.ymin + ty, p);
+        BKE_paint_material_generator_sample(layer.gradient, tile.xmin + tx, tile.ymin + ty, p);
       }
     }
   }
@@ -1541,7 +1484,7 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       if (correction.gradient.enabled) {
         const int tx = int(i % tile_width);
         const int ty = int(i / tile_width);
-        if (!BKE_paint_material_gradient_sample(
+        if (!BKE_paint_material_generator_sample(
                 correction.gradient, tile.xmin + tx, tile.ymin + ty, gradient_color))
         {
           /* Outside the UV islands the correction, like a row, lays nothing. */
@@ -3007,35 +2950,6 @@ static bool composite_stack_build_linear(Span<PaintMaterialCompositeImageLayer> 
   return !r_stack.layers.is_empty();
 }
 
-/** How many Gradient payloads \a image_layers lays: a row, a correction and a mask item each
- * sample its line and ramp per texel, so their count is the part of an evaluation a UV-line drag
- * pays for again on every step. */
-static int composite_stack_gradient_count(Span<PaintMaterialCompositeImageLayer> image_layers)
-{
-  int count = 0;
-  for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
-    if (layer.gradient.enabled) {
-      count++;
-    }
-    for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
-      if (correction.gradient.enabled) {
-        count++;
-      }
-    }
-    for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
-      if (item.gradient.enabled) {
-        count++;
-      }
-    }
-    if (layer.is_folder) {
-      count += composite_stack_gradient_count(
-          Span<PaintMaterialCompositeImageLayer>(layer.children.data(),
-                                                 int64_t(layer.children.size())));
-    }
-  }
-  return count;
-}
-
 bool BKE_paint_material_composite_eval_images(Span<PaintMaterialCompositeImageLayer> image_layers,
                                               ImBuf *composite_ibuf,
                                               const rcti *region,
@@ -3077,7 +2991,7 @@ bool BKE_paint_material_composite_eval_images(Span<PaintMaterialCompositeImageLa
       }
     }
     if (r_stats != nullptr) {
-      r_stats->gradient_items = composite_stack_gradient_count(image_layers);
+      r_stats->gradient_items = composite_stack_generator_count(image_layers);
       r_stats->gradient_samples = int64_t(r_stats->gradient_items) * area_texels;
     }
   }
@@ -3120,7 +3034,7 @@ PaintMaterialCompositeLinearSession PaintMaterialCompositeLinearSession::session
     const int eval_height)
 {
   PaintMaterialCompositeLinearSession session;
-  session.gradient_items_ = composite_stack_gradient_count(image_layers);
+  session.gradient_items_ = composite_stack_generator_count(image_layers);
   session.ok_ = composite_stack_build_linear(
       image_layers, session.locks_, session.stack_, eval_width, eval_height);
   if (session.ok_ && bottom_color != nullptr) {
@@ -3134,7 +3048,7 @@ PaintMaterialCompositeLinearSession PaintMaterialCompositeLinearSession::session
     const PaintMaterialCompositeImageLayer &row)
 {
   PaintMaterialCompositeLinearSession session;
-  session.gradient_items_ = composite_stack_gradient_count(
+  session.gradient_items_ = composite_stack_generator_count(
       Span<PaintMaterialCompositeImageLayer>(&row, 1));
   /* Always the stack's own size: a bake renders at the canvas, never at a preview octave. */
   session.ok_ = composite_stack_build_linear(
@@ -3353,44 +3267,6 @@ static uint64_t composite_mapping_hash(uint64_t hash, const PaintMaterialComposi
                           mapping.tangent_normal);
 }
 
-/** Fold a Gradient payload into \a hash: every parameter moves the composited pixels. */
-static uint64_t composite_gradient_hash(uint64_t hash, const PaintMaterialCompositeGradient &gradient)
-{
-  if (!gradient.enabled) {
-    return hash;
-  }
-  hash = get_default_hash(hash,
-                          gradient.color_channel,
-                          int(gradient.payload.space),
-                          int(gradient.payload.type),
-                          int(gradient.payload.repeat));
-  hash = get_default_hash(hash,
-                          gradient.payload.start[0],
-                          gradient.payload.start[1],
-                          gradient.payload.start[2],
-                          gradient.payload.end[0]);
-  hash = get_default_hash(hash,
-                          gradient.payload.end[1],
-                          gradient.payload.end[2],
-                          BKE_paint_layers_gradient_midpoint_effective(gradient.payload));
-  /* The approximate and exact variants must not share a cache entry. The content revision, unlike
-   * the identity key, changes when a notifier forces the same object/UV/size surface to rebuild. */
-  hash = get_default_hash(hash,
-                          gradient.surface_key,
-                          gradient.approximate,
-                          gradient.surface ? gradient.surface->revision : 0);
-  hash = get_default_hash(hash,
-                          gradient.scalar_start,
-                          gradient.scalar_end,
-                          gradient.width,
-                          gradient.height);
-  hash = get_default_hash(hash, gradient.scalar_ramp_valid);
-  if (gradient.scalar_ramp_valid) {
-    hash = get_default_hash(hash, BKE_paint_layers_gradient_ramp_hash(gradient.scalar_ramp));
-  }
-  return get_default_hash(hash, BKE_paint_layers_gradient_ramp_hash(gradient.payload.ramp));
-}
-
 uint64_t BKE_paint_material_composite_stack_hash(
     Span<PaintMaterialCompositeImageLayer> image_layers)
 {
@@ -3432,7 +3308,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
     /* A slice has no Image to name its contents: the description hash keeps a stale composite from
      * surviving an edit above the marker. */
     hash = get_default_hash(hash, layer.anchor_point_hash);
-    hash = composite_gradient_hash(hash, layer.gradient);
+    hash = composite_generator_hash(hash, layer.gradient);
     /* An adjustment is its filter and what it was told. */
     hash = get_default_hash(hash, int(layer.adjustment_filter));
     for (const float param : layer.adjustment_params) {
@@ -3475,7 +3351,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
       hash = get_default_hash(hash, correction.anchor_point_hash);
       hash = composite_mapping_hash(get_default_hash(hash, correction.mapping.enabled),
                                     correction.mapping);
-      hash = composite_gradient_hash(hash, correction.gradient);
+      hash = composite_generator_hash(hash, correction.gradient);
       /* A flat colour is not backed by an image, so its value is hashed like a row's. */
       hash = get_default_hash(hash,
                               correction.has_constant_color,
@@ -3510,7 +3386,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
         hash = get_default_hash(hash, paint_layer_curves_hash(*item.filter_curves));
       }
       hash = composite_mapping_hash(get_default_hash(hash, item.mapping.enabled), item.mapping);
-      hash = composite_gradient_hash(hash, item.gradient);
+      hash = composite_generator_hash(hash, item.gradient);
       /* A map-coverage operator changes the factor from its own map and its colour list, none of
        * which is the laid item's map: all of it has to move the hash. */
       hash = get_default_hash(hash,

@@ -20,6 +20,8 @@ from bl_ui.properties_material_paint_layers import (
     draw_material_channel_set,
     draw_material_color_balance,
     draw_material_color_match,
+    draw_material_generator_pattern_params,
+    draw_material_generator_placement,
     draw_material_kind_params,
     draw_material_layer_channels,
     draw_material_layer_height,
@@ -741,6 +743,43 @@ def draw_material_gradient_layer(layout, context, owner, layer, draw_channels=Tr
         sub.prop(layer, "gradient_gizmo_display", expand=True)
 
 
+def draw_material_generator_layer(layout, context, owner, layer, draw_channels=True):
+    """The Pattern panel of a generator row: its kind, the placement and the pattern's parameters.
+
+    The generated graph is built from these values: the kind selector switches the schema the
+    parameters draw from (the role, the name and the channel records stay), the placement is the
+    first section of every generator's schema, and the pattern parameters are the rest. A Gradient
+    is a generator of its own kind and keeps its panel: its line, gizmo and payload have no
+    counterpart here. A mask item has no channel records, so its caller passes
+    draw_channels=False and the ramp gets a subpanel of its own, as the Gradient's does.
+    """
+    # The kind selector comes first: everything below draws from the schema of the kind it shows.
+    layout.prop(layer, "generator", text="Pattern")
+
+    layout.separator()
+    header, panel = layout.panel("material_generator_placement", default_closed=False)
+    header.label(text="Placement")
+    if panel:
+        draw_material_generator_placement(panel, layer)
+
+    layout.separator()
+    header, panel = layout.panel("material_generator_pattern", default_closed=False)
+    header.label(text="Pattern")
+    if panel:
+        draw_material_generator_pattern_params(panel, layer)
+
+    if not draw_channels:
+        layout.separator()
+        header, panel = layout.panel("material_generator_ramp", default_closed=False)
+        header.label(text="Ramp")
+        if panel and layer.ramp_supported and layer.kind_ramp is not None:
+            panel.template_color_ramp(layer, "kind_ramp", expand=True)
+
+    if draw_channels:
+        layout.separator()
+        draw_material_layer_channels(layout, context, owner, layer)
+
+
 class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
     """The Layer Material tab for a layered material: the active layer read from the description,
     its opacity and its channels.
@@ -783,6 +822,16 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                     layout.prop(item.channels[0], "invert", text="Invert", toggle=True)
                 layout.separator()
                 draw_material_gradient_layer(layout, context, owner, item, draw_channels=False)
+                return
+            if item.generator_supported:
+                # A pattern mask item lays its ramp's grey over the row's mask: the same panel a
+                # generator layer draws, with the ramp of its own and no channels to choose.
+                layout.prop(item, "opacity", text="Opacity")
+                layout.prop(item, "blend_type", text="Blend")
+                if len(item.channels):
+                    layout.prop(item.channels[0], "invert", text="Invert", toggle=True)
+                layout.separator()
+                draw_material_generator_layer(layout, context, owner, item, draw_channels=False)
                 return
             if item.source == 'FILTER':
                 # A filter in the mask changes its one coverage: opacity and the kind's parameters,
@@ -844,10 +893,14 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             if layer.material is None:
                 layout.label(text="No source material", icon='ERROR')
             return
-        # A Gradient is procedural: its parameters and its ramp replace the map controls.
+        # A generator is procedural: its kind, parameters and ramp replace the map controls. A
+        # Gradient keeps its own panel; every other pattern draws the schema of its kind.
         if layer.source == 'GENERATOR':
             layout.separator()
-            draw_material_gradient_layer(layout, context, owner, layer)
+            if layer.gradient_supported:
+                draw_material_gradient_layer(layout, context, owner, layer)
+            else:
+                draw_material_generator_layer(layout, context, owner, layer)
             return
         # A filter has no map or channel records: what it is told is the parameters of its kind.
         if layer.source == 'FILTER':

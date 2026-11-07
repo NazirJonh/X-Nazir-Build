@@ -12,6 +12,7 @@
 
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 
 #include <cmath>
@@ -859,7 +860,9 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
     }
   }
   else if (generates) {
-    /* The ramp supplies the colour; the record is the channel switch, as on a Gradient row. */
+    /* The ramp supplies the colour; the record is the channel switch, as on a Gradient row. The
+     * subtype is named rather than dispatched through the generator table because a new row has no
+     * intent to read yet -- the one generator this build registers takes the category. */
     effect->kind_subtype = MA_PAINT_LAYER_GENERATOR_GRADIENT;
     BKE_paint_layers_gradient_ensure(*effect);
     const uint32_t set = BKE_paint_layers_channel_set_mask_get(ma);
@@ -1351,7 +1354,8 @@ MaterialPaintLayer *BKE_paint_layers_mask_item_add(Material &ma,
   }
   else if (generates) {
     /* The ramp supplies the grey; the record is only the structural Base Color switch, kept
-     * opaque white so an old reader sees an un-hidden item. */
+     * opaque white so an old reader sees an un-hidden item. The subtype is named because the
+     * generator category has one member; a second generator takes the choice here. */
     record.value[0] = record.value[1] = record.value[2] = record.value[3] = 1.0f;
     item->kind_subtype = MA_PAINT_LAYER_GENERATOR_GRADIENT;
   }
@@ -3089,6 +3093,8 @@ bool BKE_paint_layers_set_source(Material &ma,
      * corrections keep their own maps. */
     paint_layer_channel_maps_release(*layer);
     layer->source = MA_PAINT_LAYER_SOURCE_GENERATOR;
+    /* The one generator this build registers takes every row switched to the category; a second
+     * generator adds its own conversion, which is why the subtype is not inferred. */
     layer->kind_subtype = MA_PAINT_LAYER_GENERATOR_GRADIENT;
     BKE_paint_layers_gradient_ensure(*layer);
     if (paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr) {
@@ -3099,7 +3105,7 @@ bool BKE_paint_layers_set_source(Material &ma,
   }
   /* Leaving the generator: the records stay, but the kind subtype is a generator's member and
    * would name no kind under the new source. */
-  if (BKE_paint_layers_gradient_supported(*layer)) {
+  if (BKE_paint_layers_generator_supported(*layer)) {
     layer->kind_subtype = 0;
   }
   MaterialPaintLayerChannel *base = paint_layer_channel_find(*layer,

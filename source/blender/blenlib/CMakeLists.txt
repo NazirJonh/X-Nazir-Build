@@ -122,6 +122,7 @@ set(SRC
   intern/path_utils.cc
   intern/polyfill_2d.cc
   intern/polyfill_2d_beautify.cc
+  intern/procedural_texture.cc
   intern/quadric.cc
   intern/radial_tiling_wrapper.cc
   intern/rand.cc
@@ -354,6 +355,7 @@ set(SRC
   BLI_polyfill_2d_beautify.h
   BLI_pool.hh
   BLI_probing_strategies.hh
+  BLI_procedural_texture.hh
   BLI_quadric.h
   BLI_radial_tiling.hh
   BLI_rand.h

@@ -8,7 +8,7 @@
 #include "BKE_texture.h"
 
 #include "BLI_math_vector.h"
-#include "BLI_noise.hh"
+#include "BLI_procedural_texture.hh"
 
 #include "NOD_multi_function.hh"
 
@@ -20,6 +20,22 @@
 namespace blender {
 
 namespace nodes::node_shader_tex_wave_cc {
+
+/* The shared implementation spells the codes the way this file's storage holds them; a stored
+ * generator parameter reads through it, so the two spellings must stay the same numbers. */
+static_assert(SHD_WAVE_BANDS == PROC_WAVE_BANDS);
+static_assert(SHD_WAVE_RINGS == PROC_WAVE_RINGS);
+static_assert(SHD_WAVE_BANDS_DIRECTION_X == PROC_WAVE_BANDS_DIRECTION_X);
+static_assert(SHD_WAVE_BANDS_DIRECTION_Y == PROC_WAVE_BANDS_DIRECTION_Y);
+static_assert(SHD_WAVE_BANDS_DIRECTION_Z == PROC_WAVE_BANDS_DIRECTION_Z);
+static_assert(SHD_WAVE_BANDS_DIRECTION_DIAGONAL == PROC_WAVE_BANDS_DIRECTION_DIAGONAL);
+static_assert(SHD_WAVE_RINGS_DIRECTION_X == PROC_WAVE_RINGS_DIRECTION_X);
+static_assert(SHD_WAVE_RINGS_DIRECTION_Y == PROC_WAVE_RINGS_DIRECTION_Y);
+static_assert(SHD_WAVE_RINGS_DIRECTION_Z == PROC_WAVE_RINGS_DIRECTION_Z);
+static_assert(SHD_WAVE_RINGS_DIRECTION_SPHERICAL == PROC_WAVE_RINGS_DIRECTION_SPHERICAL);
+static_assert(SHD_WAVE_PROFILE_SIN == PROC_WAVE_PROFILE_SIN);
+static_assert(SHD_WAVE_PROFILE_SAW == PROC_WAVE_PROFILE_SAW);
+static_assert(SHD_WAVE_PROFILE_TRI == PROC_WAVE_PROFILE_TRI);
 
 static void sh_node_tex_wave_declare(NodeDeclarationBuilder &b)
 {
@@ -166,74 +182,17 @@ class WaveFunction : public mf::MultiFunction {
     MutableSpan<float> r_fac = params.uninitialized_single_output<float>(8, "Fac");
 
     mask.foreach_index([&](const int64_t i) {
-      float3 p = vector[i] * scale[i];
-      /* Prevent precision issues on unit coordinates. */
-      p = (p + 0.000001f) * 0.999999f;
-
-      float n = 0.0f;
-      float val = 0.0f;
-
-      switch (wave_type_) {
-        case SHD_WAVE_BANDS:
-          switch (bands_direction_) {
-            case SHD_WAVE_BANDS_DIRECTION_X:
-              n = p.x * 20.0f;
-              break;
-            case SHD_WAVE_BANDS_DIRECTION_Y:
-              n = p.y * 20.0f;
-              break;
-            case SHD_WAVE_BANDS_DIRECTION_Z:
-              n = p.z * 20.0f;
-              break;
-            case SHD_WAVE_BANDS_DIRECTION_DIAGONAL:
-              n = (p.x + p.y + p.z) * 10.0f;
-              break;
-          }
-          break;
-        case SHD_WAVE_RINGS:
-          float3 rp = p;
-          switch (rings_direction_) {
-            case SHD_WAVE_RINGS_DIRECTION_X:
-              rp *= float3(0.0f, 1.0f, 1.0f);
-              break;
-            case SHD_WAVE_RINGS_DIRECTION_Y:
-              rp *= float3(1.0f, 0.0f, 1.0f);
-              break;
-            case SHD_WAVE_RINGS_DIRECTION_Z:
-              rp *= float3(1.0f, 1.0f, 0.0f);
-              break;
-            case SHD_WAVE_RINGS_DIRECTION_SPHERICAL:
-              /* Ignore. */
-              break;
-          }
-          n = len_v3(rp) * 20.0f;
-          break;
-      }
-
-      n += phase[i];
-
-      if (distortion[i] != 0.0f) {
-        n += distortion[i] *
-             (noise::perlin_fbm<float3>(p * dscale[i], detail[i], droughness[i], 2.0f, true) *
-                  2.0f -
-              1.0f);
-      }
-
-      switch (wave_profile_) {
-        case SHD_WAVE_PROFILE_SIN:
-          val = 0.5f + 0.5f * sinf(n - M_PI_2);
-          break;
-        case SHD_WAVE_PROFILE_SAW:
-          n /= M_PI * 2.0f;
-          val = n - floorf(n);
-          break;
-        case SHD_WAVE_PROFILE_TRI:
-          n /= M_PI * 2.0f;
-          val = fabsf(n - floorf(n + 0.5f)) * 2.0f;
-          break;
-      }
-
-      r_fac[i] = val;
+      r_fac[i] = procedural_wave_factor(vector[i],
+                                       scale[i],
+                                       distortion[i],
+                                       detail[i],
+                                       dscale[i],
+                                       droughness[i],
+                                       phase[i],
+                                       eProceduralWaveType(wave_type_),
+                                       bands_direction_,
+                                       rings_direction_,
+                                       eProceduralWaveProfile(wave_profile_));
     });
     if (!r_color.is_empty()) {
       mask.foreach_index_optimized<int64_t>([&](const int64_t i) {

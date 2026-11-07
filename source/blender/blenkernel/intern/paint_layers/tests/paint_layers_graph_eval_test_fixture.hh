@@ -37,6 +37,7 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "BLI_hash.h"
@@ -46,6 +47,8 @@
 #include "BLI_math_base.h"
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
+#include "BLI_noise.hh"
+#include "BLI_procedural_texture.hh"
 #include "BLI_string.h"
 #include "BLI_ustring.hh"
 #include "BLI_vector.hh"
@@ -61,6 +64,7 @@
 
 #include "../../paint_material_composite_internal.hh"
 #include "../paint_layers_intern.hh"
+#include "../paint_material_generator_group_ids.hh"
 
 namespace blender::bke::tests {
 
@@ -648,6 +652,258 @@ class GraphInterpreter {
                 in[2] + (out[2] - in[2]) * clamped,
                 color.a};
       }
+      case SH_NODE_TEX_NOISE: {
+        /* The node's own body, through the one #BLI_noise.hh entry the node's multi-function and
+         * the CPU composite both read: the position is the vector scaled, the detail clamped and
+         * the roughness floored the way the node does, and the two conditional inputs ride only
+         * for the types that read them. A generator row is 2D or 3D, which are the two branches
+         * this keeps. */
+        const NodeTexNoise &tex = *static_cast<const NodeTexNoise *>(node.storage);
+        /* A socket the node's signature leaves out reads as its default of zero, the way an
+         * unavailable input stands in the multi-function. */
+        const auto input_float = [&](const char *identifier) {
+          if (const bNodeSocket *socket = bke::node_find_socket(
+                  mutable_node, SOCK_IN, UString::from_ptr_noinline(identifier)))
+          {
+            return eval_socket(*socket).r;
+          }
+          return 0.0f;
+        };
+        const float scale = input_float("Scale");
+        const float detail = clamp_f(input_float("Detail"), 0.0f, 15.0f);
+        const float roughness = max_ff(input_float("Roughness"), 0.0f);
+        const float lacunarity = input_float("Lacunarity");
+        const float offset = ELEM(tex.type,
+                                  SHD_NOISE_RIDGED_MULTIFRACTAL,
+                                  SHD_NOISE_HYBRID_MULTIFRACTAL,
+                                  SHD_NOISE_HETERO_TERRAIN) ?
+                                 input_float("Offset") :
+                                 0.0f;
+        const float gain = ELEM(tex.type,
+                                SHD_NOISE_RIDGED_MULTIFRACTAL,
+                                SHD_NOISE_HYBRID_MULTIFRACTAL) ?
+                               input_float("Gain") :
+                               0.0f;
+        const float distortion = input_float("Distortion");
+        if (tex.dimensions == 2) {
+          const RGBA vector = eval_socket(
+              *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+          if (STREQ(out_identifier, "Color")) {
+            const float3 c = noise::perlin_float3_fractal_distorted(
+                float2(vector.r * scale, vector.g * scale),
+                detail,
+                roughness,
+                lacunarity,
+                offset,
+                gain,
+                distortion,
+                int(tex.type),
+                tex.normalize != 0);
+            return {c.x, c.y, c.z, 1.0f};
+          }
+          const float fac = noise::perlin_fractal_distorted(
+              float2(vector.r * scale, vector.g * scale),
+              detail,
+              roughness,
+              lacunarity,
+              offset,
+              gain,
+              distortion,
+              int(tex.type),
+              tex.normalize != 0);
+          return {fac, fac, fac, 1.0f};
+        }
+        const RGBA vector = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+        const float3 position{vector.r * scale, vector.g * scale, vector.b * scale};
+        if (STREQ(out_identifier, "Color")) {
+          const float3 c = noise::perlin_float3_fractal_distorted(position,
+                                                                  detail,
+                                                                  roughness,
+                                                                  lacunarity,
+                                                                  offset,
+                                                                  gain,
+                                                                  distortion,
+                                                                  int(tex.type),
+                                                                  tex.normalize != 0);
+          return {c.x, c.y, c.z, 1.0f};
+        }
+        const float fac = noise::perlin_fractal_distorted(position,
+                                                          detail,
+                                                          roughness,
+                                                          lacunarity,
+                                                          offset,
+                                                          gain,
+                                                          distortion,
+                                                          int(tex.type),
+                                                          tex.normalize != 0);
+        return {fac, fac, fac, 1.0f};
+      }
+      case SH_NODE_TEX_VORONOI: {
+        /* The node's own body, per feature: the params block filled the way the multi-function
+         * fills it, the reach the feature's own sockets set, and the output the socket names. */
+        const NodeTexVoronoi &tex = *static_cast<const NodeTexVoronoi *>(node.storage);
+        /* A socket the node's signature leaves out for the feature chosen now reads as zero. */
+        const auto input_float = [&](const char *identifier) {
+          if (const bNodeSocket *socket = bke::node_find_socket(
+                  mutable_node, SOCK_IN, UString::from_ptr_noinline(identifier)))
+          {
+            return eval_socket(*socket).r;
+          }
+          return 0.0f;
+        };
+        noise::VoronoiParams params;
+        params.feature = tex.feature;
+        params.metric = tex.distance;
+        params.normalize = tex.normalize != 0;
+        params.scale = input_float("Scale");
+        params.detail = input_float("Detail");
+        params.roughness = input_float("Roughness");
+        params.lacunarity = input_float("Lacunarity");
+        params.smoothness = (tex.feature == SHD_VORONOI_SMOOTH_F1) ?
+                                clamp_f(input_float("Smoothness") / 2.0f, 0.0f, 0.5f) :
+                                0.0f;
+        params.exponent = (tex.distance == SHD_VORONOI_MINKOWSKI &&
+                           tex.feature != SHD_VORONOI_DISTANCE_TO_EDGE) ?
+                              input_float("Exponent") :
+                              0.0f;
+        params.randomness = clamp_f(input_float("Randomness"), 0.0f, 1.0f);
+
+        const RGBA vector = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+        const bool is_2d = tex.dimensions == 2;
+        const float2 v2{vector.r * params.scale, vector.g * params.scale};
+        const float3 v3{vector.r * params.scale, vector.g * params.scale, vector.b * params.scale};
+
+        if (tex.feature == SHD_VORONOI_N_SPHERE_RADIUS) {
+          const float radius = is_2d ? noise::voronoi_n_sphere_radius(params, v2) :
+                                       noise::voronoi_n_sphere_radius(params, v3);
+          return {radius, radius, radius, 1.0f};
+        }
+        if (tex.feature == SHD_VORONOI_DISTANCE_TO_EDGE) {
+          params.max_distance = 0.5f + 0.5f * params.randomness;
+          const float distance = is_2d ?
+                                     noise::fractal_voronoi_distance_to_edge<float2>(params, v2) :
+                                     noise::fractal_voronoi_distance_to_edge<float3>(params, v3);
+          return {distance, distance, distance, 1.0f};
+        }
+        const bool calc_color = STREQ(out_identifier, "Color");
+        const float f2_scale = (tex.feature == SHD_VORONOI_F2) ? 2.0f : 1.0f;
+        const float reach = 0.5f + 0.5f * params.randomness;
+        params.max_distance = is_2d ?
+                                  noise::voronoi_distance(float2{0.0f, 0.0f},
+                                                          float2(reach, reach),
+                                                          params) *
+                                      f2_scale :
+                                  noise::voronoi_distance(float3{0.0f, 0.0f, 0.0f},
+                                                          float3(reach, reach, reach),
+                                                          params) *
+                                      f2_scale;
+        const noise::VoronoiOutput output = is_2d ?
+                                                noise::fractal_voronoi_x_fx<float2>(
+                                                    params, v2, calc_color) :
+                                                noise::fractal_voronoi_x_fx<float3>(
+                                                    params, v3, calc_color);
+        if (calc_color) {
+          return {output.color.x, output.color.y, output.color.z, 1.0f};
+        }
+        return {output.distance, output.distance, output.distance, 1.0f};
+      }
+      case SH_NODE_TEX_CHECKER: {
+        const RGBA vector = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+        const float scale = eval_socket(
+                                *bke::node_find_socket(mutable_node, SOCK_IN, "Scale"_ustr))
+                                .r;
+        const float fac = procedural_checker_factor(float3(vector.r, vector.g, vector.b), scale);
+        if (STREQ(out_identifier, "Color")) {
+          const RGBA color1 = eval_socket(
+              *bke::node_find_socket(mutable_node, SOCK_IN, "Color1"_ustr));
+          const RGBA color2 = eval_socket(
+              *bke::node_find_socket(mutable_node, SOCK_IN, "Color2"_ustr));
+          const RGBA &picked = (fac == 1.0f) ? color1 : color2;
+          return picked;
+        }
+        return {fac, fac, fac, 1.0f};
+      }
+      case SH_NODE_TEX_BRICK: {
+        const NodeTexBrick &tex = *static_cast<const NodeTexBrick *>(node.storage);
+        const auto input_float = [&](const char *identifier) {
+          if (const bNodeSocket *socket = bke::node_find_socket(
+                  mutable_node, SOCK_IN, UString::from_ptr_noinline(identifier)))
+          {
+            return eval_socket(*socket).r;
+          }
+          return 0.0f;
+        };
+        const RGBA vector = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+        const float2 f2 = procedural_brick(
+            float3(vector.r, vector.g, vector.b) * input_float("Scale"),
+            input_float("Mortar Size"),
+            input_float("Mortar Smooth"),
+            input_float("Bias"),
+            input_float("Brick Width"),
+            input_float("Row Height"),
+            tex.offset,
+            tex.offset_freq,
+            tex.squash,
+            tex.squash_freq);
+        const float tint = f2.x;
+        const float f = f2.y;
+        if (STREQ(out_identifier, "Fac")) {
+          return {f, f, f, 1.0f};
+        }
+        /* The node's colour: a mix of the two bricks by the tint, then the mortar over it by how
+         * much of the texel it covers. */
+        const RGBA color1 = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Color1"_ustr));
+        const RGBA color2 = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Color2"_ustr));
+        const RGBA mortar = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Mortar"_ustr));
+        RGBA color_data = color1;
+        if (f != 1.0f) {
+          const float facm = 1.0f - tint;
+          color_data.r = color1.r * facm + color2.r * tint;
+          color_data.g = color1.g * facm + color2.g * tint;
+          color_data.b = color1.b * facm + color2.b * tint;
+          color_data.a = color1.a * facm + color2.a * tint;
+        }
+        color_data.r = color_data.r * (1.0f - f) + mortar.r * f;
+        color_data.g = color_data.g * (1.0f - f) + mortar.g * f;
+        color_data.b = color_data.b * (1.0f - f) + mortar.b * f;
+        color_data.a = color_data.a * (1.0f - f) + mortar.a * f;
+        return color_data;
+      }
+      case SH_NODE_TEX_WAVE: {
+        const NodeTexWave &tex = *static_cast<const NodeTexWave *>(node.storage);
+        const auto input_float = [&](const char *identifier) {
+          if (const bNodeSocket *socket = bke::node_find_socket(
+                  mutable_node, SOCK_IN, UString::from_ptr_noinline(identifier)))
+          {
+            return eval_socket(*socket).r;
+          }
+          return 0.0f;
+        };
+        const RGBA vector = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+        const float fac = procedural_wave_factor(float3(vector.r, vector.g, vector.b),
+                                                 input_float("Scale"),
+                                                 input_float("Distortion"),
+                                                 input_float("Detail"),
+                                                 input_float("Detail Scale"),
+                                                 input_float("Detail Roughness"),
+                                                 input_float("Phase Offset"),
+                                                 eProceduralWaveType(tex.wave_type),
+                                                 tex.bands_direction,
+                                                 tex.rings_direction,
+                                                 eProceduralWaveProfile(tex.wave_profile));
+        if (STREQ(out_identifier, "Color")) {
+          return {fac, fac, fac, 1.0f};
+        }
+        return {fac, fac, fac, 1.0f};
+      }
       default:
         return {};
     }
@@ -934,6 +1190,45 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
     return layer;
   }
 
+  /**
+   * A generator row of \a generator on top of the stack, taking part in \a channel. The Add starts
+   * the row in the set's first channel; another channel replaces that record the way a Fill's
+   * channel is switched, with the scalar ends seeded from the channel's own range.
+   */
+  MaterialPaintLayer *add_generator_layer(const char *name,
+                                          const eMaterialPaintLayerGenerator generator,
+                                          const eMaterialPaintChannel channel =
+                                              PAINT_MATERIAL_CHANNEL_BASE_COLOR)
+  {
+    MaterialPaintLayer *layer = BKE_paint_layers_generator_add(
+        *ma, generator, name, nullptr, PaintLayerPlace::Above);
+    EXPECT_NE(layer, nullptr);
+    if (layer == nullptr) {
+      return nullptr;
+    }
+    if (channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      EXPECT_TRUE(BKE_paint_layers_channel_remove(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+      EXPECT_NE(BKE_paint_layers_channel_add(*ma, layer, channel), nullptr);
+      const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+      if (!info.is_color) {
+        EXPECT_TRUE(BKE_paint_layers_generator_set_channel_scalars(
+            *ma, *layer, channel, info.value_min, info.value_max));
+      }
+    }
+    return layer;
+  }
+
+  /** Set \a row's parameter \a index to \a value: the schema stores it in the row itself. */
+  static void set_param(MaterialPaintLayer &row, const int index, const float value)
+  {
+    EXPECT_TRUE(paint_layer_kind_param_set(row, index, value));
+  }
+
+  static void set_param_int(MaterialPaintLayer &row, const int index, const int value)
+  {
+    EXPECT_TRUE(paint_layer_kind_param_int_set(row, index, value));
+  }
+
   static const char *result_name(const eMaterialPaintChannel channel)
   {
     /* The generator names the output "Result <ui name of the channel>"; building the name from the
@@ -947,11 +1242,17 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
   /** The generated graph of \a channel evaluated at pixel (1, 1), after a regeneration. */
   RGBA graph_pixel(const eMaterialPaintChannel channel)
   {
+    return this->graph_pixel(channel, 1, 1);
+  }
+
+  /** The generated graph of \a channel evaluated at pixel (\a x, \a y), after a regeneration. */
+  RGBA graph_pixel(const eMaterialPaintChannel channel, const int x, const int y)
+  {
     EXPECT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
     GraphInterpreter interpreter;
     interpreter.tree = ma->paint_layers_tree;
-    interpreter.x = 1;
-    interpreter.y = 1;
+    interpreter.x = x;
+    interpreter.y = y;
     interpreter.object_mask_value = object_mask_value;
     return interpreter.eval_result(result_name(channel));
   }

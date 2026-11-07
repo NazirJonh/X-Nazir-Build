@@ -76,6 +76,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_combined.hh"
@@ -418,6 +419,13 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
     BKE_paint_layers_gradient_ensure(layer);
   }
   BLO_read_struct(reader, MaterialPaintLayerRamp, &layer.ramp);
+  if (BKE_paint_layers_generator_supported(layer)) {
+    /* A generator of a kind whose colour band arrived after the file was written gets the default
+     * black-to-white ramp. Its parameters need nothing here: a property the file does not carry
+     * reads as the schema's default. A Gradient answers false to the ramp check inside, as its band
+     * lives in the payload above. */
+    BKE_paint_layers_ramp_ensure(layer);
+  }
   BLO_read_struct(reader, MaterialPaintLayerCurves, &layer.curves);
   if (layer.curves != nullptr) {
     /* The load brings the points back and leaves the tables null: rebuild them. */

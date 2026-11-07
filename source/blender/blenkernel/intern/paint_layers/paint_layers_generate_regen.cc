@@ -44,6 +44,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_generator_registry.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_resolve.hh"
@@ -1122,6 +1123,18 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   if (BKE_paint_layers_gradient_any(ma)) {
     ctx.gradient_group = BKE_paint_material_gradient_group_ensure(bmain);
   }
+  /* The compound patterns are one graph per kind and dimension, made the first time a row of that
+   * kind asks for it: a stack with no scratches never pays for the scratches group. The registry
+   * entry names the kind's own factory, so a compound added there needs no branch here. */
+  /* A #FunctionRef does not own its callable: the lambda is named so it outlives the context. */
+  const auto generator_group_get = [&bmain](const int kind, const bool is_2d) -> bNodeTree * {
+    const PaintLayerGeneratorInfo *info = BKE_paint_layers_generator_find(int16_t(kind));
+    if (info != nullptr && info->node_group_ensure != nullptr) {
+      return info->node_group_ensure(bmain, is_2d);
+    }
+    return nullptr;
+  };
+  ctx.generator_group_get = generator_group_get;
 
   /* A value edit changes no structure, so the root's stored hash still matches its description:
    * every group is kept and only the values are written. Nothing is rebuilt, and the groups' nodes

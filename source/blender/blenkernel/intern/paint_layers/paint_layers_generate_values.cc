@@ -23,6 +23,7 @@
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
+#include "BLI_math_constants.h"
 #include "BLI_math_vector.h"
 #include "BLI_ustring.hh"
 #include "BLI_uuid.h"
@@ -34,6 +35,7 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_material_composite.hh"
 
@@ -46,10 +48,10 @@
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
 
-#include "../paint_material_composite_internal.hh"
 #include "paint_layers_generate_intern.hh"
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
+#include "paint_material_generator_group_ids.hh"
 
 namespace blender {
 using namespace bke::paint_layers;
@@ -305,6 +307,41 @@ bool values_sync_socket(Material &ma,
     static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
     if (iface.socket_data != nullptr) {
       static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_GENERATOR_OFFSET) || STREQ(role, ROLE_GENERATOR_SCALE) ||
+      STREQ(role, ROLE_GENERATOR_ROTATION))
+  {
+    /* The placement chain's three Vector inputs, at the same places the build seeded them: a row
+     * that is not a pattern generator has no such values, and the caller rebuilds. */
+    if (socket.default_value == nullptr || layer->gradient != nullptr ||
+        !paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_GENERATES))
+    {
+      return false;
+    }
+    if (paint_layer_generator_kind_of(*layer) == MA_PAINT_LAYER_GENERATOR_GRADIENT) {
+      return false;
+    }
+    float value[3];
+    if (STREQ(role, ROLE_GENERATOR_OFFSET)) {
+      value[0] = paint_layer_kind_param_get(*layer, PAINT_LAYER_GEN_OFFSET_X);
+      value[1] = paint_layer_kind_param_get(*layer, PAINT_LAYER_GEN_OFFSET_Y);
+      value[2] = 0.0f;
+    }
+    else if (STREQ(role, ROLE_GENERATOR_SCALE)) {
+      value[0] = 1.0f;
+      value[1] = paint_layer_generator_scale_y_ratio(*layer);
+      value[2] = 1.0f;
+    }
+    else {
+      value[0] = 0.0f;
+      value[1] = 0.0f;
+      value[2] = DEG2RADF(paint_layer_kind_param_get(*layer, PAINT_LAYER_GEN_ROTATION));
+    }
+    copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
+    if (iface.socket_data != nullptr) {
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);
     }
     return true;
   }

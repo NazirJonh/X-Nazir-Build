@@ -21,7 +21,7 @@
 #include "DNA_node_types.h"
 
 #include "paint_material_blend_group_internal.hh"
-#include "paint_material_composite_internal.hh"
+#include "paint_layers/paint_material_generator_group_ids.hh"
 
 namespace blender {
 

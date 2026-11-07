@@ -52,6 +52,13 @@ struct PaintLayersBuildContext {
    */
   bNodeTree *gradient_group = nullptr;
   /**
+   * Hands out the shared group whose graph is \a kind's pattern in \a is_2d dimensions -- the
+   * Scratches, Weave or Grunge arithmetic a row of that kind instantiates -- or null when the kind is
+   * not one of the compound patterns or its group cannot be made. Empty (the default) means no
+   * compound row is built, which is what a build without a #Main has to do.
+   */
+  FunctionRef<bNodeTree *(int kind, bool is_2d)> generator_group_get;
+  /**
    * Hands out the empty node group that holds \a layer's own nodes, named and marked as that
    * layer's. Required: the build puts every layer in a group of its own, so a caller that cannot
    * create data-blocks cannot build.

@@ -19,6 +19,7 @@
 
 #include "../paint_layers_generate_intern.hh"
 #include "../paint_layers_generate_layout.hh"
+#include "../paint_material_generator_group_ids.hh"
 
 namespace blender::bke::tests {
 

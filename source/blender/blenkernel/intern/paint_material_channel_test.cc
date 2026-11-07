@@ -2083,7 +2083,9 @@ TEST(material_paint_channel, principled_extension_descriptors)
     EXPECT_TRUE(info.supports_image_paint);
     EXPECT_TRUE(info.stores_image());
     EXPECT_FALSE(info.supports_layer_paint);
-    EXPECT_FALSE(info.bake_float);
+    /* A factor of the Principled is a continuous quantity a generator ramps through; a colour of
+     * it stays a byte texture like the material's other colour maps. */
+    EXPECT_EQ(info.bake_float, !want.is_color);
     EXPECT_FALSE(info.map_float);
     /* Direct storage, unlike Height's encoded relief. */
     EXPECT_FLOAT_EQ(info.stored_bias, 0.0f);

@@ -24,6 +24,7 @@
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
 
+#include "paint_layers/paint_material_generator_group_ids.hh"
 #include "paint_material_composite_internal.hh"
 
 #include <cstring>

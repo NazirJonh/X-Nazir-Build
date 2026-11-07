@@ -27,6 +27,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -39,6 +40,7 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_paint_layers_generator_registry.hh"
 #include "BKE_paint_material_composite_surface.hh"
 
 #include "DNA_scene_types.h"
@@ -206,13 +208,23 @@ struct PaintMaterialCompositeMapping {
 };
 
 /**
- * A Gradient generator's payload, as the CPU evaluator reads it.
+ * The composite's own name for the generator registry's schema cap
+ * (#PAINT_LAYER_GENERATOR_PARAM_MAX in BKE_paint_layers_generator_registry.hh): the length of the
+ * item's #params array, which carries every kind's schema.
+ */
+inline constexpr int PAINT_MATERIAL_COMPOSITE_GENERATOR_PARAM_MAX =
+    PAINT_LAYER_GENERATOR_PARAM_MAX;
+
+/**
+ * A procedural generator's payload, as the CPU evaluator reads it.
  *
- * The row has no map: its colour comes from #ramp at the factor of the row's UV-space line, and a
- * scalar channel reads its own #scalar_ramp (grey stops) instead, falling back to
- * #scalar_start/#scalar_end when the record has no ramp. The generated shader tree builds the same
- * factor from the shared Gradient Factor group. #width and #height are the material's map size:
- * the evaluator needs them to turn a texel into the UV the shader would see.
+ * The row has no map: its colour comes from a ramp at the factor the kind's pattern gives at the
+ * texel's coordinate, and a scalar channel reads its own #scalar_ramp (grey stops) instead,
+ * falling back to #scalar_start/#scalar_end when the record has no ramp. The Gradient is the kind
+ * this item was written for and still keeps its line, midpoint, type and repeat in #payload; every
+ * other generator -- a Noise, a Voronoi, a Checker -- reads its own parameters out of #params, in
+ * its kind's schema order. #width and #height are the material's map size: the evaluator needs
+ * them to turn a texel into the UV the shader would see.
  */
 struct PaintMaterialCompositeGradient {
   bool enabled = false;
@@ -231,6 +243,13 @@ struct PaintMaterialCompositeGradient {
    * copy operations, so the two methods below copy it shallowly like every other DNA value. */
   MaterialPaintLayerGradient payload;
   /**
+   * The #MaterialPaintLayer::kind_subtype naming the generator #payload belongs to, which the
+   * sample dispatches through the generator table. The Gradient is the default so a caller that
+   * fills the fields by hand reads as the generator its payload type is; a described payload
+   * carries the row's own.
+   */
+  int16_t subtype = MA_PAINT_LAYER_GENERATOR_GRADIENT;
+  /**
    * The per-object surface used for the exact 2D preview of Object/Generated rows. Null for a UV
    * row and while the approximate preview is shown; the shared pointer lets a layer outlive a cache
    * replacement.
@@ -240,6 +259,20 @@ struct PaintMaterialCompositeGradient {
   uint64_t surface_key = 0;
   /** True when the coordinate is the UV texel itself rather than a surface sample. */
   bool approximate = true;
+  /**
+   * #eMaterialPaintLayerGradientSpace: the space the pattern sits in. A Gradient's is the payload's
+   * own; every other generator's is the schema's first parameter, which the describe copies out
+   * here so the evaluator reads one place.
+   */
+  int16_t space = MA_PAINT_LAYER_GRADIENT_SPACE_UV;
+  /** The row's kind parameters in its schema's order, the placement in the first seven slots. */
+  std::array<float, PAINT_MATERIAL_COMPOSITE_GENERATOR_PARAM_MAX> params = {};
+  /**
+   * The colour band a colour channel reads, for every generator but the Gradient (whose band is the
+   * payload's own): the row's kind ramp, copied so the item outlives the row.
+   */
+  ColorBand color_ramp = {};
+  bool color_ramp_valid = false;
 
   PaintMaterialCompositeGradient() = default;
   PaintMaterialCompositeGradient(const PaintMaterialCompositeGradient &other)
@@ -252,9 +285,14 @@ struct PaintMaterialCompositeGradient {
         width(other.width),
         height(other.height),
         payload(dna::shallow_copy(other.payload)),
+        subtype(other.subtype),
         surface(other.surface),
         surface_key(other.surface_key),
-        approximate(other.approximate)
+        approximate(other.approximate),
+        space(other.space),
+        params(other.params),
+        color_ramp(other.color_ramp),
+        color_ramp_valid(other.color_ramp_valid)
   {
   }
   PaintMaterialCompositeGradient(PaintMaterialCompositeGradient &&other) noexcept
@@ -267,9 +305,14 @@ struct PaintMaterialCompositeGradient {
         width(other.width),
         height(other.height),
         payload(dna::shallow_copy(other.payload)),
+        subtype(other.subtype),
         surface(std::move(other.surface)),
         surface_key(other.surface_key),
-        approximate(other.approximate)
+        approximate(other.approximate),
+        space(other.space),
+        params(other.params),
+        color_ramp(other.color_ramp),
+        color_ramp_valid(other.color_ramp_valid)
   {
   }
   PaintMaterialCompositeGradient &operator=(const PaintMaterialCompositeGradient &other)
@@ -284,9 +327,14 @@ struct PaintMaterialCompositeGradient {
       width = other.width;
       height = other.height;
       payload = dna::shallow_copy(other.payload);
+      subtype = other.subtype;
       surface = other.surface;
       surface_key = other.surface_key;
       approximate = other.approximate;
+      space = other.space;
+      params = other.params;
+      color_ramp = other.color_ramp;
+      color_ramp_valid = other.color_ramp_valid;
     }
     return *this;
   }
@@ -302,9 +350,14 @@ struct PaintMaterialCompositeGradient {
       width = other.width;
       height = other.height;
       payload = dna::shallow_copy(other.payload);
+      subtype = other.subtype;
       surface = std::move(other.surface);
       surface_key = other.surface_key;
       approximate = other.approximate;
+      space = other.space;
+      params = other.params;
+      color_ramp = other.color_ramp;
+      color_ramp_valid = other.color_ramp_valid;
     }
     return *this;
   }
@@ -320,26 +373,46 @@ struct PaintMaterialCompositeTexel {
 };
 
 /**
- * Evaluate \a gradient at texel (\a x, \a y) into straight scene-linear RGBA. The line, ramp and
- * scalar ends are the description's; the coordinate comes from the surface for Object/Generated
+ * Evaluate \a generator at texel (\a x, \a y) into straight scene-linear RGBA. The placement, ramp
+ * and scalar ends are the description's; the coordinate comes from the surface for Object/Generated
  * rows and from the texel's UV otherwise. Returns false when the sample lies outside the surface's
  * UV islands; \a r_rgba is then zeroed, so a row or correction lays nothing there.
  */
-bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &gradient,
-                                        int x,
-                                        int y,
-                                        float r_rgba[4]);
+bool BKE_paint_material_generator_sample(const PaintMaterialCompositeGradient &generator,
+                                         int x,
+                                         int y,
+                                         float r_rgba[4]);
 
 /**
- * As above on a grid of \a width x \a height texels instead of the gradient's own size: the grid of
+ * As above on a grid of \a width x \a height texels instead of the generator's own size: the grid of
  * the tile a stroke or an evaluation runs on.
  */
-bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &gradient,
-                                        int x,
-                                        int y,
-                                        int width,
-                                        int height,
-                                        float r_rgba[4]);
+bool BKE_paint_material_generator_sample(const PaintMaterialCompositeGradient &generator,
+                                         int x,
+                                         int y,
+                                         int width,
+                                         int height,
+                                         float r_rgba[4]);
+
+/** The Gradient-only name this sampler had before the other generators: kept so a caller written
+ * against it still builds. */
+inline bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &generator,
+                                                int x,
+                                                int y,
+                                                float r_rgba[4])
+{
+  return BKE_paint_material_generator_sample(generator, x, y, r_rgba);
+}
+
+inline bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &generator,
+                                                int x,
+                                                int y,
+                                                int width,
+                                                int height,
+                                                float r_rgba[4])
+{
+  return BKE_paint_material_generator_sample(generator, x, y, width, height, r_rgba);
+}
 
 /**
  * The Compare mode's gate: whether a record's height at a texel beats the height the rows below it
@@ -1243,6 +1316,50 @@ bNodeTree *BKE_paint_material_gradient_group_ensure(Main &bmain);
 
 /** Whether \a node is an instance of #BKE_paint_material_gradient_group_ensure's group. */
 bool BKE_paint_material_is_gradient_group(const bNode &node);
+
+/**
+ * A generator row's schema values, in the order its kind documents them. The graph reads a compound
+ * generator's through the row group's inputs, and the CPU's copy of the same pattern reads it
+ * through this -- one spelling of which parameter is which, so a schema edit cannot reach one side
+ * and not the other.
+ */
+using PaintMaterialGeneratorParams = std::array<float, PAINT_MATERIAL_COMPOSITE_GENERATOR_PARAM_MAX>;
+
+/**
+ * The shared groups that lay the compound generators' patterns, one per dimension: a 2D and a 3D
+ * Voronoi or Noise hash their coordinates differently, so the two cannot share a group. Each takes
+ * the row's already-placed Coordinate and its parameters and gives back the Factor the row's ramp
+ * indexes -- and each has a #BKE_paint_material_scratches_factor-style copy in this header, built
+ * statement for statement out of the same arithmetic. A UV row hands the group (u, v, 0).
+ * \{ */
+
+bNodeTree *BKE_paint_material_scratches_group_ensure(Main &bmain, bool is_2d);
+bNodeTree *BKE_paint_material_weave_group_ensure(Main &bmain, bool is_2d);
+bNodeTree *BKE_paint_material_grunge_group_ensure(Main &bmain, bool is_2d);
+
+/** Whether \a node is an instance of one of the two groups of that pattern. */
+bool BKE_paint_material_is_scratches_group(const bNode &node);
+bool BKE_paint_material_is_weave_group(const bNode &node);
+bool BKE_paint_material_is_grunge_group(const bNode &node);
+
+/** The Scratches' factor: the Voronoi cell edge of a coordinate stretched along Y, read through a
+ * threshold of \a width and \a soften. */
+float BKE_paint_material_scratches_factor(const float3 &placed,
+                                          const PaintMaterialGeneratorParams &params,
+                                          bool is_2d);
+
+/** The Weave's factor: which of the two thread directions lies on top of the cell the coordinate is
+ * in, with the thread's own edges faded. */
+float BKE_paint_material_weave_factor(const float3 &placed,
+                                      const PaintMaterialGeneratorParams &params,
+                                      bool is_2d);
+
+/** The Grunge's factor: a noise modulated by a second, coarser one, thresholded into patches. */
+float BKE_paint_material_grunge_factor(const float3 &placed,
+                                       const PaintMaterialGeneratorParams &params,
+                                       bool is_2d);
+
+/** \} */
 
 /**
  * The passes a layered material offers, in the order they are listed to the user.

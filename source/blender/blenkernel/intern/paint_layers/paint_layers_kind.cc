@@ -641,9 +641,9 @@ void paint_layer_normal_convert_apply(float rgb[3],
   }
 }
 
-static constexpr uint8_t all_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER) |
-                                     paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
-                                     paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM);
+/* The mask a laid kind takes, shared with the generator schemas
+ * (#paint_layer_all_roles in paint_layers_kind.hh). */
+static constexpr uint8_t all_roles = paint_layer_all_roles;
 
 /* As a mask item a filter works on the mask's coverage, a single grey: it has no channels there. */
 static constexpr uint8_t filter_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER) |
@@ -661,7 +661,9 @@ static constexpr uint8_t effect_or_mask_roles = paint_layer_role_bit(MA_PAINT_LA
 static constexpr uint8_t mask_item_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM);
 
 /* New kinds are added here. A kind that needs the row bake is registered with a `TODO:` naming
- * it, so what is deferred shows up in a search of this file. */
+ * it, so what is deferred shows up in a search of this file. The generator kinds are the
+ * exception: their schemas live in `paint_layers_kind_generators.cc`, beside the generator table
+ * they answer for, and #paint_layer_kind_find walks them right after this list. */
 static const PaintLayerKindInfo kinds[] = {
     {MA_PAINT_LAYER_SOURCE_IMAGE, 0, "Image", PaintLayerKindCategory::Source, all_roles},
     {MA_PAINT_LAYER_SOURCE_CONSTANT,
@@ -685,19 +687,6 @@ static const PaintLayerKindInfo kinds[] = {
      nullptr,
      0,
      PAINT_LAYER_KIND_READS_SOURCE},
-    /* A procedural generator: its colour and coverage come from shader nodes reading the UV, not
-     * from a map. As a row it lays its colour; as a content correction it lays that colour over
-     * the row's; as a mask item its ramp's grey over the row's mask. */
-    {MA_PAINT_LAYER_SOURCE_GENERATOR,
-     MA_PAINT_LAYER_GENERATOR_GRADIENT,
-     "Gradient",
-     PaintLayerKindCategory::Source,
-     all_roles,
-     nullptr,
-     0,
-     PAINT_LAYER_KIND_GENERATES,
-     /* The kind owns no map, so a stroke cannot paint into it. */
-     false},
     /* A folder owns children, which corrections and mask items never have. */
     {MA_PAINT_LAYER_SOURCE_STACK,
      0,
@@ -1029,6 +1018,13 @@ static const PaintLayerKindInfo kinds[] = {
 const PaintLayerKindInfo *paint_layer_kind_find(const int8_t source, const int16_t subtype)
 {
   for (const PaintLayerKindInfo &info : kinds) {
+    if (info.source == source && info.subtype == subtype) {
+      return &info;
+    }
+  }
+  /* The generators answer to the same registry: their schemas live beside the generator table
+   * (paint_layers_kind_generators.cc), and a generator kind is found here like any other kind. */
+  for (const PaintLayerKindInfo &info : paint_layer_kind_generator_kinds()) {
     if (info.source == source && info.subtype == subtype) {
       return &info;
     }

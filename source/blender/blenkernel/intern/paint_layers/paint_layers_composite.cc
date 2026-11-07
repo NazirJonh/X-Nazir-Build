@@ -35,6 +35,8 @@
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generator.hh"
+#include "BKE_paint_layers_generator_registry.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_report.hh"
@@ -180,30 +182,61 @@ template<size_t N> static void composite_filter_params(const MaterialPaintLayer 
 }
 
 /**
- * Describe \a row's Gradient payload in \a channel: the line, the ramp, the channel's scalar ends
- * and, for an Object/Generated line, the surface that gives the texel its coordinate. The one
- * place a Gradient row, a Gradient correction and a Gradient mask item are described, so the
- * evaluator cannot read them differently.
+ * Describe \a row's generator in \a channel: the line and ramp of a Gradient, the pattern, the
+ * placement and the colour band of the others, the channel's scalar ends and, for an
+ * Object/Generated coordinate, the surface that gives the texel its position. The one place a
+ * generator row, a generator correction and a generator mask item are described, so the evaluator
+ * cannot read them differently.
  */
-static bool composite_gradient_describe(
+static bool composite_generator_describe(
     const Material &ma,
     const MaterialPaintLayer &row,
     const int channel,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface,
     PaintMaterialCompositeGradient &out)
 {
-  if (row.gradient == nullptr) {
+  const int kind = int(row.kind_subtype);
+  const bool is_gradient = kind == MA_PAINT_LAYER_GENERATOR_GRADIENT;
+  /* The registry knows the kind before its CPU factor lands: a row whose generator has no table
+   * entry yet lays nothing, the same answer the build's dispatch gives it, rather than reading as
+   * the Gradient its default subtype names. */
+  if (BKE_paint_layers_generator_of(row) == nullptr) {
+    return false;
+  }
+  if (is_gradient && row.gradient == nullptr) {
     return false;
   }
   const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
       eMaterialPaintChannel(channel));
   out.enabled = true;
+  /* The subtype rides with the payload, so the composite's sample dispatches through the
+   * generator table the way the generated graph does. A generator the schema does not know is
+   * refused by the kind lookup before its row is described. */
+  out.subtype = int16_t(kind);
   out.color_channel = info.is_color;
-  out.payload = dna::shallow_copy(*row.gradient);
+  out.params = {};
+  if (is_gradient) {
+    /* The Gradient keeps its whole description in its payload; it has no schema. */
+    out.payload = dna::shallow_copy(*row.gradient);
+    out.space = int16_t(row.gradient->space);
+  }
+  else {
+    out.space = int16_t(paint_layer_kind_param_get(row, PAINT_LAYER_GEN_SPACE));
+    if (const PaintLayerKindInfo *schema = paint_layer_kind_of(row)) {
+      /* The Ramp-typed slot reads as zero: the band itself comes from the row below. */
+      for (const int i : IndexRange(std::min(schema->params_num, int(out.params.size())))) {
+        out.params[i] = paint_layer_kind_param_get(row, i);
+      }
+    }
+    if (const ColorBand *band = BKE_paint_layers_ramp_get(row); band != nullptr) {
+      out.color_ramp = *band;
+      out.color_ramp_valid = true;
+    }
+  }
   const int size = (ma.paint_layers_image_size > 0) ? int(ma.paint_layers_image_size) : 4096;
   out.width = size;
   out.height = size;
-  if (row.gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_UV) {
+  if (out.space == MA_PAINT_LAYER_GRADIENT_SPACE_UV) {
     /* A UV line already reads the texel's own UV: no surface and no approximation. */
     out.surface = nullptr;
     out.surface_key = 0;
@@ -217,8 +250,7 @@ static bool composite_gradient_describe(
      * to the surface, so a cache replacement cannot pull it out from under the evaluation. A
      * Generated row has a coordinate with stored CD_ORCO samples or a usable bbox; with neither it
      * falls back to the approximate preview rather than an empty layer. */
-    const bool coordinate_usable = row.gradient->space !=
-                                       MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED ||
+    const bool coordinate_usable = out.space != MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED ||
                                    (context_surface &&
                                     (context_surface->generated_bbox_valid ||
                                      !context_surface->generated_positions.is_empty()));
@@ -282,9 +314,9 @@ static bool composite_row_source_describe(const Material &ma,
     return false;
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES)) {
-    /* A Gradient: no map and no constant, only its line, colour ramp and the channel's own value
-     * ramp. */
-    return composite_gradient_describe(ma, layer, channel, context_surface, out.gradient);
+    /* A generator: no map and no constant, only its pattern, colour ramp and the channel's own
+     * value ramp. */
+    return composite_generator_describe(ma, layer, channel, context_surface, out.gradient);
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     /* The same decision the generator makes (#PaintLayersTreeBuilder::material_source_emit): the
@@ -540,11 +572,11 @@ static void composite_mask_items_describe(
       continue;
     }
     if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_GENERATES)) {
-      /* A Gradient mask item: the ramp's colour is the grey and its alpha the coverage, read from
-       * the item's own line rather than from a map. */
+      /* A generator mask item: the ramp's colour is the grey and its alpha the coverage, read from
+       * the item's own pattern rather than from a map. */
       PaintMaterialCompositeMaskItem item;
       item.opacity = BKE_paint_layers_effective_opacity(mask);
-      if (!composite_gradient_describe(
+      if (!composite_generator_describe(
               ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, context_surface, item.gradient))
       {
         continue;
@@ -782,8 +814,8 @@ static void composite_effect_append(
     }
   }
   else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES)) {
-    /* A Gradient correction has no map: its ramp is laid by its own blend and opacity. */
-    if (!composite_gradient_describe(ma, effect, channel, context_surface, correction.gradient)) {
+    /* A generator correction has no map: its ramp is laid by its own blend and opacity. */
+    if (!composite_generator_describe(ma, effect, channel, context_surface, correction.gradient)) {
       return;
     }
   }
@@ -1368,9 +1400,9 @@ PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
     buffer.coverage_output = item.coverage_output;
     buffer.coverage_colors = item.coverage_colors;
     buffer.gradient = item.gradient;
-    if (buffer.gradient.enabled && buffer.gradient.payload.space != MA_PAINT_LAYER_GRADIENT_SPACE_UV)
+    if (buffer.gradient.enabled && buffer.gradient.space != MA_PAINT_LAYER_GRADIENT_SPACE_UV)
     {
-      /* An Object/Generated line needs the object's surface to turn a texel into the coordinate
+      /* An Object/Generated coordinate needs the object's surface to turn a texel into the position
        * the render reads, which a stroke has no way to get here. Reading the texel's UV instead
        * would hide other texels than the render does, so the item takes no part in the stroke's
        * mask: the render still applies it.
@@ -2450,15 +2482,15 @@ bool BKE_paint_layers_bake_render_node(
   if (size <= 0 || r_color_rgba == nullptr || r_coverage_gray == nullptr) {
     return false;
   }
-  /* A subtree whose Gradients the bake cannot evaluate is never a cache. */
-  if (!BKE_paint_layers_gradient_subtree_is_bakeable(layer)) {
+  /* A subtree whose generators the bake cannot evaluate is never a cache. */
+  if (!BKE_paint_layers_generator_subtree_is_bakeable(layer)) {
     return false;
   }
-  /* An Object or Generated Gradient reads the geometry of the object it is shaded on, which only
+  /* An Object or Generated pattern reads the geometry of the object it is shaded on, which only
    * the surface of that object carries: without one the texel's own UV would be the approximate
    * preview, not a bake, so the render is refused rather than written as a wrong picture. A reader
    * is exempt: its cache is the slice of the row it points at, rendered by the slice machinery. */
-  if (surface == nullptr && !BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer) &&
+  if (surface == nullptr && !BKE_paint_layers_generator_subtree_is_shared_bakeable(layer) &&
       !paint_layer_kind_reads_anchor_point(layer))
   {
     return false;

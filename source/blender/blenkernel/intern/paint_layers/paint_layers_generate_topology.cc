@@ -218,6 +218,44 @@ static void gradient_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &
 }
 
 /**
+ * Mix what a pattern generator (anything but a Gradient) decides the nodes. The space picks the
+ * coordinate output and the dimension the texture node stores; the Seed and the choices kept in
+ * the node's storage (a Noise's type, a Voronoi's feature, a Brick's offsets) pick which sockets
+ * exist; and a parameter whose socket the current choice leaves out has nothing to link, so it
+ * too is structure. What is left -- the placement and the parameters a socket reads -- is synced
+ * in place. The row's colour band and its Enum choices are folded by #filter_payload_hash_mix; a
+ * Gradient's own payload is folded by #gradient_payload_hash_mix.
+ */
+static void generator_topology_hash_mix(uint64_t &hash, const MaterialPaintLayer &row)
+{
+  if (paint_layer_generator_kind_of(row) == MA_PAINT_LAYER_GENERATOR_GRADIENT) {
+    return;
+  }
+  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+  if (info == nullptr) {
+    return;
+  }
+  hash = topology_hash_mix(hash, PAINT_LAYER_GENERATOR_TOPOLOGY_HASH_VERSION);
+  hash = topology_hash_mix(hash, uint64_t(paint_layer_generator_space_of(row)));
+  for (const int i : IndexRange(info->params_num)) {
+    if (!paint_layer_generator_param_is_value(row, i)) {
+      hash = topology_hash_mix(hash, uint64_t(i));
+      hash = topology_hash_mix(hash, uint64_t(paint_layer_kind_param_get(row, i)));
+    }
+  }
+  /* A scalar channel's value ramp lives in a ColorRamp node's storage; a Gradient's are folded
+   * above, and these are the same nodes for a pattern row. */
+  for (const int i : IndexRange(row.channels_num)) {
+    const MaterialPaintLayerChannel &record = row.channels[i];
+    if (record.gradient_ramp == nullptr) {
+      continue;
+    }
+    hash = topology_hash_mix(hash, uint64_t(uint8_t(record.channel)));
+    hash = topology_hash_mix(hash, BKE_paint_layers_gradient_ramp_hash(*record.gradient_ramp));
+  }
+}
+
+/**
  * Mix a filter's payload: what it decides about the nodes rather than reads as a value. A Color
  * Band lives in a ColorRamp node's storage, not in a socket, so a stop or an interpolation edit
  * changes the node itself and the group must be rebuilt, not synced in place. The RGB Curves
@@ -334,6 +372,7 @@ static void topology_mask_hash_mix(uint64_t &hash,
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, item) ? 1 : 0);
     mapping_wrap_hash_mix(hash, ma, item);
     gradient_payload_hash_mix(hash, item);
+    generator_topology_hash_mix(hash, item);
     filter_payload_hash_mix(hash, item);
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
@@ -375,6 +414,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   /* Which filter an adjustment is decides its nodes; its parameters are inputs. */
   hash = topology_hash_mix(hash, uint64_t(uint16_t(layer.kind_subtype)));
   gradient_payload_hash_mix(hash, layer);
+  generator_topology_hash_mix(hash, layer);
   filter_payload_hash_mix(hash, layer);
   hash = topology_hash_mix(hash, paint_layer_blend_shape(layer));
   /* The runtime tier changes which node a participating channel gets (the dynamic group against a
@@ -495,6 +535,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, effect) ? 1 : 0);
     mapping_wrap_hash_mix(hash, ma, effect);
     gradient_payload_hash_mix(hash, effect);
+    generator_topology_hash_mix(hash, effect);
     filter_payload_hash_mix(hash, effect);
     const bool reads_source = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE);
     if (reads_source) {

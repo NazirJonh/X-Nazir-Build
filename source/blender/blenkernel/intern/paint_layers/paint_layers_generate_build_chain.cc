@@ -29,7 +29,6 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
-#include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_material_composite.hh"
 
@@ -48,7 +47,7 @@
 #include "paint_layers_generate_layout.hh"
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
-#include "../paint_material_composite_internal.hh"
+#include "paint_material_generator_group_ids.hh"
 
 namespace blender {
 namespace bke::paint_layers {
@@ -447,7 +446,9 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
           return {};
         }
       }
-      /* Gradient: `match *= value`, the standard value input of the item; White/Black read one. */
+      /* The item's own value rides the match (`match *= value`) -- the Gradient's scalar, the one
+       * generator a map-coverage item pairs with today; White and Black read one. The input is
+       * made for every map-coverage item, so a second generator needs no new plumbing here. */
       bNodeTreeInterfaceSocket **value_iface = mask_value_inputs_.lookup_ptr(&item);
       bNodeSocket *item_value = (value_iface != nullptr) ?
                                     this->group_input_socket(group, **value_iface) :
@@ -530,10 +531,11 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       }
     }
     else if (generates) {
-      /* The ramp's colour as the grey, its alpha as the coverage: the same pair a painted item's
-       * map supplies, evaluated from the item's own line. */
+      /* The generator's colour as the grey, its alpha as the coverage: the same pair a painted
+       * item's map supplies. The item is read in Base Color because its grey is one scalar, and
+       * the Gradient -- the one generator today -- lays the ramp's alpha as that coverage. */
       const RowEmitContext emit_context{tree, group, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR};
-      const KindEmitResult emitted = this->gradient_source_emit(emit_context);
+      const KindEmitResult emitted = this->generator_source_emit(emit_context);
       if (emitted.color.socket == nullptr || emitted.content_alpha.socket == nullptr) {
         discard();
         return {};
@@ -1525,13 +1527,15 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
     map_color = source_emitted.color.socket;
   }
   else if (generates) {
-    /* The ramp's colour in a colour channel, its scalar mix in another, and the ramp's alpha as
-     * the coverage, exactly what a Gradient row emits. */
+    /* The generator's colour in a colour channel, its scalar mix in another, and the alpha it lays
+     * as the coverage, exactly what the row emits. The per-channel shape is the emission's own
+     * (the Gradient's ramp covers, its scalar ends do not), so the correction path shares it
+     * instead of re-deriving it. */
     if (opacity == nullptr) {
       return false;
     }
     const RowEmitContext emit_context{tree, group, effect, channel};
-    source_emitted = this->gradient_source_emit(emit_context);
+    source_emitted = this->generator_source_emit(emit_context);
     if (source_emitted.color.socket == nullptr || source_emitted.content_alpha.socket == nullptr) {
       return false;
     }
@@ -2483,177 +2487,6 @@ NodeOutput PaintLayersTreeBuilder::anchor_point_mask_item_emit(LayerGroup &group
   return linked.coverage;
 }
 
-NodeOutput PaintLayersTreeBuilder::gradient_factor_ensure(bNodeTree &tree,
-                                                          LayerGroup &group,
-                                                          const MaterialPaintLayer &layer)
-{
-  if (const NodeOutput *cached = gradient_factors_.lookup_ptr(&layer)) {
-    return *cached;
-  }
-  BLI_assert(layer.gradient != nullptr);
-  if (ctx_.gradient_group == nullptr || tree.typeinfo == nullptr ||
-      tree.typeinfo->group_idname == nullptr)
-  {
-    return {};
-  }
-  bNode *instance = bke::node_add_node(nullptr, tree, tree.typeinfo->group_idname);
-  if (instance == nullptr) {
-    return {};
-  }
-  instance->id = &ctx_.gradient_group->id;
-  id_us_plus(&ctx_.gradient_group->id);
-  STRNCPY_UTF8(instance->label, "Gradient Factor");
-  nodes::update_node_declaration_and_sockets(tree, *instance);
-  grid_.place(*instance, layout::Column::Source, 0);
-
-  const auto discard = [&]() -> NodeOutput {
-    bke::node_remove_node(nullptr, tree, *instance, true, false);
-    return {};
-  };
-
-  /* The group's Coordinate input reads the Texture Coordinate output the row's space names: UV
-   * rows pass (u, v, 0), Object rows object-space coordinates, Generated rows normalized ones. The
-   * caller has already checked the payload (#gradient_source_emit). */
-  bNode *coord = this->uv_coordinate_ensure(tree);
-  bNodeSocket *coordinate = (coord != nullptr) ?
-                                this->gradient_coordinate_socket(*coord, *layer.gradient) :
-                                nullptr;
-  bNodeSocket *coordinate_in = bke::node_find_socket(
-      *instance, SOCK_IN, UString::from_ptr_noinline(GRADIENT_GROUP_ID_COORDINATE));
-  if (coord == nullptr || coordinate == nullptr || coordinate_in == nullptr) {
-    return discard();
-  }
-  bke::node_add_link(tree, *coord, *coordinate, *instance, *coordinate_in);
-
-  struct GradientInput {
-    Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> *inputs;
-    const char *identifier;
-  };
-  const GradientInput inputs[5] = {
-      {&gradient_start_inputs_, GRADIENT_GROUP_ID_START},
-      {&gradient_end_inputs_, GRADIENT_GROUP_ID_END},
-      {&gradient_midpoint_inputs_, GRADIENT_GROUP_ID_MIDPOINT},
-      {&gradient_type_inputs_, GRADIENT_GROUP_ID_TYPE},
-      {&gradient_repeat_inputs_, GRADIENT_GROUP_ID_REPEAT},
-  };
-  for (const GradientInput &input : inputs) {
-    bNodeTreeInterfaceSocket *const *iface = input.inputs->lookup_ptr(&layer);
-    bNodeSocket *source = (iface != nullptr) ?
-                              this->group_input_socket(group, **iface) :
-                              nullptr;
-    bNodeSocket *target = bke::node_find_socket(
-        *instance, SOCK_IN, UString::from_ptr_noinline(input.identifier));
-    if (source == nullptr || target == nullptr) {
-      return discard();
-    }
-    bke::node_add_link(tree, *group.group_input, *source, *instance, *target);
-  }
-
-  bNodeSocket *factor = bke::node_find_socket(
-      *instance, SOCK_OUT, UString::from_ptr_noinline(GRADIENT_GROUP_ID_FACTOR));
-  if (factor == nullptr) {
-    return discard();
-  }
-  const NodeOutput out{instance, factor};
-  gradient_factors_.add(&layer, out);
-  return out;
-}
-
-/** A ColorRamp node holding a copy of \a band, or null when the node cannot be made. */
-static bNode *gradient_ramp_node_add(bNodeTree &tree, const ColorBand &band)
-{
-  bNode *ramp = bke::node_add_static_node(nullptr, tree, SH_NODE_VALTORGB);
-  if (ramp == nullptr || ramp->storage == nullptr) {
-    return nullptr;
-  }
-  *static_cast<ColorBand *>(ramp->storage) = band;
-  return ramp;
-}
-
-bNode *PaintLayersTreeBuilder::gradient_ramp_ensure(bNodeTree &tree,
-                                                    const MaterialPaintLayer &layer,
-                                                    const int channel)
-{
-  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
-      eMaterialPaintChannel(channel));
-  /* Every colour channel shares the row's ramp node; a scalar channel has one of its own. */
-  if (info.is_color) {
-    if (bNode **cached = gradient_ramps_.lookup_ptr(&layer)) {
-      return *cached;
-    }
-    if (layer.gradient == nullptr) {
-      return nullptr;
-    }
-    bNode *ramp = gradient_ramp_node_add(tree, layer.gradient->ramp);
-    if (ramp == nullptr) {
-      return nullptr;
-    }
-    grid_.place(*ramp, layout::Column::Source, 1);
-    gradient_ramps_.add(&layer, ramp);
-    return ramp;
-  }
-
-  if (Map<int, bNode *> *by_channel = gradient_scalar_ramps_.lookup_ptr(&layer)) {
-    if (bNode **cached = by_channel->lookup_ptr(channel)) {
-      return *cached;
-    }
-  }
-  const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-  if (record == nullptr || record->gradient_ramp == nullptr) {
-    return nullptr;
-  }
-  bNode *ramp = gradient_ramp_node_add(tree, *record->gradient_ramp);
-  if (ramp == nullptr) {
-    return nullptr;
-  }
-  grid_.place_extra(*ramp);
-  gradient_scalar_ramps_.lookup_or_add_default(&layer).add(channel, ramp);
-  return ramp;
-}
-
-KindEmitResult PaintLayersTreeBuilder::gradient_source_emit(const RowEmitContext &ctx)
-{
-  bNodeTree &tree = ctx.tree;
-  LayerGroup &group = ctx.group;
-  const MaterialPaintLayerGradient *gradient = ctx.layer.gradient;
-  if (gradient == nullptr) {
-    return {};
-  }
-  if (ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
-    return {};
-  }
-  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
-      eMaterialPaintChannel(ctx.channel));
-  const NodeOutput factor = this->gradient_factor_ensure(tree, group, ctx.layer);
-  if (factor.socket == nullptr) {
-    return {};
-  }
-
-  /* A colour channel reads the row's shared ramp; a scalar channel reads its own value ramp, whose
-   * grey stops are the values along the gradient (the same ramp the CPU evaluates). */
-  bNode *ramp = this->gradient_ramp_ensure(tree, ctx.layer, ctx.channel);
-  if (ramp == nullptr) {
-    return {};
-  }
-  bNodeSocket *fac = socket_in(*ramp, "Fac");
-  bNodeSocket *color = socket_out(*ramp, "Color");
-  bNodeSocket *alpha = socket_out(*ramp, "Alpha");
-  if (fac == nullptr || color == nullptr || alpha == nullptr) {
-    return {};
-  }
-  /* A ramp node can be shared by several channels: the factor is linked once. */
-  if (fac->link == nullptr) {
-    bke::node_add_link(tree, *factor.node, *factor.socket, *ramp, *fac);
-  }
-  KindEmitResult out;
-  out.color = {ramp, color};
-  if (info.is_color) {
-    out.coverage = {ramp, alpha};
-  }
-  out.content_alpha = {ramp, alpha};
-  return out;
-}
-
 KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx)
 {
   bNodeTree &tree = ctx.tree;
@@ -2709,7 +2542,9 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
   else if (ctx.baked_color == nullptr &&
            paint_layer_kind_has_flag(ctx.layer, PAINT_LAYER_KIND_GENERATES))
   {
-    out = this->gradient_source_emit(ctx);
+    /* The flag is the kind schema's word that the row generates; which generator and how is the
+     * table's (#generator_source_emit). */
+    out = this->generator_source_emit(ctx);
   }
   else if (ctx.baked_color == nullptr &&
            paint_layer_kind_has_flag(ctx.layer, PAINT_LAYER_KIND_READS_SOURCE))

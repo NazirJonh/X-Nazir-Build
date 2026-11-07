@@ -440,6 +440,7 @@ static void paint_color_channel(
           if (batch_decode) {
             ChannelSourceSampler::decode_linear_batch(local.source_colors,
                                                       sampler->colorspace(channel));
+            sampler->apply_correction_batch(local.source_colors, channel);
           }
           /* Randomize Color on the sampled texels - Base Color only, the same scoping as the
            * channel value. The transform is color-independent, so the node's samples shift

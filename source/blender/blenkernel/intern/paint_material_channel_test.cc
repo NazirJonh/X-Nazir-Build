@@ -12,6 +12,7 @@
 #include "BKE_blender.hh"
 #include "BKE_brush.hh"
 #include "BKE_global.hh"
+#include "BKE_brush_material_correction.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_idtype.hh"
 #include "BKE_image.hh"
@@ -119,6 +120,16 @@ class PaintMaterialChannelTest : public bke::BlenderGTestBase {
   Image *add_image(const char *name)
   {
     return static_cast<Image *>(BKE_id_new(bmain, ID_IM, name));
+  }
+
+  /** An enabled "Correction Image" on \a channel, with the DNA defaults otherwise untouched. */
+  BrushMaterialPaintCorrection &ensure_correction(BrushMaterialPaint &paint,
+                                                  const eMaterialPaintChannel channel)
+  {
+    BrushMaterialPaintCorrection *correction =
+        BKE_brush_material_paint_correction_ensure(paint.channels[channel]);
+    correction->flag |= BRUSH_MATERIAL_PAINT_CORRECTION_ENABLED;
+    return *correction;
   }
 
   bNode *add_image_texture(bNodeTree &ntree, Image &image)
@@ -2356,6 +2367,95 @@ TEST_F(PaintMaterialChannelTest, MaterialPaintCopyIntoSelfAssignIsNoOp)
   EXPECT_EQ(tex->id.us, tex_users_before) << "self-assign must not double-count or drop";
 }
 
+TEST_F(PaintMaterialChannelTest, MaterialPaintCopyDeepCopiesCorrection)
+{
+  Brush *brush = BKE_brush_add(bmain, "CorrectionCopy", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+  BrushMaterialPaint &source = *brush->material_paint;
+  BrushMaterialPaintCorrection &source_correction = ensure_correction(
+      source, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  source_correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_LEVELS;
+  source_correction.levels_in_white = 0.5f;
+  source_correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_HSV;
+  source_correction.hsv_value = 0.75f;
+  source_correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_INVERT;
+
+  BrushMaterialPaint *copy = BKE_brush_material_paint_copy(source, 0);
+
+  const BrushMaterialPaintCorrection *copy_correction =
+      copy->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].correction;
+  ASSERT_NE(copy_correction, nullptr);
+  ASSERT_NE(copy_correction, &source_correction) << "the copy must own its correction";
+  EXPECT_TRUE(copy_correction->flag & BRUSH_MATERIAL_PAINT_CORRECTION_LEVELS);
+  EXPECT_FLOAT_EQ(copy_correction->levels_in_white, 0.5f);
+  EXPECT_FLOAT_EQ(copy_correction->hsv_value, 0.75f);
+  EXPECT_TRUE(copy_correction->flag & BRUSH_MATERIAL_PAINT_CORRECTION_INVERT);
+
+  copy->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].correction->flag &=
+      short(~BRUSH_MATERIAL_PAINT_CORRECTION_INVERT);
+  EXPECT_TRUE(source.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].correction->flag &
+              BRUSH_MATERIAL_PAINT_CORRECTION_INVERT)
+      << "mutating the copy must not touch the source";
+
+  BKE_brush_material_paint_free(copy);
+}
+
+TEST_F(PaintMaterialChannelTest, MaterialPaintCopyIntoDeepCopiesCorrection)
+{
+  Brush *brush_a = BKE_brush_add(bmain, "CorrectionIntoA", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush_a);
+  Brush *brush_b = BKE_brush_add(bmain, "CorrectionIntoB", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush_b);
+
+  BrushMaterialPaintCorrection &correction_a = ensure_correction(
+      *brush_a->material_paint, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  correction_a.levels_in_black = 0.1f;
+  BrushMaterialPaintCorrection &correction_b = ensure_correction(
+      *brush_b->material_paint, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  correction_b.levels_in_black = 0.4f;
+
+  BKE_brush_material_paint_copy_into(*brush_a->material_paint, *brush_b->material_paint);
+
+  const BrushMaterialPaintCorrection *dst =
+      brush_a->material_paint->channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].correction;
+  const BrushMaterialPaintCorrection *src =
+      brush_b->material_paint->channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].correction;
+  ASSERT_NE(dst, nullptr);
+  ASSERT_NE(src, nullptr);
+  ASSERT_NE(dst, src) << "copy_into must not alias the source's correction";
+  EXPECT_FLOAT_EQ(dst->levels_in_black, 0.4f);
+
+  brush_a->material_paint->channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].correction->flag |=
+      BRUSH_MATERIAL_PAINT_CORRECTION_INVERT;
+  EXPECT_FALSE(src->flag & BRUSH_MATERIAL_PAINT_CORRECTION_INVERT)
+      << "mutating the destination must not touch the source";
+}
+
+TEST_F(PaintMaterialChannelTest, BrushIdCopyDeepCopiesCorrection)
+{
+  Brush *brush = BKE_brush_add(bmain, "CorrectionIdCopy", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+  BrushMaterialPaintCorrection &source_correction = ensure_correction(
+      *brush->material_paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  source_correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_INVERT;
+
+  ID *copy_id = BKE_id_copy(bmain, &brush->id);
+  ASSERT_NE(copy_id, nullptr);
+  Brush *copy = reinterpret_cast<Brush *>(copy_id);
+  ASSERT_NE(copy->material_paint, nullptr);
+  const BrushMaterialPaintCorrection *copy_correction =
+      copy->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].correction;
+  ASSERT_NE(copy_correction, nullptr);
+  ASSERT_NE(copy_correction, &source_correction);
+  EXPECT_TRUE(copy_correction->flag & BRUSH_MATERIAL_PAINT_CORRECTION_INVERT);
+
+  copy->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].correction->flag &=
+      short(~BRUSH_MATERIAL_PAINT_CORRECTION_INVERT);
+  EXPECT_TRUE(source_correction.flag & BRUSH_MATERIAL_PAINT_CORRECTION_INVERT);
+
+  BKE_id_free(bmain, copy_id);
+}
+
 TEST_F(PaintMaterialChannelTest, ToolSettingsCopyDeepCopiesPresetList)
 {
   Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "PresetScene"));
@@ -2695,6 +2795,46 @@ TEST_F(PaintMaterialChannelTest, SnapshotCapturesBrushOntoPreset)
   EXPECT_TRUE(preset->material_paint->channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].use);
   EXPECT_FLOAT_EQ(preset->material_paint->channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS].value[0],
                   0.75f);
+
+  BKE_id_free(bmain, scene);
+}
+
+TEST_F(PaintMaterialChannelTest, SnapshotKeepsPresetCorrectionIndependent)
+{
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "CorrectionSnapshotScene"));
+  Brush *brush = BKE_brush_add(bmain, "CorrectionSnapshotBrush", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+  BrushMaterialPaintCorrection &brush_correction = ensure_correction(
+      *brush->material_paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  brush_correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_INVERT;
+  brush_correction.levels_in_white = 0.25f;
+
+  BKE_paint_material_brush_preset_snapshot(*scene, *brush);
+
+  PaintMaterialBrushPreset *preset = BKE_paint_material_brush_preset_find(*scene, *brush);
+  ASSERT_NE(preset, nullptr);
+  ASSERT_NE(preset->material_paint, nullptr);
+  const BrushMaterialPaintCorrection *preset_correction =
+      preset->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].correction;
+  ASSERT_NE(preset_correction, nullptr);
+  ASSERT_NE(preset_correction, &brush_correction) << "the snapshot must own its correction";
+  EXPECT_TRUE(preset_correction->flag & BRUSH_MATERIAL_PAINT_CORRECTION_INVERT);
+  EXPECT_FLOAT_EQ(preset_correction->levels_in_white, 0.25f);
+
+  /* Editing the live brush must not rewrite the snapshot. */
+  brush_correction.flag &= short(~BRUSH_MATERIAL_PAINT_CORRECTION_INVERT);
+  brush_correction.levels_in_white = 0.75f;
+  EXPECT_TRUE(preset_correction->flag & BRUSH_MATERIAL_PAINT_CORRECTION_INVERT);
+  EXPECT_FLOAT_EQ(preset_correction->levels_in_white, 0.25f);
+
+  /* Applying the preset copies its values onto the brush, still as an independent allocation. */
+  BKE_paint_material_brush_preset_apply(*scene, *brush);
+  const BrushMaterialPaintCorrection *applied =
+      brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].correction;
+  ASSERT_NE(applied, nullptr);
+  ASSERT_NE(applied, preset_correction);
+  EXPECT_TRUE(applied->flag & BRUSH_MATERIAL_PAINT_CORRECTION_INVERT);
+  EXPECT_FLOAT_EQ(applied->levels_in_white, 0.25f);
 
   BKE_id_free(bmain, scene);
 }
@@ -3165,6 +3305,153 @@ TEST(material_paint_channel, height_is_a_float_layer_map_and_the_other_scalars_s
       EXPECT_FALSE(info.map_float) << info.ui_name;
     }
   }
+TEST_F(PaintMaterialChannelTest, CorrectionSurvivesSaveReloadInBrushAndPreset)
+{
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "CorrectionPersistScene"));
+  Sculpt *sculpt_data = MEM_new<Sculpt>(__func__);
+  scene->toolsettings->sculpt = sculpt_data;
+  sculpt_data->paint.runtime = MEM_new<bke::PaintRuntime>(__func__);
+  sculpt_data->paint.runtime->ob_mode = OB_MODE_SCULPT;
+
+  Brush *brush = BKE_brush_add(bmain, "CorrectionPersistBrush", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+  BrushMaterialPaintCorrection &source_correction = ensure_correction(
+      *brush->material_paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  source_correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_LEVELS;
+  source_correction.levels_in_black = 0.1f;
+  source_correction.levels_in_white = 0.8f;
+  source_correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_HSV;
+  source_correction.hsv_hue = 0.25f;
+  source_correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_INVERT;
+  sculpt_data->paint.brush = brush;
+
+  BKE_paint_material_brush_presets_prepare_for_save(bmain);
+
+  char filepath[FILE_MAX];
+  BLI_path_join(
+      filepath, sizeof(filepath), BKE_tempdir_session(), "correction_persist_test.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+
+  const Brush *reloaded_brush = nullptr;
+  for (const Brush &candidate : bfd->main->brushes) {
+    if (STREQ(candidate.id.name + 2, "CorrectionPersistBrush")) {
+      reloaded_brush = &candidate;
+      break;
+    }
+  }
+  ASSERT_NE(reloaded_brush, nullptr);
+  ASSERT_NE(reloaded_brush->material_paint, nullptr);
+  const BrushMaterialPaintCorrection *reloaded_brush_correction =
+      reloaded_brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].correction;
+  ASSERT_NE(reloaded_brush_correction, nullptr);
+  EXPECT_TRUE(reloaded_brush_correction->flag & BRUSH_MATERIAL_PAINT_CORRECTION_LEVELS);
+  EXPECT_FLOAT_EQ(reloaded_brush_correction->levels_in_black, 0.1f);
+  EXPECT_FLOAT_EQ(reloaded_brush_correction->levels_in_white, 0.8f);
+  EXPECT_TRUE(reloaded_brush_correction->flag & BRUSH_MATERIAL_PAINT_CORRECTION_HSV);
+  EXPECT_FLOAT_EQ(reloaded_brush_correction->hsv_hue, 0.25f);
+  EXPECT_TRUE(reloaded_brush_correction->flag & BRUSH_MATERIAL_PAINT_CORRECTION_INVERT);
+
+  Scene *reloaded_scene = nullptr;
+  for (Scene &candidate : bfd->main->scenes) {
+    if (STREQ(candidate.id.name + 2, "CorrectionPersistScene")) {
+      reloaded_scene = &candidate;
+      break;
+    }
+  }
+  ASSERT_NE(reloaded_scene, nullptr);
+  ASSERT_FALSE(reloaded_scene->toolsettings->paint_mode.material_paint_brush_presets.is_empty());
+  PaintMaterialBrushPreset &reloaded_preset =
+      *reloaded_scene->toolsettings->paint_mode.material_paint_brush_presets.begin();
+  ASSERT_NE(reloaded_preset.material_paint, nullptr);
+  const BrushMaterialPaintCorrection *reloaded_preset_correction =
+      reloaded_preset.material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].correction;
+  ASSERT_NE(reloaded_preset_correction, nullptr);
+  ASSERT_NE(reloaded_preset_correction, reloaded_brush_correction)
+      << "the brush and its preset must not share a correction after reload";
+  EXPECT_TRUE(reloaded_preset_correction->flag & BRUSH_MATERIAL_PAINT_CORRECTION_LEVELS);
+  EXPECT_FLOAT_EQ(reloaded_preset_correction->levels_in_black, 0.1f);
+  EXPECT_FLOAT_EQ(reloaded_preset_correction->levels_in_white, 0.8f);
+  EXPECT_TRUE(reloaded_preset_correction->flag & BRUSH_MATERIAL_PAINT_CORRECTION_HSV);
+  EXPECT_FLOAT_EQ(reloaded_preset_correction->hsv_hue, 0.25f);
+  EXPECT_TRUE(reloaded_preset_correction->flag & BRUSH_MATERIAL_PAINT_CORRECTION_INVERT);
+
+  BLO_blendfiledata_free(bfd);
+  BLI_delete(filepath, false, false);
+
+  BKE_id_free(bmain, scene);
+}
+
+TEST(paint_material_correction, neutral_is_noop)
+{
+  BrushMaterialPaintCorrection correction;
+  correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_ENABLED;
+  float rgb[3] = {0.25f, 0.5f, 1.5f};
+  BKE_brush_material_paint_correction_apply_rgb(correction, rgb);
+  EXPECT_FLOAT_EQ(rgb[0], 0.25f);
+  EXPECT_FLOAT_EQ(rgb[1], 0.5f);
+  EXPECT_FLOAT_EQ(rgb[2], 1.5f);
+  EXPECT_FLOAT_EQ(BKE_brush_material_paint_correction_apply_value(correction, -1.0f, 1.0f, -0.25f),
+                  -0.25f);
+}
+
+TEST(paint_material_correction, disabled_is_noop)
+{
+  BrushMaterialPaintCorrection correction;
+  correction.flag &= short(~BRUSH_MATERIAL_PAINT_CORRECTION_ENABLED);
+  correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_INVERT;
+  correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_LEVELS;
+  correction.levels_in_white = 0.5f;
+  float rgb[3] = {0.25f, 0.5f, 1.5f};
+  BKE_brush_material_paint_correction_apply_rgb(correction, rgb);
+  EXPECT_FLOAT_EQ(rgb[0], 0.25f);
+  EXPECT_FLOAT_EQ(rgb[1], 0.5f);
+  EXPECT_FLOAT_EQ(rgb[2], 1.5f);
+}
+
+TEST(paint_material_correction, applies_levels_then_hsv_then_invert)
+{
+  BrushMaterialPaintCorrection correction;
+  correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_ENABLED;
+  correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_LEVELS;
+  correction.levels_in_white = 0.5f;
+  correction.levels_gamma = 1.0f;
+  correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_HSV;
+  correction.hsv_hue = 0.5f;
+  correction.hsv_saturation = 1.0f;
+  correction.hsv_value = 0.5f;
+  correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_INVERT;
+
+  /* 0.25 -> Levels(0..0.5) -> 0.5 -> HSV Value *0.5 -> 0.25 -> Invert -> 0.75. */
+  float rgb[3] = {0.25f, 0.25f, 0.25f};
+  BKE_brush_material_paint_correction_apply_rgb(correction, rgb);
+  EXPECT_NEAR(rgb[0], 0.75f, 1e-6f);
+  EXPECT_NEAR(rgb[1], 0.75f, 1e-6f);
+  EXPECT_NEAR(rgb[2], 0.75f, 1e-6f);
+}
+
+TEST(paint_material_correction, scalar_levels_and_invert_use_the_channel_range)
+{
+  BrushMaterialPaintCorrection correction;
+  correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_ENABLED;
+  correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_LEVELS;
+  correction.levels_in_black = 0.0f;
+  correction.levels_in_white = 1.0f;
+  correction.levels_gamma = 1.0f;
+  correction.flag |= BRUSH_MATERIAL_PAINT_CORRECTION_INVERT;
+
+  /* Over [0, 1]: 0.25 -> Levels identity -> 0.25 -> Invert -> 0.75. */
+  EXPECT_NEAR(BKE_brush_material_paint_correction_apply_value(correction, 0.0f, 1.0f, 0.25f),
+              0.75f,
+              1e-6f);
+  /* Over [-1, 1]: 0.5 -> Levels identity -> 0.5 -> Invert mirrors around the range. */
+  EXPECT_NEAR(BKE_brush_material_paint_correction_apply_value(correction, -1.0f, 1.0f, 0.5f),
+              -0.5f,
+              1e-6f);
 }
 
 }  // namespace blender

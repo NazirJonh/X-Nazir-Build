@@ -38,6 +38,7 @@
 #include "DNA_scene_types.h"
 
 #include "BKE_brush.hh"
+#include "BKE_brush_material_correction.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
@@ -1772,6 +1773,11 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
               }
               material::ChannelSourceSampler::decode_linear_batch(
                   raw_colors, channel_sources->colorspace(target_channel));
+              /* The member applies the channel's own prepared correction and skips a channel whose
+               * texels already came out corrected, so the brush guard above it stays. */
+              if (brush.material_paint != nullptr) {
+                channel_sources->apply_correction_batch(raw_colors, target_channel);
+              }
               for (const int ai : accepted.index_range()) {
                 accepted[ai].source_color = raw_colors[ai];
               }

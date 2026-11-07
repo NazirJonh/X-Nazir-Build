@@ -40,6 +40,7 @@
 #include "DNA_workspace_types.h"
 
 #include "BKE_brush.hh"
+#include "BKE_brush_material_correction.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
@@ -151,6 +152,10 @@ struct TexSnapshot {
   float old_mask_size[3];
   float old_mask_ofs[3];
   float old_mask_rot;
+  /** Channel source corrections ("Correction Image") baked into the buffer: they change the
+   * sampled value without touching #Tex/#Image, so a parameter edit must invalidate the cache
+   * like a texture swap would. */
+  uint64_t old_correction_stamp;
 };
 
 struct CursorSnapshot {
@@ -180,7 +185,8 @@ static bool paint_draw_tex_overlay_3d(
     PaintCursorContext &pcontext,
     bool primary,
     const MTex *mtex_override,
-    const ed::material_bake::MaterialSourcePreview *material_source);
+    const ed::material_bake::MaterialSourcePreview *material_source,
+    int preview_channel_index = -1);
 
 /* RAII guard for GPU blend and depth test state during paint cursor drawing. */
 class PaintCursorGPUStateGuard {
@@ -210,6 +216,16 @@ class PaintCursorGPUStateGuard {
 static const Image *paint_tex_sampled_image(const Tex *tex)
 {
   return (tex != nullptr && tex->type == TEX_IMAGE) ? tex->ima : nullptr;
+}
+
+/** Identity of the channel source corrections ("Correction Image"), so the stamp does not depend
+ * on which channel the preview currently samples. Delegated to BKE: one mixing implementation for
+ * the cursor and for anything that caches a corrected result. */
+static uint64_t paint_correction_stamp(const Brush *brush)
+{
+  return brush != nullptr && brush->material_paint != nullptr ?
+             BKE_brush_material_paint_corrections_hash(*brush->material_paint) :
+             0;
 }
 
 /**
@@ -272,6 +288,7 @@ static int same_tex_snap(TexSnapshot *snap,
           snap->old_mask_tex_image == paint_tex_sampled_image(mask_tex) && mask_placement_same &&
           snap->old_material_ibuf == material_ibuf &&
           snap->old_material_constant == material_constant &&
+          snap->old_correction_stamp == paint_correction_stamp(brush) &&
           snap->old_texel_mode == texel_mode);
 }
 
@@ -307,6 +324,7 @@ static void make_tex_snap(TexSnapshot *snap,
   snap->old_material_ibuf = material_source != nullptr ? material_source->ibuf : nullptr;
   snap->old_material_constant = material_source != nullptr ? material_source->constant :
                                                              float4(0.0f);
+  snap->old_correction_stamp = paint_correction_stamp(brush);
   snap->old_texel_mode = texel_mode;
 }
 
@@ -338,6 +356,18 @@ struct LoadTexData {
   const ed::material_bake::MaterialSourcePreview *material_source = nullptr;
   /** How texels become pixels; only meaningful when `col` is set. */
   OverlayTexelMode texel_mode;
+  /**
+   * Index of the brush channel whose source slot this overlay samples (Source Mode: Maps, or the
+   * Mask source preview), -1 when the preview does not come from a channel slot. Resolved by the
+   * preview provider; see #PaintCursorContext::material_preview_channel_index.
+   */
+  int channel_index = -1;
+  /**
+   * "Correction Image" this overlay has to apply to the sampled texels, resolved once through
+   * #BKE_brush_material_paint_correction_for_channel so the cursor shows the texture the stroke
+   * will paint. Null when the previewed channel has none.
+   */
+  const BrushMaterialPaintCorrection *correction = nullptr;
 };
 
 /**
@@ -498,8 +528,22 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
           /* Match the stroke's decoder, so luminance is taken from the same linear color. */
           IMB_colormanagement_colorspace_to_scene_linear_v3(linear_rgba, colorspace);
         }
+        /* Match the Mask stroke: a Base Color source is corrected as a color before its
+         * luminance; an Alpha source is corrected as a scalar before the Mask Source's invert. */
+        const BrushMaterialPaintCorrection *correction = data->correction;
+        if (correction != nullptr && !data->texel_mode.use_alpha) {
+          float rgb[3] = {linear_rgba[0], linear_rgba[1], linear_rgba[2]};
+          BKE_brush_material_paint_correction_apply_rgb(*correction, rgb);
+          linear_rgba = float4(rgb[0], rgb[1], rgb[2], linear_rgba[3]);
+        }
         float coverage = BKE_paint_material_mask_texel_coverage(
-            linear_rgba, data->texel_mode.use_alpha, data->texel_mode.invert);
+            linear_rgba, data->texel_mode.use_alpha, /*invert=*/false);
+        if (correction != nullptr && data->texel_mode.use_alpha) {
+          coverage = BKE_brush_material_paint_correction_apply_value(
+              *correction, 0.0f, 1.0f, coverage);
+        }
+        /* The Mask Source's invert comes last, like #mask_source_coverage_at_uv. */
+        coverage = BKE_brush_mask_coverage_finish(data->texel_mode.invert, coverage);
         /* Tiled and Stencil cover the region/stencil rect, not the dab; every other mode shows
          * the brush falloff so the overlay matches the dab's actual strength. */
         if (!ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL)) {
@@ -532,6 +576,11 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
                              IMB_colormanagement_space_is_data(colorspace);
         if (convert_to_linear && !is_data) {
           IMB_colormanagement_colorspace_to_scene_linear_v3(rgba, colorspace);
+        }
+        /* "Correction Image" of the previewed channel, applied in the same linear state the
+         * stroke's #finish_color_sample corrects, so the cursor shows the corrected texture. */
+        if (data->correction != nullptr) {
+          BKE_brush_material_paint_correction_apply_rgb(*data->correction, rgba);
         }
         /* Data/"Non-Color" byte values are already the stored encoding. Encoding them as sRGB
          * a second time makes the overlay paler than the source image. */
@@ -579,6 +628,20 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
           avg = BKE_brush_mask_tex_coverage_finish(*br, avg);
         }
         else {
+          /* "Correction Image" of the previewed channel, through the channel's own stored range
+           * like the stroke's #scalar_source_finish, so the strength overlay matches what a
+           * stroke writes. */
+          if (data->correction != nullptr) {
+            const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+                eMaterialPaintChannel(data->channel_index));
+            const eMaterialPaintChannel channel = eMaterialPaintChannel(data->channel_index);
+            avg = BKE_brush_material_paint_correction_apply_value(
+                *data->correction,
+                BKE_paint_material_channel_value_encode(channel, info.value_min),
+                BKE_paint_material_channel_value_encode(channel, info.value_max),
+                avg);
+          }
+
           /* Clamp to avoid precision overflow. */
           CLAMP(avg, 0.0f, 1.0f);
         }
@@ -612,7 +675,8 @@ static int load_tex(Paint *paint,
                     bool primary,
                     const MTex *mtex_override = nullptr,
                     const ed::material_bake::MaterialSourcePreview *material_source = nullptr,
-                    const OverlayTexelMode &requested_texel_mode = OverlayTexelMode())
+                    const OverlayTexelMode &requested_texel_mode = OverlayTexelMode(),
+                    const int preview_channel_index = -1)
 {
   /* Only the colored (material preview) overlay converts texels; the secondary mask texture of the
    * same cursor draw must stay a plain strength overlay. */
@@ -739,6 +803,14 @@ static int load_tex(Paint *paint,
     data.radius = radius;
     data.material_source = material_source;
     data.texel_mode = texel_mode;
+    /* The channel comes from the preview provider, which resolved it by index: finding it back
+     * from the #Tex would answer wrong when two channels share one texture. Only a channel preview
+     * (an #mtex_override) may carry a correction; the legacy strength overlays stay untouched. */
+    data.channel_index = mtex_override != nullptr ? preview_channel_index : -1;
+    if (data.channel_index != -1 && br->material_paint != nullptr) {
+      data.correction = BKE_brush_material_paint_correction_for_channel(
+          *br->material_paint, eMaterialPaintChannel(data.channel_index));
+    }
     if (mask_mtex != nullptr) {
       data.mask_mtex = mask_mtex;
       data.mask_rotation = paint->runtime != nullptr ? paint->runtime->brush_rotation_sec : 0.0f;
@@ -1034,7 +1106,8 @@ static bool paint_draw_tex_overlay(Paint *paint,
                                    bool primary,
                                    const MTex *mtex_override = nullptr,
                                    const ed::material_bake::MaterialSourcePreview *material_source = nullptr,
-                                   const OverlayTexelMode &texel_mode = OverlayTexelMode())
+                                   const OverlayTexelMode &texel_mode = OverlayTexelMode(),
+                                   const int preview_channel_index = -1)
 {
   rctf quad;
   /* Check for overlay mode. */
@@ -1073,8 +1146,16 @@ static bool paint_draw_tex_overlay(Paint *paint,
   }
 
   bke::PaintRuntime *paint_runtime = paint->runtime;
-  if (load_tex(
-          paint, brush, vc, zoom, col, primary, mtex_override, material_source, texel_mode))
+  if (load_tex(paint,
+               brush,
+               vc,
+               zoom,
+               col,
+               primary,
+               mtex_override,
+               material_source,
+               texel_mode,
+               preview_channel_index))
   {
     GPU_color_mask(true, true, true, true);
     GPU_depth_test(GPU_DEPTH_NONE);
@@ -1305,7 +1386,8 @@ static bool paint_draw_alpha_overlay(Paint *paint,
                                      const MTex &placement_mtex,
                                      const MTex *material_preview_mtex = nullptr,
                                      const ed::material_bake::MaterialSourcePreview *material_source = nullptr,
-                                     const OverlayTexelMode &texel_mode = OverlayTexelMode())
+                                     const OverlayTexelMode &texel_mode = OverlayTexelMode(),
+                                     const int preview_channel_index = -1)
 {
   /* Color means that primary brush texture is colored and secondary is used for alpha/mask
    * control. A material paint channel preview is always colored: it previews the actual pattern
@@ -1340,7 +1422,13 @@ static bool paint_draw_alpha_overlay(Paint *paint,
                                                     true,
                                                     material_preview_mtex,
                                                     material_source,
-                                                    texel_mode);
+                                                    texel_mode,
+                                                    /* The index names the channel of the material
+                                                     * preview only; #load_tex ignores it for any
+                                                     * other overlay. */
+                                                    material_preview_mtex != nullptr ?
+                                                        preview_channel_index :
+                                                        -1);
     }
     /* A material preview replaces the primary texture, not the secondary Mask texture: both layers
      * must be shown when a Mask is assigned. */
@@ -1826,7 +1914,8 @@ static void paint_cursor_check_and_draw_alpha_overlays(PaintCursorContext &pcont
           paint_cursor_placement_mtex(pcontext),
           pcontext.material_preview_mtex,
           pcontext.material_preview_source.usable ? &pcontext.material_preview_source : nullptr,
-          pcontext.material_preview_texel);
+          pcontext.material_preview_texel,
+          pcontext.material_preview_channel_index);
 }
 
 static void paint_cursor_update_anchored_location(PaintCursorContext &pcontext)
@@ -2116,8 +2205,11 @@ void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext)
    * normally empty for such brushes and would reject the overlay before the channel texture (or a
    * baked Material source) is sampled. Only a usable #material_source may be passed on. */
   if (has_material_preview) {
-    paint_draw_tex_overlay_3d(
-        pcontext, /*primary*/ true, material_preview_mtex, material_source);
+    paint_draw_tex_overlay_3d(pcontext,
+                              /*primary*/ true,
+                              material_preview_mtex,
+                              material_source,
+                              pcontext.material_preview_channel_index);
   }
   else if (brush.overlay_flags & BRUSH_OVERLAY_PRIMARY) {
     paint_draw_tex_overlay_3d(pcontext, /*primary*/ true, nullptr, nullptr);
@@ -2177,7 +2269,8 @@ static bool paint_draw_tex_overlay_3d(
     PaintCursorContext &pcontext,
     bool primary,
     const MTex *mtex_override,
-    const ed::material_bake::MaterialSourcePreview *material_source)
+    const ed::material_bake::MaterialSourcePreview *material_source,
+    const int preview_channel_index)
 {
   Brush *brush = pcontext.brush;
   const MTex *mtex = mtex_override ? mtex_override :
@@ -2211,7 +2304,8 @@ static bool paint_draw_tex_overlay_3d(
                 primary,
                 mtex_override,
                 material_source,
-                pcontext.material_preview_texel))
+                pcontext.material_preview_texel,
+                preview_channel_index))
   {
     return false;
   }

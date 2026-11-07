@@ -83,6 +83,14 @@ struct PaintCursorContext {
    * Sculpt Paint and Image Editor (#PaintMode::Texture2D). Points at
    * #material_preview_mtex_storage when set. */
   const MTex *material_preview_mtex = nullptr;
+  /**
+   * The channel whose source slot #material_preview_mtex previews, resolved by the provider that
+   * built it, or -1 when the preview does not come from a channel slot (the brush's own texture, a
+   * bake without a channel, an Erase strength mask). Passed down to the overlay so it can resolve
+   * the channel's "Correction Image" without searching the channels for the previewed #Tex - two
+   * channels can share one #Tex, and the search would then answer with the wrong channel.
+   */
+  int material_preview_channel_index = -1;
   /** Pixels for #material_preview_mtex in Source Mode: Material, where the channel has no #Tex.
    * Unused (and #MaterialSourcePreview.usable false) in Source Mode: Maps. */
   ed::material_bake::MaterialSourcePreview material_preview_source;

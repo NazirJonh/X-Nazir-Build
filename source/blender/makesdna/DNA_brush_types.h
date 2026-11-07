@@ -248,6 +248,47 @@ enum ePaintMaterialEraseMode : int8_t {
   BRUSH_MATERIAL_PAINT_ERASE_PIXEL_ART = 2,
 };
 
+/**
+ * Bits of #BrushMaterialPaintCorrection.flag. Additive on purpose: a new effect takes a free bit
+ * instead of a new field, so the struct keeps its size and a file written by an older build keeps
+ * its meaning.
+ */
+enum eBrushMaterialPaintCorrectionFlag {
+  /** Master switch; clear leaves the sample untouched whatever the parameters say. */
+  BRUSH_MATERIAL_PAINT_CORRECTION_ENABLED = (1 << 0),
+  /** `1 - v` over the channel range (color channels: `|c - 1|` per component). */
+  BRUSH_MATERIAL_PAINT_CORRECTION_INVERT = (1 << 1),
+  /** Remap Input Black..Input White through Gamma onto Output Black..Output White. */
+  BRUSH_MATERIAL_PAINT_CORRECTION_LEVELS = (1 << 2),
+  /** Hue/Saturation/Value adjustment like the Hue/Saturation/Value shader node. */
+  BRUSH_MATERIAL_PAINT_CORRECTION_HSV = (1 << 3),
+};
+
+/**
+ * Pointwise correction of a channel's source image ("Correction Image"): adjustments applied to
+ * every sampled texel of #BrushMaterialPaintChannel.source_mtex before the stroke uses it, so
+ * the texture arrives prepared for projection. The order is fixed: Levels, then
+ * Hue/Saturation/Value (color channels only), then Invert. Parameters are kept when
+ * #BRUSH_MATERIAL_PAINT_CORRECTION_ENABLED is cleared, so switching the feature off and back on
+ * restores them.
+ */
+struct BrushMaterialPaintCorrection {
+  DNA_DEFINE_CXX_METHODS(BrushMaterialPaintCorrection)
+
+  /** #eBrushMaterialPaintCorrectionFlag bits. */
+  short flag = 0;
+  char _pad[2] = {};
+  float levels_in_black = 0.0f;
+  float levels_in_white = 1.0f;
+  float levels_gamma = 1.0f;
+  float levels_out_black = 0.0f;
+  float levels_out_white = 1.0f;
+  /** Neutral values: hue 0.5, saturation 1, value 1 (the node's own identity). */
+  float hsv_hue = 0.5f;
+  float hsv_saturation = 1.0f;
+  float hsv_value = 1.0f;
+};
+
 struct BrushMaterialPaintChannel {
   DNA_DEFINE_CXX_METHODS(BrushMaterialPaintChannel)
 
@@ -287,6 +328,15 @@ struct BrushMaterialPaintChannel {
    * work without extra coordinate handling.
    */
   struct MTex source_mtex;
+
+  /**
+   * Source-image correction ("Correction Image") applied to every sample of #source_mtex,
+   * see #BrushMaterialPaintCorrection. Null in files that predate it: the feature is off.
+   * Not read for the Normal channel: corrections would break the tangent-space encoding (its
+   * green-flip toggle is the dedicated correction there). Stored in the brush, so presets and
+   * brush assets carry the settings along.
+   */
+  struct BrushMaterialPaintCorrection *correction = nullptr;
 };
 
 struct BrushMaterialPaint {

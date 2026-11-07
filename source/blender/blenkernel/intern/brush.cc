@@ -33,6 +33,7 @@
 #include "BKE_asset.hh"
 #include "BKE_bpath.hh"
 #include "BKE_brush.hh"
+#include "BKE_brush_material_correction.hh"
 #include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
 #include "BKE_grease_pencil.hh"
@@ -81,6 +82,32 @@ static void brush_init_data(ID *id)
   brush->curve_size = BKE_paint_default_curve();
   brush->curve_strength = BKE_paint_default_curve();
   brush->curve_jitter = BKE_paint_default_curve();
+}
+
+/**
+ * Give every channel of \a material_paint its own correction.
+ *
+ * Call it right after the shallow copy that produced \a material_paint: the pointers it holds are
+ * then shared with the other owner, and this replaces each of them with an independent copy. It
+ * assumes ownership of what it replaces, so calling it on a value that is not a fresh shallow copy
+ * would leak.
+ */
+static void material_paint_corrections_deep_copy(BrushMaterialPaint &material_paint)
+{
+  for (BrushMaterialPaintChannel &channel : material_paint.channels) {
+    if (channel.correction != nullptr) {
+      channel.correction = MEM_new<BrushMaterialPaintCorrection>(
+          __func__, dna::shallow_copy(*channel.correction));
+    }
+  }
+}
+
+/** Releases every correction owned by \a material_paint, leaving the channels pointing at null. */
+static void material_paint_corrections_free(BrushMaterialPaint &material_paint)
+{
+  for (BrushMaterialPaintChannel &channel : material_paint.channels) {
+    MEM_SAFE_DELETE(channel.correction);
+  }
 }
 
 static void brush_copy_data(Main * /*bmain*/,
@@ -147,6 +174,9 @@ static void brush_copy_data(Main * /*bmain*/,
      * being deterministic. Only this ID copy clears it; the preset snapshot/apply path goes
      * through #BKE_brush_material_paint_copy_into and must keep the flag of its own brush. */
     brush_dst->material_paint->mask_flag &= char(~BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH);
+    /* Channel corrections are heap payloads the shallow copy above shares; give each channel its
+     * own, like the curves further up. */
+    material_paint_corrections_deep_copy(*brush_dst->material_paint);
   }
   if (brush_src->mesh_automasking_settings != nullptr) {
     brush_dst->mesh_automasking_settings = MEM_new<MeshAutomaskingSettings>(
@@ -197,6 +227,9 @@ static void brush_free_data(ID *id)
   if (brush->curves_sculpt_settings != nullptr) {
     BKE_curvemapping_free(brush->curves_sculpt_settings->curve_parameter_falloff);
     MEM_delete(brush->curves_sculpt_settings);
+  }
+  if (brush->material_paint != nullptr) {
+    material_paint_corrections_free(*brush->material_paint);
   }
   MEM_SAFE_DELETE(brush->material_paint);
   if (brush->mesh_automasking_settings != nullptr) {
@@ -387,6 +420,9 @@ static void brush_blend_write(BlendWriter *writer, ID *id, const void *id_addres
       material_paint_copy.mask_source = BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA;
       writer->write_struct_at_address(brush->material_paint, &material_paint_copy);
     }
+    /* After the parent struct, matching #brush_blend_read_data and #scene_blend_write: the reader
+     * takes the parent first and the corrections right after it. */
+    BKE_brush_material_paint_corrections_blend_write(writer, *brush->material_paint);
   }
   if (brush->mesh_automasking_settings) {
     writer->write_struct(brush->mesh_automasking_settings);
@@ -534,6 +570,9 @@ static void brush_blend_read_data(BlendDataReader *reader, ID *id)
   }
 
   BLO_read_struct(reader, BrushMaterialPaint, &brush->material_paint);
+  if (brush->material_paint) {
+    BKE_brush_material_paint_corrections_blend_read(reader, *brush->material_paint);
+  }
 
   BLO_read_struct(reader, MeshAutomaskingSettings, &brush->mesh_automasking_settings);
   if (brush->mesh_automasking_settings) {
@@ -1247,6 +1286,9 @@ static void material_paint_all_id_user_adjust(BrushMaterialPaint &material_paint
 BrushMaterialPaint *BKE_brush_material_paint_copy(const BrushMaterialPaint &src, const int flag)
 {
   BrushMaterialPaint *dst = MEM_new<BrushMaterialPaint>(__func__, dna::shallow_copy(src));
+  /* The shallow copy above shares the channel corrections; every owner needs its own copy so
+   * editing or freeing one side cannot affect the other. */
+  material_paint_corrections_deep_copy(*dst);
   if ((flag & LIB_ID_CREATE_NO_USER_REFCOUNT) == 0) {
     material_paint_all_id_user_adjust(*dst, 1);
   }
@@ -1262,6 +1304,7 @@ void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint,
   if (do_user_refcount) {
     material_paint_all_id_user_adjust(*material_paint, -1);
   }
+  material_paint_corrections_free(*material_paint);
   MEM_delete(material_paint);
 }
 
@@ -1332,7 +1375,15 @@ void BKE_brush_material_paint_copy_into(BrushMaterialPaint &dst, const BrushMate
     return;
   }
   material_paint_all_id_user_adjust(dst, -1);
-  dst = dna::shallow_copy(src);
+
+  /* Deep-copy the source's corrections before freeing dst's: dst and src may still share pointers
+   * (copies made before corrections became deep-copied), so freeing dst's old ones first could
+   * free what is about to be copied. */
+  BrushMaterialPaint incoming = dna::shallow_copy(src);
+  material_paint_corrections_deep_copy(incoming);
+  material_paint_corrections_free(dst);
+  dst = dna::shallow_copy(incoming);
+
   material_paint_all_id_user_adjust(dst, 1);
 }
 

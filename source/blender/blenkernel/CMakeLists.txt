@@ -73,6 +73,7 @@ set(SRC
   intern/bpath.cc
   intern/brush.cc
   intern/brush_layer_source.cc
+  intern/brush_material_correction.cc
   intern/bvhutils.cc
   intern/cachefile.cc
   intern/callbacks.cc
@@ -436,6 +437,7 @@ set(SRC
   BKE_boids.h
   BKE_bpath.hh
   BKE_brush.hh
+  BKE_brush_material_correction.hh
   BKE_bvhutils.hh
   BKE_cachefile.hh
   BKE_callbacks.hh

@@ -7,6 +7,7 @@
  */
 
 #include "BKE_brush.hh"
+#include "BKE_brush_material_correction.hh"
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
@@ -49,6 +50,7 @@
 #include <cstdio>
 #include <cstring>
 #include <type_traits>
+#include <utility>
 
 #include "WM_api.hh"
 
@@ -59,6 +61,7 @@
 #include "../paint_intern.hh"
 #include "paint_dab_timing.hh"
 #include "paint_material_blend.hh"
+#include "paint_material_correction_cache.hh"
 #include "paint_material_source.hh"
 #include "paint_mask_coverage_cache.hh"
 #include "sculpt_intern.hh"
@@ -207,8 +210,7 @@ float paint_mask_texture_coverage(const Brush &brush,
 /* The scalar samplers hand the stroke writers values in storage, the domain the maps are painted
  * in: a texture's intensity already is a storage level, while the brush value and a constant are
  * authored reliefs and cross the channel's encode seam here. Identity channels pass through. */
-static float2 stored_scalar_range(const PaintModeSettings &settings,
-                                  const eMaterialPaintChannel channel)
+float2 stored_scalar_range(const PaintModeSettings &settings, const eMaterialPaintChannel channel)
 {
   const float2 range = BKE_paint_material_channel_range(settings, channel);
   return float2(BKE_paint_material_channel_value_encode(channel, range.x),
@@ -237,18 +239,69 @@ bool channel_source_invertible(const eMaterialPaintChannel channel)
   return ELEM(channel, PAINT_MATERIAL_CHANNEL_ALPHA, PAINT_MATERIAL_CHANNEL_HEIGHT);
 }
 
-float scalar_source_finish(const BrushMaterialPaint &brush_paint,
-                           const eMaterialPaintChannel channel,
-                           const float2 &range,
-                           const float sampled)
+float scalar_source_finish_prepared(const BrushMaterialPaint &brush_paint,
+                                    const eMaterialPaintChannel channel,
+                                    const float2 &range,
+                                    const float sampled,
+                                    const BrushMaterialPaintCorrectionPrepared *prepared)
 {
   /* Inversion belongs to the texture itself, so every read of an invertible channel goes through
    * here and the Sculpt and Image 2D engines cannot disagree. Off by default, which leaves the
    * plain clamp. */
+  float value = sampled;
   if (channel_source_invertible(channel) && brush_paint.channels[channel].source_invert != 0) {
-    return BKE_paint_material_value_invert(range.x, range.y, sampled);
+    value = BKE_paint_material_value_invert(range.x, range.y, value);
   }
-  return math::clamp(sampled, range.x, range.y);
+  else {
+    value = math::clamp(value, range.x, range.y);
+  }
+  /* "Correction Image": the channel's own pointwise adjustments of its source, applied after the
+   * fixed clamp/invert so both layers of the pipeline stay deterministic. Null \a prepared means
+   * the channel has no correction to apply. */
+  if (prepared != nullptr) {
+    value = BKE_brush_material_paint_correction_apply_prepared_value(
+        *prepared, range.x, range.y, value);
+  }
+  return value;
+}
+
+float mask_coverage_correct_raw(const BrushMaterialPaintCorrectionPrepared *prepared,
+                                const float raw_coverage)
+{
+  const float coverage = math::clamp(raw_coverage, 0.0f, 1.0f);
+  if (prepared == nullptr) {
+    return coverage;
+  }
+  return BKE_brush_material_paint_correction_apply_prepared_value(
+      *prepared, 0.0f, 1.0f, coverage);
+}
+
+float scalar_source_finish(const BrushMaterialPaint &brush_paint,
+                           const ChannelSourceSet::ChannelSource *source,
+                           const eMaterialPaintChannel channel,
+                           const float2 &range,
+                           const float sampled)
+{
+  if (source != nullptr && source->correction_baked) {
+    /* The cached texels already hold this function's answer - clamp, Source Invert and correction.
+     * Running any of it again would invert twice. */
+    BLI_assert(source->has_correction);
+    return sampled;
+  }
+  const BrushMaterialPaintCorrectionPrepared *prepared =
+      source != nullptr ? channel_sample_correction(*source) : nullptr;
+  BrushMaterialPaintCorrectionPrepared on_the_fly;
+  if (source == nullptr) {
+    /* A caller without a per-stroke resolution - the cursor and the tests - resolves here. Rare,
+     * so preparing on the spot is fine; every sampler passes its #ChannelSource. */
+    if (const BrushMaterialPaintCorrection *correction =
+            BKE_brush_material_paint_correction_for_channel(brush_paint, channel))
+    {
+      on_the_fly = BKE_brush_material_paint_correction_prepare(*correction);
+      prepared = &on_the_fly;
+    }
+  }
+  return scalar_source_finish_prepared(brush_paint, channel, range, sampled, prepared);
 }
 
 MaskValuePair mask_value_pair_get(const BrushMaterialPaint &brush_paint,
@@ -281,7 +334,11 @@ float mask_source_coverage_at_uv(const ChannelUvSampler &sampler,
      * long-standing intensity path, so grayscale mask images still work. */
     const float alpha = sampler.alpha_at_uv(*channel, uv, thread);
     if (alpha < 0.999f) {
-      coverage = math::clamp(alpha, 0.0f, 1.0f);
+      /* The alpha read here is the image's own, never a cached corrected buffer's, so the
+       * "Correction Image" applies even for a channel whose texel samples are already corrected -
+       * hence the sampler's unconditional accessor. It runs before the Mask Source's invert
+       * below, like on the scalar path, through the one shared coverage rule. */
+      coverage = mask_coverage_correct_raw(sampler.channel_correction(*channel), alpha);
     }
     else {
       /* Raw scalar: the channel's own Source Invert must not double with the Mask Source's one
@@ -673,12 +730,20 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
 
   pool_ = BKE_image_pool_new();
 
-
   /* Usability is decided once here rather than per sample, so the UI warning and the engine can
    * never disagree in the middle of a stroke. For IMAGE sources, probe ImBuf acquisition via the
    * stroke pool; a failed acquire marks the source unusable for the whole stroke. */
   for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
     ChannelSource &source = sources_[i];
+    /* "Correction Image" constants resolved once per stroke, next to the correction bake below:
+     * every sample path then reads #prepared_correction instead of asking BKE and doing its
+     * divisions again per texel (see #channel_sample_correction for the one gate). */
+    if (const BrushMaterialPaintCorrection *correction =
+            BKE_brush_material_paint_correction_for_channel(brush_paint, eMaterialPaintChannel(i)))
+    {
+      source.has_correction = true;
+      source.prepared_correction = BKE_brush_material_paint_correction_prepare(*correction);
+    }
     if (source.kind == ChannelSourceKind::Image) {
       /* An Image source has no #Tex to fall back on, so it is usable only when the pinned buffer
        * can be sampled directly. Anything else leaves the channel on its own value rather than
@@ -693,6 +758,9 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
           source.colorspace = ibuf->byte_buffer.colorspace;
         }
         source.ibuf = ibuf;
+        source.pooled_ibuf = ibuf;
+        source.pooled_do_linear_conversion = source.do_linear_conversion;
+        source.pooled_colorspace = source.colorspace;
         source.image_direct_sample = true;
         source.usable = true;
       }
@@ -736,7 +804,23 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
       if (direct_sample) {
         source.image = tex->ima;
         source.ibuf = ibuf;
+        source.pooled_ibuf = ibuf;
+        source.pooled_do_linear_conversion = source.do_linear_conversion;
+        source.pooled_colorspace = source.colorspace;
         source.image_direct_sample = true;
+        /* In Mask mode only the Mask Source's channel resolves, so the flag below says exactly
+         * "this channel's buffer feeds a Mask coverage read" (see #channel_source_bake_correction).
+         */
+        BLI_assert(!mask_mode || (mask_channel && eMaterialPaintChannel(i) == *mask_channel));
+        channel_source_bake_correction(brush_paint,
+                                       settings,
+                                       *tex->ima,
+                                       iuser,
+                                       *ibuf,
+                                       source,
+                                       eMaterialPaintChannel(i),
+                                       correction_buffers_[i],
+                                       /*for_mask=*/mask_mode);
       }
       else {
         BKE_image_pool_release_ibuf(tex->ima, ibuf, pool_);
@@ -747,21 +831,19 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
     }
     active_ |= source.usable;
   }
-
-
 }
 
 ChannelSourceSet::~ChannelSourceSet()
 {
   if (pool_ != nullptr) {
     for (ChannelSource &source : sources_) {
-      /* #image is set alongside #ibuf for every kind that pins one, so the release does not have
-       * to know which kind acquired it. */
-      if (source.ibuf == nullptr || source.image == nullptr) {
+      /* #pooled_ibuf, not #ibuf: a channel served from the correction cache samples the cache's
+       * copy, and giving that back to the pool would corrupt it. */
+      if (source.pooled_ibuf == nullptr || source.image == nullptr) {
         continue;
       }
-      BKE_image_pool_release_ibuf(source.image, source.ibuf, pool_);
-      source.ibuf = nullptr;
+      BKE_image_pool_release_ibuf(source.image, source.pooled_ibuf, pool_);
+      source.pooled_ibuf = nullptr;
     }
     BKE_image_pool_free(pool_);
   }
@@ -1679,7 +1761,7 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
                         rgba);
   /* Scalar channels use the texture's intensity (mask/factor), not its color, so unlike
    * #color() below there is no RGB to decode here. */
-  return scalar_source_finish(brush_paint_, channel, range, value);
+  return scalar_source_finish(brush_paint_, &source, channel, range, value);
 }
 
 float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
@@ -1708,7 +1790,7 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
                         area_local_mat_for(channel, source),
                         &value,
                         rgba);
-  return scalar_source_finish(brush_paint_, channel, range, value);
+  return scalar_source_finish(brush_paint_, &source, channel, range, value);
 }
 
 float ChannelSourceSampler::mask_coverage(const eMaterialPaintChannel channel,
@@ -1775,6 +1857,14 @@ float ChannelSourceSampler::mask_coverage(const eMaterialPaintChannel channel,
     if (source.do_linear_conversion) {
       IMB_colormanagement_colorspace_to_scene_linear_v3(rgba, source.colorspace);
     }
+    /* A source whose texels are not already corrected (procedural texture, alpha-weighted bake)
+     * owes the "Correction Image" here, as a color before its luminance - the same order the UV
+     * path (#mask_source_coverage_at_uv) and the correction cache follow. */
+    if (const BrushMaterialPaintCorrectionPrepared *prepared = channel_sample_correction(source)) {
+      float rgb[3] = {rgba.x, rgba.y, rgba.z};
+      BKE_brush_material_paint_correction_apply_prepared_rgb(*prepared, rgb);
+      rgba = float4(rgb[0], rgb[1], rgb[2], rgba.w);
+    }
     value = BKE_paint_material_mask_luminance(float3(rgba.x, rgba.y, rgba.z));
   }
   else {
@@ -1787,6 +1877,7 @@ float ChannelSourceSampler::mask_coverage(const eMaterialPaintChannel channel,
                           area_local_mat_for(channel, source),
                           &value,
                           rgba);
+    value = mask_coverage_correct_raw(channel_sample_correction(source), value);
   }
   return mask_coverage_finish(mask_invert_, value);
 }
@@ -1801,6 +1892,11 @@ const ocio::ColorSpace *ChannelSourceSampler::colorspace(const eMaterialPaintCha
   return sources_.source(channel).colorspace;
 }
 
+bool ChannelSourceSampler::correction_baked(const eMaterialPaintChannel channel) const
+{
+  return sources_.source(channel).correction_baked;
+}
+
 void ChannelSourceSampler::decode_linear_batch(MutableSpan<float3> colors,
                                                const ocio::ColorSpace *colorspace)
 {
@@ -1809,6 +1905,22 @@ void ChannelSourceSampler::decode_linear_batch(MutableSpan<float3> colors,
   }
   IMB_colormanagement_colorspace_to_scene_linear(
       reinterpret_cast<float *>(colors.data()), int(colors.size()), 1, 3, colorspace, false);
+}
+
+void ChannelSourceSampler::apply_correction_batch(MutableSpan<float3> colors,
+                                                  const ChannelSourceSet::ChannelSource &source)
+{
+  const BrushMaterialPaintCorrectionPrepared *prepared = channel_sample_correction(source);
+  if (prepared == nullptr) {
+    return;
+  }
+  BKE_brush_material_paint_correction_apply_prepared_rgb_batch(*prepared, colors);
+}
+
+void ChannelSourceSampler::apply_correction_batch(MutableSpan<float3> colors,
+                                                  const eMaterialPaintChannel channel) const
+{
+  apply_correction_batch(colors, sources_.source(channel));
 }
 
 static float3 color_channel_fallback(const eMaterialPaintChannel channel,
@@ -1835,24 +1947,40 @@ static float3 color_channel_fallback(const eMaterialPaintChannel channel,
 
 /** Shared tail of both #color overloads: turns a raw \a rgba sample into the channel's target
  * color/normal. Factored out so the \a position and #TexelSampleContext overloads only differ in
- * how they call #sculpt_apply_texture, not in how the result is interpreted. */
+ * how they call #sculpt_apply_texture, not in how the result is interpreted.
+ * \a correction is the channel's prepared "Correction Image" (null for the Normal channel, channels
+ * without one, and channels whose texels already came out corrected - see
+ * #channel_sample_correction); it is applied to the decoded linear color, the same state the stroke
+ * paints. */
 static float3 finish_color_sample(const bool is_normal,
                                   const float3 &fallback,
                                   const bool do_linear_conversion,
                                   const ocio::ColorSpace *colorspace,
                                   const float4 &rgba,
                                   const bool decode_linear,
-                                  const bool flip_green)
+                                  const bool flip_green,
+                                  const BrushMaterialPaintCorrectionPrepared *correction)
 {
   if (!is_normal) {
     /* Every color channel (Base Color, Emission, Specular Tint) decodes here; the Normal map
      * below is tangent data and must never be gamma-decoded. */
+    float3 rgb;
     if (do_linear_conversion && decode_linear) {
       float4 decoded = rgba;
       IMB_colormanagement_colorspace_to_scene_linear_v3(decoded, colorspace);
-      return float3(decoded.x, decoded.y, decoded.z);
+      rgb = float3(decoded.x, decoded.y, decoded.z);
     }
-    return float3(rgba.x, rgba.y, rgba.z);
+    else {
+      rgb = float3(rgba.x, rgba.y, rgba.z);
+    }
+    /* A deferred #decode_linear_batch is about to run on this sample: the correction must wait
+     * for it too, or it would run in the stored encoding instead of scene-linear space. */
+    if (correction != nullptr && (!do_linear_conversion || decode_linear)) {
+      float rgb_array[3] = {rgb.x, rgb.y, rgb.z};
+      BKE_brush_material_paint_correction_apply_prepared_rgb(*correction, rgb_array);
+      rgb = float3(rgb_array[0], rgb_array[1], rgb_array[2]);
+    }
+    return rgb;
   }
 
   float3 decal_normal;
@@ -1954,7 +2082,7 @@ float ChannelUvSampler::scalar_at_uv(const eMaterialPaintChannel channel,
     return fallback;
   }
   const float2 range = stored_scalar_range(settings_, channel);
-  return scalar_source_finish(brush_paint_, channel, range, value);
+  return scalar_source_finish(brush_paint_, &source, channel, range, value);
 }
 
 float ChannelUvSampler::scalar_coverage_at_uv(const eMaterialPaintChannel channel,
@@ -1974,8 +2102,9 @@ float ChannelUvSampler::scalar_coverage_at_uv(const eMaterialPaintChannel channe
     return 1.0f;
   }
   /* No Source Invert here (see the declaration): the Mask Source's invert applies once, where
-   * this raw scalar becomes coverage. */
-  return math::clamp(value, 0.0f, 1.0f);
+   * this raw scalar becomes coverage. The clamp and the "Correction Image" are the module's one
+   * raw-coverage rule. */
+  return mask_coverage_correct_raw(channel_sample_correction(source), value);
 }
 
 float ChannelUvSampler::alpha_at_uv(const eMaterialPaintChannel channel,
@@ -2008,6 +2137,24 @@ const ocio::ColorSpace *ChannelUvSampler::colorspace(const eMaterialPaintChannel
   return sources_.source(channel).colorspace;
 }
 
+bool ChannelUvSampler::correction_baked(const eMaterialPaintChannel channel) const
+{
+  return sources_.source(channel).correction_baked;
+}
+
+void ChannelUvSampler::apply_correction_batch(MutableSpan<float3> colors,
+                                              const eMaterialPaintChannel channel) const
+{
+  ChannelSourceSampler::apply_correction_batch(colors, sources_.source(channel));
+}
+
+const BrushMaterialPaintCorrectionPrepared *ChannelUvSampler::channel_correction(
+    const eMaterialPaintChannel channel) const
+{
+  const ChannelSourceSet::ChannelSource &source = sources_.source(channel);
+  return source.has_correction ? &source.prepared_correction : nullptr;
+}
+
 float3 ChannelUvSampler::color_at_uv(const eMaterialPaintChannel channel,
                                      const float2 &uv,
                                      const int thread,
@@ -2033,7 +2180,8 @@ float3 ChannelUvSampler::color_at_uv(const eMaterialPaintChannel channel,
                              source.colorspace,
                              rgba,
                              decode_linear,
-                             source.flip_green_channel);
+                             source.flip_green_channel,
+                             channel_sample_correction(source));
 }
 
 const Paint &ChannelSourceSampler::paint() const
@@ -2101,7 +2249,8 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                              source.colorspace,
                              rgba,
                              decode_linear,
-                             source.flip_green_channel);
+                             source.flip_green_channel,
+                             channel_sample_correction(source));
 }
 
 float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
@@ -2136,7 +2285,8 @@ float3 ChannelSourceSampler::color(const eMaterialPaintChannel channel,
                              source.colorspace,
                              rgba,
                              decode_linear,
-                             source.flip_green_channel);
+                             source.flip_green_channel,
+                             channel_sample_correction(source));
 }
 
 /**
@@ -2256,7 +2406,8 @@ void ChannelSourceSampler::gather_colors(const eMaterialPaintChannel channel,
                                       source.colorspace,
                                       rgba,
                                       decode_linear,
-                                      source.flip_green_channel);
+                                      source.flip_green_channel,
+                                      channel_sample_correction(source));
   }
 }
 
@@ -2314,7 +2465,7 @@ void ChannelSourceSampler::gather_scalars(const eMaterialPaintChannel channel,
                                       area_local_mat,
                                       &value,
                                       rgba);
-    r_values[i] = scalar_source_finish(brush_paint_, channel, range, value);
+    r_values[i] = scalar_source_finish(brush_paint_, &source, channel, range, value);
   }
 }
 
@@ -2642,7 +2793,8 @@ void ChannelSourceSampler::gather_tangent_normals_packed(const eMaterialPaintCha
                                            source.colorspace,
                                            rgba,
                                            true,
-                                           source.flip_green_channel);
+                                           source.flip_green_channel,
+                                           nullptr);
     r_packed[i] = remap_decal_normal_to_packed_tangent(
         n_d, t_decal, b_decal, n_m, t_m, b_m);
   }
@@ -2705,6 +2857,15 @@ uint64_t mask_source_signature(const material::ChannelSourceSet &sources,
    * the Mask Source's invert mirrors the coverage for every channel it selects. */
   hasher.mix(int(*channel));
   hasher.mix(material::mask_source_invert_get(brush_paint));
+  /* Corrections change the sampled value without touching the image, so their parameters are part
+   * of the source's identity for anyone caching the sampled result. Asked through the same gate
+   * the stroke uses, so a correction left in the brush while the source is a Material/Layer bake
+   * cannot invalidate this signature. */
+  if (const BrushMaterialPaintCorrection *correction =
+          BKE_brush_material_paint_correction_for_channel(brush_paint, *channel))
+  {
+    hasher.mix(BKE_brush_material_paint_correction_hash(*correction));
+  }
   hasher.mix(int(source.kind));
   hasher.mix(source.usable);
   hasher.mix(source.image);
@@ -2739,6 +2900,15 @@ uint64_t mask_source_key(const BrushMaterialPaint &brush_paint,
   /* The Mask Source's own invert, not the channel's: the shape coverage mirrors through
    * #mask_source_invert_get for every channel the Mask selects. */
   hasher.mix(material::mask_source_invert_get(brush_paint));
+  /* Corrections change the sampled value without touching the image; hash their parameters so a
+   * cached source reopens when they change (same reasoning as the invert above). Goes through
+   * the same gate as #mask_source_signature, or a correction that never applies would keep
+   * dropping this cache. */
+  if (const BrushMaterialPaintCorrection *correction =
+          BKE_brush_material_paint_correction_for_channel(brush_paint, *channel))
+  {
+    hasher.mix(BKE_brush_material_paint_correction_hash(*correction));
+  }
   hasher.mix(mode_settings.layer_target_mode);
   hasher.mix(paint.visible_material_channels);
   /* Size / Angle / Random are baked into the resolved source's mapping, so a cached source must be

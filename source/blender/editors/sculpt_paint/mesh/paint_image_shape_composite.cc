@@ -502,7 +502,13 @@ std::shared_ptr<const ShapeTexture> texture_from_channel_sources(
        * value. */
       continue;
     }
-    const ImBuf *ibuf = source.ibuf;
+    /* A correction-baked channel samples the cache's prepared copy. A shape builds a texture of its
+     * own and never applied "Correction Image", so it keeps reading the source's own pixels: this
+     * refactor must not change what a shape paints. */
+    const ImBuf *ibuf = source.correction_baked ? source.pooled_ibuf : source.ibuf;
+    if (ibuf == nullptr) {
+      continue;
+    }
     /* Only color channels hold display-referred pixels. A Normal or scalar map is data and must
      * never be gamma-decoded, exactly like the stroke sampler (#finish_color_sample): decoding an
      * sRGB-tagged normal map would tilt every texel and leave the channel with a wrong normal. */
@@ -517,18 +523,23 @@ std::shared_ptr<const ShapeTexture> texture_from_channel_sources(
     }
     else if (ibuf->byte_buffer.data != nullptr) {
       out.kind = ShapeTextureChannel::Kind::Buffer;
-      if (decode_to_linear && source.do_linear_conversion && source.colorspace != nullptr) {
+      /* The source image's own encoding, taken from the pooled fields: after a correction bake
+       * #colorspace / #do_linear_conversion describe the corrected copy instead. */
+      if (decode_to_linear && source.pooled_do_linear_conversion &&
+          source.pooled_colorspace != nullptr)
+      {
         /* Decode once (and reuse it while the pixels stay), so the sampling stays
          * colorspace-free. */
-        std::shared_ptr<const float[]> linear = linear_pixels_get(*ibuf, source.colorspace, true);
+        std::shared_ptr<const float[]> linear = linear_pixels_get(
+            *ibuf, source.pooled_colorspace, true);
         out.float_px = linear.get();
         out.is_linear = true;
         resources->owned_float.append(std::move(linear));
       }
       else {
         out.byte_px = ibuf->byte_buffer.data;
-        out.is_linear = source.colorspace == nullptr ||
-                        IMB_colormanagement_space_is_scene_linear(source.colorspace);
+        out.is_linear = source.pooled_colorspace == nullptr ||
+                        IMB_colormanagement_space_is_scene_linear(source.pooled_colorspace);
       }
     }
     out.flip_green = source.flip_green_channel;

@@ -1952,6 +1952,7 @@ static void apply_paint_channel(ImageData &image_data,
                   if (batch_decode_color) {
                     material::ChannelSourceSampler::decode_linear_batch(
                         tls.sampled_colors, sampler->colorspace(channel));
+                    sampler->apply_correction_batch(tls.sampled_colors, channel);
                   }
                   /* Randomize Color: a source-driven stroke paints the sampled texels, so the
                    * dab's transform applies to them - Base Color only, the same scoping as the
@@ -2067,6 +2068,7 @@ static void prepare_channel_samples(PaintLocalData &tls,
     sampler->gather_colors(channel, contexts, factors, thread_id, false, tls.raw_source_colors);
     material::ChannelSourceSampler::decode_linear_batch(tls.raw_source_colors,
                                                         sampler->colorspace(channel));
+    sampler->apply_correction_batch(tls.raw_source_colors, channel);
     /* Randomize Color on the sampled texels - Base Color only, see the matching gate in
      * #apply_paint_channel. */
     if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {

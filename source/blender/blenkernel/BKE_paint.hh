@@ -47,6 +47,7 @@ struct Brush;
 struct BrushColorJitterSettings;
 struct BrushMaterialPaint;
 struct BrushMaterialPaintChannel;
+struct BrushMaterialPaintCorrection;
 struct CurveMapping;
 struct Depsgraph;
 struct EnumPropertyItem;
@@ -1642,13 +1643,18 @@ Span<eMaterialPaintChannel> BKE_paint_material_channel_preview_order();
  * previewed; pass #PAINT_MATERIAL_CHANNELS_VISIBLE_ALL where no #Paint is in context (radial
  * control only has the #Brush).
  *
+ * \param r_channel: Optional. Receives the channel whose #MTex was filled, so a consumer that needs
+ * to know which channel it is previewing (the cursor's "Correction Image") does not have to find it
+ * back from the #Tex - two channels can share one #Tex, and then the search would answer wrong.
+ *
  * \return false when no enabled channel has a source, in which case \a r_mtex is zeroed and the
  * cursor should fall back to the brush's own texture.
  */
 bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
                                          const PaintModeSettings &mode_settings,
                                          int visible_material_channels,
-                                         MTex &r_mtex);
+                                         MTex &r_mtex,
+                                         eMaterialPaintChannel *r_channel = nullptr);
 
 /**
  * True when Source Mode: Material reads a layered material's stack (the Layer kind) rather than a
@@ -1788,6 +1794,9 @@ ColorBand *BKE_paint_gradient_value_ramp_ensure(PaintModeSettings &paint_mode,
 void BKE_paint_gradient_value_ramp_free(PaintModeSettings &paint_mode);
 
 /** \} */
+
+/* The channel "Correction Image" stack lives in `BKE_brush_material_correction.hh`; include that
+ * header directly. Kept out of here so the paint umbrella does not have to carry it. */
 
 /**
  * Returns the mesh attribute name for \a channel via

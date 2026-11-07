@@ -159,8 +159,9 @@ Brush *BKE_brush_material_mask_ensure(Main &bmain,
                                       bool *r_created = nullptr);
 
 /**
- * Deep-copies channels/base_color/flags/shared_source_mapping from \a src. The caller owns the
- * result and must eventually pass it to #BKE_brush_material_paint_free.
+ * Deep-copies channels (including each channel's source correction)/base_color/flags/
+ * shared_source_mapping from \a src. The caller owns the result and must eventually pass it to
+ * #BKE_brush_material_paint_free.
  *
  * \param flag: #LIB_ID_CREATE_ / #LIB_ID_COPY_ flags, as passed to the surrounding copy
  * function. Unless #LIB_ID_CREATE_NO_USER_REFCOUNT is set, a counted reference (#id_us_plus) is
@@ -171,7 +172,8 @@ Brush *BKE_brush_material_mask_ensure(Main &bmain,
 BrushMaterialPaint *BKE_brush_material_paint_copy(const BrushMaterialPaint &src, int flag);
 
 /**
- * Frees \a material_paint. No-op if \a material_paint is null.
+ * Frees \a material_paint, including every channel's source correction. No-op if \a material_paint
+ * is null.
  *
  * \param do_user_refcount: When true, drop a counted reference (#id_us_min) on every #Tex and
  * source material the struct holds. Required when the owner is not an ID whose `foreach_id` pass
@@ -183,9 +185,9 @@ void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint,
                                    bool do_user_refcount = false);
 
 /**
- * Overwrites \a dst's channels/base_color/flags/shared_source_mapping from \a src,
- * adjusting #Tex and source-material user counts for every reference gained or dropped. \a dst ==
- * \a src (self-assignment) is a defined no-op.
+ * Overwrites \a dst's channels (including each channel's source correction)/base_color/flags/
+ * shared_source_mapping from \a src, adjusting #Tex and source-material user counts for every
+ * reference gained or dropped. \a dst == \a src (self-assignment) is a defined no-op.
  */
 void BKE_brush_material_paint_copy_into(BrushMaterialPaint &dst, const BrushMaterialPaint &src);
 

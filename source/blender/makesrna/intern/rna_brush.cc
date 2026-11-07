@@ -6,7 +6,9 @@
  * \ingroup RNA
  */
 
+#include <algorithm>
 #include <cstdlib>
+#include <optional>
 
 #include <fmt/format.h>
 
@@ -24,6 +26,7 @@
 #include "BLI_uuid.h"
 
 #include "BKE_brush.hh"
+#include "BKE_brush_material_correction.hh"
 #include "BKE_curve_patch.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
@@ -2186,6 +2189,31 @@ static std::optional<std::string> rna_BrushMaterialPaintChannel_path(const Point
   return fmt::format("material_paint.channels[{}]", int(*channel));
 }
 
+/**
+ * Path of a channel's correction, resolved by finding the channel that owns it.
+ *
+ * A correction is a standalone allocation reachable only through its channel, so it has no index
+ * of its own to report: the index comes from the owning brush, which is also what makes
+ * `path_from_id()` work for drivers, keyframes, Copy Data Path and presets. A correction that
+ * belongs to a scene preset instead is not addressable from RNA and reports no path, exactly as
+ * before this function existed.
+ */
+static std::optional<std::string> rna_BrushMaterialPaintCorrection_path(const PointerRNA *ptr)
+{
+  const Brush *brush = reinterpret_cast<const Brush *>(ptr->owner_id);
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    return std::nullopt;
+  }
+  const BrushMaterialPaintCorrection *correction =
+      static_cast<const BrushMaterialPaintCorrection *>(ptr->data);
+  for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+    if (brush->material_paint->channels[i].correction == correction) {
+      return fmt::format("material_paint.channels[{}].correction", i);
+    }
+  }
+  return std::nullopt;
+}
+
 static int rna_BrushMaterialPaintChannel_channel_get_rna(PointerRNA *ptr)
 {
   if (const std::optional<eMaterialPaintChannel> channel =
@@ -2688,6 +2716,75 @@ static void rna_BrushMaterialPaintChannel_source_image_set(PointerRNA *ptr,
   rna_BrushMaterialPaintChannel_source_image_apply_non_color_default(bmain, channel_id, image);
   /* BKE_texture_add returns the texture with one user already; the MTex slot is that user. */
   BKE_brush_tag_unsaved_changes(brush);
+}
+
+/* Whether the channel carries a "Correction Image" block at all, which is what the panel and the
+ * socket menu's switch are about. Whether it is *applied* is the correction's own #enabled. */
+static bool rna_BrushMaterialPaintChannel_use_correction_image_get(PointerRNA *ptr)
+{
+  const BrushMaterialPaintChannel *channel =
+      static_cast<const BrushMaterialPaintChannel *>(ptr->data);
+  return channel->correction != nullptr;
+}
+
+/* Read-only facts of the channel itself, so the UI (and any Python consumer) asks them instead of
+ * hard-coding channel lists that would silently drift from the engine. Both come from the channel
+ * table the stroke reads (#BKE_paint_material_channel_info), so what the panel offers can never
+ * disagree with what a stroke applies. */
+static bool rna_BrushMaterialPaintChannel_supports_correction_image_get(PointerRNA *ptr)
+{
+  const std::optional<eMaterialPaintChannel> channel_id =
+      rna_BrushMaterialPaintChannel_channel_get(ptr);
+  return channel_id && *channel_id != PAINT_MATERIAL_CHANNEL_NORMAL;
+}
+
+static bool rna_BrushMaterialPaintChannel_supports_hsv_correction_get(PointerRNA *ptr)
+{
+  const std::optional<eMaterialPaintChannel> channel_id =
+      rna_BrushMaterialPaintChannel_channel_get(ptr);
+  return channel_id && BKE_paint_material_channel_info(*channel_id).is_color;
+}
+
+/* The Levels input range is only meaningful ordered: a zero span is handled (the stage reads it as
+ * zero), but an inverted one would silently remap through a mirrored range and give a result the
+ * user cannot predict from the sliders. The setters keep black <= white by clamping the incoming
+ * value against the other end, the way a paired slider behaves. */
+static void rna_BrushMaterialPaintCorrection_levels_in_black_set(PointerRNA *ptr, float value)
+{
+  BrushMaterialPaintCorrection *correction = static_cast<BrushMaterialPaintCorrection *>(
+      ptr->data);
+  correction->levels_in_black = std::clamp(value, 0.0f, correction->levels_in_white);
+}
+
+static void rna_BrushMaterialPaintCorrection_levels_in_white_set(PointerRNA *ptr, float value)
+{
+  BrushMaterialPaintCorrection *correction = static_cast<BrushMaterialPaintCorrection *>(
+      ptr->data);
+  correction->levels_in_white = std::clamp(value, correction->levels_in_black, 1.0f);
+}
+
+static void rna_BrushMaterialPaintChannel_use_correction_image_set(PointerRNA *ptr,
+                                                                   const bool value)
+{
+  BrushMaterialPaintChannel *channel = static_cast<BrushMaterialPaintChannel *>(ptr->data);
+  /* The tangent-space Normal map has no levels or hue to shift; its green-flip toggle is the
+   * dedicated correction. Refuse enabling from Python as well as hiding it in the UI. */
+  const std::optional<eMaterialPaintChannel> channel_id =
+      rna_BrushMaterialPaintChannel_channel_get(ptr);
+  if (value && channel_id && *channel_id == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return;
+  }
+  if (value) {
+    if (channel->correction == nullptr) {
+      /* Showing the block switches it on: a block visible but doing nothing reads as broken.
+       * Switching just the effect off is the block's own button, which leaves it in place. */
+      BKE_brush_material_paint_correction_ensure(*channel)->flag |=
+          BRUSH_MATERIAL_PAINT_CORRECTION_ENABLED;
+    }
+    return;
+  }
+  /* Hiding the block releases it, parameters included: they describe nothing without it. */
+  BKE_brush_material_paint_correction_delete(*channel);
 }
 
 static void rna_BrushCurvePatchSettings_texture_active_index_range(
@@ -4547,6 +4644,111 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  srna = RNA_def_struct(brna, "BrushMaterialPaintCorrection", nullptr);
+  RNA_def_struct_sdna(srna, "BrushMaterialPaintCorrection");
+  RNA_def_struct_path_func(srna, "rna_BrushMaterialPaintCorrection_path");
+  RNA_def_struct_ui_text(srna,
+                         "Material Paint Source Correction",
+                         "Pointwise corrections applied to a channel's source image before the "
+                         "stroke samples it");
+
+  /* Whether the block is applied to the sampled source. Kept apart from the channel's
+   * `use_correction_image`, which only decides whether the block exists: switching this off leaves
+   * the block and its parameters in place, which is what the panel's own button does. */
+  prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_MATERIAL_PAINT_CORRECTION_ENABLED);
+  RNA_def_property_ui_text(prop,
+                           "Apply Correction",
+                           "Apply this correction to the sampled source; switching it off keeps "
+                           "the block and its parameters");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "invert", PROP_BOOLEAN, PROP_NONE);
+  /* The four stage switches share one `flag` word, one bit each: the struct keeps its size, so a
+   * new effect costs a free bit and no file-format change. */
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_MATERIAL_PAINT_CORRECTION_INVERT);
+  RNA_def_property_ui_text(prop,
+                           "Invert",
+                           "Invert the sampled source (1 - v over the channel range; color "
+                           "channels invert each component)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "use_levels", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_MATERIAL_PAINT_CORRECTION_LEVELS);
+  RNA_def_property_ui_text(prop,
+                           "Levels",
+                           "Remap Input Black..Input White through Gamma onto Output Black.."
+                           "Output White");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "levels_in_black", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "levels_in_black");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_float_funcs(
+      prop, nullptr, "rna_BrushMaterialPaintCorrection_levels_in_black_set", nullptr);
+  RNA_def_property_ui_text(prop, "Input Black", "Input level treated as black");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "levels_in_white", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "levels_in_white");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_float_funcs(
+      prop, nullptr, "rna_BrushMaterialPaintCorrection_levels_in_white_set", nullptr);
+  RNA_def_property_ui_text(prop, "Input White", "Input level treated as white");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "levels_gamma", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "levels_gamma");
+  RNA_def_property_range(prop, 0.01f, 10.0f);
+  RNA_def_property_ui_range(prop, 0.01f, 10.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Gamma", "Gamma applied between the input levels");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "levels_out_black", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "levels_out_black");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Output Black", "Output level for a black input");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "levels_out_white", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "levels_out_white");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Output White", "Output level for a white input");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "use_hsv", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", BRUSH_MATERIAL_PAINT_CORRECTION_HSV);
+  RNA_def_property_ui_text(prop,
+                           "Hue / Saturation / Value",
+                           "Shift the sampled color's hue, saturation and value (color channels "
+                           "only)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "hue", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "hsv_hue");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Hue", "Hue rotation (0.5 leaves the hue unchanged)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "saturation", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "hsv_saturation");
+  RNA_def_property_range(prop, 0.0f, 2.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 2.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Saturation", "Saturation multiplier (1 leaves it unchanged)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "value", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "hsv_value");
+  RNA_def_property_range(prop, 0.0f, 2.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 2.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Value", "Value multiplier (1 leaves it unchanged)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
   srna = RNA_def_struct(brna, "BrushMaterialPaintChannel", nullptr);
   RNA_def_struct_sdna(srna, "BrushMaterialPaintChannel");
   RNA_def_struct_path_func(srna, "rna_BrushMaterialPaintChannel_path");
@@ -4776,6 +4978,54 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       prop,
       "Show Source Grid",
       "Expand the inline preview grid used to pick this channel's source image");
+
+  /* "Correction Image": pointwise adjustments of the sampled source, stored per channel in the
+   * brush. The switch owns the whole block: it allocates the correction when turned on and releases
+   * it - parameters included - when turned off, which is also what shows or hides the channel's
+   * Correction Image panel. Whether the block is *applied* is its own `enabled`. Not offered for the
+   * Normal channel, whose green-flip toggle is its own correction. */
+  prop = RNA_def_property(srna, "use_correction_image", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop,
+      "rna_BrushMaterialPaintChannel_use_correction_image_get",
+      "rna_BrushMaterialPaintChannel_use_correction_image_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Correction Image",
+      "Show this channel's source-image correction (Levels, Hue/Saturation/Value, Invert)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
+  /* Read-only: whether this channel can carry a "Correction Image" block at all. The engine
+   * corrects every channel but the tangent-space Normal map, whose green-flip toggle is its own
+   * dedicated correction; the UI gates its switch on this instead of naming channels. */
+  prop = RNA_def_property(srna, "supports_correction_image", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_BrushMaterialPaintChannel_supports_correction_image_get", nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Supports Correction Image",
+      "Whether this channel's source image can carry a Correction Image (every channel but "
+      "Normal)");
+
+  /* Read-only: whether the correction's Hue/Saturation/Value stage means anything here. The
+   * engine applies it to every color channel (Base Color, Emission, Specular Tint); a scalar
+   * channel's texture has no hue to shift. */
+  prop = RNA_def_property(srna, "supports_hsv_correction", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_BrushMaterialPaintChannel_supports_hsv_correction_get", nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Supports Hue/Saturation/Value",
+                           "Whether this channel's Correction Image has a Hue/Saturation/Value "
+                           "stage (the color channels)");
+
+  prop = RNA_def_property(srna, "correction", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "BrushMaterialPaintCorrection");
+  RNA_def_property_pointer_sdna(prop, nullptr, "correction");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Source Correction", "This channel's source-image correction settings");
 
   srna = RNA_def_struct(brna, "BrushMaterialPaint", nullptr);
   RNA_def_struct_sdna(srna, "BrushMaterialPaint");

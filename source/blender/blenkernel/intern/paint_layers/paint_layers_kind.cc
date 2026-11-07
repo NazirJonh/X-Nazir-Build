@@ -462,18 +462,27 @@ static const PaintLayerKindParam coverage_params[] = {
 };
 static_assert(std::size(coverage_params) == PAINT_LAYER_COVERAGE_PARAM_NUM);
 
-void paint_layer_hsl_apply(float rgb[3], const float params[PAINT_LAYER_HSL_PARAM_NUM])
+void paint_layer_hsv_stage_apply(float rgb[3],
+                                 const float hue_turns,
+                                 const float saturation,
+                                 const float value)
 {
   float hsv[3];
   rgb_to_hsv_v(rgb, hsv);
-  const float turned = hsv[0] + params[PAINT_LAYER_HSL_HUE] + 0.5f;
+  const float turned = hsv[0] + hue_turns;
   hsv[0] = turned - floorf(turned);
-  hsv[1] = clamp_f(hsv[1] * params[PAINT_LAYER_HSL_SATURATION], 0.0f, 1.0f);
-  hsv[2] *= params[PAINT_LAYER_HSL_VALUE];
+  hsv[1] = clamp_f(hsv[1] * saturation, 0.0f, 1.0f);
+  hsv[2] *= value;
   hsv_to_rgb_v(hsv, rgb);
   for (int i = 0; i < 3; i++) {
     rgb[i] = std::max(rgb[i], 0.0f);
   }
+}
+
+void paint_layer_hsl_apply(float rgb[3], const float params[PAINT_LAYER_HSL_PARAM_NUM])
+{
+  paint_layer_hsv_stage_apply(
+      rgb, params[PAINT_LAYER_HSL_HUE] + 0.5f, params[PAINT_LAYER_HSL_SATURATION], params[PAINT_LAYER_HSL_VALUE]);
   /* The vibrance lifts the channels away from their Rec.709 grey, most where the colour is least
    * saturated, and clamps below zero like the HSV branch above. The same coefficients the RGB to BW
    * node reads, so the graph and this agree. */

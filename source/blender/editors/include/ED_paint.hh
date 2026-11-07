@@ -877,6 +877,11 @@ namespace ed::sculpt_paint::material {
  * entries were keyed on is replaced or wound down). */
 void mask_source_coverage_cache_free_all();
 
+/** Drop every cached "Correction Image" buffer (called from #ED_editors_exit, like the Mask
+ * Source coverage registry above: the entries key on session UIDs and pixel versions that the
+ * file going away invalidates wholesale). */
+void correction_cache_clear();
+
 }  // namespace ed::sculpt_paint::material
 
 /* `paint_image_select_view3d.cc` — 3D Viewport overlay for image selection mask */

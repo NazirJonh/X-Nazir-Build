@@ -9,6 +9,7 @@
 #include "paint_mask_coverage_cache.hh"
 
 #include "BKE_brush.hh"
+#include "BKE_brush_material_correction.hh"
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
@@ -400,6 +401,13 @@ std::shared_ptr<const MaskSourceCoverage> mask_source_coverage_cache_get(
   }
   if (source.kind == ChannelSourceKind::Mtex && !source.image_direct_sample) {
     /* Procedural or otherwise engine-sampled: the texture engine has no buffer to extract from. */
+    return nullptr;
+  }
+
+  if (BKE_brush_material_paint_correction_for_channel(brush_paint, *channel) != nullptr) {
+    /* The precomputed grey is taken from the raw image, or from a corrected copy that also folds in
+     * the channel's own Source Invert; neither matches the Mask path, which applies "Correction
+     * Image" and then only the Mask Source's invert. The on-the-fly path stays exact. */
     return nullptr;
   }
 

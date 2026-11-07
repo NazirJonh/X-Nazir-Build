@@ -252,6 +252,17 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
    * Rebuilding one coverage on the next stroke costs a single extraction. */
   sculpt_paint::material::mask_source_coverage_cache_free_all();
 
+  /* The "Correction Image" cache keys on image session UIDs and #ImageRuntime::pixel_version. A
+   * memfile undo restores the UIDs but recreates the runtime, so every stored pixel version is
+   * unknown to the fresh journal and each entry would be rebuilt on its next use anyway; a file
+   * load makes them unreachable outright. Dropping them here (like the Mask Source registry
+   * above) also frees the held #ImBuf buffers before the static teardown could free them after
+   * #IMB_exit, and before the next file's strokes have to work around the dead weight. A deleted
+   * Image's entry is not specially invalidated: no per-image hook exists to borrow (the Mask
+   * Source registry has none either), and the LRU budget plus the one-entry-per-(image, channel)
+   * replacement bound what a deleted image can leave behind. */
+  sculpt_paint::material::correction_cache_clear();
+
   /* The bake cache is keyed on session UIDs, which are never reused, so every entry for a material
    * of the file being replaced is unreachable from here on. It owns #ImBuf buffers, so dropping it
    * has to be deliberate.

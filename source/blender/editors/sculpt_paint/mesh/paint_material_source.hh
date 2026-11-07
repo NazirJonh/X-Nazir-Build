@@ -19,6 +19,7 @@
 #include "BLI_span.hh"
 
 #include "BKE_brush.hh"
+#include "BKE_brush_material_correction.hh"
 #include "BKE_paint_layers_target.hh"
 
 #include "DNA_brush_types.h"
@@ -38,6 +39,7 @@ struct ReportList;
 struct Brush;
 struct BrushMaterialPaint;
 struct ImagePool;
+struct ImageUser;
 struct ImBuf;
 struct Object;
 struct Paint;
@@ -201,16 +203,15 @@ float paint_mask_texture_coverage(const Brush &brush,
 bool channel_source_invertible(eMaterialPaintChannel channel);
 
 /**
- * Final value of a sampled scalar \a channel: clamped to \a range, and mirrored inside it first
- * when \a channel is invertible (#channel_source_invertible) with
- * #BrushMaterialPaintChannel.source_invert set. \a range is in storage, so for Height the mirror
- * is around the stored neutral. The single place the texture inversion happens, shared by every
- * Sculpt and Image 2D scalar read.
+ * Body of #scalar_source_finish for a caller that resolved the channel's correction once, such as
+ * the correction cache's per-texel loop. \a prepared is null when the channel has none.
  */
-float scalar_source_finish(const BrushMaterialPaint &brush_paint,
-                           eMaterialPaintChannel channel,
-                           const float2 &range,
-                           float sampled);
+float scalar_source_finish_prepared(
+    const BrushMaterialPaint &brush_paint,
+    eMaterialPaintChannel channel,
+    const float2 &range,
+    float sampled,
+    const BrushMaterialPaintCorrectionPrepared *prepared);
 
 /**
  * Whether the Mask Source texture's coverage is mirrored (`1 - c` after the 0..1 clamp) while the
@@ -386,10 +387,26 @@ class ChannelSourceSet {
     bool flip_green_channel = false;
     /**
      * Pinned #ImBuf for a #TEX_IMAGE source, acquired from the stroke pool at construct.
-     * Null when the source is not a loadable image. Released in #ChannelSourceSet's destructor.
-     * Read-only for the rest of the stroke.
+     * Null when the source is not a loadable image. Read-only for the rest of the stroke.
+     * Points at the correction cache's prepared copy instead when #correction_baked is set; the
+     * pooled buffer then lives in #pooled_ibuf and is what goes back to the pool.
      */
     ImBuf *ibuf = nullptr;
+    /**
+     * The buffer #BKE_image_pool_acquire_ibuf handed out for this channel, or null when the channel
+     * owns none. Kept apart from #ibuf so a swapped-in corrected copy still gives the acquired
+     * buffer back to the pool.
+     */
+    ImBuf *pooled_ibuf = nullptr;
+    /**
+     * #colorspace / #do_linear_conversion of #pooled_ibuf, which describe the source image's own
+     * encoding. Kept apart from the fields above because those describe #ibuf: after a correction
+     * bake they are cleared (the cached copy is already scene-linear), while a consumer that reads
+     * the pooled pixels - the shape texture - still needs the source's own encoding to decode them
+     * correctly.
+     */
+    const ocio::ColorSpace *pooled_colorspace = nullptr;
+    bool pooled_do_linear_conversion = false;
     /**
      * True when this source is a plain image texture that #sample_image_direct can sample
      * without #RE_texture_evaluate (no nodes, no UDIM, default crop/filter/color).
@@ -403,12 +420,38 @@ class ChannelSourceSet {
      * derived cache keys on this to notice a replacement.
      */
     uint64_t baked_revision = 0;
+    /**
+     * True when the channel's "Correction Image" applies to this stroke: the correction exists,
+     * is enabled and passes #BKE_brush_material_paint_correction_for_channel (Maps mode, not the
+     * Normal channel). Resolved once at construction together with #prepared_correction, so a
+     * hot sample path neither re-asks BKE nor re-prepares the constants.
+     */
+    bool has_correction = false;
+    /**
+     * The per-texel constants of the channel's correction, derived once for the whole stroke.
+     * Valid only while #has_correction is set. The samplers, the 2D engine and the correction
+     * cache all read this instead of preparing from the DNA again.
+     */
+    BrushMaterialPaintCorrectionPrepared prepared_correction{};
+    /**
+     * True when #ibuf is the correction cache's already corrected copy instead of the source image
+     * itself, so every sample of this channel carries "Correction Image" and the sample paths must
+     * not apply it a second time. Only ever set together with #image_direct_sample and
+     * #has_correction: a source that would fall back to the texture engine reads the raw image and
+     * keeps the correction on the fly.
+     */
+    bool correction_baked = false;
   };
 
  private:
   std::array<ChannelSource, PAINT_MATERIAL_CHANNEL_NUM> sources_;
   /** Keeps baked ImBufs alive for the complete stroke. */
   std::shared_ptr<const ed::material_bake::MaterialSourceBake> bake_;
+  /**
+   * Keeps the correction cache entries this stroke pinned alive, one per channel. Owned here so the
+   * cache may evict or replace them mid-stroke without the texels changing under the sampler.
+   */
+  std::array<std::shared_ptr<const ImBuf>, PAINT_MATERIAL_CHANNEL_NUM> correction_buffers_;
   ImagePool *pool_ = nullptr;
   bool active_ = false;
 
@@ -479,6 +522,82 @@ class ChannelSourceSet {
                     float *r_value,
                     float4 &r_rgba) const;
 };
+
+/**
+ * The prepared "Correction Image" a sampled texel of \a source still owes, or null when it does
+ * not: the texels already carry the correction (#ChannelSource::correction_baked), or the channel
+ * has none this stroke. The one place that gate lives, so a new consumer can neither apply the
+ * correction twice nor skip it - callers pass this to #scalar_source_finish /
+ * #finish_color_sample-style tails instead of a boolean.
+ */
+inline const BrushMaterialPaintCorrectionPrepared *channel_sample_correction(
+    const ChannelSourceSet::ChannelSource &source)
+{
+  return source.has_correction && !source.correction_baked ? &source.prepared_correction : nullptr;
+}
+
+/**
+ * Final value of a sampled scalar \a channel: clamped to \a range, and mirrored inside it first
+ * when \a channel is invertible (#channel_source_invertible) with
+ * #BrushMaterialPaintChannel.source_invert set. \a range is in storage, so for Height the mirror
+ * is around the stored neutral. The single place the texture inversion happens, shared by every
+ * Sculpt and Image 2D scalar read.
+ *
+ * \param source: The channel's resolved source, which carries the stroke's correction state. When
+ * its texels come from the correction cache the sample is returned as-is (the cache holds this
+ * function's answer); when null - a caller without a #ChannelSourceSet, such as the tests - the
+ * correction is resolved and prepared on the fly.
+ */
+float scalar_source_finish(const BrushMaterialPaint &brush_paint,
+                           const ChannelSourceSet::ChannelSource *source,
+                           eMaterialPaintChannel channel,
+                           const float2 &range,
+                           float sampled);
+
+/**
+ * "Correction Image" of a raw Mask Source coverage: clamps to [0, 1] and applies the channel's
+ * prepared correction over that domain. The one place a raw coverage picks up the correction -
+ * #ChannelUvSampler::scalar_coverage_at_uv, the Alpha branch of #mask_source_coverage_at_uv and
+ * the correction cache's Mask-mode build all call it, so the Mask paths cannot drift. No channel
+ * #source_invert here: a Mask coverage read mirrors only through the Mask Source's own invert
+ * (#mask_coverage_finish).
+ */
+float mask_coverage_correct_raw(const BrushMaterialPaintCorrectionPrepared *prepared,
+                                float raw_coverage);
+
+/**
+ * The channel's scalar value range in storage: the descriptor (or custom) range crossed through
+ * the channel's encode seam, so a Height relief mirrors around its stored neutral. The scalar
+ * samplers hand stroke writers values in this domain.
+ */
+float2 stored_scalar_range(const PaintModeSettings &settings, eMaterialPaintChannel channel);
+
+/**
+ * Replace a directly sampleable channel's buffer with the correction cache's prepared copy.
+ *
+ * Only the direct path can be served from the cache: the texture-engine fallback evaluates the
+ * channel's own #Tex and would read the untouched image, so such a channel keeps correcting on the
+ * fly (see #ChannelSource::correction_baked).
+ *
+ * \param for_mask: True for a Mask-mode stroke: the cached texels then hold the raw coverage
+ * clamp-plus-correction WITHOUT the channel's own #source_invert, which a Mask coverage read must
+ * not see (its only mirror is the Mask Source's own invert). A Maps-mode read of the same channel
+ * folds the invert, so the flag is part of the cache key.
+ * \param iuser: The #ImageUser the buffer was acquired with; its frame/layer select the pixels the
+ * cache stores.
+ * \param r_entry: Keeps the returned buffer alive for the whole stroke; the caller stores it on the
+ * #ChannelSourceSet.
+ * \return true when #source now samples a corrected copy.
+ */
+bool channel_source_bake_correction(const BrushMaterialPaint &brush_paint,
+                                    const PaintModeSettings &settings,
+                                    const Image &image,
+                                    const ImageUser &iuser,
+                                    const ImBuf &source_ibuf,
+                                    ChannelSourceSet::ChannelSource &source,
+                                    eMaterialPaintChannel channel,
+                                    std::shared_ptr<const ImBuf> &r_entry,
+                                    bool for_mask);
 
 /**
  * Per-stroke source texture sampling for material paint channels.
@@ -703,8 +822,22 @@ class ChannelSourceSampler {
   /** Colorspace to decode with, valid whenever #needs_linear_conversion returns true. */
   const ocio::ColorSpace *colorspace(eMaterialPaintChannel channel) const;
 
+  /** See #ChannelUvSampler::correction_baked. */
+  bool correction_baked(eMaterialPaintChannel channel) const;
+
   /** Batched counterpart to the per-pixel decode #color skips when `decode_linear = false`. */
   static void decode_linear_batch(MutableSpan<float3> colors, const ocio::ColorSpace *colorspace);
+
+  /**
+   * Applies the channel's "Correction Image" to already decoded scene-linear colors, from the
+   * prepared constants \a source resolved at stroke start. Callers that deferred the colorspace
+   * conversion with `decode_linear = false` must call this after #decode_linear_batch; it is a
+   * no-op for channels without a correction, and for a channel whose texels already came out
+   * corrected (#ChannelSource::correction_baked).
+   */
+  static void apply_correction_batch(MutableSpan<float3> colors,
+                                     const ChannelSourceSet::ChannelSource &source);
+  void apply_correction_batch(MutableSpan<float3> colors, eMaterialPaintChannel channel) const;
 
  private:
   using ChannelSource = ChannelSourceSet::ChannelSource;
@@ -801,6 +934,25 @@ class ChannelUvSampler {
 
   /** The color space the raw samples of \a channel are stored in. */
   const ocio::ColorSpace *colorspace(eMaterialPaintChannel channel) const;
+
+  /** Whether \a channel's samples already carry "Correction Image" (see
+   * #ChannelSource::correction_baked), so a caller that batches its own decode must skip the
+   * correction instead of applying it twice. */
+  bool correction_baked(eMaterialPaintChannel channel) const;
+
+  /** #ChannelSourceSampler::apply_correction_batch counterpart, for a deferred decode on this UV
+   * view: applies the channel's prepared correction, or nothing when its texels already carry
+   * one. */
+  void apply_correction_batch(MutableSpan<float3> colors, eMaterialPaintChannel channel) const;
+
+  /**
+   * The prepared "Correction Image" of \a channel resolved at stroke start, or null when the
+   * channel has none. Unlike #channel_sample_correction this ignores
+   * #ChannelSource::correction_baked: it feeds a RAW read (an image's own alpha), which never
+   * comes out of the correction cache and always owes the correction.
+   */
+  const BrushMaterialPaintCorrectionPrepared *channel_correction(eMaterialPaintChannel channel)
+      const;
 
   /** See #ChannelSourceSampler::scalar_at_uv. */
   float scalar_at_uv(eMaterialPaintChannel channel, const float2 &uv, int thread) const;

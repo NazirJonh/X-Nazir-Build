@@ -869,6 +869,14 @@ enum PaintLayerDebandParam : int {
 };
 
 /**
+ * The Hue/Saturation/Value stage itself: hue shifted by \a hue_turns turns, saturation clamped to
+ * one, value scaled, result not below zero. The one formula every CPU consumer runs - the stack's
+ * HSL filter passes its own parameters (and then applies its vibrance); the brush's "Correction
+ * Image" passes the constants its prepare step resolved, so the two cannot drift apart.
+ */
+void paint_layer_hsv_stage_apply(float rgb[3], float hue_turns, float saturation, float value);
+
+/**
  * The HSL filter applied to \a rgb in place, at full strength: the Hue/Saturation/Value node's
  * function (hue shifted by `hue - 0.5` turns, saturation clamped to one, value scaled, result not
  * below zero), so the CPU composite and the generated node agree.
@@ -969,6 +977,25 @@ enum PaintLayerNormalConvertParam : int {
 void paint_layer_normal_convert_apply(float rgb[3],
                                       const float params[PAINT_LAYER_NORMAL_CONVERT_PARAM_NUM]);
 
+/**
+ * The Levels stage itself, on the t in [0, 1] the caller has already scaled out of its raw input:
+ * the one formula every CPU consumer runs. The stack's Levels filter scales from its parameter
+ * array per texel; the brush's "Correction Image" calls it with the constants its prepare step
+ * resolved, so the two cannot drift apart on the math they paint.
+ */
+inline float paint_layer_levels_stage_apply(const float t,
+                                            const float inv_gamma,
+                                            const float out_black,
+                                            const float out_white)
+{
+  float result = (t < 0.0f) ? 0.0f : ((t > 1.0f) ? 1.0f : t);
+  /* The Gamma node leaves a non-positive value as it is. */
+  if (result > 0.0f) {
+    result = powf(result, inv_gamma);
+  }
+  return result * (out_white - out_black) + out_black;
+}
+
 /** The Levels of a filter value: the same function for every consumer that applies it on the CPU. */
 inline float paint_layer_levels_apply(const float value, const float params[PAINT_LAYER_LEVELS_PARAM_NUM])
 {
@@ -979,28 +1006,32 @@ inline float paint_layer_levels_apply(const float value, const float params[PAIN
   const float inv_gamma = (params[PAINT_LAYER_LEVELS_GAMMA] != 0.0f) ?
                               1.0f / params[PAINT_LAYER_LEVELS_GAMMA] :
                               0.0f;
-  float t = value * k + m;
-  t = (t < 0.0f) ? 0.0f : ((t > 1.0f) ? 1.0f : t);
-  /* The Gamma node leaves a non-positive value as it is. */
-  if (t > 0.0f) {
-    t = powf(t, inv_gamma);
-  }
-  return t * (params[PAINT_LAYER_LEVELS_OUT_WHITE] - params[PAINT_LAYER_LEVELS_OUT_BLACK]) +
-         params[PAINT_LAYER_LEVELS_OUT_BLACK];
+  return paint_layer_levels_stage_apply(
+      value * k + m, inv_gamma, params[PAINT_LAYER_LEVELS_OUT_BLACK], params[PAINT_LAYER_LEVELS_OUT_WHITE]);
+}
+
+/**
+ * The Invert stage's per-channel target: `|c - 1|`, the complement on [0, 1], the same distance
+ * past it - what the Difference mix against white and the CPU composite both read. Shared by the
+ * stack's Invert filter (which moves each channel part of the way, by its own amount) and the
+ * brush correction's full invert.
+ */
+inline float paint_layer_invert_target(const float c)
+{
+  return std::fabs(c - 1.0f);
 }
 
 /**
  * The Invert filter applied to \a rgb in place, each channel by its own strength: the channel moves
- * from its colour to `|c - 1|` -- the complement on [0, 1], the same distance past it, which is what
- * the Difference mix against white and the CPU composite both read. The default of every amount is
- * one, so a row without stored parameters inverts the whole way as the unparameterised filter always
- * did. Alpha is not part of \a rgb and so stays untouched.
+ * from its colour to #paint_layer_invert_target of itself. The default of every amount is one, so a
+ * row without stored parameters inverts the whole way as the unparameterised filter always did.
+ * Alpha is not part of \a rgb and so stays untouched.
  */
 inline void paint_layer_invert_apply(float rgb[3],
                                      const float params[PAINT_LAYER_INVERT_PARAM_NUM])
 {
   for (int k = 0; k < 3; k++) {
-    rgb[k] += (std::fabs(rgb[k] - 1.0f) - rgb[k]) * params[k];
+    rgb[k] += (paint_layer_invert_target(rgb[k]) - rgb[k]) * params[k];
   }
 }
 

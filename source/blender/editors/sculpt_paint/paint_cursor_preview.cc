@@ -116,6 +116,9 @@ static bool mask_source_resolve(const OverlayPreviewInput &in, PaintCursorContex
     /* A constant channel has no texture to draw; only a baked buffer is previewed. */
     return ok && pcontext.material_preview_source.ibuf != nullptr;
   }
+  /* A Mask-mode Maps stroke previews the one channel it reads; corrections in the overlay preview
+   * that channel's own slot, so its index rides along. */
+  pcontext.material_preview_channel_index = int(*mask_channel);
   return BKE_paint_material_mask_preview_mtex_get(
       in.brush_paint, *mask_channel, pcontext.material_preview_mtex_storage);
 }
@@ -149,6 +152,8 @@ static bool material_bake_resolve(const OverlayPreviewInput &in, PaintCursorCont
   const bool ok = material_source_preview_resolve(in, pcontext, std::nullopt);
   pcontext.material_preview_mtex_storage = dna::shallow_copy(
       pcontext.material_preview_source.mtex);
+  /* The bake's #MTex carries no #Tex, and corrections never apply to a Material/Layer source, so
+   * the previewed channel stays unnamed (-1): the overlay has nothing to resolve for it. */
   return ok;
 }
 
@@ -160,10 +165,18 @@ static bool pbr_channel_applies(const OverlayPreviewInput & /*in*/)
 
 static bool pbr_channel_resolve(const OverlayPreviewInput &in, PaintCursorContext &pcontext)
 {
-  return BKE_paint_material_preview_mtex_get(in.brush_paint,
-                                             in.mode_settings,
-                                             in.visible_channels,
-                                             pcontext.material_preview_mtex_storage);
+  eMaterialPaintChannel channel;
+  const bool ok = BKE_paint_material_preview_mtex_get(in.brush_paint,
+                                                      in.mode_settings,
+                                                      in.visible_channels,
+                                                      pcontext.material_preview_mtex_storage,
+                                                      &channel);
+  if (ok) {
+    /* The overlay resolves this channel's "Correction Image" from the index instead of finding
+     * the channel back from the previewed #Tex, which two channels can share. */
+    pcontext.material_preview_channel_index = int(channel);
+  }
+  return ok;
 }
 
 /** \} */
@@ -253,6 +266,8 @@ void paint_cursor_material_preview_init(const PaintModeSettings &mode_settings,
   }
   else {
     pcontext.material_preview_texel = OverlayTexelMode();
+    /* No preview, no channel for the overlay to resolve a correction for. */
+    pcontext.material_preview_channel_index = -1;
   }
 }
 

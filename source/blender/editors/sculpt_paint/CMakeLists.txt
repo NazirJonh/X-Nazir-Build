@@ -192,6 +192,7 @@ set(SRC
   mesh/paint_image_ops_paint.cc
   mesh/paint_image_proj.cc
   mesh/paint_material_attribute.cc
+  mesh/paint_material_correction_cache.cc
   mesh/paint_material_source.cc
   mesh/paint_mask.cc
   mesh/paint_mask_coverage_cache.cc
@@ -311,6 +312,7 @@ set(SRC
   mesh/paint_hide.hh
   mesh/paint_material_attribute.hh
   mesh/paint_material_blend.hh
+  mesh/paint_material_correction_cache.hh
   mesh/paint_material_source.hh
   mesh/paint_material_stroke_accum.hh
   mesh/paint_image_shape_composite.hh
@@ -425,6 +427,7 @@ if(WITH_GTESTS)
     tests/paint_image_select_warp_tests.cc
     tests/paint_image_select_region_tests.cc
     tests/paint_image_select_tile_bound_tests.cc
+    tests/paint_material_source_correction_test.cc
     mesh/paint_image_uv_geom_tests.cc
     mesh/paint_image_uv_symmetry_tests.cc
     mesh/sculpt_boundary_tests.cc

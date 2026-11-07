@@ -24,6 +24,7 @@
 #include "BLI_vector.hh"
 
 #include "BKE_brush.hh"
+#include "BKE_brush_material_correction.hh"
 #include "BKE_context.hh"
 #include "BKE_curve_patch.hh"
 #include "BKE_image.hh"
@@ -670,6 +671,11 @@ static void blend_tile_region(const TileRegion &region,
               3,
               source_colorspace,
               false);
+          if (brush.material_paint != nullptr) {
+            /* The member applies the channel's own prepared correction and skips a channel whose
+             * texels already came out corrected. */
+            channel_sources->apply_correction_batch(decode_buf, target.channel);
+          }
           for (const int k : decode_slots.index_range()) {
             pending_rgb[decode_slots[k]] = target_jitters_color ?
                                                BKE_paint_stroke_color_jitter_apply_color(

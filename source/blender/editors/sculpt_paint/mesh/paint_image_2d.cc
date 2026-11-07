@@ -61,6 +61,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
+#include "BKE_brush_material_correction.hh"
 #include "BKE_bvhutils.hh"
 #include "BKE_colorband.hh"
 #include "BKE_customdata.hh"
@@ -708,23 +709,74 @@ static const CurveMaskCache *paint_2d_matching_curve_mask(const ImagePaintState 
   return nullptr;
 }
 
-static float paint_2d_alpha_source_invert(const BrushPainter *painter,
-                                          const eMaterialPaintChannel channel,
-                                          const float sampled)
+/**
+ * The prepared "Correction Image" a raw texel sample of \a channel still owes, or null when it
+ * does not: the channel has none this stroke, or its texels already came out of the correction
+ * cache carrying one. The gate itself is the stroke's own (#channel_sample_correction); only the
+ * painter's channel set is added here.
+ */
+static const BrushMaterialPaintCorrectionPrepared *paint_2d_channel_correction_get(
+    const BrushPainter *painter, const eMaterialPaintChannel channel)
 {
-  if (!ed::sculpt_paint::material::channel_source_invertible(channel) ||
-      painter->brush == nullptr || painter->brush->material_paint == nullptr ||
-      painter->brush->material_paint->channels[channel].source_invert == 0)
-  {
+  if (painter->channel_sources == nullptr) {
+    return nullptr;
+  }
+  return ed::sculpt_paint::material::channel_sample_correction(
+      painter->channel_sources->source(channel));
+}
+
+/** Applies the channel correction to an already decoded RGB sample. Scalar channels and Normal
+ * stay untouched: their sampling tail owns the scalar path. */
+static void paint_2d_apply_channel_rgb_correction(const BrushPainter *painter,
+                                                   const eMaterialPaintChannel channel,
+                                                   float4 &rgba)
+{
+  /* Normal is not a color channel, so this also skips it. */
+  if (!BKE_paint_material_channel_info(channel).is_color) {
+    return;
+  }
+  const BrushMaterialPaintCorrectionPrepared *prepared = paint_2d_channel_correction_get(painter,
+                                                                                         channel);
+  if (prepared == nullptr) {
+    return;
+  }
+  float rgb[3] = {rgba[0], rgba[1], rgba[2]};
+  BKE_brush_material_paint_correction_apply_prepared_rgb(*prepared, rgb);
+  rgba = float4(rgb[0], rgb[1], rgb[2], rgba[3]);
+}
+
+/**
+ * Finish a sampled scalar of \a channel: Source Invert and "Correction Image" (and, for a channel
+ * whose texels already came out of the correction cache, nothing at all - the cached texels hold
+ * this function's whole answer). The old name spoke of the Alpha invert alone; the finish has long
+ * covered every invertible scalar and the correction, so it now says so.
+ */
+static float paint_2d_scalar_source_finish(
+    const BrushPainter *painter,
+    const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source,
+    const eMaterialPaintChannel channel,
+    const float sampled)
+{
+  const BrushMaterialPaint *brush_paint = painter->brush != nullptr ?
+                                              painter->brush->material_paint :
+                                              nullptr;
+  const bool inverted = brush_paint != nullptr &&
+                        ed::sculpt_paint::material::channel_source_invertible(channel) &&
+                        brush_paint->channels[channel].source_invert != 0;
+  /* Only an active correction may reroute the raw intensity through the clamp; an allocated but
+   * disabled one used to change this engine's long-standing "untouched" behaviour. */
+  if (!inverted && !source.has_correction) {
     /* Untouched, not clamped: this engine has always used the raw intensity. */
     return sampled;
   }
+  BLI_assert(brush_paint != nullptr);
   /* The invertible channels' ranges are fixed, so no #PaintModeSettings is needed; the Sculpt
    * engine reaches the same result through #ed::sculpt_paint::material::scalar_source_finish. The
    * texture is a storage level, so the range is the stored one (Height mirrors around 0.5). */
   const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
   return ed::sculpt_paint::material::scalar_source_finish(
-      *painter->brush->material_paint,
+      *brush_paint,
+      &source,
       channel,
       float2(BKE_paint_material_channel_value_encode(channel, info.value_min),
              BKE_paint_material_channel_value_encode(channel, info.value_max)),
@@ -765,7 +817,9 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
       r_rgba = float4(0.0f);
       return 0.0f;
     }
-    return paint_2d_alpha_source_invert(painter, channel, value);
+    /* Target-UV bakes of color channels are scene-linear, the state corrections expect. */
+    paint_2d_apply_channel_rgb_correction(painter, channel, r_rgba);
+    return paint_2d_scalar_source_finish(painter, source, channel, value);
   }
   float3 texco;
   brush_imbuf_tex_co(painter->source_mapping, x, y, texco);
@@ -808,7 +862,13 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
   if (source.flip_green_channel) {
     r_rgba[1] = 1.0f - r_rgba[1];
   }
-  return paint_2d_alpha_source_invert(painter, channel, intensity);
+  /* "Correction Image": only when this call produced the decoded color. The batched view-dab path
+   * passes decode_linear=false and applies the correction after its own batch decode, so the two
+   * engines and both 2D paths all correct the same scene-linear state. */
+  if (decode_linear) {
+    paint_2d_apply_channel_rgb_correction(painter, channel, r_rgba);
+  }
+  return paint_2d_scalar_source_finish(painter, source, channel, intensity);
 }
 
 /**
@@ -986,7 +1046,12 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
     /* Scalar channels carry a value, not a color: decoding it as sRGB would bend it. */
     const bool batch_decode = is_color && !is_normal && source.do_linear_conversion &&
                               (paint_runtime == nullptr || !paint_runtime->do_linear_conversion);
-    const bool skip_colorspace = batch_decode &&
+    /* The batch decode runs after sampling, so this is where a color channel's correction belongs.
+     * Forcing the decode keeps Levels/HSV/Invert in scene-linear space even when the source
+     * happens to match the canvas encoding. */
+    const bool correct_colors = is_color &&
+                                paint_2d_channel_correction_get(painter, channel) != nullptr;
+    const bool skip_colorspace = batch_decode && !correct_colors &&
                                  paint_2d_area_source_matches_canvas_encoding(source, cache);
     const bool apply_color_jitter = channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
                                     paint_2d_color_jitter_active(painter);
@@ -996,6 +1061,9 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
     if (batch_decode && (!skip_colorspace || apply_color_jitter)) {
       ed::sculpt_paint::material::ChannelSourceSampler::decode_linear_batch(colors,
                                                                             source.colorspace);
+    }
+    if (correct_colors) {
+      ed::sculpt_paint::material::ChannelSourceSampler::apply_correction_batch(colors, source);
     }
     /* Randomize Color on sampled Base Color texels while the array is scene-linear. */
     if (apply_color_jitter) {
@@ -3016,6 +3084,10 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
   {
     IMB_colormanagement_colorspace_to_scene_linear_v3(sampled, source.colorspace);
   }
+  /* Same correction state and order as the stroke and view-dab paths; no-op for Normal/scalars. */
+  if (decode_linear) {
+    paint_2d_apply_channel_rgb_correction(painter, channel, sampled);
+  }
   if (is_color && apply_flip && source.flip_green_channel) {
     sampled[1] = 1.0f - sampled[1];
   }
@@ -3025,7 +3097,7 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
   else {
     const float2 range = BKE_paint_material_channel_range(paint_mode, channel);
     const float intensity = math::clamp(
-        paint_2d_alpha_source_invert(painter, channel, value), range.x, range.y);
+        paint_2d_scalar_source_finish(painter, source, channel, value), range.x, range.y);
     r_rgb = float3(intensity, intensity, intensity);
   }
   if (encode_canvas) {
@@ -3785,6 +3857,11 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
         }
       });
       ed::sculpt_paint::material::ChannelSourceSampler::decode_linear_batch(raw, source.colorspace);
+      /* The per-texel sampler skipped the correction because the decode was deferred; apply it
+       * now, on the same scene-linear state the single-sample path corrects. */
+      if (painter->brush != nullptr && painter->brush->material_paint != nullptr) {
+        ed::sculpt_paint::material::ChannelSourceSampler::apply_correction_batch(raw, source);
+      }
       threading::parallel_for(cov.pixels.index_range(), 4096, [&](const IndexRange range) {
         for (const int64_t i : range) {
           if (strengths[i] == 0) {

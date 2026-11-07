@@ -62,6 +62,7 @@
 #include "BKE_asset.hh"
 #include "BKE_bpath.hh"
 #include "BKE_brush.hh"
+#include "BKE_brush_material_correction.hh"
 #include "BKE_callbacks.hh"
 #include "BKE_collection.hh"
 #include "BKE_colorband.hh"
@@ -1543,6 +1544,7 @@ static void scene_blend_write(BlendWriter *writer, ID *id, const void *id_addres
     }
     if (preset.material_paint) {
       writer->write_struct(preset.material_paint);
+      BKE_brush_material_paint_corrections_blend_write(writer, *preset.material_paint);
     }
   }
 
@@ -1806,6 +1808,9 @@ static void scene_blend_read_data(BlendDataReader *reader, ID *id)
       }
       BLO_read_string(reader, &preset.local_name);
       BLO_read_struct(reader, BrushMaterialPaint, &preset.material_paint);
+      if (preset.material_paint) {
+        BKE_brush_material_paint_corrections_blend_read(reader, *preset.material_paint);
+      }
     }
     /* Runtime UI intent, never saved: a file that was stored while mask editing must not reopen
      * into the mask-only tab. Memfile undo reads scenes too and must keep the current state, or

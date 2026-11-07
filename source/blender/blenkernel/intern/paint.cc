@@ -4424,6 +4424,9 @@ void BKE_paint_gradient_value_ramp_free(PaintModeSettings &paint_mode)
   }
 }
 
+/* -------------------------------------------------------------------- */
+/* Paint material channel values. */
+
 float BKE_paint_material_channel_value(const BrushMaterialPaint &brush_paint,
                                        const PaintModeSettings &mode_settings,
                                        const eMaterialPaintChannel channel)
@@ -4616,7 +4619,8 @@ Material *BKE_paint_material_source_get(const BrushMaterialPaint &brush_paint)
 bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
                                          const PaintModeSettings &mode_settings,
                                          const int visible_material_channels,
-                                         MTex &r_mtex)
+                                         MTex &r_mtex,
+                                         eMaterialPaintChannel *r_channel)
 {
   for (const eMaterialPaintChannel channel : BKE_paint_material_channel_preview_order()) {
     if (!BKE_paint_material_channel_is_enabled(
@@ -4627,6 +4631,9 @@ bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
     const BrushMaterialPaintChannel &paint_channel = brush_paint.channels[channel];
     if (BKE_paint_material_channel_has_source(paint_channel)) {
       BKE_paint_material_channel_effective_mtex(brush_paint, paint_channel, r_mtex);
+      if (r_channel != nullptr) {
+        *r_channel = channel;
+      }
       return true;
     }
   }

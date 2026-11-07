@@ -1379,6 +1379,11 @@ class PAINT_MT_material_paint_channel_socket(Menu):
                 channel.source_image.colorspace_settings, "name", text="Color Space",
             )
             drawn_any = True
+            if _material_paint_correction_available(channel, material_paint):
+                # The corrections themselves live in the channel's body panel once enabled
+                # (#_draw_material_paint_source_correction); the menu only carries the switch,
+                # like "Source Picker: Grid" below. A Normal map has no levels or hue to shift.
+                layout.prop(channel, "use_correction_image", text="Correction Image")
 
         # Kept last so it stays in the same spot regardless of which options above it are shown.
         if drawn_any:
@@ -2683,6 +2688,84 @@ def _draw_material_paint_material_status(panel, channel):
     row.label(text=label, icon='ERROR')
 
 
+def _material_paint_correction_available(channel, material_paint):
+    """Whether a "Correction Image" block can exist for `channel` at all.
+
+    The correction only ever runs on a channel's own Maps-mode source image, and never on the
+    tangent-space Normal map. The socket menu's switch owns the block and the channel body only
+    draws it, so both ask this instead of repeating the condition: offering the block where the
+    correction could not run reads as a bug. Which channels qualify is the engine's own answer
+    (`supports_correction_image`), not a list kept here; a layer record has no such RNA at all,
+    and `getattr` answers False for it the way the property check used to.
+    """
+    if material_paint is None or material_paint.source_mode != 'MAPS':
+        return False
+    return getattr(channel, "supports_correction_image", False)
+
+
+def _draw_material_paint_source_correction(panel, channel):
+    """The channel's "Correction Image" adjustments: pointwise corrections applied to the sampled
+    source before a stroke uses it (the stack layer filters' own parameters, on the brush side).
+
+    Drawn only while the block exists - callers gate on `use_correction_image`, the switch in the
+    channel menu - so the panel never sits there with nothing to show. The header's button
+    switches the effects off without removing the block, so the parameters stay put.
+    Hue/Saturation/Value applies to the color channels only; a scalar channel's texture has no hue
+    to shift.
+    """
+    correction = channel.correction
+    if correction is None:
+        # The channel's switch owns the block; drawing it without one is a caller bug.
+        return
+
+    header, body = panel.panel(
+        "material_paint_correction_{:s}".format(channel.channel.lower()), default_closed=False)
+    header.use_property_split = False
+    header.use_property_decorate = False
+    # Title on the left, the block's own switch on the right. That switch governs whether the
+    # effects are applied, not whether the block exists - the channel menu's switch does that.
+    split = header.split(factor=0.7)
+    split.label(text="Correction Image")
+    right = split.row(align=True)
+    right.alignment = 'RIGHT'
+    right.prop(
+        correction,
+        "enabled",
+        text="",
+        emboss=False,
+        # Same polarity as every other visibility toggle in Blender (see the camera background
+        # image row): the unrestricted eye means "applied".
+        icon='RESTRICT_VIEW_OFF' if correction.enabled else 'RESTRICT_VIEW_ON',
+    )
+    if not body:
+        return
+
+    col = body.column(align=True)
+    col.prop(correction, "invert", text="Invert", toggle=True, icon='ARROW_LEFTRIGHT')
+
+    col.separator()
+    col.prop(correction, "use_levels", text="Levels", toggle=True)
+    if correction.use_levels:
+        box = col.box().column(align=True)
+        box.prop(correction, "levels_in_black", text="Input Black")
+        box.prop(correction, "levels_in_white", text="Input White")
+        box.prop(correction, "levels_gamma", text="Gamma")
+        box.prop(correction, "levels_out_black", text="Output Black")
+        box.prop(correction, "levels_out_white", text="Output White")
+
+    if channel.supports_hsv_correction:
+        # The engine applies the stage to every color channel (Base Color, Emission, Specular
+        # Tint); the channel's own RNA fact decides here, so the panel cannot offer it where the
+        # stroke would skip it, or skip it where the stroke would apply it.
+        col.separator()
+        col.prop(correction, "use_hsv", text="Hue / Saturation / Value", toggle=True)
+        if correction.use_hsv:
+            box = col.box().column(align=True)
+            box.prop(correction, "hue", text="Hue")
+            box.prop(correction, "saturation", text="Saturation")
+            box.prop(correction, "value", text="Value")
+
+
 def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True):
     """Draw the per-channel source image.
 
@@ -2773,6 +2856,16 @@ def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True
         # Only meaningful once a Normal source image is assigned; shown here, right after the
         # picker buttons, instead of the socket popup menu, since it applies to what was just set.
         panel.prop(channel, "normal_source_color_space", text="Tangent Space")
+
+    # "Correction Image": only a brush channel carries it (a layer record has no such RNA), only
+    # with a source image to correct, and only while the block exists - the channel menu's switch
+    # creates and removes it, so a channel without one draws nothing here. Drawn behind the same
+    # gate as that switch, so the panel and the menu cannot disagree about whether it can exist.
+    if (channel.source_image is not None and
+            _material_paint_correction_available(
+                channel, getattr(channel.id_data, "material_paint", None)) and
+            channel.use_correction_image):
+        _draw_material_paint_source_correction(panel, channel)
 
     if use_grid:
         if channel.show_source_grid:

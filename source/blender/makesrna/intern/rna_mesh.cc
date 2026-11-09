@@ -4187,6 +4187,26 @@ static void rna_def_mesh(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
 
+  /* Polygroup color fields (already in DNA; exposed here for scripts, e.g. live Extract gives
+   * its extracted polygroups their own seed). */
+  prop = RNA_def_property(srna, "face_sets_color_default", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "face_sets_color_default");
+  RNA_def_property_ui_text(prop,
+                           "Default Polygroup",
+                           "The polygroup drawn in the default color; the others get colors "
+                           "from the seed");
+  RNA_def_property_update(prop, 0, "rna_Mesh_update_draw");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
+  prop = RNA_def_property(srna, "face_sets_color_seed", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "face_sets_color_seed");
+  RNA_def_property_ui_text(
+      prop,
+      "Polygroup Color Seed",
+      "Chooses the colors of the polygroups other than the default");
+  RNA_def_property_update(prop, 0, "rna_Mesh_update_draw");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+
   prop = RNA_def_property(srna, "remesh_voxel_adaptivity", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_float_sdna(prop, nullptr, "remesh_voxel_adaptivity");
   RNA_def_property_range(prop, 0.0f, 1.0f);

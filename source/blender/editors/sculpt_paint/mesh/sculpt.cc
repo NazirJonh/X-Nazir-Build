@@ -6294,9 +6294,22 @@ static bool is_curve_edit_tool_active(bContext *C)
   return tref && ed::sculpt_paint::ED_paint_curve_is_curves_edit_tool(tref->idname);
 }
 
+/* A modal operator that explicitly claims the standard cursor (`cursor_modal_set('DEFAULT')`, e.g.
+ * the live Extract panel over its widgets) needs the pointer for itself: the brush circle would
+ * override it on every redraw. `modalcursor` is the only cross-operator channel for this, so such
+ * operators must restore the cursor on every exit path or the circle stays hidden. */
+static bool brush_cursor_suppressed(const bContext *C)
+{
+  const wmWindow *win = CTX_wm_window(C);
+  return win && win->modalcursor == WM_CURSOR_DEFAULT;
+}
+
 bool brush_cursor_poll(bContext *C)
 {
   if (!sculpt_mode_poll(C)) {
+    return false;
+  }
+  if (brush_cursor_suppressed(C)) {
     return false;
   }
   const Object *ob = CTX_data_active_object(C);

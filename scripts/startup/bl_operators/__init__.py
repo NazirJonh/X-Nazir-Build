@@ -38,6 +38,7 @@ _modules = [
     "screen_play_rendered_anim",
     "sequencer",
     "sculpt_insert_asset",
+    "sculpt_mask",
     "spreadsheet",
     "userpref",
     "userpref_sync",
@@ -69,6 +70,7 @@ def register():
         copy_global_transform,
         material_paint_layers,
         sculpt_insert_asset,
+        sculpt_mask,
         userpref_sync,
     )
 
@@ -82,6 +84,7 @@ def register():
     copy_global_transform.register()
     material_paint_layers.register()
     sculpt_insert_asset.register()
+    sculpt_mask.register()
 
 
 def unregister():
@@ -91,12 +94,14 @@ def unregister():
         copy_global_transform,
         material_paint_layers,
         sculpt_insert_asset,
+        sculpt_mask,
     )
 
     bone_selection_sets.unregister()
     copy_global_transform.unregister()
     material_paint_layers.unregister()
     sculpt_insert_asset.unregister()
+    sculpt_mask.unregister()
 
     if hasattr(bpy.types.WindowManager, "sync_settings"):
         del bpy.types.WindowManager.sync_settings

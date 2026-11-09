@@ -1702,6 +1702,15 @@ if(TEST_SRC_DIR_EXISTS)
   )
 endif()
 
+# Pure-geometry unit tests for the live Extract startup modules (no blendfile or viewport
+# needed): import the scripts/startup modules and exercise their bpy-free helpers.
+add_blender_test(
+  bl_sculpt_mask_extract_geometry
+  --python ${CMAKE_CURRENT_LIST_DIR}/sculpt_paint/sculpt_mask_extract_test.py
+  --
+  --startup-dir ${CMAKE_SOURCE_DIR}/scripts/startup
+)
+
 if(WITH_GPU_MESH_PAINT_TESTS AND TEST_SRC_DIR_EXISTS)
   set(render_tests
     brushes

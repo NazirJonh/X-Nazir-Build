@@ -5094,6 +5094,10 @@ class VIEW3D_MT_mask(Menu):
 
         layout.separator()
 
+        layout.operator("sculpt.extract_live", text="Extract Masked Area")
+
+        layout.separator()
+
         props = layout.operator("sculpt.mask_filter", text="Smooth Mask")
         props.filter_type = 'SMOOTH'
 

@@ -18,6 +18,7 @@ module is the bpy side that turns it into objects, modifiers and polygroups.
 import bpy
 from bpy.app.translations import pgettext_rpt
 from mathutils import Matrix, Vector
+from sculpt_mesh_common import FACE_SET_ATTRIBUTE, MASK_ATTRIBUTE
 
 from .extract_geometry import (
     DEFAULT_HUE,
@@ -82,7 +83,7 @@ class Part:
             depsgraph = context.evaluated_depsgraph_get()
             eval_mesh = bpy.data.meshes.new_from_object(
                 source.evaluated_get(depsgraph), depsgraph=depsgraph)
-            if eval_mesh.attributes.get(".sculpt_mask") is None:
+            if eval_mesh.attributes.get(MASK_ATTRIBUTE) is None:
                 bpy.data.meshes.remove(eval_mesh)
                 return pgettext_rpt("Apply Multires or remove the modifier to extract")
             self.mesh_data = eval_mesh
@@ -349,10 +350,10 @@ class Part:
                   and any(f not in removed for f in e.link_faces)]
         bmesh.ops.delete(bm, geom=list(removed), context='FACES')
         if fill and bm.faces:
-            layer = bm.faces.layers.int.get(".sculpt_face_set")
+            layer = bm.faces.layers.int.get(FACE_SET_ATTRIBUTE)
             if layer is None:
                 # No polygroups yet: every face keeps the default one, the patch gets its own.
-                layer = bm.faces.layers.int.new(".sculpt_face_set")
+                layer = bm.faces.layers.int.new(FACE_SET_ATTRIBUTE)
                 for f in bm.faces:
                     f[layer] = source.data.face_sets_color_default
             new_set = max((f[layer] for f in bm.faces), default=0) + 1
@@ -410,9 +411,9 @@ class Part:
         if thickness != 0.0:
             polygroups[part == 1] = POLYGROUP_INSIDE
             polygroups[part == 2] = POLYGROUP_RIM
-        face_sets = mesh.attributes.get(".sculpt_face_set")
+        face_sets = mesh.attributes.get(FACE_SET_ATTRIBUTE)
         if face_sets is None:
-            face_sets = mesh.attributes.new(".sculpt_face_set", 'INT', 'FACE')
+            face_sets = mesh.attributes.new(FACE_SET_ATTRIBUTE, 'INT', 'FACE')
         face_sets.data.foreach_set("value", polygroups)
         source = self.source()
         avoid = mesh_polygroup_hues(source.data) if source is not None else [DEFAULT_HUE]
@@ -433,7 +434,7 @@ class Part:
         import bmesh
         bm = bmesh.new()
         bm.from_mesh(mesh)
-        layer = bm.faces.layers.int.get(".sculpt_face_set")
+        layer = bm.faces.layers.int.get(FACE_SET_ATTRIBUTE)
         if layer is not None:
             rim = {f for f in bm.faces if f[layer] == POLYGROUP_RIM}
             across = [e for e in bm.edges if e.link_faces and all(f in rim for f in e.link_faces)]

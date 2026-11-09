@@ -1510,6 +1510,11 @@ class VIEW3D_PT_sculpt_voxel_remesh(Panel, View3DPaintPanel):
 
         layout.operator("object.voxel_remesh", text="Remesh")
 
+        # Mask-protected remesh (see `sculpt_masked_remesh`): the unmasked area is voxel-sized
+        # while the masked faces keep their exact coordinates and topology.
+        layout.separator()
+        layout.operator("object.voxel_remesh_protected", icon='MOD_REMESH')
+
 
 class VIEW3D_PT_sculpt_options(Panel, View3DPaintPanel):
     bl_context = ".sculpt_mode"  # dot on purpose (access from topbar)
@@ -1672,6 +1677,10 @@ class VIEW3D_PT_sculpt_symmetry(Panel, View3DPaintPanel):
         layout.prop(sculpt, "symmetrize_direction")
         layout.prop(WindowManager.operator_properties_last("sculpt.symmetrize"), "merge_tolerance")
         layout.operator("sculpt.symmetrize")
+
+        # Shape Only symmetry transfer (see `sculpt_symmetry_shape`): mirrors one side onto the
+        # other without changing the topology, and leaves the masked area alone.
+        layout.operator("mesh.symmetrize_shape", text="Symmetrize Shape", icon='SNAP_FACE')
 
 
 class VIEW3D_PT_sculpt_symmetry_for_topbar(Panel):

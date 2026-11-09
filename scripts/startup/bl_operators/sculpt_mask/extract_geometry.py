@@ -14,6 +14,7 @@ import math
 from itertools import compress
 
 import bmesh
+from sculpt_mesh_common import FACE_SET_ATTRIBUTE, MASK_ATTRIBUTE
 
 # A face is kept when all its corners are masked at least this much, and it is not hidden.
 MASK_THRESHOLD = 0.5
@@ -50,7 +51,7 @@ def polygroup_hue(face_set, default_face_set, seed):
 def mesh_polygroup_hues(mesh):
     """The hues of the polygroups a mesh shows (one when it has none)."""
     import numpy as np
-    attr = mesh.attributes.get(".sculpt_face_set")
+    attr = mesh.attributes.get(FACE_SET_ATTRIBUTE)
     ids = [1]
     if attr is not None and attr.domain == 'FACE' and len(attr.data):
         values = np.empty(len(attr.data), dtype=np.int32)
@@ -184,7 +185,7 @@ def masked_faces(mesh, threshold=MASK_THRESHOLD):
     """One bool per face: all its corners masked (at least `threshold`) and not hidden. None
     without a mask on the mesh itself."""
     import numpy as np
-    mask_attr = mesh.attributes.get(".sculpt_mask")
+    mask_attr = mesh.attributes.get(MASK_ATTRIBUTE)
     if mask_attr is None or mask_attr.domain != 'POINT':
         return None
     masks = np.empty(len(mesh.vertices), dtype=np.float32)
@@ -219,7 +220,7 @@ def extracted_mesh(source, keep, edge_rings=3):
     weights = _edge_weights(bm, edge_rings)
     bm.to_mesh(mesh)
     bm.free()
-    for name in (".sculpt_mask", ".sculpt_face_set"):
+    for name in (MASK_ATTRIBUTE, FACE_SET_ATTRIBUTE):
         attr = mesh.attributes.get(name)
         if attr is not None:
             mesh.attributes.remove(attr)

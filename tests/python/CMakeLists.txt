@@ -1718,6 +1718,20 @@ add_blender_test(
   --startup-dir ${CMAKE_SOURCE_DIR}/scripts/startup
 )
 
+add_blender_test(
+  bl_sculpt_masked_remesh
+  --python ${CMAKE_CURRENT_LIST_DIR}/sculpt_paint/masked_remesh_test.py
+  --
+  --startup-dir ${CMAKE_SOURCE_DIR}/scripts/startup
+)
+
+add_blender_test(
+  bl_sculpt_symmetry_shape
+  --python ${CMAKE_CURRENT_LIST_DIR}/sculpt_paint/symmetry_shape_test.py
+  --
+  --startup-dir ${CMAKE_SOURCE_DIR}/scripts/startup
+)
+
 if(WITH_GPU_MESH_PAINT_TESTS AND TEST_SRC_DIR_EXISTS)
   set(render_tests
     brushes

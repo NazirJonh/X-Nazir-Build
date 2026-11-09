@@ -31,6 +31,7 @@ namespace blender {
 struct bContext;
 struct Depsgraph;
 struct Mesh;
+struct MultiresSculptLayerGridDelta;
 struct Object;
 struct Scene;
 struct wmOperator;
@@ -197,6 +198,16 @@ void store_active_sculpt_layer_verts(Object &object,
  * vectors are consumed (moved). Call at stroke end, before #push_end.
  */
 void store_active_sculpt_layer_grids(Object &object, Vector<int> &&grids, Vector<float3> &&deltas);
+
+/**
+ * Sculpt layers (multires/grid domain), sparse layout: store the per-sample deltas of a top-level
+ * recording stroke — only the samples the brush write journal captured (see
+ * #SubdivCCG::position_journal), grouped per grid (see #MultiresSculptLayerGridDelta). Undo
+ * subtracts and redo adds exactly the stored samples; the layer keeps its other coefficients
+ * untouched. Call at stroke end, before #push_end.
+ */
+void store_active_sculpt_layer_grids_sparse(Object &object,
+                                            MultiresSculptLayerGridDelta &&delta);
 
 /**
  * Sculpt layer operators: push a #Type::SculptLayer undo step that captures \a node's metadata

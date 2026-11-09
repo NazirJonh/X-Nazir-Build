@@ -262,6 +262,25 @@ bool multiresModifier_reshapeFromCCG(int tot_level,
                                      MultiresReshapeFromCCGMode mode);
 
 /**
+ * Sparse per-sample undo delta for a grid-domain sculpt layer stroke: only the samples the brush
+ * actually moved (see #SubdivCCG::position_journal), grouped in \a grids order. Produced when the
+ * recording runs at the storage level; a lower-level recording propagates a coarse edit to whole
+ * top-level neighborhoods, so it keeps the dense layout.
+ */
+struct MultiresSculptLayerGridDelta {
+  /** Touched grid indices, the same set and order as the dense layout's \a touched_grids. */
+  Vector<int> grids;
+  /** Top-level sample indices within each grid, grouped in \a grids order. */
+  Vector<int> sample_indices;
+  /** Per grid: start into #sample_indices and #deltas. */
+  Vector<int> sample_start;
+  /** Per grid: number of journaled samples. */
+  Vector<int> sample_count;
+  /** Deltas aligned with #sample_indices. */
+  Vector<float3> deltas;
+};
+
+/**
  * Sculpt layer recording: convert the sculpted CCG surface to tangent displacement at the top
  * level and accumulate the difference against the pre-stroke composed surface
  * (`MDisps + sum(enabled layers)`) into \a layer for the \a touched_grids. #CD_MDISPS itself is
@@ -269,14 +288,21 @@ bool multiresModifier_reshapeFromCCG(int tot_level,
  *
  * \param touched_grids: indices of the grids modified by the stroke.
  * \param r_undo_delta: per-element deltas that were added to the layer, laid out as
- * `touched_grids.size() * grid_area` values in the order of \a touched_grids.
+ * `touched_grids.size() * grid_area` values in the order of \a touched_grids. Only filled when
+ * \a r_sparse is null or the sparse path did not apply (recording below the storage level, or an
+ * inactive journal).
+ * \param r_sparse: when not null and the journal is active at the storage level, the deltas are
+ * written here instead (only the journaled samples), and \a r_undo_delta stays empty. The layer
+ * writes themselves are restricted to the journaled samples in that case.
  */
 bool multiresModifier_reshapeFromCCG_into_sculpt_layer(int tot_level,
                                                        Mesh *coarse_mesh,
                                                        SubdivCCG *subdiv_ccg,
                                                        Span<int> touched_grids,
                                                        SculptLayer &layer,
-                                                       Vector<float3> &r_undo_delta);
+                                                       Vector<float3> &r_undo_delta,
+                                                       MultiresSculptLayerGridDelta *r_sparse =
+                                                           nullptr);
 
 /**
  * Add `layer.data * factor` to the mesh's #CD_MDISPS displacement (both are stored in the same

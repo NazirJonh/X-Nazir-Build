@@ -6030,6 +6030,13 @@ static void sculpt_fix_noise_tear(const Sculpt &sd, Object &ob)
   const MTex *mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
 
   if (ss.multires_modifier && mtex->tex && mtex->tex->type == TEX_NOISE) {
+    /* The stitch averages boundaries across the whole mesh (#multires_stitch_grids ->
+     * #BKE_subdiv_ccg_average_stitch_faces), including grids outside the touched set, and does not
+     * journal those writes. The sparse stroke-end delta cannot describe that, so drop the journal
+     * and let the reshape take the dense per-grid path. */
+    if (ss.subdiv_ccg) {
+      ss.subdiv_ccg->position_journal.end();
+    }
     multires_stitch_grids(&ob);
   }
 }
@@ -13061,11 +13068,25 @@ void apply_translations(const Span<float3> translations,
   BLI_assert(grids.size() * key.grid_area == translations.size());
   BLI_assert(!contains_nan(translations.cast<float>()));
 
+  /* The recording stroke journals every non-zero sample edit (see
+   * #SubdivCCG::position_journal): the stroke-end layer delta is restricted to these samples.
+   * Check the journal size once per call, outside the per-sample loop: a stale journal (e.g. left
+   * over a CCG rebuild) must not index past its words. */
+  SubdivCCGPositionJournal *journal =
+      (subdiv_ccg.position_journal.active &&
+       subdiv_ccg.position_journal.positions_num == positions.size()) ?
+          &subdiv_ccg.position_journal :
+          nullptr;
+
   for (const int i : grids.index_range()) {
     const Span<float3> grid_translations = translations.slice(bke::ccg::grid_range(key, i));
-    MutableSpan<float3> grid_positions = positions.slice(bke::ccg::grid_range(key, grids[i]));
+    const IndexRange grid_range = bke::ccg::grid_range(key, grids[i]);
+    MutableSpan<float3> grid_positions = positions.slice(grid_range);
     for (const int offset : grid_positions.index_range()) {
       grid_positions[offset] += grid_translations[offset];
+      if (journal && grid_translations[offset] != float3(0.0f)) {
+        journal->record(grid_range.start() + offset);
+      }
     }
   }
 }

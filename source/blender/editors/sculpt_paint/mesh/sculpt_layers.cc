@@ -2231,6 +2231,11 @@ void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
   if (!ss) {
     return;
   }
+  /* Never inherit a journal left active by an abnormal previous end (cancel or an early return):
+   * #begin below re-arms it when this stroke will actually record into a grid layer. */
+  if (ss->subdiv_ccg) {
+    ss->subdiv_ccg->position_journal.end();
+  }
   ss->layers.recording = false;
 
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
@@ -2319,6 +2324,11 @@ void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
      * the layer and drop it from the base. */
     flush_pending_multires_base(object);
     validate_grid_layers(object);
+    /* Journal the brush's per-sample edits for the stroke-end sparse layer delta (see
+     * #SubdivCCG::position_journal). Consumed and deactivated at #stroke_record_end. */
+    if (ss->subdiv_ccg) {
+      ss->subdiv_ccg->position_journal.begin(ss->subdiv_ccg->positions.size());
+    }
   }
   else {
     /* REC enable already set enabled + influence 1.0 (see #layer_toggle_rec_exec). Just ensure
@@ -2395,6 +2405,11 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
           });
       debug_validate_mesh_invariant(object, "stroke_end_base");
     }
+    if (pbvh && pbvh->type() == bke::pbvh::Type::Grids && ss->subdiv_ccg) {
+      /* Recording was turned off (or never started) for this stroke; no sparse delta will read
+       * the journal, so do not leave it armed. */
+      ss->subdiv_ccg->position_journal.end();
+    }
     SLP_PERF("[DEBUG-perf] stroke_record_end: REC=off mesh base-fold in %lld us\n",
              slp_perf_us(t_rec_end_start, slp_perf_now()));
     return;
@@ -2433,10 +2448,21 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
 
       if (!touched.is_empty()) {
         Vector<float3> undo_delta;
+        MultiresSculptLayerGridDelta sparse_delta;
         if (multiresModifier_reshapeFromCCG_into_sculpt_layer(
-                totlvl, &mesh, &subdiv_ccg, touched, *layer, undo_delta))
+                totlvl, &mesh, &subdiv_ccg, touched, *layer, undo_delta, &sparse_delta))
         {
-          undo::store_active_sculpt_layer_grids(object, std::move(touched), std::move(undo_delta));
+          if (!sparse_delta.grids.is_empty()) {
+            /* Sparse layout (top-level recording with an active journal): only the samples the
+             * brush actually moved. A stroke whose edits were all clipped to zero journals
+             * nothing; the record still lists the touched grids but with empty sample/delta
+             * arrays, so the undo step adjusts nothing. */
+            undo::store_active_sculpt_layer_grids_sparse(object, std::move(sparse_delta));
+          }
+          else {
+            undo::store_active_sculpt_layer_grids(
+                object, std::move(touched), std::move(undo_delta));
+          }
 
           /* The reshape wrote the stroke into the layer only now, at stroke end. The mesh branch
            * needs no such tag: its #data grows per dab, so the per-dab #tag_positions_changed
@@ -2473,6 +2499,10 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
        * diverge, this clear is silently lost and the next flush bakes the composed surface into
        * the base MDisps. */
       subdiv_ccg.dirty.coords = false;
+      /* The stroke's write journal has been consumed by the reshape above (or deliberately left
+       * unread on an empty stroke); deactivate so nothing outside a recording stroke feeds or
+       * reads it. */
+      subdiv_ccg.position_journal.end();
       SLP_PERF("[DEBUG-perf] stroke_record_end: REC=on multires reshape %d touched grids in %lld us\n",
                touched_num,
                slp_perf_us(t_rec_end_start, slp_perf_now()));
@@ -2575,6 +2605,12 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
                slp_perf_us(t_rec_end_start, slp_perf_now()));
     }
   }
+  else if (pbvh && pbvh->type() == bke::pbvh::Type::Grids && ss->subdiv_ccg) {
+    /* No usable recording target (layer/domain mismatch): the grids branch above did not run, so
+     * the journal was never consumed. Deactivate it here so later non-REC strokes do not keep
+     * paying for journal writes. */
+    ss->subdiv_ccg->position_journal.end();
+  }
 
   /* Skip the DEG re-eval that would free and rebuild the whole PBVH from scratch every stroke — on
    * dense meshes that rebuild is the dominant per-stroke freeze (hundreds of ms on multi-million
@@ -2603,6 +2639,11 @@ void stroke_record_cancel(const Depsgraph &depsgraph, Object &object)
   SculptSession *ss = session_of(object);
   if (!ss) {
     return;
+  }
+  /* The cancelled stroke never reaches the sparse reshape (grids only write the layer at stroke
+   * end), so its journal must not stay armed for later non-REC strokes. */
+  if (ss->subdiv_ccg) {
+    ss->subdiv_ccg->position_journal.end();
   }
   const bool was_recording = ss->layers.recording;
   ss->layers.base_view = {};
@@ -2698,10 +2739,18 @@ void cancel_recorded_offsets(const Depsgraph &depsgraph, Object &object)
 
 void stroke_record_end_direct_write(const Depsgraph &depsgraph, Object &object)
 {
-  /* The mesh path of #stroke_record_end only stores undo deltas for what #PositionDeformData already
-   * accumulated per dab, so the accumulation is done here in one go. Grids need nothing extra: their
-   * layer is always captured at stroke end by the reshape. */
+  /* The mesh path of #stroke_record_end only stores undo deltas for what #PositionDeformData
+   * already accumulated per dab, so the accumulation is done here in one go. Grids need nothing
+   * extra: their layer is always captured at stroke end by the reshape. */
   recorded_offsets_apply(depsgraph, object, 1.0f);
+  /* Direct writers (curve patch effects) store CCG positions without going through the brush
+   * helpers that fill #SubdivCCG::position_journal, so the journal would describe an empty stroke.
+   * Deactivated here, the reshape falls back to the dense per-grid delta, which does not rely on
+   * it. */
+  SculptSession *ss = object.runtime->sculpt_session;
+  if (ss && ss->subdiv_ccg) {
+    ss->subdiv_ccg->position_journal.end();
+  }
   stroke_record_end(depsgraph, object);
 }
 

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 
@@ -16,6 +17,7 @@
 #include "DNA_modifier_types.h"
 
 #include "BLI_array.hh"
+#include "BLI_bit_span.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_task.hh"
@@ -673,12 +675,33 @@ void multires_layer_frames_plan_populate(SubdivCCG &subdiv_ccg,
   }
 }
 
+/* Rebuild the pre-stroke composed value at one sample: `base + sum(layer.data * influence)`.
+ * Shared by the dense and sparse delta branches so their arithmetic cannot drift apart; the
+ * iteration order is part of the contract and must stay identical to #mdisps_add_sculpt_layers. */
+static float3 sculpt_layer_old_value(
+    const Span<MultiresGridSculptLayer> layers,
+    const Span<bke::sculpt_layers::MaskBlockWeight> weights,
+    const int64_t grid_off,
+    const int i,
+    const float3 base)
+{
+  float3 old_val = base;
+  for (const int li : layers.index_range()) {
+    if (weights[li].skip) {
+      continue;
+    }
+    old_val += layers[li].data[grid_off + i] * bke::sculpt_layers::mask_elem_weight(weights[li], i);
+  }
+  return old_val;
+}
+
 bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
                                                        Mesh *coarse_mesh,
                                                        SubdivCCG *subdiv_ccg,
                                                        const Span<int> touched_grids,
                                                        SculptLayer &layer,
-                                                       Vector<float3> &r_undo_delta)
+                                                       Vector<float3> &r_undo_delta,
+                                                       MultiresSculptLayerGridDelta *r_sparse)
 {
 #if SCULPT_LAYERS_DEBUG_FLUSH
   const auto t_start = std::chrono::high_resolution_clock::now();
@@ -689,11 +712,32 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
   {
     return false;
   }
+  /* Sparse per-sample deltas need the brush's own write journal (see
+   * #SubdivCCG::position_journal) and the touched-only reshape: below the storage level a coarse
+   * edit propagates to whole top-level neighborhoods, so the journal does not describe the top
+   * level footprint. */
+  bool use_sparse = r_sparse != nullptr && subdiv_ccg->position_journal.active &&
+                    reshape_context.reshape.level == reshape_context.top.level;
 
   multires_ensure_external_read(coarse_mesh, reshape_context.top.level);
 
   const int grid_area = reshape_context.top.grid_size * reshape_context.top.grid_size;
   const int num_grids = reshape_context.num_grids;
+
+  /* The sparse segment table stores sample offsets as int. Fall back to the dense layout before
+   * scanning when even the whole touched set cannot be addressed: the dense payload has the same
+   * nominal size, but an int overflow there is a pre-existing format limit rather than a new one,
+   * and keeping one consistent path avoids a half-written sparse record. */
+  if (use_sparse && int64_t(touched_grids.size()) * grid_area > INT_MAX) {
+    use_sparse = false;
+    *r_sparse = {};
+  }
+  if (use_sparse) {
+    *r_sparse = {};
+    r_sparse->grids.extend(touched_grids);
+    r_sparse->sample_start.reinitialize(touched_grids.size());
+    r_sparse->sample_count.reinitialize(touched_grids.size());
+  }
   const int64_t total_elems = int64_t(num_grids) * grid_area;
 
   if (!sculpt_grid_layers_applicable(reshape_context.mdisps, num_grids, grid_area)) {
@@ -828,51 +872,151 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
    * MDisps; `T_old` is the pre-stroke composed surface. The full-mesh path reads it from the
    * original-grid snapshot; the restricted path never took that snapshot and rebuilds it in place
    * from the saved base plus the same layer sum #mdisps_add_sculpt_layers would have composed —
-   * arithmetically identical, `base + sum(layer.data * influence)`. */
-  r_undo_delta.resize(touched_grids.size() * int64_t(grid_area));
-  threading::parallel_for(touched_grids.index_range(), 8, [&](const IndexRange range) {
-    for (const int64_t t : range) {
-      const int grid_index = touched_grids[t];
-      const int64_t grid_off = int64_t(grid_index) * grid_area;
-      const float3 *new_disps = reinterpret_cast<const float3 *>(
-          reshape_context.mdisps[grid_index].disps);
-      float3 *layer_grid = layer_data.data() + grid_off;
-      float3 *undo_grid = r_undo_delta.data() + t * grid_area;
-      if (restrict_to_touched) {
+   * arithmetically identical, `base + sum(layer.data * influence)`.
+   *
+   * With the brush write journal active (top-level recording) the pass is restricted again, to the
+   * samples the brush actually moved: an unedited sample has nothing to add (the layer keeps its
+   * exact old coefficient) and no delta to undo, so both the `T_old` reconstruction and the undo
+   * payload skip it. The journal — not a delta comparison — is the ground truth here: `T_new` and
+   * `T_old` are computed by different code paths and differ by ulp-scale noise on untouched
+   * samples, which a threshold would either keep or wrongly drop.
+   *
+   * The boundary ring is added to every touched grid on top of the journal bits. The brush helpers
+   * are not the only writers of CCG positions: #BKE_subdiv_ccg_update_normals averages grid
+   * boundaries and corners (`subdiv_ccg_average_inner_face_grids`,
+   * `subdiv_ccg_average_grids_boundary`, `subdiv_ccg_average_grids_corners`), writing exactly the
+   * `x == 0`, `y == 0`, `x == grid_size - 1`, `y == grid_size - 1` ring (the center `(0, 0)` lies on
+   * that ring) without journaling it. Including the ring keeps those averaged deltas in the layer
+   * and in undo. */
+  if (use_sparse) {
+    const SubdivCCGPositionJournal &journal = subdiv_ccg->position_journal;
+    const int grid_size = reshape_context.top.grid_size;
+    const auto is_boundary_sample = [grid_size](const int i) {
+      const int x = i % grid_size;
+      const int y = i / grid_size;
+      return x == 0 || y == 0 || x == grid_size - 1 || y == grid_size - 1;
+    };
+    /* Pass 1 (serial): collect each touched grid's boundary ring plus the journaled samples, and
+     * size the arrays. Journal words are read 64 samples at a time and only the set bits are
+     * visited; the ring is appended first so a journaled boundary sample is not added twice. */
+    int64_t total_samples = 0;
+    for (const int64_t t : touched_grids.index_range()) {
+      r_sparse->sample_start[t] = int(total_samples);
+      const int64_t grid_off = int64_t(touched_grids[t]) * grid_area;
+
+      if (grid_size == 1) {
+        r_sparse->sample_indices.append(0);
+        total_samples++;
+      }
+      else {
+        /* Top and bottom rows, then the left and right columns without their corners. */
+        for (const int x : IndexRange(grid_size)) {
+          r_sparse->sample_indices.append(x);
+          r_sparse->sample_indices.append((grid_size - 1) * grid_size + x);
+          total_samples += 2;
+        }
+        for (int y = 1; y < grid_size - 1; y++) {
+          r_sparse->sample_indices.append(y * grid_size);
+          r_sparse->sample_indices.append(y * grid_size + grid_size - 1);
+          total_samples += 2;
+        }
+      }
+
+      const int64_t grid_end = grid_off + grid_area;
+      for (int64_t sample = grid_off; sample < grid_end;) {
+        const int64_t word_index = sample >> 6;
+        const int bit_start = int(sample & 63);
+        const int bits_here = int(std::min<int64_t>(64 - bit_start, grid_end - sample));
+        uint64_t bits = journal.word(word_index);
+        /* Ignore bits outside this grid. A full word cannot be built with `1 << 64`. */
+        uint64_t mask = ~uint64_t(0);
+        if (bits_here < 64) {
+          mask = (uint64_t(1) << bits_here) - 1;
+        }
+        bits &= mask << bit_start;
+        for (const int bit : bits::iter_1_indices(bits)) {
+          const int i = int(word_index * 64 + bit - grid_off);
+          if (!is_boundary_sample(i)) {
+            r_sparse->sample_indices.append(i);
+            total_samples++;
+          }
+        }
+        sample += bits_here;
+      }
+      r_sparse->sample_count[t] = int(total_samples) - r_sparse->sample_start[t];
+    }
+    BLI_assert(total_samples <= INT_MAX);
+    r_sparse->deltas.reinitialize(total_samples);
+    threading::parallel_for(touched_grids.index_range(), 8, [&](const IndexRange range) {
+      for (const int64_t t : range) {
+        const int grid_index = touched_grids[t];
+        const int64_t grid_off = int64_t(grid_index) * grid_area;
+        const float3 *new_disps = reinterpret_cast<const float3 *>(
+            reshape_context.mdisps[grid_index].disps);
+        float3 *layer_grid = layer_data.data() + grid_off;
+        const int start = r_sparse->sample_start[t];
+        const int count = r_sparse->sample_count[t];
+        if (count == 0) {
+          continue;
+        }
         const float3 *base_grid = saved_base.data() + grid_off;
-        /* Folded once per grid, ahead of the element loop, through the same helper
-         * #mdisps_add_sculpt_layers uses — that is what keeps this reconstruction of `T_old`
-         * arithmetically identical to the composition it stands in for. */
+        /* Same per-grid fold as the dense path below (see its comment there). */
         Vector<bke::sculpt_layers::MaskBlockWeight, 8> weights;
         weights.reserve(layers.size());
         for (const MultiresGridSculptLayer &layer : layers) {
           weights.append(BKE_multires_grid_sculpt_layer_weight(layer, grid_index));
         }
-        for (int i = 0; i < grid_area; i++) {
-          float3 old_val = base_grid[i];
-          for (const int li : layers.index_range()) {
-            if (weights[li].skip) {
-              continue;
-            }
-            old_val += layers[li].data[grid_off + i] *
-                       bke::sculpt_layers::mask_elem_weight(weights[li], i);
-          }
+        for (int k = 0; k < count; k++) {
+          const int i = r_sparse->sample_indices[start + k];
+          const float3 old_val = sculpt_layer_old_value(
+              layers, weights.as_span(), grid_off, i, base_grid[i]);
           const float3 delta = new_disps[i] - old_val;
           layer_grid[i] += delta;
-          undo_grid[i] = delta;
+          r_sparse->deltas[start + k] = delta;
         }
       }
-      else {
-        const float3 *old_disps = reinterpret_cast<const float3 *>(
-            reshape_context.orig.mdisps[grid_index].disps);
-        for (int i = 0; i < grid_area; i++) {
-          const float3 delta = new_disps[i] - old_disps[i];
-          layer_grid[i] += delta;
-          undo_grid[i] = delta;
+    });
+  }
+  else {
+    r_undo_delta.resize(touched_grids.size() * int64_t(grid_area));
+    threading::parallel_for(touched_grids.index_range(), 8, [&](const IndexRange range) {
+      for (const int64_t t : range) {
+        const int grid_index = touched_grids[t];
+        const int64_t grid_off = int64_t(grid_index) * grid_area;
+        const float3 *new_disps = reinterpret_cast<const float3 *>(
+            reshape_context.mdisps[grid_index].disps);
+        float3 *layer_grid = layer_data.data() + grid_off;
+        float3 *undo_grid = r_undo_delta.data() + t * grid_area;
+        if (restrict_to_touched) {
+          const float3 *base_grid = saved_base.data() + grid_off;
+          /* Folded once per grid, ahead of the element loop, through the same helper
+           * #mdisps_add_sculpt_layers uses — that is what keeps this reconstruction of `T_old`
+           * arithmetically identical to the composition it stands in for. */
+          Vector<bke::sculpt_layers::MaskBlockWeight, 8> weights;
+          weights.reserve(layers.size());
+          for (const MultiresGridSculptLayer &layer : layers) {
+            weights.append(BKE_multires_grid_sculpt_layer_weight(layer, grid_index));
+          }
+          for (int i = 0; i < grid_area; i++) {
+            const float3 old_val = sculpt_layer_old_value(
+                layers, weights.as_span(), grid_off, i, base_grid[i]);
+            const float3 delta = new_disps[i] - old_val;
+            layer_grid[i] += delta;
+            undo_grid[i] = delta;
+          }
+        }
+        else {
+          const float3 *old_disps = reinterpret_cast<const float3 *>(
+              reshape_context.orig.mdisps[grid_index].disps);
+          for (int i = 0; i < grid_area; i++) {
+            const float3 delta = new_disps[i] - old_disps[i];
+            layer_grid[i] += delta;
+            undo_grid[i] = delta;
+          }
         }
       }
-    }
-  });
+    });
+  }
 
 #if SCULPT_LAYERS_DEBUG_FLUSH
   const auto t_delta = std::chrono::high_resolution_clock::now();

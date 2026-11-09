@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 
 #include "BLI_array.hh"
@@ -139,6 +140,61 @@ struct SubdivCCGMultiresLayerFrames {
 };
 
 /**
+ * Per-sample journal of the position edits brushes perform during the current recording stroke
+ * (grids domain). See #SubdivCCG::position_journal. One atomic word per 64 samples: the brush
+ * position-write helpers run on parallel worker threads and record with a lock-free OR, while
+ * begin/end and the stroke-end consumption happen on the main thread around the joined loops.
+ */
+struct SubdivCCGPositionJournal {
+  bool active = false;
+  int64_t positions_num = 0;
+  std::unique_ptr<std::atomic<uint64_t>[]> words;
+  int64_t words_num = 0;
+
+  /** Allocate (or clear) for \a positions_num samples and activate. Main thread only. */
+  void begin(const int64_t positions_num)
+  {
+    const int64_t words_needed = positions_num / 64 + 1;
+    if (this->words_num != words_needed) {
+      this->words = std::make_unique<std::atomic<uint64_t>[]>(words_needed);
+      this->words_num = words_needed;
+    }
+    for (const int64_t i : IndexRange(this->words_num)) {
+      this->words[i].store(0, std::memory_order_relaxed);
+    }
+    this->positions_num = positions_num;
+    this->active = true;
+  }
+
+  /** Deactivate. The bits stay readable until the next #begin. Main thread only. */
+  void end()
+  {
+    this->active = false;
+  }
+
+  /** Record one edited sample. Any thread; only meaningful while #active. */
+  void record(const int64_t index)
+  {
+    BLI_assert(index >= 0 && index < this->positions_num);
+    const int64_t word = index >> 6;
+    this->words[word].fetch_or(uint64_t(1) << (index & 63), std::memory_order_relaxed);
+  }
+
+  bool test(const int64_t index) const
+  {
+    BLI_assert(index >= 0 && index < this->positions_num);
+    return (this->words[index >> 6].load(std::memory_order_relaxed) >> (index & 63)) & 1;
+  }
+
+  /** Read one 64-bit word. Main thread only, after the writers have joined. */
+  uint64_t word(const int64_t word_index) const
+  {
+    BLI_assert(word_index >= 0 && word_index < this->words_num);
+    return this->words[word_index].load(std::memory_order_relaxed);
+  }
+};
+
+/**
  * Serial number for the next #SubdivCCG to come into existence. Monotonic and process-wide, so a
  * value handed out once is never handed out again — which is what a holder of an old #SubdivCCG::id
  * relies on to tell "still the same CCG" from "rebuilt at the same address".
@@ -259,6 +315,15 @@ struct SubdivCCG : NonCopyable {
    * #SubdivCCGMultiresLayerFrames::last_used to drive LRU eviction. Reset with the cache.
    */
   int64_t multires_layer_frames_clock = 0;
+
+  /**
+   * Per-sample journal of the position edits brushes perform during the current recording stroke
+   * (grids domain). Filled lock-free by the position-write helpers from the parallel brush loops
+   * (#SubdivCCGPositionJournal::record), begun and consumed on the main thread: the sculpt-layer
+   * recording reads it at stroke end to restrict the tangent-encode delta to the samples the
+   * brush actually moved. Inactive outside recording strokes; every writer checks #active first.
+   */
+  SubdivCCGPositionJournal position_journal;
 
   ~SubdivCCG();
 };

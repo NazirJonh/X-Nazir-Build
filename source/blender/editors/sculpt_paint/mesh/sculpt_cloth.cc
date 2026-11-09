@@ -1779,6 +1779,14 @@ void do_simulation_step(const Depsgraph &depsgraph,
       const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
       const Span<float3> cloth_positions = cloth_sim.pos;
       MutableSpan<float3> positions = subdiv_ccg.positions;
+      /* The simulation writes CCG positions directly instead of through #apply_translations, so it
+       * journals the moved samples itself (see #SubdivCCG::position_journal). Validated once here,
+       * like in #apply_translations, so a stale journal is never indexed. */
+      SubdivCCGPositionJournal *journal = (subdiv_ccg.position_journal.active &&
+                                           subdiv_ccg.position_journal.positions_num ==
+                                               positions.size()) ?
+                                              &subdiv_ccg.position_journal :
+                                              nullptr;
       active_nodes.foreach_index(
           [&](const int i) {
             LocalData &tls = all_tls.local();
@@ -1799,10 +1807,22 @@ void do_simulation_step(const Depsgraph &depsgraph,
               const IndexRange grid_range = bke::ccg::grid_range(key, grid);
               if (cloth_sim.use_world_space) {
                 for (const int vert : grid_range) {
-                  positions[vert] = cloth_position_from_sim(transform, cloth_positions[vert]);
+                  const float3 new_position = cloth_position_from_sim(transform,
+                                                                      cloth_positions[vert]);
+                  if (journal && new_position != positions[vert]) {
+                    journal->record(vert);
+                  }
+                  positions[vert] = new_position;
                 }
               }
               else {
+                if (journal) {
+                  for (const int vert : grid_range) {
+                    if (cloth_positions[vert] != positions[vert]) {
+                      journal->record(vert);
+                    }
+                  }
+                }
                 positions.slice(grid_range).copy_from(cloth_positions.slice(grid_range));
               }
             }

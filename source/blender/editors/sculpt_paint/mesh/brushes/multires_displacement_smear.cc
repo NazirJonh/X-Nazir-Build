@@ -41,6 +41,10 @@ static void calc_node(const Depsgraph &depsgraph,
   const StrokeCache &cache = *ss.cache;
   SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
   MutableSpan<float3> ccg_positions = subdiv_ccg.positions;
+  /* Validate the journal once per call rather than per sample; a stale journal whose CCG was
+   * rebuilt must not be indexed past its words. */
+  const bool journal_active = subdiv_ccg.position_journal.active &&
+                              subdiv_ccg.position_journal.positions_num == ccg_positions.size();
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
 
   const Span<int> grids = node.grids();
@@ -110,6 +114,11 @@ static void calc_node(const Depsgraph &depsgraph,
                         interp_limit_surface_disp;
         ccg_positions[vert] = math::interpolate(
             ccg_positions[vert], new_co, tls.factors[node_vert]);
+        /* This brush writes CCG positions directly instead of through #apply_translations, so it
+         * journals the edit itself (see #SubdivCCG::position_journal). */
+        if (journal_active && tls.factors[node_vert] != 0.0f) {
+          subdiv_ccg.position_journal.record(vert);
+        }
       }
     }
   }

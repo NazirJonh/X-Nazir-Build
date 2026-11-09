@@ -407,6 +407,13 @@ struct StepData {
    * deltas per grid, in the order of the grid list (see
    * #multiresModifier_reshapeFromCCG_into_sculpt_layer). The CCG positions are not restored
    * directly for these steps: the layer delta is reverted and the composed surface re-evaluated.
+   *
+   * Grid sparse layout (a non-empty #sculpt_layer_grid_samples): top-level recording with the
+   * brush write journal active stores only the samples the brush actually moved —
+   * #sculpt_layer_data is packed, aligned with #sculpt_layer_grid_samples (top-level sample
+   * indices within each grid, grouped in the #sculpt_layer_verts grid order), and
+   * #sculpt_layer_seg_start / #sculpt_layer_seg_count give each grid's start/count into both
+   * flat arrays. The dense grid layout remains for recording below the storage level.
    */
   int sculpt_layer_uid = 0;
   bool sculpt_layer_grids = false;
@@ -414,6 +421,7 @@ struct StepData {
   Vector<float3> sculpt_layer_data;
   Vector<int> sculpt_layer_seg_start;
   Vector<int> sculpt_layer_seg_count;
+  Vector<int> sculpt_layer_grid_samples;
 
   /** Operator-level sculpt-layer undo (#Type::SculptLayer): captures metadata and optionally a
    * full data snapshot for reversible influence/visibility and data-edit operations, plus
@@ -1875,7 +1883,51 @@ static void restore_active_sculpt_layer(StepData &step_data, Object &object, con
      * data is adjusted here; the CCG positions are re-evaluated from base + layers by the
      * caller (the composed surface is a deterministic function of the stored data). */
     const Span<int> grids = step_data.sculpt_layer_verts;
-    if (grids.is_empty() || stored.size() % grids.size() != 0) {
+    if (grids.is_empty()) {
+      return;
+    }
+    if (!step_data.sculpt_layer_grid_samples.is_empty()) {
+      /* Sparse grid layout (top-level recording with the brush write journal): only the samples
+       * the brush actually moved were stored. The segment table gives each grid's range into the
+       * packed sample/delta arrays (see the #StepData field comment). */
+      if (step_data.sculpt_layer_seg_start.size() != grids.size() ||
+          step_data.sculpt_layer_seg_count.size() != grids.size() ||
+          step_data.sculpt_layer_grid_samples.size() != stored.size())
+      {
+        return;
+      }
+      /* The layer holds `corners_num * grid_area` elements for the whole mesh, not only for the
+       * touched grids, so the grid size cannot be derived from the touched count. */
+      if (mesh.corners_num <= 0 || live.size() % mesh.corners_num != 0) {
+        return;
+      }
+      const int64_t grid_area = live.size() / mesh.corners_num;
+      const bool undo_grids = is_undo;
+      for (const int64_t t : grids.index_range()) {
+        const int64_t grid_base = int64_t(grids[t]) * grid_area;
+        if (grid_base < 0 || grid_base + grid_area > live.size()) {
+          continue;
+        }
+        float3 *layer_grid = live.data() + grid_base;
+        const int start = step_data.sculpt_layer_seg_start[t];
+        const int count = step_data.sculpt_layer_seg_count[t];
+        for (int k = 0; k < count; k++) {
+          const int64_t flat = int64_t(start) + k;
+          const int sample = step_data.sculpt_layer_grid_samples[flat];
+          if (sample < 0 || int64_t(sample) >= grid_area) {
+            continue;
+          }
+          if (undo_grids) {
+            layer_grid[sample] -= stored[flat];
+          }
+          else {
+            layer_grid[sample] += stored[flat];
+          }
+        }
+      }
+      return;
+    }
+    if (stored.size() % grids.size() != 0) {
       return;
     }
     const int64_t grid_area = stored.size() / grids.size();
@@ -1970,6 +2022,37 @@ void store_active_sculpt_layer_grids(Object &object, Vector<int> &&grids, Vector
   step_data->undo_size += grids.as_span().size_in_bytes() + deltas.as_span().size_in_bytes();
   step_data->sculpt_layer_verts = std::move(grids);
   step_data->sculpt_layer_data = std::move(deltas);
+}
+
+void store_active_sculpt_layer_grids_sparse(Object &object,
+                                            MultiresSculptLayerGridDelta &&delta)
+{
+  StepData *step_data = get_step_data(object);
+  if (!step_data || delta.grids.is_empty()) {
+    return;
+  }
+  BLI_assert(delta.sample_indices.size() == delta.deltas.size());
+  BLI_assert(delta.sample_start.size() == delta.grids.size());
+  BLI_assert(delta.sample_count.size() == delta.grids.size());
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
+  if (!layer) {
+    return;
+  }
+  step_data->sculpt_layer_uid = layer->base.uid;
+  step_data->sculpt_layer_grids = true;
+  step_data->undo_size += delta.grids.as_span().size_in_bytes() +
+                          delta.sample_indices.as_span().size_in_bytes() +
+                          delta.sample_start.as_span().size_in_bytes() +
+                          delta.sample_count.as_span().size_in_bytes() +
+                          delta.deltas.as_span().size_in_bytes();
+  step_data->sculpt_layer_verts = std::move(delta.grids);
+  step_data->sculpt_layer_data = std::move(delta.deltas);
+  step_data->sculpt_layer_grid_samples = std::move(delta.sample_indices);
+  /* The per-grid start/count reuse the segment table fields: same concept, a list of valid
+   * ranges inside the packed arrays (see the #StepData field comment). */
+  step_data->sculpt_layer_seg_start = std::move(delta.sample_start);
+  step_data->sculpt_layer_seg_count = std::move(delta.sample_count);
 }
 
 void store_active_sculpt_layer_verts(Object &object,

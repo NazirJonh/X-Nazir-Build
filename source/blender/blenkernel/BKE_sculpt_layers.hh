@@ -591,6 +591,12 @@ bool is_stale(const Mesh &mesh, const SculptLayer &layer);
  * layer untouched) rather than passed to the allocator as a huge unsigned size.
  */
 MutableSpan<float3> data_ensure(SculptLayer &layer, int64_t totelem);
+/**
+ * Elements per multires grid in a grid-domain \a layer's storage (`totelem / corners_num`), or 0
+ * when it cannot be derived. Single definition shared by the recorder and the undo restore so they
+ * index the layer with the same layout.
+ */
+int grid_area_get(const Mesh &mesh, const SculptLayer &layer);
 /** View of the layer data, empty when not allocated. */
 MutableSpan<float3> data_get(SculptLayer &layer);
 Span<float3> data_get(const SculptLayer &layer);

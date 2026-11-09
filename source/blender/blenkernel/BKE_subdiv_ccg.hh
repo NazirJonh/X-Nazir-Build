@@ -147,6 +147,12 @@ struct SubdivCCGMultiresLayerFrames {
  */
 struct SubdivCCGPositionJournal {
   bool active = false;
+  /**
+   * Set when a writer changed #SubdivCCG::positions without going through the brush helpers that
+   * record here (a curve-patch effect today). The bits then no longer describe the stroke's full
+   * footprint, so consumers must fall back to the dense path instead of trusting them.
+   */
+  std::atomic<bool> invalid{false};
   int64_t positions_num = 0;
   std::unique_ptr<std::atomic<uint64_t>[]> words;
   int64_t words_num = 0;
@@ -163,6 +169,7 @@ struct SubdivCCGPositionJournal {
       this->words[i].store(0, std::memory_order_relaxed);
     }
     this->positions_num = positions_num;
+    this->invalid.store(false, std::memory_order_relaxed);
     this->active = true;
   }
 
@@ -170,6 +177,23 @@ struct SubdivCCGPositionJournal {
   void end()
   {
     this->active = false;
+  }
+
+  /**
+   * Mark the journal unusable for the current stroke: a direct writer of #SubdivCCG::positions
+   * (curve-patch effects, and any future code path that bypasses the brush helpers) must call this
+   * before or after its writes, so the stroke-end consumers fall back to the dense delta instead
+   * of a sparse one built from an incomplete footprint. Any thread (atomic flag, so a writer that
+   * runs on a worker thread does not race with the others).
+   */
+  void invalidate()
+  {
+    this->invalid.store(true, std::memory_order_relaxed);
+  }
+
+  bool is_invalid() const
+  {
+    return this->invalid.load(std::memory_order_relaxed);
   }
 
   /** Record one edited sample. Any thread; only meaningful while #active. */

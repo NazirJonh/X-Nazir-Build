@@ -128,6 +128,10 @@ void ReliefEffect::restore(CurvePatchTargetState &target)
    * used for this pbvh's actual type -- see the matching comment there. */
   if (pbvh.type() == bke::pbvh::Type::Grids) {
     SubdivCCG &subdiv_ccg = *ob.runtime->sculpt_session->subdiv_ccg;
+    /* Direct writes to the CCG positions (see the loop below): the sculpt-layer write journal does
+     * not see them, so it must not be trusted for the stroke-end capture (see
+     * #SubdivCCGPositionJournal::invalidate). */
+    subdiv_ccg.position_journal.invalidate();
     /* Tried parallelizing this loop two different ways (a direct `parallel_for_each()` over
      * `Map::items()`, which does not compile against it -- C2672, `Map::ItemIterator` is not a
      * TBB-compatible Container/Range -- and, after that, flattening into a `Vector` first and
@@ -400,6 +404,15 @@ void ReliefEffect::apply_pass(const Depsgraph &depsgraph,
       }
     }
     tag_mask = IndexMask::from_bits(touched, tag_memory);
+  }
+
+  if (subdiv_ccg) {
+    /* These writes bypass the brush helpers that record #SubdivCCG::position_journal, so the
+     * journal no longer describes the stroke's footprint: mark it invalid so the stroke-end layer
+     * capture falls back to the dense per-grid delta (see #SubdivCCGPositionJournal::invalidate).
+     * Both this site and #restore() need it: they are independent entry points, and the journal's
+     * #begin of a new stroke clears the flag in between. */
+    subdiv_ccg->position_journal.invalidate();
   }
 
   for (LocalData &local : all_tls) {

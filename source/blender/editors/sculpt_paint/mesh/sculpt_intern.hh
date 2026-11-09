@@ -2200,6 +2200,50 @@ MutableSpan<float3> active_record_data(Object &object);
 Span<float3> stroke_base_view(const Object &object);
 
 /**
+ * Isolated-layer smooth (#Brush::use_smooth_preserve_layers): the recording stroke's reference
+ * `positions - active layer contribution` for the grid-domain Smooth brush — smoothing the delta
+ * over it edits the active layer only, so the layers below are not flattened into the recorded
+ * stroke. Empty when the option is off, the layer is not a grid layer, the reference could not be
+ * built, or it is not built yet for every grid in \a grids (the Smooth brush's neighbor operators
+ * read across grid seams, so only a fully built set is handed out; empty means the plain behavior
+ * for those grids). Valid for the whole stroke (the layer data is written only at stroke end), but
+ * built per grid by #stroke_layer_smooth_ref_ensure. The returned span covers every CCG sample;
+ * only the samples of the tested grids (and their seam neighbors) are valid.
+ */
+Span<float3> stroke_layer_smooth_ref_for_grids(const Object &object, Span<int> grids);
+
+/** Parameters of the live mesh-domain smooth reference `position - data * effective`. */
+struct MeshSmoothLayerRef {
+  float effective = 0.0f;
+  /** The active layer's per-vertex data; empty when the layer has no data buffer (a zero
+   * contribution: the reference degenerates to the positions themselves). */
+  Span<float3> data;
+};
+
+/**
+ * Isolated-layer smooth (#Brush::use_smooth_preserve_layers), mesh (vertex) domain: the parameters
+ * of the live reference for the recording stroke's Smooth brush. Returns no value when the
+ * reference does not apply (the stroke is not recording, it was refused by #stroke_record_begin, a
+ * base view exists, or the active layer's effective influence is zero) — the caller keeps the plain
+ * behavior.
+ *
+ * The mesh domain needs no prebuilt array: the layer data is written per dab, so the reference is
+ * evaluated against the live positions and data at call time and the stroke's own edits cancel.
+ */
+std::optional<MeshSmoothLayerRef> stroke_layer_smooth_ref_mesh(Object &object);
+
+/**
+ * Build #stroke_layer_smooth_ref for \a node_mask's grids and their seam neighbors, skipping the
+ * grids it has already built for this stroke (a stroke may reach new nodes dab by dab, so this
+ * extends the built set instead of restarting it). Must run on the main thread before the Smooth
+ * brush's parallel loops. No-op when the reference does not apply.
+ */
+void stroke_layer_smooth_ref_ensure(Object &object, const IndexMask &node_mask);
+
+/** Drop the isolated-layer smooth reference (stroke begin/end, session invalidation). */
+void stroke_layer_smooth_ref_clear(Object &object);
+
+/**
  * The base-view offset sampled at the current brush contact point (see #stroke_base_view). Zero
  * when the base view is inactive. Refreshed once per brush action, so it follows the symmetry and
  * tile passes.

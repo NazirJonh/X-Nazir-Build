@@ -538,12 +538,17 @@ inline int64_t multires_layer_frames_per_grid_bytes(const int grid_size)
  * run it on the main thread, and the depsgraph-driven flush reaches it through the reshape,
  * serialized against the editor by the update cycle — so it may run on a worker thread, but never
  * two at once on one CCG.
+ *
+ * With \a stamp_and_evict false the call only fills grids while there is room, like the all-grids
+ * form: nothing is stamped or evicted. Auxiliary readers (the per-dab layer reference build) use it
+ * so they cannot push out frames that the stroke-end tangent encode still needs.
  */
 void multires_layer_frames_plan_populate(SubdivCCG &subdiv_ccg,
                                          int grids_num,
                                          int64_t per_grid_bytes,
                                          blender::Span<int> touched_grids,
-                                         blender::MutableSpan<bool> r_populate_grids);
+                                         blender::MutableSpan<bool> r_populate_grids,
+                                         bool stamp_and_evict = true);
 
 /**
  * All-grids form of #multires_layer_frames_plan_populate for "fill while there is room" callers

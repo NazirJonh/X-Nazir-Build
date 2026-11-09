@@ -57,6 +57,9 @@ struct LocalData {
   Vector<float3> translations;
   /* Neighbor average of the sculpt-layer base-view offset (see #layers::stroke_base_view). */
   Vector<float3> base_view_avg;
+  /* Neighbor average of the active layer's data for the isolated-layer smooth (see
+   * #layers::stroke_layer_smooth_ref_mesh). */
+  Vector<float3> layer_data_avg;
 };
 
 BLI_NOINLINE static void apply_positions_faces(const Sculpt &sd,
@@ -109,6 +112,14 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
 
   threading::EnumerableThreadSpecific<LocalData> all_tls;
 
+  /* Isolated-layer smoothing (#Brush::use_smooth_preserve_layers): while this stroke records into
+   * the active layer, the reference `position - data * effective` is evaluated live per node (see
+   * #layers::stroke_layer_smooth_ref_mesh) instead of the base view the non-recording strokes use.
+   * The two are mutually exclusive: the base view is empty while recording by design. */
+  const std::optional<layers::MeshSmoothLayerRef> layer_ref =
+      brush.use_smooth_preserve_layers ? layers::stroke_layer_smooth_ref_mesh(object) :
+                                         std::nullopt;
+
   /* Calculate the new positions into a separate array in a separate loop because multiple loops
    * are updated in parallel. Without this there would be non-threadsafe access to changing
    * positions in other bke::pbvh::Tree nodes. */
@@ -158,6 +169,32 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
                 base_view, verts, neighbors, tls.base_view_avg.as_mutable_span());
             for (const int vi : verts.index_range()) {
               node_new_positions[vi] += base_view[verts[vi]] - tls.base_view_avg[vi];
+            }
+          }
+          else if (layer_ref) {
+            const Span<float3> layer_ref_data = layer_ref->data;
+            const float layer_ref_effective = layer_ref->effective;
+            /* Isolated-layer target `avg(pos) + R[v] - avg(R)` with the reference
+             * `R = position - data * effective`: the stroke's own edits cancel between the two
+             * terms, so smoothing rides on the layer's own delta and the base and the other
+             * layers are left fixed. avg(R) runs the same operator over the same neighbor lists,
+             * expanded by linearity to `avg(pos) - effective * avg(data)` — avg(pos) is
+             * #node_new_positions as computed above — because R itself is not materialized. */
+            if (!layer_ref_data.is_empty()) {
+              tls.layer_data_avg.resize(verts.size());
+              smooth::neighbor_data_average_mesh_check_loose(
+                  layer_ref_data, verts, neighbors, tls.layer_data_avg.as_mutable_span());
+            }
+            for (const int vi : verts.index_range()) {
+              const int v = verts[vi];
+              const float3 layer_contribution = layer_ref_data.is_empty() ?
+                                                    float3(0.0f) :
+                                                    layer_ref_data[v] * layer_ref_effective;
+              const float3 layer_avg = layer_ref_data.is_empty() ?
+                                           float3(0.0f) :
+                                           tls.layer_data_avg[vi] * layer_ref_effective;
+              node_new_positions[vi] += position_data.eval[v] - layer_contribution -
+                                        (node_new_positions[vi] - layer_avg);
             }
           }
         },
@@ -212,15 +249,27 @@ static void calc_grids(const Depsgraph &depsgraph,
                                                    new_positions);
 
   const Span<float3> base_view = layers::stroke_base_view(object);
-  if (!base_view.is_empty()) {
-    /* Base-aware target `avg(base) + O[v]`; see the mesh path in #do_smooth_brush_mesh. */
+  /* Isolated-layer smoothing (recording with #Brush::use_smooth_preserve_layers): the reference is
+   * the composed surface minus the active layer's contribution, so the same adjustment below
+   * smooths the active layer's own delta and leaves the base and the other layers fixed. The two
+   * sources are mutually exclusive: the base view is empty while recording by design. The
+   * reference is built per grid (see #layers::stroke_layer_smooth_ref_ensure); a node whose grids
+   * or their seam neighbors were not covered keeps the plain behavior. */
+  Span<float3> reference = base_view;
+  if (reference.is_empty()) {
+    reference = layers::stroke_layer_smooth_ref_for_grids(object, grids);
+  }
+  if (!reference.is_empty()) {
+    /* Base-aware target `avg(base) + O[v]`; see the mesh path in #do_smooth_brush_mesh. With the
+     * isolated-layer reference this reads `avg(composite) + R[v] - avg(R)` = the active layer's
+     * offset averaged with the same neighbor operator, base and other layers riding unchanged. */
     tls.base_view_avg.resize(positions.size());
     smooth::neighbor_position_average_interior_grids(faces,
                                                      corner_verts,
                                                      boundary_verts,
                                                      boundary_edges,
                                                      subdiv_ccg,
-                                                     base_view,
+                                                     reference,
                                                      grids,
                                                      tls.factors,
                                                      tls.base_view_avg.as_mutable_span());
@@ -229,7 +278,7 @@ static void calc_grids(const Depsgraph &depsgraph,
       const IndexRange node_range = bke::ccg::grid_range(key, i);
       const IndexRange grid_range = bke::ccg::grid_range(key, grids[i]);
       for (const int offset : IndexRange(key.grid_area)) {
-        new_positions[node_range[offset]] += base_view[grid_range[offset]] -
+        new_positions[node_range[offset]] += reference[grid_range[offset]] -
                                              tls.base_view_avg[node_range[offset]];
       }
     }
@@ -297,6 +346,14 @@ void do_smooth_brush(const Depsgraph &depsgraph,
       const Mesh &base_mesh = *id_cast<const Mesh *>(object.data);
       const OffsetIndices faces = base_mesh.faces();
       const Span<int> corner_verts = base_mesh.corner_verts();
+
+      /* Isolated-layer smoothing (#Brush::use_smooth_preserve_layers): build the reference for
+       * this dab's nodes and their seam neighbors, lazily per grid, before the parallel loops —
+       * its call site sees the surface before any dab moved positions, and later dabs extend the
+       * built grids as the stroke moves on. */
+      if (brush.use_smooth_preserve_layers) {
+        layers::stroke_layer_smooth_ref_ensure(object, node_mask);
+      }
 
       threading::EnumerableThreadSpecific<LocalData> all_tls;
       for (const float strength : iteration_strengths(brush_strength)) {

@@ -272,12 +272,32 @@ struct MultiresSculptLayerGridDelta {
   Vector<int> grids;
   /** Top-level sample indices within each grid, grouped in \a grids order. */
   Vector<int> sample_indices;
-  /** Per grid: start into #sample_indices and #deltas. */
+  /** Per grid: start into #sample_indices and #values_before. */
   Vector<int> sample_start;
   /** Per grid: number of journaled samples. */
   Vector<int> sample_count;
-  /** Deltas aligned with #sample_indices. */
-  Vector<float3> deltas;
+  /**
+   * Layer value at each journaled sample before the stroke's delta was added, aligned with
+   * #sample_indices. Held by the undo step and swapped with the live layer on undo and redo (see
+   * #restore_active_sculpt_layer), so repeated cycles return the coefficients bit-exactly.
+   */
+  Vector<float3> values_before;
+};
+
+/**
+ * Undo payload of a sculpt layer recording. Exactly one layout is filled: #sparse when #is_sparse,
+ * otherwise #dense_values_before.
+ */
+struct MultiresSculptLayerRecordResult {
+  /**
+   * The layer's per-element values before the stroke's delta was added, laid out as
+   * `touched_grids.size() * grid_area` values in the order of the touched grids. The undo step swaps
+   * them with the live layer on undo and redo (see #restore_active_sculpt_layer). Used when
+   * recording below the storage level or with an inactive or invalidated journal.
+   */
+  Vector<float3> dense_values_before;
+  MultiresSculptLayerGridDelta sparse;
+  bool is_sparse = false;
 };
 
 /**
@@ -287,22 +307,16 @@ struct MultiresSculptLayerGridDelta {
  * left unchanged (it only ever stores the base surface, layers are composed at evaluation time).
  *
  * \param touched_grids: indices of the grids modified by the stroke.
- * \param r_undo_delta: per-element deltas that were added to the layer, laid out as
- * `touched_grids.size() * grid_area` values in the order of \a touched_grids. Only filled when
- * \a r_sparse is null or the sparse path did not apply (recording below the storage level, or an
- * inactive journal).
- * \param r_sparse: when not null and the journal is active at the storage level, the deltas are
- * written here instead (only the journaled samples), and \a r_undo_delta stays empty. The layer
- * writes themselves are restricted to the journaled samples in that case.
+ * \param r_result: the undo payload, either sparse (journal active and valid at the storage level:
+ * only the journaled samples, layer writes restricted to them) or dense (see
+ * #MultiresSculptLayerRecordResult).
  */
 bool multiresModifier_reshapeFromCCG_into_sculpt_layer(int tot_level,
                                                        Mesh *coarse_mesh,
                                                        SubdivCCG *subdiv_ccg,
                                                        Span<int> touched_grids,
                                                        SculptLayer &layer,
-                                                       Vector<float3> &r_undo_delta,
-                                                       MultiresSculptLayerGridDelta *r_sparse =
-                                                           nullptr);
+                                                       MultiresSculptLayerRecordResult &r_result);
 
 /**
  * Add `layer.data * factor` to the mesh's #CD_MDISPS displacement (both are stored in the same
@@ -387,11 +401,15 @@ bke::sculpt_layers::MaskBlockWeight BKE_multires_grid_sculpt_layer_weight(
  * Returns false when the CCG is finer than \a layer's storage level, which cannot be served.
  *
  * \param r_contrib: must hold `grids_num * ccg_grid_size^2` elements.
+ * \param grid_subset: when non-empty, only these grids' contribution slices are written (and their
+ * limit-surface frames cached); the rest of \a r_contrib is left untouched. Empty means every
+ * grid. Lets a caller build the contribution lazily, for the region a brush actually reaches.
  */
 bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
                                                    SubdivCCG &subdiv_ccg,
                                                    const SculptLayer &layer,
-                                                   MutableSpan<float3> r_contrib);
+                                                   MutableSpan<float3> r_contrib,
+                                                   Span<int> grid_subset = {});
 
 /**
  * One top-level grid element to evaluate base-mesh limit frames at (see

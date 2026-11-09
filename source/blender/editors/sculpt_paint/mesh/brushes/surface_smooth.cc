@@ -43,6 +43,9 @@ struct LocalData {
    * #layers::stroke_base_view). */
   Vector<float3> base_view_storage;
   Vector<float3> base_view_avg;
+  /* Neighbor average of the active layer's data for the isolated-layer smooth (see
+   * #layers::stroke_layer_smooth_ref_mesh). */
+  Vector<float3> layer_data_avg;
 };
 
 BLI_NOINLINE static void clamp_factors(const MutableSpan<float> factors)
@@ -79,6 +82,14 @@ BLI_NOINLINE static void do_surface_smooth_brush_mesh(const Depsgraph &depsgraph
   Array<int> node_offset_data;
   const OffsetIndices node_offsets = create_node_vert_offsets(nodes, node_mask, node_offset_data);
   Array<float> all_factors(node_offsets.total_size());
+
+  /* Isolated-layer smoothing (#Brush::use_smooth_preserve_layers): while this stroke records into
+   * the active layer, the laplacian step below runs against the live reference
+   * `position - data * effective` (see #layers::stroke_layer_smooth_ref_mesh). Mutually exclusive
+   * with the base view: the base view is empty while recording by design. */
+  const std::optional<layers::MeshSmoothLayerRef> layer_ref =
+      brush.use_smooth_preserve_layers ? layers::stroke_layer_smooth_ref_mesh(object) :
+                                         std::nullopt;
 
   threading::EnumerableThreadSpecific<LocalData> all_tls;
   node_mask.foreach_index(
@@ -168,8 +179,8 @@ BLI_NOINLINE static void do_surface_smooth_brush_mesh(const Depsgraph &depsgraph
              * `O[v] - avg(O)` to both results. The layer detail then rides on the smoothed base
              * rather than being flattened into it. Averaging the offset with the same operator
              * (same neighbor lists) keeps boundary handling exact, and the raw offset is correct
-             * here (no #layers::stroke_base_view_dc): only differences of positions are used, which
-             * a constant shift leaves unchanged.
+             * here (no #layers::stroke_base_view_dc): only differences of positions are used,
+             * which a constant shift leaves unchanged.
              *
              * The displacement step needs no such correction: it reads back the base-space
              * displacements stored here and is purely differential in them. */
@@ -180,6 +191,26 @@ BLI_NOINLINE static void do_surface_smooth_brush_mesh(const Depsgraph &depsgraph
               const float3 correction = base_view[verts[vi]] - base_view_avg[vi];
               laplacian_disp[vi] += correction;
               translations[vi] += correction;
+            }
+          }
+          else if (layer_ref) {
+            const Span<float3> layer_ref_data = layer_ref->data;
+            const float layer_ref_effective = layer_ref->effective;
+            /* Isolated-layer step: the same affine argument with the reference
+             * `R = position - data * effective` (the layer contribution plays the role of the
+             * offset): adding `C[v] - avg(C)` with `C = data * effective` runs the step on the
+             * surface with the active layer removed, so the layers below are not flattened into
+             * the recorded stroke. avg(C) runs the same operator over the same neighbor lists. */
+            if (!layer_ref_data.is_empty()) {
+              tls.layer_data_avg.resize(verts.size());
+              const MutableSpan<float3> layer_data_avg = tls.layer_data_avg;
+              smooth::neighbor_data_average_mesh(layer_ref_data, neighbors, layer_data_avg);
+              for (const int vi : verts.index_range()) {
+                const float3 correction = (layer_ref_data[verts[vi]] - tls.layer_data_avg[vi]) *
+                                          layer_ref_effective;
+                laplacian_disp[vi] += correction;
+                translations[vi] += correction;
+              }
             }
           }
           scale_translations(translations, factors);
@@ -324,6 +355,29 @@ BLI_NOINLINE static void do_surface_smooth_brush_grids(
                                           base_view_avg[node_range[offset]];
                 laplacian_disp[node_range[offset]] += correction;
                 translations[node_range[offset]] += correction;
+              }
+            }
+          }
+          else {
+            /* Isolated-layer step (recording with #Brush::use_smooth_preserve_layers); see the
+             * mesh variant in #do_surface_smooth_brush_mesh. The reference is built per grid, so
+             * a node whose grids (or their seam neighbors) were not covered keeps the plain
+             * behavior. */
+            const Span<float3> layer_ref = layers::stroke_layer_smooth_ref_for_grids(object, grids);
+            if (!layer_ref.is_empty()) {
+              tls.layer_data_avg.resize(positions.size());
+              const MutableSpan<float3> layer_ref_avg = tls.layer_data_avg;
+              smooth::average_data_grids(subdiv_ccg, layer_ref, grids, layer_ref_avg);
+              const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+              for (const int grid : grids.index_range()) {
+                const IndexRange node_range = bke::ccg::grid_range(key, grid);
+                const IndexRange grid_range = bke::ccg::grid_range(key, grids[grid]);
+                for (const int offset : IndexRange(key.grid_area)) {
+                  const float3 correction = layer_ref[grid_range[offset]] -
+                                            layer_ref_avg[node_range[offset]];
+                  laplacian_disp[node_range[offset]] += correction;
+                  translations[node_range[offset]] += correction;
+                }
               }
             }
           }
@@ -496,6 +550,11 @@ void do_surface_smooth_brush(const Depsgraph &depsgraph,
           depsgraph, sd, brush, node_mask, object, ss.cache->surface_smooth_laplacian_disp);
       break;
     case bke::pbvh::Type::Grids: {
+      /* Isolated-layer smoothing (#Brush::use_smooth_preserve_layers): build the reference for
+       * this dab's nodes and their seam neighbors, lazily per grid, before the parallel loops. */
+      if (brush.use_smooth_preserve_layers) {
+        layers::stroke_layer_smooth_ref_ensure(object, node_mask);
+      }
       do_surface_smooth_brush_grids(
           depsgraph, sd, brush, node_mask, object, ss.cache->surface_smooth_laplacian_disp);
       break;

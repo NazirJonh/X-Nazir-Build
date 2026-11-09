@@ -201,6 +201,15 @@ struct Node {
   int unique_verts_num;
 
   /**
+   * Mesh recording stroke: the active sculpt layer's data at #vert_indices, captured once when
+   * this node first joined the step (before any dab touched it — see #fill_node_data_mesh). The
+   * stroke-end recorder hands these to the undo step as the swap partner of the live layer data
+   * (see #restore_active_sculpt_layer). Empty when the stroke records no layer, the layer has no
+   * data buffer, or the node is a grid node.
+   */
+  Array<float3, 0> layer_data_before;
+
+  /**
    * \todo Storing corners rather than faces is unnecessary.
    */
   Vector<int, 0> corner_indices;
@@ -389,24 +398,26 @@ struct StepData {
   size_t undo_size;
 
   /**
-   * Sculpt layers: explicit per-element deltas recorded into this step for the active layer.
-   * Undo subtracts the delta from the live layer data, redo adds it. #sculpt_layer_uid is 0 when
-   * no layer was recorded.
+   * Sculpt layers: the active layer's per-element values before the stroke touched them, recorded
+   * into this step. The restore swaps them with the live layer data on undo and redo (see
+   * #restore_active_sculpt_layer), so repeated cycles return the coefficients bit-exactly.
+   * #sculpt_layer_uid is 0 when no layer was recorded.
    *
-   * Mesh (vertex) path (#sculpt_layer_grids == false): #sculpt_layer_data holds per-vertex deltas
+   * Mesh (vertex) path (#sculpt_layer_grids == false): #sculpt_layer_data holds the layer values
    * at the vertices listed in #sculpt_layer_verts, keeping undo memory proportional to the
    * brushed area rather than the whole mesh. The two arrays are not tightly packed: each touched
    * PBVH node owns a contiguous slot, and only the slot's leading #sculpt_layer_seg_count[s]
    * entries (starting at #sculpt_layer_seg_start[s]) are valid, the trailing entries being unused
-   * zero-delta holes. This lets stroke end skip the sequential compact pass (which was on the hot
-   * path); restore iterates the segments instead. When the segment table is empty the arrays are
-   * tightly packed (legacy).
+   * holes. This lets stroke end skip the sequential compact pass (which was on the hot path);
+   * restore iterates the segments instead. When the segment table is empty the arrays are tightly
+   * packed (legacy).
    *
    * Multires/grid path (#sculpt_layer_grids == true): #sculpt_layer_verts holds the indices of
    * the grids touched by the stroke, and #sculpt_layer_data holds `grid_area` tangent-space
-   * deltas per grid, in the order of the grid list (see
+   * before-values per grid, in the order of the grid list (see
    * #multiresModifier_reshapeFromCCG_into_sculpt_layer). The CCG positions are not restored
-   * directly for these steps: the layer delta is reverted and the composed surface re-evaluated.
+   * directly for these steps: the layer data is swapped back and the composed surface
+   * re-evaluated.
    *
    * Grid sparse layout (a non-empty #sculpt_layer_grid_samples): top-level recording with the
    * brush write journal active stores only the samples the brush actually moved —
@@ -417,6 +428,11 @@ struct StepData {
    */
   int sculpt_layer_uid = 0;
   bool sculpt_layer_grids = false;
+  /** Grid-point count of one grid at the layer's storage level, captured at record time (0 when
+   * not stored — grid steps only). The restore indexes the layer with it instead of re-deriving
+   * the value from the mesh or the stored arrays, which a subdivision level change between record
+   * and restore would silently corrupt. */
+  int sculpt_layer_grid_area = 0;
   Vector<int> sculpt_layer_verts;
   Vector<float3> sculpt_layer_data;
   Vector<int> sculpt_layer_seg_start;
@@ -1857,16 +1873,15 @@ static bool can_restore_active_sculpt_layer_mesh(const StepData &step_data, Obje
 }
 
 /**
- * Sculpt layers: revert or re-apply the explicit per-element deltas recorded for the active
- * layer. The delta is constant, so undo subtracts and redo adds it (no swap needed).
+ * Sculpt layers: swap the recorded pre-stroke layer values with the live layer data. The swap is
+ * its own inverse, so undo and redo run the same code and repeated cycles return the
+ * coefficients bit-exactly (the same semantics #PositionUndoStorage uses for the positions).
  *
- * \a is_undo is threaded down from #restore_list rather than read off #StepData::needs_undo:
- * that flag is flipped only by the dyntopo and geometry restore helpers, and a #Type::Position
- * step recorded into a layer reaches none of them, so it would read a constant `true` and repeat
- * the undo subtraction on every redo (see the identical reasoning at #restore_list's is_undo
- * parameter comment).
+ * On the mesh path the layer's contribution is additionally folded into the positions with the
+ * delta the swap produces; on the grid path the CCG positions are re-evaluated from base + layers
+ * by the caller (the composed surface is a deterministic function of the stored data).
  */
-static void restore_active_sculpt_layer(StepData &step_data, Object &object, const bool is_undo)
+static void restore_active_sculpt_layer(StepData &step_data, Object &object)
 {
   if (step_data.sculpt_layer_uid == 0 || step_data.sculpt_layer_data.is_empty()) {
     return;
@@ -1879,30 +1894,29 @@ static void restore_active_sculpt_layer(StepData &step_data, Object &object, con
   MutableSpan<float3> live(static_cast<float3 *>(layer->data), layer->totelem);
   MutableSpan<float3> stored = step_data.sculpt_layer_data;
   if (step_data.sculpt_layer_grids) {
-    /* Multires/grid path: per-grid tangent-space deltas at the touched grids. Only the layer
-     * data is adjusted here; the CCG positions are re-evaluated from base + layers by the
-     * caller (the composed surface is a deterministic function of the stored data). */
+    /* Multires/grid path: per-grid tangent-space values at the touched grids. Only the layer
+     * data is swapped here; the CCG positions are re-evaluated from base + layers by the caller
+     * (the composed surface is a deterministic function of the stored data). */
     const Span<int> grids = step_data.sculpt_layer_verts;
     if (grids.is_empty()) {
+      return;
+    }
+    /* Grid area captured at record time (undo steps only live within a session, so every grid step
+     * carries it); a missing value is a recording bug, not something to re-derive. */
+    const int64_t grid_area = step_data.sculpt_layer_grid_area;
+    if (grid_area <= 0) {
       return;
     }
     if (!step_data.sculpt_layer_grid_samples.is_empty()) {
       /* Sparse grid layout (top-level recording with the brush write journal): only the samples
        * the brush actually moved were stored. The segment table gives each grid's range into the
-       * packed sample/delta arrays (see the #StepData field comment). */
+       * packed sample/value arrays (see the #StepData field comment). */
       if (step_data.sculpt_layer_seg_start.size() != grids.size() ||
           step_data.sculpt_layer_seg_count.size() != grids.size() ||
           step_data.sculpt_layer_grid_samples.size() != stored.size())
       {
         return;
       }
-      /* The layer holds `corners_num * grid_area` elements for the whole mesh, not only for the
-       * touched grids, so the grid size cannot be derived from the touched count. */
-      if (mesh.corners_num <= 0 || live.size() % mesh.corners_num != 0) {
-        return;
-      }
-      const int64_t grid_area = live.size() / mesh.corners_num;
-      const bool undo_grids = is_undo;
       for (const int64_t t : grids.index_range()) {
         const int64_t grid_base = int64_t(grids[t]) * grid_area;
         if (grid_base < 0 || grid_base + grid_area > live.size()) {
@@ -1917,42 +1931,30 @@ static void restore_active_sculpt_layer(StepData &step_data, Object &object, con
           if (sample < 0 || int64_t(sample) >= grid_area) {
             continue;
           }
-          if (undo_grids) {
-            layer_grid[sample] -= stored[flat];
-          }
-          else {
-            layer_grid[sample] += stored[flat];
-          }
+          std::swap(layer_grid[sample], stored[flat]);
         }
       }
       return;
     }
-    if (stored.size() % grids.size() != 0) {
+    if (stored.size() != grids.size() * grid_area) {
       return;
     }
-    const int64_t grid_area = stored.size() / grids.size();
-    const bool undo_grids = is_undo;
     for (const int64_t t : grids.index_range()) {
       const int64_t start = int64_t(grids[t]) * grid_area;
       if (start < 0 || start + grid_area > live.size()) {
         continue;
       }
       float3 *layer_grid = live.data() + start;
-      const float3 *delta_grid = stored.data() + t * grid_area;
+      float3 *stored_grid = stored.data() + t * grid_area;
       for (int64_t i = 0; i < grid_area; i++) {
-        if (undo_grids) {
-          layer_grid[i] -= delta_grid[i];
-        }
-        else {
-          layer_grid[i] += delta_grid[i];
-        }
+        std::swap(layer_grid[i], stored_grid[i]);
       }
     }
     return;
   }
-  /* Partial delta snapshot (mesh path): add or subtract per-vertex deltas.
-   * #sculpt_layer_data holds the delta (new - old) recorded at stroke end; undo subtracts it,
-   * redo adds it. Unlike the whole-buffer path the delta is constant, so no swap is needed.
+  /* Partial before-value snapshot (mesh path): the layer data at the touched vertices before the
+   * stroke, captured at each node's first undo push. Swapped with the live data, so the swap
+   * covers both directions (see the grid path above).
    *
    * The arrays may carry per-node holes (see #StepData::sculpt_layer_seg_start): when a segment
    * table is present only the listed ranges are valid, otherwise the arrays are tightly packed. */
@@ -1960,7 +1962,6 @@ static void restore_active_sculpt_layer(StepData &step_data, Object &object, con
   if (verts.size() != stored.size()) {
     return;
   }
-  const bool undo = is_undo;
   /* Deliberately the CURRENT effective influence, not the one in force when the stroke was
    * recorded: every influence change keeps `positions == base + sum(data * effective)` (canonical
    * recompute or the incremental RNA delta), so the positions embed the recorded delta scaled by
@@ -1979,17 +1980,12 @@ static void restore_active_sculpt_layer(StepData &step_data, Object &object, con
     for (const int64_t i : IndexRange(start, count)) {
       const int v = verts[i];
       if (v >= 0 && v < live.size()) {
-        if (undo) {
-          live[v] -= stored[i];
-          if (!skip_positions) {
-            positions[v] -= stored[i] * influence;
-          }
-        }
-        else {
-          live[v] += stored[i];
-          if (!skip_positions) {
-            positions[v] += stored[i] * influence;
-          }
+        const float3 live_before_swap = live[v];
+        std::swap(live[v], stored[i]);
+        if (!skip_positions) {
+          /* Move the positions by the layer contribution's actual change: the difference of the
+           * two bit-exact values the swap just produced, scaled by the current influence. */
+          positions[v] += (live[v] - live_before_swap) * influence;
         }
       }
     }
@@ -2005,13 +2001,16 @@ static void restore_active_sculpt_layer(StepData &step_data, Object &object, con
   }
 }
 
-void store_active_sculpt_layer_grids(Object &object, Vector<int> &&grids, Vector<float3> &&deltas)
+void store_active_sculpt_layer_grids(Object &object,
+                                     Vector<int> &&grids,
+                                     Vector<float3> &&values_before,
+                                     const int grid_area)
 {
   StepData *step_data = get_step_data(object);
-  if (!step_data || grids.is_empty() || deltas.is_empty()) {
+  if (!step_data || grids.is_empty() || values_before.is_empty()) {
     return;
   }
-  BLI_assert(deltas.size() % grids.size() == 0);
+  BLI_assert(values_before.size() % grids.size() == 0);
   Mesh &mesh = *id_cast<Mesh *>(object.data);
   SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
   if (!layer) {
@@ -2019,19 +2018,22 @@ void store_active_sculpt_layer_grids(Object &object, Vector<int> &&grids, Vector
   }
   step_data->sculpt_layer_uid = layer->base.uid;
   step_data->sculpt_layer_grids = true;
-  step_data->undo_size += grids.as_span().size_in_bytes() + deltas.as_span().size_in_bytes();
+  step_data->sculpt_layer_grid_area = grid_area;
+  step_data->undo_size += grids.as_span().size_in_bytes() +
+                          values_before.as_span().size_in_bytes();
   step_data->sculpt_layer_verts = std::move(grids);
-  step_data->sculpt_layer_data = std::move(deltas);
+  step_data->sculpt_layer_data = std::move(values_before);
 }
 
 void store_active_sculpt_layer_grids_sparse(Object &object,
-                                            MultiresSculptLayerGridDelta &&delta)
+                                            MultiresSculptLayerGridDelta &&delta,
+                                            const int grid_area)
 {
   StepData *step_data = get_step_data(object);
   if (!step_data || delta.grids.is_empty()) {
     return;
   }
-  BLI_assert(delta.sample_indices.size() == delta.deltas.size());
+  BLI_assert(delta.sample_indices.size() == delta.values_before.size());
   BLI_assert(delta.sample_start.size() == delta.grids.size());
   BLI_assert(delta.sample_count.size() == delta.grids.size());
   Mesh &mesh = *id_cast<Mesh *>(object.data);
@@ -2041,13 +2043,14 @@ void store_active_sculpt_layer_grids_sparse(Object &object,
   }
   step_data->sculpt_layer_uid = layer->base.uid;
   step_data->sculpt_layer_grids = true;
+  step_data->sculpt_layer_grid_area = grid_area;
   step_data->undo_size += delta.grids.as_span().size_in_bytes() +
                           delta.sample_indices.as_span().size_in_bytes() +
                           delta.sample_start.as_span().size_in_bytes() +
                           delta.sample_count.as_span().size_in_bytes() +
-                          delta.deltas.as_span().size_in_bytes();
+                          delta.values_before.as_span().size_in_bytes();
   step_data->sculpt_layer_verts = std::move(delta.grids);
-  step_data->sculpt_layer_data = std::move(delta.deltas);
+  step_data->sculpt_layer_data = std::move(delta.values_before);
   step_data->sculpt_layer_grid_samples = std::move(delta.sample_indices);
   /* The per-grid start/count reuse the segment table fields: same concept, a list of valid
    * ranges inside the packed arrays (see the #StepData field comment). */
@@ -2057,7 +2060,7 @@ void store_active_sculpt_layer_grids_sparse(Object &object,
 
 void store_active_sculpt_layer_verts(Object &object,
                                      Vector<int> &&verts,
-                                     Vector<float3> &&deltas,
+                                     Vector<float3> &&values_before,
                                      Vector<int> &&seg_start,
                                      Vector<int> &&seg_count)
 {
@@ -2065,7 +2068,7 @@ void store_active_sculpt_layer_verts(Object &object,
   if (!step_data || verts.is_empty()) {
     return;
   }
-  BLI_assert(verts.size() == deltas.size());
+  BLI_assert(verts.size() == values_before.size());
   BLI_assert(seg_start.size() == seg_count.size());
   Mesh &mesh = *id_cast<Mesh *>(object.data);
   SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
@@ -2073,10 +2076,11 @@ void store_active_sculpt_layer_verts(Object &object,
     return;
   }
   step_data->sculpt_layer_uid = layer->base.uid;
-  step_data->undo_size += verts.as_span().size_in_bytes() + deltas.as_span().size_in_bytes() +
+  step_data->undo_size += verts.as_span().size_in_bytes() +
+                          values_before.as_span().size_in_bytes() +
                           seg_start.as_span().size_in_bytes() + seg_count.as_span().size_in_bytes();
   step_data->sculpt_layer_verts = std::move(verts);
-  step_data->sculpt_layer_data = std::move(deltas);
+  step_data->sculpt_layer_data = std::move(values_before);
   step_data->sculpt_layer_seg_start = std::move(seg_start);
   step_data->sculpt_layer_seg_count = std::move(seg_count);
 }
@@ -2679,6 +2683,35 @@ bool foreach_recorded_eval_position_mesh(
   return true;
 }
 
+bool foreach_recorded_layer_before_mesh(
+    const Object &object, FunctionRef<void(Span<int> verts, Span<float3> layer_before)> fn)
+{
+  /* Per-object lookup, for the same reason as #foreach_recorded_position_mesh. */
+  StepData *step_data = get_step_data(object);
+  if (!step_data || !bool(step_data->node_flags & NodeDataFlag::Position)) {
+    return false;
+  }
+
+  /* Must run before #push_end, while the per-node undo data is still in the map. */
+  for (const std::unique_ptr<Node> &unode : step_data->undo_nodes_by_pbvh_node.values()) {
+    /* The same node set and order the other mesh collectors yield, so a caller can zip this
+     * onto their output positionally: only the mesh-node skips of #foreach_recorded_position_mesh
+     * apply here. A node that joined the step while the stroke recorded no layer (or whose layer
+     * had no data yet) yields an empty capture span instead of being skipped. */
+    if (unode->vert_indices.is_empty()) {
+      continue;
+    }
+    const int unique_num = unode->unique_verts_num;
+    if (unique_num <= 0) {
+      continue;
+    }
+    fn(unode->vert_indices.as_span().take_front(unique_num),
+       unode->layer_data_before.as_span().take_front(unique_num));
+  }
+
+  return true;
+}
+
 bool foreach_recorded_grids(const Object &object, FunctionRef<void(Span<int> grids)> fn)
 {
   /* Per-object lookup, for the same reason as #foreach_recorded_position_mesh: #Node.grids indexes
@@ -2761,7 +2794,9 @@ static void restore_block_positions(bContext *C,
                                     StepData &step_data,
                                     IndexMaskMemory &memory,
                                     const bool tag_update,
-                                    const bool is_undo)
+                                    /* The layer restore is a swap, identical in both
+                                     * directions; nothing else in this block branches on it. */
+                                    const bool /*is_undo*/)
 {
   /* Guaranteed by #push_end_ex, which builds the storage whenever #NodeDataFlag::Position is set,
    * in any flag combination. */
@@ -2772,16 +2807,16 @@ static void restore_block_positions(bContext *C,
   if (use_multires_undo(step_data, ss)) {
     if (step_data.sculpt_layer_uid != 0 && step_data.sculpt_layer_grids) {
       /* A stroke recorded into a grid sculpt layer: the base MDisps were not modified by the
-       * stroke, so the CCG positions are not restored directly. Revert the layer's explicit
-       * delta and re-evaluate: the composed surface (base + layers) is a deterministic
-       * function of the stored data. Skipping #multires_mark_as_modified is intentional —
-       * a later flush must not bake the composed surface into the base.
+       * stroke, so the CCG positions are not restored directly. Swap the layer's recorded
+       * pre-stroke values back and re-evaluate: the composed surface (base + layers) is a
+       * deterministic function of the stored data. Skipping #multires_mark_as_modified is
+       * intentional — a later flush must not bake the composed surface into the base.
        *
        * Consume any pending base edits first (e.g. left dirty by a previously restored
        * base-stroke step): the layer data is about to change, and a later flush against the
        * changed layer set would leak the delta into the base. */
       layers::flush_pending_multires_base(object);
-      restore_active_sculpt_layer(step_data, object, is_undo);
+      restore_active_sculpt_layer(step_data, object);
       Mesh &mesh = *id_cast<Mesh *>(object.data);
       DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
       return;
@@ -2831,7 +2866,7 @@ static void restore_block_positions(bContext *C,
      * #bounds_orig_ (and #store_bounds_orig clears the dirty accumulator, so nothing catches up
      * later), and the next stroke would drop nodes whose geometry moved back under the cursor
      * while deforming their neighbors — the mesh tears along leaf-node borders. */
-    restore_active_sculpt_layer(step_data, object, is_undo);
+    restore_active_sculpt_layer(step_data, object);
 
     const IndexMask changed_nodes = IndexMask::from_predicate(
         node_mask,
@@ -4188,6 +4223,22 @@ static void fill_node_data_mesh(const Depsgraph &depsgraph,
       unode.orig_position.reinitialize(verts_num);
     }
     store_positions_mesh(depsgraph, object, unode);
+
+    if (ss.layers.recording) {
+      /* The stroke records into the active mesh layer, whose data #PositionDeformData accumulates
+       * per dab. Capture its values for this node's vertices now, at the node's first push —
+       * #push_undo_nodes runs before the brush touches anything, so these are the pre-stroke
+       * values the layer undo swaps back (see #restore_active_sculpt_layer). */
+      const SculptLayer *layer = bke::sculpt_layers::active_get(mesh);
+      if (layer && layer->domain == SCULPT_LAYER_DOMAIN_VERT && layer->data != nullptr) {
+        const Span<float3> data = bke::sculpt_layers::data_get(*layer);
+        unode.layer_data_before.reinitialize(verts_num);
+        for (const int i : IndexRange(verts_num)) {
+          const int v = unode.vert_indices[i];
+          unode.layer_data_before[i] = (v >= 0 && v < data.size()) ? data[v] : float3(0.0f);
+        }
+      }
+    }
   }
 
   if (bool(flags & NodeDataFlag::FaceSet)) {
@@ -4746,6 +4797,7 @@ static size_t node_size_in_bytes(const Node &node)
   size_t size = sizeof(Node);
   size += node.position.as_span().size_in_bytes();
   size += node.orig_position.as_span().size_in_bytes();
+  size += node.layer_data_before.as_span().size_in_bytes();
   size += node.normal.as_span().size_in_bytes();
   size += node.col.as_span().size_in_bytes();
   size += node.mask.as_span().size_in_bytes();

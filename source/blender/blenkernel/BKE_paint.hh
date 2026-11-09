@@ -795,6 +795,35 @@ struct SculptLayerMaskEdit {
   std::string saved_tool_id;
 };
 
+/**
+ * Per-stroke reference buffer of the isolated-layer smooth (see
+ * #SculptSession::layers::smooth_layer_ref).
+ */
+struct SculptLayerSmoothRef {
+  /* One value per CCG sample. Allocated uninitialized (a zero-fill of the whole CCG is 12 bytes
+   * per sample, e.g. ~200 MB at 16M samples): only grids marked #ready are ever read. */
+  Array<float3> values;
+  /* Per grid: the grid's slice of #values has been built for this stroke. Empty whenever #values
+   * is. Sized to #SubdivCCG::grids_num. */
+  BitVector<> ready;
+  /* Per grid: this grid was a brush grid of an earlier dab, so it and every seam neighbor its
+   * operators read are already #ready and the neighbor walk can be skipped. */
+  BitVector<> seam_done;
+
+  /* Drop the buffers; keeps the invariant "#ready empty <=> #values empty" in one place. */
+  void clear()
+  {
+    this->values = {};
+    this->ready = {};
+    this->seam_done = {};
+  }
+
+  bool grid_ready(const int grid) const
+  {
+    return grid >= 0 && grid < this->ready.size() && this->ready[grid];
+  }
+};
+
 struct SculptSession : NonCopyable, NonMovable {
   /* The current active shapekey for the mesh. Only non-null for Type::Mesh */
   KeyBlock *shapekey_active = nullptr;
@@ -995,6 +1024,16 @@ struct SculptSession : NonCopyable, NonMovable {
      * follows the stroke, whereas a stored `position - base_view` box would go stale as soon as the
      * first dab moved anything and would drop nodes the falloff still reaches. */
     Array<Bounds<float3>> base_view_node_offset_bounds;
+    /* Isolated-layer smooth (#Brush::use_smooth_preserve_layers): per-sample reference
+     * `positions - active layer contribution` for the recording stroke's Smooth brush on a grid
+     * domain. Smoothing the delta over it edits the active layer only, leaving the base and the
+     * other layers fixed — instead of the composed-surface smoothing that flattens the layers
+     * below into the recorded delta. Built lazily per grid on the Smooth dabs (main thread,
+     * before the brush's parallel loops — see #stroke_layer_smooth_ref_ensure) and valid for the
+     * whole stroke: the layer data is written only at stroke end, so the contribution is constant
+     * throughout. Empty when the option is off or the reference cannot be built; only the grids
+     * marked in #SculptLayerSmoothRef::ready hold valid values. */
+    SculptLayerSmoothRef smooth_layer_ref;
     /* Open weight-mask editing session, if any. See #SculptLayerMaskEdit. */
     SculptLayerMaskEdit mask_edit;
     /* Tool the Color Gradient tool replaced when a Gradient layer became active. Restored when a row

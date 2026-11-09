@@ -6038,6 +6038,15 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Deformation", "Deformation type that is used in the brush");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  prop = RNA_def_property(srna, "use_smooth_preserve_layers", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_smooth_preserve_layers", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Preserve Layers",
+      "Smooth the active sculpt layer's own shape instead of the composed surface, so the layers "
+      "below are not flattened into the recorded stroke");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   prop = RNA_def_property(srna, "smear_deform_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, brush_smear_deform_type_items);
   RNA_def_property_ui_text(prop, "Deformation", "Deformation type that is used in the brush");

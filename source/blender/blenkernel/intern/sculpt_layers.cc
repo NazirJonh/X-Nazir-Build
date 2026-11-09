@@ -1329,6 +1329,11 @@ bool is_stale_mask(const SculptLayerMask &mask, const int64_t elem_num)
   return mask.totelem != elem_num || mask.blocks_num <= 0 || mask.block_size <= 0;
 }
 
+int grid_area_get(const Mesh &mesh, const SculptLayer &layer)
+{
+  return mesh.corners_num > 0 ? int(layer.totelem / mesh.corners_num) : 0;
+}
+
 MutableSpan<float3> data_ensure(SculptLayer &layer, const int64_t totelem)
 {
   if (layer.data != nullptr && layer.totelem == totelem) {

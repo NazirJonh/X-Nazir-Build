@@ -1184,7 +1184,8 @@ void multires_reshape_assign_final_elements_from_orig_mdisps(
 bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
                                                    SubdivCCG &subdiv_ccg,
                                                    const SculptLayer &layer,
-                                                   MutableSpan<float3> r_contrib)
+                                                   MutableSpan<float3> r_contrib,
+                                                   const Span<int> grid_subset)
 {
   if (layer.domain != SCULPT_LAYER_DOMAIN_GRID || layer.data == nullptr || layer.level <= 0) {
     return false;
@@ -1260,13 +1261,26 @@ bool BKE_multires_sculpt_layer_object_contribution(Mesh &base_mesh,
   if (can_populate) {
     const int64_t per_grid_bytes = multires_layer_frames_per_grid_bytes(top_grid_size);
     populate_grids.reinitialize(grids_num);
-    /* All-grids form: the contribution always considers the whole mesh, so materializing the
-     * identity grid-index array would be a pointless per-tick allocation. */
-    multires_layer_frames_plan_populate(subdiv_ccg, grids_num, per_grid_bytes, populate_grids);
+    if (grid_subset.is_empty()) {
+      /* All-grids form: the whole mesh is considered, so materializing the identity grid-index
+       * array would be a pointless per-tick allocation. */
+      multires_layer_frames_plan_populate(subdiv_ccg, grids_num, per_grid_bytes, populate_grids);
+    }
+    else {
+      /* A subset restricts both the work and the frame-cache population to its grids. It is built
+       * lazily during a stroke (per dab), so it must not stamp the LRU clock or evict: on a mesh
+       * whose frames exceed the cap that would push out the frames the stroke-end tangent encode
+       * is about to read. */
+      multires_layer_frames_plan_populate(
+          subdiv_ccg, grids_num, per_grid_bytes, grid_subset, populate_grids, false);
+    }
   }
 
-  threading::parallel_for(IndexRange(grids_num), 8, [&](const IndexRange range) {
-    for (const int grid_index : range) {
+  /* An empty subset means every grid, addressed by position so no index array is built. */
+  const int eval_num = grid_subset.is_empty() ? grids_num : int(grid_subset.size());
+  threading::parallel_for(IndexRange(eval_num), 8, [&](const IndexRange range) {
+    for (const int eval_index : range) {
+      const int grid_index = grid_subset.is_empty() ? eval_index : grid_subset[eval_index];
       const int64_t grid_start = int64_t(grid_index) * cur_grid_area;
       /* One grid is one mask block, so this folds once per grid. The contribution is defined at
        * influence 1.0 — callers scale it — so only the mask is folded in here.

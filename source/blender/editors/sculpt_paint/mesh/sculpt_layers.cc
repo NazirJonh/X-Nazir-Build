@@ -59,6 +59,7 @@
 #include "BLI_string_utf8.h"
 #include "BLI_task.hh"
 #include "BLI_vector.hh"
+#include "BLI_vector_set.hh"
 
 #include "BLT_translation.hh"
 
@@ -204,6 +205,7 @@ void invalidate_runtime(Object &object)
   ss->layers.base_view = {};
   ss->layers.base_view_dc = float3(0.0f);
   ss->layers.base_view_node_offset_bounds = {};
+  ss->layers.smooth_layer_ref.clear();
 }
 
 bool is_supported(const Object &object)
@@ -1506,6 +1508,208 @@ Span<float3> stroke_base_view(const Object &object)
   return ss->layers.base_view;
 }
 
+void stroke_layer_smooth_ref_clear(Object &object)
+{
+  SculptSession *ss = session_of(object);
+  if (!ss) {
+    return;
+  }
+  ss->layers.smooth_layer_ref.clear();
+}
+
+/* Shared gate of the isolated-layer smooth reference (#Brush::use_smooth_preserve_layers), used by
+ * both the grid-domain prebuilt reference (#stroke_layer_smooth_ref_ensure) and the mesh-domain
+ * live one (#stroke_layer_smooth_ref_mesh). Only a stroke that is actually recording may use the
+ * reference — a stroke #stroke_record_begin refused (a deforming modifier without a shape key, a
+ * hidden or locked layer) keeps #SculptSession::layers::recording false, and its layer data stays
+ * stale — and never while a base view exists (a REC-off stroke measures its inputs against the
+ * base view instead). Returns the active layer when the reference applies to the object's domain,
+ * null otherwise. */
+static SculptLayer *stroke_layer_smooth_ref_layer(Object &object)
+{
+  const SculptSession *ss = object.runtime->sculpt_session;
+  if (!ss || !ss->layers.recording || !ss->layers.base_view.is_empty()) {
+    return nullptr;
+  }
+  if (object.type != OB_MESH || object.data == nullptr) {
+    return nullptr;
+  }
+  SculptLayer *layer = bke::sculpt_layers::active_get(mesh_of(object));
+  if (!layer || layer->domain != domain_for(object)) {
+    return nullptr;
+  }
+  return layer;
+}
+
+std::optional<MeshSmoothLayerRef> stroke_layer_smooth_ref_mesh(Object &object)
+{
+  const SculptLayer *layer = stroke_layer_smooth_ref_layer(object);
+  if (!layer) {
+    return std::nullopt;
+  }
+  const float influence = effective(*layer);
+  if (influence == 0.0f) {
+    /* The layer contributes nothing: the composed surface is already the reference, and smoothing
+     * its (empty) delta would move nothing — the plain behavior is the useful one. */
+    return std::nullopt;
+  }
+  /* Unlike the grid domain the layer data is written per dab
+   * (#PositionDeformData::record_layer_offsets), so the reference is evaluated against the live
+   * positions and data at call time: the stroke's own edits are present in both and cancel,
+   * keeping the reference constant without prebuilding it. A layer without a data buffer
+   * contributes zero. */
+  MeshSmoothLayerRef ref;
+  ref.effective = influence;
+  ref.data = layer->data != nullptr ? bke::sculpt_layers::data_get(*layer) : Span<float3>();
+  return ref;
+}
+
+/* Collect into \a r_missing the grids whose reference values the Smooth brush's neighbor operators
+ * can read for \a grids and that are not built yet: the grids themselves plus every grid sharing a
+ * coarse face or a coarse corner with them — the CCG boundary and corner elements' neighbors all
+ * live in such grids. Hidden faces are included: the operators read across seams regardless of
+ * visibility, and an unbuilt grid would hand zeros to the average.
+ *
+ * Grids flagged #SculptLayerSmoothRef::seam_done were expanded by an earlier dab, so their walk is
+ * skipped; the grids that did need the walk are returned in \a r_expanded for the caller to flag
+ * once the build succeeded. */
+static void stroke_layer_smooth_ref_missing_grids(
+    const Mesh &mesh,
+    const SubdivCCG &subdiv_ccg,
+    const Span<int> grids,
+    const SculptLayerSmoothRef &ref,
+    VectorSet<int> &r_missing,
+    Vector<int> &r_expanded)
+{
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
+  const auto add_if_missing = [&](const int grid) {
+    if (!ref.ready[grid]) {
+      r_missing.add(grid);
+    }
+  };
+
+  /* A grid is a face corner (grid index == corner index, see #SubdivCCG::grid_to_face_map), so
+   * the face and corner walks read straight out of the base mesh topology. */
+  for (const int grid : grids) {
+    if (ref.seam_done[grid]) {
+      continue;
+    }
+    r_expanded.append(grid);
+    add_if_missing(grid);
+    const int face = subdiv_ccg.grid_to_face_map[grid];
+    for (const int corner : faces[face]) {
+      add_if_missing(corner);
+      for (const int neighbor_face : vert_to_face_map[corner_verts[corner]]) {
+        for (const int neighbor_corner : faces[neighbor_face]) {
+          add_if_missing(neighbor_corner);
+        }
+      }
+    }
+  }
+}
+
+void stroke_layer_smooth_ref_ensure(Object &object, const IndexMask &node_mask)
+{
+  SculptSession *ss = session_of(object);
+  if (!ss) {
+    return;
+  }
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
+  if (!pbvh || pbvh->type() != bke::pbvh::Type::Grids || !ss->subdiv_ccg) {
+    return;
+  }
+  SculptLayer *layer = stroke_layer_smooth_ref_layer(object);
+  if (!layer || layer->data == nullptr) {
+    return;
+  }
+  const float influence = effective(*layer);
+  if (influence == 0.0f) {
+    return;
+  }
+  SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;
+  const Span<float3> positions = subdiv_ccg.positions;
+
+  /* Built once per stroke, extended dab by dab: only the grids the brush's nodes reach are filled
+   * (their own samples plus the seam neighbors the neighbor operators read), so the first dab's
+   * cost follows the brush size rather than the mesh size. The live positions at each build point
+   * are the composed surface, and the layer data is written only at stroke end — so the per-grid
+   * values stay valid no matter when in the stroke they were built. */
+  SculptLayerSmoothRef &smooth_ref = ss->layers.smooth_layer_ref;
+  if (smooth_ref.values.is_empty() || smooth_ref.ready.size() != subdiv_ccg.grids_num) {
+    /* Uninitialized on purpose: only grids flagged ready are read (see #SculptLayerSmoothRef). */
+    smooth_ref.values = Array<float3>(positions.size(), NoInitialization());
+    smooth_ref.ready = BitVector<>(subdiv_ccg.grids_num, false);
+    smooth_ref.seam_done = BitVector<>(subdiv_ccg.grids_num, false);
+  }
+
+  /* The not yet built grids among this dab's node grids and their seam neighbors. */
+  const Span<bke::pbvh::GridsNode> nodes = pbvh->nodes<bke::pbvh::GridsNode>();
+  Vector<int> dab_grids;
+  node_mask.foreach_index([&](const int i) { dab_grids.extend(nodes[i].grids()); });
+  VectorSet<int> missing;
+  Vector<int> expanded;
+  stroke_layer_smooth_ref_missing_grids(
+      mesh_of(object), subdiv_ccg, dab_grids, smooth_ref, missing, expanded);
+  if (missing.is_empty()) {
+    for (const int grid : expanded) {
+      smooth_ref.seam_done[grid].set();
+    }
+    return;
+  }
+
+  MutableSpan<float3> ref = smooth_ref.values;
+  /* The active layer's object-space contribution at influence 1.0 (mask folded), the same
+   * evaluation the base view sums for its layers — written straight into the reference buffer,
+   * restricted to the missing grids so a later dab only pays for what it newly reaches. */
+  if (!BKE_multires_sculpt_layer_object_contribution(
+          mesh_of(object), subdiv_ccg, *layer, ref, missing.as_span()))
+  {
+    /* A partial sum would make the brush inputs inconsistent; drop the whole reference so the
+     * stroke falls back to the plain behavior (the whole-mesh path's failure mode). */
+    smooth_ref.clear();
+    return;
+  }
+  /* Reference = composed surface − active layer: smoothing the delta over it edits the active
+   * layer's own shape and leaves the base and the other layers fixed. */
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+  threading::parallel_for(IndexRange(missing.size()), 8, [&](const IndexRange range) {
+    for (const int grid : missing.as_span().slice(range)) {
+      for (const int64_t i : bke::ccg::grid_range(key, grid)) {
+        ref[i] = positions[i] - ref[i] * influence;
+      }
+    }
+  });
+  /* Main thread: a BitWord set is a read-modify-write, so parallel marking would race inside a
+   * shared word (the combines above already write disjoint float3s). */
+  for (const int grid : missing) {
+    smooth_ref.ready[grid].set();
+  }
+  for (const int grid : expanded) {
+    smooth_ref.seam_done[grid].set();
+  }
+}
+
+Span<float3> stroke_layer_smooth_ref_for_grids(const Object &object, const Span<int> grids)
+{
+  const SculptSession *ss = object.runtime->sculpt_session;
+  /* Outside a recording stroke a leftover buffer would be stale, so it is never handed out. */
+  if (!ss || !ss->layers.recording) {
+    return {};
+  }
+  const SculptLayerSmoothRef &smooth_ref = ss->layers.smooth_layer_ref;
+  if (smooth_ref.values.is_empty() || smooth_ref.ready.is_empty()) {
+    return {};
+  }
+  for (const int grid : grids) {
+    if (!smooth_ref.grid_ready(grid)) {
+      return {};
+    }
+  }
+  return smooth_ref.values;
+}
+
 float3 stroke_base_view_dc(const Object &object)
 {
   const SculptSession *ss = object.runtime->sculpt_session;
@@ -2329,6 +2533,9 @@ void stroke_record_begin(const Depsgraph &depsgraph, Object &object)
     if (ss->subdiv_ccg) {
       ss->subdiv_ccg->position_journal.begin(ss->subdiv_ccg->positions.size());
     }
+    /* The isolated-layer smooth reference is rebuilt lazily per stroke (the Smooth dabs);
+     * drop any leftover from a previous stroke. */
+    stroke_layer_smooth_ref_clear(object);
   }
   else {
     /* REC enable already set enabled + influence 1.0 (see #layer_toggle_rec_exec). Just ensure
@@ -2409,6 +2616,7 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
       /* Recording was turned off (or never started) for this stroke; no sparse delta will read
        * the journal, so do not leave it armed. */
       ss->subdiv_ccg->position_journal.end();
+      stroke_layer_smooth_ref_clear(object);
     }
     SLP_PERF("[DEBUG-perf] stroke_record_end: REC=off mesh base-fold in %lld us\n",
              slp_perf_us(t_rec_end_start, slp_perf_now()));
@@ -2446,22 +2654,28 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
       /* Captured before the #std::move below empties #touched (the probe printed 0 otherwise). */
       const int touched_num = int(touched.size());
 
+      /* The layer data's grid area at its storage level: the reshape writes
+       * `grids_num * grid_area` values and the layer buffer holds the same count. Stored into the
+       * undo step so the restore indexes the layer with the recorded area instead of re-deriving
+       * it — robust against a subdivision level change between record and restore. */
+      const int layer_grid_area = bke::sculpt_layers::grid_area_get(mesh, *layer);
+
       if (!touched.is_empty()) {
-        Vector<float3> undo_delta;
-        MultiresSculptLayerGridDelta sparse_delta;
+        MultiresSculptLayerRecordResult record;
         if (multiresModifier_reshapeFromCCG_into_sculpt_layer(
-                totlvl, &mesh, &subdiv_ccg, touched, *layer, undo_delta, &sparse_delta))
+                totlvl, &mesh, &subdiv_ccg, touched, *layer, record))
         {
-          if (!sparse_delta.grids.is_empty()) {
+          if (record.is_sparse) {
             /* Sparse layout (top-level recording with an active journal): only the samples the
              * brush actually moved. A stroke whose edits were all clipped to zero journals
-             * nothing; the record still lists the touched grids but with empty sample/delta
+             * nothing; the record still lists the touched grids but with empty sample/value
              * arrays, so the undo step adjusts nothing. */
-            undo::store_active_sculpt_layer_grids_sparse(object, std::move(sparse_delta));
+            undo::store_active_sculpt_layer_grids_sparse(
+                object, std::move(record.sparse), layer_grid_area);
           }
           else {
             undo::store_active_sculpt_layer_grids(
-                object, std::move(touched), std::move(undo_delta));
+                object, std::move(touched), std::move(record.dense_values_before), layer_grid_area);
           }
 
           /* The reshape wrote the stroke into the layer only now, at stroke end. The mesh branch
@@ -2503,14 +2717,16 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
        * unread on an empty stroke); deactivate so nothing outside a recording stroke feeds or
        * reads it. */
       subdiv_ccg.position_journal.end();
+      /* The isolated-layer smooth reference is per stroke; free it with the stroke. */
+      stroke_layer_smooth_ref_clear(object);
       SLP_PERF("[DEBUG-perf] stroke_record_end: REC=on multires reshape %d touched grids in %lld us\n",
                touched_num,
                slp_perf_us(t_rec_end_start, slp_perf_now()));
     }
     else if (pbvh->type() == bke::pbvh::Type::Mesh) {
-      /* Mesh: #data is accumulated per dab by #PositionDeformData::deform. Record the per-vertex
-       * undo deltas for the touched vertices (work proportional to the brushed area). Must run
-       * before #undo::push_end. */
+      /* Mesh: #data is accumulated per dab by #PositionDeformData::deform. Record the touched
+       * vertices' pre-stroke layer values into the undo step (work proportional to the brushed
+       * area); the restore swaps them with the live data. Must run before #undo::push_end. */
       MutableSpan<float3> data = bke::sculpt_layers::data_ensure(*layer, element_count(object));
       /* Under a shape key the basis positions (#mesh.vert_positions) are untouched by the stroke —
        * the brush edited the evaluated/display positions. Diff the live post-stroke evaluated
@@ -2525,10 +2741,13 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
       struct NodeInfo {
         Span<int> vert_indices;
         Span<float3> orig_positions;
+        /* The active layer's data at #vert_indices before the stroke (see
+         * #undo::foreach_recorded_layer_before_mesh). Empty when the node carries no capture. */
+        Span<float3> layer_before;
       };
       Vector<NodeInfo> active_nodes;
       const auto collect = [&](const Span<int> verts, const Span<float3> orig) {
-        active_nodes.append({verts, orig});
+        active_nodes.append({verts, orig, {}});
       };
       /* Under a shape key #foreach_recorded_position_mesh would hand back the base-space
        * #orig_position (the active key block); the stroke lives in evaluated space, so gather the
@@ -2538,6 +2757,18 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
       }
       else {
         undo::foreach_recorded_position_mesh(object, collect);
+      }
+      /* The pre-stroke layer values are stored per node with the same vertex lists the collectors
+       * above yield, so they zip onto #active_nodes positionally. */
+      {
+        int node_index = 0;
+        undo::foreach_recorded_layer_before_mesh(
+            object, [&](const Span<int> /*verts*/, const Span<float3> layer_before) {
+              if (node_index < active_nodes.size()) {
+                active_nodes[node_index].layer_before = layer_before;
+              }
+              node_index++;
+            });
       }
 
       Array<int> node_offsets(active_nodes.size() + 1);
@@ -2552,9 +2783,9 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
       const int max_total = node_offsets[active_nodes.size()];
 
       Vector<int> changed_verts;
-      Vector<float3> deltas;
+      Vector<float3> values_before;
       changed_verts.resize(max_total);
-      deltas.resize(max_total);
+      values_before.resize(max_total);
       Array<int> actual_counts(active_nodes.size(), 0);
 
       threading::parallel_for(active_nodes.index_range(), 1, [&](const IndexRange range) {
@@ -2562,6 +2793,13 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
           const NodeInfo &ni = active_nodes[i];
           int count = 0;
           const int base_off = node_offsets[i];
+          /* Every node of a recording stroke carries the capture: the undo push runs after
+           * #stroke_record_begin has allocated the layer data and set #recording. Without it there
+           * is no exact before-value to store, so the node is skipped instead of guessing. */
+          if (ni.layer_before.size() != ni.vert_indices.size()) {
+            BLI_assert_unreachable();
+            continue;
+          }
           for (const int64_t j : ni.vert_indices.index_range()) {
             const int v = ni.vert_indices[j];
             if (v < 0 || v >= int(data.size()) || v >= int(positions.size())) {
@@ -2572,7 +2810,8 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
               continue;
             }
             changed_verts[base_off + count] = v;
-            deltas[base_off + count] = delta;
+            /* The pre-stroke layer value comes from the node's capture. */
+            values_before[base_off + count] = ni.layer_before[j];
             count++;
           }
           actual_counts[i] = count;
@@ -2595,7 +2834,7 @@ void stroke_record_end(const Depsgraph &depsgraph, Object &object)
       if (out > 0) {
         undo::store_active_sculpt_layer_verts(object,
                                               std::move(changed_verts),
-                                              std::move(deltas),
+                                              std::move(values_before),
                                               std::move(seg_start),
                                               std::move(seg_count));
       }
@@ -2743,13 +2982,13 @@ void stroke_record_end_direct_write(const Depsgraph &depsgraph, Object &object)
    * already accumulated per dab, so the accumulation is done here in one go. Grids need nothing
    * extra: their layer is always captured at stroke end by the reshape. */
   recorded_offsets_apply(depsgraph, object, 1.0f);
-  /* Direct writers (curve patch effects) store CCG positions without going through the brush
-   * helpers that fill #SubdivCCG::position_journal, so the journal would describe an empty stroke.
-   * Deactivated here, the reshape falls back to the dense per-grid delta, which does not rely on
-   * it. */
-  SculptSession *ss = object.runtime->sculpt_session;
+  /* By definition the caller wrote the positions directly, after #stroke_record_begin reset the
+   * journal, so the journal can not describe the stroke (the invalidations a writer made before
+   * the begin are wiped by it). Invalidated here, the reshape falls back to the dense per-grid
+   * delta on its own. */
+  SculptSession *ss = session_of(object);
   if (ss && ss->subdiv_ccg) {
-    ss->subdiv_ccg->position_journal.end();
+    ss->subdiv_ccg->position_journal.invalidate();
   }
   stroke_record_end(depsgraph, object);
 }

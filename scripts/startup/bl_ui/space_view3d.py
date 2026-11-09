@@ -570,6 +570,9 @@ class _draw_tool_settings_context_mode:
         if capabilities.has_direction:
             layout.row().prop(brush, "direction", expand=True, text="")
 
+        if brush.sculpt_brush_type == 'SMOOTH':
+            layout.prop(brush, "use_smooth_preserve_layers", toggle=True)
+
         if brush.stroke_method == 'CURVE':
             VIEW3D_HT_header.draw_paint_curve_snap_template(layout, context)
 

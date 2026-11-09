@@ -175,39 +175,48 @@ void geometry_begin_add_object(Object &ob);
 void geometry_end_add_object(Object &ob);
 
 /**
- * Sculpt layers (mesh/vertex domain): store per-vertex \a deltas (new - old layer value) at the
- * given \a verts into the current undo step. Undo subtracts the delta; redo adds it. All vectors
- * are consumed (moved) into the undo step to avoid a copy. Call at stroke end, before #push_end.
+ * Sculpt layers (mesh/vertex domain): store the layer's per-vertex \a values_before (the layer
+ * data at \a verts before the stroke touched it) into the current undo step. The undo step swaps
+ * them with the live layer on undo and redo (see #restore_active_sculpt_layer), so repeated cycles
+ * return the coefficients bit-exactly. All vectors are consumed (moved) into the undo step to
+ * avoid a copy. Call at stroke end, before #push_end.
  *
- * \a verts and \a deltas may carry per-node holes; \a seg_start / \a seg_count list each node's
- * valid range so restore can skip the holes without a compact pass at stroke end. Pass empty
- * segment vectors when the arrays are already tightly packed.
+ * \a verts and \a values_before may carry per-node holes; \a seg_start / \a seg_count list each
+ * node's valid range so restore can skip the holes without a compact pass at stroke end. Pass
+ * empty segment vectors when the arrays are already tightly packed.
  */
 void store_active_sculpt_layer_verts(Object &object,
                                      Vector<int> &&verts,
-                                     Vector<float3> &&deltas,
+                                     Vector<float3> &&values_before,
                                      Vector<int> &&seg_start,
                                      Vector<int> &&seg_count);
 
 /**
- * Sculpt layers (multires/grid domain): store the explicit per-element tangent-displacement
- * \a deltas (new - old layer value) for the given \a grids into the current undo step. The delta
- * layout is `grids.size() * grid_area` values in the order of \a grids (see
- * #multiresModifier_reshapeFromCCG_into_sculpt_layer). Undo subtracts the delta from the layer
- * data, redo adds it; the CCG positions themselves are re-evaluated from base + layers. All
- * vectors are consumed (moved). Call at stroke end, before #push_end.
+ * Sculpt layers (multires/grid domain): store the layer's per-element values before the stroke's
+ * delta was added for the given \a grids into the current undo step. The layout is
+ * `grids.size() * grid_area` values in the order of \a grids (see
+ * #multiresModifier_reshapeFromCCG_into_sculpt_layer). The undo step swaps them with the live
+ * layer on undo and redo; the CCG positions themselves are re-evaluated from base + layers. \a
+ * grid_area is stored in the step so the restore does not have to re-derive it (robust against a
+ * subdivision level change between record and restore). All vectors are consumed (moved). Call at
+ * stroke end, before #push_end.
  */
-void store_active_sculpt_layer_grids(Object &object, Vector<int> &&grids, Vector<float3> &&deltas);
+void store_active_sculpt_layer_grids(Object &object,
+                                     Vector<int> &&grids,
+                                     Vector<float3> &&values_before,
+                                     int grid_area);
 
 /**
- * Sculpt layers (multires/grid domain), sparse layout: store the per-sample deltas of a top-level
+ * Sculpt layers (multires/grid domain), sparse layout: store the before-values of a top-level
  * recording stroke — only the samples the brush write journal captured (see
- * #SubdivCCG::position_journal), grouped per grid (see #MultiresSculptLayerGridDelta). Undo
- * subtracts and redo adds exactly the stored samples; the layer keeps its other coefficients
- * untouched. Call at stroke end, before #push_end.
+ * #SubdivCCG::position_journal), grouped per grid (see #MultiresSculptLayerGridDelta). The undo
+ * step swaps exactly the stored samples with the live layer on undo and redo; the layer keeps its
+ * other coefficients untouched. \a grid_area is stored in the step (see
+ * #store_active_sculpt_layer_grids). Call at stroke end, before #push_end.
  */
 void store_active_sculpt_layer_grids_sparse(Object &object,
-                                            MultiresSculptLayerGridDelta &&delta);
+                                            MultiresSculptLayerGridDelta &&delta,
+                                            int grid_area);
 
 /**
  * Sculpt layer operators: push a #Type::SculptLayer undo step that captures \a node's metadata
@@ -602,6 +611,19 @@ bool foreach_recorded_position_mesh(
  */
 bool foreach_recorded_eval_position_mesh(
     const Object &object, FunctionRef<void(Span<int> verts, Span<float3> eval_positions)> fn);
+
+/**
+ * Sculpt layers (mesh/vertex domain): iterate the active layer's per-vertex data values captured
+ * before the recording stroke touched each node (see #fill_node_data_mesh), aligned with the same
+ * vertex lists #foreach_recorded_position_mesh yields. Only nodes captured while the stroke
+ * recorded a layer are yielded. Used to store the swap partner of the live layer data into the
+ * undo step at stroke end (see #store_active_sculpt_layer_verts). Returns false when there is no
+ * suitable in-progress mesh Position step for \a object. Must be called before #push_end.
+ *
+ * Takes \a object for the same reason as #foreach_recorded_position_mesh.
+ */
+bool foreach_recorded_layer_before_mesh(
+    const Object &object, FunctionRef<void(Span<int> verts, Span<float3> layer_before)> fn);
 
 /**
  * Sculpt layers (multires/grid domain): iterate the grid indices recorded into the in-progress

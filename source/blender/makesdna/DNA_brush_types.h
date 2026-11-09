@@ -941,7 +941,11 @@ struct Brush {
   /** Roll stroke method: after the stroke finishes, hand the drawn contour off to the Curve Patch
    * editor as an editable control curve. */
   char roll_edit_after = 0;
-  char _pad5[6] = {};
+  /** Preserve Layers: when Smooth / Surface Smooth records into a sculpt layer, smooth the active
+   * layer's own delta over a reference with the layer removed, instead of the composed surface,
+   * so the layers below are not flattened into the recorded delta. */
+  char use_smooth_preserve_layers = 0;
+  char _pad5[5] = {};
 };
 
 struct PaletteColor {

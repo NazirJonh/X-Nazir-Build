@@ -1775,6 +1775,7 @@ def brush_settings(layout, context, brush, popover=False):
                 col.prop(brush, "surface_smooth_shape_preservation")
                 col.prop(brush, "surface_smooth_current_vertex")
                 col.prop(brush, "surface_smooth_iterations")
+            col.prop(brush, "use_smooth_preserve_layers")
 
         elif sculpt_brush_type == 'DISPLACEMENT_SMEAR':
             col = layout.column()

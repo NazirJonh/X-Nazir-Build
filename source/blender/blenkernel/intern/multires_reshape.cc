@@ -7,6 +7,8 @@
  */
 
 #include <algorithm>
+#include <atomic>
+#include <bit>
 #include <chrono>
 #include <climits>
 #include <cstdio>
@@ -619,7 +621,8 @@ void multires_layer_frames_plan_populate(SubdivCCG &subdiv_ccg,
                                          const int grids_num,
                                          const int64_t per_grid_bytes,
                                          const Span<int> touched_grids,
-                                         const MutableSpan<bool> r_populate_grids)
+                                         const MutableSpan<bool> r_populate_grids,
+                                         const bool stamp_and_evict)
 {
   const int64_t whole_mesh_bytes = int64_t(grids_num) * per_grid_bytes;
   const int64_t cap_bytes = std::min(multires_layer_frames_max_cache_bytes, whole_mesh_bytes);
@@ -633,9 +636,11 @@ void multires_layer_frames_plan_populate(SubdivCCG &subdiv_ccg,
    * in index order would overwrite the usage history that this form picks its victims by. */
   const int64_t stroke_clock_base = subdiv_ccg.multires_layer_frames_clock;
   MutableSpan<SubdivCCGMultiresLayerFrames> frames = subdiv_ccg.multires_layer_frames;
-  for (const int grid_index : touched_grids) {
-    if (grid_index >= 0 && grid_index < grids_num) {
-      frames[grid_index].last_used = ++subdiv_ccg.multires_layer_frames_clock;
+  if (stamp_and_evict) {
+    for (const int grid_index : touched_grids) {
+      if (grid_index >= 0 && grid_index < grids_num) {
+        frames[grid_index].last_used = ++subdiv_ccg.multires_layer_frames_clock;
+      }
     }
   }
 
@@ -646,7 +651,7 @@ void multires_layer_frames_plan_populate(SubdivCCG &subdiv_ccg,
                                              per_grid_bytes,
                                              cap_bytes,
                                              stroke_clock_base,
-                                             true,
+                                             stamp_and_evict,
                                              r_populate_grids);
   }
 }
@@ -700,9 +705,9 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
                                                        SubdivCCG *subdiv_ccg,
                                                        const Span<int> touched_grids,
                                                        SculptLayer &layer,
-                                                       Vector<float3> &r_undo_delta,
-                                                       MultiresSculptLayerGridDelta *r_sparse)
+                                                       MultiresSculptLayerRecordResult &r_result)
 {
+  r_result = {};
 #if SCULPT_LAYERS_DEBUG_FLUSH
   const auto t_start = std::chrono::high_resolution_clock::now();
 #endif
@@ -715,9 +720,12 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
   /* Sparse per-sample deltas need the brush's own write journal (see
    * #SubdivCCG::position_journal) and the touched-only reshape: below the storage level a coarse
    * edit propagates to whole top-level neighborhoods, so the journal does not describe the top
-   * level footprint. */
-  bool use_sparse = r_sparse != nullptr && subdiv_ccg->position_journal.active &&
+   * level footprint. A journal an out-of-band writer invalidated (a curve-patch effect writing
+   * positions directly) describes an incomplete footprint and is ignored the same way. */
+  bool use_sparse = subdiv_ccg->position_journal.active &&
+                    !subdiv_ccg->position_journal.is_invalid() &&
                     reshape_context.reshape.level == reshape_context.top.level;
+  MultiresSculptLayerGridDelta *r_sparse = &r_result.sparse;
 
   multires_ensure_external_read(coarse_mesh, reshape_context.top.level);
 
@@ -738,6 +746,7 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
     r_sparse->sample_start.reinitialize(touched_grids.size());
     r_sparse->sample_count.reinitialize(touched_grids.size());
   }
+  r_result.is_sparse = use_sparse;
   const int64_t total_elems = int64_t(num_grids) * grid_area;
 
   if (!sculpt_grid_layers_applicable(reshape_context.mdisps, num_grids, grid_area)) {
@@ -946,7 +955,7 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
       r_sparse->sample_count[t] = int(total_samples) - r_sparse->sample_start[t];
     }
     BLI_assert(total_samples <= INT_MAX);
-    r_sparse->deltas.reinitialize(total_samples);
+    r_sparse->values_before.reinitialize(total_samples);
     threading::parallel_for(touched_grids.index_range(), 8, [&](const IndexRange range) {
       for (const int64_t t : range) {
         const int grid_index = touched_grids[t];
@@ -971,14 +980,17 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
           const float3 old_val = sculpt_layer_old_value(
               layers, weights.as_span(), grid_off, i, base_grid[i]);
           const float3 delta = new_disps[i] - old_val;
+          /* The undo step stores the value the layer carried before this add and swaps it with the
+           * live layer on undo and redo, so repeated cycles return the coefficients bit-exactly
+           * (see #restore_active_sculpt_layer). */
+          r_sparse->values_before[start + k] = layer_grid[i];
           layer_grid[i] += delta;
-          r_sparse->deltas[start + k] = delta;
         }
       }
     });
   }
   else {
-    r_undo_delta.resize(touched_grids.size() * int64_t(grid_area));
+    r_result.dense_values_before.resize(touched_grids.size() * int64_t(grid_area));
     threading::parallel_for(touched_grids.index_range(), 8, [&](const IndexRange range) {
       for (const int64_t t : range) {
         const int grid_index = touched_grids[t];
@@ -986,7 +998,7 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
         const float3 *new_disps = reinterpret_cast<const float3 *>(
             reshape_context.mdisps[grid_index].disps);
         float3 *layer_grid = layer_data.data() + grid_off;
-        float3 *undo_grid = r_undo_delta.data() + t * grid_area;
+        float3 *undo_grid = r_result.dense_values_before.data() + t * grid_area;
         if (restrict_to_touched) {
           const float3 *base_grid = saved_base.data() + grid_off;
           /* Folded once per grid, ahead of the element loop, through the same helper
@@ -1001,8 +1013,9 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
             const float3 old_val = sculpt_layer_old_value(
                 layers, weights.as_span(), grid_off, i, base_grid[i]);
             const float3 delta = new_disps[i] - old_val;
+            /* Before-value for the swap undo (see the sparse path above). */
+            undo_grid[i] = layer_grid[i];
             layer_grid[i] += delta;
-            undo_grid[i] = delta;
           }
         }
         else {
@@ -1010,8 +1023,8 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
               reshape_context.orig.mdisps[grid_index].disps);
           for (int i = 0; i < grid_area; i++) {
             const float3 delta = new_disps[i] - old_disps[i];
+            undo_grid[i] = layer_grid[i];
             layer_grid[i] += delta;
-            undo_grid[i] = delta;
           }
         }
       }
@@ -1045,7 +1058,7 @@ bool multiresModifier_reshapeFromCCG_into_sculpt_layer(const int tot_level,
           std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
     };
     float max_delta = 0.0f;
-    for (const float3 &d : r_undo_delta) {
+    for (const float3 &d : r_result.dense_values_before) {
       max_delta = std::max(max_delta, math::length(d));
     }
     SLF_PERF(

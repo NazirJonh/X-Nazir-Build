@@ -1711,6 +1711,13 @@ add_blender_test(
   --startup-dir ${CMAKE_SOURCE_DIR}/scripts/startup
 )
 
+add_blender_test(
+  bl_brush_settings_persistence
+  --python ${CMAKE_CURRENT_LIST_DIR}/sculpt_paint/brush_settings_persistence_test.py
+  --
+  --startup-dir ${CMAKE_SOURCE_DIR}/scripts/startup
+)
+
 if(WITH_GPU_MESH_PAINT_TESTS AND TEST_SRC_DIR_EXISTS)
   set(render_tests
     brushes

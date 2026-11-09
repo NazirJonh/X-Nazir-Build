@@ -1575,6 +1575,7 @@ UserDef *BKE_blendfile_userdef_from_defaults()
         "pose_library",
         "bl_pkg",
         "bl_ext.system.xnazir_3d_cursor",
+        "bl_ext.system.xnazir_brush_advanced",
         "sculpt_layers_outliner",
     };
     for (int i = 0; i < ARRAY_SIZE(addons); i++) {

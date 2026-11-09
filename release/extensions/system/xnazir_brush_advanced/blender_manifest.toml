@@ -1,0 +1,19 @@
+schema_version = "1.0.0"
+
+id = "xnazir_brush_advanced"
+name = "XNazir Brush Advanced"
+tagline = "Control of remembered brush settings, sculpt panel layout and their config location"
+type = "add-on"
+tags = ["Sculpt"]
+version = "0.1.0"
+blender_version_min = "5.2.0"
+maintainer = "XNazir"
+license = [
+    "SPDX:GPL-2.0-or-later",
+]
+
+[build]
+paths_exclude_pattern = [
+    "__pycache__/",
+    ".*",
+]

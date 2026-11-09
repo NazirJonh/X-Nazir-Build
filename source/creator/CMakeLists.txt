@@ -1911,6 +1911,18 @@ if(WIN32 AND NOT WITH_PYTHON_MODULE)
   )
   add_dependencies(xnazir_3d_cursor_extension blender)
   unset(_xnazir_ext_dst)
+
+  set(_xnazir_ext_dst "$<TARGET_FILE_DIR:blender>/${TARGETDIR_VER}/extensions/system/xnazir_brush_advanced")
+  add_custom_target(
+    xnazir_brush_advanced_extension ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      ${CMAKE_SOURCE_DIR}/release/extensions/system/xnazir_brush_advanced
+      ${_xnazir_ext_dst}
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${_xnazir_ext_dst}/__pycache__
+    COMMENT "Copying xnazir_brush_advanced extension"
+  )
+  add_dependencies(xnazir_brush_advanced_extension blender)
+  unset(_xnazir_ext_dst)
 endif()
 
 # Install more files specified elsewhere.

@@ -125,6 +125,7 @@
 #include "BKE_report.hh"
 #include "BKE_rigidbody.h"
 #include "BKE_scene.hh"
+#include "BKE_sculpt_history.hh"
 #include "BKE_sculpt_layers.hh"
 #include "BKE_shader_fx.hh"
 #include "BKE_softbody.h"
@@ -300,6 +301,10 @@ static void object_copy_data(Main *bmain,
   BKE_mesh_maps_object_states_copy(*ob_dst, *ob_src);
   BKE_mesh_maps_object_sources_copy(*ob_dst, *ob_src);
   BKE_paint_layer_object_masks_copy(*ob_dst, *ob_src);
+
+  /* The sculpt history belongs to this object's editing timeline only; a copy of the object
+   * starts with none. */
+  ob_dst->sculpt_history = nullptr;
 }
 
 static void object_free_data(ID *id)
@@ -355,6 +360,9 @@ static void object_free_data(ID *id)
   BKE_mesh_maps_object_states_free(*ob);
   BKE_mesh_maps_object_sources_free(*ob);
   BKE_paint_layer_object_masks_free(*ob);
+
+  bke::sculpt_history::free(ob->sculpt_history);
+  ob->sculpt_history = nullptr;
 
   MEM_delete(ob->runtime);
 }
@@ -845,6 +853,14 @@ static void object_blend_write(BlendWriter *writer, ID *id, const void *id_addre
   animviz_motionpath_blend_write(writer, ob->mpath);
 
   writer->write_struct(ob->pd);
+  /* The sculpt history isn't part of undo steps (see #object_undo_preserve): undo memfiles carry
+   * no history of their own, undo re-reads get the live one swapped in by #object_undo_preserve.
+   * The pointer written inside the #Object struct itself dangles then, but
+   * #bke::sculpt_history::blend_read resolves pointers with #BLO_read_struct, which nulls a
+   * pointer to data that was never written. */
+  if (ob->sculpt_history && !is_undo) {
+    bke::sculpt_history::blend_write(*writer, *ob->sculpt_history);
+  }
   if (ob->soft) {
     /* Set deprecated pointers to prevent crashes of older Blenders */
     ob->soft->pointcache = ob->soft->shared->pointcache;
@@ -921,6 +937,7 @@ static void object_blend_read_data(BlendDataReader *reader, ID *id)
   }
 
   BLO_read_struct(reader, bPose, &ob->pose);
+  bke::sculpt_history::blend_read(*reader, *ob);
   BKE_pose_blend_read_data(reader, &ob->id, ob->pose);
 
   BLO_read_struct(reader, bMotionPath, &ob->mpath);
@@ -1288,6 +1305,24 @@ static AssetTypeInfo AssetType_OB = {
     /*on_clear_asset_fn*/ nullptr,
 };
 
+/**
+ * The sculpt history outlives undo and redo of whole-file steps (entering and leaving Sculpt
+ * Mode, object edits...): undo steps don't store it, and the history of the object as it is now
+ * is moved onto the object undo reads back. Only sculpt undo steps move its current step (see
+ * `sculpt_undo.cc`).
+ */
+static void object_undo_preserve(BlendLibReader * /*reader*/, ID *id_new, ID *id_old)
+{
+  Object *ob_new = id_cast<Object *>(id_new);
+  Object *ob_old = id_cast<Object *>(id_old);
+  if (ob_new == ob_old) {
+    return;
+  }
+  SculptHistory *swap = ob_new->sculpt_history;
+  ob_new->sculpt_history = ob_old->sculpt_history;
+  ob_old->sculpt_history = swap;
+}
+
 IDTypeInfo IDType_ID_OB = {
     .id_code = Object::id_type,
     .id_filter = FILTER_ID_OB,
@@ -1315,7 +1350,7 @@ IDTypeInfo IDType_ID_OB = {
     .blend_read_data = object_blend_read_data,
     .blend_read_after_liblink = object_blend_read_after_liblink,
 
-    .blend_read_undo_preserve = nullptr,
+    .blend_read_undo_preserve = object_undo_preserve,
 
     .lib_override_apply_post = object_lib_override_apply_post,
 };

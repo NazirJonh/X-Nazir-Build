@@ -344,6 +344,7 @@ set(SRC
   intern/rigidbody.cc
   intern/scene.cc
   intern/screen.cc
+  intern/sculpt_history.cc
   intern/sculpt_layers.cc
   intern/sculpt_layers_mask.cc
   intern/shader_fx.cc
@@ -944,6 +945,7 @@ if(WITH_GTESTS)
     intern/path_templates_test.cc
     intern/preferences_test.cc
     intern/scene_test.cc
+    intern/sculpt_history_test.cc
     intern/sculpt_layers_mask_test.cc
     intern/sculpt_layers_tree_test.cc
     intern/subdiv_ccg_test.cc

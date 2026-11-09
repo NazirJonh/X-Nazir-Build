@@ -234,6 +234,46 @@ static bool ed_undo_step_pre(bContext *C,
   return undo_dir == STEP_REDO || !shape_cancelled;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Undo-linked histories
+ *
+ * Optional #UndoType hooks (the sculpt history is the only user today) that step a mode's history
+ * where the undo stack doesn't follow it, and re-sync it after undo and redo.
+ * \{ */
+
+static bool undo_history_step_poll(const bContext *C, const bool redo)
+{
+  bool found = false;
+  BKE_undosys_types_foreach([&](const UndoType &ut) {
+    if (!found && ut.history && ut.history->step_poll) {
+      found = ut.history->step_poll(C, redo);
+    }
+  });
+  return found;
+}
+
+static bool undo_history_step_exec(bContext *C, const bool redo)
+{
+  bool done = false;
+  BKE_undosys_types_foreach([&](const UndoType &ut) {
+    if (!done && ut.history && ut.history->step) {
+      done = ut.history->step(C, redo);
+    }
+  });
+  return done;
+}
+
+static void undo_history_sync(bContext *C, const bool redo)
+{
+  BKE_undosys_types_foreach([&](const UndoType &ut) {
+    if (ut.history && ut.history->sync) {
+      ut.history->sync(C, redo);
+    }
+  });
+}
+
+/** \} */
+
 /**
  * Common post management of undo/redo (calling post handlers, adding notifiers etc.).
  *
@@ -249,6 +289,10 @@ static void ed_undo_step_post(bContext *C,
 
   Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
+
+  /* The sculpted mesh in the shape of its history step, even when undo reloaded a whole-scene
+   * step from before the history moved. */
+  undo_history_sync(C, undo_dir == STEP_REDO);
 
   /* App-Handlers (post). */
   {
@@ -552,6 +596,11 @@ static wmOperatorStatus ed_undo_exec(bContext *C, wmOperator *op)
 {
   /* "last operator" should disappear, later we can tie this with undo stack nicer */
   WM_operator_stack_clear(CTX_wm_manager(C));
+  /* Through an undo-linked history where the undo stack doesn't follow it (a file just opened has
+   * its history but no undo steps for it). */
+  if (undo_history_step_exec(C, false)) {
+    return OPERATOR_FINISHED;
+  }
   wmOperatorStatus ret = ed_undo_step_direction(C, STEP_UNDO, op->reports);
   if (ret & OPERATOR_FINISHED) {
     ed_undo_refresh_for_op(C);
@@ -578,6 +627,9 @@ static wmOperatorStatus ed_undo_push_exec(bContext *C, wmOperator *op)
 
 static wmOperatorStatus ed_redo_exec(bContext *C, wmOperator *op)
 {
+  if (undo_history_step_exec(C, true)) {
+    return OPERATOR_FINISHED;
+  }
   wmOperatorStatus ret = ed_undo_step_direction(C, STEP_REDO, op->reports);
   if (ret & OPERATOR_FINISHED) {
     ed_undo_refresh_for_op(C);
@@ -635,7 +687,8 @@ static bool ed_undo_poll(bContext *C)
     return false;
   }
   UndoStack *undo_stack = CTX_wm_manager(C)->runtime->undo_stack;
-  return (undo_stack->step_active != nullptr) && (undo_stack->step_active->prev != nullptr);
+  return ((undo_stack->step_active != nullptr) && (undo_stack->step_active->prev != nullptr)) ||
+         undo_history_step_poll(C, false);
 }
 
 void ED_OT_undo(wmOperatorType *ot)
@@ -678,7 +731,8 @@ static bool ed_redo_poll(bContext *C)
     return false;
   }
   UndoStack *undo_stack = CTX_wm_manager(C)->runtime->undo_stack;
-  return (undo_stack->step_active != nullptr) && (undo_stack->step_active->next != nullptr);
+  return ((undo_stack->step_active != nullptr) && (undo_stack->step_active->next != nullptr)) ||
+         undo_history_step_poll(C, true);
 }
 
 void ED_OT_redo(wmOperatorType *ot)

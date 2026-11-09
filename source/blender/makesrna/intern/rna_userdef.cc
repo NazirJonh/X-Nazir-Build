@@ -26,6 +26,7 @@
 #include "BLT_translation.hh"
 
 #include "BKE_name_matching.hh"
+#include "BKE_sculpt_history.hh"
 #include "BKE_studiolight.h"
 
 #include "RNA_define.hh"
@@ -403,6 +404,16 @@ static void rna_userdef_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *
 {
   WM_main_add_notifier(NC_WINDOW, nullptr);
   USERDEF_TAG_DIRTY;
+}
+
+/* Sculpt History: the limit is applied to the histories that already exist, not only to the ones
+ * recorded from now on. */
+static void rna_userdef_sculpt_history_limit_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  if (bmain != nullptr) {
+    bke::sculpt_history::apply_limit_to_all(*bmain);
+  }
+  rna_userdef_update(bmain, scene, ptr);
 }
 
 /* Asset Browser -> Automatic Updates: the periodic timer follows the preferences directly, no
@@ -6574,6 +6585,32 @@ static void rna_def_userdef_edit(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "sculpt_paint_overlay_col");
   RNA_def_property_array(prop, 3);
   RNA_def_property_ui_text(prop, "Sculpt/Paint Overlay Color", "Color of texture overlay");
+
+  prop = RNA_def_property(srna, "use_sculpt_history", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "sculpt_history_off", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Sculpt History",
+                           "Record a step of every sculpt edit of a mesh object, to scrub through "
+                           "them on a timeline");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "sculpt_history_limit", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sculpt_history_limit");
+  RNA_def_property_range(prop, -1, SHRT_MAX);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Sculpt History Limit",
+                           "Sculpt history steps kept for each object (0 keeps the default of "
+                           "100, -1 keeps every step)");
+  RNA_def_property_update(prop, 0, "rna_userdef_sculpt_history_limit_update");
+
+  prop = RNA_def_property(srna, "use_sculpt_history_save", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "sculpt_history_nosave", 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Save Sculpt History", "Keep sculpt histories in saved .blend files");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
 
   /* VSE */
   prop = RNA_def_property(srna, "connect_strips_by_default", PROP_BOOLEAN, PROP_NONE);

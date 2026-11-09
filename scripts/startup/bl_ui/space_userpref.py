@@ -720,6 +720,19 @@ class USERPREF_PT_edit_misc(EditingPanel, CenterAlignMixIn, Panel):
         col.prop(edit, "sculpt_paint_overlay_color", text="Sculpt Overlay Color")
 
 
+class USERPREF_PT_edit_sculpt_history(EditingPanel, CenterAlignMixIn, Panel):
+    bl_label = "Sculpt History"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_centered(self, context, layout):
+        edit = context.preferences.edit
+
+        col = layout.column()
+        col.prop(edit, "use_sculpt_history")
+        col.prop(edit, "sculpt_history_limit")
+        col.prop(edit, "use_sculpt_history_save")
+
+
 # -----------------------------------------------------------------------------
 # Animation Panels
 
@@ -3544,6 +3557,7 @@ classes = (
     USERPREF_PT_edit_node_editor,
     USERPREF_PT_edit_sequence_editor,
     USERPREF_PT_edit_misc,
+    USERPREF_PT_edit_sculpt_history,
 
     USERPREF_PT_animation_timeline,
     USERPREF_PT_animation_keyframes,

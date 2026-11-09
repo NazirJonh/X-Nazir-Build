@@ -26,6 +26,7 @@ namespace blender {
 
 namespace bke {
 struct ObjectRuntime;
+struct SculptHistoryRuntime;
 }
 
 struct AnimData;
@@ -553,6 +554,71 @@ struct ObjectPaintLayerMask {
   float excluded_tiles_value = 0.0f;
 };
 
+/**
+ * Sculpt history: one step of an object's temporal sculpt edits (see `BKE_sculpt_history.hh`).
+ * A keyframe holds the whole shape and mask; any other step holds the points that moved and the
+ * points whose mask changed since the step before. Points are mesh vertices, or Multires grid
+ * points.
+ */
+struct SculptHistoryStep {
+  /** Keyframe: positions (`verts_num * 3`) and faces (none for grids). Null for deltas. */
+  float *positions = nullptr;
+  int *face_offsets = nullptr;
+  int *corner_verts = nullptr;
+  int verts_num = 0;
+  int faces_num = 0;
+  int corners_num = 0;
+
+  /** Delta: the moved vertices and their new positions (`delta_num * 3`). */
+  int delta_num = 0;
+  int *delta_indices = nullptr;
+  float *delta_positions = nullptr;
+
+  /** #eSculptHistoryStepFlag. */
+  int flag = 0;
+  /** Number of the step, counting from the first one ever recorded (for the UI). */
+  int number = 0;
+  /** What made the step (operator or brush name). */
+  char name[/*MAX_NAME*/ 64] = "";
+
+  /** Keyframe: the mask of each point (`verts_num`), null when nothing is masked. */
+  float *masks = nullptr;
+  /** Delta: the points whose mask changed and their new values (`mask_delta_num`). */
+  int *mask_delta_indices = nullptr;
+  float *mask_delta_values = nullptr;
+  int mask_delta_num = 0;
+  /**
+   * Keyframe of Multires grids (sculpted at a subdivision level): the number of grids and their
+   * size; `verts_num` is then the number of grid points. 0 for a mesh keyframe.
+   */
+  int grids_num = 0;
+  int grid_size = 0;
+  char _pad1[4] = {};
+};
+
+/** #SculptHistoryStep.flag */
+enum eSculptHistoryStepFlag : int {
+  SCULPT_HISTORY_STEP_KEYFRAME = 1 << 0,
+};
+
+/** An object's sculpt history, #Object.sculpt_history. */
+struct SculptHistory {
+  /** Steps, oldest first: the first is always a keyframe. */
+  SculptHistoryStep *steps = nullptr;
+  int steps_num = 0;
+  /** Allocated length of #steps; steps append into it until it is full, then it doubles. */
+  int steps_capacity = 0;
+  /** The step the mesh is at (the scrub cursor). */
+  int current = 0;
+  /** Unused, reserved for flags (saving the steps is the user preference only). */
+  int flag = 0;
+  /** #SculptHistoryStep.number of the next step. */
+  int next_number = 0;
+  char _pad[4] = {};
+  /** Not saved: the shape and mask at the current step, to compare the next one to. */
+  bke::SculptHistoryRuntime *runtime = nullptr;
+};
+
 struct Object {
 #ifdef __cplusplus
   DNA_DEFINE_CXX_METHODS(Object)
@@ -796,6 +862,14 @@ struct Object {
 
   /** Per-object visibility of layered-material rows, one #ObjectPaintLayerMask per row. */
   ListBaseT<ObjectPaintLayerMask> paint_layer_masks = {nullptr, nullptr};
+
+  /** Sculpt history of the object's mesh, scrubbed on the timeline (see `BKE_sculpt_history.hh`).
+   * Owned by the object, never shared, never copied with #object_copy_data. */
+  struct SculptHistory *sculpt_history = nullptr;
+  /** Keeps the pointer count of the struct even: makesdna fails the build with "Align pointer
+   * error" / "Align struct error" (`makesdna.cc`) when pointers don't sit on 8 byte offsets in the
+   * 32 bit layout. Remove only after a build proves the layout stays aligned without it. */
+  void *_pad_sculpt_history = nullptr;
 
   bke::ObjectRuntime *runtime = nullptr;
 

@@ -24,6 +24,7 @@
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers_object_mask.hh"
+#include "BKE_sculpt_history.hh"
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
@@ -2615,6 +2616,12 @@ static void rna_ObjectSculptCursor_matrix_world_get(PointerRNA *ptr, float *valu
   std::copy_n(&mat[0][0], 16, values);
 }
 
+static int rna_SculptHistory_memory_kib_get(PointerRNA *ptr)
+{
+  const SculptHistory *history = static_cast<const SculptHistory *>(ptr->data);
+  return int(bke::sculpt_history::memory_bytes(*history) >> 10);
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Mesh map state RNA helpers
  * \{ */
@@ -4693,6 +4700,12 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_property_pointer_funcs(prop, "rna_Object_display_get", nullptr, nullptr, nullptr);
   RNA_def_property_ui_text(prop, "Object Display", "Object display settings for 3D viewport");
 
+  prop = RNA_def_property(srna, "sculpt_history", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "SculptHistory");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Sculpt History", "Recorded sculpt edits, null when there are none");
+
   /* Line Art */
   prop = RNA_def_property(srna, "lineart", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "ObjectLineArt");
@@ -5001,6 +5014,53 @@ static void rna_def_curve_patch_session(BlenderRNA *brna)
       prop, "Positions", "Control point positions of the curve being edited, in object space");
 }
 
+static void rna_def_object_sculpt_history(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SculptHistoryStep", nullptr);
+  RNA_def_struct_ui_text(
+      srna, "Sculpt History Step", "One recorded step of an object's sculpt history");
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Name", "What made the step");
+
+  prop = RNA_def_property(srna, "number", PROP_INT, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Number", "Number of the step, counting from the first one recorded");
+
+  prop = RNA_def_property(srna, "is_keyframe", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_HISTORY_STEP_KEYFRAME);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Keyframe", "The step holds the whole shape instead of a change");
+
+  srna = RNA_def_struct(brna, "SculptHistory", nullptr);
+  RNA_def_struct_ui_text(srna, "Sculpt History", "Recorded sculpt edits of an object");
+
+  prop = RNA_def_property(srna, "steps", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "steps", "steps_num");
+  RNA_def_property_struct_type(prop, "SculptHistoryStep");
+  RNA_def_property_ui_text(prop, "Steps", "Recorded steps, oldest first");
+
+  prop = RNA_def_property(srna, "steps_num", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "steps_num");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Steps", "Number of recorded steps");
+
+  prop = RNA_def_property(srna, "current", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "current");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Current", "Index of the step the mesh is at");
+
+  prop = RNA_def_property(srna, "memory_kib", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop, "rna_SculptHistory_memory_kib_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Memory", "Memory held by the history, in KiB");
+}
+
 static void rna_def_object_light_linking(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -5097,6 +5157,7 @@ void RNA_def_object(BlenderRNA *brna)
   rna_def_object_display(brna);
   rna_def_object_lineart(brna);
   rna_def_object_sculpt_cursor(brna);
+  rna_def_object_sculpt_history(brna);
   rna_def_object_light_linking(brna);
   rna_def_curve_patch_session(brna);
   RNA_define_animate_sdna(true);

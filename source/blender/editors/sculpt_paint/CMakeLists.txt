@@ -219,6 +219,7 @@ set(SRC
   mesh/sculpt_flood_fill.cc
   mesh/sculpt_geodesic.cc
   mesh/sculpt_gesture.cc
+  mesh/sculpt_history.cc
   mesh/sculpt_hide.cc
   mesh/sculpt_layer_mask_edit.cc
   mesh/sculpt_layer_mirror.cc
@@ -350,6 +351,8 @@ set(SRC
   mesh/sculpt_pose.hh
   mesh/sculpt_smooth.hh
   mesh/sculpt_undo.hh
+  mesh/sculpt_undo_history.cc
+  mesh/sculpt_undo_intern.hh
   mesh/vw_paint_intern.hh
 
   mesh/brushes/bmesh_topology_rake.cc

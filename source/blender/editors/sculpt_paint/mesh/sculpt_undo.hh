@@ -72,6 +72,9 @@ enum class Type : int8_t {
   DyntopoEnd,
   /* Sculpt layer tree/metadata change; not per-node data, hence a special type. */
   SculptLayer,
+  /* A jump on the sculpt history timeline (see #history_jump_begin): stores no mesh data, undo
+   * and redo put the object back in the history steps the jump went between. */
+  HistoryJump,
 };
 
 struct StepData;
@@ -155,6 +158,33 @@ void push_end_ex(Object &ob, bool use_nested_undo, bool finalize_undo_step = tru
 void push_end_all_ex(bool use_nested_undo, bool finalize_undo_step = true);
 /** Discard the sculpt undo step currently being built without pushing it to the stack. */
 void discard_init_step();
+
+/**
+ * Sculpt history: after the history steps after \a current (a #bke::sculpt_history::cursor_get)
+ * were deleted, drop the undo steps that lead into them, so undo and redo keep matching the
+ * history.
+ */
+void history_steps_deleted(const Object &ob, int current);
+
+/**
+ * Sculpt history: an undo step for a jump on the history timeline. It stores no mesh data: undo
+ * and redo put the mesh back in the history steps it goes between (#history_apply_cursor).
+ * Requires the object's PBVH.
+ */
+void history_jump_begin(const Scene &scene, Object &ob, const wmOperator *op);
+void history_jump_end(Object &ob);
+/**
+ * Put \a ob (an object in Sculpt Mode, active or not) in the state of the history step with
+ * \a cursor, updating its sculpt session (implemented in `sculpt_history.cc`).
+ */
+void history_apply_cursor(bContext *C, Object &ob, int cursor);
+/**
+ * Sculpt history hooks the undo pushes call (implemented in `sculpt_undo_history.cc`):
+ * #history_begin_ex opens the history work of an undo step (name, before-cursor, the first step),
+ * #history_push_end_object records it at the end of the push.
+ */
+void history_begin_ex(Object &ob, const char *name);
+void history_push_end_object(Object &ob, bool topology_changed, bool record);
 
 /**
  * Add another object's full-geometry snapshot to the multi-object step opened by #geometry_begin,

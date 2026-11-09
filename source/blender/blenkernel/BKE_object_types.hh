@@ -157,6 +157,14 @@ struct ObjectRuntime {
   SculptSession *sculpt_session = nullptr;
 
   /**
+   * Number of live #bke::sculpt_history::ScopedPause guards of this object; while one is alive,
+   * its sculpt history records nothing (see `BKE_sculpt_history.hh`). Runtime only: a count is
+   * meaningless across undo or a file load, and the history operations that open a guard never
+   * outlive either.
+   */
+  int sculpt_history_pause_count = 0;
+
+  /**
    * Occupied UDIM tiles per layered material and UV map, see
    * #BKE_paint_layer_object_mask_object_tiles_cached. Runtime only: the scan walks every face, so
    * the Properties editor must not repeat it per redraw. Key: owner uid + UV map name.

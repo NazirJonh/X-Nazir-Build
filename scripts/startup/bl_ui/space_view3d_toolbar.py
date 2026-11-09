@@ -1535,6 +1535,58 @@ class VIEW3D_PT_sculpt_options(Panel, View3DPaintPanel):
         col.prop(sculpt, "use_deform_only")
 
 
+class VIEW3D_PT_sculpt_history(Panel, View3DPaintPanel):
+    bl_context = ".sculpt_mode"  # dot on purpose (access from topbar)
+    bl_label = "History"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_ui_units_x = 13
+
+    # Steps listed at most, around the current one.
+    MAX_LISTED = 20
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.sculpt_object
+        return ob is not None and ob.type == 'MESH' and ob.sculpt_history is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        history = context.sculpt_object.sculpt_history
+        current = history.current
+        steps_num = history.steps_num
+
+        layout.label(text="Step {:d} of {:d} ({:d} KiB)".format(current + 1, steps_num, history.memory_kib))
+
+        row = layout.row(align=True)
+        sub = row.row(align=True)
+        sub.enabled = current > 0
+        sub.operator("sculpt.sculpt_history_goto", text="Back", icon='TRIA_LEFT').offset = -1
+        sub = row.row(align=True)
+        sub.enabled = current < steps_num - 1
+        sub.operator("sculpt.sculpt_history_goto", text="Forward", icon='TRIA_RIGHT').offset = 1
+
+        first = max(0, min(current - self.MAX_LISTED // 2, steps_num - self.MAX_LISTED))
+        last = min(steps_num, first + self.MAX_LISTED)
+        col = layout.column(align=True)
+        for index in range(first, last):
+            step = history.steps[index]
+            icon = 'KEYFRAME_HLT' if step.is_keyframe else 'KEYFRAME'
+            op = col.operator(
+                "sculpt.sculpt_history_goto",
+                text="{:d}. {:s}".format(index + 1, step.name),
+                icon=icon,
+                depress=(index == current),
+            )
+            op.index = index
+
+        col = layout.column(align=True)
+        col.operator("sculpt.sculpt_history_truncate", text="Delete Later Steps")
+        col.operator("sculpt.sculpt_history_delete", text="Delete History")
+
+
 class VIEW3D_PT_sculpt_options_gravity(Panel, View3DPaintPanel):
     bl_context = ".sculpt_mode"  # dot on purpose (access from topbar)
     bl_parent_id = "VIEW3D_PT_sculpt_options"
@@ -3181,6 +3233,7 @@ classes = (
     VIEW3D_PT_sculpt_symmetry,
     VIEW3D_PT_sculpt_symmetry_for_topbar,
     VIEW3D_PT_sculpt_options,
+    VIEW3D_PT_sculpt_history,
     VIEW3D_PT_sculpt_options_gravity,
 
     VIEW3D_PT_curves_sculpt_symmetry,

@@ -2253,6 +2253,10 @@ void operatortypes_sculpt()
   WM_operatortype_append(dyntopo::SCULPT_OT_sample_detail_size);
   WM_operatortype_append(filter::SCULPT_OT_mesh_filter);
   WM_operatortype_append(mask::SCULPT_OT_mask_filter);
+  WM_operatortype_append(SCULPT_OT_sculpt_history_goto);
+  WM_operatortype_append(SCULPT_OT_sculpt_history_scrub);
+  WM_operatortype_append(SCULPT_OT_sculpt_history_truncate);
+  WM_operatortype_append(SCULPT_OT_sculpt_history_delete);
   WM_operatortype_append(SCULPT_OT_set_pivot_position);
   cursor::ED_operatortypes_sculpt_cursor();
   WM_operatortype_append(cursor::SCULPT_OT_cursor_button_exec);

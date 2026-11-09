@@ -79,6 +79,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
+#include "BKE_sculpt_history.hh"
 #include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_undo_system.hh"
@@ -105,6 +106,7 @@
 #include "sculpt_dyntopo.hh"
 #include "sculpt_face_set.hh"
 #include "sculpt_intern.hh"
+#include "sculpt_undo_intern.hh"
 
 namespace blender {
 
@@ -294,6 +296,9 @@ struct StepData {
    * single #Library). #ptr may be null after a resolve if the object was since deleted or could
    * not be found in the current #Main -- callers must null-check before dereferencing. */
   UndoRefID_Object object_ref = {};
+
+  /** Sculpt history state of this step (see #StepHistoryData). */
+  StepHistoryData history;
 
   /** Name of the object's active shape key when the undo step was created. */
   std::string active_shape_key_name;
@@ -894,6 +899,15 @@ static bool sculpt_step_has_undo_content(const SculptUndoStep &us)
   return false;
 }
 
+/** Whether the step stores position or mask data of an object, i.e. what a history step records.
+ * SculptLayer operations also count: they change the composed positions even though they store
+ * no Position nodes (the history compares the full mesh for these). */
+static bool step_data_is_history_step(const StepData &step_data)
+{
+  return bool(step_data.node_flags & (NodeDataFlag::Position | NodeDataFlag::Mask)) ||
+         step_data.special_type == Type::SculptLayer;
+}
+
 static void discard_init_sculpt_step()
 {
   UndoStack *ustack = ED_undo_stack_get();
@@ -915,7 +929,14 @@ static bool sculpt_step_should_push(const SculptUndoStep &us)
    * so undo can leave sculpt mode. Stroke steps always store topology in #save_step_topology_data.
    */
   for (const std::unique_ptr<StepData> &sd : us.objects_data) {
-    if (sd->special_type == Type::None && sd->node_flags == NodeDataFlag{} && sd->mesh.verts_num == 0 && sd->grids.grids_num == 0) {
+    /* A history jump stores no data of its own; it is pushed because undo must be able to step
+     * back over it (see #history_jump_begin). */
+    if (sd->special_type == Type::HistoryJump) {
+      return true;
+    }
+    if (sd->special_type == Type::None && sd->node_flags == NodeDataFlag{} &&
+        sd->mesh.verts_num == 0 && sd->grids.grids_num == 0)
+    {
       return true;
     }
   }
@@ -3804,6 +3825,16 @@ static void restore_list(bContext *C,
       continue;
     }
 
+    if (sd.special_type == Type::HistoryJump) {
+      /* A jump on the history timeline stores no mesh data: undo and redo put the object back in
+       * the history steps the jump went between (see #history_jump_begin). */
+      const int cursor = is_undo ? sd.history.cursor_before : sd.history.cursor_after;
+      history_apply_cursor(C, *ob, cursor);
+      bke::sculpt_history::cursor_set(*ob, cursor);
+      WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+      continue;
+    }
+
     if (sd.needs_undo()) {
       restore_list_object(C, depsgraph, sd, *ob, is_undo);
       sd.tag_needs_redo();
@@ -3812,6 +3843,11 @@ static void restore_list(bContext *C,
       restore_list_object(C, depsgraph, sd, *ob, is_undo);
       sd.tag_needs_undo();
     }
+
+    /* The mesh now holds the shape of this step's history side; move the timeline there too
+     * (0 and missing steps are no-ops, see #bke::sculpt_history::cursor_set). */
+    bke::sculpt_history::cursor_set(
+        *ob, is_undo ? sd.history.cursor_before : sd.history.cursor_after);
 
     WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
   }
@@ -4694,6 +4730,58 @@ static void save_step_topology_data(Object &ob, SculptUndoStep *us)
   }
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Sculpt history accessors
+ *
+ * The history code lives in `sculpt_undo_history.cc` and reaches #StepData only through these
+ * (see `sculpt_undo_intern.hh` for what each field means).
+ * \{ */
+
+/**
+ * Find the (committed) step data of \a ob inside a sculpt undo step, by stored ID name. Returns
+ * null when the step does not touch the object. Only safe after #step_store_id_refs has run (the
+ * names of a step still being built are empty).
+ */
+static StepData *step_data_for_object(const SculptUndoStep &us, const Object &ob)
+{
+  for (const std::unique_ptr<StepData> &sd : us.objects_data) {
+    if (sd->object_ref.name[0] && STREQ(sd->object_ref.name, ob.id.name)) {
+      return sd.get();
+    }
+  }
+  return nullptr;
+}
+
+StepHistoryData *step_history_data(const Object &ob)
+{
+  StepData *step_data = get_step_data(ob);
+  return step_data ? &step_data->history : nullptr;
+}
+
+StepHistoryData *step_history_data(UndoStep &us, const Object &ob)
+{
+  if (us.type != BKE_UNDOSYS_TYPE_SCULPT) {
+    return nullptr;
+  }
+  StepData *step_data = step_data_for_object(reinterpret_cast<const SculptUndoStep &>(us), ob);
+  return step_data ? &step_data->history : nullptr;
+}
+
+const StepHistoryData *step_history_data(const UndoStep &us, const Object &ob)
+{
+  return step_history_data(const_cast<UndoStep &>(us), ob);
+}
+
+void step_history_jump_mark(const Object &ob)
+{
+  if (StepData *step_data = get_step_data(ob)) {
+    step_data->special_type = Type::HistoryJump;
+    step_data->history.jump = true;
+  }
+}
+
+/** \} */
+
 void push_begin_ex(const Scene & /*scene*/, Object &ob, const char *name)
 {
   UndoStack *ustack = ED_undo_stack_get();
@@ -4710,6 +4798,8 @@ void push_begin_ex(const Scene & /*scene*/, Object &ob, const char *name)
       BKE_undosys_step_push_init_with_type(ustack, C, name, BKE_UNDOSYS_TYPE_SCULPT));
 
   save_step_topology_data(ob, us);
+
+  history_begin_ex(ob, name);
 }
 
 void push_begin_add_object(Object &ob)
@@ -4724,6 +4814,10 @@ void push_begin_add_object(Object &ob)
     return;
   }
   save_step_topology_data(ob, us);
+
+  /* Global sculpt sessions add objects mid-stroke: their history starts from the shape the
+   * stroke is about to change. The step's name is the one the push was opened with. */
+  history_begin_ex(ob, us->step.name);
 }
 
 void set_object_transform_snapshot(Object &ob)
@@ -4853,6 +4947,35 @@ static void finalize_step_data(StepData &step_data)
     unode->normal = {};
   }
 
+  /* The sculpt history only compares the points this step touched (see
+   * #history_push_end_object); gather them before the position storage below consumes the nodes.
+   * A layer operation moves points without Position nodes: left empty (unknown) so that every
+   * point is compared. */
+  if (step_data.special_type != Type::SculptLayer &&
+      bool(step_data.node_flags & (NodeDataFlag::Position | NodeDataFlag::Mask)))
+  {
+    Vector<int> &touched = step_data.history.touched_points;
+    for (const std::unique_ptr<Node> &unode : step_data.nodes) {
+      if (unode->grids.is_empty()) {
+        /* Only the unique vertices: the rest are shared with neighboring nodes and would be
+         * recorded twice. */
+        touched.extend(unode->vert_indices.as_span().take_front(unode->unique_verts_num));
+      }
+      else {
+        /* One touched grid is one contiguous range of grid points. */
+        const int grid_area = step_data.grids.grid_size * step_data.grids.grid_size;
+        for (const int grid : unode->grids) {
+          for (const int point : bke::ccg::grid_range(grid_area, grid)) {
+            touched.append(point);
+          }
+        }
+      }
+    }
+    /* Nodes may overlap (a vertex stored by several of them, or several pushes of the step). */
+    std::sort(touched.begin(), touched.end());
+    touched.resize(std::unique(touched.begin(), touched.end()) - touched.begin());
+  }
+
   const NodeDataFlag flags = step_data.node_flags;
   /* Everything except positions stays in #StepData::nodes; positions get their own compressed
    * storage. Both can be present in a single step, so these are handled independently rather than
@@ -4957,10 +5080,12 @@ void push_end_ex(Object &ob, const bool /*use_nested_undo*/, const bool finalize
     return;
   }
 
+  bool record_history = false;
   if (StepData *step_data = get_step_data(ob)) {
     if (step_data_has_undo_content(*step_data)) {
       finalize_step_data(*step_data);
     }
+    record_history = step_data_is_history_step(*step_data);
     save_active_attribute(ob, &us->active_color_end);
   }
 
@@ -4972,6 +5097,12 @@ void push_end_ex(Object &ob, const bool /*use_nested_undo*/, const bool finalize
     discard_init_sculpt_step();
     return;
   }
+
+  /* The mesh now holds the shape this undo step made; the history step stores the same change.
+   * Recorded before the push: an edit on an older step truncates later history steps, and the
+   * matching undo steps are cut from the stack here, while the step being pushed is still
+   * outside it. */
+  history_push_end_object(ob, false, record_history);
 
   push_sculpt_undo_step_to_stack();
 }
@@ -5009,6 +5140,17 @@ void push_end_all_ex(const bool /*use_nested_undo*/, const bool finalize_undo_st
     Object *active_ob = us->objects_data.first()->object_ref.ptr;
     if (active_ob) {
       save_active_attribute(*active_ob, &us->active_color_end);
+    }
+  }
+
+  /* The mesh now holds the shape this undo step made; the history steps store the same change
+   * for every object it touched. Recorded before the push (see #push_end_ex): truncation cuts
+   * later undo steps from the stack while the step being pushed is still outside it. */
+  for (const std::unique_ptr<StepData> &step_data : us->objects_data) {
+    if (step_data->object_ref.ptr) {
+      history_push_end_object(*step_data->object_ref.ptr,
+                              false,
+                              step_data_is_history_step(*step_data));
     }
   }
 
@@ -5194,7 +5336,9 @@ static bool step_encode(bContext * /*C*/, Main *bmain, UndoStep *us_p)
   }
   us->step.is_applied = true;
 
-  /* We do not flush data when entering sculpt mode - this is currently indicated by Type::None */
+  /* We do not flush data when entering sculpt mode - this is currently indicated by Type::None.
+   * A history jump (#Type::HistoryJump) stores no data of its own either, but undoes into a shape
+   * the memfile must still know about, and it counts as #is_not_none for the same reason. */
   if (is_not_none) {
     bmain->is_memfile_undo_flush_needed = true;
   }
@@ -5398,6 +5542,8 @@ void geometry_begin_ex(const Scene & /*scene*/, Object &ob, const char *name)
       BKE_undosys_step_push_init_with_type(ustack, C, name, BKE_UNDOSYS_TYPE_SCULPT));
   save_common_data(ob, us);
   geometry_push(ob);
+
+  history_begin_ex(ob, name);
 }
 
 void geometry_begin_add_object(Object &ob)
@@ -5460,6 +5606,10 @@ void geometry_end(Object &ob)
 {
   geometry_end_add_object(ob);
 
+  /* A geometry operator may rewrite the topology; its result is stored as a history keyframe.
+   * Also runs after going to a history step (recording paused): undoing it goes back. */
+  history_push_end_object(ob, true, true);
+
   /* We could remove this and enforce all callers run in an operator using 'OPTYPE_UNDO'. */
   wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first);
   if (wm->op_undo_depth == 0) {
@@ -5488,6 +5638,9 @@ void register_type(UndoType *ut)
   ut->flags = UNDOTYPE_FLAG_DECODE_ACTIVE_STEP;
 
   ut->step_size = sizeof(SculptUndoStep);
+
+  /* The generic undo editor (ed_undo.cc) dispatches these without knowing about sculpt. */
+  ut->history = &history_hooks;
 }
 
 /** \} */

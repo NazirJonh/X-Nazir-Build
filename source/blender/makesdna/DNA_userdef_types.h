@@ -1677,6 +1677,16 @@ struct UserDef {
   int sculpt_cursor_buttons_per_row = 0;
   char _pad_sculpt_cursor[4] = {};
 
+  /** Don't record a sculpt history (on by default: zero, as preferences saved before this
+   * setting read it, means every sculpted mesh object gets one). */
+  char sculpt_history_off = 0;
+  /** Leave sculpt histories out of .blend files (zero, the default, saves them). */
+  char sculpt_history_nosave = 0;
+  /** Sculpt history steps kept for each object. Zero (also what preferences saved before this
+   * setting read) means the default, 100; -1 keeps every step. */
+  short sculpt_history_limit = 0;
+  char _pad_sculpt_history[4] = {};
+
   /** TEMPORARY: Essentials classification for the Sculpt/Paint brush popover. */
   short essentials_brush_set = ASSET_LIBRARY_BRUSH_SET_BOTH;
   char _pad_essentials_brush_set[6] = {};

@@ -1983,6 +1983,16 @@ void SCULPT_OT_mask_init(wmOperatorType *ot);
 
 }  // namespace ed::sculpt_paint::mask
 
+namespace ed::sculpt_paint {
+
+/* Sculpt history timeline operators (`mesh/sculpt_history.cc`). */
+void SCULPT_OT_sculpt_history_goto(wmOperatorType *ot);
+void SCULPT_OT_sculpt_history_scrub(wmOperatorType *ot);
+void SCULPT_OT_sculpt_history_truncate(wmOperatorType *ot);
+void SCULPT_OT_sculpt_history_delete(wmOperatorType *ot);
+
+}  // namespace ed::sculpt_paint
+
 namespace ed::sculpt_paint::dyntopo {
 
 void SCULPT_OT_detail_flood_fill(wmOperatorType *ot);

@@ -8,6 +8,7 @@
  */
 
 #include "BLI_enum_flags.hh"
+#include "BLI_function_ref.hh"
 #include "BLI_path_utils.hh"
 
 #include "DNA_ID.h"
@@ -19,6 +20,7 @@ namespace blender {
 struct Main;
 struct UndoStep;
 struct UndoType;
+struct UndoTypeHistoryHooks;
 struct bContext;
 
 /* IDs */
@@ -108,6 +110,28 @@ ENUM_OPERATORS(eUndoPushReturn)
 
 using UndoTypeForEachIDRefFn = void (*)(void *user_data, UndoRefID *id_ref);
 
+/**
+ * Hooks of an undo-linked per-mode history, of which the sculpt history is the only user today
+ * (see `BKE_sculpt_history.hh`). The generic undo editor (ed_undo.cc) dispatches to every type
+ * that defines them, so it doesn't have to know the modes; each type decides for itself when its
+ * history may step instead of the undo stack.
+ */
+struct UndoTypeHistoryHooks {
+  /**
+   * Whether the next undo (or redo, with \a redo) should step the history directly, because the
+   * undo stack doesn't follow it there. Pure: no state is changed. Runs on every redraw of the
+   * undo buttons (only when the stack itself can't step), so it must stay cheap.
+   */
+  bool (*step_poll)(const bContext *C, bool redo);
+  /** Step the history back (or forward with \a redo) instead of the undo stack; true when it did. */
+  bool (*step)(bContext *C, bool redo);
+  /**
+   * After an undo or redo (\a redo) ran through the stack, put the objects back in the shape of
+   * their current history step, if the undo left them elsewhere.
+   */
+  void (*sync)(bContext *C, bool redo);
+};
+
 struct UndoType {
   UndoType *next, *prev;
   /** Only for debugging. */
@@ -162,6 +186,9 @@ struct UndoType {
   /** Information for the generic undo system to refine handling of this specific undo type. */
   uint flags;
 
+  /** Optional hooks of an undo-linked per-mode history (null for most types). */
+  const UndoTypeHistoryHooks *history;
+
   /**
    * The size of the undo struct 'inherited' from #UndoStep for that specific type. Used for
    * generic allocation in BKE's `undo_system.cc`. */
@@ -183,6 +210,10 @@ enum eUndoTypeFlags {
    */
   UNDOTYPE_FLAG_DECODE_ACTIVE_STEP = 1 << 1,
 };
+
+/** Call \a fn for every registered undo type, for the rare editor-level dispatch over all of them
+ * (like the history hooks). */
+void BKE_undosys_types_foreach(FunctionRef<void(const UndoType &)> fn);
 
 /* -------------------------------------------------------------------- */
 /** \name Public Undo Types
@@ -206,6 +237,16 @@ UndoStack *BKE_undosys_stack_create();
 void BKE_undosys_stack_destroy(UndoStack *ustack);
 void BKE_undosys_stack_clear(UndoStack *ustack);
 void BKE_undosys_stack_clear_active(UndoStack *ustack);
+/**
+ * Make `us` the active step and free the steps after it, without decoding anything (a step being
+ * pushed, #UndoStack.step_init, stays).
+ */
+void BKE_undosys_stack_clear_after(UndoStack *ustack, UndoStep *us);
+/**
+ * Free the steps from `first` to `last` (in order), without decoding anything. The steps around
+ * them must not depend on them.
+ */
+void BKE_undosys_stack_remove_range(UndoStack *ustack, UndoStep *first, UndoStep *last);
 /* name optional */
 bool BKE_undosys_stack_has_undo(const UndoStack *ustack, const char *name);
 /**

@@ -12,6 +12,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 
@@ -76,6 +77,12 @@ bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
     if (!STREQ(existing->id.name + 2, NORMAL_COMBINE_TREE_NAME)) {
       BKE_id_rename(bmain, existing->id, NORMAL_COMBINE_TREE_NAME);
     }
+    /* A group loaded from a file written before the flag existed. */
+    for (bNode &node : existing->nodes) {
+      if (node.type_legacy == SH_NODE_MIX) {
+        node.flag |= NODE_KEEP_INACTIVE_BRANCH;
+      }
+    }
     return existing;
   }
 
@@ -136,6 +143,8 @@ bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
   bNode *mix = bke::node_add_node(nullptr, *group, "ShaderNodeMix"_ustr);
   auto &mix_storage = *static_cast<NodeShaderMix *>(mix->storage);
   mix_storage.data_type = SOCK_RGBA;
+  /* The factor is the row's opacity/mask and may legitimately be 0 while the row is hidden. */
+  mix->flag |= NODE_KEEP_INACTIVE_BRANCH;
   mix->location[0] = 240;
   mix->location[1] = 180;
 

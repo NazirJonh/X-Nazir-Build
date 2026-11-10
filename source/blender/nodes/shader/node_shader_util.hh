@@ -66,7 +66,14 @@ struct XYZ_to_RGB /* Transposed #imbuf_xyz_to_rgb, passed as 3x vec3. */
   float r[3], g[3], b[3];
 };
 
-void node_gpu_stack_from_data(GPUNodeStack *gs, bNodeSocket *socket, bNodeStack *ns);
+/**
+ * Fill \a gs from \a socket's value. With \a mat, also record where the value came from, so a
+ * uniform made from it can be refreshed by a value edit instead of a rebuild.
+ */
+void node_gpu_stack_from_data(GPUNodeStack *gs,
+                              bNodeSocket *socket,
+                              bNodeStack *ns,
+                              GPUMaterial *mat = nullptr);
 void node_data_from_gpu_stack(bNodeStack *ns, GPUNodeStack *gs);
 void node_shader_gpu_bump_tex_coord(GPUMaterial *mat, bNode *node, GPUNodeLink **link);
 void node_shader_gpu_default_tex_coord(GPUMaterial *mat, bNode *node, GPUNodeLink **link);

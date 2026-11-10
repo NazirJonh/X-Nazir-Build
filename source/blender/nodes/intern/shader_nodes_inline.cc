@@ -113,6 +113,13 @@ struct SocketValue {
                MultiInputValue>
       value;
 
+  /**
+   * The socket whose stored value this one is a plain copy of, when the whole chain from the source
+   * to here was such a copy. Recorded so a value edit can be pushed into a built material instead
+   * of rebuilding it; a value that went through a computation has no origin and forces a rebuild.
+   */
+  const bNodeSocket *origin = nullptr;
+
   /** Try to get the value as a primitive value. */
   std::optional<PrimitiveSocketValue> to_primitive(const bke::bNodeSocketType &type) const
   {
@@ -415,7 +422,7 @@ class ShaderNodesInliner {
         this->store_socket_value(socket, {DanglingValue{}});
       }
       else {
-        this->store_socket_value(socket, {InputSocketValue{socket.socket}});
+        this->store_socket_value(socket, {InputSocketValue{socket.socket}, socket.socket});
       }
       return;
     }
@@ -429,7 +436,7 @@ class ShaderNodesInliner {
         }
         else {
           /* If the input value is dangling, use the value of the socket itself. */
-          this->store_socket_value(socket, {InputSocketValue{socket.socket}});
+          this->store_socket_value(socket, {InputSocketValue{socket.socket}, socket.socket});
         }
         return;
       }
@@ -1131,13 +1138,37 @@ class ShaderNodesInliner {
       return;
     }
     const bke::bNodeType &node_type = *node->typeinfo;
-    if (node_type.build_multi_function && ensured_inputs.all_inputs_primitive) {
-      /* Do constant folding. */
+    if (node_type.build_multi_function && ensured_inputs.all_inputs_primitive &&
+        !(node_type.gpu_fn && this->reads_unfoldable_origin(node)))
+    {
+      /* Do constant folding. The result is a value that no source socket can be traced to, so a
+       * reader that re-reads socket values has to know that this tree contains one. */
+      params_.r_had_folded_values = true;
       this->handle_output_socket__eval_multi_function(node);
       return;
     }
     /* The node can't be constant-folded. So copy it to the destination tree instead. */
     this->handle_output_socket__eval_copy_node(node);
+  }
+
+  /** True when an input value comes from a socket whose edits must stay traceable. */
+  bool reads_unfoldable_origin(const NodeInContext &node)
+  {
+    if (params_.value_origin == nullptr || params_.unfold_origin_trees.is_empty()) {
+      return false;
+    }
+    for (const bNodeSocket *input_socket : node->input_sockets()) {
+      if (!input_socket->is_available()) {
+        continue;
+      }
+      const SocketValue *value = value_by_socket_.lookup_ptr({node.context, input_socket});
+      if (value != nullptr && value->origin != nullptr &&
+          params_.unfold_origin_trees.contains(&value->origin->owner_tree()))
+      {
+        return true;
+      }
+    }
+    return false;
   }
 
   struct EnsureInputsResult {
@@ -1183,8 +1214,13 @@ class ShaderNodesInliner {
         continue;
       }
       const SocketInContext input_socket_ctx = {node.context, input_socket};
-      const PrimitiveSocketValue value =
-          *value_by_socket_.lookup(input_socket_ctx).to_primitive(*input_socket->typeinfo);
+      const SocketValue &socket_value = value_by_socket_.lookup(input_socket_ctx);
+      const PrimitiveSocketValue value = *socket_value.to_primitive(*input_socket->typeinfo);
+      if (socket_value.origin != nullptr && params_.value_origin != nullptr) {
+        /* The folded result depends on this socket's value: a reader that re-reads values must
+         * know, since it cannot name a source for the result. */
+        params_.r_folded_origins.append(socket_value.origin);
+      }
       params.add_readonly_single_input(
           GVArray::from_single(*input_socket->typeinfo->base_cpp_type, 1, value.buffer()));
     }
@@ -1262,6 +1298,17 @@ class ShaderNodesInliner {
                                          const bke::bNodeSocketType &from_socket_type,
                                          const bke::bNodeSocketType &to_socket_type)
   {
+    /* Converting the value does not change where it came from: an edited source socket still has to
+     * be able to refresh the converted constant in a built material. */
+    SocketValue value = this->convert_value(src_value, from_socket_type, to_socket_type);
+    value.origin = src_value.origin;
+    return value;
+  }
+
+  SocketValue convert_value(const SocketValue &src_value,
+                            const bke::bNodeSocketType &from_socket_type,
+                            const bke::bNodeSocketType &to_socket_type)
+  {
     if (from_socket_type.type == to_socket_type.type) {
       return src_value;
     }
@@ -1335,6 +1382,7 @@ class ShaderNodesInliner {
       }
       else {
         this->set_primitive_value_on_socket(dst_socket, *primitive_value);
+        this->record_value_origin(dst_socket, value);
       }
       return;
     }
@@ -1386,6 +1434,18 @@ class ShaderNodesInliner {
       return;
     }
     BLI_assert_unreachable();
+  }
+
+  /**
+   * Remember which source socket a constant written into the destination tree came from. The value
+   * itself is already on the socket; this only records its provenance.
+   */
+  void record_value_origin(const bNodeSocket &dst_socket, const SocketValue &value)
+  {
+    if (value.origin == nullptr || params_.value_origin == nullptr) {
+      return;
+    }
+    params_.value_origin->add(&dst_socket, value.origin);
   }
 
   NodeAndSocket primitive_value_to_output_socket(const PrimitiveSocketValue &value)

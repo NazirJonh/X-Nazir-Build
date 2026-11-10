@@ -43,7 +43,8 @@ static void group_gpu_copy_inputs(bNode *gnode, GPUNodeStack *in, bNodeStack *gs
 
 /* Copy internal results to the external outputs.
  */
-static void group_gpu_move_outputs(bNode *gnode, GPUNodeStack *out, bNodeStack *gstack)
+static void group_gpu_move_outputs(bNode *gnode, GPUNodeStack *out, bNodeStack *gstack,
+                                   GPUMaterial *mat)
 {
   bNodeTree &ngroup = *reinterpret_cast<bNodeTree *>(gnode->id);
 
@@ -57,7 +58,7 @@ static void group_gpu_move_outputs(bNode *gnode, GPUNodeStack *out, bNodeStack *
     bNodeStack *ns = node_get_socket_stack(gstack, &sock);
     if (ns) {
       /* convert the node stack data result back to gpu stack */
-      node_gpu_stack_from_data(&out[a], &sock, ns);
+      node_gpu_stack_from_data(&out[a], &sock, ns, mat);
     }
   }
 }
@@ -73,7 +74,7 @@ static int gpu_group_execute(
 
   group_gpu_copy_inputs(node, in, exec->stack);
   ntreeExecGPUNodes(exec, mat, nullptr);
-  group_gpu_move_outputs(node, out, exec->stack);
+  group_gpu_move_outputs(node, out, exec->stack, mat);
 
   return 1;
 }

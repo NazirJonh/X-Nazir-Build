@@ -21,6 +21,25 @@ namespace blender::deg {
 
 struct Depsgraph;
 
+/**
+ * Backup of a layered material's GPU builds.
+ *
+ * Every update of a material copies the data-block on evaluation, and the copy does not inherit the
+ * compiled materials of the one it replaces: a value edit would rebuild them for a node tree that
+ * did not change. The list is taken out of the copy being freed and handed to its replacement; for
+ * any other material it stays empty, which leaves the old behavior exactly as it was.
+ */
+class MaterialBackup {
+ public:
+  explicit MaterialBackup(const Depsgraph *depsgraph);
+
+  void init_from_id(ID *id);
+  void restore_to_id(ID *id);
+
+  ListBaseT<LinkData> gpumaterial = {nullptr, nullptr};
+  bool have_data = false;
+};
+
 class RuntimeBackup {
  public:
   explicit RuntimeBackup(const Depsgraph *depsgraph);
@@ -53,6 +72,7 @@ class RuntimeBackup {
   ObjectRuntimeBackup object_backup;
   MovieClipBackup movieclip_backup;
   VolumeBackup volume_backup;
+  MaterialBackup material_backup;
 };
 
 }  // namespace blender::deg

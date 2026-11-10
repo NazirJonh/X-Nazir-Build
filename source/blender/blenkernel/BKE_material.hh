@@ -9,6 +9,7 @@
  * \brief General operations, lookup, etc. for materials.
  */
 
+#include <cstdint>
 #include <optional>
 #include <utility>
 
@@ -325,6 +326,13 @@ void BKE_material_defaults_free_gpu();
  * \{ */
 
 void BKE_material_eval(Depsgraph *depsgraph, Material *material);
+
+/**
+ * Token that changes whenever the material's generated paint-layer tree is rebuilt, and 0 when the
+ * material carries no such tree. A GPU build made for one token cannot take a value edit of
+ * another: the uniform map of that build names sockets a rebuild replaces.
+ */
+uint64_t BKE_material_paint_layers_topology_generation(const Material &ma);
 
 /** \} */
 

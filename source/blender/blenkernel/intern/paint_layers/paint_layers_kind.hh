@@ -644,6 +644,14 @@ const char *paint_layer_generator_param_socket(const MaterialPaintLayer &row, in
  */
 bool paint_layer_generator_param_is_active(const MaterialPaintLayer &row, int index);
 
+/**
+ * Whether the parameter \a index is a socket the node leaves out for the choice made now (a Noise's
+ * Offset and Gain outside the hybrid types, a Voronoi's Smoothness outside the smooth feature). It
+ * reads nothing until that choice changes, and the choice is hashed itself, so the build need not
+ * follow its value.
+ */
+bool paint_layer_generator_param_is_dormant(const MaterialPaintLayer &row, int index);
+
 /** Whether an edit of \a index is a value edit: a socket of the pattern's node or the mapping
  * chain carries it, so no node is added, dropped or reconfigured. */
 bool paint_layer_generator_param_is_value(const MaterialPaintLayer &row, int index);

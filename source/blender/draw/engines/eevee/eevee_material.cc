@@ -248,8 +248,22 @@ MaterialPass MaterialModule::material_pass_get(Object *ob,
     }
     case GPU_MAT_QUEUED:
       queued_shaders_count++;
-      matpass.gpumat = inst_.shaders.material_shader_get(
-          default_mat, default_mat->nodetree, pipeline_type, geometry_type, false, nullptr);
+      /* Keep drawing the previous build of this pipeline while its replacement compiles. The
+       * fallback is a compiled material BKE kept alive for exactly this; without one, the default
+       * material is the only thing that can be drawn. */
+      if (GPUMaterial *fallback = GPU_material_fallback_find(
+              &blender_mat->gpumaterial,
+              GPU_MAT_EEVEE,
+              GPU_material_uuid_get(matpass.gpumat),
+              blender_mat))
+      {
+        matpass.gpumat = fallback;
+        queue_texture_loading(fallback);
+      }
+      else {
+        matpass.gpumat = inst_.shaders.material_shader_get(
+            default_mat, default_mat->nodetree, pipeline_type, geometry_type, false, nullptr);
+      }
       break;
     case GPU_MAT_FAILED:
     default:

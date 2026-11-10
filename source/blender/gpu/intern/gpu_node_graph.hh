@@ -87,6 +87,19 @@ struct GPUNodeLink {
   GPUNodeLinkType link_type;
   int users; /* Refcount */
 
+  /**
+   * For #GPU_NODE_LINK_UNIFORM: the socket whose stored value this uniform was made from, when the
+   * value is a plain copy of one. Lets a value edit refresh the built material's uniform buffer
+   * instead of rebuilding the material (see #GPU_material_values_update).
+   */
+  const bNodeSocket *origin;
+  /** Whether the consuming node only reads this value; see #GPU_material_node_is_value_only. */
+  bool origin_safe;
+  /** For #GPU_NODE_LINK_UNIFORM: what a ramp edit would rewrite this uniform as; set by
+   * #GPU_uniform_ramp, null when it is not one of a ramp's uniforms. */
+  const char *ramp_key;
+  GPURampUniformRole ramp_role;
+
   union {
     /* GPU_NODE_LINK_CONSTANT | GPU_NODE_LINK_UNIFORM */
     const float *data;
@@ -154,6 +167,13 @@ struct GPUInput {
   bool is_zone_io;
   /* This variable is shared with other socket/s and doesn't need to be declared. */
   bool is_duplicate;
+
+  /* See #GPUNodeLink::origin and #GPUNodeLink::origin_safe. */
+  const bNodeSocket *origin;
+  bool origin_safe;
+  /* See #GPUNodeLink::ramp_key and #GPUNodeLink::ramp_role. */
+  const char *ramp_key;
+  GPURampUniformRole ramp_role;
 };
 
 struct GPUNodeGraphOutputLink {

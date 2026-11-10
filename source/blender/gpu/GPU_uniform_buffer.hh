@@ -16,6 +16,7 @@
 #pragma once
 
 #include "BLI_sys_types.h"
+#include "BLI_vector.hh"
 
 #include "DNA_listBase.h"
 
@@ -28,13 +29,28 @@ class UniformBuf;
 }  // namespace gpu
 
 gpu::UniformBuf *GPU_uniformbuf_create_ex(size_t size, const void *data, const char *name);
+
+/** Where one input of a list ended up in the buffer created from it. */
+struct GPUUniformBufSlot {
+  size_t offset;
+  const GPUInput *input;
+};
+
 /**
  * Create UBO from inputs list.
  *
  * \param inputs: ListBaseT<LinkData>
+ * \param r_slots: optional, receives the byte offset of every input in the buffer, in list order
+ *                 after the layout sort. Together with the input's own `origin` it is what lets a
+ *                 value edit rewrite one entry of the buffer instead of rebuilding the material.
+ * \param r_data_copy: optional, receives a CPU copy of the initial buffer contents.
  * \return nullptr if failed to create or if `inputs` is empty.
  */
-gpu::UniformBuf *GPU_uniformbuf_create_from_list(ListBaseT<LinkData> *inputs, const char *name);
+gpu::UniformBuf *GPU_uniformbuf_create_from_list(
+    ListBaseT<LinkData> *inputs,
+    const char *name,
+    Vector<GPUUniformBufSlot> *r_slots = nullptr,
+    Vector<uchar> *r_data_copy = nullptr);
 
 #define GPU_uniformbuf_create(size) GPU_uniformbuf_create_ex(size, nullptr, __func__);
 

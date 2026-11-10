@@ -59,6 +59,12 @@ bNodeTree *BKE_paint_material_gradient_group_ensure(Main &bmain)
     if (!STREQ(existing->id.name + 2, GRADIENT_TREE_NAME)) {
       BKE_id_rename(bmain, existing->id, GRADIENT_TREE_NAME);
     }
+    /* A group loaded from a file written before the flag existed. */
+    for (bNode &node : existing->nodes) {
+      if (node.type_legacy == SH_NODE_MIX) {
+        node.flag |= NODE_KEEP_INACTIVE_BRANCH;
+      }
+    }
     return existing;
   }
 
@@ -229,6 +235,13 @@ bNodeTree *BKE_paint_material_gradient_group_ensure(Main &bmain)
     return nullptr;
   }
   builder.place_output();
+
+  /* A gradient position of exactly 0 or 1 is a value, not a different graph. */
+  for (bNode &node : group->nodes) {
+    if (node.type_legacy == SH_NODE_MIX) {
+      node.flag |= NODE_KEEP_INACTIVE_BRANCH;
+    }
+  }
 
   BKE_ntree_update_tag_all(group);
   BKE_ntree_update_after_single_tree_change(bmain, *group);

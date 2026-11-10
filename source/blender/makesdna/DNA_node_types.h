@@ -241,6 +241,15 @@ enum eNode_Flag : int {
   // NODE_ACTIVE_PREVIEW = 1 << 18, /* deprecated */
   /** Active node that is used to paint on. */
   NODE_ACTIVE_PAINT_CANVAS = 1 << 19,
+  /**
+   * Keep both branches of a Mix node when the shader tree prunes the inactive one.
+   *
+   * Set by generators whose blend factor is a uniform that can legitimately reach 0 or 1 (an
+   * opacity, a coverage): pruning the branch there changes the generated shader whenever the
+   * factor crosses that value, which recompiles it. Keeping the branch makes the factor a pure
+   * uniform.
+   */
+  NODE_KEEP_INACTIVE_BRANCH = 1 << 20,
 };
 ENUM_OPERATORS(eNode_Flag)
 

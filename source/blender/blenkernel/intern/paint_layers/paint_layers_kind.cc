@@ -1412,6 +1412,8 @@ bool BKE_paint_layers_ramp_edited(Material &ma, const void *data)
      * or folder that holds the filter keeps showing the old ramp. */
     ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
     BKE_paint_layers_tag_edited(ma);
+    /* After the tag, which clears it: see #BKE_paint_layers_generator_ramp_edited. */
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_RAMP_ONLY;
   }
   return found;
 }

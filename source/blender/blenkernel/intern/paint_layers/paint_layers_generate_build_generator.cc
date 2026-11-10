@@ -20,6 +20,7 @@
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_ustring.hh"
+#include "BLI_uuid.h"
 
 #include "BKE_lib_id.hh"
 #include "BKE_node.hh"
@@ -274,6 +275,7 @@ bNode *PaintLayersTreeBuilder::generator_ramp_ensure(bNodeTree &tree,
     if (ramp == nullptr) {
       return nullptr;
     }
+    ramp_node_key_set(*ramp, layer, -1);
     grid_.place(*ramp, layout::Column::Source, 1);
     generator_ramps_.add(&layer, ramp);
     return ramp;
@@ -292,6 +294,7 @@ bNode *PaintLayersTreeBuilder::generator_ramp_ensure(bNodeTree &tree,
   if (ramp == nullptr) {
     return nullptr;
   }
+  ramp_node_key_set(*ramp, layer, channel);
   grid_.place_extra(*ramp);
   generator_scalar_ramps_.lookup_or_add_default(&layer).add(channel, ramp);
   return ramp;

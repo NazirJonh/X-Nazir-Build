@@ -530,11 +530,15 @@ bool BKE_paint_layers_generator_ramp_edited(Material &ma, const void *data)
   if (!found) {
     return false;
   }
-  /* The ramp lives in the ColorRamp node's storage; a stop or an interpolation change is a new
-   * graph, so regeneration is the safe path (and the one that updates the CPU hash). A baked row or
-   * folder that contains one also has to be rendered again. */
+  /* The ramp reads as uniforms or a band texture in the shader, so a stop or a color edit is data,
+   * not a different graph: the kept regeneration copies it into the node storage
+   * (#paint_layers_gradient_ramp_sync). Only a change of the shader shape rebuilds. A baked row or
+   * folder that contains one still has to be rendered again: the bake reads the ramp's pixels. */
   ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
   BKE_paint_layers_tag_edited(ma);
+  /* After the tag, which clears it: any other edit that follows clears it again, so the kept
+   * regeneration only trusts a ramp edit that was the sole reason for it. */
+  ma.paint_layers_flag |= MA_PAINT_LAYERS_RAMP_ONLY;
   return true;
 }
 

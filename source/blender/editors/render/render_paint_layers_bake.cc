@@ -50,6 +50,11 @@
 
 namespace blender::ed::material_bake {
 
+/* Declared at this scope because the definition lives after the anonymous namespace below
+ * (#paint_layers_bake_hold_timer_arm goes with the other timer helpers there); declaring it inside
+ * the anonymous namespace would name a different, never-defined function. */
+static void paint_layers_bake_hold_timer_arm();
+
 namespace {
 
 /** One in-flight heavy bake. The BKE job owns the localized description and the pixel buffers. */
@@ -99,6 +104,17 @@ char paint_layers_blend_timer_tag = 0;
 uintptr_t paint_layers_blend_timer_uuid()
 {
   return reinterpret_cast<uintptr_t>(&paint_layers_blend_timer_tag);
+}
+
+/**
+ * The bake-shape timer has its own uuid: it turns a row that was painted live back to its baked
+ * shape after the hand stops, and must not be restarted or cleared by an unrelated bake debounce.
+ */
+char paint_layers_bake_hold_timer_tag = 0;
+
+uintptr_t paint_layers_bake_hold_timer_uuid()
+{
+  return reinterpret_cast<uintptr_t>(&paint_layers_bake_hold_timer_tag);
 }
 
 /** The quiet time after the last edit of a burst before its renders are started. */
@@ -175,6 +191,9 @@ void paint_layers_bake_end(void *customdata)
 {
   PaintLayersBakeWMJob *job = static_cast<PaintLayersBakeWMJob *>(customdata);
   if (BKE_paint_layers_bake_job_commit(*job->bake)) {
+    /* A heavy row that landed while it was painted live keeps that shape until the hand stops; the
+     * timer is what turns it back baked, once, after the idle. */
+    paint_layers_bake_hold_timer_arm();
     WM_main_add_notifier(NC_MATERIAL | ND_SHADING, nullptr);
   }
 }
@@ -874,6 +893,16 @@ void paint_layers_bake_debounce_arm(Material &ma, const double delay_seconds)
 
 void paint_layers_blend_timer_arm()
 {
+  /* Deliberately not armed: demoting a channel rebuilds its group into a static Mix, which
+   * recompiles the material right after the user stopped scrubbing -- the stall the dynamic tier
+   * exists to avoid. The dynamic shape lasts for the session; a save/load or undo rebuilds it
+   * statically (#BKE_paint_layers_blend_load_post / #BKE_paint_layers_blend_undo_post). Keep the
+   * timer path below for when the idle demote is wanted again. */
+  constexpr bool kDemoteOnIdle = false;
+  if (!kDemoteOnIdle) {
+    return;
+  }
+
   const double deadline = BKE_paint_layers_blend_tier_next_deadline();
   if (deadline < 0.0) {
     /* Nothing is scrubbing: leave any already-registered timer alone instead of churning it on
@@ -896,6 +925,41 @@ void paint_layers_blend_timer_arm()
                      false);
 }
 
+static double paint_layers_bake_hold_tick(uintptr_t /*uuid*/, void * /*user_data*/)
+{
+  if (G_MAIN == nullptr) {
+    BKE_paint_layers_bake_hold_clear();
+    return -1.0;
+  }
+  const double now = BLI_time_now_seconds();
+  BKE_paint_layers_bake_hold_due(*G_MAIN, now);
+  const double next = BKE_paint_layers_bake_hold_next_deadline();
+  return next < 0.0 ? -1.0 : std::max(next - now, 0.0);
+}
+
+static void paint_layers_bake_hold_timer_arm()
+{
+  const double deadline = BKE_paint_layers_bake_hold_next_deadline();
+  if (deadline < 0.0) {
+    return;
+  }
+  if (BLI_timer_is_registered(paint_layers_bake_hold_timer_uuid())) {
+    BLI_timer_unregister(paint_layers_bake_hold_timer_uuid());
+  }
+  BLI_timer_register(paint_layers_bake_hold_timer_uuid(),
+                     paint_layers_bake_hold_tick,
+                     nullptr,
+                     nullptr,
+                     std::max(deadline - BLI_time_now_seconds(), 0.0),
+                     false);
+}
+
+static void paint_layers_bake_hold_timer_reset()
+{
+  BLI_timer_unregister(paint_layers_bake_hold_timer_uuid());
+  BKE_paint_layers_bake_hold_clear();
+}
+
 void paint_layers_blend_timer_reset()
 {
   /* Process-static tier records tied to a file that is about to stop existing, or to one whose
@@ -915,6 +979,7 @@ void paint_layers_bake_debounce_reset()
   /* The blend tier has the same lifetime, and is reset here so every file change that covers the
    * bake debounce covers it too (#ED_editors_exit among them). */
   paint_layers_blend_timer_reset();
+  paint_layers_bake_hold_timer_reset();
 }
 
 void MATERIAL_OT_paint_layer_use_row_result(wmOperatorType *ot)

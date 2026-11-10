@@ -174,9 +174,18 @@ static void nodestack_get_vec(float *in, short type_in, bNodeStack *ns)
   }
 }
 
-void node_gpu_stack_from_data(GPUNodeStack *gs, bNodeSocket *socket, bNodeStack *ns)
+void node_gpu_stack_from_data(GPUNodeStack *gs,
+                              bNodeSocket *socket,
+                              bNodeStack *ns,
+                              GPUMaterial *mat)
 {
   memset(gs, 0, sizeof(*gs));
+
+  /* A value read straight from the socket is the one a value edit can rewrite in a built material:
+   * a linked input has no value of its own, and a node that picks its code from a value would have
+   * to be rebuilt anyway. */
+  gs->origin = (mat != nullptr) ? GPU_material_uniform_value_origin(mat, socket) : nullptr;
+  gs->origin_safe = gs->origin != nullptr && GPU_material_node_is_value_only(socket->owner_node());
 
   if (ns == nullptr) {
     /* node_get_stack() will generate nullptr bNodeStack pointers
@@ -247,11 +256,12 @@ void node_data_from_gpu_stack(bNodeStack *ns, GPUNodeStack *gs)
 
 static void gpu_stack_from_data_list(GPUNodeStack *gs,
                                      ListBaseT<bNodeSocket> *sockets,
-                                     bNodeStack **ns)
+                                     bNodeStack **ns,
+                                     GPUMaterial *mat)
 {
   int i = 0;
   for (bNodeSocket &socket : *sockets) {
-    node_gpu_stack_from_data(&gs[i], &socket, ns[i]);
+    node_gpu_stack_from_data(&gs[i], &socket, ns[i], mat);
     i++;
   }
 
@@ -396,8 +406,8 @@ void ntreeExecGPUNodes(bNodeTreeExec *exec,
       BLI_assert(!depth_level || node->runtime->tmp_flag >= 0);
       if (node->typeinfo->gpu_fn) {
         node_get_stack(node, stack, nsin, nsout);
-        gpu_stack_from_data_list(gpuin, &node->inputs, nsin);
-        gpu_stack_from_data_list(gpuout, &node->outputs, nsout);
+        gpu_stack_from_data_list(gpuin, &node->inputs, nsin, mat);
+        gpu_stack_from_data_list(gpuout, &node->outputs, nsout, mat);
         if (node->typeinfo->gpu_fn(mat, node, &nodeexec->data, gpuin, gpuout)) {
           data_from_gpu_stack_list(&node->outputs, nsout, gpuout);
         }

@@ -1088,9 +1088,10 @@ bool BKE_paint_layers_channel_set_enabled(Material &ma,
                                           bool enabled);
 
 /**
- * Set whether \a layer's \a channel record is read as `1 - C`. Only a mask correction's Base Color
+ * Set whether \a layer's \a channel record is read as `1 - C`. Only a mask item's Base Color
  * record honours it (see #MA_PAINT_LAYER_CHANNEL_INVERT); the flag is kept on any other record
- * without effect. Part of the graph's structure, so it regenerates.
+ * without effect. A mask item's graph changes, so that edit regenerates; on a stack row's channel
+ * nothing evaluated moves and the edit stays value-only.
  *
  * \return false when \a layer carries no \a channel record or is not part of \a ma.
  */
@@ -2412,6 +2413,30 @@ int64_t BKE_paint_layers_bake_job_retained_bytes(const PaintLayersBakeJob &job);
 
 /** Release the job and its localized copy. */
 void BKE_paint_layers_bake_job_free(PaintLayersBakeJob &job);
+
+/**
+ * Defer the move back to the baked shape of a row whose heavy bake landed while the row was still
+ * live.
+ *
+ * While a stroke is being painted the row that changed is laid live, so the stroke shows at once.
+ * The bake landing makes it substitutable again; flipping it back right there rebuilds (and
+ * recompiles) the material on top of a stroke. The flip is noted here and run after a short idle
+ * instead (#BKE_paint_layers_bake_hold_due), which coalesces a whole painting session into one
+ * rebuild.
+ */
+void BKE_paint_layers_bake_hold_note(Material &ma, const bUUID &marker);
+
+/** The nearest time a held row wants its baked shape; negative when nothing is held. */
+double BKE_paint_layers_bake_hold_next_deadline();
+
+/**
+ * Flip the rows whose hold expired back to their baked shape, if their bake is still valid.
+ * \return true when some material was marked for regeneration.
+ */
+bool BKE_paint_layers_bake_hold_due(Main &bmain, double now);
+
+/** Forget every hold, on a file change or undo: the rows they named may not exist any more. */
+void BKE_paint_layers_bake_hold_clear();
 
 /**
  * A "Use Row Result" job: render one row (\a source_marker) of the layered \a ma for every channel

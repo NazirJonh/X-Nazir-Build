@@ -133,6 +133,19 @@ enum eMaterialPaintLayersFlag : short {
    * only: a file never carries it.
    */
   MA_PAINT_LAYERS_PREVIEW_WANTED = 1 << 7,
+  /**
+   * The last edit only moved values the generated tree already has sockets for, so the evaluated
+   * material can keep the build it has and let it re-read those values instead of rebuilding (see
+   * #GPU_material_values_update). Cleared by the evaluation that consumes it, and by any edit that
+   * changes the shape. Runtime only: a file never carries it.
+   */
+  MA_PAINT_LAYERS_VALUES_ONLY = 1 << 8,
+  /**
+   * The pending regeneration was asked for by a gradient ramp edit alone. The kept regeneration
+   * turns it into #MA_PAINT_LAYERS_VALUES_ONLY, since the ramp's stops are uniforms or band pixels.
+   * Cleared by every other edit tag. Runtime only: a file never carries it.
+   */
+  MA_PAINT_LAYERS_RAMP_ONLY = 1 << 9,
 };
 ENUM_OPERATORS(eMaterialPaintLayersFlag)
 

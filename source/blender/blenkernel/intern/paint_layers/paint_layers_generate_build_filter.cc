@@ -571,6 +571,7 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       grid_.place_extra(*bw);
       grid_.place_extra(*ramp);
       *static_cast<ColorBand *>(ramp->storage) = *band;
+      ramp_node_key_set(*ramp, effect, -1);
 
       bNodeSocket *bw_color = socket_in(*bw, "Color");
       bNodeSocket *bw_val = socket_out(*bw, "Val");

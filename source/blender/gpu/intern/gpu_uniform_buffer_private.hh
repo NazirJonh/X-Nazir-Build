@@ -48,6 +48,10 @@ class UniformBuf {
   {
     data_ = data;
   }
+
+  /** Drop data still waiting for its deferred upload. An explicit update supersedes it: left
+   * attached, it would be uploaded at the next bind and overwrite the newer contents. */
+  void discard_attached_data();
 };
 
 #undef DEBUG_NAME_LEN

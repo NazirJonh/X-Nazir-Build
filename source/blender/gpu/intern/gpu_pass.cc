@@ -21,6 +21,8 @@
 #include "GPU_vertex_format.hh"
 #include "gpu_codegen.hh"
 
+#include <atomic>
+#include <cstdio>
 #include <mutex>
 #include <string>
 

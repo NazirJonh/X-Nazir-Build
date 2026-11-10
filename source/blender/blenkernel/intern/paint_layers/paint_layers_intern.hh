@@ -1057,6 +1057,14 @@ bool paint_layer_row_baked_channel(const Material &ma,
                                    Image **r_color);
 
 /**
+ * Whether the description no longer matches the shape the generated root was built for: a value
+ * edit that picks nodes (a node's stored choice, a seed) has to rebuild, which the value path never
+ * asks for on its own because it leaves out #MA_PAINT_LAYERS_REGEN, the only thing that calls the
+ * regeneration at all.
+ */
+bool BKE_paint_layers_tree_shape_moved(const Material &ma);
+
+/**
  * Start (or restart) the partial-update subscription over the maps \a layer's bake depends on.
  * Called when a bake is written, so pixel edits to those maps are noticed by
  * #BKE_paint_layers_bake_notice_changes.

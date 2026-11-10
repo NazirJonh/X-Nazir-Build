@@ -15,6 +15,8 @@
 
 #include "BKE_paint_layers_generate.hh"
 
+#include <bit>
+
 #include "BLI_hash.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_span.hh"
@@ -193,27 +195,27 @@ static void topology_hash_anchor_point_marker(uint64_t &hash,
 }
 
 /**
- * Mix what a Gradient payload decides the nodes: its ramp lives in a ColorRamp node's storage and
- * its space picks the coordinate output, so both are topology. The values are inputs.
+ * Mix what a Gradient payload decides the nodes: its space picks the coordinate output, and the
+ * ramp decides *which* ColorRamp shader runs. The stop positions and colors do not: the node reads
+ * them as uniforms or texture content, so a data edit is synced in place
+ * (#paint_layers_gradient_ramp_sync) and compiles nothing.
  */
 static void gradient_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &row)
 {
   if (!BKE_paint_layers_gradient_supported(row) || row.gradient == nullptr) {
     return;
   }
-  /* A ColorRamp node holds the ramp in its storage, not in a socket: a stop or an interpolation
-   * edit is a different node, so the group is rebuilt rather than synced in place. A scalar channel
-   * has its own value ramp node, so its ramp is topology too. */
   hash = topology_hash_mix(hash, BKE_PAINT_LAYERS_GRADIENT_HASH_VERSION);
   hash = topology_hash_mix(hash, uint64_t(uint8_t(row.gradient->space)));
-  hash = topology_hash_mix(hash, BKE_paint_layers_gradient_ramp_hash(row.gradient->ramp));
+  hash = topology_hash_mix(hash, BKE_paint_layers_gradient_ramp_shape_hash(row.gradient->ramp));
   for (const int i : IndexRange(row.channels_num)) {
     const MaterialPaintLayerChannel &record = row.channels[i];
     if (record.gradient_ramp == nullptr) {
       continue;
     }
     hash = topology_hash_mix(hash, uint64_t(uint8_t(record.channel)));
-    hash = topology_hash_mix(hash, BKE_paint_layers_gradient_ramp_hash(*record.gradient_ramp));
+    hash = topology_hash_mix(hash,
+                             BKE_paint_layers_gradient_ramp_shape_hash(*record.gradient_ramp));
   }
 }
 
@@ -238,20 +240,27 @@ static void generator_topology_hash_mix(uint64_t &hash, const MaterialPaintLayer
   hash = topology_hash_mix(hash, PAINT_LAYER_GENERATOR_TOPOLOGY_HASH_VERSION);
   hash = topology_hash_mix(hash, uint64_t(paint_layer_generator_space_of(row)));
   for (const int i : IndexRange(info->params_num)) {
-    if (!paint_layer_generator_param_is_value(row, i)) {
+    if (!paint_layer_generator_param_is_value(row, i) &&
+        !paint_layer_generator_param_is_dormant(row, i))
+    {
       hash = topology_hash_mix(hash, uint64_t(i));
-      hash = topology_hash_mix(hash, uint64_t(paint_layer_kind_param_get(row, i)));
+      /* The bits, not a cast: a stored choice that is a fraction (the Brick's offset and squash)
+       * would truncate to 0 and a change of it would leave the shape, and so the build, as it was. */
+      hash = topology_hash_mix(
+          hash, uint64_t(std::bit_cast<uint32_t>(paint_layer_kind_param_get(row, i))));
     }
   }
   /* A scalar channel's value ramp lives in a ColorRamp node's storage; a Gradient's are folded
-   * above, and these are the same nodes for a pattern row. */
+   * above, and these are the same nodes for a pattern row. Only the shader shape is structure: the
+   * stops are copied into the node in place (#paint_layers_gradient_ramp_sync). */
   for (const int i : IndexRange(row.channels_num)) {
     const MaterialPaintLayerChannel &record = row.channels[i];
     if (record.gradient_ramp == nullptr) {
       continue;
     }
     hash = topology_hash_mix(hash, uint64_t(uint8_t(record.channel)));
-    hash = topology_hash_mix(hash, BKE_paint_layers_gradient_ramp_hash(*record.gradient_ramp));
+    hash = topology_hash_mix(hash,
+                             BKE_paint_layers_gradient_ramp_shape_hash(*record.gradient_ramp));
   }
 }
 
@@ -269,7 +278,9 @@ static void generator_topology_hash_mix(uint64_t &hash, const MaterialPaintLayer
 static void filter_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &row)
 {
   if (row.ramp != nullptr && paint_layer_kind_has_ramp_param(row)) {
-    hash = topology_hash_mix(hash, paint_layer_ramp_hash(row.ramp->band));
+    /* Only the shader shape is structure: the stops are copied into the node in place
+     * (#paint_layers_gradient_ramp_sync). */
+    hash = topology_hash_mix(hash, BKE_paint_layers_gradient_ramp_shape_hash(row.ramp->band));
   }
   if (row.kind_subtype == MA_PAINT_LAYER_FILTER_MATH) {
     /* A salt first, so the operation cannot read like a payload the shape already carries. */
@@ -322,7 +333,8 @@ static void topology_mask_hash_mix(uint64_t &hash,
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (record != nullptr && record->image != nullptr) {
-      topology_hash_string(hash, record->image->id.name);
+      /* A map, not which image: swapping maps is synced in place (see #paint_layers_maps_sync). */
+      hash = topology_hash_mix(hash, 1);
     }
     else {
       hash = topology_hash_mix(hash, 0);
@@ -388,7 +400,8 @@ static void topology_mask_hash_mix(uint64_t &hash,
       hash = topology_hash_mix(hash, 0);
     }
     else if (record->image != nullptr) {
-      topology_hash_string(hash, record->image->id.name);
+      /* A map, not which image: swapping maps is synced in place (see #paint_layers_maps_sync). */
+      hash = topology_hash_mix(hash, 2);
     }
     else {
       hash = topology_hash_mix(hash, 1);
@@ -421,7 +434,8 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
    * static Mix). Mixing its mask here keeps that transition out of #paint_layer_blend_shape, where
    * it would also move for channels nothing builds. */
   hash = topology_hash_mix(hash, paint_layer_blend_dynamic_mask(ma, layer));
-  topology_hash_string(hash, layer.name);
+  /* The name is not structure: it names the row's group and nothing of it reaches the shader, so
+   * renaming only renames the group (#LayerTreeFactory::layer_tree_get), never rebuilds it. */
   /* An applied mapping is a Mapping node and its inputs; its values are inputs, so only whether it
    * applies is structure. The same answer builds the interface, so the two cannot disagree. */
   hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, layer) ? 1 : 0);
@@ -481,12 +495,13 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   for (const int channel : wired_channels) {
     hash = topology_hash_mix(hash, uint64_t(channel));
     hash = topology_hash_mix(hash, row_participates(ma, layer, channel) ? 1 : 0);
-    /* A map and a flat value are different nodes (an Image Texture against a value input), and the
-     * texture node names its image: assigning, swapping or removing a map is structure, even when
-     * the channel took part before and after. */
+    /* A map and a flat value are different nodes (an Image Texture against a value input), but one
+     * image against another is the same node: the row group keeps its shape and
+     * #paint_layers_maps_sync writes the new image pointer. Only whether a map is there, and the
+     * DirectX flip of the Normal channel, are structure. */
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
     if (record != nullptr && record->image != nullptr) {
-      topology_hash_string(hash, record->image->id.name);
+      hash = topology_hash_mix(hash, 1);
       /* The DirectX green flip is nodes of its own. */
       if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
         hash = topology_hash_mix(
@@ -558,7 +573,9 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
           hash = topology_hash_mix(hash, 2);
         }
         else if (record->image != nullptr) {
-          topology_hash_string(hash, record->image->id.name);
+          /* A map, not which image: swapping maps on the same node is synced in place
+           * (#paint_layers_maps_sync). Distinct from the flat-colour code below. */
+          hash = topology_hash_mix(hash, 3);
         }
         else {
           /* A flat colour: an input, not a node that names anything. */

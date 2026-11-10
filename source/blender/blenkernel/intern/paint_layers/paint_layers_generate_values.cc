@@ -25,10 +25,13 @@
 #include "BLI_math_base.h"
 #include "BLI_math_constants.h"
 #include "BLI_math_vector.h"
+#include "BLI_string.h"
 #include "BLI_ustring.hh"
 #include "BLI_uuid.h"
 
 #include "BKE_colortools.hh"
+#include "BKE_lib_id.hh"
+#include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
@@ -40,6 +43,7 @@
 #include "BKE_paint_material_composite.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 
 #include "NOD_socket.hh"
 
@@ -314,8 +318,9 @@ bool values_sync_socket(Material &ma,
       STREQ(role, ROLE_GENERATOR_ROTATION))
   {
     /* The placement chain's three Vector inputs, at the same places the build seeded them: a row
-     * that is not a pattern generator has no such values, and the caller rebuilds. */
-    if (socket.default_value == nullptr || layer->gradient != nullptr ||
+     * that is not a pattern generator has no such values, and the caller rebuilds. The kind decides,
+     * not the Gradient payload: a row switched away from a Gradient keeps that payload. */
+    if (socket.default_value == nullptr ||
         !paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_GENERATES))
     {
       return false;
@@ -616,6 +621,253 @@ void paint_layers_curves_nodes_commit(Material &ma)
     }
     prop_int_set(group->id.properties, CURVES_NODE_COUNT_PROP, curves_nodes_count(*group));
   }
+}
+
+void ramp_node_key_set(bNode &ramp, const MaterialPaintLayer &row, const int channel)
+{
+  char marker[UUID_STRING_SIZE];
+  BLI_uuid_format(marker, row.marker);
+  char key[128];
+  SNPRINTF(key, "R:%s:%d", marker, channel);
+  prop_string_set(ramp.system_properties, RAMP_NODE_KEY_PROP, key);
+}
+
+/** Parse the key of #RAMP_NODE_KEY_PROP into its row marker and channel (-1 for a colour ramp). */
+bool ramp_node_key_parse(const char *key, bUUID &r_marker, int &r_channel)
+{
+  if (key == nullptr || key[0] != 'R' || key[1] != ':') {
+    return false;
+  }
+  const char *rest = key + 2;
+  const char *sep = std::strrchr(rest, ':');
+  if (sep == nullptr || sep == rest || sep[1] == '\0') {
+    return false;
+  }
+  const size_t marker_len = size_t(sep - rest);
+  if (marker_len >= UUID_STRING_SIZE) {
+    return false;
+  }
+  char marker[UUID_STRING_SIZE];
+  std::memcpy(marker, rest, marker_len);
+  marker[marker_len] = '\0';
+  if (!BLI_uuid_parse_string(&r_marker, marker)) {
+    return false;
+  }
+  r_channel = std::atoi(sep + 1);
+  return true;
+}
+
+}  // namespace bke::paint_layers
+
+/* Public entry points: they must live in `blender`, outside the generator's namespace. */
+const char *BKE_paint_layers_ramp_node_key(const bNode &node)
+{
+  using namespace bke::paint_layers;
+  return prop_string_get(node.system_properties, RAMP_NODE_KEY_PROP);
+}
+
+const ColorBand *BKE_paint_layers_ramp_find(const Material &ma, const char *key)
+{
+  using namespace bke::paint_layers;
+  const bNodeTree *root = ma.paint_layers_tree;
+  if (root == nullptr || key == nullptr) {
+    return nullptr;
+  }
+  for (const bNode &instance : root->nodes) {
+    if (!instance.is_group() || instance.id == nullptr || GS(instance.id->name) != ID_NT) {
+      continue;
+    }
+    const bNodeTree *group = id_cast<const bNodeTree *>(instance.id);
+    if (group == nullptr) {
+      continue;
+    }
+    for (const bNode &node : group->nodes) {
+      const char *node_key = prop_string_get(node.system_properties, RAMP_NODE_KEY_PROP);
+      if (node_key != nullptr && STREQ(node_key, key) && node.type_legacy == SH_NODE_VALTORGB &&
+          node.storage != nullptr)
+      {
+        return static_cast<const ColorBand *>(node.storage);
+      }
+    }
+  }
+  return nullptr;
+}
+
+namespace bke::paint_layers {
+
+bool paint_layers_gradient_ramp_sync(Material &ma, Main &bmain)
+{
+  bNodeTree *root = ma.paint_layers_tree;
+  if (root == nullptr) {
+    return true;
+  }
+  bool ok = true;
+  bool any_changed = false;
+  for (bNode &instance : root->nodes) {
+    if (!instance.is_group() || instance.id == nullptr || GS(instance.id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree *group = id_cast<bNodeTree *>(instance.id);
+    if (group == nullptr) {
+      continue;
+    }
+    bUUID group_marker = BLI_uuid_nil();
+    if (!layer_tree_marker_get(*group, group_marker)) {
+      continue;
+    }
+    if (BKE_paint_layers_find(ma, group_marker) == nullptr) {
+      continue;
+    }
+
+    bool group_changed = false;
+    for (bNode &node : group->nodes) {
+      const char *key = prop_string_get(node.system_properties, RAMP_NODE_KEY_PROP);
+      if (key == nullptr) {
+        continue;
+      }
+      bUUID row_marker = BLI_uuid_nil();
+      int channel = -1;
+      if (!ramp_node_key_parse(key, row_marker, channel)) {
+        ok = false;
+        continue;
+      }
+      const MaterialPaintLayer *layer = BKE_paint_layers_find(ma, row_marker);
+      if (layer == nullptr) {
+        ok = false;
+        continue;
+      }
+      const ColorBand *wanted = nullptr;
+      if (channel < 0) {
+        /* The band the builder copied into this node: a Gradient's own, the row's Ramp parameter for
+         * any other kind (#PaintLayersTreeBuilder::generator_ramp_ensure decides the same way). A
+         * row that is not a generator at all (a Color Ramp filter) reports the Gradient kind, so the
+         * kind only counts for a generator. */
+        if (paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_GENERATES) &&
+            paint_layer_generator_kind_of(*layer) == MA_PAINT_LAYER_GENERATOR_GRADIENT)
+        {
+          if (layer->gradient != nullptr) {
+            wanted = &layer->gradient->ramp;
+          }
+        }
+        else {
+          wanted = BKE_paint_layers_ramp_get(*layer);
+        }
+      }
+      else {
+        const MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer, channel);
+        if (record != nullptr && record->gradient_ramp != nullptr) {
+          wanted = record->gradient_ramp;
+        }
+      }
+      if (wanted == nullptr || node.type_legacy != SH_NODE_VALTORGB || node.storage == nullptr) {
+        ok = false;
+        continue;
+      }
+      ColorBand *storage = static_cast<ColorBand *>(node.storage);
+      if (BKE_paint_layers_gradient_ramp_shape_hash(*storage) !=
+          BKE_paint_layers_gradient_ramp_shape_hash(*wanted))
+      {
+        /* A different shader function, not a data edit: only a rebuild makes this node. */
+        ok = false;
+        continue;
+      }
+      if (BKE_paint_layers_gradient_ramp_hash(*storage) ==
+          BKE_paint_layers_gradient_ramp_hash(*wanted))
+      {
+        continue;
+      }
+      /* The stop positions and colors are uniforms or the band texture: write them into the node
+       * and let the GPU material re-extract. The shader source does not move. */
+      *storage = *wanted;
+      BKE_ntree_update_tag_node_property(group, &node);
+      group_changed = true;
+    }
+    if (group_changed) {
+      BKE_ntree_update_after_single_tree_change(bmain, *group);
+      DEG_id_tag_update(&group->id, ID_RECALC_SYNC_TO_EVAL);
+      any_changed = true;
+    }
+  }
+  if (any_changed) {
+    DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+  }
+  return ok;
+}
+
+bool paint_layers_maps_sync(Material &ma, Main &bmain)
+{
+  bNodeTree *root = ma.paint_layers_tree;
+  if (root == nullptr) {
+    return true;
+  }
+  bool ok = true;
+  bool any_changed = false;
+  for (bNode &instance : root->nodes) {
+    if (!instance.is_group() || instance.id == nullptr || GS(instance.id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree *group = id_cast<bNodeTree *>(instance.id);
+    if (group == nullptr) {
+      continue;
+    }
+    bUUID group_marker = BLI_uuid_nil();
+    if (!layer_tree_marker_get(*group, group_marker)) {
+      continue;
+    }
+    if (BKE_paint_layers_find(ma, group_marker) == nullptr) {
+      continue;
+    }
+
+    bool group_changed = false;
+    for (bNode &node : group->nodes) {
+      const char *key = prop_string_get(node.system_properties, MAP_NODE_KEY_PROP);
+      if (key == nullptr) {
+        continue;
+      }
+      bUUID marker = BLI_uuid_nil();
+      int channel = -1;
+      bool mask = false;
+      if (!blend_node_key_parse(key, marker, channel, mask) || mask || channel < 0 ||
+          channel >= PAINT_MATERIAL_CHANNEL_NUM)
+      {
+        ok = false;
+        continue;
+      }
+      const MaterialPaintLayer *layer = BKE_paint_layers_find(ma, marker);
+      if (layer == nullptr) {
+        ok = false;
+        continue;
+      }
+      const MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer, channel);
+      if (record == nullptr || record->image == nullptr) {
+        /* The map was removed: that is a different node, and the topology hash should have rebuilt
+         * the group instead of leaving this sync to fail. */
+        ok = false;
+        continue;
+      }
+      if (node.id == &record->image->id) {
+        continue;
+      }
+      if (node.id != nullptr) {
+        id_us_min(node.id);
+      }
+      node.id = &record->image->id;
+      id_us_plus(node.id);
+      BKE_ntree_update_tag_node_property(group, &node);
+      group_changed = true;
+    }
+    if (group_changed) {
+      BKE_ntree_update_after_single_tree_change(bmain, *group);
+      DEG_id_tag_update(&group->id, ID_RECALC_SYNC_TO_EVAL);
+      any_changed = true;
+    }
+  }
+  if (any_changed) {
+    /* The maps are IDs the depsgraph tracks: a swap replaces one relation with another. */
+    DEG_relations_tag_update(&bmain);
+    DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+  }
+  return ok;
 }
 
 bool paint_layers_blend_sync(Material &ma, Main &bmain)
@@ -927,6 +1179,18 @@ bool BKE_paint_layers_bump_distance_set(Material &ma, const float distance)
 bool BKE_paint_layers_normal_strength_set(Material &ma, const float strength)
 {
   return paint_layers_response_value_set(ma, PAINT_LAYERS_RESPONSE_NORMAL_STRENGTH, strength);
+}
+
+uint64_t BKE_material_paint_layers_topology_generation(const Material &ma)
+{
+  bNodeTree *root = ma.paint_layers_tree;
+  if (root == nullptr) {
+    return 0;
+  }
+  /* The stored root hash is rewritten by every full rebuild and left alone by a value sync, which
+   * makes it exactly the "which tree do these socket names belong to" token. */
+  uint64_t stored = 0;
+  return tree_root_hash_get(*root, stored) ? stored : 0;
 }
 
 /** \} */

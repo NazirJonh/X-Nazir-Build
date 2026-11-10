@@ -107,6 +107,27 @@ inline constexpr const char *TREE_SOURCE_STRUCTURE_LOW_PROP = "pbr_paint_layers_
 inline constexpr const char *TREE_SOURCE_STRUCTURE_HIGH_PROP =
     "pbr_paint_layers_source_structure_hi";
 
+/**
+ * On a generated layer group or the root: 1 once #NODE_KEEP_INACTIVE_BRANCH was set on its Mix
+ * nodes. A node added by a later rebuild lacks the flag, so a rebuilt tree is swept again; a tree
+ * that was only kept is not (the flag survived with its nodes).
+ */
+inline constexpr const char *TREE_PRUNE_GUARD_PROP = "pbr_paint_layers_prune_guard";
+
+/**
+ * On a generated Image Texture node of a row's channel: `B:<row marker>:<channel>`, the map the
+ * node shows. The kind of node does not change when the row swaps one image for another, so the
+ * value sync writes the new image pointer instead of rebuilding the group.
+ */
+inline constexpr const char *MAP_NODE_KEY_PROP = "pbr_paint_layers_map";
+
+/**
+ * On a generated ColorRamp node: `R:<row marker>:<channel>`, with -1 for the row's shared colour
+ * ramp and the channel otherwise. A ramp whose shader shape did not change is copied into the
+ * node's storage in place instead of rebuilding the group.
+ */
+inline constexpr const char *RAMP_NODE_KEY_PROP = "pbr_paint_layers_ramp";
+
 /** On a row's opacity input: set (to 1) exactly when the row was built from a bake of the whole
  * row, so that input holds the row's visibility alone -- the bake already holds its opacity -- and
  * the value sync can tell a group built that way from one built live or over a content bake. */
@@ -370,6 +391,13 @@ void mapping_input_relay(bNodeTree &tree,
 IDProperty *properties_ensure(IDProperty *&properties);
 void prop_int_set(IDProperty *&properties, const char *key, int value);
 void prop_string_set(IDProperty *&properties, const char *key, const char *value);
+
+/**
+ * Mark a ColorRamp node with the row and channel it shows (#RAMP_NODE_KEY_PROP, `R:<marker>:<channel>`,
+ * -1 for the row's shared colour ramp), so an edit of stops or colors is copied into its storage in
+ * place (#paint_layers_gradient_ramp_sync) instead of rebuilding the group.
+ */
+void ramp_node_key_set(bNode &ramp, const MaterialPaintLayer &row, int channel);
 int prop_int_get(const IDProperty *properties, const char *key, int fallback);
 const char *prop_string_get(const IDProperty *properties, const char *key);
 void uid_prop_set(IDProperty *&properties, const char *key, const bUUID &uid);
@@ -453,6 +481,23 @@ uint64_t paint_layers_root_topology_hash(const Material &ma, Span<int> wired_cha
  * tree, or one built before the nodes were keyed), so the caller falls back to a full rebuild.
  */
 bool paint_layers_blend_sync(Material &ma, Main &bmain);
+
+/**
+ * Bring the image pointer of every keyed channel map node in line with the description, in place.
+ * A swap from one image to another is the same node, so the group keeps its shape; the bake hash
+ * still moves (it keys the image), so a substituted row re-bakes.
+ * \return false when the tree no longer carries the nodes the description expects, so the caller
+ * falls back to a full rebuild.
+ */
+bool paint_layers_maps_sync(Material &ma, Main &bmain);
+
+/**
+ * Copy each keyed ColorRamp's band from the description into its node storage, in place, for the
+ * ramps whose shader shape (one stop / two-stop uniforms / band texture) did not change. The ramp
+ * pixels are uniforms or texture content in the shader, so this compiles nothing.
+ * \return false when a ramp's shape changed or its node is missing, so the caller rebuilds.
+ */
+bool paint_layers_gradient_ramp_sync(Material &ma, Main &bmain);
 
 /** Record how many keyed blend nodes each layer group holds, after a build. */
 void paint_layers_blend_nodes_commit(Material &ma);

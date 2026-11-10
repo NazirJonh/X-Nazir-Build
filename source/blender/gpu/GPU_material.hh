@@ -29,6 +29,7 @@ struct GPUInput;
 struct GPUNodeLink;
 struct GPUNodeStack;
 struct GPUPass;
+struct ColorBand;
 namespace gpu {
 class Texture;
 class UniformBuf;
@@ -39,6 +40,7 @@ struct Main;
 struct Material;
 struct Scene;
 struct bNode;
+struct bNodeSocket;
 struct bNodeTree;
 
 /**
@@ -150,6 +152,35 @@ GPUMaterial *GPU_material_from_callbacks(eGPUMaterialEngine engine,
 void GPU_material_free_single(GPUMaterial *material);
 void GPU_material_free(ListBaseT<LinkData> *gpumaterial);
 
+/**
+ * Prepare \a gpumaterials for a rebuild: entries already marked as the previous build's fallback
+ * are freed, the rest are marked. A fallback is a compiled material kept so a viewport can keep
+ * drawing it while its replacement compiles, instead of falling back to the default material.
+ */
+void GPU_material_rebuild_begin(ListBaseT<LinkData> *gpumaterials);
+
+/**
+ * Re-read the uniform values a layered material's edits changed and upload them into the node-tree
+ * uniform buffer of \a mat, instead of rebuilding the material.
+ *
+ * \return false when the edit cannot be covered this way (a value that only a rebuild can apply, a
+ * socket that no longer resolves, a material built for a different node tree); the caller then has
+ * to take the full path.
+ */
+bool GPU_material_values_update(GPUMaterial *mat, Material *ma);
+
+/**
+ * Whether every build in \a gpumaterials can apply a value edit to its uniform buffer. False when
+ * there is no build yet, or when one of them has to be rebuilt for such an edit.
+ */
+bool GPU_materials_values_supported(ListBaseT<LinkData> *gpumaterials);
+
+/** A compiled fallback in \a gpumaterials for the pipeline \a uuid, or null. */
+GPUMaterial *GPU_material_fallback_find(ListBaseT<LinkData> *gpumaterials,
+                                        eGPUMaterialEngine engine,
+                                        uint64_t uuid,
+                                        Material *ma);
+
 void GPU_materials_free(Main *bmain);
 
 GPUPass *GPU_material_get_pass(GPUMaterial *material);
@@ -162,6 +193,13 @@ const char *GPU_material_get_name(GPUMaterial *material);
  * Return can be null if it's a world material.
  */
 Material *GPU_material_get_material(GPUMaterial *material);
+
+/**
+ * The socket whose stored value \a socket's uniform was made from, while a material is being built;
+ * null afterwards, and for a value that is not a plain copy of one.
+ */
+const bNodeSocket *GPU_material_uniform_value_origin(const GPUMaterial *mat,
+                                                     const bNodeSocket *socket);
 /**
  * Return true if the material compilation has not yet begin or begin.
  */
@@ -311,6 +349,15 @@ struct GPUNodeStack {
   bool hasoutput;
   short sockettype;
   bool end;
+  /**
+   * The socket whose stored value #vec holds and whose node reads it as a value, while a material
+   * is being built. A uniform made from such a value keeps the socket, so an edit of it can rewrite
+   * the uniform buffer of the built material instead of rebuilding it.
+   */
+  const bNodeSocket *origin;
+  /** Whether the node reading this value only uses it as a value; see
+   * #GPU_material_node_is_value_only. */
+  bool origin_safe;
 
   /* Return true if the socket might contain a polychromatic value.
    * This is a conservative heuristic that allows for optimization. */
@@ -378,8 +425,44 @@ struct GPUCodegenOutput {
   GPUShaderCreateInfo *create_info;
 };
 
+/** What one ColorRamp uniform holds, so a ramp edit can rewrite it without a rebuild. */
+enum GPURampUniformRole {
+  GPU_RAMP_UNIFORM_NONE = 0,
+  /** First float of the mul/bias pair the linear and ease functions read: the pair is one uniform. */
+  GPU_RAMP_UNIFORM_MUL_BIAS_0,
+  /** Second float of that pair, recorded right after the first; never a uniform of its own. */
+  GPU_RAMP_UNIFORM_MUL_BIAS_1,
+  /** The single edge position the two-stop constant function reads. */
+  GPU_RAMP_UNIFORM_CONST_POS,
+  /** The whole color of the first stop. */
+  GPU_RAMP_UNIFORM_COLOR_0,
+  /** The whole color of the second stop. */
+  GPU_RAMP_UNIFORM_COLOR_1,
+  /** The whole color of the only stop of a one-stop ramp. */
+  GPU_RAMP_UNIFORM_COLOR_SINGLE,
+};
+
 GPUNodeLink *GPU_constant(const float *num);
 GPUNodeLink *GPU_uniform(const float *num);
+/**
+ * A uniform a ramp's stops became, whose value a ramp edit rewrites without a rebuild: \a role
+ * names what \a value holds of the one-stop or two-stop optimization of \a node (a ColorRamp), and
+ * the node's ramp key lets the edit find the edited band again. Falls back to the plain
+ * #GPU_uniform for a node without a key, or a material that cannot take such an edit (see
+ * #GPU_material_values_update). The link must be passed to one of the node's own
+ * `valtorgb_opti_*`/`set_rgba` calls, which read it as a plain value.
+ */
+GPUNodeLink *GPU_uniform_ramp(GPUMaterial *mat,
+                              const bNode *node,
+                              const float *value,
+                              GPURampUniformRole role);
+/**
+ * A uniform holding \a stack's value that also remembers where the value came from, so the uniform
+ * remains refreshable by a value edit.
+ */
+GPUNodeLink *GPU_uniform_from_stack(const GPUNodeStack *stack);
+/** Whether \a node only reads its unconnected inputs as values, and no code choice from one. */
+bool GPU_material_node_is_value_only(const bNode &node);
 GPUNodeLink *GPU_attribute(GPUMaterial *mat, eCustomDataType type, const char *name);
 /**
  * Add a GPU attribute that refers to the default color attribute on a geometry.
@@ -417,6 +500,15 @@ GPUNodeLink *GPU_image_sky(GPUMaterial *mat,
                            float *layer,
                            GPUSamplerState sampler_state);
 GPUNodeLink *GPU_color_band(GPUMaterial *mat, int size, float *pixels, float *r_row);
+
+/**
+ * Record that \a node (a ColorRamp the paint layer generator made) was built from \a band, into
+ * row \a row of the band texture, or -1 when its stops became uniforms of the node's own making
+ * (see #GPU_uniform_ramp). A layered material's value edit then rewrites the row or those uniforms
+ * instead of rebuilding (#GPU_material_values_update). Nothing is recorded for another node or
+ * material.
+ */
+void GPU_material_ramp_track(GPUMaterial *mat, const bNode *node, const ColorBand *band, int row);
 
 /**
  * Create an implementation defined differential calculation of a float function.

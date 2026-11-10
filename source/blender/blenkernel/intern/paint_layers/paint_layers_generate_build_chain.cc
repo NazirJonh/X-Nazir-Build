@@ -155,6 +155,19 @@ NodeOutput PaintLayersTreeBuilder::bake_tile_uv_add(bNodeTree &tree, Vector<bNod
   return {combine, com_out};
 }
 
+/**
+ * Mark an Image Texture node with the row and channel it shows, so swapping the image is a pointer
+ * write (#paint_layers_maps_sync) rather than a rebuild of the group.
+ */
+static void map_node_key_set(bNode &node, const MaterialPaintLayer &row, const int channel)
+{
+  char marker[UUID_STRING_SIZE];
+  BLI_uuid_format(marker, row.marker);
+  char key[128];
+  SNPRINTF(key, "B:%s:%d", marker, channel);
+  prop_string_set(node.system_properties, MAP_NODE_KEY_PROP, key);
+}
+
 NodeOutput PaintLayersTreeBuilder::rgb_mean_nodes_add(bNodeTree &tree,
                                                       const NodeOutput color,
                                                       Vector<bNode *> &r_nodes)
@@ -321,6 +334,7 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
     if (map == nullptr) {
       return {};
     }
+    map_node_key_set(*map, *mask, record->channel);
     nodes.append(map);
     grid_.place(*map, layout::Column::Mask, 0);
     this->mapping_apply(tree, *mask, *map, nodes);
@@ -593,6 +607,7 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
         discard();
         return {};
       }
+      map_node_key_set(*item_map, item, item_record->channel);
       nodes.append(item_map);
       grid_.place(*item_map, layout::Column::Mask, row++);
       this->mapping_apply(tree, item, *item_map, nodes);
@@ -1016,6 +1031,7 @@ NodeOutput PaintLayersTreeBuilder::map_coverage_match_add(bNodeTree &tree,
   if (map == nullptr) {
     return {};
   }
+  map_node_key_set(*map, item, record->channel);
   r_nodes.append(map);
   grid_.place_extra(*map);
   this->mapping_apply(tree, item, *map, r_nodes);
@@ -1582,6 +1598,7 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
       }
       return false;
     }
+    map_node_key_set(*map, effect, channel);
     grid_.place_extra(*map);
   }
   Vector<bNode *> nodes;
@@ -2681,6 +2698,10 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
     if (map == nullptr) {
       return {};
     }
+    /* Which map this node shows, so swapping the row's image is a pointer write (see
+     * #paint_layers_maps_sync) instead of a rebuild: an Image Texture against another Image
+     * Texture is the same node. */
+    map_node_key_set(*map, ctx.layer, ctx.channel);
     /* Why grid: the row source opens the Source column at the origin. */
     grid_.place(*map, layout::Column::Source, 0);
     Vector<bNode *> source_nodes;

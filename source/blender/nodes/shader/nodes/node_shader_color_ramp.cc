@@ -52,44 +52,57 @@ static int gpu_shader_valtorgb(GPUMaterial *mat,
   int size;
 
   /* Common / easy case optimization. */
+  if (coba->tot == 1 || (coba->tot == 2 && coba->color_mode == COLBAND_BLEND_RGB &&
+                         ELEM(coba->ipotype,
+                              COLBAND_INTERP_LINEAR,
+                              COLBAND_INTERP_CONSTANT,
+                              COLBAND_INTERP_EASE)))
+  {
+    /* The stops become uniforms (some of them computed here); a ramp edit that keeps the shape
+     * rewrites them in place (see #GPU_material_values_update). */
+    GPU_material_ramp_track(mat, node, coba, -1);
+  }
   if (coba->tot == 1) {
-    return GPU_link(mat, "set_rgba", GPU_uniform(&coba->data[0].r), &out[0].link);
+    return GPU_link(
+        mat,
+        "set_rgba",
+        GPU_uniform_ramp(mat, node, &coba->data[0].r, GPU_RAMP_UNIFORM_COLOR_SINGLE),
+        &out[0].link);
   }
   if ((coba->tot == 2) && (coba->color_mode == COLBAND_BLEND_RGB)) {
     float mul_bias[2];
     switch (coba->ipotype) {
       case COLBAND_INTERP_LINEAR:
-        mul_bias[0] = 1.0f / (coba->data[1].pos - coba->data[0].pos);
-        mul_bias[1] = -mul_bias[0] * coba->data[0].pos;
+        BKE_colorband_valtorgb_mul_bias(*coba, mul_bias);
         return GPU_stack_link(mat,
                               node,
                               "valtorgb_opti_linear",
                               in,
                               out,
-                              GPU_uniform(mul_bias),
-                              GPU_uniform(&coba->data[0].r),
-                              GPU_uniform(&coba->data[1].r));
+                              GPU_uniform_ramp(mat, node, mul_bias, GPU_RAMP_UNIFORM_MUL_BIAS_0),
+                              GPU_uniform_ramp(mat, node, &coba->data[0].r, GPU_RAMP_UNIFORM_COLOR_0),
+                              GPU_uniform_ramp(mat, node, &coba->data[1].r, GPU_RAMP_UNIFORM_COLOR_1));
       case COLBAND_INTERP_CONSTANT:
-        mul_bias[1] = max_ff(coba->data[0].pos, coba->data[1].pos);
-        return GPU_stack_link(mat,
-                              node,
-                              "valtorgb_opti_constant",
-                              in,
-                              out,
-                              GPU_uniform(&mul_bias[1]),
-                              GPU_uniform(&coba->data[0].r),
-                              GPU_uniform(&coba->data[1].r));
+        mul_bias[1] = BKE_colorband_valtorgb_const_pos(*coba);
+        return GPU_stack_link(
+            mat,
+            node,
+            "valtorgb_opti_constant",
+            in,
+            out,
+            GPU_uniform_ramp(mat, node, &mul_bias[1], GPU_RAMP_UNIFORM_CONST_POS),
+            GPU_uniform_ramp(mat, node, &coba->data[0].r, GPU_RAMP_UNIFORM_COLOR_0),
+            GPU_uniform_ramp(mat, node, &coba->data[1].r, GPU_RAMP_UNIFORM_COLOR_1));
       case COLBAND_INTERP_EASE:
-        mul_bias[0] = 1.0f / (coba->data[1].pos - coba->data[0].pos);
-        mul_bias[1] = -mul_bias[0] * coba->data[0].pos;
+        BKE_colorband_valtorgb_mul_bias(*coba, mul_bias);
         return GPU_stack_link(mat,
                               node,
                               "valtorgb_opti_ease",
                               in,
                               out,
-                              GPU_uniform(mul_bias),
-                              GPU_uniform(&coba->data[0].r),
-                              GPU_uniform(&coba->data[1].r));
+                              GPU_uniform_ramp(mat, node, mul_bias, GPU_RAMP_UNIFORM_MUL_BIAS_0),
+                              GPU_uniform_ramp(mat, node, &coba->data[0].r, GPU_RAMP_UNIFORM_COLOR_0),
+                              GPU_uniform_ramp(mat, node, &coba->data[1].r, GPU_RAMP_UNIFORM_COLOR_1));
       default:
         break;
     }
@@ -97,6 +110,7 @@ static int gpu_shader_valtorgb(GPUMaterial *mat,
 
   BKE_colorband_evaluate_table_rgba(coba, &array, &size);
   GPUNodeLink *tex = GPU_color_band(mat, size, array, &layer);
+  GPU_material_ramp_track(mat, node, coba, int(layer));
 
   if (coba->ipotype == COLBAND_INTERP_CONSTANT) {
     return GPU_stack_link(mat, node, "valtorgb_nearest", in, out, tex, GPU_constant(&layer));

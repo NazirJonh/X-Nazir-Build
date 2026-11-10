@@ -470,7 +470,8 @@ static void material_paint_layers_blend_read(BlendDataReader *reader, Material &
    * save either: a file saved while a bake was armed or running must not load back permanently
    * stale with nothing left to clear the mark. */
   material.paint_layers_flag &= ~(MA_PAINT_LAYERS_BAKE_STALE | MA_PAINT_LAYERS_BAKE_CANCELLED |
-                                  MA_PAINT_LAYERS_BAKE_SCHEDULED | MA_PAINT_LAYERS_PREVIEW_WANTED);
+                                  MA_PAINT_LAYERS_BAKE_SCHEDULED | MA_PAINT_LAYERS_PREVIEW_WANTED |
+                                  MA_PAINT_LAYERS_VALUES_ONLY | MA_PAINT_LAYERS_RAMP_ONLY);
   BLO_read_struct_list(reader, MaterialPaintLayer, &material.paint_layers);
   for (MaterialPaintLayer &layer : material.paint_layers) {
     material_paint_layer_blend_read(reader, layer);
@@ -2883,8 +2884,28 @@ void BKE_material_eval(Depsgraph *depsgraph, Material *material)
    * of the description carries the animated value. */
   if (BKE_paint_layers_is_layered(*material)) {
     BKE_paint_layers_values_sync(*material);
+    /* A value edit changes no socket set, so the builds of the previous update can stay: their
+     * uniform buffers re-read the values (#GPU_material_values_update) instead of being rebuilt.
+     * Anything else -- an edit that moved the shape, values driven outside the description, a
+     * build that cannot re-read its values -- keeps the rebuild, which is also what marks the old
+     * build as the fallback the viewport draws while the replacement compiles. */
+    const bool values_only = (material->paint_layers_flag & MA_PAINT_LAYERS_VALUES_ONLY) != 0;
+    material->paint_layers_flag &= ~MA_PAINT_LAYERS_VALUES_ONLY;
+    if (values_only && DEG_is_active(depsgraph)) {
+      /* The original keeps the mark otherwise, and a later update that has nothing to do with
+       * values (an edit of the material's own nodes) would reuse the old build. */
+      DEG_get_original(material)->paint_layers_flag &= ~MA_PAINT_LAYERS_VALUES_ONLY;
+    }
+    const bool has_anim = BKE_animdata_from_id(&material->id) != nullptr;
+    const bool supported = values_only && !has_anim &&
+                           GPU_materials_values_supported(&material->gpumaterial);
+    if (!supported) {
+      GPU_material_rebuild_begin(&material->gpumaterial);
+    }
   }
-  GPU_material_free(&material->gpumaterial);
+  else {
+    GPU_material_free(&material->gpumaterial);
+  }
 }
 
 /* Default Materials

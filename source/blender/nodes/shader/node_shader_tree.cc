@@ -883,6 +883,12 @@ static void shader_node_disconnect_inactive_mix_branch(bNodeTree *ntree,
                                                        int b_socket_index,
                                                        bool clamp_factor)
 {
+  /* A generated Mix whose factor is a uniform may legitimately sit at 0 or 1 (a hidden layer, a
+   * coverage of zero). Disconnecting a branch there rewrites the shader for what is a value
+   * change, so such nodes keep both branches and stay uniform. */
+  if (node->flag & NODE_KEEP_INACTIVE_BRANCH) {
+    return;
+  }
   bNodeSocket *factor_socket = ntree_shader_node_input_get(node, factor_socket_index);
   if (factor_socket->link == nullptr) {
     float factor = 0.5;

@@ -10,9 +10,42 @@
 
 #include "intern/eval/deg_eval_copy_on_write.h"
 
+#include "BKE_paint_layers.hh"
+
+#include "DNA_material_types.h"
+
 #include "DRW_engine.hh"
 
 namespace blender::deg {
+
+MaterialBackup::MaterialBackup(const Depsgraph * /*depsgraph*/)
+{
+}
+
+void MaterialBackup::init_from_id(ID *id)
+{
+  Material *material = reinterpret_cast<Material *>(id);
+  if (!BKE_paint_layers_is_layered(*material) || material->gpumaterial.first == nullptr) {
+    return;
+  }
+  /* Take the builds out of the copy that is about to be freed: it drops whatever it still owns, so
+   * moving the list is what keeps the compiled materials alive across the update. */
+  gpumaterial = material->gpumaterial;
+  have_data = true;
+  material->gpumaterial.clear_no_delete();
+}
+
+void MaterialBackup::restore_to_id(ID *id)
+{
+  if (!have_data) {
+    return;
+  }
+  Material *material = reinterpret_cast<Material *>(id);
+  material->gpumaterial = gpumaterial;
+  have_data = false;
+  /* The list still names the copy it was made for, which is gone: #BKE_material_eval, which runs on
+   * the new copy right after this, points the builds at it. */
+}
 
 RuntimeBackup::RuntimeBackup(const Depsgraph *depsgraph)
     : have_backup(false),
@@ -22,7 +55,8 @@ RuntimeBackup::RuntimeBackup(const Depsgraph *depsgraph)
       sound_backup(depsgraph),
       object_backup(depsgraph),
       movieclip_backup(depsgraph),
-      volume_backup(depsgraph)
+      volume_backup(depsgraph),
+      material_backup(depsgraph)
 {
 }
 
@@ -56,6 +90,9 @@ void RuntimeBackup::init_from_id(ID *id)
     case ID_VO:
       volume_backup.init_from_volume(reinterpret_cast<Volume *>(id));
       break;
+    case ID_MA:
+      material_backup.init_from_id(id);
+      break;
     default:
       break;
   }
@@ -87,6 +124,9 @@ void RuntimeBackup::restore_to_id(ID *id)
       break;
     case ID_VO:
       volume_backup.restore_to_volume(reinterpret_cast<Volume *>(id));
+      break;
+    case ID_MA:
+      material_backup.restore_to_id(id);
       break;
     default:
       break;

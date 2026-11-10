@@ -71,6 +71,8 @@ void BKE_paint_layers_tag_edited(Material &ma)
 {
   /* An edit is a reason to try a cancelled heavy bake again. */
   ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_CANCELLED;
+  /* Whatever the edit was, it is not covered by the value path: the shape may have moved. */
+  ma.paint_layers_flag &= ~(MA_PAINT_LAYERS_VALUES_ONLY | MA_PAINT_LAYERS_RAMP_ONLY);
   ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
   DEG_id_tag_update(&ma.id, ID_RECALC_SHADING);
 }
@@ -86,10 +88,17 @@ void BKE_paint_layers_tag_value_edited(Material &ma)
    * the evaluated copy the shader reads is refreshed. If the tree does not match the description's
    * values (it was hand-edited), fall back to a full regeneration rather than leaving a stale one. */
   DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
-  if (BKE_paint_layers_values_sync(ma)) {
+  if (BKE_paint_layers_values_sync(ma) && !BKE_paint_layers_tree_shape_moved(ma)) {
     BKE_paint_layers_values_tag_trees(ma);
+    /* No socket set changed: the evaluated material can keep its build and re-read the values.
+     * Not when a regeneration or blend sync is already pending: that edit moves the shader and
+     * has to win. */
+    if ((ma.paint_layers_flag & (MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC)) == 0) {
+      ma.paint_layers_flag |= MA_PAINT_LAYERS_VALUES_ONLY;
+    }
   }
   else {
+    ma.paint_layers_flag &= ~MA_PAINT_LAYERS_VALUES_ONLY;
     ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
   }
 }
@@ -104,6 +113,8 @@ void BKE_paint_layers_tag_value_edited(Material &ma)
 static void paint_layers_tag_blend_edited(Material &ma)
 {
   ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_CANCELLED;
+  /* A blend mode is a node property: the shader source changes, only a rebuild applies it. */
+  ma.paint_layers_flag &= ~(MA_PAINT_LAYERS_VALUES_ONLY | MA_PAINT_LAYERS_RAMP_ONLY);
   ma.paint_layers_flag |= MA_PAINT_LAYERS_BLEND_SYNC | MA_PAINT_LAYERS_BAKE_STALE;
   DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
 }
@@ -2200,7 +2211,14 @@ bool BKE_paint_layers_channel_set_invert(Material &ma,
   else {
     record->flag &= ~MA_PAINT_LAYER_CHANNEL_INVERT;
   }
-  BKE_paint_layers_tag_edited(ma);
+  /* Only a mask item reads the flag in the generated graph (1 - C). On a stack row's channel it is
+   * a painting/display setting, so a rebuild would be wasted. */
+  if (layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    BKE_paint_layers_tag_edited(ma);
+  }
+  else {
+    BKE_paint_layers_tag_value_edited(ma);
+  }
   return true;
 }
 

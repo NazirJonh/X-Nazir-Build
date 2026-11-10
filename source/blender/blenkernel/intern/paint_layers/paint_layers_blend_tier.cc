@@ -235,6 +235,43 @@ bool BKE_paint_layers_blend_tier_demote_due(Main &bmain, const double now)
     bool removed = false;
     bool removed_dynamic = false;
     Vector<BlendTierEntry> &entries = item.value;
+
+    /* The material may have been freed since the record was made; a dangling record is simply
+     * forgotten, there is no tree left to rebuild. */
+    Material *ma = nullptr;
+    for (Material &candidate : bmain.materials) {
+      if (candidate.id.session_uid == item.key) {
+        ma = &candidate;
+        break;
+      }
+    }
+    if (ma == nullptr) {
+      for (const BlendTierEntry &entry : entries) {
+        removed_dynamic = removed_dynamic || entry.dynamic;
+      }
+      entries.clear();
+      affected.append(item.key);
+      if (removed_dynamic) {
+        rebuild.append(item.key);
+      }
+      continue;
+    }
+
+    /* A rebuild is already pending -- the user just made an edit, a bake is landing, or the
+     * material is stale. Demoting now would add a second regeneration on top of it for no visible
+     * reason, so the record waits out another hold window instead. */
+    if ((ma->paint_layers_flag & (MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC |
+                                  MA_PAINT_LAYERS_BAKE_STALE |
+                                  MA_PAINT_LAYERS_BAKE_SCHEDULED)) != 0)
+    {
+      for (BlendTierEntry &entry : entries) {
+        if (entry.deadline <= now) {
+          entry.deadline = now + kBlendTierHoldSeconds;
+        }
+      }
+      continue;
+    }
+
     for (int64_t i = entries.size() - 1; i >= 0; i--) {
       if (entries[i].deadline <= now) {
         removed_dynamic = removed_dynamic || entries[i].dynamic;

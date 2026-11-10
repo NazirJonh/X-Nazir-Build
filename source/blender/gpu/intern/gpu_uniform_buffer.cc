@@ -49,6 +49,11 @@ UniformBuf::~UniformBuf()
   MEM_SAFE_DELETE_VOID(data_);
 }
 
+void UniformBuf::discard_attached_data()
+{
+  MEM_SAFE_DELETE_VOID(data_);
+}
+
 }  // namespace gpu
 
 /** \} */
@@ -176,12 +181,19 @@ static inline size_t buffer_size_from_list(ListBaseT<LinkData> *inputs)
   return buffer_size;
 }
 
-static inline void buffer_fill_from_list(void *data, ListBaseT<LinkData> *inputs)
+static inline void buffer_fill_from_list(void *data,
+                                         ListBaseT<LinkData> *inputs,
+                                         Vector<GPUUniformBufSlot> *r_slots)
 {
   /* Now that we know the total ubo size we can start populating it. */
+  uchar *data_start = static_cast<uchar *>(data);
   float *offset = static_cast<float *>(data);
   for (LinkData &link : *inputs) {
     GPUInput *input = static_cast<GPUInput *>(link.data);
+    if (r_slots != nullptr) {
+      r_slots->append(
+          GPUUniformBufSlot{size_t(reinterpret_cast<uchar *>(offset) - data_start), input});
+    }
     memcpy(offset, input->vec, input->type * sizeof(float));
     offset += get_padded_gpu_type(&link);
   }
@@ -211,7 +223,10 @@ gpu::UniformBuf *GPU_uniformbuf_create_ex(size_t size, const void *data, const c
   return ubo;
 }
 
-gpu::UniformBuf *GPU_uniformbuf_create_from_list(ListBaseT<LinkData> *inputs, const char *name)
+gpu::UniformBuf *GPU_uniformbuf_create_from_list(ListBaseT<LinkData> *inputs,
+                                                const char *name,
+                                                Vector<GPUUniformBufSlot> *r_slots,
+                                                Vector<uchar> *r_data_copy)
 {
   /* There is no point on creating an UBO if there is no arguments. */
   if (inputs->is_empty()) {
@@ -221,13 +236,21 @@ gpu::UniformBuf *GPU_uniformbuf_create_from_list(ListBaseT<LinkData> *inputs, co
   buffer_from_list_inputs_sort(inputs);
   size_t buffer_size = buffer_size_from_list(inputs);
   void *data = MEM_new_uninitialized(buffer_size, __func__);
-  buffer_fill_from_list(data, inputs);
+  buffer_fill_from_list(data, inputs, r_slots);
 
   UniformBuf *ubo = nullptr;
   if (buffer_size <= GPU_max_uniform_buffer_size()) {
     ubo = GPUBackend::get()->uniformbuf_alloc(buffer_size, name);
+    if (r_data_copy != nullptr) {
+      /* Taken before the buffer owns the data, so an edit can diff against what is uploaded. */
+      r_data_copy->resize(int64_t(buffer_size));
+      memcpy(r_data_copy->data(), data, buffer_size);
+    }
     /* Defer data upload. */
     ubo->attach_data(data);
+  }
+  else {
+    MEM_SAFE_DELETE_VOID(data);
   }
   return ubo;
 }
@@ -239,6 +262,9 @@ void GPU_uniformbuf_free(gpu::UniformBuf *ubo)
 
 void GPU_uniformbuf_update(gpu::UniformBuf *ubo, const void *data)
 {
+  if (data != nullptr) {
+    ubo->discard_attached_data();
+  }
   ubo->update(data);
 }
 

@@ -23,6 +23,7 @@ namespace blender {
 
 struct Material;
 struct MaterialPaintLayer;
+struct bNode;
 struct Mesh;
 struct Object;
 
@@ -135,10 +136,29 @@ void BKE_paint_layers_gradient_color(const MaterialPaintLayerGradient &gradient,
 
 /**
  * Hash of everything in \a ramp that decides its colors: the stop count, the interpolation modes
- * and every stop. Order-sensitive. The bake, topology and composite hashes fold it in, so a ramp
- * edit invalidates all three by the same rule.
+ * and every stop. Order-sensitive. The bake and composite hashes fold it in, so a ramp edit
+ * invalidates both. The topology hash uses #BKE_paint_layers_gradient_ramp_shape_hash instead: the
+ * node's data is synced in place, only the shader shape has to rebuild.
  */
 uint64_t BKE_paint_layers_gradient_ramp_hash(const ColorBand &ramp);
+
+/**
+ * Hash of the part of \a ramp that decides *which shader* the ColorRamp node builds: a one-stop
+ * constant, the two-stop optimised uniform functions, or the band texture (and its nearest
+ * lookup). Stop positions and colors are uniforms or texture content, so they are left out: a ramp
+ * edit that keeps this hash updates the node's storage in place and compiles nothing.
+ */
+uint64_t BKE_paint_layers_gradient_ramp_shape_hash(const ColorBand &ramp);
+
+/**
+ * The key the generator stored on a ColorRamp node it made for a gradient row, or null for any other
+ * node. The key stays valid when the tree is evaluated again, unlike the node's identifier in an
+ * inlined copy.
+ */
+const char *BKE_paint_layers_ramp_node_key(const bNode &node);
+
+/** The ramp of the generated node whose key is \a key in \a ma's generated groups, or null. */
+const ColorBand *BKE_paint_layers_ramp_find(const Material &ma, const char *key);
 
 /** Whether any row of \a ma, or any correction or mask item laid over one, is a Gradient. */
 bool BKE_paint_layers_gradient_any(const Material &ma);

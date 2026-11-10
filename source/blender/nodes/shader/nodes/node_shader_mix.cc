@@ -397,7 +397,7 @@ static int gpu_shader_mix(GPUMaterial *mat,
     else {
       const float min = 0.0f;
       const float max = 1.0f;
-      const GPUNodeLink *factor_link = in[0].link ? in[0].link : GPU_uniform(in[0].vec);
+      const GPUNodeLink *factor_link = in[0].link ? in[0].link : GPU_uniform_from_stack(&in[0]);
       GPU_link(mat,
                "node_mix_clamp_value",
                factor_link,

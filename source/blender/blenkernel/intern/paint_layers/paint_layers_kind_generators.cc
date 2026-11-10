@@ -735,6 +735,19 @@ const char *paint_layer_generator_param_socket(const MaterialPaintLayer &row, co
   return nullptr;
 }
 
+bool paint_layer_generator_param_is_dormant(const MaterialPaintLayer &row, const int index)
+{
+  Span<const GeneratorSocketParam> sockets;
+  Span<const GeneratorConditionalSocketParam> conditional;
+  generator_socket_tables(paint_layer_generator_kind_of(row), sockets, conditional);
+  for (const GeneratorConditionalSocketParam &param : conditional) {
+    if (param.index == index) {
+      return paint_layer_generator_param_socket(row, index) == nullptr;
+    }
+  }
+  return false;
+}
+
 bool paint_layer_generator_param_is_active(const MaterialPaintLayer &row, const int index)
 {
   if (index < 0) {

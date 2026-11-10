@@ -12,6 +12,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 
@@ -60,6 +61,13 @@ bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain)
      * marker, so the name never decides which tree this is. */
     if (!STREQ(existing->id.name + 2, BLEND_TREE_NAME)) {
       BKE_id_rename(bmain, existing->id, BLEND_TREE_NAME);
+    }
+    /* A group loaded from a file built before the flag existed: set it on its branches so hiding a
+     * scrubbed row stays a uniform change. */
+    for (bNode &node : existing->nodes) {
+      if (node.type_legacy == SH_NODE_MIX) {
+        node.flag |= NODE_KEEP_INACTIVE_BRANCH;
+      }
     }
     return existing;
   }
@@ -276,6 +284,14 @@ bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain)
    * nodes were created, so their socket declarations are still the defaults. Tag the whole tree and
    * run the update now: without this the group instantiates into a shader with the wrong sockets
    * and the node inliner asserts when EEVEE compiles a material using it. */
+  /* The factor is the row's opacity and may legitimately be 0 while the row is hidden. Pruning the
+   * inactive branch at that value rewrites the shader, so every Mix keeps both branches. */
+  for (bNode &node : group->nodes) {
+    if (node.type_legacy == SH_NODE_MIX) {
+      node.flag |= NODE_KEEP_INACTIVE_BRANCH;
+    }
+  }
+
   BKE_ntree_update_tag_all(group);
   BKE_ntree_update_after_single_tree_change(bmain, *group);
   return group;

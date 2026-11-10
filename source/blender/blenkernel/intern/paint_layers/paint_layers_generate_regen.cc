@@ -26,6 +26,7 @@
 #include "BLI_string_utf8.h"
 #include "BLI_ustring.hh"
 #include "BLI_threads.h"
+#include "BLI_time.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
@@ -243,7 +244,11 @@ class LayerTreeFactory {
                (unsigned long long)topology,
                (has_stored && stored == topology) ? "group KEPT" : "group CLEARED + REBUILT");
         if (has_stored && stored == topology) {
-          /* Unchanged: keep the nodes and the interface; the build only re-links the instance. */
+          /* Unchanged: keep the nodes and the interface; the build only re-links the instance.
+           * The name is not part of the hash, so a rename lands here and only renames the group. */
+          if (!STREQ(candidate->id.name + 2, name)) {
+            BKE_id_rename(bmain_, candidate->id, name);
+          }
           used_.append(candidate);
           unchanged_.add(&layer);
           handed_.add(&layer, candidate);
@@ -307,6 +312,30 @@ class LayerTreeFactory {
   Span<bNodeTree *> used() const
   {
     return used_;
+  }
+
+  /**
+   * The groups this pass built or rebuilt, which are the only ones whose nodes changed. A kept
+   * group is not here: its nodes, interface and values were already current.
+   *
+   * Source groups come first: a layer group instances them, so its own update has to see their
+   * current interface.
+   */
+  Vector<bNodeTree *> built_trees() const
+  {
+    Vector<bNodeTree *> sources;
+    Vector<bNodeTree *> layers;
+    for (const auto &item : pending_hashes_) {
+      bUUID marker = BLI_uuid_nil();
+      if (source_group_row_get(*item.first, marker)) {
+        sources.append(item.first);
+      }
+      else {
+        layers.append(item.first);
+      }
+    }
+    sources.extend(layers);
+    return sources;
   }
 
   /** Delete the groups nobody uses any more. */
@@ -409,6 +438,85 @@ static void generated_trees_update(Main &bmain, const Span<bNodeTree *> layer_tr
 }
 
 /**
+ * Keep the branches of the generated Mix nodes alive in EEVEE's inactive-branch prune.
+ *
+ * A row's blend factor is a uniform (its opacity, a coverage) that legitimately reaches 0 when the
+ * row is hidden. Disconnecting the branch at that value rewrites the shader, so hiding and showing
+ * a row would recompile it. The flag makes such nodes uniform-only; the tree records that it was
+ * swept so a kept tree is not walked again, while a rebuilt one is (its new nodes lack the flag).
+ */
+static void prune_guard_tree(bNodeTree &tree, const bool force)
+{
+  if (!force && prop_int_get(tree.id.properties, TREE_PRUNE_GUARD_PROP, 0) != 0) {
+    return;
+  }
+  for (bNode &node : tree.nodes) {
+    if (node.type_legacy == SH_NODE_MIX) {
+      node.flag |= NODE_KEEP_INACTIVE_BRANCH;
+    }
+  }
+  prop_int_set(tree.id.properties, TREE_PRUNE_GUARD_PROP, 1);
+}
+
+/** Sweep the root and every layer group instance of \a ma. */
+static void prune_guard_apply(Material &ma, const bool force)
+{
+  if (ma.paint_layers_tree == nullptr) {
+    return;
+  }
+  bNodeTree &root = *ma.paint_layers_tree;
+  prune_guard_tree(root, force);
+  for (bNode &node : root.nodes) {
+    if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree *group = id_cast<bNodeTree *>(node.id);
+    if (group == nullptr) {
+      continue;
+    }
+    bUUID marker = BLI_uuid_nil();
+    if (!layer_tree_marker_get(*group, marker)) {
+      continue;
+    }
+    prune_guard_tree(*group, force);
+  }
+}
+
+/**
+ * Bring every layer group's name in line with its row. A kept regeneration never reaches
+ * #LayerTreeFactory::layer_tree_get, and the name is no longer part of the topology hash, so a
+ * rename lands here; a rebuild already does this in the factory.
+ */
+static void layer_groups_rename(Main &bmain, Material &ma)
+{
+  if (ma.paint_layers_tree == nullptr) {
+    return;
+  }
+  for (bNode &node : ma.paint_layers_tree->nodes) {
+    if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree *group = id_cast<bNodeTree *>(node.id);
+    if (group == nullptr) {
+      continue;
+    }
+    bUUID marker = BLI_uuid_nil();
+    if (!layer_tree_marker_get(*group, marker)) {
+      continue;
+    }
+    const MaterialPaintLayer *layer = BKE_paint_layers_find(ma, marker);
+    if (layer == nullptr) {
+      continue;
+    }
+    char name[MAX_ID_NAME - 2];
+    SNPRINTF(name, ".PL Layer %s", layer->name[0] != '\0' ? layer->name : "Layer");
+    if (!STREQ(group->id.name + 2, name)) {
+      BKE_id_rename(bmain, group->id, name);
+    }
+  }
+}
+
+/**
  * The node in \a ma's embedded tree that instances \a tree: found by its marker and re-pointed when
  * it names a different tree, created when missing.
  *
@@ -451,55 +559,88 @@ static bNode *instance_ensure(Material &ma, bNodeTree &tree)
  */
 static void source_groups_refresh(Main &bmain, Material &ma)
 {
+  /* Collect the rows first: a material that reads no source must not walk every node tree on
+   * every update. */
+  Vector<std::pair<bUUID, const MaterialPaintLayer *>> rows;
   BKE_paint_layers_foreach_source_row(
-      static_cast<const Material &>(ma), [&](const MaterialPaintLayer &layer) -> bool {
-        if (layer.material == nullptr) {
-          return true;
-        }
-        const bool mapped = BKE_paint_layers_mapping_remaps(ma, layer);
-        for (bNodeTree &group : bmain.nodetrees) {
-          bUUID marker = BLI_uuid_nil();
-          if (!source_group_row_get(group, marker) || !BLI_uuid_equal(marker, layer.marker) ||
-              !BLI_uuid_equal(tree_owner_uid_get(group), ma.paint_layers_owner_uid))
-          {
-            continue;
-          }
-          const uint64_t content = source_group_content_hash(*layer.material, mapped);
-          uint64_t stored = 0;
-          if (tree_topology_hash_get(group, stored) && stored == content) {
-            break;
-          }
-          /* Only socket values moved (a slider dragged): the group takes them in place, with no
-           * rebuild of its nodes and no change of relations. */
-          const uint64_t structure = source_group_structure_hash(*layer.material, mapped);
-          uint64_t stored_structure = 0;
-          if (source_group_structure_hash_get(group, stored_structure) &&
-              stored_structure == structure &&
-              source_group_values_sync(bmain, group, *layer.material))
-          {
-            tree_topology_hash_set(group, content);
-            DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
-            break;
-          }
-          tree_hash_clear(group);
-          if (source_group_fill(bmain, group, *layer.material, mapped)) {
-            tree_topology_hash_set(group, content);
-            source_group_structure_hash_set(group, structure);
-            /* The private copies of the groups on the source's path are new IDs. */
-            DEG_relations_tag_update(&bmain);
-          }
-          else {
-            /* Nothing to show any more: the rebuild decides what the row lays instead. */
-            ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
-          }
-          BKE_ntree_update_tag_all(&group);
-          BKE_ntree_update_after_single_tree_change(bmain, group);
-          DEG_id_tag_update(&group.id, ID_RECALC_SYNC_TO_EVAL);
-          DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
-          break;
+      static_cast<const Material &>(ma),
+      [&](const MaterialPaintLayer &layer) -> bool {
+        if (layer.material != nullptr) {
+          rows.append({layer.marker, &layer});
         }
         return true;
       });
+  if (rows.is_empty()) {
+    return;
+  }
+
+  /* One pass over the trees instead of one pass per row: a stack with several Material rows used
+   * to scan #Main's whole node tree list once per row. */
+  Vector<std::pair<bUUID, bNodeTree *>> groups;
+  for (bNodeTree &group : bmain.nodetrees) {
+    bUUID marker = BLI_uuid_nil();
+    if (!source_group_row_get(group, marker) ||
+        !BLI_uuid_equal(tree_owner_uid_get(group), ma.paint_layers_owner_uid))
+    {
+      continue;
+    }
+    groups.append({marker, &group});
+  }
+  if (groups.is_empty()) {
+    return;
+  }
+
+  for (const auto &[row_marker, layer] : rows) {
+    bNodeTree *group = nullptr;
+    for (const auto &item : groups) {
+      if (BLI_uuid_equal(item.first, row_marker)) {
+        group = item.second;
+        break;
+      }
+    }
+    if (group == nullptr) {
+      continue;
+    }
+    /* A kept source group follows its row's name like a layer group; the name is not hashed. */
+    char group_name[MAX_ID_NAME - 2];
+    SNPRINTF(group_name, ".PL Source %s", layer->name[0] != '\0' ? layer->name : "Layer");
+    if (!STREQ(group->id.name + 2, group_name)) {
+      BKE_id_rename(bmain, group->id, group_name);
+    }
+    const bool mapped = BKE_paint_layers_mapping_remaps(ma, *layer);
+    const uint64_t content = source_group_content_hash(*layer->material, mapped);
+    uint64_t stored = 0;
+    if (tree_topology_hash_get(*group, stored) && stored == content) {
+      continue;
+    }
+    /* Only socket values moved (a slider dragged): the group takes them in place, with no
+     * rebuild of its nodes and no change of relations. */
+    const uint64_t structure = source_group_structure_hash(*layer->material, mapped);
+    uint64_t stored_structure = 0;
+    if (source_group_structure_hash_get(*group, stored_structure) &&
+        stored_structure == structure &&
+        source_group_values_sync(bmain, *group, *layer->material))
+    {
+      tree_topology_hash_set(*group, content);
+      DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+      continue;
+    }
+    tree_hash_clear(*group);
+    if (source_group_fill(bmain, *group, *layer->material, mapped)) {
+      tree_topology_hash_set(*group, content);
+      source_group_structure_hash_set(*group, structure);
+      /* The private copies of the groups on the source's path are new IDs. */
+      DEG_relations_tag_update(&bmain);
+    }
+    else {
+      /* Nothing to show any more: the rebuild decides what the row lays instead. */
+      ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+    }
+    BKE_ntree_update_tag_all(group);
+    BKE_ntree_update_after_single_tree_change(bmain, *group);
+    DEG_id_tag_update(&group->id, ID_RECALC_SYNC_TO_EVAL);
+    DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+  }
 }
 
 /**
@@ -578,16 +719,27 @@ static bool viewer_socket_linked_to(const bNodeTree &tree,
   return false;
 }
 
-static void viewer_mix_factor_set(bNodeTree &tree, bNode &mix, const float factor)
+static bool viewer_mix_factor_set(bNodeTree &tree, bNode &mix, const float factor)
 {
   bNodeSocket *fac = socket_in(mix, "Fac");
   if (fac == nullptr) {
-    return;
+    return false;
+  }
+  bool changed = false;
+  for (const bNodeLink &link : tree.links) {
+    if (link.tosock == fac) {
+      changed = true;
+      break;
+    }
   }
   bke::node_remove_socket_links(tree, *fac);
   if (bNodeSocketValueFloat *value = static_cast<bNodeSocketValueFloat *>(fac->default_value)) {
-    value->value = factor;
+    if (value->value != factor) {
+      value->value = factor;
+      changed = true;
+    }
   }
+  return changed;
 }
 
 static void viewer_depsgraph_tag(Main *bmain, Material &ma)
@@ -829,7 +981,7 @@ bool BKE_paint_layers_view_pass_set(Material &ma, const int pass)
  * active row has no mask output; a root saved before the output existed is scheduled for the one
  * rebuild that adds it.
  */
-static bool view_pass_mask_root_link(Main *bmain, Material &ma)
+static bool view_pass_mask_root_link(Main *bmain, Material &ma, bool *r_changed)
 {
   if (ma.paint_layers_tree == nullptr) {
     return false;
@@ -874,6 +1026,9 @@ static bool view_pass_mask_root_link(Main *bmain, Material &ma)
     BKE_ntree_update_after_single_tree_change(*bmain, root);
   }
   DEG_id_tag_update(&root.id, ID_RECALC_SYNC_TO_EVAL);
+  if (r_changed != nullptr) {
+    *r_changed = true;
+  }
   return true;
 }
 
@@ -898,19 +1053,21 @@ bool BKE_paint_layers_view_pass_sync(Main *bmain, Material &ma)
 
   bNode *mix = viewer_node_find(ma, VIEW_PASS_MIX_PROP, SH_NODE_MIX_SHADER);
   if (pass == PAINT_LAYER_PASS_COMBINED) {
-    if (mix != nullptr) {
-      viewer_mix_factor_set(*ma.nodetree, *mix, 0.0f);
+    if (mix != nullptr && viewer_mix_factor_set(*ma.nodetree, *mix, 0.0f)) {
       viewer_depsgraph_tag(bmain, ma);
     }
     return true;
   }
 
   bNodeTree &tree = *ma.nodetree;
+  /* Whether this sync rewrote the graph. Nothing is tagged otherwise: this runs after every
+   * regeneration, and a tag on an unchanged graph costs a full GPU material rebuild. */
+  bool changed = false;
   /* Any failure leaves the material on its combined shading: a half-installed viewer must never
    * keep showing a pass whose channel moved. */
   const auto fail = [&]() -> bool {
-    if (mix != nullptr) {
-      viewer_mix_factor_set(tree, *mix, 0.0f);
+    const bool factor_changed = mix != nullptr && viewer_mix_factor_set(tree, *mix, 0.0f);
+    if (changed || factor_changed) {
       viewer_depsgraph_tag(bmain, ma);
     }
     return false;
@@ -960,6 +1117,7 @@ bool BKE_paint_layers_view_pass_sync(Main *bmain, Material &ma)
     if (mix == nullptr) {
       return fail();
     }
+    changed = true;
     prop_int_set(mix->prop, VIEW_PASS_MIX_PROP, 1);
     STRNCPY_UTF8(mix->label, "Paint Pass");
     mix->location[0] = output->location[0] - 200.0f;
@@ -971,6 +1129,7 @@ bool BKE_paint_layers_view_pass_sync(Main *bmain, Material &ma)
     if (surface_links_num != 0 && !(surface_links_num == 1 && surface_from == &principled)) {
       return fail();
     }
+    changed = changed || surface_links_num != 0;
     bke::node_remove_socket_links(tree, *surface);
   }
 
@@ -983,10 +1142,12 @@ bool BKE_paint_layers_view_pass_sync(Main *bmain, Material &ma)
   if (!viewer_socket_linked_to(tree, *surface, *mix_out)) {
     bke::node_remove_socket_links(tree, *surface);
     bke::node_add_link(tree, *mix, *mix_out, *output, *surface);
+    changed = true;
   }
   if (!viewer_socket_linked_to(tree, *mix_principled, *bsdf)) {
     bke::node_remove_socket_links(tree, *mix_principled);
     bke::node_add_link(tree, principled, *bsdf, *mix, *mix_principled);
+    changed = true;
   }
 
   bNode *emission = viewer_node_find(ma, VIEW_PASS_EMISSION_PROP, SH_NODE_EMISSION);
@@ -995,6 +1156,7 @@ bool BKE_paint_layers_view_pass_sync(Main *bmain, Material &ma)
     if (emission == nullptr) {
       return fail();
     }
+    changed = true;
     prop_int_set(emission->prop, VIEW_PASS_EMISSION_PROP, 1);
     STRNCPY_UTF8(emission->label, "Paint Pass Viewer");
     emission->location[0] = mix->location[0] - 200.0f;
@@ -1010,12 +1172,16 @@ bool BKE_paint_layers_view_pass_sync(Main *bmain, Material &ma)
     if (bNodeSocketValueFloat *value = static_cast<bNodeSocketValueFloat *>(
             emission_strength->default_value))
     {
-      value->value = 1.0f;
+      if (value->value != 1.0f) {
+        value->value = 1.0f;
+        changed = true;
+      }
     }
   }
   if (!viewer_socket_linked_to(tree, *mix_viewer, *emission_out)) {
     bke::node_remove_socket_links(tree, *mix_viewer);
     bke::node_add_link(tree, *emission, *emission_out, *mix, *mix_viewer);
+    changed = true;
   }
 
   bNode *instance = instance_find(ma, ma.paint_layers_owner_uid);
@@ -1025,7 +1191,7 @@ bool BKE_paint_layers_view_pass_sync(Main *bmain, Material &ma)
   bNodeSocket *result = nullptr;
   if (pass == PAINT_LAYER_MAP_MASK) {
     /* The root's mask output has to follow the active row before the material can show it. */
-    if (!view_pass_mask_root_link(bmain, ma)) {
+    if (!view_pass_mask_root_link(bmain, ma, &changed)) {
       return fail();
     }
     result = instance_output_find(*ma.paint_layers_tree, *instance, "Result Mask");
@@ -1040,11 +1206,21 @@ bool BKE_paint_layers_view_pass_sync(Main *bmain, Material &ma)
   if (result == nullptr && pass != PAINT_LAYER_MAP_MASK) {
     /* A channel of the set that no row takes part in has no generated result. It is still offered,
      * as the Image Editor offers it, and shows the channel's neutral value. */
+    int links_num = 0;
+    viewer_socket_source(tree, *emission_color, links_num);
+    if (links_num != 0) {
+      changed = true;
+    }
     bke::node_remove_socket_links(tree, *emission_color);
     if (bNodeSocketValueRGBA *value = static_cast<bNodeSocketValueRGBA *>(
             emission_color->default_value))
     {
+      float previous[4];
+      copy_v4_v4(previous, value->value);
       view_pass_empty_color(pass, value->value);
+      if (!equals_v4v4(previous, value->value)) {
+        changed = true;
+      }
     }
   }
   else if (result == nullptr) {
@@ -1053,14 +1229,29 @@ bool BKE_paint_layers_view_pass_sync(Main *bmain, Material &ma)
   else if (!viewer_socket_linked_to(tree, *emission_color, *result)) {
     bke::node_remove_socket_links(tree, *emission_color);
     bke::node_add_link(tree, *instance, *result, *emission, *emission_color);
+    changed = true;
   }
 
-  viewer_mix_factor_set(tree, *mix, 1.0f);
-  viewer_depsgraph_tag(bmain, ma);
+  changed = viewer_mix_factor_set(tree, *mix, 1.0f) || changed;
+  if (changed) {
+    viewer_depsgraph_tag(bmain, ma);
+  }
   return true;
 }
 
 /** \} */
+
+bool BKE_paint_layers_tree_shape_moved(const Material &ma)
+{
+  using namespace bke::paint_layers;
+  bNodeTree *tree = ma.paint_layers_tree;
+  uint64_t stored_root = 0;
+  if (tree == nullptr || !tree_root_hash_get(*tree, stored_root)) {
+    /* No tree, or one without a stored shape: the regeneration builds or rebuilds it anyway. */
+    return false;
+  }
+  return stored_root != paint_layers_root_topology_hash(ma, paint_layers_wired_channels(ma));
+}
 
 bool BKE_paint_layers_regenerate(Main &bmain,
                                  Material &ma,
@@ -1072,6 +1263,15 @@ bool BKE_paint_layers_regenerate(Main &bmain,
       *r_report = report;
     }
   };
+#if PBR_LAYERS_DIAGNOSTICS
+  const double regen_start = BLI_time_now_seconds();
+#endif
+
+  /* A regeneration can move nodes in place (a map, a ramp, a blend mode) without moving the root's
+   * topology hash, so a build kept for "values only" could not tell. Whatever ran this, the update
+   * that follows rebuilds. */
+  const bool ramp_only = (ma.paint_layers_flag & MA_PAINT_LAYERS_RAMP_ONLY) != 0;
+  ma.paint_layers_flag &= ~(MA_PAINT_LAYERS_VALUES_ONLY | MA_PAINT_LAYERS_RAMP_ONLY);
 
   if (!BKE_paint_layers_is_layered(ma) || ma.nodetree == nullptr) {
     report_out();
@@ -1139,10 +1339,11 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   /* A value edit changes no structure, so the root's stored hash still matches its description:
    * every group is kept and only the values are written. Nothing is rebuilt, and the groups' nodes
    * (and anything a user put in them) survive. A missing or mismatched stored hash -- a file written
-   * before this feature, or a structural edit -- falls through to a full rebuild. A structural edit
-   * is exactly what #MA_PAINT_LAYERS_REGEN names (the value edits tag #BKE_paint_layers_tag_value_edited),
-   * and a flag the last pass did not consume -- #BKE_paint_layers_undo_validate leaves one, its
-   * dangling-id clears being invisible to the hash -- must not be kept over either. */
+   * before this feature, or a structural edit -- falls through to a full rebuild. The flag only
+   * says that a pass is due, not that the shape moved: a stroke into a baked row re-renders its
+   * maps and marks it too, and rebuilding the whole tree for that is what the hash exists to avoid.
+   * A dangling id left by an undo decode is not invisible to it either, since
+   * #BKE_paint_layers_undo_validate drops the stored hash of such a tree. */
   const uint64_t root_hash = paint_layers_root_topology_hash(ma, wired_channels);
   uint64_t stored_root = 0;
   /* The kept root also has to still be instantiated in the material: a user can delete the group
@@ -1150,34 +1351,45 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   const bNode *kept_instance = instance_find(ma, ma.paint_layers_owner_uid);
   const bool keep_root = !created_tree && tree_root_hash_get(*tree, stored_root) &&
                          stored_root == root_hash && kept_instance != nullptr &&
-                         kept_instance->id == &tree->id &&
-                         (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) == 0;
+                         kept_instance->id == &tree->id;
 
   bool relations_changed = report.replaced_foreign_tree;
   /* A failed sync means a value input has no socket on its instance (a hand-edited tree), a keyed
-   * blend node no longer matches the description, or a curves node is out of step with its row:
-   * the kept root cannot be trusted, so the full rebuild below takes over. Nodes are synced before
-   * values, so a tree update cannot reset a value written in the same pass. */
-  const bool blend_sync_ok = keep_root && paint_layers_blend_sync(ma, bmain);
+   * map, ramp or blend node no longer matches the description, or a curves node is out of step with
+   * its row: the kept root cannot be trusted, so the full rebuild below takes over. Nodes are synced
+   * before values, so a tree update cannot reset a value written in the same pass. */
+  const bool maps_sync_ok = keep_root && paint_layers_maps_sync(ma, bmain);
+  const bool ramps_sync_ok = maps_sync_ok && paint_layers_gradient_ramp_sync(ma, bmain);
+  const bool blend_sync_ok = ramps_sync_ok && paint_layers_blend_sync(ma, bmain);
   const bool curves_sync_ok = blend_sync_ok && paint_layers_curves_sync(ma, bmain);
   const bool values_sync_ok = curves_sync_ok && BKE_paint_layers_values_sync(ma);
   const bool kept = values_sync_ok;
   PBR_LAYERS_LOG(
       "[PBR-Layers regen] material=\"%s\" created_tree=%d root_hash=%llu stored_root=%llu "
-      "instance_ok=%d keep_root=%d blend_sync=%d curves_sync=%d values_sync=%d => %s\n",
+      "instance_ok=%d keep_root=%d maps_sync=%d ramps_sync=%d blend_sync=%d curves_sync=%d "
+      "values_sync=%d => %s\n",
       ma.id.name + 2,
       int(created_tree),
       (unsigned long long)root_hash,
       (unsigned long long)stored_root,
       int(kept_instance != nullptr && kept_instance->id == &tree->id),
       int(keep_root),
+      int(maps_sync_ok),
+      int(ramps_sync_ok),
       int(blend_sync_ok),
       int(curves_sync_ok),
       int(values_sync_ok),
       kept ? "KEPT (in-place)" : "FULL REBUILD");
   if (kept) {
     source_groups_refresh(bmain, ma);
+    layer_groups_rename(bmain, ma);
+    prune_guard_apply(ma, false);
     regenerate_tags(bmain, ma, *tree, false);
+    /* The ramp sync only wrote stops into nodes of the same shader shape, and nothing else asked
+     * for this pass, so the build can keep its code and refresh the ramp's uniforms or band row. */
+    if (ramp_only && (ma.paint_layers_flag & MA_PAINT_LAYERS_BLEND_SYNC) == 0) {
+      ma.paint_layers_flag |= MA_PAINT_LAYERS_VALUES_ONLY;
+    }
   }
   else {
     /* The factory outlives the build, which only holds a non-owning reference to it. */
@@ -1205,11 +1417,20 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     /* The root's own hash goes the same way: a pass that fails before the instance is wired must
      * not leave a hash that makes the next one keep a half-built root. */
     tree_hash_clear(*tree);
+    paint_layers_kept_group_rebuild_count_reset();
     BKE_paint_layers_tree_build(ma, *tree, ctx);
 
-    /* Innermost first: a source group sits in a layer group, which sits in the root. */
-    Vector<bNodeTree *> generated(factory.sources_used());
-    generated.extend(factory.used());
+    /* Innermost first: a source group sits in a layer group, which sits in the root. Only the
+     * groups this pass built changed; a kept group whose nodes had to be repaired is the one
+     * exception the builder counts, and it falls back to updating every group. */
+    Vector<bNodeTree *> generated;
+    if (paint_layers_kept_group_rebuild_count() == 0) {
+      generated = factory.built_trees();
+    }
+    else {
+      generated = factory.sources_used();
+      generated.extend(factory.used());
+    }
     generated_trees_update(bmain, generated, *tree);
     factory.prune_unused();
     /* The groups are built and instantiated: record how many keyed blend nodes each holds, so a
@@ -1243,6 +1464,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     /* A layer group kept unchanged still holds the source group of the old content. */
     source_groups_refresh(bmain, ma);
 
+    /* Rebuilt groups have new Mix nodes; the sweep also covers kept ones, for a file written
+     * before the flag existed. */
+    prune_guard_apply(ma, true);
+
     relations_changed = factory.groups_created() || factory.groups_deleted() || created_tree ||
                         report.replaced_foreign_tree;
     PBR_LAYERS_LOG("[PBR-Layers regen] rebuild done material=\"%s\" groups_created=%d groups_deleted=%d\n",
@@ -1265,6 +1490,13 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   /* A rebuild re-creates the instance's sockets, so the viewport pass viewer has to find the
    * channel result again. Idempotent and cheap when the combined shading is shown. */
   BKE_paint_layers_view_pass_sync(&bmain, ma);
+
+#if PBR_LAYERS_DIAGNOSTICS
+  PBR_LAYERS_LOG("[PBR-Layers regen] time material=\"%s\" kept=%d total=%.2f ms\n",
+                 ma.id.name + 2,
+                 int(kept),
+                 (BLI_time_now_seconds() - regen_start) * 1000.0);
+#endif
 
   report.relations_changed = relations_changed;
   report_out();
@@ -1298,7 +1530,14 @@ void BKE_paint_layers_regenerate_tagged(Main &bmain)
     /* A source edit that changed what a Material row's group is made of (a value that became a
      * texture) marks the rebuild too; one that only moved a value is the evaluation's sync. */
     BKE_paint_layers_material_sources_notice(ma);
-    BKE_paint_layers_bake_plan_run(bmain, ma);
+    /* The planner has nothing to do while no row is due: its own "stale" signal is only raised by
+     * a pixel change, a bake request or an edit that can block or release a bake. Skipping it here
+     * keeps the per-update cost off materials nobody painted on. */
+    if ((ma.paint_layers_flag &
+         (MA_PAINT_LAYERS_BAKE_STALE | MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC)) != 0)
+    {
+      BKE_paint_layers_bake_plan_run(bmain, ma);
+    }
     const bool needs_regen =
         (ma.paint_layers_flag & (MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC)) != 0 ||
         ma.paint_layers_tree == nullptr;
@@ -1643,6 +1882,63 @@ static bool undo_tree_dangling_clear(bNodeTree &tree, const Set<const ID *> &liv
   return cleared;
 }
 
+/**
+ * Whether the generated trees of \a ma came back from the decode intact and still describe the
+ * restored description. Only then may an undo skip the regeneration: the per-tree hashes are
+ * dropped by #BKE_paint_layers_undo_prepare on a tree the decode keeps as it was, so a tree that
+ * still carries matching hashes is one the decode re-read whole.
+ */
+static bool undo_tree_is_current(Material &ma, const bool dangling)
+{
+  if (dangling || ma.paint_layers_tree == nullptr || ma.nodetree == nullptr) {
+    return false;
+  }
+  const bNode *instance = instance_find(ma, ma.paint_layers_owner_uid);
+  if (instance == nullptr || instance->id != &ma.paint_layers_tree->id) {
+    return false;
+  }
+  /* A tree saved in the middle of a blend scrub holds runtime group instances: it has to be
+   * rebuilt into static Mix nodes, as the loader does. */
+  if (prop_int_get(ma.paint_layers_tree->id.properties, TREE_ROOT_BLEND_DYNAMIC_PROP, 0) != 0) {
+    return false;
+  }
+  const Vector<int> wired = paint_layers_wired_channels(ma);
+  uint64_t stored_root = 0;
+  if (!tree_root_hash_get(*ma.paint_layers_tree, stored_root) ||
+      stored_root != paint_layers_root_topology_hash(ma, wired))
+  {
+    return false;
+  }
+  const PaintLayerFormMap forms = paint_layers_form_map(ma);
+  for (bNode &node : ma.paint_layers_tree->nodes) {
+    if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree *group = id_cast<bNodeTree *>(node.id);
+    if (group == nullptr) {
+      continue;
+    }
+    bUUID marker = BLI_uuid_nil();
+    if (!layer_tree_marker_get(*group, marker)) {
+      continue;
+    }
+    const MaterialPaintLayer *layer = BKE_paint_layers_find(ma, marker);
+    if (layer == nullptr) {
+      return false;
+    }
+    uint64_t stored = 0;
+    if (!tree_topology_hash_get(*group, stored) ||
+        stored != paint_layers_layer_topology_hash(ma, *layer, wired, forms))
+    {
+      return false;
+    }
+  }
+  /* Read-only on purpose: this runs inside the undo decode. The description and the snapshot the
+   * trees came from are the same state, so there is nothing to sync; the evaluation's
+   * #BKE_paint_layers_values_sync brings any animated value current. */
+  return true;
+}
+
 void BKE_paint_layers_undo_validate(Main &bmain)
 {
   /* Most files have no layered material: skip building the set of every ID of Main for them. */
@@ -1663,24 +1959,27 @@ void BKE_paint_layers_undo_validate(Main &bmain)
 
   for (const int i : materials.index_range()) {
     Material &ma = *materials[i];
-    undo_dangling_id_clear(ma.paint_layers_tree, live);
+    bool dangling = undo_dangling_id_clear(ma.paint_layers_tree, live);
+    bool bake_invalidated = false;
 
     /* A bake cache whose maps the decode freed is not a cache any more: clearing the hash makes the
      * planner render the row again. A Material row whose source the decode freed reads nothing. */
     BKE_paint_layers_foreach(
         ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) -> bool {
-          undo_dangling_id_clear(row.material, live);
+          dangling |= undo_dangling_id_clear(row.material, live);
           if (row.bake == nullptr) {
             return true;
           }
-          bool dangling = undo_dangling_id_clear(row.bake->coverage, live);
+          bool row_dangling = undo_dangling_id_clear(row.bake->coverage, live);
           for (Image *&image : row.bake->images) {
-            dangling |= undo_dangling_id_clear(image, live);
+            row_dangling |= undo_dangling_id_clear(image, live);
           }
-          if (dangling) {
+          dangling |= row_dangling;
+          if (row_dangling) {
             paint_layers_bake_tiles_clear(*row.bake);
             row.bake->hash[0] = 0;
             row.bake->hash[1] = 0;
+            bake_invalidated = true;
           }
           return true;
         });
@@ -1691,19 +1990,31 @@ void BKE_paint_layers_undo_validate(Main &bmain)
     if (ma.nodetree != nullptr) {
       trees.append(ma.nodetree);
     }
-    bool tree_cleared = false;
     for (bNodeTree *tree : trees) {
       if (undo_tree_dangling_clear(*tree, live)) {
         /* The tree's stored hashes no longer describe the ids it names: a keep decision would hand
          * the nulled pointers back, so the next pass rebuilds the tree instead. A decode that nulled
          * the pointers deliberately (#BKE_paint_layers_undo_prepare) cleared the hashes itself. */
         tree_hash_clear(*tree);
-        tree_cleared = true;
+        dangling = true;
       }
     }
-    /* Regenerated only when something was actually cleared: a validate on a current material must
-     * not throw the kept trees away. */
-    if (tree_cleared) {
+
+    /* A tree the decode re-read whole comes back with its hashes and pointers: when they still
+     * describe the restored description, regeneration would rebuild and recompile for nothing. A
+     * tree it kept as it was had its pointers nulled by #BKE_paint_layers_undo_prepare and its
+     * hashes dropped, which the check below reads as "not current". */
+    if (!bake_invalidated && undo_tree_is_current(ma, dangling)) {
+      ma.paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
+      /* The trees came back with their data; only their evaluated copies and the material's
+       * uniforms need a refresh. No regeneration runs, so nothing is rebuilt or recompiled. */
+      BKE_paint_layers_values_tag_trees(ma);
+      if (ma.nodetree != nullptr) {
+        DEG_id_tag_update(&ma.nodetree->id, ID_RECALC_SYNC_TO_EVAL);
+      }
+      DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+    }
+    else {
       ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
       DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
     }

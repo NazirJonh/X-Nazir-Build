@@ -202,6 +202,25 @@ Map<uint32_t, BakeMaterialRuntime> &bake_runtime()
 }
 
 /**
+ * A heavy bake that landed while its row was still laid live: the row can be substituted again,
+ * but flipping it right there would rebuild the material on top of the stroke that made the bake
+ * stale. The flip waits out a short idle instead, so a whole painting session is one rebuild.
+ */
+struct BakeShapeHold {
+  bUUID marker;
+  double deadline;
+};
+
+/** How long a landed heavy bake waits for the hand to stop before its row turns baked. */
+static constexpr double BAKE_SHAPE_HOLD_SECONDS = 3.0;
+
+Map<uint32_t, Vector<BakeShapeHold>> &bake_shape_holds()
+{
+  static Map<uint32_t, Vector<BakeShapeHold>> map;
+  return map;
+}
+
+/**
  * Guards #bake_runtime(). The map is written by the main-thread regeneration and read from
  * `BKE_material_eval` through #BKE_paint_layers_bake_is_valid, which runs in the depsgraph task pool
  * and on evaluated copies, so an unlocked Map would be a data race. Every access holds the lock only
@@ -4779,6 +4798,10 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
   else if (bake_any_row_needs_surface(*ma)) {
     paint_layers_bake_view_resolve(*ma, &bmain, scene, job.view_layer, view);
   }
+  /* A regeneration this commit does not need must not be introduced by the subscriptions below;
+   * one an earlier edit asked for is kept. */
+  const bool had_regen = (ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0;
+  bool need_regen = false;
   for (PaintLayersBakeJob::RowResult &row : job.rows) {
     MaterialPaintLayer *layer = BKE_paint_layers_find(*ma, row.marker);
     /* The row was removed, its bake dropped or switched off while the worker ran: nothing to
@@ -4824,6 +4847,10 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
       bake_tile_object_indices_set(*ma, targets);
     }
     const int object_num = tiled_row ? int(row.objects.size()) : 0;
+    /* Whether the row was laid live when the bake landed. That is the only case where the newly
+     * valid bake changes the generated shape; a partial re-bake of a row that already read its
+     * bake does not. */
+    const bool was_substituted = paint_layer_row_substituted(*ma, *layer);
     bool row_written = false;
     bool all_objects = true;
     Vector<int> written_channels;
@@ -4898,10 +4925,28 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
       bake_object_identity_record(*ma, *layer, row.objects[0].identity);
     }
     BKE_paint_layers_bake_subscribe(*ma, *layer);
+    const bool now_substituted = paint_layer_row_substituted(*ma, *layer);
+    if (!was_substituted && now_substituted) {
+      /* The row was live while it was painted and can be baked again: turn it baked after the
+       * hand stops instead of on top of the stroke. */
+      BKE_paint_layers_bake_hold_note(*ma, layer->marker);
+    }
+    else if (!now_substituted) {
+      /* The bake is still not usable: the row stays live, which needs no new shape. */
+      need_regen = true;
+    }
     changed = true;
   }
   if (changed) {
-    ma->paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+    /* A row that was live stays live and a partially re-baked one keeps its baked shape: neither
+     * needs a rebuild. #BKE_paint_layers_bake_subscribe marks one unconditionally, so the flag is
+     * restored to what the edit actually needs. */
+    if (!need_regen && !had_regen) {
+      ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+    }
+    else {
+      ma->paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+    }
     /* New bake maps were written into the layers outside any operator. Tagging the material marks
      * it changed for the next undo push; otherwise a memfile undo reuses it as it is and frees the
      * maps, leaving the layers' bake slots dangling. */
@@ -4936,6 +4981,81 @@ int64_t BKE_paint_layers_bake_job_retained_bytes(const PaintLayersBakeJob &job)
     }
   }
   return bytes;
+}
+
+void BKE_paint_layers_bake_hold_note(Material &ma, const bUUID &marker)
+{
+  const double deadline = BLI_time_now_seconds() + BAKE_SHAPE_HOLD_SECONDS;
+  Vector<BakeShapeHold> &holds = bake_shape_holds().lookup_or_add_default(ma.id.session_uid);
+  for (BakeShapeHold &hold : holds) {
+    if (BLI_uuid_equal(hold.marker, marker)) {
+      hold.deadline = deadline;
+      return;
+    }
+  }
+  holds.append({marker, deadline});
+}
+
+double BKE_paint_layers_bake_hold_next_deadline()
+{
+  double next = -1.0;
+  for (const auto item : bake_shape_holds().items()) {
+    for (const BakeShapeHold &hold : item.value) {
+      if (next < 0.0 || hold.deadline < next) {
+        next = hold.deadline;
+      }
+    }
+  }
+  return next;
+}
+
+bool BKE_paint_layers_bake_hold_due(Main &bmain, const double now)
+{
+  bool tagged = false;
+  Vector<uint32_t> empty;
+  for (const auto item : bake_shape_holds().items()) {
+    Material *ma = nullptr;
+    for (Material &candidate : bmain.materials) {
+      if (candidate.id.session_uid == item.key) {
+        ma = &candidate;
+        break;
+      }
+    }
+    if (ma == nullptr || !BKE_paint_layers_is_layered(*ma)) {
+      empty.append(item.key);
+      continue;
+    }
+    bool tag_material = false;
+    for (int64_t i = item.value.size() - 1; i >= 0; i--) {
+      const BakeShapeHold &hold = item.value[i];
+      if (hold.deadline > now) {
+        continue;
+      }
+      const MaterialPaintLayer *layer = BKE_paint_layers_find(*ma, hold.marker);
+      /* A row that lost its bake or whose bake is no longer valid stays live; there is no baked
+       * shape to turn back to. */
+      if (layer != nullptr && paint_layer_row_substituted(*ma, *layer)) {
+        tag_material = true;
+      }
+      item.value.remove(i);
+    }
+    if (item.value.is_empty()) {
+      empty.append(item.key);
+    }
+    if (tag_material) {
+      BKE_paint_layers_tag_edited(*ma);
+      tagged = true;
+    }
+  }
+  for (const uint32_t uid : empty) {
+    bake_shape_holds().remove(uid);
+  }
+  return tagged;
+}
+
+void BKE_paint_layers_bake_hold_clear()
+{
+  bake_shape_holds().clear();
 }
 
 void BKE_paint_layers_bake_job_free(PaintLayersBakeJob &job)

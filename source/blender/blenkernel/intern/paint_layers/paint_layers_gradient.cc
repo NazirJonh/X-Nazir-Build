@@ -240,6 +240,23 @@ uint64_t BKE_paint_layers_gradient_ramp_hash(const ColorBand &ramp)
   return hash;
 }
 
+uint64_t BKE_paint_layers_gradient_ramp_shape_hash(const ColorBand &ramp)
+{
+  /* Mirrors gpu_shader_valtorgb's choice of shader function. A one-stop band is a uniform; a
+   * two-stop RGB band with linear/constant/ease interpolation uses the optimised uniform functions;
+   * everything else samples the band as a texture (nearest for constant interpolation). */
+  if (ramp.tot <= 1) {
+    return 1;
+  }
+  if (ramp.tot == 2 && ramp.color_mode == COLBAND_BLEND_RGB &&
+      (ramp.ipotype == COLBAND_INTERP_LINEAR || ramp.ipotype == COLBAND_INTERP_CONSTANT ||
+       ramp.ipotype == COLBAND_INTERP_EASE))
+  {
+    return 2 + uint64_t(ramp.ipotype);
+  }
+  return 10 + (ramp.ipotype == COLBAND_INTERP_CONSTANT ? 1 : 0);
+}
+
 bool BKE_paint_layers_gradient_any(const Material &ma)
 {
   bool found = false;

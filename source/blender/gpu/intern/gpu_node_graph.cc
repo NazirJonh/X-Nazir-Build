@@ -23,6 +23,7 @@
 #include "BLI_utildefines.h"
 
 #include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 
 #include "GPU_texture.hh"
@@ -156,6 +157,11 @@ static void gpu_node_input_link(GPUNode *node, GPUNodeLink *link, const GPUType 
       break;
     case GPU_NODE_LINK_UNIFORM:
       input->source = GPU_SOURCE_UNIFORM;
+      /* Only a uniform can carry a value edit: a constant is baked into the shader source. */
+      input->origin = link->origin;
+      input->origin_safe = link->origin_safe;
+      input->ramp_key = link->ramp_key;
+      input->ramp_role = link->ramp_role;
       break;
     case GPU_NODE_LINK_DIFFERENTIATE_FLOAT_FN:
       input->source = GPU_SOURCE_FUNCTION_CALL;
@@ -198,6 +204,47 @@ static const char *gpu_uniform_set_function_from_type(eNodeSocketDatatype type)
 }
 
 /**
+ * Whether a node only reads its unconnected inputs as values, without any of them deciding what the
+ * generated code looks like. Nodes that ask `socket_not_zero()`/`might_be_tinted()` of a value pick
+ * a different set of material flags or a different GLSL function for it, so a value edit there is a
+ * rebuild, not a uniform update.
+ */
+bool GPU_material_node_is_value_only(const bNode &node)
+{
+  switch (node.type_legacy) {
+    case SH_NODE_MIX:
+    case SH_NODE_MATH:
+    case SH_NODE_VECTOR_MATH:
+    case SH_NODE_MAPPING:
+    case SH_NODE_VALTORGB:
+    case SH_NODE_TEX_IMAGE:
+    case SH_NODE_SEPXYZ:
+    case SH_NODE_COMBXYZ:
+    case SH_NODE_SEPARATE_COLOR:
+    case SH_NODE_COMBINE_COLOR:
+    case SH_NODE_COMPOSE_COLOR_ALPHA:
+    case SH_NODE_VECTOR_ROTATE:
+    case SH_NODE_MAP_RANGE:
+    case SH_NODE_CLAMP:
+    /* The color filters the layers lay: one #GPU_stack_link each, with no code chosen by a value. */
+    case SH_NODE_HUE_SAT:
+    case SH_NODE_BRIGHTCONTRAST:
+    case SH_NODE_GAMMA:
+    case SH_NODE_INVERT:
+    /* The pattern textures the generators lay. Each picks its GLSL function from the node's stored
+     * choices (dimensions, type, feature), never from a socket value; the sockets are uniforms. */
+    case SH_NODE_TEX_CHECKER:
+    case SH_NODE_TEX_WAVE:
+    case SH_NODE_TEX_VORONOI:
+    case SH_NODE_TEX_NOISE:
+    case SH_NODE_TEX_BRICK:
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
  * Link stack uniform buffer.
  * This is called for the input/output sockets that are not connected.
  */
@@ -227,7 +274,7 @@ static GPUNodeLink *gpu_uniformbuffer_link(GPUMaterial *mat,
     return nullptr;
   }
 
-  GPUNodeLink *link = GPU_uniform(stack->vec);
+  GPUNodeLink *link = GPU_uniform_from_stack(stack);
 
   if (in_out == SOCK_IN) {
     GPU_link(mat, gpu_uniform_set_function_from_type(socket->type), link, &stack->link);
@@ -1115,6 +1162,16 @@ void gpu_node_graph_optimize(GPUNodeGraph *graph)
   /* TODO: Consider performing other node graph optimizations here. */
 }
 
+GPUNodeLink *GPU_uniform_from_stack(const GPUNodeStack *stack)
+{
+  GPUNodeLink *link = GPU_uniform(stack->vec);
+  /* Remember where the value came from, so a value edit can rewrite the uniform buffer of the built
+   * material instead of rebuilding it (see #GPU_material_values_update). */
+  link->origin = stack->origin;
+  link->origin_safe = stack->origin_safe;
+  return link;
+}
+
 GPUNodeStack &GPU_node_get_input(const bNode &node,
                                  GPUNodeStack inputs[],
                                  const StringRef identifier)
@@ -1141,7 +1198,7 @@ GPUNodeLink *GPU_node_get_input_link(const bNode &node,
   if (input.link) {
     return input.link;
   }
-  return GPU_uniform(input.vec);
+  return GPU_uniform_from_stack(&input);
 }
 
 }  // namespace blender

@@ -41,6 +41,8 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLT_translation.hh"
+
 #include "BKE_attribute.hh"
 #include "BKE_collection.hh"
 #include "BKE_context.hh"
@@ -60,6 +62,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_source_graph.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_scene.hh"
 
@@ -96,6 +99,30 @@
 #include "WM_types.hh"
 
 namespace blender::ed::material_bake {
+
+/** The material of \a bmain with \a session_uid, or null when it went away (deleted, or belonged
+ * to a file that has since been closed). The bake callbacks carry session uids for exactly that
+ * reason, and resolve them this way on the main thread. */
+static Material *material_by_session_uid(Main &bmain, const uint32_t session_uid)
+{
+  for (Material &material : bmain.materials) {
+    if (material.id.session_uid == session_uid) {
+      return &material;
+    }
+  }
+  return nullptr;
+}
+
+/** The image of \a bmain with \a session_uid, or null when it went away. */
+static Image *image_by_session_uid(Main &bmain, const uint32_t session_uid)
+{
+  for (Image &image : bmain.images) {
+    if (image.id.session_uid == session_uid) {
+      return &image;
+    }
+  }
+  return nullptr;
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Baked Result
@@ -1131,6 +1158,53 @@ bool bake_channel_requests_build(const Material &bake_material,
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Source Graph Channel Requests
+ *
+ * The CPU-composite cache of a source-graph material is baked from what the material's own graph
+ * feeds its generated instance, not from its Principled inputs: one request per linked
+ * `Source <channel>` input of the instance. The sockets sit in the root tree of the localized
+ * copy, so there is no group path to route through.
+ * \{ */
+
+static bool bake_source_graph_requests_build(const Material &bake_material,
+                                             const Span<eMaterialPaintChannel> channels,
+                                             Vector<BakeSocketRequest> &r_requests,
+                                             Vector<int> &r_request_channels)
+{
+  /* KNOWN LIMITATION, agreed: the cache is rendered on a UV quad, so a channel whose chain reads
+   * the object or the camera (#BKE_paint_layers_source_graph_object_dependent -- Geometry, Object
+   * Info, Texture Coordinate, Camera Info, Light Path) bakes the quad's answer, not the real
+   * surface's. The render itself keeps reading the graph, so only the CPU composite can disagree;
+   * callers warn rather than promise the pixels. */
+  PaintLayersSourceChannelFeed feeds[PAINT_MATERIAL_CHANNEL_NUM];
+  const int feeds_num = BKE_paint_layers_source_graph_feeds_find(
+      bake_material, MutableSpan<PaintLayersSourceChannelFeed>(feeds, PAINT_MATERIAL_CHANNEL_NUM));
+  for (const eMaterialPaintChannel channel : channels) {
+    const PaintLayersSourceChannelFeed *feed = nullptr;
+    for (const int i : IndexRange(feeds_num)) {
+      if (feeds[i].channel == channel) {
+        feed = &feeds[i];
+        break;
+      }
+    }
+    if (feed == nullptr) {
+      /* The channel was fed when the bake was planned and is not any more: it keeps whatever it
+       * had, and the landing's re-validation leaves the material stale for the newer graph. */
+      continue;
+    }
+    BakeSocketRequest request;
+    request.source = feed->socket;
+    request.is_color = BKE_paint_material_channel_info(channel).is_color;
+    SNPRINTF(request.name, "__PBR_PAINT_BAKE_%d", int(channel));
+    r_requests.append(request);
+    r_request_channels.append(int(channel));
+  }
+  return !r_requests.is_empty();
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Bake Job
  * \{ */
 
@@ -1397,6 +1471,14 @@ struct MaterialBakeImagesJob {
   /** Node-tree hash the targets carry once this bake lands. */
   uint64_t baked_hash = 0;
   uint32_t material_session_uid = 0;
+  /**
+   * A source-graph cache bake: the landing wires the targets into the material and stamps
+   * #source_hash_at_start, and no per-image link takes part.
+   */
+  bool source_graph = false;
+  /** The channel-graph hash at the start, what #Material::paint_layers_source_hash reads once
+   * this bake lands; an edit since then keeps the material stale (the landing re-derives). */
+  uint64_t source_hash_at_start = 0;
   /** The Material row of a layered material the maps are for, told how the render ended. */
   MaterialBakeRowLink row;
   /** The owner the `wmJob` of this render is keyed on, excluded when its free callback settles. */
@@ -1511,6 +1593,14 @@ static Image *bake_target_image_find(Main &bmain,
   return nullptr;
 }
 
+static BakeTargetKind bake_target_kind(const bool source_cache, const bool placeholder)
+{
+  if (source_cache) {
+    return placeholder ? BakeTargetKind::SourceCachePlaceholder : BakeTargetKind::SourceCache;
+  }
+  return placeholder ? BakeTargetKind::Placeholder : BakeTargetKind::Row;
+}
+
 /** Create one target image and link it back to \a material. Main thread only. */
 Image *bake_target_image_create(Main &bmain,
                                 Material &material,
@@ -1518,11 +1608,20 @@ Image *bake_target_image_create(Main &bmain,
                                 const int size,
                                 const char *layer_id,
                                 const uint64_t current_hash,
-                                const bool placeholder)
+                                const BakeTargetKind kind)
 {
+  const bool placeholder = ELEM(
+      kind, BakeTargetKind::Placeholder, BakeTargetKind::SourceCachePlaceholder);
+  const bool source_cache = ELEM(
+      kind, BakeTargetKind::SourceCache, BakeTargetKind::SourceCachePlaceholder);
   const MaterialPaintChannelInfo &info = BKE_paint_material_channels()[channel];
   char name[MAX_ID_NAME - 2];
-  SNPRINTF(name, "%s %s Bake", material.id.name + 2, info.ui_name);
+  if (source_cache) {
+    SNPRINTF(name, "%s %s Source", material.id.name + 2, info.ui_name);
+  }
+  else {
+    SNPRINTF(name, "%s %s Bake", material.id.name + 2, info.ui_name);
+  }
 
   const bool is_color = bake_channel_is_color(channel);
   const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -1554,6 +1653,12 @@ Image *bake_target_image_create(Main &bmain,
   STRNCPY(image->colorspace_settings.name,
           IMB_colormanagement_role_colorspace_name_get(is_color ? COLOR_ROLE_SCENE_LINEAR :
                                                                   COLOR_ROLE_DATA));
+
+  if (source_cache) {
+    /* No bake link and no row stamp: the material's #paint_layers_source_images array is the only
+     * owner, the stored hash the only claim, and the internal flag the only advertisement. */
+    return image;
+  }
 
   BLI_uuid_parse_string(&image->paint_layer_id, layer_id);
   image->paint_layer_channel = int(channel);
@@ -1707,21 +1812,28 @@ static void material_bake_images_startjob(void *customdata, wmJobWorkerStatus *w
   }
   BKE_ntree_update_after_single_tree_change(*bake_main, *bake_material.nodetree);
 
-  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(&bake_material);
   Vector<BakeSocketRequest> requests;
   Vector<int> request_channels;
-  bool baked = bake_channel_requests_build(bake_material,
-                                           resolve,
-                                           /*include_image_resolution=*/true,
-                                           requests,
-                                           request_channels,
-                                           job.include_height);
-  /* The builder answers for every renderable channel of the material; this job asked for a subset,
-   * and rendering the rest would only cost time. */
-  for (int64_t request_index = requests.size() - 1; request_index >= 0; request_index--) {
-    if (!job.channels.contains(eMaterialPaintChannel(request_channels[request_index]))) {
-      requests.remove(request_index);
-      request_channels.remove(request_index);
+  bool baked;
+  if (job.source_graph) {
+    baked = bake_source_graph_requests_build(bake_material, job.channels, requests, request_channels);
+  }
+  else {
+    const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(&bake_material);
+    baked = bake_channel_requests_build(bake_material,
+                                        resolve,
+                                        /*include_image_resolution=*/true,
+                                        requests,
+                                        request_channels,
+                                        job.include_height);
+    /* The builder answers for every renderable channel of the material; this job asked for a
+     * subset, and rendering the rest would only cost time. The source-graph builder already
+     * answers exactly what was asked. */
+    for (int64_t request_index = requests.size() - 1; request_index >= 0; request_index--) {
+      if (!job.channels.contains(eMaterialPaintChannel(request_channels[request_index]))) {
+        requests.remove(request_index);
+        request_channels.remove(request_index);
+      }
     }
   }
   /* The "Normal without relief" option is applied after the resolve (which must still see the
@@ -1785,6 +1897,72 @@ static void material_bake_images_startjob(void *customdata, wmJobWorkerStatus *w
 }
 
 /**
+ * Land a source-graph cache bake: the rendered buffers go into the material's cache images, and --
+ * only when every channel the bake was asked for rendered -- the stored hash becomes the one the
+ * bake started from. A channel that failed to render leaves the claim unstamped, so the
+ * re-validation keeps the material stale instead of reading freshness over pixels that never
+ * arrived; the bake's failure memory keeps the auto path from retrying the same graph. An edit
+ * since the start shows up as a mismatch in the re-validation either way. Runs on the main thread,
+ * once the worker is done.
+ */
+static void material_source_cache_land(MaterialBakeImagesJob &job, Main &bmain)
+{
+  Material *ma = material_by_session_uid(bmain, job.material_session_uid);
+  if (ma == nullptr) {
+    /* The material went away; the created targets are orphans with no user and no fake user, and
+     * the next purge takes them. */
+    return;
+  }
+  Vector<PaintLayersSourceCacheLandedChannel> landed;
+  for (const int i : job.channels.index_range()) {
+    ImBuf *rendered = job.rendered[i];
+    if (rendered == nullptr || rendered->float_data() == nullptr) {
+      /* A channel that failed to render (a cancelled job included) lands nothing: its claim part
+       * is left to the next bake, its old pixels or the constant are what the CPU serves meanwhile
+       * (the stale mark stays on with the claim unstamped). */
+      continue;
+    }
+    Image *target = image_by_session_uid(bmain, job.target_session_uids[i]);
+    if (target == nullptr) {
+      continue;
+    }
+    /* The cache is a map of the channel's value: it covers by the opacity it is laid by, never by
+     * the render's alpha, so the fourth component is forced to the full coverage the chain's
+     * constant bottom carries. Done on the buffer, before the adopt copies it in. */
+    float *texel = rendered->float_data_for_write();
+    for (const int64_t t : IndexRange(int64_t(rendered->x) * rendered->y)) {
+      texel[t * 4 + 3] = 1.0f;
+    }
+    if (!bake_target_image_adopt(*target, rendered, job.channels[i], /*replace_size=*/true)) {
+      bake_target_image_write_back(*target, *rendered);
+    }
+    landed.append(PaintLayersSourceCacheLandedChannel{job.channels[i], target});
+  }
+  if (BKE_paint_layers_source_cache_land_apply(
+          *ma, job.source_hash_at_start, job.channels, landed) ==
+      PaintLayersSourceCacheLandState::Partial)
+  {
+    BKE_paint_layers_source_cache_failure_remember(*ma, job.source_hash_at_start);
+    /* The one user status a failed channel gets: the claim did not stamp, the panel reads stale,
+     * and the auto path leaves this graph alone until it changes or the user asks again. */
+    for (const eMaterialPaintChannel channel : job.channels) {
+      const bool landed_channel = std::any_of(
+          landed.begin(), landed.end(), [&](const PaintLayersSourceCacheLandedChannel &entry) {
+            return entry.channel == channel;
+          });
+      if (!landed_channel) {
+        printf("[paint-layers source cache] channel %s did not render; the cache stays stale\n",
+               IFACE_(BKE_paint_material_channel_info(channel).ui_name));
+      }
+    }
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  /* An edit that landed while the bake was in flight (or a channel that failed to) leaves the
+   * mark on with nothing scheduled to serve it; the next bake is armed here. */
+  paint_layers_source_cache_landing_rearm(*ma);
+}
+
+/**
  * Publish the rendered buffers into their targets. Runs on the main thread once the worker is
  * done, which is what makes it safe to touch real #Image data-blocks at all.
  */
@@ -1795,23 +1973,20 @@ static void material_bake_images_endjob(void *customdata)
   if (bmain == nullptr) {
     return;
   }
-  Material *source_material = nullptr;
-  for (Material &material : bmain->materials) {
-    if (material.id.session_uid == job.material_session_uid) {
-      source_material = &material;
-      break;
-    }
-  }
+  Material *source_material = material_by_session_uid(*bmain, job.material_session_uid);
   /* The render is of the material as it was copied. An edit since then has already started the
    * bake of the newer state; an undo since then restores both the material and the maps' link to
    * the older one, and nothing would ever start a bake to put the undone pixels right. Either way,
    * these pixels describe a state the material is no longer in.
    *
-   * A Material row's maps are the exception: it compares the source's content hash it started from
-   * with the source's now (#BKE_paint_layers_material_bake_land), so pixels of an older state are
-   * taken and the row is stale against them, and the next scene update renders it again. Dropping
-   * them here on a hash that moves for reasons of its own (a tree sharing a group) would leave the
-   * row without maps for good. */
+   * A source-graph cache bake lands regardless: its hash-at-start rule (the landing stamps the hash
+   * the bake began from and re-derives the stale mark) is exactly the exception the rows take. */
+  if (job.source_graph) {
+    if (source_material != nullptr) {
+      material_source_cache_land(job, *bmain);
+    }
+    return;
+  }
   if (!job.row.active &&
       (source_material == nullptr ||
        material_bake_source_node_tree_hash(*source_material) != job.baked_hash))
@@ -1822,13 +1997,7 @@ static void material_bake_images_endjob(void *customdata)
   for (const int i : job.channels.index_range()) {
     ImBuf *rendered = job.rendered[i];
     const uint32_t session_uid = job.target_session_uids[i];
-    Image *target = nullptr;
-    for (Image &image : bmain->images) {
-      if (image.id.session_uid == session_uid) {
-        target = &image;
-        break;
-      }
-    }
+    Image *target = image_by_session_uid(*bmain, session_uid);
     ImageMaterialSource source;
     const bool target_valid = target != nullptr &&
                               BKE_image_material_source_get(*target, source) &&
@@ -1861,19 +2030,16 @@ static void material_bake_images_endjob(void *customdata)
     /* The pending claim is released by #material_bake_images_free, which always follows. */
   }
   if (job.row.active) {
-    for (Material &owner : bmain->materials) {
-      if (owner.id.session_uid == job.row.owner_session_uid) {
-        const bool took = BKE_paint_layers_material_bake_land(
-            owner, job.row.marker, job.row.hash, job.row.source_hash, all_landed, job.row.preview_side);
-        if (MaterialPaintLayer *row = BKE_paint_layers_find(owner, job.row.marker)) {
-          printf("[paint-layers material row] render end: all_landed=%d took=%d\n",
-                 int(all_landed),
-                 int(took));
-          BKE_paint_layers_material_row_log(owner, *row, "after land");
-        }
-        WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &owner.id);
-        break;
+    if (Material *owner = material_by_session_uid(*bmain, job.row.owner_session_uid)) {
+      const bool took = BKE_paint_layers_material_bake_land(
+          *owner, job.row.marker, job.row.hash, job.row.source_hash, all_landed, job.row.preview_side);
+      if (MaterialPaintLayer *row = BKE_paint_layers_find(*owner, job.row.marker)) {
+        printf("[paint-layers material row] render end: all_landed=%d took=%d\n",
+               int(all_landed),
+               int(took));
+        BKE_paint_layers_material_row_log(*owner, *row, "after land");
       }
+      WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &owner->id);
     }
   }
 }
@@ -1884,6 +2050,23 @@ static void material_bake_images_free(void *customdata)
   if (job->material_copy != nullptr) {
     /* The job never ran, so the copy never reached a Main of its own. */
     BKE_id_free(nullptr, &job->material_copy->id);
+  }
+  if (job->source_graph) {
+    /* A cache bake that never landed -- cancelled, or the endjob found the material gone -- leaves
+     * the placeholder targets it created unwired. Released here, or they would sit in the file as
+     * phantom users; the ones the landing wired carry the material's user and stay. */
+    if (Main *bmain = G_MAIN) {
+      Material *ma = material_by_session_uid(*bmain, job->material_session_uid);
+      for (const int i : job->channels.index_range()) {
+        Image *image = image_by_session_uid(*bmain, job->target_session_uids[i]);
+        if (image == nullptr ||
+            (ma != nullptr && ma->paint_layers_source_images[int(job->channels[i])] == image))
+        {
+          continue;
+        }
+        id_us_min(&image->id);
+      }
+    }
   }
   for (ImBuf *ibuf : job->rendered) {
     if (ibuf != nullptr) {
@@ -1925,15 +2108,32 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
   BLI_assert(params.blocking || wm != nullptr);
 
   const int size = bake_size_clamp(params.size);
-  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(params.material);
+  const MaterialSourceResolve resolve = params.source_graph ?
+                                            MaterialSourceResolve{} :
+                                            BKE_paint_material_source_resolve(params.material);
   ChannelUnavailableReason reason = ChannelUnavailableReason::None;
-  if (BKE_paint_material_principled_find(*params.material, reason) == nullptr) {
+  if (!params.source_graph &&
+      BKE_paint_material_principled_find(*params.material, reason) == nullptr)
+  {
     return result;
   }
 
   /* Deduplicated per channel for new maps; an explicit target is its own entry. */
   Vector<const BakeTargetSpec *> to_create;
   for (const BakeTargetSpec &target : params.targets) {
+    /* A source-graph cache bake is told exactly the channels its caller resolved off the instance;
+     * the per-target checks below belong to the Principled resolve it does not use. */
+    if (params.source_graph) {
+      if (!std::any_of(to_create.begin(),
+                       to_create.end(),
+                       [&](const BakeTargetSpec *other) {
+                         return other->channel == target.channel && other->existing == target.existing;
+                       }))
+      {
+        to_create.append(&target);
+      }
+      continue;
+    }
     /* A channel outside the owning layered material's set is not rendered into a map. A coverage
      * target is the row's composition factor rather than a channel, so the set never drops it. A
      * plain Bake to Images has no owner and renders every requested channel. */
@@ -1974,13 +2174,18 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
   else {
     BLI_uuid_format(result.layer_id, BLI_uuid_generate_random());
   }
-  const uint64_t current_hash = material_bake_source_node_tree_hash(*params.material);
+  /* The source-graph bake's validity key is the channel-graph hash the landing stamps; a
+   * Principled bake keys its maps on the whole-tree state as before. */
+  const uint64_t current_hash =
+      params.source_graph ? BKE_paint_layers_source_channel_graph_hash_cached(*params.material) :
+                            material_bake_source_node_tree_hash(*params.material);
 
   Vector<eMaterialPaintChannel> render_channels;
   Vector<uint32_t> render_target_uids;
   for (const BakeTargetSpec *target : to_create) {
     const eMaterialPaintChannel channel = target->channel;
-    const bool constant = resolve.channels[channel] == ChannelResolution::Constant;
+    const bool constant = !params.source_graph &&
+                          resolve.channels[channel] == ChannelResolution::Constant;
     Image *image = target->existing != nullptr ?
                        target->existing :
                    params.reuse_existing ?
@@ -1991,7 +2196,8 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
                                                 size,
                                                 result.layer_id,
                                                 current_hash,
-                                                /*placeholder=*/!constant && !params.blocking);
+                                                bake_target_kind(params.source_graph,
+                                                                 !constant && !params.blocking));
     if (image == nullptr) {
       /* Only reachable when re-baking a layer whose target for this channel is gone. */
       continue;
@@ -2039,8 +2245,10 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
 
   /* The job slot is keyed on the material, so starting this job replaces one still in flight for the
    * same material. Carry that job's targets over; otherwise a batch of single-channel re-bakes
-   * (one call per map) would leave only the last map baked. */
-  if (!params.blocking) {
+   * (one call per map) would leave only the last map baked. A source-graph bake resolves its
+   * channels off the current graph each time -- a replaced job's set may describe a graph that no
+   * longer exists, so nothing is carried. */
+  if (!params.blocking && !params.source_graph) {
     for (Image &image : bmain.images) {
       ImageMaterialSource source;
       if (!material_bake_source_is_baking(image) || !BKE_image_material_source_get(image, source) ||
@@ -2074,6 +2282,8 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
   job->size = size;
   job->baked_hash = current_hash;
   job->material_session_uid = params.material->id.session_uid;
+  job->source_graph = params.source_graph;
+  job->source_hash_at_start = current_hash;
   job->row = params.row;
   /* The Height request is built only when a map of it was asked for; the "Normal without relief"
    * disconnect runs in the worker, on the localized copy. */

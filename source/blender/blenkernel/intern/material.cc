@@ -78,6 +78,7 @@
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_source_graph.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_layers_composite.hh"
@@ -468,10 +469,13 @@ static void material_paint_layers_blend_read(BlendDataReader *reader, Material &
   /* The pending-bake and cancel marks are derived state; a file never carries them. The scheduled
    * mark belongs to the editor's debounce timer and `wmJob`s, which a file does not carry across a
    * save either: a file saved while a bake was armed or running must not load back permanently
-   * stale with nothing left to clear the mark. */
-  material.paint_layers_flag &= ~(MA_PAINT_LAYERS_BAKE_STALE | MA_PAINT_LAYERS_BAKE_CANCELLED |
-                                  MA_PAINT_LAYERS_BAKE_SCHEDULED | MA_PAINT_LAYERS_PREVIEW_WANTED |
-                                  MA_PAINT_LAYERS_VALUES_ONLY | MA_PAINT_LAYERS_RAMP_ONLY);
+   * stale with nothing left to clear the mark. The source-cache stale mark likewise: it is
+   * re-derived from the stored hash once the trees are up (see
+   * #BKE_paint_layers_source_cache_validate). */
+  material.paint_layers_flag &=
+      ~(MA_PAINT_LAYERS_BAKE_STALE | MA_PAINT_LAYERS_BAKE_CANCELLED |
+        MA_PAINT_LAYERS_BAKE_SCHEDULED | MA_PAINT_LAYERS_PREVIEW_WANTED |
+        MA_PAINT_LAYERS_VALUES_ONLY | MA_PAINT_LAYERS_RAMP_ONLY | MA_PAINT_LAYERS_SOURCE_STALE);
   BLO_read_struct_list(reader, MaterialPaintLayer, &material.paint_layers);
   for (MaterialPaintLayer &layer : material.paint_layers) {
     material_paint_layer_blend_read(reader, layer);
@@ -546,6 +550,14 @@ static void material_copy_data(Main *bmain,
    * to scan first. It is recreated on demand; an evaluated copy shares it under COW like the tree. */
   if ((flag & LIB_ID_CREATE_NO_USER_REFCOUNT) == 0 && (flag & LIB_ID_CREATE_NO_MAIN) == 0) {
     material_dst->paint_layers_canvas_image = nullptr;
+    /* The source-graph cache describes the source material's graph render: a real copy must not
+     * read the original's maps. The hash goes with them: it and the array are one claim about the
+     * graph, and a copy carrying "hash matches, cache missing" would be judged fresh forever. With
+     * a zero hash the first validation marks the copy stale and its cache is baked like any other. */
+    for (Image *&image : material_dst->paint_layers_source_images) {
+      image = nullptr;
+    }
+    material_dst->paint_layers_source_hash = 0;
   }
 
   material_dst->gpumaterial.clear_no_delete();
@@ -579,6 +591,9 @@ static void material_free_data(ID *id)
      * so the same evaluated-copy exemption applies: freeing a CoE copy must not release the live
      * original's owner. */
     BKE_image_paint_selection_owner_release(material->id.session_uid);
+    /* The source-graph cache bake's failure memory is keyed on the session UID like the caches
+     * above, and its record says nothing a file could want back: it dies with the material. */
+    BKE_paint_layers_source_cache_failure_forget(*material);
   }
 
   /* Invalidate image paint slot info for all images used in this material. */
@@ -636,6 +651,12 @@ static void material_foreach_id(ID *id, LibraryForeachIDData *data)
    * across purge exactly like the generated tree above. */
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(
       data, material->paint_layers_canvas_image, IDWALK_CB_USER);
+
+  /* The source-graph cache images are the material's own too: one user each, so they ride remap,
+   * purge and append/link with the material that owns them. */
+  for (Image *&image : material->paint_layers_source_images) {
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, image, IDWALK_CB_USER);
+  }
 
   for (MaterialPaintLayer &layer : material->paint_layers) {
     BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, material_paint_layer_foreach_id(&layer, data));

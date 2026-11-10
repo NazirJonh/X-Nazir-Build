@@ -42,6 +42,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_source_graph.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_scene.hh"
@@ -282,6 +283,12 @@ static void material_changed(Main *bmain, Material *ma)
   BKE_paint_material_combined_cache_invalidate(ma);
   /* A Layer brush source reads this material directly or through a row; rebake it once edits stop. */
   ed::brush_layer_source::brush_layer_source_notify_changed(*bmain, false);
+
+  /* The source-graph cache is keyed on the graph's content: an edit that moved the channel-graph
+   * hash marks the cache stale here, and the debounce this function arms below is what re-bakes it
+   * (see the bake scheduling). A stack-only edit moves nothing the walk reads, so the cache of a
+   * material whose rows changed stays fresh. */
+  BKE_paint_layers_source_cache_validate(*ma);
 
   /* The renders an edit makes due -- a Material row's maps, a heavy row's bake -- are started once
    * the edits stop, not by the scene update of each one, so a burst (a slider held down, a node

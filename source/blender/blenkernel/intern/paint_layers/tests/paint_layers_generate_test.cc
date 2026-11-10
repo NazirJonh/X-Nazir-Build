@@ -15,7 +15,11 @@
 #include "BKE_node_tree_interface.hh"
 
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_source_graph.hh"
+
+#include "BLI_math_vector.h"
 
 #include "../paint_layers_generate_intern.hh"
 #include "../paint_layers_generate_layout.hh"
@@ -1045,14 +1049,6 @@ TEST_F(PaintLayersGenerateTest, disabling_height_leaves_the_marked_bump_off_the_
   EXPECT_NE(record->image, nullptr);
 }
 
-/** The one link feeding \a input, or null when it has none or more than one. */
-static const bNodeLink *fed_by_one(const bNodeTree &tree, const bNodeSocket &input)
-{
-  tree.ensure_topology_cache();
-  const Span<const bNodeLink *> links = input.directly_linked_links();
-  return links.size() == 1 ? links.first() : nullptr;
-}
-
 /** How many nodes of \a type \a tree holds itself, without descending into its groups. */
 static int direct_type_count(const bNodeTree &tree, const int type)
 {
@@ -1063,28 +1059,6 @@ static int direct_type_count(const bNodeTree &tree, const int type)
     }
   }
   return count;
-}
-
-/** A Principled BSDF into a Material Output, for the tests that generate into a material the
- * author already wired. */
-static bNode *principled_with_output_add(bNodeTree &tree)
-{
-  bNode *principled = bke::node_add_static_node(nullptr, tree, SH_NODE_BSDF_PRINCIPLED);
-  bNode *output = bke::node_add_static_node(nullptr, tree, SH_NODE_OUTPUT_MATERIAL);
-  bke::node_add_link(tree,
-                     *principled,
-                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
-                     *output,
-                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
-  return principled;
-}
-
-/** The channel set of the Normal and Height tests: Base Color, Normal and Height. */
-static uint16_t normal_and_height_set()
-{
-  return uint16_t(uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR |
-                 uint16_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL |
-                 uint16_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT);
 }
 
 /**

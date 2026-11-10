@@ -55,6 +55,35 @@ class MATERIAL_MT_context_menu(Menu):
         layout.operator("object.material_slot_remove_all")
 
 
+class MATERIAL_MT_layered(Menu):
+    bl_label = "Layered Material"
+
+    def draw(self, _context):
+        layout = self.layout
+
+        # The operator's poll owns the eligibility rule, so the menu cannot drift from it.
+        if bpy.ops.material.layered_convert.poll():
+            props = layout.operator("material.layered_convert",
+                                    text="Convert, Keep Node Graph")
+            props.mode = 'GRAPH'
+            props = layout.operator("material.layered_convert",
+                                    text="Convert, Bake to Fill Layer")
+            props.mode = 'BAKE'
+            layout.separator()
+
+        if bpy.ops.material.source_cache_update.poll():
+            layout.operator("material.source_cache_update",
+                            text="Update Source-Graph Cache")
+            layout.separator()
+
+        if bpy.ops.material.layered_revert.poll():
+            layout.operator("material.layered_revert",
+                            text="Revert to Plain Material")
+            layout.separator()
+
+        layout.operator("material.new_layered", text="New Layered Material")
+
+
 class MATERIAL_UL_matslots(UIList):
 
     def draw_item(self, _context, layout, _data, item, icon, _active_data, _active_propname, _index):
@@ -151,12 +180,14 @@ class EEVEE_MATERIAL_PT_context_material(MaterialButtonsPanel, Panel):
 
             col.separator()
 
-            # A glyph icon where the font provides one, the built-in icon otherwise (background
-            # mode), like the Stack Layers Add buttons in the Outliner.
+            # The Layered Material button opens a menu: the active material can become the base of
+            # a stack (keeping its node graph, or baked down into a Fill layer), or a stack is
+            # created from scratch. A glyph icon where the font provides one, the built-in icon
+            # otherwise (background mode), like the Stack Layers Add buttons in the Outliner.
             if glyph := bpy.app.icons.glyph(GLYPH_BRUSH):
-                col.operator("material.new_layered", text="", icon_value=glyph)
+                col.menu("MATERIAL_MT_layered", text="", icon_value=glyph)
             else:
-                col.operator("material.new_layered", text="", icon='ADD')
+                col.menu("MATERIAL_MT_layered", text="", icon='ADD')
 
             col.separator()
 
@@ -1683,6 +1714,15 @@ class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
         layout.use_property_split = True
         layout.prop(owner, "paint_layers_image_size")
 
+        # The baked CPU cache of a converted material's own graph, what its composite reads. The
+        # one status line it gets: the mark is only ever set on a source-graph material, so the
+        # property doubles as the mode check.
+        if owner.source_cache_is_stale:
+            col = layout.column(heading="Source-Graph Cache")
+            col.context_pointer_set("material", owner)
+            col.label(text="Outdated", icon='TIME')
+            col.operator("material.source_cache_update", text="Update Now", icon='FILE_REFRESH')
+
 
 class LAYER_MATERIAL_PT_advanced(LayerMaterialButtonsPanel, Panel):
     """Settings that change how the stack is computed rather than what it contains."""
@@ -1872,6 +1912,7 @@ class LAYER_MATERIAL_PT_object_mask(LayerMaterialButtonsPanel, Panel):
 
 classes = (
     MATERIAL_MT_context_menu,
+    MATERIAL_MT_layered,
     MATERIAL_UL_matslots,
     MATERIAL_PT_preview,
     EEVEE_MATERIAL_PT_context_material,

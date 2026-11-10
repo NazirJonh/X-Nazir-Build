@@ -16,6 +16,7 @@
 #include "ED_paint_layers_bake.hh"
 #include "ED_undo.hh"
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
 #include "BLI_set.hh"
@@ -29,15 +30,20 @@
 #include "BKE_callbacks.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
+#include "BKE_layer.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
+#include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_source_graph.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
 #include "DNA_ID.h"
 #include "DNA_material_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_windowmanager_types.h"
 
@@ -345,6 +351,33 @@ void paint_layers_blend_undo_post(Main *bmain,
   paint_layers_blend_timer_reset();
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Source-Graph Cache Bake
+ *
+ * The CPU-composite cache of a source-graph material is re-baked like every other render an edit
+ * makes due: after the debounce, from the same tick and the same scene-update sweep. The policy is
+ * the agreed one -- a material the user is actually looking at (the active material of the active
+ * object of a window, or one an Image Editor shows the composite of) re-bakes itself; every other
+ * material carries only the stale mark until asked or wanted.
+ * \{ */
+
+/** Whether \a ma is the active material of \a win's active object. */
+static bool paint_layers_source_cache_is_active_material(const wmWindow &win, const Material &ma)
+{
+  const ViewLayer *view_layer = WM_window_get_active_view_layer(&win);
+  Object *ob = BKE_view_layer_active_object_get(view_layer);
+  return ob != nullptr && BKE_object_material_get(ob, ob->actcol) == &ma;
+}
+
+/** The agreed auto-bake policy: looked at now, or not baked until asked. */
+static bool paint_layers_source_cache_wanted(const wmWindow &win, const Material &ma)
+{
+  return (ma.paint_layers_flag & MA_PAINT_LAYERS_PREVIEW_WANTED) != 0 ||
+         paint_layers_source_cache_is_active_material(win, ma);
+}
+
+/** \} */
+
 double paint_layers_bake_debounce_tick(uintptr_t /*uuid*/, void * /*user_data*/)
 {
   /* #BLI_timer callbacks carry no context; the main database and its window manager are the ones
@@ -385,6 +418,11 @@ double paint_layers_bake_debounce_tick(uintptr_t /*uuid*/, void * /*user_data*/)
      * update makes (#paint_layers_bake_jobs_ensure), now for the material that waited. */
     material_bake_layered_rows_ensure(bmain, *ma);
     paint_layers_bake_job_start(wm, win, bmain, *ma);
+    if (win != nullptr && paint_layers_source_cache_wanted(*win, *ma) &&
+        BKE_paint_layers_source_cache_bake_due(*ma, /*manual=*/false))
+    {
+      paint_layers_source_cache_bake_start(wm, win, bmain, *ma);
+    }
     /* Nothing started: nothing will ever reach #paint_layers_bake_scheduled_settle for it. A job
      * that did start clears the mark itself when it frees. */
     if (paint_layers_bake_scheduled_settle_clears(paint_layers_bake_jobs_in_flight(wm, *ma))) {
@@ -728,6 +766,103 @@ wmOperatorStatus paint_layer_row_result_exec(bContext *C, wmOperator *op)
 
 }  // namespace
 
+/**
+ * Start the cache bake of \a ma, or settle a cache the graph can no longer fill. A graph that
+ * feeds nothing has no job to run: its claim lands inline, the same hand-over the landing makes.
+ * Shared by the debounced auto path and the manual #MATERIAL_OT_source_cache_update, which the
+ * active-material policy does not gate. \return true when a job was started.
+ */
+bool paint_layers_source_cache_bake_start(wmWindowManager &wm,
+                                          wmWindow *win,
+                                          Main &bmain,
+                                          Material &ma)
+{
+  if (win == nullptr || !BKE_paint_layers_source_cache_stale_get(ma)) {
+    return false;
+  }
+  PaintLayersSourceChannelFeed feeds[PAINT_MATERIAL_CHANNEL_NUM];
+  const int feeds_num = BKE_paint_layers_source_graph_feeds_find(
+      ma, MutableSpan<PaintLayersSourceChannelFeed>(feeds, PAINT_MATERIAL_CHANNEL_NUM));
+  if (feeds_num == 0) {
+    /* Nothing the graph feeds: there is no cache to bake and none to keep. The images go the way
+     * of any map released from the stack, the claim drops to zero, and the mark clears with it. */
+    for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      if (Image *image = ma.paint_layers_source_images[i]) {
+        id_us_min(&image->id);
+        ma.paint_layers_source_images[i] = nullptr;
+      }
+    }
+    ma.paint_layers_source_hash = 0;
+    BKE_paint_layers_source_cache_validate(ma);
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma.id);
+    return false;
+  }
+  /* Channels the graph stopped feeding lose their maps at once: the CPU serves their constant
+   * while the rest of the cache re-bakes, the same split the landing stamps. */
+  bool dropped = false;
+  for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    const bool fed = std::any_of(
+        feeds, feeds + feeds_num, [&](const PaintLayersSourceChannelFeed &feed) {
+          return int(feed.channel) == i;
+        });
+    if (!fed && ma.paint_layers_source_images[i] != nullptr) {
+      id_us_min(&ma.paint_layers_source_images[i]->id);
+      ma.paint_layers_source_images[i] = nullptr;
+      dropped = true;
+    }
+  }
+  if (dropped) {
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma.id);
+  }
+  /* One job per material: while a bake is in flight, a newer edit's bake does not start. The
+   * stale mark stays on with nothing scheduled under it, and the landing re-arms the bake
+   * (#paint_layers_source_cache_landing_rearm), so the flight is followed by exactly one bake of
+   * what the graph is now. */
+  if (paint_layers_bake_job_test_excluding(
+          wm, &ma, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE, nullptr, WM_JOB_TYPE_ANY))
+  {
+    return false;
+  }
+  Vector<ed::material_bake::BakeTargetSpec> targets;
+  for (const int i : IndexRange(feeds_num)) {
+    targets.append(ed::material_bake::BakeTargetSpec{
+        feeds[i].channel, ma.paint_layers_source_images[int(feeds[i].channel)], false});
+  }
+  ed::material_bake::MaterialBakeToImagesParams params;
+  params.material = &ma;
+  params.targets = targets;
+  params.size = std::min(int(ma.paint_layers_image_size), int(PAINT_LAYERS_SOURCE_CACHE_MAX_SIZE));
+  params.source_graph = true;
+  ed::material_bake::material_bake_to_images(bmain, &wm, win, params);
+  return true;
+}
+
+void paint_layers_source_cache_landing_rearm(Material &ma)
+{
+  /* A bake that landed below the graph's current state (an edit during the flight), or one that
+   * could not land all its channels, leaves the mark on with nothing scheduled to serve it: the
+   * next bake is armed here, once, under the same wanted policy the tick applies. The bake's
+   * failure memory (#BKE_paint_layers_source_cache_bake_due) keeps a graph whose channels never
+   * all render from arming it again and again. */
+  if (!BKE_paint_layers_source_cache_bake_due(ma, /*manual=*/false)) {
+    return;
+  }
+  /* No window comes with a job's end callback; the main database and its window manager are the
+   * ones the main loop is running with, the same read #paint_layers_bake_debounce_tick makes. No
+   * single window decides: a material active in any window's active object is looked at, so the
+   * policy reads every window before giving up. */
+  if (G_MAIN == nullptr || G_MAIN->wm.first == nullptr) {
+    return;
+  }
+  wmWindowManager &wm = *static_cast<wmWindowManager *>(G_MAIN->wm.first);
+  for (const wmWindow &window : wm.windows) {
+    if (paint_layers_source_cache_wanted(window, ma)) {
+      paint_layers_bake_debounce_arm(ma);
+      return;
+    }
+  }
+}
+
 bool paint_layers_bake_job_is_excluded(const void *owner,
                                        const int job_type,
                                        const void *exclude_owner,
@@ -804,6 +939,14 @@ void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bma
      * row and independent of the heavy planner's one job per layered material. */
     material_bake_layered_rows_ensure(bmain, ma);
     paint_layers_bake_job_start(wm, win, bmain, ma);
+    /* The source-graph cache rides the same sweep, under its own policy: a material that is being
+     * looked at re-bakes a stale cache here; the others keep the mark until asked. The due
+     * decision keeps a graph the bake already failed to land from being retried every sweep. */
+    if (win != nullptr && paint_layers_source_cache_wanted(*win, ma) &&
+        BKE_paint_layers_source_cache_bake_due(ma, /*manual=*/false))
+    {
+      paint_layers_source_cache_bake_start(wm, win, bmain, ma);
+    }
   }
 }
 

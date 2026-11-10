@@ -146,6 +146,23 @@ enum eMaterialPaintLayersFlag : short {
    * Cleared by every other edit tag. Runtime only: a file never carries it.
    */
   MA_PAINT_LAYERS_RAMP_ONLY = 1 << 9,
+  /**
+   * The stack composites over the material's own node graph: the generated tree takes the channels
+   * the graph feeds through interface inputs named `Source <channel>`, and the stack's rows lay
+   * over them. The graph's nodes stay the user's -- the generator only ever re-aims the links that
+   * fed the Principled into the generated instance, never edits a node. Set when an existing
+   * material was converted (as opposed to a stack created from scratch), and carried in the file
+   * because the graph the stack reads is part of the material.
+   */
+  MA_PAINT_LAYERS_SOURCE_GRAPH = 1 << 10,
+  /**
+   * The CPU-composite cache of the source graph (#Material::paint_layers_source_images) is behind
+   * the graph's current content: the hash it was baked from no longer matches. Set by the editor's
+   * update path when the graph hash moved, cleared when a cache bake lands. Runtime only: a file
+   * never carries it -- the stored hash is the truth, and staleness is re-derived from it after a
+   * load (see #BKE_paint_layers_source_cache_validate).
+   */
+  MA_PAINT_LAYERS_SOURCE_STALE = 1 << 11,
 };
 ENUM_OPERATORS(eMaterialPaintLayersFlag)
 
@@ -527,6 +544,15 @@ enum eMaterialPaintLayerFlag : int16_t {
    * evaluated with, so it only answers the paint target and the UI.
    */
   MA_PAINT_LAYER_LOCKED = 1 << 5,
+  /**
+   * The row is the Fill a material conversion's bake created. Only such a row is filled again by a
+   * later bake of the same conversion: a Fill the user made by hand never carries the bit, so a
+   * re-bake adds a fresh Fill instead of touching theirs. The bit survives a Revert, which keeps
+   * the rows, so the reuse reaches a stack re-baked after reverting. Files written before the bit
+   * existed read it as zero: their conversion fills are not reused, and a re-bake stacks a fresh
+   * Fill on top -- the safe direction for a stack the bit knows nothing about.
+   */
+  MA_PAINT_LAYER_CONVERSION_FILL = 1 << 6,
 };
 ENUM_OPERATORS(eMaterialPaintLayerFlag)
 
@@ -1794,6 +1820,27 @@ struct Material {
    * pointer-size multiple the file format wants. The two pads are not one: this one closes the
    * tail, #_pad_paint_layers aligns the pointer. */
   char _pad_paint_layers_tail[4] = {};
+  /**
+   * The CPU-composite cache of this material's own node graph, one image per `Source <channel>`
+   * (#MA_PAINT_LAYERS_SOURCE_GRAPH), by channel index; null where the channel is not cached. This
+   * is a read-only cache, never painted into and never shown as a stack row: the CPU composite
+   * starts a channel chain from it instead of the channel's neutral constant, while the render
+   * reads the graph directly. Only the channels the graph feeds are carried, and never Normal or
+   * Height (the author chain stays on the Principled). Owned by the material (one user); no fake
+   * user, like the canvas image above. Zero in older files, which read as "no cache". The literal
+   * length is #PAINT_MATERIAL_CHANNEL_NUM, which `paint_layers.cc` static_asserts.
+   */
+  struct Image *paint_layers_source_images[18 /*PAINT_MATERIAL_CHANNEL_NUM*/] = {};
+  /**
+   * The content hash of what the graph feeds the `Source <channel>` inputs at the moment the cache
+   * above was baked, the validity key of that cache (see
+   * #BKE_paint_layers_source_channel_graph_hash). The hash and the array are one claim about the
+   * graph and are kept consistent: zero whenever the array carries nothing -- the graph feeds no
+   * adopted channel, no cache yet, after a revert, on a copy (so the copy is planned for its first
+   * bake instead of being judged fresh with no maps). A mismatch with the live graph marks the
+   * cache stale and schedules a re-bake.
+   */
+  uint64_t paint_layers_source_hash = 0;
   /** The material's mesh map atlases, one #MaterialMeshMapSlot per #eMaterialMeshMapType. */
   ListBaseT<MaterialMeshMapSlot> mesh_map_slots = {nullptr, nullptr};
   /** Bake/viewport settings shared by every mesh map of this material. */

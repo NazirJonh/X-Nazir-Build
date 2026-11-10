@@ -286,6 +286,14 @@ struct MaterialBakeToImagesParams {
    */
   Material *set_material = nullptr;
   /**
+   * Bake the material's own source-graph channels (the linked `Source <channel>` inputs of its
+   * generated instance) rather than its Principled inputs: the CPU-composite cache of a
+   * source-graph material. The targets are the material's cache images; no per-image bake link is
+   * written, and the validity hash is stamped by the landing in
+   * #Material::paint_layers_source_hash, not on the images.
+   */
+  bool source_graph = false;
+  /**
    * The Material row this render is for. Its maps are handed over by #before_render, and when the
    * render ends the row is told whether they landed.
    */
@@ -332,13 +340,30 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
                                                    wmWindow *win,
                                                    const MaterialBakeToImagesParams &params);
 
+/** What a target image created by #bake_target_image_create is for. */
+enum class BakeTargetKind {
+  /** A stack row's bake map, full size, linked back to the material. */
+  Row,
+  /** Like Row, but 1x1 until the render's own buffer lands. */
+  Placeholder,
+  /** A source-graph cache map, owned by the material's cache array only. */
+  SourceCache,
+  /** Like SourceCache, but 1x1 until the render's own buffer lands. */
+  SourceCachePlaceholder,
+};
+
 /**
  * Create a target #Image for (\a material, \a channel) exactly as the bake does, linked back to the
  * material. Exposed for tests so the colorspace contract of a baked map can be checked without a
  * render; production reaches it through #material_bake_to_images.
  *
- * With \a placeholder the image only holds a 1x1 buffer (the link still records \a size); the
- * caller is expected to hand it a full-size render buffer afterwards.
+ * With the Placeholder kinds the image only holds a 1x1 buffer (the link still records \a size);
+ * the caller is expected to hand it a full-size render buffer afterwards.
+ *
+ * With the SourceCache kinds the image is a source-graph cache map instead: named "<Material>
+ * <Channel> Source", marked internal like every map the stack owns, and carrying no bake link and no row
+ * stamp -- the material's #Material::paint_layers_source_images array is its only owner and the
+ * stored hash its only validity claim.
  */
 Image *bake_target_image_create(Main &bmain,
                                 Material &material,
@@ -346,7 +371,7 @@ Image *bake_target_image_create(Main &bmain,
                                 int size,
                                 const char *layer_id,
                                 uint64_t current_hash,
-                                bool placeholder = false);
+                                BakeTargetKind kind = BakeTargetKind::Row);
 
 /**
  * Write a rendered scene-linear buffer into \a image exactly as the completion callback does.

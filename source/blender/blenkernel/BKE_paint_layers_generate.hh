@@ -107,6 +107,12 @@ void BKE_paint_layers_tree_build(const Material &ma,
 struct PaintLayersRegenerateReport {
   /** A group input the generator owns had been detached and was linked again. */
   bool restored_inputs = false;
+  /**
+   * A link that fed the Principled was re-aimed into the generated instance's `Source <channel>`
+   * input (a source-graph material taking over a graph the user built). The graph's nodes were not
+   * edited; only where its outputs end moved.
+   */
+  bool adopted_source_links = false;
   /** A foreign (hand-built) node group was found where the generated tree belongs; it was left
    * alone and a fresh tree was created instead. */
   bool replaced_foreign_tree = false;

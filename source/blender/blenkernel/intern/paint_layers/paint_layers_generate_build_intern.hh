@@ -911,6 +911,13 @@ class PaintLayersTreeBuilder {
   /** The root's mask output, fed by the active row's group after the channels are built. */
   bNodeTreeInterfaceSocket *mask_output_ = nullptr;
   bNode *group_output_ = nullptr;
+  /**
+   * A source-graph material's chain bottoms: the interface input per channel that the wiring step
+   * feeds from the graph the user built. Empty for a plain stack, whose chains start at constants.
+   */
+  Map<int, bNodeTreeInterfaceSocket *> source_inputs_;
+  /** The root's Group Input node, created when #source_inputs_ is not empty. */
+  bNode *group_input_ = nullptr;
   /** Node positions of this build; a fresh builder starts from row zero. */
   layout::LayoutGrid grid_;
   Map<const MaterialPaintLayer *, LayerGroup *> layer_groups_;

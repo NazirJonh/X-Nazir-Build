@@ -1414,6 +1414,11 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     ctx.layer_invalidate = layer_invalidate;
     ctx.source_group_get = source_group_get;
 
+    /* The interface the instance reads is about to be re-created with fresh socket identifiers,
+     * which takes the links the author's graph feeds into it along with the old sockets: keep them
+     * and re-aim at the rebuilt interface below, or a structural edit would silently drop the
+     * graph's contribution to every channel. */
+    const Vector<PaintLayersSourceLink> source_links = source_links_capture(ma);
     tree_clear(bmain, *tree);
     /* The root's own hash goes the same way: a pass that fails before the instance is wired must
      * not leave a hash that makes the next one keep a half-built root. */
@@ -1449,6 +1454,9 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     /* The root was rebuilt with a new interface: the instance has to follow it before its outputs
      * are looked up for the routing below. */
     nodes::update_node_declaration_and_sockets(*ma.nodetree, *instance);
+    /* The graph's links come back before the wiring reads the Principled: a restored link is the
+     * stack's bottom, and the wiring adopts only a feed that still sits on the Principled. */
+    source_links_restore(ma, *instance, source_links);
 
     principled_ensure(ma, report);
     wire_instance_to_material(ma, *tree, *instance, report);

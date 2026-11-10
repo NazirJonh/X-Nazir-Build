@@ -64,6 +64,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_source_graph.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_sculpt_layers.hh"
@@ -815,6 +816,20 @@ void do_versions_after_linking_520(FileData *fd, Main *bmain)
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 49)) {
     bke::sculpt_layers::sculpt_layers_after_lib_link_fixups(*bmain);
   }
+
+  /* The source-cache staleness is runtime-only and never carried by a file: every load re-derives
+   * it from the stored hash and the packed state of the cache images. Idempotent by construction.
+   *
+   * Deliberately in the after-linking pass, not in #blo_do_versions_520: that pass runs *before*
+   * liblinking, where the material's ID pointers are not restored yet -- the cache images and the
+   * generated tree read as null, so the re-derivation would zero the stored claim of every
+   * converted material instead of comparing it to the live graph. This pass runs after all
+   * liblinking is done, for a plain file read and for a library subset (append and link) alike,
+   * which is the order and the coverage the check needs. It is also deliberately not in
+   * #IDTypeInfo::blend_read_after_liblink: that hook runs per ID type in no order this check can
+   * rely on, and the re-derivation reads the *state of other data-blocks* (the cache images).
+   * Nothing here creates data-blocks, so the after-linking lock does not constrain it. */
+  BKE_paint_layers_source_cache_validate_all(*bmain);
 
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning

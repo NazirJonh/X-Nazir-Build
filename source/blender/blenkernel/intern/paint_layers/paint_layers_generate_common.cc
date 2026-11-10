@@ -12,7 +12,9 @@
 
 #include "paint_layers_generate_intern.hh"
 
+#include <algorithm>
 #include <array>
+#include <cstring>
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
@@ -26,10 +28,12 @@
 
 #include "BKE_idprop.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_library.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_interface.hh"
+#include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_material_resolve.hh"
@@ -37,6 +41,7 @@
 #include "paint_layers_intern.hh"
 
 #include "DNA_ID.h"
+#include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
@@ -378,6 +383,14 @@ PaintLayerFormMap paint_layers_form_map(const Material &ma)
   return forms;
 }
 
+bool source_channel_adoptable(const int channel)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+  return !ELEM(channel, PAINT_MATERIAL_CHANNEL_NORMAL, PAINT_MATERIAL_CHANNEL_HEIGHT);
+}
+
 Vector<int> paint_layers_wired_channels(const Material &ma)
 {
   Vector<int> wired;
@@ -392,6 +405,27 @@ Vector<int> paint_layers_wired_channels(const Material &ma)
         });
     if (wires) {
       wired.append(int(info.channel));
+    }
+  }
+  /* A stack that composites over the material's own graph wires every channel of its set: each one
+   * needs a `Source <channel>` interface input and a chain lane, even where no row takes part, or
+   * the graph's contribution to a channel the set offers would be dropped instead of passed
+   * through to the Principled. */
+  if ((ma.paint_layers_flag & MA_PAINT_LAYERS_SOURCE_GRAPH) != 0) {
+    const uint32_t set = BKE_paint_layers_channel_set_mask_get(ma);
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      const int channel = int(info.channel);
+      if ((set & (uint32_t(1) << channel)) == 0 || wired.contains(channel)) {
+        continue;
+      }
+      /* CUSTOM has no Principled socket and AO is never routed; a chain for them would build
+       * nothing to wire. */
+      if (info.socket_name == nullptr || !source_channel_adoptable(channel)) {
+        continue;
+      }
+      /* The loop above follows the canonical channel table, so appending here keeps that order
+       * without a sort. */
+      wired.append(channel);
     }
   }
   return wired;
@@ -523,6 +557,52 @@ const bNode *response_node_find(const Material &ma, const char *key)
   /* The tree itself is not const (a material owns a mutable pointer), so the mutable search is the
    * one walk; the const overload only narrows the answer back to what a reader may do with it. */
   return response_node_find(const_cast<Material &>(ma), key);
+}
+
+bool node_is_generator_owned(const bNode &node)
+{
+  return prop_string_get(node.system_properties, RESPONSE_NODE_KEY_PROP) != nullptr;
+}
+
+void response_nodes_created_record(bNodeTree &tree, const bNode &node)
+{
+  const char *current = prop_string_get(tree.id.properties, RESPONSE_NODE_CREATED_PROP);
+  std::string record = (current != nullptr && current[0] != '\0') ?
+                           std::string(current) + "," + std::to_string(node.identifier) :
+                           std::to_string(node.identifier);
+  prop_string_set(tree.id.properties, RESPONSE_NODE_CREATED_PROP, record.c_str());
+}
+
+bool response_node_is_created(const bNodeTree &tree, const bNode &node)
+{
+  const char *record = prop_string_get(tree.id.properties, RESPONSE_NODE_CREATED_PROP);
+  if (record == nullptr) {
+    return false;
+  }
+  /* Identifiers are positive integers, so a comma never occurs inside an entry: a walk over the
+   * comma-separated list is the whole parse. */
+  const std::string wanted = std::to_string(node.identifier);
+  const char *begin = record;
+  while (*begin != '\0') {
+    const char *end = strchr(begin, ',');
+    const size_t len = (end != nullptr) ? size_t(end - begin) : strlen(begin);
+    if (len == wanted.size() && strncmp(begin, wanted.c_str(), len) == 0) {
+      return true;
+    }
+    begin = (end != nullptr) ? end + 1 : begin + len;
+  }
+  return false;
+}
+
+void response_nodes_created_clear(bNodeTree &tree)
+{
+  IDProperty *root = tree.id.properties;
+  if (root == nullptr) {
+    return;
+  }
+  if (IDProperty *prop = IDP_GetPropertyFromGroup(root, RESPONSE_NODE_CREATED_PROP)) {
+    IDP_FreeFromGroup(root, prop);
+  }
 }
 
 /** The float an input socket of \a node carries, or \a fallback when it has no such socket. */
@@ -715,7 +795,12 @@ static bNode *response_node_ensure(Material &ma,
   if (node != nullptr) {
     node->location[0] = x;
     node->location[1] = y;
+    /* Marked at creation, so a later wiring can tell the generator's helpers from the user's nodes
+     * of the same type. Recorded too: the marker alone would also claim a duplicate the user made
+     * of this node (system properties are copied), and only the minted ones are the revert's to
+     * remove. */
     prop_string_set(node->system_properties, RESPONSE_NODE_KEY_PROP, key);
+    response_nodes_created_record(*ma.nodetree, *node);
   }
   return node;
 }
@@ -891,6 +976,285 @@ bNodeSocket *instance_output_find(bNodeTree &tree, bNode &instance, const char *
   return nullptr;
 }
 
+/** The interface input of \a tree named \a name, or null. */
+static bNodeTreeInterfaceSocket *interface_input_find(bNodeTree &tree, const char *name)
+{
+  tree.ensure_interface_cache();
+  for (bNodeTreeInterfaceSocket *iface : tree.interface_inputs()) {
+    if (iface->name != nullptr && STREQ(iface->name, name) && iface->identifier != nullptr) {
+      return iface;
+    }
+  }
+  return nullptr;
+}
+
+/** The socket the interface input named \a name builds on \a instance, or null. */
+bNodeSocket *instance_input_find(bNodeTree &tree, bNode &instance, const char *name)
+{
+  const bNodeTreeInterfaceSocket *iface = interface_input_find(tree, name);
+  if (iface == nullptr) {
+    return nullptr;
+  }
+  return bke::node_find_socket(
+      instance, SOCK_IN, UString::from_ptr_noinline(iface->identifier));
+}
+
+void source_input_name_get(const MaterialPaintChannelInfo &info, char (&r_name)[64])
+{
+  SNPRINTF(r_name, "Source %s", info.ui_name);
+}
+
+/** Read a socket's default as the four floats the generator's bottom value is carried in. */
+void socket_value_read(const bNodeSocket &socket, float r_value[4])
+{
+  r_value[0] = r_value[1] = r_value[2] = 0.0f;
+  r_value[3] = 1.0f;
+  if (socket.default_value == nullptr) {
+    return;
+  }
+  switch (socket.type) {
+    case SOCK_FLOAT:
+      r_value[0] = r_value[1] = r_value[2] =
+          static_cast<const bNodeSocketValueFloat *>(socket.default_value)->value;
+      break;
+    case SOCK_VECTOR:
+      copy_v3_v3(r_value,
+                 static_cast<const bNodeSocketValueVector *>(socket.default_value)->value);
+      break;
+    case SOCK_RGBA:
+      copy_v4_v4(r_value,
+                 static_cast<const bNodeSocketValueRGBA *>(socket.default_value)->value);
+      break;
+    default:
+      break;
+  }
+}
+
+/** Write \a value as the default of \a socket, keeping the socket's own type. */
+void socket_value_write(bNodeSocket &socket, const float value[4])
+{
+  if (socket.default_value == nullptr) {
+    return;
+  }
+  switch (socket.type) {
+    case SOCK_FLOAT:
+      static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value[0];
+      break;
+    case SOCK_VECTOR:
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
+      break;
+    case SOCK_RGBA:
+      copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(socket.default_value)->value, value);
+      break;
+    default:
+      break;
+  }
+}
+
+/** As #socket_value_write, for an interface socket, whose data is not a #bNodeSocket. */
+static void interface_value_write(bNodeTreeInterfaceSocket &iface, const float value[4])
+{
+  if (iface.socket_data == nullptr || iface.socket_type == nullptr) {
+    return;
+  }
+  if (STREQ(iface.socket_type, "NodeSocketFloat")) {
+    static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value[0];
+  }
+  else if (STREQ(iface.socket_type, "NodeSocketVector")) {
+    copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);
+  }
+  else if (STREQ(iface.socket_type, "NodeSocketColor")) {
+    copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(iface.socket_data)->value, value);
+  }
+}
+
+void source_input_value_set(bNodeTree &tree,
+                            bNodeTreeInterfaceSocket *iface,
+                            const float value[4],
+                            bNodeSocket *instance_in)
+{
+  /* One value lives in three places: the interface is what a new instance is built from, the Group
+   * Input node mirrors it for the chain inside the group, and the existing instance socket is what
+   * the shader reads until the next rebuild. Writing all three here keeps them from drifting. */
+  if (iface != nullptr) {
+    interface_value_write(*iface, value);
+    if (iface->identifier != nullptr) {
+      for (bNode &node : tree.nodes) {
+        if (!node.is_group_input()) {
+          continue;
+        }
+        if (bNodeSocket *group_in = bke::node_find_socket(
+                node, SOCK_OUT, UString::from_ptr_noinline(iface->identifier)))
+        {
+          socket_value_write(*group_in, value);
+        }
+        break;
+      }
+    }
+  }
+  if (instance_in != nullptr) {
+    socket_value_write(*instance_in, value);
+  }
+}
+
+/**
+ * A source-graph material's channel that the graph fed by value alone: the Principled input's
+ * default becomes the Source input's default, on the instance and on the interface -- the value a
+ * fresh instance reads and what the CPU resolver finds at the chain's bottom.
+ */
+static void source_input_default_set(bNodeTree &tree,
+                                     bNodeSocket &source_in,
+                                     const char *source_name,
+                                     const bNodeSocket &from)
+{
+  float value[4];
+  socket_value_read(from, value);
+  /* The CPU composite still starts a row from #BKE_paint_layers_channel_bottom_color -- reading a
+   * graph's value there would take a bake -- so this default is what the render sees, not what a
+   * 2D channel view shows underneath a row. */
+  source_input_value_set(
+      tree, interface_input_find(tree, source_name), value, &source_in);
+}
+
+/**
+ * Take the graph's feed for a channel away from the Principled input and hand it to the generated
+ * instance's `Source <channel>` input: the graph's nodes keep every connection they had, the link
+ * that ended at the Principled now ends at the stack's bottom, and the stack's result takes the
+ * Principled input over. A channel the graph fed by value alone keeps its value as the Source
+ * input's default.
+ *
+ * A feed that already comes from the instance or from one of the generator's routing helpers is
+ * left where it is -- that is the wiring of a material converted earlier, not a graph to adopt.
+ */
+static void source_input_adopt(Material &ma,
+                               bNodeTree &tree,
+                               bNode &instance,
+                               bNodeSocket &source_in,
+                               const char *source_name,
+                               bNodeSocket &target,
+                               PaintLayersRegenerateReport &r_report)
+{
+  ma.nodetree->ensure_topology_cache();
+  const Span<bNodeLink *> links = target.directly_linked_links();
+  if (!links.is_empty()) {
+    bNode &from_node = *links[0]->fromnode;
+    bNodeSocket &from_socket = *links[0]->fromsock;
+    /* The instance's own outputs and the response helpers reading them are the stack's wiring, not
+     * the user's graph: a conversion leaves both where they are. */
+    if (&from_node == &instance || node_is_generator_owned(from_node)) {
+      return;
+    }
+    /* Re-aim: the user's output feeds the Source input from now on. */
+    bke::node_remove_socket_links(*ma.nodetree, target);
+    bke::node_add_link(*ma.nodetree, from_node, from_socket, instance, source_in);
+    /* A graph that reads the instance would loop the generated group's output back into one of its
+     * inputs -- that is not a graph a stack can lay over, so the link goes back the way it was and
+     * the channel keeps the plain-stack wiring. */
+    ma.nodetree->ensure_topology_cache();
+    if (ma.nodetree->has_available_link_cycle()) {
+      bke::node_remove_socket_links(*ma.nodetree, source_in);
+      bke::node_add_link(*ma.nodetree,
+                         from_node,
+                         from_socket,
+                         target.owner_node(),
+                         target);
+      return;
+    }
+    r_report.adopted_source_links = true;
+    return;
+  }
+  source_input_default_set(tree, source_in, source_name, target);
+}
+
+Vector<PaintLayersSourceLink> source_links_capture(const Material &ma)
+{
+  Vector<PaintLayersSourceLink> links;
+  if ((ma.paint_layers_flag & MA_PAINT_LAYERS_SOURCE_GRAPH) == 0 || ma.nodetree == nullptr ||
+      ma.paint_layers_tree == nullptr)
+  {
+    return links;
+  }
+  bNode *instance = instance_find(ma, ma.paint_layers_owner_uid);
+  if (instance == nullptr) {
+    return links;
+  }
+  bNodeTree &tree = *ma.nodetree;
+  bNodeTree &root = *ma.paint_layers_tree;
+  tree.ensure_topology_cache();
+  root.ensure_interface_cache();
+  /* The interface inputs are what the graph can feed: read the links off each instance socket
+   * through its identifier, while the interface the socket was built from still exists. */
+  for (bNodeTreeInterfaceSocket *iface : root.interface_inputs()) {
+    if (iface->identifier == nullptr || iface->name == nullptr) {
+      continue;
+    }
+    bNodeSocket *to = bke::node_find_socket(
+        *instance, SOCK_IN, UString::from_ptr_noinline(iface->identifier));
+    if (to == nullptr) {
+      continue;
+    }
+    for (const bNodeLink *link : to->directly_linked_links()) {
+      if (link->fromnode == nullptr || link->fromsock == nullptr) {
+        continue;
+      }
+      links.append(PaintLayersSourceLink{
+          link->fromnode->identifier, link->fromsock->identifier, std::string(iface->name)});
+    }
+  }
+  return links;
+}
+
+void source_links_restore(Material &ma, bNode &instance, const Span<PaintLayersSourceLink> links)
+{
+  if (links.is_empty() || ma.nodetree == nullptr || ma.paint_layers_tree == nullptr) {
+    return;
+  }
+  bNodeTree &tree = *ma.nodetree;
+  bNodeTree &root = *ma.paint_layers_tree;
+  root.ensure_interface_cache();
+  for (const PaintLayersSourceLink &saved : links) {
+    const bNodeTreeInterfaceSocket *iface = interface_input_find(root, saved.to_name.c_str());
+    if (iface == nullptr) {
+      continue;
+    }
+    bNodeSocket *to = bke::node_find_socket(
+        instance, SOCK_IN, UString::from_ptr_noinline(iface->identifier));
+    if (to == nullptr) {
+      continue;
+    }
+    /* The author's node and socket are found again by identifier: the capture may run long before
+     * the restore (a rebuild between them), and no assumption about what else happened in the
+     * material's tree meanwhile is needed. */
+    bNode *from_node = nullptr;
+    for (bNode &node : tree.nodes) {
+      if (node.identifier == saved.from_node_id) {
+        from_node = &node;
+        break;
+      }
+    }
+    bNodeSocket *from_socket = (from_node != nullptr) ?
+                                   bke::node_find_socket(*from_node,
+                                                         SOCK_OUT,
+                                                         UString::from_ptr_noinline(
+                                                             saved.from_socket_identifier.c_str())) :
+                                   nullptr;
+    if (from_socket == nullptr) {
+      continue;
+    }
+    tree.ensure_topology_cache();
+    if (!to->directly_linked_links().is_empty()) {
+      continue;
+    }
+    bke::node_add_link(tree, *from_node, *from_socket, instance, *to);
+    /* A graph that reads the instance cannot also feed it: the link goes back out, as on the first
+     * adoption. */
+    tree.ensure_topology_cache();
+    if (tree.has_available_link_cycle()) {
+      bke::node_remove_socket_links(tree, *to);
+    }
+  }
+}
+
 void wire_instance_to_material(Material &ma,
                                bNodeTree &tree,
                                bNode &instance,
@@ -903,6 +1267,23 @@ void wire_instance_to_material(Material &ma,
     return;
   }
   bNode &principled = const_cast<bNode &>(*principled_const);
+  const bool source_graph = (ma.paint_layers_flag & MA_PAINT_LAYERS_SOURCE_GRAPH) != 0;
+  /* A source-graph material never adopts the author's Normal chain: their Normal Map or Bump
+   * already produces the vector the Principled expects, and moving it under the stack's Normal
+   * input would apply the tangent transform a second time. Only a feed the generator itself placed
+   * -- a previously converted material -- may be replaced by the stack's own chain. */
+  bool user_normal_chain = false;
+  if (source_graph) {
+    tree.ensure_topology_cache();
+    if (bNodeSocket *normal = socket_in(principled, "Normal")) {
+      for (const bNodeLink *link : normal->directly_linked_links()) {
+        if (link->fromnode != &instance && !node_is_generator_owned(*link->fromnode)) {
+          user_normal_chain = true;
+          break;
+        }
+      }
+    }
+  }
 
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (info.channel == PAINT_MATERIAL_CHANNEL_CUSTOM ||
@@ -916,64 +1297,86 @@ void wire_instance_to_material(Material &ma,
     if (instance_out == nullptr) {
       continue;
     }
+    char source_name[64];
+    source_input_name_get(info, source_name);
 
-    if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
-      bNode *normal_map = normal_map_ensure(ma);
-      if (normal_map == nullptr) {
-        continue;
-      }
-      /* The node was just created on a tree whose topology cache predates it.
-       * #input_link_restore reads a socket's owner through that cache, so refresh it before the
-       * new node's sockets are used. */
-      ma.nodetree->ensure_topology_cache();
-      bNodeSocket *map_color = socket_in(*normal_map, "Color");
-      bNodeSocket *map_normal = socket_out(*normal_map, "Normal");
-      bNodeSocket *principled_normal = socket_in(principled, "Normal");
-      if (map_color == nullptr || map_normal == nullptr || principled_normal == nullptr) {
-        continue;
-      }
-      input_link_restore(ma, *map_color, instance, *instance_out, r_report);
-      input_link_restore(ma, *principled_normal, *normal_map, *map_normal, r_report);
-      continue;
-    }
-    if (info.channel == PAINT_MATERIAL_CHANNEL_HEIGHT) {
-      bNode *bump = bump_ensure(ma);
-      if (bump == nullptr) {
-        continue;
-      }
-      /* See the Normal branch: the freshly created node is not in the topology cache yet. */
-      ma.nodetree->ensure_topology_cache();
-      bNodeSocket *bump_height = socket_in(*bump, "Height");
-      bNodeSocket *bump_normal_out = socket_out(*bump, "Normal");
-      bNodeSocket *principled_normal = socket_in(principled, "Normal");
-      if (bump_height == nullptr || bump_normal_out == nullptr || principled_normal == nullptr) {
-        continue;
-      }
-      input_link_restore(ma, *bump_height, instance, *instance_out, r_report);
-      /* Height rides over the Normal stack: the Bump's Normal input takes whatever currently feeds
-       * the Principled Normal, be that the Normal Map or a hand-built graph. */
-      bNodeSocket *bump_normal_in = socket_in(*bump, "Normal");
-      if (bump_normal_in != nullptr) {
-        /* The Height link just made dirtied the cache that this read goes through. */
-        ma.nodetree->ensure_topology_cache();
-        const Span<bNodeLink *> normal_links = principled_normal->directly_linked_links();
-        /* On a regenerate the Principled Normal is already fed by this Bump: its Normal input must
-         * keep the user's chain, linking it to its own output would form a cycle. */
-        if (normal_links.size() == 1 && normal_links[0]->fromnode != bump) {
-          input_link_restore(ma,
-                             *bump_normal_in,
-                             *normal_links[0]->fromnode,
-                             *normal_links[0]->fromsock,
-                             r_report);
+    /* Normal and Height are never adopted from the graph (#source_channel_adoptable): the stack
+     * wires its own response chain for them, and only when the author's chain does not stand. */
+    if (!source_channel_adoptable(int(info.channel))) {
+      if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+        if (source_graph && user_normal_chain) {
+          /* Leave the author's chain exactly where it is. A stack Normal row still builds, but its
+           * result has no route into the material until the user removes that chain. */
+          continue;
         }
+        bNode *normal_map = normal_map_ensure(ma);
+        if (normal_map == nullptr) {
+          continue;
+        }
+        /* The node was just created on a tree whose topology cache predates it.
+         * #input_link_restore reads a socket's owner through that cache, so refresh it before the
+         * new node's sockets are used. */
+        ma.nodetree->ensure_topology_cache();
+        bNodeSocket *map_color = socket_in(*normal_map, "Color");
+        bNodeSocket *map_normal = socket_out(*normal_map, "Normal");
+        bNodeSocket *principled_normal = socket_in(principled, "Normal");
+        if (map_color == nullptr || map_normal == nullptr || principled_normal == nullptr) {
+          continue;
+        }
+        input_link_restore(ma, *map_color, instance, *instance_out, r_report);
+        input_link_restore(ma, *principled_normal, *normal_map, *map_normal, r_report);
       }
-      input_link_restore(ma, *principled_normal, *bump, *bump_normal_out, r_report);
+      else if (info.channel == PAINT_MATERIAL_CHANNEL_HEIGHT) {
+        if (source_graph && user_normal_chain) {
+          /* Height rides the author's normal chain through their Bump; replacing the Principled
+           * Normal with the stack's Bump would detach that chain. */
+          continue;
+        }
+        bNode *bump = bump_ensure(ma);
+        if (bump == nullptr) {
+          continue;
+        }
+        /* See the Normal branch: the freshly created node is not in the topology cache yet. */
+        ma.nodetree->ensure_topology_cache();
+        bNodeSocket *bump_height = socket_in(*bump, "Height");
+        bNodeSocket *bump_normal_out = socket_out(*bump, "Normal");
+        bNodeSocket *principled_normal = socket_in(principled, "Normal");
+        if (bump_height == nullptr || bump_normal_out == nullptr ||
+            principled_normal == nullptr)
+        {
+          continue;
+        }
+        input_link_restore(ma, *bump_height, instance, *instance_out, r_report);
+        /* Height rides over the Normal stack: the Bump's Normal input takes whatever currently
+         * feeds the Principled Normal, be that the Normal Map or a hand-built graph. */
+        bNodeSocket *bump_normal_in = socket_in(*bump, "Normal");
+        if (bump_normal_in != nullptr) {
+          /* The Height link just made dirtied the cache that this read goes through. */
+          ma.nodetree->ensure_topology_cache();
+          const Span<bNodeLink *> normal_links = principled_normal->directly_linked_links();
+          /* On a regenerate the Principled Normal is already fed by this Bump: its Normal input
+           * must keep the user's chain, linking it to its own output would form a cycle. */
+          if (normal_links.size() == 1 && normal_links[0]->fromnode != bump) {
+            input_link_restore(ma,
+                               *bump_normal_in,
+                               *normal_links[0]->fromnode,
+                               *normal_links[0]->fromsock,
+                               r_report);
+          }
+        }
+        input_link_restore(ma, *principled_normal, *bump, *bump_normal_out, r_report);
+      }
       continue;
     }
 
     bNodeSocket *target = principled_channel_socket(ma, info.channel);
     if (target == nullptr) {
       continue;
+    }
+    if (source_graph) {
+      if (bNodeSocket *source_in = instance_input_find(tree, instance, source_name)) {
+        source_input_adopt(ma, tree, instance, *source_in, source_name, *target, r_report);
+      }
     }
     input_link_restore(ma, *target, instance, *instance_out, r_report);
   }

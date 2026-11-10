@@ -54,6 +54,7 @@ struct Image;
 struct ImageUser;
 struct ImBuf;
 struct Main;
+struct Material;
 struct MaterialPaintChannelInfo;
 struct MaterialPaintLayerBake;
 struct Mesh;
@@ -423,6 +424,12 @@ inline MaterialPaintLayerChannel *paint_layer_channel_find(MaterialPaintLayer &l
   return const_cast<MaterialPaintLayerChannel *>(
       paint_layer_channel_find(const_cast<const MaterialPaintLayer &>(layer), channel));
 }
+
+/** Whether \a layer is a row of \a ma's stack, an item of one row's mask stack or one of its
+ * content corrections: the rows the channel, enabled and opacity edits may touch. Structural
+ * edits (move, duplicate, source) stay on #paint_layer_in_stack.
+ */
+bool paint_layer_owned(const Material &ma, const MaterialPaintLayer *layer);
 
 /**
  * Whether \a record is a live channel: not null and #MA_PAINT_LAYER_CHANNEL_ENABLED.
@@ -928,6 +935,16 @@ bool BKE_paint_layers_blend_is_extended(eMaterialPaintLayerBlend blend);
 bool paint_blend_code_is_extended(int ramp_blend);
 
 namespace bke::paint_layers {
+
+/**
+ * Whether the author graph's feed for \a channel is adopted into a `Source <channel>` input of the
+ * generated tree. Normal and Height never are: their author Normal Map and Bump chain stays on the
+ * Principled, and adopting it under the stack would apply its tangent transform a second time --
+ * the stack wires its own response chain beside it instead. The one statement of the rule, so the
+ * wired channels, the root's interface, the wiring step and the cache readers cannot drift apart
+ * on it.
+ */
+bool source_channel_adoptable(int channel);
 
 /**
  * How much of a row's blend mode is graph shape rather than a node property: the Normal channel's

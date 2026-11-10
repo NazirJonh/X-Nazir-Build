@@ -24,6 +24,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_source_graph.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -66,6 +67,8 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
   void TearDown() override
   {
     BKE_paint_layers_blend_tier_clear();
+    BKE_paint_layers_source_memo_free_all();
+    BKE_paint_layers_source_cache_failure_free_all();
     BKE_main_free(bmain);
     G_MAIN = nullptr;
   }
@@ -225,6 +228,38 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
       return nullptr;
     }
     return group_instance_find(*ma->nodetree, *ma->paint_layers_tree);
+  }
+
+  /* The three helpers below are shared by the generator's tests and the source-graph tests. */
+
+  /** The one link feeding \a input, or null when it has none or more than one. */
+  static const bNodeLink *fed_by_one(const bNodeTree &tree, const bNodeSocket &input)
+  {
+    tree.ensure_topology_cache();
+    const Span<const bNodeLink *> links = input.directly_linked_links();
+    return links.size() == 1 ? links.first() : nullptr;
+  }
+
+  /** A Principled BSDF into a Material Output, for the tests that generate into a material the
+   * author already wired. */
+  static bNode *principled_with_output_add(bNodeTree &tree)
+  {
+    bNode *principled = bke::node_add_static_node(nullptr, tree, SH_NODE_BSDF_PRINCIPLED);
+    bNode *output = bke::node_add_static_node(nullptr, tree, SH_NODE_OUTPUT_MATERIAL);
+    bke::node_add_link(tree,
+                       *principled,
+                       *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                       *output,
+                       *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+    return principled;
+  }
+
+  /** The channel set of the Normal and Height tests: Base Color, Normal and Height. */
+  static uint32_t normal_and_height_set()
+  {
+    return uint32_t(uint32_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR |
+                    uint32_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL |
+                    uint32_t(1) << PAINT_MATERIAL_CHANNEL_HEIGHT);
   }
 };
 

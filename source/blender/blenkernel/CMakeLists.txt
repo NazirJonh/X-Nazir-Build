@@ -307,6 +307,8 @@ set(SRC
   intern/paint_layers/paint_layers_generate_values.cc
   intern/paint_layers/paint_layers_graph_heal.cc
   intern/paint_layers/paint_layers_object_mask.cc
+  intern/paint_layers/paint_layers_source_cache.cc
+  intern/paint_layers/paint_layers_source_graph.cc
   intern/paint_layers/paint_layers_source_hash.cc
   intern/paint_layers/paint_layers_target.cc
   intern/paint_material_cache_common.cc
@@ -594,6 +596,7 @@ set(SRC
   BKE_paint_layers_graph_heal.hh
   BKE_paint_layers_import.hh
   BKE_paint_layers_object_mask.hh
+  BKE_paint_layers_source_graph.hh
   BKE_paint_layers_target.hh
   BKE_paint_types.hh
   BKE_paint_material_combined.hh
@@ -916,6 +919,7 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_description_test.cc
     intern/paint_layers/tests/paint_layers_effect_test.cc
     intern/paint_layers/tests/paint_layers_generate_test.cc
+    intern/paint_layers/tests/paint_layers_source_graph_test.cc
     intern/paint_layers/tests/paint_layers_gradient_test.cc
     intern/paint_layers/tests/paint_layers_gradient_surface_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_content_alpha_test.cc

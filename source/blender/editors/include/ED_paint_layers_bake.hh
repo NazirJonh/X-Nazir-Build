@@ -49,6 +49,27 @@ namespace blender::ed::material_bake {
 void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bmain);
 
 /**
+ * Start the source-graph cache bake of \a ma, or settle a cache its graph can no longer fill, the
+ * same call the debounced auto path makes for a material the user is looking at. What happened is
+ * read off the state the caller checked before it: a fresh cache, a bake already in flight, or a
+ * graph that feeds nothing (whose release lands inline) all answer false.
+ * \return true only when a bake job was started.
+ */
+bool paint_layers_source_cache_bake_start(wmWindowManager &wm,
+                                          wmWindow *win,
+                                          Main &bmain,
+                                          Material &ma);
+
+/**
+ * Arm the debounce for a source-graph cache bake of \a ma whose landing left it stale: an edit
+ * that happened while the bake flew, or a channel that failed to land, would otherwise wait for an
+ * unrelated edit to be served. The auto-path decision (#BKE_paint_layers_source_cache_bake_due)
+ * and the wanted policy gate it, so a graph whose channels never all render does not arm the bake
+ * again and again. Called from the landing, on the main thread.
+ */
+void paint_layers_source_cache_landing_rearm(Material &ma);
+
+/**
  * Register the #BKE_CB_EVT_UNDO_POST handler that clears a stale #MA_PAINT_LAYERS_BAKE_SCHEDULED
  * mark left in a memfile-undo snapshot. Called once from the editor's startup init
  * (#ED_operatortypes_paint), after #BKE_callback_global_init, so it is registered before the first

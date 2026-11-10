@@ -29,6 +29,7 @@
 #include "BLI_string.h"
 #include "BLI_string_utils.hh"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
 
@@ -905,79 +906,9 @@ void MATERIAL_OT_new(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
 }
 
-/**
- * The channels the dialog offers, one checkbox each, in the order the panels list them. CUSTOM is a
- * vertex-painting attribute, so a toggle for it would silently no-op -- the same reason the channel
- * panels never offer it.
- *
- * Why booleans rather than one flag enum: an expanded flag enum is a row of exclusive buttons, and
- * adding a second one takes Shift; a checkbox per channel needs no key at all.
- */
-struct NewLayeredChannel {
-  eMaterialPaintChannel channel;
-  const char *prop_name;
-  const char *ui_name;
-  /** Listed in the collapsed Advanced sub-panel instead of the main column. */
-  bool advanced = false;
-};
-
-static const NewLayeredChannel new_layered_channels[] = {
-    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "channel_base_color", N_("Base Color")},
-    {PAINT_MATERIAL_CHANNEL_METALLIC, "channel_metallic", N_("Metallic")},
-    {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "channel_roughness", N_("Roughness")},
-    {PAINT_MATERIAL_CHANNEL_SPECULAR, "channel_specular", N_("Specular")},
-    {PAINT_MATERIAL_CHANNEL_NORMAL, "channel_normal", N_("Normal")},
-    {PAINT_MATERIAL_CHANNEL_HEIGHT, "channel_height", N_("Height")},
-    {PAINT_MATERIAL_CHANNEL_ALPHA, "channel_alpha", N_("Alpha")},
-    {PAINT_MATERIAL_CHANNEL_AO, "channel_ao", N_("AO")},
-    {PAINT_MATERIAL_CHANNEL_EMISSION, "channel_emission", N_("Emission")},
-    /* The channels past Emission are map-only Principled inputs most materials never paint, so
-     * they sit in the Advanced sub-panel and start unticked. */
-    {PAINT_MATERIAL_CHANNEL_EMISSION_STRENGTH,
-     "channel_emission_strength",
-     N_("Emission Strength"),
-     true},
-    {PAINT_MATERIAL_CHANNEL_TRANSMISSION, "channel_transmission", N_("Transmission"), true},
-    {PAINT_MATERIAL_CHANNEL_SUBSURFACE, "channel_subsurface", N_("Subsurface"), true},
-    {PAINT_MATERIAL_CHANNEL_COAT, "channel_coat", N_("Coat"), true},
-    {PAINT_MATERIAL_CHANNEL_COAT_ROUGHNESS, "channel_coat_roughness", N_("Coat Roughness"), true},
-    {PAINT_MATERIAL_CHANNEL_SHEEN, "channel_sheen", N_("Sheen"), true},
-    {PAINT_MATERIAL_CHANNEL_SPECULAR_TINT, "channel_specular_tint", N_("Specular Tint"), true},
-    {PAINT_MATERIAL_CHANNEL_ANISOTROPIC, "channel_anisotropic", N_("Anisotropic"), true},
-};
-
-/* Wide enough for every channel bit (#Material::paint_layers_channels is uint32_t): a narrower
- * mask silently drops channels past bit 15. */
-static uint32_t new_layered_material_channel_mask(wmOperator *op)
-{
-  uint32_t mask = 0;
-  for (const NewLayeredChannel &entry : new_layered_channels) {
-    if (RNA_boolean_get(op->ptr, entry.prop_name)) {
-      mask |= uint32_t(1) << int(entry.channel);
-    }
-  }
-  return mask;
-}
-
 static void new_layered_material_ui(bContext *C, wmOperator *op)
 {
-  ui::Layout &col = op->layout->column(false);
-  for (const NewLayeredChannel &entry : new_layered_channels) {
-    if (entry.advanced) {
-      continue;
-    }
-    ui::Layout &row = col.row(true);
-    row.prop(op->ptr, entry.prop_name, UI_ITEM_NONE, std::nullopt, ICON_NONE);
-  }
-  if (ui::Layout *advanced = op->layout->panel(C, "new_layered_advanced", true, IFACE_("Advanced")))
-  {
-    ui::Layout &advanced_col = advanced->column(false);
-    for (const NewLayeredChannel &entry : new_layered_channels) {
-      if (entry.advanced) {
-        advanced_col.prop(op->ptr, entry.prop_name, UI_ITEM_NONE, std::nullopt, ICON_NONE);
-      }
-    }
-  }
+  layered_channels_ui(C, op);
   op->layout->prop(op->ptr, "image_size", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 }
 
@@ -1001,7 +932,7 @@ static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator *op)
   Main *bmain = CTX_data_main(C);
   /* An empty set is not a valid material (BKE refuses to store one), and the material must not be
    * created before this is known, or a refused creation would leave an orphan behind. */
-  const uint32_t channel_mask = new_layered_material_channel_mask(op);
+  const uint32_t channel_mask = layered_channel_mask_from_op(op);
   if (channel_mask == 0) {
     BKE_report(op->reports, RPT_ERROR, "Select at least one channel for the new material");
     return OPERATOR_CANCELLED;
@@ -1097,14 +1028,9 @@ void MATERIAL_OT_new_layered(wmOperatorType *ot)
    * checkbox is independent, Base Color included, but at least one must stay ticked. Height is on
    * by default here only because a new material can be given it; a stack opened from a file keeps
    * its own set (#BKE_paint_layers_channel_set_mask_get). */
-  const uint32_t default_set = BKE_paint_layers_new_material_channel_set();
-  for (const NewLayeredChannel &entry : new_layered_channels) {
-    RNA_def_boolean(ot->srna,
-                    entry.prop_name,
-                    (default_set & (uint32_t(1) << int(entry.channel))) != 0,
-                    entry.ui_name,
-                    "Let the new material's stack work with this channel");
-  }
+  layered_channels_rna_define(ot,
+                              BKE_paint_layers_new_material_channel_set(),
+                              "Let the new material's stack work with this channel");
 
   RNA_def_enum(ot->srna,
                "image_size",

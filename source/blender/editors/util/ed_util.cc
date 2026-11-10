@@ -30,6 +30,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
+#include "BKE_paint_layers_source_graph.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_material_composite.hh"
@@ -287,6 +288,9 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
     BKE_paint_layers_effect_gpu_cache_free_all();
     /* The per-object Gradient surfaces are keyed on session UIDs too and own tens of megabytes. */
     BKE_paint_layers_gradient_surface_cache_clear();
+    /* The source-graph memos are process-static maps keyed on session UIDs too. */
+    BKE_paint_layers_source_memo_free_all();
+    BKE_paint_layers_source_cache_failure_free_all();
     /* And the Combined preview derived from them, which owns a float buffer of its own. */
     BKE_paint_material_combined_cache_free_all();
     /* The paint-layers bake debounce keeps its armed timer and pending set as process-static

@@ -38,6 +38,7 @@
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_generator_registry.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_source_graph.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_report.hh"
 
@@ -1199,6 +1200,24 @@ bool BKE_paint_layers_composite_image_layers(
   r_layers.clear();
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
+  }
+  /* The source-graph cache as the chain's bottom, laid first so every row lands over it: the rows
+   * blend over the graph's own map instead of over the neutral constant, which the evaluator still
+   * seeds underneath and this layer then covers outright. Described here -- the one place every
+   * composite consumer gathers its stack from (the channel view, the composite cache, the Combined
+   * preview on both devices) -- so the paths cannot drift apart. The layer covers at full opacity
+   * and carries the channel's content alpha like any row does; its image alpha is the AOV render's,
+   * not a coverage, so it blends by opacity alone. A stack with no row of its own still composites:
+   * the cache is what it shows. The canvas-size walk skips this layer while a row map exists, so a
+   * cache at its own resolution never shrinks the stack. */
+  if (Image *cache = BKE_paint_layers_source_cache_image_get(ma, channel)) {
+    PaintMaterialCompositeImageLayer bottom;
+    bottom.color_image = cache;
+    bottom.color_iuser = nullptr;
+    bottom.is_source_cache = true;
+    bottom.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
+        eMaterialPaintChannel(channel));
+    r_layers.append(std::move(bottom));
   }
   composite_image_layers_collect(ma,
                                  ma.paint_layers,

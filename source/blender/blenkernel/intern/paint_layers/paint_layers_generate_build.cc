@@ -1404,6 +1404,34 @@ bool PaintLayersTreeBuilder::result_interface_create()
   /* Interface sockets are created before the group output node, so that node gets its sockets
    * immediately and can be linked right away. */
   bNodeTreeInterface &interface = tree_.tree_interface;
+  /* A stack that composites over the material's own graph takes the graph's channels as inputs
+   * before anything else: the wiring step re-aims the links that fed the Principled into these,
+   * and every chain starts at its Group Input socket instead of a constant. */
+  if ((ma_.paint_layers_flag & MA_PAINT_LAYERS_SOURCE_GRAPH) != 0) {
+    for (const int channel : wired_channels_) {
+      /* Normal and Height are never taken from the graph (see #source_channel_adoptable): the
+       * author's chain stays on the Principled, so exposing a Source input for these would only
+       * invite a second normal transform. Their chains keep the constant bottom. */
+      if (!source_channel_adoptable(channel)) {
+        continue;
+      }
+      const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+          eMaterialPaintChannel(channel));
+      char source_name[64];
+      source_input_name_get(info, source_name);
+      const char *socket_type = info.is_color ? "NodeSocketColor" : "NodeSocketFloat";
+      bNodeTreeInterfaceSocket *socket = interface.add_socket(
+          source_name, "", socket_type, NODE_INTERFACE_SOCKET_INPUT, nullptr);
+      if (socket != nullptr) {
+        /* The neutral bottom until the wiring adopts the graph's own value or link; a channel the
+         * graph never fed keeps this, which is the value a plain stack would have started at. */
+        float bottom_color[4];
+        BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel(channel), bottom_color);
+        source_input_value_set(tree_, socket, bottom_color, nullptr);
+        source_inputs_.add(channel, socket);
+      }
+    }
+  }
   for (const int channel : wired_channels_) {
     const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
         eMaterialPaintChannel(channel));
@@ -1419,6 +1447,14 @@ bool PaintLayersTreeBuilder::result_interface_create()
    * after the channels (the active row's group may be built by any of them). */
   mask_output_ = interface.add_socket(
       "Result Mask", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  if (!source_inputs_.is_empty()) {
+    group_input_ = bke::node_add_node(nullptr, tree_, "NodeGroupInput"_ustr);
+    if (group_input_ == nullptr) {
+      return false;
+    }
+    group_input_->location[0] = -600;
+    group_input_->location[1] = 0.0f;
+  }
   group_output_ = bke::node_add_node(nullptr, tree_, "NodeGroupOutput"_ustr);
   if (group_output_ == nullptr) {
     return false;
@@ -1453,6 +1489,18 @@ void PaintLayersTreeBuilder::blend_mix_input_create(LayerGroup &group,
 
 NodeOutput PaintLayersTreeBuilder::channel_bottom_add(const int channel, const float location_y)
 {
+  /* A stack that composites over the material's own graph starts its chain at the interface input
+   * the wiring step feeds: the graph's value for the channel, or its constant when it fed none. No
+   * node of the chain belongs to the build here, so there is nothing to place. */
+  if (bNodeTreeInterfaceSocket *const *iface = source_inputs_.lookup_ptr(channel)) {
+    if (group_input_ != nullptr && (*iface)->identifier != nullptr) {
+      bNodeSocket *source_out = bke::node_find_socket(
+          *group_input_, SOCK_OUT, UString::from_ptr_noinline((*iface)->identifier));
+      if (source_out != nullptr) {
+        return {group_input_, source_out};
+      }
+    }
+  }
   /* The bottom of every chain is a constant rather than the first layer's own map: a chain that
    * started at a bare image would have no Mix node of its own, and the layer's opacity could not
    * be applied at all. The shared channel table is what the CPU composite starts from too, so a

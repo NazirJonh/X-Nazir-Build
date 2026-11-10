@@ -8,12 +8,21 @@
 
 #pragma once
 
+#include <cstdint>
+
+#include "BLI_span.hh"
+
+#include "BKE_paint_layers.hh"
+
+#include "DNA_scene_types.h"
+
 namespace blender {
 
 struct ReportList;
 struct Scene;
 struct ScrArea;
 struct bContext;
+struct wmOperator;
 struct wmOperatorType;
 
 /* `render_shading.cc` */
@@ -30,6 +39,40 @@ void OBJECT_OT_material_slot_remove_all(wmOperatorType *ot);
 
 void MATERIAL_OT_new(wmOperatorType *ot);
 void MATERIAL_OT_new_layered(wmOperatorType *ot);
+
+/* Shared by the New Layered and Convert dialogs, so both offer the same channels in the same order
+ * and read them back the same way. */
+struct LayeredChannelOption {
+  eMaterialPaintChannel channel;
+  const char *prop_name;
+  const char *ui_name;
+  /** Listed in the collapsed Advanced sub-panel instead of the main column. */
+  bool advanced = false;
+};
+
+/** The channel checkboxes, in the order the channel panels list them. */
+const LayeredChannelOption *layered_channel_options(int &r_count);
+/** The same table as a range, for the loops over every checkbox. */
+inline Span<LayeredChannelOption> layered_channel_entries()
+{
+  int count = 0;
+  const LayeredChannelOption *options = layered_channel_options(count);
+  return Span<LayeredChannelOption>(options, count);
+}
+/** The channel set the dialog's checkboxes currently describe. */
+PaintChannelMask layered_channel_mask_from_op(wmOperator *op);
+/** Draw the checkboxes into a column of \a op's layout. */
+void layered_channels_ui(bContext *C, wmOperator *op);
+/** Define the checkboxes on \a ot, ticked according to \a default_mask. */
+void layered_channels_rna_define(wmOperatorType *ot,
+                                 PaintChannelMask default_mask,
+                                 const char *description);
+
+/* `render_layered_convert.cc` */
+void MATERIAL_OT_layered_convert(wmOperatorType *ot);
+void MATERIAL_OT_layered_revert(wmOperatorType *ot);
+void MATERIAL_OT_source_cache_update(wmOperatorType *ot);
+
 void TEXTURE_OT_new(wmOperatorType *ot);
 void WORLD_OT_new(wmOperatorType *ot);
 

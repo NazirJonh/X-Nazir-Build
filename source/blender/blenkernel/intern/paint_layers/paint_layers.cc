@@ -14,6 +14,7 @@
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_source_graph.hh"
 
 #include <cmath>
 #include <cstdio>
@@ -369,7 +370,7 @@ bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &root, const bUU
  * corrections: the rows the channel, enabled and opacity edits may touch. Structural edits (move,
  * duplicate, source) stay on #paint_layer_in_stack.
  */
-static bool paint_layer_owned(const Material &ma, const MaterialPaintLayer *layer)
+bool paint_layer_owned(const Material &ma, const MaterialPaintLayer *layer)
 {
   if (layer == nullptr) {
     return false;
@@ -761,6 +762,24 @@ bool BKE_paint_layers_channel_set_mask_set(Material &ma, uint32_t mask)
   /* A material setting, not a row: the layers keep every record and map they had. */
   BKE_paint_layers_tag_edited(ma);
   return true;
+}
+
+bool BKE_paint_layers_source_graph_get(const Material &ma)
+{
+  return (ma.paint_layers_flag & MA_PAINT_LAYERS_SOURCE_GRAPH) != 0;
+}
+
+void BKE_paint_layers_source_graph_set(Material &ma, const bool enabled)
+{
+  const bool was = (ma.paint_layers_flag & MA_PAINT_LAYERS_SOURCE_GRAPH) != 0;
+  if (was == enabled) {
+    return;
+  }
+  /* The mode decides the shape of the generated tree (a `Source <channel>` chain bottom instead of
+   * a constant) and what the wiring step adopts, so a flip is a structural edit: the root's stored
+   * hash covers the mode, and the tag makes the rebuild happen at the regeneration point. */
+  SET_FLAG_FROM_TEST(ma.paint_layers_flag, enabled, MA_PAINT_LAYERS_SOURCE_GRAPH);
+  BKE_paint_layers_tag_edited(ma);
 }
 
 /**
@@ -1206,6 +1225,10 @@ bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
   paint_layer_anchor_point_release_broken_bakes(ma);
 
   BKE_paint_layers_tag_edited(ma);
+  /* An emptied stack of a converted material keeps its mode: the regeneration builds the
+   * pass-through tree (every `Source <channel>` straight to its `Result`), so the graph's channels
+   * reach the Principled unchanged, and the next row layers over them again. Handing the links
+   * back here would be a silent half-revert; #BKE_paint_layers_revert_to_plain is the way out. */
   return true;
 }
 
@@ -2262,6 +2285,11 @@ static_assert(sizeof(MaterialPaintLayer::channel_settings) /
                       sizeof(MaterialPaintLayerChannelSettings) ==
                   PAINT_MATERIAL_CHANNEL_NUM,
               "MaterialPaintLayer::channel_settings is indexed by channel; the literal size must "
+              "match");
+
+static_assert(sizeof(Material::paint_layers_source_images) / sizeof(Image *) ==
+                  PAINT_MATERIAL_CHANNEL_NUM,
+              "Material::paint_layers_source_images is indexed by channel; the literal size must "
               "match");
 
 bool BKE_paint_layers_channel_opacity_set(Material &ma,
@@ -3890,6 +3918,10 @@ static void paint_layers_slot_images_collect(const Main &bmain,
     });
   };
   for (const Material &ma : bmain.materials) {
+    /* The source-graph cache is deliberately left out: its pixels are re-made from the graph in
+     * seconds, and packing a 2K float map set would cost save time and file size for a snapshot.
+     * A load therefore finds the images unpacked and
+     * #BKE_paint_layers_source_cache_validate_all hands them back for a re-bake. */
     if (!BKE_paint_layers_is_layered(ma)) {
       continue;
     }

@@ -34,6 +34,7 @@
  * RNA definitions too. */
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_object_mask.hh"
+#include "BKE_paint_layers_source_graph.hh"
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
@@ -1444,6 +1445,13 @@ static void rna_Material_paint_layers_gradient_bake_update(Main *bmain,
 static bool rna_Material_smart_asset_instance_get(PointerRNA *ptr)
 {
   return BKE_paint_layers_asset_instances_any(*id_cast<Material *>(ptr->owner_id));
+}
+
+static bool rna_Material_source_cache_is_stale_get(PointerRNA *ptr)
+{
+  /* The mark is only ever set on a layered material with the source-graph mode on, so the
+   * property doubles as the mode check the panel would otherwise make. */
+  return BKE_paint_layers_source_cache_stale_get(*id_cast<Material *>(ptr->owner_id));
 }
 
 /* The effective set, not the raw field: an unauthored field reads the derived set. */
@@ -8616,6 +8624,16 @@ void RNA_def_material(BlenderRNA *brna)
       "Smart Asset Instances",
       "The Smart assets dropped into this material, oldest first; each holds its own rows, which "
       "Reload and Make Unique act on separately");
+
+  prop = RNA_def_property(srna, "source_cache_is_stale", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Material_source_cache_is_stale_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Source-Graph Cache Is Stale",
+      "The baked CPU cache of the material's own node graph (what a converted material's composite "
+      "reads) is behind the graph: an edit is waiting out its short pause, a bake is running, or "
+      "the previous one could not land. Use MATERIAL_OT_source_cache_update to bake it now");
 
   prop = RNA_def_property(srna, "paint_layers_image_size", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "paint_layers_image_size");

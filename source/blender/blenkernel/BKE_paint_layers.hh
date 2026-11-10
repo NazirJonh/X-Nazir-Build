@@ -36,6 +36,12 @@
 
 namespace blender {
 
+/**
+ * Bit set of material paint channels, bit N for #eMaterialPaintChannel N. 32 bits because the
+ * channel count is past 16; a narrower type would silently drop the top channels.
+ */
+using PaintChannelMask = uint32_t;
+
 struct Image;
 struct Main;
 struct Material;
@@ -49,6 +55,7 @@ struct Scene;
 struct ViewLayer;
 struct Brush;
 struct ReportList;
+struct bNodeSocket;
 enum eMaterialPaintChannel : int8_t;
 enum eMaterialPaintLayerBlend : int8_t;
 enum eMaterialPaintLayerFilter : int16_t;
@@ -349,7 +356,7 @@ void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &l
  * setters. A caller that must put a channel into the set does so explicitly.
  * This is a read-only view of the description; it never creates a channel record.
  */
-uint32_t BKE_paint_layers_channel_set_mask_get(const Material &ma);
+PaintChannelMask BKE_paint_layers_channel_set_mask_get(const Material &ma);
 
 /** Whether \a channel is in \a ma's global paint channel set. */
 bool BKE_paint_layers_channel_in_set(const Material &ma, eMaterialPaintChannel channel);
@@ -423,6 +430,26 @@ void BKE_paint_layers_new_material_response_apply(Material &ma);
  * A no-op when the field is already nonzero, so it is idempotent and never touches a layer record.
  */
 void BKE_paint_layers_channels_materialize(Material &ma);
+
+/**
+ * Whether \a ma's stack composites over the material's own node graph
+ * (#MA_PAINT_LAYERS_SOURCE_GRAPH).
+ *
+ * A stack created from scratch builds its chains over constants; a converted one lays its rows over
+ * the channels of the graph the user built by hand. The generated tree then carries interface
+ * inputs named `Source <channel>` -- one per wired channel -- and the links that fed the Principled
+ * feed those instead, so the graph's nodes keep their meaning and the generator never edits them.
+ * A conversion that flattens the graph into maps instead (a Fill layer of baked maps) leaves this
+ * off: after the bake the graph is gone and the stack owns everything.
+ */
+bool BKE_paint_layers_source_graph_get(const Material &ma);
+
+/**
+ * Turn the source-graph mode of \a ma on or off, and tag the material for regeneration: the mode
+ * changes which chains the generated tree builds (a `Source <channel>` bottom instead of a
+ * constant) and what the wiring step adopts. Layers and their records are never touched.
+ */
+void BKE_paint_layers_source_graph_set(Material &ma, bool enabled);
 
 /**
  * How many channels \a layer takes part in, the measure of the nodes it adds to the generated tree.
@@ -1724,6 +1751,13 @@ inline constexpr int SOURCE_GROUP_MAX_DEPTH = 8;
 
 /** Drop the remembered hash and resolve of \a ma, which is being freed. */
 void BKE_paint_layers_source_material_hash_forget(const Material &ma);
+
+/**
+ * Release the heap buffers of every source-hash and source-resolve memo. The maps are function-static
+ * and keep their capacity after the last entry is forgotten, which leaves "Not freed memory blocks"
+ * at exit. Safe at any time: the memos refill on demand.
+ */
+void BKE_paint_layers_source_memo_free_all();
 
 /**
  * Whether the colour \a channel (or, for the alpha channel, the coverage) of the Material row

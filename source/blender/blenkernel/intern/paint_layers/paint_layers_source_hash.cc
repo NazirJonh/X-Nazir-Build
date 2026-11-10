@@ -18,13 +18,16 @@
 #include "BLI_map.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_string_ref.hh"
 #include "BLI_ustring.hh"
 #include "BLI_vector.hh"
 
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_source_graph.hh"
 #include "BKE_paint_material_resolve.hh"
 
 #include "DNA_ID.h"
@@ -33,6 +36,7 @@
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 
+#include "paint_layers_generate_intern.hh"
 #include "paint_layers_intern.hh"
 
 namespace blender {
@@ -69,6 +73,25 @@ static uint64_t source_hash_string(uint64_t h, const char *text)
     h = hash_mix(h, uint8_t(*c));
   }
   return hash_mix(h, 1);
+}
+
+/**
+ * Hash the reference to \a id the way the stored hashes need it to be stable: name and owning
+ * library, never `session_uid`, which is reborn every session and would make a hash stored in the
+ * file mismatch after every load. The name is the file-stable identity a data-block keeps, a packed
+ * image included; a rename or a re-link from another library moving the hash is the wanted answer,
+ * since the graph then reads something else.
+ */
+static uint64_t source_hash_id_reference(uint64_t h, const ID *id)
+{
+  if (id == nullptr) {
+    return hash_mix(h, 0);
+  }
+  h = source_hash_string(h, id->name);
+  if (id->lib != nullptr) {
+    h = source_hash_string(h, id->lib->filepath);
+  }
+  return h;
 }
 
 /** Hash the scalar \a data of a socket of \a type, as #bNodeSocket::default_value stores it. */
@@ -384,21 +407,82 @@ static void source_signal_recursive(const bNodeTree &tree,
 
 namespace {
 
-struct SourceHashMemo {
-  uint64_t signal = 0;
-  uint64_t content = 0;
+/** One memoized answer of a source hash, keyed by `ID::session_uid` and valid while the node tree
+ * signal it was made from stands. All the maps share #source_hash_memo_mutex() and register with
+ * #source_memo_registry(), so one forget clears a material's entry from every one of them. */
+class SourceMemoMapBase {
+ public:
+  virtual ~SourceMemoMapBase() = default;
+  virtual void remove(uint32_t session_uid) = 0;
+  virtual void clear_and_shrink() = 0;
 };
 
-Map<uint32_t, SourceHashMemo> &source_hash_memo()
+/** Every memo above, so one forget reaches them all. Guarded by #source_hash_memo_mutex(); the
+ * memos register themselves from their (mutex-guarded) first use, and entries a memo has not made
+ * yet are entries a forget cannot miss. */
+Vector<SourceMemoMapBase *> &source_memo_registry()
 {
-  static Map<uint32_t, SourceHashMemo> memo;
+  static Vector<SourceMemoMapBase *> registry;
+  return registry;
+}
+
+/**
+ * \tparam Answer: what the memo keeps beside the signal. \tparam ZeroIsAnAnswer: whether a zero
+ * answer is an answer. It is for the channel-graph memo, whose zero is the content "the graph
+ * feeds nothing"; the stored-hash memos take the other branch, where a zero is the "no claim"
+ * placeholder no answer of theirs may be mistaken for.
+ */
+template<typename Answer, bool ZeroIsAnAnswer = false> class SourceMemoMap final
+    : public SourceMemoMapBase {
+ public:
+  struct Entry {
+    uint64_t signal = 0;
+    Answer answer{};
+  };
+
+  const Entry *lookup(const uint32_t session_uid, const uint64_t signal) const
+  {
+    const Entry *entry = map_.lookup_ptr(session_uid);
+    if (entry == nullptr || entry->signal != signal) {
+      return nullptr;
+    }
+    if constexpr (!ZeroIsAnAnswer) {
+      if (entry->answer == 0) {
+        return nullptr;
+      }
+    }
+    return entry;
+  }
+
+  void add_overwrite(const uint32_t session_uid, const uint64_t signal, const Answer answer)
+  {
+    map_.add_overwrite(session_uid, Entry{signal, answer});
+  }
+
+  void remove(const uint32_t session_uid) override
+  {
+    map_.remove(session_uid);
+  }
+
+  void clear_and_shrink() override
+  {
+    map_ = Map<uint32_t, Entry>();
+  }
+
+ private:
+  Map<uint32_t, Entry> map_;
+};
+
+SourceMemoMap<uint64_t> &source_hash_memo()
+{
+  static SourceMemoMap<uint64_t> memo;
   return memo;
 }
 
 /**
- * Guards #source_hash_memo(). The main thread reads and writes it, and the free of an evaluated
+ * Guards the memos above. The main thread reads and writes them, and the free of an evaluated
  * copy (which shares the session UID of its original) forgets an entry from wherever the depsgraph
- * frees it. Held around the map only, never around a walk of the trees.
+ * frees it. Held around the maps only, never around a walk of the trees.
  */
 std::mutex &source_hash_memo_mutex()
 {
@@ -447,15 +531,15 @@ uint64_t BKE_paint_layers_source_material_tree_hash_cached(const Material &ma)
   source_signal_recursive(*ma.nodetree, visited, signal);
   {
     std::lock_guard lock(source_hash_memo_mutex());
-    if (const SourceHashMemo *memo = source_hash_memo().lookup_ptr(ma.id.session_uid)) {
-      if (memo->signal == signal && memo->content != 0) {
-        return memo->content;
-      }
+    if (const SourceMemoMap<uint64_t>::Entry *memo = source_hash_memo().lookup(ma.id.session_uid,
+                                                                               signal))
+    {
+      return memo->answer;
     }
   }
   const uint64_t content = BKE_paint_layers_source_material_tree_hash(ma);
   std::lock_guard lock(source_hash_memo_mutex());
-  source_hash_memo().add_overwrite(ma.id.session_uid, SourceHashMemo{signal, content});
+  source_hash_memo().add_overwrite(ma.id.session_uid, signal, content);
   return content;
 }
 
@@ -471,6 +555,8 @@ uint64_t BKE_paint_layers_source_material_tree_hash_cached(const Material &ma)
 struct NormalHashWalk {
   Set<uint64_t> seen;
   uint64_t hash = 0;
+  /** Set when the walk met a node whose result depends on the object or the camera. */
+  bool object_dependent = false;
 };
 
 static void normal_hash_input(NormalHashWalk &walk,
@@ -486,9 +572,23 @@ static void normal_hash_node(NormalHashWalk &walk, const bNode &node)
   h = hash_mix(h, uint16_t(node.custom2));
   h = hash_float(h, node.custom3);
   h = hash_float(h, node.custom4);
-  h = node.id != nullptr ? source_hash_string(h, node.id->name) : hash_mix(h, 0);
+  /* Name and library, not a session uid: the channel-graph hash is stored in the file and compared
+   * after a load (see #BKE_paint_layers_source_channel_graph_hash). */
+  h = source_hash_id_reference(h, node.id);
   h = source_hash_node_storage(h, node);
   h = hash_mix(h, node.is_muted() ? 1 : 0);
+  /* A coarse test on purpose: it names the node kinds a UV-quad bake cannot reproduce faithfully
+   * (Texture Coordinate counts although its UV output is safe), so a caller warns rather than
+   * promises the pixels. */
+  if (ELEM(node.type_legacy,
+           SH_NODE_TEX_COORD,
+           SH_NODE_NEW_GEOMETRY,
+           SH_NODE_OBJECT_INFO,
+           SH_NODE_CAMERA,
+           SH_NODE_LIGHT_PATH))
+  {
+    walk.object_dependent = true;
+  }
 }
 
 static void normal_hash_output(NormalHashWalk &walk,
@@ -496,6 +596,29 @@ static void normal_hash_output(NormalHashWalk &walk,
                                const bNodeSocket &output,
                                Vector<const bNode *> &context)
 {
+  /* A route helper the generator minted is not the author's content: a regeneration recreates it
+   * (with a fresh name), so hashing it would read every such rebuild as a graph change. The walk
+   * follows through it without hashing it, the same transparency the generated chain gives it.
+   * The ownership marker alone is not the test -- a duplicate the user made of a helper carries it
+   * too (system properties are copied) -- so the minted record answers as well, the same pair
+   * #BKE_paint_layers_revert_to_plain removes by. */
+  if (bke::paint_layers::node_is_generator_owned(node) &&
+      bke::paint_layers::response_node_is_created(node.owner_tree(), node))
+  {
+    for (const bNodeSocket &input : node.inputs) {
+      if (!input.is_directly_linked()) {
+        walk.hash = source_hash_socket_value(walk.hash, input.type, input.default_value);
+        continue;
+      }
+      for (const bNodeLink *link : input.directly_linked_links()) {
+        if (link->fromnode == nullptr || link->fromsock == nullptr) {
+          continue;
+        }
+        normal_hash_output(walk, *link->fromnode, *link->fromsock, context);
+      }
+    }
+    return;
+  }
   const uint64_t key = hash_mix(
       hash_mix(hash_mix(uint64_t(intptr_t(&output)), context.size()),
                uint64_t(intptr_t(context.is_empty() ? nullptr : context.last()))),
@@ -599,17 +722,86 @@ static uint64_t source_normal_hash(const Material &ma)
 
 /** \} */
 
-/** Guarded by #source_hash_memo_mutex(), like the full hash's memo. */
-static Map<uint32_t, SourceHashMemo> &source_normal_hash_memo()
+/* -------------------------------------------------------------------- */
+/** \name Channel-graph hash
+ *
+ * The part of the source the material's own CPU cache depends on: what feeds each
+ * `Source <channel>` input of the generated instance. The walk is the Normal one at heart --
+ * upstream from a socket, through groups, muted links and reroutes -- but it starts at the
+ * instance's Source inputs and follows the generator's route helpers through without hashing them,
+ * so a regeneration that recreates them does not read as a graph change. Nothing else of the tree
+ * takes part: the stack's own rows, the viewer nodes and the routing downstream of the instance
+ * are outside the walk, which is why editing the stack leaves the cache's validity alone.
+ * \{ */
+
+static uint64_t source_channel_graph_hash(const Material &ma, bool *r_object_dependent)
 {
-  static Map<uint32_t, SourceHashMemo> memo;
+  if (r_object_dependent != nullptr) {
+    *r_object_dependent = false;
+  }
+  if (ma.nodetree == nullptr) {
+    return 0;
+  }
+  ma.nodetree->ensure_topology_cache();
+  bNode *instance = bke::paint_layers::instance_find(ma, ma.paint_layers_owner_uid);
+  if (instance == nullptr || ma.paint_layers_tree == nullptr) {
+    return 0;
+  }
+  NormalHashWalk walk;
+  Vector<const bNode *> context;
+  /* The Source inputs the interface carries are matched the way the wiring matches them: the
+   * interface socket by name, the instance socket by its identifier (see #instance_input_find). */
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    char source_name[64];
+    bke::paint_layers::source_input_name_get(info, source_name);
+    const bNodeSocket *input = bke::paint_layers::instance_input_find(
+        *ma.paint_layers_tree, *instance, source_name);
+    if (input == nullptr || !input->is_directly_linked()) {
+      /* An unlinked Source input reads its neutral constant -- the graph feeds that channel
+       * nothing, there is nothing to cache, and claiming it in the hash would leave a material no
+       * bake can satisfy. Only what the graph actually feeds is the content. */
+      continue;
+    }
+    /* The input's identity is part of the content: a stack that stops wiring a channel drops its
+     * Source input, and the graph the cache was baked from is no longer the one the stack reads. */
+    walk.hash = source_hash_string(walk.hash, input->identifier);
+    normal_hash_input(walk, *input, context);
+  }
+  if (r_object_dependent != nullptr) {
+    *r_object_dependent = walk.object_dependent;
+  }
+  /* Zero is a valid content here: the graph feeds no adopted channel, no cache belongs to it, and
+   * the stored hash reads zero with it (see #Material::paint_layers_source_hash). */
+  return walk.hash;
+}
+
+/** \} */
+
+/** The channel-graph memo keeps the object-dependence the walk met beside the content. */
+struct SourceChannelGraphAnswer {
+  uint64_t content = 0;
+  bool object_dependent = false;
+};
+
+/** Guarded by #source_hash_memo_mutex(), like the full hash's memo. */
+static SourceMemoMap<uint64_t> &source_normal_hash_memo()
+{
+  static SourceMemoMap<uint64_t> memo;
   return memo;
 }
 
 /** Guarded by #source_hash_memo_mutex(), like the full hash's memo. */
-static Map<uint32_t, SourceHashMemo> &source_structure_hash_memo()
+static SourceMemoMap<uint64_t> &source_structure_hash_memo()
 {
-  static Map<uint32_t, SourceHashMemo> memo;
+  static SourceMemoMap<uint64_t> memo;
+  return memo;
+}
+
+/** Guarded by #source_hash_memo_mutex(), like the full hash's memo. Zero is a content here
+ * (the graph feeds nothing), so the map keeps a zero answer instead of recomputing it. */
+static SourceMemoMap<SourceChannelGraphAnswer, true> &source_channel_graph_memo()
+{
+  static SourceMemoMap<SourceChannelGraphAnswer, true> memo;
   return memo;
 }
 
@@ -624,15 +816,15 @@ uint64_t BKE_paint_layers_source_structure_hash_cached(const Material &ma)
   source_signal_recursive(*ma.nodetree, visited, signal);
   {
     std::lock_guard lock(source_hash_memo_mutex());
-    if (const SourceHashMemo *entry = source_structure_hash_memo().lookup_ptr(ma.id.session_uid)) {
-      if (entry->signal == signal && entry->content != 0) {
-        return entry->content;
-      }
+    if (const SourceMemoMap<uint64_t>::Entry *entry = source_structure_hash_memo().lookup(
+            ma.id.session_uid, signal))
+    {
+      return entry->answer;
     }
   }
   const uint64_t content = BKE_paint_layers_source_material_structure_hash(ma);
   std::lock_guard lock(source_hash_memo_mutex());
-  source_structure_hash_memo().add_overwrite(ma.id.session_uid, SourceHashMemo{signal, content});
+  source_structure_hash_memo().add_overwrite(ma.id.session_uid, signal, content);
   return content;
 }
 
@@ -647,25 +839,109 @@ uint64_t BKE_paint_layers_source_normal_hash_cached(const Material &ma)
   source_signal_recursive(*ma.nodetree, visited, signal);
   {
     std::lock_guard lock(source_hash_memo_mutex());
-    if (const SourceHashMemo *entry = source_normal_hash_memo().lookup_ptr(ma.id.session_uid)) {
-      if (entry->signal == signal && entry->content != 0) {
-        return entry->content;
-      }
+    if (const SourceMemoMap<uint64_t>::Entry *entry = source_normal_hash_memo().lookup(
+            ma.id.session_uid, signal))
+    {
+      return entry->answer;
     }
   }
   const uint64_t content = source_normal_hash(ma);
   std::lock_guard lock(source_hash_memo_mutex());
-  source_normal_hash_memo().add_overwrite(ma.id.session_uid, SourceHashMemo{signal, content});
+  source_normal_hash_memo().add_overwrite(ma.id.session_uid, signal, content);
   return content;
+}
+
+uint64_t BKE_paint_layers_source_channel_graph_hash(const Material &ma)
+{
+  return source_channel_graph_hash(ma, nullptr);
+}
+
+/** The memoized answer for \a ma's channel graph, recomputed when the signal moved. */
+static SourceChannelGraphAnswer source_channel_graph_memo_entry(const Material &ma)
+{
+  SourceChannelGraphAnswer none;
+  if (ma.nodetree == nullptr) {
+    return none;
+  }
+  ma.nodetree->ensure_topology_cache();
+  Set<const bNodeTree *> visited;
+  uint64_t signal = 0;
+  source_signal_recursive(*ma.nodetree, visited, signal);
+  {
+    std::lock_guard lock(source_hash_memo_mutex());
+    if (const SourceMemoMap<SourceChannelGraphAnswer, true>::Entry *entry =
+            source_channel_graph_memo().lookup(ma.id.session_uid, signal))
+    {
+      return entry->answer;
+    }
+  }
+  SourceChannelGraphAnswer answer;
+  answer.content = source_channel_graph_hash(ma, &answer.object_dependent);
+  std::lock_guard lock(source_hash_memo_mutex());
+  source_channel_graph_memo().add_overwrite(ma.id.session_uid, signal, answer);
+  return answer;
+}
+
+uint64_t BKE_paint_layers_source_channel_graph_hash_cached(const Material &ma)
+{
+  return source_channel_graph_memo_entry(ma).content;
+}
+
+int BKE_paint_layers_source_graph_feeds_find(const Material &ma,
+                                             MutableSpan<PaintLayersSourceChannelFeed> r_feeds)
+{
+  BLI_assert(r_feeds.size() >= PAINT_MATERIAL_CHANNEL_NUM);
+  int found = 0;
+  if (ma.nodetree == nullptr) {
+    return 0;
+  }
+  ma.nodetree->ensure_topology_cache();
+  bNode *instance = bke::paint_layers::instance_find(ma, ma.paint_layers_owner_uid);
+  if (instance == nullptr || ma.paint_layers_tree == nullptr) {
+    return 0;
+  }
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!bke::paint_layers::source_channel_adoptable(int(info.channel))) {
+      continue;
+    }
+    char source_name[64];
+    bke::paint_layers::source_input_name_get(info, source_name);
+    const bNodeSocket *socket = bke::paint_layers::instance_input_find(
+        *ma.paint_layers_tree, *instance, source_name);
+    if (socket == nullptr || !socket->is_directly_linked()) {
+      continue;
+    }
+    r_feeds[found++] = PaintLayersSourceChannelFeed{info.channel, socket};
+  }
+  return found;
+}
+
+bool BKE_paint_layers_source_graph_object_dependent(const Material &ma)
+{
+  return source_channel_graph_memo_entry(ma).object_dependent;
+}
+
+void BKE_paint_layers_source_memo_free_all()
+{
+  {
+    std::lock_guard lock(source_hash_memo_mutex());
+    for (SourceMemoMapBase *memo : source_memo_registry()) {
+      memo->clear_and_shrink();
+    }
+  }
+  std::lock_guard lock(source_resolve_memo_mutex());
+  source_resolve_memo() = Map<const bNodeTree *, SourceResolveMemo>();
 }
 
 void BKE_paint_layers_source_material_hash_forget(const Material &ma)
 {
   {
     std::lock_guard lock(source_hash_memo_mutex());
-    source_hash_memo().remove(ma.id.session_uid);
-    source_normal_hash_memo().remove(ma.id.session_uid);
-    source_structure_hash_memo().remove(ma.id.session_uid);
+    /* Every memo the file keeps, through the one registry: a new memo registers itself there,
+     * so the forget cannot grow a hole by missing it. */
+    for (SourceMemoMapBase *memo : source_memo_registry()) {
+      memo->remove(ma.id.session_uid);
+    }
   }
   if (ma.nodetree != nullptr) {
     std::lock_guard lock(source_resolve_memo_mutex());

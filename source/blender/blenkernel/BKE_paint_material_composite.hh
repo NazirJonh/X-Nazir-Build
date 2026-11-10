@@ -515,6 +515,14 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
    */
   bool empty_base = false;
   /**
+   * The material's own source-graph cache laid as the chain's bottom
+   * (#BKE_paint_layers_source_cache_image_get): the stack's rows blend over it instead of over the
+   * channel's neutral constant. Runtime description only -- nothing in the stack's DNA description
+   * and nothing the row hashes read. The canvas-size walk skips it while a row map exists, since
+   * the cache may sit at its own resolution below the maps.
+   */
+  bool is_source_cache = false;
+  /**
    * The side of the square canvas of an #empty_base row whose corrections own no map to say it (Fill
    * and Material ones); 0 leaves the size to the first map found.
    */

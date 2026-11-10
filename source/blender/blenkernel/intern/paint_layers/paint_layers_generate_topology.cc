@@ -650,6 +650,14 @@ uint64_t paint_layers_root_topology_hash(const Material &ma, const Span<int> wir
 {
   uint64_t hash = 0;
   hash = topology_hash_mix(hash, uint64_t(layout::kLayoutVersion));
+  /* The source-graph mode changes the shape of every chain (a `Source <channel>` interface input
+   * and a Group Input bottom instead of a constant), so it is part of the root's structure even
+   * when the wired channels read the same: a material whose rows already wire the whole set would
+   * otherwise keep its root across a conversion. The mix is a no-op for a plain stack, whose hashes
+   * stay what earlier versions wrote. */
+  if ((ma.paint_layers_flag & MA_PAINT_LAYERS_SOURCE_GRAPH) != 0) {
+    hash = topology_hash_mix(hash, 0x9E3779B97F4A7C15ull);
+  }
   for (const int channel : wired_channels) {
     hash = topology_hash_mix(hash, uint64_t(channel));
   }

@@ -17,6 +17,8 @@ set(SRC
   paint_material_combined_effects.cc
   paint_material_combined_gather.cc
   render_internal.cc
+  render_layered_channels.cc
+  render_layered_convert.cc
   render_material_bake.cc
   render_material_bake_ops.cc
   render_opengl.cc

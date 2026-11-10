@@ -3191,8 +3191,27 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
   if (r_byte_colorspace != nullptr) {
     *r_byte_colorspace = nullptr;
   }
+  /* The source-graph cache sits at the bottom at its own resolution (#is_source_cache): the row
+   * maps decide the canvas while they exist, and only a stack of no other content falls back to
+   * the cache's own size -- that is an empty stack, whose whole content the cache is. */
+  int cache_width = 0;
+  int cache_height = 0;
+  const char *cache_colorspace = nullptr;
   for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
     if (!layer.enabled) {
+      continue;
+    }
+    if (layer.is_source_cache) {
+      if (cache_width == 0 && layer.color_image != nullptr) {
+        Vector<CompositeImageLock> locks;
+        const ImBuf *ibuf = composite_image_acquire(layer.color_image, layer.color_iuser, locks);
+        if (ibuf != nullptr) {
+          cache_width = ibuf->x;
+          cache_height = ibuf->y;
+          cache_colorspace = IMB_colormanagement_get_byte_colorspace(ibuf);
+        }
+        composite_images_release(locks);
+      }
       continue;
     }
     if (layer.is_folder) {
@@ -3259,6 +3278,15 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
     }
     composite_images_release(locks);
     return r_width > 0 && r_height > 0;
+  }
+  if (cache_width > 0 && cache_height > 0) {
+    /* No row map, gradient or declared base said a size: the cache is the stack's only content. */
+    r_width = cache_width;
+    r_height = cache_height;
+    if (r_byte_colorspace != nullptr) {
+      *r_byte_colorspace = cache_colorspace;
+    }
+    return true;
   }
   return false;
 }

@@ -23,6 +23,7 @@
  */
 
 #include <cstddef>
+#include <string>
 
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
@@ -45,9 +46,18 @@ struct IDProperty;
 struct Image;
 struct Main;
 struct Material;
+struct MaterialPaintChannelInfo;
 struct MaterialPaintLayer;
 
 namespace bke::paint_layers {
+
+/**
+ * The interface name of the `Source <channel>` input the channel \a info describes: the name the
+ * builder adds the interface socket under, the wiring matches it by (through
+ * #instance_input_find), and the hash walks read. One spelling, so a new lookup site cannot drift
+ * back to matching an identifier against it.
+ */
+void source_input_name_get(const MaterialPaintChannelInfo &info, char (&r_name)[64]);
 
 /** On a generated tree: the uid of the material that owns it, so a copy never adopts its source's
  * groups and a foreign tree is never overwritten. */
@@ -179,6 +189,12 @@ inline constexpr const char *CURVES_NODE_COUNT_PROP = "pbr_paint_layers_curves_n
 inline constexpr const char *RESPONSE_NODE_KEY_PROP = "pbr_paint_layers_response_key";
 inline constexpr const char *RESPONSE_NODE_BUMP = "bump";
 inline constexpr const char *RESPONSE_NODE_NORMAL_MAP = "normal_map";
+/**
+ * On the material's own node tree: the #bNode::identifier of every response node the generator
+ * minted, comma-separated. The revert removes exactly these -- see
+ * #response_nodes_created_record.
+ */
+inline constexpr const char *RESPONSE_NODE_CREATED_PROP = "pbr_paint_layers_response_created";
 /** #INPUT_ROLE_PROP value of the constant of a channel that carries no map. */
 inline constexpr const char *ROLE_FILL = "fill";
 /** #INPUT_ROLE_PROP value of that constant's alpha: the content alpha a map-less row lays, which
@@ -271,7 +287,11 @@ inline constexpr const char *INPUT_ID_COLOR_PROP = "pbr_paint_layers_id_color";
 bNode *instance_find(const Material &ma, const bUUID &owner_uid);
 bNode *material_output_find(Material &ma);
 bNode *mix_node_add(bNodeTree &tree, int ramp_blend, float location_x, float location_y);
+/** The stack's own Normal Map node: one the generator placed (#RESPONSE_NODE_KEY_PROP), or a new
+ * one. A source-graph material never hands back the author's node of the same type -- their chain
+ * is adopted into the stack's `Source Normal` input, not re-fed. */
 bNode *normal_map_ensure(Material &ma);
+/** The stack's own Bump node, under the same ownership rule as #normal_map_ensure. */
 bNode *bump_ensure(Material &ma);
 /**
  * The Bump or Normal Map node of \a ma's own tree the stack marked as its own
@@ -281,6 +301,36 @@ bNode *bump_ensure(Material &ma);
  */
 bNode *response_node_find(Material &ma, const char *key);
 const bNode *response_node_find(const Material &ma, const char *key);
+
+/**
+ * Whether \a node carries the stack's ownership marker (#RESPONSE_NODE_KEY_PROP): a Bump or Normal
+ * Map the generator minted, or one it adopted because the stack itself had wired it. The one
+ * predicate behind the wiring's "never re-aim what the stack feeds" (#source_input_adopt) and the
+ * release's stack-owned links, so the two cannot disagree about what belongs to the stack. The
+ * generated instance is checked separately by the callers that hold it; it carries no marker.
+ *
+ * The marker alone does not decide what the revert removes: a node the user duplicated from a
+ * helper carries the copied marker but is theirs all the same, and so is one the stack adopted
+ * from their graph. The revert takes only the nodes the generator minted
+ * (#response_nodes_created_record).
+ */
+bool node_is_generator_owned(const bNode &node);
+
+/**
+ * The identifiers (`bNode::identifier`, comma-separated) of the response nodes the generator minted
+ * in the material's embedded tree, recorded on that tree as private ID properties -- the same
+ * bookkeeping pattern as the original-links record. The revert removes the minted nodes and
+ * nothing else of their kind: a duplicate the user made carries the copied
+ * #RESPONSE_NODE_KEY_PROP but an identifier of its own, and a node the stack adopted from the
+ * user's graph was minted by the user -- neither is the generator's to delete. `bNode::identifier`
+ * names a node across save and load and a material copy; a duplicate of a recorded node is minted
+ * an identifier of its own and so stays out of the record.
+ */
+void response_nodes_created_record(bNodeTree &tree, const bNode &node);
+/** Whether \a node is one #response_nodes_created_record wrote down. */
+bool response_node_is_created(const bNodeTree &tree, const bNode &node);
+/** Drop the record; the revert calls it once the nodes it named are removed. */
+void response_nodes_created_clear(bNodeTree &tree);
 
 /**
  * The response values the Normal & Height panel edits: one #Material::paint_layers_*_delta field
@@ -320,9 +370,17 @@ float response_field(const Material &ma, ePaintLayersResponseValue value);
  */
 void paint_layers_response_nodes_sync(Material &ma);
 bNodeSocket *instance_output_find(bNodeTree &tree, bNode &instance, const char *result_name);
+/** The socket the interface input named \a name builds on \a instance, or null. */
+bNodeSocket *instance_input_find(bNodeTree &tree, bNode &instance, const char *name);
 bNodeSocket *principled_channel_socket(Material &ma, int channel);
 bNodeSocket *socket_in(bNode &node, const char *name);
 bNodeSocket *socket_out(bNode &node, StringRefNull name);
+
+/** The four floats a chain's bottom value is carried in, read off a node socket's default. The
+ * wiring's adoption takes a graph's value this way (#source_input_default_set). */
+void socket_value_read(const bNodeSocket &socket, float r_value[4]);
+/** As #socket_value_read, into a node socket's default. */
+void socket_value_write(bNodeSocket &socket, const float value[4]);
 
 /** #bNode::prop key of the Vector Rotate and Mapping nodes a row's UV mapping chain is made of.
  * The marker, not the node name, tells a generated chain from a node of the source. */
@@ -790,6 +848,43 @@ Vector<const Image *> row_map_images(const MaterialPaintLayer &row);
 bool row_has_maps(const Material &ma, const MaterialPaintLayer &row);
 
 /** \} */
+
+/**
+ * One link from the author's graph into the generated instance's `Source <channel>` input of a
+ * source-graph material.
+ *
+ * A full rebuild clears the root's interface and re-creates its sockets, which mints fresh
+ * identifiers and takes the instance's sockets -- and every link into them -- with the old ones.
+ * The interface socket's name is the one thing a rebuild keeps, so it is what a link is remembered
+ * by across one (#source_links_capture, #source_links_restore). The author's node and socket are
+ * remembered by identifier rather than by pointer: the capture and the restore run either side of
+ * a rebuild, and nothing between them may be allowed to matter for the pointers' validity.
+ */
+struct PaintLayersSourceLink {
+  /** #bNode::identifier of the author's node the link came from. */
+  int from_node_id = 0;
+  /** #bNodeSocket::identifier of the author's output the link came from. */
+  std::string from_socket_identifier;
+  /** The name of the interface input the link fed; owned copy, valid after the rebuild. */
+  std::string to_name;
+};
+
+/**
+ * Write a source-graph channel's bottom value to the interface socket, the root's Group Input and
+ * the instance socket, keeping each socket's own type. The three are the same value at different
+ * stages of the generated tree's life, so they must be written together.
+ */
+void source_input_value_set(bNodeTree &tree,
+                            bNodeTreeInterfaceSocket *iface,
+                            const float value[4],
+                            bNodeSocket *instance_in);
+
+/** The graph's links into \a ma's generated instance, taken before a root rebuild clears them. */
+Vector<PaintLayersSourceLink> source_links_capture(const Material &ma);
+
+/** Re-aim the captured links at the instance's sockets of the rebuilt root. A link whose author
+ * node no longer exists, or whose re-aim would form a cycle, is dropped. */
+void source_links_restore(Material &ma, bNode &instance, Span<PaintLayersSourceLink> links);
 
 }  // namespace bke::paint_layers
 }  // namespace blender

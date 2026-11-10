@@ -147,7 +147,7 @@ struct FloatImBufGuard {
   {
     ibuf = IMB_allocImBuf(uint(width), uint(height), ImBufFlags::Zero);
     if (ibuf != nullptr) {
-      IMB_alloc_float_pixels(*ibuf, 4, false);
+      IMB_alloc_float_pixels(ibuf, 4, false);
       std::copy_n(rgba.data(), int64_t(width) * height * 4, ibuf->float_data_for_write());
     }
   }

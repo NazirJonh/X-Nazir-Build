@@ -62,8 +62,9 @@ static void expect_cpu_computed_kind_common(MaterialPaintLayer &effect)
   EXPECT_TRUE(paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_NEEDS_BAKE));
   effect.role = MA_PAINT_LAYER_ROLE_LAYER;
   EXPECT_FALSE(paint_layer_kind_role_allowed(effect));
+  /* As a mask item it reads the grey the mask has up to it, through the mask effect's cache. */
   effect.role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
-  EXPECT_FALSE(paint_layer_kind_role_allowed(effect));
+  EXPECT_TRUE(paint_layer_kind_role_allowed(effect));
   effect.role = MA_PAINT_LAYER_ROLE_EFFECT;
 }
 
@@ -662,8 +663,9 @@ TEST_F(PaintLayersFilterKindsTest, rna_color_balance_reaches_the_payload)
   EXPECT_FLOAT_EQ(RNA_property_float_get_index(&payload, lift, 0), 0.0f);
   RNA_property_float_set_index(&payload, lift, 1, 0.25f);
   EXPECT_FLOAT_EQ(balance_row->color_balance->lift[1], 0.25f);
-  float range_min = 0.0f, range_max = 0.0f;
-  RNA_property_float_range(&payload, lift, &range_min, &range_max);
+  /* The picker's range is the soft one; the hard range is wider so a value can be typed past it. */
+  float range_min = 0.0f, range_max = 0.0f, step = 0.0f, precision = 0.0f;
+  RNA_property_float_ui_range(&payload, lift, &range_min, &range_max, &step, &precision);
   EXPECT_FLOAT_EQ(range_min, -1.0f);
   EXPECT_FLOAT_EQ(range_max, 1.0f);
 }

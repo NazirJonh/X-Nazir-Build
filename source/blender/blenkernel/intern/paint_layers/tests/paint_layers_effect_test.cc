@@ -2437,22 +2437,26 @@ TEST_F(PaintLayersEffectTest, the_chain_hash_tracks_the_effects_before_this_one_
   corrections.append(effect_b);
   corrections.append(target);
 
-  const Span<const PaintMaterialCompositeCorrection> span(corrections.data(), corrections.size());
-  const uint64_t chain = BKE_paint_layers_effect_chain_hash(span, marker_target);
+  /* Build the view at each call site: GCC 14 instantiates std::vector<const T> (which fails its
+   * static assertion) when a named const-element span lvalue is passed by value. */
+  const auto span_of = [&]() {
+    return Span<const PaintMaterialCompositeCorrection>(corrections.data(), corrections.size());
+  };
+  const uint64_t chain = BKE_paint_layers_effect_chain_hash(span_of(), marker_target);
   EXPECT_NE(chain, 0u);
 
   /* A change to an earlier effect -- its parameters -- re-keys the later one. */
   corrections[0].effect_hash = 112;
-  EXPECT_NE(BKE_paint_layers_effect_chain_hash(span, marker_target), chain);
+  EXPECT_NE(BKE_paint_layers_effect_chain_hash(span_of(), marker_target), chain);
 
   /* Swapping the order of the effects before the target re-keys it too. */
   corrections[0].effect_hash = 111;
-  const uint64_t ordered = BKE_paint_layers_effect_chain_hash(span, marker_target);
+  const uint64_t ordered = BKE_paint_layers_effect_chain_hash(span_of(), marker_target);
   PaintMaterialCompositeCorrection swapped_a = corrections[0];
   PaintMaterialCompositeCorrection swapped_b = corrections[1];
   corrections[0] = swapped_b;
   corrections[1] = swapped_a;
-  EXPECT_NE(BKE_paint_layers_effect_chain_hash(span, marker_target), ordered);
+  EXPECT_NE(BKE_paint_layers_effect_chain_hash(span_of(), marker_target), ordered);
 
   /* A non-effect correction (nil marker) adds nothing before the target. */
   PaintMaterialCompositeCorrection plain;
@@ -2460,10 +2464,9 @@ TEST_F(PaintLayersEffectTest, the_chain_hash_tracks_the_effects_before_this_one_
   corrections.clear();
   corrections.append(plain);
   corrections.append(target);
-  const Span<const PaintMaterialCompositeCorrection> span2(corrections.data(), corrections.size());
-  const Span<const PaintMaterialCompositeCorrection> none;
-  EXPECT_EQ(BKE_paint_layers_effect_chain_hash(span2, marker_target),
-            BKE_paint_layers_effect_chain_hash(none, marker_target))
+  EXPECT_EQ(BKE_paint_layers_effect_chain_hash(span_of(), marker_target),
+            BKE_paint_layers_effect_chain_hash(Span<const PaintMaterialCompositeCorrection>(),
+                                               marker_target))
       << "no effect precedes the target, so the fingerprint is the empty fold";
 }
 

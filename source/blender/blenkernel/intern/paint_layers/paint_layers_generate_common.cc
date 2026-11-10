@@ -727,14 +727,21 @@ static bool response_node_is_stack_wired(Material &ma, const bNode &node, const 
  * the stack's own, and this keeps the look a hand-tuned node from a file written before the fields
  * existed had.
  *
- * Every value is taken, not only those still at zero. Adoption happens once, right before the sync
- * starts writing the node, so its sockets hold whatever the file left there; a guard on the field
- * would confuse "never edited" with "the user set exactly one".
+ * Adoption happens once, right before the sync starts writing the node, so its sockets hold whatever
+ * the file left there. A field that already moved off the neutral value keeps it: a slider edited
+ * while the node was unmarked would otherwise be lost. The cost is that a slider set back to exactly
+ * the neutral value reads as untouched.
  */
 static void response_node_values_adopt(Material &ma, const bNode &node, const char *key)
 {
   for (const PaintLayersResponseValueInfo &info : paint_layers_response_values()) {
     if (!STREQ(info.node_key, key)) {
+      continue;
+    }
+    /* A slider moved while the node was still the author's is an edit the stack has to keep: the
+     * node's socket would otherwise overwrite it with the value the author tuned. A field left at
+     * the neutral delta reads as untouched, so the node's look is what it takes. */
+    if (response_field_delta(ma, info.value) != 0.0f) {
       continue;
     }
     const float value = clamp_f(response_socket_value_get(node, info.socket, 1.0f),
@@ -803,6 +810,12 @@ static bNode *response_node_ensure(Material &ma,
     response_nodes_created_record(*ma.nodetree, *node);
   }
   return node;
+}
+
+void response_nodes_adopt(Material &ma)
+{
+  response_node_adopt(ma, SH_NODE_NORMAL_MAP, RESPONSE_NODE_NORMAL_MAP);
+  response_node_adopt(ma, SH_NODE_BUMP, RESPONSE_NODE_BUMP);
 }
 
 /** A Normal Map node in \a ma, created when missing. */

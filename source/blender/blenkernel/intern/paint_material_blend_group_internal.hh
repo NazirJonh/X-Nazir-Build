@@ -32,6 +32,9 @@ constexpr const char *BLEND_NODE_VECTOR_MATH_A = "Vector";
 constexpr const char *BLEND_NODE_VECTOR_MATH_B = "Vector_001";
 constexpr const char *BLEND_NODE_VECTOR_MATH_SCALE = "Scale";
 constexpr const char *BLEND_NODE_VECTOR_MATH_VALUE = "Value";
+/** The vector output of a Vector Math node; its "Value" output is the scalar one, which only the
+ * dot product, the length and the distance fill in. */
+constexpr const char *BLEND_NODE_VECTOR_MATH_VECTOR = "Vector";
 constexpr const char *BLEND_NODE_MATH_A = "Value";
 constexpr const char *BLEND_NODE_MATH_B = "Value_001";
 constexpr const char *BLEND_NODE_MATH_C = "Value_002";

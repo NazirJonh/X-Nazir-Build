@@ -704,16 +704,18 @@ TEST_F(PaintLayersGenerateTest, participation_cpu_matches_generator)
 /** \name Values and topology
  * \{ */
 
-/** A node a test drops into a generated tree to tell whether a later pass rebuilt it. */
+/** A node a test drops into a generated tree to tell whether a later pass rebuilt it. A type the
+ * generator never builds: the chains create Value nodes of their own, so those would survive any
+ * rebuild and the sentinel would always read "kept". */
 static bool tree_sentinel_set(bNodeTree &tree)
 {
-  return bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE) != nullptr;
+  return bke::node_add_static_node(nullptr, tree, SH_NODE_BLACKBODY) != nullptr;
 }
 
 static bool tree_sentinel_get(const bNodeTree &tree)
 {
   for (const bNode &node : tree.nodes) {
-    if (node.type_legacy == SH_NODE_VALUE) {
+    if (node.type_legacy == SH_NODE_BLACKBODY) {
       return true;
     }
   }
@@ -894,6 +896,8 @@ TEST_F(PaintLayersGenerateTest, repeated_regenerate_does_not_grow_the_group)
 
 TEST_F(PaintLayersGenerateTest, height_regenerate_does_not_link_bump_to_itself)
 {
+  /* The first row freezes the build default, which has no Height: the set the dialog proposes does. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(*ma, BKE_paint_layers_new_material_channel_set()));
   MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
   add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
@@ -1276,6 +1280,7 @@ TEST_F(PaintLayersGenerateTest, height_rides_over_a_users_bump)
 
 TEST_F(PaintLayersGenerateTest, response_edit_reaches_the_owned_nodes_without_a_rebuild)
 {
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(*ma, BKE_paint_layers_new_material_channel_set()));
   MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
   add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
   add_channel(*layer, PAINT_MATERIAL_CHANNEL_NORMAL, add_image("Normal"));
@@ -1344,6 +1349,7 @@ TEST_F(PaintLayersGenerateTest, response_edit_reaches_the_owned_nodes_without_a_
  */
 TEST_F(PaintLayersGenerateTest, response_edit_leaves_an_unmarked_bump_alone)
 {
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(*ma, BKE_paint_layers_new_material_channel_set()));
   MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
   add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
@@ -1389,6 +1395,7 @@ TEST_F(PaintLayersGenerateTest, response_edit_leaves_an_unmarked_bump_alone)
  */
 TEST_F(PaintLayersGenerateTest, response_adoption_reads_a_hand_tuned_node_once)
 {
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(*ma, BKE_paint_layers_new_material_channel_set()));
   MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
   add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
@@ -1431,6 +1438,7 @@ TEST_F(PaintLayersGenerateTest, response_adoption_reads_a_hand_tuned_node_once)
  */
 TEST_F(PaintLayersGenerateTest, response_never_adopts_a_users_own_bump)
 {
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(*ma, BKE_paint_layers_new_material_channel_set()));
   MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
   add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
 
@@ -1956,7 +1964,7 @@ TEST_F(PaintLayersGenerateTest, gradient_space_feeds_the_matching_coordinate_out
   for (const int i : IndexRange(ARRAY_SIZE(cases))) {
     ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *gradient, cases[i].space));
     ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-    bNodeTree *group = layer_tree_find(*bmain, "Gradient");
+    bNodeTree *group = layer_tree_find(*bmain, gradient->name);
     ASSERT_NE(group, nullptr);
     group->ensure_topology_cache();
 

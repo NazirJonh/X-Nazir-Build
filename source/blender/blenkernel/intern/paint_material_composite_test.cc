@@ -282,8 +282,8 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_extended_blend_modes_match_their_d
       /* Over a half, Vivid Light dodges the layer pushed past one and Pin Light takes the max. */
       {CompositeBlend::VividLight, below / (1.0f - (2.0f * layer - 1.0f))},
       {CompositeBlend::PinLight, 2.0f * layer - 1.0f},
-      /* Equal RGB sums: neither comparison is a win, so what is below stays. */
-      {CompositeBlend::LighterColor, below},
+      /* Greys of unequal sums: Lighter Color takes the layer, Darker Color keeps what is below. */
+      {CompositeBlend::LighterColor, layer},
       {CompositeBlend::DarkerColor, below},
   };
 
@@ -333,13 +333,16 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_extended_blend_boundary_vectors)
 
   for (const CompositeBlend mode : modes) {
     for (const float below : belows) {
+      const float half[4] = {0.5f, 0.5f, 0.5f, 1.0f};
       /* The continuity of the split itself, on the dispatcher: at a half the layer, four of the
        * six modes return what is below (Hard Light's halves exchange into an identity, Vivid and
-       * Pin's halves agree, and an equal RGB sum keeps the below colour). Linear Burn keeps
-       * sliding, so it is left out. */
-      if (mode != CompositeBlend::LinearBurn) {
+       * Pin's halves agree, and an equal RGB sum keeps the below colour: for the two colour
+       * comparisons that is a below of exactly a half, any other grey has a winner). Linear Burn
+       * keeps sliding, so it is left out. */
+      const bool colour_comparison = mode == CompositeBlend::LighterColor ||
+                                     mode == CompositeBlend::DarkerColor;
+      if (mode != CompositeBlend::LinearBurn && (!colour_comparison || below == 0.5f)) {
         float continuous[4] = {below, below, below, 1.0f};
-        const float half[4] = {0.5f, 0.5f, 0.5f, 1.0f};
         BKE_paint_material_blend_apply(int(mode), continuous, 1.0f, half);
         EXPECT_NEAR(continuous[0], below, 1e-6f) << "mode " << int(mode);
         EXPECT_NEAR(continuous[1], below, 1e-6f) << "mode " << int(mode);
@@ -393,7 +396,8 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_color_sum_decides_the_whole_colour
   EXPECT_NEAR(lighter[0], 102.0f / 255.0f, 1e-4f);
   EXPECT_NEAR(lighter[2], 102.0f / 255.0f, 1e-4f);
 
-  top.blend = CompositeBlend::DarkerColor;
+  /* The stack holds a copy of the layer, so the mode is changed on the copy. */
+  stack.layers[1].blend = CompositeBlend::DarkerColor;
   const std::array<float, 4> darker = linear_pixel(stack, 0, 0);
   EXPECT_NEAR(darker[0], 230.0f / 255.0f, 1e-4f);
   EXPECT_NEAR(darker[2], 25.0f / 255.0f, 1e-4f);
@@ -2832,6 +2836,10 @@ TEST_F(PaintLayersCompositeTest, tangent_normal_flag_is_only_set_for_a_mapped_no
   };
   EXPECT_FALSE(flag_for(PAINT_MATERIAL_CHANNEL_NORMAL));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  /* An identity transform with Repeat reads the map as the unmapped path does, so it is not
+   * described as a mapping at all; the flag needs one that really remaps. */
+  EXPECT_FALSE(flag_for(PAINT_MATERIAL_CHANNEL_NORMAL));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, fill, 0.5f));
   EXPECT_TRUE(flag_for(PAINT_MATERIAL_CHANNEL_NORMAL));
   EXPECT_FALSE(flag_for(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
 
@@ -3193,7 +3201,7 @@ TEST_F(PaintLayersCompositeTest, the_cached_composite_of_a_surface_gradient_matc
     EXPECT_EQ(cached_pixels[i], reference_pixels[i]) << i;
   }
   /* The surface really is what the pixels come from: the exact ramp runs against U. */
-  EXPECT_LT(reference_pixels[(0 * 8 + 0) * 4], reference_pixels[(0 * 8 + 7) * 4])
+  EXPECT_GT(reference_pixels[(0 * 8 + 0) * 4], reference_pixels[(0 * 8 + 7) * 4])
       << "the object-space X of texel 0 is the far end of the line";
   IMB_freeImBuf(reference);
 }
@@ -3494,9 +3502,9 @@ TEST_F(PaintLayersCompositeTest, stack_hash_tracks_the_gradient_surface_and_appr
   auto surface_a = gradient_test_surface(float3(0.25f), 0xaaaa);
   auto surface_b = gradient_test_surface(float3(0.25f), 0xbbbb);
 
-  ma->active_layer_marker = gradient->marker;
-  const uint64_t approximate = hash_with(surface_a);
-  ma->active_layer_marker = {};
+  /* Whether the active row is being dragged is the caller's call: it hands out no surface then,
+   * and a layer without one is the approximate preview. */
+  const uint64_t approximate = hash_with(nullptr);
   const uint64_t exact_a = hash_with(surface_a);
   const uint64_t exact_b = hash_with(surface_b);
   EXPECT_NE(approximate, exact_a);

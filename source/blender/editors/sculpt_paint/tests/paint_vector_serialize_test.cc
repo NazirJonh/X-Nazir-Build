@@ -7,6 +7,7 @@
 #include "DNA_paint_vector_types.h"
 #include "DNA_screen_types.h"
 
+#include "BKE_cpp_types.hh"
 #include "BKE_mesh_sample.hh"
 #include "BKE_paint_vector.hh"
 
@@ -15,6 +16,23 @@
 #include "BLI_string.h"
 
 #include "testing/testing.h"
+
+namespace {
+
+/* A #VectorItem holds a `bke::CurvesGeometry`; its construction creates attribute arrays through
+ * the C++ type registry, which must be filled before the first test runs. */
+class CppTypesEnvironment : public ::testing::Environment {
+ public:
+  void SetUp() override
+  {
+    blender::BKE_cpp_types_init();
+  }
+};
+
+[[maybe_unused]] const ::testing::Environment *const cpp_types_environment =
+    ::testing::AddGlobalTestEnvironment(new CppTypesEnvironment());
+
+}  // namespace
 
 namespace blender::ed::sculpt_paint::shape {
 

@@ -782,6 +782,8 @@ TEST_F(PaintLayersMathTest, changing_the_operation_moves_the_hash_and_rebuilds_t
   bNodeTree *group = math_layer_tree_find(*bmain, "Row");
   ASSERT_NE(group, nullptr);
   ASSERT_EQ(math_group_count_op(*group, NODE_MATH_ADD, 0), 3);
+  /* The row's own strength product is a Multiply whatever the operation is. */
+  const int other_multiplies = math_group_count_op(*group, NODE_MATH_MULTIPLY, 0);
 
   ASSERT_TRUE(paint_layer_kind_param_int_set(
       *math, PAINT_LAYER_MATH_OPERATION, PAINT_LAYER_MATH_OP_MULTIPLY));
@@ -791,7 +793,7 @@ TEST_F(PaintLayersMathTest, changing_the_operation_moves_the_hash_and_rebuilds_t
   expect_graph_matches_cpu(kColor);
   group = math_layer_tree_find(*bmain, "Row");
   ASSERT_NE(group, nullptr);
-  EXPECT_EQ(math_group_count_op(*group, NODE_MATH_MULTIPLY, 0), 3);
+  EXPECT_EQ(math_group_count_op(*group, NODE_MATH_MULTIPLY, 0), other_multiplies + 3);
   EXPECT_EQ(math_group_count_op(*group, NODE_MATH_ADD, 0), 0);
 
   /* The operands are inputs: the hash holds and the graph keeps its shape, the values sync. */
@@ -983,7 +985,7 @@ class PaintLayersCurvesTest : public PaintLayersFilterTest {
       curve.curve[1].x = 1.0f;
       curve.curve[1].y = 1.25f;
     }
-    BKE_curvemapping_init(&cumap);
+    BKE_curvemapping_changed_all(&cumap);
   }
 };
 
@@ -1103,7 +1105,7 @@ TEST_F(PaintLayersCurvesTest, live_edit_reaches_the_graph_without_regeneration)
   MaterialPaintLayerCurves *curves = BKE_paint_layers_curves_ensure(*filter);
   ASSERT_NE(curves, nullptr);
   curves->curve_mapping.cm[0].curve[0].y = 0.5f;
-  BKE_curvemapping_init(&curves->curve_mapping);
+  BKE_curvemapping_changed_all(&curves->curve_mapping);
 
   /* A drag: the edit lands inside the live scope, the interpreter reads `node.storage` as it is
    * afterwards — no regeneration in between. */
@@ -1188,7 +1190,7 @@ TEST_F(PaintLayersCurvesTest, loaded_group_without_the_count_rebuilds_once)
 
   ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
   curves->curve_mapping.cm[0].curve[0].y = 0.75f;
-  BKE_curvemapping_init(&curves->curve_mapping);
+  BKE_curvemapping_changed_all(&curves->curve_mapping);
   EXPECT_TRUE(BKE_paint_layers_curves_edited(*bmain, *ma, &curves->curve_mapping));
   EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 }
@@ -1969,6 +1971,8 @@ TEST_F(PaintLayersMaskFilterTest, color_ramp_in_the_mask_works_on_its_coverage)
   band->band.data[0].a = 1.0f;
   band->band.data[1] = {};
   band->band.data[1].pos = 1.0f;
+  /* Black to white: the ramp is the identity on a grey, so the coverage stays what it was. */
+  band->band.data[1].r = band->band.data[1].g = band->band.data[1].b = 1.0f;
   band->band.data[1].a = 1.0f;
 
   expect_graph_matches_cpu(kColor);

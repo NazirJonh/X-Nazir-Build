@@ -3852,7 +3852,13 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
         BLI_rcti_init(r_changed_region, 0, entry.ibuf->x, 0, entry.ibuf->y);
       }
       else {
-        *r_changed_region = entry.dirty_region;
+        /* The dirty rectangle is rounded out to the partial-update chunks, which can be larger than
+         * a small buffer; the caller indexes pixels with it, so it must stay inside the buffer. */
+        rcti buffer_rect;
+        BLI_rcti_init(&buffer_rect, 0, entry.ibuf->x, 0, entry.ibuf->y);
+        if (!BLI_rcti_isect(&entry.dirty_region, &buffer_rect, r_changed_region)) {
+          BLI_rcti_init(r_changed_region, 0, 0, 0, 0);
+        }
       }
     }
     entry.stack_hash = stack_hash;

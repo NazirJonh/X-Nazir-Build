@@ -3305,6 +3305,8 @@ TEST(material_paint_channel, height_is_a_float_layer_map_and_the_other_scalars_s
       EXPECT_FALSE(info.map_float) << info.ui_name;
     }
   }
+}
+
 TEST_F(PaintMaterialChannelTest, CorrectionSurvivesSaveReloadInBrushAndPreset)
 {
   Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "CorrectionPersistScene"));

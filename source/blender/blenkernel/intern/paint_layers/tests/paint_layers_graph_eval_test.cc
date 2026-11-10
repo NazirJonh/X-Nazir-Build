@@ -118,6 +118,7 @@ TEST_F(PaintLayersGraphEvalTest, every_blend_mode_matches_the_cpu)
       MA_PAINT_LAYER_BLEND_DARKER_COLOR,
   };
   for (const eMaterialPaintLayerBlend blend : blends) {
+    SCOPED_TRACE(::testing::Message() << "blend " << int(blend));
     ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, top, blend));
     expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   }
@@ -169,6 +170,7 @@ TEST_F(PaintLayersGraphEvalTest, every_channel_blend_mode_matches_the_cpu)
       MA_PAINT_LAYER_BLEND_DARKER_COLOR,
   };
   for (const eMaterialPaintLayerBlend blend : blends) {
+    SCOPED_TRACE(::testing::Message() << "blend " << int(blend));
     ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
         *ma, *top, PAINT_MATERIAL_CHANNEL_BASE_COLOR, blend));
     expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
@@ -311,6 +313,7 @@ TEST_F(PaintLayersGraphEvalTest, mask_correction_blends_match_the_cpu)
                                              MA_PAINT_LAYER_BLEND_LIGHTEN,
                                              MA_PAINT_LAYER_BLEND_DIFFERENCE};
   for (const eMaterialPaintLayerBlend blend : blends) {
+    SCOPED_TRACE(::testing::Message() << "blend " << int(blend));
     ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, item, blend));
     expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   }

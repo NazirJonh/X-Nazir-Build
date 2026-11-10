@@ -301,6 +301,12 @@ bNode *bump_ensure(Material &ma);
  */
 bNode *response_node_find(Material &ma, const char *key);
 const bNode *response_node_find(const Material &ma, const char *key);
+/**
+ * Mark the Bump and Normal Map the stack wired but never marked as its own. Run before a rebuild
+ * re-creates the instance: the stack-wired test reads the links from the instance's Result outputs,
+ * which the new interface drops, so adopting afterwards would find nothing and mint a second node.
+ */
+void response_nodes_adopt(Material &ma);
 
 /**
  * Whether \a node carries the stack's ownership marker (#RESPONSE_NODE_KEY_PROP): a Bump or Normal

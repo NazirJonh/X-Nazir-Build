@@ -1350,9 +1350,25 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   /* The kept root also has to still be instantiated in the material: a user can delete the group
    * node, and a full regeneration is what puts it back (#instance_ensure). */
   const bNode *kept_instance = instance_find(ma, ma.paint_layers_owner_uid);
+  /* Likewise the stack's Bump and Normal Map: the wiring that adopts a hand-tuned node, or puts back
+   * a deleted one, only runs in a full pass, and the hash cannot see an edit made to the material's
+   * own tree. A source-graph material may deliberately leave them out (the author's chain stands). */
+  const bool response_nodes_stand = [&]() {
+    if ((ma.paint_layers_flag & MA_PAINT_LAYERS_SOURCE_GRAPH) != 0) {
+      return true;
+    }
+    ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+    if (BKE_paint_material_principled_find(ma, reason) == nullptr) {
+      return true;
+    }
+    return (!wired_channels.contains(PAINT_MATERIAL_CHANNEL_HEIGHT) ||
+            response_node_find(ma, RESPONSE_NODE_BUMP) != nullptr) &&
+           (!wired_channels.contains(PAINT_MATERIAL_CHANNEL_NORMAL) ||
+            response_node_find(ma, RESPONSE_NODE_NORMAL_MAP) != nullptr);
+  }();
   const bool keep_root = !created_tree && tree_root_hash_get(*tree, stored_root) &&
                          stored_root == root_hash && kept_instance != nullptr &&
-                         kept_instance->id == &tree->id;
+                         kept_instance->id == &tree->id && response_nodes_stand;
 
   bool relations_changed = report.replaced_foreign_tree;
   /* A failed sync means a value input has no socket on its instance (a hand-edited tree), a keyed
@@ -1419,6 +1435,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
      * and re-aim at the rebuilt interface below, or a structural edit would silently drop the
      * graph's contribution to every channel. */
     const Vector<PaintLayersSourceLink> source_links = source_links_capture(ma);
+    response_nodes_adopt(ma);
     tree_clear(bmain, *tree);
     /* The root's own hash goes the same way: a pass that fails before the instance is wired must
      * not leave a hash that makes the next one keep a half-built root. */
@@ -2005,6 +2022,12 @@ void BKE_paint_layers_undo_validate(Main &bmain)
          * the nulled pointers back, so the next pass rebuilds the tree instead. A decode that nulled
          * the pointers deliberately (#BKE_paint_layers_undo_prepare) cleared the hashes itself. */
         tree_hash_clear(*tree);
+        /* The root's own hash too: it is what the regeneration compares to keep or rebuild, and a
+         * group whose hash is gone would otherwise be kept without one, leaving every later undo
+         * check to read the tree as stale. */
+        if (ma.paint_layers_tree != nullptr) {
+          tree_hash_clear(*ma.paint_layers_tree);
+        }
         dangling = true;
       }
     }

@@ -2334,10 +2334,11 @@ bool BKE_paint_layers_channel_blend_set(Material &ma,
       return false;
     }
   }
-  else if (blend < -1 || blend > MA_PAINT_LAYER_BLEND_VALUE ||
-           blend == MA_PAINT_LAYER_BLEND_NORMAL_COMBINE)
+  else if (blend < -1 || blend > MA_PAINT_LAYER_BLEND_DARKER_COLOR ||
+           ELEM(blend, MA_PAINT_LAYER_BLEND_NORMAL_COMBINE, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE))
   {
-    /* Inherit, or one of the user-facing blends; Normal Combine is the Normal channel's own doing. */
+    /* Inherit, or one of the user-facing blends, the six extended modes included; the Normal
+     * combine and replace are the Normal channel's own doing. */
     return false;
   }
   if (layer.channel_settings[channel].blend == blend) {

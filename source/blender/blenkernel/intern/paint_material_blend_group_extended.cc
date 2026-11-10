@@ -150,14 +150,14 @@ BlendBranch blend_branch_extended_add(bNodeTree &group,
                 BLEND_GROUP_ID_B,
                 sum,
                 BLEND_NODE_VECTOR_MATH_B) ||
-          !link(sum, BLEND_NODE_VECTOR_MATH_VALUE, shift, BLEND_NODE_VECTOR_MATH_A) ||
+          !link(sum, BLEND_NODE_VECTOR_MATH_VECTOR, shift, BLEND_NODE_VECTOR_MATH_A) ||
           !blend_group_socket_vector_default_set(
               *shift, BLEND_NODE_VECTOR_MATH_B, 1.0f, 1.0f, 1.0f))
       {
         return {};
       }
       full = shift;
-      full_output = BLEND_NODE_VECTOR_MATH_VALUE;
+      full_output = BLEND_NODE_VECTOR_MATH_VECTOR;
       break;
     }
     case MA_PAINT_BLEND_VIVID_LIGHT:
@@ -186,7 +186,7 @@ BlendBranch blend_branch_extended_add(bNodeTree &group,
                 doubled,
                 BLEND_NODE_VECTOR_MATH_A) ||
           !blend_group_socket_float_default_set(*doubled, BLEND_NODE_VECTOR_MATH_SCALE, 2.0f) ||
-          !link(doubled, BLEND_NODE_VECTOR_MATH_VALUE, shifted, BLEND_NODE_VECTOR_MATH_A) ||
+          !link(doubled, BLEND_NODE_VECTOR_MATH_VECTOR, shifted, BLEND_NODE_VECTOR_MATH_A) ||
           !blend_group_socket_vector_default_set(
               *shifted, BLEND_NODE_VECTOR_MATH_B, 1.0f, 1.0f, 1.0f))
       {
@@ -196,9 +196,9 @@ BlendBranch blend_branch_extended_add(bNodeTree &group,
       if (!blend_group_socket_float_default_set(*soft, BLEND_NODE_MIX_FACTOR, 1.0f) ||
           !blend_group_socket_float_default_set(*hard, BLEND_NODE_MIX_FACTOR, 1.0f) ||
           !link(&group_input, BLEND_GROUP_ID_A, soft, BLEND_NODE_MIX_A) ||
-          !link(doubled, BLEND_NODE_VECTOR_MATH_VALUE, soft, BLEND_NODE_MIX_B) ||
+          !link(doubled, BLEND_NODE_VECTOR_MATH_VECTOR, soft, BLEND_NODE_MIX_B) ||
           !link(&group_input, BLEND_GROUP_ID_A, hard, BLEND_NODE_MIX_A) ||
-          !link(shifted, BLEND_NODE_VECTOR_MATH_VALUE, hard, BLEND_NODE_MIX_B))
+          !link(shifted, BLEND_NODE_VECTOR_MATH_VECTOR, hard, BLEND_NODE_MIX_B))
       {
         return {};
       }

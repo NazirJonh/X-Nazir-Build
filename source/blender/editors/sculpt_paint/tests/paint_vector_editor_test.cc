@@ -4,6 +4,8 @@
 
 #include "../shapes/paint_vector_editor.hh"
 
+#include "BKE_cpp_types.hh"
+
 #include "BLI_math_base.hh"
 #include "BLI_math_vector_types.hh"
 
@@ -12,6 +14,24 @@
 #include "WM_types.hh" /* wmEvent, KM_PRESS, LEFTMOUSE, EVT_MODAL_MAP */
 
 #include "testing/testing.h"
+
+namespace {
+
+/* The editor owns a #ShapeEditSession whose #VectorItem holds a `bke::CurvesGeometry`; its
+ * construction creates attribute arrays through the C++ type registry, which must be filled
+ * before the first test runs. */
+class CppTypesEnvironment : public ::testing::Environment {
+ public:
+  void SetUp() override
+  {
+    blender::BKE_cpp_types_init();
+  }
+};
+
+[[maybe_unused]] const ::testing::Environment *const cpp_types_environment =
+    ::testing::AddGlobalTestEnvironment(new CppTypesEnvironment());
+
+}  // namespace
 
 namespace blender::ed::sculpt_paint::shape {
 

@@ -1117,6 +1117,14 @@ class IMAGE_HT_header(Header):
                     icon='NODE_COMPOSITING',
                     emboss=False,
                 )
+                # The mapping gizmo's Mirror handle is dragged in this editor, so the click-to-place
+                # mode for it belongs here too: the point is read in the editor's own 2D view.
+                layout.operator(
+                    "paint.layer_mapping_mirror_set_point",
+                    text="",
+                    icon='CURSOR',
+                    emboss=False,
+                )
 
         # A 3D Gradient shown without a usable object, UV map or surface samples the texel's UV,
         # not the object surface; say so rather than letting it look exact.

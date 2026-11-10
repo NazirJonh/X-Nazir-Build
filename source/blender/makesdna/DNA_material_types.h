@@ -1167,6 +1167,15 @@ enum eMaterialPaintLayerMappingFlag : int16_t {
    * axes locked together: editing one sets the other to the same value.
    */
   MA_PAINT_LAYER_MAPPING_SCALE_UNLOCKED = 1 << 1,
+  /**
+   * Mirror the row's maps along U: the map is read through the fold
+   * `u' = |u - mirror_center.x| + mirror_center.x` before the transform, so what either side of
+   * the center shows, both sides show. The per-texel sign of `u - mirror_center.x` also flips the
+   * U component of a tangent-space Normal, the way a negative scale does.
+   */
+  MA_PAINT_LAYER_MAPPING_MIRROR_U = 1 << 3,
+  /** Mirror along V: the fold and the Normal flip of #MA_PAINT_LAYER_MAPPING_MIRROR_U, on V. */
+  MA_PAINT_LAYER_MAPPING_MIRROR_V = 1 << 4,
 };
 ENUM_OPERATORS(eMaterialPaintLayerMappingFlag)
 
@@ -1207,10 +1216,18 @@ struct MaterialPaintLayerMapping {
   int16_t flag = 0;
   /** #eMaterialPaintLayerMappingWrap. */
   int16_t wrap = MA_PAINT_LAYER_MAPPING_WRAP_REPEAT;
-  /* Pads the struct to 32 bytes: it is embedded in #MaterialPaintLayer between pointer members, so
-   * its size must stay a multiple of 8. The room also keeps the next mapping option from changing
-   * the size. */
+  /* The original padding stays exactly where it was, so an old file's fields keep their offsets;
+   * the Mirror center is appended after it. The struct grows 32 -> 40 bytes, still a multiple of 8
+   * because it is embedded in #MaterialPaintLayer between pointer members, so later mapping options
+   * can be appended without moving the center. */
   char _pad[6] = {};
+  /**
+   * The UV point the Mirror fold (#MA_PAINT_LAYER_MAPPING_MIRROR_U / _V) reflects around, on every
+   * folded axis at once. Read only while a mirror flag is set; (0.5, 0.5) is where a fresh row
+   * starts. A future mapping space defines its own center meaning; the flags stay per axis either
+   * way.
+   */
+  float mirror_center[2] = {0.5f, 0.5f};
 };
 
 /** #MaterialPaintLayerBake::flag */

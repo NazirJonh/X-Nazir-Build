@@ -74,6 +74,7 @@ uint64_t mapping_hash(const Material &owner, const MaterialPaintLayer &row, uint
                             int(row.mapping.space),
                             int(row.mapping.flag),
                             int(BKE_paint_layers_mapping_wrap_get(row)));
+    hash = get_default_hash(hash, row.mapping.mirror_center[0], row.mapping.mirror_center[1]);
   }
   for (const MaterialPaintLayer &effect : row.effects) {
     hash = mapping_hash(owner, effect, hash);

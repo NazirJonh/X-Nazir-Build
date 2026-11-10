@@ -52,6 +52,8 @@ constexpr int gpu_layer_repeat_u = 64;
 constexpr int gpu_layer_repeat_v = 128;
 constexpr int gpu_layer_tangent_normal = 256;
 constexpr int gpu_layer_normal_directx = 262144;
+constexpr int gpu_layer_mirror_u = 1048576;
+constexpr int gpu_layer_mirror_v = 2097152;
 constexpr int gpu_layer_has_mask = 2048;
 constexpr int gpu_layer_row_store = 4096;
 constexpr int gpu_layer_row_use = 8192;
@@ -88,6 +90,41 @@ constexpr int gpu_map_nearest = 131072;
  */
 constexpr int gpu_effect_result = 1048576;
 static_assert(gpu_effect_result == 1048576, "COMBINED_LAYER_EFFECT_RESULT");
+
+/* The Mirror flags must match #COMBINED_LAYER_MIRROR_U / _V of the shader and stay clear of the
+ * other layer-pass flags. Only the correction pass reuses the Mirror U bit, as
+ * #gpu_effect_result: an effect correction never gets a mapping, so the two never meet. */
+static_assert(gpu_layer_mirror_u == 1048576, "COMBINED_LAYER_MIRROR_U");
+static_assert(gpu_layer_mirror_v == 2097152, "COMBINED_LAYER_MIRROR_V");
+static_assert(gpu_layer_mirror_u == gpu_effect_result,
+              "The effect result flag shares the Mirror U bit by design");
+static_assert((gpu_layer_mirror_v &
+               (gpu_layer_init | gpu_layer_has_map | gpu_layer_alpha_coverage |
+                gpu_layer_premultiplied | gpu_layer_mapped | gpu_layer_repeat_u |
+                gpu_layer_repeat_v | gpu_layer_tangent_normal | gpu_layer_normal_directx |
+                gpu_layer_mirror_u | gpu_layer_has_mask | gpu_layer_row_store |
+                gpu_layer_row_use | gpu_layer_empty_base | gpu_layer_tracks_alpha |
+                gpu_layer_adjustment | gpu_layer_slot | gpu_map_nearest)) == 0,
+              "Mirror V overlaps another layer flag");
+static_assert((gpu_layer_mirror_u &
+               (gpu_layer_init | gpu_layer_has_map | gpu_layer_alpha_coverage |
+                gpu_layer_premultiplied | gpu_layer_mapped | gpu_layer_repeat_u |
+                gpu_layer_repeat_v | gpu_layer_tangent_normal | gpu_layer_normal_directx |
+                gpu_layer_has_mask | gpu_layer_row_store | gpu_layer_row_use |
+                gpu_layer_empty_base | gpu_layer_tracks_alpha | gpu_layer_adjustment |
+                gpu_layer_slot | gpu_map_nearest)) == 0,
+              "Mirror U overlaps another layer flag");
+
+/**
+ * The UV mapping values a layer, mask or correction pass uploads as uniforms. The flags that go
+ * with them stay with the caller, who adds them to the pass's own.
+ */
+struct GpuMappingUniforms {
+  float2 offset = float2(0.0f);
+  float2 scale = float2(1.0f);
+  float2 rotation = float2(1.0f, 0.0f);
+  float2 mirror_center = float2(0.5f, 0.5f);
+};
 
 /** \} */
 
@@ -272,9 +309,7 @@ struct CombinedPasses {
            const float4 &layer_color,
            const float4 &init_color,
            const float opacity,
-           const float2 &mapping_offset = float2(0.0f),
-           const float2 &mapping_scale = float2(1.0f),
-           const float2 &mapping_rotation = float2(1.0f, 0.0f),
+           const GpuMappingUniforms &mapping = {},
            const int blend = int(CompositeBlend::Mix),
            gpu::Texture *mask = nullptr,
            const int filter_kind = 0,

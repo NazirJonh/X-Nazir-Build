@@ -1211,6 +1211,35 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         col.prop(row, "tile_rotation", text="Rotation")
         col.prop(row, "mapping_wrap", text="UV Wrap")
 
+        # Mirror: fold around a center point on U and/or V axes. The fold makes both sides show the
+        # same content in real time, useful for symmetric painting.
+        col.separator()
+        col.label(text="Mirror")
+        mirror_col = col.column(align=True)
+        mirror_row = mirror_col.row(align=True)
+        mirror_row.prop(row, "mapping_mirror_u", text="U", toggle=True)
+        mirror_row.prop(row, "mapping_mirror_v", text="V", toggle=True)
+        # The center is a value of the row, so the field below can be typed before an axis is
+        # switched on: the natural order (place the point, then fold around it) works. The sculpt 3D
+        # cursor is projected through the active object's surface, so it places the point from
+        # anywhere. The two modes that need a view of their own live where that view is: the Image
+        # Editor's header places the point in the image, the 3D Viewport's header places it on the
+        # mesh, and the Image Editor's mapping gizmo drags it.
+        mirror_sub = mirror_col.column()
+        mirror_sub.prop(row, "mapping_mirror_center", text="Center")
+        from_cursor = mirror_sub.row(align=True).operator(
+            "paint.layer_mapping_mirror_from_cursor",
+            text="From 3D Cursor",
+            icon='PIVOT_CURSOR',
+        )
+        # The row the button edits: the operators resolve it from this marker, so the panel edits
+        # what it shows whatever the other editors happen to display.
+        from_cursor.marker = row.marker
+        if row.mapping_mirror_applies:
+            gizmo_note = mirror_col.column(align=True)
+            gizmo_note.enabled = False
+            gizmo_note.label(text="Drag the mirror handle in the Image Editor", icon='BLANK1')
+
         if row.mapping_enabled and row.source == 'MATERIAL':
             # The wrapper moves the active UV layer (TexCoord UV and open Image Textures) of the
             # source tree and of the groups on the path to its Principled BSDF; a coordinate-driven

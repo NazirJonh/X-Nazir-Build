@@ -146,6 +146,8 @@ static void composite_mapping_describe(const Material &ma,
   copy_v2_v2(out.scale, row.mapping.scale);
   out.rotation = row.mapping.rotation;
   out.wrap = BKE_paint_layers_mapping_wrap_get(row);
+  out.mirror_axes = BKE_paint_layers_mapping_mirror_get(row);
+  BKE_paint_layers_mapping_mirror_center_get(row, out.mirror_center);
   out.tangent_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
 }
 

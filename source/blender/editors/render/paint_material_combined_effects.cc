@@ -86,9 +86,7 @@ static gpu::Texture *gpu_map_texture(Image *image,
  */
 static void gpu_mapping_setup(const PaintMaterialCompositeMapping &mapping,
                               int &r_flags,
-                              float2 &r_offset,
-                              float2 &r_scale,
-                              float2 &r_rotation)
+                              GpuMappingUniforms &r_uniforms)
 {
   if (!mapping.enabled) {
     return;
@@ -106,10 +104,26 @@ static void gpu_mapping_setup(const PaintMaterialCompositeMapping &mapping,
   if (mapping.tangent_normal) {
     r_flags |= gpu_layer_tangent_normal;
   }
-  r_offset = float2(mapping.offset[0], mapping.offset[1]);
-  r_scale = float2(BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]),
-                   BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]));
-  r_rotation = float2(std::cos(mapping.rotation), std::sin(mapping.rotation));
+  if (mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U)) {
+    r_flags |= gpu_layer_mirror_u;
+  }
+  if (mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V)) {
+    r_flags |= gpu_layer_mirror_v;
+  }
+  r_uniforms.offset = float2(mapping.offset[0], mapping.offset[1]);
+  r_uniforms.scale = float2(BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]),
+                            BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]));
+  r_uniforms.rotation = float2(std::cos(mapping.rotation), std::sin(mapping.rotation));
+  r_uniforms.mirror_center = float2(mapping.mirror_center[0], mapping.mirror_center[1]);
+}
+
+/** Upload the mapping values of \a uniforms; the three passes name them alike. */
+static void gpu_mapping_uniforms_set(gpu::Shader *shader, const GpuMappingUniforms &uniforms)
+{
+  GPU_shader_uniform_2fv(shader, "mapping_offset", &uniforms.offset.x);
+  GPU_shader_uniform_2fv(shader, "mapping_scale", &uniforms.scale.x);
+  GPU_shader_uniform_2fv(shader, "mapping_rotation", &uniforms.rotation.x);
+  GPU_shader_uniform_2fv(shader, "mapping_mirror_center", &uniforms.mirror_center.x);
 }
 
 /* -------------------------------------------------------------------- */
@@ -220,9 +234,7 @@ bool CombinedPasses::lay(CombinedTarget &t,
                          const float4 &layer_color,
                          const float4 &init_color,
                          const float opacity,
-                         const float2 &mapping_offset,
-                         const float2 &mapping_scale,
-                         const float2 &mapping_rotation,
+                         const GpuMappingUniforms &mapping,
                          const int blend,
                          gpu::Texture *mask,
                          const int filter_kind,
@@ -234,15 +246,13 @@ bool CombinedPasses::lay(CombinedTarget &t,
   gpu::Texture *sampled = map != nullptr ? map : dummy;
   gpu::Texture *mask_sampled = mask != nullptr ? mask : dummy;
   gpu::Texture *slot_cov_sampled = slot_coverage != nullptr ? slot_coverage : dummy;
-  const float lod = map_lod(t, map, flags, mapping_scale);
+  const float lod = map_lod(t, map, flags, mapping.scale);
   GPU_shader_bind(layer_shader);
   GPU_shader_uniform_mat4(layer_shader, "texel_to_uv", t.texel_to_uv_4x4.ptr());
   GPU_shader_uniform_2iv(layer_shader, "texture_size", &t.size.x);
   GPU_shader_uniform_4fv(layer_shader, "layer_color", &layer_color.x);
   GPU_shader_uniform_4fv(layer_shader, "init_color", &init_color.x);
-  GPU_shader_uniform_2fv(layer_shader, "mapping_offset", &mapping_offset.x);
-  GPU_shader_uniform_2fv(layer_shader, "mapping_scale", &mapping_scale.x);
-  GPU_shader_uniform_2fv(layer_shader, "mapping_rotation", &mapping_rotation.x);
+  gpu_mapping_uniforms_set(layer_shader, mapping);
   GPU_shader_uniform_1f(layer_shader, "opacity", opacity);
   GPU_shader_uniform_1f(layer_shader, "lod", lod);
   GPU_shader_uniform_1i(layer_shader, "flags", flags);
@@ -322,11 +332,9 @@ bool CombinedPasses::mask_step(CombinedTarget &t,
 {
   gpu::Texture *sampled = map != nullptr ? map : dummy;
   int step_flags = flags;
-  float2 mapping_offset(0.0f);
-  float2 mapping_scale(1.0f);
-  float2 mapping_rotation(1.0f, 0.0f);
+  GpuMappingUniforms mapping_uniforms;
   if (mapping != nullptr && map != nullptr) {
-    gpu_mapping_setup(*mapping, step_flags, mapping_offset, mapping_scale, mapping_rotation);
+    gpu_mapping_setup(*mapping, step_flags, mapping_uniforms);
   }
   float4 params_0(0.0f);
   float4 params_1(0.0f);
@@ -349,9 +357,7 @@ bool CombinedPasses::mask_step(CombinedTarget &t,
   GPU_shader_bind(mask_shader);
   GPU_shader_uniform_mat4(mask_shader, "texel_to_uv", t.texel_to_uv_4x4.ptr());
   GPU_shader_uniform_2iv(mask_shader, "texture_size", &t.size.x);
-  GPU_shader_uniform_2fv(mask_shader, "mapping_offset", &mapping_offset.x);
-  GPU_shader_uniform_2fv(mask_shader, "mapping_scale", &mapping_scale.x);
-  GPU_shader_uniform_2fv(mask_shader, "mapping_rotation", &mapping_rotation.x);
+  gpu_mapping_uniforms_set(mask_shader, mapping_uniforms);
   GPU_shader_uniform_4fv(mask_shader, "filter_params_0", &params_0.x);
   GPU_shader_uniform_4fv(mask_shader, "filter_params_1", &params_1.x);
   GPU_shader_uniform_4fv(mask_shader, "filter_params_2", &params_2.x);
@@ -410,11 +416,9 @@ bool CombinedPasses::correction_step(CombinedTarget &t,
     }
     step_flags |= gpu_layer_has_map | (premultiplied ? gpu_layer_premultiplied : 0);
   }
-  float2 mapping_offset(0.0f);
-  float2 mapping_scale(1.0f);
-  float2 mapping_rotation(1.0f, 0.0f);
+  GpuMappingUniforms mapping_uniforms;
   if (map != nullptr && slot_color == nullptr && effect_result == nullptr) {
-    gpu_mapping_setup(correction.mapping, step_flags, mapping_offset, mapping_scale, mapping_rotation);
+    gpu_mapping_setup(correction.mapping, step_flags, mapping_uniforms);
   }
   gpu::Texture *sampled = (map != nullptr && effect_result == nullptr) ? map : dummy;
   gpu::Texture *effect_sampled = effect_result != nullptr ? effect_result : dummy;
@@ -448,9 +452,7 @@ bool CombinedPasses::correction_step(CombinedTarget &t,
   GPU_shader_uniform_mat4(correction_shader, "texel_to_uv", t.texel_to_uv_4x4.ptr());
   GPU_shader_uniform_2iv(correction_shader, "texture_size", &t.size.x);
   GPU_shader_uniform_4fv(correction_shader, "constant_color", &constant_color.x);
-  GPU_shader_uniform_2fv(correction_shader, "mapping_offset", &mapping_offset.x);
-  GPU_shader_uniform_2fv(correction_shader, "mapping_scale", &mapping_scale.x);
-  GPU_shader_uniform_2fv(correction_shader, "mapping_rotation", &mapping_rotation.x);
+  gpu_mapping_uniforms_set(correction_shader, mapping_uniforms);
   GPU_shader_uniform_4fv(correction_shader, "filter_params_0", &params_0.x);
   GPU_shader_uniform_4fv(correction_shader, "filter_params_1", &params_1.x);
   GPU_shader_uniform_4fv(correction_shader, "filter_params_2", &params_2.x);
@@ -816,9 +818,7 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
     }
   }
   float4 layer_color(layer.constant_color);
-  float2 mapping_offset(0.0f);
-  float2 mapping_scale(1.0f);
-  float2 mapping_rotation(1.0f, 0.0f);
+  GpuMappingUniforms mapping_uniforms;
   bool has_mask = false;
 
   if (layer.is_folder) {
@@ -876,7 +876,7 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
       flags |= gpu_layer_adjustment;
     }
     if (map != nullptr && reader_slot == nullptr) {
-      gpu_mapping_setup(layer.mapping, flags, mapping_offset, mapping_scale, mapping_rotation);
+      gpu_mapping_setup(layer.mapping, flags, mapping_uniforms);
     }
     if (row_in_textures) {
       if (!lay(t,
@@ -886,9 +886,7 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
                layer_color,
                float4(0.0f),
                1.0f,
-               mapping_offset,
-               mapping_scale,
-               mapping_rotation,
+               mapping_uniforms,
                int(CompositeBlend::Mix),
                nullptr,
                int(layer.adjustment_filter),
@@ -991,9 +989,7 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
            layer_color,
            float4(0.0f),
            layer.opacity,
-           mapping_offset,
-           mapping_scale,
-           mapping_rotation,
+           mapping_uniforms,
            int(layer.blend),
            has_mask ? t.mask_accum : nullptr,
            int(layer.adjustment_filter),

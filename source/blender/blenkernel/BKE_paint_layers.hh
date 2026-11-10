@@ -19,6 +19,7 @@
  * marker does not: it moves a cursor, not the stack.
  */
 
+#include <cmath>
 #include <cstdint>
 #include <memory>
 
@@ -1329,9 +1330,10 @@ bool BKE_paint_layers_mapping_is_identity(const MaterialPaintLayer &layer);
 
 /**
  * Whether generation needs to remap \a layer: #BKE_paint_layers_mapping_applies, and the transform
- * either moves the UVs or clips them (#BKE_paint_layers_mapping_wrap_get is not Repeat). An
- * identity mapping with Repeat is skipped, so a row whose mapping was switched on before it had a
- * value builds the same graph as an unmapped one.
+ * either moves the UVs, clips them (#BKE_paint_layers_mapping_wrap_get is not Repeat) or folds an
+ * axis (#BKE_paint_layers_mapping_mirror_get). An identity mapping with Repeat and no fold is
+ * skipped, so a row whose mapping was switched on before it had a value builds the same graph as an
+ * unmapped one.
  */
 bool BKE_paint_layers_mapping_remaps(const Material &ma, const MaterialPaintLayer &layer);
 
@@ -1448,6 +1450,72 @@ int16_t BKE_paint_layers_mapping_wrap_get(const MaterialPaintLayer &layer);
  * \a ma.
  */
 bool BKE_paint_layers_mapping_set_wrap(Material &ma, MaterialPaintLayer *layer, int16_t wrap);
+
+/** The #MA_PAINT_LAYER_MAPPING_MIRROR_* bits of \a layer: the axes its maps fold along. */
+int16_t BKE_paint_layers_mapping_mirror_get(const MaterialPaintLayer &layer);
+
+/**
+ * Fold the axes of \a layer's maps around its #MaterialPaintLayerMapping::mirror_center. \a axes is
+ * a mask of #MA_PAINT_LAYER_MAPPING_MIRROR_U / _V; 0 folds nothing. The fold reads the map through
+ * `|uv - center| + center` per folded axis before the transform, so what either side of the center
+ * shows, both sides show -- the same nodes the generated graph builds and the CPU and GPU composites
+ * apply. Structural: the row's chain gains or loses the fold and its per-texel Normal flip.
+ *
+ * Refused (false, unchanged) for a row not in \a ma and for turning an axis on while the mapping is
+ * unsupported. The center keeps whatever it was last placed at; a new row starts at (0.5, 0.5).
+ */
+bool BKE_paint_layers_mapping_set_mirror(Material &ma, MaterialPaintLayer *layer, int16_t axes);
+
+/**
+ * Whether \a layer's mapping folds at least one axis right now: an applied mapping with a mirror
+ * bit set. The one predicate the topology hash, the graph builder and the composites share.
+ */
+bool BKE_paint_layers_mapping_mirror_applies(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Whether \a layer offers the Mirror fold at all: a Fill (constant) layer whose mapping is
+ * supported. The one predicate the Outliner row button, its operator and the RNA/UI share; unlike
+ * #BKE_paint_layers_mapping_mirror_applies it does not ask for the fold to be on.
+ */
+bool BKE_paint_layers_mapping_mirror_available(const Material &ma, const MaterialPaintLayer &layer);
+
+/** The UV center the mirror of \a layer folds around. */
+void BKE_paint_layers_mapping_mirror_center_get(const MaterialPaintLayer &layer,
+                                                float r_center[2]);
+
+/**
+ * Set the UV center the mirror of \a layer folds around. Value-only: a drag on it must not rebuild
+ * anything. Non-finite values are refused.
+ */
+bool BKE_paint_layers_mapping_set_mirror_center(Material &ma,
+                                                MaterialPaintLayer *layer,
+                                                const float center[2]);
+
+/**
+ * The offset the generated graph adds to `coordinate - center` before taking its sign, so a texel
+ * exactly on the fold line reads as +1 there like in #BKE_paint_layers_mapping_mirror_side (which
+ * the CPU resample and the compute shader use: ">= center" is +1) instead of SIGN's zero.
+ */
+constexpr float BKE_PAINT_LAYERS_MIRROR_SIDE_BIAS = 1e-6f;
+
+/**
+ * The Mirror fold of one coordinate around \a center on one axis, the formula the generated graph,
+ * the CPU resample and the shader all apply: `|coordinate - center| + center`.
+ */
+inline float BKE_paint_layers_mapping_mirror_fold(const float coordinate, const float center)
+{
+  return fabsf(coordinate - center) + center;
+}
+
+/**
+ * Which side of \a center \a coordinate lies on: the sign a tangent-space Normal's component along
+ * the folded axis is multiplied by at that coordinate, the covariant counterpart of the fold (the
+ * per-texel generalization of the negative-scale flip). Exactly at the center the side reads +1.
+ */
+inline float BKE_paint_layers_mapping_mirror_side(const float coordinate, const float center)
+{
+  return coordinate >= center ? 1.0f : -1.0f;
+}
 
 /** \} */
 

@@ -2105,9 +2105,9 @@ static void composite_image_own(ImBuf *ibuf, Vector<CompositeImageLock> &r_locks
 
 /**
  * The canvas-UV transform of a row's mapping, the one both CPU passes (the resample of a map and
- * the clip of a Material row's coverage) read through, so they cannot disagree on a texel: rotate
- * around Z, then scale along the canvas axes, then offset. An axis that repeats wraps with floor;
- * one that clips is range-tested.
+ * the clip of a Material row's coverage) read through, so they cannot disagree on a texel: the
+ * Mirror fold of the mapped axes around the center, then rotate around Z, then scale along the
+ * canvas axes, then offset. An axis that repeats wraps with floor; one that clips is range-tested.
  */
 struct CompositeMappingTransform {
   float scale_x;
@@ -2116,6 +2116,10 @@ struct CompositeMappingTransform {
   float sin_rot;
   float offset_u;
   float offset_v;
+  bool mirror_u = false;
+  bool mirror_v = false;
+  float mirror_center_u = 0.5f;
+  float mirror_center_v = 0.5f;
   bool repeat_u = true;
   bool repeat_v = true;
 
@@ -2125,7 +2129,11 @@ struct CompositeMappingTransform {
         cos_rot(cosf(mapping.rotation)),
         sin_rot(sinf(mapping.rotation)),
         offset_u(mapping.offset[0]),
-        offset_v(mapping.offset[1])
+        offset_v(mapping.offset[1]),
+        mirror_u(mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U)),
+        mirror_v(mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V)),
+        mirror_center_u(mapping.mirror_center[0]),
+        mirror_center_v(mapping.mirror_center[1])
   {
     BKE_paint_layers_mapping_wrap_axes(mapping.wrap, repeat_u, repeat_v);
   }
@@ -2136,12 +2144,34 @@ struct CompositeMappingTransform {
     return !(repeat_u && repeat_v);
   }
 
+  /** Which side of the fold center \a u lies on along U, when U folds; always +1 when it does not.
+   * The covariant counterpart of the fold, the flip a tangent normal's U component takes. */
+  float side_u(const float u) const
+  {
+    return mirror_u ? BKE_paint_layers_mapping_mirror_side(u, mirror_center_u) : 1.0f;
+  }
+
+  /** #side_u along V. */
+  float side_v(const float v) const
+  {
+    return mirror_v ? BKE_paint_layers_mapping_mirror_side(v, mirror_center_v) : 1.0f;
+  }
+
   /** The mapped coordinate of the canvas point (\a u, \a v). \return false outside the square on
-   * an axis that clips. Only a clipping axis is range-tested: a wrapped one can round to 1. */
+   * an axis that clips. Only a clipping axis is range-tested: a wrapped one can round to 1. The
+   * fold reads the canvas UV the painting addresses, before the transform moves it. */
   bool apply(const float u, const float v, float &r_u, float &r_v) const
   {
-    const float ru = u * cos_rot - v * sin_rot;
-    const float rv = u * sin_rot + v * cos_rot;
+    float fu = u;
+    float fv = v;
+    if (mirror_u) {
+      fu = BKE_paint_layers_mapping_mirror_fold(u, mirror_center_u);
+    }
+    if (mirror_v) {
+      fv = BKE_paint_layers_mapping_mirror_fold(v, mirror_center_v);
+    }
+    const float ru = fu * cos_rot - fv * sin_rot;
+    const float rv = fu * sin_rot + fv * cos_rot;
     r_u = ru * scale_x + offset_u;
     r_v = rv * scale_y + offset_v;
     if (repeat_u) {
@@ -2292,18 +2322,22 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
       if (mapping.tangent_normal && p[3] > 0.0f) {
         /* The mapping moved only the read point; the tangent-space vectors follow it. `R^T * S`
          * (flipped by the scale's sign, then rotated back) is the covariant counterpart of the
-         * UV transform `S * R`; the magnitude of the scale does not turn a direction.
+         * UV transform `S * R`; the magnitude of the scale does not turn a direction. The Mirror
+         * fold turns the component along each folded axis per texel, by the side of its center
+         * the canvas point reads from, the same per-texel flip the graph's side-sign vector does.
          * Un-premultiply first so the alpha does not skew the decode. */
         const float inv_alpha = 1.0f / p[3];
         const float nx = 2.0f * p[0] * inv_alpha - 1.0f;
         const float ny = 2.0f * p[1] * inv_alpha - 1.0f;
         const float nz = 2.0f * p[2] * inv_alpha - 1.0f;
-        const float rx = scale_x < 0.0f ? -1.0f : 1.0f;
-        const float ry = scale_y < 0.0f ? -1.0f : 1.0f;
+        const float rx = (scale_x < 0.0f ? -1.0f : 1.0f);
+        const float ry = (scale_y < 0.0f ? -1.0f : 1.0f);
         const float fx = rx * nx;
         const float fy = ry * ny;
-        p[0] = (0.5f * (cos_rot * fx + sin_rot * fy) + 0.5f) * p[3];
-        p[1] = (0.5f * (-sin_rot * fx + cos_rot * fy) + 0.5f) * p[3];
+        /* The fold's side signs act on the canvas axes, so they come after the rotation back: the
+         * UV transform is `S * R * fold`, whose inverse on a direction is `side * R^T * S^-1`. */
+        p[0] = (0.5f * transform.side_u(u) * (cos_rot * fx + sin_rot * fy) + 0.5f) * p[3];
+        p[1] = (0.5f * transform.side_v(v) * (-sin_rot * fx + cos_rot * fy) + 0.5f) * p[3];
         p[2] = (0.5f * nz + 0.5f) * p[3];
       }
     }
@@ -3261,6 +3295,10 @@ static uint64_t composite_mapping_hash(uint64_t hash, const PaintMaterialComposi
   }
   hash = get_default_hash(hash, mapping.offset[0], mapping.offset[1], mapping.rotation);
   hash = get_default_hash(hash, mapping.wrap);
+  /* The folded axes and the center move which texel a pixel reads, so they move the hash too, or
+   * an edit of either would keep serving the cached composite. */
+  hash = get_default_hash(hash, mapping.mirror_axes, mapping.mirror_center[0],
+                          mapping.mirror_center[1]);
   return get_default_hash(hash,
                           BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]),
                           BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]),

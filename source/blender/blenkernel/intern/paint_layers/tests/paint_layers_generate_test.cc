@@ -1907,6 +1907,33 @@ TEST_F(PaintLayersGenerateTest, the_wrap_is_topology_only_while_the_mapping_rema
   EXPECT_NE(repeat_x, repeated);
 }
 
+TEST_F(PaintLayersGenerateTest, the_mirror_axes_are_topology_and_the_center_is_not)
+{
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const auto row_hash = [&]() {
+    return paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms);
+  };
+
+  const uint64_t unfolded = row_hash();
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(*ma, fill, MA_PAINT_LAYER_MAPPING_MIRROR_U));
+  const uint64_t folded_u = row_hash();
+  EXPECT_NE(folded_u, unfolded);
+
+  /* Moving the center is a value edit: the fold's nodes read it from a socket. */
+  const float center[2] = {0.25f, 0.75f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror_center(*ma, fill, center));
+  EXPECT_EQ(row_hash(), folded_u);
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(
+      *ma, fill, int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V)));
+  EXPECT_NE(row_hash(), folded_u);
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(*ma, fill, 0));
+  EXPECT_EQ(row_hash(), unfolded) << "a row without a fold hashes as it did before the option";
+}
+
 TEST_F(PaintLayersGenerateTest, a_clipped_correction_and_mask_item_each_get_their_own_factor)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));

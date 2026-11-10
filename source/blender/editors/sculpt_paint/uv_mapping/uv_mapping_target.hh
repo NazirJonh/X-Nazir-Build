@@ -22,6 +22,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 #include "DNA_uuid_types.h"
 
 #include "uv_mapping_math.hh"
@@ -51,6 +53,13 @@ class PaintLayerRowMappingTarget {
    */
   bool resolve(const bContext &C);
 
+  /**
+   * Resolve the row \a marker names on the active object's active material, without asking for a
+   * space of its own. A nil marker takes the row the context shows instead, the way the gizmo does.
+   */
+  bool resolve_row(const bContext &C, bUUID marker);
+
+
   /** Read the row's mapping. False when the row is gone or no longer carries a mapping. */
   bool read(UvMappingXform &r_xform) const;
 
@@ -62,6 +71,18 @@ class PaintLayerRowMappingTarget {
 
   /** Lock or unlock the row's scale axes (the Mapping panel's Lock toggle). */
   bool set_scale_locked(bool locked);
+
+  /** Whether the row's Mirror fold reaches what it shows: the mapping applies and an axis folds. */
+  bool mirror_applies() const;
+
+  /** The UV point the row's Mirror fold reflects around. False when the row is gone. */
+  bool read_mirror_center(float r_center[2]) const;
+
+  /** Move the row's Mirror fold center. Value-only, so a drag never rebuilds anything. */
+  bool write_mirror_center(const float2 &center);
+
+  /** The undo step name of a Mirror center gesture. */
+  const char *mirror_undo_name() const;
 
   const char *undo_name() const;
 

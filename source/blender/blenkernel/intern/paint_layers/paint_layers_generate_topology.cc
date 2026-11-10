@@ -147,6 +147,46 @@ static void mapping_wrap_hash_mix(uint64_t &hash, const Material &ma, const Mate
 }
 
 /**
+ * The shape of the Mirror fold's node chain, mixed into the topology hash while an axis folds. The
+ * hash is what decides whether a saved tree is rebuilt, so the chain gaining, losing or rewiring a
+ * node means bumping this -- otherwise a file built by the older chain keeps its wiring.
+ * 2: the fold hands the transform its folded UV through #MappingChain::fold_out, and biases the
+ * side signs so a texel sitting on the fold line reads as +1 -- "at or beyond the center" -- on
+ * all three paths (graph, CPU resample, compute shader).
+ */
+static constexpr uint64_t MAPPING_MIRROR_CHAIN_VERSION = 2;
+
+/**
+ * Mix which axes the row's Mirror folds into \a hash: nothing while the mapping does not apply,
+ * the axis mask otherwise. The fold's nodes and its per-texel Normal flip exist per axis, so the
+ * axes are structure; the center is a value the fold reads and never moves the hash.
+ */
+static void mapping_mirror_hash_mix(uint64_t &hash, const Material &ma, const MaterialPaintLayer &row)
+{
+  if (BKE_paint_layers_mapping_applies(ma, row)) {
+    const int16_t axes = BKE_paint_layers_mapping_mirror_get(row);
+    hash = topology_hash_mix(hash, uint64_t(axes));
+    if (axes != 0) {
+      hash = topology_hash_mix(hash, MAPPING_MIRROR_CHAIN_VERSION);
+    }
+  }
+}
+
+/**
+ * Mix everything a row's UV mapping decides into \a hash, in one fixed order: whether it remaps,
+ * the wrap, the mirror axes. Every row kind goes through here so a new mapping option cannot be
+ * hashed in some places and forgotten in others. Rows without wrap or mirror hash as before.
+ */
+static void mapping_topology_hash_mix(uint64_t &hash,
+                                      const Material &ma,
+                                      const MaterialPaintLayer &row)
+{
+  hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, row) ? 1 : 0);
+  mapping_wrap_hash_mix(hash, ma, row);
+  mapping_mirror_hash_mix(hash, ma, row);
+}
+
+/**
  * Which point a reader names, and whether the reference resolves: the tap sockets are only built
  * for a valid reference. \a tag tells the places a reader can sit in apart.
  *
@@ -328,8 +368,7 @@ static void topology_mask_hash_mix(uint64_t &hash,
     hash = topology_hash_mix(hash, 1);
     /* The inversion is a node of its own. */
     hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(*mask) ? 1 : 0);
-    hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, *mask) ? 1 : 0);
-    mapping_wrap_hash_mix(hash, ma, *mask);
+    mapping_topology_hash_mix(hash, ma, *mask);
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (record != nullptr && record->image != nullptr) {
@@ -381,8 +420,7 @@ static void topology_mask_hash_mix(uint64_t &hash,
       hash = topology_hash_mix(hash,
                                paint_layer_mask_effect_bake_map(ma, item) != nullptr ? 1 : 0);
     }
-    hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, item) ? 1 : 0);
-    mapping_wrap_hash_mix(hash, ma, item);
+    mapping_topology_hash_mix(hash, ma, item);
     gradient_payload_hash_mix(hash, item);
     generator_topology_hash_mix(hash, item);
     filter_payload_hash_mix(hash, item);
@@ -438,8 +476,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
    * renaming only renames the group (#LayerTreeFactory::layer_tree_get), never rebuilds it. */
   /* An applied mapping is a Mapping node and its inputs; its values are inputs, so only whether it
    * applies is structure. The same answer builds the interface, so the two cannot disagree. */
-  hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, layer) ? 1 : 0);
-  mapping_wrap_hash_mix(hash, ma, layer);
+  mapping_topology_hash_mix(hash, ma, layer);
   /* A row inside an isolating folder is built in the isolated form, with sockets of its own. */
   hash = topology_hash_mix(hash, forms.lookup_default(&layer, {}).in_isolating_folder ? 1 : 0);
   /* A Pass Through folder builds no group, an isolating one does: the mode is structure, although
@@ -547,8 +584,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     }
     /* Which filter it is decides its nodes; its parameters are inputs. */
     hash = topology_hash_mix(hash, uint64_t(uint16_t(effect.kind_subtype)));
-    hash = topology_hash_mix(hash, BKE_paint_layers_mapping_remaps(ma, effect) ? 1 : 0);
-    mapping_wrap_hash_mix(hash, ma, effect);
+    mapping_topology_hash_mix(hash, ma, effect);
     gradient_payload_hash_mix(hash, effect);
     generator_topology_hash_mix(hash, effect);
     filter_payload_hash_mix(hash, effect);

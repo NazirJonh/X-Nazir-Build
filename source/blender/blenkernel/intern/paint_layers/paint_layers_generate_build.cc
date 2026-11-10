@@ -268,6 +268,23 @@ void PaintLayersTreeBuilder::mapping_inputs_create(LayerGroup &group,
       input.store.add(&row, socket);
     }
   }
+  /* The fold center rides the group's inputs the same way, while the folded axes themselves are
+   * the chain's shape and never a value. */
+  if (BKE_paint_layers_mapping_mirror_applies(ma_, row)) {
+    char base[200];
+    SNPRINTF(base, "%s Mapping Mirror Center", label);
+    bNodeTreeInterfaceSocket *socket = layer_group_value_input(group,
+                                                               base,
+                                                               "NodeSocketVector",
+                                                               ROLE_MAPPING_MIRROR_CENTER,
+                                                               row.marker,
+                                                               -1);
+    if (socket != nullptr) {
+      const float value[3] = {row.mapping.mirror_center[0], row.mapping.mirror_center[1], 0.0f};
+      group_input_vector_default_set(group, *socket, value);
+      mapping_mirror_center_inputs_.add(&row, socket);
+    }
+  }
 }
 
 bNode *PaintLayersTreeBuilder::uv_coordinate_ensure(bNodeTree &tree)
@@ -327,19 +344,33 @@ bNode *PaintLayersTreeBuilder::mapping_node_ensure(bNodeTree &tree,
         bNodeTreeInterfaceSocket *const *iface = inputs.lookup_ptr(&row);
         return mapping_group_input_socket(group_input, iface);
       };
+  bNodeSocket *center_socket = value_socket(mapping_mirror_center_inputs_);
+  const int16_t mirror_axes = (center_socket != nullptr) ?
+                                  BKE_paint_layers_mapping_mirror_get(row) :
+                                  int16_t(0);
   const MappingChain chain = mapping_chain_add(tree,
                                                *coord,
                                                *uv,
                                                group_input,
                                                value_socket(mapping_offset_inputs_),
                                                value_socket(mapping_scale_inputs_),
-                                               value_socket(mapping_rotation_inputs_));
+                                               value_socket(mapping_rotation_inputs_),
+                                               group_input,
+                                               center_socket,
+                                               mirror_axes);
   if (chain.mapping == nullptr) {
     return nullptr;
   }
   grid_.place_extra(*chain.mapping);
   grid_.place_extra(*chain.rotate);
+  for (bNode *fold : chain.fold_nodes) {
+    grid_.place_extra(*fold);
+    r_nodes.append(fold);
+  }
   mapping_nodes_.add(&row, chain.mapping);
+  if (chain.side_sign != nullptr) {
+    mapping_side_signs_.add(&row, {chain.side_sign_node, chain.side_sign});
+  }
   r_nodes.append(chain.mapping);
   r_nodes.append(chain.rotate);
   return chain.mapping;
@@ -534,6 +565,7 @@ void PaintLayersTreeBuilder::nodes_discard(bNodeTree &tree, Span<bNode *> nodes)
   }
   for (const MaterialPaintLayer *row : stale) {
     mapping_nodes_.remove(row);
+    mapping_side_signs_.remove(row);
   }
   stale.clear();
   for (const auto item : mapping_clip_masks_.items()) {
@@ -583,6 +615,12 @@ NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
       scale = {link.fromnode, link.fromsock};
     }
   }
+  bNode *side_sign_node = nullptr;
+  bNodeSocket *side_sign = nullptr;
+  if (const auto *sign_pair = mapping_side_signs_.lookup_ptr(&row)) {
+    side_sign_node = sign_pair->first;
+    side_sign = sign_pair->second;
+  }
 
   Vector<bNode *> made;
   bNode *encode_node = nullptr;
@@ -593,6 +631,8 @@ NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
                                                 rotation.socket,
                                                 scale.node,
                                                 scale.socket,
+                                                side_sign_node,
+                                                side_sign,
                                                 made,
                                                 encode_node);
   if (encoded == nullptr) {

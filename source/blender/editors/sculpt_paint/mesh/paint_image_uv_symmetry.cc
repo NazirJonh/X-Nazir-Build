@@ -15,10 +15,13 @@
 #include "DNA_object_types.h"
 
 #include "BLI_kdopbvh.hh"
+#include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_span.hh"
 
+#include "BKE_attribute.hh"
+#include "BKE_attribute_enums.hh"
 #include "BKE_bvhutils.hh"
 #include "BKE_editmesh.hh"
 #include "BKE_editmesh_bvh.hh"
@@ -30,6 +33,14 @@ namespace blender {
 
 /** Fraction of the mesh bounding-box diagonal a mirrored point may miss the surface by. */
 static constexpr float SYMMETRY_SNAP_TOLERANCE_FACTOR = 1e-4f;
+
+/**
+ * The same, for a free point rather than a mirrored one: the sculpt cursor and a viewport hit are
+ * not guaranteed to lie on the surface, so they get a roomier -- still bounded -- snap radius.
+ * Two percent of the mesh's size keeps the search on the part of the mesh under the point, where
+ * the mirror passes need the exacting figure above.
+ */
+static constexpr float SYMMETRY_POINT_SNAP_FACTOR = 0.02f;
 
 static float symmetry_snap_tolerance(BMesh *bm)
 {
@@ -108,6 +119,81 @@ static int symmetry_nearest_face(Object *ob,
     return -1;
   }
   return tri_faces[nearest.index];
+}
+
+bool image_paint_symmetry_uv_at_position(Object *ob,
+                                         const float3 &position,
+                                         float r_uv[2],
+                                         const int corner_tri_hint)
+{
+  if (ob == nullptr || r_uv == nullptr || ob->type != OB_MESH || (ob->mode & OB_MODE_EDIT)) {
+    return false;
+  }
+  const Mesh *mesh = id_cast<const Mesh *>(ob->data);
+  if (mesh == nullptr || mesh->faces_num == 0) {
+    return false;
+  }
+  const StringRefNull uv_name = mesh->active_or_default_uv_map_name();
+  if (uv_name.is_empty()) {
+    return false;
+  }
+  const bke::AttributeReader<float2> uv_reader = mesh->attributes().lookup<float2>(
+      uv_name, bke::AttrDomain::Corner);
+  if (!uv_reader) {
+    return false;
+  }
+  const VArray<float2> uv_map = *uv_reader;
+
+  const Span<float3> positions = mesh->vert_positions();
+  if (positions.is_empty()) {
+    return false;
+  }
+  const Span<int3> corner_tris = mesh->corner_tris();
+  const Span<int> corner_verts = mesh->corner_verts();
+
+  /* The triangle the point reads from, and the point itself once it is on that triangle. A caller
+   * holding a ray-cast hit passes its index, so the hover path does not search a second time. */
+  int tri_index = corner_tri_hint;
+  float3 point = position;
+  if (tri_index < 0) {
+    float3 bounds_min(std::numeric_limits<float>::max());
+    float3 bounds_max(std::numeric_limits<float>::lowest());
+    for (const float3 &vert_position : positions) {
+      bounds_min = math::min(bounds_min, vert_position);
+      bounds_max = math::max(bounds_max, vert_position);
+    }
+    const float tolerance = std::max(
+        math::distance(bounds_min, bounds_max) * SYMMETRY_POINT_SNAP_FACTOR, 1e-4f);
+
+    bke::BVHTreeFromMesh tree = mesh->bvh_corner_tris_no_hidden();
+    if (tree.tree == nullptr) {
+      return false;
+    }
+    BVHTreeNearest nearest{};
+    nearest.index = -1;
+    nearest.dist_sq = tolerance * tolerance;
+    BLI_bvhtree_find_nearest(tree.tree, position, &nearest, tree.nearest_callback, &tree);
+    tri_index = nearest.index;
+    point = float3(nearest.co);
+  }
+  if (tri_index < 0 || tri_index >= corner_tris.size()) {
+    return false;
+  }
+  /* #Mesh::corner_tris holds global corner indices (the tessellator adds the face start), so the
+   * triangle's three entries index the UV attribute directly. */
+  const int3 &tri = corner_tris[tri_index];
+  const int corners[3] = {tri[0], tri[1], tri[2]};
+  const float3 v0 = positions[corner_verts[corners[0]]];
+  const float3 v1 = positions[corner_verts[corners[1]]];
+  const float3 v2 = positions[corner_verts[corners[2]]];
+  float weights[3];
+  interp_weights_tri_v3(weights, v0, v1, v2, point);
+  const float2 uv0 = uv_map[corners[0]];
+  const float2 uv1 = uv_map[corners[1]];
+  const float2 uv2 = uv_map[corners[2]];
+  r_uv[0] = weights[0] * uv0.x + weights[1] * uv1.x + weights[2] * uv2.x;
+  r_uv[1] = weights[0] * uv0.y + weights[1] * uv1.y + weights[2] * uv2.y;
+  return true;
 }
 
 void image_paint_symmetry_mirror_faces(Object *ob,

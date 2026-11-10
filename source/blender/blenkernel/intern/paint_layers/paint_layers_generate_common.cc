@@ -1040,14 +1040,196 @@ UvReaders uv_readers_find(bNodeTree &tree)
   return found;
 }
 
+/**
+ * One Vector Math node of the Mirror fold: the tag that marks it as part of the row's mapping
+ * chain, the operation it computes and whether it reads a second and a third vector. #FoldNode
+ * indexes the table, so the chain's shape is written down once and a new node is declared in the
+ * same place as its arity.
+ */
+struct FoldNodeSpec {
+  const char *tag;
+  int operation;
+  bool reads_b;
+  bool reads_c;
+};
+
+/** The Mirror fold's nodes, from the fold's arithmetic to the two outputs the chain hands out. */
+enum FoldNode {
+  /** `uv - center`. */
+  FoldSub,
+  /** `|uv - center|`. */
+  FoldAbs,
+  /** `|uv - center| + center`. */
+  FoldAdd,
+  /** `(|uv - center| + center) - uv`. */
+  FoldDelta,
+  /** `mask * ((|uv - center| + center) - uv)`. */
+  FoldMask,
+  /** `uv + mask * ((|uv - center| + center) - uv)`: the folded UV the transform reads. */
+  FoldOut,
+  /** `(uv - center) + bias`: the side test's input, biased off the exact centre. */
+  FoldBias,
+  /** `sign((uv - center) + bias)`. */
+  FoldSign,
+  /** `mask * sign + (1 - mask)`: the per-texel side sign a tangent Normal multiplies by. */
+  FoldSide,
+  FoldNodeNum,
+};
+
+static constexpr std::array<FoldNodeSpec, FoldNodeNum> FOLD_NODE_SPECS = {{
+    {"mirror_sub", NODE_VECTOR_MATH_SUBTRACT, true, false},
+    {"mirror_abs", NODE_VECTOR_MATH_ABSOLUTE, false, false},
+    {"mirror_add", NODE_VECTOR_MATH_ADD, true, false},
+    {"mirror_delta", NODE_VECTOR_MATH_SUBTRACT, true, false},
+    {"mirror_mask", NODE_VECTOR_MATH_MULTIPLY, true, false},
+    {"mirror_out", NODE_VECTOR_MATH_ADD, true, false},
+    {"mirror_bias", NODE_VECTOR_MATH_ADD, true, false},
+    {"mirror_sign", NODE_VECTOR_MATH_SIGN, false, false},
+    {"mirror_side", NODE_VECTOR_MATH_MULTIPLY_ADD, true, true},
+}};
+
+/**
+ * The Mirror fold of \a uv_out around \a center_socket, one chain for any set of folded axes: the
+ * map is read through `uv + mask * (|uv - center| + center - uv)`, where \a mask is the folded
+ * axes baked as constants (the folded axes are the chain's shape, the center is a value). Every
+ * node is marked a mapping-chain node, so the value sync, the UV-reader predicate and the removal
+ * see one chain. On failure nothing is left in \a tree and the result names nothing.
+ *
+ * #MappingChain::fold_out is the folded UV, #MappingChain::side_sign the per-texel side signs
+ * `mask * sign(uv - center) + (1 - mask)` a tangent-space Normal multiplies by. They are the two
+ * ends of the chain and are handed out as such, so which one a caller reads is never a matter of
+ * node order.
+ */
+static MappingChain mapping_fold_nodes_add(bNodeTree &tree,
+                                           bNode &uv_node,
+                                           bNodeSocket &uv_out,
+                                           bNode &center_node,
+                                           bNodeSocket &center_socket,
+                                           const int16_t mirror_axes)
+{
+  const bool fold_u = (mirror_axes & MA_PAINT_LAYER_MAPPING_MIRROR_U) != 0;
+  const bool fold_v = (mirror_axes & MA_PAINT_LAYER_MAPPING_MIRROR_V) != 0;
+  const float mask[3] = {fold_u ? 1.0f : 0.0f, fold_v ? 1.0f : 0.0f, 0.0f};
+  const float inv_mask[3] = {fold_u ? 0.0f : 1.0f, fold_v ? 0.0f : 1.0f, 1.0f};
+  /**
+   * A fraction of a texel added to `uv - center` before the sign. SIGN reads zero exactly at the
+   * center, while #BKE_paint_layers_mapping_mirror_side and the compute shader read the side as
+   * "+1 at and beyond". The bias puts the texel row on the fold line on the same side in all
+   * three, which is what a mirrored Normal needs.
+   */
+  const float side_bias[3] = {
+      BKE_PAINT_LAYERS_MIRROR_SIDE_BIAS, BKE_PAINT_LAYERS_MIRROR_SIDE_BIAS, 0.0f};
+
+  std::array<bNode *, FoldNodeNum> nodes = {};
+  const auto remove_made = [&]() {
+    for (bNode *made : nodes) {
+      if (made != nullptr) {
+        bke::node_remove_node(nullptr, tree, *made, true, false);
+      }
+    }
+  };
+  for (const int i : IndexRange(FoldNodeNum)) {
+    nodes[i] = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+    if (nodes[i] == nullptr) {
+      remove_made();
+      return {};
+    }
+    nodes[i]->custom1 = FOLD_NODE_SPECS[i].operation;
+    prop_string_set(nodes[i]->prop, MAPPING_CHAIN_PROP, FOLD_NODE_SPECS[i].tag);
+  }
+
+  const auto socket_a = [&](const FoldNode node) { return socket_in(*nodes[node], "Vector"); };
+  const auto socket_b = [&](const FoldNode node) { return socket_in(*nodes[node], "Vector_001"); };
+  const auto socket_c = [&](const FoldNode node) { return socket_in(*nodes[node], "Vector_002"); };
+  const auto socket_out_of = [&](const FoldNode node) { return socket_out(*nodes[node], "Vector"); };
+  const auto write_const = [&](bNodeSocket *socket, const float value[3]) {
+    if (socket != nullptr && socket->default_value != nullptr) {
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket->default_value)->value, value);
+    }
+  };
+  /* Check the sockets the table promises before anything is wired, so a renamed socket fails here
+   * rather than halfway through the chain. */
+  for (const int i : IndexRange(FoldNodeNum)) {
+    if (socket_a(FoldNode(i)) == nullptr || socket_out_of(FoldNode(i)) == nullptr ||
+        (FOLD_NODE_SPECS[i].reads_b && socket_b(FoldNode(i)) == nullptr) ||
+        (FOLD_NODE_SPECS[i].reads_c && socket_c(FoldNode(i)) == nullptr))
+    {
+      remove_made();
+      return {};
+    }
+  }
+
+  /* The folded axes ride the constants of the MULTIPLY and the MULTIPLY_ADD, so one chain shape
+   * serves every combination and the center stays the only value. */
+  write_const(socket_b(FoldMask), mask);
+  write_const(socket_b(FoldBias), side_bias);
+  write_const(socket_b(FoldSide), mask);
+  write_const(socket_c(FoldSide), inv_mask);
+
+  bke::node_add_link(tree, uv_node, uv_out, *nodes[FoldSub], *socket_a(FoldSub));
+  bke::node_add_link(tree, center_node, center_socket, *nodes[FoldSub], *socket_b(FoldSub));
+  bke::node_add_link(tree, *nodes[FoldSub], *socket_out_of(FoldSub), *nodes[FoldAbs],
+                     *socket_a(FoldAbs));
+  bke::node_add_link(tree, *nodes[FoldAbs], *socket_out_of(FoldAbs), *nodes[FoldAdd],
+                     *socket_a(FoldAdd));
+  bke::node_add_link(tree, center_node, center_socket, *nodes[FoldAdd], *socket_b(FoldAdd));
+  bke::node_add_link(tree, *nodes[FoldAdd], *socket_out_of(FoldAdd), *nodes[FoldDelta],
+                     *socket_a(FoldDelta));
+  bke::node_add_link(tree, uv_node, uv_out, *nodes[FoldDelta], *socket_b(FoldDelta));
+  bke::node_add_link(tree, *nodes[FoldDelta], *socket_out_of(FoldDelta), *nodes[FoldMask],
+                     *socket_a(FoldMask));
+  bke::node_add_link(tree, uv_node, uv_out, *nodes[FoldOut], *socket_a(FoldOut));
+  bke::node_add_link(tree, *nodes[FoldMask], *socket_out_of(FoldMask), *nodes[FoldOut],
+                     *socket_b(FoldOut));
+
+  bke::node_add_link(tree, *nodes[FoldSub], *socket_out_of(FoldSub), *nodes[FoldBias],
+                     *socket_a(FoldBias));
+  bke::node_add_link(tree, *nodes[FoldBias], *socket_out_of(FoldBias), *nodes[FoldSign],
+                     *socket_a(FoldSign));
+  bke::node_add_link(tree, *nodes[FoldSign], *socket_out_of(FoldSign), *nodes[FoldSide],
+                     *socket_a(FoldSide));
+
+  MappingChain chain;
+  for (bNode *node : nodes) {
+    chain.fold_nodes.append(node);
+  }
+  chain.fold_out_node = nodes[FoldOut];
+  chain.fold_out = socket_out_of(FoldOut);
+  chain.side_sign = socket_out_of(FoldSide);
+  chain.side_sign_node = nodes[FoldSide];
+  return chain;
+}
+
 MappingChain mapping_chain_add(bNodeTree &tree,
                                bNode &uv_node,
                                bNodeSocket &uv_out,
                                bNode *values_node,
                                bNodeSocket *offset,
                                bNodeSocket *scale,
-                               bNodeSocket *rotation)
+                               bNodeSocket *rotation,
+                               bNode *center_node,
+                               bNodeSocket *center_socket,
+                               const int16_t mirror_axes)
 {
+  MappingChain chain;
+  const auto discard_fold = [&]() {
+    for (bNode *fold : chain.fold_nodes) {
+      bke::node_remove_node(nullptr, tree, *fold, true, false);
+    }
+    chain.fold_nodes.clear();
+  };
+  bNode *uv_source = &uv_node;
+  bNodeSocket *uv_source_out = &uv_out;
+  if (center_node != nullptr && center_socket != nullptr && mirror_axes != 0) {
+    chain = mapping_fold_nodes_add(tree, uv_node, uv_out, *center_node, *center_socket, mirror_axes);
+    if (chain.fold_out == nullptr) {
+      discard_fold();
+      return {};
+    }
+    /* The transform reads the folded UV, never the side signs the Normal remap takes. */
+    uv_source = chain.fold_out_node;
+    uv_source_out = chain.fold_out;
+  }
   bNode *rotate = bke::node_add_static_node(nullptr, tree, SH_NODE_VECTOR_ROTATE);
   bNode *mapping = bke::node_add_static_node(nullptr, tree, SH_NODE_MAPPING);
   bNodeSocket *rotate_vector = (rotate != nullptr) ? socket_in(*rotate, "Vector") : nullptr;
@@ -1065,6 +1247,7 @@ MappingChain mapping_chain_add(bNodeTree &tree,
     if (mapping != nullptr) {
       bke::node_remove_node(nullptr, tree, *mapping, true, false);
     }
+    discard_fold();
     return {};
   }
   /* A Vector Rotate in front of the Mapping node gives `offset + scale * (R * uv)`: the Mapping
@@ -1074,7 +1257,7 @@ MappingChain mapping_chain_add(bNodeTree &tree,
   mapping->custom1 = NODE_MAPPING_TYPE_POINT;
   prop_string_set(rotate->prop, MAPPING_CHAIN_PROP, "rotate");
   prop_string_set(mapping->prop, MAPPING_CHAIN_PROP, "mapping");
-  bke::node_add_link(tree, uv_node, uv_out, *rotate, *rotate_vector);
+  bke::node_add_link(tree, *uv_source, *uv_source_out, *rotate, *rotate_vector);
   bke::node_add_link(tree, *rotate, *rotate_out, *mapping, *map_vector);
   if (values_node != nullptr) {
     if (offset != nullptr) {
@@ -1087,7 +1270,9 @@ MappingChain mapping_chain_add(bNodeTree &tree,
       bke::node_add_link(tree, *values_node, *rotation, *rotate, *rotate_rotation);
     }
   }
-  return {rotate, mapping};
+  chain.rotate = rotate;
+  chain.mapping = mapping;
+  return chain;
 }
 
 bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
@@ -1097,6 +1282,8 @@ bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
                                     bNodeSocket *rotation,
                                     bNode *scale_node,
                                     bNodeSocket *scale,
+                                    bNode *side_sign_node,
+                                    bNodeSocket *side_sign,
                                     Vector<bNode *> &r_made,
                                     bNode *&r_encode)
 {
@@ -1105,7 +1292,10 @@ bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
   bNode *flip = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
   bNode *rotate = bke::node_add_static_node(nullptr, tree, SH_NODE_VECTOR_ROTATE);
   bNode *encode = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
-  const std::array<bNode *, 5> created = {decode, sign, flip, rotate, encode};
+  bNode *fold = (side_sign != nullptr && side_sign_node != nullptr) ?
+                    bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr) :
+                    nullptr;
+  const std::array<bNode *, 6> created = {decode, sign, flip, rotate, encode, fold};
   const auto discard = [&]() -> bNodeSocket * {
     for (bNode *node : created) {
       if (node != nullptr) {
@@ -1115,7 +1305,7 @@ bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
     return nullptr;
   };
   if (decode == nullptr || sign == nullptr || flip == nullptr || rotate == nullptr ||
-      encode == nullptr)
+      encode == nullptr || (side_sign != nullptr && side_sign_node != nullptr && fold == nullptr))
   {
     return discard();
   }
@@ -1123,6 +1313,9 @@ bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
   encode->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
   sign->custom1 = NODE_VECTOR_MATH_SIGN;
   flip->custom1 = NODE_VECTOR_MATH_MULTIPLY;
+  if (fold != nullptr) {
+    fold->custom1 = NODE_VECTOR_MATH_MULTIPLY;
+  }
   /* The UVs go through `S * R`, so a tangent normal needs its covariant counterpart
    * `R^T * S`: flip by the sign of the scale (its magnitude does not turn a direction), then
    * rotate back. */
@@ -1160,9 +1353,6 @@ bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
   {
     return discard();
   }
-  for (bNode *node : created) {
-    r_made.append(node);
-  }
   /* The owner nodes come from the caller: a socket's own `owner_node()` needs a topology cache
    * that a tree under construction does not have. */
   if (rotation != nullptr && rotation_node != nullptr) {
@@ -1176,10 +1366,34 @@ bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
     copy_v3_fl(static_cast<bNodeSocketValueVector *>(sign_in->default_value)->value, 1.0f);
   }
   bke::node_add_link(tree, color_node, color_socket, *decode, *decode_in);
+  if (fold != nullptr) {
+    /* The Mirror fold's side signs turn the component along each folded axis per texel, on the
+     * side of the center the texel reads from. They act on the canvas axes, so they sit after the
+     * rotation back: the UV transform is `S * R * fold`, and a direction goes through its inverse
+     * `side * R^T * S^-1`. Before the rotation they would only agree at multiples of 90 degrees. */
+    bNodeSocket *fold_a = socket_in(*fold, "Vector");
+    bNodeSocket *fold_b = socket_in(*fold, "Vector_001");
+    bNodeSocket *fold_out = socket_out(*fold, "Vector");
+    if (fold_a == nullptr || fold_b == nullptr || fold_out == nullptr) {
+      return discard();
+    }
+    bke::node_add_link(tree, *rotate, *rotate_out, *fold, *fold_a);
+    bke::node_add_link(tree, *side_sign_node, *side_sign, *fold, *fold_b);
+    bke::node_add_link(tree, *fold, *fold_out, *encode, *encode_in);
+  }
+  else {
+    bke::node_add_link(tree, *rotate, *rotate_out, *encode, *encode_in);
+  }
   bke::node_add_link(tree, *decode, *decode_out, *flip, *flip_a);
   bke::node_add_link(tree, *sign, *sign_out, *flip, *flip_b);
   bke::node_add_link(tree, *flip, *flip_out, *rotate, *rotate_in);
-  bke::node_add_link(tree, *rotate, *rotate_out, *encode, *encode_in);
+  /* Report only the nodes this call actually made. \a fold is null when the row folds nothing,
+   * and every node is fully wired by now, so a caller can place and later remove the list as is. */
+  for (bNode *node : created) {
+    if (node != nullptr) {
+      r_made.append(node);
+    }
+  }
   r_encode = encode;
   return encode_out;
 }

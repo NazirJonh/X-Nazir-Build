@@ -3723,6 +3723,64 @@ TEST_F(PaintLayersDescription, mapping_wrap_copies_with_the_row)
   EXPECT_EQ(BKE_paint_layers_mapping_wrap_get(*duplicate), MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y);
 }
 
+TEST_F(PaintLayersDescription, a_mirror_fold_remaps_an_identity_repeat_mapping)
+{
+  Material &ma = *BKE_material_add(bmain, "MappingMirrorRemapsMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
+  EXPECT_FALSE(BKE_paint_layers_mapping_remaps(ma, *fill));
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(ma, fill, MA_PAINT_LAYER_MAPPING_MIRROR_U));
+  EXPECT_TRUE(BKE_paint_layers_mapping_is_identity(*fill));
+  EXPECT_TRUE(BKE_paint_layers_mapping_remaps(ma, *fill))
+      << "the fold moves the UVs on its own, so the identity transform still builds a chain";
+  EXPECT_TRUE(BKE_paint_layers_mapping_mirror_applies(ma, *fill));
+
+  /* A switched-off mapping folds nothing, whatever axes are stored. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, fill, false));
+  EXPECT_FALSE(BKE_paint_layers_mapping_remaps(ma, *fill));
+  EXPECT_FALSE(BKE_paint_layers_mapping_mirror_applies(ma, *fill));
+}
+
+TEST_F(PaintLayersDescription, a_mirror_is_refused_on_a_row_that_supports_no_mapping)
+{
+  Material &ma = *BKE_material_add(bmain, "MappingMirrorRefusedMat");
+  MaterialPaintLayer *bare = BKE_paint_layers_add(ma, "Bare", nullptr, PaintLayerPlace::Above);
+  ASSERT_TRUE(BKE_paint_layers_set_source(ma, bare, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_mirror(ma, bare, MA_PAINT_LAYER_MAPPING_MIRROR_U))
+      << "no map to fold yet";
+  EXPECT_EQ(BKE_paint_layers_mapping_mirror_get(*bare), 0);
+  EXPECT_TRUE(BKE_paint_layers_mapping_set_mirror(ma, bare, 0)) << "clearing is always allowed";
+}
+
+TEST_F(PaintLayersDescription, a_mirror_axis_leaves_the_mapping_enabled_and_the_other_axis_alone)
+{
+  Material &ma = *BKE_material_add(bmain, "MappingMirrorFlagsMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
+  float center[2];
+  BKE_paint_layers_mapping_mirror_center_get(*fill, center);
+  EXPECT_EQ(center[0], 0.5f);
+  EXPECT_EQ(center[1], 0.5f);
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(ma, fill, MA_PAINT_LAYER_MAPPING_MIRROR_V));
+  EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(*fill));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(
+      ma, fill, MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V));
+  EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(*fill)) << "U must not share the Disabled bit";
+  EXPECT_TRUE(BKE_paint_layers_mapping_applies(ma, *fill));
+  EXPECT_TRUE(BKE_paint_layers_mapping_scale_lock_get(*fill));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(ma, fill, MA_PAINT_LAYER_MAPPING_MIRROR_U));
+  EXPECT_EQ(BKE_paint_layers_mapping_mirror_get(*fill), MA_PAINT_LAYER_MAPPING_MIRROR_U);
+
+  /* A center placed at the origin survives the axes being switched. */
+  const float origin[2] = {0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror_center(ma, fill, origin));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(ma, fill, 0));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(ma, fill, MA_PAINT_LAYER_MAPPING_MIRROR_V));
+  BKE_paint_layers_mapping_mirror_center_get(*fill, center);
+  EXPECT_EQ(center[0], 0.0f);
+  EXPECT_EQ(center[1], 0.0f);
+}
+
 TEST_F(PaintLayersDescription, mesh_map_row_adds_base_color_and_reads_the_atlas)
 {
   Material *ma = BKE_material_add(bmain, "MeshMapMat");

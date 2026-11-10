@@ -416,6 +416,7 @@ void outliner_draw_stack_row_icons(ui::Block *block,
       }
     }
 
+
     /* The source's own and the decorators' buttons: one unit each, right-aligned against the
      * built-in toggles. An operator button dims while the row asks for it or the stack is not
      * editable; a menu-style one is the stock `wm.call_menu` pointed at the idname. */
@@ -424,14 +425,22 @@ void outliner_draw_stack_row_icons(ui::Block *block,
        * of the value column; the rest are right-aligned against the built-in toggles. */
       int row_buttons = 0;
       for (const StackRowButton &button : row->buttons) {
-        row_buttons += button.before_value ? 0 : 1;
+        row_buttons += (button.before_value || button.before_icon) ? 0 : 1;
       }
       const int before_x = int(region->v2d.cur.xmax - outliner_right_columns_width(space_outliner));
       int button_index = 0;
       int before_index = 0;
       for (const StackRowButton &button : row->buttons) {
         int but_x;
-        if (button.before_value) {
+        if (button.before_icon) {
+          /* Between the expand arrow and the row icon, where the inline toggles sit; a source
+           * that cannot be edited shows no switch at all. */
+          if (!can_toggle) {
+            continue;
+          }
+          but_x = te->xs + int(UI_UNIT_X);
+        }
+        else if (button.before_value) {
           but_x = before_x + before_index * UI_UNIT_X;
           before_index++;
         }
@@ -498,7 +507,9 @@ void outliner_draw_stack_row_icons(ui::Block *block,
         if (!button.enabled) {
           button_flag_enable(but, ui::BUT_DISABLED);
         }
-        else if (!can_toggle && !menu_style) {
+        else if ((!can_toggle && !menu_style) ||
+                 (button.before_icon && element_should_draw_faded(tvc, space_outliner, te, tselem)))
+        {
           button_flag_enable(but, ui::BUT_INACTIVE);
         }
       }

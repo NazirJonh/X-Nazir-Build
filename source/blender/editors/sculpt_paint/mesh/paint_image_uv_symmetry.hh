@@ -44,4 +44,25 @@ void image_paint_symmetry_mirror_faces(Object *ob,
                                        int symmetry_flags,
                                        Vector<int> &r_seed_faces);
 
+/**
+ * The UV the active UV map carries at the mesh point nearest \a position (object space).
+ *
+ * This is the bridge from a 3D point -- the sculpt 3D cursor, a viewport hit, a snap -- to the UV
+ * space a row's mapping lives in: the triangle holding the point is located, \a position is
+ * projected onto it, and the triangle's corner UVs are interpolated by the projected barycentric
+ * weights. \return false when there is no mesh, no active UV map, or the point is farther from the
+ * surface than a small fraction of the mesh's own size (2% of its bounding-box diagonal): a mesh
+ * with nothing under the point reads no UV rather than the UV of whichever triangle is nearest.
+ *
+ * \param corner_tri_hint: the corner triangle already known to hold \a position -- a ray-cast
+ * hit's index, which a caller holding one passes so the search is skipped -- or -1 to locate it.
+ *
+ * Object Mode only: the Mesh data is read, not a BMesh being edited. A caller in Edit Mode should
+ * use the edit-mesh route and pass object-space coordinates from it.
+ */
+bool image_paint_symmetry_uv_at_position(Object *ob,
+                                         const float3 &position,
+                                         float r_uv[2],
+                                         int corner_tri_hint = -1);
+
 }  // namespace blender

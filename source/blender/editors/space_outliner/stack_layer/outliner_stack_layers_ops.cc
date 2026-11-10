@@ -371,6 +371,7 @@ void OUTLINER_OT_stack_layer_lock_toggle(wmOperatorType *ot)
   rna_def_stack_row_marker(ot);
 }
 
+
 /**
  * The Add dialog's own choices change what it shows: a palette swatch writes `fill_color` and the
  * inline picker beside it has to follow, and switching from Fill to Empty takes the color controls

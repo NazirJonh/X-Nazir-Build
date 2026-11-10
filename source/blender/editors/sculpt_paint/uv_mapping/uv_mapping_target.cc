@@ -105,6 +105,28 @@ bool PaintLayerRowMappingTarget::resolve(const bContext &C)
   return true;
 }
 
+bool PaintLayerRowMappingTarget::resolve_row(const bContext &C, const bUUID marker)
+{
+  material_ = nullptr;
+  marker_ = {};
+
+  Material *ma = BKE_paint_layers_active_material_get(CTX_data_active_object(&C));
+  if (ma == nullptr || !BKE_paint_layers_is_layered(*ma)) {
+    return false;
+  }
+
+  MaterialPaintLayer *layer = BLI_uuid_is_nil(marker) ? mapping_shown_row_get(C, *ma) :
+                                                        BKE_paint_layers_find(*ma, marker);
+  if (layer == nullptr || !mapping_is_edited(*ma, *layer)) {
+    return false;
+  }
+
+  material_ = ma;
+  marker_ = layer->marker;
+  return true;
+}
+
+
 bool PaintLayerRowMappingTarget::read(UvMappingXform &r_xform) const
 {
   const MaterialPaintLayer *layer = row();
@@ -153,6 +175,38 @@ bool PaintLayerRowMappingTarget::set_scale_locked(const bool locked)
   /* Locking joins the axes at the X value, which is a scale change: like the panel's toggle, it
    * keeps the tile where the cage draws it. */
   return BKE_paint_layers_mapping_set_scale_lock_holding_tile(*material_, layer, locked);
+}
+
+bool PaintLayerRowMappingTarget::mirror_applies() const
+{
+  const MaterialPaintLayer *layer = row();
+  return layer != nullptr && material_ != nullptr &&
+         BKE_paint_layers_mapping_mirror_applies(*material_, *layer);
+}
+
+bool PaintLayerRowMappingTarget::read_mirror_center(float r_center[2]) const
+{
+  const MaterialPaintLayer *layer = row();
+  if (layer == nullptr) {
+    return false;
+  }
+  BKE_paint_layers_mapping_mirror_center_get(*layer, r_center);
+  return true;
+}
+
+bool PaintLayerRowMappingTarget::write_mirror_center(const float2 &center)
+{
+  MaterialPaintLayer *layer = row();
+  if (layer == nullptr) {
+    return false;
+  }
+  const float values[2] = {center.x, center.y};
+  return BKE_paint_layers_mapping_set_mirror_center(*material_, layer, values);
+}
+
+const char *PaintLayerRowMappingTarget::mirror_undo_name() const
+{
+  return "Move Layer Mirror Center";
 }
 
 const char *PaintLayerRowMappingTarget::undo_name() const

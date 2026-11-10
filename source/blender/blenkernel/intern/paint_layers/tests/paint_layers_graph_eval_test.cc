@@ -628,6 +628,110 @@ TEST_F(PaintLayersMappingEvalTest, an_unmapped_row_still_reads_the_pixel_directl
   expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
 }
 
+/* Mirror: the fold's pixels against the CPU composite (the same |uv - center| + center on both
+ * sides), and the fold itself against the plain offset transform that reads the same point, so the
+ * fold chain is checked against the mapping path the tests above already trust. */
+
+TEST_F(PaintLayersMappingEvalTest, a_mirrored_fill_layer_matches_the_cpu)
+{
+  Image *quad = add_quad_image("Quad");
+  make_image_data(quad);
+  add_layer("Bottom", add_solid_image("Bottom", 10, 20, 30, 255));
+  MaterialPaintLayer *fill = add_fill("Fill", quad);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+
+  struct MirrorCase {
+    int16_t axes;
+    float center[2];
+  };
+  static const MirrorCase all[] = {
+      {MA_PAINT_LAYER_MAPPING_MIRROR_U, {0.5f, 0.5f}},
+      {MA_PAINT_LAYER_MAPPING_MIRROR_U, {0.3f, 0.7f}},
+      {MA_PAINT_LAYER_MAPPING_MIRROR_V, {0.5f, 0.5f}},
+      {MA_PAINT_LAYER_MAPPING_MIRROR_V, {0.6f, 0.35f}},
+      {int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V), {0.4f, 0.6f}},
+      {int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V), {0.25f, 0.25f}},
+  };
+  for (const MirrorCase &test : all) {
+    SCOPED_TRACE(::testing::Message() << "axes=" << test.axes << " center=" << test.center[0]
+                                      << "," << test.center[1]);
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(*ma, fill, test.axes));
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror_center(*ma, fill, test.center));
+    EXPECT_TRUE(BKE_paint_layers_mapping_mirror_applies(*ma, *fill));
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  }
+  /* Off again: the row reads its map the plain way, the same pixels the unmapped row would. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(*ma, fill, 0));
+  EXPECT_FALSE(BKE_paint_layers_mapping_mirror_applies(*ma, *fill));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+TEST_F(PaintLayersMappingEvalTest, the_mirror_fold_reads_where_the_matching_offset_reads)
+{
+  Image *quad = add_quad_image("Quad");
+  make_image_data(quad);
+  add_layer("Bottom", add_solid_image("Bottom", 10, 20, 30, 255));
+  MaterialPaintLayer *fill = add_fill("Fill", quad);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  const float center[2] = {0.5f, 0.5f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror_center(*ma, fill, center));
+
+  /* Pixel (1, 1) reads the canvas UV (0.375, 0.375); the fold around (0.5, 0.5) turns it into
+   * (0.625, 0.625), which a plain +0.25 offset reads unmapped. Two chains, one answer. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(
+      *ma, fill, int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V)));
+  const RGBA mirrored = graph_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(*ma, fill, 0));
+  const float offset[2] = {0.25f, 0.25f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, fill, offset));
+  const RGBA shifted = graph_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+
+  EXPECT_NEAR(mirrored.r, shifted.r, 2e-3f);
+  EXPECT_NEAR(mirrored.g, shifted.g, 2e-3f);
+  EXPECT_NEAR(mirrored.b, shifted.b, 2e-3f);
+}
+
+TEST_F(PaintLayersMappingEvalTest, a_mirrored_fill_normal_matches_the_cpu)
+{
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+  Image *flat = add_solid_image("Flat", 128, 128, 255, 255);
+  Image *detail = add_solid_image("Detail", 204, 128, 230, 255);
+  make_image_data(flat);
+  make_image_data(detail);
+  add_layer("Bottom", flat, channel);
+  MaterialPaintLayer *fill = add_fill("MappedNormal", detail, channel);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  /* The per-texel side flip is the whole risk of a folded Normal: the pixel sits before the
+   * center, so the sampled vectors read from the other side and their component along each folded
+   * axis has to come back flipped. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(
+      *ma, fill, int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V)));
+  const float center[2] = {0.5f, 0.5f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror_center(*ma, fill, center));
+  expect_graph_matches_cpu(channel, 5e-3f);
+}
+
+TEST_F(PaintLayersMappingEvalTest, a_mirrored_normal_on_the_fold_line_matches_the_cpu)
+{
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+  Image *flat = add_solid_image("Flat", 128, 128, 255, 255);
+  Image *detail = add_solid_image("Detail", 204, 128, 230, 255);
+  make_image_data(flat);
+  make_image_data(detail);
+  add_layer("Bottom", flat, channel);
+  MaterialPaintLayer *fill = add_fill("MappedNormal", detail, channel);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(
+      *ma, fill, int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V)));
+  /* The evaluated pixel (1, 1) reads the UV (0.375, 0.375), exactly representable: the center sits
+   * on it, where SIGN reads zero and the CPU and the shader read "+1 at the center". The graph
+   * biases its side signs to agree, which this pins. */
+  const float center[2] = {0.375f, 0.375f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror_center(*ma, fill, center));
+  expect_graph_matches_cpu(channel, 5e-3f);
+}
+
 /* UV wrap: the clip factor the graph builds against the transparent texels the CPU resample
  * writes, in every mode, with values that put the evaluated pixel inside and outside the square. */
 

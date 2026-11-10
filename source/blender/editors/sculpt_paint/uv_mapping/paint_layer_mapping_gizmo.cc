@@ -28,6 +28,8 @@
 #include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
 
+#include "BLT_translation.hh"
+
 #include "BKE_context.hh"
 #include "BKE_screen.hh"
 
@@ -75,11 +77,14 @@ enum class MappingHandle {
   EdgeMinY,
   EdgeMaxY,
   Anchor,
+  MirrorCenter,
 };
 
 struct LayerMappingGizmoGroup {
   wmGizmo *gz_cage = nullptr;
   wmGizmo *gz_anchor = nullptr;
+  /** The Mirror fold center, drawn only while the row folds an axis. */
+  wmGizmo *gz_mirror = nullptr;
   /** Scale-lock toggle: the locked icon while the axes move together, else the unlocked one. */
   wmGizmo *gz_lock_locked = nullptr;
   wmGizmo *gz_lock_unlocked = nullptr;
@@ -91,6 +96,8 @@ struct LayerMappingGizmoGroup {
   float2 drag_pivot_uv = float2(0.5f);
   UvMappingXform start_xform;
   bool start_scale_locked = false;
+  /** The Mirror center a #MappingHandle::MirrorCenter drag started from, in canvas UV. */
+  float2 start_mirror_center = float2(0.5f);
 
   Material *session_material = nullptr;
   bUUID session_marker = {};
@@ -291,7 +298,7 @@ void update_status_text(bContext *C, const UvMappingXform &xform)
   char text[256];
   BLI_snprintf(text,
                sizeof(text),
-               "Offset %.4f  %.4f    Scale %.3f  %.3f    Rotation %.1f deg",
+               IFACE_("Offset %.4f  %.4f    Scale %.3f  %.3f    Rotation %.1f deg"),
                xform.offset.x,
                xform.offset.y,
                xform.scale.x,
@@ -342,16 +349,32 @@ void finish_drag(bContext *C, LayerMappingGizmoGroup &ggd, const bool commit)
 
   if (same_target) {
     if (commit) {
-      UvMappingXform current;
-      if (target.read(current)) {
-        const UvMappingXform &start = ggd.start_xform;
-        const bool changed = math::distance_squared(current.offset, start.offset) > 1e-12f ||
-                             math::distance_squared(current.scale, start.scale) > 1e-12f ||
-                             std::fabs(current.rotation - start.rotation) > 1e-6f;
+      bool changed = false;
+      if (ggd.handle == MappingHandle::MirrorCenter) {
+        float current[2];
+        if (target.read_mirror_center(current)) {
+          changed = math::distance_squared(float2(current[0], current[1]),
+                                           ggd.start_mirror_center) > 1e-12f;
+        }
         if (changed) {
-          ED_undo_push(C, target.undo_name());
+          ED_undo_push(C, target.mirror_undo_name());
         }
       }
+      else {
+        UvMappingXform current;
+        if (target.read(current)) {
+          const UvMappingXform &start = ggd.start_xform;
+          changed = math::distance_squared(current.offset, start.offset) > 1e-12f ||
+                    math::distance_squared(current.scale, start.scale) > 1e-12f ||
+                    std::fabs(current.rotation - start.rotation) > 1e-6f;
+          if (changed) {
+            ED_undo_push(C, target.undo_name());
+          }
+        }
+      }
+    }
+    else if (ggd.handle == MappingHandle::MirrorCenter) {
+      target.write_mirror_center(ggd.start_mirror_center);
     }
     else {
       target.write(ggd.start_xform);
@@ -385,6 +408,12 @@ void begin_drag(bContext *C,
   ggd.start_scale_locked = target.scale_locked();
   ggd.handle = handle;
   ggd.start_mouse_uv = canvas_uv_from_event(*region, *event);
+  if (handle == MappingHandle::MirrorCenter) {
+    float center[2];
+    if (target.read_mirror_center(center)) {
+      ggd.start_mirror_center = float2(center[0], center[1]);
+    }
+  }
 
   /* The anchor keeps its place on a press and follows the mouse once it moves, so a plain click on
    * it changes nothing. */
@@ -409,6 +438,22 @@ void apply_drag(bContext *C,
   }
 
   const float precision = (event->modifier & KM_SHIFT) ? 0.1f : 1.0f;
+  if (ggd.handle == MappingHandle::MirrorCenter) {
+    const float2 center = ggd.start_mirror_center +
+                          (mouse_uv - ggd.start_mouse_uv) * precision;
+    if (!target.write_mirror_center(center)) {
+      finish_drag(C, ggd, false);
+      return;
+    }
+    if (ScrArea *area = CTX_wm_area(C)) {
+      char text[128];
+      BLI_snprintf(text, sizeof(text), IFACE_("Mirror Center %.4f  %.4f"), center.x, center.y);
+      ED_area_status_text(area, text);
+    }
+    notify_mapping_changed(C, target.material(), CTX_wm_region(C));
+    return;
+  }
+
   UvMappingXform next = ggd.start_xform;
 
   switch (ggd.handle) {
@@ -510,7 +555,10 @@ void layer_mapping_gizmo_invoke_prepare(const bContext *C,
   }
 
   MappingHandle handle = MappingHandle::None;
-  if (gz == ggd->gz_anchor) {
+  if (gz == ggd->gz_mirror) {
+    handle = MappingHandle::MirrorCenter;
+  }
+  else if (gz == ggd->gz_anchor) {
     handle = MappingHandle::Anchor;
   }
   else if (gz == ggd->gz_cage) {
@@ -620,6 +668,18 @@ void layer_mapping_gizmo_setup(const bContext * /*C*/, wmGizmoGroup *gzgroup)
   WM_gizmo_set_color_highlight(ggd->gz_anchor, anchor_color_hi);
   WM_gizmo_set_scale(ggd->gz_anchor, 0.15f);
 
+  /* The Mirror fold center: a cross, drawn only while the row folds an axis, so it reads as a
+   * different handle from the mapping pivot ring. */
+  ggd->gz_mirror = WM_gizmo_new_ptr(gzt_move3d, gzgroup, nullptr);
+  WM_gizmo_set_fn_custom_modal(ggd->gz_mirror, layer_mapping_gizmo_modal);
+  RNA_enum_set(ggd->gz_mirror->ptr, "draw_style", ED_GIZMO_MOVE_STYLE_CROSS_2D);
+  ggd->gz_mirror->flag |= WM_GIZMO_DRAW_MODAL | WM_GIZMO_DRAW_NO_SCALE;
+  float mirror_color[4] = {0.4f, 0.9f, 0.6f, 1.0f};
+  float mirror_color_hi[4] = {0.6f, 1.0f, 0.8f, 1.0f};
+  WM_gizmo_set_color(ggd->gz_mirror, mirror_color);
+  WM_gizmo_set_color_highlight(ggd->gz_mirror, mirror_color_hi);
+  WM_gizmo_set_scale(ggd->gz_mirror, 0.18f);
+
   ggd->gz_cage = WM_gizmo_new_ptr(gzt_cage, gzgroup, nullptr);
   RNA_enum_set(ggd->gz_cage->ptr, "draw_style", ED_GIZMO_CAGE2D_STYLE_BOX_TRANSFORM);
   RNA_enum_set(ggd->gz_cage->ptr,
@@ -674,10 +734,17 @@ void layer_mapping_gizmo_refresh(const bContext *C, wmGizmoGroup *gzgroup)
       ggd->gz_lock_unlocked->flag &= ~WM_GIZMO_HIDDEN;
     }
     ggd->gz_lock_outline->flag &= ~WM_GIZMO_HIDDEN;
+    if (target.mirror_applies()) {
+      ggd->gz_mirror->flag &= ~WM_GIZMO_HIDDEN;
+    }
+    else {
+      ggd->gz_mirror->flag |= WM_GIZMO_HIDDEN;
+    }
   }
   else {
     ggd->gz_cage->flag |= WM_GIZMO_HIDDEN;
     ggd->gz_anchor->flag |= WM_GIZMO_HIDDEN;
+    ggd->gz_mirror->flag |= WM_GIZMO_HIDDEN;
     ggd->gz_lock_locked->flag |= WM_GIZMO_HIDDEN;
     ggd->gz_lock_unlocked->flag |= WM_GIZMO_HIDDEN;
     ggd->gz_lock_outline->flag |= WM_GIZMO_HIDDEN;
@@ -691,7 +758,8 @@ void layer_mapping_gizmo_refresh(const bContext *C, wmGizmoGroup *gzgroup)
                           nullptr;
   wmGizmo *modal_gz = gzmap != nullptr ? WM_gizmomap_get_modal(gzmap) : nullptr;
   const bool is_our_modal = modal_gz != nullptr &&
-                            (modal_gz == ggd->gz_cage || modal_gz == ggd->gz_anchor);
+                            (modal_gz == ggd->gz_cage || modal_gz == ggd->gz_anchor ||
+                             modal_gz == ggd->gz_mirror);
   /* No "was modal on an earlier redraw" requirement, as in the shape gizmo: the handle is armed
    * and the modal started within one event, while a quick click or a slow redraw can press and
    * release between two refreshes. A refresh that finds a drag without our modal always means the
@@ -761,6 +829,18 @@ void layer_mapping_gizmo_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
   unit_m4(ggd->gz_anchor->matrix_offset);
   const float anchor_location[3] = {anchor.x, anchor.y, 0.0f};
   WM_gizmo_set_matrix_location(ggd->gz_anchor, anchor_location);
+
+  /* The Mirror center: its own cross, at the UV point the fold reflects around. */
+  float mirror_center[2] = {0.5f, 0.5f};
+  if (target.mirror_applies() && target.read_mirror_center(mirror_center)) {
+    const float2 mirror_px = region_from_canvas_uv(
+        *region, float2(mirror_center[0], mirror_center[1]));
+    unit_m4(ggd->gz_mirror->matrix_space);
+    unit_m4(ggd->gz_mirror->matrix_basis);
+    unit_m4(ggd->gz_mirror->matrix_offset);
+    const float mirror_location[3] = {mirror_px.x, mirror_px.y, 0.0f};
+    WM_gizmo_set_matrix_location(ggd->gz_mirror, mirror_location);
+  }
 
   /* Scale-lock toggle just outside the cage's top-right corner. */
   const float2 lock_px = corner11 + float2(LOCK_BUTTON_OFFSET, LOCK_BUTTON_OFFSET);

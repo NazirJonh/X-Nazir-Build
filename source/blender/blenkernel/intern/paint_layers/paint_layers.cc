@@ -2056,6 +2056,20 @@ bool BKE_paint_layers_channel_set_image(Material &ma,
   record->image = image;
   if (record->image != nullptr) {
     id_us_plus(&record->image->id);
+    /* A channel that is not a colour reads its map as raw data: an sRGB-tagged file would be
+     * gamma-decoded into wrong normal / roughness / metallic values, and a Normal's flips (a
+     * mirror, a negative scale) would act about the wrong centre. The brush channels already do
+     * this on assignment (see rna_BrushMaterialPaintChannel_source_image_set). */
+    if (!BKE_paint_material_channel_info(channel).is_color) {
+      const char *data_name = IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA);
+      if (data_name != nullptr && data_name[0] != '\0' &&
+          !STREQ(image->colorspace_settings.name, data_name))
+      {
+        STRNCPY(image->colorspace_settings.name, data_name);
+        BKE_image_free_buffers(image);
+        DEG_id_tag_update(&image->id, ID_RECALC_SOURCE);
+      }
+    }
   }
   BKE_paint_layers_tag_edited(ma);
   return true;
@@ -2240,8 +2254,9 @@ bool BKE_paint_layers_normal_set_directx(Material &ma, MaterialPaintLayer *layer
 }
 
 /* The mapping sits between pointer members of #MaterialPaintLayer: a size that is not a multiple of
- * 8 would leave the row's DNA with a hole. */
-static_assert(sizeof(MaterialPaintLayerMapping) == 32, "MaterialPaintLayerMapping must be 32 bytes");
+ * 8 would leave the row's DNA with a hole. The Mirror center appended two floats to the old 32-byte
+ * record, so the record is now 40 -- still a multiple of 8. */
+static_assert(sizeof(MaterialPaintLayerMapping) == 40, "MaterialPaintLayerMapping must be 40 bytes");
 
 static_assert(sizeof(MaterialPaintLayer::channel_settings) /
                       sizeof(MaterialPaintLayerChannelSettings) ==
@@ -2637,9 +2652,10 @@ bool BKE_paint_layers_mapping_remaps(const Material &ma, const MaterialPaintLaye
     return false;
   }
   /* An identity transform with Repeat reads the map exactly as the unmapped path does. Clip still
-   * needs the mapping to test the unit square. */
+   * needs the mapping to test the unit square, and a Mirror fold moves the UVs on its own. */
   return !BKE_paint_layers_mapping_is_identity(layer) ||
-         BKE_paint_layers_mapping_wrap_get(layer) != MA_PAINT_LAYER_MAPPING_WRAP_REPEAT;
+         BKE_paint_layers_mapping_wrap_get(layer) != MA_PAINT_LAYER_MAPPING_WRAP_REPEAT ||
+         BKE_paint_layers_mapping_mirror_get(layer) != 0;
 }
 
 /**
@@ -2908,6 +2924,93 @@ bool BKE_paint_layers_mapping_set_wrap(Material &ma, MaterialPaintLayer *layer, 
   layer->mapping.wrap = wrap;
   /* The wrap adds or removes the clip factor's nodes, which is topology. */
   BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+/* The mapping flags share one word, so a bit given to two meanings turns one switch into the
+ * other: Mirror U once sat on the bit of the Disabled flag, and turning it on switched the whole
+ * mapping off. Every flag is listed here so that a new one cannot overlap. */
+namespace {
+constexpr int mapping_flag_bits[] = {MA_PAINT_LAYER_MAPPING_ENABLED_DEPRECATED,
+                                     MA_PAINT_LAYER_MAPPING_SCALE_UNLOCKED,
+                                     MA_PAINT_LAYER_MAPPING_DISABLED,
+                                     MA_PAINT_LAYER_MAPPING_MIRROR_U,
+                                     MA_PAINT_LAYER_MAPPING_MIRROR_V};
+constexpr bool mapping_flag_bits_are_disjoint()
+{
+  int seen = 0;
+  for (const int bit : mapping_flag_bits) {
+    if ((seen & bit) != 0 || bit == 0 || (bit & (bit - 1)) != 0) {
+      return false;
+    }
+    seen |= bit;
+  }
+  return true;
+}
+static_assert(mapping_flag_bits_are_disjoint(),
+              "Layer mapping flags must each own a single, distinct bit");
+}  // namespace
+
+int16_t BKE_paint_layers_mapping_mirror_get(const MaterialPaintLayer &layer)
+{
+  return layer.mapping.flag & (MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V);
+}
+
+bool BKE_paint_layers_mapping_mirror_applies(const Material &ma, const MaterialPaintLayer &layer)
+{
+  return BKE_paint_layers_mapping_applies(ma, layer) && BKE_paint_layers_mapping_mirror_get(layer);
+}
+
+bool BKE_paint_layers_mapping_mirror_available(const Material &ma, const MaterialPaintLayer &layer)
+{
+  return layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
+         BKE_paint_layers_mapping_supported(ma, layer);
+}
+
+bool BKE_paint_layers_mapping_set_mirror(Material &ma, MaterialPaintLayer *layer, int16_t axes)
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  /* A foreign bit is dropped rather than refused, so a caller may pass a raw flag word. */
+  axes &= (MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V);
+  if (axes != 0 && !BKE_paint_layers_mapping_supported(ma, *layer)) {
+    return false;
+  }
+  const int16_t current = BKE_paint_layers_mapping_mirror_get(*layer);
+  if (current == axes) {
+    return true;
+  }
+  layer->mapping.flag &= ~(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V);
+  layer->mapping.flag |= axes;
+  /* The row's chain gains or loses the fold and its Normal flip, which is a different shape. */
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+void BKE_paint_layers_mapping_mirror_center_get(const MaterialPaintLayer &layer, float r_center[2])
+{
+  copy_v2_v2(r_center, layer.mapping.mirror_center);
+}
+
+bool BKE_paint_layers_mapping_set_mirror_center(Material &ma,
+                                                MaterialPaintLayer *layer,
+                                                const float center[2])
+{
+  if (!paint_layer_owned(ma, layer) || center == nullptr) {
+    return false;
+  }
+  if (!isfinite(center[0]) || !isfinite(center[1])) {
+    return false;
+  }
+  if (layer->mapping.mirror_center[0] == center[0] &&
+      layer->mapping.mirror_center[1] == center[1])
+  {
+    return true;
+  }
+  copy_v2_v2(layer->mapping.mirror_center, center);
+  /* The center is a value the fold nodes read, like the offset. */
+  BKE_paint_layers_tag_value_edited(ma);
   return true;
 }
 

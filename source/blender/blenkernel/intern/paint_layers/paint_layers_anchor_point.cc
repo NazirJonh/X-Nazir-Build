@@ -462,7 +462,11 @@ static uint64_t anchor_point_hash_row(uint64_t h,
                                              row.mapping.scale[0],
                                              row.mapping.scale[1],
                                              row.mapping.rotation));
-  h = anchor_point_hash_mix(h, get_default_hash(int(row.mapping.flag), int(row.mapping.wrap)));
+  h = anchor_point_hash_mix(h,
+                            get_default_hash(int(row.mapping.flag),
+                                             int(row.mapping.wrap),
+                                             row.mapping.mirror_center[0],
+                                             row.mapping.mirror_center[1]));
   /* What a filter or a map-coverage operator is set to, and what a Material row reads: values the
    * description of the slice carries, though they hold no pixels. */
   if (const PaintLayerKindInfo *kind = paint_layer_kind_of(row)) {

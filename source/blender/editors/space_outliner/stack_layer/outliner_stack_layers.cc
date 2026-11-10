@@ -307,6 +307,7 @@ wmOperatorStatus stack_row_lock_toggle_exec(bContext *C, wmOperator *op)
              OPERATOR_CANCELLED;
 }
 
+
 wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);

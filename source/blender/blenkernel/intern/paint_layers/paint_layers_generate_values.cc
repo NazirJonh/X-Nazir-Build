@@ -195,10 +195,11 @@ bool values_sync_socket(Material &ma,
     return true;
   }
   if (STREQ(role, ROLE_MAPPING_OFFSET) || STREQ(role, ROLE_MAPPING_SCALE) ||
-      STREQ(role, ROLE_MAPPING_ROTATION))
+      STREQ(role, ROLE_MAPPING_ROTATION) || STREQ(role, ROLE_MAPPING_MIRROR_CENTER))
   {
-    /* The Mapping's three Vector inputs; the marker names the row that owns the mapping. The scale
-     * goes through the helper the CPU shares, so an old file's zero axis reads as one on both. */
+    /* The Mapping's three Vector inputs and the Mirror fold's center; the marker names the row
+     * that owns the mapping. The scale goes through the helper the CPU shares, so an old file's
+     * zero axis reads as one on both. */
     if (socket.default_value == nullptr) {
       return false;
     }
@@ -211,6 +212,10 @@ bool values_sync_socket(Material &ma,
       value[0] = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]);
       value[1] = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[1]);
       value[2] = 1.0f;
+    }
+    else if (STREQ(role, ROLE_MAPPING_MIRROR_CENTER)) {
+      value[0] = layer->mapping.mirror_center[0];
+      value[1] = layer->mapping.mirror_center[1];
     }
     else {
       value[2] = layer->mapping.rotation;

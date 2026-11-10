@@ -1111,7 +1111,6 @@ void paint_stack_rows_append(const Material &material,
       row.action_icon = ICON_SELECT_SET;
       row.action_tooltip = TIP_("Mesh Mask: choose the objects or UDIM tiles this layer shows on");
     }
-
     /* The value column edits the row's opacity; a value left at its default reads as inherited
      * rather than deliberately set, so the control dims until the user moves it. */
     PointerRNA layer_ptr = RNA_pointer_create_discrete(

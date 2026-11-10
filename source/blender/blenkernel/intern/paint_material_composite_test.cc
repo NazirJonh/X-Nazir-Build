@@ -2990,6 +2990,43 @@ TEST_F(PaintLayersCompositeTest, the_wrap_moves_the_stack_hash_only_while_the_ma
   EXPECT_NE(stack_hash(), repeated);
 }
 
+TEST_F(PaintLayersCompositeTest, the_mirror_axes_and_center_move_the_stack_hash_while_the_mapping_applies)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom",
+                                               add_solid_image("Bottom", 4, 0, 0, 0, 255));
+  MaterialPaintLayer *correction = add_fill_correction(
+      bottom, add_quad_image("Map", kWrapRed, kWrapGreen, kWrapBlue, kWrapWhite));
+  auto stack_hash = [&]() {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    return BKE_paint_material_composite_stack_hash(layers);
+  };
+  const uint64_t plain = stack_hash();
+
+  ASSERT_TRUE(
+      BKE_paint_layers_mapping_set_mirror(*ma, correction, MA_PAINT_LAYER_MAPPING_MIRROR_U));
+  const uint64_t folded = stack_hash();
+  EXPECT_NE(folded, plain);
+
+  const float center[2] = {0.25f, 0.5f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror_center(*ma, correction, center));
+  EXPECT_NE(stack_hash(), folded);
+
+  /* A mapping switched off reads the map as it is, whatever the fold stored. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, false));
+  EXPECT_EQ(stack_hash(), plain);
+}
+
+TEST(PaintMaterialCompositeMapping, mirror_axis_tests_each_axis_bit)
+{
+  PaintMaterialCompositeMapping mapping;
+  EXPECT_FALSE(mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U));
+  mapping.mirror_axes = MA_PAINT_LAYER_MAPPING_MIRROR_V;
+  EXPECT_FALSE(mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U));
+  EXPECT_TRUE(mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V));
+}
+
 /** A 4x4 surface whose every valid texel carries \a position. */
 static std::shared_ptr<PaintMaterialCompositeSurface> gradient_test_surface(const float3 position,
                                                                             const uint64_t key)

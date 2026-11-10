@@ -929,6 +929,8 @@ bool stack_row_reorder_poll(bContext *C);
 wmOperatorStatus stack_row_visibility_toggle_exec(bContext *C, wmOperator *op);
 bool stack_row_visibility_toggle_poll(bContext *C);
 wmOperatorStatus stack_row_lock_toggle_exec(bContext *C, wmOperator *op);
+
+
 wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_mask_image_invoke(bContext *C, wmOperator *op, const wmEvent *event);
 wmOperatorStatus stack_row_mask_image_exec(bContext *C, wmOperator *op);

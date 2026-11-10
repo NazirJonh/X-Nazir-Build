@@ -165,6 +165,7 @@ set(SRC
   mesh/paint_image_shape_gizmo.cc
   uv_mapping/paint_layer_mapping_gizmo.cc
   uv_mapping/paint_layer_mapping_ops.cc
+  uv_mapping/paint_layer_mapping_pick_3d.cc
   uv_mapping/uv_mapping_math.cc
   uv_mapping/uv_mapping_target.cc
   selection/paint_image_select_fragment.cc

@@ -1852,10 +1852,11 @@ void PaintLayersTreeBuilder::source_group_mapping_wire(bNodeTree &tree,
   /* The instance's sockets carry the wrapper's identifiers, not the row group's: the same role
    * names the socket on each side. */
   const std::pair<Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> *, const char *>
-      wires[3] = {
+      wires[4] = {
           {&mapping_offset_inputs_, SOURCE_GROUP_ROLE_MAPPING_OFFSET},
           {&mapping_scale_inputs_, SOURCE_GROUP_ROLE_MAPPING_SCALE},
           {&mapping_rotation_inputs_, SOURCE_GROUP_ROLE_MAPPING_ROTATION},
+          {&mapping_mirror_center_inputs_, SOURCE_GROUP_ROLE_MAPPING_MIRROR_CENTER},
       };
   for (const auto &[inputs, role] : wires) {
     bNodeTreeInterfaceSocket *const *iface = inputs->lookup_ptr(&layer);

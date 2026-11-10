@@ -1297,6 +1297,13 @@ class VIEW3D_HT_header(Header):
                 # Ctrl-Wheel and keeps its width while the item name changes.
                 row.template_enum_menu(mat, "paint_layers_view_pass", width=5.0, wrap=False)
 
+            # The Mirror fold's center can be placed on the surface itself: a modal session whose
+            # gizmo follows the cursor, so the symmetry shows while the point is still moving.
+            if mat is not None and mat.is_layered:
+                layout.operator(
+                    "paint.layer_mapping_mirror_pick_3d", text="", icon='ORIENTATION_CURSOR'
+                )
+
             if VIEW3D_HT_header.paint_curve_uses_view3d_snapping(context):
                 VIEW3D_HT_header.draw_paint_curve_snap_template(layout, context)
             else:

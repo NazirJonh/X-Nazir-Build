@@ -24,6 +24,7 @@
 
 #include <cstddef>
 
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
 
 #include "BLI_map.hh"
@@ -209,6 +210,11 @@ inline constexpr const char *ROLE_MAPPING_OFFSET = "mapping_offset";
 inline constexpr const char *ROLE_MAPPING_SCALE = "mapping_scale";
 /** #INPUT_ROLE_PROP value of a row's UV mapping rotation (a Vector input holding 0, 0, angle). */
 inline constexpr const char *ROLE_MAPPING_ROTATION = "mapping_rotation";
+/**
+ * #INPUT_ROLE_PROP value of a row's UV mirror fold center (a Vector input holding center, 0). Only
+ * built while the row's mapping folds an axis; the folded axes are the chain's shape, not a value.
+ */
+inline constexpr const char *ROLE_MAPPING_MIRROR_CENTER = "mapping_mirror_center";
 /** #INPUT_ROLE_PROP value of a Gradient row's UV-space line start (a Vector input, z unused). */
 inline constexpr const char *ROLE_GRADIENT_START = "gradient_start";
 /** #INPUT_ROLE_PROP value of a Gradient row's UV-space line end (a Vector input, z unused). */
@@ -246,7 +252,10 @@ inline constexpr const char *ROLE_CHANNEL_MIXER = "channel_mixer";
 inline constexpr const char *SOURCE_GROUP_ROLE_MAPPING_OFFSET = "source_mapping_offset";
 inline constexpr const char *SOURCE_GROUP_ROLE_MAPPING_SCALE = "source_mapping_scale";
 inline constexpr const char *SOURCE_GROUP_ROLE_MAPPING_ROTATION = "source_mapping_rotation";
-/** Prefix of the wrapper's three row-mapping value inputs. */
+/** #INPUT_ROLE_PROP value of the wrapper's row-mapping mirror center input (a Vector, z unused). */
+inline constexpr const char *SOURCE_GROUP_ROLE_MAPPING_MIRROR_CENTER =
+    "source_mapping_mirror_center";
+/** Prefix of the wrapper's row-mapping value inputs. */
 inline constexpr const char *SOURCE_GROUP_MAPPING_INPUT_PREFIX = "Mapping ";
 /** #INPUT_ROLE_PROP value of one Color ID colour's enable flag (the marker is the map-coverage
  * item's); the entry is named by #INPUT_ID_COLOR_PROP. */
@@ -344,6 +353,27 @@ UvReaders uv_readers_find(bNodeTree &tree);
 struct MappingChain {
   bNode *rotate = nullptr;
   bNode *mapping = nullptr;
+  /**
+   * The Vector Math nodes of the row's Mirror fold, empty when the row folds nothing. They sit
+   * between the UV source and #rotate and read the fold center from \a center_socket.
+   */
+  Vector<bNode *> fold_nodes;
+  /**
+   * The fold's output: the node and socket holding the folded UV, which is what the transform
+   * reads. Both null when the row folds nothing. Passed beside the socket for the same reason as
+   * #side_sign_node.
+   */
+  bNode *fold_out_node = nullptr;
+  bNodeSocket *fold_out = nullptr;
+  /**
+   * A Vector whose components are the fold's side signs at the canvas UV (+1 on and beyond the
+   * center, -1 before it, +1 on an axis that does not fold), or null when the row folds nothing.
+   * A tangent-space Normal multiplies by it before the rotation, the per-texel generalization of
+   * the negative-scale flip. \a side_sign_node is the socket's owner, passed beside it because a
+   * tree under construction has no topology cache to find it through.
+   */
+  bNodeSocket *side_sign = nullptr;
+  bNode *side_sign_node = nullptr;
 };
 
 /**
@@ -351,6 +381,15 @@ struct MappingChain {
  * Mapping. Rotation, offset and scale are linked from \a values_node's sockets, and any of them
  * may be null (the node keeps its identity default). Neither node is placed. On failure nothing is
  * left in \a tree and the result is empty.
+ *
+ * When \a mirror_axes names folded axes and \a center_node / \a center_socket carry the fold
+ * center, the chain grows the Mirror fold in front of the rotate -- the map is read through
+ * `uv + mask * (|uv - center| + center - uv)` in the canvas UV, before the transform -- and
+ * #MappingChain::fold_out carries the folded UV the rotate reads while #MappingChain::side_sign
+ * carries the fold's side signs for a tangent-space Normal. The fold and the signs read the same
+ * canvas UV the painting addresses, which is what makes the symmetry line up with the strokes. The
+ * folded axes are the chain's shape; the center is a value. The owner node of the center socket is
+ * passed beside it, because a tree under construction has no topology cache to find it through.
  */
 MappingChain mapping_chain_add(bNodeTree &tree,
                                bNode &uv_node,
@@ -358,12 +397,18 @@ MappingChain mapping_chain_add(bNodeTree &tree,
                                bNode *values_node,
                                bNodeSocket *offset,
                                bNodeSocket *scale,
-                               bNodeSocket *rotation);
+                               bNodeSocket *rotation,
+                               bNode *center_node = nullptr,
+                               bNodeSocket *center_socket = nullptr,
+                               int16_t mirror_axes = 0);
 
 /**
  * Add the covariant remap of an encoded tangent-space normal read from \a color_socket: decode,
  * flip by the sign of the scale, rotate back, encode. \a rotation and \a scale are the sockets
- * that drive the row transform (null scale is the identity). The nodes made are appended to
+ * that drive the row transform (null scale is the identity). \a side_sign / \a side_sign_node,
+ * when non-null, are the row's Mirror fold side-sign vector and its owner: the decoded normal
+ * multiplies by it before the scale flip, which turns the component along each folded axis per
+ * texel, on the side of the fold center the texel reads from. The nodes made are appended to
  * \a r_made, unplaced. \return the encoded output, or null with nothing left in \a tree.
  */
 bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
@@ -373,8 +418,35 @@ bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
                                     bNodeSocket *rotation,
                                     bNode *scale_node,
                                     bNodeSocket *scale,
+                                    bNode *side_sign_node,
+                                    bNodeSocket *side_sign,
                                     Vector<bNode *> &r_made,
                                     bNode *&r_encode);
+
+/** The same without a Mirror side-sign vector: the old signature, for callers and tests that do
+ * not fold anything. */
+inline bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
+                                           bNode &color_node,
+                                           bNodeSocket &color_socket,
+                                           bNode *rotation_node,
+                                           bNodeSocket *rotation,
+                                           bNode *scale_node,
+                                           bNodeSocket *scale,
+                                           Vector<bNode *> &r_made,
+                                           bNode *&r_encode)
+{
+  return normal_remap_nodes_add(tree,
+                                color_node,
+                                color_socket,
+                                rotation_node,
+                                rotation,
+                                scale_node,
+                                scale,
+                                nullptr,
+                                nullptr,
+                                r_made,
+                                r_encode);
+}
 
 /**
  * Link the row-mapping input of \a tree's Group Input that \a from_iface stands for into the input
@@ -565,7 +637,8 @@ void source_group_row_set(bNodeTree &tree, const bUUID &marker);
 bool source_group_fill(Main &bmain,
                        bNodeTree &wrapper,
                        const Material &source,
-                       bool mapped = false);
+                       bool mapped = false,
+                       int16_t mirror_axes = 0);
 
 /** Delete the private group copies of \a owner_uid that no instance node uses any more. */
 void source_group_paths_prune(Main &bmain, const bUUID &owner_uid);
@@ -592,10 +665,29 @@ bool source_group_structure_hash_get(bNodeTree &wrapper, uint64_t &r_hash);
  */
 bool source_group_normal_live(const Material &source);
 
+/** How a row maps its source group: whether the wrapper carries Mapping nodes, and which axes fold. */
+struct SourceGroupMapping {
+  bool mapped = false;
+  int16_t axes = 0;
+};
+
+/** The mapping of the source group of  layer; the axes only count while the row remaps. */
+inline SourceGroupMapping source_group_mapping_get(const Material &ma,
+                                                   const MaterialPaintLayer &layer)
+{
+  SourceGroupMapping mapping;
+  mapping.mapped = BKE_paint_layers_mapping_remaps(ma, layer);
+  mapping.axes = mapping.mapped ? BKE_paint_layers_mapping_mirror_get(layer) : 0;
+  return mapping;
+}
+
 /** The hash the source group stores in its topology words: the source's content and the fill's
  * version. \a mapped is part of it because a mapped wrapper carries Mapping nodes and their three
- * interface inputs, so toggling the row's mapping has to refill the group once. */
-uint64_t source_group_content_hash(const Material &source, bool mapped = false);
+ * interface inputs, so toggling the row's mapping has to refill the group once; \a mirror_axes is
+ * part of it the same way, because a folding wrapper carries the fold's nodes. */
+uint64_t source_group_content_hash(const Material &source,
+                                   bool mapped = false,
+                                   int16_t mirror_axes = 0);
 
 /** The wrapper interface input whose #INPUT_ROLE_PROP is \a role, whatever its name. */
 bNodeTreeInterfaceSocket *source_group_mapping_input_find(bNodeTree &tree, const char *role);
@@ -615,11 +707,19 @@ bNodeSocket *source_group_mapping_input_socket(bNodeTree &tree,
                                                const char *role);
 
 /**
- * Make \a tree one mapped level: the value inputs, the implicit UV wiring and the chain in front
- * of every UV reader. \return whether a chain was inserted, so a level without a UV reader is not
- * treated as mapped.
+ * The Mirror fold's side-sign output of \a tree's mapping chain, or null when the level folds
+ * nothing. \a r_node, when asked, takes the socket's owner node (a tree under construction has no
+ * topology cache to find it through).
  */
-bool source_group_mapping_prepare(bNodeTree &tree);
+bNodeSocket *source_group_side_sign_find(bNodeTree &tree, bNode **r_node);
+
+/**
+ * Make \a tree one mapped level: the value inputs, the implicit UV wiring and the chain in front
+ * of every UV reader. \a mirror_axes names the axes the row's Mirror folds, which decides whether
+ * the chain grows the fold's nodes beside the transform. \return whether a chain was inserted, so
+ * a level without a UV reader is not treated as mapped.
+ */
+bool source_group_mapping_prepare(bNodeTree &tree, int16_t mirror_axes = 0);
 
 /** Drop the value inputs again once the row applies no mapping (the root keeps its interface). */
 void source_group_mapping_interface_remove(bNodeTree &tree);
@@ -632,8 +732,11 @@ bool source_group_color_reads_mapped_uv(const bNodeTree &tree, const bNode &node
 
 /** The same without the socket values: what a group filled from the source keeps while they move.
  * \a mapped is part of it too: a mapped wrapper carries Mapping nodes, so a toggle must not be
- * mistaken for a value-only edit by the refresh's in-place sync. */
-uint64_t source_group_structure_hash(const Material &source, bool mapped = false);
+ * mistaken for a value-only edit by the refresh's in-place sync; \a mirror_axes for the same
+ * reason. */
+uint64_t source_group_structure_hash(const Material &source,
+                                     bool mapped = false,
+                                     int16_t mirror_axes = 0);
 
 /** Remove every node of \a tree, leaving its interface untouched. */
 void tree_clear_nodes(Main &bmain, bNodeTree &tree);

@@ -860,8 +860,12 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_offset_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_scale_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_rotation_inputs_;
+  /** A row's UV mirror fold center input, keyed by the row, while its mapping folds an axis. */
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_mirror_center_inputs_;
   /** The Mapping node built for a row, so every channel and map of it shares the one node. */
   Map<const MaterialPaintLayer *, bNode *> mapping_nodes_;
+  /** The Mirror fold's side-sign vector of a row, with its owner node, for the Normal remap. */
+  Map<const MaterialPaintLayer *, std::pair<bNode *, bNodeSocket *>> mapping_side_signs_;
   /** The instance of a Material row's source group, with the group, keyed by the row. */
   Map<const MaterialPaintLayer *, std::pair<bNode *, bNodeTree *>> source_group_instances_;
   /** The taps this build published, one per (point, channel) and one per point for the mask. */

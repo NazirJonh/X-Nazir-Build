@@ -56,25 +56,33 @@
 
 namespace blender::bke::paint_layers {
 
-/** Bumped when what a fill produces changes, so groups made by an older fill are rebuilt once. */
-static constexpr uint64_t SOURCE_GROUP_FILL_VERSION = 6;
+/**
+ * Bumped when what a fill produces changes, so groups made by an older fill are rebuilt once.
+ * 7: the Mirror fold hands the wrapper's transform its folded UV and biases its side signs.
+ */
+static constexpr uint64_t SOURCE_GROUP_FILL_VERSION = 7;
 
-uint64_t source_group_content_hash(const Material &source, const bool mapped)
+uint64_t source_group_content_hash(const Material &source, const bool mapped, const int16_t mirror_axes)
 {
   uint64_t hash = BKE_paint_layers_source_material_tree_hash_cached(source);
   hash = hash * 1000003u ^ SOURCE_GROUP_FILL_VERSION;
   /* Whether the wrapper carries the row mapping is structural, but it lives in the content hash
    * (with the version) so toggling it refills the group once. Slider values do not enter here, so
-   * dragging a mapping value never refills. */
+   * dragging a mapping value never refills. The folded axes change the wrapper's nodes the same
+   * way; the center is a value and never does. */
   hash = hash * 1000003u ^ (mapped ? 1u : 0u);
+  hash = hash * 1000003u ^ uint64_t(uint16_t(mirror_axes));
   return hash;
 }
 
-uint64_t source_group_structure_hash(const Material &source, const bool mapped)
+uint64_t source_group_structure_hash(const Material &source,
+                                     const bool mapped,
+                                     const int16_t mirror_axes)
 {
   uint64_t hash = BKE_paint_layers_source_structure_hash_cached(source);
   hash = hash * 1000003u ^ SOURCE_GROUP_FILL_VERSION;
   hash = hash * 1000003u ^ (mapped ? 1u : 0u);
+  hash = hash * 1000003u ^ uint64_t(uint16_t(mirror_axes));
   return hash;
 }
 
@@ -157,6 +165,8 @@ struct SourceGroupBuild {
   const char *source_name;
   /** Whether the row applies its UV mapping, so every level carries the mapping chain. */
   bool mapped;
+  /** The axes the row's Mirror folds, so every mapped level grows the fold's nodes. */
+  int16_t mirror_axes;
 };
 
 /** One channel a level hands up: the node of the level's copy that feeds it. */
@@ -265,6 +275,7 @@ static void source_group_normal_output_add(const bNode &principled,
                                            const Map<const bNode *, bNode *> &node_map,
                                            const Map<const bNodeSocket *, bNodeSocket *> &socket_map,
                                            const bool mapped,
+                                           const int16_t mirror_axes,
                                            Vector<SourceGroupOutput> &r_outputs)
 {
   const bNodeSocket *input = bke::node_find_socket(principled, SOCK_IN, "Normal"_ustr);
@@ -289,18 +300,35 @@ static void source_group_normal_output_add(const bNode &principled,
     if (mapped && source_group_color_reads_mapped_uv(tree, *node)) {
       /* The row mapping moved the texture's read point, so the encoded vectors follow it: remap
        * them with this level's mapping rotation and scale-sign before exposing the Color. A
-       * colour that does not read the moved UV (Generated coordinates, a named UV Map) stays. */
+       * colour that does not read the moved UV (Generated coordinates, a named UV Map) stays.
+       * The row's Mirror fold, when it folds an axis, turns the component along it per texel. */
       bNode *group_input = source_group_group_input_ensure(tree);
       if (group_input != nullptr) {
         bNodeSocket *rotation = source_group_mapping_input_socket(
             tree, *group_input, SOURCE_GROUP_ROLE_MAPPING_ROTATION);
         bNodeSocket *scale = source_group_mapping_input_socket(
             tree, *group_input, SOURCE_GROUP_ROLE_MAPPING_SCALE);
+        bNode *side_sign_node = nullptr;
+        bNodeSocket *side_sign = source_group_side_sign_find(tree, &side_sign_node);
+        if (mirror_axes != 0 && side_sign == nullptr) {
+          /* The fold's flip of the Normal is skipped here, which lights the mirrored half wrong. */
+          printf("[paint-layers source group] mirror axes %d requested but no side sign on this level\n",
+                 int(mirror_axes));
+        }
         Vector<bNode *> made;
         bNode *encode_node = nullptr;
         if (rotation != nullptr && scale != nullptr) {
-          if (bNodeSocket *remapped = normal_remap_nodes_add(
-                  tree, *node, *socket, group_input, rotation, group_input, scale, made, encode_node))
+          if (bNodeSocket *remapped = normal_remap_nodes_add(tree,
+                                                             *node,
+                                                             *socket,
+                                                             group_input,
+                                                             rotation,
+                                                             group_input,
+                                                             scale,
+                                                             side_sign_node,
+                                                             side_sign,
+                                                             made,
+                                                             encode_node))
           {
             node = encode_node;
             socket = remapped;
@@ -337,9 +365,9 @@ static bool source_group_level_build(const SourceGroupBuild &build,
   }
 
   if (build.mapped) {
-    /* Every level: the three mapping inputs, the implicit UV wiring and the chain in front of
-     * every UV output. Path copies are fresh, so a mapped build always starts from no inputs. */
-    source_group_mapping_prepare(tree);
+    /* Every level: the mapping inputs, the implicit UV wiring and the chain in front of every UV
+     * output. Path copies are fresh, so a mapped build always starts from no inputs. */
+    source_group_mapping_prepare(tree, build.mirror_axes);
   }
   else if (depth == 0) {
     /* The root's interface survives a refill, so inputs left by an earlier mapped build go now. */
@@ -380,7 +408,7 @@ static bool source_group_level_build(const SourceGroupBuild &build,
     /* A chain inserted at a parent level may feed this level's Normal through a group input, so
      * the row's `mapped` flag (not only this level's local chain) decides the remap. */
     source_group_normal_output_add(
-        build.principled, tree, node_map, socket_map, build.mapped, outputs);
+        build.principled, tree, node_map, socket_map, build.mapped, build.mirror_axes, outputs);
   }
   else {
     const bNode *orig_group = build.path[depth];
@@ -444,7 +472,11 @@ static bool source_group_level_build(const SourceGroupBuild &build,
   return source_group_outputs_wire(tree, outputs);
 }
 
-bool source_group_fill(Main &bmain, bNodeTree &wrapper, const Material &source, const bool mapped)
+bool source_group_fill(Main &bmain,
+                       bNodeTree &wrapper,
+                       const Material &source,
+                       const bool mapped,
+                       const int16_t mirror_axes)
 {
   /* The interface stays: the instances of the group link into its outputs, and a refill that
    * changes no structure must not move them. */
@@ -468,7 +500,7 @@ bool source_group_fill(Main &bmain, bNodeTree &wrapper, const Material &source, 
     return done(false);
   }
   const SourceGroupBuild build{
-      bmain, *principled, group_path, owner_uid, source.id.name + 2, mapped};
+      bmain, *principled, group_path, owner_uid, source.id.name + 2, mapped, mirror_axes};
   return done(source_group_level_build(build, wrapper, *source.nodetree, 0));
 }
 

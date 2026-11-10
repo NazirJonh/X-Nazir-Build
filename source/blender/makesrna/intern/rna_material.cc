@@ -1983,6 +1983,108 @@ static void rna_MaterialPaintLayer_mapping_wrap_set(PointerRNA *ptr, int value)
   }
 }
 
+static int rna_MaterialPaintLayer_mapping_mirror_editable(const PointerRNA *ptr,
+                                                          const char **r_info)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  PointerRNA ptr_mutable = *ptr;
+  Material *ma = rna_paint_layer_material(&ptr_mutable, layer);
+  if (ma == nullptr) {
+    return 0;
+  }
+  /* The same rule as the mapping's own toggle: once an axis folds it stays switchable off even
+   * after its map is gone. */
+  if (BKE_paint_layers_mapping_mirror_get(*layer) != 0 ||
+      BKE_paint_layers_mapping_supported(*ma, *layer))
+  {
+    return PROP_EDITABLE;
+  }
+  if (r_info != nullptr) {
+    *r_info = N_("Row reads no repeatable map; assign an image to a Fill first");
+  }
+  return 0;
+}
+
+static int rna_MaterialPaintLayer_mapping_mirror_center_editable(const PointerRNA *ptr,
+                                                                 const char **r_info)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  PointerRNA ptr_mutable = *ptr;
+  Material *ma = rna_paint_layer_material(&ptr_mutable, layer);
+  /* The center is a value of a row that maps something, folded or not: placing the point before a
+   * Mirror axis is switched on is the natural order, and the fold then starts where it was put.
+   * The placement operators resolve the same predicate, so what they can write is what this
+   * offers. */
+  if (ma != nullptr && BKE_paint_layers_mapping_applies(*ma, *layer)) {
+    return PROP_EDITABLE;
+  }
+  if (r_info != nullptr) {
+    *r_info = N_("Enable the row's mapping to place the symmetry point");
+  }
+  return 0;
+}
+
+/* Mirror: fold the row's maps around mirror_center on the enabled axes. */
+
+static bool rna_MaterialPaintLayer_mapping_mirror_applies_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  return ma != nullptr && BKE_paint_layers_mapping_mirror_applies(*ma, *layer);
+}
+
+static bool rna_MaterialPaintLayer_mapping_mirror_u_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (BKE_paint_layers_mapping_mirror_get(*layer) & MA_PAINT_LAYER_MAPPING_MIRROR_U) != 0;
+}
+
+static void rna_MaterialPaintLayer_mapping_mirror_u_set(PointerRNA *ptr, bool value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  if (ma == nullptr) {
+    return;
+  }
+  const int16_t current = BKE_paint_layers_mapping_mirror_get(*layer);
+  const int16_t axes = value ? (current | MA_PAINT_LAYER_MAPPING_MIRROR_U) :
+                               (current & ~MA_PAINT_LAYER_MAPPING_MIRROR_U);
+  BKE_paint_layers_mapping_set_mirror(*ma, layer, axes);
+}
+
+static bool rna_MaterialPaintLayer_mapping_mirror_v_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (BKE_paint_layers_mapping_mirror_get(*layer) & MA_PAINT_LAYER_MAPPING_MIRROR_V) != 0;
+}
+
+static void rna_MaterialPaintLayer_mapping_mirror_v_set(PointerRNA *ptr, bool value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  if (ma == nullptr) {
+    return;
+  }
+  const int16_t current = BKE_paint_layers_mapping_mirror_get(*layer);
+  const int16_t axes = value ? (current | MA_PAINT_LAYER_MAPPING_MIRROR_V) :
+                               (current & ~MA_PAINT_LAYER_MAPPING_MIRROR_V);
+  BKE_paint_layers_mapping_set_mirror(*ma, layer, axes);
+}
+
+static void rna_MaterialPaintLayer_mapping_mirror_center_get(PointerRNA *ptr, float *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  BKE_paint_layers_mapping_mirror_center_get(*layer, value);
+}
+
+static void rna_MaterialPaintLayer_mapping_mirror_center_set(PointerRNA *ptr, const float *value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_mapping_set_mirror_center(*ma, layer, value);
+  }
+}
+
 static int rna_MaterialPaintLayer_blend_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -6408,6 +6510,56 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "UV Wrap",
                            "What the row's maps do outside the unit UV square after the mapping");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* Mirror: fold the maps around mirror_center. Read-only predicate first, then the axes and the
+   * center. The fold reads the map through |uv - center| + center per folded axis, so what either
+   * side shows, both sides show, and painting one side updates the other in real time through the
+   * generated graph and the GPU composite. */
+  prop = RNA_def_property(srna, "mapping_mirror_applies", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_MaterialPaintLayer_mapping_mirror_applies_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Mirror Applies", "Whether the enabled Mirror fold reaches what the row shows");
+
+  prop = RNA_def_property(srna, "mapping_mirror_u", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_mapping_mirror_u_get",
+                                 "rna_MaterialPaintLayer_mapping_mirror_u_set");
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
+  RNA_def_property_ui_text(prop,
+                           "Mirror U",
+                           "Fold the row's maps along U: both sides of the center show the same");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "mapping_mirror_v", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_mapping_mirror_v_get",
+                                 "rna_MaterialPaintLayer_mapping_mirror_v_set");
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
+  RNA_def_property_ui_text(prop,
+                           "Mirror V",
+                           "Fold the row's maps along V: both sides of the center show the same");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "mapping_mirror_center", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_mapping_mirror_center_get",
+                               "rna_MaterialPaintLayer_mapping_mirror_center_set",
+                               nullptr);
+  RNA_def_property_editable_func(prop,
+                                 "rna_MaterialPaintLayer_mapping_mirror_center_editable");
+  {
+    /* The center defaults to the tile's middle (0.5, 0.5), where the fold is immediately visible. */
+    static const float mapping_mirror_center_default[2] = {0.5f, 0.5f};
+    RNA_def_property_float_array_default(prop, mapping_mirror_center_default);
+  }
+  RNA_def_property_ui_text(
+      prop,
+      "Mirror Center",
+      "The UV point the Mirror fold reflects around on every folded axis");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "channels", PROP_COLLECTION, PROP_NONE);

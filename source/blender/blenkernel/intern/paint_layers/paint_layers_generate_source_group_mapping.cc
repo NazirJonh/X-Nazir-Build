@@ -67,7 +67,7 @@ bNodeTreeInterfaceSocket *source_group_mapping_input_find(bNodeTree &tree, const
 }
 
 /**
- * Add or find one of the wrapper's three row-mapping value inputs. Found by role before anything is
+ * Add or find one of the wrapper's row-mapping value inputs. Found by role before anything is
  * added, so a refill keeps the socket identifiers an instance links into. \a default_value is the
  * identity the Mapping reads while no row links the input.
  */
@@ -91,11 +91,12 @@ static bNodeTreeInterfaceSocket *source_group_mapping_input_ensure(bNodeTree &tr
   return socket;
 }
 
-/** The wrapper's three row-mapping value inputs, in the order the chain reads them. */
+/** The wrapper's row-mapping value inputs, in the order the chain reads them. */
 static bool source_group_mapping_interface_ensure(bNodeTree &tree)
 {
   static const float zero[3] = {0.0f, 0.0f, 0.0f};
   static const float one[3] = {1.0f, 1.0f, 1.0f};
+  static const float center_default[3] = {0.5f, 0.5f, 0.0f};
   char name[64];
   SNPRINTF(name, "%sOffset", SOURCE_GROUP_MAPPING_INPUT_PREFIX);
   if (source_group_mapping_input_ensure(tree, name, SOURCE_GROUP_ROLE_MAPPING_OFFSET, zero) ==
@@ -115,6 +116,12 @@ static bool source_group_mapping_interface_ensure(bNodeTree &tree)
   {
     return false;
   }
+  SNPRINTF(name, "%sMirror Center", SOURCE_GROUP_MAPPING_INPUT_PREFIX);
+  if (source_group_mapping_input_ensure(
+          tree, name, SOURCE_GROUP_ROLE_MAPPING_MIRROR_CENTER, center_default) == nullptr)
+  {
+    return false;
+  }
   return true;
 }
 
@@ -125,9 +132,10 @@ static bool source_group_mapping_interface_ensure(bNodeTree &tree)
  */
 void source_group_mapping_interface_remove(bNodeTree &tree)
 {
-  const char *roles[3] = {SOURCE_GROUP_ROLE_MAPPING_OFFSET,
+  const char *roles[4] = {SOURCE_GROUP_ROLE_MAPPING_OFFSET,
                           SOURCE_GROUP_ROLE_MAPPING_SCALE,
-                          SOURCE_GROUP_ROLE_MAPPING_ROTATION};
+                          SOURCE_GROUP_ROLE_MAPPING_ROTATION,
+                          SOURCE_GROUP_ROLE_MAPPING_MIRROR_CENTER};
   bool removed = false;
   for (const char *role : roles) {
     if (bNodeTreeInterfaceSocket *socket = source_group_mapping_input_find(tree, role)) {
@@ -242,14 +250,17 @@ static void source_group_image_textures_repeat(bNodeTree &tree)
 /**
  * Insert the row mapping in front of every UV output that feeds anything: each Texture Coordinate
  * node and every UV Map node with no layer named (the active UV; other named layers are the
- * source's own and stay untouched). The chain is `Vector Rotate` then `Mapping`, so the UVs go
- * through `S * R * uv + offset`: rotate first, then scale and offset. The rotation comes from the
- * wrapper's rotation input, the offset and scale from its other two; the Mapping's own Rotation
- * stays at its identity default. The outgoing links are read from #bNodeTree::links, not the stale
- * per-socket caches, and re-pointed through the Mapping. Generated nodes carry the dot-prefixed
- * names so the value sync never matches them against a source node.
+ * source's own and stay untouched). The chain is the row's Mirror fold when \a mirror_axes folds
+ * an axis, then `Vector Rotate` then `Mapping`, so the UVs go through the fold in the canvas UV
+ * and then `S * R * uv + offset`. The rotation comes from the wrapper's rotation input, the offset
+ * and scale from its other two and the fold center from its fourth; the Mapping's own Rotation
+ * stays at its identity default. The outgoing links are read from #bNodeTree::links, not the
+ * stale per-socket caches, and re-pointed through the Mapping. Generated nodes carry the
+ * dot-prefixed names so the value sync never matches them against a source node.
  */
-static int source_group_mapping_insert(bNodeTree &tree, bNode &group_input)
+static int source_group_mapping_insert(bNodeTree &tree,
+                                       bNode &group_input,
+                                       const int16_t mirror_axes)
 {
   int inserted = 0;
   bNodeSocket *offset_out = source_group_mapping_input_socket(
@@ -258,7 +269,13 @@ static int source_group_mapping_insert(bNodeTree &tree, bNode &group_input)
       tree, group_input, SOURCE_GROUP_ROLE_MAPPING_SCALE);
   bNodeSocket *rotation_out = source_group_mapping_input_socket(
       tree, group_input, SOURCE_GROUP_ROLE_MAPPING_ROTATION);
-  if (offset_out == nullptr || scale_out == nullptr || rotation_out == nullptr) {
+  bNodeSocket *center_out = (mirror_axes != 0) ? source_group_mapping_input_socket(
+                                                     tree, group_input,
+                                                     SOURCE_GROUP_ROLE_MAPPING_MIRROR_CENTER) :
+                                                 nullptr;
+  if (offset_out == nullptr || scale_out == nullptr || rotation_out == nullptr ||
+      (mirror_axes != 0 && center_out == nullptr))
+  {
     return 0;
   }
 
@@ -280,8 +297,16 @@ static int source_group_mapping_insert(bNodeTree &tree, bNode &group_input)
       continue;
     }
 
-    const MappingChain chain = mapping_chain_add(
-        tree, *source, *uv_out, &group_input, offset_out, scale_out, rotation_out);
+    const MappingChain chain = mapping_chain_add(tree,
+                                                 *source,
+                                                 *uv_out,
+                                                 &group_input,
+                                                 offset_out,
+                                                 scale_out,
+                                                 rotation_out,
+                                                 &group_input,
+                                                 center_out,
+                                                 mirror_axes);
     if (chain.mapping == nullptr) {
       return inserted;
     }
@@ -289,11 +314,23 @@ static int source_group_mapping_insert(bNodeTree &tree, bNode &group_input)
     bNode *mapping = chain.mapping;
     bNodeSocket *map_out = socket_out(*mapping, "Vector");
     if (map_out == nullptr) {
+      for (bNode *fold : chain.fold_nodes) {
+        bke::node_remove_node(nullptr, tree, *fold, true, false);
+      }
+      bke::node_remove_node(nullptr, tree, *mapping, true, false);
+      bke::node_remove_node(nullptr, tree, *rotate, true, false);
       return inserted;
     }
-    rotate->location[0] = source->location[0] + 80.0f;
+    /* The fold's nodes sit between the UV source and the rotate; place them on the same line. */
+    float place_x = source->location[0] + 80.0f;
+    for (bNode *fold : chain.fold_nodes) {
+      fold->location[0] = place_x;
+      fold->location[1] = source->location[1];
+      place_x += 80.0f;
+    }
+    rotate->location[0] = place_x;
     rotate->location[1] = source->location[1];
-    mapping->location[0] = source->location[0] + 160.0f;
+    mapping->location[0] = place_x + 80.0f;
     mapping->location[1] = source->location[1];
 
     /* Re-point the readers: remove-and-add keeps the tree's own bookkeeping honest. */
@@ -345,9 +382,10 @@ bool source_group_mapping_present(const bNodeTree &tree)
 /**
  * The row-mapping half of a mapped level: inputs, implicit UVs, Repeat, and the chain. Returns
  * whether a chain was actually inserted, so a source with no UV reader is not treated as mapped by
- * the clip factor or the Normal remap.
+ * the clip factor or the Normal remap. \a mirror_axes names the axes the row's Mirror folds; the
+ * chain then reads the fold center from the wrapper's fourth input.
  */
-bool source_group_mapping_prepare(bNodeTree &tree)
+bool source_group_mapping_prepare(bNodeTree &tree, const int16_t mirror_axes)
 {
   source_group_implicit_uv_wire(tree);
   if (!source_group_mapping_interface_ensure(tree)) {
@@ -358,7 +396,7 @@ bool source_group_mapping_prepare(bNodeTree &tree)
     return false;
   }
   nodes::update_node_declaration_and_sockets(tree, *group_input);
-  const int inserted = source_group_mapping_insert(tree, *group_input);
+  const int inserted = source_group_mapping_insert(tree, *group_input, mirror_axes);
   if (inserted > 0) {
     /* Tiling semantics only where the UV actually moves; a texture on Generated/Object
      * coordinates keeps the source's own extension. */
@@ -368,20 +406,44 @@ bool source_group_mapping_prepare(bNodeTree &tree)
 }
 
 /**
- * Relay the parent's three mapping inputs into the child path \a instance, each side found by role
+ * Relay the parent's row-mapping inputs into the child path \a instance, each side found by role
  * on its own interface. An unlinked input leaves the child's Mapping at its identity default.
  */
 void source_group_mapping_instance_wire(bNodeTree &tree,
                                                bNode &group_input,
                                                bNode &instance)
 {
-  const char *roles[3] = {SOURCE_GROUP_ROLE_MAPPING_OFFSET,
+  const char *roles[4] = {SOURCE_GROUP_ROLE_MAPPING_OFFSET,
                           SOURCE_GROUP_ROLE_MAPPING_SCALE,
-                          SOURCE_GROUP_ROLE_MAPPING_ROTATION};
+                          SOURCE_GROUP_ROLE_MAPPING_ROTATION,
+                          SOURCE_GROUP_ROLE_MAPPING_MIRROR_CENTER};
   for (const char *role : roles) {
     mapping_input_relay(
         tree, group_input, source_group_mapping_input_find(tree, role), instance, role);
   }
+}
+
+/**
+ * The Mirror fold's side-sign output of \a tree's mapping chain, or null when the level folds
+ * nothing. \a r_node, when asked, takes the socket's owner node. Found by the chain marker, not by
+ * name: the generated nodes carry dot-prefixed names the value sync must not match against a
+ * source node.
+ */
+bNodeSocket *source_group_side_sign_find(bNodeTree &tree, bNode **r_node)
+{
+  for (bNode &node : tree.nodes) {
+    const char *tag = prop_string_get(node.prop, MAPPING_CHAIN_PROP);
+    if (tag != nullptr && STREQ(tag, "mirror_side")) {
+      if (r_node != nullptr) {
+        *r_node = &node;
+      }
+      return socket_out(node, "Vector");
+    }
+  }
+  if (r_node != nullptr) {
+    *r_node = nullptr;
+  }
+  return nullptr;
 }
 
 /**

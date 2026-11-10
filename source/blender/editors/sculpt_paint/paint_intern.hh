@@ -25,6 +25,7 @@
 #include "DNA_object_enums.h"
 #include "DNA_scene_enums.h"
 #include "DNA_scene_types.h"
+#include "DNA_uuid_types.h"
 #include "DNA_vec_types.h"
 #include "DNA_windowmanager_enums.h"
 

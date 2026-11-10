@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cfloat>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -26,6 +27,7 @@
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
 #include "BLI_set.hh"
+#include "BLI_string.h"
 #include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
@@ -87,6 +89,7 @@
 #include "ED_paint.hh"
 #include "ED_paint_layers_bake.hh"
 #include "ED_screen.hh"
+#include "ED_sculpt.hh"
 #include "ED_undo.hh"
 
 #include "WM_api.hh"
@@ -106,6 +109,7 @@
 #include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
+#include "UI_view2d.hh"
 
 #include "paint_curve_intern.hh"
 #include "paint_curve_patch_edit_intern.hh"
@@ -120,6 +124,7 @@
 
 #include "curves/sculpt_intern.hh"
 #include "mesh/paint_hide.hh"
+#include "mesh/paint_image_uv_symmetry.hh"
 #include "selection/paint_image_select_view3d.hh"
 #include "mesh/paint_mask.hh"
 #include "mesh/paint_material_attribute.hh"
@@ -3509,6 +3514,10 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_layer_source_make_local);
   WM_operatortype_append(PAINT_OT_layer_mapping_scale_lock_toggle);
   WM_operatortype_append(PAINT_OT_layer_mapping_reset);
+  WM_operatortype_append(PAINT_OT_layer_mapping_mirror_toggle);
+  WM_operatortype_append(PAINT_OT_layer_mapping_mirror_set_point);
+  WM_operatortype_append(PAINT_OT_layer_mapping_mirror_from_cursor);
+  WM_operatortype_append(PAINT_OT_layer_mapping_mirror_pick_3d);
   WM_operatortype_append(PAINT_OT_stack_layer_copy);
   WM_operatortype_append(PAINT_OT_stack_layer_paste);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);

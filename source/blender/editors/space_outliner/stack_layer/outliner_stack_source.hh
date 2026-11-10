@@ -286,6 +286,9 @@ struct StackRowButton {
   /** Draw the button in a column of its own before the value column rather than among the
    * buttons right of the columns. */
   bool before_value = false;
+  /** Draw the button in the slot between the expand arrow and the row icon: a row-level switch
+   * that is no column and does not compete with the shared visibility and lock columns. */
+  bool before_icon = false;
   /** Draw the button only while the pointer is over its row, as the Properties tree shows its
    * drag handle; its column stays reserved either way. */
   bool hover_only = false;
@@ -366,6 +369,7 @@ struct StackRow {
   /** Draws the action button pressed: the source is in the action's mode for this row. */
   bool action_active = false;
   const char *action_tooltip = nullptr;
+
   /**
    * False when the source recognized something it cannot represent. Such a row is still listed --
    * a layer the user cannot see is worse than one it cannot edit -- but carries no controls.
@@ -1029,6 +1033,7 @@ class StackGroupingEditor {
   {
     return false;
   }
+
 
   /**
    * Give the row at \a target_ordinal a copy of the mask of the row at \a source_ordinal, replacing

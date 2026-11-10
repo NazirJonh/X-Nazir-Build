@@ -33,6 +33,11 @@
 #define COMBINED_LAYER_REPEAT_V 128
 #define COMBINED_LAYER_TANGENT_NORMAL 256
 #define COMBINED_LAYER_NORMAL_DIRECTX 262144
+/* The row's Mirror fold: the map is read through `|uv - center| + center` on each set axis, and a
+ * tangent-space Normal's component along that axis is flipped per texel by the side of the center
+ * it reads from -- the per-texel counterpart of the negative-scale flip. */
+#define COMBINED_LAYER_MIRROR_U 1048576
+#define COMBINED_LAYER_MIRROR_V 2097152
 #define COMBINED_LAYER_HAS_MASK 2048
 /* The row stage: the layer pass stores the row's colour and coverage instead of blending them, and a
  * later pass blends what the corrections left. */
@@ -622,10 +627,12 @@ float texel_hash_uniform(int2 texel, int seed, uint salt)
 /**
  * One straight, scene-linear texel of a map at the canvas \a uv, read through the row's UV mapping.
  *
- * `uv' = (R * uv) * scale + offset` is the transform of the generated Mapping node chain and of
- * the CPU resample. An axis that repeats wraps; one that clips reads transparent outside [0, 1).
+ * `uv' = (R * fold(uv)) * scale + offset` is the transform of the generated Mapping node chain and
+ * of the CPU resample: the Mirror fold reads the canvas UV first, then the rotate-scale-offset
+ * transform moves it. An axis that repeats wraps; one that clips reads transparent outside [0, 1).
  * A tangent-space Normal map has its vectors follow the mapping, as in
- * `composite_resample_mapped`: flipped by the sign of the scale, then rotated back.
+ * `composite_resample_mapped`: flipped by the sign of the scale, rotated back, then flipped per axis by the
+ * side of the fold center the canvas point reads from.
  */
 float4 sample_map(sampler2D tx,
                   float2 uv,
@@ -633,13 +640,24 @@ float4 sample_map(sampler2D tx,
                   float2 mapping_offset,
                   float2 mapping_scale,
                   float2 mapping_rotation,
+                  float2 mapping_mirror_center,
                   float lod)
 {
   float2 sample_uv = uv;
+  float2 side = float2(1.0f);
   bool clipped = false;
   if ((flags & COMBINED_LAYER_MAPPED) != 0) {
-    float2 rotated = float2(uv.x * mapping_rotation.x - uv.y * mapping_rotation.y,
-                            uv.x * mapping_rotation.y + uv.y * mapping_rotation.x);
+    float2 folded = uv;
+    if ((flags & COMBINED_LAYER_MIRROR_U) != 0) {
+      folded.x = abs(uv.x - mapping_mirror_center.x) + mapping_mirror_center.x;
+      side.x = (uv.x >= mapping_mirror_center.x) ? 1.0f : -1.0f;
+    }
+    if ((flags & COMBINED_LAYER_MIRROR_V) != 0) {
+      folded.y = abs(uv.y - mapping_mirror_center.y) + mapping_mirror_center.y;
+      side.y = (uv.y >= mapping_mirror_center.y) ? 1.0f : -1.0f;
+    }
+    float2 rotated = float2(folded.x * mapping_rotation.x - folded.y * mapping_rotation.y,
+                            folded.x * mapping_rotation.y + folded.y * mapping_rotation.x);
     sample_uv = rotated * mapping_scale + mapping_offset;
     bool repeat_u = (flags & COMBINED_LAYER_REPEAT_U) != 0;
     bool repeat_v = (flags & COMBINED_LAYER_REPEAT_V) != 0;
@@ -676,8 +694,9 @@ float4 sample_map(sampler2D tx,
     float s = mapping_rotation.y;
     float fx = rx * n.x;
     float fy = ry * n.y;
-    color.xyz = float3(0.5f * (c * fx + s * fy) + 0.5f,
-                       0.5f * (-s * fx + c * fy) + 0.5f,
+    /* The fold's side signs act on the canvas axes, after the rotation back. */
+    color.xyz = float3(0.5f * side.x * (c * fx + s * fy) + 0.5f,
+                       0.5f * side.y * (-s * fx + c * fy) + 0.5f,
                        0.5f * n.z + 0.5f);
   }
   return color;
@@ -730,6 +749,8 @@ struct MaskResources {
   [[push_constant]] const float2 mapping_offset;
   [[push_constant]] const float2 mapping_scale;
   [[push_constant]] const float2 mapping_rotation;
+  /** The UV point the row's Mirror fold reflects around, on its folded axes. */
+  [[push_constant]] const float2 mapping_mirror_center;
   /** The filter's parameters in its schema order. */
   [[push_constant]] const float4 filter_params_0;
   [[push_constant]] const float4 filter_params_1;
@@ -798,6 +819,7 @@ void mask_comp([[resource_table]] MaskResources &srt,
                             srt.mapping_offset,
                             srt.mapping_scale,
                             srt.mapping_rotation,
+                            srt.mapping_mirror_center,
                             srt.lod);
       if (srt.mode == COMBINED_MASK_COV_SCALAR) {
         match = clamp(c.x, 0.0f, 1.0f);
@@ -857,6 +879,7 @@ void mask_comp([[resource_table]] MaskResources &srt,
                               srt.mapping_offset,
                               srt.mapping_scale,
                               srt.mapping_rotation,
+                              srt.mapping_mirror_center,
                               srt.lod);
         gray = clamp((c.x + c.y + c.z) / 3.0f, 0.0f, 1.0f);
         weight = clamp(c.w, 0.0f, 1.0f) * opacity;
@@ -882,6 +905,7 @@ void mask_comp([[resource_table]] MaskResources &srt,
                           srt.mapping_offset,
                           srt.mapping_scale,
                           srt.mapping_rotation,
+                          srt.mapping_mirror_center,
                           srt.lod);
     float value = ((srt.flags & COMBINED_MASK_FROM_ALPHA) != 0) ? c.w : (c.x + c.y + c.z) / 3.0f;
     m *= (1.0f - srt.influence) + srt.influence * clamp(value, 0.0f, 1.0f);
@@ -918,6 +942,8 @@ struct LayerResources {
   [[push_constant]] const float2 mapping_scale;
   /** Cosine and sine of the mapping rotation. */
   [[push_constant]] const float2 mapping_rotation;
+  /** The UV point the row's Mirror fold reflects around, on its folded axes. */
+  [[push_constant]] const float2 mapping_mirror_center;
   /** The adjustment's filter and its parameters in the schema order. */
   [[push_constant]] const float4 filter_params_0;
   [[push_constant]] const float4 filter_params_1;
@@ -983,6 +1009,7 @@ void layer_comp([[resource_table]] LayerResources &srt,
                        srt.mapping_offset,
                        srt.mapping_scale,
                        srt.mapping_rotation,
+                       srt.mapping_mirror_center,
                        srt.lod);
       if ((srt.flags & COMBINED_LAYER_NORMAL_DIRECTX) != 0) {
         top.y = 1.0f - top.y;
@@ -1054,6 +1081,8 @@ struct CorrectionResources {
   [[push_constant]] const float2 mapping_offset;
   [[push_constant]] const float2 mapping_scale;
   [[push_constant]] const float2 mapping_rotation;
+  /** The UV point the row's Mirror fold reflects around, on its folded axes. */
+  [[push_constant]] const float2 mapping_mirror_center;
   [[push_constant]] const float4 filter_params_0;
   [[push_constant]] const float4 filter_params_1;
   /** A Color Balance's exponent triple; unused by every other filter. */
@@ -1124,6 +1153,7 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
                    srt.mapping_offset,
                    srt.mapping_scale,
                    srt.mapping_rotation,
+                   srt.mapping_mirror_center,
                    srt.lod);
   }
   /* A slice correction covers by the coverage its reader rendered with; its colour's alpha is

@@ -533,6 +533,10 @@ void outliner_stack_rows_ensure(const StackReadContext &ctx,
     int before = 0;
     int after = 0;
     for (const StackRowButton &button : row.buttons) {
+      if (button.before_icon) {
+        /* Drawn beside the row icon, so it reserves no column. */
+        continue;
+      }
       (button.before_value ? before : after)++;
     }
     runtime.stack_buttons_before_max = std::max(runtime.stack_buttons_before_max, before);

@@ -185,10 +185,11 @@ struct PaintMaterialCompositeConstant {
 
 /**
  * The UV mapping of a row's own map (a Fill layer, correction or mask): when #enabled, the map is
- * read through `uv' = (R * uv) * scale + offset` with Repeat edges, the transform the Vector Rotate
- * and Mapping nodes of the generated graph apply. Copied from the description when the stack is derived; the
- * resample happens while the buffers are acquired, so the evaluator reads the remapped buffer and
- * never sees these.
+ * read through the Mirror fold of the axes in #mirror_axes around #mirror_center, then
+ * `uv' = (R * uv) * scale + offset` with Repeat edges, the transform the Vector Rotate and Mapping
+ * nodes of the generated graph apply, with the fold's Vector Math nodes in front of them. Copied
+ * from the description when the stack is derived; the resample happens while the buffers are
+ * acquired, so the evaluator reads the remapped buffer and never sees these.
  */
 struct PaintMaterialCompositeMapping {
   bool enabled = false;
@@ -201,10 +202,24 @@ struct PaintMaterialCompositeMapping {
    */
   int16_t wrap = 0;
   /**
+   * The #MA_PAINT_LAYER_MAPPING_MIRROR_* axes the map folds around #mirror_center before the
+   * transform: what either side of the center shows, both sides show. A tangent-space Normal's
+   * component along a folded axis flips per texel, by the side of the center it reads from.
+   */
+  int16_t mirror_axes = 0;
+  /** The UV point the fold reflects around, on every folded axis at once. */
+  float mirror_center[2] = {0.5f, 0.5f};
+  /**
    * The mapped map holds tangent-space normals (Normal channel): the resample also rotates and
    * flips the vectors, so the lighting follows the pattern.
    */
   bool tangent_normal = false;
+
+  /** Whether \a axis (a #MA_PAINT_LAYER_MAPPING_MIRROR_* bit) folds. */
+  bool mirror_axis(const int16_t axis) const
+  {
+    return (mirror_axes & axis) != 0;
+  }
 };
 
 /**

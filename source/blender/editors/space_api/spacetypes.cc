@@ -15,6 +15,8 @@
 #include "BLI_listbase.h"
 
 #include "BKE_context.hh"
+#include "BKE_main.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_screen.hh"
 
 #include "GPU_state.hh"
@@ -66,6 +68,12 @@ void ED_spacetypes_init()
   using namespace blender::ed;
   /* UI unit is a variable, may be used in some space type initialization. */
   U.widget_unit = 20;
+
+  /* A shader preview shares the generated paint-layers tree with its material; stop the jobs before
+   * a regeneration rewrites it. */
+  BKE_paint_layers_regenerate_pre_hook_set([](Main &bmain) {
+    ED_preview_kill_jobs(static_cast<wmWindowManager *>(bmain.wm.first), &bmain);
+  });
 
   /* Create space types. */
   ED_spacetype_outliner();

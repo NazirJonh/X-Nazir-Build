@@ -1254,6 +1254,13 @@ bool BKE_paint_layers_tree_shape_moved(const Material &ma)
   return stored_root != paint_layers_root_topology_hash(ma, paint_layers_wired_channels(ma));
 }
 
+static void (*regenerate_pre_hook)(Main &bmain) = nullptr;
+
+void BKE_paint_layers_regenerate_pre_hook_set(void (*hook)(Main &bmain))
+{
+  regenerate_pre_hook = hook;
+}
+
 bool BKE_paint_layers_regenerate(Main &bmain,
                                  Material &ma,
                                  PaintLayersRegenerateReport *r_report)
@@ -1285,6 +1292,11 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   }
   if (BLI_uuid_is_nil(ma.paint_layers_owner_uid)) {
     ma.paint_layers_owner_uid = BLI_uuid_generate_random();
+  }
+  /* The rebuild rewrites the tree a running shader preview shares; only the main thread may stop
+   * those jobs, and a worker never regenerates. */
+  if (regenerate_pre_hook != nullptr && BLI_thread_is_main()) {
+    regenerate_pre_hook(bmain);
   }
 
   bool created_tree = false;

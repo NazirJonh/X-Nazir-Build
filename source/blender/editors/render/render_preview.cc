@@ -2378,6 +2378,13 @@ void ED_preview_icon_job(
 
   IconPreview *ip, *old_ip;
 
+  /* Evaluating can regenerate a layered material, which stops the running preview jobs (they share
+   * its generated tree) and frees the very job #WM_jobs_get returns below. Evaluate first, so the
+   * later call is a no-op and the job is never held across it. */
+  if (GS(id->name) != ID_SCE) {
+    CTX_data_ensure_evaluated_depsgraph(C);
+  }
+
   ED_preview_ensure_dbase(true);
 
   /* suspended start means it starts after 1 timer step, see WM_jobs_timer below */

@@ -167,6 +167,17 @@ void ED_space_image_set(Main *bmain, SpaceImage *sima, Image *ima, bool automati
 
   sima->image = ima;
 
+  /* The composite flag belongs to a layer stack's canvas. A manual pick (image browser, drop) shows
+   * that image itself, even when it is a map of the stack: the stack is reached through the canvas
+   * menu, which sets the flag after the image. An automatic change keeps the composite only while
+   * the new image still belongs to a stack. */
+  if (previous_image != ima && (sima->flag & SI_PAINT_COMPOSITE_MODE) != 0 &&
+      (!automatic || ima == nullptr || bmain == nullptr ||
+       space_image_composite_material_find(*bmain, *ima) == nullptr))
+  {
+    sima->flag &= ~SI_PAINT_COMPOSITE_MODE;
+  }
+
   if (ima == nullptr || ima->type == IMA_TYPE_R_RESULT || ima->type == IMA_TYPE_COMPOSITE) {
     if (sima->mode == SI_MODE_PAINT) {
       sima->mode = SI_MODE_VIEW;

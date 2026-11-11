@@ -1398,6 +1398,10 @@ void ED_image_undosys_type(UndoType *ut)
 
   ut->step_foreach_ID_ref = image_undosys_foreach_ID_ref;
 
+  /* Image steps only restore pixel tiles of an existing image. They cannot add, remove or rename
+   * data-blocks or change asset metadata, so asset lists don't need to re-fetch after them. */
+  ut->step_may_change_asset_data = false;
+
   /* NOTE: this is actually a confusing case, since it expects a valid context, but only in a
    * specific case, see `image_undosys_step_encode` code. We cannot specify
    * `UNDOTYPE_FLAG_NEED_CONTEXT_FOR_ENCODE` though, as it can be called with a null context by

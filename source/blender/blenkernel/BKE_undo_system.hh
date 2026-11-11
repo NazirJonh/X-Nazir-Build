@@ -183,6 +183,23 @@ struct UndoType {
                               UndoTypeForEachIDRefFn foreach_ID_ref_fn,
                               void *user_data);
 
+  /**
+   * Whether steps of this type may change data that asset lists (asset shelf, asset browser)
+   * display: asset metadata, the set of data-blocks and their names, etc. Fully self-contained
+   * types (most importantly sculpt steps) opt out, so asset lists don't have to re-fetch after
+   * undoing/redoing their steps.
+   *
+   * Why this is declared explicitly: the opt-out must not be deduced from implementation details
+   * like which callbacks a type registers. Deducing it from #step_foreach_ID_ref silently breaks
+   * the optimization when that hook gets registered for unrelated reasons, and silently skips
+   * invalidation for new types that change asset data without registering the hook.
+   *
+   * Defaults to true, so types are treated conservatively unless they opt out. Initialized in
+   * #BKE_undosys_type_append (a default member initializer would break #MEM_new_zeroed, which
+   * requires the type to stay trivial).
+   */
+  bool step_may_change_asset_data;
+
   /** Information for the generic undo system to refine handling of this specific undo type. */
   uint flags;
 

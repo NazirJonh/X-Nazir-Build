@@ -955,6 +955,12 @@ UndoType *BKE_undosys_type_append(void (*undosys_fn)(UndoType *))
 {
   UndoType *ut = MEM_new_zeroed<UndoType>(__func__);
 
+  /* Default true so types are conservatively treated as being able to change data that asset
+   * lists display. Must be set before the registration callback runs so types can opt out. It
+   * cannot be a default member initializer of #UndoType because #MEM_new_zeroed requires that
+   * type to stay trivial. See #UndoType.step_may_change_asset_data. */
+  ut->step_may_change_asset_data = true;
+
   undosys_fn(ut);
 
   BLI_addtail(&g_undo_types, ut);

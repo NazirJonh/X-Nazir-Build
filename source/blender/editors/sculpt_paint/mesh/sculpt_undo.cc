@@ -5635,6 +5635,12 @@ void register_type(UndoType *ut)
    * references are stored/resolved by #step_store_id_refs / #step_resolve_id_refs instead. */
   ut->step_foreach_ID_ref = nullptr;
 
+  /* Sculpt steps restore geometry/attribute data of the object(s) they were pushed for. They
+   * cannot change data that asset lists display (asset metadata, data-block names, ...), so
+   * asset lists don't need to re-fetch after a sculpt undo/redo. Dyntopo strokes are still
+   * caught: their steps set #UndoStep.use_memfile_step, handled by a separate check. */
+  ut->step_may_change_asset_data = false;
+
   ut->flags = UNDOTYPE_FLAG_DECODE_ACTIVE_STEP;
 
   ut->step_size = sizeof(SculptUndoStep);

@@ -275,6 +275,73 @@ static void undo_history_sync(bContext *C, const bool redo)
 /** \} */
 
 /**
+ * Whether a single undo step \a us can have changed data that asset lists (asset shelf, asset
+ * browser) display: asset metadata, the set of data-blocks and their names, etc.
+ *
+ * Steps which are fully self-contained may be excluded, most importantly the sculpt steps: they
+ * only restore geometry/attribute data of the object(s) they were pushed for. Such types declare
+ * this through #UndoType.step_may_change_asset_data, so the decision doesn't hinge on which
+ * callbacks they happen to register.
+ */
+static bool ed_undo_step_touched_asset_data(const UndoStep &us)
+{
+  /* Memfile steps restore the whole #Main, asset metadata included. */
+  if (us.type == BKE_UNDOSYS_TYPE_MEMFILE) {
+    return true;
+  }
+  /* The step is entangled with global (memfile) state, e.g. a dyntopo sculpt stroke. */
+  if (us.use_memfile_step) {
+    return true;
+  }
+  /* The undo type didn't opt out, so it may change what asset lists display. */
+  return us.type->step_may_change_asset_data;
+}
+
+/**
+ * Whether any of the undo steps decoded by an undo/redo (the previously and the currently active
+ * step both included, this is the range of steps decoded, skipped steps included) can have
+ * changed data that asset lists display. See #ed_undo_step_touched_asset_data.
+ *
+ * Must be called after the undo/redo was performed, with \a step_active_before being the active
+ * step captured before it.
+ */
+static bool ed_undo_steps_touched_asset_data(const UndoStack &ustack,
+                                             const UndoStep *step_active_before)
+{
+  const UndoStep *step_active_after = ustack.step_active;
+
+  if (step_active_before == nullptr || step_active_after == nullptr) {
+    /* Either nothing was stepped at all, or the range cannot be determined -- be conservative. */
+    return step_active_before != step_active_after;
+  }
+
+  /* The decoded range is walked in the direction of the undo/redo, from the previously active
+   * step towards the currently active one. */
+  const eUndoStepDir step_dir = BKE_undosys_step_calc_direction(
+      &ustack, step_active_after, step_active_before);
+  if (step_dir == STEP_INVALID) {
+    /* #BKE_undosys_step_calc_direction only returns this when it cannot resolve the direction
+     * from a corrupted stack (asserting in debug builds). The range cannot be determined -- be
+     * conservative. */
+    return true;
+  }
+
+  for (const UndoStep *us = step_active_before; us != nullptr;
+       us = (step_dir == STEP_REDO) ? us->next : us->prev)
+  {
+    if (ed_undo_step_touched_asset_data(*us)) {
+      return true;
+    }
+    if (us == step_active_after) {
+      return false;
+    }
+  }
+
+  /* \a step_active_after not reached, which shouldn't happen. Be conservative. */
+  return true;
+}
+
+/**
  * Common post management of undo/redo (calling post handlers, adding notifiers etc.).
  *
  * \note Also check #undo_history_exec in bottom if you change notifiers.
@@ -282,7 +349,8 @@ static void undo_history_sync(bContext *C, const bool redo)
 static void ed_undo_step_post(bContext *C,
                               wmWindowManager *wm,
                               const enum eUndoStepDir undo_dir,
-                              ReportList *reports)
+                              ReportList *reports,
+                              bool steps_touched_asset_data)
 {
   using namespace blender::ed;
   BLI_assert(ELEM(undo_dir, STEP_UNDO, STEP_REDO));
@@ -319,7 +387,12 @@ static void ed_undo_step_post(bContext *C,
   WM_toolsystem_refresh_active(C);
   WM_toolsystem_refresh_screen_all(bmain);
 
-  asset::list::storage_tag_main_data_dirty();
+  /* Asset lists (asset shelf, asset browser) only need to re-fetch when the decoded steps could
+   * have changed the data they display. Avoids an expensive list re-read after e.g. every sculpt
+   * undo. */
+  if (steps_touched_asset_data) {
+    asset::list::storage_tag_main_data_dirty();
+  }
 
   /* Self-heal: an undo or redo decode can leave a layered material's generated graph with dangling
    * references (a group node without its tree, a lost map) while the graph still counts as up to
@@ -353,11 +426,13 @@ static wmOperatorStatus ed_undo_step_direction(bContext *C,
   wmWindowManager *wm = CTX_wm_manager(C);
 
   if (!ed_undo_step_pre(C, wm, step, reports)) {
-    /* A live Vector shape session consumed the undo by cancelling itself. */
-    ed_undo_step_post(C, wm, step, reports);
+    /* A live Vector shape session consumed the undo by cancelling itself. No stack step was
+     * decoded, asset data cannot have changed. */
+    ed_undo_step_post(C, wm, step, reports, false);
     return OPERATOR_FINISHED;
   }
 
+  const UndoStep *step_active_before = wm->runtime->undo_stack->step_active;
   if (step == STEP_UNDO) {
     BKE_undosys_step_undo(wm->runtime->undo_stack, C);
   }
@@ -365,7 +440,9 @@ static wmOperatorStatus ed_undo_step_direction(bContext *C,
     BKE_undosys_step_redo(wm->runtime->undo_stack, C);
   }
 
-  ed_undo_step_post(C, wm, step, reports);
+  const bool steps_touched_asset_data = ed_undo_steps_touched_asset_data(
+      *wm->runtime->undo_stack, step_active_before);
+  ed_undo_step_post(C, wm, step, reports, steps_touched_asset_data);
 
   return OPERATOR_FINISHED;
 }
@@ -407,9 +484,12 @@ static int ed_undo_step_by_name(bContext *C, const char *undo_name, ReportList *
 
   ed_undo_step_pre(C, wm, undo_dir, reports);
 
+  const UndoStep *step_active_before = wm->runtime->undo_stack->step_active;
   BKE_undosys_step_load_data_ex(wm->runtime->undo_stack, C, undo_step_target, nullptr, true);
 
-  ed_undo_step_post(C, wm, undo_dir, reports);
+  const bool steps_touched_asset_data = ed_undo_steps_touched_asset_data(
+      *wm->runtime->undo_stack, step_active_before);
+  ed_undo_step_post(C, wm, undo_dir, reports, steps_touched_asset_data);
 
   return OPERATOR_FINISHED;
 }
@@ -438,9 +518,12 @@ static int ed_undo_step_by_index(bContext *C, const int undo_index, ReportList *
 
   ed_undo_step_pre(C, wm, undo_dir, reports);
 
+  const UndoStep *step_active_before = wm->runtime->undo_stack->step_active;
   BKE_undosys_step_load_from_index(wm->runtime->undo_stack, C, undo_index);
 
-  ed_undo_step_post(C, wm, undo_dir, reports);
+  const bool steps_touched_asset_data = ed_undo_steps_touched_asset_data(
+      *wm->runtime->undo_stack, step_active_before);
+  ed_undo_step_post(C, wm, undo_dir, reports, steps_touched_asset_data);
 
   return OPERATOR_FINISHED;
 }

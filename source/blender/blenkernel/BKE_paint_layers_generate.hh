@@ -145,6 +145,15 @@ bool BKE_paint_layers_regenerate(Main &bmain,
                                  PaintLayersRegenerateReport *r_report = nullptr);
 
 /**
+ * Register the function a regeneration calls on the main thread right before it rewrites the
+ * generated tree. A shader preview job renders a localized copy of the material that shares the
+ * generated tree with the original, so the editors register the call that stops those jobs: a
+ * rebuild under a running preview frees nodes the preview thread is still drawing with. Null
+ * (the default, and what tests run with) means nothing to stop.
+ */
+void BKE_paint_layers_regenerate_pre_hook_set(void (*hook)(Main &bmain));
+
+/**
  * Regenerate every layered material of \a bmain that needs it -- #MA_PAINT_LAYERS_REGEN is set or
  * the generated tree is missing -- and nothing else.
  *

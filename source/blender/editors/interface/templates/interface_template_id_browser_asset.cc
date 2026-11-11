@@ -117,6 +117,28 @@ short id_browser_target_idcode(const bContext *C)
   return ptr_type ? RNA_type_to_ID_code(ptr_type) : 0;
 }
 
+static short id_browser_memory_idcode = 0;
+
+std::string id_browser_catalog_memory_domain_for(const short idcode)
+{
+  const std::string base = grid_settings::id_browser_catalog_memory_domain;
+  if (idcode == 0 || idcode == ID_IM) {
+    return base;
+  }
+  const char code[3] = {char(idcode & 0xff), char((idcode >> 8) & 0xff), '\0'};
+  return base + "_" + code;
+}
+
+void id_browser_catalog_memory_idcode_set(const short idcode)
+{
+  id_browser_memory_idcode = idcode;
+}
+
+std::string id_browser_catalog_memory_domain()
+{
+  return id_browser_catalog_memory_domain_for(id_browser_memory_idcode);
+}
+
 /* The popover remembers one library selection across uses, so a stored selection can be hidden
  * for the type currently browsed: picking images last time may have left an image library
  * selected for a popover that now browses materials, where it would come up empty. Reset to
@@ -209,7 +231,8 @@ void id_browser_set_membership(wmWindowManager &wm, const grid_settings::Catalog
    * is pointed at #ASSET_LIBRARY_ALL to keep #id_browser_library_is_missing() and the header label
    * consistent with what #id_browser_foreach_membership_asset actually iterates. */
   grid_settings::library_ref_set(settings, asset_system::all_library_reference());
-  grid_settings::catalog_mode_set_membership(settings, mode);
+  grid_settings::catalog_mode_set_membership(
+      settings, mode, id_browser_catalog_memory_domain().c_str());
   grid_view_session_reset_scroll(id_browser_grid_session_key);
   WM_file_tag_modified();
 
@@ -282,7 +305,7 @@ void id_browser_catalog_state_set_single(const AssetLibraryReference &library_re
 {
   BKE_asset_catalog_memory_set_set(&U,
                                    library_ref,
-                                   grid_settings::id_browser_catalog_memory_domain,
+                                   id_browser_catalog_memory_domain(),
                                    Span<bUUID>(&catalog_id, 1));
   WM_file_tag_modified();
 }
@@ -295,7 +318,7 @@ void id_browser_catalog_state_set_single(const AssetLibraryReference &library_re
  */
 void id_browser_catalog_state_set_all(const AssetLibraryReference &library_ref)
 {
-  const char *domain = grid_settings::id_browser_catalog_memory_domain;
+  const std::string domain = id_browser_catalog_memory_domain();
   if (library_ref.type == ASSET_LIBRARY_ALL) {
     BKE_asset_catalog_memory_set_all(&U, asset_system::all_library_reference(), domain);
     for (asset_system::AssetLibrary *library :
@@ -328,14 +351,14 @@ void id_browser_catalog_state_set_all(const AssetLibraryReference &library_ref)
 static void id_browser_catalog_selection_sanitize(const AssetLibraryReference &lib_ref,
                                                    const asset_system::AssetLibrary &library)
 {
-  if (BKE_asset_catalog_memory_get_mode(&U, lib_ref, grid_settings::id_browser_catalog_memory_domain) !=
+  if (BKE_asset_catalog_memory_get_mode(&U, lib_ref, id_browser_catalog_memory_domain()) !=
       ASSET_CATALOG_MEMORY_SET)
   {
     return;
   }
 
   const Vector<bUUID> enabled_ids = BKE_asset_catalog_memory_get_set(
-      &U, lib_ref, grid_settings::id_browser_catalog_memory_domain);
+      &U, lib_ref, id_browser_catalog_memory_domain());
   if (enabled_ids.is_empty()) {
     return;
   }
@@ -352,11 +375,11 @@ static void id_browser_catalog_selection_sanitize(const AssetLibraryReference &l
   }
 
   if (valid_ids.is_empty()) {
-    BKE_asset_catalog_memory_set_all(&U, lib_ref, grid_settings::id_browser_catalog_memory_domain);
+    BKE_asset_catalog_memory_set_all(&U, lib_ref, id_browser_catalog_memory_domain());
   }
   else {
     BKE_asset_catalog_memory_set_set(
-        &U, lib_ref, grid_settings::id_browser_catalog_memory_domain, valid_ids.as_span());
+        &U, lib_ref, id_browser_catalog_memory_domain(), valid_ids.as_span());
   }
   /* Preferences-only write (#BKE_asset_catalog_memory_set_all/_set_set already flag
    * #UserDef.runtime.is_dirty) -- this does not touch blend-file data, so the file itself must
@@ -382,10 +405,10 @@ void id_browser_foreach_asset(const bContext &C,
 
   Vector<bUUID> catalog_ids;
   const eAssetCatalogMemoryMode mode = BKE_asset_catalog_memory_get_mode(
-      &U, lib_ref, grid_settings::id_browser_catalog_memory_domain);
+      &U, lib_ref, id_browser_catalog_memory_domain());
   if (!all_libraries && mode == ASSET_CATALOG_MEMORY_SET) {
     catalog_ids = BKE_asset_catalog_memory_get_set(
-        &U, lib_ref, grid_settings::id_browser_catalog_memory_domain);
+        &U, lib_ref, id_browser_catalog_memory_domain());
   }
 
   if (!all_libraries && !catalog_ids.is_empty() && ed::asset::list::is_loaded(&lib_ref)) {
@@ -394,11 +417,11 @@ void id_browser_foreach_asset(const bContext &C,
     {
       id_browser_catalog_selection_sanitize(lib_ref, *library);
       if (BKE_asset_catalog_memory_get_mode(
-              &U, lib_ref, grid_settings::id_browser_catalog_memory_domain) ==
+              &U, lib_ref, id_browser_catalog_memory_domain()) ==
           ASSET_CATALOG_MEMORY_SET)
       {
         catalog_ids = BKE_asset_catalog_memory_get_set(
-            &U, lib_ref, grid_settings::id_browser_catalog_memory_domain);
+            &U, lib_ref, id_browser_catalog_memory_domain());
       }
       else {
         catalog_ids.clear();
@@ -443,13 +466,13 @@ void id_browser_foreach_asset(const bContext &C,
         continue;
       }
       if (BKE_asset_catalog_memory_get_mode(
-              &U, *per_lib_ref, grid_settings::id_browser_catalog_memory_domain) !=
+              &U, *per_lib_ref, id_browser_catalog_memory_domain()) !=
           ASSET_CATALOG_MEMORY_SET)
       {
         continue;
       }
       Vector<bUUID> ids = BKE_asset_catalog_memory_get_set(
-          &U, *per_lib_ref, grid_settings::id_browser_catalog_memory_domain);
+          &U, *per_lib_ref, id_browser_catalog_memory_domain());
       if (ids.is_empty()) {
         continue;
       }
@@ -679,9 +702,9 @@ static wmOperatorStatus id_browser_show_current_file_exec(bContext *C, wmOperato
   /* Leave any Recent/Favorites membership: it lives under #ASSET_LIBRARY_ALL, so clear the mode
    * for both the new library and #ALL (mirrors the catalog selector's "All" item). */
   BKE_asset_catalog_memory_set_all(
-      &U, local_ref, grid_settings::id_browser_catalog_memory_domain);
+      &U, local_ref, id_browser_catalog_memory_domain());
   BKE_asset_catalog_memory_set_all(
-      &U, asset_system::all_library_reference(), grid_settings::id_browser_catalog_memory_domain);
+      &U, asset_system::all_library_reference(), id_browser_catalog_memory_domain());
   grid_view_session_reset_scroll(id_browser_grid_session_key);
   WM_file_tag_modified();
 

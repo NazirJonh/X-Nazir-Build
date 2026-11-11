@@ -1605,8 +1605,31 @@ int16_t BKE_paint_layers_mapping_wrap_get(const MaterialPaintLayer &layer);
  */
 bool BKE_paint_layers_mapping_set_wrap(Material &ma, MaterialPaintLayer *layer, int16_t wrap);
 
-/** The #MA_PAINT_LAYER_MAPPING_MIRROR_* bits of \a layer: the axes its maps fold along. */
+/**
+ * The #MA_PAINT_LAYER_MAPPING_MIRROR_* bits of \a layer that fold now: the configured axes while
+ * Mirror is enabled, 0 otherwise.
+ */
 int16_t BKE_paint_layers_mapping_mirror_get(const MaterialPaintLayer &layer);
+
+/** The configured Mirror axes of \a layer, whether or not Mirror is enabled. */
+int16_t BKE_paint_layers_mapping_mirror_axes_get(const MaterialPaintLayer &layer);
+
+/** Whether Mirror is switched on for \a layer (#MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED). */
+bool BKE_paint_layers_mapping_mirror_enabled_get(const MaterialPaintLayer &layer);
+
+/**
+ * Store the Mirror axes of \a layer without changing whether Mirror is enabled; the graph is only
+ * rebuilt when Mirror is on. False for a row not in \a ma.
+ */
+bool BKE_paint_layers_mapping_set_mirror_axes(Material &ma, MaterialPaintLayer *layer, int16_t axes);
+
+/**
+ * Switch Mirror on or off for \a layer, keeping its axes and center. Structural. Refused (false) for
+ * a row not in \a ma and for switching on while the mapping is unsupported.
+ */
+bool BKE_paint_layers_mapping_set_mirror_enabled(Material &ma,
+                                                 MaterialPaintLayer *layer,
+                                                 bool enabled);
 
 /**
  * Fold the axes of \a layer's maps around its #MaterialPaintLayerMapping::mirror_center. \a axes is

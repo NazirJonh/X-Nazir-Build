@@ -828,6 +828,17 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             return False
         return cls._owner_material(context) is not None
 
+    @staticmethod
+    def _draw_lock(layout, row):
+        layout.prop(row, "locked", text="Lock", icon='LOCKED' if row.locked else 'UNLOCKED')
+
+    @staticmethod
+    def _draw_opacity_lock(layout, row):
+        """Opacity with the Lock toggle to its right, as one row."""
+        line = layout.row(align=True)
+        line.prop(row, "opacity", text="Opacity")
+        line.prop(row, "locked", text="", icon='LOCKED' if row.locked else 'UNLOCKED')
+
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
@@ -843,11 +854,10 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         item = self._shown_mask_item(context, owner, layer)
         if item is not None:
             layout.label(text=item.name, icon='MOD_MASK')
-            layout.prop(item, "locked", text="Lock", icon='LOCKED' if item.locked else 'UNLOCKED')
             if item.gradient_supported:
                 # A Gradient mask item has a line and a ramp instead of a map; its invert and blend
                 # are the mask item's own, as on any other correction.
-                layout.prop(item, "opacity", text="Opacity")
+                self._draw_opacity_lock(layout, item)
                 layout.prop(item, "blend_type", text="Blend")
                 if len(item.channels):
                     layout.prop(item.channels[0], "invert", text="Invert", toggle=True)
@@ -857,7 +867,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             if item.generator_supported:
                 # A pattern mask item lays its ramp's grey over the row's mask: the same panel a
                 # generator layer draws, with the ramp of its own and no channels to choose.
-                layout.prop(item, "opacity", text="Opacity")
+                self._draw_opacity_lock(layout, item)
                 layout.prop(item, "blend_type", text="Blend")
                 if len(item.channels):
                     layout.prop(item.channels[0], "invert", text="Invert", toggle=True)
@@ -868,7 +878,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 # A filter in the mask changes its one coverage: opacity and the kind's parameters,
                 # and no channels to choose. A map-coverage operator draws its own mode, tolerance
                 # and colours in #draw_material_mask_coverage_item.
-                layout.prop(item, "opacity", text="Opacity")
+                self._draw_opacity_lock(layout, item)
                 layout.separator()
                 if item.is_map_coverage:
                     draw_material_mask_coverage_item(layout, context, item)
@@ -893,9 +903,12 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             if item.source == 'ANCHOR_POINT':
                 # A marker publishes a slice and a reader lays one: no map, no channels to choose.
                 if item.is_anchor_point_reader:
-                    layout.prop(item, "opacity", text="Opacity")
+                    self._draw_opacity_lock(layout, item)
                     layout.prop(item, "blend_type", text="Blend")
+                else:
+                    self._draw_lock(layout, item)
                 return
+            self._draw_lock(layout, item)
             draw_material_mask_item(layout, context, item)
             return
 
@@ -903,8 +916,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             # The marker is a place: it has no opacity, blend or channels of its own.
             return
 
-        layout.prop(layer, "opacity", text="Opacity")
-        layout.prop(layer, "locked", text="Lock", icon='LOCKED' if layer.locked else 'UNLOCKED')
+        self._draw_opacity_lock(layout, layer)
         # The row's own blend is the base a channel inherits; a channel's override is edited in the
         # Outliner stack, beside its opacity.
         layout.prop(layer, "blend_type", text="Blend")
@@ -1242,11 +1254,49 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         col.prop(row, "tile_rotation", text="Rotation")
         col.prop(row, "mapping_wrap", text="UV Wrap")
 
+        if row.mapping_enabled and row.source == 'MATERIAL':
+            # The wrapper moves the active UV layer (TexCoord UV and open Image Textures) of the
+            # source tree and of the groups on the path to its Principled BSDF; a coordinate-driven
+            # procedural texture, a named UV Map node and a group beside that path keep their own input.
+            note = layout.column(align=True)
+            note.enabled = False
+            note.label(text="Only the active UV of the main shader path is mapped", icon='BLANK1')
+            note.label(text="Procedural, named-UV and side-group textures are not", icon='BLANK1')
+
+
+class LAYER_MATERIAL_PT_mapping_mirror(LayerMaterialButtonsPanel, Panel):
+    """Mirror fold of the Mapping panel: a subpanel whose header checkbox switches it on or off.
+
+    Off by default. The axes and the center are kept while it is off, so switching it back on
+    restores them.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_mapping_mirror"
+    bl_label = "Mirror"
+    bl_parent_id = "LAYER_MATERIAL_PT_mapping"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return LAYER_MATERIAL_PT_mapping._shown_row(context) is not None
+
+    def draw_header(self, context):
+        row = LAYER_MATERIAL_PT_mapping._shown_row(context)
+        if row is not None:
+            self.layout.prop(row, "mapping_mirror_enabled", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        row = LAYER_MATERIAL_PT_mapping._shown_row(context)
+        if row is None:
+            return
+
         # Mirror: fold around a center point on U and/or V axes. The fold makes both sides show the
         # same content in real time, useful for symmetric painting.
-        col.separator()
-        col.label(text="Mirror")
-        mirror_col = col.column(align=True)
+        layout.active = row.mapping_mirror_enabled
+        mirror_col = layout.column(align=True)
         mirror_row = mirror_col.row(align=True)
         mirror_row.prop(row, "mapping_mirror_u", text="U", toggle=True)
         mirror_row.prop(row, "mapping_mirror_v", text="V", toggle=True)
@@ -1270,15 +1320,6 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
             gizmo_note = mirror_col.column(align=True)
             gizmo_note.enabled = False
             gizmo_note.label(text="Drag the mirror handle in the Image Editor", icon='BLANK1')
-
-        if row.mapping_enabled and row.source == 'MATERIAL':
-            # The wrapper moves the active UV layer (TexCoord UV and open Image Textures) of the
-            # source tree and of the groups on the path to its Principled BSDF; a coordinate-driven
-            # procedural texture, a named UV Map node and a group beside that path keep their own input.
-            note = layout.column(align=True)
-            note.enabled = False
-            note.label(text="Only the active UV of the main shader path is mapped", icon='BLANK1')
-            note.label(text="Procedural, named-UV and side-group textures are not", icon='BLANK1')
 
 
 class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):
@@ -1937,6 +1978,7 @@ classes = (
     LAYER_MATERIAL_PT_layers,
     LAYER_MATERIAL_PT_normal_height,
     LAYER_MATERIAL_PT_mapping,
+    LAYER_MATERIAL_PT_mapping_mirror,
     LAYER_MT_mapping_reset,
     LAYER_MATERIAL_PT_source_surface,
     LAYER_MATERIAL_PT_anchor_point,

@@ -337,7 +337,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
   const Vector<StackEffectMenuKind> content = kinds_for(PAINT_LAYER_TARGET_CONTENT);
   const Vector<StackEffectMenuKind> mask = kinds_for(PAINT_LAYER_TARGET_MASK);
 
-  /* The newer filters are listed in the "New Effects" submenu and nothing else is, so no entry
+  /* The newer filters are listed in the "Filter" submenu and nothing else is, so no entry
    * appears in both lists. */
   for (const char *identifier : {"FILTER_EXPOSURE",
                                  "FILTER_DEBAND",
@@ -382,11 +382,12 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
   EXPECT_NE(kind_named(mask, "Paint"), kind_named(content, "Paint"));
   EXPECT_NE(kind_named(mask, "Fill"), kind_named(content, "Fill"));
 
-  /* Kinds that exist only in a mask are offered only while it is the mask that shows. */
+  /* Kinds that exist only in a mask are added from the Add Mask menu, so neither Effects list
+   * offers them. */
   EXPECT_FALSE(has_identifier(content, "MASK_FILTER_COLOR_ID"));
   EXPECT_FALSE(has_identifier(content, "MASK_FILTER_UV_ISLAND"));
-  EXPECT_TRUE(has_identifier(mask, "MASK_FILTER_COLOR_ID"));
-  EXPECT_TRUE(has_identifier(mask, "MASK_FILTER_UV_ISLAND"));
+  EXPECT_FALSE(has_identifier(mask, "MASK_FILTER_COLOR_ID"));
+  EXPECT_FALSE(has_identifier(mask, "MASK_FILTER_UV_ISLAND"));
 
   /* A mask filter with a content twin stays in both menus. */
   EXPECT_TRUE(has_identifier(content, "FILTER_HSL"));

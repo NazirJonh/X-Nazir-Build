@@ -3045,7 +3045,10 @@ static Button *item_menu(Layout *layout,
   return but;
 }
 
-void Layout::menu(MenuType *mt, const std::optional<StringRef> name_opt, int icon)
+void Layout::menu(MenuType *mt,
+                  const std::optional<StringRef> name_opt,
+                  int icon,
+                  const bool force_dropdown)
 {
   Block *block = this->block();
   bContext *C = static_cast<bContext *>(block->evil_C);
@@ -3066,17 +3069,20 @@ void Layout::menu(MenuType *mt, const std::optional<StringRef> name_opt, int ico
             mt,
             nullptr,
             mt->description ? TIP_(mt->description) : "",
-            false);
+            force_dropdown);
 }
 
-void Layout::menu(const StringRef menuname, const std::optional<StringRef> name, int icon)
+void Layout::menu(const StringRef menuname,
+                  const std::optional<StringRef> name,
+                  int icon,
+                  const bool force_dropdown)
 {
   MenuType *mt = WM_menutype_find(menuname, false);
   if (mt == nullptr) {
     RNA_warning_bare("UILayout.menu(): not found %s", std::string(menuname).c_str());
     return;
   }
-  this->menu(mt, name, icon);
+  this->menu(mt, name, icon, force_dropdown);
 }
 
 void Layout::menu_contents(const StringRef menuname)

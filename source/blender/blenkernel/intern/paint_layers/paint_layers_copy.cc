@@ -171,9 +171,13 @@ static void paint_layer_channels_duplicate(Main &bmain,
    * every other import keeps classifying by the image alone, as it did before. A painting row's
    * external file map stays under the policy, so Share still shares it. */
   const bool assigned_texture = options.copy_assigned_maps && !paint_layer_row_paints_maps(src);
+  const bool share_assigned = options.share_assigned_maps && !paint_layer_row_paints_maps(src);
   for (const int i : IndexRange(src.channels_num)) {
     Image *image = dst.channels[i].image;
-    if (image != nullptr) {
+    if (image != nullptr && share_assigned) {
+      id_us_plus(&image->id);
+    }
+    else if (image != nullptr) {
       const bool painted_map = !assigned_texture && paint_layer_image_is_painted(*image);
       if (painted_map) {
         if (options.image_policy == PaintLayerImageImportPolicy::Strip) {
@@ -466,7 +470,12 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
     BLI_insertlinkafter(owner, layer, copy);
   }
   PaintLayerMarkerMap marker_map;
-  paint_layer_branch_duplicate(bmain, ma, *copy, *layer, &marker_map);
+  /* A duplicate inside the same material shares the textures a row only reads (a Fill's assigned
+   * maps); only painted maps get a copy of their own, as strokes would otherwise hit both rows. */
+  PaintLayerCopyOptions copy_options;
+  copy_options.image_policy = PaintLayerImageImportPolicy::Share;
+  copy_options.share_assigned_maps = true;
+  paint_layer_branch_duplicate(bmain, ma, *copy, *layer, &marker_map, copy_options);
   paint_layer_anchor_point_refs_remap(*copy, marker_map);
 
   BKE_paint_layers_tag_edited(ma);

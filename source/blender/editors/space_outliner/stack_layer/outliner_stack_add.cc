@@ -362,16 +362,37 @@ static void stack_add_kind_item_add(EnumPropertyItem *&items,
  * an editor whose vocabulary repeats a correction per target can offer one line per thing. Its
  * identifiers are that view's resolved role, not the stable name of the full list: the Effects
  * menu is UI, and scripts name a kind through `stack_layer_add`. The newer corrections are listed
- * by their own operator (the "New Effects" submenu), so the two views never share an entry.
+ * by their own operator (the "Filter" submenu), so the two views never share an entry.
  */
 enum class StackAddKindsView {
   /** The full, stable list of kinds. */
   All,
-  /** The Effects menu's folded view, without the entries of the "New Effects" submenu. */
+  /** The Effects menu's folded view, without the entries of the "Filter" submenu. */
   Effects,
-  /** Only the entries of the "New Effects" submenu. */
+  /** Only the entries of the "Filter" submenu. */
   NewEffects,
+  /** Only the entries of the "Generate Patterns" submenu. */
+  PatternEffects,
+  /** Only the entries of the "Correction" submenu. */
+  CorrectionEffects,
+  /** Only the Anchor Point entries, listed after the submenus. */
+  AnchorEffects,
 };
+
+/** The list of the Effects menu that \a entry is shown in. */
+static StackAddKindsView stack_effect_menu_group(const StackEffectMenuKind &entry)
+{
+  if (entry.is_anchor) {
+    return StackAddKindsView::AnchorEffects;
+  }
+  if (entry.is_pattern) {
+    return StackAddKindsView::PatternEffects;
+  }
+  if (entry.is_correction) {
+    return StackAddKindsView::CorrectionEffects;
+  }
+  return entry.is_new ? StackAddKindsView::NewEffects : StackAddKindsView::Effects;
+}
 
 static const EnumPropertyItem *stack_add_kinds_itemf(bContext *C,
                                                      const StackAddKindsView view,
@@ -391,7 +412,7 @@ static const EnumPropertyItem *stack_add_kinds_itemf(bContext *C,
         Vector<StackEffectMenuKind> effect_kinds;
         editor->effect_menu_kinds(*C, effect_kinds);
         for (const StackEffectMenuKind &entry : effect_kinds) {
-          if (entry.is_new != (view == StackAddKindsView::NewEffects)) {
+          if (stack_effect_menu_group(entry) != view) {
             continue;
           }
           stack_add_kind_item_add(items, items_num, entry.kind, entry.info);
@@ -433,6 +454,30 @@ const EnumPropertyItem *stack_effect_new_type_itemf(bContext *C,
                                                     bool *r_free)
 {
   return stack_add_kinds_itemf(C, StackAddKindsView::NewEffects, r_free);
+}
+
+const EnumPropertyItem *stack_effect_pattern_type_itemf(bContext *C,
+                                                        PointerRNA * /*ptr*/,
+                                                        PropertyRNA * /*prop*/,
+                                                        bool *r_free)
+{
+  return stack_add_kinds_itemf(C, StackAddKindsView::PatternEffects, r_free);
+}
+
+const EnumPropertyItem *stack_effect_correction_type_itemf(bContext *C,
+                                                           PointerRNA * /*ptr*/,
+                                                           PropertyRNA * /*prop*/,
+                                                           bool *r_free)
+{
+  return stack_add_kinds_itemf(C, StackAddKindsView::CorrectionEffects, r_free);
+}
+
+const EnumPropertyItem *stack_effect_anchor_type_itemf(bContext *C,
+                                                       PointerRNA * /*ptr*/,
+                                                       PropertyRNA * /*prop*/,
+                                                       bool *r_free)
+{
+  return stack_add_kinds_itemf(C, StackAddKindsView::AnchorEffects, r_free);
 }
 
 /** The same question every mutating stack operator asks: is there a stack here to remove from,

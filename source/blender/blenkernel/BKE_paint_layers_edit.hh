@@ -163,6 +163,13 @@ struct PaintLayerAddParams {
    * channels in the material's set are taken; other kinds are unaffected.
    */
   uint32_t channels = 0;
+  /**
+   * A Paint or Fill row starts with the channels of #BKE_paint_layers_starter_channel_set only
+   * (those that are also in the material's set), instead of every channel of the set. The others
+   * have no record, so the row's slot for them is off until the user adds it. Ignored by an
+   * \a empty Fill, which takes \a channels, and by other kinds.
+   */
+  bool starter_channels_only = false;
   /** The filter of a #PaintLayerAddKind::Filter Add, an #eMaterialPaintLayerFilter. */
   int16_t filter = 0;
   /**

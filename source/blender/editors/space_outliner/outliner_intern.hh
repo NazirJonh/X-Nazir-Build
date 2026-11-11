@@ -958,6 +958,21 @@ const EnumPropertyItem *stack_effect_new_type_itemf(bContext *C,
                                                     PointerRNA * /*ptr*/,
                                                     PropertyRNA * /*prop*/,
                                                     bool *r_free);
+/** The corrections of the "Generate Patterns" submenu: the procedural patterns, Gradient apart. */
+const EnumPropertyItem *stack_effect_pattern_type_itemf(bContext *C,
+                                                        PointerRNA * /*ptr*/,
+                                                        PropertyRNA * /*prop*/,
+                                                        bool *r_free);
+/** The corrections of the "Correction" submenu: the filters of the original list. */
+const EnumPropertyItem *stack_effect_correction_type_itemf(bContext *C,
+                                                           PointerRNA * /*ptr*/,
+                                                           PropertyRNA * /*prop*/,
+                                                           bool *r_free);
+/** The Anchor Point entries of the Add Effect menu, listed after its submenus. */
+const EnumPropertyItem *stack_effect_anchor_type_itemf(bContext *C,
+                                                      PointerRNA * /*ptr*/,
+                                                      PropertyRNA * /*prop*/,
+                                                      bool *r_free);
 wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_add_invoke(bContext *C, wmOperator *op, const wmEvent *event);
 bool stack_row_add_poll(bContext *C);
@@ -1156,6 +1171,9 @@ void OUTLINER_OT_stack_layer_mask_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_new(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_effect_add_pattern(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_effect_add_correction(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_effect_add_anchor(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_duplicate(wmOperatorType *ot);

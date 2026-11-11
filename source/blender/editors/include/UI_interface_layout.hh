@@ -450,13 +450,18 @@ struct Layout : public Item, NonCopyable, NonMovable {
   /**
    * Adds a menu item, which is a button that when active will display a menu.
    * If menu fails to poll with `WM_menutype_poll` it will not be added into the layout.
+   *  force_dropdown draws the button as a pulldown with the dropdown arrow, like the enum menu
+   * buttons of a header do; a plain menu button stays square when it only has an icon.
    */
-  void menu(MenuType *mt, std::optional<StringRef> name, int icon);
+  void menu(MenuType *mt, std::optional<StringRef> name, int icon, bool force_dropdown = false);
   /**
    * Adds a menu item, which is a button that when active will display a menu.
    * If menu fails to poll with `WM_menutype_poll` it will not be added into the layout.
    */
-  void menu(StringRef menuname, std::optional<StringRef> name, int icon);
+  void menu(StringRef menuname,
+            std::optional<StringRef> name,
+            int icon,
+            bool force_dropdown = false);
 
   /** Adds the menu content into this layout. */
   void menu_contents(StringRef menuname);

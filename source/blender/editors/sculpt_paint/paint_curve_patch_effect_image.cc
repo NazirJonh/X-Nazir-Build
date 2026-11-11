@@ -61,6 +61,7 @@
 #include "BLI_bounds.hh"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_execution_mode.hh"
+#include "BLI_function_ref.hh"
 #include "BLI_hash.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_index_range.hh"
@@ -1097,6 +1098,69 @@ struct ChunkWrite {
   int node_index;
 };
 
+/**
+ * The patch uv distance from the pixel \a li of a row to its nearest valid neighbor in the same
+ * row, as a vector pointing at that neighbor. This is the pixel's footprint in the patch frame.
+ *
+ * The nearer of the two neighbors wins: a seam or a frame flip between the pixel and one of them
+ * makes that step huge, while the step to the other side stays a true pixel step.
+ */
+std::optional<float2> pixel_footprint_uv_step(const CurvePatchSampler &sampler,
+                                              const CurvePatchSample &sample,
+                                              const int li,
+                                              const int row_size,
+                                              const int thread_id)
+{
+  std::optional<float2> best;
+  float best_length_sq = 0.0f;
+  for (const int neighbor_li : {li - 1, li + 1}) {
+    if (neighbor_li < 0 || neighbor_li >= row_size) {
+      continue;
+    }
+    const std::optional<CurvePatchSample> neighbor = sampler.sample(neighbor_li, thread_id);
+    if (!neighbor || !neighbor->patch_uv_valid) {
+      continue;
+    }
+    const float2 step = neighbor->patch_uv - sample.patch_uv;
+    const float length_sq = math::length_squared(step);
+    if (!best || length_sq < best_length_sq) {
+      best = step;
+      best_length_sq = length_sq;
+    }
+  }
+  return best;
+}
+
+/**
+ * A packed normal averaged over the footprint of one texel instead of read at a single point: a
+ * normal map minified onto the canvas otherwise aliases, and the stair-stepped slopes read as lost
+ * sharpness once lit. Four taps sit a quarter of \a footprint_step away from \a uv, along it and
+ * across it; the footprint is taken as isotropic (the canvas texel is square in world space), so no
+ * uv derivative is needed.
+ *
+ * Returns nothing when the taps cancel out, so the caller keeps its single-tap result.
+ */
+std::optional<float3> normal_footprint_average(
+    const FunctionRef<float3(const float2 &)> normal_at_uv,
+    const float2 &uv,
+    const float2 &footprint_step)
+{
+  const float2 step = footprint_step * 0.25f;
+  const float2 perp(-step.y, step.x);
+  float3 sum(0.0f);
+  for (const float2 &offset : {step, -step, perp, -perp}) {
+    sum += normal_at_uv(uv + offset) * 2.0f - float3(1.0f);
+  }
+  /* Averaging the unpacked directions shortens them, so the result is renormalized before it is
+   * packed again. */
+  if (math::length_squared(sum) <= 1e-8f) {
+    return std::nullopt;
+  }
+  float packed[3];
+  BKE_pbr_normal_pack(math::normalize(sum), false, packed);
+  return float3(packed[0], packed[1], packed[2]);
+}
+
 void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                   const Brush &brush,
                                   CurvePatchTargetState &target,
@@ -1713,23 +1777,31 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                       b_decal = flat_v / len_v;
                     }
                   }
-                  source_color = use_patch_frame ?
-                                     channel_sources->tangent_normal_packed_at_uv(target_channel,
-                                                                                 sample->patch_uv,
-                                                                                 thread_id,
-                                                                                 t_decal,
-                                                                                 b_decal,
-                                                                                 n_m,
-                                                                                 t_m,
-                                                                                 b_m) :
-                                     channel_sources->tangent_normal_packed(target_channel,
-                                                                            *tex_ctx,
-                                                                            thread_id,
-                                                                            t_decal,
-                                                                            b_decal,
-                                                                            n_m,
-                                                                            t_m,
-                                                                            b_m);
+                  const auto normal_at_uv = [&](const float2 &uv) {
+                    return channel_sources->tangent_normal_packed_at_uv(
+                        target_channel, uv, thread_id, t_decal, b_decal, n_m, t_m, b_m);
+                  };
+                  /* Only the committed build pays for the footprint average; the live preview
+                   * keeps the single tap. */
+                  std::optional<float3> averaged;
+                  if (use_patch_frame && item.params.final_quality) {
+                    if (const std::optional<float2> footprint = pixel_footprint_uv_step(
+                            sampler, *sample, li, int(range.size()), thread_id))
+                    {
+                      averaged = normal_footprint_average(
+                          normal_at_uv, sample->patch_uv, *footprint);
+                    }
+                  }
+                  if (averaged) {
+                    source_color = *averaged;
+                  }
+                  else if (use_patch_frame) {
+                    source_color = normal_at_uv(sample->patch_uv);
+                  }
+                  else {
+                    source_color = channel_sources->tangent_normal_packed(
+                        target_channel, *tex_ctx, thread_id, t_decal, b_decal, n_m, t_m, b_m);
+                  }
                 }
                 else if (target_has_source) {
                   if (target_paints_color) {

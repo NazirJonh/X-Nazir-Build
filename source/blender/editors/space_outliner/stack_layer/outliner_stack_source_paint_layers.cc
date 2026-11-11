@@ -124,13 +124,15 @@ const uint32_t GRADIENT = 0xE3E9;       /* gradient */
 constexpr uint32_t TEXTURE = 0xE421;    /* texture */
 constexpr uint32_t INVERT = 0xE891;     /* invert_colors */
 constexpr uint32_t LEVELS = 0xE429;     /* tune */
+constexpr uint32_t BRIGHTNESS = 0xE3F6; /* exposure */
 /* Hue/Saturation/Value's own lens, not `colors`: that one is the Fill layer's. */
 constexpr uint32_t HSL = 0xE40A;        /* color_lens */
 constexpr uint32_t ANCHOR = 0xF1CD;     /* anchor */
 constexpr uint32_t CELL_TOWER = 0xEBBA; /* cell_tower: the Anchor Point reader */
-constexpr uint32_t LINE_CURVE = 0xF757; /* line_curve */
 constexpr uint32_t COLORIZE = 0xE3B8;   /* colorize */
 constexpr uint32_t SELECT_ALL = 0xE162; /* select_all */
+/* The procedural patterns (Noise, Voronoi, ...), kept apart from the Gradient's own glyph. */
+constexpr uint32_t PATTERN = 0xE3A5;    /* blur_on */
 }  // namespace paint_glyph
 
 /* -------------------------------------------------------------------- */
@@ -403,12 +405,11 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_INVERT:
       return {ICON_ARROW_LEFTRIGHT, paint_glyph::INVERT};
     case MA_PAINT_LAYER_FILTER_LEVELS:
-      return {ICON_IMAGE_ALPHA, paint_glyph::LEVELS};
+      return {ICON_SEQ_HISTOGRAM, 0};
     case MA_PAINT_LAYER_FILTER_HSL:
       return {ICON_COLOR, paint_glyph::HSL};
     case MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST:
-      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
-      return {ICON_COLOR, 0};
+      return {ICON_COLOR, paint_glyph::BRIGHTNESS};
     case MA_PAINT_LAYER_FILTER_COLOR_RAMP:
       /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
       return {ICON_COLOR, 0};
@@ -428,10 +429,10 @@ static PaintKindLook paint_filter_look(const int16_t filter)
       /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
       return {ICON_RNDCURVE, 0};
     case MA_PAINT_LAYER_FILTER_COLOR_BALANCE:
-      /* No glyph of its own yet: distinguishes it from the generic filter arrow. */
-      return {ICON_COLOR, 0};
+      /* The sliders Levels wore before it took the histogram. */
+      return {ICON_IMAGE_ALPHA, paint_glyph::LEVELS};
     case MA_PAINT_LAYER_FILTER_BLUR:
-      return {ICON_MOD_SMOOTH, 0};
+      return {ICON_MATFLUID, 0};
     case MA_PAINT_LAYER_FILTER_SHARPEN:
       return {ICON_SHARPCURVE, 0};
     case MA_PAINT_LAYER_FILTER_HIGH_PASS:
@@ -478,7 +479,7 @@ static PaintKindLook paint_filter_look(const int16_t filter)
  */
 static PaintKindLook paint_look_for_source(const eMaterialPaintLayerSource source,
                                            const PaintLookRole role,
-                                           const int16_t filter_subtype = 0)
+                                           const int16_t subtype = 0)
 {
   switch (source) {
     case MA_PAINT_LAYER_SOURCE_IMAGE:
@@ -491,11 +492,16 @@ static PaintKindLook paint_look_for_source(const eMaterialPaintLayerSource sourc
     case MA_PAINT_LAYER_SOURCE_MATERIAL:
       return {ICON_MATERIAL, paint_glyph::TEXTURE};
     case MA_PAINT_LAYER_SOURCE_GENERATOR:
+      /* A pattern wears its own glyph so it is not read as a Gradient; the Gradient, and a subtype
+       * the caller does not name, keep the ramp. */
+      if (!ELEM(subtype, 0, MA_PAINT_LAYER_GENERATOR_GRADIENT)) {
+        return {ICON_TEXTURE, paint_glyph::PATTERN};
+      }
       return {PAINT_GRADIENT_ICON, paint_glyph::GRADIENT};
     case MA_PAINT_LAYER_SOURCE_FILTER:
-      return paint_filter_look(filter_subtype);
+      return paint_filter_look(subtype);
     case MA_PAINT_LAYER_SOURCE_CURVE_PATCH:
-      return {ICON_CURVE_BEZCURVE, paint_glyph::LINE_CURVE};
+      return {ICON_CURVE_DATA, 0};
     case MA_PAINT_LAYER_SOURCE_ANCHOR_POINT:
       return {ICON_EMPTY_AXIS, paint_glyph::ANCHOR};
     case MA_PAINT_LAYER_SOURCE_STACK:
@@ -665,7 +671,7 @@ static const PaintFilterAddKind paint_coverage_add_kinds[] = {
 };
 
 /**
- * Whether a filter is listed in the "New Effects" submenu of the Add Effect menu instead of the main
+ * Whether a filter is listed in the "Filter" submenu of the Add Effect menu instead of the main
  * list. The submenu holds the filters added after the original set, so the main list keeps the
  * place the older ones have always had; a filter not named here stays in the main list rather than
  * disappearing from the menu.
@@ -723,7 +729,7 @@ StackRow paint_correction_row_build(const Material &material,
   row.glyph = look.glyph;
   if (curve_patch) {
     /* The effect's action is its tool entrance, the same one the row's own action icon is. */
-    row.action_icon = ICON_CURVE_BEZCURVE;
+    row.action_icon = ICON_CURVE_DATA;
     row.action_tooltip = TIP_("Edit Curves: enter the Curve Patch tool of this effect");
   }
   if (BKE_paint_layers_is_anchor_point(effect)) {
@@ -1229,7 +1235,7 @@ void paint_stack_rows_append(const Material &material,
       if (layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR) {
         StackRowPreview gradient_slot;
         const PaintKindLook gradient_look = paint_look_for_source(
-            MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::Content);
+            MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::Content, layer.kind_subtype);
         gradient_slot.section_id = "CHANNELS";
         gradient_slot.glyph = gradient_look.glyph;
         gradient_slot.icon = gradient_look.icon;
@@ -1509,8 +1515,8 @@ struct PaintAddKindEntry {
   int mask_twin = -1;
   /** Whether this entry is the mask form the Effects menu folds into its content entry. */
   bool is_mask_twin = false;
-  /** Whether the kind exists only in the mask, so the menu offers it only while a mask slot is
-   * the one showing. */
+  /** Whether the kind exists only in the mask, so the Effects menu leaves it out: the Add Mask menu
+   * offers it. */
   bool mask_only = false;
   /** The function word the Effects menu uses for this entry; null keeps #info.name. */
   const char *menu_name = nullptr;
@@ -1634,7 +1640,9 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
      * name the mask form itself: an Add aimed at the row would otherwise land in its color. No
      * adjustment form is offered, as it has no map of the row's to read. */
     for (const PaintFilterAddKind &filter : paint_effect_add_kinds) {
-      add(effect({filter.identifier, filter.name, filter.description}),
+      add(with_look(effect({filter.identifier, filter.name, filter.description}),
+                    paint_look_for_source(
+                        MA_PAINT_LAYER_SOURCE_FILTER, PaintLookRole::Content, filter.filter)),
           PaintLayerAddKind::Filter,
           filter.filter,
           PaintLayerAddKind::MaskFilter);
@@ -1674,8 +1682,8 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
           PaintLayerAddKind::MaskFilter,
           filter.filter);
     }
-    /* The map-driven filters of the mask. They have no content form, so the menu keeps them only
-     * while a mask slot is the one showing. */
+    /* The map-driven filters of the mask. They have no content form, so the Effects menu leaves them
+     * out and the Add Mask menu offers them. */
     for (const PaintFilterAddKind &filter : paint_coverage_add_kinds) {
       add(with_look(effect({std::string("MASK_") + filter.identifier,
                             std::string("Mask ") + filter.name,
@@ -1784,7 +1792,8 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
       add(with_look({std::string(generator.identifier),
                      std::string(generator.menu_name),
                      std::string(generator.description)},
-                    paint_look_for_source(MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::Content)),
+                    paint_look_for_source(
+                        MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::Content, subtype)),
           PaintLayerAddKind::Gradient,
           0,
           std::nullopt,
@@ -1797,7 +1806,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                                 " laid over the active target: the layer's colour, or its mask "
                                 "while a mask slot is the one showing"}),
                     paint_look_for_source(
-                        MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::Content)),
+                        MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::Content, subtype)),
           PaintLayerAddKind::GradientCorrection,
           0,
           PaintLayerAddKind::MaskGradient,
@@ -1810,7 +1819,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                             "A procedural " + menu_word +
                                 "'s grey laid over the active layer's mask"}),
                     paint_look_for_source(
-                        MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::MaskItem)),
+                        MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::MaskItem, subtype)),
           PaintLayerAddKind::MaskGradient,
           0,
           std::nullopt,
@@ -2650,15 +2659,24 @@ class PaintLayersStackSource final : public StackSource,
       if (!entry.info.is_effect || entry.is_mask_twin) {
         continue;
       }
-      /* A mask-only kind has no content form, so it only makes sense while a mask slot is the one
-       * showing. */
-      if (!target_is_mask && entry.mask_only) {
+      /* A mask-only kind (Color ID, UV Island) is added from the Add Mask menu, not from here. */
+      if (entry.mask_only) {
         continue;
       }
       StackEffectMenuKind menu;
       menu.kind = int(index);
       menu.is_new = ELEM(entry.kind, PaintLayerAddKind::Filter, PaintLayerAddKind::MaskFilter) &&
                     paint_filter_is_new(entry.filter);
+      /* The Gradient stays in the main list: it is the one pattern with a line and a ramp of its
+       * own, and the registry's other generators are the ones the submenu gathers. */
+      /* The filters of the original list fold into one submenu; the newer ones keep their own. */
+      menu.is_correction = !menu.is_new &&
+                           ELEM(entry.kind, PaintLayerAddKind::Filter, PaintLayerAddKind::MaskFilter);
+      menu.is_anchor = ELEM(entry.kind,
+                            PaintLayerAddKind::AnchorPoint,
+                            PaintLayerAddKind::AnchorPointCorrection);
+      menu.is_pattern = entry.kind == PaintLayerAddKind::GradientCorrection &&
+                        !ELEM(entry.generator, MA_PAINT_LAYER_GENERATOR_GRADIENT);
       menu.info = entry.info;
       if (entry.menu_name != nullptr) {
         /* Untranslated, like every name in the table: the itemf translates it. */
@@ -2874,6 +2892,8 @@ class PaintLayersStackSource final : public StackSource,
     params.fill_folder = args.fill_folder;
     params.empty = args.empty;
     params.channels = args.channel_mask;
+    /* A layer added from the Stack starts lean; the user switches the other slots on. */
+    params.starter_channels_only = true;
     if (ELEM(params.kind,
              PaintLayerAddKind::Fill,
              PaintLayerAddKind::CorrectionFill,

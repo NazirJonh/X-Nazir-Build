@@ -883,9 +883,12 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
    * a narrow opacity falloff exposes the texel grid as stair-steps, so those patches (see
    * `opacity_boost`) get a denser live table instead. */
   const bool dense = high_quality || opacity_boost;
-  const float pixel_fraction = high_quality ? 0.06f : (opacity_boost ? 0.1f : 0.15f);
-  const int res_min = dense ? 512 : 128;
-  const int res_cap = high_quality ? 1536 : (opacity_boost ? 1024 : 512);
+  const float pixel_fraction = high_quality ? 0.04f : (opacity_boost ? 0.08f : 0.1f);
+  const int res_min = dense ? 512 : 192;
+  /* The caps bound the LUT memory (32 bytes per pixel: 2560^2 is about 210 MB) and the live
+   * rebuild cost. A cap below what a long curve asks for makes each texel span several output
+   * pixels, which is the loss of fine texture detail along and across the strip. */
+  const int res_cap = high_quality ? 2560 : (opacity_boost ? 1536 : 1024);
   const float max_extent = std::max(ext.x, ext.y);
   /* Quantized to 64-pixel steps: dragging a control point changes the curve's extent slightly on
    * every event, and an exact resolution would therefore drift by a pixel or two each time and

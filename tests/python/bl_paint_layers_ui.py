@@ -226,22 +226,34 @@ class PaintLayersUiTest(unittest.TestCase):
 
     def test_height_joins_the_brush_only_for_a_layered_material_canvas(self):
         from bl_ui.properties_paint_common import (
+            _MATERIAL_PAINT_CHANNEL_UI_ORDER,
             _material_paint_canvas_channels,
             _material_paint_toggle_ids,
         )
 
+        # A layered material hands the helpers its Active Channels; here every channel is active.
+        all_channels = frozenset(_MATERIAL_PAINT_CHANNEL_UI_ORDER)
+
         # The vertex canvas has no per-vertex Height, layered material or not.
-        self.assertNotIn('HEIGHT', _material_paint_canvas_channels(show_custom=True, layered=True))
+        self.assertNotIn('HEIGHT', _material_paint_canvas_channels(show_custom=True, active_channels=all_channels))
         # A plain Material canvas has no Principled socket to hold Height.
-        self.assertNotIn('HEIGHT', _material_paint_canvas_channels(show_custom=False, layered=False))
+        self.assertNotIn('HEIGHT', _material_paint_canvas_channels(show_custom=False))
         # A layered Material canvas paints it: its row owns the channel map.
-        self.assertIn('HEIGHT', _material_paint_canvas_channels(show_custom=False, layered=True))
+        self.assertIn('HEIGHT', _material_paint_canvas_channels(show_custom=False, active_channels=all_channels))
 
         paint = SimpleNamespace(visible_material_channels={'BASE_COLOR', 'METALLIC', 'HEIGHT'})
-        _visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom=False, layered=True)
+        _visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom=False, active_channels=all_channels)
         self.assertIn('HEIGHT', toggle_ids)
-        _visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom=False, layered=False)
+        _visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom=False)
         self.assertNotIn('HEIGHT', toggle_ids)
+
+        # A channel outside the material's Active Channels is offered nowhere, even when its
+        # visibility bit is set.
+        active = frozenset({'BASE_COLOR', 'HEIGHT'})
+        visible, toggle_ids = _material_paint_toggle_ids(
+            paint, show_custom=False, active_channels=active)
+        self.assertCountEqual(toggle_ids, ['BASE_COLOR', 'HEIGHT'])
+        self.assertNotIn('METALLIC', visible)
 
         # The same rule reaches the writable set the sync check compares: a layered material
         # writes Height through its row, a plain one has no map to write.
@@ -255,10 +267,10 @@ class PaintLayersUiTest(unittest.TestCase):
             material_paint=SimpleNamespace(channels=channels, use_alpha_map=True))
         mode_settings = SimpleNamespace(canvas_source='MATERIAL')
         writable = material_paint_writable_channels(
-            brush, paint, mode_settings, layered=True)
+            brush, paint, mode_settings, active_channels=all_channels)
         self.assertIn('HEIGHT', writable)
         writable = material_paint_writable_channels(
-            brush, paint, mode_settings, layered=False)
+            brush, paint, mode_settings)
         self.assertNotIn('HEIGHT', writable)
 
     def test_normal_height_panel_is_registered(self):

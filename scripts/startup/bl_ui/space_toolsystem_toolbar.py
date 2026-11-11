@@ -3403,18 +3403,19 @@ class _defs_sculpt_paint_shape:
                 layout.prop(shape, "rotation", text="Angle")
 
         # The PBR channel toggles, exactly as the Color Gradient tool shows them for the same
-        # canvases (the shape tools write the same Sculpt paint channels).
+        # canvases (the shape tools write the same Sculpt paint channels). A Stack Layers active
+        # material narrows them to its Active Channels, like every PBR Paint channel list.
         if (not region_is_header and
                 settings is not None and
                 canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}):
             from bl_ui.properties_paint_common import (
-                material_paint_layered_active,
+                material_paint_layered_active_channels,
                 draw_material_paint_channel_toggles,
             )
             draw_material_paint_channel_toggles(
                 layout, settings.brush, settings,
                 show_custom=(canvas_source == 'MATERIAL_PAINT'),
-                layered=material_paint_layered_active(context),
+                active_channels=material_paint_layered_active_channels(context),
             )
 
         # Last, so the collapsible Shape Options sits below the channel toggles instead of

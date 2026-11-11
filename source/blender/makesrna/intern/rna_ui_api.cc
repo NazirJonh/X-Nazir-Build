@@ -714,7 +714,8 @@ static void rna_uiItemM(Layout *layout,
                         const char *text_ctxt,
                         bool translate,
                         int icon,
-                        int icon_value)
+                        int icon_value,
+                        bool use_dropdown)
 {
   /* Get translated name (label). */
   std::optional<StringRefNull> text = rna_translate_ui_text(
@@ -724,7 +725,7 @@ static void rna_uiItemM(Layout *layout,
     icon = icon_value;
   }
 
-  layout->menu(menuname, text, icon);
+  layout->menu(menuname, text, icon, use_dropdown);
 }
 
 static void rna_uiItemM_contents(Layout *layout, const char *menuname)
@@ -2163,6 +2164,12 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_property(func, "icon_value", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_ui_text(parm, "Icon Value", "Override automatic icon of the item");
+  RNA_def_boolean(func,
+                  "use_dropdown",
+                  false,
+                  "Dropdown",
+                  "Draw the button as a dropdown with its arrow (as an enum menu button of a header "
+                  "does), even when it only has an icon");
 
   func = RNA_def_function(srna, "menu_contents", "rna_uiItemM_contents");
   parm = RNA_def_string(func, "menu", nullptr, 0, "", "Identifier of the menu");

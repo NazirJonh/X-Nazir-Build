@@ -1435,6 +1435,11 @@ struct PaintLayerCopyOptions {
    * the policy would share or strip it: the asset has to carry the texture, it is not painted data.
    */
   bool copy_assigned_maps = false;
+  /**
+   * Share the texture a non-painting row (a Fill or a Fill correction) reads, whatever the image is
+   * (generated, dirty or an asset): no stroke goes into it, so the copy has no reason to own one.
+   */
+  bool share_assigned_maps = false;
 };
 
 /**

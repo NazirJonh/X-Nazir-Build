@@ -594,7 +594,9 @@ MaterialPaintLayer *BKE_paint_layers_anchor_point_add(Material &ma,
 }
 
 
-void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &layer)
+void BKE_paint_layers_default_channels_apply(Material &ma,
+                                             MaterialPaintLayer &layer,
+                                             const PaintChannelMask limit_mask)
 {
   /* A MESH_MAP row reads the material's shared atlas; a layer has a single explicit participation
    * in it, so it defaults to Base Color alone. Its records name which channels the row paints, and
@@ -605,10 +607,11 @@ void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &l
     }
     return;
   }
-  /* Every channel the material's set names gets a record. A set that was never authored derives
-   * from the layer records and the build default, so this is also how the default reaches a fresh
-   * stack: one source of truth instead of a second hard-coded list here. */
-  const uint32_t set = BKE_paint_layers_channel_set_mask_get(ma);
+  /* Every channel the material's set names gets a record, unless the caller narrows it. A set that
+   * was never authored derives from the layer records and the build default, so this is also how
+   * the default reaches a fresh stack: one source of truth instead of a second hard-coded list
+   * here. */
+  const uint32_t set = BKE_paint_layers_channel_set_mask_get(ma) & limit_mask;
   for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
     if ((set & (uint32_t(1) << channel)) == 0) {
       continue;
@@ -638,6 +641,14 @@ static constexpr uint32_t PAINT_LAYERS_NEW_MATERIAL_CHANNEL_SET =
 uint32_t BKE_paint_layers_default_channel_set()
 {
   return PAINT_LAYERS_DEFAULT_CHANNEL_SET;
+}
+
+uint32_t BKE_paint_layers_starter_channel_set()
+{
+  return (uint32_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
+         (uint32_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
+         (uint32_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
+         (uint32_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL);
 }
 
 uint32_t BKE_paint_layers_new_material_channel_set()

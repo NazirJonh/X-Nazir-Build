@@ -26,6 +26,7 @@ def has_selected_ids_in_context(context):
 GLYPH_BRUSH = 0xE3AE
 _GLYPH_FILL = 0xE997
 _GLYPH_GRADIENT = 0xE3E9
+_GLYPH_PATTERN = 0xE3A5
 
 # The add and context menus registered stack sources provide, by source idname. A source module
 # (or an add-on) calls the two helpers below from its own register/unregister; the Stack Layers
@@ -69,12 +70,14 @@ def _stack_source_header_for(space, kind="header"):
     return None
 
 
-def _stack_add_button(row, glyph, fallback_icon, kind, label):
-    # A glyph icon where the font provides one, the built-in icon otherwise (background mode).
-    if glyph:
-        props = row.operator("outliner.stack_layer_add", text="", icon_value=glyph)
-    else:
-        props = row.operator("outliner.stack_layer_add", text="", icon=fallback_icon)
+def _stack_glyph_args(glyph, fallback_icon):
+    # `icon_value` of a glyph where the font provides one, the built-in icon otherwise (background
+    # mode), as keyword arguments for a layout call.
+    return {"icon_value": glyph} if glyph else {"icon": fallback_icon}
+
+
+def _stack_add_button(row, glyph, fallback_icon, kind, label, *, text=""):
+    props = row.operator("outliner.stack_layer_add", text=text, **_stack_glyph_args(glyph, fallback_icon))
     props.type = kind
     props.label = label
 
@@ -135,19 +138,15 @@ class OUTLINER_HT_tool_header(Header):
             props = row.operator("outliner.stack_layer_add", text="", icon='MATERIAL')
             props.type = 'MATERIAL'
             props.label = "Add Material Layer"
-            # A procedural ramp built from shader nodes: a layer of its own, not an effect of the
-            # selected row, so it sits with the other layer kinds. Its glyph is also what the row's
-            # preview slot shows.
-            _stack_add_button(row, bpy.app.icons.glyph(_GLYPH_GRADIENT), 'COLORSET_13_VEC',
-                              'GRADIENT', "Add Gradient Layer")
-            # The other procedural patterns (Noise, Voronoi, ...): one menu listing the generator
-            # registry, so a new generator shows up here without a button of its own.
-            row.menu("OUTLINER_MT_stack_layer_pattern_add", text="", icon='TEXTURE')
+            # The procedural layers (a Gradient, and the patterns of the generator registry) are
+            # not needed every time, so one dropdown holds them instead of a button each.
+            row.menu("OUTLINER_MT_stack_layer_procedural_add", text="", icon='PLUS', use_dropdown=True)
             # Corrections hang on the selected layer or on its mask; one menu holds them all.
             row = layout.row(align=True)
-            # The corrections, with the newer ones in a "New Effects" submenu. A plain `menu`
-            # rather than an enum button: an enum button cannot hold a submenu.
-            row.menu("OUTLINER_MT_stack_layer_effect_add", text="", icon='SHADERFX')
+            # The corrections, with the newer ones in submenus. A `menu` rather than an enum button,
+            # because an enum button cannot hold a submenu; `use_dropdown` gives it the arrow the
+            # enum buttons have.
+            row.menu("OUTLINER_MT_stack_layer_effect_add", text="", icon='SHADERFX', use_dropdown=True)
 
             # Only the add is here, as a menu of the starting masks; switching a mask off and
             # taking it away live in the row's context menu, while its slot is the one showing.
@@ -187,19 +186,33 @@ class OUTLINER_HT_tool_header(Header):
         row.operator("outliner.stack_layer_remove", text="", icon='TRASH')
 
 
-class OUTLINER_MT_stack_layer_pattern_add(Menu):
-    bl_label = "Add Pattern Layer"
+class OUTLINER_MT_stack_layer_procedural_add(Menu):
+    bl_label = "Add Procedural Layer"
 
     def draw(self, _context):
         layout = self.layout
+        # A procedural ramp built from shader nodes: a layer of its own, not an effect of the
+        # selected row. Its glyph is also what the row's preview slot shows.
+        _stack_add_button(layout, bpy.app.icons.glyph(_GLYPH_GRADIENT), 'COLORSET_13_VEC',
+                          'GRADIENT', "Add Gradient Layer", text="Gradient Layer")
+        layout.menu("OUTLINER_MT_stack_layer_pattern_add",
+                    **_stack_glyph_args(bpy.app.icons.glyph(_GLYPH_PATTERN), 'TEXTURE'))
+
+
+class OUTLINER_MT_stack_layer_pattern_add(Menu):
+    bl_label = "Pattern Layer"
+
+    def draw(self, _context):
+        layout = self.layout
+        pattern_icon = _stack_glyph_args(bpy.app.icons.glyph(_GLYPH_PATTERN), 'TEXTURE')
         # The generators are the registry's: the RNA enum is held to it by a test, and each
         # identifier is also the `type` of the Add kind that lays that pattern as a layer.
         generators = bpy.types.MaterialPaintLayer.bl_rna.properties["generator"].enum_items
         for item in generators:
             if item.identifier == 'GRADIENT':
-                # Has its own button in the header.
+                # Has its own entry in the procedural menu.
                 continue
-            props = layout.operator("outliner.stack_layer_add", text=item.name, icon='TEXTURE')
+            props = layout.operator("outliner.stack_layer_add", text=item.name, **pattern_icon)
             props.type = item.identifier
             props.label = "Add {:s} Layer".format(item.name)
 
@@ -209,12 +222,46 @@ class OUTLINER_MT_stack_layer_effect_add(Menu):
 
     def draw(self, _context):
         layout = self.layout
-        # The original corrections stay in the list, as they always were; the newer ones are a
-        # submenu of their own operator, so the two lists never repeat an entry.
+        # What is not a filter, a pattern or an Anchor Point stays in the list; each group below is
+        # a submenu (or the closing entries) of an operator of its own, so the lists never repeat
+        # an entry.
         layout.operator_enum("outliner.stack_layer_effect_add", "type")
         layout.separator()
+        layout.menu("OUTLINER_MT_stack_layer_effect_add_correction", text="Correction", icon='MODIFIER')
         layout.operator_menu_enum(
-            "outliner.stack_layer_effect_add_new", "type", text="New Effects", icon='SOLO_ON')
+            "outliner.stack_layer_effect_add_new", "type", text="Filter", icon='SOLO_ON')
+        # The generator registry's patterns (Noise, Voronoi, ...); the Gradient stays in the list
+        # above, and the pattern glyph keeps the two apart.
+        # A menu of its own rather than an enum button: `operator_menu_enum` takes no glyph value.
+        layout.menu("OUTLINER_MT_stack_layer_effect_add_pattern", text="Generate Patterns",
+                    **_stack_glyph_args(bpy.app.icons.glyph(_GLYPH_PATTERN), 'TEXTURE'))
+        # The Anchor Point and its reader close the menu, after every submenu.
+        layout.separator()
+        layout.operator_enum("outliner.stack_layer_effect_add_anchor", "type")
+
+
+class OUTLINER_MT_stack_layer_effect_add_correction(Menu):
+    bl_label = "Correction"
+
+    def draw(self, _context):
+        self.layout.operator_enum("outliner.stack_layer_effect_add_correction", "type")
+
+
+class OUTLINER_MT_stack_layer_effect_add_pattern(Menu):
+    bl_label = "Generate Patterns"
+
+    def draw(self, _context):
+        self.layout.operator_enum("outliner.stack_layer_effect_add_pattern", "type")
+
+
+# The map-driven mask filters: they only exist in a mask, so the Add Mask menus offer them instead of
+# the Add Effect menu. `(type, label, kind identifier of stack_layer_add, icon, tooltip)`.
+_STACK_MASK_FILTER_ENTRIES = (
+    ('COLOR_ID', "Mask Color ID", 'MASK_FILTER_COLOR_ID', 'COLOR',
+     "Keep the active layer's mask only where an ID Map matches the listed colors"),
+    ('UV_ISLAND', "Mask UV Island", 'MASK_FILTER_UV_ISLAND', 'UV_ISLANDSEL',
+     "Keep the active layer's mask only on the UV islands captured from the Image Editor"),
+)
 
 
 class OUTLINER_MT_stack_layer_mask_add(Menu):
@@ -235,6 +282,11 @@ class OUTLINER_MT_stack_layer_mask_add(Menu):
         # the mask (see Material.paint_layer_add_image_mask). Nothing is created before a pick.
         layout.operator(
             "outliner.stack_layer_mask_image", text="Add Image Mask", icon='IMAGE_DATA')
+        layout.separator()
+        for identifier, label, kind, icon, _tip in _STACK_MASK_FILTER_ENTRIES:
+            props = layout.operator("outliner.stack_layer_add", text=label, icon=icon)
+            props.type = kind
+            props.label = label
 
 
 class OUTLINER_OT_stack_layer_mask_add(bpy.types.Operator):
@@ -254,6 +306,8 @@ class OUTLINER_OT_stack_layer_mask_add(bpy.types.Operator):
              'CLIPUV_HLT', 1),
             ('IMAGE', "Add Image Mask", "Give the layer a mask that reads an image",
              'IMAGE_DATA', 2),
+            *((identifier, label, tip, icon, 3 + index)
+              for index, (identifier, label, _kind, icon, tip) in enumerate(_STACK_MASK_FILTER_ENTRIES)),
         ),
         # Never remembered: the entry picked last time must not be what a script gets by default.
         options={'SKIP_SAVE'},
@@ -268,6 +322,10 @@ class OUTLINER_OT_stack_layer_mask_add(bpy.types.Operator):
             # Opens the ID Browser; the pick makes the mask (see Material.paint_layer_add_image_mask).
             bpy.ops.outliner.stack_layer_mask_image('INVOKE_DEFAULT')
             return {'CANCELLED'}
+        for identifier, label, kind, _icon, _tip in _STACK_MASK_FILTER_ENTRIES:
+            if self.type == identifier:
+                # A filter of the mask: the Add makes the base mask first when the row has none.
+                return bpy.ops.outliner.stack_layer_add(type=kind, label=label)
         # `add` is always passed: see OUTLINER_MT_stack_layer_mask_add.
         return bpy.ops.outliner.stack_layer_mask(add=True, initial_color=self.type)
 
@@ -1091,8 +1149,11 @@ class OUTLINER_PT_options_filter(Panel):
 classes = (
     OUTLINER_HT_header,
     OUTLINER_HT_tool_header,
+    OUTLINER_MT_stack_layer_procedural_add,
     OUTLINER_MT_stack_layer_pattern_add,
     OUTLINER_MT_stack_layer_effect_add,
+    OUTLINER_MT_stack_layer_effect_add_correction,
+    OUTLINER_MT_stack_layer_effect_add_pattern,
     OUTLINER_MT_stack_layer_mask_add,
     OUTLINER_OT_stack_layer_mask_add,
     OUTLINER_MT_stack_layer_advanced,

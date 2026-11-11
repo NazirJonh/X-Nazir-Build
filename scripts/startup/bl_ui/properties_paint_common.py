@@ -1981,7 +1981,7 @@ def material_paint_color_channels(paint_mode):
         if material_paint_channel_is_color(paint_mode, channel_id))
 
 
-def _material_paint_canvas_channels(show_custom, *, layered=False):
+def _material_paint_canvas_channels(show_custom, *, active_channels=None):
     """The channels a PBR Paint canvas can store, in display order.
 
     ``show_custom`` selects the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color) canvas, whose
@@ -1990,58 +1990,83 @@ def _material_paint_canvas_channels(show_custom, *, layered=False):
     in neither: it has no per-vertex storage and no Principled socket, so a plain material's brush
     never paints it (a layer row's Height record is edited through the layer panel).
 
-    ``layered`` adds Height for the Material (image) canvas when the active material is a Stack
-    Layers material: its row owns the channel maps, so a brush stroke paints Height there
-    (mirrors #MaterialPaintChannelInfo.supports_layer_paint). It never applies to the vertex
-    canvas.
+    ``active_channels`` (#material_paint_layered_active_channels) is set only for a Stack Layers
+    material. Its row owns the channel maps, so the Material (image) canvas also paints Height
+    (mirrors #MaterialPaintChannelInfo.supports_layer_paint; never the vertex canvas), and the
+    result is narrowed to the material's Active Channels: a channel the set leaves out has no layer
+    record to paint into, so it is dropped even while the canvas could store it.
     """
     supported = _MATERIAL_PAINT_VERTEX_CHANNELS if show_custom else _MATERIAL_PAINT_MAP_CHANNELS
+    layered = active_channels is not None
     return [
         channel_id for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER
-        if channel_id in supported or (layered and not show_custom and channel_id == 'HEIGHT')
+        if (channel_id in supported or (layered and not show_custom and channel_id == 'HEIGHT')) and
+        (not layered or channel_id in active_channels)
         ]
 
 
-def material_paint_layered_active(context):
-    """Whether the context's active object has a Stack Layers material.
+def material_paint_layered_active_channels(context):
+    """The Active Channel ids of the context's active Stack Layers material, or ``None``.
 
-    Its Material (image) canvas paints Height as well as the Principled channels, because the
-    row owns the channel maps (mirrors #MaterialPaintChannelInfo.supports_layer_paint).
+    ``None`` when the active object's active material is not layered, so nothing narrows the
+    channel lists. Otherwise the ids of the material's global paint channel set - the Active
+    Channels the Layer Material Settings keep and the New Layered Material dialog starts a stack
+    from. A stroke can only write channels the set names: outside it the stack owns no record, no
+    map and no generated wiring, so the PBR Paint UI offers nothing there (the same rule
+    #BKE_paint_layers_channel_clamp_to_set applies to cursors that must not rest on a channel the
+    material leaves out). Custom stays outside this filter: it is not part of the Active Channels
+    UI and binds a vertex attribute on its own, independent of the stack.
     """
     ob = getattr(context, "active_object", None)
     material = getattr(ob, "active_material", None) if ob is not None else None
-    return bool(material is not None and material.is_layered)
+    if material is None or not material.is_layered:
+        return None
+    return frozenset(
+        channel_id
+        for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER
+        if material.paint_layers_channel_in_set(channel=channel_id)
+    )
 
 
-def _material_paint_toggle_ids(paint, show_custom, *, layered=False):
+def _material_paint_toggle_ids(paint, show_custom, *, active_channels=None):
     """Return ``(visible, toggle_ids)``: the visible channel set and the channels offered as toggles.
 
     The offered channels are the ones the canvas can store (#_material_paint_canvas_channels).
     ``show_custom`` also draws the vertex-only Custom channel, which has no entry in the display
-    order. ``layered`` adds Height for a Stack Layers Material canvas.
+    order.
+
+    ``active_channels`` (#material_paint_layered_active_channels) marks a Stack Layers material and
+    narrows both results to its Active Channels: a channel the set leaves out owns no layer record,
+    so its visibility bit alone must not resurrect it - ``visible`` is intersected with the set,
+    which keeps the per-channel value rows of the PBR Paint panel from drawing it as well. Custom
+    is spared: it is not part of the Active Channels UI and binds a vertex attribute on its own.
     """
-    channel_ids = _material_paint_canvas_channels(show_custom, layered=layered)
+    channel_ids = _material_paint_canvas_channels(show_custom, active_channels=active_channels)
     # Falling back to every channel keeps the list usable if the panel is drawn for a mode without
     # its own visibility set; the paint helpers still gate what a stroke writes.
     visible = set(paint.visible_material_channels) if paint is not None else set(channel_ids)
+    if active_channels is not None:
+        visible &= active_channels
     toggle_ids = [channel_id for channel_id in channel_ids if channel_id in visible]
     if show_custom:
         toggle_ids.append('CUSTOM')
     return visible, toggle_ids
 
 
-def draw_material_paint_channel_toggles(layout, brush, paint, *, show_custom, layered=False):
+def draw_material_paint_channel_toggles(layout, brush, paint, *, show_custom, active_channels=None):
     """Draw only the channel enable toggles of the PBR Paint UI (one or more channels).
 
     For tools that write into the brush's material channels without being a brush themselves,
-    such as the Sculpt Color Gradient tool. ``layered`` marks a Stack Layers active material, whose
-    Material canvas also paints Height.
+    such as the Sculpt Color Gradient tool. ``active_channels``
+    (#material_paint_layered_active_channels) marks a Stack Layers active material: the toggles
+    narrow to its Active Channels and its Material canvas also offers Height.
     """
     material_paint = brush.material_paint if brush is not None else None
     if material_paint is None:
         return
     channels = {channel.channel: channel for channel in material_paint.channels}
-    _visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom, layered=layered)
+    _visible, toggle_ids = _material_paint_toggle_ids(
+        paint, show_custom, active_channels=active_channels)
     _draw_material_paint_channel_toggles(
         layout, channels, toggle_ids, _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS,
     )
@@ -2140,6 +2165,9 @@ def draw_gradient_tool_channels(layout, context, brush, paint, *, show_custom,
     while the channel has no ramp to show (a scalar channel gets one through the Add button in its
     subpanel); Normal has no ramp at all. Every enabled channel then gets its own subpanel: a
     colour channel shows the tools' colour ramp, a scalar channel its own grey value ramp.
+
+    A Stack Layers active material narrows the rows to its Active Channels
+    (#material_paint_layered_active_channels), like every other PBR Paint channel list.
     """
     paint_mode = context.tool_settings.paint_mode
     material_paint = brush.material_paint if brush is not None else None
@@ -2147,7 +2175,8 @@ def draw_gradient_tool_channels(layout, context, brush, paint, *, show_custom,
         return
     channels = {channel.channel: channel for channel in material_paint.channels}
     _visible, toggle_ids = _material_paint_toggle_ids(
-        paint, show_custom, layered=material_paint_layered_active(context))
+        paint, show_custom,
+        active_channels=material_paint_layered_active_channels(context))
     ramps = {record.channel: record for record in paint_mode.gradient_value_ramps}
 
     _gradient_tool_channel_rows(layout, channels, toggle_ids, ramps, paint_mode)
@@ -2954,6 +2983,10 @@ def draw_material_paint_visibility_popover(_context, layout, paint, paint_mode_s
     enables its paint `use` flag so the channel row appears ready to assign a source texture.
     Hiding a channel does not clear `use`, its value, or source texture, but it removes the
     channel from the UI and skips it during painting until shown again.
+
+    A Stack Layers active material narrows the checkboxes to its Active Channels
+    (#material_paint_layered_active_channels): a channel outside the set has no layer record, so
+    its checkbox would only set a bit no panel ever shows.
     """
     if paint is None:
         layout.label(text="No paint settings for this mode", icon='INFO')
@@ -2961,7 +2994,8 @@ def draw_material_paint_visibility_popover(_context, layout, paint, paint_mode_s
 
     is_vertex_paint = paint_mode_settings.canvas_source == 'MATERIAL_PAINT'
     channel_ids = _material_paint_canvas_channels(
-        is_vertex_paint, layered=material_paint_layered_active(_context))
+        is_vertex_paint,
+        active_channels=material_paint_layered_active_channels(_context))
 
     col = layout.column()
     for identifier in channel_ids:
@@ -3046,16 +3080,18 @@ def material_paint_missing_map_channels(ob, brush, paint, paint_mode_settings):
     return missing
 
 
-def material_paint_writable_channels(brush, paint, paint_mode_settings, *, layered=False):
+def material_paint_writable_channels(brush, paint, paint_mode_settings, *, active_channels=None):
     """Channel identifiers \a brush actually writes to for the Material (image) canvas.
 
     Mirrors #BKE_paint_material_channel_writes_to_target: enabled, listed in
     `visible_material_channels`, and - for Alpha only - `use_alpha_map`, restricted to the channels
     the canvas can store (#_material_paint_canvas_channels, the ones with a Principled paint map).
     Height, AO and Custom have no Principled socket, so `supports_image_paint` is clear for them and
-    a plain material's canvas never writes them; ``layered`` marks a Stack Layers active material,
-    whose row owns the maps so Height joins the writable set (mirrors
-    #MaterialPaintChannelInfo.supports_layer_paint).
+    a plain material's canvas never writes them. ``active_channels``
+    (#material_paint_layered_active_channels) marks a Stack Layers active material, whose row owns
+    the maps so Height joins the writable set (mirrors
+    #MaterialPaintChannelInfo.supports_layer_paint) and channels outside its Active Channels drop
+    out, as they do from the panel that edits them.
     If the C++ conditions above change, update this function to match.
 
     Returns ``None`` when there is no usable brush/channel configuration (distinct from an empty
@@ -3067,7 +3103,8 @@ def material_paint_writable_channels(brush, paint, paint_mode_settings, *, layer
     channels = {channel.channel: channel for channel in material_paint.channels}
     visible = set(paint.visible_material_channels)
     writable = set()
-    for channel_id in _material_paint_canvas_channels(show_custom=False, layered=layered):
+    for channel_id in _material_paint_canvas_channels(show_custom=False,
+                                                      active_channels=active_channels):
         channel = channels.get(channel_id)
         if channel is None or not channel.use or channel_id not in visible:
             continue
@@ -3352,9 +3389,12 @@ def draw_material_paint_channels(
     # Use one aligned grid_flow so channel toggles wrap when the panel is too narrow.
     # Labels may be clipped in very tight cells; the short labels below keep controls readable.
     # `show_custom` is only passed True for the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color)
-    # canvas, so it also selects the vertex-storable channel subset here.
+    # canvas, so it also selects the vertex-storable channel subset here. A Stack Layers active
+    # material narrows both results to its Active Channels: the panel must not offer a channel the
+    # material's set leaves out, whose stroke would have no layer record to land in.
     visible, toggle_ids = _material_paint_toggle_ids(
-        paint, show_custom, layered=material_paint_layered_active(context))
+        paint, show_custom,
+        active_channels=material_paint_layered_active_channels(context))
     toggle_labels = _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS
     if is_mask_target:
         # A Mask stroke reads one channel at most (see #BrushMaterialPaint.mask_source), the

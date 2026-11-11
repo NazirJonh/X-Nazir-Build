@@ -573,7 +573,12 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
   else {
     /* The default channel set is a policy of its own (see the BKE helper); the Add only places
      * the row. */
-    BKE_paint_layers_default_channels_apply(ma, *created);
+    const bool starter_only = params.starter_channels_only &&
+                              ELEM(params.kind, PaintLayerAddKind::Paint, PaintLayerAddKind::Fill);
+    BKE_paint_layers_default_channels_apply(
+        ma,
+        *created,
+        starter_only ? BKE_paint_layers_starter_channel_set() : ~PaintChannelMask(0));
     if (params.kind == PaintLayerAddKind::Fill && params.fill_color != nullptr) {
       BKE_paint_layers_set_fill_color(ma, created, params.fill_color);
     }

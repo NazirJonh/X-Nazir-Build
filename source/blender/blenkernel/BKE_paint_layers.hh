@@ -338,8 +338,14 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
  * records are left as they are, so the call is idempotent. A set that was never authored derives
  * from the layer records and the build default, so this is also how the build default reaches a
  * fresh stack.
+ *
+ * \a limit_mask narrows the channels that get a record to the ones it names too (all by default),
+ * so a caller can start a row with fewer channels than the set offers; a channel without a record
+ * reads as off and is switched on later through #BKE_paint_layers_channel_add.
  */
-void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &layer);
+void BKE_paint_layers_default_channels_apply(Material &ma,
+                                             MaterialPaintLayer &layer,
+                                             PaintChannelMask limit_mask = ~PaintChannelMask(0));
 
 /**
  * The material's global paint channel set, as a bitmask over #eMaterialPaintChannel (`1 << channel`).
@@ -400,6 +406,13 @@ bool BKE_paint_layers_channel_set_mask_set(Material &ma, uint32_t mask);
  * adds Height.
  */
 uint32_t BKE_paint_layers_default_channel_set();
+
+/**
+ * The channels a Paint or Fill row added from the Stack starts with (Base Color, Metallic,
+ * Roughness, Normal); see #PaintLayerAddParams::starter_channels_only. The rest stay off until the
+ * user adds them to the row.
+ */
+uint32_t BKE_paint_layers_starter_channel_set();
 
 /**
  * The channel set a brand-new layered material starts from: the build default plus Height. Only the

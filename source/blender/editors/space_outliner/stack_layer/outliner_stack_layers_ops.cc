@@ -532,7 +532,7 @@ void OUTLINER_OT_stack_layer_effect_add(wmOperatorType *ot)
 
 void OUTLINER_OT_stack_layer_effect_add_new(wmOperatorType *ot)
 {
-  /* The same again for the "New Effects" submenu. A second operator rather than a property of the
+  /* The same again for the "Filter" submenu. A second operator rather than a property of the
    * first: the enum an operator validates `type` against is its own, so a submenu cannot narrow a
    * shared one without a script that names a kind having to know which group it sits in. */
   OUTLINER_OT_stack_layer_add(ot);
@@ -541,6 +541,42 @@ void OUTLINER_OT_stack_layer_effect_add_new(wmOperatorType *ot)
   ot->description = "Add one of the newer corrections to the active layer or its mask";
   PropertyRNA *prop = RNA_struct_type_find_property(ot->srna, "type");
   RNA_def_enum_funcs(prop, stack_effect_new_type_itemf);
+}
+
+void OUTLINER_OT_stack_layer_effect_add_pattern(wmOperatorType *ot)
+{
+  /* Same reason as the "Filter" operator: the enum an operator validates `type` against is its
+   * own, so the "Generate Patterns" submenu gets one that lists only the patterns. */
+  OUTLINER_OT_stack_layer_add(ot);
+  ot->name = "Add Pattern Effect";
+  ot->idname = "OUTLINER_OT_stack_layer_effect_add_pattern";
+  ot->description = "Add a procedural pattern to the active layer or its mask";
+  PropertyRNA *prop = RNA_struct_type_find_property(ot->srna, "type");
+  RNA_def_enum_funcs(prop, stack_effect_pattern_type_itemf);
+}
+
+void OUTLINER_OT_stack_layer_effect_add_correction(wmOperatorType *ot)
+{
+  /* As the other submenu operators: its own `type` enum, listing the filters of the original
+   * list. */
+  OUTLINER_OT_stack_layer_add(ot);
+  ot->name = "Add Correction Effect";
+  ot->idname = "OUTLINER_OT_stack_layer_effect_add_correction";
+  ot->description = "Add a filter correction to the active layer or its mask";
+  PropertyRNA *prop = RNA_struct_type_find_property(ot->srna, "type");
+  RNA_def_enum_funcs(prop, stack_effect_correction_type_itemf);
+}
+
+void OUTLINER_OT_stack_layer_effect_add_anchor(wmOperatorType *ot)
+{
+  /* As the other group operators: its own `type` enum, for the Anchor Point entries the Add Effect
+   * menu lists after its submenus. */
+  OUTLINER_OT_stack_layer_add(ot);
+  ot->name = "Add Anchor Point Effect";
+  ot->idname = "OUTLINER_OT_stack_layer_effect_add_anchor";
+  ot->description = "Add an Anchor Point or one of its readers to the active layer or its mask";
+  PropertyRNA *prop = RNA_struct_type_find_property(ot->srna, "type");
+  RNA_def_enum_funcs(prop, stack_effect_anchor_type_itemf);
 }
 
 /**

@@ -178,6 +178,16 @@ MaterialPaintLayer *outliner_stack_row_mask_add_image(bContext &C,
                                                      Image &image);
 
 /**
+ * Add an Anchor Point Reader that reads \a point, as the Add Effect menu would: a correction of the
+ * active layer's content, or of its mask while a mask slot is the one showing. The Outliner of the
+ * context supplies the owner and the placement, so the ID Browser-style pick and the menu add the
+ * same row. The undo step is the caller's.
+ *
+ * \return false when there is no Stack Layers Outliner in the context or the Add is refused.
+ */
+bool outliner_stack_row_add_anchor_reader(bContext &C, const bUUID &point);
+
+/**
  * \name Python-defined stack sources and row decorators
  *
  * The registration half of the `bpy.types.OutlinerStackSource` and

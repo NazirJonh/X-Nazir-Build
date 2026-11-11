@@ -3004,6 +3004,16 @@ void id_browser_popover_invoke(bContext *C,
                                const char *propname,
                                bool browse_images);
 
+/**
+ * Open the ID Browser popover at the cursor over the items of the collection \a items_propname of
+ * the data-block \a ptr, by name. Picking one writes its name into the string property
+ * \a string_propname and runs that property's update.
+ */
+void id_browser_named_items_popover_invoke(bContext *C,
+                                           PointerRNA ptr,
+                                           const char *string_propname,
+                                           const char *items_propname);
+
 /** Pointer to #wmWindowManager::id_browser_grid_view_settings (the ID browser's grid settings). */
 PointerRNA id_browser_grid_settings_ptr(wmWindowManager &wm);
 

@@ -1210,6 +1210,134 @@ static void rna_Material_paint_layer_add_material_mask_correction_update(bContex
   rna_Material_paint_layer_add_material_do(C, ptr, PaintLayerAddKind::MaskCorrectionMaterial);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Anchor Points a new reader can read
+ *
+ * The Add Effect menu's Anchor Point Reader asks the user which point to read in the ID Browser
+ * popover, and an Anchor Point is no data-block it could list. So the material offers its points as
+ * a read-only collection of named items (#ui::id_browser_named_items_popover_invoke browses them by
+ * name), and "add a reader" is the assignment of a write-only string: setting it to an item's name
+ * adds a reader that reads that point.
+ * \{ */
+
+struct RNAAnchorPointItem {
+  bUUID marker;
+  char label[160];
+};
+
+/** Every Anchor Point of \a ma, in the order the stack lists them, named by the point, its layer and
+ * whether it publishes the content or the mask. */
+static void rna_anchor_point_items_collect(const Material &ma, Vector<RNAAnchorPointItem> &r_items)
+{
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+        const auto add = [&](const MaterialPaintLayer &point,
+                             const PaintLayerAnchorPointTarget target) {
+          if (!BKE_paint_layers_is_anchor_point(point)) {
+            return;
+          }
+          RNAAnchorPointItem item = {};
+          item.marker = point.marker;
+          const std::string label = fmt::format(
+              "{} ({}, {})",
+              point.name[0] != '\0' ? point.name : "Anchor Point",
+              row.name[0] != '\0' ? row.name : "Layer",
+              target == PaintLayerAnchorPointTarget::Mask ? "Mask" : "Content");
+          STRNCPY(item.label, label.c_str());
+          r_items.append(item);
+        };
+        for (const MaterialPaintLayer &effect : row.effects) {
+          add(effect, PaintLayerAnchorPointTarget::Content);
+        }
+        for (const MaterialPaintLayer &item : row.mask_stack) {
+          add(item, PaintLayerAnchorPointTarget::Mask);
+        }
+        return true;
+      });
+}
+
+static void rna_Material_paint_layer_anchor_points_begin(CollectionPropertyIterator *iter,
+                                                         PointerRNA *ptr)
+{
+  const Material *ma = id_cast<Material *>(ptr->owner_id);
+  Vector<RNAAnchorPointItem> items;
+  if (ma != nullptr && BKE_paint_layers_is_layered(*ma)) {
+    rna_anchor_point_items_collect(*ma, items);
+  }
+  /* The iterator owns the array and frees it at the end, so the items outlive this call. */
+  /* #bUUID has member initializers, so the item is not trivial and the zeroed allocation is out;
+   * #MEM_new_array constructs every element, which is all the label and marker need. */
+  RNAAnchorPointItem *data = MEM_new_array<RNAAnchorPointItem>(
+      size_t(std::max<int64_t>(items.size(), 1)), __func__);
+  for (const int64_t i : items.index_range()) {
+    data[i] = items[i];
+  }
+  rna_iterator_array_begin(iter, ptr, data, sizeof(RNAAnchorPointItem), items.size(), true, nullptr);
+}
+
+static void rna_MaterialPaintLayerAnchorPointItem_name_get(PointerRNA *ptr, char *value)
+{
+  const RNAAnchorPointItem *item = static_cast<const RNAAnchorPointItem *>(ptr->data);
+  strcpy(value, item->label);
+}
+
+static int rna_MaterialPaintLayerAnchorPointItem_name_length(PointerRNA *ptr)
+{
+  const RNAAnchorPointItem *item = static_cast<const RNAAnchorPointItem *>(ptr->data);
+  return int(strlen(item->label));
+}
+
+/* The point the last assignment named, consumed by the update that follows it; see
+ * #rna_paint_layer_add_pending for why the add is not done in the setter. */
+static bUUID rna_paint_layer_add_anchor_reader_pending = {};
+
+static void rna_Material_paint_layer_add_anchor_reader_get(PointerRNA * /*ptr*/, char *value)
+{
+  value[0] = '\0';
+}
+
+static int rna_Material_paint_layer_add_anchor_reader_length(PointerRNA * /*ptr*/)
+{
+  return 0;
+}
+
+static void rna_Material_paint_layer_add_anchor_reader_set(PointerRNA *ptr, const char *value)
+{
+  rna_paint_layer_add_anchor_reader_pending = BLI_uuid_nil();
+  const Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (ma == nullptr || value == nullptr || value[0] == '\0') {
+    return;
+  }
+  Vector<RNAAnchorPointItem> items;
+  rna_anchor_point_items_collect(*ma, items);
+  for (const RNAAnchorPointItem &item : items) {
+    if (STREQ(item.label, value)) {
+      rna_paint_layer_add_anchor_reader_pending = item.marker;
+      return;
+    }
+  }
+}
+
+static void rna_Material_paint_layer_add_anchor_reader_update(bContext *C, PointerRNA *ptr)
+{
+  const bUUID point = rna_paint_layer_add_anchor_reader_pending;
+  rna_paint_layer_add_anchor_reader_pending = BLI_uuid_nil();
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (BLI_uuid_is_nil(point) || ma == nullptr) {
+    return;
+  }
+  if (!ed::outliner::outliner_stack_row_add_anchor_reader(*C, point)) {
+    BKE_report(CTX_wm_reports(C),
+               RPT_WARNING,
+               "Select a layer to add an Anchor Point Reader to");
+    return;
+  }
+  ED_undo_push(C, "Add Anchor Point Reader");
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, ptr->owner_id);
+}
+
+/** \} */
+
 /* The same write-only assignment for a mask that reads an image: the ID Browser of the Add Mask
  * menu assigns the image here, and the update makes the mask that reads it. */
 static PointerRNA rna_Material_paint_layer_add_image_mask_get(PointerRNA * /*ptr*/)
@@ -8218,6 +8346,52 @@ static void rna_def_material_lineart(BlenderRNA *brna)
 
 /* The mesh map RNA helpers that call BKE live in the runtime half (the definition pass must not
  * depend on BKE); only the registration below is here. */
+/* The Anchor Points a new reader can read, and the write-only assignment that adds one. */
+static void rna_def_material_anchor_point_items(BlenderRNA *brna, StructRNA *srna)
+{
+  StructRNA *item_srna = RNA_def_struct(brna, "MaterialPaintLayerAnchorPointItem", nullptr);
+  RNA_def_struct_ui_text(
+      item_srna, "Anchor Point Item", "An Anchor Point of a layered material, as a search entry");
+  PropertyRNA *prop = RNA_def_property(item_srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayerAnchorPointItem_name_get",
+                                "rna_MaterialPaintLayerAnchorPointItem_name_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Name", "The point, its layer and whether it publishes content or mask");
+  RNA_def_struct_name_property(item_srna, prop);
+
+  prop = RNA_def_property(srna, "paint_layer_anchor_points", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerAnchorPointItem");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Material_paint_layer_anchor_points_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Anchor Points", "Every Anchor Point of the layered material, for a reader to read");
+
+  prop = RNA_def_property(srna, "paint_layer_add_anchor_reader", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_Material_paint_layer_add_anchor_reader_get",
+                                "rna_Material_paint_layer_add_anchor_reader_length",
+                                "rna_Material_paint_layer_add_anchor_reader_set");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_HIDDEN);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_NO_COMPARISON);
+  RNA_def_property_ui_text(prop,
+                           "Add Anchor Point Reader",
+                           "Write-only: setting the name of an Anchor Point adds a reader that "
+                           "reads it; reads as empty");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layer_add_anchor_reader_update");
+}
+
 static void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
 {
   StructRNA *coll_srna;
@@ -8668,6 +8842,7 @@ void RNA_def_material(BlenderRNA *brna)
 
   /* mesh maps */
   rna_def_material_mesh_maps(brna, srna);
+  rna_def_material_anchor_point_items(brna, srna);
 
   prop = RNA_def_property(srna, "is_layered", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_Material_is_layered_get", nullptr);

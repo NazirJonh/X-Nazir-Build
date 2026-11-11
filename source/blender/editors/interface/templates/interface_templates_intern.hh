@@ -239,6 +239,12 @@ struct IDBrowserTarget {
   const char *image_filter = nullptr;
   /** Browse images for a Texture pointer property, wrapping them on assignment. */
   bool browse_images = false;
+  /**
+   * A collection property of the same struct whose items are browsed by name instead of data-blocks:
+   * #propname is then a string property, and picking an item writes its name into it. Null for the
+   * ordinary data-block browser.
+   */
+  const char *items_prop = nullptr;
 };
 
 /**
@@ -273,6 +279,17 @@ void id_browser_popover_invoke(bContext *C,
  * the popover is open, keeping it valid across undo. An owner without a session UID or an empty
  * \a data_path falls back to keeping \a ptr's data by value.
  */
+/**
+ * Open the ID-browser popover at the cursor over the items of the collection \a items_propname of
+ * the data-block \a ptr, by name: picking one writes its name into the string property
+ * \a string_propname and runs that property's update. For things a data-block holds that are not
+ * data-blocks themselves, such as the Anchor Points of a layered material.
+ */
+void id_browser_named_items_popover_invoke(bContext *C,
+                                           PointerRNA ptr,
+                                           const char *string_propname,
+                                           const char *items_propname);
+
 void id_browser_popover_invoke_direct(bContext *C,
                                       PointerRNA ptr,
                                       const char *propname,

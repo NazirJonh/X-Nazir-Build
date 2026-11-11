@@ -2119,6 +2119,90 @@ void OUTLINER_OT_stack_layer_use_as_brush_source(wmOperatorType *ot)
 /** \name The source
  * \{ */
 
+/** Whether \a material has an Anchor Point a reader could read. */
+static bool paint_material_has_anchor_point(const Material &material)
+{
+  bool found = false;
+  BKE_paint_layers_foreach(
+      material, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+        for (const MaterialPaintLayer &effect : row.effects) {
+          found = found || BKE_paint_layers_is_anchor_point(effect);
+        }
+        for (const MaterialPaintLayer &item : row.mask_stack) {
+          found = found || BKE_paint_layers_is_anchor_point(item);
+        }
+        return true;
+      });
+  return found;
+}
+
+/** The material the Stack Layers Outliner of \a C edits, or null. */
+static Material *paint_anchor_reader_material(bContext *C)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
+    return nullptr;
+  }
+  ID *owner = outliner_stack_owner_get(outliner_stack_read_context(*C), *space_outliner);
+  return (owner != nullptr && GS(owner->name) == ID_MA) ? id_cast<Material *>(owner) : nullptr;
+}
+
+/* Off while the material has no Anchor Point: a reader with nothing to read would be added blind. */
+static bool paint_anchor_reader_poll(bContext *C)
+{
+  if (!stack_row_add_poll(C)) {
+    return false;
+  }
+  const Material *material = paint_anchor_reader_material(C);
+  return material != nullptr && paint_material_has_anchor_point(*material);
+}
+
+/* The pick does the add: nothing is created until a point is chosen in the browser. */
+static wmOperatorStatus paint_anchor_reader_invoke(bContext *C,
+                                                   wmOperator * /*op*/,
+                                                   const wmEvent * /*event*/)
+{
+  Material *material = paint_anchor_reader_material(C);
+  if (material == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  ui::id_browser_named_items_popover_invoke(
+      C, RNA_id_pointer_create(&material->id), "paint_layer_add_anchor_reader", "paint_layer_anchor_points");
+  return OPERATOR_FINISHED;
+}
+
+void OUTLINER_OT_stack_layer_effect_add_anchor_reader(wmOperatorType *ot)
+{
+  ot->name = "Add Anchor Point Reader";
+  ot->idname = "OUTLINER_OT_stack_layer_effect_add_anchor_reader";
+  ot->description =
+      "Add a reader of an Anchor Point, picked from the material's points in a searchable browser";
+  ot->poll = paint_anchor_reader_poll;
+  ot->invoke = paint_anchor_reader_invoke;
+}
+
+bool outliner_stack_row_add_anchor_reader(bContext &C, const bUUID &point)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C);
+  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
+    return false;
+  }
+  /* The Effects menu resolves a reader to the role of the target; the pick does the same, so a
+   * reader lands in the mask while a mask slot is the one showing. */
+  const char *identifier = paint_effect_menu_target_is_mask(C) ? "ANCHOR_POINT_MASK_CORRECTION" :
+                                                                  "ANCHOR_POINT_CORRECTION";
+  const Span<PaintAddKindEntry> entries = paint_add_kind_entries();
+  for (const int64_t index : entries.index_range()) {
+    if (entries[index].info.identifier != identifier) {
+      continue;
+    }
+    StackAddArgs args;
+    args.anchor_point_source = point;
+    return outliner_stack_row_add(&C, *space_outliner, int(index), -1, args) >= 0;
+  }
+  return false;
+}
+
 MaterialPaintLayer *outliner_stack_row_mask_add_image(bContext &C,
                                                      Material &material,
                                                      MaterialPaintLayer &layer,
@@ -2663,6 +2747,10 @@ class PaintLayersStackSource final : public StackSource,
       if (entry.mask_only) {
         continue;
       }
+      /* The reader is picked from a popover that lists the points, not added blind from here. */
+      if (entry.kind == PaintLayerAddKind::AnchorPointCorrection) {
+        continue;
+      }
       StackEffectMenuKind menu;
       menu.kind = int(index);
       menu.is_new = ELEM(entry.kind, PaintLayerAddKind::Filter, PaintLayerAddKind::MaskFilter) &&
@@ -2672,9 +2760,7 @@ class PaintLayersStackSource final : public StackSource,
       /* The filters of the original list fold into one submenu; the newer ones keep their own. */
       menu.is_correction = !menu.is_new &&
                            ELEM(entry.kind, PaintLayerAddKind::Filter, PaintLayerAddKind::MaskFilter);
-      menu.is_anchor = ELEM(entry.kind,
-                            PaintLayerAddKind::AnchorPoint,
-                            PaintLayerAddKind::AnchorPointCorrection);
+      menu.is_anchor = entry.kind == PaintLayerAddKind::AnchorPoint;
       menu.is_pattern = entry.kind == PaintLayerAddKind::GradientCorrection &&
                         !ELEM(entry.generator, MA_PAINT_LAYER_GENERATOR_GRADIENT);
       menu.info = entry.info;
@@ -2852,6 +2938,7 @@ class PaintLayersStackSource final : public StackSource,
       }
       anchor = point_owner;
       params.anchor_point_list = list;
+      params.anchor_point_source = args.anchor_point_source;
       params.insert_after = insert_after;
     }
     const bool is_mask_correction = ELEM(params.kind,

@@ -65,6 +65,8 @@
 #include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 
+#include "MEM_guardedalloc.h"
+
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
@@ -974,6 +976,121 @@ class IDBrowserGridItem : public PreviewGridItem {
   }
 };
 
+/**
+ * One row of the named-items browser (#IDBrowserNamedItemsView): a name, not a data-block. It is
+ * drawn as the list row an #IDBrowserGridItem makes, so the two browsers read the same.
+ */
+class IDBrowserNamedGridItem : public PreviewGridItem {
+ public:
+  IDBrowserNamedGridItem(StringRef identifier, StringRef label, const int preview_icon_id)
+      : PreviewGridItem(identifier, label, preview_icon_id)
+  {
+    /* Activate on release, like #IDBrowserGridItem, so a drag-scroll is not taken for a pick. */
+    this->select_on_click_set();
+  }
+
+  StringRef get_rename_string() const override
+  {
+    /* Used by grid-view search filtering; base class returns null. */
+    return label;
+  }
+
+  void build_grid_tile(const bContext & /*C*/, Layout &layout) const override
+  {
+    const GridViewStyle &style = this->get_view().get_style();
+
+    Layout &row = layout.row(true);
+    row.alignment_set(LayoutAlign::Expand);
+
+    Layout &icon_col = row.row(true);
+    icon_col.fixed_size_set(true);
+    icon_col.ui_units_x_set(1.0f);
+    icon_col.ui_units_y_set(1.0f);
+    Button *icon_but = uiDefBut(icon_col.block(),
+                                ButtonType::PreviewTile,
+                                "",
+                                0,
+                                0,
+                                UI_UNIT_X,
+                                UI_UNIT_X,
+                                nullptr,
+                                0,
+                                0,
+                                "");
+    def_but_icon(icon_but, preview_icon_id, UI_HAS_ICON | BUT_ICON_PREVIEW);
+    icon_but->emboss = EmbossType::None;
+
+    Layout &label_col = row.row(true);
+    label_col.alignment_set(LayoutAlign::Expand);
+    Button *label_but = uiItemL_ex(&label_col, label, ICON_NONE, false, false);
+    if (label_but) {
+      button_flag_enable(label_but, BUT_LIST_ITEM);
+    }
+    if (this->is_active()) {
+      layout_list_set_labels_active(&row);
+    }
+    if (Button *item_but = this->view_item_button()) {
+      /* Highlight the whole row, as #IDBrowserGridItem does. */
+      button_view_item_draw_size_set(item_but, style.tile_width, style.tile_height);
+    }
+  }
+};
+
+/**
+ * The items of a collection property, browsed by name. For a target that is not an ID pointer: the
+ * rows are the collection's items (named by their RNA name property) and picking one writes the
+ * item's name into a string property of the target and runs its update, which is how a write-only
+ * "add" property of a data-block takes its value. The list, search and popover are the ID
+ * Browser's own.
+ */
+class IDBrowserNamedItemsView : public AbstractGridView {
+  PointerRNA target_ptr_;
+  PropertyRNA *string_prop_;
+  PropertyRNA *items_prop_;
+  int icon_id_;
+
+ public:
+  IDBrowserNamedItemsView(PointerRNA target_ptr,
+                          PropertyRNA *string_prop,
+                          PropertyRNA *items_prop,
+                          const int icon_id)
+      : target_ptr_(target_ptr),
+        string_prop_(string_prop),
+        items_prop_(items_prop),
+        icon_id_(icon_id)
+  {
+  }
+
+  void build_items() override
+  {
+    CollectionPropertyIterator iter;
+    RNA_property_collection_begin(&target_ptr_, items_prop_, &iter);
+    int index = 0;
+    for (; iter.valid; RNA_property_collection_next(&iter), index++) {
+      char *name_buf = RNA_struct_name_get_alloc(&iter.ptr, nullptr, 0, nullptr);
+      if (name_buf == nullptr) {
+        continue;
+      }
+      const std::string name = name_buf;
+      MEM_delete(name_buf);
+
+      /* The index keeps two items of the same name apart for the view's own bookkeeping. */
+      IDBrowserNamedGridItem &item = this->add_item<IDBrowserNamedGridItem>(
+          std::to_string(index) + name, name, icon_id_);
+      const PointerRNA target_ptr = target_ptr_;
+      PropertyRNA *string_prop = string_prop_;
+      item.set_on_activate_fn(
+          [target_ptr, string_prop, name](bContext &C, PreviewGridItem & /*item*/) {
+            /* A local copy: captured values are const, and the assignment mutates its target. */
+            PointerRNA ptr = target_ptr;
+            RNA_property_string_set(&ptr, string_prop, name.c_str());
+            RNA_property_update(&C, &ptr, string_prop);
+          });
+    }
+    RNA_property_collection_end(&iter);
+  }
+};
+
 static bool id_browser_asset_passes_name_match(const NameMatchResolvedFilter &resolved,
                                                const asset_system::AssetRepresentation &asset)
 {
@@ -1419,7 +1536,7 @@ static IDBrowserFilter id_browser_filter_resolve(const bContext &C,
  * Tile size and column count for the chosen view mode. Both modes force the column count as a hint
  * so float rounding at a boundary cannot drop one and reopen a gap on the popover's right edge.
  */
-static void id_browser_view_set_tile_size(IDBrowserView &view,
+static void id_browser_view_set_tile_size(AbstractGridView &view,
                                           const Layout &layout,
                                           const bool list_mode,
                                           const int preview_size,
@@ -2073,10 +2190,105 @@ static void id_browser_catalog_tree_draw(const bContext &C,
 
 /** \} */
 
+/**
+ * The popover of a named-items target (see #IDBrowserNamedItemsView): a search field over a list
+ * of the collection's items. None of the data-block controls apply -- no source, no asset library,
+ * no paint filters -- so this is a much smaller layout than #id_browser_popover_draw's.
+ */
+static void id_browser_named_items_popover_draw(const bContext *C, Panel *panel)
+{
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm == nullptr) {
+    return;
+  }
+  PointerRNA target_ptr = CTX_data_pointer_get(C, "id_browser_ptr");
+  const std::optional<StringRefNull> prop_name = CTX_data_string_get(C, "id_browser_prop");
+  const std::optional<StringRefNull> items_name = CTX_data_string_get(C, "id_browser_items_prop");
+  Layout &layout = *panel->layout;
+  if (target_ptr.data == nullptr || !prop_name || !items_name) {
+    layout.label(IFACE_("Nothing to browse"), ICON_ERROR);
+    return;
+  }
+  PropertyRNA *string_prop = RNA_struct_find_property(&target_ptr, prop_name->c_str());
+  PropertyRNA *items_prop = RNA_struct_find_property(&target_ptr, items_name->c_str());
+  if (string_prop == nullptr || RNA_property_type(string_prop) != PROP_STRING ||
+      items_prop == nullptr || RNA_property_type(items_prop) != PROP_COLLECTION)
+  {
+    layout.label(IFACE_("Nothing to browse"), ICON_ERROR);
+    return;
+  }
+
+  /* The search text is shared with the data-block browser; opening this popover starts it clean,
+   * so a leftover filter cannot hide the items. */
+  if (layout.block()->oldblock == nullptr) {
+    wm->runtime->id_browser_search[0] = '\0';
+  }
+
+  const float units_x = ID_BROWSER_POPOVER_UNITS_X;
+  layout.ui_units_x_set(units_x);
+
+  Layout &header = layout.column(true);
+  header.fixed_size_set(true);
+  {
+    Layout &search_row = header.row(true);
+    Block *search_block = search_row.block();
+    Button *search_but = uiDefBut(search_block,
+                                  ButtonType::Text,
+                                  "",
+                                  0,
+                                  0,
+                                  UI_UNIT_X * (units_x - 2.0f),
+                                  UI_UNIT_Y,
+                                  wm->runtime->id_browser_search,
+                                  0.0f,
+                                  float(sizeof(wm->runtime->id_browser_search)),
+                                  TIP_("Filter by name"));
+    button_flag2_enable(search_but, BUT2_FORCE_SEMI_MODAL_ACTIVE);
+    /* Live filter while typing. */
+    button_flag_enable(search_but, BUT_TEXTEDIT_UPDATE);
+    def_but_icon(search_but, ICON_VIEWZOOM, UI_HAS_ICON);
+    button_placeholder_set(search_but, IFACE_("Search"));
+  }
+  header.separator(0.5f);
+
+  std::unique_ptr<IDBrowserNamedItemsView> view = std::make_unique<IDBrowserNamedItemsView>(
+      target_ptr,
+      string_prop,
+      items_prop,
+      /* The Anchor Point glyph, which this browser exists for; the built-in icon stands in where
+       * glyph icons are not available. */
+      BKE_icon_glyph_ensure(0xF1CD) ? BKE_icon_glyph_ensure(0xF1CD) : int(ICON_EMPTY_AXIS));
+  id_browser_view_set_tile_size(*view,
+                                layout,
+                                /*list_mode=*/true,
+                                id_browser_grid_preview_size_get(*wm),
+                                /*cols_hint=*/1);
+  view->set_min_viewport_height(int(UI_UNIT_Y * ID_BROWSER_GRID_VIEWPORT_UNITS_Y * 0.5f));
+  view->set_fixed_viewport_layout(true);
+
+  std::optional<StringRef> filter_str;
+  char search_pattern[sizeof(wm->runtime->id_browser_search) + 2];
+  if (wm->runtime->id_browser_search[0] != '\0') {
+    BLI_strncpy_ensure_pad(
+        search_pattern, wm->runtime->id_browser_search, '*', sizeof(search_pattern));
+    filter_str = search_pattern;
+  }
+
+  Block *block = layout.block();
+  AbstractGridView *grid_view = block_add_view(*block, "id browser named items", std::move(view));
+  GridViewBuilder builder(*block);
+  builder.build_grid_view(*C, *grid_view, layout, filter_str);
+}
+
 static void id_browser_popover_draw(const bContext *C, Panel *panel)
 {
   wmWindowManager *wm = CTX_wm_manager(C);
   if (wm == nullptr) {
+    return;
+  }
+  /* A target that browses the items of a collection by name has a layout of its own. */
+  if (CTX_data_string_get(C, "id_browser_items_prop")) {
+    id_browser_named_items_popover_draw(C, panel);
     return;
   }
   /* The popover's own UI state (view mode, search) lives on the window manager, so it works in any
@@ -2859,6 +3071,10 @@ void id_browser_popover_context_set(Layout &layout, const IDBrowserTarget &targe
 {
   layout.context_ptr_set("id_browser_ptr", target.ptr);
   layout.context_string_set("id_browser_prop", target.propname);
+  if (target.items_prop && target.items_prop[0] != '\0') {
+    /* Read back by #id_browser_popover_draw: browse the items of this collection by name. */
+    layout.context_string_set("id_browser_items_prop", target.items_prop);
+  }
   if (target.browse_images) {
     /* Read back by #id_browser_browse_idcode (library selector, grid build). */
     layout.context_int_set(id_browser_browse_images_ctx, 1);
@@ -2949,6 +3165,40 @@ void id_browser_popover_invoke(bContext *C,
   if (handle == nullptr) {
     return;
   }
+}
+
+void id_browser_named_items_popover_invoke(bContext *C,
+                                           PointerRNA ptr,
+                                           const char *string_propname,
+                                           const char *items_propname)
+{
+  /* The owner may be freed (or moved by undo) while the popover is open, so keep its identity and
+   * re-resolve it by session UID on every rebuild, like #id_browser_popover_invoke. The target is
+   * the owner ID itself: both properties live on it. */
+  const std::string prop = string_propname;
+  const std::string items = items_propname;
+  ID *owner = ptr.owner_id;
+  const uint32_t owner_uid = owner != nullptr ? owner->session_uid : 0;
+  const short owner_idcode = owner != nullptr ? GS(owner->name) : 0;
+  id_browser_popover_panel_create(
+      C,
+      [prop, items, owner, owner_uid, owner_idcode](
+          bContext *C, Layout *layout, PanelType *panel_type) {
+        ID *resolved = (owner_uid != 0 && G_MAIN != nullptr) ?
+                           BKE_libblock_find_session_uid(G_MAIN, owner_idcode, owner_uid) :
+                           owner;
+        if (resolved == nullptr) {
+          layout->label(IFACE_("Data-block no longer available"), ICON_ERROR);
+          return;
+        }
+        PointerRNA target_ptr = RNA_id_pointer_create(resolved);
+        IDBrowserTarget target;
+        target.ptr = &target_ptr;
+        target.propname = prop.c_str();
+        target.items_prop = items.c_str();
+        id_browser_popover_context_set(*layout, target);
+        UI_paneltype_draw(C, panel_type, layout);
+      });
 }
 
 void id_browser_popover_invoke_direct(bContext *C,

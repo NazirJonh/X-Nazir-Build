@@ -27,6 +27,7 @@ GLYPH_BRUSH = 0xE3AE
 _GLYPH_FILL = 0xE997
 _GLYPH_GRADIENT = 0xE3E9
 _GLYPH_PATTERN = 0xE3A5
+_GLYPH_ANCHOR = 0xF1CD
 
 # The add and context menus registered stack sources provide, by source idname. A source module
 # (or an add-on) calls the two helpers below from its own register/unregister; the Stack Layers
@@ -235,9 +236,12 @@ class OUTLINER_MT_stack_layer_effect_add(Menu):
         # A menu of its own rather than an enum button: `operator_menu_enum` takes no glyph value.
         layout.menu("OUTLINER_MT_stack_layer_effect_add_pattern", text="Generate Patterns",
                     **_stack_glyph_args(bpy.app.icons.glyph(_GLYPH_PATTERN), 'TEXTURE'))
-        # The Anchor Point and its reader close the menu, after every submenu.
+        # The Anchor Point and its reader close the menu, after every submenu. The reader is off
+        # while the material has no point to read; a click opens the ID Browser over the points.
         layout.separator()
         layout.operator_enum("outliner.stack_layer_effect_add_anchor", "type")
+        layout.operator("outliner.stack_layer_effect_add_anchor_reader", text="Anchor Point Reader",
+                        **_stack_glyph_args(bpy.app.icons.glyph(_GLYPH_ANCHOR), 'EMPTY_AXIS'))
 
 
 class OUTLINER_MT_stack_layer_effect_add_correction(Menu):

@@ -632,6 +632,11 @@ struct StackAddArgs {
    * says the row lands beside the folder, not inside.
    */
   bool fill_folder = true;
+  /**
+   * The Anchor Point a reader kind reads, or nil to leave the choice to the row's own panel. Ignored
+   * by every other kind.
+   */
+  bUUID anchor_point_source = {};
 };
 
 /**

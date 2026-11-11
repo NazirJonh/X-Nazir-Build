@@ -1174,6 +1174,7 @@ void OUTLINER_OT_stack_layer_effect_add_new(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_pattern(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_correction(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_anchor(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_effect_add_anchor_reader(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_duplicate(wmOperatorType *ot);

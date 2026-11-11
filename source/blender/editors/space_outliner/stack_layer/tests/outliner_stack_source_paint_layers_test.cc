@@ -369,7 +369,6 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
   for (const char *twin : {"MASK_CORRECTION",
                            "MASK_CORRECTION_FILL",
                            "MASK_CORRECTION_MATERIAL",
-                           "ANCHOR_POINT_MASK_CORRECTION",
                            "MASK_CORRECTION_GRADIENT"})
   {
     EXPECT_FALSE(has_identifier(content, twin));
@@ -388,6 +387,12 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
   EXPECT_FALSE(has_identifier(content, "MASK_FILTER_UV_ISLAND"));
   EXPECT_FALSE(has_identifier(mask, "MASK_FILTER_COLOR_ID"));
   EXPECT_FALSE(has_identifier(mask, "MASK_FILTER_UV_ISLAND"));
+
+  /* The Anchor Point Reader is picked from its own popover, so neither list offers it. */
+  for (const char *reader : {"ANCHOR_POINT_CORRECTION", "ANCHOR_POINT_MASK_CORRECTION"}) {
+    EXPECT_FALSE(has_identifier(content, reader)) << reader;
+    EXPECT_FALSE(has_identifier(mask, reader)) << reader;
+  }
 
   /* A mask filter with a content twin stays in both menus. */
   EXPECT_TRUE(has_identifier(content, "FILTER_HSL"));

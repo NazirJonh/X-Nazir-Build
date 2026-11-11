@@ -383,10 +383,10 @@ static void id_browser_sync_assigned_image_location(const bContext &C,
      * Preferences-only write (#BKE_asset_catalog_memory_set_all already flags
      * #UserDef.runtime.is_dirty), so it must not mark the blend-file modified. */
     BKE_asset_catalog_memory_set_all(
-        &U, location->library_ref, grid_settings::id_browser_catalog_memory_domain);
+        &U, location->library_ref, id_browser_catalog_memory_domain());
     BKE_asset_catalog_memory_set_all(&U,
                                      asset_system::all_library_reference(),
-                                     grid_settings::id_browser_catalog_memory_domain);
+                                     id_browser_catalog_memory_domain());
   }
 
   if (!changed) {
@@ -1621,7 +1621,7 @@ static void build_id_grid(const bContext &C,
   if (source == ID_BROWSER_SOURCE_ASSET_LIBRARY) {
     PointerRNA settings_ptr = id_browser_grid_settings_ptr(*wm);
     if (settings_ptr.data != nullptr) {
-      catalog_mode = grid_settings::catalog_mode_get(settings_ptr);
+      catalog_mode = grid_settings::catalog_mode_get(settings_ptr, id_browser_catalog_memory_domain().c_str());
     }
   }
 
@@ -2009,7 +2009,7 @@ class IDBrowserCatalogTreeView : public AbstractTreeView {
       /* Membership modes are stored under the #ASSET_LIBRARY_ALL key, which the per-library mode
        * checks below cannot see -- they win over the All state. */
       if (settings_.data != nullptr &&
-          ELEM(grid_settings::catalog_mode_get(settings_),
+          ELEM(grid_settings::catalog_mode_get(settings_, id_browser_catalog_memory_domain().c_str()),
                grid_settings::CatalogMode::Recent,
                grid_settings::CatalogMode::Favorites))
       {
@@ -2019,7 +2019,7 @@ class IDBrowserCatalogTreeView : public AbstractTreeView {
         /* Active only when no section library narrows by a catalog anymore. */
         for (const Section &section : sections_) {
           if (BKE_asset_catalog_memory_get_mode(
-                  &U, section.lib_ref, grid_settings::id_browser_catalog_memory_domain) ==
+                  &U, section.lib_ref, id_browser_catalog_memory_domain()) ==
               ASSET_CATALOG_MEMORY_SET)
           {
             return false;
@@ -2028,7 +2028,7 @@ class IDBrowserCatalogTreeView : public AbstractTreeView {
         return true;
       }
       return BKE_asset_catalog_memory_get_mode(
-                 &U, lib_ref_, grid_settings::id_browser_catalog_memory_domain) !=
+                 &U, lib_ref_, id_browser_catalog_memory_domain()) !=
              ASSET_CATALOG_MEMORY_SET;
     });
     all_item.uncollapse_by_default();
@@ -2089,7 +2089,7 @@ class IDBrowserCatalogTreeView : public AbstractTreeView {
        * #catalog_mode_set_membership) stays active alongside Recent/Favorites and trips the
        * single-active assert in #AbstractView::change_state_delayed. */
       if (settings_.data != nullptr &&
-          ELEM(grid_settings::catalog_mode_get(settings_),
+          ELEM(grid_settings::catalog_mode_get(settings_, id_browser_catalog_memory_domain().c_str()),
                grid_settings::CatalogMode::Recent,
                grid_settings::CatalogMode::Favorites))
       {
@@ -2104,7 +2104,7 @@ class IDBrowserCatalogTreeView : public AbstractTreeView {
         int sections_with_set = 0;
         for (const Section &section : sections_) {
           if (BKE_asset_catalog_memory_get_mode(
-                  &U, section.lib_ref, grid_settings::id_browser_catalog_memory_domain) ==
+                  &U, section.lib_ref, id_browser_catalog_memory_domain()) ==
               ASSET_CATALOG_MEMORY_SET)
           {
             sections_with_set++;
@@ -2120,13 +2120,13 @@ class IDBrowserCatalogTreeView : public AbstractTreeView {
       /* Single active entry: the owning library's memory must be narrowed to exactly this one
        * catalog UUID. */
       if (BKE_asset_catalog_memory_get_mode(
-              &U, owner_lib_ref, grid_settings::id_browser_catalog_memory_domain) !=
+              &U, owner_lib_ref, id_browser_catalog_memory_domain()) !=
           ASSET_CATALOG_MEMORY_SET)
       {
         return false;
       }
       const Vector<bUUID> enabled = BKE_asset_catalog_memory_get_set(
-          &U, owner_lib_ref, grid_settings::id_browser_catalog_memory_domain);
+          &U, owner_lib_ref, id_browser_catalog_memory_domain());
       return enabled.size() == 1 && enabled.first() == catalog_id;
     });
 
@@ -2392,6 +2392,8 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
   /* Shared with the library selector (#id_browser_library_rna_itemf): a single helper resolves
    * the browsed ID type, so the two cannot drift apart when new types are added. */
   const short target_idcode = id_browser_target_idcode(C);
+  /* Before anything reads the catalog memory: each browsed type keeps its own domain. */
+  id_browser_catalog_memory_idcode_set(id_browser_browse_idcode(C));
   const bool is_image = target_idcode == ID_IM;
   const bool is_material = target_idcode == ID_MA;
   /* Only on the first build of the popover's block, i.e. when the user just opened it. Every
@@ -2480,7 +2482,7 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
     grid_settings::CatalogMode catalog_mode = grid_settings::CatalogMode::All;
     AssetLibraryReference lib_ref = {};
     if (quick_settings.data != nullptr) {
-      catalog_mode = grid_settings::catalog_mode_get(quick_settings);
+      catalog_mode = grid_settings::catalog_mode_get(quick_settings, id_browser_catalog_memory_domain().c_str());
       lib_ref = grid_settings::library_ref_get(quick_settings);
     }
     const bool recent_active = is_asset_source &&
@@ -2588,6 +2590,9 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
         * buttons already cover that. Other
        * #template_grid_library_selector callers leave this key unset and stay unaffected. */
       source_options.context_int_set("grid_library_selector_show_recent_favorites", 0);
+      /* The library menu's "All Libraries" exit restores the catalog filter of this type's domain. */
+      source_options.context_string_set("grid_library_selector_catalog_domain",
+                                        id_browser_catalog_memory_domain());
 
       /* Thin WM RNA property: side-effecting set + image-library itemf. */
       GridLibrarySelectorParams selector_params;
@@ -2605,7 +2610,7 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
        * pseudo-catalog is showing. */
       if (settings_ptr.data != nullptr) {
         const grid_settings::CatalogMode catalog_mode = grid_settings::catalog_mode_get(
-            settings_ptr);
+            settings_ptr, id_browser_catalog_memory_domain().c_str());
         if (ELEM(catalog_mode, grid_settings::CatalogMode::Recent, grid_settings::CatalogMode::Favorites))
         {
           PropertyRNA *lib_prop = RNA_struct_find_property(&wm_ptr,
@@ -3676,10 +3681,12 @@ static wmOperatorStatus id_browser_random_asset_exec(bContext *C, wmOperator *op
       candidates.append({&asset, nullptr});
       return true;
     };
+    id_browser_catalog_memory_idcode_set(idcode);
     grid_settings::CatalogMode catalog_mode = grid_settings::CatalogMode::All;
     PointerRNA settings_ptr = id_browser_grid_settings_ptr(*wm);
     if (settings_ptr.data != nullptr) {
-      catalog_mode = grid_settings::catalog_mode_get(settings_ptr);
+      catalog_mode = grid_settings::catalog_mode_get(settings_ptr,
+                                                     id_browser_catalog_memory_domain().c_str());
     }
     if (ELEM(catalog_mode, grid_settings::CatalogMode::Recent, grid_settings::CatalogMode::Favorites))
     {

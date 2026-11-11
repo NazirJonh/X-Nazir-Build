@@ -1236,6 +1236,11 @@ enum eMaterialPaintLayerMappingFlag : int16_t {
   MA_PAINT_LAYER_MAPPING_MIRROR_U = 1 << 3,
   /** Mirror along V: the fold and the Normal flip of #MA_PAINT_LAYER_MAPPING_MIRROR_U, on V. */
   MA_PAINT_LAYER_MAPPING_MIRROR_V = 1 << 4,
+  /**
+   * The Mirror fold is switched on. The axes above and the center are only read while this is set,
+   * so switching Mirror off keeps what was configured. Zeroed rows start with Mirror off.
+   */
+  MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED = 1 << 5,
 };
 ENUM_OPERATORS(eMaterialPaintLayerMappingFlag)
 

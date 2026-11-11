@@ -409,6 +409,21 @@ short id_browser_target_idcode(const bContext *C);
  */
 short id_browser_browse_idcode(const bContext *C);
 /**
+ * Catalog-memory domain (#UserDef.catalog_memory) of the ID Browser for \a idcode. Each browsed ID
+ * type keeps its own catalog selection and Recent/Favorites mode ("id_browser_MA", ...), so a
+ * catalog picked while browsing brushes cannot hide the materials of the same library. Images keep
+ * the original "id_browser" domain so their saved selections survive.
+ */
+std::string id_browser_catalog_memory_domain_for(short idcode);
+/**
+ * Set the ID type #id_browser_catalog_memory_domain follows. The popover draw sets it from the
+ * browsed type, so the catalog tree, the grid and the header buttons that act afterwards all use the
+ * same domain without threading the type through every call.
+ */
+void id_browser_catalog_memory_idcode_set(short idcode);
+/** The domain of the ID type last set by #id_browser_catalog_memory_idcode_set. */
+std::string id_browser_catalog_memory_domain();
+/**
  * The popover remembers one library selection across uses, so it can be hidden for the type
  * currently browsed (e.g. an image library while browsing materials). When the stored library is
  * one that can never provide material assets (tagged image or brush library, or a cached "contains

@@ -3085,7 +3085,8 @@ constexpr int mapping_flag_bits[] = {MA_PAINT_LAYER_MAPPING_ENABLED_DEPRECATED,
                                      MA_PAINT_LAYER_MAPPING_SCALE_UNLOCKED,
                                      MA_PAINT_LAYER_MAPPING_DISABLED,
                                      MA_PAINT_LAYER_MAPPING_MIRROR_U,
-                                     MA_PAINT_LAYER_MAPPING_MIRROR_V};
+                                     MA_PAINT_LAYER_MAPPING_MIRROR_V,
+                                     MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED};
 constexpr bool mapping_flag_bits_are_disjoint()
 {
   int seen = 0;
@@ -3101,9 +3102,21 @@ static_assert(mapping_flag_bits_are_disjoint(),
               "Layer mapping flags must each own a single, distinct bit");
 }  // namespace
 
-int16_t BKE_paint_layers_mapping_mirror_get(const MaterialPaintLayer &layer)
+int16_t BKE_paint_layers_mapping_mirror_axes_get(const MaterialPaintLayer &layer)
 {
   return layer.mapping.flag & (MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V);
+}
+
+bool BKE_paint_layers_mapping_mirror_enabled_get(const MaterialPaintLayer &layer)
+{
+  return (layer.mapping.flag & MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED) != 0;
+}
+
+int16_t BKE_paint_layers_mapping_mirror_get(const MaterialPaintLayer &layer)
+{
+  return BKE_paint_layers_mapping_mirror_enabled_get(layer) ?
+             BKE_paint_layers_mapping_mirror_axes_get(layer) :
+             int16_t(0);
 }
 
 bool BKE_paint_layers_mapping_mirror_applies(const Material &ma, const MaterialPaintLayer &layer)
@@ -3131,9 +3144,55 @@ bool BKE_paint_layers_mapping_set_mirror(Material &ma, MaterialPaintLayer *layer
   if (current == axes) {
     return true;
   }
+  if (axes == 0) {
+    /* Off keeps the configured axes, so switching Mirror back on restores them. */
+    layer->mapping.flag &= ~MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED;
+  }
+  else {
+    layer->mapping.flag &= ~(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V);
+    layer->mapping.flag |= axes | MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED;
+  }
+  /* The row's chain gains or loses the fold and its Normal flip, which is a different shape. */
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_mapping_set_mirror_axes(Material &ma, MaterialPaintLayer *layer, int16_t axes)
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  axes &= (MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V);
+  if (axes == BKE_paint_layers_mapping_mirror_axes_get(*layer)) {
+    return true;
+  }
   layer->mapping.flag &= ~(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V);
   layer->mapping.flag |= axes;
-  /* The row's chain gains or loses the fold and its Normal flip, which is a different shape. */
+  if (BKE_paint_layers_mapping_mirror_enabled_get(*layer)) {
+    BKE_paint_layers_tag_edited(ma);
+  }
+  return true;
+}
+
+bool BKE_paint_layers_mapping_set_mirror_enabled(Material &ma,
+                                                 MaterialPaintLayer *layer,
+                                                 const bool enabled)
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  if (enabled == BKE_paint_layers_mapping_mirror_enabled_get(*layer)) {
+    return true;
+  }
+  if (enabled && !BKE_paint_layers_mapping_supported(ma, *layer)) {
+    return false;
+  }
+  if (enabled) {
+    layer->mapping.flag |= MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED;
+  }
+  else {
+    layer->mapping.flag &= ~MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED;
+  }
   BKE_paint_layers_tag_edited(ma);
   return true;
 }

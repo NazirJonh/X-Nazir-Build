@@ -2170,10 +2170,24 @@ static bool rna_MaterialPaintLayer_mapping_mirror_applies_get(PointerRNA *ptr)
   return ma != nullptr && BKE_paint_layers_mapping_mirror_applies(*ma, *layer);
 }
 
+static bool rna_MaterialPaintLayer_mapping_mirror_enabled_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_mapping_mirror_enabled_get(*layer);
+}
+
+static void rna_MaterialPaintLayer_mapping_mirror_enabled_set(PointerRNA *ptr, bool value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_mapping_set_mirror_enabled(*ma, layer, value);
+  }
+}
+
 static bool rna_MaterialPaintLayer_mapping_mirror_u_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
-  return (BKE_paint_layers_mapping_mirror_get(*layer) & MA_PAINT_LAYER_MAPPING_MIRROR_U) != 0;
+  return (BKE_paint_layers_mapping_mirror_axes_get(*layer) & MA_PAINT_LAYER_MAPPING_MIRROR_U) != 0;
 }
 
 static void rna_MaterialPaintLayer_mapping_mirror_u_set(PointerRNA *ptr, bool value)
@@ -2183,16 +2197,16 @@ static void rna_MaterialPaintLayer_mapping_mirror_u_set(PointerRNA *ptr, bool va
   if (ma == nullptr) {
     return;
   }
-  const int16_t current = BKE_paint_layers_mapping_mirror_get(*layer);
+  const int16_t current = BKE_paint_layers_mapping_mirror_axes_get(*layer);
   const int16_t axes = value ? (current | MA_PAINT_LAYER_MAPPING_MIRROR_U) :
                                (current & ~MA_PAINT_LAYER_MAPPING_MIRROR_U);
-  BKE_paint_layers_mapping_set_mirror(*ma, layer, axes);
+  BKE_paint_layers_mapping_set_mirror_axes(*ma, layer, axes);
 }
 
 static bool rna_MaterialPaintLayer_mapping_mirror_v_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
-  return (BKE_paint_layers_mapping_mirror_get(*layer) & MA_PAINT_LAYER_MAPPING_MIRROR_V) != 0;
+  return (BKE_paint_layers_mapping_mirror_axes_get(*layer) & MA_PAINT_LAYER_MAPPING_MIRROR_V) != 0;
 }
 
 static void rna_MaterialPaintLayer_mapping_mirror_v_set(PointerRNA *ptr, bool value)
@@ -2202,10 +2216,10 @@ static void rna_MaterialPaintLayer_mapping_mirror_v_set(PointerRNA *ptr, bool va
   if (ma == nullptr) {
     return;
   }
-  const int16_t current = BKE_paint_layers_mapping_mirror_get(*layer);
+  const int16_t current = BKE_paint_layers_mapping_mirror_axes_get(*layer);
   const int16_t axes = value ? (current | MA_PAINT_LAYER_MAPPING_MIRROR_V) :
                                (current & ~MA_PAINT_LAYER_MAPPING_MIRROR_V);
-  BKE_paint_layers_mapping_set_mirror(*ma, layer, axes);
+  BKE_paint_layers_mapping_set_mirror_axes(*ma, layer, axes);
 }
 
 static void rna_MaterialPaintLayer_mapping_mirror_center_get(PointerRNA *ptr, float *value)
@@ -6801,6 +6815,15 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Mirror Applies", "Whether the enabled Mirror fold reaches what the row shows");
+
+  prop = RNA_def_property(srna, "mapping_mirror_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_mapping_mirror_enabled_get",
+                                 "rna_MaterialPaintLayer_mapping_mirror_enabled_set");
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
+  RNA_def_property_ui_text(
+      prop, "Mirror", "Switch the Mirror fold on or off; its axes and center are kept");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "mapping_mirror_u", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop,

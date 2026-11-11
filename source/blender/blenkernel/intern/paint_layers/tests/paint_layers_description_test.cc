@@ -21,6 +21,7 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_report.hh"
@@ -4303,6 +4304,287 @@ TEST_F(PaintLayersDescription, height_write_skip_takes_the_row_out_of_height_alo
   paint_layer_channel_add(*other, *image);
   EXPECT_TRUE(BKE_paint_layers_channel_height_write_set(*ma, *other, false));
   EXPECT_TRUE(BKE_paint_layers_channel_height_write(*layer));
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Map encoding (what a record's map stores)
+ * \{ */
+
+/** A Fill row of \a ma carrying \a map under its \a channel record. */
+static MaterialPaintLayer &map_encoding_fill_row(Material &ma,
+                                                 Image &map,
+                                                 const eMaterialPaintChannel channel)
+{
+  MaterialPaintLayer *fill = BKE_paint_layers_add(ma, "Fill", nullptr, PaintLayerPlace::Above);
+  BLI_assert(fill != nullptr);
+  BKE_paint_layers_set_source(ma, fill, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  BKE_paint_layers_channel_add(ma, fill, channel);
+  BKE_paint_layers_channel_set_image(ma, fill, channel, &map);
+  return *fill;
+}
+
+TEST_F(PaintLayersDescription, map_encoding_setter_takes_the_pairs_the_channel_supports)
+{
+  Material &ma = *BKE_material_add(bmain, "MapEncodingSet");
+  const float grey[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  Image &map = *BKE_image_add_generated(
+      bmain, 4, 4, "RoughMap", 32, false, IMA_GENTYPE_BLANK, grey, false, true, false);
+  MaterialPaintLayer &fill = map_encoding_fill_row(ma, map, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+
+  /* A glossiness is a roughness upside down; an F0 colour is not. */
+  EXPECT_TRUE(BKE_paint_layers_channel_map_encoding_allowed(PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+                                                            MA_PAINT_LAYER_MAP_ENCODING_CHANNEL));
+  EXPECT_TRUE(BKE_paint_layers_channel_map_encoding_allowed(
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS));
+  EXPECT_TRUE(BKE_paint_layers_channel_map_encoding_allowed(
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA));
+  EXPECT_FALSE(BKE_paint_layers_channel_map_encoding_allowed(
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_MAP_ENCODING_F0));
+  EXPECT_TRUE(BKE_paint_layers_channel_map_encoding_allowed(PAINT_MATERIAL_CHANNEL_SPECULAR,
+                                                            MA_PAINT_LAYER_MAP_ENCODING_F0));
+  EXPECT_FALSE(BKE_paint_layers_channel_map_encoding_allowed(
+      PAINT_MATERIAL_CHANNEL_SPECULAR, MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS));
+  EXPECT_FALSE(BKE_paint_layers_channel_map_encoding_allowed(
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS));
+
+  EXPECT_TRUE(BKE_paint_layers_channel_set_map_encoding(
+      ma, &fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS));
+  EXPECT_EQ(BKE_paint_layers_channel_map_encoding_get(fill.channels[0]),
+            MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS);
+  EXPECT_FALSE(BKE_paint_layers_channel_set_map_encoding(
+      ma, &fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_MAP_ENCODING_F0));
+  EXPECT_EQ(BKE_paint_layers_channel_map_encoding_get(fill.channels[0]),
+            MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS);
+  /* A record that is not of the stack refuses. */
+  MaterialPaintLayer stray;
+  EXPECT_FALSE(BKE_paint_layers_channel_set_map_encoding(
+      ma, &stray, PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS));
+
+  /* An out-of-range value reads as the channel's own encoding, never as a conversion. */
+  MaterialPaintLayerChannel &record = fill.channels[0];
+  record.map_encoding = 99;
+  EXPECT_EQ(BKE_paint_layers_channel_map_encoding_get(record),
+            MA_PAINT_LAYER_MAP_ENCODING_CHANNEL);
+}
+
+TEST_F(PaintLayersDescription, map_encoding_survives_a_duplicate)
+{
+  Material &ma = *BKE_material_add(bmain, "MapEncodingCopy");
+  const float grey[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  Image &map = *BKE_image_add_generated(
+      bmain, 4, 4, "GlossMap", 32, false, IMA_GENTYPE_BLANK, grey, false, true, false);
+  MaterialPaintLayer &fill = map_encoding_fill_row(ma, map, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_map_encoding(
+      ma, &fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA));
+
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(bmain, ma, &fill);
+  ASSERT_NE(copy, nullptr);
+  const MaterialPaintLayerChannel *rough = paint_layer_channel_find(
+      *copy, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(rough, nullptr);
+  EXPECT_EQ(rough->map_encoding, int8_t(MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA));
+  EXPECT_EQ(BKE_paint_layers_channel_map_encoding_get(*rough),
+            MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA);
+}
+
+TEST_F(PaintLayersDescription, map_encoding_moves_the_composite_hash_and_the_description)
+{
+  Material &ma = *BKE_material_add(bmain, "MapEncodingHash");
+  const float grey[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  Image &map = *BKE_image_add_generated(
+      bmain, 4, 4, "RoughHashMap", 32, false, IMA_GENTYPE_BLANK, grey, false, true, false);
+  MaterialPaintLayer &fill = map_encoding_fill_row(ma, map, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, layers));
+  ASSERT_EQ(layers.size(), 1);
+  EXPECT_EQ(layers[0].map_encoding, int8_t(MA_PAINT_LAYER_MAP_ENCODING_CHANNEL));
+  EXPECT_TRUE(layers[0].color_alpha_coverage);
+  const uint64_t hash_channel = BKE_paint_material_composite_stack_hash(layers);
+
+  ASSERT_TRUE(BKE_paint_layers_channel_set_map_encoding(
+      ma, &fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS));
+  layers.clear();
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, layers));
+  EXPECT_EQ(layers[0].map_encoding, int8_t(MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS));
+  EXPECT_NE(BKE_paint_material_composite_stack_hash(layers), hash_channel);
+
+  /* The spec-gloss packing also takes the map's alpha out of the coverage. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_map_encoding(ma,
+                                                        &fill,
+                                                        PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+                                                        MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA));
+  layers.clear();
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, layers));
+  EXPECT_FALSE(layers[0].color_alpha_coverage);
+  EXPECT_NE(BKE_paint_material_composite_stack_hash(layers), hash_channel);
+}
+
+TEST_F(PaintLayersDescription, normal_directx_moves_the_composite_hash)
+{
+  /* The green flip is part of what the composite shows, so the cache hash has to see the switch
+   * (the regression of the DirectX flag missing from the hash). */
+  Material &ma = *BKE_material_add(bmain, "NormalDirectXHash");
+  const float flat_normal[4] = {0.5f, 0.5f, 1.0f, 1.0f};
+  Image &map = *BKE_image_add_generated(bmain,
+                                        4,
+                                        4,
+                                        "NormalHashMap",
+                                        32,
+                                        false,
+                                        IMA_GENTYPE_BLANK,
+                                        flat_normal,
+                                        false,
+                                        true,
+                                        false);
+  MaterialPaintLayer &fill = map_encoding_fill_row(ma, map, PAINT_MATERIAL_CHANNEL_NORMAL);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(ma, PAINT_MATERIAL_CHANNEL_NORMAL, layers));
+  ASSERT_EQ(layers.size(), 1);
+  EXPECT_FALSE(layers[0].normal_directx);
+  const uint64_t hash_opengl = BKE_paint_material_composite_stack_hash(layers);
+
+  ASSERT_TRUE(BKE_paint_layers_normal_set_directx(ma, &fill, true));
+  layers.clear();
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(ma, PAINT_MATERIAL_CHANNEL_NORMAL, layers));
+  EXPECT_TRUE(layers[0].normal_directx);
+  EXPECT_NE(BKE_paint_material_composite_stack_hash(layers), hash_opengl);
+}
+
+TEST_F(PaintLayersDescription, spec_gloss_set_reads_the_map_twice_and_bakes_nothing)
+{
+  Material &ma = *BKE_material_add(bmain, "SpecGlossSet");
+  /* A spec-gloss map: a mid specular colour and an alpha that varies, which is the glossiness the
+   * roughness reads. */
+  const float mid[4] = {0.2f, 0.2f, 0.2f, 1.0f};
+  Image &spec_map = *BKE_image_add_generated(bmain,
+                                             2,
+                                             2,
+                                             "SpecGlossMap",
+                                             32,
+                                             false,
+                                             IMA_GENTYPE_BLANK,
+                                             mid,
+                                             false,
+                                             true,
+                                             false);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(&spec_map, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int i : IndexRange(4)) {
+      pixels[i * 4 + 0] = 10;
+      pixels[i * 4 + 1] = 10;
+      pixels[i * 4 + 2] = 10;
+      pixels[i * 4 + 3] = uchar(51 + i * 20);
+    }
+    BKE_image_release_ibuf(&spec_map, ibuf, lock);
+  }
+  MaterialPaintLayer &fill = map_encoding_fill_row(
+      ma, spec_map, PAINT_MATERIAL_CHANNEL_SPECULAR);
+  const int images_before = int(BLI_listbase_count(&bmain->images));
+
+  const char *reason = nullptr;
+  ASSERT_TRUE(BKE_paint_layers_specular_map_convert(*bmain,
+                                                    ma,
+                                                    fill,
+                                                    spec_map,
+                                                    PaintSpecularMapKind::SpecGlossSet,
+                                                    true,
+                                                    nullptr,
+                                                    nullptr,
+                                                    &reason));
+  EXPECT_EQ(reason, nullptr);
+  /* No image was made: the same map now serves both records. */
+  EXPECT_EQ(int(BLI_listbase_count(&bmain->images)), images_before);
+  const MaterialPaintLayerChannel *spec = paint_layer_channel_find(
+      fill, PAINT_MATERIAL_CHANNEL_SPECULAR);
+  const MaterialPaintLayerChannel *rough = paint_layer_channel_find(
+      fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(spec, nullptr);
+  ASSERT_NE(rough, nullptr);
+  EXPECT_EQ(spec->image, &spec_map);
+  EXPECT_EQ(spec->map_encoding, int8_t(MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA));
+  EXPECT_EQ(rough->image, &spec_map);
+  EXPECT_EQ(rough->map_encoding, int8_t(MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA));
+  EXPECT_EQ(spec_map.id.us, 2);
+
+  /* A constant alpha carries no glossiness: the roughness half refuses the whole set. */
+  Image &flat_map = *BKE_image_add_generated(bmain,
+                                             2,
+                                             2,
+                                             "SpecGlossFlat",
+                                             32,
+                                             false,
+                                             IMA_GENTYPE_BLANK,
+                                             mid,
+                                             false,
+                                             true,
+                                             false);
+  MaterialPaintLayer &flat_fill = map_encoding_fill_row(
+      ma, flat_map, PAINT_MATERIAL_CHANNEL_SPECULAR);
+  reason = nullptr;
+  EXPECT_FALSE(BKE_paint_layers_specular_map_convert(*bmain,
+                                                     ma,
+                                                     flat_fill,
+                                                     flat_map,
+                                                     PaintSpecularMapKind::SpecGlossSet,
+                                                     true,
+                                                     nullptr,
+                                                     nullptr,
+                                                     &reason));
+  ASSERT_NE(reason, nullptr);
+  EXPECT_NE(std::strstr(reason, "alpha"), nullptr);
+}
+
+TEST_F(PaintLayersDescription, map_encoding_round_trips_a_smart_asset)
+{
+  /* The asset save copies rows structurally and the import copies them again; the encoding is
+   * part of the record, so the glossiness read survives both -- the round trip the asset save
+   * promises. */
+  Material &source = *BKE_material_add(bmain, "AssetEncodingSource");
+  const float grey[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  Image &map = *BKE_image_add_generated(
+      bmain, 4, 4, "AssetGlossMap", 32, false, IMA_GENTYPE_BLANK, grey, false, true, false);
+  MaterialPaintLayer &fill = map_encoding_fill_row(source, map, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_map_encoding(
+      source, &fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS));
+
+  const MaterialPaintLayer *rows[1] = {&fill};
+  Material *asset = BKE_paint_layers_asset_create(*bmain,
+                                                  source,
+                                                  Span<const MaterialPaintLayer *>(rows, 1),
+                                                  PaintLayerAssetType::Layer,
+                                                  "EncodingAsset");
+  ASSERT_NE(asset, nullptr);
+  const MaterialPaintLayer *asset_row = static_cast<const MaterialPaintLayer *>(
+      asset->paint_layers.first);
+  ASSERT_NE(asset_row, nullptr);
+  const MaterialPaintLayerChannel *asset_rough = paint_layer_channel_find(
+      *asset_row, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(asset_rough, nullptr);
+  EXPECT_EQ(asset_rough->map_encoding, int8_t(MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS));
+
+  /* The import into another material reads the map the same way. */
+  Material &target = *BKE_material_add(bmain, "AssetEncodingTarget");
+  PaintLayerImportParams params;
+  const MaterialPaintLayer *asset_rows[1] = {asset_row};
+  ASSERT_TRUE(BKE_paint_layers_import_rows(
+      bmain, target, *asset, Span<const MaterialPaintLayer *>(asset_rows, 1), params));
+  MaterialPaintLayer *imported = static_cast<MaterialPaintLayer *>(target.paint_layers.first);
+  ASSERT_NE(imported, nullptr);
+  const MaterialPaintLayerChannel *imported_rough = paint_layer_channel_find(
+      *imported, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(imported_rough, nullptr);
+  EXPECT_EQ(imported_rough->map_encoding, int8_t(MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS));
+  EXPECT_NE(imported_rough->image, nullptr);
 }
 
 /** \} */

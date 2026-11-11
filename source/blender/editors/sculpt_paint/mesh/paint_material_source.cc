@@ -236,7 +236,13 @@ static float stored_scalar_constant(const PaintModeSettings &settings,
 
 bool channel_source_invertible(const eMaterialPaintChannel channel)
 {
-  return ELEM(channel, PAINT_MATERIAL_CHANNEL_ALPHA, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  /* Roughness joins the two: a glossiness texture is as often the source at hand as its inverse,
+   * and the brush's Source Invert reads it as the roughness the stroke paints -- the brush-side
+   * counterpart of a Roughness record's own map encoding. */
+  return ELEM(channel,
+              PAINT_MATERIAL_CHANNEL_ALPHA,
+              PAINT_MATERIAL_CHANNEL_HEIGHT,
+              PAINT_MATERIAL_CHANNEL_ROUGHNESS);
 }
 
 float scalar_source_finish_prepared(const BrushMaterialPaint &brush_paint,

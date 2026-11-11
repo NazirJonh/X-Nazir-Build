@@ -544,6 +544,9 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
         hash = topology_hash_mix(
             hash, (record->flag & MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX) != 0 ? 1 : 0);
       }
+      /* A map encoding is nodes of its own too: the gloss inversion, the alpha grey, the F0 level
+       * chain, and the coverage the spec-gloss packing leaves unwired. */
+      hash = topology_hash_mix(hash, uint64_t(uint8_t(paint_layer_map_encoding_get(*record))));
     }
     else {
       hash = topology_hash_mix(hash, 0);

@@ -54,6 +54,19 @@ constexpr int gpu_layer_tangent_normal = 256;
 constexpr int gpu_layer_normal_directx = 262144;
 constexpr int gpu_layer_mirror_u = 1048576;
 constexpr int gpu_layer_mirror_v = 2097152;
+/* What the row's map stores (#eMaterialPaintLayerMapEncoding): the read-time conversion the layer
+ * pass runs on the sampled texel, before the coverage. The spec-gloss alpha packing and the F0
+ * colour with gloss alpha are the two `*_alpha` ones; their map alpha is data, so
+ * #gpu_layer_alpha_coverage never joins them. */
+constexpr int gpu_layer_map_glossiness = 4194304;
+constexpr int gpu_layer_map_glossiness_alpha = 8388608;
+constexpr int gpu_layer_map_f0 = 16777216;
+constexpr int gpu_layer_map_f0_glossiness_alpha = 33554432;
+static_assert(gpu_layer_map_glossiness == 4194304, "COMBINED_LAYER_MAP_GLOSSINESS");
+static_assert(gpu_layer_map_glossiness_alpha == 8388608, "COMBINED_LAYER_MAP_GLOSSINESS_ALPHA");
+static_assert(gpu_layer_map_f0 == 16777216, "COMBINED_LAYER_MAP_F0");
+static_assert(gpu_layer_map_f0_glossiness_alpha == 33554432,
+              "COMBINED_LAYER_MAP_F0_GLOSSINESS_ALPHA");
 constexpr int gpu_layer_has_mask = 2048;
 constexpr int gpu_layer_row_store = 4096;
 constexpr int gpu_layer_row_use = 8192;

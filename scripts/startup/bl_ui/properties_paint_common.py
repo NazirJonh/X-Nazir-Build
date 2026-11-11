@@ -1444,6 +1444,11 @@ class PAINT_MT_material_layer_channel_socket(Menu):
             layout.prop_menu_enum(
                 channel.image.colorspace_settings, "name", text="Color Space",
             )
+            # What the map stores, next to the color space that decodes it: a glossiness or a
+            # specular colour is read as the channel's value everywhere the map is read. A
+            # correction's map is read in the channel's own scale, so it has none to choose.
+            if channel.channel in {'ROUGHNESS', 'SPECULAR'} and not layer.is_correction:
+                layout.prop_menu_enum(channel, "map_encoding", text="Map Encoding")
             drawn_any = True
 
         # Parity with the old Channels box: remove the record from here. Every channel of a layer
@@ -2828,8 +2833,10 @@ def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True
             "paint.material_channel_source_clear", text="", icon='X',
         ).channel = channel.channel
 
-    # Layer channels share this drawer but have no inversion; only a brush's Alpha and Height do.
-    if (channel.channel in {'ALPHA', 'HEIGHT'} and texture is not None and
+    # Layer channels share this drawer but have no inversion; only a brush's Alpha, Height and
+    # Roughness do (the last reads a glossiness texture as the roughness the stroke paints, see
+    # #channel_source_invertible).
+    if (channel.channel in {'ALPHA', 'HEIGHT', 'ROUGHNESS'} and texture is not None and
             "use_source_invert" in channel.bl_rna.properties):
         # Inverts the texture itself, so it holds for every read of this channel as a value. The
         # Mask Source has its own invert (#use_mask_source_invert on the brush's material paint),

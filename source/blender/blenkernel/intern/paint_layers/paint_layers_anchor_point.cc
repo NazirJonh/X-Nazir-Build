@@ -447,6 +447,7 @@ static uint64_t anchor_point_hash_row(uint64_t h,
                               get_default_hash(int(record.channel),
                                                int(record.state),
                                                int(record.flag),
+                                               int(record.map_encoding),
                                                record.image != nullptr ?
                                                    record.image->id.session_uid :
                                                    0));

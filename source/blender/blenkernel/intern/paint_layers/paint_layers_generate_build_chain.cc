@@ -301,6 +301,120 @@ NodeOutput PaintLayersTreeBuilder::normal_green_flip_nodes_add(bNodeTree &tree,
   return {combine, com_out};
 }
 
+NodeOutput PaintLayersTreeBuilder::map_encoding_nodes_add(bNodeTree &tree,
+                                                          const MaterialPaintLayerChannel &record,
+                                                          const NodeOutput map_color,
+                                                          Vector<bNode *> &r_nodes)
+{
+  const auto fail = [&](Vector<bNode *> &nodes) {
+    this->nodes_discard(tree, nodes);
+    return NodeOutput{};
+  };
+  if (map_color.node == nullptr || map_color.socket == nullptr) {
+    return {};
+  }
+  switch (paint_layer_map_encoding_get(record)) {
+    case MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS: {
+      /* Glossiness is the inverse of what the channel stores: the Invert (Fac one) turns the map's
+       * grey around, `1 - rgb`, its own alpha passing through as the coverage it stays. */
+      bNode *invert = bke::node_add_node(nullptr, tree, "ShaderNodeInvert"_ustr);
+      bNodeSocket *fac = (invert != nullptr) ? socket_in(*invert, "Fac") : nullptr;
+      bNodeSocket *color_in = (invert != nullptr) ? socket_in(*invert, "Color") : nullptr;
+      bNodeSocket *color_out = (invert != nullptr) ? socket_out(*invert, "Color") : nullptr;
+      if (invert == nullptr || fac == nullptr || color_in == nullptr || color_out == nullptr) {
+        if (invert != nullptr) {
+          bke::node_remove_node(nullptr, tree, *invert, true, false);
+        }
+        return {};
+      }
+      if (fac->default_value != nullptr) {
+        static_cast<bNodeSocketValueFloat *>(fac->default_value)->value = 1.0f;
+      }
+      grid_.place_extra(*invert);
+      bke::node_add_link(tree, *map_color.node, *map_color.socket, *invert, *color_in);
+      r_nodes.append(invert);
+      return {invert, color_out};
+    }
+    case MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA: {
+      /* The spec-gloss packing: the glossiness is the map's alpha, which is data here and no
+       * coverage. `1 - a` reads as the grey; the Combine leaves the colour's alpha at one, so the
+       * row covers by its opacity and mask alone (the caller leaves the coverage unwired). */
+      bNodeSocket *map_alpha = socket_out(*map_color.node, "Alpha");
+      if (map_alpha == nullptr) {
+        return {};
+      }
+      Vector<bNode *> created;
+      const NodeOutput grey = math_node_add(
+          tree, grid_, created, NODE_MATH_SUBTRACT, {}, {map_color.node, map_alpha}, 1.0f);
+      const NodeOutput converted = grey_combine_add(tree, grid_, created, grey);
+      if (converted.node == nullptr) {
+        return fail(created);
+      }
+      for (bNode *node : created) {
+        r_nodes.append(node);
+      }
+      return converted;
+    }
+    case MA_PAINT_LAYER_MAP_ENCODING_F0:
+    case MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA: {
+      /* The specular colour (the F0) reads as the IOR Level scalar: its scene luminance over the
+       * F0 a level of one is (#SPECULAR_LEVEL_F0_FULL), clamped 0..1 on the texel so the graph and
+       * the byte-wide bake cannot disagree. The luminance is the RGB to BW node's, whose GPU
+       * backend asks the scene coefficients the CPU helper uses; the Cycles OSL one is hard
+       * Rec.709, which the default configuration agrees with. */
+      bNode *bw = bke::node_add_node(nullptr, tree, "ShaderNodeRGBToBW"_ustr);
+      bNodeSocket *bw_in = (bw != nullptr) ? socket_in(*bw, "Color") : nullptr;
+      bNodeSocket *bw_out = (bw != nullptr) ? socket_out(*bw, "Val") : nullptr;
+      if (bw == nullptr || bw_in == nullptr || bw_out == nullptr) {
+        if (bw != nullptr) {
+          bke::node_remove_node(nullptr, tree, *bw, true, false);
+        }
+        return {};
+      }
+      grid_.place_extra(*bw);
+      bke::node_add_link(tree, *map_color.node, *map_color.socket, *bw, *bw_in);
+      Vector<bNode *> created;
+      created.append(bw);
+      const NodeOutput scaled = math_node_add(tree,
+                                              grid_,
+                                              created,
+                                              NODE_MATH_MULTIPLY,
+                                              {},
+                                              {bw, bw_out},
+                                              1.0f / SPECULAR_LEVEL_F0_FULL);
+      const NodeOutput low = (scaled.socket != nullptr) ?
+                                 math_node_add(tree,
+                                               grid_,
+                                               created,
+                                               NODE_MATH_MAXIMUM,
+                                               {},
+                                               {scaled.node, scaled.socket},
+                                               0.0f) :
+                                 NodeOutput{};
+      const NodeOutput level = (low.socket != nullptr) ?
+                                   math_node_add(tree,
+                                                 grid_,
+                                                 created,
+                                                 NODE_MATH_MINIMUM,
+                                                 {},
+                                                 {low.node, low.socket},
+                                                 1.0f) :
+                                   NodeOutput{};
+      const NodeOutput converted = grey_combine_add(tree, grid_, created, level);
+      if (converted.node == nullptr) {
+        return fail(created);
+      }
+      for (bNode *node : created) {
+        r_nodes.append(node);
+      }
+      return converted;
+    }
+    case MA_PAINT_LAYER_MAP_ENCODING_CHANNEL:
+      return {};
+  }
+  return {};
+}
+
 NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
                                                       LayerGroup &group,
                                                       const MaterialPaintLayer &layer)
@@ -892,6 +1006,32 @@ NodeOutput combine_xyz_node_add(bNodeTree &tree,
     bke::node_add_link(tree, *xyz[i].node, *xyz[i].socket, *node, *ins[i]);
   }
   return {node, out};
+}
+
+NodeOutput grey_combine_add(bNodeTree &tree,
+                            layout::LayoutGrid &grid,
+                            Vector<bNode *> &r_nodes,
+                            NodeOutput grey)
+{
+  bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineColor"_ustr);
+  bNodeSocket *red = (combine != nullptr) ? socket_in(*combine, "Red") : nullptr;
+  bNodeSocket *green = (combine != nullptr) ? socket_in(*combine, "Green") : nullptr;
+  bNodeSocket *blue = (combine != nullptr) ? socket_in(*combine, "Blue") : nullptr;
+  bNodeSocket *color_out = (combine != nullptr) ? socket_out(*combine, "Color") : nullptr;
+  if (combine == nullptr || red == nullptr || green == nullptr || blue == nullptr ||
+      color_out == nullptr || grey.socket == nullptr)
+  {
+    if (combine != nullptr) {
+      bke::node_remove_node(nullptr, tree, *combine, true, false);
+    }
+    return {};
+  }
+  grid.place_extra(*combine);
+  r_nodes.append(combine);
+  bke::node_add_link(tree, *grey.node, *grey.socket, *combine, *red);
+  bke::node_add_link(tree, *grey.node, *grey.socket, *combine, *green);
+  bke::node_add_link(tree, *grey.node, *grey.socket, *combine, *blue);
+  return {combine, color_out};
 }
 
 /**
@@ -2405,34 +2545,25 @@ KindEmitResult PaintLayersTreeBuilder::anchor_point_source_emit(const RowEmitCon
     if (mask.socket == nullptr) {
       return {};
     }
-    bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineColor"_ustr);
-    if (combine == nullptr) {
+    Vector<bNode *> created;
+    const NodeOutput color = grey_combine_add(tree, grid_, created, mask);
+    if (color.node == nullptr) {
       return {};
     }
-    bNodeSocket *red = socket_in(*combine, "Red");
-    bNodeSocket *green = socket_in(*combine, "Green");
-    bNodeSocket *blue = socket_in(*combine, "Blue");
-    bNodeSocket *result = socket_out(*combine, "Color");
-    if (red == nullptr || green == nullptr || blue == nullptr || result == nullptr) {
-      bke::node_remove_node(nullptr, tree, *combine, true, false);
-      return {};
-    }
-    grid_.place(*combine, layout::Column::Source, 0);
-    bke::node_add_link(tree, *mask.node, *mask.socket, *combine, *red);
-    bke::node_add_link(tree, *mask.node, *mask.socket, *combine, *green);
-    bke::node_add_link(tree, *mask.node, *mask.socket, *combine, *blue);
+    /* The reader's nodes sit with the source row's, not in the Extra column the helper claims. */
+    grid_.place(*color.node, layout::Column::Source, 0);
     bNode *one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
     bNodeSocket *one_out = (one != nullptr) ? socket_out(*one, "Value") : nullptr;
     if (one_out == nullptr || one_out->default_value == nullptr) {
       if (one != nullptr) {
         bke::node_remove_node(nullptr, tree, *one, true, false);
       }
-      bke::node_remove_node(nullptr, tree, *combine, true, false);
+      this->nodes_discard(tree, created);
       return {};
     }
     static_cast<bNodeSocketValueFloat *>(one_out->default_value)->value = 1.0f;
     grid_.place(*one, layout::Column::Source, 1);
-    out.color = {combine, result};
+    out.color = color;
     out.coverage = {one, one_out};
     out.content_alpha = {one, one_out};
     return out;
@@ -2726,11 +2857,28 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
       /* The Mapping moved only the read point; the tangent-space vectors follow it. */
       out.color = this->normal_remap_add(tree, ctx.layer, out.color, &source_nodes);
     }
-    if (bNodeSocket *map_alpha = socket_out(*map, "Alpha")) {
-      /* A clipping UV wrap takes the part outside the square out of the coverage, and with it the
-       * content alpha, which starts from the coverage. */
-      out.coverage = this->mapping_clip_alpha(tree, ctx.layer, {map, map_alpha}, source_nodes);
-      out.content_alpha = out.coverage;
+    if (out.color.socket != nullptr &&
+        paint_layer_map_encoding_get(*ctx.record) != MA_PAINT_LAYER_MAP_ENCODING_CHANNEL)
+    {
+      /* What the map stores (a glossiness, a specular colour) read as the channel's value, in
+       * nodes the user sees: the CPU composite and the GPU preview run the same formulas where
+       * they read the map. */
+      const NodeOutput converted = this->map_encoding_nodes_add(
+          tree, *ctx.record, out.color, source_nodes);
+      if (converted.node != nullptr) {
+        out.color = converted;
+      }
+    }
+    /* The spec-gloss packing leaves the coverage unwired: the map's alpha is glossiness data, not
+     * coverage, and the row covers by its opacity and mask alone, as the CPU and GPU descriptions
+     * say with `color_alpha_coverage = false`. An unwired coverage is the factor's one. */
+    if (!paint_layer_map_alpha_is_data(ctx.record)) {
+      if (bNodeSocket *map_alpha = socket_out(*map, "Alpha")) {
+        /* A clipping UV wrap takes the part outside the square out of the coverage, and with it
+         * the content alpha, which starts from the coverage. */
+        out.coverage = this->mapping_clip_alpha(tree, ctx.layer, {map, map_alpha}, source_nodes);
+        out.content_alpha = out.coverage;
+      }
     }
     layout::frame_add(tree, "Source", source_nodes);
   }

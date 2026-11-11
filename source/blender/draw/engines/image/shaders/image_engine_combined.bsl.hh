@@ -38,6 +38,18 @@
  * it reads from -- the per-texel counterpart of the negative-scale flip. */
 #define COMBINED_LAYER_MIRROR_U 1048576
 #define COMBINED_LAYER_MIRROR_V 2097152
+/* What the row's map stores (`#eMaterialPaintLayerMapEncoding`), read into the channel's value
+ * before the coverage: a glossiness map is `1 - rgb`, the spec-gloss packing reads `1 - alpha`
+ * with the map's alpha as data (no `COMBINED_LAYER_ALPHA_COVERAGE` alongside), an F0 colour reads
+ * as the specular level `clamp(dot(rgb, map_luma.rgb) * map_luma.a, 0, 1)`. */
+#define COMBINED_LAYER_MAP_GLOSSINESS 4194304
+#define COMBINED_LAYER_MAP_GLOSSINESS_ALPHA 8388608
+#define COMBINED_LAYER_MAP_F0 16777216
+/* The spec-gloss packing on the Specular record: the F0 level from the colour, the alpha glossiness
+ * data and so on, as the CPU composite reads it. */
+#define COMBINED_LAYER_MAP_F0_GLOSSINESS_ALPHA 33554432
+/* The F0 a level of one is (`0.08`, #SPECULAR_LEVEL_F0_FULL on the CPU) rides in `map_luma.w` as
+ * its reciprocal, so the pass multiplies by one value. */
 #define COMBINED_LAYER_HAS_MASK 2048
 /* The row stage: the layer pass stores the row's colour and coverage instead of blending them, and a
  * later pass blends what the corrections left. */
@@ -949,6 +961,12 @@ struct LayerResources {
   [[push_constant]] const float4 filter_params_1;
   /** A Color Balance's exponent triple; unused by every other filter. */
   [[push_constant]] const float4 filter_params_2;
+  /**
+   * The scene luminance an F0 map encoding reads a specular colour by: the RGB the scene
+   * coefficients (the ones the CPU helper and the RGB to BW nodes use), `w` the F0 a level of one
+   * is pre-divided (`1 / 0.08`).
+   */
+  [[push_constant]] const float4 map_luma;
   [[push_constant]] const float opacity;
   [[push_constant]] const float lod;
   [[push_constant]] const int flags;
@@ -1013,6 +1031,25 @@ void layer_comp([[resource_table]] LayerResources &srt,
                        srt.lod);
       if ((srt.flags & COMBINED_LAYER_NORMAL_DIRECTX) != 0) {
         top.y = 1.0f - top.y;
+      }
+      /* What the map stores, read as the channel's value where the texel enters the pass -- the
+       * same place the CPU composite converts and the generated graph builds nodes, so the three
+       * cannot disagree. The spec-gloss alpha packing reads `1 - a` and leaves the alpha one: it
+       * is glossiness data, not the coverage, which stays the pass's `1 x mask x opacity`. */
+      if ((srt.flags & COMBINED_LAYER_MAP_GLOSSINESS) != 0) {
+        top.xyz = float3(1.0f) - top.xyz;
+      }
+      else if ((srt.flags & COMBINED_LAYER_MAP_GLOSSINESS_ALPHA) != 0) {
+        const float roughness = 1.0f - clamp(top.w, 0.0f, 1.0f);
+        top = float4(float3(roughness), 1.0f);
+      }
+      else if ((srt.flags & COMBINED_LAYER_MAP_F0_GLOSSINESS_ALPHA) != 0) {
+        const float level = clamp(dot(top.xyz, srt.map_luma.xyz) * srt.map_luma.w, 0.0f, 1.0f);
+        top = float4(float3(level), 1.0f);
+      }
+      else if ((srt.flags & COMBINED_LAYER_MAP_F0) != 0) {
+        const float level = clamp(dot(top.xyz, srt.map_luma.xyz) * srt.map_luma.w, 0.0f, 1.0f);
+        top = float4(float3(level), top.w);
       }
     }
     if ((srt.flags & (COMBINED_LAYER_SLOT | COMBINED_LAYER_ALPHA_COVERAGE)) ==

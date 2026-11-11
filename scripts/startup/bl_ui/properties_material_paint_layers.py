@@ -158,7 +158,7 @@ def _draw_layer_channel_source_preview(layout, _context, record, locked=False):
         )
 
 
-def _draw_layer_channel_source(panel, _context, record, locked=False):
+def _draw_layer_channel_source(panel, _context, record, locked=False, is_correction=False):
     """The layer channel's source row: a "Drop image" picker writing the record's own image.
 
     `locked` draws it read-only, so the map owned by a Paint row can be seen but not swapped.
@@ -179,6 +179,13 @@ def _draw_layer_channel_source(panel, _context, record, locked=False):
     if record.channel == 'NORMAL' and not locked:
         space_row = panel.row(align=True)
         space_row.prop(record, "normal_space", text="Tangent Space", expand=True)
+    # What the map stores, which the stack reads as the channel's value. A glossiness or a
+    # specular colour reads converted everywhere, and the choice is inert while the record has no
+    # map, so it only shows for one that carries it. A correction's map is read by the correction
+    # chain in the channel's own scale, so it has no encoding to choose.
+    if (record.channel in {'ROUGHNESS', 'SPECULAR'} and record.image is not None
+            and not locked and not is_correction):
+        panel.prop(record, "map_encoding", text="Map Encoding")
 
 
 def _layer_color_eyedropper_path(record):
@@ -224,7 +231,8 @@ def _layer_channel_view(layer, record, channel_id, name):
         socket_context_set=(("material_paint_layer_channel", record),
                             ("material_paint_layer_owner", layer)),
         source_draw=lambda panel, ctx, enabled: _draw_layer_channel_source(
-            panel, ctx, record, locked=_layer_images_locked(layer)),
+            panel, ctx, record, locked=_layer_images_locked(layer),
+            is_correction=layer.is_correction),
         source_preview=lambda layout, ctx: _draw_layer_channel_source_preview(
             layout, ctx, record, locked=_layer_images_locked(layer)),
         source_has=lambda: record.image is not None,

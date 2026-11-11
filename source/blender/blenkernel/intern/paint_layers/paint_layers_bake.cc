@@ -1288,6 +1288,9 @@ static uint64_t bake_hash_layer(uint64_t h,
     h = bake_hash_mix(h, uint8_t(record.channel));
     h = bake_hash_mix(h, uint8_t(record.state));
     h = bake_hash_mix(h, uint8_t(record.flag));
+    /* How the map is read is baked into the result: a glossiness or an F0 colour lands in the
+     * cache as the channel's value, so the switch has to retire it. */
+    h = bake_hash_mix(h, uint8_t(record.map_encoding));
     h = bake_hash_mix(h, record.image != nullptr ? record.image->id.session_uid : 0);
     for (const float value : record.value) {
       h = bake_hash_float(h, value);

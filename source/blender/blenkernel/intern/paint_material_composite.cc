@@ -45,6 +45,7 @@
 
 #include "CLG_log.h"
 
+#include "paint_layers/paint_layers_intern.hh"
 #include "paint_layers/paint_layers_kind.hh"
 
 #include "paint_layers/paint_material_generator_group_ids.hh"
@@ -1332,6 +1333,16 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     if (layer.normal_directx) {
       for (int64_t i = 0; i < count; i++) {
         r_color[i * 4 + 1] = 1.0f - r_color[i * 4 + 1];
+      }
+    }
+    if (layer.map_encoding != int8_t(MA_PAINT_LAYER_MAP_ENCODING_CHANNEL)) {
+      /* What the map stores (glossiness, an F0 colour) read as the channel's value, before the
+       * coverage and any correction see the texel. The generated graph and the GPU preview run
+       * the same conversion from the same helper's formulas. */
+      const eMaterialPaintLayerMapEncoding encoding = eMaterialPaintLayerMapEncoding(
+          layer.map_encoding);
+      for (int64_t i = 0; i < count; i++) {
+        paint_layer_map_to_channel_value(encoding, r_color + i * 4);
       }
     }
   }
@@ -3371,6 +3382,10 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.constant_color[3]);
     hash = get_default_hash(hash, layer.color_alpha_coverage, layer.is_folder);
     hash = get_default_hash(hash, layer.empty_base, layer.tracks_content_alpha);
+    /* The read-time conversions are part of what the composite shows: a DirectX normal's green
+     * flip and a map encoding that reads glossiness or an F0 colour into the channel both change
+     * every texel, so either moving has to retire the cached composite. */
+    hash = get_default_hash(hash, layer.normal_directx, layer.map_encoding);
     /* A slice has no Image to name its contents: the description hash keeps a stale composite from
      * surviving an edit above the marker. */
     hash = get_default_hash(hash, layer.anchor_point_hash);

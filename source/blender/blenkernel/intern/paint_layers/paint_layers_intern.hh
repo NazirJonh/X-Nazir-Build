@@ -28,8 +28,11 @@
 #include "BKE_mesh_maps.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_import.hh"
+#include "BKE_paint_material_composite.hh"
 
 #include "paint_layers_kind.hh"
+
+#include "IMB_colormanagement.hh"
 
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
@@ -456,6 +459,144 @@ inline bool paint_layer_channel_contributes(const MaterialPaintLayerChannel *rec
 {
   return paint_layer_channel_live(record) && (record->image != nullptr || record->value[3] > 0.0f);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Map Encoding
+ *
+ * What a record's map stores (#eMaterialPaintLayerMapEncoding) and the one statement of the
+ * read-time conversion. The CPU composite, the generated graph and the GPU preview all ask these
+ * -- none of them may spell the formulas out for itself, or the three would drift.
+ *
+ * The conversion runs where the map's texels enter the stack (see
+ * #paint_layer_map_to_channel_value), so everything downstream -- corrections, masks, blending,
+ * bake, palette -- sees channel values. Non-linear blend modes therefore happen in the channel's
+ * space, on purpose: rows that read their maps differently must still blend in one space.
+ * \{ */
+
+/**
+ * The scene luminance of \a rgb: the weights the RGB to BW nodes use, from the scene's own
+ * coefficients (#IMB_colormanagement_get_luminance).
+ */
+inline float paint_layer_map_luminance(const float rgb[3])
+{
+  return IMB_colormanagement_get_luminance(rgb);
+}
+
+/** What the record's map stores. */
+inline eMaterialPaintLayerMapEncoding paint_layer_map_encoding_get(
+    const MaterialPaintLayerChannel &record)
+{
+  const int8_t encoding = record.map_encoding;
+  if (encoding < int8_t(MA_PAINT_LAYER_MAP_ENCODING_CHANNEL) ||
+      encoding > int8_t(MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA))
+  {
+    /* A file from a newer build: read the map as it lies rather than guess a conversion. */
+    return MA_PAINT_LAYER_MAP_ENCODING_CHANNEL;
+  }
+  return eMaterialPaintLayerMapEncoding(encoding);
+}
+
+/** Whether the record's Roughness map is glossiness in its RGB. */
+inline bool paint_layer_map_is_glossiness(const MaterialPaintLayerChannel *record)
+{
+  return record != nullptr && record->image != nullptr &&
+         paint_layer_map_encoding_get(*record) == MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS;
+}
+
+/** Whether the record's map carries glossiness in its alpha (the spec-gloss packing). */
+inline bool paint_layer_map_glossiness_from_alpha(const MaterialPaintLayerChannel *record)
+{
+  return record != nullptr && record->image != nullptr &&
+         paint_layer_map_encoding_get(*record) == MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA;
+}
+
+/** Whether the record's Specular map is the specular colour (the F0). */
+inline bool paint_layer_map_specular_is_f0(const MaterialPaintLayerChannel *record)
+{
+  if (record == nullptr || record->image == nullptr) {
+    return false;
+  }
+  const eMaterialPaintLayerMapEncoding encoding = paint_layer_map_encoding_get(*record);
+  return encoding == MA_PAINT_LAYER_MAP_ENCODING_F0 ||
+         encoding == MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA;
+}
+
+/**
+ * Whether the record's map alpha is data the channel reads (glossiness) rather than coverage.
+ * The row then covers by its opacity and mask alone: a spec-gloss texel with `a = 0.2` must not
+ * make the row half transparent, it makes it glossy.
+ */
+inline bool paint_layer_map_alpha_is_data(const MaterialPaintLayerChannel *record)
+{
+  if (record == nullptr || record->image == nullptr) {
+    return false;
+  }
+  const eMaterialPaintLayerMapEncoding encoding = paint_layer_map_encoding_get(*record);
+  return encoding == MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA ||
+         encoding == MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA;
+}
+
+/**
+ * Convert one map texel into the channel's value, in place, by \a encoding. The map's RGBA comes
+ * as scene-linear floats exactly as the map's readers decode it (a stored byte over 255 for a data
+ * map, decoded for a colour map), and leaves as the channel's scale:
+ *
+ * - `GLOSSINESS`: `roughness = 1 - rgb`, the texel's own alpha kept (it stays the coverage);
+ * - `GLOSSINESS_ALPHA`: `roughness = 1 - a`, the RGB carrying the value grey and the alpha one
+ *   (the caller reads the coverage from `#paint_layer_map_alpha_is_data` instead);
+ * - `F0`, `F0_GLOSSINESS_ALPHA`: `level = clamp(luma(rgb) / 0.08, 0, 1)` in the RGB, the alpha
+ *   kept (coverage) for the former and one for the latter;
+ * - `CHANNEL` and anything unknown: the texel over as it is.
+ *
+ * The level clamps here, on the texel, so the composite and the byte-wide bake cannot disagree.
+ */
+inline void paint_layer_map_to_channel_value(const eMaterialPaintLayerMapEncoding encoding,
+                                             float rgba[4])
+{
+  switch (encoding) {
+    case MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS: {
+      rgba[0] = 1.0f - rgba[0];
+      rgba[1] = 1.0f - rgba[1];
+      rgba[2] = 1.0f - rgba[2];
+      break;
+    }
+    case MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA: {
+      const float roughness = 1.0f - clamp_f(rgba[3], 0.0f, 1.0f);
+      rgba[0] = roughness;
+      rgba[1] = roughness;
+      rgba[2] = roughness;
+      rgba[3] = 1.0f;
+      break;
+    }
+    case MA_PAINT_LAYER_MAP_ENCODING_F0: {
+      const float level = clamp_f(
+          paint_layer_map_luminance(rgba) / SPECULAR_LEVEL_F0_FULL, 0.0f, 1.0f);
+      rgba[0] = level;
+      rgba[1] = level;
+      rgba[2] = level;
+      break;
+    }
+    case MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA: {
+      const float level = clamp_f(
+          paint_layer_map_luminance(rgba) / SPECULAR_LEVEL_F0_FULL, 0.0f, 1.0f);
+      rgba[0] = level;
+      rgba[1] = level;
+      rgba[2] = level;
+      rgba[3] = 1.0f;
+      break;
+    }
+    case MA_PAINT_LAYER_MAP_ENCODING_CHANNEL:
+      break;
+  }
+}
+
+/** The conversion of \a record's map encoding: the one form the readers of a record use. */
+inline void paint_layer_map_to_channel_value(const MaterialPaintLayerChannel &record, float rgba[4])
+{
+  paint_layer_map_to_channel_value(paint_layer_map_encoding_get(record), rgba);
+}
+
+/** \} */
 
 /**
  * Whether \a channel is filtered out by \a ma's global paint channel set.

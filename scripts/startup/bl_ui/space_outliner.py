@@ -405,6 +405,41 @@ class OUTLINER_MT_smart_asset_save(Menu):
             props.type = asset_type
 
 
+def _stack_layer_map_encoding_items_draw(layout, channel):
+    """The encodings the channel takes, as the map-encoding operator's items. Which pair a channel
+    takes is the BKE setter's to say -- ``BKE_paint_layers_channel_map_encoding_allowed`` (see
+    ``BKE_paint_layers.hh``) is the one place the matrix is written, and the C++ menus filter
+    through it -- so this list names the pairs and leaves the refusal to the operator's exec."""
+    items = (
+        ('CHANNEL', "Roughness"),
+        ('GLOSSINESS', "Glossiness"),
+        ('GLOSSINESS_ALPHA', "Glossiness (Alpha)"),
+    ) if channel == 'ROUGHNESS' else (
+        ('CHANNEL', "Level"),
+        ('F0', "Specular Colour (F0)"),
+        ('F0_GLOSSINESS_ALPHA', "Specular + Glossiness (Alpha)"),
+    )
+    for encoding, text in items:
+        props = layout.operator(
+            "outliner.stack_layer_channel_map_encoding", text=text)
+        props.channel = channel
+        props.encoding = encoding
+
+
+class OUTLINER_MT_stack_layer_roughness_encoding(Menu):
+    bl_label = "Set Roughness Encoding"
+
+    def draw(self, _context):
+        _stack_layer_map_encoding_items_draw(self.layout, 'ROUGHNESS')
+
+
+class OUTLINER_MT_stack_layer_specular_encoding(Menu):
+    bl_label = "Set Specular Encoding"
+
+    def draw(self, _context):
+        _stack_layer_map_encoding_items_draw(self.layout, 'SPECULAR')
+
+
 class OUTLINER_MT_context_menu(Menu):
     bl_label = "Outliner"
 
@@ -490,6 +525,35 @@ class OUTLINER_MT_context_menu(Menu):
                         "channel",
                         text="Paste Image",
                         icon='PASTEDOWN',
+                    )
+                # A specular map is a colour (or glossiness) where the Specular slot reads a
+                # scalar: the converter makes the maps the slots read, so the poll only lists it
+                # for a row whose Specular slot carries a map.
+                if bpy.ops.outliner.stack_layer_specular_convert.poll():
+                    layout.operator_menu_enum(
+                        "outliner.stack_layer_specular_convert",
+                        "kind",
+                        text="Convert Specular Map",
+                        icon='INDIRECT_ONLY_ON',
+                    )
+                # The no-bake way round: the map keeps its pixels and the slot reads it
+                # differently. The quick toggle covers the common case (a glossiness map dropped
+                # on Roughness); the submenus carry every pair the channel takes.
+                if bpy.ops.outliner.stack_layer_channel_map_encoding.poll():
+                    props = layout.operator(
+                        "outliner.stack_layer_channel_map_encoding",
+                        text="Roughness: Read as Glossiness",
+                        icon='MOD_INVERT',
+                    )
+                    props.channel = 'ROUGHNESS'
+                    props.toggle = True
+                    layout.menu(
+                        "OUTLINER_MT_stack_layer_roughness_encoding",
+                        icon='MOD_INVERT',
+                    )
+                    layout.menu(
+                        "OUTLINER_MT_stack_layer_specular_encoding",
+                        icon='SHADERFX',
                     )
                 if bpy.ops.outliner.stack_layer_material_copy.poll():
                     layout.operator(

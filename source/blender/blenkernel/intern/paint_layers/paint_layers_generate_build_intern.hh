@@ -154,6 +154,17 @@ NodeOutput combine_xyz_node_add(bNodeTree &tree,
                                 Vector<bNode *> &r_nodes,
                                 const NodeOutput xyz[3]);
 
+/**
+ * A Combine Color node laying the single grey \a grey over its own RGB: the scalar the stack
+ * computed comes back a colour. The alpha stays unwired, so the combine reads one and the row
+ * covers by its opacity and mask alone. Empty, with nothing left in the tree, when the node cannot
+ * be made.
+ */
+NodeOutput grey_combine_add(bNodeTree &tree,
+                            layout::LayoutGrid &grid,
+                            Vector<bNode *> &r_nodes,
+                            NodeOutput grey);
+
 /** A Mix node in float mode, `mix(A, B, factor)`; null when it cannot be made. */
 bNode *mix_float_node_add(bNodeTree &tree);
 
@@ -665,6 +676,23 @@ class PaintLayersTreeBuilder {
   NodeOutput normal_green_flip_nodes_add(bNodeTree &tree,
                                          NodeOutput color,
                                          Vector<bNode *> &r_nodes);
+
+  /**
+   * \a map_color -- the color output of the record's map node -- with the record's map encoding
+   * (#eMaterialPaintLayerMapEncoding) read out of it, as nodes the user sees in the Shader Editor:
+   * an Invert for a glossiness map, a Subtract from the map's alpha combined back to grey for the
+   * spec-gloss packing, an RGB to BW, a Multiply and a Clamp for the F0 colour. The same formulas
+   * #paint_layer_map_to_channel_value runs for the CPU composite; the GPU preview mirrors them.
+   *
+   * The nodes made are appended to \a r_nodes; empty when one is missing, in which case nothing
+   * was added and the map reads unconverted. The spec-gloss packing also takes the map's alpha out
+   * of the coverage, which the caller asks #paint_layer_map_alpha_is_data for: an unwired coverage
+   * is the factor's one.
+   */
+  NodeOutput map_encoding_nodes_add(bNodeTree &tree,
+                                    const MaterialPaintLayerChannel &record,
+                                    NodeOutput map_color,
+                                    Vector<bNode *> &r_nodes);
 
   /**
    * The three UV mapping inputs of \a row (offset, scale, rotation), named after \a label, in

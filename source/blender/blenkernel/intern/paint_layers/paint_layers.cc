@@ -1589,6 +1589,40 @@ void BKE_paint_layers_map_coverage_image_use_data(Main &bmain, Image &image)
   BKE_image_signal(&bmain, &image, nullptr, IMA_SIGNAL_COLORMANAGE);
 }
 
+/**
+ * Make \a image read as data when a map of it lands on a scalar \a channel of a row.
+ *
+ * This is the guardrail, not the driver: the caller (the RNA image set) runs it only when the
+ * record's image really changed, and never on an image another record of the same material reads
+ * with a colour encoding -- the no-bake spec-gloss set has the same image under the Specular
+ * record as the F0 colour and under the Roughness record as the glossiness, so flipping it to data
+ * for one would bend the F0 the other reads. A same-material second user the caller can see; a
+ * foreign one is the user's own colorspace choice.
+ */
+void BKE_paint_layers_channel_map_use_data(Main &bmain,
+                                           Image &image,
+                                           const eMaterialPaintChannel channel)
+{
+  if (BKE_paint_material_channel_info(channel).is_color) {
+    return;
+  }
+  /* A Specular map may be the specular colour (the F0 map encoding), which is a colour and has to
+   * keep its colour space -- forcing it to data would read the F0 through a raw sRGB triple and
+   * saturate the level. A level map the user wants as data sets it in the channel's own menu. */
+  if (channel == PAINT_MATERIAL_CHANNEL_SPECULAR) {
+    return;
+  }
+  const char *data_name = IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA);
+  if (data_name == nullptr || STREQ(image.colorspace_settings.name, data_name)) {
+    return;
+  }
+  /* A scalar channel reads data: an sRGB decode would bend every value before the stack -- and
+   * before an encoding's inversion -- sees it, the quiet error a glossiness map dropped on
+   * Roughness makes. The map becomes Non-Color, the way the specular converter writes its maps. */
+  STRNCPY(image.colorspace_settings.name, data_name);
+  BKE_image_signal(&bmain, &image, nullptr, IMA_SIGNAL_COLORMANAGE);
+}
+
 float BKE_paint_layers_coverage_tolerance_get(const MaterialPaintLayer &item)
 {
   return paint_layer_kind_param_get(item, PAINT_LAYER_COVERAGE_TOLERANCE);
@@ -2083,7 +2117,15 @@ bool BKE_paint_layers_channel_set_image(Material &ma,
      * gamma-decoded into wrong normal / roughness / metallic values, and a Normal's flips (a
      * mirror, a negative scale) would act about the wrong centre. The brush channels already do
      * this on assignment (see rna_BrushMaterialPaintChannel_source_image_set). */
-    if (!BKE_paint_material_channel_info(channel).is_color) {
+    /* A map read as the F0 colour (this record's own, or the Specular record of the same row that
+     * shares the image in the no-bake spec-gloss set) is a colour: Non-Color would bend its level. */
+    bool read_as_color = paint_layer_map_specular_is_f0(record);
+    if (layer != nullptr) {
+      for (const MaterialPaintLayerChannel &other : Span(layer->channels, layer->channels_num)) {
+        read_as_color |= other.image == image && paint_layer_map_specular_is_f0(&other);
+      }
+    }
+    if (!BKE_paint_material_channel_info(channel).is_color && !read_as_color) {
       const char *data_name = IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA);
       if (data_name != nullptr && data_name[0] != '\0' &&
           !STREQ(image->colorspace_settings.name, data_name))
@@ -2274,6 +2316,74 @@ bool BKE_paint_layers_normal_set_directx(Material &ma, MaterialPaintLayer *layer
   }
   BKE_paint_layers_tag_edited(ma);
   return true;
+}
+
+bool BKE_paint_layers_channel_map_encoding_allowed(const eMaterialPaintChannel channel,
+                                                   const eMaterialPaintLayerMapEncoding encoding)
+{
+  switch (channel) {
+    case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
+      switch (encoding) {
+        case MA_PAINT_LAYER_MAP_ENCODING_CHANNEL:
+        case MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS:
+        case MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA:
+          return true;
+        default:
+          return false;
+      }
+    case PAINT_MATERIAL_CHANNEL_SPECULAR:
+      switch (encoding) {
+        case MA_PAINT_LAYER_MAP_ENCODING_CHANNEL:
+        case MA_PAINT_LAYER_MAP_ENCODING_F0:
+        case MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA:
+          return true;
+        default:
+          return false;
+      }
+    default:
+      /* A record of any other channel reads its map as it lies; the encodings name conversions
+       * only the two scalar channels above take. */
+      return encoding == MA_PAINT_LAYER_MAP_ENCODING_CHANNEL;
+  }
+}
+
+const MaterialPaintLayerChannel *BKE_paint_layers_row_channel_find(
+    const MaterialPaintLayer &row, const eMaterialPaintChannel channel)
+{
+  return paint_layer_channel_find(row, int(channel));
+}
+
+bool BKE_paint_layers_channel_set_map_encoding(Material &ma,
+                                               MaterialPaintLayer *layer,
+                                               const eMaterialPaintChannel channel,
+                                               const eMaterialPaintLayerMapEncoding encoding)
+{
+  MaterialPaintLayerChannel *record = paint_layer_channel_in_stack(ma, layer, channel);
+  if (record == nullptr) {
+    return false;
+  }
+  /* The encoding is read where a row's own map enters the stack. A correction's map is read by the
+   * correction chain, which works in the channel's scale, so an encoding there would be a setting
+   * nothing reads; a painted row's map is painted in the channel's scale for the same reason. */
+  if (!paint_layer_in_stack(ma, layer) ||
+      BKE_paint_layers_row_image_map_issue(*layer) != PaintLayerImageMapIssue::None)
+  {
+    return false;
+  }
+  if (!BKE_paint_layers_channel_map_encoding_allowed(channel, encoding)) {
+    return false;
+  }
+  record->map_encoding = int8_t(encoding);
+  /* The map's read changes what the stack shows: the description, the graph's source nodes and
+   * the GPU preview all follow it, so this is a regeneration, not a value edit. */
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+eMaterialPaintLayerMapEncoding BKE_paint_layers_channel_map_encoding_get(
+    const MaterialPaintLayerChannel &record)
+{
+  return paint_layer_map_encoding_get(record);
 }
 
 /* The mapping sits between pointer members of #MaterialPaintLayer: a size that is not a multiple of

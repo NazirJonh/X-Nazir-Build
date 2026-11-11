@@ -564,6 +564,153 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_mask_from_alpha_reads_alpha_not_lu
   EXPECT_NEAR(linear_pixel(stack, 0, 0)[0], 200.0f / 255.0f, 1e-5f);
 }
 
+/* The read-time conversion the description asks for and the evaluator runs on the decoded texels:
+ * glossiness as `1 - rgb`, the spec-gloss packing as `1 - alpha` with the alpha as data, an F0
+ * colour as the specular level. The generated graph and the GPU preview state the same formulas;
+ * these tests pin the CPU's numbers. */
+
+class PaintMaterialCompositeMapEncodingTest : public PaintMaterialCompositeEvalTest {
+ public:
+  /** A 2x2 grey buffer with \a values laid row-major, alpha opaque. */
+  ImBuf *add_grey_buffer(const uchar values[4])
+  {
+    ImBuf *ibuf = IMB_allocImBuf(2, 2, ImBufFlags::ByteData);
+    ibuf->channels = 4;
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int i : IndexRange(4)) {
+      pixels[i * 4 + 0] = values[i];
+      pixels[i * 4 + 1] = values[i];
+      pixels[i * 4 + 2] = values[i];
+      pixels[i * 4 + 3] = 255;
+    }
+    owned_buffers.append(ibuf);
+    return ibuf;
+  }
+
+  /** A 2x2 buffer with the grey \a value everywhere and \a alphas in the alpha channel. */
+  ImBuf *add_grey_alpha_buffer(const uchar value, const uchar alphas[4])
+  {
+    ImBuf *ibuf = IMB_allocImBuf(2, 2, ImBufFlags::ByteData);
+    ibuf->channels = 4;
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int i : IndexRange(4)) {
+      pixels[i * 4 + 0] = value;
+      pixels[i * 4 + 1] = value;
+      pixels[i * 4 + 2] = value;
+      pixels[i * 4 + 3] = alphas[i];
+    }
+    owned_buffers.append(ibuf);
+    return ibuf;
+  }
+
+  /** The encoded 2x2 grey over an opaque mid-grey bottom, at the texel \a index (row-major). */
+  std::array<float, 4> encoded_pixel(PaintMaterialCompositeLayer &layer, const int index)
+  {
+    PaintMaterialCompositeStack stack;
+    stack.width = 2;
+    stack.height = 2;
+    PaintMaterialCompositeLayer bottom;
+    bottom.color_ibuf = add_buffer(128, 128, 128, 255);
+    make_data(bottom.color_ibuf);
+    stack.layers.append(bottom);
+    stack.layers.append(layer);
+    const int x = index % 2;
+    const int y = index / 2;
+    return linear_pixel(stack, x, y);
+  }
+};
+
+TEST_F(PaintMaterialCompositeMapEncodingTest, glossiness_map_reads_as_roughness)
+{
+  /* Gloss {0, 0.25, 0.5, 1} in the map: the channel reads 1 - gloss, within the byte the map
+   * itself was quantized to. */
+  const uchar gloss[4] = {0, 64, 128, 255};
+  PaintMaterialCompositeLayer layer;
+  layer.color_ibuf = add_grey_buffer(gloss);
+  make_data(layer.color_ibuf);
+  layer.map_encoding = int8_t(MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS);
+  layer.color_alpha_coverage = true;
+
+  const std::array<float, 4> opaque = encoded_pixel(layer, 0);
+  EXPECT_NEAR(opaque[0], 1.0f, 1e-5f);
+  const std::array<float, 4> quarter = encoded_pixel(layer, 1);
+  EXPECT_NEAR(quarter[0], 0.75f, 1.0f / 255.0f + 1e-5f);
+  const std::array<float, 4> half = encoded_pixel(layer, 2);
+  EXPECT_NEAR(half[0], 0.5f, 1.0f / 255.0f + 1e-5f);
+  const std::array<float, 4> full = encoded_pixel(layer, 3);
+  EXPECT_NEAR(full[0], 0.0f, 1e-5f);
+  /* The map's own alpha stays the coverage: the texel covers as a painted map does. */
+  EXPECT_NEAR(full[3], 1.0f, 1e-5f);
+}
+
+TEST_F(PaintMaterialCompositeMapEncodingTest, glossiness_without_encoding_reads_as_roughness_flat)
+{
+  /* The same map without the encoding reads as the roughness it lies: the pin that the encoding,
+   * not the presence of a grey map, does the conversion. */
+  const uchar gloss[4] = {0, 64, 128, 255};
+  PaintMaterialCompositeLayer layer;
+  layer.color_ibuf = add_grey_buffer(gloss);
+  make_data(layer.color_ibuf);
+  const std::array<float, 4> zero = encoded_pixel(layer, 0);
+  EXPECT_NEAR(zero[0], 0.0f, 1e-5f);
+}
+
+TEST_F(PaintMaterialCompositeMapEncodingTest, glossiness_alpha_reads_as_roughness_and_not_coverage)
+{
+  /* The spec-gloss packing: the alpha is glossiness, so `a = 0.2` reads as roughness 0.8 and the
+   * row stays opaque -- the map's alpha is data, never the coverage. */
+  const uchar alphas[4] = {51, 51, 255, 255};
+  PaintMaterialCompositeLayer layer;
+  layer.color_ibuf = add_grey_alpha_buffer(200, alphas);
+  make_data(layer.color_ibuf);
+  layer.map_encoding = int8_t(MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA);
+  /* What the description says for the alpha-data encodings: no coverage from the map. */
+  layer.color_alpha_coverage = false;
+
+  const std::array<float, 4> glossy = encoded_pixel(layer, 0);
+  EXPECT_NEAR(glossy[0], 1.0f - 51.0f / 255.0f, 1e-5f);
+  EXPECT_NEAR(glossy[3], 1.0f, 1e-5f);
+  const std::array<float, 4> plain = encoded_pixel(layer, 2);
+  EXPECT_NEAR(plain[0], 0.0f, 1e-5f);
+}
+
+TEST_F(PaintMaterialCompositeMapEncodingTest, f0_colour_reads_as_the_specular_level)
+{
+  /* A dielectric F0 of 0.04 is the level 0.5; a metal's 1.0 clamps; a plain level map reads as it
+   * lies when no encoding says otherwise. The values are grey, so any scene luminance reads the
+   * value itself. */
+  const uchar f0_dielectric = uchar(0.04f * 255.0f + 0.5f);
+  PaintMaterialCompositeLayer layer;
+  layer.color_ibuf = add_grey_buffer({f0_dielectric, f0_dielectric, 255, 255});
+  make_data(layer.color_ibuf);
+  layer.map_encoding = int8_t(MA_PAINT_LAYER_MAP_ENCODING_F0);
+  layer.color_alpha_coverage = true;
+
+  const std::array<float, 4> dielectric = encoded_pixel(layer, 0);
+  EXPECT_NEAR(dielectric[0], 0.5f, 1.0f / 255.0f + 1e-5f);
+  const std::array<float, 4> metal = encoded_pixel(layer, 2);
+  EXPECT_NEAR(metal[0], 1.0f, 1e-5f);
+  /* The F0 map's own alpha stays the coverage (only the spec-gloss packing takes it out). */
+  EXPECT_NEAR(metal[3], 1.0f, 1e-5f);
+}
+
+TEST_F(PaintMaterialCompositeMapEncodingTest, f0_with_gloss_alpha_is_level_and_opaque)
+{
+  /* The spec-gloss set on the Specular record: the colour reads as the level and the alpha --
+   * glossiness data -- leaves the row opaque. */
+  const uchar f0_dielectric = uchar(0.04f * 255.0f + 0.5f);
+  const uchar alphas[4] = {51, 51, 51, 51};
+  PaintMaterialCompositeLayer layer;
+  layer.color_ibuf = add_grey_alpha_buffer(f0_dielectric, alphas);
+  make_data(layer.color_ibuf);
+  layer.map_encoding = int8_t(MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA);
+  layer.color_alpha_coverage = false;
+
+  const std::array<float, 4> texel = encoded_pixel(layer, 1);
+  EXPECT_NEAR(texel[0], 0.5f, 1.0f / 255.0f + 1e-5f);
+  EXPECT_NEAR(texel[3], 1.0f, 1e-5f);
+}
+
 TEST_F(PaintMaterialCompositeEvalTest, linear_normal_combine_lays_relief_over_relief)
 {
   /* Two normal maps tilted the same way along X. Combining them must tilt further than either,

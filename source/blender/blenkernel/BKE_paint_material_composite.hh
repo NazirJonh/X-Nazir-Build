@@ -430,6 +430,15 @@ inline bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradi
 }
 
 /**
+ * The F0 a Specular IOR Level of one stands for: `level = F0 / SPECULAR_LEVEL_F0_FULL`. The
+ * specular-glossiness packing and the F0 map encoding read a specular colour into the channel by
+ * this rule, and the specular converter bakes the same division into a level map, so every path
+ * shares the one constant (0.08, the dielectric F0 at the default IOR of 1.5 doubled; a level of
+ * 0.5 is 0.04, the engines' convention).
+ */
+constexpr float SPECULAR_LEVEL_F0_FULL = 0.08f;
+
+/**
  * The Compare mode's gate: whether a record's height at a texel beats the height the rows below it
  * accumulated. Both are given as distances from the neutral level, the space every height mode
  * works in.
@@ -475,6 +484,14 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
   bool color_alpha_coverage = false;
   /** A Normal map authored in DirectX convention; convert its green channel to OpenGL before blend. */
   bool normal_directx = false;
+  /**
+   * What the row's map stores (#eMaterialPaintLayerMapEncoding): the conversion into the channel's
+   * own scale happens while the map is read, before anything downstream sees the texel. Zero keeps
+   * the map as it lies. With #MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA or
+   * #MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA the map's alpha is data and
+   * #color_alpha_coverage is false: the row covers by its opacity and mask alone.
+   */
+  int8_t map_encoding = 0;
   /**
    * The mask is the image's alpha rather than its colour.
    *

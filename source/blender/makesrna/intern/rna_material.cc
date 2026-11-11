@@ -22,6 +22,7 @@
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 
+#include "BLI_index_range.hh"
 #include "BLI_math_gradient.hh"
 #include "BLI_math_rotation.h"
 
@@ -2449,6 +2450,13 @@ static bool rna_MaterialPaintLayer_is_anchor_point_reader_get(PointerRNA *ptr)
   return BKE_paint_layers_reads_anchor_point(*static_cast<const MaterialPaintLayer *>(ptr->data));
 }
 
+/** Whether the row is a content correction: a modifier of its layer rather than a stack row. */
+static bool rna_MaterialPaintLayer_is_correction_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->role == MA_PAINT_LAYER_ROLE_EFFECT;
+}
+
 /** How many channels the row takes part in; the generator's node-cost measure for the row. */
 static int rna_MaterialPaintLayer_channel_weight_get(PointerRNA *ptr)
 {
@@ -4344,39 +4352,70 @@ static int rna_MaterialPaintLayerChannel_state_get(PointerRNA *ptr)
   return record->state;
 }
 
+/**
+ * Whether a record of \a ma reads \a image with a colour encoding (the F0 kinds). One image may
+ * serve two records of the same material -- the no-bake spec-gloss set reads the Specular's map
+ * again under Roughness -- and flipping it to data for a scalar record would bend the F0 colour
+ * the other record reads, so the colour-space guardrails skip such an image.
+ */
+static bool rna_paint_layer_map_color_encoding_user_find(Material &ma, const Image &image)
+{
+  bool found = false;
+  BKE_paint_layers_foreach(ma, [&](const MaterialPaintLayer &row,
+                                   const MaterialPaintLayer * /*parent*/) {
+    for (const int i : IndexRange(row.channels_num)) {
+      const MaterialPaintLayerChannel &record = row.channels[i];
+      if (record.image == &image &&
+          ELEM(BKE_paint_layers_channel_map_encoding_get(record),
+               MA_PAINT_LAYER_MAP_ENCODING_F0,
+               MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA))
+      {
+        found = true;
+        return false;
+      }
+    }
+    return true;
+  });
+  return found;
+}
+
 static void rna_MaterialPaintLayerChannel_image_set(PointerRNA *ptr,
                                                     PointerRNA value,
                                                     ReportList * /*reports*/)
 {
   MaterialPaintLayer *layer = nullptr;
   if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
-    BKE_paint_layers_channel_set_image(
-        *ma,
-        layer,
-        eMaterialPaintChannel(rna_MaterialPaintLayerChannel_channel_get(ptr)),
-        static_cast<Image *>(value.data));
-  }
-}
-
-static void rna_MaterialPaintLayerChannel_image_update(Main *bmain,
-                                                       Scene *scene,
-                                                       PointerRNA *ptr)
-{
-  /* A Color ID item compares the map's texels against stored colours, so the map is read as data:
-   * the colour space is part of "the ID Map" being right. Dropping an image, opening one and
-   * picking one all come through the image property. This is the update callback, as only it gets
-   * the #Main the colour space signal needs. */
-  MaterialPaintLayer *layer = nullptr;
-  if (rna_paint_layer_sub_owner(ptr, &layer) != nullptr && layer != nullptr &&
-      BKE_paint_layers_is_map_coverage(*layer) && !BKE_paint_layers_map_coverage_paintable(*layer))
-  {
-    const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
-        ptr->data);
-    if (record->image != nullptr) {
-      BKE_paint_layers_map_coverage_image_use_data(*bmain, *record->image);
+    const eMaterialPaintChannel channel = eMaterialPaintChannel(
+        rna_MaterialPaintLayerChannel_channel_get(ptr));
+    const MaterialPaintLayerChannel *record = BKE_paint_layers_row_channel_find(*layer, channel);
+    Image *previous = (record != nullptr) ? record->image : nullptr;
+    Image *image = static_cast<Image *>(value.data);
+    if (!BKE_paint_layers_channel_set_image(*ma, layer, channel, image)) {
+      return;
+    }
+    /* The colour-space guardrails run on the change itself, here where it was seen: the update
+     * callback fires on every assignment, a re-assign of the same image included, and would flip
+     * an image nothing changed for. As the brush channel's source image does (see
+     * #rna_BrushMaterialPaintChannel_source_image_set), a set function has no #Main; the editor's
+     * is the one this data lives in. */
+    if (image == nullptr || image == previous) {
+      return;
+    }
+    Main *bmain = G_MAIN;
+    /* A Color ID item compares the map's texels against stored colours, so the map is read as
+     * data: the colour space is part of "the ID Map" being right. */
+    if (BKE_paint_layers_is_map_coverage(*layer) &&
+        !BKE_paint_layers_map_coverage_paintable(*layer) &&
+        !rna_paint_layer_map_color_encoding_user_find(*ma, *image))
+    {
+      BKE_paint_layers_map_coverage_image_use_data(*bmain, *image);
+    }
+    /* The guardrail for the scalar channels: a map dropped on Roughness or its kind reads as data,
+     * the same rule the map encoding's inversion assumes. */
+    if (!rna_paint_layer_map_color_encoding_user_find(*ma, *image)) {
+      BKE_paint_layers_channel_map_use_data(*bmain, *image, channel);
     }
   }
-  rna_Material_update(bmain, scene, ptr);
 }
 
 static void rna_MaterialPaintLayerChannel_value_get(PointerRNA *ptr, float *value)
@@ -4534,6 +4573,103 @@ static void rna_MaterialPaintLayerChannel_normal_space_set(PointerRNA *ptr, int 
   if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
     BKE_paint_layers_normal_set_directx(*ma, layer, value == 1);
   }
+}
+
+static int rna_MaterialPaintLayerChannel_map_encoding_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  return int(BKE_paint_layers_channel_map_encoding_get(*record));
+}
+
+static void rna_MaterialPaintLayerChannel_map_encoding_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
+    const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+        ptr->data);
+    /* The setter refuses a pair the channel does not take, so the map never lies about its scale.
+     * A refusal writes nothing: the record keeps its encoding and the get, which reads the record,
+     * shows the value that is really there -- the UI re-asks rather than a set that lied. */
+    BKE_paint_layers_channel_set_map_encoding(
+        *ma, layer, eMaterialPaintChannel(record->channel), eMaterialPaintLayerMapEncoding(value));
+  }
+}
+
+static const EnumPropertyItem *rna_MaterialPaintLayerChannel_map_encoding_itemf(
+    bContext * /*C*/, PointerRNA *ptr, PropertyRNA * /*prop*/, bool *r_free)
+{
+  /* Every encoding a record may name, as one list: which pair the record's channel takes is the
+   * BKE predicate's to say (#BKE_paint_layers_channel_map_encoding_allowed, the one place the
+   * matrix is written), so a new encoding joins the DNA enum and the BKE matrix and every menu
+   * built from here follows. The identity item is relabeled per channel, as the two channels that
+   * take an encoding name their own value differently. */
+  static const EnumPropertyItem items[] = {
+      {int(MA_PAINT_LAYER_MAP_ENCODING_CHANNEL),
+       "CHANNEL",
+       0,
+       "Channel",
+       "The map stores the channel's own value"},
+      {int(MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS),
+       "GLOSSINESS",
+       ICON_ARROW_LEFTRIGHT,
+       "Glossiness",
+       "The map is glossiness: the channel reads 1 - value"},
+      {int(MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA),
+       "GLOSSINESS_ALPHA",
+       ICON_ARROW_LEFTRIGHT,
+       "Glossiness (Alpha)",
+       "The map carries glossiness in its alpha (the spec-gloss packing): the channel reads "
+       "1 - alpha, and the map's alpha is data, not coverage"},
+      {int(MA_PAINT_LAYER_MAP_ENCODING_F0),
+       "F0",
+       ICON_SHADERFX,
+       "Specular Colour (F0)",
+       "The map is the specular colour: the channel reads level = luminance / 0.08, clamped to "
+       "0..1"},
+      {int(MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA),
+       "F0_GLOSSINESS_ALPHA",
+       ICON_SHADERFX,
+       "Specular + Glossiness (Alpha)",
+       "The map is the specular colour with glossiness in its alpha: the channel reads the level "
+       "from the colour, and the map's alpha is data, not coverage"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  const eMaterialPaintChannel channel = eMaterialPaintChannel(record->channel);
+  const char *channel_name = (channel == PAINT_MATERIAL_CHANNEL_ROUGHNESS) ? "Roughness" :
+                             (channel == PAINT_MATERIAL_CHANNEL_SPECULAR) ?
+                                 "Level" :
+                                 "Channel";
+  const char *channel_description = (channel == PAINT_MATERIAL_CHANNEL_ROUGHNESS) ?
+                                        "The map stores the roughness itself" :
+                                    (channel == PAINT_MATERIAL_CHANNEL_SPECULAR) ?
+                                        "The map stores the Specular IOR Level itself" :
+                                        "The map stores the channel's own value";
+
+  EnumPropertyItem *item = nullptr;
+  int totitem = 0;
+  for (const EnumPropertyItem &entry : items) {
+    if (entry.identifier == nullptr) {
+      break;
+    }
+    if (!BKE_paint_layers_channel_map_encoding_allowed(
+            channel, eMaterialPaintLayerMapEncoding(entry.value)))
+    {
+      continue;
+    }
+    EnumPropertyItem shown = entry;
+    if (entry.value == int(MA_PAINT_LAYER_MAP_ENCODING_CHANNEL)) {
+      shown.name = channel_name;
+      shown.description = channel_description;
+    }
+    RNA_enum_item_add(&item, &totitem, &shown);
+  }
+  RNA_enum_item_end(&item, &totitem);
+  *r_free = true;
+  return item;
 }
 
 /**
@@ -6162,6 +6298,13 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Is Anchor Point Reader", "Whether this row reads a slice");
 
+  /* Read-only: a correction modifies its row and lays what it holds in the channel's own scale, so
+   * the per-map settings a stack row offers (a map encoding, for one) do not apply to it. */
+  prop = RNA_def_property(srna, "is_correction", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_is_correction_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Is Correction", "Whether this row is a correction of a layer");
+
   /* Read-only: how many channels the row takes part in, the generated node-cost measure the UI
    * reads to warn about a row heavy enough to bake in AUTO mode. */
   prop = RNA_def_property(srna, "channel_weight", PROP_INT, PROP_NONE);
@@ -7255,7 +7398,7 @@ static void rna_def_material_paint_layer_channel(BlenderRNA *brna)
    * drop target) leaks a user per assignment without it. */
   RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
   RNA_def_property_ui_text(prop, "Image", "The channel's map, or none for a constant");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerChannel_image_update");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "value", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_array(prop, 4);
@@ -7308,6 +7451,24 @@ static void rna_def_material_paint_layer_channel(BlenderRNA *brna)
                               nullptr);
   RNA_def_property_ui_text(
       prop, "Tangent Space", "Convention of the Normal map: OpenGL or DirectX tangent space");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* What the record's map stores, read into the channel's value wherever the map is read (the CPU
+   * composite, the generated graph, the GPU preview). Shown for a record that carries a map: while
+   * there is none the encoding is inert. The setter routes through BKE, which refuses a pair the
+   * channel does not take. */
+  prop = RNA_def_property(srna, "map_encoding", PROP_ENUM, PROP_NONE);
+  /* Dynamic items: the channel decides which encodings a map of its own may carry. */
+  RNA_def_property_enum_items(prop, rna_enum_dummy_NULL_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayerChannel_map_encoding_get",
+                              "rna_MaterialPaintLayerChannel_map_encoding_set",
+                              "rna_MaterialPaintLayerChannel_map_encoding_itemf");
+  RNA_def_property_ui_text(
+      prop,
+      "Map Encoding",
+      "What the channel's map stores: glossiness reads as 1 - value, a specular colour as "
+      "luminance / 0.08; blending happens in the channel's own space");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   /* The scalar channels' single value, stored in `value[0]`; colour channels use `value`. */

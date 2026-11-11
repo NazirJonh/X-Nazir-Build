@@ -137,8 +137,6 @@ constexpr uint32_t SELECT_ALL = 0xE162; /* select_all */
 /** \name Description helpers
  * \{ */
 
-namespace {
-
 /** The owner of a layered paint stack is always a material. */
 Material &layers_owner(ID &owner)
 {
@@ -151,6 +149,8 @@ const Material &layers_owner(const ID &owner)
   BLI_assert(GS(owner.name) == ID_MA);
   return id_cast<const Material &>(owner);
 }
+
+namespace {
 
 /**
  * The channel the Stack Layers header selected, from the scene's paint settings; clamped.

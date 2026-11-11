@@ -255,6 +255,16 @@ bool CombinedPasses::lay(CombinedTarget &t,
   gpu_mapping_uniforms_set(layer_shader, mapping);
   GPU_shader_uniform_1f(layer_shader, "opacity", opacity);
   GPU_shader_uniform_1f(layer_shader, "lod", lod);
+  /* The scene luminance the F0 map encoding reads a specular colour by: the coefficients the RGB
+   * to BW nodes and the CPU helper use, with `w` carrying the F0 a level of one is pre-divided, so
+   * the layer pass multiplies by one value. */
+  float luma_coefficients[3];
+  IMB_colormanagement_get_luminance_coefficients(luma_coefficients);
+  const float4 map_luma(luma_coefficients[0],
+                        luma_coefficients[1],
+                        luma_coefficients[2],
+                        1.0f / SPECULAR_LEVEL_F0_FULL);
+  GPU_shader_uniform_4fv(layer_shader, "map_luma", &map_luma.x);
   GPU_shader_uniform_1i(layer_shader, "flags", flags);
   GPU_shader_uniform_1i(layer_shader, "blend", blend);
   GPU_shader_uniform_1i(layer_shader, "filter_kind", filter_kind);
@@ -857,6 +867,22 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
       flags |= gpu_layer_has_map;
       if (layer.normal_directx) {
         flags |= gpu_layer_normal_directx;
+      }
+      switch (eMaterialPaintLayerMapEncoding(layer.map_encoding)) {
+        case MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS:
+          flags |= gpu_layer_map_glossiness;
+          break;
+        case MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA:
+          flags |= gpu_layer_map_glossiness_alpha;
+          break;
+        case MA_PAINT_LAYER_MAP_ENCODING_F0:
+          flags |= gpu_layer_map_f0;
+          break;
+        case MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA:
+          flags |= gpu_layer_map_f0_glossiness_alpha;
+          break;
+        case MA_PAINT_LAYER_MAP_ENCODING_CHANNEL:
+          break;
       }
       if (premultiplied) {
         flags |= gpu_layer_premultiplied;

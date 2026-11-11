@@ -1086,6 +1086,38 @@ enum eMaterialPaintLayerChannelFlag : int8_t {
 };
 
 /**
+ * #MaterialPaintLayerChannel::map_encoding: what the record's map stores, which the stack reads as
+ * the channel's value instead of as it lies. Only the map is affected: the record's flat value and
+ * every correction, mask, filter and brush of the row stay in the channel's own scale, and while
+ * the record has no map the encoding is inert. The read-time conversion happens where the map's
+ * texels enter the stack (the same place a DirectX normal's green is flipped), so every reader --
+ * the CPU composite, the generated graph and the GPU preview -- sees channel values. Zero reads as
+ * the encoding every older file had.
+ */
+enum eMaterialPaintLayerMapEncoding : int8_t {
+  /** The map stores the channel's own value; the default, and what any record reads. */
+  MA_PAINT_LAYER_MAP_ENCODING_CHANNEL = 0,
+  /** A Roughness record's map is glossiness: the channel reads `roughness = 1 - rgb`. */
+  MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS = 1,
+  /**
+   * A Roughness record's map carries glossiness in its alpha (the spec-gloss packing): the channel
+   * reads `roughness = 1 - a` and the map's alpha is data, not coverage.
+   */
+  MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA = 2,
+  /**
+   * A Specular record's map is the specular colour (the F0): the channel reads
+   * `level = clamp(luma(rgb) / 0.08, 0, 1)`.
+   */
+  MA_PAINT_LAYER_MAP_ENCODING_F0 = 3,
+  /**
+   * A Specular record's map is the specular colour in RGB with glossiness in its alpha (the
+   * spec-gloss packing): the channel reads the F0 level as #MA_PAINT_LAYER_MAP_ENCODING_F0 does,
+   * and the map's alpha is data, not coverage.
+   */
+  MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA = 4,
+};
+
+/**
  * One channel of a #MaterialPaintLayer. A layer owns a `channels` array with one entry per channel
  * it takes part in; #channel names which #eMaterialPaintChannel the record stands for.
  */
@@ -1098,7 +1130,9 @@ struct MaterialPaintLayerChannel {
   int8_t state = MA_PAINT_LAYER_CHANNEL_ABSENT;
   /** #eMaterialPaintLayerChannelFlag. */
   int8_t flag = 0;
-  char _pad[5] = {};
+  /** #eMaterialPaintLayerMapEncoding. Taken from the padding, so older files read as #CHANNEL. */
+  int8_t map_encoding = MA_PAINT_LAYER_MAP_ENCODING_CHANNEL;
+  char _pad[4] = {};
   /** The channel's map, or null when it has none. */
   struct Image *image = nullptr;
   /** Constant value used while the channel carries no map. */

@@ -94,6 +94,10 @@ bool stack_image_assign_check(const Material &material,
 /** True when \a material takes a paste; reports why it does not otherwise. */
 bool stack_clipboard_material_editable_check(const Material &material, ReportList *reports);
 
+/** The owner of a layered paint stack is always a material. Shared by the source's own files. */
+Material &layers_owner(ID &owner);
+const Material &layers_owner(const ID &owner);
+
 /**
  * The Material Symbols codepoints `space_outliner.py` repeats by hand for its header buttons.
  * The test pins these values so the Python constants cannot drift silently from the C++ ones.

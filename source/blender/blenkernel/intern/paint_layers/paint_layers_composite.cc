@@ -396,10 +396,13 @@ static bool composite_row_source_describe(const Material &ma,
     /* The description carries no per-node #ImageUser; the default one is what a plain map uses. */
     out.color_iuser = nullptr;
     /* A fresh paint map is transparent where nothing was painted; that texel must show the rows
-     * below rather than cover them with the map's black. */
-    out.color_alpha_coverage = true;
+     * below rather than cover them with the map's black. An encoding that reads the alpha as
+     * data (the spec-gloss packing) takes the coverage away: a glossy texel must not make the
+     * row transparent. The conversion itself happens where the map is read. */
+    out.color_alpha_coverage = !paint_layer_map_alpha_is_data(record);
     out.normal_directx = channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
                          (record->flag & MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX) != 0;
+    out.map_encoding = int8_t(paint_layer_map_encoding_get(*record));
     composite_mapping_describe(ma, layer, channel, out.mapping);
     return true;
   }

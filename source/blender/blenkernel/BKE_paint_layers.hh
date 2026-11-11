@@ -619,6 +619,17 @@ bool BKE_paint_layers_id_color_set_tolerance(Material &ma,
  */
 void BKE_paint_layers_map_coverage_image_use_data(Main &bmain, Image &image);
 
+/**
+ * Make \a image read as data when a map of it lands on a scalar \a channel of a row: the channel's
+ * value is data, and an sRGB decode would bend it before the stack -- and before a map encoding's
+ * inversion -- sees it. A colour channel leaves the image as it is, and so does one already read
+ * as data. Specular is left alone too: its map may be the specular colour (the F0 map encoding),
+ * which is a colour and must keep its colour space.
+ */
+void BKE_paint_layers_channel_map_use_data(Main &bmain,
+                                           Image &image,
+                                           eMaterialPaintChannel channel);
+
 /** Whether \a item is a map-driven mask coverage operator (Color ID or UV Island). */
 bool BKE_paint_layers_is_map_coverage(const MaterialPaintLayer &item);
 
@@ -1080,6 +1091,78 @@ bool BKE_paint_layers_channel_set_image(Material &ma,
                                         eMaterialPaintChannel channel,
                                         Image *image);
 
+/** What a specular map carries: what the specular converter reads out of it. */
+enum class PaintSpecularMapKind : int8_t {
+  /** A grayscale level (0..1): the scalar the Specular IOR Level input is, flattened to grey. */
+  Level = 0,
+  /**
+   * Specular-glossiness packing: the RGB is the specular colour (the F0), the alpha is glossiness.
+   * The alpha of the map is where Substance and friends put it, so the converter can make the
+   * roughness map out of it as well.
+   */
+  ColorGlossiness = 1,
+  /** A specular colour without glossiness: the RGB is the specular colour (the F0). */
+  Color = 2,
+  /**
+   * No bake: the map keeps its spec-gloss packing, and the stack reads it where it lies -- the
+   * Specular record as the F0 colour (#MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA), the
+   * Roughness record as `1 - alpha` of the same image
+   * (#MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA), which then has two users and no new image is
+   * made. Nothing is baked: turning the records' encodings back to the channel's own undoes it.
+   */
+  SpecGlossSet = 3,
+};
+
+/**
+ * Convert \a spec_map into the grey maps the stack's scalar channels read, and slot them on
+ * \a layer: a specular level map under its Specular record, and -- when \a kind carries
+ * glossiness and \a make_roughness is set -- a roughness map (`1 - glossiness`) under its
+ * Roughness record.
+ *
+ * The Specular channel feeds the Principled BSDF's "Specular IOR Level", a multiplier with 0.5 at
+ * the dielectric default (F0 = 0.04), so a specular *colour* is not a level: the converter reads
+ * `level = luminance(F0) / 0.08`, clamped to 0..1, which keeps dielectric plastic at 0.5 and lets
+ * a metal saturate to 1.0. A level map goes over flattened to grey, read as stored data. Both
+ * maps are byte, Non-Color, named after \a spec_map, and referenced by the records afterwards.
+ *
+ * Non-destructive: a Roughness record that already carries a map is not replaced -- the caller
+ * removes it first. The #PaintLayerImageMapIssue cases of
+ * #BKE_paint_layers_row_image_map_issue refuse here too: only a Fill row (or a Fill correction)
+ * takes maps of its own.
+ *
+ * A channel \a ma's global set leaves out takes part nowhere, the map with it; the set is not
+ * touched here, so a caller that wants the roughness map read puts Roughness in the set
+ * (#BKE_paint_layers_channel_set_enable).
+ *
+ * The #PaintSpecularMapKind::SpecGlossSet kind bakes nothing: the map keeps its pixels, the
+ * Specular record reads it as the F0 colour and -- when \a make_roughness is set -- the Roughness
+ * record reads `1 - alpha` of the same image, which then carries a second user. The map's alpha
+ * has to vary (it is the glossiness the roughness reads); a constant one refuses, as it would read
+ * the roughness flat.
+ *
+ * \param r_reason: when not null, receives the refusal reason on a false return, for the caller's
+ *                  report; untouched on success.
+ * \return false when \a layer is not a Fill of \a ma, the map cannot be read, or a record refuses
+ * the assignment; nothing is assigned then and no image is left behind.
+ */
+bool BKE_paint_layers_specular_map_convert(Main &bmain,
+                                           Material &ma,
+                                           MaterialPaintLayer &layer,
+                                           Image &spec_map,
+                                           PaintSpecularMapKind kind,
+                                           bool make_roughness,
+                                           Image **r_level_map,
+                                           Image **r_rough_map,
+                                           const char **r_reason = nullptr);
+
+/**
+ * The record of \a row's channels array that stands for \a channel, or null when the row carries
+ * none. The one lookup every reader of a row outside BKE goes through, so an Outliner verb and a
+ * BKE one cannot disagree about which record a channel has.
+ */
+const MaterialPaintLayerChannel *BKE_paint_layers_row_channel_find(const MaterialPaintLayer &row,
+                                                                  eMaterialPaintChannel channel);
+
 /**
  * Add the \a channel record to \a layer: enabled, without a map, with a zero value. The map is
  * created by the first stroke into the channel, not here. An existing record for \a channel is
@@ -1137,6 +1220,37 @@ bool BKE_paint_layers_channel_set_invert(Material &ma,
  * \return false when \a layer carries no Normal record or is not part of \a ma.
  */
 bool BKE_paint_layers_normal_set_directx(Material &ma, MaterialPaintLayer *layer, bool directx);
+
+/**
+ * Whether the \a channel record may read its map as \a encoding: the encodings a Roughness or a
+ * Specular record takes are the channel's own (0) and the pair the channel supports, everything
+ * else -- including a record of any other channel -- is refused. The one place the matrix of
+ * #eMaterialPaintLayerMapEncoding is written.
+ */
+bool BKE_paint_layers_channel_map_encoding_allowed(eMaterialPaintChannel channel,
+                                                   eMaterialPaintLayerMapEncoding encoding);
+
+/**
+ * Set what the \a channel record's map of \a layer stores, and so how the stack reads it into the
+ * channel's value (#eMaterialPaintLayerMapEncoding). Like #BKE_paint_layers_normal_set_directx it
+ * creates and removes no record and does not touch the map: the record has to be in \a ma's stack
+ * already, and while the record has no map the encoding is inert but kept -- a map dropped later
+ * is read with it. Refused for a pair the channel does not support, so a map never lies about its
+ * scale. The encoding is read where a stack row's own map enters the stack, so a correction or a
+ * painted row -- whose maps the stack reads in the channel's own scale -- refuses it.
+ * Part of the graph's structure, so it regenerates, and it moves the composite cache's hash.
+ *
+ * \return false when \a layer carries no \a channel record, is not a Fill row of \a ma (a
+ *         correction or a painted row), or the channel does not take the encoding.
+ */
+bool BKE_paint_layers_channel_set_map_encoding(Material &ma,
+                                               MaterialPaintLayer *layer,
+                                               eMaterialPaintChannel channel,
+                                               eMaterialPaintLayerMapEncoding encoding);
+
+/** What the record's map stores; an out-of-range value reads as the channel's own encoding. */
+eMaterialPaintLayerMapEncoding BKE_paint_layers_channel_map_encoding_get(
+    const MaterialPaintLayerChannel &record);
 
 /**
  * Set the per-channel opacity multiplier of \a layer's \a channel, applied over the row's own

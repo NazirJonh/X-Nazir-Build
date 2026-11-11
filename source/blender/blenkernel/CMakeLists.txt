@@ -273,6 +273,7 @@ set(SRC
   intern/paint_layers/paint_layers_bake_mask_effect.cc
   intern/paint_layers/paint_layers_bake_intern.hh
   intern/paint_layers/paint_layers_copy.cc
+  intern/paint_layers/paint_layers_convert.cc
   intern/paint_layers/paint_layers_blend_tier.cc
   intern/paint_layers/paint_layers_kind.cc
   intern/paint_layers/paint_layers_mask_effect.cc

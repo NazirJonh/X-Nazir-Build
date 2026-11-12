@@ -43,7 +43,11 @@ bool PaintLayerRowProjectionTarget::resolve(const bContext &C)
   marker_ = {};
 
   Object *ob = CTX_data_active_object(&C);
-  if (ob == nullptr || (ob->mode & OB_MODE_TEXTURE_PAINT) == 0) {
+  /* `OB_MODE_OBJECT` is zero, so it cannot be tested as a mask bit. Layers are painted in Sculpt
+   * mode as well as Texture Paint, like the Gradient gizmo. */
+  if (ob == nullptr ||
+      (ob->mode != OB_MODE_OBJECT && (ob->mode & (OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT)) == 0))
+  {
     return false;
   }
   Material *ma = BKE_paint_layers_active_material_get(ob);
@@ -69,10 +73,9 @@ bool PaintLayerRowProjectionTarget::read(ProjectionFrame &r_frame) const
     return false;
   }
   copy_v3_v3(r_frame.center, layer->projection->center);
-  /* The gizmo shows the extents the graph reads: one per axis while the row takes its scale from
-   * the controller, whose own gizmo already draws that scale. */
   BKE_paint_layers_projection_size_effective(*layer, r_frame.size);
-  copy_v3_v3(r_frame.rotation, layer->projection->rotation);
+  BKE_paint_layers_projection_normal_get(*layer, r_frame.normal);
+  r_frame.roll = layer->projection->roll;
   return true;
 }
 
@@ -91,19 +94,19 @@ bool PaintLayerRowProjectionTarget::write(const ProjectionFrame &frame)
     copy_v3_v3(written.size, layer->projection->size);
   }
   return BKE_paint_layers_projection_set_values(
-      *material_, layer, written.center, written.size, written.rotation);
+      *material_, layer, written.center, written.size, written.normal, written.roll);
 }
 
-bool PaintLayerRowProjectionTarget::write_rotation_axis(const int axis, const float value)
+bool PaintLayerRowProjectionTarget::write_roll(const float roll)
 {
-  if (axis < 0 || axis > 2 || !std::isfinite(value)) {
+  if (!std::isfinite(roll)) {
     return false;
   }
   ProjectionFrame frame;
   if (!read(frame)) {
     return false;
   }
-  frame.rotation[axis] = value;
+  frame.roll = roll;
   return write(frame);
 }
 

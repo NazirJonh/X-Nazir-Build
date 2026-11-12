@@ -2853,7 +2853,7 @@ TEST_F(PaintLayersCompositeTest, projection_structure_and_values_move_the_stack_
   const float center[3] = {1.0f, -2.0f, 0.5f};
   const float size[3] = {2.0f, 3.0f, 4.0f};
   const float rotation[3] = {0.1f, 0.2f, 0.3f};
-  ASSERT_TRUE(BKE_paint_layers_projection_set_values(*ma, fill, center, size, rotation));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values_euler(*ma, fill, center, size, rotation));
   const uint64_t values_hash = stack_hash();
   EXPECT_NE(values_hash, planar_hash) << "the composite cache holds the projected pixels";
 

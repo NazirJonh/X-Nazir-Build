@@ -1207,8 +1207,18 @@ enum eMaterialPaintLayerMappingSpace : int16_t {
   MA_PAINT_LAYER_MAPPING_SPACE_UV = 0,
   /** A planar frame: the map is projected along the frame's local axis. */
   MA_PAINT_LAYER_MAPPING_SPACE_PLANAR = 1,
+  /** Six-sided box projection, one map copy per face, blended across the edges. */
+  MA_PAINT_LAYER_MAPPING_SPACE_BOX = 2,
+  /** Three-sided projection blended by the surface normal. */
+  MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR = 3,
+  /** A single image laid out as a cube cross; one atlas cell per face. */
+  MA_PAINT_LAYER_MAPPING_SPACE_CUBE = 4,
+  /** Cylindrical projection around the frame's local axis. */
+  MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER = 5,
+  /** Spherical projection around the frame's local origin. */
+  MA_PAINT_LAYER_MAPPING_SPACE_SPHERE = 6,
   /** Sentinel: the number of spaces, never stored. */
-  MA_PAINT_LAYER_MAPPING_SPACE_NUM = 2,
+  MA_PAINT_LAYER_MAPPING_SPACE_NUM = 7,
 };
 
 /** #MaterialPaintLayerProjection::axis: the projection axis of Planar and Cylinder. */
@@ -1216,6 +1226,14 @@ enum eMaterialPaintLayerProjectionAxis : int8_t {
   MA_PAINT_LAYER_PROJECTION_AXIS_X = 0,
   MA_PAINT_LAYER_PROJECTION_AXIS_Y = 1,
   MA_PAINT_LAYER_PROJECTION_AXIS_Z = 2,
+};
+
+/** #MaterialPaintLayerProjection::cube_layout: how the six faces sit in the atlas. */
+enum eMaterialPaintLayerProjectionCubeLayout : int8_t {
+  /** Horizontal cross in a 4x3 atlas: +Y above, -Y below, -X +Z +X -Z across the middle. */
+  MA_PAINT_LAYER_PROJECTION_CUBE_CROSS_4X3 = 0,
+  /** Sentinel: the number of layouts, never stored. */
+  MA_PAINT_LAYER_PROJECTION_CUBE_LAYOUT_NUM = 1,
 };
 
 /** #MaterialPaintLayerProjection::flag */
@@ -1232,10 +1250,9 @@ enum eMaterialPaintLayerProjectionFlag : int16_t {
   MA_PAINT_LAYER_PROJECTION_FACING = 1 << 3,
   /**
    * Flip which side of the surface the facing weight keeps: its peak lands on the faces whose
-   * normal points away from the projector instead of on the ones it points at. Stored so that a
-   * zero -- a new frame, and every file written before the bit -- reads back as the decal
-   * convention, where the frame's arrow enters the surface and the weight peaks on the face it
-   * lands on.
+   * normal looks away from the frame's +Z axis instead of on the ones that look toward it.
+   * Stored so that a zero -- a new frame, and every file written before the bit -- reads back
+   * as the convention where the weight peaks on faces looking toward +Z.
    */
   MA_PAINT_LAYER_PROJECTION_FACING_INVERT = 1 << 4,
   /**
@@ -1258,9 +1275,12 @@ enum eMaterialPaintLayerProjectionFlag : int16_t {
  * space is not #MA_PAINT_LAYER_MAPPING_SPACE_UV.
  *
  * The frame lives in the space of #MaterialPaintLayer::projection_object when one is set, else in
- * the painted object's own object space; the inline center/rotation/size are then applied inside
+ * the painted object's own object space; the inline center/normal+roll/size are then applied inside
  * that space. A projection object (usually an Empty) therefore moves, turns and scales the whole
  * projection through its own transform, while the inline values give the frame its extents.
+ *
+ * The orientation is stored as a unit `normal` (the projection direction) and a `roll` (rotation
+ * around that direction in radians), not as Euler angles.
  */
 struct MaterialPaintLayerProjection {
   DNA_DEFINE_CXX_METHODS(MaterialPaintLayerProjection)
@@ -1269,12 +1289,16 @@ struct MaterialPaintLayerProjection {
   float center[3] = {};
   /** Full extents of the frame; zero reads back as one. */
   float size[3] = {1.0f, 1.0f, 1.0f};
-  /** Frame rotation in radians, XYZ Euler, in the controller's space. */
-  float rotation[3] = {};
-  char _pad1[4] = {};
+  /** Projection direction: local +Z of the frame, unit. Zero reads as (0,0,1). */
+  float normal[3] = {0.0f, 0.0f, 1.0f};
+  /** Rotation around #normal in radians; kept in (-pi, pi]. */
+  float roll = 0.0f;
+  /** Face blend: 0 gives hard faces, 1 the softest normal blend (Triplanar; Box stays hard). */
+  float blend = 0.0f;
   /** #eMaterialPaintLayerProjectionAxis. */
   int8_t axis = MA_PAINT_LAYER_PROJECTION_AXIS_Z;
-  char _pad2 = 0;
+  /** #eMaterialPaintLayerProjectionCubeLayout. */
+  int8_t cube_layout = MA_PAINT_LAYER_PROJECTION_CUBE_CROSS_4X3;
   /** #eMaterialPaintLayerProjectionFlag. */
   int16_t flag = MA_PAINT_LAYER_PROJECTION_CLIP | MA_PAINT_LAYER_PROJECTION_DEPTH |
                  MA_PAINT_LAYER_PROJECTION_FIT_ASPECT | MA_PAINT_LAYER_PROJECTION_FACING;

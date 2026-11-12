@@ -6,8 +6,9 @@
  * \ingroup bke
  *
  * The projection payload of a Paint Layers row: allocating, reading and changing the frame
- * (space, axis, center, size, rotation, clip) and its controller object. Nothing here reads or
- * writes a node tree; every mutation only marks the material stale.
+ * (space, axis, center, size, normal+roll, clip) and its controller object. The orientation is
+ * always stored as a unit normal and a roll angle; nothing here reads or writes a node tree;
+ * every mutation only marks the material stale.
  */
 
 #include <cmath>
@@ -15,6 +16,8 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_math_base.h"
+#include "BLI_math_matrix.h"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_utildefines.h"
 
@@ -78,9 +81,72 @@ float BKE_paint_layers_projection_angle_normalize(const float angle)
 /* Indexed by #eMaterialPaintLayerMappingSpace. UV has no frame, so its controller display is the
  * plain default a user Empty starts with. */
 static const ProjectionModeInfo projection_mode_table[MA_PAINT_LAYER_MAPPING_SPACE_NUM] = {
-    {MA_PAINT_LAYER_MAPPING_SPACE_UV, false, OB_PLAINAXES},
-    {MA_PAINT_LAYER_MAPPING_SPACE_PLANAR, true, OB_SINGLE_ARROW},
+    /* Space, axis, controller display, blend, cube layout, samples. */
+    {MA_PAINT_LAYER_MAPPING_SPACE_UV, false, OB_PLAINAXES, false, false, 1},
+    {MA_PAINT_LAYER_MAPPING_SPACE_PLANAR, true, OB_SINGLE_ARROW, false, false, 1},
+    {MA_PAINT_LAYER_MAPPING_SPACE_BOX, false, OB_CUBE, false, false, 3},
+    {MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR, false, OB_CUBE, true, false, 3},
+    {MA_PAINT_LAYER_MAPPING_SPACE_CUBE, false, OB_CUBE, false, true, 1},
+    {MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER, true, OB_CIRCLE, false, false, 1},
+    {MA_PAINT_LAYER_MAPPING_SPACE_SPHERE, false, OB_EMPTY_SPHERE, false, false, 1},
 };
+
+/* Indexed by #eMaterialPaintLayerProjectionCubeLayout. The origins are the lower-left corner of
+ * each face's cell, in the order +X, -X, +Y, -Y, +Z, -Z. */
+static const ProjectionCubeLayoutInfo
+    projection_cube_layout_table[MA_PAINT_LAYER_PROJECTION_CUBE_LAYOUT_NUM] = {
+        /* Cross 4x3: +Y above, -Y below, -X +Z +X -Z across the middle. */
+        {{0.25f, 1.0f / 3.0f},
+         {{0.5f, 1.0f / 3.0f},
+          {0.0f, 1.0f / 3.0f},
+          {0.25f, 2.0f / 3.0f},
+          {0.25f, 0.0f},
+          {0.25f, 1.0f / 3.0f},
+          {0.75f, 1.0f / 3.0f}}},
+};
+
+static bool paint_layer_projection_cube_layout_valid(const int8_t layout)
+{
+  return layout >= 0 && layout < MA_PAINT_LAYER_PROJECTION_CUBE_LAYOUT_NUM;
+}
+
+const ProjectionCubeLayoutInfo &BKE_paint_layers_projection_cube_layout_info(const int8_t layout)
+{
+  return projection_cube_layout_table[paint_layer_projection_cube_layout_valid(layout) ?
+                                          layout :
+                                          MA_PAINT_LAYER_PROJECTION_CUBE_CROSS_4X3];
+}
+
+/** The stored roll wrapped to (-pi, pi], so equal turns store equal values. */
+static float paint_layer_projection_roll_wrap(float roll)
+{
+  roll = fmodf(roll, 2.0f * M_PI);
+  if (roll <= -M_PI) {
+    roll += 2.0f * M_PI;
+  }
+  else if (roll > M_PI) {
+    roll -= 2.0f * M_PI;
+  }
+  return roll;
+}
+
+/** \a normal made unit; a zero vector reads as +Z. */
+static void paint_layer_projection_normal_unit(const float normal[3], float r_normal[3])
+{
+  copy_v3_v3(r_normal, normal);
+  if (!normalize_v3(r_normal)) {
+    r_normal[0] = 0.0f;
+    r_normal[1] = 0.0f;
+    r_normal[2] = 1.0f;
+  }
+}
+
+void BKE_paint_layers_projection_normal_get(const MaterialPaintLayer &layer, float r_normal[3])
+{
+  const float default_normal[3] = {0.0f, 0.0f, 1.0f};
+  paint_layer_projection_normal_unit(
+      (layer.projection != nullptr) ? layer.projection->normal : default_normal, r_normal);
+}
 
 static bool paint_layer_projection_space_valid(const int16_t space)
 {
@@ -154,8 +220,13 @@ MaterialPaintLayerProjection *BKE_paint_layers_projection_ensure(MaterialPaintLa
   MaterialPaintLayerProjection *projection = MEM_new<MaterialPaintLayerProjection>(__func__);
   copy_v3_fl(projection->center, 0.0f);
   copy_v3_fl(projection->size, 1.0f);
-  copy_v3_fl(projection->rotation, 0.0f);
+  projection->normal[0] = 0.0f;
+  projection->normal[1] = 0.0f;
+  projection->normal[2] = 1.0f;
+  projection->roll = 0.0f;
+  projection->blend = 0.0f;
   projection->axis = MA_PAINT_LAYER_PROJECTION_AXIS_Z;
+  projection->cube_layout = MA_PAINT_LAYER_PROJECTION_CUBE_CROSS_4X3;
   projection->angle = PAINT_LAYER_PROJECTION_ANGLE_DEFAULT;
   /* A frame starts as the decal it is meant to be: clipped to the frame, limited in depth, fitted
    * to the source image and faded out past the facing limit. */
@@ -207,11 +278,158 @@ bool BKE_paint_layers_projection_set_space(Material &ma,
   return true;
 }
 
-bool BKE_paint_layers_projection_set_values(Material &ma,
-                                            MaterialPaintLayer *layer,
-                                            const float center[3],
-                                            const float size[3],
-                                            const float rotation[3])
+/* -------------------------------------------------------------------- */
+/** \name Frame orientation helpers
+ * \{ */
+
+/**
+ * Builds the frame basis: local +Z = `normal`, +X from the reference up and rolled by `roll`.
+ *
+ * The reference up is +Z of the parent space. When `normal` is nearly parallel to +Z the cross
+ * product degenerates, so the reference falls back to +Y. This choice keeps "top of the image
+ * points up" for a vertical wall projected along +X or -X.
+ */
+void BKE_paint_layers_projection_frame_matrix(const float normal_in[3],
+                                              const float roll,
+                                              float r_mat[3][3])
+{
+  float z_axis[3];
+  copy_v3_v3(z_axis, normal_in);
+  if (!normalize_v3(z_axis)) {
+    zero_v3(z_axis);
+    z_axis[2] = 1.0f;
+  }
+  /* Reference up: +Z of parent, or +Y when nearly parallel to the normal. */
+  float up[3] = {0.0f, 0.0f, 1.0f};
+  if (fabsf(dot_v3v3(z_axis, up)) > 0.999f) {
+    up[0] = 0.0f;
+    up[1] = 1.0f;
+    up[2] = 0.0f;
+  }
+  /* Un-rolled x and y: right-handed with z. */
+  float x_axis[3], y_axis[3];
+  cross_v3_v3v3(x_axis, up, z_axis);
+  normalize_v3(x_axis);
+  cross_v3_v3v3(y_axis, z_axis, x_axis);
+  /* Rotate x and y around z by `roll`. */
+  const float cos_r = cosf(roll);
+  const float sin_r = sinf(roll);
+  float xr[3], yr[3];
+  for (const int i : IndexRange(3)) {
+    xr[i] = x_axis[i] * cos_r + y_axis[i] * sin_r;
+    yr[i] = -x_axis[i] * sin_r + y_axis[i] * cos_r;
+  }
+  /* Blender stores a 3x3 as `mat[axis][component]`: `r_mat[j]` is the j-th frame axis in parent
+   * space, the layout `eul_to_mat3`, `mul_m3_v3` and `copy_m4_m3` expect. */
+  copy_v3_v3(r_mat[0], xr);
+  copy_v3_v3(r_mat[1], yr);
+  copy_v3_v3(r_mat[2], z_axis);
+}
+
+/** XYZ Euler of the same basis, for graph and CPU consumers that still take Euler. */
+void BKE_paint_layers_projection_frame_euler(const float normal[3],
+                                             const float roll,
+                                             float r_euler[3])
+{
+  float mat[3][3];
+  BKE_paint_layers_projection_frame_matrix(normal, roll, mat);
+  mat3_to_eul(r_euler, mat);
+}
+
+/**
+ * Inverse: extracts the normal (axis 2) and the roll from an orthonormal basis. The roll is
+ * the signed angle from the un-rolled reference x-axis to axis 0 of `mat`, measured around the
+ * normal using the right-hand rule.
+ */
+void BKE_paint_layers_projection_frame_from_matrix(const float mat[3][3],
+                                                   float r_normal[3],
+                                                   float *r_roll)
+{
+  /* `mat[2]` = the frame's Z axis in parent space = the normal. */
+  copy_v3_v3(r_normal, mat[2]);
+  if (!normalize_v3(r_normal)) {
+    zero_v3(r_normal);
+    r_normal[2] = 1.0f;
+  }
+  float up[3] = {0.0f, 0.0f, 1.0f};
+  if (fabsf(dot_v3v3(r_normal, up)) > 0.999f) {
+    up[0] = 0.0f;
+    up[1] = 1.0f;
+    up[2] = 0.0f;
+  }
+  float x_ref[3], y_ref[3];
+  cross_v3_v3v3(x_ref, up, r_normal);
+  normalize_v3(x_ref);
+  cross_v3_v3v3(y_ref, r_normal, x_ref);
+  /* `mat[0]` = the rolled x axis in parent space. */
+  *r_roll = atan2f(dot_v3v3(mat[0], y_ref), dot_v3v3(mat[0], x_ref));
+}
+
+/**
+ * Frame orientation for a surface hit.
+ *
+ * The frame's +Z looks outward (toward the observer). Without FACING_INVERT the facing weight
+ * peaks at dot(world_normal, frame_Z) = +1, so the face directly at the projector is kept. The
+ * image is not mirrored because `cross(up, normal)` puts frame X to the observer's right for a
+ * vertical wall. The caller passes `surface_normal` already in the frame's space.
+ */
+void BKE_paint_layers_projection_orientation_from_surface(const float surface_normal[3],
+                                                         float r_normal[3],
+                                                         float *r_roll)
+{
+  copy_v3_v3(r_normal, surface_normal);
+  if (!normalize_v3(r_normal)) {
+    r_normal[0] = 0.0f;
+    r_normal[1] = 0.0f;
+    r_normal[2] = 1.0f;
+  }
+  *r_roll = 0.0f;
+}
+
+/** \} */
+
+bool BKE_paint_layers_projection_set_orientation(Material &ma,
+                                                 MaterialPaintLayer *layer,
+                                                 const float normal[3],
+                                                 float roll)
+{
+  if (!paint_layer_owned(ma, layer) || layer->projection == nullptr) {
+    return false;
+  }
+  for (int i = 0; i < 3; i++) {
+    if (!std::isfinite(normal[i])) {
+      return false;
+    }
+  }
+  if (!std::isfinite(roll)) {
+    return false;
+  }
+  paint_layer_projection_normal_unit(normal, layer->projection->normal);
+  layer->projection->roll = paint_layer_projection_roll_wrap(roll);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_projection_set_roll(Material &ma,
+                                          MaterialPaintLayer *layer,
+                                          const float roll)
+{
+  if (!paint_layer_owned(ma, layer) || layer->projection == nullptr) {
+    return false;
+  }
+  if (!std::isfinite(roll)) {
+    return false;
+  }
+  layer->projection->roll = paint_layer_projection_roll_wrap(roll);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_projection_set_values_euler(Material &ma,
+                                                  MaterialPaintLayer *layer,
+                                                  const float center[3],
+                                                  const float size[3],
+                                                  const float rotation[3])
 {
   if (!paint_layer_owned(ma, layer) || layer->projection == nullptr) {
     return false;
@@ -221,11 +439,39 @@ bool BKE_paint_layers_projection_set_values(Material &ma,
       return false;
     }
   }
+  /* Euler from a script or a legacy caller: decompose it into normal+roll before storing. */
+  float mat[3][3];
+  eul_to_mat3(mat, rotation);
+  float normal[3];
+  float roll;
+  BKE_paint_layers_projection_frame_from_matrix(mat, normal, &roll);
+  return BKE_paint_layers_projection_set_values(ma, layer, center, size, normal, roll);
+}
+
+bool BKE_paint_layers_projection_set_values(Material &ma,
+                                            MaterialPaintLayer *layer,
+                                            const float center[3],
+                                            const float size[3],
+                                            const float normal_in[3],
+                                            const float roll)
+{
+  if (!paint_layer_owned(ma, layer) || layer->projection == nullptr) {
+    return false;
+  }
+  for (int i = 0; i < 3; i++) {
+    if (!std::isfinite(center[i]) || !std::isfinite(size[i]) || !std::isfinite(normal_in[i])) {
+      return false;
+    }
+  }
+  if (!std::isfinite(roll)) {
+    return false;
+  }
   copy_v3_v3(layer->projection->center, center);
   for (int i = 0; i < 3; i++) {
     layer->projection->size[i] = BKE_paint_layers_projection_size_normalize(size[i]);
   }
-  copy_v3_v3(layer->projection->rotation, rotation);
+  paint_layer_projection_normal_unit(normal_in, layer->projection->normal);
+  layer->projection->roll = paint_layer_projection_roll_wrap(roll);
   BKE_paint_layers_tag_value_edited(ma);
   return true;
 }
@@ -276,7 +522,14 @@ bool BKE_paint_layers_projection_set_rotation(Material &ma,
       return false;
     }
   }
-  copy_v3_v3(layer->projection->rotation, rotation);
+  /* Euler wrapper: decompose into normal+roll via the frame basis matrix. */
+  float mat[3][3];
+  eul_to_mat3(mat, rotation);
+  float normal[3];
+  float roll;
+  BKE_paint_layers_projection_frame_from_matrix(mat, normal, &roll);
+  copy_v3_v3(layer->projection->normal, normal);
+  layer->projection->roll = roll;
   BKE_paint_layers_tag_value_edited(ma);
   return true;
 }
@@ -402,11 +655,12 @@ void BKE_paint_layers_projection_facing_weights(const float angle,
   const float cos_min = cosf(DEG2RADF(limit));
   const float cos_max = cosf(DEG2RADF(max_ff(limit - PAINT_LAYER_PROJECTION_ANGLE_BAND, 0.0f)));
   const float scale = 1.0f / max_ff(cos_max - cos_min, 1e-6f);
-  /* The weight peaks on the faces whose normal points back at the projector -- Ucupaint's decal,
-   * whose arrow enters the surface -- so the sign is baked here rather than into the component:
-   * both normal paths read this one scale, and the flip therefore reaches both. The offset keeps
-   * the unflipped magnitude, so the limit still lands where the angle says. */
-  r_scale = invert ? scale : -scale;
+  /* The weight peaks on the faces whose normal looks toward the frame's +Z axis (the projection
+   * direction): component = dot(world_normal, frame_Z) runs through scale and offset, and the
+   * positive scale for the default convention maps component from cos_min (the angular limit)
+   * to cos_max (full weight) onto t from 0 to 1. Flip negates the scale, so the weight peaks
+   * instead on the faces looking away from +Z. Both normal paths read this one pair. */
+  r_scale = invert ? -scale : scale;
   r_offset = -cos_min * scale;
 }
 
@@ -447,6 +701,55 @@ bool BKE_paint_layers_projection_set_angle(Material &ma, MaterialPaintLayer *lay
   }
   layer->projection->angle = angle;
   BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+float BKE_paint_layers_projection_blend_get(const MaterialPaintLayer &layer)
+{
+  if (layer.projection != nullptr) {
+    return clamp_f(layer.projection->blend, 0.0f, 1.0f);
+  }
+  return 0.0f;
+}
+
+bool BKE_paint_layers_projection_set_blend(Material &ma,
+                                           MaterialPaintLayer *layer,
+                                           const float blend)
+{
+  if (!paint_layer_owned(ma, layer) || layer->projection == nullptr || !std::isfinite(blend)) {
+    return false;
+  }
+  layer->projection->blend = clamp_f(blend, 0.0f, 1.0f);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+int8_t BKE_paint_layers_projection_cube_layout_get(const MaterialPaintLayer &layer)
+{
+  /* An unknown stored value (a damaged payload) reads as the first layout, like the table lookup. */
+  if (layer.projection != nullptr &&
+      BKE_paint_layers_projection_mode_info(layer.mapping.space).uses_cube_layout &&
+      paint_layer_projection_cube_layout_valid(layer.projection->cube_layout))
+  {
+    return layer.projection->cube_layout;
+  }
+  return MA_PAINT_LAYER_PROJECTION_CUBE_CROSS_4X3;
+}
+
+bool BKE_paint_layers_projection_set_cube_layout(Material &ma,
+                                                 MaterialPaintLayer *layer,
+                                                 const int8_t layout)
+{
+  if (!paint_layer_owned(ma, layer) || layer->projection == nullptr ||
+      !paint_layer_projection_cube_layout_valid(layout))
+  {
+    return false;
+  }
+  if (layer->projection->cube_layout == layout) {
+    return true;
+  }
+  layer->projection->cube_layout = layout;
+  BKE_paint_layers_tag_edited(ma);
   return true;
 }
 
@@ -526,6 +829,71 @@ void BKE_paint_layers_projection_aspect_factors(const Image *image, float r_fact
   else {
     r_factors[1] = float(width) / float(height);
   }
+}
+
+ePaintLayerProjectionPreset BKE_paint_layers_projection_preset_get(
+    const MaterialPaintLayer &layer)
+{
+  if (layer.projection == nullptr) {
+    return PAINT_LAYER_PROJ_PRESET_CUSTOM;
+  }
+  const int16_t f = layer.projection->flag;
+  /* Decal: CLIP | DEPTH | FIT_ASPECT | FACING, no FACING_INVERT. */
+  const int16_t decal_on = MA_PAINT_LAYER_PROJECTION_CLIP | MA_PAINT_LAYER_PROJECTION_DEPTH |
+                           MA_PAINT_LAYER_PROJECTION_FIT_ASPECT |
+                           MA_PAINT_LAYER_PROJECTION_FACING;
+  const int16_t decal_off = MA_PAINT_LAYER_PROJECTION_FACING_INVERT;
+  if ((f & decal_on) == decal_on && (f & decal_off) == 0) {
+    return PAINT_LAYER_PROJ_PRESET_DECAL;
+  }
+  /* Flat: CLIP | DEPTH | FACING | FIT_ASPECT all off. */
+  const int16_t flat_flags = MA_PAINT_LAYER_PROJECTION_CLIP | MA_PAINT_LAYER_PROJECTION_DEPTH |
+                             MA_PAINT_LAYER_PROJECTION_FIT_ASPECT |
+                             MA_PAINT_LAYER_PROJECTION_FACING;
+  if ((f & flat_flags) == 0) {
+    return PAINT_LAYER_PROJ_PRESET_FLAT;
+  }
+  return PAINT_LAYER_PROJ_PRESET_CUSTOM;
+}
+
+bool BKE_paint_layers_projection_apply_preset(Material &ma,
+                                              MaterialPaintLayer *layer,
+                                              const ePaintLayerProjectionPreset preset)
+{
+  if (!paint_layer_owned(ma, layer) || layer->projection == nullptr) {
+    return false;
+  }
+  constexpr int16_t relevant = MA_PAINT_LAYER_PROJECTION_CLIP | MA_PAINT_LAYER_PROJECTION_DEPTH |
+                               MA_PAINT_LAYER_PROJECTION_FIT_ASPECT |
+                               MA_PAINT_LAYER_PROJECTION_FACING |
+                               MA_PAINT_LAYER_PROJECTION_FACING_INVERT;
+  const int16_t other = layer->projection->flag & ~relevant;
+  int16_t new_flag = other;
+  switch (preset) {
+    case PAINT_LAYER_PROJ_PRESET_DECAL: {
+      new_flag |= MA_PAINT_LAYER_PROJECTION_CLIP | MA_PAINT_LAYER_PROJECTION_DEPTH |
+                  MA_PAINT_LAYER_PROJECTION_FIT_ASPECT | MA_PAINT_LAYER_PROJECTION_FACING;
+      layer->projection->angle = PAINT_LAYER_PROJECTION_ANGLE_DEFAULT;
+      break;
+    }
+    case PAINT_LAYER_PROJ_PRESET_FLAT: {
+      /* CLIP, DEPTH, FIT_ASPECT, FACING all off. */
+      break;
+    }
+    case PAINT_LAYER_PROJ_PRESET_CUSTOM: {
+      return true;
+    }
+    default: {
+      /* A value from outside the enum (a script) must not read as Flat. */
+      return false;
+    }
+  }
+  if (new_flag == layer->projection->flag) {
+    return true;
+  }
+  layer->projection->flag = new_flag;
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
 }
 
 /** \} */

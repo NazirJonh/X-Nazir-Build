@@ -26,11 +26,12 @@ struct Object;
 
 namespace blender::ed::sculpt_paint::projection {
 
-/** The inline frame of a projected row: centre, full extents and XYZ Euler radians. */
+/** The inline frame of a projected row: centre, full extents, normal and roll. */
 struct ProjectionFrame {
   float center[3] = {0.0f, 0.0f, 0.0f};
   float size[3] = {1.0f, 1.0f, 1.0f};
-  float rotation[3] = {0.0f, 0.0f, 0.0f};
+  float normal[3] = {0.0f, 0.0f, 1.0f};
+  float roll = 0.0f;
 };
 
 class PaintLayerRowProjectionTarget {
@@ -47,8 +48,8 @@ class PaintLayerRowProjectionTarget {
   /** Write the row's inline frame through the value-only BKE setter. */
   bool write(const ProjectionFrame &frame);
 
-  /** Write one XYZ Euler component, keeping the other two. */
-  bool write_rotation_axis(int axis, float value);
+  /** Write the roll, keeping center/size/normal. */
+  bool write_roll(float roll);
 
   Material *material() const
   {

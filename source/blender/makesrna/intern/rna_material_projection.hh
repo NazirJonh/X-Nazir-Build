@@ -6,7 +6,7 @@
  * \ingroup RNA
  *
  * The projection RNA of a Paint Layers row: the mapping space that switches it on and the frame
- * (center, size, rotation, axis, clip) with its controller object.
+ * (center, size, normal+roll, axis, clip) with its controller object.
  *
  * Included by `rna_material.cc` rather than compiled on its own: makesrna emits the callbacks of a
  * property into the generated file of the file that defines it, so the runtime functions below
@@ -19,6 +19,7 @@
 
 #include <cfloat>
 
+#include "BLI_math_constants.h"
 #include "BLI_math_vector.h"
 
 #include "BLT_translation.hh"
@@ -49,6 +50,31 @@ static const EnumPropertyItem rna_enum_material_paint_layer_mapping_space_items[
      0,
      "Planar",
      "Project along the frame's local axis onto its plane"},
+    {MA_PAINT_LAYER_MAPPING_SPACE_BOX,
+     "BOX",
+     0,
+     "Box",
+     "Project the map onto the six sides of the frame, one map copy per face"},
+    {MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR,
+     "TRIPLANAR",
+     0,
+     "Triplanar",
+     "Blend three projections by the surface normal"},
+    {MA_PAINT_LAYER_MAPPING_SPACE_CUBE,
+     "CUBE",
+     0,
+     "Cube",
+     "Project the map onto a six-sided cube-cross atlas in one texture"},
+    {MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER,
+     "CYLINDER",
+     0,
+     "Cylinder",
+     "Wrap the map around the frame's axis cylinder"},
+    {MA_PAINT_LAYER_MAPPING_SPACE_SPHERE,
+     "SPHERE",
+     0,
+     "Sphere",
+     "Wrap the map around the frame's spherical surface"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -56,6 +82,23 @@ static const EnumPropertyItem rna_enum_material_paint_layer_projection_axis_item
     {MA_PAINT_LAYER_PROJECTION_AXIS_X, "X", 0, "X", "Project along the frame's local X axis"},
     {MA_PAINT_LAYER_PROJECTION_AXIS_Y, "Y", 0, "Y", "Project along the frame's local Y axis"},
     {MA_PAINT_LAYER_PROJECTION_AXIS_Z, "Z", 0, "Z", "Project along the frame's local Z axis"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Indexed like the atlas table of #BKE_paint_layers_projection_cube_layout_info. */
+static const EnumPropertyItem rna_enum_material_paint_layer_projection_cube_layout_items[] = {
+    {MA_PAINT_LAYER_PROJECTION_CUBE_CROSS_4X3,
+     "CROSS_4X3",
+     0,
+     "Cross 4x3",
+     "Horizontal cross: +Y above, -Y below, -X +Z +X -Z across the middle"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_material_paint_layer_projection_preset_items[] = {
+    {PAINT_LAYER_PROJ_PRESET_DECAL, "DECAL", 0, "Decal", "Clip, depth, aspect, facing fade"},
+    {PAINT_LAYER_PROJ_PRESET_FLAT, "FLAT", 0, "Flat", "No clip, no depth, no facing"},
+    {PAINT_LAYER_PROJ_PRESET_CUSTOM, "CUSTOM", 0, "Custom", "Flags do not match any preset"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -74,6 +117,32 @@ static bool rna_MaterialPaintLayer_projection_uses_axis_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
   return BKE_paint_layers_projection_mode_info(layer->mapping.space).uses_axis;
+}
+
+static bool rna_MaterialPaintLayer_projection_uses_blend_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_projection_mode_info(layer->mapping.space).uses_blend;
+}
+
+static bool rna_MaterialPaintLayer_projection_uses_cube_layout_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_projection_mode_info(layer->mapping.space).uses_cube_layout;
+}
+
+static int rna_MaterialPaintLayer_projection_cube_layout_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return int(BKE_paint_layers_projection_cube_layout_get(*layer));
+}
+
+static void rna_MaterialPaintLayer_projection_cube_layout_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_projection_set_cube_layout(*ma, layer, int8_t(value));
+  }
 }
 
 static void rna_MaterialPaintLayer_mapping_space_set(PointerRNA *ptr, int value)
@@ -184,7 +253,9 @@ static void rna_MaterialPaintLayer_projection_rotation_get(PointerRNA *ptr, floa
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
   if (layer->projection != nullptr) {
-    copy_v3_v3(value, layer->projection->rotation);
+    float normal[3];
+    BKE_paint_layers_projection_normal_get(*layer, normal);
+    BKE_paint_layers_projection_frame_euler(normal, layer->projection->roll, value);
   }
   else {
     zero_v3(value);
@@ -196,6 +267,70 @@ static void rna_MaterialPaintLayer_projection_rotation_set(PointerRNA *ptr, cons
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
     BKE_paint_layers_projection_set_rotation(*ma, layer, value);
+  }
+}
+
+static float rna_MaterialPaintLayer_projection_roll_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (layer->projection != nullptr) ? layer->projection->roll : 0.0f;
+}
+
+static void rna_MaterialPaintLayer_projection_roll_set(PointerRNA *ptr, float value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_projection_set_roll(*ma, layer, value);
+  }
+}
+
+static float rna_MaterialPaintLayer_projection_blend_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (layer->projection != nullptr) ? layer->projection->blend : 0.0f;
+}
+
+static void rna_MaterialPaintLayer_projection_blend_set(PointerRNA *ptr, float value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_projection_set_blend(*ma, layer, value);
+  }
+}
+
+static float rna_MaterialPaintLayer_projection_depth_size_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  if (layer->projection != nullptr) {
+    return BKE_paint_layers_projection_size_normalize(layer->projection->size[2]);
+  }
+  return 1.0f;
+}
+
+static void rna_MaterialPaintLayer_projection_depth_size_set(PointerRNA *ptr, float value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    if (layer->projection != nullptr) {
+      float size[3];
+      copy_v3_v3(size, layer->projection->size);
+      size[2] = value;
+      BKE_paint_layers_projection_set_size(*ma, layer, size);
+    }
+  }
+}
+
+static int rna_MaterialPaintLayer_projection_preset_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return int(BKE_paint_layers_projection_preset_get(*layer));
+}
+
+static void rna_MaterialPaintLayer_projection_preset_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_projection_apply_preset(*ma, layer, ePaintLayerProjectionPreset(value));
   }
 }
 
@@ -587,7 +722,68 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
   RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_projection_editable");
   RNA_def_property_ui_text(prop,
                            "Projection Rotation",
-                           "Frame rotation, XYZ Euler, in the controller's space");
+                           "Frame rotation, XYZ Euler, in the controller's space (script wrapper; "
+                           "use projection_roll for the interactive UI)");
+  /* The frame is stored as normal+roll: an Euler written here is decomposed and reads back as an
+   * equivalent triple, not the same angles, so an F-Curve on its channels would not interpolate
+   * what its keys say. */
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "projection_roll", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_projection_roll_get",
+                               "rna_MaterialPaintLayer_projection_roll_set",
+                               nullptr);
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_projection_editable");
+  RNA_def_property_range(prop, -float(M_PI), float(M_PI));
+  RNA_def_property_ui_text(prop, "Roll", "Rotation of the frame around the projection normal");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "projection_blend", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_projection_blend_get",
+                               "rna_MaterialPaintLayer_projection_blend_set",
+                               nullptr);
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_projection_editable");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "Normal Blend",
+                           "Triplanar face blend: 0 hard faces, 1 the softest normal blend (Box "
+                           "keeps hard faces)");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "projection_cube_layout", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_projection_cube_layout_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_projection_cube_layout_get",
+                              "rna_MaterialPaintLayer_projection_cube_layout_set",
+                              nullptr);
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_projection_editable");
+  RNA_def_property_ui_text(prop, "Cube Layout", "How the six faces sit in the Cube atlas");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "projection_depth_size", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_projection_depth_size_get",
+                               "rna_MaterialPaintLayer_projection_depth_size_set",
+                               nullptr);
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_projection_editable");
+  RNA_def_property_range(prop, PAINT_LAYER_PROJECTION_SIZE_MIN, FLT_MAX);
+  RNA_def_property_ui_text(
+      prop,
+      "Depth",
+      "Extent of the projection slab along the frame Z axis (the projection direction)");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "projection_preset", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_projection_preset_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_projection_preset_get",
+                              "rna_MaterialPaintLayer_projection_preset_set",
+                              nullptr);
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_projection_editable");
+  RNA_def_property_ui_text(prop, "Preset", "Decal or Flat preset for the projection flags");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "projection_clip", PROP_BOOLEAN, PROP_NONE);
@@ -620,8 +816,8 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
   RNA_def_property_ui_text(
       prop,
       "Facing Fade",
-      "Fade the projection out on faces that turn away from the axis, so it does not show through "
-      "on the far side or stretch over faces parallel to it");
+      "Fade the projection out on faces that look away from the frame's +Z axis, so it does not "
+      "show through on the far side or stretch over faces parallel to it");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "projection_facing_invert", PROP_BOOLEAN, PROP_NONE);
@@ -632,9 +828,8 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
   RNA_def_property_ui_text(
       prop,
       "Flip Facing",
-      "Fade out the faces the axis points away from instead of the ones it points at; off is the "
-      "decal convention, where the frame's arrow enters the surface and the fade keeps the face it "
-      "lands on");
+      "Keeps the faces that look away from the frame's +Z axis instead of the ones that look "
+      "toward it");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "projection_snap", PROP_BOOLEAN, PROP_NONE);
@@ -690,11 +885,11 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_projection_axis_items);
   RNA_def_property_enum_funcs(prop,
                               "rna_MaterialPaintLayer_projection_axis_get",
-                              "rna_MaterialPaintLayer_projection_axis_set",
+                              nullptr,
                               nullptr);
-  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_projection_editable");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
-      prop, "Projection Axis", "Local axis a Planar, Cylinder or Sphere projection runs along");
+      prop, "Projection Axis", "Fixed to Z; the frame normal sets the projection direction");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "projection_uses_axis", PROP_BOOLEAN, PROP_NONE);
@@ -702,6 +897,19 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
   RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_projection_uses_axis_get", nullptr);
   RNA_def_property_ui_text(
       prop, "Uses Axis", "The row's projection space runs along a local axis of the frame");
+
+  prop = RNA_def_property(srna, "projection_uses_blend", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_projection_uses_blend_get", nullptr);
+  RNA_def_property_ui_text(
+      prop, "Uses Blend", "The row's projection space blends its faces by the surface normal");
+
+  prop = RNA_def_property(srna, "projection_uses_cube_layout", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_MaterialPaintLayer_projection_uses_cube_layout_get", nullptr);
+  RNA_def_property_ui_text(
+      prop, "Uses Cube Layout", "The row's projection space reads a cube atlas");
 
   /* The optional controller object: its own transform places, turns and scales the frame, and the
    * inline values above are applied inside its space. */

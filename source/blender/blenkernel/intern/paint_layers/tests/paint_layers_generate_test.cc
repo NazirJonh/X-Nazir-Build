@@ -2020,11 +2020,46 @@ TEST_F(PaintLayersGenerateTest, planar_projection_feeds_the_map_through_its_fram
   EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Center", false));
   EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Size", false));
   EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Rotation", false));
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Blend", false));
   EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Clip", false));
   EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Depth", false));
   EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Facing", false));
   EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Facing Direction", false));
   EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Aspect", false));
+}
+
+TEST_F(PaintLayersGenerateTest, box_projection_samples_three_faces_and_blends_them)
+{
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_BOX));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 3) << "one map copy per face";
+  EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 0);
+  EXPECT_GE(count_type(*group, SH_NODE_SEPARATE_XYZ), 1);
+  EXPECT_GE(count_type(*group, SH_NODE_MIX), 2) << "Y over Z, then X over that";
+  EXPECT_GE(count_type(*group, SH_NODE_MATH), 10) << "weights, clip factor and UV math";
+}
+
+TEST_F(PaintLayersGenerateTest, every_projection_mode_samples_as_its_table_row_says)
+{
+  /* The map reads per point come from the mode table, so a new mode is covered by adding its row. */
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  for (int space = MA_PAINT_LAYER_MAPPING_SPACE_UV + 1; space < MA_PAINT_LAYER_MAPPING_SPACE_NUM;
+       space++)
+  {
+    ASSERT_TRUE(BKE_paint_layers_projection_set_space(*ma, fill, int16_t(space)))
+        << "space " << space;
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma)) << "space " << space;
+    bNodeTree *group = layer_tree_find(*bmain, "Fill");
+    ASSERT_NE(group, nullptr) << "space " << space;
+    EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE),
+              BKE_paint_layers_projection_mode_info(int16_t(space)).samples_num)
+        << "space " << space;
+  }
 }
 
 TEST_F(PaintLayersGenerateTest, projection_mode_is_structure_and_the_frame_is_a_value)
@@ -2035,7 +2070,7 @@ TEST_F(PaintLayersGenerateTest, projection_mode_is_structure_and_the_frame_is_a_
   const uint64_t uv_hash = paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms);
 
   ASSERT_TRUE(BKE_paint_layers_projection_set_space(
-      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR));
   const uint64_t projected_hash = paint_layers::paint_layers_layer_topology_hash(
       *ma, *fill, wired, forms);
   EXPECT_NE(projected_hash, uv_hash);
@@ -2044,9 +2079,17 @@ TEST_F(PaintLayersGenerateTest, projection_mode_is_structure_and_the_frame_is_a_
   const float center[3] = {1.0f, 2.0f, 3.0f};
   const float size[3] = {2.0f, 2.0f, 2.0f};
   const float rotation[3] = {0.1f, 0.2f, 0.3f};
-  ASSERT_TRUE(BKE_paint_layers_projection_set_values(*ma, fill, center, size, rotation));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values_euler(*ma, fill, center, size, rotation));
   EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0)
       << "a frame drag syncs inputs and keeps the nodes";
+  EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms),
+            projected_hash);
+
+  /* The blend, the orientation and the roll are inputs as well; only the layout is structure. */
+  const float side_normal[3] = {1.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_blend(*ma, fill, 0.7f));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_orientation(*ma, fill, side_normal, 0.4f));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_roll(*ma, fill, -1.0f));
   EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms),
             projected_hash);
 
@@ -2071,7 +2114,7 @@ TEST_F(PaintLayersGenerateTest, projection_size_from_controller_is_a_value_input
   const float center[3] = {0.0f, 0.0f, 0.0f};
   const float size[3] = {2.0f, 3.0f, 4.0f};
   const float rotation[3] = {0.0f, 0.0f, 0.0f};
-  ASSERT_TRUE(BKE_paint_layers_projection_set_values(*ma, fill, center, size, rotation));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values_euler(*ma, fill, center, size, rotation));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
@@ -2126,6 +2169,42 @@ TEST_F(PaintLayersGenerateTest, projection_facing_reads_the_world_normal_in_both
    * bakes the world-space direction the world normal reads against instead. */
   EXPECT_EQ(count_type(*group, SH_NODE_NEW_GEOMETRY), 1);
   EXPECT_EQ(count_type(*group, SH_NODE_VECT_TRANSFORM), 0);
+}
+
+TEST_F(PaintLayersGenerateTest, projection_value_sync_orientation)
+{
+  /* After a non-trivial orientation, the Rotation instance socket (written by value-sync) must
+   * equal frame_euler(normal, roll). This verifies the graph path only; the CPU composite path
+   * uses the same helper by construction (paint_layers_composite.cc calls frame_euler directly),
+   * but is not covered by a separate runtime test here. */
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  const float center[3] = {0.0f, 0.0f, 0.0f};
+  const float size[3] = {1.0f, 1.0f, 1.0f};
+  const float normal[3] = {1.0f, 0.0f, 0.0f};
+  const float roll = 0.7f;
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values(*ma, fill, center, size, normal, roll));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  bNode *instance = group_instance_find(*ma->paint_layers_tree, *group);
+  ASSERT_NE(instance, nullptr);
+  const bNodeTreeInterfaceSocket *rot_iface = interface_input_find(*group,
+                                                                   "Fill Projection Rotation");
+  ASSERT_NE(rot_iface, nullptr);
+  bNodeSocket *rot_socket = bke::node_find_socket(
+      *instance, SOCK_IN, UString::from_ptr_noinline(rot_iface->identifier));
+  ASSERT_NE(rot_socket, nullptr);
+  const float *socket_value = static_cast<bNodeSocketValueVector *>(rot_socket->default_value)->value;
+
+  float expected_euler[3];
+  BKE_paint_layers_projection_frame_euler(normal, roll, expected_euler);
+  for (const int i : IndexRange(3)) {
+    EXPECT_NEAR(socket_value[i], expected_euler[i], 1e-5f)
+        << "value-sync rotation axis " << i;
+  }
 }
 
 /** \} */

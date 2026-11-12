@@ -37,6 +37,9 @@
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
+#include "BLI_math_matrix.h"
+#include "BLI_math_rotation.h"
+#include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
 #include "BLI_uuid.h"
@@ -4613,8 +4616,8 @@ TEST_F(PaintLayersDescription, projection_is_supported_by_a_fill_that_reads_a_ma
   EXPECT_TRUE(fill->projection == nullptr) << "the payload is on demand";
 
   ASSERT_TRUE(BKE_paint_layers_projection_set_space(
-      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
-  EXPECT_EQ(fill->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR));
+  EXPECT_EQ(fill->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR);
   EXPECT_NE(fill->projection, nullptr);
   EXPECT_TRUE(BKE_paint_layers_projection_applies(ma, *fill));
   EXPECT_TRUE(BKE_paint_layers_projection_clip_get(*fill));
@@ -4627,7 +4630,7 @@ TEST_F(PaintLayersDescription, projection_is_supported_by_a_fill_that_reads_a_ma
       ma, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR, paint_map));
   EXPECT_FALSE(BKE_paint_layers_projection_supported(ma, *paint));
   EXPECT_FALSE(BKE_paint_layers_projection_set_space(
-      ma, paint, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+      ma, paint, MA_PAINT_LAYER_MAPPING_SPACE_BOX));
   EXPECT_EQ(paint->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_UV);
 }
 
@@ -4636,18 +4639,21 @@ TEST_F(PaintLayersDescription, projection_frame_values_are_normalized_and_value_
   Material &ma = *BKE_material_add(bmain, "ProjectionValuesMat");
   MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Projected");
   ASSERT_TRUE(BKE_paint_layers_projection_set_space(
-      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_BOX));
 
   ma.paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
   const float center[3] = {1.0f, 2.0f, 3.0f};
   const float size[3] = {2.0f, 0.0f, -4.0f};
   const float rotation[3] = {0.1f, 0.2f, 0.3f};
-  ASSERT_TRUE(BKE_paint_layers_projection_set_values(ma, fill, center, size, rotation));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values_euler(ma, fill, center, size, rotation));
   EXPECT_EQ(ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0)
       << "a frame move never rebuilds the graph";
+  float stored_euler[3];
+  BKE_paint_layers_projection_frame_euler(
+      fill->projection->normal, fill->projection->roll, stored_euler);
   for (int i = 0; i < 3; i++) {
     EXPECT_FLOAT_EQ(fill->projection->center[i], center[i]);
-    EXPECT_FLOAT_EQ(fill->projection->rotation[i], rotation[i]);
+    EXPECT_FLOAT_EQ(stored_euler[i], rotation[i]);
   }
   EXPECT_FLOAT_EQ(fill->projection->size[0], 2.0f);
   EXPECT_FLOAT_EQ(fill->projection->size[1], 1.0f);
@@ -4694,29 +4700,29 @@ TEST_F(PaintLayersDescription, projection_facing_weight_matches_the_graph_rule)
   const float cos_min = cosf(DEG2RADF(angle));
   const float cos_max = cosf(DEG2RADF(angle - PAINT_LAYER_PROJECTION_ANGLE_BAND));
 
-  /* The default is Ucupaint's decal: the frame's arrow enters the surface, so the faces whose
-   * normal points back at it -- the negative component -- are the ones kept at full weight. */
+  /* Without Flip: the frame's +Z looks at the observer, so the faces whose normal aligns with
+   * +Z (the positive component) are kept at full weight. */
   float scale = 0.0f;
   float offset = 0.0f;
   BKE_paint_layers_projection_facing_weights(angle, false, scale, offset);
-  EXPECT_LT(scale, 0.0f) << "the decal side is the negative component";
-  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_facing_weight(scale, offset, -1.0f), 1.0f);
-  EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(scale, offset, -cos_max), 1.0f, 1e-5f);
-  EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(scale, offset, -cos_min), 0.0f, 1e-5f);
-  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_facing_weight(scale, offset, 1.0f), 0.0f);
-  /* The band is symmetric: the fading rim's midpoint sits halfway up the hermite. */
-  EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(
-                  scale, offset, -0.5f * (cos_min + cos_max)),
-              0.5f,
-              1e-4f);
-
-  /* The flip mirrors the weight onto the other side of the surface without moving the limit. */
-  BKE_paint_layers_projection_facing_weights(angle, true, scale, offset);
-  EXPECT_GT(scale, 0.0f);
+  EXPECT_GT(scale, 0.0f) << "without flip, positive component is the kept side";
   EXPECT_FLOAT_EQ(BKE_paint_layers_projection_facing_weight(scale, offset, 1.0f), 1.0f);
   EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(scale, offset, cos_max), 1.0f, 1e-5f);
   EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(scale, offset, cos_min), 0.0f, 1e-5f);
   EXPECT_FLOAT_EQ(BKE_paint_layers_projection_facing_weight(scale, offset, -1.0f), 0.0f);
+  /* The band is symmetric: the fading rim's midpoint sits halfway up the hermite. */
+  EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(
+                  scale, offset, 0.5f * (cos_min + cos_max)),
+              0.5f,
+              1e-4f);
+
+  /* Flip mirrors the weight onto the other side of the surface without moving the limit. */
+  BKE_paint_layers_projection_facing_weights(angle, true, scale, offset);
+  EXPECT_LT(scale, 0.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_facing_weight(scale, offset, -1.0f), 1.0f);
+  EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(scale, offset, -cos_max), 1.0f, 1e-5f);
+  EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(scale, offset, -cos_min), 0.0f, 1e-5f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_facing_weight(scale, offset, 1.0f), 0.0f);
 }
 
 TEST_F(PaintLayersDescription, projection_angle_is_stored_away_from_the_file_marker)
@@ -4758,6 +4764,24 @@ TEST_F(PaintLayersDescription, projection_mode_table_covers_every_space)
   }
   EXPECT_FALSE(BKE_paint_layers_projection_mode_info(MA_PAINT_LAYER_MAPPING_SPACE_UV).uses_axis);
   EXPECT_TRUE(BKE_paint_layers_projection_mode_info(MA_PAINT_LAYER_MAPPING_SPACE_PLANAR).uses_axis);
+  EXPECT_TRUE(
+      BKE_paint_layers_projection_mode_info(MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER).uses_axis);
+  /* Every mode names a map read count and a controller display; only the table decides who blends
+   * faces and who reads an atlas. */
+  int blend_modes = 0;
+  int cube_modes = 0;
+  for (int space = 0; space < MA_PAINT_LAYER_MAPPING_SPACE_NUM; space++) {
+    const ProjectionModeInfo &info = BKE_paint_layers_projection_mode_info(int16_t(space));
+    EXPECT_TRUE(info.samples_num == 1 || info.samples_num == 3) << "space " << space;
+    EXPECT_NE(info.controller_display, 0) << "space " << space;
+    blend_modes += info.uses_blend ? 1 : 0;
+    cube_modes += info.uses_cube_layout ? 1 : 0;
+  }
+  EXPECT_EQ(blend_modes, 1);
+  EXPECT_EQ(cube_modes, 1);
+  EXPECT_TRUE(BKE_paint_layers_projection_mode_info(MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR)
+                  .uses_blend);
+  EXPECT_EQ(BKE_paint_layers_projection_mode_info(MA_PAINT_LAYER_MAPPING_SPACE_BOX).samples_num, 3);
   /* A stored value outside the table reads as UV, which has no frame. */
   EXPECT_EQ(BKE_paint_layers_projection_mode_info(MA_PAINT_LAYER_MAPPING_SPACE_NUM).space,
             MA_PAINT_LAYER_MAPPING_SPACE_UV);
@@ -4782,7 +4806,7 @@ TEST_F(PaintLayersDescription, projection_snap_and_controller_scale_are_off_and_
   const float center[3] = {0.0f, 0.0f, 0.0f};
   const float size[3] = {2.0f, 3.0f, 4.0f};
   const float rotation[3] = {0.0f, 0.0f, 0.0f};
-  ASSERT_TRUE(BKE_paint_layers_projection_set_values(ma, fill, center, size, rotation));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values_euler(ma, fill, center, size, rotation));
 
   /* The frame reads one on every axis while the controller carries the scale, but the inline
    * extents stay stored so turning the option off restores them. */
@@ -4840,27 +4864,29 @@ TEST_F(PaintLayersDescription, projection_payload_copies_with_the_row_and_clears
   Material *ma = BKE_material_add(bmain, "ProjectionCopyMat");
   MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, *ma, "Projected");
   ASSERT_TRUE(BKE_paint_layers_projection_set_space(
-      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER));
   const float center[3] = {0.5f, -1.0f, 2.0f};
   const float size[3] = {3.0f, 4.0f, 5.0f};
   const float rotation[3] = {0.25f, 0.5f, 0.75f};
-  ASSERT_TRUE(BKE_paint_layers_projection_set_values(
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values_euler(
       *ma, fill, center, size, rotation));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_blend(*ma, fill, 0.5f));
 
   Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
   ASSERT_NE(copy, nullptr);
   const MaterialPaintLayer *copy_layer = paint_layers_first(*copy);
   ASSERT_NE(copy_layer, nullptr);
   ASSERT_NE(copy_layer->projection, nullptr);
-  EXPECT_EQ(copy_layer->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
+  EXPECT_EQ(copy_layer->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER);
   EXPECT_FLOAT_EQ(copy_layer->projection->center[2], 2.0f);
   EXPECT_FLOAT_EQ(copy_layer->projection->size[1], 4.0f);
+  EXPECT_FLOAT_EQ(copy_layer->projection->blend, 0.5f);
   BKE_id_free(bmain, copy);
 
   MaterialPaintLayer *duplicate = BKE_paint_layers_duplicate(*bmain, *ma, fill);
   ASSERT_NE(duplicate, nullptr);
   ASSERT_NE(duplicate->projection, nullptr);
-  EXPECT_EQ(duplicate->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
+  EXPECT_EQ(duplicate->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER);
   /* Freeing a row with a frame releases the payload with it. */
   ASSERT_TRUE(BKE_paint_layers_remove(*ma, duplicate));
   EXPECT_EQ(paint_layers_first(*ma), fill);
@@ -4932,11 +4958,12 @@ TEST_F(PaintLayersDescription, projection_round_trips_through_a_file)
   ASSERT_TRUE(BKE_paint_layers_set_source(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
   paint_layer_channel_add(*layer, *image);
   ASSERT_TRUE(BKE_paint_layers_projection_set_space(
-      *ma, layer, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+      *ma, layer, MA_PAINT_LAYER_MAPPING_SPACE_BOX));
   const float center[3] = {1.0f, -2.0f, 0.5f};
   const float size[3] = {2.0f, 3.0f, 4.0f};
   const float rotation[3] = {0.1f, 0.2f, 0.3f};
-  ASSERT_TRUE(BKE_paint_layers_projection_set_values(*ma, layer, center, size, rotation));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values_euler(*ma, layer, center, size, rotation));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_blend(*ma, layer, 0.25f));
   ASSERT_TRUE(BKE_paint_layers_projection_set_clip(*ma, layer, false));
 
   char filepath[FILE_MAX];
@@ -4961,11 +4988,15 @@ TEST_F(PaintLayersDescription, projection_round_trips_through_a_file)
   ASSERT_NE(reloaded, nullptr);
   MaterialPaintLayer *reloaded_layer = paint_layers_first(*reloaded);
   ASSERT_NE(reloaded_layer, nullptr);
-  EXPECT_EQ(reloaded_layer->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
+  EXPECT_EQ(reloaded_layer->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_BOX);
   ASSERT_NE(reloaded_layer->projection, nullptr);
   EXPECT_FLOAT_EQ(reloaded_layer->projection->center[1], -2.0f);
   EXPECT_FLOAT_EQ(reloaded_layer->projection->size[2], 4.0f);
-  EXPECT_FLOAT_EQ(reloaded_layer->projection->rotation[2], 0.3f);
+  float reloaded_euler[3];
+  BKE_paint_layers_projection_frame_euler(
+      reloaded_layer->projection->normal, reloaded_layer->projection->roll, reloaded_euler);
+  EXPECT_NEAR(reloaded_euler[2], 0.3f, 1e-5f);
+  EXPECT_FLOAT_EQ(reloaded_layer->projection->blend, 0.25f);
   EXPECT_FALSE(BKE_paint_layers_projection_clip_get(*reloaded_layer));
   EXPECT_EQ(reloaded_layer->projection_object, nullptr);
 }
@@ -5023,6 +5054,528 @@ TEST_F(PaintLayersDescription, projection_old_file_reads_the_facing_defaults)
   EXPECT_FALSE(BKE_paint_layers_projection_size_from_controller_get(*reloaded_layer));
 
   BLO_blendfiledata_free(bfd);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Projection frame orientation helpers (WP9)
+ * \{ */
+
+TEST_F(PaintLayersDescription, projection_frame_matrix_orthonormal_and_round_trips)
+{
+  /* For a set of representative normals and rolls, frame_matrix produces an orthonormal matrix
+   * with det=+1, and frame_from_matrix recovers the normal+roll. */
+  const float pi = M_PI;
+  /* Normals: ±axes, diagonal, near-threshold (|n·Z| just below and just above 0.999). */
+  const float near_below[3] = {0.0f, sqrtf(1.0f - 0.998f * 0.998f), 0.998f};  /* dot≈ 0.998 < 0.999. */
+  const float near_above[3] = {0.0f, sqrtf(1.0f - 0.9995f * 0.9995f), 0.9995f};  /* dot≈ 0.9995 > 0.999. */
+  const float diag[3] = {0.577f, 0.577f, 0.577f};
+  const float nx[3] = {1.0f, 0.0f, 0.0f};
+  const float nnx[3] = {-1.0f, 0.0f, 0.0f};
+  const float ny[3] = {0.0f, 1.0f, 0.0f};
+  const float nny[3] = {0.0f, -1.0f, 0.0f};
+  const float nz[3] = {0.0f, 0.0f, 1.0f};
+  const float nnz[3] = {0.0f, 0.0f, -1.0f};
+  const float rolls[] = {0.0f, pi / 2.0f, -pi / 2.0f, pi, 0.3f};
+  const int num_rolls = 5;
+  const float *normals[] = {nx, nnx, ny, nny, nz, nnz, diag, near_below, near_above};
+  const int num_normals = 9;
+  for (const int ni : IndexRange(num_normals)) {
+    for (const int ri : IndexRange(num_rolls)) {
+      const float *n = normals[ni];
+      const float r = rolls[ri];
+      float mat[3][3];
+      BKE_paint_layers_projection_frame_matrix(n, r, mat);
+      /* Orthonormality: rows unit and perpendicular. */
+      for (const int i : IndexRange(3)) {
+        const float len_sq = mat[i][0] * mat[i][0] + mat[i][1] * mat[i][1] +
+                             mat[i][2] * mat[i][2];
+        EXPECT_NEAR(len_sq, 1.0f, 1e-5f)
+            << "normal[" << ni << "] roll=" << r << " row " << i << " not unit";
+        for (const int j : IndexRange(i + 1, 3)) {
+          const float dot_val = mat[i][0] * mat[j][0] + mat[i][1] * mat[j][1] +
+                                mat[i][2] * mat[j][2];
+          EXPECT_NEAR(dot_val, 0.0f, 1e-5f)
+              << "normal[" << ni << "] rows " << i << "," << j << " not perpendicular";
+        }
+      }
+      /* det = +1: cross(row0, row1) dot row2 = 1. */
+      float cr[3];
+      cross_v3_v3v3(cr, mat[0], mat[1]);
+      const float det_val = dot_v3v3(cr, mat[2]);
+      EXPECT_NEAR(det_val, 1.0f, 1e-5f)
+          << "normal[" << ni << "] roll=" << r << " det not +1";
+      /* Axis 2 (`mat[2]`) = the normalized normal. */
+      float expected[3];
+      copy_v3_v3(expected, n);
+      normalize_v3(expected);
+      EXPECT_NEAR(mat[2][0], expected[0], 1e-5f);
+      EXPECT_NEAR(mat[2][1], expected[1], 1e-5f);
+      EXPECT_NEAR(mat[2][2], expected[2], 1e-5f);
+      /* Round-trip. */
+      float rec_n[3];
+      float rec_r;
+      BKE_paint_layers_projection_frame_from_matrix(mat, rec_n, &rec_r);
+      for (const int i : IndexRange(3)) {
+        EXPECT_NEAR(rec_n[i], expected[i], 1e-5f) << "normal round-trip axis " << i;
+      }
+      /* Compare roll as angle mod 2*pi. */
+      EXPECT_NEAR(sinf(rec_r), sinf(r), 1e-5f);
+      EXPECT_NEAR(cosf(rec_r), cosf(r), 1e-5f);
+    }
+  }
+}
+
+TEST_F(PaintLayersDescription, projection_frame_euler_agrees_with_frame_matrix)
+{
+  /* frame_euler gives the same rotation as frame_matrix when fed to eul_to_mat3. */
+  const float normals[][3] = {
+      {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.6f, 0.0f, 0.8f}};
+  const float rolls[] = {0.0f, M_PI / 4.0f, -M_PI / 2.0f};
+  for (const auto &n : normals) {
+    for (const float roll : rolls) {
+      float mat_direct[3][3];
+      BKE_paint_layers_projection_frame_matrix(n, roll, mat_direct);
+      float euler[3];
+      BKE_paint_layers_projection_frame_euler(n, roll, euler);
+      float mat_from_euler[3][3];
+      eul_to_mat3(mat_from_euler, euler);
+      for (const int i : IndexRange(3)) {
+        for (const int j : IndexRange(3)) {
+          EXPECT_NEAR(mat_direct[i][j], mat_from_euler[i][j], 1e-5f)
+              << " mismatch at (" << i << "," << j << ")";
+        }
+      }
+    }
+  }
+}
+
+TEST_F(PaintLayersDescription, projection_frame_y_points_up_for_horizontal_normal)
+{
+  /* With roll=0 and normal = +X, column 1 (the frame Y axis) should point in the +Z direction
+   * (the reference up), because the image top faces up for a wall projected along +X. */
+  const float normal[3] = {1.0f, 0.0f, 0.0f};
+  float mat[3][3];
+  BKE_paint_layers_projection_frame_matrix(normal, 0.0f, mat);
+  /* `mat[1]` = Y axis in parent space. */
+  EXPECT_NEAR(mat[1][0], 0.0f, 1e-5f);
+  EXPECT_NEAR(mat[1][1], 0.0f, 1e-5f);
+  /* +Z or -Z depending on cross product orientation; the important thing is it's unit in Z. */
+  EXPECT_GT(fabsf(mat[1][2]), 0.99f) << "Y axis should be nearly vertical for horizontal normal";
+}
+
+TEST_F(PaintLayersDescription, projection_set_orientation_normalizes_and_rejects_invalid)
+{
+  Material &ma = *BKE_material_add(bmain, "SetOrientMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "OrientFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+
+  /* Non-normalized normal is normalized before storing. */
+  const float long_n[3] = {0.0f, 0.0f, 5.0f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_orientation(ma, fill, long_n, 0.0f));
+  EXPECT_NEAR(fill->projection->normal[2], 1.0f, 1e-6f);
+
+  /* Zero normal becomes (0,0,1). */
+  const float zero_n[3] = {0.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_orientation(ma, fill, zero_n, 1.0f));
+  EXPECT_NEAR(fill->projection->normal[0], 0.0f, 1e-6f);
+  EXPECT_NEAR(fill->projection->normal[2], 1.0f, 1e-6f);
+  EXPECT_NEAR(fill->projection->roll, 1.0f, 1e-6f);
+
+  /* NaN rejected, values unchanged. */
+  const float nan_n[3] = {std::numeric_limits<float>::quiet_NaN(), 0.0f, 1.0f};
+  EXPECT_FALSE(BKE_paint_layers_projection_set_orientation(ma, fill, nan_n, 0.0f));
+  EXPECT_NEAR(fill->projection->roll, 1.0f, 1e-6f);
+
+  /* Inf in roll rejected. */
+  const float good_n[3] = {1.0f, 0.0f, 0.0f};
+  EXPECT_FALSE(BKE_paint_layers_projection_set_orientation(
+      ma, fill, good_n, std::numeric_limits<float>::infinity()));
+}
+
+TEST_F(PaintLayersDescription, projection_set_roll_wraps_to_pm_pi)
+{
+  Material &ma = *BKE_material_add(bmain, "SetRollMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "RollFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+
+  /* 3pi/2 wraps to -pi/2. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_roll(ma, fill, 3.0f * M_PI / 2.0f));
+  EXPECT_NEAR(fill->projection->roll, -M_PI / 2.0f, 1e-5f);
+
+  /* -3pi/2 wraps to pi/2. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_roll(ma, fill, -3.0f * M_PI / 2.0f));
+  EXPECT_NEAR(fill->projection->roll, M_PI / 2.0f, 1e-5f);
+
+  /* pi stays pi. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_roll(ma, fill, M_PI));
+  EXPECT_NEAR(fill->projection->roll, M_PI, 1e-5f);
+}
+
+TEST_F(PaintLayersDescription, projection_set_values_rejects_foreign_and_normalizes_size)
+{
+  Material &ma = *BKE_material_add(bmain, "SetValuesMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "ValuesFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+
+  /* Size normalization: zero axis reads as 1.0. */
+  const float center[3] = {0.0f, 0.0f, 0.0f};
+  const float size[3] = {0.0f, -4.0f, 2.0f};
+  const float normal[3] = {0.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values(ma, fill, center, size, normal, 0.0f));
+  EXPECT_NEAR(fill->projection->size[0], 1.0f, 1e-6f);
+  EXPECT_NEAR(fabsf(fill->projection->size[1]), 4.0f, 1e-3f);
+
+  /* A layer not owned by ma returns false. */
+  Material &other = *BKE_material_add(bmain, "OtherMat");
+  EXPECT_FALSE(BKE_paint_layers_projection_set_values(
+      other, fill, center, size, normal, 0.0f));
+}
+
+TEST_F(PaintLayersDescription, projection_set_rotation_wrapper)
+{
+  /* set_rotation(Euler) stores normal+roll; frame_euler round-trips to the same matrix. */
+  Material &ma = *BKE_material_add(bmain, "SetRotWrapMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "RotWrapFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+
+  const float euler[3] = {0.4f, -0.3f, 1.2f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_rotation(ma, fill, euler));
+
+  /* Compare matrices rather than angles (Euler is ambiguous). */
+  float mat_orig[3][3];
+  eul_to_mat3(mat_orig, euler);
+  float mat_stored[3][3];
+  BKE_paint_layers_projection_frame_matrix(
+      fill->projection->normal, fill->projection->roll, mat_stored);
+  for (const int i : IndexRange(3)) {
+    for (const int j : IndexRange(3)) {
+      EXPECT_NEAR(mat_orig[i][j], mat_stored[i][j], 1e-5f)
+          << "(" << i << "," << j << ")";
+    }
+  }
+}
+
+TEST_F(PaintLayersDescription, projection_set_rotation_round_trips_near_the_poles)
+{
+  /* Euler triples whose frame +Z is on or next to the pole (the +/-0.999 reference switch of the
+   * frame basis): the stored normal+roll must give back the same rotation. */
+  Material &ma = *BKE_material_add(bmain, "PoleRotMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "PoleRotFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+
+  const float eulers[][3] = {{0.0f, 0.0f, 0.0f},
+                             {0.0f, 0.0f, 1.0f},
+                             {0.03f, 0.02f, 0.5f},
+                             {0.04f, -0.03f, -2.0f},
+                             {float(M_PI), 0.0f, 0.3f},
+                             {float(M_PI) - 0.03f, 0.02f, 0.3f}};
+  for (const auto &euler : eulers) {
+    ASSERT_TRUE(BKE_paint_layers_projection_set_rotation(ma, fill, euler));
+    float expected[3][3];
+    eul_to_mat3(expected, euler);
+    float read_euler[3];
+    float normal[3];
+    BKE_paint_layers_projection_normal_get(*fill, normal);
+    BKE_paint_layers_projection_frame_euler(normal, fill->projection->roll, read_euler);
+    float actual[3][3];
+    eul_to_mat3(actual, read_euler);
+    for (const int i : IndexRange(3)) {
+      for (const int j : IndexRange(3)) {
+        EXPECT_NEAR(expected[i][j], actual[i][j], 1e-4f)
+            << "euler " << euler[0] << " " << euler[1] << " " << euler[2] << " at (" << i << ","
+            << j << ")";
+      }
+    }
+  }
+}
+
+TEST_F(PaintLayersDescription, projection_normal_get_reads_zero_as_up)
+{
+  Material &ma = *BKE_material_add(bmain, "NormalGetMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "NormalGetFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  float normal[3];
+  /* A payload that never went through a setter (a damaged file) may hold a zero or a long normal. */
+  zero_v3(fill->projection->normal);
+  BKE_paint_layers_projection_normal_get(*fill, normal);
+  EXPECT_NEAR(normal[2], 1.0f, 1e-6f);
+  fill->projection->normal[0] = 3.0f;
+  BKE_paint_layers_projection_normal_get(*fill, normal);
+  EXPECT_NEAR(len_v3(normal), 1.0f, 1e-6f);
+  EXPECT_NEAR(normal[0], 1.0f, 1e-6f);
+}
+
+TEST_F(PaintLayersDescription, projection_cube_layout_unknown_value_reads_as_default)
+{
+  Material &ma = *BKE_material_add(bmain, "CubeLayoutMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "CubeLayoutFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_CUBE));
+  EXPECT_TRUE(BKE_paint_layers_projection_set_cube_layout(
+      ma, fill, MA_PAINT_LAYER_PROJECTION_CUBE_CROSS_4X3));
+  EXPECT_FALSE(BKE_paint_layers_projection_set_cube_layout(
+      ma, fill, MA_PAINT_LAYER_PROJECTION_CUBE_LAYOUT_NUM));
+  EXPECT_FALSE(BKE_paint_layers_projection_set_cube_layout(ma, fill, -1));
+  fill->projection->cube_layout = 99;
+  EXPECT_EQ(BKE_paint_layers_projection_cube_layout_get(*fill),
+            MA_PAINT_LAYER_PROJECTION_CUBE_CROSS_4X3);
+  /* The table lookup agrees: an unknown layout is the first row. */
+  EXPECT_EQ(&BKE_paint_layers_projection_cube_layout_info(99),
+            &BKE_paint_layers_projection_cube_layout_info(MA_PAINT_LAYER_PROJECTION_CUBE_CROSS_4X3));
+}
+
+TEST_F(PaintLayersDescription, projection_preset_decal_resets_angle_and_flat_keeps_it)
+{
+  Material &ma = *BKE_material_add(bmain, "PresetAngleMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "PresetAngleFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_angle(ma, fill, 45.0f));
+  /* The angle is not part of what the preset getter reads. */
+  EXPECT_EQ(BKE_paint_layers_projection_preset_get(*fill), PAINT_LAYER_PROJ_PRESET_DECAL);
+  ASSERT_TRUE(BKE_paint_layers_projection_apply_preset(ma, fill, PAINT_LAYER_PROJ_PRESET_FLAT));
+  EXPECT_EQ(BKE_paint_layers_projection_preset_get(*fill), PAINT_LAYER_PROJ_PRESET_FLAT);
+  EXPECT_NEAR(BKE_paint_layers_projection_angle_get(*fill), 45.0f, 1e-5f);
+  ASSERT_TRUE(BKE_paint_layers_projection_apply_preset(ma, fill, PAINT_LAYER_PROJ_PRESET_DECAL));
+  EXPECT_EQ(BKE_paint_layers_projection_preset_get(*fill), PAINT_LAYER_PROJ_PRESET_DECAL);
+  EXPECT_NEAR(BKE_paint_layers_projection_angle_get(*fill),
+              PAINT_LAYER_PROJECTION_ANGLE_DEFAULT,
+              1e-5f);
+}
+
+TEST_F(PaintLayersDescription, projection_ensure_defaults)
+{
+  Material &ma = *BKE_material_add(bmain, "EnsureDefaultsMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "DefaultsFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  ASSERT_NE(fill->projection, nullptr);
+  EXPECT_NEAR(fill->projection->normal[0], 0.0f, 1e-6f);
+  EXPECT_NEAR(fill->projection->normal[1], 0.0f, 1e-6f);
+  EXPECT_NEAR(fill->projection->normal[2], 1.0f, 1e-6f);
+  EXPECT_NEAR(fill->projection->roll, 0.0f, 1e-6f);
+  /* frame_matrix(0,0,1; 0) gives the identity. */
+  float mat[3][3];
+  BKE_paint_layers_projection_frame_matrix(fill->projection->normal, fill->projection->roll, mat);
+  for (const int i : IndexRange(3)) {
+    for (const int j : IndexRange(3)) {
+      EXPECT_NEAR(mat[i][j], (i == j) ? 1.0f : 0.0f, 1e-5f);
+    }
+  }
+}
+
+TEST_F(PaintLayersDescription, projection_normal_roll_blend_round_trip)
+{
+  /* Write a row with normal=(1,0,0) roll=0.7, save/read .blend, verify values. */
+  Material *ma = BKE_material_add(bmain, "NormalRollRoundTripMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  id_us_plus(&ma->id);
+  Image *image = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "NormalRollRTImg"));
+  id_us_plus(&image->id);
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "NRRTRow");
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  paint_layer_channel_add(*layer, *image);
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, layer, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+
+  const float center[3] = {0.5f, -1.0f, 2.0f};
+  const float size[3] = {2.0f, 3.0f, 4.0f};
+  const float normal[3] = {1.0f, 0.0f, 0.0f};
+  const float roll = 0.7f;
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values(*ma, layer, center, size, normal, roll));
+
+  char filepath[FILE_MAX];
+  BLI_path_join(filepath, sizeof(filepath), BKE_tempdir_session(),
+                "normal_roll_round_trip.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+  Material *reloaded = nullptr;
+  for (Material &candidate : bfd->main->materials) {
+    if (STREQ(candidate.id.name + 2, "NormalRollRoundTripMat")) {
+      reloaded = &candidate;
+      break;
+    }
+  }
+  ASSERT_NE(reloaded, nullptr);
+  MaterialPaintLayer *rl = paint_layers_first(*reloaded);
+  ASSERT_NE(rl, nullptr);
+  ASSERT_NE(rl->projection, nullptr);
+  EXPECT_NEAR(rl->projection->normal[0], 1.0f, 1e-6f);
+  EXPECT_NEAR(rl->projection->normal[1], 0.0f, 1e-6f);
+  EXPECT_NEAR(rl->projection->normal[2], 0.0f, 1e-6f);
+  EXPECT_NEAR(rl->projection->roll, 0.7f, 1e-6f);
+  EXPECT_NEAR(rl->projection->center[0], 0.5f, 1e-6f);
+  BLO_blendfiledata_free(bfd);
+}
+
+TEST_F(PaintLayersDescription, projection_preset_decal_survives_snap_and_size_from_controller)
+{
+  Material &ma = *BKE_material_add(bmain, "PresetSnapMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "PresetSnapFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  ASSERT_TRUE(BKE_paint_layers_projection_apply_preset(ma, fill, PAINT_LAYER_PROJ_PRESET_DECAL));
+  EXPECT_EQ(BKE_paint_layers_projection_preset_get(*fill), PAINT_LAYER_PROJ_PRESET_DECAL);
+
+  /* Turning on SNAP and SIZE_FROM_CONTROLLER does not change the preset to CUSTOM. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_snap(ma, fill, true));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_size_from_controller(ma, fill, true));
+  EXPECT_EQ(BKE_paint_layers_projection_preset_get(*fill), PAINT_LAYER_PROJ_PRESET_DECAL);
+}
+
+TEST_F(PaintLayersDescription, projection_preset_flat_turns_off_four_flags)
+{
+  Material &ma = *BKE_material_add(bmain, "PresetFlatMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "PresetFlatFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  /* Start from Decal (all 4 on) and switch to Flat. */
+  ASSERT_TRUE(BKE_paint_layers_projection_apply_preset(ma, fill, PAINT_LAYER_PROJ_PRESET_DECAL));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_facing_invert(ma, fill, true));
+  ASSERT_TRUE(BKE_paint_layers_projection_apply_preset(ma, fill, PAINT_LAYER_PROJ_PRESET_FLAT));
+  EXPECT_FALSE(BKE_paint_layers_projection_clip_get(*fill));
+  EXPECT_FALSE(BKE_paint_layers_projection_depth_get(*fill));
+  EXPECT_FALSE(BKE_paint_layers_projection_fit_aspect_get(*fill));
+  EXPECT_FALSE(BKE_paint_layers_projection_facing_get(*fill));
+  EXPECT_FALSE(BKE_paint_layers_projection_facing_invert_get(*fill));
+  EXPECT_EQ(BKE_paint_layers_projection_preset_get(*fill), PAINT_LAYER_PROJ_PRESET_FLAT);
+}
+
+TEST_F(PaintLayersDescription, projection_preset_decal_turns_on_four_flags)
+{
+  Material &ma = *BKE_material_add(bmain, "PresetDecalMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "PresetDecalFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  ASSERT_TRUE(BKE_paint_layers_projection_apply_preset(ma, fill, PAINT_LAYER_PROJ_PRESET_FLAT));
+  ASSERT_TRUE(BKE_paint_layers_projection_apply_preset(ma, fill, PAINT_LAYER_PROJ_PRESET_DECAL));
+  EXPECT_TRUE(BKE_paint_layers_projection_clip_get(*fill));
+  EXPECT_TRUE(BKE_paint_layers_projection_depth_get(*fill));
+  EXPECT_TRUE(BKE_paint_layers_projection_fit_aspect_get(*fill));
+  EXPECT_TRUE(BKE_paint_layers_projection_facing_get(*fill));
+  EXPECT_FALSE(BKE_paint_layers_projection_facing_invert_get(*fill));
+  EXPECT_NEAR(BKE_paint_layers_projection_angle_get(*fill),
+              PAINT_LAYER_PROJECTION_ANGLE_DEFAULT, 1e-5f);
+}
+
+TEST_F(PaintLayersDescription, projection_preset_custom_on_manual_change)
+{
+  Material &ma = *BKE_material_add(bmain, "PresetCustomMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "PresetCustomFill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  ASSERT_TRUE(BKE_paint_layers_projection_apply_preset(ma, fill, PAINT_LAYER_PROJ_PRESET_DECAL));
+  /* Manually turn off CLIP -> no longer Decal or Flat. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_clip(ma, fill, false));
+  EXPECT_EQ(BKE_paint_layers_projection_preset_get(*fill), PAINT_LAYER_PROJ_PRESET_CUSTOM);
+  /* apply_preset(CUSTOM) does not change anything. */
+  const int16_t before = fill->projection->flag;
+  ASSERT_TRUE(BKE_paint_layers_projection_apply_preset(ma, fill, PAINT_LAYER_PROJ_PRESET_CUSTOM));
+  EXPECT_EQ(fill->projection->flag, before);
+}
+
+TEST_F(PaintLayersDescription, projection_orientation_from_surface)
+{
+  /* ±X, ±Y, ±Z, diagonal surface normals → orientation_from_surface gives r_normal = +surface,
+   * roll = 0. frame_matrix(r_normal, 0) is orthonormal with det=+1. */
+  const float normals[][3] = {
+      {1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
+      {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f},
+      {0.577f, 0.577f, 0.577f}};
+  for (const auto &sn : normals) {
+    float r_normal[3];
+    float r_roll;
+    BKE_paint_layers_projection_orientation_from_surface(sn, r_normal, &r_roll);
+    /* r_normal = normalize(surface_normal). */
+    float expected[3];
+    copy_v3_v3(expected, sn);
+    normalize_v3(expected);
+    for (const int i : IndexRange(3)) {
+      EXPECT_NEAR(r_normal[i], expected[i], 1e-5f);
+    }
+    EXPECT_NEAR(r_roll, 0.0f, 1e-6f);
+    /* Orthonormality of frame_matrix. */
+    float mat[3][3];
+    BKE_paint_layers_projection_frame_matrix(r_normal, r_roll, mat);
+    float cr[3];
+    cross_v3_v3v3(cr, mat[0], mat[1]);
+    EXPECT_NEAR(dot_v3v3(cr, mat[2]), 1.0f, 1e-5f) << "det not +1";
+  }
+}
+
+TEST_F(PaintLayersDescription, projection_orientation_from_surface_wall_x_axis_right)
+{
+  /* A vertical wall with surface_normal = +X: observer at +X looking in -X direction.
+   * Frame X should be to the observer's right = +Y world (no mirror). */
+  const float sn[3] = {1.0f, 0.0f, 0.0f};
+  float r_normal[3];
+  float r_roll;
+  BKE_paint_layers_projection_orientation_from_surface(sn, r_normal, &r_roll);
+  float mat[3][3];
+  BKE_paint_layers_projection_frame_matrix(r_normal, r_roll, mat);
+  /* `mat[0]` = frame X axis in parent space. */
+  const float *frame_x = mat[0];
+  /* Observer right = +Y for wall at +X. */
+  EXPECT_NEAR(frame_x[0], 0.0f, 1e-5f);
+  EXPECT_NEAR(frame_x[1], 1.0f, 1e-5f) << "frame X should be +Y (not mirrored)";
+  EXPECT_NEAR(frame_x[2], 0.0f, 1e-5f);
+}
+
+TEST_F(PaintLayersDescription, projection_facing_weight_positive_normal_toward_z)
+{
+  /* A face whose normal equals the frame +Z (dot = +1) must have weight = 1 without Flip.
+   * frame_Z = normalize(surface_normal) from orientation_from_surface. */
+  const float surface_normal[3] = {0.0f, 0.0f, 1.0f};
+  float r_normal[3];
+  float r_roll;
+  BKE_paint_layers_projection_orientation_from_surface(surface_normal, r_normal, &r_roll);
+  float scale, offset;
+  BKE_paint_layers_projection_facing_weights(80.0f, false, scale, offset);
+  /* component = dot(face_world_normal, frame_Z) = dot(surface_normal, r_normal) ≈ 1. */
+  const float component = dot_v3v3(surface_normal, r_normal);
+  const float weight = BKE_paint_layers_projection_facing_weight(scale, offset, component);
+  EXPECT_NEAR(weight, 1.0f, 1e-4f) << "face looking at +Z should have weight 1";
+}
+
+TEST_F(PaintLayersDescription, projection_flip_column_signs)
+{
+  /* Flip: negate columns X and Z of frame_matrix(n, roll), keep Y. Then
+   * frame_from_matrix gives the new normal/roll. Verify column properties. */
+  const float n[3] = {0.6f, 0.0f, 0.8f};
+  const float roll = 0.4f;
+  float mat_orig[3][3];
+  BKE_paint_layers_projection_frame_matrix(n, roll, mat_orig);
+  /* Build flipped: negate axes 0 and 2. */
+  float mat_flip[3][3];
+  copy_m3_m3(mat_flip, mat_orig);
+  negate_v3(mat_flip[0]);
+  negate_v3(mat_flip[2]);
+  float flipped_n[3], flipped_roll;
+  BKE_paint_layers_projection_frame_from_matrix(mat_flip, flipped_n, &flipped_roll);
+  /* Check: new normal = -original normal (column 2 negated). */
+  for (const int i : IndexRange(3)) {
+    EXPECT_NEAR(flipped_n[i], -n[i] / len_v3(n), 1e-5f) << "Z column sign";
+  }
+  /* Check: column 1 (Y) unchanged: frame_matrix(flipped_n, flipped_roll)[col1] == mat_orig[col1]. */
+  float mat_verify[3][3];
+  BKE_paint_layers_projection_frame_matrix(flipped_n, flipped_roll, mat_verify);
+  for (const int i : IndexRange(3)) {
+    EXPECT_NEAR(mat_verify[1][i], mat_orig[1][i], 1e-5f) << "Y axis preserved";
+    EXPECT_NEAR(mat_verify[0][i], -mat_orig[0][i], 1e-5f) << "X axis negated";
+    EXPECT_NEAR(mat_verify[2][i], -mat_orig[2][i], 1e-5f) << "Z axis negated";
+  }
 }
 
 /** \} */

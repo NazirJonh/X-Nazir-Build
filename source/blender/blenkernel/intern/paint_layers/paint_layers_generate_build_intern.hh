@@ -112,13 +112,18 @@ struct MapRead {
 struct ProjectionNodes {
   bNode *tex_coord = nullptr;
   bNode *position = nullptr;
-  /** Face UV before the row's 2D mapping (the frame plane's UV). */
-  bNode *uv = nullptr;
+  bNode *normal = nullptr;
+  /** Face UVs before the row's 2D mapping: one for Planar, three for Box and Triplanar (X, Y, Z). */
+  bNode *uv[3] = {};
+  /** Normalized face weights for Box and Triplanar; unused for the single-sample modes. */
+  bNode *weight[3] = {};
   /** The frame's factor: one inside, fading out at the frame edge, the depth slab and the facing
    * limit mixed in, then with the clip toggle. */
   bNode *clip = nullptr;
   /** Floor of the painted object's UV: the UDIM tile origin a tiled source map samples. */
   bNode *tile_origin = nullptr;
+  /** 1 for the single-sample modes, 3 for Box and Triplanar. */
+  int samples = 0;
 };
 
 /**
@@ -968,15 +973,17 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_rotation_inputs_;
   /** A row's UV mirror fold center input, keyed by the row, while its mapping folds an axis. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_mirror_center_inputs_;
-  /** A projected row's frame and clip value inputs, keyed by the row. */
+  /** A projected row's frame, blend and clip value inputs, keyed by the row. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_center_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_size_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_rotation_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_blend_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_clip_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_depth_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_facing_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_facing_dir_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_aspect_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_tiling_inputs_;
   /** The shared projection nodes of a projected row. */
   Map<const MaterialPaintLayer *, ProjectionNodes> projection_nodes_;
   /** The Mapping node built for a row, so every channel and map of it shares the one node. */

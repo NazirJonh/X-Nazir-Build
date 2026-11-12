@@ -207,7 +207,8 @@ ImBuf *composite_alloc_transparent(const int width, const int height)
   return dst;
 }
 
-/** `q = R^-1 (p - center) / size`, the shader's frame-space position. */
+/** `q = R^-1 (p - center) / (size * 0.5)`, the shader's frame-space position over the half
+ * extent: size is the frame's full extent, the one the gizmo's cage and the panel show. */
 static void composite_projection_position(const PaintMaterialCompositeProjection &projection,
                                           const float inv_rot[3][3],
                                           const float p[3],
@@ -215,18 +216,21 @@ static void composite_projection_position(const PaintMaterialCompositeProjection
 {
   /* Why the CPU repeats the graph here: the Vector Rotate node is Euler XYZ and inverted, and
    * `eul_to_mat3` builds the same XYZ matrix whose transpose is that inverse. The size is
-   * normalized once for both sides (#BKE_paint_layers_projection_size_normalize). */
+   * normalized once for both sides (#BKE_paint_layers_projection_size_normalize); the graph
+   * scales the Size input by one half before the same divide. */
   float offset[3];
   sub_v3_v3v3(offset, p, projection.center);
   mul_v3_m3v3(r_q, inv_rot, offset);
   for (int i = 0; i < 3; i++) {
-    const float size = BKE_paint_layers_projection_size_normalize(projection.size[i]);
-    r_q[i] /= size;
+    const float half_size = BKE_paint_layers_projection_size_normalize(projection.size[i]) * 0.5f;
+    r_q[i] /= half_size;
   }
 }
 
-/** The row's 2D UV adjust, applied to a projected UV. */
+/** The row's 2D UV adjust, applied to a projected UV. The Cube atlas is read cell by cell, so it
+ * never wraps: the is_cube flag keeps the point inside the atlas. */
 static void composite_projection_uv_wrap(const PaintMaterialCompositeMapping &mapping,
+                                         const bool is_cube,
                                          float &u,
                                          float &v)
 {
@@ -238,9 +242,28 @@ static void composite_projection_uv_wrap(const PaintMaterialCompositeMapping &ma
     u = ru * BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]) + mapping.offset[0];
     v = rv * BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]) + mapping.offset[1];
   }
-  if (mapping.wrap != MA_PAINT_LAYER_MAPPING_WRAP_CLIP) {
+  if (!is_cube && mapping.wrap != MA_PAINT_LAYER_MAPPING_WRAP_CLIP) {
     u -= floorf(u);
     v -= floorf(v);
+  }
+}
+
+/** The face UV of Box and Triplanar, as the graph's `projection_face_uv`: face 0 is X, 1 is Y, 2
+ * is Z. */
+static void composite_projection_face_uv(const int face, const float q[3], float r_uv[2])
+{
+  if (face == 0) {
+    /* +X: u from -Y, v from +Z. */
+    r_uv[0] = 0.5f - q[1] * 0.5f;
+    r_uv[1] = 0.5f + q[2] * 0.5f;
+  }
+  else if (face == 1) {
+    r_uv[0] = 0.5f + q[0] * 0.5f;
+    r_uv[1] = 0.5f + q[2] * 0.5f;
+  }
+  else {
+    r_uv[0] = 0.5f + q[0] * 0.5f;
+    r_uv[1] = 0.5f + q[1] * 0.5f;
   }
 }
 
@@ -336,11 +359,25 @@ ImBuf *composite_resample_projected(const ImBuf *src,
   eul_to_mat3(frame_rot, projection.rotation);
   transpose_m3_m3(inv_frame_rot, frame_rot);
 
+  /* The face weights of Box and Triplanar, as the graph's `projection_weights_add`: exponent 64
+   * for Box, 32 down to 1 with the blend for Triplanar. */
+  const ProjectionModeInfo &mode = BKE_paint_layers_projection_mode_info(projection.space);
+  const bool is_box = mode.samples_num > 1;
+  const bool is_cube = mode.uses_cube_layout;
+  const bool is_cylinder = projection.space == MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER;
+  const bool is_sphere = projection.space == MA_PAINT_LAYER_MAPPING_SPACE_SPHERE;
+  const float exponent = mode.uses_blend ?
+                             BKE_paint_layers_projection_triplanar_exponent(projection.blend) :
+                             PAINT_LAYER_PROJECTION_BOX_EXPONENT;
+  const ProjectionCubeLayoutInfo &atlas = BKE_paint_layers_projection_cube_layout_info(
+      projection.cube_layout);
+
   const auto sample_uv = [&](float u, float v, float r_rgba[4]) -> bool {
-    composite_projection_uv_wrap(mapping, u, v);
-    /* A tiled source is sampled from one tile buffer; its pattern wraps inside that tile. */
+    composite_projection_uv_wrap(mapping, is_cube, u, v);
+    /* A tiled source is sampled from one tile buffer; its pattern wraps inside that tile. The Cube
+     * atlas never wraps: its cells live at fixed sub-rectangles of [0, 1]. */
     const bool repeat = projection.source_tiled ||
-                        mapping.wrap != MA_PAINT_LAYER_MAPPING_WRAP_CLIP;
+                        (!is_cube && mapping.wrap != MA_PAINT_LAYER_MAPPING_WRAP_CLIP);
     return sampler.sample(u, v, repeat, repeat, r_rgba);
   };
 
@@ -443,25 +480,52 @@ ImBuf *composite_resample_projected(const ImBuf *src,
 
         /* The frame factor the generated graph builds: the two footprint axes with their smooth
          * edges, the depth slab when its toggle asks, all under the frame's clip mix; the facing
-         * fade joins after it and applies even while the map repeats. */
+         * fade joins after it and applies even while the map repeats. Box and Triplanar have no
+         * axis: the frame factor is the box inside and the facing reads the frame's +Z. */
         const int axis = clamp_i(projection.axis,
                                  MA_PAINT_LAYER_PROJECTION_AXIS_X,
                                  MA_PAINT_LAYER_PROJECTION_AXIS_Z);
         const int u_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_X) ? 1 : 0;
         const int v_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_Z) ? 1 : 2;
+        float n_frame[3];
+        mul_v3_m3v3(n_frame, inv_frame_rot, n_interp);
         float weight = 1.0f;
         if (projection.clip) {
-          weight = BKE_paint_layers_projection_axis_factor(q[u_index]) *
-                   BKE_paint_layers_projection_axis_factor(q[v_index]);
-          if (projection.depth) {
+          if (is_box || is_cube) {
+            /* Box, Triplanar and Cube share the box inside: the three footprint axes with their
+             * smooth edges. */
+            weight = BKE_paint_layers_projection_axis_factor(q[0]) *
+                     BKE_paint_layers_projection_axis_factor(q[1]) *
+                     BKE_paint_layers_projection_axis_factor(q[2]);
+            if (projection.depth) {
+              weight *= BKE_paint_layers_projection_axis_factor(n_frame[2]);
+            }
+          }
+          else if (is_cylinder) {
+            /* Cylinder: inside the unit circle around the axis, and within the height slab. */
+            const int a = (axis + 1) % 3;
+            const int b = (axis + 2) % 3;
+            const float radial = q[a] * q[a] + q[b] * q[b];
+            weight = (radial < 1.0f) ? 1.0f : 0.0f;
             weight *= BKE_paint_layers_projection_axis_factor(q[axis]);
+          }
+          else if (is_sphere) {
+            /* Sphere: inside the unit ball. */
+            const float length_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2];
+            weight = (length_sq < 1.0f) ? 1.0f : 0.0f;
+          }
+          else {
+            weight = BKE_paint_layers_projection_axis_factor(q[u_index]) *
+                     BKE_paint_layers_projection_axis_factor(q[v_index]);
+            if (projection.depth) {
+              weight *= BKE_paint_layers_projection_axis_factor(q[axis]);
+            }
           }
         }
         if (weight > 0.0f && projection.facing) {
-          float n_frame[3];
-          mul_v3_m3v3(n_frame, inv_frame_rot, n_interp);
+          const float facing_component = is_box ? n_frame[2] : n_frame[axis];
           weight *= BKE_paint_layers_projection_facing_weight(
-              projection.facing_scale, projection.facing_offset, n_frame[axis]);
+              projection.facing_scale, projection.facing_offset, facing_component);
         }
         if (weight <= 0.0f) {
           continue;
@@ -488,8 +552,73 @@ ImBuf *composite_resample_projected(const ImBuf *src,
           covered = true;
         };
 
-        /* Planar: X reads Y/Z, Y reads X/Z and Z reads X/Y. */
-        accumulate_sample(0.5f + q[u_index] * 0.5f, 0.5f + q[v_index] * 0.5f, weight);
+        /* The tiling multiplies the UV only, never the frame factor read above, like the graph's. */
+        if (is_box) {
+          /* Box and Triplanar: the three face reads blended by the frame normal's powers, the
+           * graph's normalized weights; the color mixes by them and the alpha sums. */
+          const float sum = std::max(powf(fabsf(n_frame[0]), exponent) +
+                                         powf(fabsf(n_frame[1]), exponent) +
+                                         powf(fabsf(n_frame[2]), exponent),
+                                     PAINT_LAYER_PROJECTION_EPSILON);
+          for (int tri_face = 0; tri_face < 3; tri_face++) {
+            float uv[2];
+            composite_projection_face_uv(tri_face, q, uv);
+            const float face_weight = powf(fabsf(n_frame[tri_face]), exponent) / sum;
+            accumulate_sample(0.5f + (uv[0] - 0.5f) * projection.tiling[0],
+                              0.5f + (uv[1] - 0.5f) * projection.tiling[1],
+                              weight * face_weight);
+          }
+        }
+        else if (is_cube) {
+          /* Cube atlas: the dominant frame axis picks one of six faces; its cell is a quarter by a
+           * third of the atlas, placed by the cross origins the graph's CUBE case uses. */
+          const float ax = fabsf(q[0]);
+          const float ay = fabsf(q[1]);
+          const float az = fabsf(q[2]);
+          int atlas_face = 0;
+          if (ax + PAINT_LAYER_PROJECTION_EPSILON > ay &&
+              ax + PAINT_LAYER_PROJECTION_EPSILON > az)
+          {
+            atlas_face = (q[0] > 0.0f) ? 0 : 1;
+          }
+          else if (ay + PAINT_LAYER_PROJECTION_EPSILON > az) {
+            atlas_face = (q[1] > 0.0f) ? 2 : 3;
+          }
+          else {
+            atlas_face = (q[2] > 0.0f) ? 4 : 5;
+          }
+          float local_uv[2];
+          composite_projection_face_uv(atlas_face / 2, q, local_uv);
+          const float uu = atlas.origin[atlas_face][0] + local_uv[0] * atlas.cell_size[0];
+          const float vv = atlas.origin[atlas_face][1] + local_uv[1] * atlas.cell_size[1];
+          accumulate_sample(uu, vv, weight);
+        }
+        else if (is_cylinder) {
+          /* Cylinder: U winds around the axis, V reads the height along it. */
+          const int a = (axis + 1) % 3;
+          const int b = (axis + 2) % 3;
+          const float angle = atan2f(q[b], q[a]);
+          accumulate_sample(
+              BKE_paint_layers_projection_angle_u(angle), 0.5f + q[axis] * 0.5f, weight);
+        }
+        else if (is_sphere) {
+          /* Sphere: U winds around the axis, V is the polar angle from it. */
+          const int a = (axis + 1) % 3;
+          const int b = (axis + 2) % 3;
+          const float length = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+          const float ratio = clamp_f(
+              q[axis] / std::max(length, PAINT_LAYER_PROJECTION_EPSILON), -1.0f, 1.0f);
+          const float angle = atan2f(q[b], q[a]);
+          accumulate_sample(BKE_paint_layers_projection_angle_u(angle),
+                            BKE_paint_layers_projection_polar_v(acosf(ratio)),
+                            weight);
+        }
+        else {
+          /* Planar: X reads Y/Z, Y reads X/Z and Z reads X/Y. */
+          accumulate_sample(0.5f + q[u_index] * projection.tiling[0] * 0.5f,
+                            0.5f + q[v_index] * projection.tiling[1] * 0.5f,
+                            weight);
+        }
 
         if (!covered) {
           continue;

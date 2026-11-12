@@ -771,6 +771,8 @@ struct MaskResources {
   /** The grey of an item that has no map. */
   [[push_constant]] const float constant_gray;
   [[push_constant]] const float opacity;
+  /** The contrast the item's coverage is reshaped around its half with (one keeps it). */
+  [[push_constant]] const float contrast;
   /** How much of the row's own mask map applies; one for an item. */
   [[push_constant]] const float influence;
   [[push_constant]] const float lod;
@@ -822,6 +824,8 @@ void mask_comp([[resource_table]] MaskResources &srt,
       }
       /* White and Black carry one; Gradient carries the item's standard value. */
       match *= srt.influence;
+      /* The item's own contrast, the formula #BKE_paint_layers_mask_contrast_apply implements. */
+      match = clamp((match - 0.5f) * srt.contrast + 0.5f, 0.0f, 1.0f);
       m *= 1.0f + (match - 1.0f) * clamp(srt.opacity, 0.0f, 1.0f);
     }
     else {
@@ -875,6 +879,9 @@ void mask_comp([[resource_table]] MaskResources &srt,
                                 srt.filter_lut_tx)
                        .x;
       m += (grey - m) * opacity;
+      /* The filter's result is the coverage the item leaves; the contrast reshapes it like any
+       * item's. */
+      m = clamp((m - 0.5f) * srt.contrast + 0.5f, 0.0f, 1.0f);
     }
     else {
       float gray = clamp(srt.constant_gray, 0.0f, 1.0f);
@@ -900,6 +907,8 @@ void mask_comp([[resource_table]] MaskResources &srt,
       if ((srt.flags & COMBINED_MASK_INVERT) != 0) {
         gray = 1.0f - gray;
       }
+      /* The item's own contrast, the formula #BKE_paint_layers_mask_contrast_apply implements. */
+      gray = clamp((gray - 0.5f) * srt.contrast + 0.5f, 0.0f, 1.0f);
       float fac = clamp(weight, 0.0f, 1.0f);
       if (srt.blend == COMBINED_BLEND_MIX) {
         m = mix(m, gray, fac);

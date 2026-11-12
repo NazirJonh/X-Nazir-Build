@@ -122,6 +122,7 @@
 #include "paint_layers_gradient.hh"
 
 #include "projection/projection_ops.hh"
+#include "decal/decal_target.hh"
 #include "shapes/paint_shape_op_props.hh"
 
 #include "curves/sculpt_intern.hh"
@@ -3529,6 +3530,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_layer_mapping_mirror_from_cursor);
   WM_operatortype_append(PAINT_OT_layer_mapping_mirror_pick_3d);
   blender::ed::sculpt_paint::projection::operatortypes_register();
+  blender::ed::sculpt_paint::decal::operatortypes_register();
   WM_operatortype_append(PAINT_OT_stack_layer_copy);
   WM_operatortype_append(PAINT_OT_stack_layer_paste);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);

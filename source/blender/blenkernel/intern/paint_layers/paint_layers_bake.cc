@@ -1165,6 +1165,8 @@ static uint64_t bake_hash_layer(uint64_t h,
   if (!opacity_is_live_over_map) {
     h = bake_hash_float(h, layer.opacity);
   }
+  /* A mask item's contrast reshapes its coverage inside the parent's bake, like the opacity does. */
+  h = bake_hash_float(h, layer.mask_contrast);
   /* Only the fact that the mapping applies: such a row stays live and is never baked
    * (#BKE_paint_layers_bake_blocked), so the slider values must not move the hash. A Material row
    * is rendered and its mapping is applied when its maps are read, so toggling it must not move a

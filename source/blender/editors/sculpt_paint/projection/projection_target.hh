@@ -15,13 +15,17 @@
 
 #pragma once
 
+#include "BLI_math_matrix_types.hh"
+
 #include "DNA_uuid_types.h"
 
 namespace blender {
+struct ARegion;
 struct bContext;
 struct Material;
 struct MaterialPaintLayer;
 struct Object;
+struct View3D;
 }  // namespace blender
 
 namespace blender::ed::sculpt_paint::projection {
@@ -33,6 +37,52 @@ struct ProjectionFrame {
   float normal[3] = {0.0f, 0.0f, 1.0f};
   float roll = 0.0f;
 };
+
+/**
+ * Transform a normal vector from local to world using transpose(inverse(M3)). One vector at a
+ * time: #math::transform_normals is span based (it threads), too heavy for a gesture step.
+ */
+float3 normal_local_to_world(const float4x4 &o2w, const float3 &local_no);
+
+/** Transform a normal vector from world to a frame object's local space using transpose(M3(o2w)). */
+float3 normal_world_to_local(const float4x4 &o2w, const float3 &world_no);
+
+/**
+ * The world matrix of \a space_ob -- the object whose space a frame lives in (the controller when
+ * one is set, else the painted object) -- as the evaluated depsgraph holds it, so a conversion
+ * matches what the bake and the composite read. The un-evaluated matrix is the fallback when no
+ * depsgraph is there.
+ */
+float4x4 projection_space_to_world(const bContext &C, const Object &space_ob);
+
+/** The inverse of #projection_space_to_world; a zero matrix when the space is degenerate, which
+ * makes the conversion's own relative-transform check refuse it. */
+float4x4 projection_space_from_world(const bContext &C, const Object &space_ob);
+
+/**
+ * Raycast the object's evaluated mesh under \a mval: true with the hit's world-space position and
+ * normal. The one view raycast the place and move gestures and the decal placement share, so they
+ * cannot disagree on what a click lands on.
+ */
+bool projection_frame_raycast(const bContext &C,
+                              const ARegion *region,
+                              const View3D *v3d,
+                              const Object &ob,
+                              const float mval[2],
+                              float r_world_loc[3],
+                              float r_world_no[3]);
+
+/**
+ * Carry a world point and normal into the space of \a space_ob (the controller when one is set,
+ * else the painted object). A null \a space_ob, or one without an evaluated copy, copies the world
+ * values through.
+ */
+void projection_frame_point_from_world(const bContext &C,
+                                       const Object *space_ob,
+                                       const float world_loc[3],
+                                       const float world_no[3],
+                                       float r_center[3],
+                                       float r_normal[3]);
 
 class PaintLayerRowProjectionTarget {
  public:

@@ -136,6 +136,67 @@ static bool composite_channel_linear(const Span<PaintMaterialCompositeImageLayer
 }
 
 /**
+ * Describe \a row's projection to the evaluator: the frame the bake reads the row's maps (or a UV
+ * gradient) through. A space that does not apply is left disabled. The one place a projection is
+ * described, so a map read and a projected gradient line cannot drift apart.
+ */
+static void composite_projection_describe(const Material &ma,
+                                          const MaterialPaintLayer &row,
+                                          const int tile_number,
+                                          const Image *source_image,
+                                          const Object *painted_object,
+                                          PaintMaterialCompositeProjection &out)
+{
+  if (!BKE_paint_layers_projection_applies(ma, row)) {
+    out.present = false;
+    return;
+  }
+  const MaterialPaintLayerProjection &projection = *row.projection;
+  out.present = true;
+  out.space = row.mapping.space;
+  out.axis = projection.axis;
+  out.cube_layout = projection.cube_layout;
+  copy_v3_v3(out.center, projection.center);
+  /* Same effective extents as the generated graph: the inline size reads one while the row takes
+   * its scale from the controller. */
+  BKE_paint_layers_projection_size_effective(row, out.size);
+  /* Euler derived from normal+roll, matching the graph's ROLE_PROJECTION_ROTATION value. */
+  float frame_normal[3];
+  BKE_paint_layers_projection_normal_get(row, frame_normal);
+  BKE_paint_layers_projection_frame_euler(frame_normal, projection.roll, out.rotation);
+  out.blend = projection.blend;
+  out.clip = BKE_paint_layers_projection_clip_get(row);
+  out.depth = BKE_paint_layers_projection_depth_get(row);
+  out.facing = BKE_paint_layers_projection_facing_get(row);
+  /* The facing weight's scale and offset from the limit and the flip, through the one helper the
+   * graph's value sync bakes with, so a bake reads the frame the viewport shows. */
+  BKE_paint_layers_projection_facing_weights(BKE_paint_layers_projection_angle_get(row),
+                                             BKE_paint_layers_projection_facing_invert_get(row),
+                                             out.facing_scale,
+                                             out.facing_offset);
+  /* The aspect fit lands on the row's two footprint axes, the depth axis keeps one, exactly as
+   * the generated graph's Aspect input does. */
+  copy_v3_fl(out.aspect, 1.0f);
+  if (BKE_paint_layers_projection_fit_aspect_get(row)) {
+    float factors[2];
+    BKE_paint_layers_projection_aspect_factors(source_image, factors);
+    const int8_t axis = BKE_paint_layers_projection_axis_get(row);
+    const int u_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_X) ? 1 : 0;
+    const int v_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_Z) ? 1 : 2;
+    out.aspect[u_index] = factors[0];
+    out.aspect[v_index] = factors[1];
+  }
+  /* The row's mapping scale is its tiling here, like the graph's Tiling input. */
+  out.tiling[0] = BKE_paint_layers_mapping_scale_normalize(row.mapping.scale[0]);
+  out.tiling[1] = BKE_paint_layers_mapping_scale_normalize(row.mapping.scale[1]);
+  out.tile_number = tile_number;
+  out.source_tiled = source_image != nullptr && source_image->source == IMA_SRC_TILED;
+  out.object = painted_object;
+  out.controller = row.projection_object;
+  out.material = &ma;
+}
+
+/**
  * Describe \a row's projection and UV mapping to the evaluator for the map it reads in \a channel.
  * A space that does not apply is left disabled, so the evaluator reads the map as it is. A
  * projection takes precedence over the UV adjust; the bake applies both in the same order as the
@@ -149,52 +210,7 @@ static void composite_mapping_describe(const Material &ma,
                                        const Object *painted_object,
                                        const Image *source_image = nullptr)
 {
-  if (BKE_paint_layers_projection_applies(ma, row)) {
-    const MaterialPaintLayerProjection &projection = *row.projection;
-    out.projection.present = true;
-    out.projection.space = row.mapping.space;
-    out.projection.axis = projection.axis;
-    out.projection.cube_layout = projection.cube_layout;
-    copy_v3_v3(out.projection.center, projection.center);
-    /* Same effective extents as the generated graph: the inline size reads one while the row takes
-     * its scale from the controller. */
-    BKE_paint_layers_projection_size_effective(row, out.projection.size);
-    /* Euler derived from normal+roll, matching the graph's ROLE_PROJECTION_ROTATION value. */
-    float frame_normal[3];
-    BKE_paint_layers_projection_normal_get(row, frame_normal);
-    BKE_paint_layers_projection_frame_euler(frame_normal, projection.roll, out.projection.rotation);
-    out.projection.blend = projection.blend;
-    out.projection.clip = BKE_paint_layers_projection_clip_get(row);
-    out.projection.depth = BKE_paint_layers_projection_depth_get(row);
-    out.projection.facing = BKE_paint_layers_projection_facing_get(row);
-    /* The facing weight's scale and offset from the limit and the flip, through the one helper the
-     * graph's value sync bakes with, so a bake reads the frame the viewport shows. */
-    BKE_paint_layers_projection_facing_weights(BKE_paint_layers_projection_angle_get(row),
-                                               BKE_paint_layers_projection_facing_invert_get(row),
-                                               out.projection.facing_scale,
-                                               out.projection.facing_offset);
-    /* The aspect fit lands on the row's two footprint axes, the depth axis keeps one, exactly as
-     * the generated graph's Aspect input does. */
-    copy_v3_fl(out.projection.aspect, 1.0f);
-    if (BKE_paint_layers_projection_fit_aspect_get(row)) {
-      float factors[2];
-      BKE_paint_layers_projection_aspect_factors(source_image, factors);
-      const int8_t axis = BKE_paint_layers_projection_axis_get(row);
-      const int u_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_X) ? 1 : 0;
-      const int v_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_Z) ? 1 : 2;
-      out.projection.aspect[u_index] = factors[0];
-      out.projection.aspect[v_index] = factors[1];
-    }
-    /* The row's mapping scale is its tiling here, like the graph's Tiling input. */
-    out.projection.tiling[0] = BKE_paint_layers_mapping_scale_normalize(row.mapping.scale[0]);
-    out.projection.tiling[1] = BKE_paint_layers_mapping_scale_normalize(row.mapping.scale[1]);
-    out.projection.tile_number = tile_number;
-    out.projection.source_tiled = source_image != nullptr &&
-                                  source_image->source == IMA_SRC_TILED;
-    out.projection.object = painted_object;
-    out.projection.controller = row.projection_object;
-    out.projection.material = &ma;
-  }
+  composite_projection_describe(ma, row, tile_number, source_image, painted_object, out.projection);
   /* The wrap is read even when the 2D adjust is off: a projected lookup still follows it, as the
    * generated Image Texture's extension does. */
   out.wrap = BKE_paint_layers_mapping_wrap_get(row);
@@ -248,13 +264,19 @@ template<size_t N> static void composite_filter_params(const MaterialPaintLayer 
  * Object/Generated coordinate, the surface that gives the texel its position. The one place a
  * generator row, a generator correction and a generator mask item are described, so the evaluator
  * cannot read them differently.
+ *
+ * \a projection_row is the row whose frame a UV line reads when it projects: the row itself for a
+ * generator row, its owner for a mask item, null for a correction (which owns no frame).
  */
 static bool composite_generator_describe(
     const Material &ma,
     const MaterialPaintLayer &row,
     const int channel,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface,
-    PaintMaterialCompositeGradient &out)
+    PaintMaterialCompositeGradient &out,
+    const MaterialPaintLayer *projection_row = nullptr,
+    const int tile_number = 1001,
+    const Object *painted_object = nullptr)
 {
   const int kind = int(row.kind_subtype);
   const bool is_gradient = kind == MA_PAINT_LAYER_GENERATOR_GRADIENT;
@@ -297,11 +319,19 @@ static bool composite_generator_describe(
   const int size = (ma.paint_layers_image_size > 0) ? int(ma.paint_layers_image_size) : 4096;
   out.width = size;
   out.height = size;
+  out.projected = false;
   if (out.space == MA_PAINT_LAYER_GRADIENT_SPACE_UV) {
-    /* A UV line already reads the texel's own UV: no surface and no approximation. */
+    /* A UV line already reads the texel's own UV: no surface and no approximation. Under a
+     * projected row the frame replaces that UV, and the evaluators that reach the painted surface
+     * render the line through the frame; the rest keeps the plain UV read. */
     out.surface = nullptr;
     out.surface_key = 0;
     out.approximate = false;
+    if (projection_row != nullptr) {
+      composite_projection_describe(
+          ma, *projection_row, tile_number, nullptr, painted_object, out.projection);
+      out.projected = out.projection.present;
+    }
   }
   else {
     /* The 2D preview needs the texel's object-space position. Without one the evaluator falls
@@ -378,8 +408,15 @@ static bool composite_row_source_describe(const Material &ma,
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES)) {
     /* A generator: no map and no constant, only its pattern, colour ramp and the channel's own
-     * value ramp. */
-    return composite_generator_describe(ma, layer, channel, context_surface, out.gradient);
+     * value ramp. A projected row reads its UV line through its own frame. */
+    return composite_generator_describe(ma,
+                                        layer,
+                                        channel,
+                                        context_surface,
+                                        out.gradient,
+                                        &layer,
+                                        tile_number,
+                                        painted_object);
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     /* The same decision the generator makes (#PaintLayersTreeBuilder::material_source_emit): the
@@ -475,6 +512,314 @@ static bool composite_row_source_describe(const Material &ma,
   return true;
 }
 
+/** What every mask item description of one #composite_mask_items_describe call shares. */
+struct MaskItemDescribeContext {
+  const Material &ma;
+  const MaterialPaintLayer &layer;
+  const int tile_number;
+  const int *slice_rect;
+  const bool dimensions_only;
+  const bool describe_only;
+  const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface;
+  const Object *painted_object;
+};
+
+static CompositeBlend composite_mask_item_blend(const MaterialPaintLayer &mask)
+{
+  return CompositeBlend(BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
+}
+
+/** A mask item that reads an Anchor Point slice. */
+static void composite_mask_item_anchor_point(const MaskItemDescribeContext &context,
+                                             const MaterialPaintLayer &mask,
+                                             Vector<PaintMaterialCompositeMaskItem> &r_items)
+{
+  const Material &ma = context.ma;
+  /* The slice a mask item reads: a mask point gives its scalar, a content point its coverage.
+   * Both are grey buffers in canvas space, read like a painted map without a mapping. */
+  if (!paint_layer_mask_item_lays(ma, mask)) {
+    return;
+  }
+  PaintMaterialCompositeMaskItem item;
+  item.opacity = BKE_paint_layers_effective_opacity(mask);
+  item.contrast = BKE_paint_layers_mask_contrast_get(mask);
+  item.anchor_point_reader = mask.marker;
+  const PaintLayerAnchorPointRef mask_ref = paint_layer_anchor_point_resolve(ma, mask);
+  item.anchor_point_target = int8_t(mask_ref.target);
+  item.anchor_point_point = (mask_ref.point != nullptr) ? mask_ref.point->marker : bUUID{};
+  const int read_channel = paint_layer_anchor_point_mask_read_channel(ma, mask);
+  item.anchor_point_read_channel = read_channel;
+  const bool mask_target = item.anchor_point_target == int8_t(PaintLayerAnchorPointTarget::Mask);
+  const bool baked = paint_layer_anchor_point_reader_baked(ma, mask) && mask.bake != nullptr &&
+                     (mask_target ? mask.bake->images[read_channel] != nullptr :
+                                    mask.bake->coverage != nullptr);
+  if (baked) {
+    /* A mask point's scalar is the grey the bake holds in its colour map; a content point's
+     * coverage is the coverage map, which already holds the reader's opacity, so only its
+     * visibility stays live (as for a substituted row). Read like a painted grey map. */
+    if (mask_target) {
+      item.image = mask.bake->images[read_channel];
+    }
+    else {
+      item.image = mask.bake->coverage;
+      item.opacity = (mask.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f;
+    }
+    item.iuser = nullptr;
+    item.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, mask, read_channel);
+    BKE_paint_layers_anchor_point_slice_images(ma, mask, item.grey_input_images);
+  }
+  else {
+    /* In describe-only mode the reader keeps its descriptor, hash and subscriptions; the
+     * slice buffers belong to the GPU slot pass instead of the CPU cache. */
+    if (!context.describe_only) {
+      std::shared_ptr<ImBuf> slice_color;
+      std::shared_ptr<ImBuf> slice_coverage;
+      if (!BKE_paint_layers_slice_render(ma,
+                                         mask,
+                                         read_channel,
+                                         &slice_color,
+                                         &slice_coverage,
+                                         context.slice_rect,
+                                         context.dimensions_only,
+                                         context.painted_object))
+      {
+        return;
+      }
+      const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, mask);
+      item.grey_buffer = (ref.target == PaintLayerAnchorPointTarget::Mask) ?
+                             std::move(slice_color) :
+                             std::move(slice_coverage);
+    }
+    item.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, mask, read_channel);
+    BKE_paint_layers_anchor_point_slice_images(ma, mask, item.grey_input_images);
+  }
+  item.blend = composite_mask_item_blend(mask);
+  item.invert = paint_layer_mask_item_inverted(mask);
+  r_items.append(item);
+}
+
+/** A map-driven coverage operator. */
+static void composite_mask_item_map_coverage(const MaskItemDescribeContext &context,
+                                             const MaterialPaintLayer &mask,
+                                             Vector<PaintMaterialCompositeMaskItem> &r_items)
+{
+  /* A map-driven coverage operator: it lays its map's `match` over the coverage below,
+   * whether or not it has a map yet (a missing map is `match = 0`, not a pass-through). Its
+   * Base Color record is structural, so the map is read from it directly. */
+  PaintMaterialCompositeMaskItem item;
+  item.opacity = BKE_paint_layers_effective_opacity(mask);
+  item.contrast = BKE_paint_layers_mask_contrast_get(mask);
+  item.map_coverage = mask.kind_subtype;
+  item.invert = paint_layer_mask_item_inverted(mask);
+  item.coverage_tolerance = paint_layer_kind_param_get(mask, PAINT_LAYER_COVERAGE_TOLERANCE);
+  item.coverage_softness = paint_layer_kind_param_get(mask, PAINT_LAYER_COVERAGE_SOFTNESS);
+  item.coverage_output = BKE_paint_layers_mask_item_output_value(mask);
+  if (paint_layer_map_coverage_has_map(mask)) {
+    item.coverage_image = paint_layer_map_coverage_record(mask)->image;
+    composite_mapping_describe(context.ma,
+                               mask,
+                               PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                               item.coverage_mapping,
+                               context.tile_number,
+                               context.painted_object,
+                               item.coverage_image);
+  }
+  for (const MaterialPaintLayerIdColor &color : mask.id_colors) {
+    PaintMaterialCompositeIdColor out_color;
+    copy_v3_v3(out_color.color, color.color);
+    out_color.tolerance = color.tolerance;
+    out_color.own_tolerance = paint_layer_mask_item_color_id_advanced(mask);
+    out_color.enabled = (color.flag & MA_PAINT_LAYER_ID_COLOR_ENABLED) != 0;
+    item.coverage_colors.append(out_color);
+  }
+  r_items.append(item);
+}
+
+/** A filter mask item, or the CPU-computed kind that lays its own grey. */
+static void composite_mask_item_filter(const MaskItemDescribeContext &context,
+                                       const MaterialPaintLayer &mask,
+                                       Vector<PaintMaterialCompositeMaskItem> &r_items)
+{
+  const Material &ma = context.ma;
+  /* A filter changes the coverage so far; it owns no map or grey and no record. Its contrast
+   * still applies: the graph wraps the filter's result in the same chain. A CPU-computed
+   * kind lays its own grey instead: the mask effect cache computes the mask built up to the
+   * item with the kernel over it, and the item reads like a painted map with its invert, blend
+   * and opacity. In describe-only the grey is left out and the kind named, so the combined
+   * preview refuses the stack instead of shading the item as a no-op. */
+  if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_NEEDS_BAKE)) {
+    PaintMaterialCompositeMaskItem effect;
+    effect.opacity = BKE_paint_layers_effective_opacity(mask);
+    effect.contrast = BKE_paint_layers_mask_contrast_get(mask);
+    effect.blend = composite_mask_item_blend(mask);
+    effect.invert = paint_layer_mask_item_inverted(mask);
+    effect.effect_filter = mask.kind_subtype;
+    /* A fresh bake stands in, the way a substituted row's does: its map is read like a painted
+     * item's, the item's own mapping over it. Without one the grey is computed through the mask
+     * effect cache from the mask built up to the item. */
+    if (Image *bake_map = paint_layer_mask_effect_bake_map(ma, mask)) {
+      effect.image = bake_map;
+      composite_mapping_describe(ma,
+                                 mask,
+                                 PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                 effect.mapping,
+                                 context.tile_number,
+                                 context.painted_object,
+                                 effect.image);
+    }
+    else {
+      effect.grey_buffer = paint_layer_mask_effect_buffer_get(
+          ma, context.layer, mask, context.describe_only, &effect.grey_input_images);
+      if (!context.describe_only && effect.grey_buffer == nullptr) {
+        /* The input could not be rendered: the item is left out, as the generator leaves a
+         * filter it cannot express out of the live graph. */
+        return;
+      }
+    }
+    r_items.append(effect);
+    return;
+  }
+  PaintMaterialCompositeMaskItem filter;
+  filter.opacity = BKE_paint_layers_effective_opacity(mask);
+  filter.contrast = BKE_paint_layers_mask_contrast_get(mask);
+  filter.filter = mask.kind_subtype;
+  composite_filter_params(mask, filter.filter_params);
+  filter.filter_ramp = BKE_paint_layers_ramp_get(mask);
+  filter.filter_curves = BKE_paint_layers_curves_get(mask);
+  r_items.append(filter);
+}
+
+/** A generator mask item. */
+static void composite_mask_item_generator(const MaskItemDescribeContext &context,
+                                          const MaterialPaintLayer &mask,
+                                          Vector<PaintMaterialCompositeMaskItem> &r_items)
+{
+  /* A generator mask item: the ramp's colour is the grey and its alpha the coverage, read from
+   * the item's own pattern rather than from a map. A UV line follows the row's frame when the
+   * row projects, so a decal's gradient mask moves with its frame. */
+  PaintMaterialCompositeMaskItem item;
+  item.opacity = BKE_paint_layers_effective_opacity(mask);
+  item.contrast = BKE_paint_layers_mask_contrast_get(mask);
+  if (!composite_generator_describe(context.ma,
+                                    mask,
+                                    PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                    context.context_surface,
+                                    item.gradient,
+                                    &context.layer,
+                                    context.tile_number,
+                                    context.painted_object))
+  {
+    return;
+  }
+  item.blend = composite_mask_item_blend(mask);
+  item.invert = paint_layer_mask_item_inverted(mask);
+  r_items.append(item);
+}
+
+/** A mask correction that reads a material. */
+static void composite_mask_item_reads_source(const MaskItemDescribeContext &context,
+                                             const MaterialPaintLayer &mask,
+                                             Vector<PaintMaterialCompositeMaskItem> &r_items)
+{
+  const Material &ma = context.ma;
+  /* The grey of a mask correction that reads a material is the mean of the source's Base
+   * Color, read as a painted item's map is: a plain value, a plain texture or the map rendered
+   * from it. A graph with no map yet is the generator's to show alone, so nothing is carried
+   * until the render lands. A plain transparency folds into the opacity. */
+  if (!paint_layer_mask_item_lays(ma, mask)) {
+    return;
+  }
+  const int source_channel = paint_layer_mask_source_channel(mask);
+  const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+      ma, mask, source_channel, PaintLayerMaterialUse::Composite);
+  const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
+      ma, mask, PaintLayerMaterialUse::Composite);
+  if (source.kind == PaintLayerMaterialSourceKind::None ||
+      coverage.kind == PaintLayerMaterialCoverageKind::Pending)
+  {
+    return;
+  }
+  PaintMaterialCompositeMaskItem item;
+  item.opacity = BKE_paint_layers_effective_opacity(mask);
+  item.contrast = BKE_paint_layers_mask_contrast_get(mask);
+  if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
+    item.constant_gray = (source.constant[0] + source.constant[1] + source.constant[2]) / 3.0f;
+  }
+  else {
+    item.image = source.image;
+    item.iuser = (source.kind == PaintLayerMaterialSourceKind::LiveImage) ? source.iuser :
+                                                                            nullptr;
+    /* Read at the item's UV like a painted item's map is, so the Mapping and its gizmo move
+     * the mask in the Image Editor's composite too. */
+    composite_mapping_describe(ma,
+                               mask,
+                               source_channel,
+                               item.mapping,
+                               context.tile_number,
+                               context.painted_object,
+                               (source.image != nullptr) ? source.image : coverage.image);
+  }
+  if (coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
+    item.opacity *= clamp_f(coverage.constant, 0.0f, 1.0f);
+  }
+  item.blend = composite_mask_item_blend(mask);
+  item.invert = paint_layer_mask_item_inverted(mask);
+  r_items.append(item);
+}
+
+/** A mask item that reads the material's shared mesh-map atlas. */
+static void composite_mask_item_mesh_map(const MaskItemDescribeContext &context,
+                                         const MaterialPaintLayer &mask,
+                                         Vector<PaintMaterialCompositeMaskItem> &r_items)
+{
+  /* The atlas' R is the grey; it is read with Extend, no Mapping, and its alpha is data. */
+  if (!paint_layer_mask_item_lays(context.ma, mask)) {
+    return;
+  }
+  Image *atlas = paint_layer_mesh_map_image(context.ma, mask);
+  if (atlas == nullptr) {
+    return;
+  }
+  PaintMaterialCompositeMaskItem item;
+  item.opacity = BKE_paint_layers_effective_opacity(mask);
+  item.image = atlas;
+  item.is_mesh_map = true;
+  item.is_mesh_map_scalar = paint_layer_mesh_map_is_scalar(mask.mesh_map_type);
+  item.blend = composite_mask_item_blend(mask);
+  item.invert = paint_layer_mask_item_inverted(mask);
+  r_items.append(item);
+}
+
+/** A painted mask item: its Base Color map, or its flat grey. */
+static void composite_mask_item_painted(const MaskItemDescribeContext &context,
+                                        const MaterialPaintLayer &mask,
+                                        Vector<PaintMaterialCompositeMaskItem> &r_items)
+{
+  const MaterialPaintLayerChannel *mask_record = paint_layer_channel_find(
+      mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  if (mask_record == nullptr || !paint_layer_mask_item_lays(mask)) {
+    return;
+  }
+  PaintMaterialCompositeMaskItem item;
+  item.opacity = BKE_paint_layers_effective_opacity(mask);
+  item.contrast = BKE_paint_layers_mask_contrast_get(mask);
+  item.image = mask_record->image;
+  item.iuser = nullptr;
+  item.constant_gray = paint_layer_mask_constant(*mask_record);
+  item.blend = composite_mask_item_blend(mask);
+  item.invert = paint_layer_mask_item_inverted(mask);
+  if (item.image != nullptr) {
+    composite_mapping_describe(context.ma,
+                               mask,
+                               PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                               item.mapping,
+                               context.tile_number,
+                               context.painted_object,
+                               item.image);
+  }
+  r_items.append(item);
+}
+
 /**
  * Describe \a layer's mask stack to the evaluator, bottom to top: the base first, then the
  * corrections over it in the order they were added. One that lays nothing yet is not carried, as
@@ -510,259 +855,39 @@ static void composite_mask_items_describe(
   if (hidden_with_base && (base->flag & MA_PAINT_LAYER_ENABLED) == 0) {
     return;
   }
+  const MaskItemDescribeContext context{ma,
+                                        layer,
+                                        tile_number,
+                                        slice_rect,
+                                        dimensions_only,
+                                        describe_only,
+                                        context_surface,
+                                        painted_object};
   for (const MaterialPaintLayer &mask : layer.mask_stack) {
     if (stop_before != nullptr && BLI_uuid_equal(mask.marker, *stop_before)) {
       break;
     }
     if (paint_layer_kind_reads_anchor_point(mask)) {
-      /* The slice a mask item reads: a mask point gives its scalar, a content point its coverage.
-       * Both are grey buffers in canvas space, read like a painted map without a mapping. */
-      if (!paint_layer_mask_item_lays(ma, mask)) {
-        continue;
-      }
-      PaintMaterialCompositeMaskItem item;
-      item.opacity = BKE_paint_layers_effective_opacity(mask);
-      item.anchor_point_reader = mask.marker;
-      const PaintLayerAnchorPointRef mask_ref = paint_layer_anchor_point_resolve(ma, mask);
-      item.anchor_point_target = int8_t(mask_ref.target);
-      item.anchor_point_point = (mask_ref.point != nullptr) ? mask_ref.point->marker : bUUID{};
-      const int read_channel = paint_layer_anchor_point_mask_read_channel(ma, mask);
-      item.anchor_point_read_channel = read_channel;
-      const bool mask_target = item.anchor_point_target ==
-                               int8_t(PaintLayerAnchorPointTarget::Mask);
-      const bool baked = paint_layer_anchor_point_reader_baked(ma, mask) &&
-                         mask.bake != nullptr &&
-                         (mask_target ? mask.bake->images[read_channel] != nullptr :
-                                        mask.bake->coverage != nullptr);
-      if (baked) {
-        /* A mask point's scalar is the grey the bake holds in its colour map; a content point's
-         * coverage is the coverage map, which already holds the reader's opacity, so only its
-         * visibility stays live (as for a substituted row). Read like a painted grey map. */
-        if (mask_target) {
-          item.image = mask.bake->images[read_channel];
-        }
-        else {
-          item.image = mask.bake->coverage;
-          item.opacity = (mask.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f;
-        }
-        item.iuser = nullptr;
-        item.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, mask, read_channel);
-        BKE_paint_layers_anchor_point_slice_images(ma, mask, item.grey_input_images);
-      }
-      else {
-        /* In describe-only mode the reader keeps its descriptor, hash and subscriptions; the
-         * slice buffers belong to the GPU slot pass instead of the CPU cache. */
-        if (!describe_only) {
-          std::shared_ptr<ImBuf> slice_color;
-          std::shared_ptr<ImBuf> slice_coverage;
-          if (!BKE_paint_layers_slice_render(ma,
-                                             mask,
-                                             read_channel,
-                                             &slice_color,
-                                             &slice_coverage,
-                                             slice_rect,
-                                             dimensions_only,
-                                             painted_object))
-          {
-            continue;
-          }
-          const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, mask);
-          item.grey_buffer = (ref.target == PaintLayerAnchorPointTarget::Mask) ?
-                                        std::move(slice_color) :
-                                        std::move(slice_coverage);
-        }
-        item.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, mask, read_channel);
-        BKE_paint_layers_anchor_point_slice_images(ma, mask, item.grey_input_images);
-      }
-      item.blend = CompositeBlend(
-          BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
-      item.invert = paint_layer_mask_item_inverted(mask);
-      r_items.append(item);
-      continue;
+      composite_mask_item_anchor_point(context, mask, r_items);
     }
-    if (paint_layer_kind_is_map_coverage(mask)) {
-      /* A map-driven coverage operator: it lays its map's `match` over the coverage below,
-       * whether or not it has a map yet (a missing map is `match = 0`, not a pass-through). Its
-       * Base Color record is structural, so the map is read from it directly. */
-      PaintMaterialCompositeMaskItem item;
-      item.opacity = BKE_paint_layers_effective_opacity(mask);
-      item.map_coverage = mask.kind_subtype;
-      item.invert = paint_layer_mask_item_inverted(mask);
-      item.coverage_tolerance = paint_layer_kind_param_get(mask, PAINT_LAYER_COVERAGE_TOLERANCE);
-      item.coverage_softness = paint_layer_kind_param_get(mask, PAINT_LAYER_COVERAGE_SOFTNESS);
-      item.coverage_output = BKE_paint_layers_mask_item_output_value(mask);
-      if (paint_layer_map_coverage_has_map(mask)) {
-        item.coverage_image = paint_layer_map_coverage_record(mask)->image;
-        composite_mapping_describe(ma,
-                                   mask,
-                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                   item.coverage_mapping,
-                                   tile_number,
-                                   painted_object,
-                                   item.coverage_image);
-      }
-      for (const MaterialPaintLayerIdColor &color : mask.id_colors) {
-        PaintMaterialCompositeIdColor out_color;
-        copy_v3_v3(out_color.color, color.color);
-        out_color.tolerance = color.tolerance;
-        out_color.own_tolerance = paint_layer_mask_item_color_id_advanced(mask);
-        out_color.enabled = (color.flag & MA_PAINT_LAYER_ID_COLOR_ENABLED) != 0;
-        item.coverage_colors.append(out_color);
-      }
-      r_items.append(item);
-      continue;
+    else if (paint_layer_kind_is_map_coverage(mask)) {
+      composite_mask_item_map_coverage(context, mask, r_items);
     }
-    if (paint_layer_effect_is_filter(mask)) {
-      /* A filter changes the coverage so far; it owns no map or grey and no record. A CPU-computed
-       * kind lays its own grey instead: the mask effect cache computes the mask built up to the
-       * item with the kernel over it, and the item reads like a painted map with its invert, blend
-       * and opacity. In describe-only the grey is left out and the kind named, so the combined
-       * preview refuses the stack instead of shading the item as a no-op. */
-      if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_NEEDS_BAKE)) {
-        PaintMaterialCompositeMaskItem effect;
-        effect.opacity = BKE_paint_layers_effective_opacity(mask);
-        effect.blend = CompositeBlend(
-            BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
-        effect.invert = paint_layer_mask_item_inverted(mask);
-        effect.effect_filter = mask.kind_subtype;
-        /* A fresh bake stands in, the way a substituted row's does: its map is read like a painted
-         * item's, the item's own mapping over it. Without one the grey is computed through the mask
-         * effect cache from the mask built up to the item. */
-        if (Image *bake_map = paint_layer_mask_effect_bake_map(ma, mask)) {
-          effect.image = bake_map;
-          composite_mapping_describe(ma,
-                                     mask,
-                                     PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                     effect.mapping,
-                                     tile_number,
-                                     painted_object);
-        }
-        else {
-          effect.grey_buffer = paint_layer_mask_effect_buffer_get(
-              ma, layer, mask, describe_only, &effect.grey_input_images);
-          if (!describe_only && effect.grey_buffer == nullptr) {
-            /* The input could not be rendered: the item is left out, as the generator leaves a
-             * filter it cannot express out of the live graph. */
-            continue;
-          }
-        }
-        r_items.append(effect);
-        continue;
-      }
-      PaintMaterialCompositeMaskItem filter;
-      filter.opacity = BKE_paint_layers_effective_opacity(mask);
-      filter.filter = mask.kind_subtype;
-      composite_filter_params(mask, filter.filter_params);
-      filter.filter_ramp = BKE_paint_layers_ramp_get(mask);
-      filter.filter_curves = BKE_paint_layers_curves_get(mask);
-      r_items.append(filter);
-      continue;
+    else if (paint_layer_effect_is_filter(mask)) {
+      composite_mask_item_filter(context, mask, r_items);
     }
-    if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_GENERATES)) {
-      /* A generator mask item: the ramp's colour is the grey and its alpha the coverage, read from
-       * the item's own pattern rather than from a map. */
-      PaintMaterialCompositeMaskItem item;
-      item.opacity = BKE_paint_layers_effective_opacity(mask);
-      if (!composite_generator_describe(
-              ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, context_surface, item.gradient))
-      {
-        continue;
-      }
-      item.blend = CompositeBlend(
-          BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
-      item.invert = paint_layer_mask_item_inverted(mask);
-      r_items.append(item);
-      continue;
+    else if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_GENERATES)) {
+      composite_mask_item_generator(context, mask, r_items);
     }
-    if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_READS_SOURCE)) {
-      /* The grey of a mask correction that reads a material is the mean of the source's Base
-       * Color, read as a painted item's map is: a plain value, a plain texture or the map rendered
-       * from it. A graph with no map yet is the generator's to show alone, so nothing is carried
-       * until the render lands. A plain transparency folds into the opacity. */
-      if (!paint_layer_mask_item_lays(ma, mask)) {
-        continue;
-      }
-      const int source_channel = paint_layer_mask_source_channel(mask);
-      const PaintLayerMaterialSource source = paint_layer_material_channel_source(
-          ma, mask, source_channel, PaintLayerMaterialUse::Composite);
-      const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
-          ma, mask, PaintLayerMaterialUse::Composite);
-      if (source.kind == PaintLayerMaterialSourceKind::None ||
-          coverage.kind == PaintLayerMaterialCoverageKind::Pending)
-      {
-        continue;
-      }
-      PaintMaterialCompositeMaskItem item;
-      item.opacity = BKE_paint_layers_effective_opacity(mask);
-      if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
-        item.constant_gray = (source.constant[0] + source.constant[1] + source.constant[2]) / 3.0f;
-      }
-      else {
-        item.image = source.image;
-        item.iuser = (source.kind == PaintLayerMaterialSourceKind::LiveImage) ? source.iuser :
-                                                                                nullptr;
-        /* Read at the item's UV like a painted item's map is, so the Mapping and its gizmo move
-         * the mask in the Image Editor's composite too. */
-        composite_mapping_describe(ma,
-                                   mask,
-                                   source_channel,
-                                   item.mapping,
-                                   tile_number,
-                                   painted_object,
-                                   (source.image != nullptr) ? source.image : coverage.image);
-      }
-      if (coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
-        item.opacity *= clamp_f(coverage.constant, 0.0f, 1.0f);
-      }
-      item.blend = CompositeBlend(
-          BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
-      item.invert = paint_layer_mask_item_inverted(mask);
-      r_items.append(item);
-      continue;
+    else if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_READS_SOURCE)) {
+      composite_mask_item_reads_source(context, mask, r_items);
     }
-    const MaterialPaintLayerChannel *mask_record = paint_layer_channel_find(
-        mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-    if (mask.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
-      /* The atlas' R is the grey; it is read with Extend, no Mapping, and its alpha is data. */
-      if (!paint_layer_mask_item_lays(ma, mask)) {
-        continue;
-      }
-      Image *atlas = paint_layer_mesh_map_image(ma, mask);
-      if (atlas == nullptr) {
-        continue;
-      }
-      PaintMaterialCompositeMaskItem item;
-      item.opacity = BKE_paint_layers_effective_opacity(mask);
-      item.image = atlas;
-      item.is_mesh_map = true;
-      item.is_mesh_map_scalar = paint_layer_mesh_map_is_scalar(mask.mesh_map_type);
-      item.blend = CompositeBlend(
-          BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
-      item.invert = paint_layer_mask_item_inverted(mask);
-      r_items.append(item);
-      continue;
+    else if (mask.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+      composite_mask_item_mesh_map(context, mask, r_items);
     }
-    if (mask_record == nullptr || !paint_layer_mask_item_lays(mask)) {
-      continue;
+    else {
+      composite_mask_item_painted(context, mask, r_items);
     }
-    PaintMaterialCompositeMaskItem item;
-    item.opacity = BKE_paint_layers_effective_opacity(mask);
-    item.image = mask_record->image;
-    item.iuser = nullptr;
-    item.constant_gray = paint_layer_mask_constant(*mask_record);
-    item.blend = CompositeBlend(
-        BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
-    item.invert = paint_layer_mask_item_inverted(mask);
-    if (item.image != nullptr) {
-      composite_mapping_describe(ma,
-                                 mask,
-                                 PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                 item.mapping,
-                                 tile_number,
-                                 painted_object,
-                                 item.image);
-    }
-    r_items.append(item);
   }
 }
 
@@ -811,6 +936,173 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                                                             Vector<Image *> *r_images);
 
 /**
+ * Append the CPU-computed effect \a effect to \a out as a correction carrying the map the effect
+ * cache computed. Nothing is appended while the effect lays nothing or its input cannot be
+ * rendered.
+ */
+static void composite_effect_append_cpu_computed(const Material &ma,
+                                                 const MaterialPaintLayer *owner_row,
+                                                 const MaterialPaintLayer &effect,
+                                                 const int channel,
+                                                 const float pass_through_scale,
+                                                 const bool describe_only,
+                                                 PaintMaterialCompositeImageLayer &out)
+{
+  /* A CPU-computed effect reads the row's own content, so it needs the row it hangs on: the
+   * standalone corrections-row description has none and leaves it out. */
+  if (owner_row == nullptr || !paint_layer_effect_filters(ma, effect, channel)) {
+    return;
+  }
+  /* A CPU-computed effect carries its result as a map the effect cache computed: the kind and
+   * the parameters travel like a filter's, the buffer beside them. In describe_only only the
+   * kind is known -- the buffer is not computed, and the combined preview falls back to the CPU
+   * when it sees the kind. */
+  PaintMaterialCompositeCorrection effect_correction;
+  effect_correction.filter = effect.kind_subtype;
+  composite_filter_params(effect, effect_correction.filter_params);
+  effect_correction.effect_hash = paint_layer_effect_hash(effect, channel);
+  /* The GPU path keys its result texture on the effect instance, which a parameter hash cannot do
+   * across rows: name the marker the correction was made from. */
+  effect_correction.effect_marker = effect.marker;
+  effect_correction.effect_color = paint_layer_effect_buffer_get(
+      ma, *owner_row, effect, channel, describe_only, &effect_correction.effect_images);
+  if (!describe_only && effect_correction.effect_color == nullptr) {
+    /* The input could not be rendered: the correction is left out, as the generator leaves it
+     * out of the live graph. */
+    return;
+  }
+  effect_correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
+                              pass_through_scale;
+  out.content_corrections.append(effect_correction);
+}
+
+/**
+ * Describe an Anchor Point reader correction into \a correction. False when the correction is left
+ * out because its slice cannot be rendered.
+ */
+static bool composite_effect_anchor_point_describe(
+    const Material &ma,
+    const MaterialPaintLayer &effect,
+    const int channel,
+    const float pass_through_scale,
+    const int *slice_rect,
+    const bool dimensions_only,
+    const bool describe_only,
+    const Object *painted_object,
+    PaintMaterialCompositeCorrection &correction)
+{
+  correction.anchor_point_reader = effect.marker;
+  const PaintLayerAnchorPointRef effect_ref = paint_layer_anchor_point_resolve(ma, effect);
+  correction.anchor_point_target = int8_t(effect_ref.target);
+  correction.anchor_point_point = (effect_ref.point != nullptr) ? effect_ref.point->marker :
+                                                                    bUUID{};
+  /* What the slice shows, laid by the reader's own blend and opacity. A baked reader reads the
+   * maps its slice was rendered into. Only the row whose bake is being rendered ignores its own
+   * bake; a correction nested in it describes its own bake, which is valid and cheaper than
+   * rendering its slice live again. */
+  const bool baked = paint_layer_anchor_point_reader_baked(ma, effect) && effect.bake != nullptr &&
+                     effect.bake->images[channel] != nullptr && effect.bake->coverage != nullptr;
+  if (baked) {
+    correction.image = effect.bake->images[channel];
+    correction.iuser = nullptr;
+    correction.anchor_point_coverage_image = effect.bake->coverage;
+    correction.anchor_point_coverage_iuser = nullptr;
+    correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
+    /* The coverage map already holds the reader's opacity; only its visibility stays live. */
+    correction.opacity = ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) *
+                         pass_through_scale;
+    return true;
+  }
+  if (!describe_only && !BKE_paint_layers_slice_render(ma,
+                                                       effect,
+                                                       channel,
+                                                       &correction.grey_buffer,
+                                                       &correction.anchor_point_coverage,
+                                                       slice_rect,
+                                                       dimensions_only,
+                                                       painted_object))
+  {
+    return false;
+  }
+  correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
+  BKE_paint_layers_anchor_point_slice_images(ma, effect, correction.grey_input_images);
+  return true;
+}
+
+/**
+ * Describe a correction that reads a material into \a correction: what the source supplies, as a
+ * Material row's colour. False while there is nothing to carry yet.
+ */
+static bool composite_effect_source_describe(const Material &ma,
+                                             const MaterialPaintLayer &effect,
+                                             const int channel,
+                                             const int tile_number,
+                                             const Object *painted_object,
+                                             PaintMaterialCompositeCorrection &correction)
+{
+  /* What the source supplies, as a Material row's colour: its plain value, its plain texture
+   * or the map rendered from it. A graph with no map yet is the generator's to show alone, so
+   * nothing is carried until the render lands. The correction's transparency is a plain value
+   * or none (see #paint_layer_correction_reads_source), and a value folds into the opacity. */
+  const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+      ma, effect, channel, PaintLayerMaterialUse::Composite);
+  const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
+      ma, effect, PaintLayerMaterialUse::Composite);
+  if (source.kind == PaintLayerMaterialSourceKind::None ||
+      coverage.kind == PaintLayerMaterialCoverageKind::Pending)
+  {
+    return false;
+  }
+  if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
+    copy_v4_v4(correction.constant_color, source.constant);
+    correction.has_constant_color = true;
+  }
+  else {
+    correction.image = source.image;
+    correction.iuser = (source.kind == PaintLayerMaterialSourceKind::LiveImage) ? source.iuser :
+                                                                                  nullptr;
+    /* The source is read at the correction's UV, as the generator's source wrapper does and as
+     * a Material row's map is: the Image Editor's composite and the gizmo go through this. */
+    composite_mapping_describe(ma, effect, channel, correction.mapping, tile_number, painted_object);
+  }
+  if (coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
+    correction.opacity *= clamp_f(coverage.constant, 0.0f, 1.0f);
+  }
+  return true;
+}
+
+/** Describe a plain correction into \a correction: a mesh map, a painted map or a flat colour. */
+static bool composite_effect_map_describe(const Material &ma,
+                                          const MaterialPaintLayer &effect,
+                                          const int channel,
+                                          const int tile_number,
+                                          const Object *painted_object,
+                                          PaintMaterialCompositeCorrection &correction)
+{
+  const MaterialPaintLayerChannel *effect_record = paint_layer_channel_find(effect, channel);
+  if (effect.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
+    /* A mesh-map correction reads the material's shared atlas; no Mapping, alpha is data. */
+    Image *atlas = paint_layer_mesh_map_image(ma, effect);
+    if (atlas == nullptr) {
+      return false;
+    }
+    correction.image = atlas;
+    correction.is_mesh_map = true;
+    correction.is_mesh_map_scalar = paint_layer_mesh_map_is_scalar(effect.mesh_map_type);
+  }
+  else if (effect_record->image != nullptr) {
+    correction.image = effect_record->image;
+    composite_mapping_describe(ma, effect, channel, correction.mapping, tile_number, painted_object);
+  }
+  else {
+    /* Only a Fill correction lays without a map: its flat colour. */
+    copy_v4_v4(correction.constant_color, effect_record->value);
+    correction.has_constant_color = true;
+  }
+  return true;
+}
+
+/**
  * Append the content correction \a effect to \a out as the evaluator reads it in \a channel: a filter,
  * or a map, flat colour, source or slice laid by the correction's own blend and opacity. Nothing is
  * appended for a correction that lays nothing here, as the generator builds nothing for it.
@@ -830,32 +1122,8 @@ static void composite_effect_append(
     const Object *painted_object = nullptr)
 {
   if (paint_layer_effect_is_cpu_computed(effect)) {
-    /* A CPU-computed effect reads the row's own content, so it needs the row it hangs on: the
-     * standalone corrections-row description has none and leaves it out. */
-    if (owner_row == nullptr || !paint_layer_effect_filters(ma, effect, channel)) {
-      return;
-    }
-    /* A CPU-computed effect carries its result as a map the effect cache computed: the kind and
-     * the parameters travel like a filter's, the buffer beside them. In describe_only only the
-     * kind is known -- the buffer is not computed, and the combined preview falls back to the CPU
-     * when it sees the kind. */
-    PaintMaterialCompositeCorrection effect_correction;
-    effect_correction.filter = effect.kind_subtype;
-    composite_filter_params(effect, effect_correction.filter_params);
-    effect_correction.effect_hash = paint_layer_effect_hash(effect, channel);
-    /* The GPU path keys its result texture on the effect instance, which a parameter hash cannot do
-     * across rows: name the marker the correction was made from. */
-    effect_correction.effect_marker = effect.marker;
-    effect_correction.effect_color = paint_layer_effect_buffer_get(
-        ma, *owner_row, effect, channel, describe_only, &effect_correction.effect_images);
-    if (!describe_only && effect_correction.effect_color == nullptr) {
-      /* The input could not be rendered: the correction is left out, as the generator leaves it
-       * out of the live graph. */
-      return;
-    }
-    effect_correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
-                                pass_through_scale;
-    out.content_corrections.append(effect_correction);
+    composite_effect_append_cpu_computed(
+        ma, owner_row, effect, channel, pass_through_scale, describe_only, out);
     return;
   }
   if (paint_layer_effect_filters(ma, effect, channel)) {
@@ -876,104 +1144,33 @@ static void composite_effect_append(
   correction.iuser = nullptr;
   correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
                        pass_through_scale;
+  bool described;
   if (paint_layer_kind_reads_anchor_point(effect)) {
-    correction.anchor_point_reader = effect.marker;
-    const PaintLayerAnchorPointRef effect_ref = paint_layer_anchor_point_resolve(ma, effect);
-    correction.anchor_point_target = int8_t(effect_ref.target);
-    correction.anchor_point_point = (effect_ref.point != nullptr) ? effect_ref.point->marker :
-                                                                      bUUID{};
-    /* What the slice shows, laid by the reader's own blend and opacity. A baked reader reads the
-     * maps its slice was rendered into. Only the row whose bake is being rendered ignores its own
-     * bake; a correction nested in it describes its own bake, which is valid and cheaper than
-     * rendering its slice live again. */
-    const bool baked = paint_layer_anchor_point_reader_baked(ma, effect) &&
-                       effect.bake != nullptr && effect.bake->images[channel] != nullptr &&
-                       effect.bake->coverage != nullptr;
-    if (baked) {
-      correction.image = effect.bake->images[channel];
-      correction.iuser = nullptr;
-      correction.anchor_point_coverage_image = effect.bake->coverage;
-      correction.anchor_point_coverage_iuser = nullptr;
-      correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
-      /* The coverage map already holds the reader's opacity; only its visibility stays live. */
-      correction.opacity = ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) *
-                           pass_through_scale;
-    }
-    else {
-      if (!describe_only &&
-          !BKE_paint_layers_slice_render(ma,
-                                         effect,
-                                         channel,
-                                         &correction.grey_buffer,
-                                         &correction.anchor_point_coverage,
-                                         slice_rect,
-                                         dimensions_only,
-                                         painted_object))
-      {
-        return;
-      }
-      correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
-      BKE_paint_layers_anchor_point_slice_images(ma, effect, correction.grey_input_images);
-    }
+    described = composite_effect_anchor_point_describe(ma,
+                                                       effect,
+                                                       channel,
+                                                       pass_through_scale,
+                                                       slice_rect,
+                                                       dimensions_only,
+                                                       describe_only,
+                                                       painted_object,
+                                                       correction);
   }
   else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES)) {
     /* A generator correction has no map: its ramp is laid by its own blend and opacity. */
-    if (!composite_generator_describe(ma, effect, channel, context_surface, correction.gradient)) {
-      return;
-    }
+    described = composite_generator_describe(
+        ma, effect, channel, context_surface, correction.gradient);
   }
   else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
-    /* What the source supplies, as a Material row's colour: its plain value, its plain texture
-     * or the map rendered from it. A graph with no map yet is the generator's to show alone, so
-     * nothing is carried until the render lands. The correction's transparency is a plain value
-     * or none (see #paint_layer_correction_reads_source), and a value folds into the opacity. */
-    const PaintLayerMaterialSource source = paint_layer_material_channel_source(
-        ma, effect, channel, PaintLayerMaterialUse::Composite);
-    const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
-        ma, effect, PaintLayerMaterialUse::Composite);
-    if (source.kind == PaintLayerMaterialSourceKind::None ||
-        coverage.kind == PaintLayerMaterialCoverageKind::Pending)
-    {
-      return;
-    }
-    if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
-      copy_v4_v4(correction.constant_color, source.constant);
-      correction.has_constant_color = true;
-    }
-    else {
-      correction.image = source.image;
-      correction.iuser = (source.kind == PaintLayerMaterialSourceKind::LiveImage) ?
-                             source.iuser :
-                             nullptr;
-      /* The source is read at the correction's UV, as the generator's source wrapper does and as
-       * a Material row's map is: the Image Editor's composite and the gizmo go through this. */
-      composite_mapping_describe(ma, effect, channel, correction.mapping, tile_number, painted_object);
-    }
-    if (coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
-      correction.opacity *= clamp_f(coverage.constant, 0.0f, 1.0f);
-    }
+    described = composite_effect_source_describe(
+        ma, effect, channel, tile_number, painted_object, correction);
   }
   else {
-    const MaterialPaintLayerChannel *effect_record = paint_layer_channel_find(effect, channel);
-    if (effect.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
-      /* A mesh-map correction reads the material's shared atlas; no Mapping, alpha is data. */
-      Image *atlas = paint_layer_mesh_map_image(ma, effect);
-      if (atlas == nullptr) {
-        return;
-      }
-      correction.image = atlas;
-      correction.is_mesh_map = true;
-      correction.is_mesh_map_scalar = paint_layer_mesh_map_is_scalar(effect.mesh_map_type);
-    }
-    else if (effect_record->image != nullptr) {
-      correction.image = effect_record->image;
-      composite_mapping_describe(ma, effect, channel, correction.mapping, tile_number, painted_object);
-    }
-    else {
-      /* Only a Fill correction lays without a map: its flat colour. */
-      copy_v4_v4(correction.constant_color, effect_record->value);
-      correction.has_constant_color = true;
-    }
+    described = composite_effect_map_describe(
+        ma, effect, channel, tile_number, painted_object, correction);
+  }
+  if (!described) {
+    return;
   }
   correction.blend = layer_channel_blend(effect, channel);
   out.content_corrections.append(correction);
@@ -1561,6 +1758,7 @@ PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
     buffer.is_mesh_map_scalar = item.is_mesh_map_scalar;
     buffer.constant_gray = item.constant_gray;
     buffer.opacity = item.opacity;
+    buffer.contrast = item.contrast;
     buffer.blend = item.blend;
     buffer.invert = item.invert;
     buffer.filter = item.filter;
@@ -1650,6 +1848,21 @@ void PaintLayersMaskSampler::tile_acquire(const int tile_number,
       }
       else if (ibuf != nullptr) {
         IMB_freeImBuf(ibuf);
+      }
+    }
+    else if (item.gradient.enabled && item.gradient.projected) {
+      /* A UV line under a projected row reads the frame: rendered once through it into the tile,
+       * the walk a projected map's resample takes, and read like a map from here. A render that
+       * cannot be made keeps the plain UV read. */
+      ImBuf *projected = BKE_paint_material_gradient_projected_render(
+          item.gradient, ref_width, ref_height, tile_number);
+      if (projected != nullptr && projected->x == ref_width && projected->y == ref_height) {
+        tile.items[i] = projected;
+        tile.item_samples[i] = projected->float_data();
+        buffers_[i].gradient.enabled = false;
+      }
+      else if (projected != nullptr) {
+        IMB_freeImBuf(projected);
       }
     }
     if (item.coverage_image != nullptr) {
@@ -3016,47 +3229,109 @@ PaintLayersGpuCaptureKind gpu_content_capture_kind(const int8_t target)
 
 }  // namespace
 
-bool BKE_paint_layers_gpu_capture_plan(
-    const Material &ma,
-    const Span<Span<const PaintMaterialCompositeImageLayer>> stacks,
-    const Span<int> channels,
-    Vector<PaintLayersGpuCaptureJob> &r_jobs,
-    const char **r_reason)
-{
-  r_jobs.clear();
-  if (r_reason != nullptr) {
-    *r_reason = nullptr;
-  }
-  if (stacks.size() != channels.size()) {
-    if (r_reason != nullptr) {
-      *r_reason = "the capture plan's stacks and channels differ in size";
-    }
-    return false;
+namespace {
+
+/** The jobs of #BKE_paint_layers_gpu_capture_plan, discovered from the stacks and then described. */
+class GpuCapturePlanner {
+ public:
+  GpuCapturePlanner(const Material &ma,
+                    const int channel_num,
+                    Vector<PaintLayersGpuCaptureJob> &r_jobs,
+                    const char **r_reason)
+      : ma_(ma), channel_num_(channel_num), jobs_(r_jobs), reason_(r_reason)
+  {
   }
 
-  const auto fail = [&](const char *reason) {
-    if (r_reason != nullptr) {
-      *r_reason = reason;
+  /** Collect every reader the passes of \a stacks lay. False when the plan cannot be built. */
+  bool collect_stacks(const Span<Span<const PaintMaterialCompositeImageLayer>> stacks,
+                      const Span<int> channels)
+  {
+    for (const int stack_index : stacks.index_range()) {
+      const int channel = channels[stack_index];
+      if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+        continue;
+      }
+      for (const PaintMaterialCompositeImageLayer &layer : stacks[stack_index]) {
+        if (!this->collect_layer(layer, channel, 0)) {
+          return false;
+        }
+      }
     }
-    return false;
-  };
+    return true;
+  }
 
-  /* One depth per job, parallel to #r_jobs: a job discovered inside another's description is one
+  /**
+   * Describe each job once. Jobs discovered while describing are appended and described by the
+   * same loop; the entry stays on the job, so the gather never describes a slice twice.
+   */
+  bool describe_jobs()
+  {
+    for (int index = 0; index < int(jobs_.size()); index++) {
+      const bUUID reader_marker = jobs_[index].reader;
+      const int channel = jobs_[index].channel;
+      const PaintLayersGpuCaptureKind kind = jobs_[index].kind;
+      const int depth = depths_[index];
+      Material &ma_mut = const_cast<Material &>(ma_);
+      MaterialPaintLayer *reader = BKE_paint_layers_find(ma_mut, reader_marker);
+      if (reader == nullptr) {
+        return this->fail("an Anchor Point reader cannot be found");
+      }
+      const bool mask_kind = kind != PaintLayersGpuCaptureKind::Content;
+      PaintMaterialCompositeImageLayer entry;
+      if (!BKE_paint_layers_slice_describe(ma_, *reader, channel, entry, nullptr, true, mask_kind))
+      {
+        return this->fail("an Anchor Point slice cannot be described");
+      }
+      const bool clear_to_one = mask_kind && entry.mask_items.is_empty();
+      if (gpu_entry_has_adjustment(entry)) {
+        return this->fail("an adjustment row is read as an Anchor Point source");
+      }
+      if (!clear_to_one) {
+        if (const char *reason = BKE_paint_layers_gpu_unsupported_reason(entry, mask_kind)) {
+          return this->fail(reason);
+        }
+      }
+      /* Nested readers are collected from the description before it is moved onto the job: the job
+       * vector may reallocate while they are appended. */
+      if (!this->collect_nested_entry(entry, channel, depth + 1, reader_marker)) {
+        return false;
+      }
+      jobs_[index].clear_to_one = clear_to_one;
+      jobs_[index].entry = std::move(entry);
+    }
+    return true;
+  }
+
+ private:
+  const Material &ma_;
+  const int channel_num_;
+  Vector<PaintLayersGpuCaptureJob> &jobs_;
+  const char **reason_;
+  /** One depth per job, parallel to #jobs_: a job discovered inside another's description is one
    * level deeper. The hard limit bounds both recursion and work on a malicious description. */
-  Vector<int> depths;
+  Vector<int> depths_;
 
-  /* Add \a reader's job unless the same slot is already planned. Returns false only when the plan
+  bool fail(const char *reason)
+  {
+    if (reason_ != nullptr) {
+      *reason_ = reason;
+    }
+    return false;
+  }
+
+  /** Add \a reader's job unless the same slot is already planned. Returns false only when the plan
    * cannot be built. */
-  const auto add_job = [&](const bUUID &reader,
-                           const bUUID &point,
-                           const int channel,
-                           const PaintLayersGpuCaptureKind kind,
-                           const int depth) -> bool {
+  bool add_job(const bUUID &reader,
+               const bUUID &point,
+               const int channel,
+               const PaintLayersGpuCaptureKind kind,
+               const int depth)
+  {
     if (BLI_uuid_is_nil(reader) || BLI_uuid_is_nil(point)) {
       return true;
     }
     const bool mask_item = kind == PaintLayersGpuCaptureKind::MaskItem;
-    for (PaintLayersGpuCaptureJob &job : r_jobs) {
+    for (PaintLayersGpuCaptureJob &job : jobs_) {
       if (job.kind != kind || !BLI_uuid_equal(job.point, point)) {
         continue;
       }
@@ -3078,36 +3353,37 @@ bool BKE_paint_layers_gpu_capture_plan(
       return true;
     }
     if (depth > PAINT_LAYER_ANCHOR_POINT_DEPTH_HARD) {
-      return fail("the Anchor Point chain is too deep for the GPU path");
+      return this->fail("the Anchor Point chain is too deep for the GPU path");
     }
-    if (int(r_jobs.size()) >= PAINT_LAYER_ANCHOR_POINT_LIMIT * int(channels.size())) {
-      return fail("too many Anchor Point slices for the GPU path");
+    if (int(jobs_.size()) >= PAINT_LAYER_ANCHOR_POINT_LIMIT * channel_num_) {
+      return this->fail("too many Anchor Point slices for the GPU path");
     }
     PaintLayersGpuCaptureJob job;
     job.reader = reader;
     job.point = point;
     job.channel = channel;
     job.kind = kind;
-    job.rank = paint_layer_anchor_point_rank(ma, point);
+    job.rank = paint_layer_anchor_point_rank(ma_, point);
     job.readers.append(reader);
-    r_jobs.append(std::move(job));
-    depths.append(depth);
+    jobs_.append(std::move(job));
+    depths_.append(depth);
     return true;
-  };
+  }
 
-  /* The readers a row (or a described slice entry) lays through its corrections and mask items. */
-  const auto collect_corrections_and_mask = [&](const PaintMaterialCompositeImageLayer &row,
-                                                const int channel,
-                                                const int depth) -> bool {
+  /** The readers a row (or a described slice entry) lays through its corrections and mask items. */
+  bool collect_corrections_and_mask(const PaintMaterialCompositeImageLayer &row,
+                                    const int channel,
+                                    const int depth)
+  {
     for (const PaintMaterialCompositeCorrection &correction : row.content_corrections) {
       if (correction.opacity <= 0.0f || !gpu_correction_is_live_reader(correction)) {
         continue;
       }
-      if (!add_job(correction.anchor_point_reader,
-                   correction.anchor_point_point,
-                   channel,
-                   gpu_content_capture_kind(correction.anchor_point_target),
-                   depth))
+      if (!this->add_job(correction.anchor_point_reader,
+                         correction.anchor_point_point,
+                         channel,
+                         gpu_content_capture_kind(correction.anchor_point_target),
+                         depth))
       {
         return false;
       }
@@ -3119,123 +3395,101 @@ bool BKE_paint_layers_gpu_capture_plan(
       const bool mask_target = item.anchor_point_target ==
                                int8_t(PaintLayerAnchorPointTarget::Mask);
       /* A content point read by a mask item is captured in the channel its coverage comes from. */
-      if (!add_job(item.anchor_point_reader,
-                   item.anchor_point_point,
-                   mask_target ? channel : item.anchor_point_read_channel,
-                   mask_target ? PaintLayersGpuCaptureKind::MaskItem :
-                                 PaintLayersGpuCaptureKind::Content,
-                   depth))
+      if (!this->add_job(item.anchor_point_reader,
+                         item.anchor_point_point,
+                         mask_target ? channel : item.anchor_point_read_channel,
+                         mask_target ? PaintLayersGpuCaptureKind::MaskItem :
+                                       PaintLayersGpuCaptureKind::Content,
+                         depth))
       {
         return false;
       }
     }
     return true;
-  };
+  }
 
-  /* Collect a row that the passes will lay, including its own reader. A hidden or zero-opacity row
+  /** Collect a row that the passes will lay, including its own reader. A hidden or zero-opacity row
    * is skipped: nothing reads it unless another reader's slice contains it, which
    * #collect_nested_entry handles. */
-  std::function<bool(const PaintMaterialCompositeImageLayer &, int, int)> collect_layer;
-  collect_layer = [&](const PaintMaterialCompositeImageLayer &layer,
-                      const int channel,
-                      const int depth) -> bool {
+  bool collect_layer(const PaintMaterialCompositeImageLayer &layer,
+                     const int channel,
+                     const int depth)
+  {
     if (!layer.enabled || layer.opacity <= 0.0f) {
       return true;
     }
     if (!BLI_uuid_is_nil(layer.anchor_point_reader) && layer.color_image == nullptr &&
-        !add_job(layer.anchor_point_reader,
-                 layer.anchor_point_point,
-                 channel,
-                 gpu_content_capture_kind(layer.anchor_point_target),
-                 depth))
+        !this->add_job(layer.anchor_point_reader,
+                       layer.anchor_point_point,
+                       channel,
+                       gpu_content_capture_kind(layer.anchor_point_target),
+                       depth))
     {
       return false;
     }
-    if (!collect_corrections_and_mask(layer, channel, depth)) {
+    if (!this->collect_corrections_and_mask(layer, channel, depth)) {
       return false;
     }
     for (const PaintMaterialCompositeImageLayer &child : layer.children) {
-      if (!collect_layer(child, channel, depth)) {
+      if (!this->collect_layer(child, channel, depth)) {
         return false;
       }
     }
     return true;
-  };
+  }
 
-  /* The readers inside an already described slice. The entry's own reader is the source row's own
+  /** The readers inside an already described slice. The entry's own reader is the source row's own
    * reader, which is a nested reader unless it is the one this job was made for. */
-  const auto collect_nested_entry = [&](const PaintMaterialCompositeImageLayer &entry,
-                                        const int channel,
-                                        const int depth,
-                                        const bUUID &job_reader) -> bool {
+  bool collect_nested_entry(const PaintMaterialCompositeImageLayer &entry,
+                            const int channel,
+                            const int depth,
+                            const bUUID &job_reader)
+  {
     if (!BLI_uuid_is_nil(entry.anchor_point_reader) && entry.color_image == nullptr &&
         !BLI_uuid_equal(entry.anchor_point_reader, job_reader) &&
-        !add_job(entry.anchor_point_reader,
-                 entry.anchor_point_point,
-                 channel,
-                 gpu_content_capture_kind(entry.anchor_point_target),
-                 depth))
+        !this->add_job(entry.anchor_point_reader,
+                       entry.anchor_point_point,
+                       channel,
+                       gpu_content_capture_kind(entry.anchor_point_target),
+                       depth))
     {
       return false;
     }
-    if (!collect_corrections_and_mask(entry, channel, depth)) {
+    if (!this->collect_corrections_and_mask(entry, channel, depth)) {
       return false;
     }
     for (const PaintMaterialCompositeImageLayer &child : entry.children) {
-      if (!collect_layer(child, channel, depth)) {
+      if (!this->collect_layer(child, channel, depth)) {
         return false;
       }
     }
     return true;
-  };
+  }
+};
 
-  for (const int stack_index : stacks.index_range()) {
-    const int channel = channels[stack_index];
-    if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
-      continue;
+}  // namespace
+
+bool BKE_paint_layers_gpu_capture_plan(
+    const Material &ma,
+    const Span<Span<const PaintMaterialCompositeImageLayer>> stacks,
+    const Span<int> channels,
+    Vector<PaintLayersGpuCaptureJob> &r_jobs,
+    const char **r_reason)
+{
+  r_jobs.clear();
+  if (r_reason != nullptr) {
+    *r_reason = nullptr;
+  }
+  if (stacks.size() != channels.size()) {
+    if (r_reason != nullptr) {
+      *r_reason = "the capture plan's stacks and channels differ in size";
     }
-    for (const PaintMaterialCompositeImageLayer &layer : stacks[stack_index]) {
-      if (!collect_layer(layer, channel, 0)) {
-        return false;
-      }
-    }
+    return false;
   }
 
-  /* Describe each job once. Jobs discovered while describing are appended and described by the
-   * same loop; the entry stays on the job, so the gather never describes a slice twice. */
-  for (int index = 0; index < int(r_jobs.size()); index++) {
-    const bUUID reader_marker = r_jobs[index].reader;
-    const int channel = r_jobs[index].channel;
-    const PaintLayersGpuCaptureKind kind = r_jobs[index].kind;
-    const int depth = depths[index];
-    Material &ma_mut = const_cast<Material &>(ma);
-    MaterialPaintLayer *reader = BKE_paint_layers_find(ma_mut, reader_marker);
-    if (reader == nullptr) {
-      return fail("an Anchor Point reader cannot be found");
-    }
-    const bool mask_kind = kind != PaintLayersGpuCaptureKind::Content;
-    PaintMaterialCompositeImageLayer entry;
-    if (!BKE_paint_layers_slice_describe(
-            ma, *reader, channel, entry, nullptr, true, mask_kind))
-    {
-      return fail("an Anchor Point slice cannot be described");
-    }
-    const bool clear_to_one = mask_kind && entry.mask_items.is_empty();
-    if (gpu_entry_has_adjustment(entry)) {
-      return fail("an adjustment row is read as an Anchor Point source");
-    }
-    if (!clear_to_one) {
-      if (const char *reason = BKE_paint_layers_gpu_unsupported_reason(entry, mask_kind)) {
-        return fail(reason);
-      }
-    }
-    /* Nested readers are collected from the description before it is moved onto the job: the job
-     * vector may reallocate while they are appended. */
-    if (!collect_nested_entry(entry, channel, depth + 1, reader_marker)) {
-      return false;
-    }
-    r_jobs[index].clear_to_one = clear_to_one;
-    r_jobs[index].entry = std::move(entry);
+  GpuCapturePlanner planner(ma, int(channels.size()), r_jobs, r_reason);
+  if (!planner.collect_stacks(stacks, channels) || !planner.describe_jobs()) {
+    return false;
   }
 
   /* A reader nested in a slice sits above the point it names, so its own point must be captured

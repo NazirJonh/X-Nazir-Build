@@ -357,6 +357,13 @@ bool BKE_paint_material_generator_sample(const PaintMaterialCompositeGradient &g
     zero_v4(r_rgba);
     return false;
   }
+  return BKE_paint_material_generator_sample_coordinate(generator, coordinate, r_rgba);
+}
+
+bool BKE_paint_material_generator_sample_coordinate(const PaintMaterialCompositeGradient &generator,
+                                                    const float3 &coordinate,
+                                                    float r_rgba[4])
+{
   const bool is_gradient = generator.subtype == MA_PAINT_LAYER_GENERATOR_GRADIENT;
   const float3 placed = is_gradient ?
                             coordinate :
@@ -501,6 +508,10 @@ uint64_t composite_generator_hash(uint64_t hash, const PaintMaterialCompositeGra
   hash = get_default_hash(hash, gradient.color_ramp_valid);
   if (gradient.color_ramp_valid) {
     hash = get_default_hash(hash, paint_layer_ramp_hash(gradient.color_ramp));
+  }
+  if (gradient.projected) {
+    /* A projected line reads the frame, so the frame's every value moves the cached pixels. */
+    hash = composite_projection_hash(hash, gradient.projection);
   }
   hash = get_default_hash(hash, BKE_paint_layers_gradient_ramp_hash(gradient.payload.ramp));
   if (gradient.subtype != MA_PAINT_LAYER_GENERATOR_GRADIENT) {

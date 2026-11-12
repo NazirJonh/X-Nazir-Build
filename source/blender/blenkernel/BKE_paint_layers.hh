@@ -330,6 +330,28 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
                                                MaterialPaintLayer *layer);
 
 /**
+ * Deep-copy \a src (a stack row of another material) into \a ma by \a place relative to \a anchor
+ * (null anchor = on top of the stack), keeping its name, role and branch: channel records,
+ * projection payload with its controller, masks, effects and folder children, each with fresh
+ * markers unique within \a ma.
+ *
+ * \param share_images: the channel maps are shared with the source (one more user) instead of
+ *   copied. The decal path needs the share -- a decal's image is one content every copy shows --
+ *   while the ordinary duplicate takes a map of its own, because a map is painted in place and a
+ *   shared one would turn every stroke on one copy into a stroke on the other. Masks and effects
+ *   get maps of their own either way.
+ *
+ * \return the copy, or null when \a src is not a stack row (an effect or a mask item belongs to
+ *   its row's list), or the anchor cannot take it.
+ */
+MaterialPaintLayer *BKE_paint_layers_copy_to_material(Main &bmain,
+                                                      Material &ma,
+                                                      const MaterialPaintLayer &src,
+                                                      MaterialPaintLayer *anchor,
+                                                      PaintLayerPlace place,
+                                                      bool share_images);
+
+/**
  * Give a freshly authored Paint or Fill \a layer the channels it takes part in by default: an
  * enabled record with no map for every channel of the material's global set
  * (#BKE_paint_layers_channel_set_mask_get).
@@ -698,6 +720,28 @@ bool BKE_paint_layers_mask_item_set_alpha_background(Material &ma,
  * one otherwise. The generator, the CPU composite and the pickers read this one number.
  */
 float BKE_paint_layers_mask_item_output_value(const MaterialPaintLayer &item);
+
+/**
+ * The contrast of the mask item \a item: the multiplier its coverage is reshaped around its half
+ * with, 1 for every file written before the option. 0 flattens the coverage to its half, 5 sharpens
+ * its edge.
+ */
+float BKE_paint_layers_mask_contrast_get(const MaterialPaintLayer &item);
+
+/**
+ * Store the actual contrast multiplier of the mask item \a item, clamped to 0..5 (kept in DNA as an
+ * offset from 1, see #MaterialPaintLayer::mask_contrast). Value-only: the reshaping is nodes
+ * and a formula the graph always builds.
+ * \return false when \a item is not a mask item of \a ma.
+ */
+bool BKE_paint_layers_mask_contrast_set(Material &ma, MaterialPaintLayer *item, float contrast);
+
+/**
+ * Reshape \a coverage around its half by the actual contrast multiplier \a contrast (what
+ * #BKE_paint_layers_mask_contrast_get returns, not the DNA offset): `clamp((cov - 0.5) * contrast +
+ * 0.5)`. The one formula the generated graph's nodes and the CPU mask both implement.
+ */
+float BKE_paint_layers_mask_contrast_apply(float coverage, float contrast);
 
 /**
  * Whether the map of the map-coverage operator \a item may be written: the UV Island capture does,

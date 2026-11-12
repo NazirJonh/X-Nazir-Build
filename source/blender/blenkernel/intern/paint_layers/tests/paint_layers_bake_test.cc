@@ -2789,4 +2789,29 @@ TEST_F(PaintLayersBakeTest, a_mask_effect_over_a_rectangular_mask_stretches_into
 
 /** \} */
 
+TEST_F(PaintLayersBakeTest, a_mask_item_contrast_edit_invalidates_the_parent_bake_once)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = add_baked_row("Row");
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT, "Mask Fill", 0.75f);
+  ASSERT_NE(item, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+
+  /* The contrast is part of the parent's pixels, like the item's opacity is. */
+  EXPECT_TRUE(BKE_paint_layers_mask_contrast_set(*ma, item, 3.0f));
+  EXPECT_FLOAT_EQ(item->mask_contrast, 2.0f) << "the stored value is the offset from 1";
+  EXPECT_FLOAT_EQ(BKE_paint_layers_mask_contrast_get(*item), 3.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_mask_contrast_apply(0.75f, 1.0f), 0.75f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_mask_contrast_apply(0.75f, 3.0f), 1.0f);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed) << "no infinite bake: the re-baked hash matches the description";
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+}
+
 }  // namespace blender::bke::tests

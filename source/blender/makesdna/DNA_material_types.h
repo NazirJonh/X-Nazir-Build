@@ -1733,6 +1733,15 @@ struct MaterialPaintLayer {
    * dependencies; the material never needs it to be one of its own users.
    */
   struct Object *projection_object = nullptr;
+  /**
+   * The contrast of a mask item's coverage as an offset from 1 (0 is identity), so a file written
+   * before the option reads unchanged. The actual contrast is this plus one: the coverage is
+   * reshaped around its half by `clamp((cov - 0.5) * (1 + offset) + 0.5)`. Appended last so the
+   * offsets of the older fields do not move.
+   */
+  float mask_contrast = 0.0f;
+  /** Keeps the struct size a multiple of 8 so an array of rows stays aligned. */
+  char _pad[4] = {};
 };
 
 /**

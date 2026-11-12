@@ -18,6 +18,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BKE_appdir.hh"
+#include "BKE_attribute.hh"
 #include "BKE_blender.hh"
 #include "BKE_context.hh"
 #include "BKE_global.hh"
@@ -26,11 +27,15 @@
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_report.hh"
 
 #include "../paint_layers_intern.hh"
@@ -46,6 +51,7 @@
 #include "BLI_math_matrix.h"
 #include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector_types.hh"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
@@ -55,17 +61,20 @@
 #include "BLO_readfile.hh"
 #include "BLO_writefile.hh"
 
+#include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include <string>
 
 #include "paint_layers_description_test_fixture.hh"
+#include "paint_layers_graph_eval_test_fixture.hh"
 
 namespace blender::bke::tests {
 
@@ -106,6 +115,50 @@ TEST_F(PaintLayersDescription, projection_is_supported_by_a_fill_that_reads_a_ma
   EXPECT_FALSE(BKE_paint_layers_projection_set_space(
       ma, paint, MA_PAINT_LAYER_MAPPING_SPACE_BOX));
   EXPECT_EQ(paint->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_UV);
+}
+
+/** A Gradient row owns no map: the projection replaces the UV its line reads, which only means
+ * something for a UV line. */
+TEST_F(PaintLayersDescription, projection_is_supported_by_a_uv_gradient_row_only)
+{
+  Material &ma = *BKE_material_add(bmain, "ProjectionGradientMat");
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      ma, nullptr, nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_NE(gradient->gradient, nullptr);
+  /* A new Gradient reads the object space: its line has coordinates of its own and a frame has
+   * nothing to replace there. */
+  EXPECT_FALSE(BKE_paint_layers_projection_supported(ma, *gradient));
+  EXPECT_FALSE(BKE_paint_layers_projection_set_space(
+      ma, gradient, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  EXPECT_EQ(gradient->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_UV);
+
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  EXPECT_TRUE(BKE_paint_layers_projection_supported(ma, *gradient));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, gradient, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  EXPECT_TRUE(BKE_paint_layers_projection_applies(ma, *gradient));
+
+  /* Back to the object space: the line re-owns its coordinates, so the projection stops applying
+   * even though the payload is still there, and comes back with the space. */
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  EXPECT_FALSE(BKE_paint_layers_projection_supported(ma, *gradient));
+  EXPECT_FALSE(BKE_paint_layers_projection_applies(ma, *gradient));
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_space(
+      ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  EXPECT_TRUE(BKE_paint_layers_projection_applies(ma, *gradient));
+
+  /* A Gradient mask item follows the row its stack hangs on; it holds no frame of its own. */
+  ASSERT_NE(BKE_paint_layers_mask_add(ma, gradient, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      ma, gradient, MA_PAINT_LAYER_SOURCE_GENERATOR, "Mask Gradient", 1.0f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(ma, *item, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  EXPECT_FALSE(BKE_paint_layers_projection_supported(ma, *item));
+  EXPECT_FALSE(BKE_paint_layers_projection_set_space(
+      ma, item, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
 }
 
 TEST_F(PaintLayersDescription, projection_frame_values_are_normalized_and_value_only)
@@ -1061,6 +1114,142 @@ TEST_F(PaintLayersDescription, projection_flip_column_signs)
     EXPECT_NEAR(mat_verify[1][i], mat_orig[1][i], 1e-5f) << "Y axis preserved";
     EXPECT_NEAR(mat_verify[0][i], -mat_orig[0][i], 1e-5f) << "X axis negated";
     EXPECT_NEAR(mat_verify[2][i], -mat_orig[2][i], 1e-5f) << "Z axis negated";
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Graph ↔ CPU parity of the projection modes
+ * \{ */
+
+/**
+ * Every mapping space, read on both sides the way the product reads it: the generated graph at a
+ * reference texel through the interpreter, the same row baked through the CPU composite into the
+ * painted object's UV space. The flat grid -- object XY equal to its render UV, normal +Z -- makes
+ * the interpreter's texel-centre object position the point the CPU bake samples, so a projected
+ * lookup has to land on the same map texel.
+ */
+TEST_F(PaintLayersGraphEvalTest, every_projection_space_matches_the_cpu)
+{
+  Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "ProjectionParityObject");
+  Mesh *mesh = BKE_mesh_add(bmain, "ProjectionParityMesh");
+  ob->data = id_cast<ID *>(mesh);
+  BKE_object_material_assign(bmain, ob, ma, 1, BKE_MAT_ASSIGN_OBDATA);
+  /* A quad spanning [0, 1]² at z = 0, its render UV equal to its XY. The edges are derived from
+   * its face, since the projected render walks corner triangles and needs the corner/edge
+   * topology to be consistent. */
+  Mesh *source = BKE_mesh_new_nomain(4, 0, 1, 4);
+  MutableSpan<float3> positions = source->vert_positions_for_write();
+  positions[0] = float3(0.0f, 0.0f, 0.0f);
+  positions[1] = float3(1.0f, 0.0f, 0.0f);
+  positions[2] = float3(1.0f, 1.0f, 0.0f);
+  positions[3] = float3(0.0f, 1.0f, 0.0f);
+  MutableSpan<int> face_offsets = source->face_offsets_for_write();
+  face_offsets[0] = 0;
+  face_offsets[1] = 4;
+  MutableSpan<int> corner_verts = source->corner_verts_for_write();
+  corner_verts[0] = 0;
+  corner_verts[1] = 1;
+  corner_verts[2] = 2;
+  corner_verts[3] = 3;
+  bke::SpanAttributeWriter<float2> uvs =
+      source->attributes_for_write().lookup_or_add_for_write_span<float2>("UVMap",
+                                                                          bke::AttrDomain::Corner);
+  uvs.span[0] = float2(0.0f, 0.0f);
+  uvs.span[1] = float2(1.0f, 0.0f);
+  uvs.span[2] = float2(1.0f, 1.0f);
+  uvs.span[3] = float2(0.0f, 1.0f);
+  uvs.finish();
+  bke::mesh_calc_edges(*source, false, false);
+  source->tag_topology_changed();
+  source->tag_positions_changed();
+  BKE_mesh_nomain_to_mesh(source, mesh, ob);
+
+  /* Four distinct quadrants, so every mode's lookup lands somewhere visible. */
+  Image *map = add_solid_image("ProjectionParityMap", 255, 0, 0, 255);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(map, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    const uchar red[4] = {255, 0, 0, 255};
+    const uchar green[4] = {0, 255, 0, 255};
+    const uchar blue[4] = {0, 0, 255, 255};
+    const uchar white[4] = {255, 255, 255, 255};
+    for (const int y : IndexRange(4)) {
+      for (const int x : IndexRange(4)) {
+        const uchar *rgba = (x < 2) ? ((y < 2) ? red : green) : ((y < 2) ? blue : white);
+        uchar *pixel = pixels + (int64_t(y) * 4 + x) * 4;
+        for (const int k : IndexRange(4)) {
+          pixel[k] = rgba[k];
+        }
+      }
+    }
+    BKE_image_release_ibuf(map, ibuf, lock);
+  }
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *top = add_layer("Top", map);
+  /* A UV gradient mask on the projected row: the graph feeds the line the row's projected UV read
+   * raw (no frame factor, no tiling), and the CPU renders the same line through the same frame.
+   * The parity of the two is what pins that behaviour for every space. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_GENERATOR, "Parity Gradient", 1.0f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *item, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+
+  const int16_t spaces[6] = {MA_PAINT_LAYER_MAPPING_SPACE_PLANAR,
+                             MA_PAINT_LAYER_MAPPING_SPACE_BOX,
+                             MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR,
+                             MA_PAINT_LAYER_MAPPING_SPACE_CUBE,
+                             MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER,
+                             MA_PAINT_LAYER_MAPPING_SPACE_SPHERE};
+  for (const int16_t space : spaces) {
+    ASSERT_TRUE(BKE_paint_layers_projection_set_space(*ma, top, space));
+    /* Explicit frame values, so both sides read the same numbers: the frame spans [-1, 1]² in
+     * object space, which keeps every reference texel inside its smooth edge. */
+    const float center[3] = {0.0f, 0.0f, 0.0f};
+    const float size[3] = {2.0f, 2.0f, 2.0f};
+    const float rotation[3] = {0.0f, 0.0f, 0.0f};
+    ASSERT_TRUE(BKE_paint_layers_projection_set_values(*ma, top, center, size, rotation));
+
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, false, nullptr, nullptr, 1001, ob));
+    int width = 0, height = 0;
+    ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+    ASSERT_EQ(width, 4) << "space " << space;
+    ASSERT_EQ(height, 4) << "space " << space;
+    Vector<float> linear(int64_t(width) * height * 4);
+    float bottom[4];
+    BKE_paint_layers_channel_bottom_color(PAINT_MATERIAL_CHANNEL_BASE_COLOR, bottom);
+    ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+        layers,
+        PaintMaterialCompositeLinearTarget::frame(linear, width),
+        nullptr,
+        nullptr,
+        bottom));
+
+    for (const int y : IndexRange(4)) {
+      for (const int x : IndexRange(4)) {
+        GraphInterpreter interpreter;
+        interpreter.tree = ma->paint_layers_tree;
+        interpreter.x = x;
+        interpreter.y = y;
+        interpreter.object_mask_value = object_mask_value;
+        const RGBA graph = interpreter.eval_result(
+            result_name(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+        const float *cpu = linear.data() + (int64_t(y) * width + x) * 4;
+        EXPECT_NEAR(graph.r, cpu[0], 2e-3f)
+            << "space " << space << " texel " << x << "," << y << " R";
+        EXPECT_NEAR(graph.g, cpu[1], 2e-3f)
+            << "space " << space << " texel " << x << "," << y << " G";
+        EXPECT_NEAR(graph.b, cpu[2], 2e-3f)
+            << "space " << space << " texel " << x << "," << y << " B";
+      }
+    }
   }
 }
 

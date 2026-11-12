@@ -978,6 +978,293 @@ def mesh_map_source_member_count(source):
     return count
 
 
+def _decal_master_projector_node(ma, node_name):
+    """The projector copy of one Decal Master decal, or None.
+
+    The addon keeps a node per decal inside the material's ``DCL-Master`` group, each instancing a
+    copy of ``DCL-Master-Projector`` whose named inner nodes hold the parameters. Every step is
+    guarded: a material the addon never set up (or a hand-edited one) yields None rather than an
+    exception."""
+    node_tree = getattr(ma, "node_tree", None)
+    master = node_tree.nodes.get("DCL-Master") if node_tree else None
+    master_tree = getattr(master, "node_tree", None)
+    decal_node = master_tree.nodes.get(node_name) if master_tree else None
+    return getattr(decal_node, "node_tree", None)
+
+
+def _decal_master_socket_scalar(socket):
+    """The number a node socket holds, or None.
+
+    The addon's parameter names live on sockets that may be scalar (a Math node) or a component of
+    a vector (a Mapping node); a scalar or the first component are both what its UI writes."""
+    if socket is None:
+        return None
+    value = getattr(socket, "default_value", None)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except TypeError:
+        try:
+            return float(value[0])
+        except (TypeError, IndexError, KeyError):
+            return None
+
+
+def _decal_master_read_projector(projector, ob, cam):
+    """The decal parameters the projector copy holds, as a dict.
+
+    Returns None when a node the addon always creates is missing. The frame follows Docs/03 §2:
+    ``size.x = size.y = 2 / (s0 * scale)`` covers the addon's range of ``+-1 / (s0 * scale)`` --
+    the frame stores full extents, and the projection divides the offset by half of them -- with
+    ``s0 = 1 / max(dimensions) * 6`` the addon's object normalization, the roll the projector's Z
+    angle, and the depth double the furthest camera-space bbox corner, which is what the addon's
+    Z-threshold automask covered. Everything is read in the camera's own space, where the frame
+    lives."""
+    image_node = projector.nodes.get("Decal Image")
+    scale_node = projector.nodes.get("Scale Node")
+    rotation_node = projector.nodes.get("Rotation Node")
+    if image_node is None or scale_node is None or rotation_node is None:
+        return None
+    image = getattr(image_node, "image", None)
+    if image is None:
+        return None
+
+    scale = 1.0
+    scale_input = scale_node.inputs[1] if len(scale_node.inputs) > 1 else None
+    scale_value = _decal_master_socket_scalar(scale_input)
+    if scale_value is not None:
+        scale = max(scale_value, 1e-6)
+    # The addon's Vector Rotate holds the angle in the Axis-Angle input; index 3 per its node
+    # layout, by name where a build renamed it.
+    angle = 0.0
+    rotation_input = rotation_node.inputs.get("Angle") or (
+        rotation_node.inputs[3] if len(rotation_node.inputs) > 3 else None)
+    angle_value = _decal_master_socket_scalar(rotation_input)
+    if angle_value is not None:
+        angle = angle_value
+
+    blend_node = projector.nodes.get("Blending Mode")
+    blend = getattr(blend_node, "blend_type", "MIX") if blend_node is not None else "MIX"
+    opacity_node = projector.nodes.get("Opacity Value")
+    opacity = 1.0
+    if opacity_node is not None and len(opacity_node.outputs) > 0:
+        opacity_value = _decal_master_socket_scalar(opacity_node.outputs[0])
+        if opacity_value is not None:
+            opacity = opacity_value
+    # The -N variant carries Normal Opacity and stamps a tangent-space normal.
+    is_normal = projector.nodes.get("Normal Opacity") is not None
+
+    dimensions = getattr(ob, "dimensions", None)
+    if dimensions is None or max(dimensions.x, dimensions.y) <= 0.0:
+        return None
+    base_scale = 1.0 / max(dimensions.x, dimensions.y) * 6.0
+    # The frame stores full extents (the projection divides the offset by half of them), so the
+    # addon's coverage across +-1/(s0 * scale) needs the doubled distance from the centre to an
+    # edge.
+    size_xy = 2.0 / (base_scale * scale)
+
+    # The depth window: double the furthest bbox corner along the camera's view axis, in camera
+    # space (where the frame's centre sits at the origin).
+    size_z = 2.0
+    cam_matrix = cam.matrix_world if cam is not None else None
+    if cam_matrix is not None:
+        cam_inverse = cam_matrix.inverted()
+        corners_cam = [cam_inverse @ (ob.matrix_world @ corner)
+                       for corner in ob.bound_box]
+        zs = [corner.z for corner in corners_cam]
+        size_z = 2.0 * max(max(zs), -min(zs), 1e-3)
+
+    return {
+        "image_name": image.name,
+        "is_normal": is_normal,
+        "size": (size_xy, size_xy, size_z),
+        "roll": angle,
+        "blend": blend,
+        "opacity": min(max(opacity, 0.0), 1.0),
+    }
+
+
+class MATERIAL_OT_paint_layer_decal_import_decal_master(Operator):
+    """Convert a material's Decal Master setup into projected paint layer rows.
+
+    One decal group per ``sna_dcl_col`` entry: the projector copy's parameters become the rows'
+    projection frame, read in the decal camera's space. The addon's nodes stay unless the removal
+    option is set; decals that already have rows are skipped, so the import can be re-run."""
+    bl_idname = "material.paint_layer_decal_import_decal_master"
+    bl_label = "Import Decal Master Decals"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    remove_setup: bpy.props.BoolProperty(
+        name="Remove Setup",
+        default=False,
+        description="Remove the DCL-Master nodes and the addon's records after the import",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        ma = _context_material(context)
+        if ma is None:
+            return False
+        return hasattr(ma, "sna_dcl_col") and len(ma.sna_dcl_col) > 0
+
+    def _decal_row_names(self, ma, decal_name):
+        # The decal is the text in front of the last " · ", as `decal_name_of_row_name` reads it.
+        return [layer.name for layer in ma.paint_layers
+                if layer.name.rpartition(" · ")[0] == decal_name]
+
+    def execute(self, context):
+        ma = _context_material(context)
+        if ma is None:
+            return {'CANCELLED'}
+        ob = context.object
+        if ob is None:
+            self.report({'ERROR'}, "No active object to read the dimensions from")
+            return {'CANCELLED'}
+
+        imported = 0
+        skipped = 0
+        failed = 0
+        frames = {}
+        for index, entry in enumerate(ma.sna_dcl_col):
+            decal_name = entry.dcl_name
+            if not decal_name:
+                continue
+            cam = bpy.data.objects.get(entry.cam_name) if entry.cam_name else None
+            if cam is None:
+                self.report({'WARNING'},
+                            "{:s}: camera {:s} not found".format(decal_name, entry.cam_name))
+                failed += 1
+                continue
+            projector = _decal_master_projector_node(ma, entry.node_name)
+            if projector is None:
+                self.report({'WARNING'},
+                            "{:s}: projector node {:s} not found".format(
+                                decal_name, entry.node_name))
+                failed += 1
+                continue
+            frame = _decal_master_read_projector(projector, ob, cam)
+            if frame is None:
+                self.report({'WARNING'}, "{:s}: the projector's parameters are incomplete".format(
+                    decal_name))
+                failed += 1
+                continue
+            # The rows are named after the image with its extension stripped; either that name or
+            # the addon's own decal name having rows means the decal is already in.
+            image_decal_name = os.path.splitext(frame["image_name"])[0]
+            if (self._decal_row_names(ma, decal_name) or
+                    self._decal_row_names(ma, image_decal_name)):
+                skipped += 1
+                continue
+            frame["camera"] = cam
+            frames[index] = frame
+
+        if not frames:
+            if imported == 0 and skipped > 0:
+                self.report({'INFO'}, "All {:d} Decal Master decals already imported".format(
+                    skipped))
+            return {'FINISHED'} if skipped or failed else {'CANCELLED'}
+
+        # The decal operators poll for Sculpt or Texture Paint mode; the converter works in Object
+        # Mode, so the mode is switched for the batch and restored after. They also read the
+        # object's active material slot, which is not necessarily the material the Properties tab
+        # shows.
+        mode_before = ob.mode
+        active_material_before = ob.active_material
+        try:
+            if mode_before not in {'SCULPT', 'TEXTURE_PAINT'}:
+                bpy.ops.object.mode_set(mode='SCULPT')
+            if active_material_before != ma:
+                ob.active_material = ma
+        except (RuntimeError, TypeError):
+            if ob.mode != mode_before:
+                try:
+                    bpy.ops.object.mode_set(mode=mode_before)
+                except RuntimeError:
+                    pass
+            self.report({'ERROR'},
+                        "Cannot enter Sculpt Mode on this material to create the decal rows")
+            return {'CANCELLED'}
+        try:
+            for index, frame in frames.items():
+                channel = 'NORMAL' if frame["is_normal"] else 'BASE_COLOR'
+                # The rows the call adds are found by diffing names: the decal's name comes from the
+                # image file name with its extension stripped, which need not equal image.name.
+                names_before = {layer.name for layer in ma.paint_layers}
+                try:
+                    bpy.ops.paint.decal_add_image(
+                        image_name=frame["image_name"],
+                        channel=channel,
+                        space='PLANAR',
+                        place_from_view=False,
+                    )
+                except RuntimeError as exc:
+                    self.report({'WARNING'}, "{:s}: {:s}".format(
+                        frame["image_name"], str(exc)))
+                    failed += 1
+                    continue
+                rows = [layer for layer in ma.paint_layers if layer.name not in names_before]
+                if not rows:
+                    failed += 1
+                    continue
+                cam = frame["camera"]
+                for layer in rows:
+                    layer.projection_object = cam
+                    layer.projection_center = (0.0, 0.0, 0.0)
+                    layer.projection_size = frame["size"]
+                    # The projector's Z angle is the roll around the frame normal, which stays the
+                    # default (0, 0, 1) for a camera-facing decal.
+                    layer.projection_roll = frame["roll"]
+                    layer.projection_axis = 'Z'
+                    layer.projection_clip = True
+                    if not frame["is_normal"]:
+                        try:
+                            layer.blend_type = frame["blend"]
+                        except TypeError:
+                            pass
+                    layer.opacity = frame["opacity"]
+                imported += 1
+        finally:
+            if active_material_before != ma:
+                try:
+                    ob.active_material = active_material_before
+                except (RuntimeError, TypeError):
+                    pass
+            if ob.mode != mode_before:
+                try:
+                    bpy.ops.object.mode_set(mode=mode_before)
+                except RuntimeError:
+                    pass
+
+        if self.remove_setup:
+            node_tree = getattr(ma, "node_tree", None)
+            master = node_tree.nodes.get("DCL-Master") if node_tree else None
+            if master is not None:
+                # The surface the setup saved: the DCL-Master node's BSDF input, back to the
+                # output, before the node goes away.
+                output = next((node for node in node_tree.nodes
+                               if node.type == 'OUTPUT_MATERIAL' and node.is_active_output), None)
+                bsdf_link = next(
+                    (link for link in node_tree.links
+                     if link.to_node == master and link.to_socket.name == "BSDF"), None)
+                if output is not None and bsdf_link is not None:
+                    node_tree.links.new(bsdf_link.from_socket, output.inputs["Surface"])
+                node_tree.nodes.remove(master)
+            for prop in ("sna_dcl_col", "sna_node_col", "sna_cam_col"):
+                if hasattr(ma, prop):
+                    collection = getattr(ma, prop)
+                    try:
+                        collection.clear()
+                    except (AttributeError, TypeError):
+                        self.report({'WARNING'},
+                                    "Could not clear the addon's {:s} records".format(prop))
+
+        self.report(
+            {'INFO'},
+            "Imported {:d}, skipped {:d}, failed {:d}".format(imported, skipped, failed))
+        return {'FINISHED'}
+
+
 def register():
     bpy.types.Material.paint_layers_output = bpy.props.PointerProperty(type=MaterialPaintLayersOutput)
 
@@ -999,6 +1286,7 @@ classes = (
     MATERIAL_OT_paint_layer_id_color_remove,
     MATERIAL_OT_paint_layer_object_mask_toggle,
     MATERIAL_OT_paint_layer_object_mask_refresh_tiles,
+    MATERIAL_OT_paint_layer_decal_import_decal_master,
     PAINT_OT_brush_layer_source_row_search,
     PAINT_IDF_layer_material,
     OBJECT_OT_mesh_map_refresh,

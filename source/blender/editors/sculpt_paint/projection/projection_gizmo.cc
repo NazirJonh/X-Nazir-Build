@@ -137,7 +137,6 @@ bool projection_gizmo_place(const bContext *C, wmGizmoGroup *gzgroup)
   if (ggd->drag_gz == nullptr) {
     /* No drag is in flight, so the uniform-scale annulus capture of the last one is stale. */
     ggd->uniform_drag_valid = false;
-    ggd->volume_uniform = false;
   }
   ProjectionFrame frame;
   if (!ggd->target.resolve(*C) || !ggd->target.read(frame)) {
@@ -325,6 +324,13 @@ void projection_frame_basis(const float rot[3][3], const float origin[3], float 
     }
     r_mat[3][i] = origin[i];
   }
+}
+
+void projection_frame_cage_matrix_get(const ProjectionFrame &frame, float r_matrix[4][4])
+{
+  float rot[3][3];
+  BKE_paint_layers_projection_frame_matrix(frame.normal, frame.roll, rot);
+  projection_frame_basis(rot, frame.center, r_matrix);
 }
 
 void projection_frame_axis(const float rot[3][3], const int i, float r_axis[3])

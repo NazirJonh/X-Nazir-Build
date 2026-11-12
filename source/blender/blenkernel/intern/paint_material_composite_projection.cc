@@ -367,360 +367,420 @@ static void composite_projection_pad_colors(float *out,
       });
 }
 
-/** Everything one band of a projected bake reads, so the rasterizer is a plain function rather
- * than a long lambda. The buffers are shared between bands; each band writes only its own rows. */
-struct ProjectionBakeContext {
-  const PaintMaterialCompositeMapping &mapping;
-  const Object &object;
-  Span<bool> slot_matches;
-  const VArray<int> &material_indices;
-  Span<int3> tris;
-  Span<int> tri_faces;
-  Span<float2> uvs;
+/* The first UDIM tile number and the tiles per row of the UDIM numbering. */
+static constexpr int composite_projection_udim_first = 1001;
+static constexpr int composite_projection_udim_row_len = 10;
+/* The slack of the closed tile-border test, and of the inside test of a barycentric weight. */
+static constexpr float composite_projection_border_epsilon = 1e-5f;
+
+/** The flags and constants of a projection's space, built once for the whole bake. */
+struct CompositeProjectionKind {
+  bool volume = false;
+  bool box = false;
+  bool cube = false;
+  bool cylinder = false;
+  bool sphere = false;
+  float exponent = 1.0f;
+  /* The Cube atlas table row, the one the generated graph reads. */
+  const ProjectionCubeLayoutInfo *atlas = nullptr;
+  /* The projection axis and the two frame axes a Planar frame reads its UV from. */
+  int axis = 0;
+  int u_index = 0;
+  int v_index = 0;
+};
+
+static CompositeProjectionKind composite_projection_kind_make(
+    const PaintMaterialCompositeProjection &projection)
+{
+  CompositeProjectionKind kind;
+  const ProjectionModeInfo &mode = BKE_paint_layers_projection_mode_info(projection.space);
+  kind.volume = mode.is_volume;
+  kind.box = mode.samples_num > 1;
+  kind.cube = projection.space == MA_PAINT_LAYER_MAPPING_SPACE_CUBE;
+  kind.cylinder = projection.space == MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER;
+  kind.sphere = projection.space == MA_PAINT_LAYER_MAPPING_SPACE_SPHERE;
+  kind.exponent = mode.uses_blend ?
+                      BKE_paint_layers_projection_triplanar_exponent(projection.blend) :
+                      PAINT_LAYER_PROJECTION_BOX_EXPONENT;
+  kind.atlas = &BKE_paint_layers_projection_cube_layout_info(projection.cube_layout);
+  kind.axis = clamp_i(
+      projection.axis, MA_PAINT_LAYER_PROJECTION_AXIS_X, MA_PAINT_LAYER_PROJECTION_AXIS_Z);
+  kind.u_index = (kind.axis == MA_PAINT_LAYER_PROJECTION_AXIS_X) ? 1 : 0;
+  kind.v_index = (kind.axis == MA_PAINT_LAYER_PROJECTION_AXIS_Z) ? 1 : 2;
+  return kind;
+}
+
+/** The mesh, UV, material and frame state both projected rasterizers share. */
+struct CompositeProjectionBakeContext {
+  const PaintMaterialCompositeProjection &projection;
+  const Object *object = nullptr;
+  CompositeProjectionKind kind;
+  VArraySpan<float2> uvs;
   Span<float3> positions;
   Span<float3> normals;
   Span<int> corner_verts;
-  CompositeProjectionSampler &sampler;
-  float *out;
-  MutableSpan<uint8_t> island;
-  MutableSpan<int4> band_boxes;
-  int ref_width;
-  int ref_height;
-  int band_rows;
-  int tile_x;
-  int tile_y;
-  bool has_controller;
-  const float4x4 &object_to_world;
-  const float4x4 &world_to_controller;
-  const float3x3 &normal_object_to_world;
-  const float3x3 &normal_world_to_controller;
-  const float (&inv_frame_rot)[3][3];
-  bool is_box;
-  bool is_cube;
-  bool is_cylinder;
-  bool is_sphere;
-  float exponent;
-  const ProjectionCubeLayoutInfo &atlas;
+  Span<int3> tris;
+  Array<bool> slot_matches;
+  VArray<int> material_indices;
+  Array<int> tri_faces;
+  bool has_controller = false;
+  float4x4 object_to_world = float4x4::identity();
+  float4x4 world_to_controller = float4x4::identity();
+  float3x3 normal_object_to_world = float3x3::identity();
+  float3x3 normal_world_to_controller = float3x3::identity();
+  int tile_x = 0;
+  int tile_y = 0;
+  int width = 0;
+  int height = 0;
+  float inv_frame_rot[3][3];
+
+  explicit CompositeProjectionBakeContext(const PaintMaterialCompositeProjection &projection_)
+      : projection(projection_)
+  {
+  }
 };
 
-/** Rasterize the triangles that reach the rows of \a band into the bake buffers. */
-static void composite_projection_rasterize_band(const ProjectionBakeContext &ctx, const int band)
+/**
+ * Fill \a ctx from the projection's object. False when the row names no mesh, render UV map,
+ * triangle or matching material slot. \a need_normals reads the corner normals, which only the
+ * rasterizer that weights by the surface normal needs.
+ */
+static bool composite_projection_context_init(CompositeProjectionBakeContext &ctx,
+                                              const bool need_normals,
+                                              const int width,
+                                              const int height,
+                                              const int tile_number)
 {
-  const PaintMaterialCompositeMapping &mapping = ctx.mapping;
-  const PaintMaterialCompositeProjection &projection = mapping.projection;
-  const Object *object = &ctx.object;
-  const Span<bool> slot_matches = ctx.slot_matches;
-  const VArray<int> &material_indices = ctx.material_indices;
-  const Span<int3> tris = ctx.tris;
-  const Span<int> tri_faces = ctx.tri_faces;
-  const Span<float2> uvs = ctx.uvs;
-  const Span<float3> positions = ctx.positions;
-  const Span<float3> normals = ctx.normals;
-  const Span<int> corner_verts = ctx.corner_verts;
-  CompositeProjectionSampler &sampler = ctx.sampler;
-  float *out = ctx.out;
-  MutableSpan<uint8_t> island = ctx.island;
-  const int ref_width = ctx.ref_width;
-  const int ref_height = ctx.ref_height;
-  const int tile_x = ctx.tile_x;
-  const int tile_y = ctx.tile_y;
-  const float tile_origin_u = float(tile_x);
-  const float tile_origin_v = float(tile_y);
-  const bool has_controller = ctx.has_controller;
-  const float4x4 &object_to_world = ctx.object_to_world;
-  const float4x4 &world_to_controller = ctx.world_to_controller;
-  const float3x3 &normal_object_to_world = ctx.normal_object_to_world;
-  const float3x3 &normal_world_to_controller = ctx.normal_world_to_controller;
-  const float(&inv_frame_rot)[3][3] = ctx.inv_frame_rot;
-  const bool is_box = ctx.is_box;
-  const bool is_cube = ctx.is_cube;
-  const bool is_cylinder = ctx.is_cylinder;
-  const bool is_sphere = ctx.is_sphere;
-  const float exponent = ctx.exponent;
-  const ProjectionCubeLayoutInfo &atlas = ctx.atlas;
+  const PaintMaterialCompositeProjection &projection = ctx.projection;
+  const Object *object = projection.object;
+  const Mesh *mesh_ptr = composite_projection_mesh(object);
+  if (mesh_ptr == nullptr) {
+    return false;
+  }
+  const Mesh &mesh = *mesh_ptr;
+  const StringRefNull uv_name_ref = BKE_paint_layers_gradient_uv_map_name(mesh);
+  const char *uv_name = uv_name_ref.is_empty() ? nullptr : uv_name_ref.c_str();
+  if (uv_name == nullptr) {
+    return false;
+  }
+  const auto &attributes = mesh.attributes();
+  const auto uv_attr = attributes.lookup<float2>(uv_name, bke::AttrDomain::Corner);
+  if (!uv_attr) {
+    return false;
+  }
+  ctx.object = object;
+  ctx.uvs = VArraySpan<float2>(*uv_attr);
+  ctx.positions = mesh.vert_positions();
+  if (need_normals) {
+    ctx.normals = mesh.corner_normals();
+  }
+  ctx.corner_verts = mesh.corner_verts();
+  ctx.tris = mesh.corner_tris();
+  if (ctx.tris.is_empty() || object->totcol <= 0) {
+    return false;
+  }
+  ctx.slot_matches = Array<bool>(object->totcol, false);
+  if (composite_projection_slots_match(*object, projection.material, ctx.slot_matches) == 0) {
+    return false;
+  }
+  ctx.material_indices = *attributes.lookup_or_default<int>(
+      "material_index", bke::AttrDomain::Face, 0);
+  ctx.tri_faces = Array<int>(int(ctx.tris.size()));
+  bke::mesh::corner_tris_calc_face_indices(mesh.faces(), ctx.tri_faces);
 
-  const auto sample_uv = [&](float u, float v, float r_rgba[4]) -> bool {
-    composite_projection_uv_wrap(mapping, is_cube, u, v);
-    /* A tiled source is sampled from one tile buffer; its pattern wraps inside that tile. The Cube
-     * atlas never wraps: its cells live at fixed sub-rectangles of [0, 1]. */
-    const bool repeat = projection.source_tiled ||
-                        (!is_cube && mapping.wrap != MA_PAINT_LAYER_MAPPING_WRAP_CLIP);
-    return sampler.sample(u, v, repeat, repeat, r_rgba);
+  /* The painted mesh is in its own object space; a controller Empty moves the frame into its own
+   * space first, exactly as a Texture Coordinate node naming that object does in the shader. */
+  ctx.has_controller = projection.controller != nullptr && projection.controller != object;
+  if (ctx.has_controller) {
+    ctx.object_to_world = object->object_to_world();
+    ctx.world_to_controller = projection.controller->world_to_object();
+    if (need_normals) {
+      ctx.normal_object_to_world = math::transpose(math::invert(float3x3(ctx.object_to_world)));
+      ctx.normal_world_to_controller = math::transpose(
+          math::invert(float3x3(ctx.world_to_controller)));
+    }
+  }
+
+  const int bake_tile = (tile_number >= composite_projection_udim_first) ?
+                            tile_number :
+                            composite_projection_udim_first;
+  ctx.tile_x = (bake_tile - composite_projection_udim_first) % composite_projection_udim_row_len;
+  ctx.tile_y = (bake_tile - composite_projection_udim_first) / composite_projection_udim_row_len;
+  ctx.width = width;
+  ctx.height = height;
+
+  /* The frame rotation is constant across the bake; the normal reads it too, for the Box and
+   * Triplanar face weights and the Planar facing's component along the axis. */
+  float frame_rot[3][3];
+  eul_to_mat3(frame_rot, projection.rotation);
+  transpose_m3_m3(ctx.inv_frame_rot, frame_rot);
+  ctx.kind = composite_projection_kind_make(projection);
+  return true;
+}
+
+/** The corners of the triangle a texel is rasterized from, in its UV tile and in object space. */
+struct CompositeProjectionTri {
+  float tri_uv[3][2];
+  float3 p0, p1, p2;
+  float3 n0, n1, n2;
+};
+
+/**
+ * Rasterize the matching triangles into the UV tile of \a ctx and call \a texel_fn on each texel
+ * a triangle covers: `(x, y, tri, p, n)`, the position and normal already in the
+ * controller's space (the normal is zero when the context read none). Then pad the colors of
+ * \a out past the islands. Bands own whole rows, so the callback may write its own texel.
+ */
+template<typename TexelFn>
+static void composite_projection_raster(const CompositeProjectionBakeContext &ctx,
+                                        float *out,
+                                        TexelFn &&texel_fn)
+{
+  const int ref_width = ctx.width;
+  const int ref_height = ctx.height;
+  const bool has_normals = !ctx.normals.is_empty();
+  /* The texels a triangle covered, for the padding below; per-band boxes of them keep that pass off
+   * the empty parts of the canvas. */
+  Array<uint8_t> island(int64_t(ref_width) * ref_height, uint8_t(0));
+  const int band_num = std::min(composite_projection_band_max, ref_height);
+  const int band_rows = (ref_height + band_num - 1) / band_num;
+  Array<int4> band_boxes(band_num, int4(ref_width, ref_height, -1, -1));
+
+  const float tile_origin_u = float(ctx.tile_x);
+  const float tile_origin_v = float(ctx.tile_y);
+  /* One bake is one UDIM tile. A triangle crossing a tile border is left out; UV islands are
+   * expected to stay inside their tile. The far border belongs to the tile (an island touching
+   * `u = 1` or `v = 1`, as a cube cross does, ends exactly there), so the test is a closed
+   * range, not the vertex's floor. */
+  const auto in_tile = [&](const float2 &uv) {
+    return uv.x >= float(ctx.tile_x) - composite_projection_border_epsilon &&
+           uv.x <= float(ctx.tile_x + 1) + composite_projection_border_epsilon &&
+           uv.y >= float(ctx.tile_y) - composite_projection_border_epsilon &&
+           uv.y <= float(ctx.tile_y + 1) + composite_projection_border_epsilon;
   };
 
-  const int band_y0 = band * ctx.band_rows;
-  const int band_y1 = std::min(band_y0 + ctx.band_rows, ref_height) - 1;
-  int4 &band_box = ctx.band_boxes[band];
-
-  for (const int tri_index : IndexRange(tris.size())) {
-    const int face = tri_faces[tri_index];
-    const int material_index = material_indices[face];
-    if (material_index < 0 || material_index >= object->totcol ||
-        !slot_matches[material_index])
-    {
-      continue;
-    }
-    const int3 &tri = tris[tri_index];
-    const int c0 = tri[0];
-    const int c1 = tri[1];
-    const int c2 = tri[2];
-    const float2 uv0 = uvs[c0];
-    const float2 uv1 = uvs[c1];
-    const float2 uv2 = uvs[c2];
-    /* One bake is one UDIM tile. A triangle crossing a tile border is left out; UV islands are
-     * expected to stay inside their tile. The far border belongs to the tile (an island touching
-     * `u = 1` or `v = 1`, as a cube cross does, ends exactly there), so the test is a closed
-     * range, not the vertex's floor. */
-    const auto in_tile = [&](const float2 &uv) {
-      constexpr float border_epsilon = 1e-5f;
-      return uv.x >= float(tile_x) - border_epsilon &&
-             uv.x <= float(tile_x + 1) + border_epsilon &&
-             uv.y >= float(tile_y) - border_epsilon &&
-             uv.y <= float(tile_y + 1) + border_epsilon;
-    };
-    if (!in_tile(uv0) || !in_tile(uv1) || !in_tile(uv2)) {
-      continue;
-    }
-    const float2 local_uv0 = uv0 - float2(tile_origin_u, tile_origin_v);
-    const float2 local_uv1 = uv1 - float2(tile_origin_u, tile_origin_v);
-    const float2 local_uv2 = uv2 - float2(tile_origin_u, tile_origin_v);
-    const float min_u = std::min({local_uv0.x, local_uv1.x, local_uv2.x});
-    const float max_u = std::max({local_uv0.x, local_uv1.x, local_uv2.x});
-    const float min_v = std::min({local_uv0.y, local_uv1.y, local_uv2.y});
-    const float max_v = std::max({local_uv0.y, local_uv1.y, local_uv2.y});
-    if (max_u < 0.0f || max_v < 0.0f || min_u >= 1.0f || min_v >= 1.0f) {
-      continue;
-    }
-    const int x0 = clamp_i(int(floorf(min_u * float(ref_width))), 0, ref_width - 1);
-    const int x1 = clamp_i(int(ceilf(max_u * float(ref_width))), 0, ref_width - 1);
-    const int y0 = std::max(clamp_i(int(floorf(min_v * float(ref_height))), 0, ref_height - 1),
-                            band_y0);
-    const int y1 = std::min(clamp_i(int(ceilf(max_v * float(ref_height))), 0, ref_height - 1),
-                            band_y1);
-    if (y0 > y1) {
-      continue;
-    }
-    const float tri_uv[3][2] = {
-        {local_uv0.x, local_uv0.y},
-        {local_uv1.x, local_uv1.y},
-        {local_uv2.x, local_uv2.y},
-    };
-    const float3 &p0 = positions[corner_verts[c0]];
-    const float3 &p1 = positions[corner_verts[c1]];
-    const float3 &p2 = positions[corner_verts[c2]];
-    const float3 &n0 = normals[c0];
-    const float3 &n1 = normals[c1];
-    const float3 &n2 = normals[c2];
-
-    for (int y = y0; y <= y1; y++) {
-      for (int x = x0; x <= x1; x++) {
-        const float u = (float(x) + 0.5f) / float(ref_width);
-        const float v = (float(y) + 0.5f) / float(ref_height);
-        const float co[2] = {u, v};
-        float w01[3];
-        barycentric_weights_v2(tri_uv[0], tri_uv[1], tri_uv[2], co, w01);
-        const float w0 = w01[0];
-        const float w1 = w01[1];
-        const float w2 = 1.0f - w0 - w1;
-        if (!std::isfinite(w0) || !std::isfinite(w1) || !std::isfinite(w2)) {
-          continue;
-        }
-        if (w0 < -1e-5f || w1 < -1e-5f || w2 < -1e-5f) {
-          continue;
-        }
-        island[int64_t(y) * ref_width + x] = 1;
-        band_box = int4(std::min(band_box.x, x),
-                        std::min(band_box.y, y),
-                        std::max(band_box.z, x),
-                        std::max(band_box.w, y));
-        float p[3];
-        p[0] = float(p0.x) * w0 + float(p1.x) * w1 + float(p2.x) * w2;
-        p[1] = float(p0.y) * w0 + float(p1.y) * w1 + float(p2.y) * w2;
-        p[2] = float(p0.z) * w0 + float(p1.z) * w1 + float(p2.z) * w2;
-        float n_interp[3];
-        n_interp[0] = float(n0.x) * w0 + float(n1.x) * w1 + float(n2.x) * w2;
-        n_interp[1] = float(n0.y) * w0 + float(n1.y) * w1 + float(n2.y) * w2;
-        n_interp[2] = float(n0.z) * w0 + float(n1.z) * w1 + float(n2.z) * w2;
-
-        if (has_controller) {
-          const float3 p_controller = math::transform_point(
-              world_to_controller,
-              math::transform_point(object_to_world, float3(p[0], p[1], p[2])));
-          p[0] = p_controller.x;
-          p[1] = p_controller.y;
-          p[2] = p_controller.z;
-          const float3 n_controller = normal_world_to_controller *
-                                      (normal_object_to_world *
-                                       float3(n_interp[0], n_interp[1], n_interp[2]));
-          n_interp[0] = n_controller.x;
-          n_interp[1] = n_controller.y;
-          n_interp[2] = n_controller.z;
-        }
-
-        float q[3];
-        composite_projection_position(projection, inv_frame_rot, p, q);
-        /* The image-aspect fit scales the frame-space coordinates before anything reads them,
-         * exactly as the generated graph's Aspect input does; the depth axis keeps one. */
-        for (int i = 0; i < 3; i++) {
-          q[i] *= projection.aspect[i];
-        }
-
-        /* The frame factor the generated graph builds: the two footprint axes with their smooth
-         * edges, the depth slab when its toggle asks, all under the frame's clip mix; the facing
-         * fade joins after it and applies even while the map repeats. The facing is a Planar
-         * input: it fades the faces that look away from the one projection direction, which the
-         * volume kinds do not have -- the map reaches a surface from every side -- so they never
-         * read it. A single-axis facing would blank the faces the axis runs across, exactly the
-         * sides the map arrives from. */
-        const int axis = clamp_i(projection.axis,
-                                 MA_PAINT_LAYER_PROJECTION_AXIS_X,
-                                 MA_PAINT_LAYER_PROJECTION_AXIS_Z);
-        const int u_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_X) ? 1 : 0;
-        const int v_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_Z) ? 1 : 2;
-        float n_frame[3];
-        mul_v3_m3v3(n_frame, inv_frame_rot, n_interp);
-        float weight = 1.0f;
-        if (projection.clip) {
-          if (is_box || is_cube) {
-            /* Box, Triplanar and Cube share the box inside: the three axes with their smooth
-             * edges. The depth toggle is a Planar input: the box inside already bounds all
-             * three axes, and the graph builds no depth slab for the volume kinds either. */
-            weight = BKE_paint_layers_projection_axis_factor(q[0]) *
-                     BKE_paint_layers_projection_axis_factor(q[1]) *
-                     BKE_paint_layers_projection_axis_factor(q[2]);
-          }
-          else if (is_cylinder) {
-            /* Cylinder: inside the unit circle around the axis, and within the height slab. */
-            const int a = (axis + 1) % 3;
-            const int b = (axis + 2) % 3;
-            const float radial = q[a] * q[a] + q[b] * q[b];
-            weight = (radial < 1.0f) ? 1.0f : 0.0f;
-            weight *= BKE_paint_layers_projection_axis_factor(q[axis]);
-          }
-          else if (is_sphere) {
-            /* Sphere: inside the unit ball. */
-            const float length_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2];
-            weight = (length_sq < 1.0f) ? 1.0f : 0.0f;
-          }
-          else {
-            weight = BKE_paint_layers_projection_axis_factor(q[u_index]) *
-                     BKE_paint_layers_projection_axis_factor(q[v_index]);
-            if (projection.depth) {
-              weight *= BKE_paint_layers_projection_axis_factor(q[axis]);
-            }
-          }
-        }
-        if (weight > 0.0f && projection.facing &&
-            !(is_box || is_cube || is_cylinder || is_sphere))
+  threading::parallel_for(IndexRange(band_num), 1, [&](const IndexRange bands) {
+    for (const int band : bands) {
+      const int band_y0 = band * band_rows;
+      const int band_y1 = std::min(band_y0 + band_rows, ref_height) - 1;
+      int4 &band_box = band_boxes[band];
+      for (const int tri_index : IndexRange(ctx.tris.size())) {
+        const int face = ctx.tri_faces[tri_index];
+        const int material_index = ctx.material_indices[face];
+        if (material_index < 0 || material_index >= ctx.object->totcol ||
+            !ctx.slot_matches[material_index])
         {
-          const float facing_component = n_frame[axis];
-          weight *= BKE_paint_layers_projection_facing_weight(
-              projection.facing_scale, projection.facing_offset, facing_component);
-        }
-        if (weight <= 0.0f) {
           continue;
         }
-
-        float straight[3] = {0.0f, 0.0f, 0.0f};
-        float alpha = 0.0f;
-        bool covered = false;
-
-        const auto accumulate_sample = [&](const float uu,
-                                           const float vv,
-                                           const float weight) {
-          float tap[4];
-          if (!sample_uv(uu, vv, tap)) {
-            return;
-          }
-          float sample_rgb[3];
-          float sample_alpha;
-          composite_straight_from_premul(tap, sample_rgb, sample_alpha);
-          straight[0] += sample_rgb[0] * weight;
-          straight[1] += sample_rgb[1] * weight;
-          straight[2] += sample_rgb[2] * weight;
-          alpha += sample_alpha * weight;
-          covered = true;
-        };
-
-        /* The tiling multiplies the UV only, never the frame factor read above, like the graph's. */
-        if (is_box) {
-          /* Box and Triplanar: the three face reads blended by the frame normal's powers, the
-           * graph's normalized weights; the color mixes by them and the alpha sums. */
-          const float sum = std::max(powf(fabsf(n_frame[0]), exponent) +
-                                         powf(fabsf(n_frame[1]), exponent) +
-                                         powf(fabsf(n_frame[2]), exponent),
-                                     PAINT_LAYER_PROJECTION_EPSILON);
-          for (int tri_face = 0; tri_face < 3; tri_face++) {
-            float uv[2];
-            composite_projection_face_uv(tri_face, q, uv);
-            const float face_weight = powf(fabsf(n_frame[tri_face]), exponent) / sum;
-            accumulate_sample(0.5f + (uv[0] - 0.5f) * projection.tiling[0],
-                              0.5f + (uv[1] - 0.5f) * projection.tiling[1],
-                              weight * face_weight);
-          }
-        }
-        else if (is_cube) {
-          /* Cube atlas: the dominant frame axis picks one of six faces; its cell is a quarter by a
-           * third of the atlas, placed by the cross origins the graph's CUBE case uses. */
-          const float ax = fabsf(q[0]);
-          const float ay = fabsf(q[1]);
-          const float az = fabsf(q[2]);
-          int atlas_face = 0;
-          if (ax + PAINT_LAYER_PROJECTION_EPSILON > ay &&
-              ax + PAINT_LAYER_PROJECTION_EPSILON > az)
-          {
-            atlas_face = (q[0] > 0.0f) ? 0 : 1;
-          }
-          else if (ay + PAINT_LAYER_PROJECTION_EPSILON > az) {
-            atlas_face = (q[1] > 0.0f) ? 2 : 3;
-          }
-          else {
-            atlas_face = (q[2] > 0.0f) ? 4 : 5;
-          }
-          float local_uv[2];
-          composite_projection_face_uv(atlas_face / 2, q, local_uv);
-          const float uu = atlas.origin[atlas_face][0] + local_uv[0] * atlas.cell_size[0];
-          const float vv = atlas.origin[atlas_face][1] + local_uv[1] * atlas.cell_size[1];
-          accumulate_sample(uu, vv, weight);
-        }
-        else if (is_cylinder) {
-          /* Cylinder: U winds around the axis, V reads the height along it. */
-          const int a = (axis + 1) % 3;
-          const int b = (axis + 2) % 3;
-          const float angle = atan2f(q[b], q[a]);
-          accumulate_sample(
-              BKE_paint_layers_projection_angle_u(angle), 0.5f + q[axis] * 0.5f, weight);
-        }
-        else if (is_sphere) {
-          /* Sphere: U winds around the axis, V is the polar angle from it. */
-          const int a = (axis + 1) % 3;
-          const int b = (axis + 2) % 3;
-          const float length = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
-          const float ratio = clamp_f(
-              q[axis] / std::max(length, PAINT_LAYER_PROJECTION_EPSILON), -1.0f, 1.0f);
-          const float angle = atan2f(q[b], q[a]);
-          accumulate_sample(BKE_paint_layers_projection_angle_u(angle),
-                            BKE_paint_layers_projection_polar_v(acosf(ratio)),
-                            weight);
-        }
-        else {
-          /* Planar: X reads Y/Z, Y reads X/Z and Z reads X/Y. */
-          accumulate_sample(0.5f + q[u_index] * projection.tiling[0] * 0.5f,
-                            0.5f + q[v_index] * projection.tiling[1] * 0.5f,
-                            weight);
-        }
-
-        if (!covered) {
+        const int3 &tri_corners = ctx.tris[tri_index];
+        const int c0 = tri_corners[0];
+        const int c1 = tri_corners[1];
+        const int c2 = tri_corners[2];
+        const float2 uv0 = ctx.uvs[c0];
+        const float2 uv1 = ctx.uvs[c1];
+        const float2 uv2 = ctx.uvs[c2];
+        if (!in_tile(uv0) || !in_tile(uv1) || !in_tile(uv2)) {
           continue;
         }
-        float *pixel = out + (int64_t(y) * ref_width + x) * 4;
-        pixel[0] = straight[0] * alpha;
-        pixel[1] = straight[1] * alpha;
-        pixel[2] = straight[2] * alpha;
-        pixel[3] = alpha;
+        const float2 local_uv0 = uv0 - float2(tile_origin_u, tile_origin_v);
+        const float2 local_uv1 = uv1 - float2(tile_origin_u, tile_origin_v);
+        const float2 local_uv2 = uv2 - float2(tile_origin_u, tile_origin_v);
+        const float min_u = std::min({local_uv0.x, local_uv1.x, local_uv2.x});
+        const float max_u = std::max({local_uv0.x, local_uv1.x, local_uv2.x});
+        const float min_v = std::min({local_uv0.y, local_uv1.y, local_uv2.y});
+        const float max_v = std::max({local_uv0.y, local_uv1.y, local_uv2.y});
+        if (max_u < 0.0f || max_v < 0.0f || min_u >= 1.0f || min_v >= 1.0f) {
+          continue;
+        }
+        const int x0 = clamp_i(int(floorf(min_u * float(ref_width))), 0, ref_width - 1);
+        const int x1 = clamp_i(int(ceilf(max_u * float(ref_width))), 0, ref_width - 1);
+        const int y0 = std::max(clamp_i(int(floorf(min_v * float(ref_height))), 0, ref_height - 1),
+                                band_y0);
+        const int y1 = std::min(clamp_i(int(ceilf(max_v * float(ref_height))), 0, ref_height - 1),
+                                band_y1);
+        if (y0 > y1) {
+          continue;
+        }
+        CompositeProjectionTri tri;
+        tri.tri_uv[0][0] = local_uv0.x;
+        tri.tri_uv[0][1] = local_uv0.y;
+        tri.tri_uv[1][0] = local_uv1.x;
+        tri.tri_uv[1][1] = local_uv1.y;
+        tri.tri_uv[2][0] = local_uv2.x;
+        tri.tri_uv[2][1] = local_uv2.y;
+        tri.p0 = ctx.positions[ctx.corner_verts[c0]];
+        tri.p1 = ctx.positions[ctx.corner_verts[c1]];
+        tri.p2 = ctx.positions[ctx.corner_verts[c2]];
+        if (has_normals) {
+          tri.n0 = ctx.normals[c0];
+          tri.n1 = ctx.normals[c1];
+          tri.n2 = ctx.normals[c2];
+        }
+
+        for (int y = y0; y <= y1; y++) {
+          for (int x = x0; x <= x1; x++) {
+            const float u = (float(x) + 0.5f) / float(ref_width);
+            const float v = (float(y) + 0.5f) / float(ref_height);
+            const float co[2] = {u, v};
+            float w01[3];
+            barycentric_weights_v2(tri.tri_uv[0], tri.tri_uv[1], tri.tri_uv[2], co, w01);
+            const float w0 = w01[0];
+            const float w1 = w01[1];
+            const float w2 = 1.0f - w0 - w1;
+            if (!std::isfinite(w0) || !std::isfinite(w1) || !std::isfinite(w2)) {
+              continue;
+            }
+            if (w0 < -composite_projection_border_epsilon ||
+                w1 < -composite_projection_border_epsilon ||
+                w2 < -composite_projection_border_epsilon)
+            {
+              continue;
+            }
+            island[int64_t(y) * ref_width + x] = 1;
+            band_box = int4(std::min(band_box.x, x),
+                            std::min(band_box.y, y),
+                            std::max(band_box.z, x),
+                            std::max(band_box.w, y));
+            float p[3];
+            p[0] = float(tri.p0.x) * w0 + float(tri.p1.x) * w1 + float(tri.p2.x) * w2;
+            p[1] = float(tri.p0.y) * w0 + float(tri.p1.y) * w1 + float(tri.p2.y) * w2;
+            p[2] = float(tri.p0.z) * w0 + float(tri.p1.z) * w1 + float(tri.p2.z) * w2;
+            float n_interp[3] = {0.0f, 0.0f, 0.0f};
+            if (has_normals) {
+              n_interp[0] = float(tri.n0.x) * w0 + float(tri.n1.x) * w1 + float(tri.n2.x) * w2;
+              n_interp[1] = float(tri.n0.y) * w0 + float(tri.n1.y) * w1 + float(tri.n2.y) * w2;
+              n_interp[2] = float(tri.n0.z) * w0 + float(tri.n1.z) * w1 + float(tri.n2.z) * w2;
+            }
+
+            if (ctx.has_controller) {
+              const float3 p_controller = math::transform_point(
+                  ctx.world_to_controller,
+                  math::transform_point(ctx.object_to_world, float3(p[0], p[1], p[2])));
+              p[0] = p_controller.x;
+              p[1] = p_controller.y;
+              p[2] = p_controller.z;
+              if (has_normals) {
+                const float3 n_controller = ctx.normal_world_to_controller *
+                                            (ctx.normal_object_to_world *
+                                             float3(n_interp[0], n_interp[1], n_interp[2]));
+                n_interp[0] = n_controller.x;
+                n_interp[1] = n_controller.y;
+                n_interp[2] = n_controller.z;
+              }
+            }
+            texel_fn(x, y, tri, p, n_interp);
+          }
+        }
+      }
+    }
+  });
+  composite_projection_pad_colors(out, island, ref_width, ref_height, band_boxes);
+}
+
+/** The cube-cross atlas UV of the dominant frame axis: a cell is a quarter by a third of it,
+ * placed by the cross origins the graph's CUBE case uses. */
+static void composite_projection_cube_uv(const CompositeProjectionKind &kind,
+                                         const float q[3],
+                                         float r_uv[2])
+{
+  const float ax = fabsf(q[0]);
+  const float ay = fabsf(q[1]);
+  const float az = fabsf(q[2]);
+  int atlas_face = 0;
+  if (ax + PAINT_LAYER_PROJECTION_EPSILON > ay && ax + PAINT_LAYER_PROJECTION_EPSILON > az) {
+    atlas_face = (q[0] > 0.0f) ? 0 : 1;
+  }
+  else if (ay + PAINT_LAYER_PROJECTION_EPSILON > az) {
+    atlas_face = (q[1] > 0.0f) ? 2 : 3;
+  }
+  else {
+    atlas_face = (q[2] > 0.0f) ? 4 : 5;
+  }
+  float local_uv[2];
+  composite_projection_face_uv(atlas_face / 2, q, local_uv);
+  const ProjectionCubeLayoutInfo &atlas = *kind.atlas;
+  r_uv[0] = atlas.origin[atlas_face][0] + local_uv[0] * atlas.cell_size[0];
+  r_uv[1] = atlas.origin[atlas_face][1] + local_uv[1] * atlas.cell_size[1];
+}
+
+/** Cylinder: U winds around the axis, V reads the height along it. */
+static void composite_projection_cylinder_uv(const CompositeProjectionKind &kind,
+                                             const float q[3],
+                                             float r_uv[2])
+{
+  const int a = (kind.axis + 1) % 3;
+  const int b = (kind.axis + 2) % 3;
+  const float angle = atan2f(q[b], q[a]);
+  r_uv[0] = BKE_paint_layers_projection_angle_u(angle);
+  r_uv[1] = 0.5f + q[kind.axis] * 0.5f;
+}
+
+/** Sphere: U winds around the axis, V is the polar angle from it. */
+static void composite_projection_sphere_uv(const CompositeProjectionKind &kind,
+                                           const float q[3],
+                                           float r_uv[2])
+{
+  const int a = (kind.axis + 1) % 3;
+  const int b = (kind.axis + 2) % 3;
+  const float length = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+  const float ratio = clamp_f(
+      q[kind.axis] / std::max(length, PAINT_LAYER_PROJECTION_EPSILON), -1.0f, 1.0f);
+  const float angle = atan2f(q[b], q[a]);
+  r_uv[0] = BKE_paint_layers_projection_angle_u(angle);
+  r_uv[1] = BKE_paint_layers_projection_polar_v(acosf(ratio));
+}
+
+/**
+ * The frame factor the generated graph builds: the two footprint axes with their smooth edges, the
+ * depth slab when its toggle asks, all under the frame's clip mix; the facing fade joins after it
+ * and applies even while the map repeats. The facing is a Planar input: it fades the faces that
+ * look away from the one projection direction, which the volume kinds do not have -- the map
+ * reaches a surface from every side -- so they never read it. A single-axis facing would blank the
+ * faces the axis runs across, exactly the sides the map arrives from.
+ */
+static float composite_projection_frame_weight(const PaintMaterialCompositeProjection &projection,
+                                               const CompositeProjectionKind &kind,
+                                               const float q[3],
+                                               const float n_frame[3])
+{
+  const int axis = kind.axis;
+  float weight = 1.0f;
+  if (projection.clip) {
+    if (kind.box || kind.cube) {
+      /* Box, Triplanar and Cube share the box inside: the three axes with their smooth
+       * edges. The depth toggle is a Planar input: the box inside already bounds all
+       * three axes, and the graph builds no depth slab for the volume kinds either. */
+      weight = BKE_paint_layers_projection_axis_factor(q[0]) *
+               BKE_paint_layers_projection_axis_factor(q[1]) *
+               BKE_paint_layers_projection_axis_factor(q[2]);
+    }
+    else if (kind.cylinder) {
+      /* Cylinder: inside the unit circle around the axis, and within the height slab. */
+      const int a = (axis + 1) % 3;
+      const int b = (axis + 2) % 3;
+      const float radial = q[a] * q[a] + q[b] * q[b];
+      weight = (radial < 1.0f) ? 1.0f : 0.0f;
+      weight *= BKE_paint_layers_projection_axis_factor(q[axis]);
+    }
+    else if (kind.sphere) {
+      /* Sphere: inside the unit ball. */
+      const float length_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2];
+      weight = (length_sq < 1.0f) ? 1.0f : 0.0f;
+    }
+    else {
+      weight = BKE_paint_layers_projection_axis_factor(q[kind.u_index]) *
+               BKE_paint_layers_projection_axis_factor(q[kind.v_index]);
+      if (projection.depth) {
+        weight *= BKE_paint_layers_projection_axis_factor(q[axis]);
       }
     }
   }
+  if (weight > 0.0f && projection.facing && !kind.volume) {
+    const float facing_component = n_frame[axis];
+    weight *= BKE_paint_layers_projection_facing_weight(
+        projection.facing_scale, projection.facing_offset, facing_component);
+  }
+  return weight;
 }
 
 /**
@@ -735,42 +795,12 @@ ImBuf *composite_resample_projected(const ImBuf *src,
                                     const PaintMaterialCompositeMapping &mapping)
 {
   const PaintMaterialCompositeProjection &projection = mapping.projection;
-  const Object *object = projection.object;
-  const Mesh *mesh_ptr = composite_projection_mesh(object);
-  if (mesh_ptr == nullptr) {
+  CompositeProjectionBakeContext ctx(projection);
+  if (!composite_projection_context_init(
+          ctx, true, ref_width, ref_height, projection.tile_number))
+  {
     return nullptr;
   }
-  const Mesh &mesh = *mesh_ptr;
-  const StringRefNull uv_name_ref = BKE_paint_layers_gradient_uv_map_name(mesh);
-  const char *uv_name = uv_name_ref.is_empty() ? nullptr : uv_name_ref.c_str();
-  if (uv_name == nullptr) {
-    return nullptr;
-  }
-  const auto &attributes = mesh.attributes();
-  const auto uv_attr = attributes.lookup<float2>(uv_name, bke::AttrDomain::Corner);
-  if (!uv_attr) {
-    return nullptr;
-  }
-  const VArraySpan<float2> uvs(*uv_attr);
-  const Span<float3> positions = mesh.vert_positions();
-  const Span<float3> normals = mesh.corner_normals();
-  const Span<int> corner_verts = mesh.corner_verts();
-  const Span<int3> tris = mesh.corner_tris();
-  if (tris.is_empty()) {
-    return nullptr;
-  }
-  if (object->totcol <= 0) {
-    return nullptr;
-  }
-  Array<bool> slot_matches(object->totcol, false);
-  if (composite_projection_slots_match(*object, projection.material, slot_matches) == 0) {
-    return nullptr;
-  }
-  const VArray<int> material_indices = *attributes.lookup_or_default<int>(
-      "material_index", bke::AttrDomain::Face, 0);
-  Array<int> tri_faces(int(tris.size()));
-  bke::mesh::corner_tris_calc_face_indices(mesh.faces(), tri_faces);
-
   CompositeProjectionSampler sampler(src);
   if (!sampler.valid()) {
     return nullptr;
@@ -780,86 +810,179 @@ ImBuf *composite_resample_projected(const ImBuf *src,
     return nullptr;
   }
   float *out = dst->float_data_for_write();
+  const CompositeProjectionKind &kind = ctx.kind;
 
-  /* The painted mesh is in its own object space; a controller Empty moves the frame into its own
-   * space first, exactly as a Texture Coordinate node naming that object does in the shader. */
-  const bool has_controller = projection.controller != nullptr &&
-                              projection.controller != object;
-  float4x4 object_to_world = float4x4::identity();
-  float4x4 world_to_controller = float4x4::identity();
-  float3x3 normal_object_to_world = float3x3::identity();
-  float3x3 normal_world_to_controller = float3x3::identity();
-  if (has_controller) {
-    object_to_world = object->object_to_world();
-    world_to_controller = projection.controller->world_to_object();
-    normal_object_to_world = math::transpose(math::invert(float3x3(object_to_world)));
-    normal_world_to_controller = math::transpose(math::invert(float3x3(world_to_controller)));
-  }
-
-  const int tile_number = (projection.tile_number >= 1001) ? projection.tile_number : 1001;
-  /* The frame rotation is constant across the bake; the normal reads it too, for the Box and
-   * Triplanar face weights and the Planar facing's component along the axis. */
-  float frame_rot[3][3];
-  float inv_frame_rot[3][3];
-  eul_to_mat3(frame_rot, projection.rotation);
-  transpose_m3_m3(inv_frame_rot, frame_rot);
-
-  /* The face weights of Box and Triplanar, as the graph's `projection_weights_add`: exponent 64
-   * for Box, 32 down to 1 with the blend for Triplanar. */
-  const ProjectionModeInfo &mode = BKE_paint_layers_projection_mode_info(projection.space);
-  const float exponent = mode.uses_blend ?
-                             BKE_paint_layers_projection_triplanar_exponent(projection.blend) :
-                             PAINT_LAYER_PROJECTION_BOX_EXPONENT;
-
-  /* The texels a triangle covered, for the padding below; per-band boxes of them keep that pass off
-   * the empty parts of the canvas. */
-  Array<uint8_t> island(int64_t(ref_width) * ref_height, uint8_t(0));
-  const int band_num = std::min(composite_projection_band_max, ref_height);
-  const int band_rows = (ref_height + band_num - 1) / band_num;
-  Array<int4> band_boxes(band_num, int4(ref_width, ref_height, -1, -1));
-
-  ProjectionBakeContext ctx{
-      mapping,
-      *object,
-      slot_matches,
-      material_indices,
-      tris,
-      tri_faces,
-      uvs,
-      positions,
-      normals,
-      corner_verts,
-      sampler,
-      out,
-      island,
-      band_boxes,
-      ref_width,
-      ref_height,
-      band_rows,
-      (tile_number - 1001) % 10,
-      (tile_number - 1001) / 10,
-      has_controller,
-      object_to_world,
-      world_to_controller,
-      normal_object_to_world,
-      normal_world_to_controller,
-      inv_frame_rot,
-      mode.samples_num > 1,
-      mode.uses_cube_layout,
-      projection.space == MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER,
-      projection.space == MA_PAINT_LAYER_MAPPING_SPACE_SPHERE,
-      exponent,
-      BKE_paint_layers_projection_cube_layout_info(projection.cube_layout),
+  const auto sample_uv = [&](float u, float v, float r_rgba[4]) -> bool {
+    composite_projection_uv_wrap(mapping, kind.cube, u, v);
+    /* A tiled source is sampled from one tile buffer; its pattern wraps inside that tile. The Cube
+     * atlas never wraps: its cells live at fixed sub-rectangles of [0, 1]. */
+    const bool repeat = projection.source_tiled ||
+                        (!kind.cube && mapping.wrap != MA_PAINT_LAYER_MAPPING_WRAP_CLIP);
+    return sampler.sample(u, v, repeat, repeat, r_rgba);
   };
 
-  threading::parallel_for(IndexRange(band_num), 1, [&](const IndexRange bands) {
-    for (const int band : bands) {
-      composite_projection_rasterize_band(ctx, band);
+  const auto texel = [&](const int x,
+                         const int y,
+                         const CompositeProjectionTri &tri,
+                         const float p[3],
+                         const float n_interp[3]) {
+    float q[3];
+    composite_projection_position(projection, ctx.inv_frame_rot, p, q);
+    /* The image-aspect fit scales the frame-space coordinates before anything reads them,
+     * exactly as the generated graph's Aspect input does; the depth axis keeps one. */
+    for (int i = 0; i < 3; i++) {
+      q[i] *= projection.aspect[i];
     }
-  });
-  composite_projection_pad_colors(out, island, ref_width, ref_height, band_boxes);
+    float n_frame[3];
+    mul_v3_m3v3(n_frame, ctx.inv_frame_rot, n_interp);
+    float weight = 1.0f;
+    weight = composite_projection_frame_weight(projection, kind, q, n_frame);
+    if (weight <= 0.0f) {
+      return;
+    }
+
+    float straight[3] = {0.0f, 0.0f, 0.0f};
+    float alpha = 0.0f;
+    bool covered = false;
+
+    const auto accumulate_sample = [&](const float uu, const float vv, const float weight) {
+      float tap[4];
+      if (!sample_uv(uu, vv, tap)) {
+        return;
+      }
+      float sample_rgb[3];
+      float sample_alpha;
+      composite_straight_from_premul(tap, sample_rgb, sample_alpha);
+      straight[0] += sample_rgb[0] * weight;
+      straight[1] += sample_rgb[1] * weight;
+      straight[2] += sample_rgb[2] * weight;
+      alpha += sample_alpha * weight;
+      covered = true;
+    };
+
+    /* The tiling multiplies the UV only, never the frame factor read above, like the graph's. */
+    if (kind.box) {
+      /* Box and Triplanar: the three face reads blended by the frame normal's powers, the
+       * graph's normalized weights; the color mixes by them and the alpha sums. */
+      const float sum = std::max(powf(fabsf(n_frame[0]), kind.exponent) +
+                                     powf(fabsf(n_frame[1]), kind.exponent) +
+                                     powf(fabsf(n_frame[2]), kind.exponent),
+                                 PAINT_LAYER_PROJECTION_EPSILON);
+      for (int tri_face = 0; tri_face < 3; tri_face++) {
+        float uv[2];
+        composite_projection_face_uv(tri_face, q, uv);
+        const float face_weight = powf(fabsf(n_frame[tri_face]), kind.exponent) / sum;
+        accumulate_sample(0.5f + (uv[0] - 0.5f) * projection.tiling[0],
+                          0.5f + (uv[1] - 0.5f) * projection.tiling[1],
+                          weight * face_weight);
+      }
+    }
+    else if (kind.cube || kind.cylinder || kind.sphere) {
+      float uv[2];
+      if (kind.cube) {
+        composite_projection_cube_uv(kind, q, uv);
+      }
+      else if (kind.cylinder) {
+        composite_projection_cylinder_uv(kind, q, uv);
+      }
+      else {
+        composite_projection_sphere_uv(kind, q, uv);
+      }
+      accumulate_sample(uv[0], uv[1], weight);
+    }
+    else {
+      /* Planar: X reads Y/Z, Y reads X/Z and Z reads X/Y. */
+      accumulate_sample(0.5f + q[kind.u_index] * projection.tiling[0] * 0.5f,
+                        0.5f + q[kind.v_index] * projection.tiling[1] * 0.5f,
+                        weight);
+    }
+
+    if (!covered) {
+      return;
+    }
+    float *pixel = out + (int64_t(y) * ref_width + x) * 4;
+    pixel[0] = straight[0] * alpha;
+    pixel[1] = straight[1] * alpha;
+    pixel[2] = straight[2] * alpha;
+    pixel[3] = alpha;
+  };
+
+  composite_projection_raster(ctx, out, texel);
+  return dst;
+}
+
+/**
+ * Render a projected UV gradient into the painted object's UV space, as a float RGBA premultiplied
+ * scene-linear buffer. The coordinate is the single projected UV the generated graph feeds the
+ * gradient's line (#ProjectionNodes::uv[0]: the +X face for Box and Triplanar, the atlas cell for
+ * Cube), read raw: no frame factor and no tiling ride on it,
+ * exactly as in the graph, where the coverage stays the ramp's own alpha. Null when there is no
+ * object, mesh or render UV map; the caller keeps the plain UV read then.
+ */
+ImBuf *BKE_paint_material_gradient_projected_render(
+    const PaintMaterialCompositeGradient &gradient,
+    const int ref_width,
+    const int ref_height,
+    const int tile_number)
+{
+  BLI_assert(gradient.projected);
+  const PaintMaterialCompositeProjection &projection = gradient.projection;
+  CompositeProjectionBakeContext ctx(projection);
+  if (!composite_projection_context_init(ctx, false, ref_width, ref_height, tile_number)) {
+    return nullptr;
+  }
+  ImBuf *dst = composite_alloc_transparent(ref_width, ref_height);
+  if (dst == nullptr) {
+    return nullptr;
+  }
+  float *out = dst->float_data_for_write();
+  const CompositeProjectionKind &kind = ctx.kind;
+
+  const auto texel = [&](const int x,
+                         const int y,
+                         const CompositeProjectionTri & /*tri*/,
+                         const float p[3],
+                         const float * /*n*/) {
+    float q[3];
+    composite_projection_position(projection, ctx.inv_frame_rot, p, q);
+    /* The image-aspect fit scales the frame-space coordinates before the mode reads them,
+     * exactly as the generated graph's Aspect input does. */
+    for (int i = 0; i < 3; i++) {
+      q[i] *= projection.aspect[i];
+    }
+
+    /* The single projected UV the graph feeds the line (no tiling on it). */
+    float uv[2];
+    if (kind.box) {
+      composite_projection_face_uv(0, q, uv);
+    }
+    else if (kind.cube) {
+      composite_projection_cube_uv(kind, q, uv);
+    }
+    else if (kind.cylinder) {
+      composite_projection_cylinder_uv(kind, q, uv);
+    }
+    else if (kind.sphere) {
+      composite_projection_sphere_uv(kind, q, uv);
+    }
+    else {
+      /* Planar: X reads Y/Z, Y reads X/Z and Z reads
+       * X/Y. */
+      uv[0] = 0.5f + q[kind.u_index] * 0.5f;
+      uv[1] = 0.5f + q[kind.v_index] * 0.5f;
+    }
+
+    float rgba[4];
+    BKE_paint_material_generator_sample_coordinate(gradient, float3(uv[0], uv[1], 0.0f), rgba);
+    float *pixel = out + (int64_t(y) * ref_width + x) * 4;
+    pixel[0] = rgba[0] * rgba[3];
+    pixel[1] = rgba[1] * rgba[3];
+    pixel[2] = rgba[2] * rgba[3];
+    pixel[3] = rgba[3];
+  };
+
+  composite_projection_raster(ctx, out, texel);
   return dst;
 }
 
 }  // namespace blender
-

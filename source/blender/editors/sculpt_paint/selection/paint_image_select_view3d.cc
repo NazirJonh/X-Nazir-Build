@@ -3343,13 +3343,16 @@ void image_select_view3d_draw_uv_texture_pbr(
     for (const int c : IndexRange(3)) {
       const int corner = tri[c];
       positions.append(math::transform_point(object_to_world, vert_positions[corner_verts[corner]]));
-      normals.append(math::transform_direction(object_to_world, vert_normals[corner_verts[corner]]));
+      normals.append(vert_normals[corner_verts[corner]]);
       dest_uvs.append(dest_to_src(surface_map.uv_map[corner]));
     }
   }
   if (positions.is_empty()) {
     return;
   }
+  /* The normals are gathered in object space: one #math::transform_normals pass applies the
+   * inverse-transpose that keeps them pointing right off a non-uniformly scaled object. */
+  math::transform_normals(float3x3(object_to_world), normals);
 
   GPU_blend(GPU_BLEND_ALPHA);
   GPU_depth_test(GPU_DEPTH_LESS_EQUAL);

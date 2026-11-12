@@ -142,13 +142,6 @@ struct ProjectionGizmoGroup {
   float surface_key[PROJECTION_SURFACE_KEY_SIZE] = {};
   bool surface_key_valid = false;
 
-  /**
-   * Shift is held during the running volume-cage drag: the set callback collapses the cage's
-   * per-axis factors into one, scaling the cube uniformly from its center. Set by the cage's
-   * custom modal, the only place the drag's event reaches.
-   */
-  bool volume_uniform = false;
-
   /** State of the uniform-scale annulus drag, captured at #invoke_prepare. */
   bool uniform_drag_valid = false;
   int uniform_mval_init[2] = {0, 0};
@@ -319,5 +312,12 @@ void projection_frame_basis(const float rot[3][3], const float origin[3], float 
 
 /** The frame axis \a i in the parent space: column \a i of the frame matrix. */
 void projection_frame_axis(const float rot[3][3], int i, float r_axis[3]);
+
+/**
+ * The cage matrix of \a frame at unit scale: the frame rotation (from its normal and roll) in the
+ * 3x3 part, the frame center in column 3. The cage modal reports a scale delta; the dimensions
+ * carry the absolute size.
+ */
+void projection_frame_cage_matrix_get(const ProjectionFrame &frame, float r_matrix[4][4]);
 
 }  // namespace blender::ed::sculpt_paint::projection

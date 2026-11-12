@@ -41,6 +41,7 @@
 #include "RNA_enum_types.hh"
 
 #include "rna_internal.hh"
+#include "rna_material_projection.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -75,15 +76,9 @@ const EnumPropertyItem rna_enum_ramp_blend_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
-/* The mapping projection. Only UV exists so far; the enum is stored from the start so a second
- * space never renumbers files. */
-static const EnumPropertyItem rna_enum_material_paint_layer_mapping_space_items[] = {
-    {MA_PAINT_LAYER_MAPPING_SPACE_UV, "UV", 0, "UV", "Project with the stack UV map"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
 
 /* What the row's maps do outside the unit UV square after the mapping. */
-static const EnumPropertyItem rna_enum_material_paint_layer_mapping_wrap_items[] = {
+const EnumPropertyItem rna_enum_material_paint_layer_mapping_wrap_items[] = {
     {MA_PAINT_LAYER_MAPPING_WRAP_REPEAT, "REPEAT", 0, "Repeat", "Repeat along both axes"},
     {MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X,
      "REPEAT_X",
@@ -1515,6 +1510,7 @@ static MaterialPaintLayer *rna_Material_paint_layers_merge_down(Material *ma,
 }
 
 static bool rna_Material_paint_layers_composite(Material *ma,
+                                                bContext *C,
                                                 ReportList *reports,
                                                 const int channel,
                                                 PointerRNA *image_ptr)
@@ -1543,7 +1539,22 @@ static bool rna_Material_paint_layers_composite(Material *ma,
                "False (see bpy.ops.material.paint_layers_bake_now)");
     return false;
   }
-  return BKE_paint_layers_composite_image(*ma, channel, *image, nullptr, reports);
+  /* A projected row bakes in the UV space of the active object, when it uses this material. */
+  const Object *painted_object = CTX_data_active_object(C);
+  bool uses_material = false;
+  if (painted_object != nullptr) {
+    for (int slot = 0; slot < painted_object->totcol; slot++) {
+      Object *candidate = const_cast<Object *>(painted_object);
+      uses_material |= BKE_object_material_get(candidate, short(slot + 1)) == ma;
+    }
+  }
+  return BKE_paint_layers_composite_image(*ma,
+                                          channel,
+                                          *image,
+                                          nullptr,
+                                          reports,
+                                          PAINT_TILE_NUMBER_BASE,
+                                          uses_material ? painted_object : nullptr);
 }
 
 static bool rna_Material_is_layered_get(PointerRNA *ptr)
@@ -1823,7 +1834,7 @@ static bool rna_Material_paint_layers_channel_in_set(Material *ma, int channel)
 
 /** Every layer-pointer setter goes back to the material that owns the row, which the pointer's
  * #owner_id carries. */
-static Material *rna_paint_layer_material(PointerRNA *ptr, MaterialPaintLayer *layer)
+Material *rna_paint_layer_material(PointerRNA *ptr, MaterialPaintLayer *layer)
 {
   Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
   if (ma == nullptr) {
@@ -2002,11 +2013,6 @@ static int rna_MaterialPaintLayer_mapping_enabled_editable(const PointerRNA *ptr
   return 0;
 }
 
-static int rna_MaterialPaintLayer_mapping_space_get(PointerRNA *ptr)
-{
-  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
-  return layer->mapping.space;
-}
 
 static void rna_MaterialPaintLayer_mapping_offset_get(PointerRNA *ptr, float *value)
 {
@@ -6697,173 +6703,7 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_ui_icon(prop, ICON_UNLOCKED, 1);
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
-  /* Stored from the start; not editable while UV is the only space. */
-  prop = RNA_def_property(srna, "mapping_space", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_mapping_space_items);
-  RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayer_mapping_space_get", nullptr, nullptr);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop, "Mapping Space", "Projection the row's mapping works in");
-
-  prop = RNA_def_property(srna, "mapping_offset", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_array(prop, 2);
-  RNA_def_property_float_funcs(prop,
-                               "rna_MaterialPaintLayer_mapping_offset_get",
-                               "rna_MaterialPaintLayer_mapping_offset_set",
-                               nullptr);
-  RNA_def_property_ui_text(prop, "Mapping Offset", "Translation of the row's maps in UV space");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "mapping_scale", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_array(prop, 2);
-  RNA_def_property_float_funcs(prop,
-                               "rna_MaterialPaintLayer_mapping_scale_get",
-                               "rna_MaterialPaintLayer_mapping_scale_set",
-                               nullptr);
-  /* A negative axis mirrors the map; the shared helper keeps the sign and only lifts a magnitude
-   * below #PAINT_LAYER_MAPPING_SCALE_MIN (a zero reads back as one). */
-  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
-  {
-    /* UI default 1,1; DNA zeroes still read back as one through the shared helper. */
-    static const float mapping_scale_default[2] = {1.0f, 1.0f};
-    RNA_def_property_float_array_default(prop, mapping_scale_default);
-  }
-  RNA_def_property_ui_text(prop, "Mapping Scale", "Scale of the row's maps in UV space");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  /* Rotation changes where the row's maps are read; a Normal map's vectors follow it. */
-  prop = RNA_def_property(srna, "mapping_rotation", PROP_FLOAT, PROP_ANGLE);
-  RNA_def_property_float_funcs(prop,
-                               "rna_MaterialPaintLayer_mapping_rotation_get",
-                               "rna_MaterialPaintLayer_mapping_rotation_set",
-                               nullptr);
-  RNA_def_property_ui_text(prop,
-                           "Mapping Rotation",
-                           "Rotation of the row's maps around Z in UV space; a Normal map's "
-                           "vectors follow it");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  /* Read-only: where the tile's middle sits on the canvas. The Mapping panel's fields read it to
-   * keep the tile in place while the scale and the rotation change; the offset is the one stored
-   * value that moves the tile. */
-  prop = RNA_def_property(srna, "mapping_tile_center", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_array(prop, 2);
-  RNA_def_property_float_funcs(
-      prop, "rna_MaterialPaintLayer_mapping_tile_center_get", nullptr, nullptr);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop,
-                           "Tile Center",
-                           "Position of the tile's middle on the canvas, which the scale and the "
-                           "rotation edits of the UI keep still");
-
-  /* The panel's edits: they change the scale, rotation or lock and follow the offset so the tile
-   * keeps its place. The raw properties above stay the data's own meaning for scripts and
-   * drivers. */
-  prop = RNA_def_property(srna, "tile_scale", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_array(prop, 2);
-  RNA_def_property_float_funcs(prop,
-                               "rna_MaterialPaintLayer_mapping_tile_scale_get",
-                               "rna_MaterialPaintLayer_mapping_tile_scale_set",
-                               nullptr);
-  RNA_def_property_flag(prop, PROP_EDITABLE);
-  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
-  {
-    static const float mapping_scale_default[2] = {1.0f, 1.0f};
-    RNA_def_property_float_array_default(prop, mapping_scale_default);
-  }
-  RNA_def_property_ui_text(
-      prop, "Scale", "Scale of the row's maps, keeping the tile's centre on the canvas");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "tile_rotation", PROP_FLOAT, PROP_ANGLE);
-  RNA_def_property_float_funcs(prop,
-                               "rna_MaterialPaintLayer_mapping_tile_rotation_get",
-                               "rna_MaterialPaintLayer_mapping_tile_rotation_set",
-                               nullptr);
-  RNA_def_property_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(
-      prop, "Rotation", "Rotate the row's maps around the tile's centre on the canvas");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "tile_scale_lock", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_funcs(prop,
-                                 "rna_MaterialPaintLayer_mapping_tile_scale_lock_get",
-                                 "rna_MaterialPaintLayer_mapping_tile_scale_lock_set");
-  RNA_def_property_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(
-      prop, "Lock Scale", "Edit both scale axes together, keeping the tile in place");
-  RNA_def_property_ui_icon(prop, ICON_UNLOCKED, 1);
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "mapping_wrap", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_mapping_wrap_items);
-  RNA_def_property_enum_funcs(prop,
-                              "rna_MaterialPaintLayer_mapping_wrap_get",
-                              "rna_MaterialPaintLayer_mapping_wrap_set",
-                              nullptr);
-  RNA_def_property_ui_text(prop,
-                           "UV Wrap",
-                           "What the row's maps do outside the unit UV square after the mapping");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  /* Mirror: fold the maps around mirror_center. Read-only predicate first, then the axes and the
-   * center. The fold reads the map through |uv - center| + center per folded axis, so what either
-   * side shows, both sides show, and painting one side updates the other in real time through the
-   * generated graph and the GPU composite. */
-  prop = RNA_def_property(srna, "mapping_mirror_applies", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_funcs(
-      prop, "rna_MaterialPaintLayer_mapping_mirror_applies_get", nullptr);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(
-      prop, "Mirror Applies", "Whether the enabled Mirror fold reaches what the row shows");
-
-  prop = RNA_def_property(srna, "mapping_mirror_enabled", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_funcs(prop,
-                                 "rna_MaterialPaintLayer_mapping_mirror_enabled_get",
-                                 "rna_MaterialPaintLayer_mapping_mirror_enabled_set");
-  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
-  RNA_def_property_ui_text(
-      prop, "Mirror", "Switch the Mirror fold on or off; its axes and center are kept");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "mapping_mirror_u", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_funcs(prop,
-                                 "rna_MaterialPaintLayer_mapping_mirror_u_get",
-                                 "rna_MaterialPaintLayer_mapping_mirror_u_set");
-  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
-  RNA_def_property_ui_text(prop,
-                           "Mirror U",
-                           "Fold the row's maps along U: both sides of the center show the same");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "mapping_mirror_v", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_funcs(prop,
-                                 "rna_MaterialPaintLayer_mapping_mirror_v_get",
-                                 "rna_MaterialPaintLayer_mapping_mirror_v_set");
-  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
-  RNA_def_property_ui_text(prop,
-                           "Mirror V",
-                           "Fold the row's maps along V: both sides of the center show the same");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
-  prop = RNA_def_property(srna, "mapping_mirror_center", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_array(prop, 2);
-  RNA_def_property_float_funcs(prop,
-                               "rna_MaterialPaintLayer_mapping_mirror_center_get",
-                               "rna_MaterialPaintLayer_mapping_mirror_center_set",
-                               nullptr);
-  RNA_def_property_editable_func(prop,
-                                 "rna_MaterialPaintLayer_mapping_mirror_center_editable");
-  {
-    /* The center defaults to the tile's middle (0.5, 0.5), where the fold is immediately visible. */
-    static const float mapping_mirror_center_default[2] = {0.5f, 0.5f};
-    RNA_def_property_float_array_default(prop, mapping_mirror_center_default);
-  }
-  RNA_def_property_ui_text(
-      prop,
-      "Mirror Center",
-      "The UV point the Mirror fold reflects around on every folded axis");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
-
+  rna_def_material_paint_layer_projection(srna);
   prop = RNA_def_property(srna, "channels", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_struct_type(prop, "MaterialPaintLayerChannel");
   RNA_def_property_collection_funcs(prop,
@@ -7773,7 +7613,7 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
   func = RNA_def_function(srna, "composite", "rna_Material_paint_layers_composite");
   RNA_def_function_ui_description(func,
                                   "Composite one channel of the stack into an image on the CPU");
-  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_flag(func, FUNC_USE_REPORTS | FUNC_USE_CONTEXT);
   parm = RNA_def_enum(func,
                       "channel",
                       rna_enum_material_paint_channel_items,

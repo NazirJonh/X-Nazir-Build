@@ -13,6 +13,7 @@
 
 #include "BKE_idprop.hh"
 #include "BKE_node_tree_interface.hh"
+#include "BKE_object.hh"
 
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
@@ -24,6 +25,8 @@
 #include "../paint_layers_generate_intern.hh"
 #include "../paint_layers_generate_layout.hh"
 #include "../paint_material_generator_group_ids.hh"
+
+#include "DNA_object_types.h"
 
 namespace blender::bke::tests {
 
@@ -1993,4 +1996,138 @@ TEST_F(PaintLayersGenerateTest, gradient_space_feeds_the_matching_coordinate_out
 }
 
 /** \} */
+/* -------------------------------------------------------------------- */
+/** \name Projection
+ * \{ */
+
+TEST_F(PaintLayersGenerateTest, planar_projection_feeds_the_map_through_its_frame)
+{
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 1);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_COORD), 1);
+  EXPECT_GE(count_type(*group, SH_NODE_VECTOR_ROTATE), 2)
+      << "one rotates the position, one the facing normal";
+  EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 0) << "the 2D UV adjust is off";
+  const Vector<int> sources = image_vector_sources(*group);
+  ASSERT_EQ(sources.size(), 1);
+  EXPECT_EQ(sources[0], SH_NODE_COMBINE_XYZ) << "the map reads the projection UV";
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Center", false));
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Size", false));
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Rotation", false));
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Clip", false));
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Depth", false));
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Facing", false));
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Facing Direction", false));
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Aspect", false));
+}
+
+TEST_F(PaintLayersGenerateTest, projection_mode_is_structure_and_the_frame_is_a_value)
+{
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t uv_hash = paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms);
+
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  const uint64_t projected_hash = paint_layers::paint_layers_layer_topology_hash(
+      *ma, *fill, wired, forms);
+  EXPECT_NE(projected_hash, uv_hash);
+
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  const float center[3] = {1.0f, 2.0f, 3.0f};
+  const float size[3] = {2.0f, 2.0f, 2.0f};
+  const float rotation[3] = {0.1f, 0.2f, 0.3f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values(*ma, fill, center, size, rotation));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0)
+      << "a frame drag syncs inputs and keeps the nodes";
+  EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms),
+            projected_hash);
+
+  ASSERT_TRUE(BKE_paint_layers_projection_set_axis(
+      *ma, fill, MA_PAINT_LAYER_PROJECTION_AXIS_X));
+  EXPECT_NE(paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms),
+            projected_hash);
+
+  /* The controller is topology too: the generated Texture Coordinate node names the object. */
+  Object *controller = BKE_object_add_only_object(bmain, OB_EMPTY, "ProjectionTopologyController");
+  ASSERT_NE(controller, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_projection_set_object(*ma, fill, controller));
+  EXPECT_NE(paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms),
+            projected_hash);
+}
+
+TEST_F(PaintLayersGenerateTest, projection_size_from_controller_is_a_value_input)
+{
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  const float center[3] = {0.0f, 0.0f, 0.0f};
+  const float size[3] = {2.0f, 3.0f, 4.0f};
+  const float rotation[3] = {0.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values(*ma, fill, center, size, rotation));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t hash = paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms);
+
+  ASSERT_TRUE(BKE_paint_layers_projection_set_size_from_controller(*ma, fill, true));
+  EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms), hash)
+      << "the option only changes the size input's value";
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  bNode *instance = group_instance_find(*ma->paint_layers_tree, *group);
+  ASSERT_NE(instance, nullptr);
+  const bNodeTreeInterfaceSocket *size_iface = interface_input_find(*group,
+                                                                    "Fill Projection Size");
+  ASSERT_NE(size_iface, nullptr);
+  bNodeSocket *size_socket = bke::node_find_socket(
+      *instance, SOCK_IN, UString::from_ptr_noinline(size_iface->identifier));
+  ASSERT_NE(size_socket, nullptr);
+  const float *value = static_cast<bNodeSocketValueVector *>(size_socket->default_value)->value;
+  EXPECT_FLOAT_EQ(value[0], 1.0f);
+  EXPECT_FLOAT_EQ(value[1], 1.0f);
+  EXPECT_FLOAT_EQ(value[2], 1.0f);
+}
+
+TEST_F(PaintLayersGenerateTest, projection_facing_reads_the_world_normal_in_both_branches)
+{
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  /* The world normal comes from Geometry: the Texture Coordinate "Normal" output is in the
+   * shaded object's space and would turn with the object twice. Without a controller the chain
+   * then brings it into the frame's space live, so it is not broken by a missing link. */
+  EXPECT_EQ(count_type(*group, SH_NODE_NEW_GEOMETRY), 1);
+  EXPECT_EQ(count_type(*group, SH_NODE_VECT_TRANSFORM), 1)
+      << "no controller: the normal is brought into object space by a live node";
+
+  Object *controller = BKE_object_add_only_object(bmain, OB_EMPTY, "FacingController");
+  ASSERT_NE(controller, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_projection_set_object(*ma, fill, controller));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  /* A controller names one object, whose whole rotation a live chain cannot name: the value sync
+   * bakes the world-space direction the world normal reads against instead. */
+  EXPECT_EQ(count_type(*group, SH_NODE_NEW_GEOMETRY), 1);
+  EXPECT_EQ(count_type(*group, SH_NODE_VECT_TRANSFORM), 0);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

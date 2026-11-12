@@ -663,6 +663,37 @@ void ED_view3d_shape_transform_gizmo_setup(wmGizmoGroupType *gzgt);
 /** True when \a mval is over the live Sculpt shape session's cage handles or interior. */
 bool ED_view3d_shape_transform_gizmo_hit(const bContext *C, const int mval[2]);
 
+/* `sculpt_paint/projection/projection_gizmo.cc` */
+
+/** Register the 3D Viewport gizmo group that moves and scales the inline frame of the active
+ * projected paint-layer row. */
+void ED_view3d_projection_gizmo_setup(wmGizmoGroupType *gzgt);
+
+/* `sculpt_paint/projection/projection_ops.cc` */
+
+/**
+ * Whether \a object is an Empty the projection controller operators created: the marker they set
+ * on it says so, and it is what keeps a user's own Empty out of every cleanup and display update.
+ */
+bool ED_paint_layer_projection_controller_is_marked(const Object *object);
+
+/**
+ * Point \a empty's display at the frame kind \a row's space controls. Only an Empty this editor
+ * marked as a projection controller is touched, so a user's own Empty keeps its look. Returns
+ * whether the display changed.
+ */
+bool ED_paint_layer_projection_controller_display_type_update(Object &empty,
+                                                              const MaterialPaintLayer &row);
+
+/**
+ * Add or remove the Shrinkwrap constraint that keeps \a controller on the surface of its parent,
+ * following \a row's Snap to Surface flag. Only the constraint this editor owns (by name) is ever
+ * touched. The constraint target is the parent, which the Add Controller operator sets to the
+ * painted object.
+ */
+void ED_paint_layer_projection_controller_snap_update(Object &controller,
+                                                      const MaterialPaintLayer &row);
+
 /* `paint_shape_image_3d.cc` */
 
 /** Register the Image Editor gizmo group that displays a live 3D Sculpt shape session's cage in

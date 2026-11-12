@@ -230,42 +230,138 @@ void PaintLayersTreeBuilder::mapping_inputs_create(LayerGroup &group,
                                                    const MaterialPaintLayer &row,
                                                    const char *label)
 {
-  /* The one predicate the topology hash builds by, so the interface and the hash agree. */
-  if (!BKE_paint_layers_mapping_remaps(ma_, row)) {
+  /* The one predicate the topology hash builds by, so the interface and the hash agree. A
+   * projected row needs its frame values even when the 2D UV mapping itself is off. */
+  const bool mapping = BKE_paint_layers_mapping_remaps(ma_, row);
+  const bool projection = BKE_paint_layers_projection_applies(ma_, row);
+  if (!mapping && !projection) {
     return;
   }
-  struct MappingInput {
-    const char *suffix;
-    const char *role;
-    float value[3];
-    Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &store;
-  };
-  /* The mapping chain reads three Vectors: the offset in x, y; the scale in x, y; the angle in
-   * z (fed to the Vector Rotate in front of the Mapping node). */
-  const MappingInput inputs[3] = {
-      {"Offset",
-       ROLE_MAPPING_OFFSET,
-       {row.mapping.offset[0], row.mapping.offset[1], 0.0f},
-       mapping_offset_inputs_},
-      {"Scale",
-       ROLE_MAPPING_SCALE,
-       {BKE_paint_layers_mapping_scale_normalize(row.mapping.scale[0]),
-        BKE_paint_layers_mapping_scale_normalize(row.mapping.scale[1]),
-        1.0f},
-       mapping_scale_inputs_},
-      {"Rotation",
-       ROLE_MAPPING_ROTATION,
-       {0.0f, 0.0f, row.mapping.rotation},
-       mapping_rotation_inputs_},
-  };
-  for (const MappingInput &input : inputs) {
-    char base[200];
-    SNPRINTF(base, "%s Mapping %s", label, input.suffix);
-    bNodeTreeInterfaceSocket *socket = layer_group_value_input(
-        group, base, "NodeSocketVector", input.role, row.marker, -1);
-    if (socket != nullptr) {
-      group_input_vector_default_set(group, *socket, input.value);
-      input.store.add(&row, socket);
+  if (mapping) {
+    struct MappingInput {
+      const char *suffix;
+      const char *role;
+      float value[3];
+      Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &store;
+    };
+    /* The mapping chain reads three Vectors: the offset in x, y; the scale in x, y; the angle in
+     * z (fed to the Vector Rotate in front of the Mapping node). */
+    const MappingInput inputs[3] = {
+        {"Offset",
+         ROLE_MAPPING_OFFSET,
+         {row.mapping.offset[0], row.mapping.offset[1], 0.0f},
+         mapping_offset_inputs_},
+        {"Scale",
+         ROLE_MAPPING_SCALE,
+         {BKE_paint_layers_mapping_scale_normalize(row.mapping.scale[0]),
+          BKE_paint_layers_mapping_scale_normalize(row.mapping.scale[1]),
+          1.0f},
+         mapping_scale_inputs_},
+        {"Rotation",
+         ROLE_MAPPING_ROTATION,
+         {0.0f, 0.0f, row.mapping.rotation},
+         mapping_rotation_inputs_},
+    };
+    for (const MappingInput &input : inputs) {
+      char base[200];
+      SNPRINTF(base, "%s Mapping %s", label, input.suffix);
+      bNodeTreeInterfaceSocket *socket = layer_group_value_input(
+          group, base, "NodeSocketVector", input.role, row.marker, -1);
+      if (socket != nullptr) {
+        group_input_vector_default_set(group, *socket, input.value);
+        input.store.add(&row, socket);
+      }
+    }
+  }
+  if (projection) {
+    const MaterialPaintLayerProjection &payload = *row.projection;
+    /* The interface default is the value an instance starts with: the same effective extents the
+     * value sync writes, so a rebuilt group does not flash the ignored inline size. */
+    float effective_size[3];
+    BKE_paint_layers_projection_size_effective(row, effective_size);
+    struct ProjectionVectorInput {
+      const char *suffix;
+      const char *role;
+      float value[3];
+      Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &store;
+    };
+    const ProjectionVectorInput vector_inputs[3] = {
+        {"Center", ROLE_PROJECTION_CENTER,
+         {payload.center[0], payload.center[1], payload.center[2]}, projection_center_inputs_},
+        {"Size",
+         ROLE_PROJECTION_SIZE,
+         {effective_size[0], effective_size[1], effective_size[2]},
+         projection_size_inputs_},
+        {"Rotation",
+         ROLE_PROJECTION_ROTATION,
+         {payload.rotation[0], payload.rotation[1], payload.rotation[2]},
+         projection_rotation_inputs_},
+    };
+    for (const ProjectionVectorInput &input : vector_inputs) {
+      char base[200];
+      SNPRINTF(base, "%s Projection %s", label, input.suffix);
+      bNodeTreeInterfaceSocket *socket = layer_group_value_input(
+          group, base, "NodeSocketVector", input.role, row.marker, -1);
+      if (socket != nullptr) {
+        group_input_vector_default_set(group, *socket, input.value);
+        input.store.add(&row, socket);
+      }
+    }
+    struct ProjectionFloatInput {
+      const char *suffix;
+      const char *role;
+      float value;
+      Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &store;
+    };
+    /* The depth toggle and the facing weight ride on the factor's always-built nodes, so a toggle
+     * or a slider drag only syncs their values. */
+    const ProjectionFloatInput float_inputs[2] = {
+        {"Clip",
+         ROLE_PROJECTION_CLIP,
+         (payload.flag & MA_PAINT_LAYER_PROJECTION_CLIP) != 0 ? 1.0f : 0.0f,
+         projection_clip_inputs_},
+        {"Depth",
+         ROLE_PROJECTION_DEPTH,
+         (payload.flag & MA_PAINT_LAYER_PROJECTION_DEPTH) != 0 ? 1.0f : 0.0f,
+         projection_depth_inputs_},
+    };
+    for (const ProjectionFloatInput &input : float_inputs) {
+      char base[200];
+      SNPRINTF(base, "%s Projection %s", label, input.suffix);
+      bNodeTreeInterfaceSocket *socket = layer_group_value_input(
+          group, base, "NodeSocketFloat", input.role, row.marker, -1);
+      if (socket != nullptr) {
+        group_input_default_set(group, *socket, input.value);
+        input.store.add(&row, socket);
+      }
+    }
+    struct ProjectionVector3Input {
+      const char *suffix;
+      const char *role;
+      float value[3];
+      Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &store;
+    };
+    /* The facing weight's baked scale/offset/toggle and the world-space direction the world normal
+     * reads against, plus the image-aspect fit: all synced without a rebuild. The direction is
+     * unused while the row has no controller (the Vector Transform node names the shaded object
+     * instead), but carrying it keeps the row group one shape. */
+    const ProjectionVector3Input factor_inputs[3] = {
+        {"Facing", ROLE_PROJECTION_FACING, {1.0f, 0.0f, 0.0f}, projection_facing_inputs_},
+        {"Facing Direction",
+         ROLE_PROJECTION_FACING_DIR,
+         {0.0f, 0.0f, 1.0f},
+         projection_facing_dir_inputs_},
+        {"Aspect", ROLE_PROJECTION_ASPECT, {1.0f, 1.0f, 1.0f}, projection_aspect_inputs_},
+    };
+    for (const ProjectionVector3Input &input : factor_inputs) {
+      char base[200];
+      SNPRINTF(base, "%s Projection %s", label, input.suffix);
+      bNodeTreeInterfaceSocket *socket = layer_group_value_input(
+          group, base, "NodeSocketVector", input.role, row.marker, -1);
+      if (socket != nullptr) {
+        group_input_vector_default_set(group, *socket, input.value);
+        input.store.add(&row, socket);
+      }
     }
   }
   /* The fold center rides the group's inputs the same way, while the folded axes themselves are
@@ -527,12 +623,18 @@ NodeOutput PaintLayersTreeBuilder::mapping_clip_alpha(bNodeTree &tree,
                                                       const NodeOutput alpha,
                                                       Vector<bNode *> &r_nodes)
 {
+  const bool projection = BKE_paint_layers_projection_applies(ma_, row);
   if (alpha.node == nullptr || alpha.socket == nullptr ||
-      !BKE_paint_layers_mapping_remaps(ma_, row))
+      (!projection && !BKE_paint_layers_mapping_remaps(ma_, row)))
   {
     return alpha;
   }
-  const NodeOutput mask = this->mapping_clip_factor(tree, row, r_nodes, false);
+  /* A projected row clips on the frame, not on the UV square: its per-face UVs are not the
+   * Mapping chain's input, so the UV factor would be meaningless here. The map's own extension
+   * still handles the unit square. */
+  const NodeOutput mask = projection ?
+                              this->projection_clip_factor(tree, row, r_nodes) :
+                              this->mapping_clip_factor(tree, row, r_nodes, false);
   if (mask.node == nullptr || mask.socket == nullptr) {
     return alpha;
   }
@@ -575,6 +677,19 @@ void PaintLayersTreeBuilder::nodes_discard(bNodeTree &tree, Span<bNode *> nodes)
   }
   for (const MaterialPaintLayer *row : stale) {
     mapping_clip_masks_.remove(row);
+  }
+  stale.clear();
+  for (const auto item : projection_nodes_.items()) {
+    const ProjectionNodes &projection = item.value;
+    const bool removed = nodes.contains(projection.tex_coord) || nodes.contains(projection.position) ||
+                         nodes.contains(projection.uv) || nodes.contains(projection.clip) ||
+                         nodes.contains(projection.tile_origin);
+    if (removed) {
+      stale.append(item.key);
+    }
+  }
+  for (const MaterialPaintLayer *row : stale) {
+    projection_nodes_.remove(row);
   }
   for (bNode *node : nodes) {
     bke::node_remove_node(nullptr, tree, *node, true, false);

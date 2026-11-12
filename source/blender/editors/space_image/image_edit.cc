@@ -553,6 +553,7 @@ void ED_space_image_gradient_preview_sync(const bContext &C, SpaceImage &sima)
 
   runtime->gradient_surface.reset();
   runtime->gradient_preview_state = GradientPreviewState::None;
+  runtime->projection_object_uid = 0;
 
   /* One exit point per branch. The reason of each branch is named at its call site. */
   const auto report = [&](const GradientPreviewState state, const char * /*reason*/) {
@@ -573,6 +574,14 @@ void ED_space_image_gradient_preview_sync(const bContext &C, SpaceImage &sima)
     report(GradientPreviewState::None, "no layered material for this image");
     return;
   }
+  /* A projected row bakes in the UV space of the object being painted. The Image Editor has no
+   * object of its own, so it takes the active one when that uses the material. */
+  if (Object *active = CTX_data_active_object(&C);
+      active != nullptr && active->type == OB_MESH && object_uses_material(*active, *ma))
+  {
+    runtime->projection_object_uid = active->id.session_uid;
+  }
+
   /* A material with no 3D Gradient row has nothing to resolve, and must not build a surface. */
   GeneratorSpaces spaces;
   paint_layers_collect_generator_spaces(ma->paint_layers, spaces);
@@ -760,6 +769,16 @@ bool ED_space_image_update_gpu_combined(Main *bmain,
   return true;
 }
 
+/** The object the editor resolved for projected rows, or null when it no longer exists. */
+static const Object *space_image_projection_object_find(Main &bmain, const SpaceImage &sima)
+{
+  const uint32_t uid = (sima.runtime != nullptr) ? sima.runtime->projection_object_uid : 0;
+  if (uid == 0) {
+    return nullptr;
+  }
+  return id_cast<const Object *>(BKE_libblock_find_session_uid(&bmain, ID_OB, uid));
+}
+
 ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
                                                SpaceImage *sima,
                                                uint64_t *r_revision,
@@ -791,6 +810,7 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
   const int pass = sima->material_paint_pass;
   const bool layered = BKE_paint_layers_is_layered(*ma);
 
+  const Object *painted_object = space_image_projection_object_find(*bmain, *sima);
   if (pass == PAINT_LAYER_PASS_COMBINED) {
     /* The interactive Gradient throttle: while handles are dragged, keep the last preview on screen
      * between refreshes instead of rebuilding it for every mouse step. The octave is already coarse;
@@ -823,7 +843,15 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
     const std::shared_ptr<const PaintMaterialCompositeSurface> surface =
         sima->runtime != nullptr ? sima->runtime->gradient_surface : nullptr;
     ImBuf *combined = ed::material_combined::combined_preview_ensure(
-        *bmain, *ma, lighting, request, r_revision, r_changed_region, nullptr, surface);
+        *bmain,
+        *ma,
+        lighting,
+        request,
+        r_revision,
+        r_changed_region,
+        nullptr,
+        surface,
+        painted_object);
     if (gradient_drag) {
       /* Recorded whether or not this frame resolved: a stack that resolves to nothing must not turn
        * every following mouse step into an evaluation attempt either. */
@@ -880,12 +908,22 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
       return cached;
     }
   }
+  /* The composite canvas follows the Image Editor's active UDIM tile; a non-tiled image reads the
+   * base tile. */
+  const int tile_number = (sima->iuser.tile >= 1001) ? sima->iuser.tile : 1001;
   Vector<PaintMaterialCompositeImageLayer> layers;
   const std::shared_ptr<const PaintMaterialCompositeSurface> surface =
       sima->runtime != nullptr ? sima->runtime->gradient_surface : nullptr;
   const bool has_stack = layered ?
                              BKE_paint_layers_composite_image_layers(
-                                 *ma, pass, layers, /*describe_only=*/true, surface) :
+                                 *ma,
+                                 pass,
+                                 layers,
+                                 /*describe_only=*/true,
+                                 surface,
+                                 /*height_won_cache=*/nullptr,
+                                 tile_number,
+                                 painted_object) :
                              BKE_paint_material_composite_stack_from_material(
                                  *bmain, *ma, pass, layers);
   if (!has_stack) {
@@ -899,7 +937,14 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
    * ever notice. See #composite_gradient_describe. */
   const auto describe_full = [&](Vector<PaintMaterialCompositeImageLayer> &r_full) {
     return BKE_paint_layers_composite_image_layers(
-        *ma, pass, r_full, /*describe_only=*/false, surface);
+        *ma,
+        pass,
+        r_full,
+        /*describe_only=*/false,
+        surface,
+        /*height_won_cache=*/nullptr,
+        tile_number,
+        painted_object);
   };
   /* A channel pass is only ever stored below the canvas while the material's own Gradient handles
    * are dragged: the pass is then shown at an octave of what the editor can display, and refines to

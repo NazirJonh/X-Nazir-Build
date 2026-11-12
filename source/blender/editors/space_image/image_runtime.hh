@@ -130,6 +130,12 @@ struct SpaceImage_Runtime {
    * editor: the surface cache is only the source of the shared pointer. */
   std::shared_ptr<const PaintMaterialCompositeSurface> gradient_surface;
   GradientPreviewState gradient_preview_state = GradientPreviewState::None;
+
+  /* Session uid of the object a projected row of the shown material bakes in the UV space of, or
+   * zero. Resolved by #ED_space_image_gradient_preview_sync next to the surface above, from the
+   * active object when it uses the material. A uid rather than a pointer: the object may be
+   * deleted between the sync and an acquire outside a draw (eyedropper, save). */
+  uint32_t projection_object_uid = 0;
 };
 
 } /* namespace ed::image */

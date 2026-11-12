@@ -31,6 +31,7 @@
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
+#include "DNA_object_types.h"
 #include "DNA_uuid_types.h"
 
 #include "paint_layers_generate_intern.hh"
@@ -477,6 +478,17 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   /* An applied mapping is a Mapping node and its inputs; its values are inputs, so only whether it
    * applies is structure. The same answer builds the interface, so the two cannot disagree. */
   mapping_topology_hash_mix(hash, ma, layer);
+  if (BKE_paint_layers_projection_applies(ma, layer)) {
+    /* The space picks the UV math and the number of samples; the axis and the atlas layout change
+     * the nodes. The frame values, blend and clip are value inputs, so a slider move or a gizmo
+     * drag never rebuilds. The controller's name is structure: the Texture Coordinate names it. */
+    hash = topology_hash_mix(hash, PAINT_LAYER_PROJECTION_HASH_VERSION);
+    hash = topology_hash_mix(hash, 0x700 + uint64_t(uint16_t(layer.mapping.space)));
+    hash = topology_hash_mix(hash, uint64_t(uint8_t(BKE_paint_layers_projection_axis_get(layer))));
+    if (layer.projection_object != nullptr) {
+      topology_hash_string(hash, layer.projection_object->id.name);
+    }
+  }
   /* A row inside an isolating folder is built in the isolated form, with sockets of its own. */
   hash = topology_hash_mix(hash, forms.lookup_default(&layer, {}).in_isolating_folder ? 1 : 0);
   /* A Pass Through folder builds no group, an isolating one does: the mode is structure, although

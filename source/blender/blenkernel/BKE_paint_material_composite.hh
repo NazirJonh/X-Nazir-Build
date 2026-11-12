@@ -60,6 +60,7 @@ struct CurveMapping;
 struct ImBuf;
 struct Image;
 struct Main;
+struct Object;
 struct bNode;
 struct bNodeTree;
 struct ImageUser;
@@ -184,6 +185,66 @@ struct PaintMaterialCompositeConstant {
 };
 
 /**
+ * The first UDIM tile number. A non-tiled image reads it as its only tile, so it is the default
+ * tile of every composite and bake that names no tile.
+ */
+inline constexpr int PAINT_TILE_NUMBER_BASE = 1001;
+
+/**
+ * The projection of a row's own map, as the CPU bake reads it.
+ *
+ * #object is the painted object whose UV space the bake writes and whose panel provides the
+ * position and normal at each texel; null when no object was recorded (a material preview without
+ * a paint context), in which case the bake produces a transparent map rather than reading the map
+ * at the wrong UV.
+ *
+ * #object and #controller are the original objects, not evaluated copies: the bake writes the
+ * original mesh's UV space, which is what painting edits. When a modifier changes the topology the
+ * evaluated surface no longer matches that UV layout, so the projection follows the original mesh
+ * and its transform.
+ */
+struct PaintMaterialCompositeProjection {
+  bool present = false;
+  /** #eMaterialPaintLayerMappingSpace. */
+  int16_t space = 0;
+  /** #eMaterialPaintLayerProjectionAxis. */
+  int8_t axis = 0;
+  float center[3] = {};
+  float size[3] = {1.0f, 1.0f, 1.0f};
+  float rotation[3] = {};
+  /** #eMaterialPaintLayerProjectionFlag: clip the projection to its frame. */
+  bool clip = true;
+  /** Limit the projection to a depth slab along the axis, of the frame's size on it. */
+  bool depth = true;
+  /** Fade the projection out on faces that turn away from the axis. */
+  bool facing = true;
+  /**
+   * The facing weight's baked scale and offset: the frame-space normal component along the axis
+   * runs through the same clamped Multiply Add and hermite the generated graph's Math nodes do.
+   */
+  float facing_scale = 0.0f;
+  float facing_offset = 0.0f;
+  /**
+   * The per-axis image-aspect factors, applied to the frame-space position before the UV square
+   * and the frame factor read it; the depth axis keeps one.
+   */
+  float aspect[3] = {1.0f, 1.0f, 1.0f};
+  /**
+   * The destination UDIM tile of this bake, 1001 for the base tile. The source map is acquired and
+   * sampled from the same tile when it is tiled.
+   */
+  int tile_number = PAINT_TILE_NUMBER_BASE;
+  /** The source map is a tiled image: the shader wraps the projected UV inside the tile. */
+  bool source_tiled = false;
+  /** The painted object whose UV space the bake writes. */
+  const Object *object = nullptr;
+  /** The object whose space the frame lives in, or null for the painted object's space. */
+  const Object *controller = nullptr;
+  /** The material whose slots restrict the baked triangles. */
+  const Material *material = nullptr;
+};
+
+/**
  * The UV mapping of a row's own map (a Fill layer, correction or mask): when #enabled, the map is
  * read through the Mirror fold of the axes in #mirror_axes around #mirror_center, then
  * `uv' = (R * uv) * scale + offset` with Repeat edges, the transform the Vector Rotate and Mapping
@@ -214,6 +275,8 @@ struct PaintMaterialCompositeMapping {
    * flips the vectors, so the lighting follows the pattern.
    */
   bool tangent_normal = false;
+  /** The row's projection; takes precedence over #enabled when #present. */
+  PaintMaterialCompositeProjection projection;
 
   /** Whether \a axis (a #MA_PAINT_LAYER_MAPPING_MIRROR_* bit) folds. */
   bool mirror_axis(const int16_t axis) const

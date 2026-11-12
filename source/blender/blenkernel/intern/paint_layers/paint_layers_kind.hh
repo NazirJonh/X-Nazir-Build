@@ -53,6 +53,12 @@ enum class PaintLayerDependencyKind : uint8_t {
   CurvePatchVectors = 3,
   /** The brush snapshot a Curve Patch row owns (the row's tool state, digested by the bake). */
   BrushPreset = 4,
+  /**
+   * The object whose space a projected row's frame is placed in (usually an Empty). A user of the
+   * object, never a map to paint; its transform reaches the shader through the node's ID
+   * reference.
+   */
+  ProjectionObject = 5,
 };
 
 /** What a change to the dependency invalidates. */
@@ -1464,6 +1470,15 @@ inline void paint_layer_dependencies(MaterialPaintLayer &row,
       fn(dep);
     }
   }
+  /* The frame controller: its own transform is read by the generated Texture Coordinate node, so a
+   * pointer change is topology and the object must stay alive while the row names it. */
+  if (row.projection_object != nullptr) {
+    PaintLayerDependency dep{reinterpret_cast<ID **>(&row.projection_object),
+                             PaintLayerDependencyKind::ProjectionObject,
+                             PAINT_LAYER_DEP_TOPOLOGY | PAINT_LAYER_DEP_OWNERSHIP,
+                             -1};
+    fn(dep);
+  }
   /* The bake cache: the colour maps by channel, then the shared coverage map. */
   if (row.bake != nullptr) {
     for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
@@ -1525,6 +1540,7 @@ inline LibraryForeachIDCallbackFlag paint_layer_dependency_foreach_flag(const Pa
     case PaintLayerDependencyKind::SourceMaterial:
     case PaintLayerDependencyKind::CurvePatchVectors:
     case PaintLayerDependencyKind::BrushPreset:
+    case PaintLayerDependencyKind::ProjectionObject:
       return IDWALK_CB_USER;
   }
   return IDWALK_CB_NOP;

@@ -39,6 +39,7 @@
 #include "BKE_context.hh"
 #include "BKE_editmesh.hh"
 #include "BKE_icons.hh"
+#include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
@@ -71,6 +72,7 @@
 
 #include "BLT_translation.hh"
 
+#include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph_query.hh"
 
 #include "IMB_imbuf_types.hh"
@@ -2222,6 +2224,44 @@ MaterialPaintLayer *outliner_stack_row_mask_add_image(bContext &C,
   return mask;
 }
 
+/** Collect the controllers of \a layer's subtree, the way the removal is about to drop them. */
+static void paint_layer_row_controllers_collect(const MaterialPaintLayer &layer,
+                                                Vector<Object *, 4> &r_controllers)
+{
+  if (ED_paint_layer_projection_controller_is_marked(layer.projection_object)) {
+    /* One controller may serve the row and its mask: the release reads each once. */
+    if (!r_controllers.contains(layer.projection_object)) {
+      r_controllers.append(layer.projection_object);
+    }
+  }
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    paint_layer_row_controllers_collect(item, r_controllers);
+  }
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    paint_layer_row_controllers_collect(effect, r_controllers);
+  }
+  for (const MaterialPaintLayer &child : layer.children) {
+    paint_layer_row_controllers_collect(child, r_controllers);
+  }
+}
+
+/** Delete the collected controllers the removal left unused, as Ucupaint removes its decal Empty
+ * (remove_decal_object): a marked controller whose only user left is its collection goes, one
+ * another row or object still names stays. */
+static void paint_layer_row_controllers_release(Main &bmain, const Span<Object *> controllers)
+{
+  bool removed = false;
+  for (Object *object : controllers) {
+    if (object->id.us <= 1) {
+      BKE_id_delete(&bmain, object);
+      removed = true;
+    }
+  }
+  if (removed) {
+    DEG_relations_tag_update(&bmain);
+  }
+}
+
 class PaintLayersStackSource final : public StackSource,
                                      public StackEditor,
                                      public StackGroupingEditor {
@@ -3116,11 +3156,16 @@ class PaintLayersStackSource final : public StackSource,
       return true;
     }
     layers_mask_edit_end_if_active(C, material, *layer);
+    /* The controllers the removed rows drop go with them when nothing else uses them; collect
+     * before the removal so the pointers are still readable. */
+    Vector<Object *, 4> controllers;
+    paint_layer_row_controllers_collect(*layer, controllers);
     if (!BKE_paint_layers_remove(material, layer)) {
       return false;
     }
     /* Drop the object mask records of the removed row (and its descendants) right away. */
     BKE_paint_layer_object_masks_cleanup_all(*CTX_data_main(&C));
+    paint_layer_row_controllers_release(*CTX_data_main(&C), controllers);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return true;
   }

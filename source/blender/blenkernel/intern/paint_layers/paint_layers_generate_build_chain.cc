@@ -451,19 +451,19 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
     map_node_key_set(*map, *mask, record->channel);
     nodes.append(map);
     grid_.place(*map, layout::Column::Mask, 0);
-    this->mapping_apply(tree, *mask, *map, nodes);
-    bNodeSocket *map_color = socket_out(*map, "Color");
-    bNodeSocket *map_alpha = socket_out(*map, "Alpha");
-    if (map_color == nullptr || map_alpha == nullptr) {
+    const MapRead read = this->map_read_apply(tree, *mask, *map, nodes);
+    if (read.color.node == nullptr || read.color.socket == nullptr ||
+        read.alpha.node == nullptr || read.alpha.socket == nullptr)
+    {
       discard();
       return {};
     }
-    grey = this->rgb_mean_nodes_add(tree, {map, map_color}, nodes);
+    grey = this->rgb_mean_nodes_add(tree, read.color, nodes);
     if (grey.node == nullptr) {
       discard();
       return {};
     }
-    alpha = this->mapping_clip_alpha(tree, *mask, {map, map_alpha}, nodes);
+    alpha = this->mapping_clip_alpha(tree, *mask, read.alpha, nodes);
   }
   else {
     bNodeTreeInterfaceSocket **value_iface = mask_value_inputs_.lookup_ptr(&layer);
@@ -724,19 +724,19 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       map_node_key_set(*item_map, item, item_record->channel);
       nodes.append(item_map);
       grid_.place(*item_map, layout::Column::Mask, row++);
-      this->mapping_apply(tree, item, *item_map, nodes);
-      bNodeSocket *item_color = socket_out(*item_map, "Color");
-      bNodeSocket *item_map_alpha = socket_out(*item_map, "Alpha");
-      if (item_color == nullptr || item_map_alpha == nullptr) {
+      const MapRead item_read = this->map_read_apply(tree, item, *item_map, nodes);
+      if (item_read.color.node == nullptr || item_read.color.socket == nullptr ||
+          item_read.alpha.node == nullptr || item_read.alpha.socket == nullptr)
+      {
         discard();
         return {};
       }
-      item_grey = this->rgb_mean_nodes_add(tree, {item_map, item_color}, nodes);
+      item_grey = this->rgb_mean_nodes_add(tree, item_read.color, nodes);
       if (item_grey.node == nullptr) {
         discard();
         return {};
       }
-      item_alpha = this->mapping_clip_alpha(tree, item, {item_map, item_map_alpha}, nodes);
+      item_alpha = this->mapping_clip_alpha(tree, item, item_read.alpha, nodes);
     }
     else {
       bNodeTreeInterfaceSocket **item_value_iface = mask_value_inputs_.lookup_ptr(&item);
@@ -1665,7 +1665,6 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
                                                       nullptr;
   bNode *map = nullptr;
   bNodeSocket *map_color = nullptr;
-  bNodeSocket *map_alpha = nullptr;
   bNode *map_color_node = nullptr;
   KindEmitResult source_emitted;
   if (from_source) {
@@ -1730,9 +1729,9 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   }
   else {
     map = this->image_map_node_add(tree, *record->image);
-    map_color = (map != nullptr) ? socket_out(*map, "Color") : nullptr;
-    map_alpha = (map != nullptr) ? socket_out(*map, "Alpha") : nullptr;
-    if (opacity == nullptr || map_color == nullptr || map_alpha == nullptr) {
+    if (opacity == nullptr || map == nullptr || socket_out(*map, "Color") == nullptr ||
+        socket_out(*map, "Alpha") == nullptr)
+    {
       if (map != nullptr) {
         bke::node_remove_node(nullptr, tree, *map, true, false);
       }
@@ -1774,9 +1773,20 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
       }
     }
   }
-  /* A correction's own map reads through the correction's Mapping while it applies; an atlas is
-   * already in the stack's UV space and is read as it is. */
-  const bool mapped = map != nullptr && !mesh_map && this->mapping_apply(tree, effect, *map, nodes);
+  /* A correction's own map reads through the correction's projection or Mapping while it applies;
+   * an atlas is already in the stack's UV space and is read as it is. */
+  MapRead read;
+  if (map != nullptr && mesh_map) {
+    read.color = {map_color_node, map_color};
+    read.alpha = {map, socket_out(*map, "Alpha")};
+  }
+  else if (map != nullptr) {
+    read = this->map_read_apply(tree, effect, *map, nodes);
+    if (read.color.socket == nullptr || read.alpha.socket == nullptr) {
+      this->nodes_discard(tree, nodes);
+      return false;
+    }
+  }
   /* Nothing of the correction is linked to the chain until it is complete, so a failure removes
    * what was made and leaves the row as it was. */
   const auto discard = [&]() {
@@ -1787,17 +1797,15 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
    * and a data map follows the same rule a row's does, so the two cannot disagree. */
   NodeOutput color = (from_source || generates) ?
                          source_emitted.color :
-                         NodeOutput{flat ? group.group_input :
-                                           (mesh_map ? map_color_node : map),
-                                    map_color};
-  if (mapped && channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+                         (flat ? NodeOutput{group.group_input, map_color} : read.color);
+  if (read.mapped && channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
     /* The Mapping moved only the read point; the tangent-space vectors follow it. */
     color = this->normal_remap_add(tree, effect, color, &nodes);
   }
   NodeOutput alpha = (from_source || generates) ? source_emitted.content_alpha :
-                                                  NodeOutput{map, map_alpha};
-  if (mapped) {
-    /* A clipping UV wrap takes the part outside the square out of the map's alpha. */
+                                                  (flat ? NodeOutput{} : read.alpha);
+  if (!from_source && !flat && !mesh_map) {
+    /* A clipping UV wrap or the projection frame takes the part outside out of the map's alpha. */
     alpha = this->mapping_clip_alpha(tree, effect, alpha, nodes);
   }
 
@@ -2838,8 +2846,12 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
     grid_.place(*map, layout::Column::Source, 0);
     Vector<bNode *> source_nodes;
     source_nodes.append(map);
-    out.color = {map, socket_out(*map, "Color")};
-    const bool mapped = this->mapping_apply(tree, ctx.layer, *map, source_nodes);
+    const MapRead read = this->map_read_apply(tree, ctx.layer, *map, source_nodes);
+    if (read.color.socket == nullptr || read.alpha.socket == nullptr) {
+      this->nodes_discard(tree, source_nodes);
+      return {};
+    }
+    out.color = read.color;
     if (ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL && out.color.socket != nullptr &&
         (ctx.record->flag & MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX) != 0)
     {
@@ -2853,7 +2865,8 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
         out.color = flipped;
       }
     }
-    if (mapped && ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL && out.color.socket != nullptr) {
+    if (read.mapped && ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
+        out.color.socket != nullptr) {
       /* The Mapping moved only the read point; the tangent-space vectors follow it. */
       out.color = this->normal_remap_add(tree, ctx.layer, out.color, &source_nodes);
     }
@@ -2873,12 +2886,10 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
      * coverage, and the row covers by its opacity and mask alone, as the CPU and GPU descriptions
      * say with `color_alpha_coverage = false`. An unwired coverage is the factor's one. */
     if (!paint_layer_map_alpha_is_data(ctx.record)) {
-      if (bNodeSocket *map_alpha = socket_out(*map, "Alpha")) {
-        /* A clipping UV wrap takes the part outside the square out of the coverage, and with it
-         * the content alpha, which starts from the coverage. */
-        out.coverage = this->mapping_clip_alpha(tree, ctx.layer, {map, map_alpha}, source_nodes);
-        out.content_alpha = out.coverage;
-      }
+      /* A clipping UV wrap or the projection frame takes the part outside out of the coverage, and
+       * with it the content alpha, which starts from the coverage. */
+      out.coverage = this->mapping_clip_alpha(tree, ctx.layer, read.alpha, source_nodes);
+      out.content_alpha = out.coverage;
     }
     layout::frame_add(tree, "Source", source_nodes);
   }

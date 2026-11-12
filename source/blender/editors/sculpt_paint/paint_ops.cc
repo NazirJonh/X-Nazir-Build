@@ -131,6 +131,7 @@
 #include "mesh/sculpt_expand.hh"
 #include "mesh/sculpt_intern.hh"
 #include "uv_mapping/paint_layer_mapping_ops.hh"
+#include "projection/projection_ops.hh"
 
 namespace blender {
 
@@ -3421,6 +3422,7 @@ void ED_operatortypes_paint()
 
   /* palette */
   using namespace blender::ed::sculpt_paint;
+  using namespace blender::ed::sculpt_paint::projection;
   using namespace blender::ed::sculpt_paint::uv_mapping;
   WM_operatortype_append(PALETTE_OT_new);
   WM_operatortype_append(PALETTE_OT_color_add);
@@ -3518,6 +3520,9 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_layer_mapping_mirror_set_point);
   WM_operatortype_append(PAINT_OT_layer_mapping_mirror_from_cursor);
   WM_operatortype_append(PAINT_OT_layer_mapping_mirror_pick_3d);
+  WM_operatortype_append(PAINT_OT_layer_projection_add_controller);
+  WM_operatortype_append(PAINT_OT_layer_projection_select_controller);
+  WM_operatortype_append(PAINT_OT_layer_projection_controller_to_cursor);
   WM_operatortype_append(PAINT_OT_stack_layer_copy);
   WM_operatortype_append(PAINT_OT_stack_layer_paste);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);

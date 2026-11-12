@@ -1191,7 +1191,8 @@ class LAYER_MATERIAL_PT_normal_height(LayerMaterialButtonsPanel, Panel):
 
 
 class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
-    """UV mapping of the maps and sources the shown row reads: a layer, a correction or a mask item.
+    """Lookup space of the maps and sources the shown row reads: a layer, a correction or a mask
+    item.
 
     Shown while the row can carry a mapping (RNA ``mapping_available``): a Fill -- with a map or
     not, since its mapping is a property of the row and is on from the start -- or a Material row
@@ -1201,10 +1202,15 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
     edit the tile the gizmo draws: they turn it around its centre, the gizmo's anchor ring, so it
     keeps its place on the canvas; only Offset moves it. The row's raw ``mapping_scale`` and
     ``mapping_rotation`` keep the data's own meaning for scripts and drivers.
+
+    UV reads the active UVs; Planar, Box, Triplanar, Cube, Cylinder and Sphere project the map
+    through a frame in object or controller space. The frame's Empty (optional) places, turns and
+    scales the projection, while the inline center/size/rotation give it its extents. The UV
+    controls below the frame adjust the projected UVs (or the UVs themselves in UV mode).
     """
 
     bl_idname = "LAYER_MATERIAL_PT_mapping"
-    bl_label = "Mapping"
+    bl_label = "Mapping & Projection"
     bl_parent_id = "LAYER_MATERIAL_PT_layers"
 
     @classmethod
@@ -1223,13 +1229,75 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         row = cls._shown_row(context)
-        return row is not None and row.mapping_available
+        return row is not None and (row.mapping_available or row.projection_supported)
 
     def draw_header_preset(self, _context):
         # Drawn while the panel's poll passed, so a row that carries a mapping is shown; the menu's
         # operators poll the same way and grey out with it. The preset hook is the header's
         # right-aligned slot, which puts the button at the header's far edge.
         self.layout.menu("LAYER_MT_mapping_reset", text="", icon='RECOVER_LAST')
+
+    def _draw_projection(self, context, layout, row):
+        """The controller, frame and limits of a projected row."""
+        controller = layout.column(align=True)
+        controller.label(text="Controller")
+        controller.prop(row, "projection_object", text="")
+        sub = controller.row(align=True)
+        sub.operator("paint.layer_projection_add_controller", text="Add", icon='ADD')
+        sub.operator("paint.layer_projection_select_controller",
+                     text="Select",
+                     icon='RESTRICT_SELECT_OFF')
+        sub.operator("paint.layer_projection_controller_to_cursor",
+                     text="Set to Cursor",
+                     icon='CURSOR')
+        obj = row.projection_object
+        if obj is not None and context.scene not in obj.users_scene:
+            warn = controller.column(align=True)
+            warn.label(text="Controller is not in the current scene", icon='ERROR')
+        # The constraint lives on the controller, so there is nothing to snap without one.
+        snap = controller.row()
+        snap.enabled = obj is not None
+        snap.prop(row, "projection_snap", text="Snap to Surface")
+
+        frame = layout.column(align=True)
+        frame.label(text="Frame")
+        frame.prop(row, "projection_center", text="Center")
+        frame.prop(row, "projection_size", text="Size")
+        # The depth is the frame's size on the projection axis, the way Ucupaint's decal
+        # distance reads it; the Limit Depth toggle below switches it off.
+        if row.projection_uses_axis:
+            axis_index = 'XYZ'.index(row.projection_axis)
+            frame.prop(row, "projection_size", index=axis_index, text="Depth")
+        frame.prop(row, "projection_rotation", text="Rotation")
+        if row.projection_uses_axis:
+            frame.prop(row, "projection_axis", text="Axis")
+        # Ucupaint sizes its decal by the Empty itself; this mode makes the inline Size one
+        # and leaves the controller's scale as the only place the frame is sized.
+        size_from_empty = frame.row()
+        size_from_empty.enabled = obj is not None
+        size_from_empty.prop(row, "projection_size_from_controller", text="Size from Empty")
+        frame.prop(row, "projection_fit_aspect", text="Fit Image Aspect")
+
+        limits = layout.column(align=True)
+        limits.label(text="Limits")
+        limits.prop(row, "projection_clip", text="Clip to Frame")
+        limits.prop(row, "projection_depth", text="Limit Depth")
+        limits.prop(row, "projection_facing", text="Facing Fade")
+        angle = limits.row()
+        angle.enabled = row.projection_facing
+        angle.prop(row, "projection_angle", text="Facing Angle")
+        # The fade keeps the faces the frame's arrow enters by default; this keeps the ones it
+        # points away from instead, which reads better for a projection onto a back side.
+        flip = limits.row()
+        flip.enabled = row.projection_facing
+        flip.prop(row, "projection_facing_invert", text="Flip Facing")
+
+        if row.projection_object is None:
+            note = layout.column(align=True)
+            note.enabled = False
+            note.label(text="No controller: the frame lives in object space", icon='INFO')
+            note.label(text="Assign an Empty to place it in the viewport", icon='BLANK1')
+        layout.separator()
 
     def draw(self, context):
         layout = self.layout
@@ -1239,7 +1307,12 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         if row is None:
             return
 
-        layout.prop(row, "mapping_enabled", text="Enabled")
+        layout.prop(row, "mapping_space", text="Projection")
+
+        if row.mapping_space != 'UV':
+            self._draw_projection(context, layout, row)
+
+        layout.prop(row, "mapping_enabled", text="UV Adjust")
         col = layout.column()
         col.enabled = row.mapping_enabled
         col.prop(row, "mapping_offset", text="Offset")

@@ -90,6 +90,37 @@ struct NodeOutput {
   bNodeSocket *socket = nullptr;
 };
 
+/** A map read through a row's projection or UV mapping: the sockets to use in its place. */
+struct MapRead {
+  /** The node holding the colour and alpha: the map itself, or the blend of its face samples. */
+  bNode *node = nullptr;
+  NodeOutput color;
+  NodeOutput alpha;
+  /** A projection or a UV mapping moved the read point, so a Normal map needs its remap. */
+  bool mapped = false;
+  /** The map was read through a projection; the projection's clip factor reaches its coverage. */
+  bool projected = false;
+};
+
+/**
+ * The nodes one projected row shares across every map it reads in its group: the controller
+ * coordinates, the frame-space position and normal, and the per-face UVs and weights.
+ *
+ * A row group is one bNodeTree, so one entry per row is enough. The per-map work (a 2D mapping
+ * chain and the map copies a Box or Triplanar blend reads) stays with the map's caller.
+ */
+struct ProjectionNodes {
+  bNode *tex_coord = nullptr;
+  bNode *position = nullptr;
+  /** Face UV before the row's 2D mapping (the frame plane's UV). */
+  bNode *uv = nullptr;
+  /** The frame's factor: one inside, fading out at the frame edge, the depth slab and the facing
+   * limit mixed in, then with the clip toggle. */
+  bNode *clip = nullptr;
+  /** Floor of the painted object's UV: the UDIM tile origin a tiled source map samples. */
+  bNode *tile_origin = nullptr;
+};
+
 /**
  * What one generator row produces for its group: the float every channel indexes its ramp with,
  * and -- for the one pattern that lays a colour of its own -- that colour, which replaces the
@@ -714,6 +745,53 @@ class PaintLayersTreeBuilder {
                      Vector<bNode *> &r_nodes);
 
   /**
+   * Read \a map through \a row's projection when one applies, else through its UV mapping, and
+   * return the sockets every caller should read instead of the map's own. A single-sample
+   * projection (Planar, Cylinder, Sphere, Cube) re-points \a map's Vector; Box and Triplanar read
+   * up to three copies of \a map through their face UVs and blend the colour and alpha by the
+   * surface normal. \a r_nodes receives every node made for this map, so a caller that rolls back
+   * removes them.
+   */
+  MapRead map_read_apply(bNodeTree &tree,
+                         const MaterialPaintLayer &row,
+                         bNode &map,
+                         Vector<bNode *> &r_nodes);
+
+  /**
+   * The shared projection nodes of \a row in \a tree, built on first use: the Texture Coordinate
+   * of its controller space, the frame-space position and normal, the face UVs, the normal weights
+   * and the frame clip factor. \a r_nodes receives what this call made. Null when the row does not
+   * project or a node or interface socket is missing.
+   */
+  ProjectionNodes *projection_nodes_ensure(bNodeTree &tree,
+                                           const MaterialPaintLayer &row,
+                                           Vector<bNode *> &r_nodes);
+
+  /**
+   * \a uv, one face UV or the single-sample UV of \a row, through the row's 2D mapping when it
+   * applies. \a r_nodes receives the mapping chain made. No mapping returns \a uv unchanged.
+   */
+  bNode *projection_uv_mapped(bNodeTree &tree,
+                              const MaterialPaintLayer &row,
+                              bNode &uv,
+                              Vector<bNode *> &r_nodes);
+
+  /**
+   * The frame clip factor of \a row: `mix(1, inside, clip)`, where `inside` is one inside the
+   * frame's bounds and zero outside. Shared by every channel of the row. Empty while the row does
+   * not project. The nodes made are appended to \a r_nodes.
+   */
+  NodeOutput projection_clip_factor(bNodeTree &tree,
+                                    const MaterialPaintLayer &row,
+                                    Vector<bNode *> &r_nodes);
+
+  /** The Group Input socket of the row's projection value input, or null. */
+  bNodeSocket *projection_input_socket(
+      bNodeTree &tree,
+      const MaterialPaintLayer &row,
+      const Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &inputs);
+
+  /**
    * The Mapping node of \a row in \a tree: a Vector Rotate (the row's rotation) followed by a
    * `Point` Mapping (the row's scale and offset), fed by the object's UV and by the row group's
    * mapping inputs. Built on first use and shared by every map of the row; \a r_nodes receives the
@@ -890,6 +968,17 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_rotation_inputs_;
   /** A row's UV mirror fold center input, keyed by the row, while its mapping folds an axis. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_mirror_center_inputs_;
+  /** A projected row's frame and clip value inputs, keyed by the row. */
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_center_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_size_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_rotation_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_clip_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_depth_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_facing_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_facing_dir_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> projection_aspect_inputs_;
+  /** The shared projection nodes of a projected row. */
+  Map<const MaterialPaintLayer *, ProjectionNodes> projection_nodes_;
   /** The Mapping node built for a row, so every channel and map of it shares the one node. */
   Map<const MaterialPaintLayer *, bNode *> mapping_nodes_;
   /** The Mirror fold's side-sign vector of a row, with its owner node, for the Normal remap. */

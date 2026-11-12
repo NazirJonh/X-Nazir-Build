@@ -259,6 +259,37 @@ inline constexpr const char *ROLE_GENERATOR_ROTATION = "generator_rotation";
  */
 inline constexpr const char *ROLE_COLOR_BALANCE = "color_balance";
 inline constexpr const char *ROLE_CHANNEL_MIXER = "channel_mixer";
+/** #INPUT_ROLE_PROP value of a projected row's frame centre (a Vector input). */
+inline constexpr const char *ROLE_PROJECTION_CENTER = "projection_center";
+/** #INPUT_ROLE_PROP value of a projected row's frame extents (a Vector input, normalized). */
+inline constexpr const char *ROLE_PROJECTION_SIZE = "projection_size";
+/** #INPUT_ROLE_PROP value of a projected row's frame rotation (a Vector input, XYZ Euler radians).
+ */
+inline constexpr const char *ROLE_PROJECTION_ROTATION = "projection_rotation";
+/** #INPUT_ROLE_PROP value of a projected row's clip toggle (a Float input, 0 or 1). */
+inline constexpr const char *ROLE_PROJECTION_CLIP = "projection_clip";
+/** #INPUT_ROLE_PROP value of a projected row's depth-slab toggle (a Float input, 0 or 1): one
+ * limits the frame factor to the axis' slab, zero leaves the depth unbounded. */
+inline constexpr const char *ROLE_PROJECTION_DEPTH = "projection_depth";
+/**
+ * #INPUT_ROLE_PROP value of a projected row's facing weight (a Vector input): the X and Y hold the
+ * scale and offset of the clamped Multiply Add that turns the frame-space normal component along
+ * the axis into the 0..1 hermite weight, and the Z holds the toggle. Baked out of the facing limit
+ * so a slider drag never rebuilds.
+ */
+inline constexpr const char *ROLE_PROJECTION_FACING = "projection_facing";
+/**
+ * #INPUT_ROLE_PROP value of a projected row's facing direction (a Vector input): the normalized
+ * world-space direction the world normal reads against, baked out of the controller's transform
+ * and the inline rotation. Unused while the row has no controller.
+ */
+inline constexpr const char *ROLE_PROJECTION_FACING_DIR = "projection_facing_dir";
+/**
+ * #INPUT_ROLE_PROP value of a projected row's image-aspect fit (a Vector input): the X and Y scale
+ * the frame's two footprint coordinates before the 0.5 offset, the Z is unused. (1, 1) when the
+ * fit is off or the row reads no image.
+ */
+inline constexpr const char *ROLE_PROJECTION_ASPECT = "projection_aspect";
 /**
  * On a source-group wrapper's interface input: the row mapping value relayed into the wrapper.
  * The same three roles travel from the row group into the wrapper instance and down every private

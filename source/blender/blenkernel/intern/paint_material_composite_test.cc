@@ -15,6 +15,7 @@
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_object.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
@@ -37,6 +38,7 @@
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "IMB_colormanagement.hh"
@@ -2826,6 +2828,49 @@ TEST_F(PaintLayersCompositeTest, identity_mapping_reads_unchanged_pixels)
       EXPECT_NEAR(after[k], before[i][k], 1e-4f) << i << " " << k;
     }
   }
+}
+
+/** The stack hash follows the projection's structure and the pixels its frame values move. */
+TEST_F(PaintLayersCompositeTest, projection_structure_and_values_move_the_stack_hash)
+{
+  MaterialPaintLayer *fill = add_fill_layer(
+      "Projected", add_solid_image("ProjectionHashMap", 4, 255, 0, 0, 255));
+  auto stack_hash = [&]() {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    return BKE_paint_material_composite_stack_hash(layers);
+  };
+
+  const uint64_t uv_hash = stack_hash();
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  const uint64_t planar_hash = stack_hash();
+  EXPECT_NE(planar_hash, uv_hash) << "the mapping space is structure";
+
+  /* Center, size and rotation are group values for the generator, but the CPU composite caches
+   * pixels: a frame move changes what those pixels are, so its key has to move too. */
+  const float center[3] = {1.0f, -2.0f, 0.5f};
+  const float size[3] = {2.0f, 3.0f, 4.0f};
+  const float rotation[3] = {0.1f, 0.2f, 0.3f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values(*ma, fill, center, size, rotation));
+  const uint64_t values_hash = stack_hash();
+  EXPECT_NE(values_hash, planar_hash) << "the composite cache holds the projected pixels";
+
+  ASSERT_TRUE(BKE_paint_layers_projection_set_axis(
+      *ma, fill, MA_PAINT_LAYER_PROJECTION_AXIS_X));
+  const uint64_t axis_hash = stack_hash();
+  EXPECT_NE(axis_hash, values_hash) << "the axis changes the UV math";
+
+  Object *controller = BKE_object_add_only_object(bmain, OB_EMPTY, "ProjectionHashController");
+  ASSERT_NE(controller, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_projection_set_object(*ma, fill, controller));
+  const uint64_t controller_hash = stack_hash();
+  EXPECT_NE(controller_hash, axis_hash) << "the controller is topology";
+
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_UV));
+  EXPECT_NE(stack_hash(), controller_hash) << "leaving the projection changes the stack";
 }
 
 /** The stack hash follows the normalized mapping values of a row, a correction and a mask item. */

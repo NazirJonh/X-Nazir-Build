@@ -1399,6 +1399,83 @@ TEST_F(PaintLayersGraphEvalTest, surface_map_releases_texels_and_rebuilds_on_dem
   BKE_paint_material_surface_map_free();
 }
 
+TEST_F(PaintLayersGraphEvalTest, surface_map_keeps_entries_of_alternating_targets)
+{
+  Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "SurfaceAlternateObject");
+  Mesh *mesh = BKE_mesh_add(bmain, "SurfaceAlternateMesh");
+  ob->data = id_cast<ID *>(mesh);
+  BKE_object_material_assign(bmain, ob, ma, 1, BKE_MAT_ASSIGN_OBDATA);
+  /* The same quad over the lower-left quarter of the UV tile as the tests above. */
+  Mesh *source = BKE_mesh_new_nomain(4, 0, 1, 4);
+  MutableSpan<float3> positions = source->vert_positions_for_write();
+  positions[0] = float3(0.0f, 0.0f, 2.0f);
+  positions[1] = float3(4.0f, 0.0f, 2.0f);
+  positions[2] = float3(4.0f, 4.0f, 2.0f);
+  positions[3] = float3(0.0f, 4.0f, 2.0f);
+  MutableSpan<int> face_offsets = source->face_offsets_for_write();
+  face_offsets[0] = 0;
+  face_offsets[1] = 4;
+  MutableSpan<int> corner_verts = source->corner_verts_for_write();
+  for (const int i : IndexRange(4)) {
+    corner_verts[i] = i;
+  }
+  bke::SpanAttributeWriter<float2> uvs =
+      source->attributes_for_write().lookup_or_add_for_write_span<float2>("UVMap",
+                                                                          bke::AttrDomain::Corner);
+  uvs.span[0] = float2(0.0f, 0.0f);
+  uvs.span[1] = float2(0.5f, 0.0f);
+  uvs.span[2] = float2(0.5f, 0.5f);
+  uvs.span[3] = float2(0.0f, 0.5f);
+  uvs.finish();
+  bke::mesh_calc_edges(*source, false, false);
+  source->tag_topology_changed();
+  source->tag_positions_changed();
+  BKE_mesh_nomain_to_mesh(source, mesh, ob);
+
+  BKE_paint_material_surface_map_free();
+  /* Two targets of one object: the same tile at two canvas sizes. The store keeps an entry per
+   * target, so alternating between them answers with the same instance instead of a rebuild --
+   * what lets the GPU cache hold several maps and reuse their textures. */
+  const int size = 16;
+  const std::shared_ptr<const PaintMaterialSurfaceMap> first = BKE_paint_material_surface_map_get(
+      ob, ma, size, size, 1001);
+  ASSERT_NE(first, nullptr);
+  const std::shared_ptr<const PaintMaterialSurfaceMap> second = BKE_paint_material_surface_map_get(
+      ob, ma, size * 2, size * 2, 1001);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(BKE_paint_material_surface_map_get(ob, ma, size, size, 1001), first);
+
+  /* Releasing the texels finds an entry that is not the last inserted one. */
+  BKE_paint_material_surface_map_texels_release(second);
+  EXPECT_TRUE(second->texels_released);
+  EXPECT_TRUE(second->position.is_empty());
+
+  /* A rebuilt map of one target replaces its stale instance: the release of the dropped map is a
+   * no-op that leaves its arrays alone, and the identity moves to the new map. The content hash is
+   * the mesh's, so the other target's entry is stale by it too and rebuilds at its next ask. */
+  mesh->vert_positions_for_write()[2].z = 3.0f;
+  mesh->tag_positions_changed();
+  const std::shared_ptr<const PaintMaterialSurfaceMap> moved = BKE_paint_material_surface_map_get(
+      ob, ma, size, size, 1001);
+  ASSERT_NE(moved, nullptr);
+  EXPECT_NE(moved, first);
+  EXPECT_NE(moved->key.content_hash, first->key.content_hash);
+  BKE_paint_material_surface_map_texels_release(first);
+  EXPECT_FALSE(first->texels_released);
+  EXPECT_EQ(first->position.size(), size * size);
+  EXPECT_EQ(BKE_paint_material_surface_map_get(ob, ma, size, size, 1001, /*need_texels=*/false),
+            moved);
+
+  BKE_paint_material_surface_map_free();
+  /* Freeing drops the entries but not a holder's map. */
+  EXPECT_EQ(first->width, size);
+  const std::shared_ptr<const PaintMaterialSurfaceMap> fresh = BKE_paint_material_surface_map_get(
+      ob, ma, size, size, 1001);
+  ASSERT_NE(fresh, nullptr);
+  EXPECT_NE(fresh, moved);
+  BKE_paint_material_surface_map_free();
+}
+
 TEST_F(PaintLayersGraphEvalTest, projected_effect_input_hash_follows_uv_adjust_and_frame)
 {
   PaintMaterialCompositeImageLayer layer;

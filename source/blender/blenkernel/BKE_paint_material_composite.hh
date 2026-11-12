@@ -1722,9 +1722,12 @@ struct PaintMaterialSurfaceMap {
 
 /**
  * The cached surface map of \a object restricted to the slots holding \a material (every slot when
- * null), at \a width by \a height for \a tile_number. One entry is kept: asking for another key
- * replaces it. Null when the object has no mesh, render UV map, triangle or matching slot. The
- * returned map stays valid for its holder after a replacement or #BKE_paint_material_surface_map_free.
+ * null), at \a width by \a height for \a tile_number. An LRU store bounded by the sum of the maps'
+ * bytes keeps the entries: asking for another target adds one and evicts the least recently used
+ * ones, and a rebuilt map of one target replaces its stale instance (the content hash in the key
+ * moves with the mesh). Null when the object has no mesh, render UV map, triangle or matching
+ * slot. The returned map stays valid for its holder after a replacement or
+ * #BKE_paint_material_surface_map_free.
  *
  * \param need_texels: false for a caller that only needs the identity of the entry because it already
  *        holds the texels elsewhere (the GPU upload): a hit on an entry whose texels were released is
@@ -1740,9 +1743,9 @@ std::shared_ptr<const PaintMaterialSurfaceMap> BKE_paint_material_surface_map_ge
     bool need_texels = true);
 
 /**
- * Free the position and normal arrays of \a map when it is the cached entry, once a consumer has
- * copied them elsewhere (the GPU upload: they are 0.5 GiB at 4K). Main thread only, and only for
- * a holder that no longer reads the arrays. No-op for a map that is not the current entry.
+ * Free the position and normal arrays of \a map when it is in the cache store, once a consumer
+ * has copied them elsewhere (the GPU upload: they are 0.5 GiB at 4K). Main thread only, and only
+ * for a holder that no longer reads the arrays. No-op for a map that is not in the store.
  */
 void BKE_paint_material_surface_map_texels_release(
     const std::shared_ptr<const PaintMaterialSurfaceMap> &map);

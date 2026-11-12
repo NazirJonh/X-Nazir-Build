@@ -135,38 +135,74 @@ static void gpu_mapping_uniforms_set(gpu::Shader *shader, const GpuMappingUnifor
 /** \name Projection surface map
  *
  * The painted surface per canvas texel (#BKE_paint_material_surface_map_get) uploaded as two
- * RGBA32F textures: object-space position (`w` = 1 where covered) and normal. One entry, like the
- * BKE cache: the textures live with the map they were made from and are freed when another map
- * replaces it, with the shaders at draw exit, and from #combined_projection_gpu_free.
+ * RGBA32F textures: object-space position (`w` = 1 where covered) and normal. The textures live
+ * with the map they were made from, in an LRU store like the BKE cache's: a frame that projects
+ * several objects or tiles alternates between the entries instead of replacing them, and the byte
+ * budget evicts the least recently used ones. An evicted entry is not freed at once: the passes
+ * read the raw pointers of #GpuProjection after the call that filled them, so the eviction parks
+ * the entry until the next call lets the driver have it.
  * \{ */
 
-static struct {
+/** What the surface map textures may hold in sum: two 4K RGBA32F maps are 1 GiB, a smaller canvas
+ * fits proportionally more. */
+constexpr size_t GPU_SURFACE_CACHE_BYTES = size_t(1024) * 1024 * 1024;
+
+/** One uploaded target: the map the textures were made from (its identity answers whether they
+ * still hold what a rebuilt map would) and what they were made for, to recognize them while a
+ * stroke freezes the map. */
+struct GpuSurfaceMapEntry {
   std::shared_ptr<const PaintMaterialSurfaceMap> map;
   gpu::Texture *position = nullptr;
   gpu::Texture *normal = nullptr;
-  /* What the textures were made for, to recognize them while a stroke freezes the map. */
   uint32_t object_uid = 0;
   uint32_t material_uid = 0;
   int tile_number = 0;
   int canvas = 0;
+  /** The bytes of both textures: the budget counts them, not the entries. */
+  size_t bytes = 0;
+};
+
+static struct {
+  /* The entries, oldest first: the vector is the LRU order, as the effect caches' store keeps its
+   * own. Draw-thread only, like the passes that read it. */
+  Vector<GpuSurfaceMapEntry> entries;
+  size_t total_bytes = 0;
+  /* The entries the budget evicted, whose textures a pass of this frame may still read: they wait
+   * here for the next call to hand them to the driver. */
+  Vector<GpuSurfaceMapEntry> pending_free;
 } gpu_surface_cache;
 
-static void gpu_surface_cache_release()
+static void gpu_surface_entry_release(GpuSurfaceMapEntry &entry)
 {
-  if (gpu_surface_cache.position != nullptr) {
-    GPU_texture_free(gpu_surface_cache.position);
+  if (entry.position != nullptr) {
+    GPU_texture_free(entry.position);
   }
-  if (gpu_surface_cache.normal != nullptr) {
-    GPU_texture_free(gpu_surface_cache.normal);
+  if (entry.normal != nullptr) {
+    GPU_texture_free(entry.normal);
   }
-  gpu_surface_cache.position = nullptr;
-  gpu_surface_cache.normal = nullptr;
-  gpu_surface_cache.map.reset();
+  entry.position = nullptr;
+  entry.normal = nullptr;
+  entry.map.reset();
+}
+
+/** Free the parked evicted entries: a pass that read them has had its own call since, so nothing
+ * reads the textures any longer. */
+static void gpu_surface_cache_pending_free()
+{
+  for (GpuSurfaceMapEntry &entry : gpu_surface_cache.pending_free) {
+    gpu_surface_entry_release(entry);
+  }
+  gpu_surface_cache.pending_free.clear_and_shrink();
 }
 
 void combined_projection_gpu_free()
 {
-  gpu_surface_cache_release();
+  gpu_surface_cache_pending_free();
+  for (GpuSurfaceMapEntry &entry : gpu_surface_cache.entries) {
+    gpu_surface_entry_release(entry);
+  }
+  gpu_surface_cache.entries.clear_and_shrink();
+  gpu_surface_cache.total_bytes = 0;
   /* The CPU twin is dropped with it: it is the same 0.5 GiB per 4K canvas and is rebuilt on demand. */
   BKE_paint_material_surface_map_free();
 }
@@ -201,69 +237,159 @@ bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projec
                                                              4096;
   const uint32_t object_uid = object->id.session_uid;
   const uint32_t material_uid = material->id.session_uid;
-  const bool same_target = gpu_surface_cache.position != nullptr &&
-                           gpu_surface_cache.object_uid == object_uid &&
-                           gpu_surface_cache.material_uid == material_uid &&
-                           gpu_surface_cache.tile_number == projection.tile_number &&
-                           gpu_surface_cache.canvas == canvas;
+  /* The evicted entries of the previous call are let go of here: the passes between the two calls
+   * have had their dispatch, so the parked textures are read by no one any longer. */
+  gpu_surface_cache_pending_free();
+  int entry_index = -1;
+  for (const int i : gpu_surface_cache.entries.index_range()) {
+    const GpuSurfaceMapEntry &entry = gpu_surface_cache.entries[i];
+    if (entry.object_uid == object_uid && entry.material_uid == material_uid &&
+        entry.tile_number == projection.tile_number && entry.canvas == canvas)
+    {
+      entry_index = i;
+      break;
+    }
+  }
+  const bool same_target = entry_index != -1;
   /* During a stroke the mesh moves every dab (sculpt) and the map would be rebuilt at each: the
    * last upload stands in until the stroke is over, and the first frame after it rebuilds. */
   const bool frozen = same_target && BKE_paint_layers_bake_stroke_active_get();
-  if (!frozen) {
+  if (frozen) {
+    /* Still the youngest: the stroke keeps standing on this entry. */
+    GpuSurfaceMapEntry touched = std::move(gpu_surface_cache.entries[entry_index]);
+    gpu_surface_cache.entries.remove(entry_index);
+    gpu_surface_cache.entries.append(std::move(touched));
+    entry_index = gpu_surface_cache.entries.size() - 1;
+  }
+  else {
     bke::paint_perf::ScopedTimer perf_map("proj.gpu.surface_map");
     /* The texels are asked for only when they are about to be uploaded: a cache entry whose texels
      * went to the GPU earlier is released, and a hit on it needs nothing but its identity. */
     std::shared_ptr<const PaintMaterialSurfaceMap> map = BKE_paint_material_surface_map_get(
         object, material, canvas, canvas, projection.tile_number, /*need_texels=*/false);
-    if (map != nullptr && map->texels_released && (!same_target || map != gpu_surface_cache.map)) {
-      /* The GPU copy of this entry is gone (another target took its place): rebuild with texels. */
+    if (map != nullptr && map->texels_released &&
+        (!same_target || map != gpu_surface_cache.entries[entry_index].map))
+    {
+      /* The GPU copy of this map is gone (the budget evicted its entry): rebuild with texels. */
       map = BKE_paint_material_surface_map_get(
           object, material, canvas, canvas, projection.tile_number, /*need_texels=*/true);
     }
     if (map == nullptr && !same_target) {
       return gpu_refuse("a projected row's object has no surface map");
     }
+    size_t evicted_bytes = 0;
     if (map == nullptr) {
       /* The evaluated mesh can be missing for a moment after a mode switch or an edit: the previous
        * map stands in rather than a 500 ms CPU composite, and the next frame rebuilds. */
       perf_map.note("kept previous map canvas=%d", canvas);
     }
-    else if (!same_target || map != gpu_surface_cache.map) {
-      gpu_surface_cache_release();
+    else if (same_target && map == gpu_surface_cache.entries[entry_index].map) {
+      /* The textures are this map's already: the entry is only made the youngest one, moved out
+       * first as the effect caches' store does, since the append may reallocate the vector. */
+      GpuSurfaceMapEntry touched = std::move(gpu_surface_cache.entries[entry_index]);
+      gpu_surface_cache.entries.remove(entry_index);
+      gpu_surface_cache.entries.append(std::move(touched));
+      entry_index = gpu_surface_cache.entries.size() - 1;
+      perf_map.note("reused canvas=%d", canvas);
+    }
+    else if (same_target) {
+      /* The map was rebuilt since the textures were made (the mesh moved outside a stroke): the
+       * entry keeps its place in the store, its textures are remade from the new map. */
+      GpuSurfaceMapEntry &entry = gpu_surface_cache.entries[entry_index];
+      /* The old textures are parked, not freed: a pass of this frame may still read them. */
+      GpuSurfaceMapEntry stale;
+      stale.position = entry.position;
+      stale.normal = entry.normal;
+      gpu_surface_cache.pending_free.append(std::move(stale));
+      entry.position = nullptr;
+      entry.normal = nullptr;
+      entry.map.reset();
       /* Both textures are 32-bit float. The position keeps full precision: it is divided by the
        * frame size and a texel of error is a visible shift. The normal is the interpolated, not
        * normalized, corner normal the CPU bake reads, and the shader's facing fade and Box weights
        * depend on its length. Normalizing it or packing it into a narrower (snorm or half float)
        * format would change those results, and 16-bit snorm texture usage as a compute-shader
        * image is not guaranteed on every driver, so it is stored unmodified. */
-      gpu_surface_cache.position = gpu_surface_texture_create(
+      entry.position = gpu_surface_texture_create(
           "combined_surface_position",
           canvas,
           map->position,
           gpu::TextureFormat::SFLOAT_32_32_32_32);
-      gpu_surface_cache.normal = gpu_surface_texture_create(
+      entry.normal = gpu_surface_texture_create(
           "combined_surface_normal", canvas, map->normal, gpu::TextureFormat::SFLOAT_32_32_32_32);
-      if (gpu_surface_cache.position == nullptr || gpu_surface_cache.normal == nullptr) {
-        gpu_surface_cache_release();
+      if (entry.position == nullptr || entry.normal == nullptr) {
+        gpu_surface_entry_release(entry);
+        gpu_surface_cache.total_bytes -= entry.bytes;
+        gpu_surface_cache.entries.remove(entry_index);
         return gpu_refuse("the surface map textures could not be allocated");
       }
       /* The upload is read by the dispatch that follows. */
       GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE);
-      gpu_surface_cache.map = map;
+      entry.map = map;
       /* The textures hold the texels now: the CPU copy (0.5 GiB at 4K) is no longer read. */
       BKE_paint_material_surface_map_texels_release(map);
-      gpu_surface_cache.object_uid = object_uid;
-      gpu_surface_cache.material_uid = material_uid;
-      gpu_surface_cache.tile_number = projection.tile_number;
-      gpu_surface_cache.canvas = canvas;
+      /* The entry is made the youngest one: a copy, since the append may reallocate the vector. */
+      GpuSurfaceMapEntry touched = entry;
+      gpu_surface_cache.entries.remove(entry_index);
+      gpu_surface_cache.entries.append(std::move(touched));
+      entry_index = gpu_surface_cache.entries.size() - 1;
       perf_map.note("uploaded canvas=%d", canvas);
     }
     else {
-      perf_map.note("reused canvas=%d", canvas);
+      /* A target the store does not hold: make room from the front, parking the evicted entries
+       * for the next call to free, and upload the new one. */
+      const size_t bytes = size_t(canvas) * size_t(canvas) * sizeof(float[4]) * 2;
+      while (!gpu_surface_cache.entries.is_empty() &&
+             gpu_surface_cache.total_bytes + bytes > GPU_SURFACE_CACHE_BYTES)
+      {
+        GpuSurfaceMapEntry oldest = std::move(gpu_surface_cache.entries[0]);
+        gpu_surface_cache.total_bytes -= oldest.bytes;
+        evicted_bytes += oldest.bytes;
+        gpu_surface_cache.pending_free.append(std::move(oldest));
+        gpu_surface_cache.entries.remove(0);
+      }
+      GpuSurfaceMapEntry entry;
+      entry.map = map;
+      entry.object_uid = object_uid;
+      entry.material_uid = material_uid;
+      entry.tile_number = projection.tile_number;
+      entry.canvas = canvas;
+      entry.bytes = bytes;
+      /* Both textures are 32-bit float. The position keeps full precision: it is divided by the
+       * frame size and a texel of error is a visible shift. The normal is the interpolated, not
+       * normalized, corner normal the CPU bake reads, and the shader's facing fade and Box weights
+       * depend on its length. Normalizing it or packing it into a narrower (snorm or half float)
+       * format would change those results, and 16-bit snorm texture usage as a compute-shader
+       * image is not guaranteed on every driver, so it is stored unmodified. */
+      entry.position = gpu_surface_texture_create(
+          "combined_surface_position",
+          canvas,
+          map->position,
+          gpu::TextureFormat::SFLOAT_32_32_32_32);
+      entry.normal = gpu_surface_texture_create(
+          "combined_surface_normal", canvas, map->normal, gpu::TextureFormat::SFLOAT_32_32_32_32);
+      if (entry.position == nullptr || entry.normal == nullptr) {
+        gpu_surface_entry_release(entry);
+        return gpu_refuse("the surface map textures could not be allocated");
+      }
+      /* The upload is read by the dispatch that follows. */
+      GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE);
+      /* The textures hold the texels now: the CPU copy (0.5 GiB at 4K) is no longer read. */
+      BKE_paint_material_surface_map_texels_release(map);
+      gpu_surface_cache.total_bytes += bytes;
+      gpu_surface_cache.entries.append(std::move(entry));
+      entry_index = gpu_surface_cache.entries.size() - 1;
+      if (evicted_bytes == 0) {
+        perf_map.note("uploaded canvas=%d", canvas);
+      }
+      else {
+        perf_map.note("uploaded canvas=%d evicted=%u MiB", canvas, uint32_t(evicted_bytes >> 20));
+      }
     }
   }
-  r_projection.position = gpu_surface_cache.position;
-  r_projection.normal = gpu_surface_cache.normal;
+  const GpuSurfaceMapEntry &entry = gpu_surface_cache.entries[entry_index];
+  r_projection.position = entry.position;
+  r_projection.normal = entry.normal;
   r_projection.canvas_size = int2(canvas);
 
   /* The frame, as `composite_projection_position` and the bake's texel callback read it. */

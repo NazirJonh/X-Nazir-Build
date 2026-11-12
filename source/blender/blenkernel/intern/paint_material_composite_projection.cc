@@ -1125,9 +1125,32 @@ uint64_t composite_mesh_content_hash(const Mesh &mesh)
   return content;
 }
 
+/** What one entry holds: the two RGBA32F texel arrays while they have not been released, else
+ * nothing. */
+static size_t surface_map_cache_bytes(const PaintMaterialSurfaceMap &map)
+{
+  return map.texels_released ? 0 : size_t(map.width) * size_t(map.height) * sizeof(float[4]) * 2;
+}
+
+/** What the store holds in sum: two 4K maps with texels are 1 GiB, a smaller canvas fits more. */
+constexpr size_t SURFACE_MAP_CACHE_BYTES = size_t(1024) * 1024 * 1024;
+
+/** The target of \a key without its content: the identity a rebuilt map of the same object,
+ * material, tile and canvas replaces, which the key's content hash would not match. */
+static bool surface_map_same_target(const PaintMaterialSurfaceMap &map,
+                                    const PaintMaterialSurfaceMapKey &key)
+{
+  return map.key.object_uid == key.object_uid && map.key.material_uid == key.material_uid &&
+         map.key.tile_number == key.tile_number && map.key.width == key.width &&
+         map.key.height == key.height;
+}
+
 static struct {
   std::mutex mutex;
-  std::shared_ptr<const PaintMaterialSurfaceMap> entry;
+  /* The entries, oldest first: the vector is the LRU order, as the effect caches' store keeps its
+   * own. A hit moves its entry to the back, the budget evicts from the front. */
+  Vector<std::shared_ptr<const PaintMaterialSurfaceMap>> entries;
+  size_t total_bytes = 0;
 } g_surface_map_cache;
 
 std::shared_ptr<const PaintMaterialSurfaceMap> BKE_paint_material_surface_map_get(
@@ -1184,10 +1207,16 @@ std::shared_ptr<const PaintMaterialSurfaceMap> BKE_paint_material_surface_map_ge
 
   {
     std::lock_guard lock(g_surface_map_cache.mutex);
-    if (g_surface_map_cache.entry && g_surface_map_cache.entry->key == key &&
-        (!need_texels || !g_surface_map_cache.entry->texels_released))
-    {
-      return g_surface_map_cache.entry;
+    for (const int i : g_surface_map_cache.entries.index_range()) {
+      const std::shared_ptr<const PaintMaterialSurfaceMap> &candidate =
+          g_surface_map_cache.entries[i];
+      if (candidate->key == key && (!need_texels || !candidate->texels_released)) {
+        /* The hit moves to the back: the vector is the LRU order. */
+        std::shared_ptr<const PaintMaterialSurfaceMap> hit = candidate;
+        g_surface_map_cache.entries.remove(i);
+        g_surface_map_cache.entries.append(hit);
+        return hit;
+      }
     }
   }
 
@@ -1224,9 +1253,28 @@ std::shared_ptr<const PaintMaterialSurfaceMap> BKE_paint_material_surface_map_ge
   composite_projection_raster(ctx, position_out, texel, normal_out);
 
   std::shared_ptr<const PaintMaterialSurfaceMap> result = std::move(map);
+  const size_t bytes = surface_map_cache_bytes(*result);
   {
     std::lock_guard lock(g_surface_map_cache.mutex);
-    g_surface_map_cache.entry = result;
+    /* A rebuilt map of the same target replaces its stale instance here, not through the budget:
+     * the content hash in the key moved with the mesh, so the stale entry would not match by key,
+     * and an entry whose texels are released holds no bytes for the budget to evict. */
+    for (int64_t i = g_surface_map_cache.entries.size() - 1; i >= 0; i--) {
+      if (surface_map_same_target(*g_surface_map_cache.entries[i], result->key)) {
+        g_surface_map_cache.total_bytes -= surface_map_cache_bytes(*g_surface_map_cache.entries[i]);
+        g_surface_map_cache.entries.remove(i);
+      }
+    }
+    /* Room is made from the front, the least recently used entry first. The budget counts bytes,
+     * and an entry alone above it still goes in, as the one entry the store holds. */
+    while (!g_surface_map_cache.entries.is_empty() &&
+           g_surface_map_cache.total_bytes + bytes > SURFACE_MAP_CACHE_BYTES)
+    {
+      g_surface_map_cache.total_bytes -= surface_map_cache_bytes(*g_surface_map_cache.entries[0]);
+      g_surface_map_cache.entries.remove(0);
+    }
+    g_surface_map_cache.total_bytes += bytes;
+    g_surface_map_cache.entries.append(result);
   }
   return result;
 }
@@ -1235,21 +1283,29 @@ void BKE_paint_material_surface_map_texels_release(
     const std::shared_ptr<const PaintMaterialSurfaceMap> &map)
 {
   std::lock_guard lock(g_surface_map_cache.mutex);
-  if (map == nullptr || map != g_surface_map_cache.entry || map->texels_released) {
+  if (map == nullptr || map->texels_released) {
     return;
   }
-  /* The entry is shared as const so a reader cannot change it, but it is owned here and the one
-   * consumer that asked for this has copied the texels already. */
-  PaintMaterialSurfaceMap &entry = const_cast<PaintMaterialSurfaceMap &>(*map);
-  entry.position = Array<float4>();
-  entry.normal = Array<float4>();
-  entry.texels_released = true;
+  const size_t bytes = surface_map_cache_bytes(*map);
+  for (const int i : g_surface_map_cache.entries.index_range()) {
+    if (g_surface_map_cache.entries[i] == map) {
+      /* The entry is shared as const so a reader cannot change it, but it is owned here and the
+       * one consumer that asked for this has copied the texels already. */
+      PaintMaterialSurfaceMap &released = const_cast<PaintMaterialSurfaceMap &>(*map);
+      released.position = Array<float4>();
+      released.normal = Array<float4>();
+      released.texels_released = true;
+      g_surface_map_cache.total_bytes -= bytes;
+      return;
+    }
+  }
 }
 
 void BKE_paint_material_surface_map_free()
 {
   std::lock_guard lock(g_surface_map_cache.mutex);
-  g_surface_map_cache.entry.reset();
+  g_surface_map_cache.entries.clear_and_shrink();
+  g_surface_map_cache.total_bytes = 0;
 }
 
 /** \} */

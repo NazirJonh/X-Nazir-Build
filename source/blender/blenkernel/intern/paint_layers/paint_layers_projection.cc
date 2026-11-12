@@ -13,19 +13,25 @@
 
 #include <cmath>
 
+#include <algorithm>
+
 #include "MEM_guardedalloc.h"
 
 #include "BLI_math_base.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BLI_index_range.hh"
 
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_gradient.hh"
 
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
@@ -208,6 +214,13 @@ static bool paint_layer_projection_payload_supported(const Material &ma,
      * needs the same rewrite once per face, which is a later step. */
     return false;
   }
+  if (BKE_paint_layers_gradient_supported(layer)) {
+    /* A Gradient owns no map: the projection replaces the UV its line reads, which is only
+     * meaningful for a UV line (an Object or Generated line has coordinates of its own) and only
+     * for a row -- a mask item follows the row its stack hangs on, it holds no frame. */
+    return layer.role == MA_PAINT_LAYER_ROLE_LAYER && layer.gradient != nullptr &&
+           layer.gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_UV;
+  }
   if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_FLAT_VALUE)) {
     /* A painted map is written at the raw UV; a filter owns no map, and a kind that generates its
      * own UVs keeps them as its parameter. */
@@ -242,7 +255,8 @@ bool BKE_paint_layers_projection_supported(const Material &ma, const MaterialPai
 
 bool BKE_paint_layers_projection_applies(const Material &ma, const MaterialPaintLayer &layer)
 {
-  return layer.projection != nullptr && paint_layer_projection_space_valid(layer.mapping.space) &&
+  return layer.projection != nullptr &&
+         paint_layer_projection_space_valid(layer.mapping.space) &&
          layer.mapping.space != MA_PAINT_LAYER_MAPPING_SPACE_UV &&
          paint_layer_projection_payload_supported(ma, layer);
 }
@@ -932,6 +946,7 @@ bool BKE_paint_layers_projection_apply_preset(Material &ma,
 }
 
 /** \} */
+
 
 }  // namespace blender
 

@@ -173,6 +173,9 @@ set(SRC
   projection/projection_place_op.cc
   projection/projection_target.cc
   projection/projection_target.hh
+  decal/decal_ops.cc
+  decal/decal_target.cc
+  decal/decal_target.hh
   uv_mapping/paint_layer_mapping_gizmo.cc
   uv_mapping/paint_layer_mapping_ops.cc
   uv_mapping/paint_layer_mapping_pick_3d.cc
@@ -455,6 +458,7 @@ if(WITH_GTESTS)
     paint_curve_patch_sampler_test.cc
     paint_image_curve_patch_raster_test.cc
     paint_curve_patch_session_test.cc
+    tests/decal_target_test.cc
     tests/paint_control_points_test.cc
     tests/paint_shape_blend_test.cc
     tests/paint_shape_edit_test.cc

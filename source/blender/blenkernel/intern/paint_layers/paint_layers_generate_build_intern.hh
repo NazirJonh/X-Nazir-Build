@@ -127,6 +127,32 @@ struct ProjectionNodes {
 };
 
 /**
+ * The group-input sockets one projected row's frame values arrive on, and the group input node
+ * they belong to: what #PaintLayersTreeBuilder::projection_nodes_ensure wires every step from.
+ */
+struct ProjectionSockets {
+  bNode *group_input = nullptr;
+  bNodeSocket *center = nullptr;
+  bNodeSocket *size = nullptr;
+  bNodeSocket *rotation = nullptr;
+  bNodeSocket *blend = nullptr;
+  bNodeSocket *clip = nullptr;
+  bNodeSocket *depth = nullptr;
+  bNodeSocket *facing = nullptr;
+  bNodeSocket *facing_dir = nullptr;
+  bNodeSocket *aspect = nullptr;
+  bNodeSocket *tiling = nullptr;
+
+  /** Whether the group input and every socket the build reads exist. */
+  bool valid() const
+  {
+    return group_input != nullptr && center != nullptr && size != nullptr && rotation != nullptr &&
+           blend != nullptr && clip != nullptr && depth != nullptr && facing != nullptr &&
+           facing_dir != nullptr && aspect != nullptr && tiling != nullptr;
+  }
+};
+
+/**
  * What one generator row produces for its group: the float every channel indexes its ramp with,
  * and -- for the one pattern that lays a colour of its own -- that colour, which replaces the
  * ramped grey in a colour channel.
@@ -456,6 +482,17 @@ class PaintLayersTreeBuilder {
   NodeOutput mask_factor_ensure(bNodeTree &tree, LayerGroup &group, const MaterialPaintLayer &layer);
 
   /**
+   * The coverage \a coverage of mask item \a item reshaped around its half by the item's contrast
+   * input: the node form of #BKE_paint_layers_mask_contrast_apply. Built whatever the value is, so
+   * a slider move is a value edit; empty when a node or the input cannot be made.
+   */
+  NodeOutput mask_contrast_nodes_add(bNodeTree &tree,
+                                     LayerGroup &group,
+                                     Vector<bNode *> &nodes,
+                                     const NodeOutput coverage,
+                                     const MaterialPaintLayer &item);
+
+  /**
    * Expose the row's mask factor as the group's `Mask` output, a grayscale colour. Built once per
    * row, when its first channel is built; a row without a mask gets no output.
    */
@@ -772,6 +809,10 @@ class PaintLayersTreeBuilder {
                                            const MaterialPaintLayer &row,
                                            Vector<bNode *> &r_nodes);
 
+  /** The group-input sockets of \a row's projection values in \a tree; not #ProjectionSockets::valid
+   * when the row's interface inputs or the group input node are missing. */
+  ProjectionSockets projection_sockets_get(bNodeTree &tree, const MaterialPaintLayer &row);
+
   /**
    * \a uv, one face UV or the single-sample UV of \a row, through the row's 2D mapping when it
    * applies. \a r_nodes receives the mapping chain made. No mapping returns \a uv unchanged.
@@ -965,6 +1006,8 @@ class PaintLayersTreeBuilder {
   /** A row's base mask opacity and constant inputs, keyed by the row. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_opacity_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_value_inputs_;
+  /** A mask item's contrast input, keyed by the item itself (the base mask item for the base). */
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_contrast_inputs_;
   /** Per row, the base mask's switch input that gates the whole mask stack. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_enabled_inputs_;
   /** A row's UV mapping value inputs, keyed by the row that owns the Mapping. */

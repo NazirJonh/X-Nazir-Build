@@ -808,6 +808,475 @@ bool projection_cube_weights_add(bNodeTree &tree,
   return true;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Projection nodes build steps
+ *
+ * The steps of #PaintLayersTreeBuilder::projection_nodes_ensure, run in the order the nodes are
+ * made. A step that returns false leaves its partial nodes in `made`, which the caller removes.
+ * \{ */
+
+/** The state one projection build threads through its steps. */
+struct ProjectionBuild {
+  bNodeTree &tree;
+  const MaterialPaintLayer &row;
+  const ProjectionSockets &sockets;
+  Vector<bNode *> &made;
+  layout::LayoutGrid &grid;
+
+  int16_t space = 0;
+  int8_t axis = 0;
+
+  bNode *tex_coord = nullptr;
+  NodeOutput rotation_value;
+  /** The frame-space coordinate and its components. */
+  NodeOutput q;
+  SeparateOutputs q_components;
+  /** The world-space normal and the normal Box and Triplanar weigh. */
+  NodeOutput normal;
+  NodeOutput frame_normal;
+  NodeOutput facing_factor;
+  SeparateOutputs tiling;
+
+  NodeOutput uv[3];
+  NodeOutput weights[3];
+  NodeOutput inside;
+};
+
+/** Add a static node and record it in \a made at once, so a failing step removes it too. */
+bNode *projection_node_track(bNodeTree &tree, const int type, Vector<bNode *> &made)
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, type);
+  if (node != nullptr) {
+    made.append(node);
+  }
+  return node;
+}
+
+/** The in-plane axis indices of a Cylinder or Sphere around \a axis: the angle is `atan2(y, x)`. */
+void projection_angle_axes(const int8_t axis, int &r_x_index, int &r_y_index)
+{
+  r_y_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_Z) ? 1 :
+              (axis == MA_PAINT_LAYER_PROJECTION_AXIS_X) ? 2 :
+                                                           0;
+  r_x_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_Z) ? 0 :
+              (axis == MA_PAINT_LAYER_PROJECTION_AXIS_X) ? 1 :
+                                                           2;
+}
+
+/** The controller-space position, as the frame-space coordinate `q`. */
+bool projection_frame_space_build(ProjectionBuild &b)
+{
+  bNode *tex_coord = projection_node_track(b.tree, SH_NODE_TEX_COORD, b.made);
+  if (tex_coord == nullptr) {
+    return false;
+  }
+  if (b.row.projection_object != nullptr) {
+    tex_coord->id = &b.row.projection_object->id;
+    id_us_plus(&b.row.projection_object->id);
+  }
+  bNodeSocket *object_out = socket_out(*tex_coord, "Object");
+  if (object_out == nullptr) {
+    return false;
+  }
+  b.grid.place_extra(*tex_coord);
+  b.tex_coord = tex_coord;
+
+  const NodeOutput position = {tex_coord, object_out};
+  const NodeOutput center_value = {b.sockets.group_input, b.sockets.center};
+  const NodeOutput size_value = {b.sockets.group_input, b.sockets.size};
+  b.rotation_value = {b.sockets.group_input, b.sockets.rotation};
+
+  const NodeOutput centered = projection_vector_math(
+      b.tree, NODE_VECTOR_MATH_SUBTRACT, position, center_value, 0.0f, b.made, b.grid);
+  const NodeOutput rotated_position = projection_vector_rotate(
+      b.tree, centered, b.rotation_value, true, b.made, b.grid);
+  /* The Size input is the frame's full extent, the extent the cage shows, so the frame-space
+   * coordinate reads the offset over the half of it: the axis is inside while
+   * |q| < #PAINT_LAYER_PROJECTION_FRAME_EXTENT. The CPU composite divides by the same half
+   * (#composite_projection_position). */
+  const NodeOutput half_size = projection_vector_math(
+      b.tree, NODE_VECTOR_MATH_SCALE, size_value, {}, 0.5f, b.made, b.grid);
+  const NodeOutput q_unscaled = projection_vector_math(
+      b.tree, NODE_VECTOR_MATH_DIVIDE, rotated_position, half_size, 1.0f, b.made, b.grid);
+  /* The image-aspect fit scales the frame's footprint coordinates before anything reads them, so
+   * the UV square and the frame factor show the same rectangle. The sync scales the depth axis by
+   * one, which leaves the slab untouched. */
+  b.q = projection_vector_math(b.tree,
+                               NODE_VECTOR_MATH_MULTIPLY,
+                               q_unscaled,
+                               {b.sockets.group_input, b.sockets.aspect},
+                               0.0f,
+                               b.made,
+                               b.grid);
+  if (half_size.node == nullptr || b.q.node == nullptr) {
+    return false;
+  }
+  b.q_components = projection_separate(b.tree, b.q, b.made, b.grid);
+  return b.q_components.node != nullptr;
+}
+
+/**
+ * The world-space normal: the Texture Coordinate "Normal" output is in the shaded object's space,
+ * so the facing weight and the Box and Triplanar face weights read the Geometry node instead.
+ */
+bool projection_world_normal_build(ProjectionBuild &b)
+{
+  bNode *geometry = projection_node_track(b.tree, SH_NODE_NEW_GEOMETRY, b.made);
+  if (geometry == nullptr) {
+    return false;
+  }
+  b.grid.place_extra(*geometry);
+  bNodeSocket *world_normal_out = socket_out(*geometry, "Normal");
+  if (world_normal_out == nullptr) {
+    return false;
+  }
+  b.normal = {geometry, world_normal_out};
+  return true;
+}
+
+/**
+ * The frame-space component of the surface normal along the axis: a controller names one object,
+ * whose whole rotation a live node chain cannot name, so the value sync bakes the world-space
+ * direction the world normal reads against; without a controller the Vector Transform node names
+ * the shaded object and the inline rotation applies live. Empty node on failure.
+ */
+NodeOutput projection_facing_component_build(ProjectionBuild &b)
+{
+  if (b.row.projection_object != nullptr) {
+    NodeOutput dot = projection_vector_math(b.tree,
+                                            NODE_VECTOR_MATH_DOT_PRODUCT,
+                                            b.normal,
+                                            {b.sockets.group_input, b.sockets.facing_dir},
+                                            0.0f,
+                                            b.made,
+                                            b.grid);
+    if (dot.node != nullptr) {
+      bNodeSocket *value_out = socket_out(*dot.node, "Value");
+      if (value_out != nullptr) {
+        dot.socket = value_out;
+      }
+    }
+    return dot;
+  }
+  bNode *to_object = projection_node_track(b.tree, SH_NODE_VECT_TRANSFORM, b.made);
+  if (to_object == nullptr) {
+    return {};
+  }
+  if (NodeShaderVectTransform *storage = static_cast<NodeShaderVectTransform *>(to_object->storage))
+  {
+    storage->type = SHD_VECT_TRANSFORM_TYPE_NORMAL;
+    storage->convert_from = SHD_VECT_TRANSFORM_SPACE_WORLD;
+    storage->convert_to = SHD_VECT_TRANSFORM_SPACE_OBJECT;
+  }
+  bNodeSocket *vt_in = socket_in(*to_object, "Vector");
+  bNodeSocket *vt_out = socket_out(*to_object, "Vector");
+  if (vt_in == nullptr || vt_out == nullptr) {
+    return {};
+  }
+  bke::node_add_link(b.tree, *b.normal.node, *b.normal.socket, *to_object, *vt_in);
+  b.grid.place_extra(*to_object);
+  const NodeOutput n_frame = projection_vector_rotate(
+      b.tree, {to_object, vt_out}, b.rotation_value, true, b.made, b.grid);
+  const SeparateOutputs n_components = projection_separate(b.tree, n_frame, b.made, b.grid);
+  if (n_components.node == nullptr) {
+    return {};
+  }
+  return n_components.component[b.axis];
+}
+
+/**
+ * The facing fade. The volume kinds receive the map from every direction, so a facing built on one
+ * frame axis would blank the faces that axis runs across: the facing fade is a Planar input, and
+ * the volume kinds build no facing nodes at all. The CPU composite skips the weight for them too.
+ */
+bool projection_facing_build(ProjectionBuild &b)
+{
+  if (BKE_paint_layers_projection_mode_info(b.space).is_volume) {
+    return true;
+  }
+  const NodeOutput facing_component = projection_facing_component_build(b);
+  if (facing_component.node == nullptr) {
+    return false;
+  }
+  /* The facing weight from the limit's baked scale and offset: one clamped entry, then the
+   * smooth t * t * (3 - 2 t), then the toggle mix. */
+  const SeparateOutputs facing = projection_separate(
+      b.tree, {b.sockets.group_input, b.sockets.facing}, b.made, b.grid);
+  if (facing.node == nullptr) {
+    return false;
+  }
+  const NodeOutput facing_entry = projection_facing_hermite_entry(
+      b.tree, facing_component, facing.component[0], facing.component[1], b.made, b.grid);
+  const NodeOutput facing_hermite = projection_facing_hermite(
+      b.tree, facing_entry, b.made, b.grid);
+  if (facing_hermite.node == nullptr) {
+    return false;
+  }
+  b.facing_factor = projection_clip_mix(
+      b.tree, facing_hermite, facing.component[2], b.made, b.grid);
+  return b.facing_factor.node != nullptr;
+}
+
+/**
+ * The tiling multiplies the UV only: the frame factor reads q itself, so the footprint stays the
+ * frame while the map repeats inside it (the extension is set from UV Wrap).
+ */
+bool projection_tiling_build(ProjectionBuild &b)
+{
+  b.tiling = projection_separate(
+      b.tree, {b.sockets.group_input, b.sockets.tiling}, b.made, b.grid);
+  return b.tiling.node != nullptr;
+}
+
+/**
+ * The frame-space normal for the Box and Triplanar face weights: the world normal rotated by the
+ * frame's rotation. A controller names one object whose whole rotation a live node chain cannot
+ * name, so the value sync bakes the world direction; without one the Vector Transform names the
+ * shaded object and the inline rotation applies live.
+ */
+bool projection_frame_normal_build(ProjectionBuild &b)
+{
+  if (b.row.projection_object == nullptr) {
+    b.frame_normal = projection_vector_rotate(
+        b.tree, b.normal, b.rotation_value, true, b.made, b.grid);
+  }
+  else {
+    b.frame_normal = b.normal;
+  }
+  return b.frame_normal.node != nullptr;
+}
+
+/** The tiled UV of one Planar axis pair. */
+NodeOutput projection_planar_uv(ProjectionBuild &b, const int u_index, const int v_index)
+{
+  const NodeOutput u_tiled = projection_math(b.tree,
+                                             NODE_MATH_MULTIPLY,
+                                             b.q_components.component[u_index],
+                                             b.tiling.component[0],
+                                             0.0f,
+                                             b.made,
+                                             b.grid);
+  const NodeOutput v_tiled = projection_math(b.tree,
+                                             NODE_MATH_MULTIPLY,
+                                             b.q_components.component[v_index],
+                                             b.tiling.component[1],
+                                             0.0f,
+                                             b.made,
+                                             b.grid);
+  const NodeOutput u = projection_affine(b.tree, u_tiled, 0.5f, 0.5f, b.made, b.grid);
+  const NodeOutput v = projection_affine(b.tree, v_tiled, 0.5f, 0.5f, b.made, b.grid);
+  return projection_combine_xyz(b.tree, u, v, 0.0f, b.made, b.grid);
+}
+
+/**
+ * The frame factor of one Planar axis pair: the footprint axes always, the depth slab when its
+ * toggle asks for it. The facing fade joins after the clip mix.
+ */
+NodeOutput projection_planar_factor(ProjectionBuild &b, const int u_index, const int v_index)
+{
+  const NodeOutput u_factor = projection_axis_factor(
+      b.tree, b.q_components.component[u_index], b.made, b.grid);
+  const NodeOutput v_factor = projection_axis_factor(
+      b.tree, b.q_components.component[v_index], b.made, b.grid);
+  NodeOutput factor = projection_math(
+      b.tree, NODE_MATH_MULTIPLY, u_factor, v_factor, 0.0f, b.made, b.grid);
+  const NodeOutput depth_factor = projection_clip_mix(
+      b.tree,
+      projection_axis_factor(b.tree, b.q_components.component[b.axis], b.made, b.grid),
+      {b.sockets.group_input, b.sockets.depth},
+      b.made,
+      b.grid);
+  if (factor.node != nullptr && depth_factor.node != nullptr) {
+    factor = projection_math(
+        b.tree, NODE_MATH_MULTIPLY, factor, depth_factor, 0.0f, b.made, b.grid);
+  }
+  return factor;
+}
+
+bool projection_planar_build(ProjectionBuild &b)
+{
+  /* X: u = y, v = z; Y: u = x, v = z; Z: u = x, v = y. */
+  const int u_index = (b.axis == MA_PAINT_LAYER_PROJECTION_AXIS_X) ? 1 : 0;
+  const int v_index = (b.axis == MA_PAINT_LAYER_PROJECTION_AXIS_Z) ? 1 : 2;
+  b.uv[0] = projection_planar_uv(b, u_index, v_index);
+  b.inside = projection_planar_factor(b, u_index, v_index);
+  return true;
+}
+
+/**
+ * Face 0 is X, 1 is Y, 2 is Z; the weights split the frame-space normal between them. The tiling
+ * wraps each face's UV around the face center, exactly as the CPU composite does.
+ */
+bool projection_box_build(ProjectionBuild &b, const bool triplanar)
+{
+  for (int face = 0; face < 3; face++) {
+    b.uv[face] = projection_face_uv_tiled(
+        b.tree, face, b.q_components.component, b.tiling, b.made, b.grid);
+  }
+  const NodeOutput blend = {b.sockets.group_input, b.sockets.blend};
+  if (!projection_weights_add(
+          b.tree, b.frame_normal, triplanar, blend, b.weights, b.made, b.grid))
+  {
+    return false;
+  }
+  b.inside = projection_inside_all(b.tree, b.q_components.component, b.made, b.grid);
+  return true;
+}
+
+/** The atlas layout is the one table row the CPU bake reads too. */
+bool projection_cube_build(ProjectionBuild &b)
+{
+  const ProjectionCubeLayoutInfo &atlas = BKE_paint_layers_projection_cube_layout_info(
+      BKE_paint_layers_projection_cube_layout_get(b.row));
+  NodeOutput local[3];
+  for (int face = 0; face < 3; face++) {
+    local[face] = projection_face_uv(b.tree, face, b.q_components.component, b.made, b.grid);
+    if (local[face].node == nullptr) {
+      return false;
+    }
+  }
+  NodeOutput cube_weights[6];
+  if (!projection_cube_weights_add(b.tree, b.q_components.component, cube_weights, b.made, b.grid))
+  {
+    return false;
+  }
+  NodeOutput weighted = {};
+  for (int face = 0; face < 6; face++) {
+    const SeparateOutputs local_uv = projection_separate(b.tree, local[face / 2], b.made, b.grid);
+    if (local_uv.node == nullptr) {
+      return false;
+    }
+    const NodeOutput u = projection_affine(
+        b.tree, local_uv.component[0], atlas.cell_size[0], atlas.origin[face][0], b.made, b.grid);
+    const NodeOutput v = projection_affine(
+        b.tree, local_uv.component[1], atlas.cell_size[1], atlas.origin[face][1], b.made, b.grid);
+    const NodeOutput cell = projection_combine_xyz(b.tree, u, v, 0.0f, b.made, b.grid);
+    const NodeOutput scaled = projection_vector_math(
+        b.tree, NODE_VECTOR_MATH_SCALE, cell, cube_weights[face], 1.0f, b.made, b.grid);
+    if (scaled.node == nullptr) {
+      return false;
+    }
+    weighted = (weighted.node == nullptr) ?
+                   scaled :
+                   projection_vector_math(
+                       b.tree, NODE_VECTOR_MATH_ADD, weighted, scaled, 0.0f, b.made, b.grid);
+    if (weighted.node == nullptr) {
+      return false;
+    }
+  }
+  b.uv[0] = weighted;
+  b.inside = projection_inside_all(b.tree, b.q_components.component, b.made, b.grid);
+  return true;
+}
+
+bool projection_cylinder_build(ProjectionBuild &b)
+{
+  int x_index;
+  int y_index;
+  projection_angle_axes(b.axis, x_index, y_index);
+  const NodeOutput y_component = b.q_components.component[y_index];
+  const NodeOutput x_component = b.q_components.component[x_index];
+  const NodeOutput angle = projection_math(
+      b.tree, NODE_MATH_ARCTAN2, y_component, x_component, 0.0f, b.made, b.grid);
+  const NodeOutput u = projection_affine(b.tree, angle, INV_TWO_PI, 0.5f, b.made, b.grid);
+  const NodeOutput height = b.q_components.component[b.axis];
+  const NodeOutput v = projection_affine(b.tree, height, 0.5f, 0.5f, b.made, b.grid);
+  b.uv[0] = projection_combine_xyz(b.tree, u, v, 0.0f, b.made, b.grid);
+  const NodeOutput radial_a = projection_math(
+      b.tree, NODE_MATH_MULTIPLY, y_component, y_component, 0.0f, b.made, b.grid);
+  const NodeOutput radial_b = projection_math(
+      b.tree, NODE_MATH_MULTIPLY, x_component, x_component, 0.0f, b.made, b.grid);
+  const NodeOutput radial = projection_math(
+      b.tree, NODE_MATH_ADD, radial_a, radial_b, 0.0f, b.made, b.grid);
+  const NodeOutput radial_inside = projection_math(
+      b.tree, NODE_MATH_LESS_THAN, radial, {}, 1.0f, b.made, b.grid);
+  const NodeOutput height_inside = projection_inside_axis(b.tree, height, b.made, b.grid);
+  b.inside = projection_inside_product(b.tree, radial_inside, height_inside, b.made, b.grid);
+  return true;
+}
+
+bool projection_sphere_build(ProjectionBuild &b)
+{
+  const NodeOutput length = projection_vector_length(b.tree, b.q, b.made, b.grid);
+  const NodeOutput safe_length = projection_math(
+      b.tree, NODE_MATH_MAXIMUM, length, {}, EPSILON, b.made, b.grid);
+  const int polar_index = b.axis;
+  int x_index;
+  int y_index;
+  projection_angle_axes(b.axis, x_index, y_index);
+  const NodeOutput ratio = projection_math(b.tree,
+                                           NODE_MATH_DIVIDE,
+                                           b.q_components.component[polar_index],
+                                           safe_length,
+                                           1.0f,
+                                           b.made,
+                                           b.grid);
+  const NodeOutput clamped_low = projection_math(
+      b.tree, NODE_MATH_MAXIMUM, ratio, {}, -1.0f, b.made, b.grid);
+  const NodeOutput clamped = projection_math(
+      b.tree, NODE_MATH_MINIMUM, clamped_low, {}, 1.0f, b.made, b.grid);
+  const NodeOutput polar = projection_math_unary(
+      b.tree, NODE_MATH_ARCCOSINE, clamped, b.made, b.grid);
+  const NodeOutput v = projection_affine(b.tree, polar, INV_PI, 0.0f, b.made, b.grid);
+  const NodeOutput angle = projection_math(b.tree,
+                                           NODE_MATH_ARCTAN2,
+                                           b.q_components.component[y_index],
+                                           b.q_components.component[x_index],
+                                           0.0f,
+                                           b.made,
+                                           b.grid);
+  const NodeOutput u = projection_affine(b.tree, angle, INV_TWO_PI, 0.5f, b.made, b.grid);
+  b.uv[0] = projection_combine_xyz(b.tree, u, v, 0.0f, b.made, b.grid);
+  b.inside = projection_math(b.tree, NODE_MATH_LESS_THAN, length, {}, 1.0f, b.made, b.grid);
+  return true;
+}
+
+/** The per-space UVs and the inside factor. */
+bool projection_space_build(ProjectionBuild &b)
+{
+  bool ok = false;
+  switch (b.space) {
+    case MA_PAINT_LAYER_MAPPING_SPACE_PLANAR:
+      ok = projection_planar_build(b);
+      break;
+    case MA_PAINT_LAYER_MAPPING_SPACE_BOX:
+    case MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR:
+      ok = projection_box_build(b, BKE_paint_layers_projection_mode_info(b.space).uses_blend);
+      break;
+    case MA_PAINT_LAYER_MAPPING_SPACE_CUBE:
+      ok = projection_cube_build(b);
+      break;
+    case MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER:
+      ok = projection_cylinder_build(b);
+      break;
+    case MA_PAINT_LAYER_MAPPING_SPACE_SPHERE:
+      ok = projection_sphere_build(b);
+      break;
+    default:
+      break;
+  }
+  return ok && b.uv[0].node != nullptr && b.inside.node != nullptr;
+}
+
+/**
+ * The frame clip factor: `mix(1, inside, clip)`, then the facing fade. The mirrored copy on the far
+ * side and the stretched sweep over faces parallel to the axis are artifacts of the direction, not
+ * of the frame's bounds, so the fade hides them even while the map repeats. The volume kinds build
+ * no facing, so their frame factor is the clip mix alone.
+ */
+NodeOutput projection_frame_clip_build(ProjectionBuild &b)
+{
+  const NodeOutput clip = {b.sockets.group_input, b.sockets.clip};
+  NodeOutput clip_factor = projection_clip_mix(b.tree, b.inside, clip, b.made, b.grid);
+  if (clip_factor.node != nullptr && b.facing_factor.node != nullptr) {
+    clip_factor = projection_math(
+        b.tree, NODE_MATH_MULTIPLY, clip_factor, b.facing_factor, 0.0f, b.made, b.grid);
+  }
+  return clip_factor;
+}
+
+/** \} */
+
 }  // namespace
 
 bNodeSocket *PaintLayersTreeBuilder::projection_input_socket(
@@ -827,6 +1296,24 @@ bNodeSocket *PaintLayersTreeBuilder::projection_input_socket(
       *group_input, SOCK_OUT, UString::from_ptr_noinline((*iface)->identifier));
 }
 
+ProjectionSockets PaintLayersTreeBuilder::projection_sockets_get(bNodeTree &tree,
+                                                                 const MaterialPaintLayer &row)
+{
+  ProjectionSockets sockets;
+  sockets.center = projection_input_socket(tree, row, projection_center_inputs_);
+  sockets.size = projection_input_socket(tree, row, projection_size_inputs_);
+  sockets.rotation = projection_input_socket(tree, row, projection_rotation_inputs_);
+  sockets.blend = projection_input_socket(tree, row, projection_blend_inputs_);
+  sockets.clip = projection_input_socket(tree, row, projection_clip_inputs_);
+  sockets.depth = projection_input_socket(tree, row, projection_depth_inputs_);
+  sockets.facing = projection_input_socket(tree, row, projection_facing_inputs_);
+  sockets.facing_dir = projection_input_socket(tree, row, projection_facing_dir_inputs_);
+  sockets.aspect = projection_input_socket(tree, row, projection_aspect_inputs_);
+  sockets.tiling = projection_input_socket(tree, row, projection_tiling_inputs_);
+  sockets.group_input = projection_group_input(tree);
+  return sockets;
+}
+
 ProjectionNodes *PaintLayersTreeBuilder::projection_nodes_ensure(
     bNodeTree &tree,
     const MaterialPaintLayer &row,
@@ -839,432 +1326,37 @@ ProjectionNodes *PaintLayersTreeBuilder::projection_nodes_ensure(
     return found;
   }
 
-  bNodeSocket *center_socket = projection_input_socket(tree, row, projection_center_inputs_);
-  bNodeSocket *size_socket = projection_input_socket(tree, row, projection_size_inputs_);
-  bNodeSocket *rotation_socket = projection_input_socket(
-      tree, row, projection_rotation_inputs_);
-  bNodeSocket *blend_socket = projection_input_socket(tree, row, projection_blend_inputs_);
-  bNodeSocket *clip_socket = projection_input_socket(tree, row, projection_clip_inputs_);
-  bNodeSocket *depth_socket = projection_input_socket(tree, row, projection_depth_inputs_);
-  bNodeSocket *facing_socket = projection_input_socket(tree, row, projection_facing_inputs_);
-  bNodeSocket *facing_dir_socket = projection_input_socket(
-      tree, row, projection_facing_dir_inputs_);
-  bNodeSocket *aspect_socket = projection_input_socket(tree, row, projection_aspect_inputs_);
-  bNodeSocket *tiling_socket = projection_input_socket(tree, row, projection_tiling_inputs_);
-  bNode *group_input = projection_group_input(tree);
-  if (center_socket == nullptr || size_socket == nullptr || rotation_socket == nullptr ||
-      blend_socket == nullptr || clip_socket == nullptr || depth_socket == nullptr ||
-      facing_socket == nullptr || facing_dir_socket == nullptr || aspect_socket == nullptr ||
-      tiling_socket == nullptr ||
-      group_input == nullptr)
-  {
+  const ProjectionSockets sockets = this->projection_sockets_get(tree, row);
+  if (!sockets.valid()) {
     return nullptr;
   }
 
   Vector<bNode *> made;
-  const auto fail = [&]() {
+  ProjectionBuild build{tree, row, sockets, made, grid_};
+  build.space = row.mapping.space;
+  build.axis = BKE_paint_layers_projection_axis_get(row);
+
+  /* The order is the node creation order of the graph: the frame-space position, the world normal,
+   * the facing fade, the tiling, the frame normal, then the per-space UVs. */
+  const bool built = projection_frame_space_build(build) && projection_world_normal_build(build) &&
+                     projection_facing_build(build) && projection_tiling_build(build) &&
+                     projection_frame_normal_build(build) && projection_space_build(build);
+  const NodeOutput clip_factor = built ? projection_frame_clip_build(build) : NodeOutput();
+  if (clip_factor.node == nullptr) {
     for (bNode *node : made) {
       bke::node_remove_node(nullptr, tree, *node, true, false);
     }
-    return static_cast<ProjectionNodes *>(nullptr);
-  };
-
-  bNode *tex_coord = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_COORD);
-  if (tex_coord == nullptr) {
-    return fail();
-  }
-  if (row.projection_object != nullptr) {
-    /* The node owns a user of its own, as any node that names an ID does; the row's user is a
-     * separate one, held by the row and released with it. */
-    tex_coord->id = &row.projection_object->id;
-    id_us_plus(&row.projection_object->id);
-  }
-  bNodeSocket *object_out = socket_out(*tex_coord, "Object");
-  if (object_out == nullptr) {
-    made.append(tex_coord);
-    return fail();
-  }
-  made.append(tex_coord);
-  grid_.place_extra(*tex_coord);
-
-  const NodeOutput position = {tex_coord, object_out};
-  const NodeOutput center_value = {group_input, center_socket};
-  const NodeOutput rotation_value = {group_input, rotation_socket};
-  const NodeOutput size_value = {group_input, size_socket};
-
-  const NodeOutput centered = projection_vector_math(
-      tree, NODE_VECTOR_MATH_SUBTRACT, position, center_value, 0.0f, made, grid_);
-  const NodeOutput rotated_position = projection_vector_rotate(
-      tree, centered, rotation_value, true, made, grid_);
-  /* The Size input is the frame's full extent, the extent the cage shows, so the frame-space
-   * coordinate reads the offset over the half of it: the axis is inside while
-   * |q| < #PAINT_LAYER_PROJECTION_FRAME_EXTENT. The CPU composite divides by the same half
-   * (#composite_projection_position). */
-  const NodeOutput half_size = projection_vector_math(
-      tree, NODE_VECTOR_MATH_SCALE, size_value, {}, 0.5f, made, grid_);
-  const NodeOutput q_unscaled = projection_vector_math(
-      tree, NODE_VECTOR_MATH_DIVIDE, rotated_position, half_size, 1.0f, made, grid_);
-  /* The image-aspect fit scales the frame's footprint coordinates before anything reads them, so
-   * the UV square and the frame factor show the same rectangle. The sync scales the depth axis by
-   * one, which leaves the slab untouched. */
-  const NodeOutput q = projection_vector_math(
-      tree, NODE_VECTOR_MATH_MULTIPLY, q_unscaled, {group_input, aspect_socket}, 0.0f, made, grid_);
-  if (half_size.node == nullptr || q.node == nullptr) {
-    return fail();
-  }
-  const SeparateOutputs q_components = projection_separate(tree, q, made, grid_);
-  if (q_components.node == nullptr) {
-    return fail();
-  }
-
-  const int16_t space = row.mapping.space;
-  const ProjectionModeInfo &mode = BKE_paint_layers_projection_mode_info(space);
-  const int8_t axis = BKE_paint_layers_projection_axis_get(row);
-  NodeOutput uv[3];
-  NodeOutput weights[3];
-  NodeOutput inside;
-
-  /* The world-space normal: the Texture Coordinate "Normal" output is in the shaded object's
-   * space, so the facing weight and the Box and Triplanar face weights read the Geometry node
-   * instead. */
-  bNode *geometry = bke::node_add_static_node(nullptr, tree, SH_NODE_NEW_GEOMETRY);
-  if (geometry == nullptr) {
-    return fail();
-  }
-  made.append(geometry);
-  grid_.place_extra(*geometry);
-  bNodeSocket *world_normal_out = socket_out(*geometry, "Normal");
-  if (world_normal_out == nullptr) {
-    return fail();
-  }
-  const NodeOutput normal = {geometry, world_normal_out};
-  /* The volume kinds receive the map from every direction, so a facing built on one frame axis
-   * would blank the faces that axis runs across: the facing fade is a Planar input, and the
-   * volume kinds build no facing nodes at all. The CPU composite skips the weight for them too. */
-  const bool volume_space = ELEM(space,
-                                 MA_PAINT_LAYER_MAPPING_SPACE_BOX,
-                                 MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR,
-                                 MA_PAINT_LAYER_MAPPING_SPACE_CUBE,
-                                 MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER,
-                                 MA_PAINT_LAYER_MAPPING_SPACE_SPHERE);
-  NodeOutput facing_factor;
-  if (!volume_space) {
-    /* The frame-space component of the surface normal along the axis: a controller names one
-     * object, whose whole rotation a live node chain cannot name, so the value sync bakes the
-     * world-space direction the world normal reads against; without a controller the Vector
-     * Transform node names the shaded object and the inline rotation applies live. */
-    NodeOutput facing_component;
-    if (row.projection_object != nullptr) {
-      NodeOutput dot = projection_vector_math(tree,
-                                              NODE_VECTOR_MATH_DOT_PRODUCT,
-                                              normal,
-                                              {group_input, facing_dir_socket},
-                                              0.0f,
-                                              made,
-                                              grid_);
-      if (dot.node != nullptr) {
-        bNodeSocket *value_out = socket_out(*dot.node, "Value");
-        if (value_out != nullptr) {
-          dot.socket = value_out;
-        }
-      }
-      facing_component = dot;
-    }
-    else {
-      bNode *to_object = bke::node_add_static_node(nullptr, tree, SH_NODE_VECT_TRANSFORM);
-      if (to_object == nullptr) {
-        return fail();
-      }
-      if (NodeShaderVectTransform *storage =
-              static_cast<NodeShaderVectTransform *>(to_object->storage))
-      {
-        storage->type = SHD_VECT_TRANSFORM_TYPE_NORMAL;
-        storage->convert_from = SHD_VECT_TRANSFORM_SPACE_WORLD;
-        storage->convert_to = SHD_VECT_TRANSFORM_SPACE_OBJECT;
-      }
-      bNodeSocket *vt_in = socket_in(*to_object, "Vector");
-      bNodeSocket *vt_out = socket_out(*to_object, "Vector");
-      if (vt_in == nullptr || vt_out == nullptr) {
-        made.append(to_object);
-        return fail();
-      }
-      bke::node_add_link(tree, *geometry, *world_normal_out, *to_object, *vt_in);
-      made.append(to_object);
-      grid_.place_extra(*to_object);
-      const NodeOutput n_frame = projection_vector_rotate(
-          tree, {to_object, vt_out}, rotation_value, true, made, grid_);
-      const SeparateOutputs n_components = projection_separate(tree, n_frame, made, grid_);
-      if (n_components.node == nullptr) {
-        return fail();
-      }
-      facing_component = n_components.component[axis];
-    }
-    if (facing_component.node == nullptr) {
-      return fail();
-    }
-    /* The facing weight from the limit's baked scale and offset: one clamped entry, then the
-     * smooth t * t * (3 - 2 t), then the toggle mix. */
-    const SeparateOutputs facing = projection_separate(
-        tree, {group_input, facing_socket}, made, grid_);
-    if (facing.node == nullptr) {
-      return fail();
-    }
-    const NodeOutput facing_entry = projection_facing_hermite_entry(
-        tree, facing_component, facing.component[0], facing.component[1], made, grid_);
-    const NodeOutput facing_hermite = projection_facing_hermite(tree, facing_entry, made, grid_);
-    if (facing_hermite.node == nullptr) {
-      return fail();
-    }
-    facing_factor = projection_clip_mix(tree, facing_hermite, facing.component[2], made, grid_);
-    if (facing_factor.node == nullptr) {
-      return fail();
-    }
-  }
-
-  /* The tiling multiplies the UV only: the frame factor reads q itself, so the footprint stays the
-   * frame while the map repeats inside it (the extension is set from UV Wrap). */
-  const SeparateOutputs tiling = projection_separate(
-      tree, {group_input, tiling_socket}, made, grid_);
-  if (tiling.node == nullptr) {
-    return fail();
-  }
-  const auto axis_uv = [&](const int u_index, const int v_index) -> NodeOutput {
-    const NodeOutput u_tiled = projection_math(tree,
-                                               NODE_MATH_MULTIPLY,
-                                               q_components.component[u_index],
-                                               tiling.component[0],
-                                               0.0f,
-                                               made,
-                                               grid_);
-    const NodeOutput v_tiled = projection_math(tree,
-                                               NODE_MATH_MULTIPLY,
-                                               q_components.component[v_index],
-                                               tiling.component[1],
-                                               0.0f,
-                                               made,
-                                               grid_);
-    const NodeOutput u = projection_affine(tree, u_tiled, 0.5f, 0.5f, made, grid_);
-    const NodeOutput v = projection_affine(tree, v_tiled, 0.5f, 0.5f, made, grid_);
-    return projection_combine_xyz(tree, u, v, 0.0f, made, grid_);
-  };
-
-  /* The frame factor of one Planar axis pair: the footprint axes always, the depth slab when its
-   * toggle asks for it. The facing fade joins after the clip mix, below. */
-  const auto planar_factor = [&](const int axis_index,
-                                 const int u_index,
-                                 const int v_index) -> NodeOutput {
-    const NodeOutput u_factor = projection_axis_factor(
-        tree, q_components.component[u_index], made, grid_);
-    const NodeOutput v_factor = projection_axis_factor(
-        tree, q_components.component[v_index], made, grid_);
-    NodeOutput factor = projection_math(
-        tree, NODE_MATH_MULTIPLY, u_factor, v_factor, 0.0f, made, grid_);
-    const NodeOutput depth_factor = projection_clip_mix(
-        tree,
-        projection_axis_factor(tree, q_components.component[axis_index], made, grid_),
-        {group_input, depth_socket},
-        made,
-        grid_);
-    if (factor.node != nullptr && depth_factor.node != nullptr) {
-      factor = projection_math(
-          tree, NODE_MATH_MULTIPLY, factor, depth_factor, 0.0f, made, grid_);
-    }
-    return factor;
-  };
-
-  /* The frame-space normal for the Box and Triplanar face weights: the world normal rotated by
-   * the frame's rotation. A controller names one object whose whole rotation a live node chain
-   * cannot name, so the value sync bakes the world direction; without one the Vector Transform
-   * names the shaded object and the inline rotation applies live. */
-  NodeOutput frame_normal;
-  if (row.projection_object == nullptr) {
-    frame_normal = projection_vector_rotate(tree, normal, rotation_value, true, made, grid_);
-  }
-  else {
-    frame_normal = normal;
-  }
-  if (frame_normal.node == nullptr) {
-    return fail();
-  }
-
-  switch (space) {
-    case MA_PAINT_LAYER_MAPPING_SPACE_PLANAR: {
-      /* X: u = y, v = z; Y: u = x, v = z; Z: u = x, v = y. */
-      const int u_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_X) ? 1 : 0;
-      const int v_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_Z) ? 1 : 2;
-      uv[0] = axis_uv(u_index, v_index);
-      inside = planar_factor(axis, u_index, v_index);
-      break;
-    }
-    case MA_PAINT_LAYER_MAPPING_SPACE_BOX:
-    case MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR: {
-      /* Face 0 is X, 1 is Y, 2 is Z; the weights split the frame-space normal between them. The
-       * tiling wraps each face's UV around the face center, exactly as the CPU composite does. */
-      for (int face = 0; face < 3; face++) {
-        uv[face] = projection_face_uv_tiled(
-            tree, face, q_components.component, tiling, made, grid_);
-      }
-      const NodeOutput blend = {group_input, blend_socket};
-      if (!projection_weights_add(tree,
-                                  frame_normal,
-                                  mode.uses_blend,
-                                  blend,
-                                  weights,
-                                  made,
-                                  grid_))
-      {
-        return fail();
-      }
-      inside = projection_inside_all(tree, q_components.component, made, grid_);
-      break;
-    }
-    case MA_PAINT_LAYER_MAPPING_SPACE_CUBE: {
-      /* The atlas layout is the one table row the CPU bake reads too. */
-      const ProjectionCubeLayoutInfo &atlas = BKE_paint_layers_projection_cube_layout_info(
-          BKE_paint_layers_projection_cube_layout_get(row));
-      NodeOutput local[3];
-      for (int face = 0; face < 3; face++) {
-        local[face] = projection_face_uv(tree, face, q_components.component, made, grid_);
-        if (local[face].node == nullptr) {
-          return fail();
-        }
-      }
-      NodeOutput cube_weights[6];
-      if (!projection_cube_weights_add(
-              tree, q_components.component, cube_weights, made, grid_))
-      {
-        return fail();
-      }
-      NodeOutput weighted = {};
-      for (int face = 0; face < 6; face++) {
-        const SeparateOutputs local_uv = projection_separate(
-            tree, local[face / 2], made, grid_);
-        if (local_uv.node == nullptr) {
-          return fail();
-        }
-        const NodeOutput u = projection_affine(
-            tree, local_uv.component[0], atlas.cell_size[0], atlas.origin[face][0], made, grid_);
-        const NodeOutput v = projection_affine(
-            tree, local_uv.component[1], atlas.cell_size[1], atlas.origin[face][1], made, grid_);
-        const NodeOutput cell = projection_combine_xyz(tree, u, v, 0.0f, made, grid_);
-        const NodeOutput scaled = projection_vector_math(
-            tree, NODE_VECTOR_MATH_SCALE, cell, cube_weights[face], 1.0f, made, grid_);
-        if (scaled.node == nullptr) {
-          return fail();
-        }
-        weighted = (weighted.node == nullptr) ?
-                       scaled :
-                       projection_vector_math(
-                           tree, NODE_VECTOR_MATH_ADD, weighted, scaled, 0.0f, made, grid_);
-        if (weighted.node == nullptr) {
-          return fail();
-        }
-      }
-      uv[0] = weighted;
-      inside = projection_inside_all(tree, q_components.component, made, grid_);
-      break;
-    }
-    case MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER: {
-      const NodeOutput y_component = q_components.component[(axis ==
-                                                             MA_PAINT_LAYER_PROJECTION_AXIS_Z) ?
-                                                                1 :
-                                                                (axis ==
-                                                                 MA_PAINT_LAYER_PROJECTION_AXIS_X) ?
-                                                                2 :
-                                                                0];
-      const NodeOutput x_component = q_components.component[(axis ==
-                                                             MA_PAINT_LAYER_PROJECTION_AXIS_Z) ?
-                                                                0 :
-                                                                (axis ==
-                                                                 MA_PAINT_LAYER_PROJECTION_AXIS_X) ?
-                                                                1 :
-                                                                2];
-      const NodeOutput angle = projection_math(
-          tree, NODE_MATH_ARCTAN2, y_component, x_component, 0.0f, made, grid_);
-      const NodeOutput u = projection_affine(tree, angle, INV_TWO_PI, 0.5f, made, grid_);
-      const NodeOutput height = q_components.component[axis];
-      const NodeOutput v = projection_affine(tree, height, 0.5f, 0.5f, made, grid_);
-      uv[0] = projection_combine_xyz(tree, u, v, 0.0f, made, grid_);
-      const NodeOutput radial_a = projection_math(
-          tree, NODE_MATH_MULTIPLY, y_component, y_component, 0.0f, made, grid_);
-      const NodeOutput radial_b = projection_math(
-          tree, NODE_MATH_MULTIPLY, x_component, x_component, 0.0f, made, grid_);
-      const NodeOutput radial = projection_math(
-          tree, NODE_MATH_ADD, radial_a, radial_b, 0.0f, made, grid_);
-      const NodeOutput radial_inside = projection_math(
-          tree, NODE_MATH_LESS_THAN, radial, {}, 1.0f, made, grid_);
-      const NodeOutput height_inside = projection_inside_axis(tree, height, made, grid_);
-      inside = projection_inside_product(
-          tree, radial_inside, height_inside, made, grid_);
-      break;
-    }
-    case MA_PAINT_LAYER_MAPPING_SPACE_SPHERE: {
-      const NodeOutput length = projection_vector_length(tree, q, made, grid_);
-      const NodeOutput safe_length = projection_math(
-          tree, NODE_MATH_MAXIMUM, length, {}, EPSILON, made, grid_);
-      const int polar_index = axis;
-      const int y_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_Z) ? 1 :
-                          (axis == MA_PAINT_LAYER_PROJECTION_AXIS_X) ? 2 :
-                                                                       0;
-      const int x_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_Z) ? 0 :
-                          (axis == MA_PAINT_LAYER_PROJECTION_AXIS_X) ? 1 :
-                                                                       2;
-      const NodeOutput ratio = projection_math(tree,
-                                               NODE_MATH_DIVIDE,
-                                               q_components.component[polar_index],
-                                               safe_length,
-                                               1.0f,
-                                               made,
-                                               grid_);
-      const NodeOutput clamped_low = projection_math(
-          tree, NODE_MATH_MAXIMUM, ratio, {}, -1.0f, made, grid_);
-      const NodeOutput clamped = projection_math(
-          tree, NODE_MATH_MINIMUM, clamped_low, {}, 1.0f, made, grid_);
-      const NodeOutput polar = projection_math_unary(
-          tree, NODE_MATH_ARCCOSINE, clamped, made, grid_);
-      const NodeOutput v = projection_affine(tree, polar, INV_PI, 0.0f, made, grid_);
-      const NodeOutput angle = projection_math(tree,
-                                               NODE_MATH_ARCTAN2,
-                                               q_components.component[y_index],
-                                               q_components.component[x_index],
-                                               0.0f,
-                                               made,
-                                               grid_);
-      const NodeOutput u = projection_affine(tree, angle, INV_TWO_PI, 0.5f, made, grid_);
-      uv[0] = projection_combine_xyz(tree, u, v, 0.0f, made, grid_);
-      inside = projection_math(tree, NODE_MATH_LESS_THAN, length, {}, 1.0f, made, grid_);
-      break;
-    }
-    default:
-      return fail();
-  }
-
-  if (uv[0].node == nullptr || inside.node == nullptr) {
-    return fail();
-  }
-
-  const NodeOutput clip = {group_input, clip_socket};
-  NodeOutput clip_factor = projection_clip_mix(tree, inside, clip, made, grid_);
-  /* The facing fade joins after the clip mix: the mirrored copy on the far side and the stretched
-   * sweep over faces parallel to the axis are artifacts of the direction, not of the frame's
-   * bounds, so they hide even while the map repeats. The volume kinds build no facing, so their
-   * frame factor is the clip mix alone. */
-  if (clip_factor.node != nullptr && facing_factor.node != nullptr) {
-    clip_factor = projection_math(
-        tree, NODE_MATH_MULTIPLY, clip_factor, facing_factor, 0.0f, made, grid_);
-  }
-  if (clip_factor.node == nullptr) {
-    return fail();
+    return nullptr;
   }
 
   ProjectionNodes projection;
-  projection.tex_coord = tex_coord;
-  projection.position = q.node;
-  projection.normal = frame_normal.node;
-  projection.samples = mode.samples_num;
+  projection.tex_coord = build.tex_coord;
+  projection.position = build.q.node;
+  projection.normal = build.frame_normal.node;
+  projection.samples = BKE_paint_layers_projection_mode_info(build.space).samples_num;
   for (int i = 0; i < projection.samples; i++) {
-    projection.uv[i] = uv[i].node;
-    projection.weight[i] = weights[i].node;
+    projection.uv[i] = build.uv[i].node;
+    projection.weight[i] = build.weights[i].node;
   }
   projection.clip = clip_factor.node;
 

@@ -123,6 +123,19 @@ std::unique_ptr<ui::DropTargetInterface> image_id_browser_drop_target_get(bConte
 std::unique_ptr<ui::DropTargetInterface> curve_patch_texture_list_drop_target_get(
     bContext *C, const ARegion *region, const wmEvent *event);
 
+/** The button context string that marks a Decal panel drop zone; its value is the channel. */
+inline constexpr const char *DECAL_DROP_CHANNEL_CONTEXT = "decal_drop_channel";
+
+/**
+ * Return a drop target for a Decal panel drop zone under the cursor: the dropped image
+ * becomes a new decal through #PAINT_OT_decal_add_image. The Python UI marks the button with
+ * the `decal_drop_channel` context string; a button without it is not a decal drop zone.
+ * Used by the generic button drop dispatch.
+ */
+std::unique_ptr<ui::DropTargetInterface> decal_image_drop_target_get(bContext *C,
+                                                                     const ARegion *region,
+                                                                     const wmEvent *event);
+
 /**
  * Register the brush texture-slot image/texture drop box in the "User Interface" drop-box map.
  */

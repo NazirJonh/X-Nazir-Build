@@ -16,6 +16,7 @@
 
 #include "BKE_paint_layers_generate.hh"
 
+#include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
@@ -415,6 +416,50 @@ NodeOutput PaintLayersTreeBuilder::map_encoding_nodes_add(bNodeTree &tree,
   return {};
 }
 
+NodeOutput PaintLayersTreeBuilder::mask_contrast_nodes_add(bNodeTree &tree,
+                                                           LayerGroup &group,
+                                                           Vector<bNode *> &nodes,
+                                                           const NodeOutput coverage,
+                                                           const MaterialPaintLayer &item)
+{
+  bNodeTreeInterfaceSocket **contrast_iface = mask_contrast_inputs_.lookup_ptr(&item);
+  bNodeSocket *contrast = (contrast_iface != nullptr) ?
+                              this->group_input_socket(group, **contrast_iface) :
+                              nullptr;
+  if (contrast == nullptr) {
+    /* No input means the item lays without a contrast (an item kind the value pass does not
+     * describe): the coverage passes through untouched instead of failing the whole mask. */
+    return coverage;
+  }
+  /* Math over \a a and the constant \a b, as a #NodeOutput. */
+  const auto with_constant = [&](const int operation, const NodeOutput a, const float b) {
+    bNode *node = math_constant_node_add(tree, grid_, nodes, operation, a, b);
+    return (node != nullptr) ? NodeOutput{node, socket_out(*node, "Value")} : NodeOutput{};
+  };
+
+  /* `clamp((cov - 0.5) * contrast + 0.5)`, the node form of #BKE_paint_layers_mask_contrast_apply
+   * (the group value is the actual multiplier, not the DNA offset):
+   * the contrast is a group value, so a slider move never rewires the chain. */
+  const NodeOutput centered = with_constant(NODE_MATH_SUBTRACT, coverage, 0.5f);
+  if (centered.node == nullptr) {
+    return {};
+  }
+  const NodeOutput scaled = math_node_add(
+      tree, grid_, nodes, NODE_MATH_MULTIPLY, centered, {group.group_input, contrast}, 0.0f);
+  if (scaled.node == nullptr) {
+    return {};
+  }
+  const NodeOutput shifted = with_constant(NODE_MATH_ADD, scaled, 0.5f);
+  if (shifted.node == nullptr) {
+    return {};
+  }
+  const NodeOutput low = with_constant(NODE_MATH_MAXIMUM, shifted, 0.0f);
+  if (low.node == nullptr) {
+    return {};
+  }
+  return with_constant(NODE_MATH_MINIMUM, low, 1.0f);
+}
+
 NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
                                                       LayerGroup &group,
                                                       const MaterialPaintLayer &layer)
@@ -482,6 +527,11 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       return {};
     }
   }
+  grey = this->mask_contrast_nodes_add(tree, group, nodes, grey, *mask);
+  if (grey.node == nullptr) {
+    discard();
+    return {};
+  }
 
   /* `F = mix(1, C, A * opacity)`: the Multiply item over a factor of one. */
   NodeOutput weight = {group.group_input, opacity};
@@ -547,6 +597,13 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       /* `M = lerp(M, f(M), opacity)`: the filter works on the coverage so far, as a grey. */
       NodeOutput filtered = current;
       if (this->filter_lay(tree, group, item, -1, filtered)) {
+        /* The filter's result is the coverage the item leaves; the contrast reshapes it like any
+         * item's. */
+        filtered = this->mask_contrast_nodes_add(tree, group, nodes, filtered, item);
+        if (filtered.node == nullptr) {
+          discard();
+          return {};
+        }
         current = filtered;
       }
       continue;
@@ -587,6 +644,11 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       }
       match = math_node_add(
           tree, grid_, nodes, NODE_MATH_MULTIPLY, match, {group.group_input, item_value});
+      if (match.socket == nullptr) {
+        discard();
+        return {};
+      }
+      match = this->mask_contrast_nodes_add(tree, group, nodes, match, item);
       if (match.socket == nullptr) {
         discard();
         return {};
@@ -755,6 +817,11 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
         discard();
         return {};
       }
+    }
+    item_grey = this->mask_contrast_nodes_add(tree, group, nodes, item_grey, item);
+    if (item_grey.node == nullptr) {
+      discard();
+      return {};
     }
     NodeOutput item_weight = {group.group_input, item_opacity};
     if (item_alpha.node != nullptr) {

@@ -25,6 +25,7 @@
 #include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_report.hh"
 
 #include "../paint_layers_intern.hh"

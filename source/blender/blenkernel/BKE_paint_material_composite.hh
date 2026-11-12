@@ -361,6 +361,14 @@ struct PaintMaterialCompositeGradient {
    */
   ColorBand color_ramp = {};
   bool color_ramp_valid = false;
+  /**
+   * A UV line under a projected row reads the frame's projected UV instead of the texel's own:
+   * #projection holds the frame to project through, and the evaluators that can reach the painted
+   * surface render the gradient through it (the ones that cannot keep the plain UV read).
+   */
+  bool projected = false;
+  /** The frame a #projected line reads; meaningless otherwise. */
+  PaintMaterialCompositeProjection projection;
 
   PaintMaterialCompositeGradient() = default;
   PaintMaterialCompositeGradient(const PaintMaterialCompositeGradient &other)
@@ -380,7 +388,9 @@ struct PaintMaterialCompositeGradient {
         space(other.space),
         params(other.params),
         color_ramp(other.color_ramp),
-        color_ramp_valid(other.color_ramp_valid)
+        color_ramp_valid(other.color_ramp_valid),
+        projected(other.projected),
+        projection(other.projection)
   {
   }
   PaintMaterialCompositeGradient(PaintMaterialCompositeGradient &&other) noexcept
@@ -400,7 +410,9 @@ struct PaintMaterialCompositeGradient {
         space(other.space),
         params(other.params),
         color_ramp(other.color_ramp),
-        color_ramp_valid(other.color_ramp_valid)
+        color_ramp_valid(other.color_ramp_valid),
+        projected(other.projected),
+        projection(std::move(other.projection))
   {
   }
   PaintMaterialCompositeGradient &operator=(const PaintMaterialCompositeGradient &other)
@@ -423,6 +435,8 @@ struct PaintMaterialCompositeGradient {
       params = other.params;
       color_ramp = other.color_ramp;
       color_ramp_valid = other.color_ramp_valid;
+      projected = other.projected;
+      projection = other.projection;
     }
     return *this;
   }
@@ -446,6 +460,8 @@ struct PaintMaterialCompositeGradient {
       params = other.params;
       color_ramp = other.color_ramp;
       color_ramp_valid = other.color_ramp_valid;
+      projected = other.projected;
+      projection = std::move(other.projection);
     }
     return *this;
   }
@@ -481,6 +497,15 @@ bool BKE_paint_material_generator_sample(const PaintMaterialCompositeGradient &g
                                          int width,
                                          int height,
                                          float r_rgba[4]);
+
+/**
+ * The colour a generator lays at \a coordinate, in the space the generator reads (UV rows pass
+ * (u, v, 0)): the factor through the generator table, then the ramp or scalar ends. Straight
+ * scene-linear RGBA. The one formula the texel evaluation and the projected render share.
+ */
+bool BKE_paint_material_generator_sample_coordinate(const PaintMaterialCompositeGradient &generator,
+                                                    const float3 &coordinate,
+                                                    float r_rgba[4]);
 
 /** The Gradient-only name this sampler had before the other generators: kept so a caller written
  * against it still builds. */
@@ -541,6 +566,15 @@ inline bool height_compare_won(const float d_below, const float d_layer)
  * \return the encoded height.
  */
 float height_blend_step(int height_blend, float below, float layer, float scale, float factor);
+
+/**
+ * Render a projected UV gradient (\a gradient.projected) into the painted object's UV space as
+ * straight scene-linear RGBA: the same walk a projected map's resample takes, with the ramp
+ * evaluated at the frame's projected UV instead of a map sampled there. Null when the object, its
+ * mesh or its render UV map is missing, in which case the caller keeps the plain UV read.
+ */
+ImBuf *BKE_paint_material_gradient_projected_render(
+    const PaintMaterialCompositeGradient &gradient, int ref_width, int ref_height, int tile_number);
 
 /**
  * What an image layer and its buffer twin share verbatim. The stack builders copy it as one value
@@ -792,6 +826,12 @@ struct PaintMaterialCompositeMaskItem {
   float constant_gray = 1.0f;
   /** The item's effective opacity (enabled folded in). */
   float opacity = 1.0f;
+  /**
+   * The contrast the item's coverage is reshaped around its half with, the multiplier itself (1 for
+   * every file written before the option). The generator's nodes and the CPU mask apply
+   * #BKE_paint_layers_mask_contrast_apply with it.
+   */
+  float contrast = 1.0f;
   /** How the item combines with the factor below it: the base mask's Multiply unless set. */
   CompositeBlend blend = CompositeBlend::Multiply;
   /** Reads the grey #C as `1 - C`, the alpha untouched; a mask correction's choice. */
@@ -943,6 +983,8 @@ struct PaintMaterialCompositeMaskBuffer {
   bool is_mesh_map_scalar = false;
   float constant_gray = 1.0f;
   float opacity = 1.0f;
+  /** The contrast the item's coverage is reshaped around its half with (1 is the identity). */
+  float contrast = 1.0f;
   CompositeBlend blend = CompositeBlend::Multiply;
   bool invert = false;
   /** See #PaintMaterialCompositeMaskItem::filter. */

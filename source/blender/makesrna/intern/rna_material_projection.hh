@@ -16,6 +16,7 @@
 #pragma once
 
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_gradient.hh"
 
 #include <cfloat>
 
@@ -205,9 +206,39 @@ static int rna_MaterialPaintLayer_mapping_space_editable(const PointerRNA *ptr,
     return PROP_EDITABLE;
   }
   if (r_info != nullptr) {
-    *r_info = N_("Row reads no repeatable map; assign an image to a Fill first");
+    if (BKE_paint_layers_gradient_supported(*layer)) {
+      if (layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+        *r_info = N_("A gradient mask item reads the projection frame of its row");
+      }
+      else if (layer->role == MA_PAINT_LAYER_ROLE_LAYER) {
+        *r_info = N_(
+            "A Gradient projects in UV space only: switch the gradient's space to UV first");
+      }
+      else {
+        *r_info = N_("A Gradient correction keeps its own coordinates");
+      }
+    }
+    else {
+      *r_info = N_("Row reads no repeatable map; assign an image to a Fill first");
+    }
   }
   return 0;
+}
+
+/* The stored contrast is an offset from 1 (0 is identity), so a file written before the option
+ * reads as it always did; the property shows the actual multiplier. */
+static float rna_MaterialPaintLayer_mask_contrast_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_mask_contrast_get(*layer);
+}
+
+static void rna_MaterialPaintLayer_mask_contrast_set(PointerRNA *ptr, float value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_mask_contrast_set(*ma, layer, value);
+  }
 }
 
 static bool rna_MaterialPaintLayer_projection_supported_get(PointerRNA *ptr)

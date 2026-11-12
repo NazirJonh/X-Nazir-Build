@@ -16,6 +16,7 @@
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_generator.hh"
 
+#include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
@@ -161,6 +162,22 @@ KindEmitResult paint_layer_generator_voronoi_gpu_emit(PaintLayersTreeBuilder &bu
  * scalar channel keeps a value ramp of its own, so the nodes live in the builder's caches.
  * \{ */
 
+/** The row whose projection frame a gradient reads: the row itself, or the owner of a mask item
+ * (the mask hangs on the row's stack, so the decal frame the row applies is the one it follows). */
+static const MaterialPaintLayer *gradient_projection_row(const Material &ma,
+                                                         const MaterialPaintLayer &layer)
+{
+  if (layer.role != MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return &layer;
+  }
+  const MaterialPaintLayer *owner = nullptr;
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+        owner = (BLI_findindex(&row.mask_stack, &layer) != -1) ? &row : owner;
+        return owner == nullptr;
+      });
+  return owner;
+}
 NodeOutput PaintLayersTreeBuilder::gradient_factor_ensure(bNodeTree &tree,
                                                           LayerGroup &group,
                                                           const MaterialPaintLayer &layer)
@@ -196,6 +213,20 @@ NodeOutput PaintLayersTreeBuilder::gradient_factor_ensure(bNodeTree &tree,
   bNodeSocket *coordinate = (coord != nullptr) ?
                                 this->gradient_coordinate_socket(*coord, *layer.gradient) :
                                 nullptr;
+  if (coordinate != nullptr && layer.gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_UV) {
+    /* A UV line under a projected row reads the frame's projected UV instead of the surface's, so
+     * a gradient mask follows the decal frame. The frame is the mask item's owner row's; either
+     * way the projection nodes live in this same group tree. */
+    const MaterialPaintLayer *row = gradient_projection_row(ma_, layer);
+    if (row != nullptr && BKE_paint_layers_projection_applies(ma_, *row)) {
+      Vector<bNode *> made;
+      if (ProjectionNodes *projection = this->projection_nodes_ensure(tree, *row, made)) {
+        if (projection->uv[0] != nullptr) {
+          coordinate = socket_out(*projection->uv[0], "Vector");
+        }
+      }
+    }
+  }
   bNodeSocket *coordinate_in = bke::node_find_socket(
       *instance, SOCK_IN, UString::from_ptr_noinline(GRADIENT_GROUP_ID_COORDINATE));
   if (coord == nullptr || coordinate == nullptr || coordinate_in == nullptr) {

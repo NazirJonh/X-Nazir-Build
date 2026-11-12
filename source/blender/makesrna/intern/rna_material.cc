@@ -6483,6 +6483,20 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Opacity", "Opacity of the paint layer, in percent");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
+  prop = RNA_def_property(srna, "mask_contrast", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_mask_contrast_get",
+                               "rna_MaterialPaintLayer_mask_contrast_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 5.0f);
+  RNA_def_property_float_default(prop, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 5.0f, 1, 2);
+  RNA_def_property_ui_text(prop,
+                           "Mask Contrast",
+                           "How sharply the mask item's coverage separates around its half: 1 "
+                           "keeps it, 5 hardens the edge, 0 flattens it");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
   prop = RNA_def_property(srna, "blend_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_blend_items);
   RNA_def_property_enum_funcs(

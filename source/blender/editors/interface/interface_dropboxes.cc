@@ -210,6 +210,11 @@ std::unique_ptr<DropTargetInterface> region_but_find_drop_target_at(bContext *C,
   {
     return target;
   }
+  /* A Decal panel drop zone: the button carries the `decal_drop_channel` context string. */
+  if (std::unique_ptr<DropTargetInterface> target = decal_image_drop_target_get(C, region, event))
+  {
+    return target;
+  }
   return nullptr;
 }
 

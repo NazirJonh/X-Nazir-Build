@@ -172,17 +172,10 @@ static void projection_cage_matrix_get(const wmGizmo * /*gz*/,
   auto *ggd = static_cast<ProjectionGizmoGroup *>(gz_prop->custom_func.user_data);
   ProjectionFrame frame;
   if (ggd != nullptr && ggd->target.read(frame)) {
-    /* Unit scale: the modal reports a scale delta; dimensions carry the absolute size. */
-    float rot[3][3];
-    BKE_paint_layers_projection_frame_matrix(frame.normal, frame.roll, rot);
-    unit_m4(matrix);
-    for (const int i : IndexRange(3)) {
-      for (const int j : IndexRange(3)) {
-        matrix[i][j] = rot[i][j];
-      }
-      /* The handle is drawn on the surface, so the drag starts from there. */
-      matrix[3][i] = frame.center[i] + rot[2][i] * ggd->surface_height;
-    }
+    projection_frame_cage_matrix_get(frame, matrix);
+    /* The handle is drawn on the surface, so the drag starts from there. `matrix[2]` is the same
+     * direction #projection_cage_matrix_set shifts back out of the stored center. */
+    madd_v3_v3v3fl(matrix[3], matrix[3], matrix[2], ggd->surface_height);
   }
   else {
     unit_m4(matrix);

@@ -346,7 +346,8 @@ struct CombinedPasses {
                  const CurveMapping *filter_curves,
                  const PaintMaterialCompositeMapping *mapping,
                  gpu::Texture *slot_dst = nullptr,
-                 gpu::Texture *mask_source = nullptr);
+                 gpu::Texture *mask_source = nullptr,
+                 const float contrast = 1.0f);
 
   /** One correction laid over the row's colour and coverage. False when its map has no GPU texture. */
   bool correction_step(CombinedTarget &t,

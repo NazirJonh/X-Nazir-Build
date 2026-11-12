@@ -291,7 +291,8 @@ class GraphInterpreter {
         return sample_image(id_cast<Image *>(node.id), out_identifier);
       }
       case SH_NODE_TEX_COORD:
-        /* The reference texel's centre in UV space. */
+        /* The reference texel's centre in UV space. The projection chains read this as the Object
+         * output too: the reference surface is the flat grid whose object XY is its UV. */
         return {(float(x) + 0.5f) / kGridSize, (float(y) + 0.5f) / kGridSize, 0.0f, 1.0f};
       case SH_NODE_TEX_WHITE_NOISE: {
         /* The deband's hash family at the reference texel, the W carrying which pass reads: a
@@ -306,6 +307,23 @@ class GraphInterpreter {
             uint32_t(y) + uint32_t(int(vector.r * kGridSize)) * 6151u);
         const float value = float(noise) / 4294967296.0f;
         return {value, value, value, 1.0f};
+      }
+      case SH_NODE_NEW_GEOMETRY:
+        /* The reference surface's normal: the flat +Z grid the facing and the Box/Triplanar
+         * weights read. */
+        if (STREQ(out_identifier, "Normal")) {
+          return {0.0f, 0.0f, 1.0f, 1.0f};
+        }
+        return {};
+      case SH_NODE_VECT_TRANSFORM:
+        /* One space in the interpreter's convention: the world and the object coincide, so every
+         * transform the generated chains build is the identity. */
+        return eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+      case SH_NODE_COMBINE_XYZ: {
+        const RGBA x = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "X"_ustr));
+        const RGBA y = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Y"_ustr));
+        const RGBA z = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Z"_ustr));
+        return {x.r, y.r, z.r, 1.0f};
       }
       case SH_NODE_MAPPING: {
         const RGBA vector = eval_socket(
@@ -465,6 +483,43 @@ class GraphInterpreter {
             value = (fabsf(a - b) <= std::max(epsilon, 1e-5f)) ? 1.0f : 0.0f;
             break;
           }
+          case NODE_MATH_MULTIPLY_ADD: {
+            /* The affine the frame chains build: `a * b + c`. */
+            const float c = eval_socket(
+                *bke::node_find_socket(mutable_node, SOCK_IN, "Value_002"_ustr)).r;
+            value = a * b + c;
+            break;
+          }
+          case NODE_MATH_ABSOLUTE:
+            value = fabsf(a);
+            break;
+          case NODE_MATH_MINIMUM:
+            value = std::min(a, b);
+            break;
+          case NODE_MATH_MAXIMUM:
+            value = std::max(a, b);
+            break;
+          case NODE_MATH_ARCTAN2:
+            value = (a == 0.0f && b == 0.0f) ? 0.0f : atan2f(a, b);
+            break;
+          case NODE_MATH_ARCCOSINE:
+            value = acosf(clamp_f(a, -1.0f, 1.0f));
+            break;
+          case NODE_MATH_FRACTION:
+            value = a - floorf(a);
+            break;
+          case NODE_MATH_PINGPONG: {
+            /* #pingpongf: the triangle wave of \a a over the scale \a b. */
+            if (b == 0.0f) {
+              value = 0.0f;
+            }
+            else {
+              const float span = b * 2.0f;
+              const float phase = (a - b) / span - floorf((a - b) / span);
+              value = fabsf(phase * span - b);
+            }
+            break;
+          }
           default:
             break;
         }
@@ -473,6 +528,14 @@ class GraphInterpreter {
           value = clamp_f(value, 0.0f, 1.0f);
         }
         return {value, value, value, value};
+      }
+      case SH_NODE_VALTORGB: {
+        /* The gradient's colour band, the one #BKE_colorband_evaluate walks on the CPU. */
+        const float factor = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Fac"_ustr)).r;
+        float color[4];
+        BKE_colorband_evaluate(static_cast<const ColorBand *>(node.storage), factor, color);
+        return {color[0], color[1], color[2], color[3]};
       }
       case SH_NODE_COMPOSE_COLOR_ALPHA: {
         /* The content alpha composed over the colour: the colour's own alpha is replaced. */
@@ -568,6 +631,26 @@ class GraphInterpreter {
                   smaller ? std::min(vector.g, other.g) : std::max(vector.g, other.g),
                   smaller ? std::min(vector.b, other.b) : std::max(vector.b, other.b),
                   1.0f};
+        }
+        if (ELEM(node.custom1, NODE_VECTOR_MATH_ADD, NODE_VECTOR_MATH_SUBTRACT)) {
+          const RGBA other = eval_socket(
+              *bke::node_find_socket(mutable_node, SOCK_IN, "Vector_001"_ustr));
+          const bool plus = node.custom1 == NODE_VECTOR_MATH_ADD;
+          return {plus ? vector.r + other.r : vector.r - other.r,
+                  plus ? vector.g + other.g : vector.g - other.g,
+                  plus ? vector.b + other.b : vector.b - other.b,
+                  1.0f};
+        }
+        if (node.custom1 == NODE_VECTOR_MATH_DOT_PRODUCT) {
+          const RGBA other = eval_socket(
+              *bke::node_find_socket(mutable_node, SOCK_IN, "Vector_001"_ustr));
+          const float dot = vector.r * other.r + vector.g * other.g + vector.b * other.b;
+          return {dot, dot, dot, 1.0f};
+        }
+        if (node.custom1 == NODE_VECTOR_MATH_LENGTH) {
+          const float length = sqrtf(vector.r * vector.r + vector.g * vector.g +
+                                     vector.b * vector.b);
+          return {length, length, length, 1.0f};
         }
         return {vector.r, vector.g, vector.b, 1.0f};
       }

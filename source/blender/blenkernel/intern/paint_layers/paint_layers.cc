@@ -1721,6 +1721,37 @@ float BKE_paint_layers_mask_item_output_value(const MaterialPaintLayer &item)
   return (record != nullptr) ? paint_layer_mask_constant(*record) : 1.0f;
 }
 
+float BKE_paint_layers_mask_contrast_get(const MaterialPaintLayer &item)
+{
+  /* A stored offset of zero (every file written before the option) is the identity; a value a
+   * hand-edited file pushed out of range is clamped to the setter's range. */
+  return clamp_f(item.mask_contrast + 1.0f, 0.0f, 5.0f);
+}
+
+bool BKE_paint_layers_mask_contrast_set(Material &ma, MaterialPaintLayer *item, const float contrast)
+{
+  if (!paint_layer_owned(ma, item) || item->role != MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return false;
+  }
+  const float offset = clamp_f(contrast, 0.0f, 5.0f) - 1.0f;
+  if (item->mask_contrast == offset) {
+    return true;
+  }
+  item->mask_contrast = offset;
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+float BKE_paint_layers_mask_contrast_apply(const float coverage, const float contrast)
+{
+  if (contrast == 1.0f) {
+    /* The identity is kept bit-exact: the formula's subtract/add round-trip can move a float by
+     * one ulp, and a file written before the option must composite exactly as it did. */
+    return coverage;
+  }
+  return clamp_f((coverage - 0.5f) * contrast + 0.5f, 0.0f, 1.0f);
+}
+
 bool BKE_paint_layers_is_map_coverage(const MaterialPaintLayer &item)
 {
   return paint_layer_kind_is_map_coverage(item);

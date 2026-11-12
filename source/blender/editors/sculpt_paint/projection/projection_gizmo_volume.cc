@@ -158,72 +158,11 @@ static void projection_volume_cage_matrix_get(const wmGizmo * /*gz*/,
   auto *ggd = static_cast<ProjectionGizmoGroup *>(gz_prop->custom_func.user_data);
   ProjectionFrame frame;
   if (ggd != nullptr && ggd->target.read(frame)) {
-    /* Unit scale: the modal reports a scale delta; dimensions carry the absolute size. */
-    float rot[3][3];
-    BKE_paint_layers_projection_frame_matrix(frame.normal, frame.roll, rot);
-    projection_frame_basis(rot, frame.center, matrix);
+    projection_frame_cage_matrix_get(frame, matrix);
   }
   else {
     unit_m4(matrix);
   }
-}
-
-static void projection_volume_cage_matrix_set(const wmGizmo * /*gz*/,
-                                              wmGizmoProperty *gz_prop,
-                                              const void *value_p)
-{
-  const float(*matrix)[4] = static_cast<const float(*)[4]>(value_p);
-  auto *ggd = static_cast<ProjectionGizmoGroup *>(gz_prop->custom_func.user_data);
-  if (ggd == nullptr) {
-    return;
-  }
-  float loc[3];
-  float rot[3][3];
-  float scale[3];
-  mat4_to_loc_rot_size(loc, rot, scale, matrix);
-  UNUSED_VARS(loc);
-
-  /* Shift holds the drag uniform: collapse the cage's per-axis factors into one. */
-  float factor[3] = {scale[0], scale[1], scale[2]};
-  if (ggd->volume_uniform) {
-    const float uniform = (scale[0] + scale[1] + scale[2]) / 3.0f;
-    factor[0] = uniform;
-    factor[1] = uniform;
-    factor[2] = uniform;
-  }
-
-  ProjectionFrame frame;
-  if (!ggd->target.read(frame)) {
-    return;
-  }
-  /* Scaling from the center: the cage modal pivots at the dragged corner, but the stored center
-   * never moves for the volume frame. The signs of the stored sizes are kept, like the planar
-   * cage does. */
-  for (int i = 0; i < 3; i++) {
-    frame.size[i] = copysignf(
-        std::max(ggd->cage_size_init[i] * fabsf(factor[i]), PAINT_LAYER_PROJECTION_SIZE_MIN),
-        ggd->cage_sign_init[i]);
-  }
-  if (ggd->target.write(frame)) {
-    projection_target_notify(ggd->target.material());
-  }
-}
-
-/**
- * Shift toggles uniform scaling for the running drag: #gizmo_cage3d_modal has no modifier handling
- * of its own, so the wrapper stashes the state for the set callback and defers the drag itself to
- * the library modal.
- */
-static wmOperatorStatus projection_volume_cage_modal(bContext *C,
-                                                     wmGizmo *gz,
-                                                     const wmEvent *event,
-                                                     eWM_GizmoFlagTweak tweak_flag)
-{
-  auto *ggd = static_cast<ProjectionGizmoGroup *>(gz->parent_gzgroup->customdata);
-  if (ggd != nullptr) {
-    ggd->volume_uniform = (event->modifier & KM_SHIFT) != 0;
-  }
-  return gz->type->modal(C, gz, event, tweak_flag);
 }
 
 /** \} */
@@ -564,10 +503,8 @@ void projection_gizmo_volume_invoke_prepare(const bContext *C,
                                             const wmEvent *event)
 {
   /* Every drag start invalidates the previous capture: when the one below fails, the modal must
-   * not apply the stale anchor and sizes of an older drag. The Shift flag joins it, so a
-   * modifier held at the end of one drag cannot leak into the next. */
+   * not apply the stale anchor and sizes of an older drag. */
   ggd.uniform_drag_valid = false;
-  ggd.volume_uniform = false;
   ggd.rot_drag_valid = false;
   ggd.move_drag_valid = false;
   ggd.scale_plane_valid = false;
@@ -711,22 +648,20 @@ void projection_gizmo_volume_setup(wmGizmoGroup *gzgroup, ProjectionGizmoGroup &
   const wmGizmoType *gzt_dial = WM_gizmotype_find("GIZMO_GT_dial_3d", true);
   const wmGizmoType *gzt_prim = WM_gizmotype_find("GIZMO_GT_primitive_3d", true);
 
-  /* --- Cage: full extents, per-axis scale, no translate (the Move handles move the center). --- */
+  /* --- Cage: the volume's outline only. It takes no transform flags, so it has no corner or face
+   * hot-spots of its own: the extents are scaled by the Scale handles below. --- */
   if (gzt_cage != nullptr) {
     wmGizmo *gz = projection_volume_handle_new(gzt_cage, gzgroup, TH_GIZMO_PRIMARY);
     ggd.gz_volume_cage = gz;
     if (gz != nullptr) {
-      RNA_enum_set(gz->ptr, "transform", ED_GIZMO_CAGE_XFORM_FLAG_SCALE);
       RNA_enum_set(gz->ptr, "draw_style", ED_GIZMO_CAGE3D_STYLE_BOX);
       /* The volume's edges are a neutral dashed black and white line, readable on any surface. */
       RNA_enum_set(gz->ptr, "draw_options", ED_GIZMO_CAGE_DRAW_FLAG_DASHED_OUTLINE);
       const float dims[3] = {1.0f, 1.0f, 1.0f};
       RNA_float_set_array(gz->ptr, "dimensions", dims);
       WM_gizmo_set_line_width(gz, 1.5f);
-      WM_gizmo_set_fn_custom_modal(gz, projection_volume_cage_modal);
       wmGizmoPropertyFnParams params{};
       params.value_get_fn = projection_volume_cage_matrix_get;
-      params.value_set_fn = projection_volume_cage_matrix_set;
       params.user_data = &ggd;
       WM_gizmo_target_property_def_func(gz, "matrix", &params);
     }

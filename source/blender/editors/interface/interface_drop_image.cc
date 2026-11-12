@@ -1544,6 +1544,66 @@ static bool curve_patch_texture_button_target(const ui::Button &but,
 }
 
 /**
+ * An image a drag carries and where it came from: freshly loaded ones carry an extra
+ * #BKE_image_load_exists user that must be released once the consumer took its own reference.
+ */
+struct DragResolvedImage {
+  Image *image = nullptr;
+  bool has_extra_user = false;
+};
+
+/** Every image \a drag carries, in drag order: a multi-select asset list, then a local ID, then
+ * the image files of a multi-file path drop. The one resolver of an image drag, shared by every
+ * image-consuming drop target. */
+static Vector<DragResolvedImage> drag_resolve_images(bContext *C, const wmDrag &drag)
+{
+  Vector<DragResolvedImage> images;
+  Main *bmain = CTX_data_main(C);
+
+  if (drag.type == WM_DRAG_ASSET_LIST) {
+    const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
+    if (asset_drags) {
+      for (const wmDragAssetListItem &item : *asset_drags) {
+        if (drag_asset_list_item_idtype(item) != ID_IM) {
+          continue;
+        }
+        /* #resolve_image_from_asset releases its own load reference, see
+         * #ed::asset::resolve_image_from_asset. */
+        Image *image = item.is_external ?
+                           ed::asset::resolve_image_from_asset(
+                               *bmain, *item.asset_data.external_info->asset) :
+                           id_cast<Image *>(item.asset_data.local_id);
+        if (image) {
+          images.append({image, false});
+        }
+      }
+      if (!images.is_empty()) {
+        return images;
+      }
+    }
+  }
+
+  if (ID *id = WM_drag_get_local_ID_or_import_from_asset(C, &drag, ID_IM)) {
+    if (GS(id->name) == ID_IM) {
+      images.append({id_cast<Image *>(id), false});
+    }
+    return images;
+  }
+
+  if (drag.type == WM_DRAG_PATH) {
+    for (const std::string &path : WM_drag_get_paths(&drag)) {
+      if (!BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+        continue;
+      }
+      if (Image *image = BKE_image_load_exists(bmain, path.c_str(), nullptr)) {
+        images.append({image, true});
+      }
+    }
+  }
+  return images;
+}
+
+/**
  * Drop target for the Curve Patch STAMPS texture list. A multi-select Asset Browser drag or a
  * multi-file drop appends one slot per image (or takes the dragged texture directly); a drop on a
  * single row replaces that slot's texture.
@@ -1593,63 +1653,6 @@ class CurvePatchTextureListDropTarget : public ui::DropTargetInterface {
       return count;
     }
     return 0;
-  }
-
-  /** An image and where it came from: freshly loaded ones carry an extra #BKE_image_load_exists
-   * user that must be released once the slot's texture holds its own reference. */
-  struct ResolvedImage {
-    Image *image = nullptr;
-    bool has_extra_user = false;
-  };
-
-  /** Every image carried by the drag, in drag order: a multi-select asset list, then a local ID,
-   * then the image files of a multi-file path drop. */
-  static Vector<ResolvedImage> resolve_drag_images(bContext *C, const wmDrag &drag)
-  {
-    Vector<ResolvedImage> images;
-    Main *bmain = CTX_data_main(C);
-
-    if (drag.type == WM_DRAG_ASSET_LIST) {
-      const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
-      if (asset_drags) {
-        for (const wmDragAssetListItem &item : *asset_drags) {
-          if (drag_asset_list_item_idtype(item) != ID_IM) {
-            continue;
-          }
-          /* #resolve_image_from_asset releases its own load reference, see
-           * #ed::asset::resolve_image_from_asset. */
-          Image *image = item.is_external ?
-                             ed::asset::resolve_image_from_asset(
-                                 *bmain, *item.asset_data.external_info->asset) :
-                             id_cast<Image *>(item.asset_data.local_id);
-          if (image) {
-            images.append({image, false});
-          }
-        }
-        if (!images.is_empty()) {
-          return images;
-        }
-      }
-    }
-
-    if (ID *id = WM_drag_get_local_ID_or_import_from_asset(C, &drag, ID_IM)) {
-      if (GS(id->name) == ID_IM) {
-        images.append({id_cast<Image *>(id), false});
-      }
-      return images;
-    }
-
-    if (drag.type == WM_DRAG_PATH) {
-      for (const std::string &path : WM_drag_get_paths(&drag)) {
-        if (!BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
-          continue;
-        }
-        if (Image *image = BKE_image_load_exists(bmain, path.c_str(), nullptr)) {
-          images.append({image, true});
-        }
-      }
-    }
-    return images;
   }
 
   /** Append one slot holding \a tex. Direct DNA assignment: the new slot is the texture's one
@@ -1761,13 +1764,13 @@ class CurvePatchTextureListDropTarget : public ui::DropTargetInterface {
       return true;
     }
 
-    const Vector<ResolvedImage> images = resolve_drag_images(C, drag);
+    const Vector<DragResolvedImage> images = drag_resolve_images(C, drag);
     if (images.is_empty()) {
       return false;
     }
 
     if (target_.replace_slot) {
-      const ResolvedImage &resolved = images[0];
+      const DragResolvedImage &resolved = images[0];
       PointerRNA slot_ptr = target_.replace_slot_ptr;
       PropertyRNA *prop = RNA_struct_find_property(&slot_ptr, "texture");
       if (!prop) {
@@ -1783,7 +1786,7 @@ class CurvePatchTextureListDropTarget : public ui::DropTargetInterface {
     }
 
     Vector<Tex *> added_textures;
-    for (const ResolvedImage &resolved : images) {
+    for (const DragResolvedImage &resolved : images) {
       /* Prepares the texture (and its image) in the brush's library, handling asset-editable
        * linked brushes; the new slot is the texture's one user (#ED_paint_texture_wrap_image_
        * for_owner hands it back with exactly that one user, no extra reference to take). */
@@ -1815,6 +1818,130 @@ std::unique_ptr<ui::DropTargetInterface> curve_patch_texture_list_drop_target_ge
     return nullptr;
   }
   return std::make_unique<CurvePatchTextureListDropTarget>(target);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Decal drop target
+ * \{ */
+
+/** The operator a decal drop calls: the interface layer reaches the decal code by name only. */
+static constexpr const char *DECAL_ADD_IMAGE_OPERATOR = "PAINT_OT_decal_add_image";
+
+/**
+ * How many decals a drop of \a drag would add: the images it carries (a local image ID or image
+ * asset, a multi-select asset list, image files), without resolving any.
+ */
+static int decal_drag_image_count(const wmDrag &drag)
+{
+  if (drag.type == WM_DRAG_ASSET_LIST) {
+    return drag_asset_list_count_of(drag, ID_IM);
+  }
+  if (drag.type == WM_DRAG_PATH) {
+    int count = 0;
+    for (const std::string &path : WM_drag_get_paths(&drag)) {
+      if (BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+        count++;
+      }
+    }
+    return count;
+  }
+  return WM_drag_is_ID_type(&drag, ID_IM) ? 1 : 0;
+}
+
+/**
+ * A Decal panel drop zone: each image the drag carries becomes a new decal row group through
+ * #PAINT_OT_decal_add_image, one operator call per image in drag order. The Python UI marks the
+ * button with the `decal_drop_channel` context string (a paint channel identifier, or "AUTO" to
+ * let the file name choose), the way the Curve Patch texture list publishes its targets.
+ */
+class DecalImageDropTarget : public ui::DropTargetInterface {
+ public:
+  explicit DecalImageDropTarget(std::string channel) : channel_(std::move(channel)) {}
+
+  bool can_drop(bContext &C, const wmDrag &drag, const char ** /*r_disabled_hint*/) const override
+  {
+    wmOperatorType *ot = WM_operatortype_find(DECAL_ADD_IMAGE_OPERATOR, false);
+    if (ot == nullptr || ot->poll == nullptr || !ot->poll(&C)) {
+      return false;
+    }
+    return decal_drag_image_count(drag) > 0;
+  }
+
+  std::string drop_tooltip(const ui::DragInfo &drag_info) const override
+  {
+    const int count = decal_drag_image_count(drag_info.drag_data);
+    if (count > 1) {
+      return fmt::format(fmt::runtime(TIP_("Add {} decals from the images")), count);
+    }
+    return TIP_("Add a decal from the image");
+  }
+
+  bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override
+  {
+    const Vector<DragResolvedImage> images = drag_resolve_images(C, drag_info.drag_data);
+    if (images.is_empty()) {
+      return false;
+    }
+    wmOperatorType *ot = WM_operatortype_find(DECAL_ADD_IMAGE_OPERATOR, false);
+    if (ot == nullptr) {
+      /* The poll found it, so this is a teardown race: release the loads instead of leaking. */
+      for (const DragResolvedImage &resolved : images) {
+        if (resolved.has_extra_user) {
+          id_us_min(&resolved.image->id);
+        }
+      }
+      return false;
+    }
+    bool any_finished = false;
+    for (const DragResolvedImage &resolved : images) {
+      PointerRNA props = WM_operator_properties_create_ptr(ot);
+      RNA_string_set(&props, "image_name", resolved.image->id.name + 2);
+      if (PropertyRNA *channel_prop = RNA_struct_find_property(&props, "channel");
+          channel_prop != nullptr && !channel_.empty())
+      {
+        int channel_value = -1;
+        if (RNA_property_enum_value(C, &props, channel_prop, channel_.c_str(), &channel_value)) {
+          RNA_property_enum_set(&props, channel_prop, channel_value);
+        }
+      }
+      const wmOperatorStatus status = WM_operator_name_call_ptr(
+          C, ot, wm::OpCallContext::ExecDefault, &props, nullptr);
+      WM_operator_properties_free(&props);
+      /* The decal row took its own reference to the image; release a path load's loan. Each
+       * operator call is its own undo step, one per image: acceptable for this workflow, a
+       * batched single-step variant would need a new operator API. */
+      if (resolved.has_extra_user) {
+        id_us_min(&resolved.image->id);
+      }
+      any_finished |= (status & (OPERATOR_FINISHED | OPERATOR_INTERFACE)) != 0;
+    }
+    return any_finished;
+  }
+
+ private:
+  std::string channel_;
+};
+
+std::unique_ptr<ui::DropTargetInterface> decal_image_drop_target_get(bContext * /*C*/,
+                                                                     const ARegion *region,
+                                                                     const wmEvent *event)
+{
+  std::string channel;
+  if (!find_button_at(region, event, [&](const ui::Button &but) {
+        const std::optional<StringRefNull> value = ui::button_context_string_get(
+            &but, DECAL_DROP_CHANNEL_CONTEXT);
+        if (!value.has_value()) {
+          return false;
+        }
+        channel = value->is_empty() ? "AUTO" : std::string(value->c_str());
+        return true;
+      }))
+  {
+    return nullptr;
+  }
+  return std::make_unique<DecalImageDropTarget>(channel);
 }
 
 /** \} */

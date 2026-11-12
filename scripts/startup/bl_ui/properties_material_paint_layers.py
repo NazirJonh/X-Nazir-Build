@@ -283,6 +283,7 @@ def draw_material_mask_item(layout, context, item):
         # The base is the Multiply item of the row's own mask: it has no blend to choose.
         col.prop(item, "blend_type", text="Blend")
     col.prop(item, "opacity", text="Opacity")
+    col.prop(item, "mask_contrast", text="Contrast", slider=True)
     if base and record is not None:
         # The base mask's slot is a debug view (see below), so its Invert is offered here, where it
         # stays reachable with Developer Extras off.

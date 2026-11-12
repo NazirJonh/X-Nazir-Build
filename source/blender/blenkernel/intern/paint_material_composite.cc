@@ -1261,6 +1261,8 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
       }
       /* White/Black carry one here; Gradient carries the item's standard value. */
       match *= item.coverage_output;
+      /* The item's own contrast, reshaping its match around the half like the graph's nodes do. */
+      match = BKE_paint_layers_mask_contrast_apply(match, item.contrast);
       mask_factor *= 1.0f + (match - 1.0f) * opacity;
       continue;
     }
@@ -1273,6 +1275,9 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
           item.filter, item.filter_params, item.filter_ramp, item.filter_curves, mask_texel_xy,
           grey);
       mask_factor += (grey[0] - mask_factor) * opacity;
+      /* The filter's result is the coverage the item leaves; the contrast reshapes it like any
+       * item's, exactly as the graph wraps the filter's output in the same chain. */
+      mask_factor = BKE_paint_layers_mask_contrast_apply(mask_factor, item.contrast);
       continue;
     }
     const float *sample = item_samples[item_i];
@@ -1308,6 +1313,8 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
     if (item.invert) {
       gray = 1.0f - gray;
     }
+    /* The item's own contrast, reshaping its grey around the half like the graph's nodes do. */
+    gray = BKE_paint_layers_mask_contrast_apply(gray, item.contrast);
     /* The factor is a grey colour to the blend, as it is in the graph's Mix node. */
     float value[4] = {mask_factor, mask_factor, mask_factor, mask_factor};
     const float top[4] = {gray, gray, gray, gray};
@@ -2852,6 +2859,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       PaintMaterialCompositeMaskBuffer buffer;
       buffer.constant_gray = item.constant_gray;
       buffer.opacity = item.opacity;
+      buffer.contrast = item.contrast;
       buffer.blend = item.blend;
       buffer.invert = item.invert;
       buffer.filter = item.filter;
@@ -2909,9 +2917,29 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       }
       buffer.gradient = item.gradient;
       if (buffer.gradient.enabled) {
-        /* The gradient has no map: its grid is the composite's, not the description's size. */
-        buffer.gradient.width = ref_width;
-        buffer.gradient.height = ref_height;
+        if (buffer.gradient.projected) {
+          /* A projected line is rendered once through the frame, the walk a projected map's
+           * resample takes; the buffer takes over and the evaluator reads it like a map. A render
+           * without the object or its render UV keeps the plain UV read. */
+          ImBuf *projected = BKE_paint_material_gradient_projected_render(
+              buffer.gradient, ref_width, ref_height, buffer.gradient.projection.tile_number);
+          if (projected != nullptr) {
+            composite_image_own(projected, r_locks);
+            buffer.ibuf = projected;
+            buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
+            buffer.gradient.enabled = false;
+          }
+          else {
+            /* The plain UV read is what is left; its texel grid is still the composite's. */
+            buffer.gradient.width = ref_width;
+            buffer.gradient.height = ref_height;
+          }
+        }
+        else {
+          /* The gradient has no map: its grid is the composite's, not the description's size. */
+          buffer.gradient.width = ref_width;
+          buffer.gradient.height = ref_height;
+        }
       }
       layer.mask_items.append(buffer);
     }
@@ -3020,11 +3048,33 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
     }
     layer.gradient = image_layer.gradient;
     if (layer.gradient.enabled) {
-      /* The gradient has no map of its own: its UV grid is the composite's, not the size the
-       * description was created at. A stack whose bottom map is smaller than the material would
-       * otherwise read only part of the ramp. */
-      layer.gradient.width = ref_width;
-      layer.gradient.height = ref_height;
+      if (layer.gradient.projected) {
+        /* A projected line is rendered once through the frame into the colour buffer, the walk a
+         * projected map's resample takes; the buffer takes over and the coverage is its alpha, the
+         * coverage the ramp's evaluation lays. A render without the object or its render UV keeps
+         * the plain UV read. */
+        ImBuf *projected = BKE_paint_material_gradient_projected_render(
+            layer.gradient, ref_width, ref_height, layer.gradient.projection.tile_number);
+        if (projected != nullptr) {
+          composite_image_own(projected, r_locks);
+          layer.color_ibuf = projected;
+          layer.color_colorspace_name = composite_buffer_colorspace_name(layer.color_ibuf);
+          layer.color_alpha_coverage = true;
+          layer.gradient.enabled = false;
+        }
+        else {
+          /* The plain UV read is what is left; its texel grid is still the composite's. */
+          layer.gradient.width = ref_width;
+          layer.gradient.height = ref_height;
+        }
+      }
+      else {
+        /* The gradient has no map of its own: its UV grid is the composite's, not the size the
+         * description was created at. A stack whose bottom map is smaller than the material would
+         * otherwise read only part of the ramp. */
+        layer.gradient.width = ref_width;
+        layer.gradient.height = ref_height;
+      }
     }
     /* A clipping wrap of a Material row reaches its coverage as a 0/1 factor, since the row does
      * not cover through its map's alpha. Folded after the row's own coverage is acquired and
@@ -3395,8 +3445,7 @@ bool BKE_paint_material_composite_stack_dimensions(
  * projected read bakes, so each enters the key. The one place a projection is hashed, so a map read
  * and a projected gradient line cannot disagree on a cache entry.
  */
-static uint64_t composite_projection_hash(uint64_t hash,
-                                          const PaintMaterialCompositeProjection &projection)
+uint64_t composite_projection_hash(uint64_t hash, const PaintMaterialCompositeProjection &projection)
 {
   BLI_assert(projection.present);
   hash = get_default_hash(
@@ -3593,6 +3642,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
       hash = get_default_hash(
           hash, item.image != nullptr ? item.image->id.session_uid : 0, item.opacity);
       hash = get_default_hash(hash, item.constant_gray, int(item.blend), item.invert);
+      hash = get_default_hash(hash, item.contrast);
       hash = get_default_hash(hash, item.anchor_point_hash);
       hash = get_default_hash(hash, int(item.filter));
       for (const float param : item.filter_params) {

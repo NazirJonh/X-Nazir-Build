@@ -11,6 +11,7 @@ namespace blender {
 
 struct PaintMaterialCompositeGradient;
 struct PaintMaterialCompositeImageLayer;
+struct PaintMaterialCompositeProjection;
 
 /**
  * How many generator payloads \a image_layers lays (a row, a correction and a mask item each count
@@ -24,6 +25,12 @@ int composite_stack_generator_count(Span<PaintMaterialCompositeImageLayer> image
  * `paint_material_composite_generator.cc`, beside the sample whose inputs it guards.
  */
 uint64_t composite_generator_hash(uint64_t hash, const PaintMaterialCompositeGradient &gradient);
+
+/**
+ * Fold \a projection into \a hash: every value of the frame and both transforms move the pixels a
+ * projected read bakes. Shared by a map's mapping hash and a projected generator line's.
+ */
+uint64_t composite_projection_hash(uint64_t hash, const PaintMaterialCompositeProjection &projection);
 
 struct ID;
 struct Main;

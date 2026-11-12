@@ -83,17 +83,8 @@ struct PlaceProjectionState {
 /** \name Helpers
  * \{ */
 
-/** Transform a normal vector from local to world using transpose(inverse(M3)). */
-static float3 normal_local_to_world(const float4x4 &o2w, const float3 &local_no)
-{
-  return math::normalize(math::transpose(math::invert(float3x3(o2w))) * local_no);
-}
-
-/** Transform a normal vector from world to a frame object's local space using transpose(M3(o2w)). */
-static float3 normal_world_to_local(const float4x4 &o2w, const float3 &world_no)
-{
-  return math::normalize(math::transpose(float3x3(o2w)) * world_no);
-}
+/* The view raycast and the world-to-frame carry are shared with the decal placement and the move
+ * gesture: #projection_frame_raycast and #projection_frame_point_from_world in projection_target. */
 
 static void place_free(wmOperator *op)
 {
@@ -164,82 +155,6 @@ static bool place_find_view3d(const bContext *C,
   r_mval[0] = float(event.xy[0] - region->winrct.xmin);
   r_mval[1] = float(event.xy[1] - region->winrct.ymin);
   return true;
-}
-
-/** Raycast the active object's evaluated mesh. Returns true with world-space position and normal
- * on hit. */
-static bool place_raycast(const bContext *C,
-                          const ARegion *region,
-                          const View3D *v3d,
-                          const float mval[2],
-                          Object *ob,
-                          float r_world_loc[3],
-                          float r_world_no[3])
-{
-  Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
-  float ray_start[3], ray_dir[3];
-  if (!ED_view3d_win_to_ray_clipped(depsgraph, region, v3d, mval, ray_start, ray_dir, true)) {
-    return false;
-  }
-  Object *ob_eval = DEG_get_evaluated(depsgraph, ob);
-  if (ob_eval == nullptr || ob_eval->type != OB_MESH) {
-    return false;
-  }
-  Mesh *me_eval = BKE_object_get_evaluated_mesh(ob_eval);
-  if (me_eval == nullptr) {
-    return false;
-  }
-  /* Transform ray to object space. */
-  const float4x4 &o2w = ob_eval->object_to_world();
-  const float4x4 w2o = math::invert(o2w);
-  float3 local_start = math::transform_point(w2o, float3(ray_start));
-  float3 local_dir = math::normalize(math::transform_direction(w2o, float3(ray_dir)));
-
-  bke::BVHTreeFromMesh tree_data = me_eval->bvh_corner_tris_no_hidden();
-  if (tree_data.tree == nullptr) {
-    return false;
-  }
-  BVHTreeRayHit hit{};
-  hit.index = -1;
-  hit.dist = BVH_RAYCAST_DIST_MAX;
-  const float start_f[3] = {local_start.x, local_start.y, local_start.z};
-  const float dir_f[3] = {local_dir.x, local_dir.y, local_dir.z};
-  BLI_bvhtree_ray_cast(
-      tree_data.tree, start_f, dir_f, 0.0f, &hit, tree_data.raycast_callback, &tree_data);
-  if (hit.index < 0) {
-    return false;
-  }
-  /* hit.co and hit.no are in object space; transform to world. */
-  const float3 world_loc = math::transform_point(o2w, float3(hit.co));
-  const float3 world_no = normal_local_to_world(o2w, float3(hit.no));
-  copy_v3_v3(r_world_loc, world_loc);
-  copy_v3_v3(r_world_no, world_no);
-  return true;
-}
-
-/** Convert a world point and normal into the frame's space (controller or object). */
-static void place_world_to_frame(const bContext *C,
-                                 Object *space_ob,
-                                 const float world_loc[3],
-                                 const float world_no[3],
-                                 float r_center[3],
-                                 float r_normal[3])
-{
-  if (space_ob != nullptr) {
-    Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
-    Object *sp_eval = DEG_get_evaluated(depsgraph, space_ob);
-    if (sp_eval != nullptr) {
-      const float4x4 w2o = sp_eval->world_to_object();
-      const float3 lp = math::transform_point(w2o, float3(world_loc));
-      copy_v3_v3(r_center, lp);
-      /* Normal: world→frame uses transpose(M3(o2w)). */
-      const float3 ln = normal_world_to_local(sp_eval->object_to_world(), float3(world_no));
-      copy_v3_v3(r_normal, ln);
-      return;
-    }
-  }
-  copy_v3_v3(r_center, world_loc);
-  copy_v3_v3(r_normal, world_no);
 }
 
 /** Fallback: intersect ray with the view plane through the 3D cursor. */
@@ -356,14 +271,17 @@ static wmOperatorStatus place_modal(bContext *C, wmOperator *op, const wmEvent *
     Object *space_ob = data->target.space_object();
     float world_loc[3], world_no[3];
     bool got_hit = false;
-    if (ob != nullptr && place_raycast(C, region, v3d, mval, ob, world_loc, world_no)) {
+    if (ob != nullptr &&
+        projection_frame_raycast(*C, region, v3d, *ob, mval, world_loc, world_no))
+    {
       got_hit = true;
     }
     else if (place_plane_fallback(C, region, v3d, rv3d, mval, world_loc, world_no)) {
       got_hit = true;
     }
     if (got_hit) {
-      place_world_to_frame(C, space_ob, world_loc, world_no, data->hit_center, world_no);
+      projection_frame_point_from_world(
+          *C, space_ob, world_loc, world_no, data->hit_center, world_no);
       BKE_paint_layers_projection_orientation_from_surface(
           world_no, data->hit_normal, &data->roll);
       data->roll_at_r_press = data->roll;
@@ -601,7 +519,7 @@ static wmOperatorStatus move_modal(bContext *C, wmOperator *op, const wmEvent *e
     }
   }
   else {
-    hit = place_raycast(C, region, v3d, mval, ob, world_loc, world_no);
+    hit = projection_frame_raycast(*C, region, v3d, *ob, mval, world_loc, world_no);
   }
   if (!hit) {
     /* A miss keeps the last good placement instead of jumping. */
@@ -610,7 +528,7 @@ static wmOperatorStatus move_modal(bContext *C, wmOperator *op, const wmEvent *e
 
   float center[3];
   float frame_no[3];
-  place_world_to_frame(C, space_ob, world_loc, world_no, center, frame_no);
+  projection_frame_point_from_world(*C, space_ob, world_loc, world_no, center, frame_no);
   copy_v3_v3(data->frame.center, center);
   /* Like a Shrinkwrap controller, the frame turns to the face it lands on, so it can cross an edge
    * onto another face. Alt keeps the orientation, and Shift moves in the frame's own plane. */

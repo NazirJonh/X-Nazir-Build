@@ -1440,6 +1440,12 @@ struct PaintLayerCopyOptions {
    * (generated, dirty or an asset): no stroke goes into it, so the copy has no reason to own one.
    */
   bool share_assigned_maps = false;
+  /**
+   * Share the channel maps of the copied row itself (one more user) instead of copying them: a
+   * decal's image is one content every copy shows. The maps of its masks and corrections stay
+   * copies of their own either way.
+   */
+  bool share_row_maps = false;
 };
 
 /**

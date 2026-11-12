@@ -858,6 +858,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 # A Gradient mask item has a line and a ramp instead of a map; its invert and blend
                 # are the mask item's own, as on any other correction.
                 self._draw_opacity_lock(layout, item)
+                layout.prop(item, "mask_contrast", text="Contrast", slider=True)
                 layout.prop(item, "blend_type", text="Blend")
                 if len(item.channels):
                     layout.prop(item.channels[0], "invert", text="Invert", toggle=True)
@@ -879,6 +880,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 # and no channels to choose. A map-coverage operator draws its own mode, tolerance
                 # and colours in #draw_material_mask_coverage_item.
                 self._draw_opacity_lock(layout, item)
+                layout.prop(item, "mask_contrast", text="Contrast", slider=True)
                 layout.separator()
                 if item.is_map_coverage:
                     draw_material_mask_coverage_item(layout, context, item)
@@ -1242,9 +1244,6 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         layout.operator("paint.layer_projection_place",
                         text="Place on Surface",
                         icon='RESTRICT_SELECT_OFF')
-        # Sculpt Mode only: the operator polls the mode and the volume kinds, and switches to
-        # the Projection Frame tool that draws the standard handles for the frame.
-        layout.operator("paint.projection_frame_tool", text="Edit Frame", icon='MESH_CUBE')
         sculpt = context.tool_settings.sculpt
         if sculpt is not None:
             layout.prop(sculpt, "show_projection_gizmo", text="Show Gizmo", toggle=1)
@@ -1328,6 +1327,157 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
                      icon='LOCKED' if row.tile_scale_lock else 'UNLOCKED',
                      icon_only=True)
             layout.prop(row, "mapping_wrap", text="UV Wrap")
+
+
+def _decal_name_of_row(layer):
+    """The decal a row belongs to, or None: the text in front of the last " · " separator.
+
+    Mirrors `decal_name_of_row_name`, the one parser of the row naming scheme.
+    """
+    name, sep, _channel = layer.name.rpartition(" · ")
+    return name if sep and name else None
+
+
+def _decal_shown_name(ma):
+    """The decal the decal operators act on: the active row's group, else the only one.
+
+    Mirrors `decal_target_find`: the anchor button and the panel label then always talk about the
+    same group, also when the material holds more than one decal.
+    """
+    if ma is None:
+        return None
+    active = ma.paint_layers.active
+    if active is not None and _decal_name_of_row(active) is not None:
+        return _decal_name_of_row(active)
+    names = set()
+    for layer in ma.paint_layers:
+        name = _decal_name_of_row(layer)
+        if name is not None:
+            names.add(name)
+    return names.pop() if len(names) == 1 else None
+
+
+class LAYER_MATERIAL_PT_decal(LayerMaterialButtonsPanel, Panel):
+    """The decal workflow on the projected rows.
+
+    A decal is the row group one image maps through: every row is named ``<decal> · <channel>`` and
+    shares one Planar frame, which "Project from View" places the way a camera at the view would
+    project through. The block buttons treat the group as one: order, hide, blend, space.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_decal"
+    bl_label = "Decal"
+    bl_parent_id = "LAYER_MATERIAL_PT_layers"
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return ob is not None and ob.mode == 'TEXTURE_PAINT'
+
+    def draw_header(self, context):
+        # Show the active decal name next to the panel label so the user knows which group the
+        # block buttons act on without having to open the layer list.
+        ob = context.active_object
+        if ob is None or ob.mode != 'TEXTURE_PAINT':
+            return
+        ma = ob.active_material
+        if ma is None:
+            return
+        decal_name = _decal_shown_name(ma)
+        if decal_name is not None:
+            self.layout.label(text=decal_name)
+
+    def draw(self, context):
+        layout = self.layout
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.operator("paint.decal_add", text="Add Decal...", icon='ADD')
+        # Drop zone: an image dropped on this row becomes a decal through the UI drop target
+        # (paint.decal_add_image); a click opens the file browser, like the Add button above.
+        # "AUTO" lets the file name decide the channel (a _n/_normal suffix is a normal stamp).
+        drop = col.row(align=True)
+        drop.context_string_set("decal_drop_channel", "AUTO")
+        drop.operator("paint.decal_add", text="Drop Image to Add Decal", icon='FILE_IMAGE')
+        col.operator("paint.decal_project_from_view", text="Project from View", icon='CAMERA_DATA')
+        col.operator(
+            "paint.decal_from_selection",
+            text="Decal from Selection",
+            icon='MESH_GRID',
+        )
+
+        # The world anchor: the group's rows read their frame in the space of a controller Empty,
+        # so a material shared by several objects shows the decal in one world place. Without one,
+        # a shared material keeps the decal in each object's own space.
+        ma = context.active_object.active_material if context.active_object else None
+        decal_name = _decal_shown_name(ma)
+        controller = None
+        if decal_name is not None:
+            controllers = {
+                layer.projection_object
+                for layer in ma.paint_layers
+                if _decal_name_of_row(layer) == decal_name
+            }
+            # One controller for the whole group, or none: a mixed group is not anchored.
+            if len(controllers) == 1:
+                controller = next(iter(controllers))
+        col = layout.column(align=True)
+        if controller is None:
+            col.operator(
+                "paint.decal_world_anchor_set", text="Anchor to World", icon='WORLD'
+            ).attach = True
+            if ma is not None and ma.users > 1:
+                col.label(
+                    text="Material is shared by %d objects: the decal lives in each object's space"
+                    % ma.users,
+                    icon='ERROR',
+                )
+        else:
+            row = col.row(align=True)
+            row.label(text="Anchor: " + controller.name, icon='WORLD')
+            row.operator("paint.decal_world_anchor_set", text="Release", icon='X').attach = False
+        col.operator(
+            "paint.decal_propagate_to_selected", text="Propagate to Selected", icon='DUPLICATE'
+        )
+
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.operator("paint.decal_move", text="", icon='TRIA_UP').direction = 'UP'
+        row.operator("paint.decal_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
+        row = col.row(align=True)
+        row.operator("paint.decal_visibility_set", text="", icon='HIDE_OFF').visible = True
+        row.operator("paint.decal_visibility_set", text="", icon='HIDE_ON').visible = False
+        col.operator("paint.decal_remove", text="Remove Decal", icon='X')
+
+        # The group's coverage mask: every row gets a full mask, then the Mask brush paints the
+        # decal's extent (the addon's face map).
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.operator("paint.decal_mask_add", text="Add Mask", icon='MOD_MASK')
+        row.operator("paint.decal_mask_remove", text="Remove Mask", icon='X')
+
+        col = layout.column(align=True)
+        col.label(text="Projection Space")
+        row = col.row(align=True)
+        row.operator("paint.decal_projection_mode_set", text="Planar").space = 'PLANAR'
+        row = col.row(align=True)
+        row.operator("paint.decal_projection_mode_set", text="Box").space = 'BOX'
+        row.operator("paint.decal_projection_mode_set", text="Triplanar").space = 'TRIPLANAR'
+        row = col.row(align=True)
+        row.operator("paint.decal_projection_mode_set", text="Cylinder").space = 'CYLINDER'
+        row.operator("paint.decal_projection_mode_set", text="Sphere").space = 'SPHERE'
+        col.operator("paint.decal_projection_mode_set", text="Cube Atlas").space = 'CUBE'
+        col.operator("paint.decal_blend_mode_set", text="Blend Mode...")
+
+        # The Decal Master converter: offered only on a material the addon set up (the sna_*
+        # properties do not exist in a plain Blender build).
+        ma = context.active_object.active_material if context.active_object else None
+        if ma is not None and hasattr(ma, "sna_dcl_col") and len(ma.sna_dcl_col) > 0:
+            col = layout.column(align=True)
+            col.label(text="Decal Master")
+            col.operator(
+                "material.paint_layer_decal_import_decal_master",
+                text="Import Decal Master Setup",
+            )
 
 
 class LAYER_MATERIAL_PT_mapping_advanced(LayerMaterialButtonsPanel, Panel):
@@ -2102,6 +2252,7 @@ classes = (
     LAYER_MATERIAL_PT_layers,
     LAYER_MATERIAL_PT_normal_height,
     LAYER_MATERIAL_PT_mapping,
+    LAYER_MATERIAL_PT_decal,
     LAYER_MATERIAL_PT_mapping_advanced,
     LAYER_MATERIAL_PT_mapping_mirror,
     LAYER_MT_mapping_reset,

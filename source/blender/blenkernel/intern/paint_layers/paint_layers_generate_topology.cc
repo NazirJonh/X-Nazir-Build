@@ -357,6 +357,12 @@ static void filter_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &ro
 }
 
 /**
+ * Bumped when what a mask item's built chain holds changes shape: the contrast chain is built
+ * whatever the value is, so a tree made before it existed has to rebuild once to grow the nodes.
+ */
+constexpr uint64_t MASK_CONTRAST_TOPOLOGY_VERSION = 0x702;
+
+/**
  * The shape of \a layer's mask: one for every channel of the row, so the same nodes reach every
  * channel chain and the walk needs no channel of its own beyond what a mask item's reader names.
  *
@@ -372,6 +378,7 @@ static void topology_mask_hash_mix(uint64_t &hash,
    * and whether it has a map are structure; its constant, opacity and enabled flag are inputs. */
   if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
     hash = topology_hash_mix(hash, 1);
+    hash = topology_hash_mix(hash, MASK_CONTRAST_TOPOLOGY_VERSION);
     /* The inversion is a node of its own. */
     hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(*mask) ? 1 : 0);
     mapping_topology_hash_mix(hash, ma, *mask);
@@ -400,6 +407,8 @@ static void topology_mask_hash_mix(uint64_t &hash,
       topology_hash_anchor_point_marker(hash, ma, item, 0x603);
       continue;
     }
+    /* The contrast chain is built for every item that lays, whatever its value is. */
+    hash = topology_hash_mix(hash, MASK_CONTRAST_TOPOLOGY_VERSION);
     if (paint_layer_kind_reads_anchor_point(item)) {
       topology_hash_anchor_point_reader(hash, ma, item, wired_channels, 0x606, 0x607, true);
       continue;

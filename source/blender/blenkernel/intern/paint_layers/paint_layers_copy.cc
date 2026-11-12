@@ -175,7 +175,7 @@ static void paint_layer_channels_duplicate(Main &bmain,
   const bool share_assigned = options.share_assigned_maps && !paint_layer_row_paints_maps(src);
   for (const int i : IndexRange(src.channels_num)) {
     Image *image = dst.channels[i].image;
-    if (image != nullptr && share_assigned) {
+    if (image != nullptr && (share_assigned || options.share_row_maps)) {
       id_us_plus(&image->id);
     }
     else if (image != nullptr) {
@@ -354,6 +354,8 @@ MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   item_copy->object_mask_type = item.object_mask_type;
   /* The channel of its source a mask correction takes its grey from, kept with the copy. */
   item_copy->mask_source_channels = item.mask_source_channels;
+  /* A mask item's contrast is part of its state. */
+  item_copy->mask_contrast = item.mask_contrast;
   /* The row's UV mapping is part of its state, not of its kind: a pasted fill or fill
    * correction has to keep the offset, scale, rotation, lock and wrap the gizmo edits. */
   item_copy->mapping = dna::shallow_copy(item.mapping);
@@ -438,10 +440,12 @@ void paint_layer_branch_duplicate(Main &bmain,
 
   /* The mask and the corrections go with their row, with maps of their own for the same reason as
    * the channel maps. */
+  PaintLayerCopyOptions item_options = options;
+  item_options.share_row_maps = false;
   const auto item_duplicate = [&](const MaterialPaintLayer &item,
                                   ListBaseT<MaterialPaintLayer> &r_list) {
     if (MaterialPaintLayer *copy = paint_layer_item_duplicate(
-            bmain, ma, item, r_map, options))
+            bmain, ma, item, r_map, item_options))
     {
       BLI_addtail(&r_list, copy);
     }
@@ -457,6 +461,7 @@ void paint_layer_branch_duplicate(Main &bmain,
     for (const MaterialPaintLayer &child : src.children) {
       MaterialPaintLayer *child_copy = paint_layer_alloc(ma, child.name);
       BLI_addtail(&dst.children, child_copy);
+      /* A child is a row of the copied branch, so its own maps follow the options as they are. */
       paint_layer_branch_duplicate(bmain, ma, *child_copy, child, r_map, options);
     }
   }
@@ -500,6 +505,41 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
   paint_layer_branch_duplicate(bmain, ma, *copy, *layer, &marker_map, copy_options);
   paint_layer_anchor_point_refs_remap(*copy, marker_map);
 
+  BKE_paint_layers_tag_edited(ma);
+  return copy;
+}
+
+MaterialPaintLayer *BKE_paint_layers_copy_to_material(Main &bmain,
+                                                      Material &ma,
+                                                      const MaterialPaintLayer &src,
+                                                      MaterialPaintLayer *anchor,
+                                                      const PaintLayerPlace place,
+                                                      const bool share_images)
+{
+  if (src.role != MA_PAINT_LAYER_ROLE_LAYER) {
+    /* A mask item or a correction is copied beside its own row's list; there is no home for one
+     * in another material until the row it belongs to has been copied first. */
+    return nullptr;
+  }
+  /* The same placement rules as #BKE_paint_layers_add: the anchor, when one is named, has to be a
+   * row of the destination's stack. */
+  BKE_paint_layers_channels_materialize(ma);
+  if (anchor != nullptr && !paint_layer_anchor_valid(ma, anchor, place)) {
+    return nullptr;
+  }
+
+  MaterialPaintLayer *copy = paint_layer_alloc(ma, src.name);
+  copy->role = src.role;
+  paint_layer_link(ma, copy, anchor, place);
+  PaintLayerMarkerMap marker_map;
+  PaintLayerCopyOptions copy_options;
+  copy_options.share_row_maps = share_images;
+  paint_layer_branch_duplicate(bmain, ma, *copy, src, &marker_map, copy_options);
+  paint_layer_anchor_point_refs_remap(*copy, marker_map);
+  /* A reader whose point stayed in the source material would show a permanent NotFound issue: the
+   * reference is cleared, the way a copy pasted into a material that holds none of the points is. */
+  paint_layer_anchor_point_foreign_ref_clear(ma, *copy);
+  ma.paint_layers_flag |= MA_PAINT_LAYERED;
   BKE_paint_layers_tag_edited(ma);
   return copy;
 }

@@ -338,7 +338,8 @@ bool CombinedPasses::mask_step(CombinedTarget &t,
                                const CurveMapping *filter_curves,
                                const PaintMaterialCompositeMapping *mapping,
                                gpu::Texture *slot_dst,
-                               gpu::Texture *mask_source)
+                               gpu::Texture *mask_source,
+                               const float contrast)
 {
   gpu::Texture *sampled = map != nullptr ? map : dummy;
   int step_flags = flags;
@@ -373,6 +374,7 @@ bool CombinedPasses::mask_step(CombinedTarget &t,
   GPU_shader_uniform_4fv(mask_shader, "filter_params_2", &params_2.x);
   GPU_shader_uniform_1f(mask_shader, "constant_gray", constant_gray);
   GPU_shader_uniform_1f(mask_shader, "opacity", opacity);
+  GPU_shader_uniform_1f(mask_shader, "contrast", contrast);
   GPU_shader_uniform_1f(mask_shader, "influence", influence);
   GPU_shader_uniform_1f(mask_shader, "lod", lod);
   GPU_shader_uniform_1i(mask_shader, "flags", step_flags);
@@ -702,7 +704,10 @@ bool CombinedPasses::mask_build(CombinedTarget &t,
                      nullptr,
                      nullptr,
                      nullptr,
-                     nullptr))
+                     nullptr,
+                     nullptr,
+                     nullptr,
+                     item.contrast))
       {
         return false;
       }
@@ -750,7 +755,10 @@ bool CombinedPasses::mask_build(CombinedTarget &t,
                    item.filter_params,
                    item.filter_ramp,
                    item.filter_curves,
-                   live_reader ? nullptr : &item.mapping))
+                   live_reader ? nullptr : &item.mapping,
+                   nullptr,
+                   nullptr,
+                   item.contrast))
     {
       return false;
     }

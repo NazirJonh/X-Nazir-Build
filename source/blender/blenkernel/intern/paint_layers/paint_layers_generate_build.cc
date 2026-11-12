@@ -1297,6 +1297,13 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
       group_input_default_set(group, *opacity, BKE_paint_layers_effective_opacity(*mask));
       mask_opacity_inputs_.add(&layer, opacity);
     }
+    SNPRINTF(base, "%s Mask Contrast", layer_name);
+    bNodeTreeInterfaceSocket *contrast = layer_group_value_input(
+        group, base, "NodeSocketFloat", ROLE_MASK_CONTRAST, layer.marker, -1);
+    if (contrast != nullptr) {
+      group_input_default_set(group, *contrast, BKE_paint_layers_mask_contrast_get(*mask));
+      mask_contrast_inputs_.add(mask, contrast);
+    }
     SNPRINTF(base, "%s Mask Enabled", layer_name);
     bNodeTreeInterfaceSocket *enabled = layer_group_value_input(
         group, base, "NodeSocketFloat", ROLE_MASK_ENABLED, layer.marker, -1);
@@ -1335,6 +1342,13 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     if (opacity != nullptr) {
       group_input_default_set(group, *opacity, BKE_paint_layers_effective_opacity(item));
       mask_opacity_inputs_.add(&item, opacity);
+    }
+    SNPRINTF(base, "%s %s Contrast", layer_name, item_name);
+    bNodeTreeInterfaceSocket *contrast = layer_group_value_input(
+        group, base, "NodeSocketFloat", ROLE_MASK_CONTRAST, item.marker, -1);
+    if (contrast != nullptr) {
+      group_input_default_set(group, *contrast, BKE_paint_layers_mask_contrast_get(item));
+      mask_contrast_inputs_.add(&item, contrast);
     }
     filter_params_create(item, true);
     SNPRINTF(base, "%s %s", layer_name, item_name);

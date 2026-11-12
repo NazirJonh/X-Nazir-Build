@@ -12,6 +12,8 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_attribute.hh"
+#include "BKE_mesh.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_paint.hh"
@@ -25,6 +27,7 @@
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
 #include "BLI_uuid.h"
 
@@ -37,6 +40,7 @@
 
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_mesh_types.h"
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -757,6 +761,61 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_normal_combine_over_a_flat_normal_
 
   const std::array<float, 4> result = linear_pixel(stack, 0, 0);
   EXPECT_NEAR(result[0], 200.0f / 255.0f, 0.01f);
+}
+
+/**
+ * The D4 comparison against Decal Master's `DCL-Master-Normal`, pinned as documented behaviour
+ * rather than as a pass/fail against the addon.
+ *
+ * The addon mixes normals in spherical coordinates (Docs/02 §1.3): both normals normalized, their
+ * polar angles added, rebuilt and encoded back. This branch runs the whiteout
+ * (#blend_normal_combine): the slopes add, the two Z multiply, the result renormalizes, and the
+ * layer's factor interpolates towards it in normal space. The two agree while the base is flat --
+ * which is the decal case, a stamp over an untouched surface -- and diverge on tilted bases: the
+ * addon's angular sum of two 45-degree normals points down the pole, the whiteout keeps a shared
+ * slope. The expectations below pin the whiteout, so a future switch to the addon's semantics is a
+ * deliberate one; the choice stays with the user (see walkthrough.md, D4).
+ */
+TEST_F(PaintMaterialCompositeEvalTest,
+       linear_normal_combine_runs_the_whiteout_where_the_addon_adds_spherical_angles)
+{
+  auto combine = [&](const std::array<uchar, 3> base, const std::array<uchar, 3> detail) {
+    PaintMaterialCompositeStack stack;
+    stack.width = size;
+    stack.height = size;
+    PaintMaterialCompositeLayer bottom;
+    bottom.color_ibuf = add_buffer(base[0], base[1], base[2], 255);
+    make_data(bottom.color_ibuf);
+    stack.layers.append(bottom);
+    PaintMaterialCompositeLayer top;
+    top.color_ibuf = add_buffer(detail[0], detail[1], detail[2], 255);
+    make_data(top.color_ibuf);
+    top.blend = CompositeBlend::NormalCombine;
+    stack.layers.append(top);
+    return linear_pixel(stack, 0, 0);
+  };
+
+  /* Flat over flat: both formulas keep the flat normal exactly. */
+  const std::array<float, 4> flat = combine({128, 128, 255}, {128, 128, 255});
+  EXPECT_NEAR(flat[0], 128.0f / 255.0f, 1e-4f);
+  EXPECT_NEAR(flat[2], 1.0f, 1e-4f);
+
+  /* A flat base under a 45-degree X tilt: both formulas give the detail's own tilt, which is why
+   * the decal stamps look the same on an untouched surface. */
+  const std::array<float, 4> tilted = combine({128, 128, 255}, {200, 128, 232});
+  EXPECT_NEAR(tilted[0], 200.0f / 255.0f, 0.01f);
+
+  /* A flat base under a reversed detail: both formulas give the reversed normal. */
+  const std::array<float, 4> reversed = combine({128, 128, 255}, {128, 128, 0});
+  EXPECT_NEAR(reversed[2], 0.0f, 1e-4f);
+
+  /* Two orthogonal 45-degree tilts over a non-flat base -- where the formulas part ways. The
+   * whiteout gives the shared slope (0.544, 0.544, 0.639) decoded; the addon's spherical sum gives
+   * (0.0, 0.939, 0.343). */
+  const std::array<float, 4> crossed = combine({200, 128, 232}, {128, 200, 232});
+  EXPECT_NEAR(crossed[0], 0.772f, 0.01f);
+  EXPECT_NEAR(crossed[1], 0.772f, 0.01f);
+  EXPECT_NEAR(crossed[2], 0.819f, 0.01f);
 }
 
 TEST_F(PaintMaterialCompositeEvalTest, linear_mask_influence_zero_ignores_the_mask)
@@ -2171,10 +2230,14 @@ class PaintLayersCompositeTest : public bke::BlenderGTestBase {
   }
 
   /** The scene-linear composite at (x, y): the evaluator's own output, before encoding. */
-  std::array<float, 4> linear_pixel(const int channel, const int x, const int y)
+  std::array<float, 4> linear_pixel(const int channel,
+                                    const int x,
+                                    const int y,
+                                    const Object *painted_object = nullptr)
   {
     Vector<PaintMaterialCompositeImageLayer> layers;
-    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, channel, layers, false, nullptr, nullptr, PAINT_TILE_NUMBER_BASE, painted_object));
     int width = 0, height = 0;
     EXPECT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
     Vector<float> linear(int64_t(width) * height * 4);
@@ -3158,6 +3221,194 @@ TEST_F(PaintLayersCompositeTest, a_clipped_mask_item_leaves_the_factor_alone_out
   p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 2, 0);
   EXPECT_NEAR(p[0], 0.0f, 1e-4f);
   EXPECT_NEAR(p[2], 1.0f, 1e-4f);
+}
+
+/** A UV gradient mask item follows the row's projection frame: the factor is the ramp at the
+ * projected UV, not at the texel's own. */
+TEST_F(PaintLayersCompositeTest, a_projected_rows_gradient_mask_item_follows_the_frame)
+{
+  /* A quad in X/Y spanning [0, 2]², its render UV covering the lower-left quarter of the unit
+   * square, as the object the bake reads positions and UVs from. */
+  Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "ProjectObject");
+  Mesh *mesh = BKE_mesh_add(bmain, "ProjectMesh");
+  ob->data = id_cast<ID *>(mesh);
+  BKE_object_material_assign(bmain, ob, ma, 1, BKE_MAT_ASSIGN_OBDATA);
+  /* A quad; the edges are derived from its face, since the projected render walks corner
+   * triangles and needs the corner/edge topology to be consistent. */
+  Mesh *source = BKE_mesh_new_nomain(4, 0, 1, 4);
+  MutableSpan<float3> positions = source->vert_positions_for_write();
+  positions[0] = float3(0.0f, 0.0f, 0.0f);
+  positions[1] = float3(2.0f, 0.0f, 0.0f);
+  positions[2] = float3(2.0f, 2.0f, 0.0f);
+  positions[3] = float3(0.0f, 2.0f, 0.0f);
+  MutableSpan<int> face_offsets = source->face_offsets_for_write();
+  face_offsets[0] = 0;
+  face_offsets[1] = 4;
+  MutableSpan<int> corner_verts = source->corner_verts_for_write();
+  corner_verts[0] = 0;
+  corner_verts[1] = 1;
+  corner_verts[2] = 2;
+  corner_verts[3] = 3;
+  bke::SpanAttributeWriter<float2> uvs =
+      source->attributes_for_write().lookup_or_add_for_write_span<float2>(
+          "UVMap", bke::AttrDomain::Corner);
+  uvs.span[0] = float2(0.0f, 0.0f);
+  uvs.span[1] = float2(0.5f, 0.0f);
+  uvs.span[2] = float2(0.5f, 0.5f);
+  uvs.span[3] = float2(0.0f, 0.5f);
+  uvs.finish();
+  bke::mesh_calc_edges(*source, false, false);
+  source->tag_topology_changed();
+  source->tag_positions_changed();
+  BKE_mesh_nomain_to_mesh(source, mesh, ob);
+
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_paint_layer("Top", add_solid_image("Top", 4, 0, 0, 255, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_GENERATOR, "Mask Gradient", 1.0f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *item, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  /* The frame is written explicitly: the payload a space switch allocates has unit size, and this
+   * test is about the projected read, not about that default. The frame spans [-2, 2]² (full
+   * extents 4) in object space, so the quad's projected UV runs (0.5, 0.5) to (1, 1). The default
+   * line reads (0, 0.5) to (1, 0.5) with a black-to-white ramp, so the factor is the projected u. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, top, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  const float frame_center[3] = {0.0f, 0.0f, 0.0f};
+  const float frame_size[3] = {4.0f, 4.0f, 4.0f};
+  const float frame_rotation[3] = {0.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values(
+      *ma, top, frame_center, frame_size, frame_rotation));
+
+  /* Texel (0, 0): destination UV (0.125, 0.125), object (0.5, 0.5), projected u 0.625. */
+  std::array<float, 4> p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0, 0, ob);
+  EXPECT_NEAR(p[0], 0.375f, 1e-3f);
+  EXPECT_NEAR(p[2], 0.625f, 1e-3f);
+  /* Texel (1, 1): object (1.5, 1.5), projected u 0.875. */
+  p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 1, 1, ob);
+  EXPECT_NEAR(p[0], 0.125f, 1e-3f);
+  EXPECT_NEAR(p[2], 0.875f, 1e-3f);
+
+  /* Without the frame the same line reads the texel's own UV: the factor there is 0.125 and
+   * 0.375, the row nearly hidden. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(*ma, top, MA_PAINT_LAYER_MAPPING_SPACE_UV));
+  p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0, 0, ob);
+  EXPECT_NEAR(p[0], 0.875f, 1e-3f);
+  EXPECT_NEAR(p[2], 0.125f, 1e-3f);
+}
+
+/** The projected gradient reads its line raw: the row's tiling never reaches it. The row's own
+ * map is a solid colour, which reads the same texel at any tiling, so a composite that moves with
+ * the tiling can only come from the mask -- and it must not move. */
+TEST_F(PaintLayersCompositeTest, a_projected_gradient_ignores_the_rows_tiling)
+{
+  /* The quad object the projected renders read positions and UVs from, as the frame test above. */
+  Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "GradientTilingObject");
+  Mesh *mesh = BKE_mesh_add(bmain, "GradientTilingMesh");
+  ob->data = id_cast<ID *>(mesh);
+  BKE_object_material_assign(bmain, ob, ma, 1, BKE_MAT_ASSIGN_OBDATA);
+  Mesh *source = BKE_mesh_new_nomain(4, 0, 1, 4);
+  MutableSpan<float3> positions = source->vert_positions_for_write();
+  positions[0] = float3(0.0f, 0.0f, 0.0f);
+  positions[1] = float3(2.0f, 0.0f, 0.0f);
+  positions[2] = float3(2.0f, 2.0f, 0.0f);
+  positions[3] = float3(0.0f, 2.0f, 0.0f);
+  MutableSpan<int> face_offsets = source->face_offsets_for_write();
+  face_offsets[0] = 0;
+  face_offsets[1] = 4;
+  MutableSpan<int> corner_verts = source->corner_verts_for_write();
+  corner_verts[0] = 0;
+  corner_verts[1] = 1;
+  corner_verts[2] = 2;
+  corner_verts[3] = 3;
+  bke::SpanAttributeWriter<float2> uvs =
+      source->attributes_for_write().lookup_or_add_for_write_span<float2>(
+          "UVMap", bke::AttrDomain::Corner);
+  uvs.span[0] = float2(0.0f, 0.0f);
+  uvs.span[1] = float2(0.5f, 0.0f);
+  uvs.span[2] = float2(0.5f, 0.5f);
+  uvs.span[3] = float2(0.0f, 0.5f);
+  uvs.finish();
+  bke::mesh_calc_edges(*source, false, false);
+  source->tag_topology_changed();
+  source->tag_positions_changed();
+  BKE_mesh_nomain_to_mesh(source, mesh, ob);
+
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_paint_layer("Top", add_solid_image("Top", 4, 0, 0, 255, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_GENERATOR, "Mask Gradient", 1.0f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *item, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(*ma, top, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  const float center[3] = {0.0f, 0.0f, 0.0f};
+  const float size[3] = {2.0f, 2.0f, 2.0f};
+  const float rotation[3] = {0.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values(
+      *ma, top, center, size, rotation));
+
+  const auto linear_frame = [&]() {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, false, nullptr, nullptr, 1001, ob));
+    int width = 0, height = 0;
+    EXPECT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+    Vector<float> linear(int64_t(width) * height * 4);
+    float bottom[4];
+    BKE_paint_layers_channel_bottom_color(PAINT_MATERIAL_CHANNEL_BASE_COLOR, bottom);
+    EXPECT_TRUE(BKE_paint_material_composite_eval_images_linear(
+        layers,
+        PaintMaterialCompositeLinearTarget::frame(linear, width),
+        nullptr,
+        nullptr,
+        bottom));
+    return linear;
+  };
+
+  const float unit[2] = {1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, top, unit));
+  const Vector<float> untiled = linear_frame();
+  const float tiled[2] = {3.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, top, tiled));
+  const Vector<float> tiled_linear = linear_frame();
+  ASSERT_EQ(tiled_linear.size(), untiled.size());
+  for (const int i : untiled.index_range()) {
+    EXPECT_NEAR(tiled_linear[i], untiled[i], 1e-5f) << "channel " << i % 4;
+  }
+}
+
+TEST_F(PaintLayersCompositeTest, a_mask_item_contrast_reshapes_the_factor_around_the_half)
+{
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_paint_layer("Top", add_solid_image("Top", 4, 0, 0, 255, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_CONSTANT, "F", 0.75f);
+  ASSERT_NE(item, nullptr);
+  auto stack_hash = [&]() {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    return BKE_paint_material_composite_stack_hash(layers);
+  };
+
+  /* The default contrast of one reads the grey as it is. */
+  const uint64_t hash_plain = stack_hash();
+  std::array<float, 4> p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0, 0);
+  EXPECT_NEAR(p[2], 0.75f, 1e-4f);
+
+  /* Five: the grey past the half saturates, the top row covers fully, and the cache follows. */
+  ASSERT_TRUE(BKE_paint_layers_mask_contrast_set(*ma, item, 5.0f));
+  EXPECT_NE(stack_hash(), hash_plain);
+  p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0, 0);
+  EXPECT_NEAR(p[2], 1.0f, 1e-4f);
+
+  /* Zero: every grey reads as the half, the top row half-covers. */
+  ASSERT_TRUE(BKE_paint_layers_mask_contrast_set(*ma, item, 0.0f));
+  p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0, 0);
+  EXPECT_NEAR(p[2], 0.5f, 1e-4f);
 }
 
 TEST_F(PaintLayersCompositeTest, the_wrap_moves_the_stack_hash_only_while_the_mapping_applies)

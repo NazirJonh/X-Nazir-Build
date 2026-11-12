@@ -8,7 +8,16 @@ struct ImBuf;
 
 namespace blender {
 
+struct Mesh;
+struct Object;
 struct PaintMaterialCompositeMapping;
+
+/**
+ * The mesh a projected row bakes through: the evaluated mesh when \a object is an evaluated object,
+ * so the bake sees the modifiers' UV and positions the 3D viewport shows, else the original data.
+ * Null when \a object is not a mesh object or has no mesh.
+ */
+const Mesh *composite_projection_mesh(const Object *object);
 
 /** A premultiplied scene-linear transparent buffer of \a width by \a height, or null. */
 ImBuf *composite_alloc_transparent(int width, int height);

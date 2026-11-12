@@ -769,14 +769,42 @@ bool ED_space_image_update_gpu_combined(Main *bmain,
   return true;
 }
 
-/** The object the editor resolved for projected rows, or null when it no longer exists. */
+/**
+ * The object the editor resolved for projected rows, or null when it no longer exists. The
+ * evaluated object when a window's depsgraph holds one, so the bake reads the mesh the 3D viewport
+ * shows (modifiers applied); the original otherwise. Resolved here, from the uid, because an
+ * acquire outside a draw has no context and must not hold an evaluated pointer across depsgraph
+ * rebuilds.
+ */
 static const Object *space_image_projection_object_find(Main &bmain, const SpaceImage &sima)
 {
   const uint32_t uid = (sima.runtime != nullptr) ? sima.runtime->projection_object_uid : 0;
   if (uid == 0) {
     return nullptr;
   }
-  return id_cast<const Object *>(BKE_libblock_find_session_uid(&bmain, ID_OB, uid));
+  const Object *object = id_cast<const Object *>(BKE_libblock_find_session_uid(&bmain, ID_OB, uid));
+  if (object == nullptr) {
+    return nullptr;
+  }
+  wmWindowManager *wm = static_cast<wmWindowManager *>(bmain.wm.first);
+  if (wm == nullptr) {
+    return object;
+  }
+  for (const wmWindow &win : wm->windows) {
+    Scene *scene = WM_window_get_active_scene(&win);
+    ViewLayer *view_layer = WM_window_get_active_view_layer(&win);
+    if (scene == nullptr || view_layer == nullptr) {
+      continue;
+    }
+    const Depsgraph *depsgraph = BKE_scene_get_depsgraph(scene, view_layer);
+    if (depsgraph == nullptr) {
+      continue;
+    }
+    if (const Object *object_eval = DEG_get_evaluated(depsgraph, object)) {
+      return object_eval;
+    }
+  }
+  return object;
 }
 
 ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,

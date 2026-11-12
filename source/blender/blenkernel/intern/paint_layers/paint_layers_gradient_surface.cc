@@ -23,6 +23,9 @@
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 
+#include "BLI_array.hh"
+#include "BLI_enumerable_thread_specific.hh"
+#include "BLI_function_ref.hh"
 #include "BLI_hash.hh"
 #include "BLI_implicit_sharing.hh"
 #include "BLI_index_range.hh"
@@ -31,6 +34,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_string_ref.hh"
+#include "BLI_task.hh"
 #include "BLI_time.h"
 #include "BLI_vector.hh"
 #include "BLI_virtual_array.hh"
@@ -39,6 +43,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_customdata.hh"
+#include "BKE_global.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 
@@ -166,85 +171,32 @@ static SurfaceIdentity surface_identity(const Object &object,
   return identity;
 }
 
-/**
- * Grow every rasterized island outward by \a passes texels, one ring a pass: each empty texel takes
- * the position of its nearest valid neighbour, and the writes of a pass only become sources in the
- * next one, so the result does not depend on the traversal order.
- *
- * A written map is read with bilinear filtering and mipmaps; an empty texel beside an island would
- * otherwise blend into it as a dark or transparent seam. Edge neighbours go before diagonal ones,
- * which keeps a straight island border straight. Each pass is bounded by the current valid box, so
- * the cost follows the grown area, not the whole canvas.
- *
- * \return how many texels the padding filled, so the caller can keep the surface's island count
- *         without a second pass over the mask.
- */
+/** The surface's own use of #BKE_paint_composite_pad_islands: the position grids follow the mask. */
 static int64_t surface_pad_islands(MutableSpan<float3> positions,
                                    MutableSpan<float3> generated_positions,
                                    MutableSpan<uint8_t> valid,
                                    const int width,
                                    const int height,
                                    const int passes,
-                                   int valid_min_x,
-                                   int valid_min_y,
-                                   int valid_max_x,
-                                   int valid_max_y)
+                                   const int valid_min_x,
+                                   const int valid_min_y,
+                                   const int valid_max_x,
+                                   const int valid_max_y)
 {
-  /* Four edge neighbours first, then the four diagonals. */
-  constexpr int offsets[8][2] = {
-      {-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
   const bool copy_generated = !generated_positions.is_empty();
-  struct TexelCopy {
-    int dst;
-    int src;
-  };
-  Vector<TexelCopy> copies;
-  int64_t filled = 0;
-  for (int pass = 0; pass < passes; pass++) {
-    copies.clear();
-    const int x_min = std::max(0, valid_min_x - 1);
-    const int x_max = std::min(width - 1, valid_max_x + 1);
-    const int y_min = std::max(0, valid_min_y - 1);
-    const int y_max = std::min(height - 1, valid_max_y + 1);
-    for (int y = y_min; y <= y_max; y++) {
-      for (int x = x_min; x <= x_max; x++) {
-        const int index = y * width + x;
-        if (valid[index] != 0) {
-          continue;
+  return BKE_paint_composite_pad_islands(
+      valid,
+      width,
+      height,
+      passes,
+      int2(valid_min_x, valid_min_y),
+      int2(valid_max_x, valid_max_y),
+      [&](const int64_t dst, const int64_t src) {
+        positions[dst] = positions[src];
+        if (copy_generated) {
+          generated_positions[dst] = generated_positions[src];
         }
-        for (const auto &offset : offsets) {
-          const int nx = x + offset[0];
-          const int ny = y + offset[1];
-          if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
-            continue;
-          }
-          const int neighbour = ny * width + nx;
-          if (valid[neighbour] != 0) {
-            copies.append({index, neighbour});
-            break;
-          }
-        }
-      }
-    }
-    if (copies.is_empty()) {
-      break;
-    }
-    filled += int64_t(copies.size());
-    for (const TexelCopy &copy : copies) {
-      positions[copy.dst] = positions[copy.src];
-      if (copy_generated) {
-        generated_positions[copy.dst] = generated_positions[copy.src];
-      }
-      valid[copy.dst] = 1;
-      const int dst_x = copy.dst % width;
-      const int dst_y = copy.dst / width;
-      valid_min_x = std::min(valid_min_x, dst_x);
-      valid_max_x = std::max(valid_max_x, dst_x);
-      valid_min_y = std::min(valid_min_y, dst_y);
-      valid_max_y = std::max(valid_max_y, dst_y);
-    }
-  }
-  return filled;
+      });
 }
 
 /**
@@ -450,6 +402,114 @@ SurfaceCache &surface_cache()
 
 }  // namespace
 
+int64_t BKE_paint_composite_pad_islands(MutableSpan<uint8_t> valid,
+                                        const int width,
+                                        const int height,
+                                        const int passes,
+                                        const int2 valid_min,
+                                        const int2 valid_max,
+                                        const FunctionRef<void(int64_t dst, int64_t src)> copy_texel)
+{
+  /* Four edge neighbours first, then the four diagonals. */
+  constexpr int offsets[8][2] = {
+      {-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
+  struct TexelCopy {
+    int64_t dst;
+    int64_t src;
+  };
+
+  /* The empty texels that touch a valid one are the ring the next pass fills. Only the first ring
+   * needs a scan of the box; every later ring is found among the neighbours of the texels a pass
+   * has just filled, so the cost follows the border and the passes, not the area times the passes. */
+  Array<uint8_t> queued(valid.size(), uint8_t(0));
+  Vector<int64_t> ring;
+  const int x_min = std::max(0, valid_min.x - 1);
+  const int x_max = std::min(width - 1, valid_max.x + 1);
+  const int y_min = std::max(0, valid_min.y - 1);
+  const int y_max = std::min(height - 1, valid_max.y + 1);
+  if (y_max >= y_min) {
+    /* The scan only reads `valid` and writes the flag of the texel it is on, so rows are independent;
+     * each task collects its own ring and the order they are joined in does not matter, since every
+     * pass chooses its sources from the validity it started with. */
+    threading::EnumerableThreadSpecific<Vector<int64_t>> ring_by_thread;
+    threading::parallel_for(IndexRange(y_min, y_max - y_min + 1), 16, [&](const IndexRange rows) {
+      Vector<int64_t> &local = ring_by_thread.local();
+      for (const int y : rows) {
+        for (int x = x_min; x <= x_max; x++) {
+          const int64_t index = int64_t(y) * width + x;
+          if (valid[index] != 0) {
+            continue;
+          }
+          for (const auto &offset : offsets) {
+            const int nx = x + offset[0];
+            const int ny = y + offset[1];
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+              continue;
+            }
+            if (valid[int64_t(ny) * width + nx] != 0) {
+              queued[index] = 1;
+              local.append(index);
+              break;
+            }
+          }
+        }
+      }
+    });
+    for (const Vector<int64_t> &local : ring_by_thread) {
+      ring.extend(local);
+    }
+  }
+
+  Vector<TexelCopy> copies;
+  Vector<int64_t> next_ring;
+  int64_t filled = 0;
+  for (int pass = 0; pass < passes && !ring.is_empty(); pass++) {
+    /* The writes of a pass only become sources in the next one: every source is chosen against the
+     * validity the pass started with, so the result does not depend on the traversal order. */
+    copies.clear();
+    for (const int64_t index : ring) {
+      const int x = int(index % width);
+      const int y = int(index / width);
+      for (const auto &offset : offsets) {
+        const int nx = x + offset[0];
+        const int ny = y + offset[1];
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+          continue;
+        }
+        const int64_t neighbour = int64_t(ny) * width + nx;
+        if (valid[neighbour] != 0) {
+          copies.append({index, neighbour});
+          break;
+        }
+      }
+    }
+    filled += int64_t(copies.size());
+    next_ring.clear();
+    for (const TexelCopy &copy : copies) {
+      copy_texel(copy.dst, copy.src);
+      valid[copy.dst] = 1;
+    }
+    for (const TexelCopy &copy : copies) {
+      const int x = int(copy.dst % width);
+      const int y = int(copy.dst / width);
+      for (const auto &offset : offsets) {
+        const int nx = x + offset[0];
+        const int ny = y + offset[1];
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+          continue;
+        }
+        const int64_t neighbour = int64_t(ny) * width + nx;
+        if (valid[neighbour] == 0 && queued[neighbour] == 0) {
+          queued[neighbour] = 1;
+          next_ring.append(neighbour);
+        }
+      }
+    }
+    std::swap(ring, next_ring);
+  }
+  return filled;
+}
+
 std::shared_ptr<const PaintMaterialCompositeSurface> BKE_paint_layers_gradient_surface_get(
     const Object &object, const Mesh &mesh, const char *uv_map_name, const int size)
 {
@@ -522,11 +582,11 @@ std::shared_ptr<const PaintMaterialCompositeSurface> BKE_paint_layers_gradient_s
                                                                        padding_texels,
                                                                        need_generated);
   /* A diagnostic for the sizes that make a Merge stall: the rasterization is single-threaded and
-   * a 4096 surface is hundreds of MiB next to the bake's own strips. Kept on by default like the
-   * other `[paint-layers ...]` traces, and only for the sizes worth measuring. The delta is what
+   * a 4096 surface is hundreds of MiB next to the bake's own strips. Printed only with `--debug`,
+   * so a release run stays silent, and only for the sizes worth measuring. The delta is what
    * the build itself cost, which the allocator's peak is not: that one is the high-water mark of
    * the whole process since it started. */
-  if (built && clamped_size >= 2048) {
+  if (built && clamped_size >= 2048 && (G.debug & G_DEBUG)) {
     const double seconds = BLI_time_now_seconds() - time_start;
     const double surface_mib = double(built->positions.size()) * double(sizeof(float3)) /
                                (1024.0 * 1024.0);

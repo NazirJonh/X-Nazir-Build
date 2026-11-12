@@ -57,16 +57,22 @@ namespace blender {
  */
 bool anchor_slice_layer_is_texel_exact(const PaintMaterialCompositeImageLayer &layer)
 {
-  if (layer.mapping.enabled || !BLI_uuid_is_nil(layer.anchor_point_reader)) {
+  /* A projection moves texels as well: it bakes the map through the object's UV layout. */
+  if (layer.mapping.enabled || layer.mapping.projection.present ||
+      !BLI_uuid_is_nil(layer.anchor_point_reader))
+  {
     return false;
   }
   for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
-    if (correction.mapping.enabled || !BLI_uuid_is_nil(correction.anchor_point_reader)) {
+    if (correction.mapping.enabled || correction.mapping.projection.present ||
+        !BLI_uuid_is_nil(correction.anchor_point_reader))
+    {
       return false;
     }
   }
   for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
     if (item.mapping.enabled || item.coverage_mapping.enabled ||
+        item.mapping.projection.present || item.coverage_mapping.projection.present ||
         !BLI_uuid_is_nil(item.anchor_point_reader))
     {
       return false;

@@ -35,6 +35,7 @@
 #include "DEG_depsgraph.hh"
 
 #include "ED_gizmo_library.hh"
+#include "ED_material_combined.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 
@@ -59,6 +60,7 @@ ProjectionGizmoGroup *projection_gizmo_group(wmGizmoGroup *gzgroup)
 int projection_gizmo_volume_show_mask_get(const bContext *C)
 {
   if (!ED_paint_projection_frame_tool_is_active(C)) {
+    /* An empty mask hides every standard set while the cage stays. */
     return 0;
   }
   const Scene *scene = CTX_data_scene(C);
@@ -111,7 +113,12 @@ void projection_gizmo_setup(const bContext * /*C*/, wmGizmoGroup *gzgroup)
   auto *ggd = MEM_new<ProjectionGizmoGroup>(__func__);
   gzgroup->customdata = ggd;
   gzgroup->customdata_free = [](void *customdata) {
-    MEM_delete(static_cast<ProjectionGizmoGroup *>(customdata));
+    ProjectionGizmoGroup *group = static_cast<ProjectionGizmoGroup *>(customdata);
+    /* A drag this group never got to finish leaves a mark nothing else clears. */
+    if (group->drag_material_uid != 0) {
+      ed::material_combined::gradient_interactive_end(group->drag_material_uid);
+    }
+    MEM_delete(group);
   };
 
   projection_gizmo_planar_setup(gzgroup, *ggd);
@@ -136,6 +143,20 @@ bool projection_gizmo_place(const bContext *C, wmGizmoGroup *gzgroup)
   if (!ggd->target.resolve(*C) || !ggd->target.read(frame)) {
     projection_gizmo_handles_set_hidden(*ggd, true);
     return false;
+  }
+  /* The material's composite previews shade at an octave for as long as a handle is dragged and
+   * refine to the canvas when it ends: a projected map is baked per texel, so a full-resolution
+   * rebuild on every mouse move is what makes a 4K frame lag. Re-armed on every placement, as the
+   * mark is a heartbeat as much as a flag. */
+  if (const Material *material = ggd->target.material()) {
+    if (ggd->drag_gz != nullptr) {
+      ed::material_combined::gradient_interactive_begin(*material);
+      ggd->drag_material_uid = material->id.session_uid;
+    }
+    else if (ggd->drag_material_uid != 0) {
+      ed::material_combined::gradient_interactive_end(ggd->drag_material_uid);
+      ggd->drag_material_uid = 0;
+    }
   }
   Object *space_ob = ggd->target.space_object();
   if (space_ob == nullptr) {
@@ -191,6 +212,13 @@ void projection_gizmo_invoke_prepare(const bContext *C,
     copy_v3_v3(ggd->cage_size_init, ggd->base_size);
     copy_v3_v3(ggd->cage_sign_init, ggd->base_sign);
     ggd->cage_surface_init = ggd->surface_height;
+    /* The preview octave starts with the press, not with the next placement: the Image Editor may
+     * redraw before this region does, and its first rebuild of the drag would otherwise be a full
+     * canvas one. #projection_gizmo_place keeps the mark alive and ends it. */
+    if (const Material *material = ggd->target.material()) {
+      ed::material_combined::gradient_interactive_begin(*material);
+      ggd->drag_material_uid = material->id.session_uid;
+    }
     projection_gizmo_volume_invoke_prepare(C, *ggd, gz, event);
   }
 }

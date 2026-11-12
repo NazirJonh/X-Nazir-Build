@@ -43,11 +43,9 @@ bool PaintLayerRowProjectionTarget::resolve(const bContext &C)
   marker_ = {};
 
   Object *ob = CTX_data_active_object(&C);
-  /* `OB_MODE_OBJECT` is zero, so it cannot be tested as a mask bit. Layers are painted in Sculpt
-   * mode as well as Texture Paint, like the Gradient gizmo. */
-  if (ob == nullptr ||
-      (ob->mode != OB_MODE_OBJECT && (ob->mode & (OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT)) == 0))
-  {
+  /* The frame is edited in Sculpt Mode only: the handles must not stay behind in Object Mode or
+   * show up in Texture Paint, and the Place, Move and Flip operators share this poll. */
+  if (ob == nullptr || (ob->mode & OB_MODE_SCULPT) == 0) {
     return false;
   }
   Material *ma = BKE_paint_layers_active_material_get(ob);

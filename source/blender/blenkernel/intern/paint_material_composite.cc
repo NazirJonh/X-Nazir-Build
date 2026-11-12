@@ -24,6 +24,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -3390,6 +3391,71 @@ bool BKE_paint_material_composite_stack_dimensions(
 }
 
 /**
+ * Fold \a projection into \a hash. The frame's every value and both transforms move the pixels a
+ * projected read bakes, so each enters the key. The one place a projection is hashed, so a map read
+ * and a projected gradient line cannot disagree on a cache entry.
+ */
+static uint64_t composite_projection_hash(uint64_t hash,
+                                          const PaintMaterialCompositeProjection &projection)
+{
+  BLI_assert(projection.present);
+  hash = get_default_hash(
+      hash, int(projection.space), int(projection.axis), int(projection.cube_layout));
+  hash = get_default_hash(hash, projection.center[0], projection.center[1], projection.center[2]);
+  hash = get_default_hash(hash,
+                          BKE_paint_layers_projection_size_normalize(projection.size[0]),
+                          BKE_paint_layers_projection_size_normalize(projection.size[1]),
+                          BKE_paint_layers_projection_size_normalize(projection.size[2]));
+  hash = get_default_hash(
+      hash, projection.rotation[0], projection.rotation[1], projection.rotation[2]);
+  /* The clip, the depth slab and the facing fade all cut pixels without moving the frame, so
+   * each enters the key as well; the facing scale carries the Flip Facing sign, and the aspect
+   * factors scale the coordinates the frame factor reads. */
+  hash = get_default_hash(hash, projection.clip, projection.blend);
+  hash = get_default_hash(hash,
+                          projection.depth,
+                          projection.facing,
+                          projection.facing_scale,
+                          projection.facing_offset);
+  hash = get_default_hash(
+      hash, projection.aspect[0], projection.aspect[1], projection.aspect[2]);
+  hash = get_default_hash(hash, projection.tiling[0], projection.tiling[1]);
+  hash = get_default_hash(hash, projection.tile_number, projection.source_tiled);
+  const auto hash_object = [&](const Object *object, const bool with_matrix) {
+    if (object == nullptr) {
+      hash = get_default_hash(hash, 0);
+      return;
+    }
+    hash = get_default_hash(hash, object->id.session_uid);
+    if (!with_matrix) {
+      return;
+    }
+    const float(*matrix)[4] = object->object_to_world().ptr();
+    for (int i = 0; i < 4; i++) {
+      for (int j = 0; j < 4; j++) {
+        hash = get_default_hash(hash, matrix[i][j]);
+      }
+    }
+  };
+  /* A frame in object space does not move when the object does; a controller Empty's transform
+   * does move the projection, so both transforms enter the key then. */
+  hash_object(projection.object, projection.controller != nullptr);
+  hash_object(projection.controller, true);
+  if (const Mesh *bake_mesh = composite_projection_mesh(projection.object)) {
+    /* The bake reads the object's render UV and topology; a UV layer switch or a topology edit
+     * has to rebuild it even though neither moves the layer stack. */
+    const Mesh &mesh = *bake_mesh;
+    const StringRefNull uv_name_ref = BKE_paint_layers_gradient_uv_map_name(mesh);
+    const char *uv_name = uv_name_ref.is_empty() ? nullptr : uv_name_ref.c_str();
+    for (const char *c = uv_name; c != nullptr && *c != '\0'; c++) {
+      hash = get_default_hash(hash, int(*c));
+    }
+    hash = get_default_hash(hash, mesh.verts_num, mesh.faces_num, mesh.corners_num);
+  }
+  return hash;
+}
+
+/**
  * Fold \a mapping into \a hash. A mapping slider moves pixels without changing any image, so the
  * normalized values have to move the hash, or an edit would keep serving the cached composite.
  */
@@ -3411,64 +3477,7 @@ static uint64_t composite_mapping_hash(uint64_t hash, const PaintMaterialComposi
                             mapping.tangent_normal);
   }
   if (mapping.projection.present) {
-    const PaintMaterialCompositeProjection &projection = mapping.projection;
-    hash = get_default_hash(
-        hash, int(projection.space), int(projection.axis), int(projection.cube_layout));
-    hash = get_default_hash(
-        hash, projection.center[0], projection.center[1], projection.center[2]);
-    hash = get_default_hash(hash,
-                            BKE_paint_layers_projection_size_normalize(projection.size[0]),
-                            BKE_paint_layers_projection_size_normalize(projection.size[1]),
-                            BKE_paint_layers_projection_size_normalize(projection.size[2]));
-    hash = get_default_hash(
-        hash, projection.rotation[0], projection.rotation[1], projection.rotation[2]);
-    /* The clip, the depth slab and the facing fade all cut pixels without moving the frame, so
-     * each enters the key as well; the facing scale carries the Flip Facing sign, and the aspect
-     * factors scale the coordinates the frame factor reads. */
-    hash = get_default_hash(hash, projection.clip, projection.blend);
-    hash = get_default_hash(hash,
-                            projection.depth,
-                            projection.facing,
-                            projection.facing_scale,
-                            projection.facing_offset);
-    hash = get_default_hash(hash,
-                            projection.aspect[0],
-                            projection.aspect[1],
-                            projection.aspect[2]);
-    hash = get_default_hash(hash, projection.tiling[0], projection.tiling[1]);
-    hash = get_default_hash(hash, projection.tile_number, projection.source_tiled);
-    const auto hash_object = [&](const Object *object, const bool with_matrix) {
-      if (object == nullptr) {
-        hash = get_default_hash(hash, 0);
-        return;
-      }
-      hash = get_default_hash(hash, object->id.session_uid);
-      if (!with_matrix) {
-        return;
-      }
-      const float(*matrix)[4] = object->object_to_world().ptr();
-      for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-          hash = get_default_hash(hash, matrix[i][j]);
-        }
-      }
-    };
-    /* A frame in object space does not move when the object does; a controller Empty's transform
-     * does move the projection, so both transforms enter the key then. */
-    hash_object(projection.object, projection.controller != nullptr);
-    hash_object(projection.controller, true);
-    if (projection.object != nullptr && projection.object->type == OB_MESH &&
-        projection.object->data != nullptr)
-    {
-      /* The bake reads the object's render UV and topology; a UV layer switch or a topology edit
-       * has to rebuild it even though neither moves the layer stack. */
-      const Mesh &mesh = *id_cast<const Mesh *>(projection.object->data);
-      const char *uv_name = CustomData_get_render_layer_name(&mesh.corner_data, CD_PROP_FLOAT2);
-      for (const char *c = uv_name; c != nullptr && *c != '\0'; c++) {
-        hash = get_default_hash(hash, int(*c));
-      }
-      hash = get_default_hash(hash, mesh.verts_num, mesh.faces_num, mesh.corners_num);
-    }
+    hash = composite_projection_hash(hash, mapping.projection);
   }
   return hash;
 }

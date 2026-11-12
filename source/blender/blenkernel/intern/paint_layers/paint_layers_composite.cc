@@ -2877,6 +2877,25 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
   if (layer.gradient.enabled) {
     return "a Gradient generator row is not laid by the GPU path";
   }
+  /* A projected map is baked into UV space on the CPU (#composite_resample_projected); the GPU
+   * layer pass only applies the UV adjust, so it would show the map stretched over the UVs instead
+   * of the frame the 3D viewport projects. Refused like the Gradient, so the CPU preview takes
+   * over. */
+  if (layer.mapping.projection.present) {
+    return "a projected row is not laid by the GPU path";
+  }
+  for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+    if (correction.opacity > 0.0f && correction.mapping.projection.present) {
+      return "a projected correction is not laid by the GPU path";
+    }
+  }
+  for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+    if (item.opacity > 0.0f &&
+        (item.mapping.projection.present || item.coverage_mapping.projection.present))
+    {
+      return "a projected mask item is not laid by the GPU path";
+    }
+  }
   /* The height modes are a delta-space step no shader branch reproduces, and a Compare row's win
    * or loss gates every channel of the row through a rendered mask. The description carries the
    * effective mode, so an Inherit row over Add, Subtract or a non-Mix colour blend is refused

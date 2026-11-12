@@ -5616,7 +5616,6 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         _defs_transform.transform,
         None,
         _defs_sculpt.sculpt_cursor,
-        _defs_sculpt.projection_frame,
         None,
         *_tools_annotate,
     ]
@@ -5657,6 +5656,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         *_tools_image_paint_select_view3d,
         None,
         _defs_sculpt.sculpt_cursor,
+        _defs_sculpt.projection_frame,
         None,
         *_tools_annotate,
     ]

@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 #include "WM_types.hh"
 
 #include "projection_target.hh"
@@ -98,6 +100,13 @@ struct ProjectionGizmoGroup {
    * arrows, dials) draws itself from its own drag state and is left alone.
    */
   wmGizmo *drag_gz = nullptr;
+
+  /**
+   * Session uid of the material whose previews are shaded at an octave while a handle is dragged
+   * (see #gradient_interactive_begin), or zero. Kept so the mark is cleared by uid when the drag
+   * ends or the group goes away, without dereferencing a material the drag outlived.
+   */
+  uint32_t drag_material_uid = 0;
 
   /**
    * Cage state captured at #invoke_prepare: the cage modal reports its scale relative to the

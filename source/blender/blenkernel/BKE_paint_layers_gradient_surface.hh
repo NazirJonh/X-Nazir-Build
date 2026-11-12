@@ -29,10 +29,13 @@
  * on #BakeTargetSpec).
  */
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 
+#include "BLI_function_ref.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 
 #include "BKE_paint_material_composite_surface.hh"
@@ -105,6 +108,41 @@ uint64_t BKE_paint_layers_gradient_surface_identity(const Object &object,
                                                    const Mesh &mesh,
                                                    const char *uv_map_name,
                                                    int size);
+
+/**
+ * Grow every rasterized island of a UV-space buffer outward by \a passes texels, one ring a pass:
+ * each empty texel takes the data of its nearest valid neighbour, and the writes of a pass only
+ * become sources in the next one, so the result does not depend on the traversal order.
+ *
+ * A written map is read with bilinear filtering and mipmaps; an empty texel beside an island would
+ * otherwise blend into it as a dark or transparent seam. Edge neighbours go before diagonal ones,
+ * which keeps a straight island border straight. Each pass is bounded by the current valid box, so
+ * the cost follows the grown area, not the whole canvas.
+ *
+ * The one growth rule of the surface's position grids and of a projected map's colours, so a
+ * bake's seams and the preview's agree.
+ *
+ * \param valid: one byte per texel, non-zero inside an island; padded texels are marked as well.
+ * \param valid_min, valid_max: the box (inclusive) the valid texels lie in.
+ * \param copy_texel: copies the payload of texel \a src to texel \a dst (row-major indices).
+ * \return how many texels the padding filled.
+ */
+int64_t BKE_paint_composite_pad_islands(MutableSpan<uint8_t> valid,
+                                        int width,
+                                        int height,
+                                        int passes,
+                                        int2 valid_min,
+                                        int2 valid_max,
+                                        FunctionRef<void(int64_t dst, int64_t src)> copy_texel);
+
+/**
+ * The padding a map of \a size texels wide is grown by: enough for bilinear filtering and the first
+ * mip levels, capped so a large canvas does not pay for a wide margin.
+ */
+inline int BKE_paint_composite_island_padding(const int size)
+{
+  return std::clamp(size / 64, 1, 16);
+}
 
 /**
  * The UV map the generated shader reads as `Texture Coordinate.UV`: the render-active/default map,

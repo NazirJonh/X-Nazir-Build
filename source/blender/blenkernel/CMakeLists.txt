@@ -270,7 +270,9 @@ set(SRC
   intern/paint_layers/paint_layers_anchor_point.cc
   intern/paint_layers/paint_layers_asset.cc
   intern/paint_layers/paint_layers_bake.cc
+  intern/paint_layers/paint_layers_bake_job.cc
   intern/paint_layers/paint_layers_bake_mask_effect.cc
+  intern/paint_layers/paint_layers_bake_material_rows.cc
   intern/paint_layers/paint_layers_bake_intern.hh
   intern/paint_layers/paint_layers_copy.cc
   intern/paint_layers/paint_layers_convert.cc

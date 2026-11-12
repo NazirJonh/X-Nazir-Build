@@ -58,13 +58,36 @@ namespace blender::ed::outliner {
  * The tool header carries the Stack Layers controls and nothing else, so an empty strip under the
  * header in every other display mode is wasted space the user did not ask for. Every path that
  * changes the display mode outside the RNA property's own update -- an operator that sets the mode
- * directly, a mode restored from a file, a duplicated area -- goes through this, so they all agree
- * with a mode set from the UI. The re-layout it triggers is deferred to the next window draw (see
- * the definition), which is why it needs no `bContext`.
+ * directly, a mode restored from a file, a duplicated area -- goes through
+ * #outliner_stack_regions_visibility_sync, which calls this, so they all agree with a mode set from
+ * the UI. The re-layout it triggers is deferred to the next window draw (see the definition), which
+ * is why it needs no `bContext`.
  */
 void outliner_tool_header_visibility_sync(bContext * /*C*/,
                                           ScrArea *area,
                                           const SpaceOutliner &space_outliner);
+
+/**
+ * Bring every region whose visibility follows the Stack Layers display in line with the space.
+ *
+ * The display mode and its sub-view decide both strips at once: the tool header shows in Stack
+ * Layers, the footer status strip only in its stack sub-view (#outliner_stack_footer_wanted). Every
+ * path that changes either -- RNA updates, the Back and Focus operators, the follow-active-object
+ * listener, init and undo -- calls this instead of #outliner_tool_header_visibility_sync directly,
+ * which is what stops a new call site from updating one strip and forgetting the other. The
+ * footer region's listener re-runs it for the changes that only send `ND_SPACE_OUTLINER`.
+ */
+void outliner_stack_regions_visibility_sync(bContext *C,
+                                            ScrArea *area,
+                                            const SpaceOutliner &space_outliner);
+
+/**
+ * Whether the Stack Layers display wants the footer: only the stack sub-view has status to show.
+ *
+ * RNA's `show_stack_footer` reads this, and the Python header's poll reads that property, so the
+ * condition exists in one place only.
+ */
+bool outliner_stack_footer_wanted(const SpaceOutliner &space_outliner);
 
 /**
  * The name of the data-block the displayed Stack Layers stack belongs to, as the source last
@@ -74,6 +97,14 @@ void outliner_tool_header_visibility_sync(bContext * /*C*/,
  * context to resolve a focus with. Empty until the stack has been drawn once.
  */
 const char *outliner_stack_focus_name_get(const SpaceOutliner &space_outliner);
+
+/**
+ * How many top-level rows the focused stack currently reads as having.
+ *
+ * Zero when the rows are not cached right now (no focus yet, or dropped by an undo); the footer
+ * treats that the same as an empty stack and leaves the count out.
+ */
+int outliner_stack_layer_count_get(const SpaceOutliner &space_outliner);
 
 /** Index of the focused stack's source-defined sub-selection, such as a material slot. */
 int outliner_stack_focus_sub_index_get(const SpaceOutliner &space_outliner);

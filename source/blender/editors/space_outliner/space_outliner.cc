@@ -485,9 +485,9 @@ static void outliner_space_listener(const wmSpaceTypeListenerParams *params)
         ctx, *params->area, *space_outliner, static_cast<ID *>(wmn->reference));
   }
   if (outliner_stack_view_follow_active(*space_outliner, ctx)) {
-    /* The display mode may have changed under the header, and the tool header exists only in
-     * Stack Layers. */
-    outliner_tool_header_visibility_sync(nullptr, params->area, *space_outliner);
+    /* The display mode and its sub-view may have changed under both strips; the tool header
+     * exists only in Stack Layers and the footer only in its stack sub-view. */
+    outliner_stack_regions_visibility_sync(nullptr, params->area, *space_outliner);
     ED_area_tag_redraw(params->area);
   }
   if (wmn->category == NC_SCENE && wmn->data == ND_OB_ACTIVE &&
@@ -568,6 +568,54 @@ static void outliner_header_region_listener(const wmRegionListenerParams *params
   }
 }
 
+/* ************************ footer outliner area region *********************** */
+
+/* The footer is an ordinary header-style region, so it shares the header's init, draw and free. */
+
+static void outliner_footer_region_listener(const wmRegionListenerParams *params)
+{
+  ARegion *region = params->region;
+  ScrArea *area = params->area;
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(area->spacedata.first);
+  const wmNotifier *wmn = params->notifier;
+  if (space_outliner == nullptr) {
+    return;
+  }
+
+  /* context changes */
+  switch (wmn->category) {
+    case NC_SPACE:
+      if (wmn->data == ND_SPACE_OUTLINER) {
+        /* Every display-mode and sub-view change announces through this notifier, including the
+         * ones set directly by an operator that skips the RNA update. Both strips follow those
+         * changes, so they are re-decided here as well as at the explicit sync calls. */
+        outliner_stack_regions_visibility_sync(nullptr, area, *space_outliner);
+        ED_region_tag_redraw(region);
+      }
+      break;
+    case NC_WM:
+      if (wmn->data == ND_UNDO) {
+        /* Undo can bring back a different display mode, and it drops the rows the layer count
+         * reads; both are picked up again on the next read. */
+        outliner_stack_regions_visibility_sync(nullptr, area, *space_outliner);
+        ED_region_tag_redraw(region);
+      }
+      break;
+    case NC_SCENE:
+      if (wmn->data == ND_OB_ACTIVE) {
+        /* The main region's listener drops the focus; the strip shows what the next read
+         * resolves it to. */
+        ED_region_tag_redraw(region);
+      }
+      break;
+    case NC_ID:
+      if (wmn->action == NA_RENAME) {
+        ED_region_tag_redraw(region);
+      }
+      break;
+  }
+}
+
 /* ******************** default callbacks for outliner space ***************** */
 
 static SpaceLink *outliner_create(const ScrArea * /*area*/, const Scene * /*scene*/)
@@ -601,6 +649,17 @@ static SpaceLink *outliner_create(const ScrArea * /*area*/, const Scene * /*scen
   region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
   region->flag = RGN_FLAG_HIDDEN;
 
+  /* Footer: the Stack Layers status strip. It sits on the edge opposite the header, like every
+   * other editor's footer, and starts hidden for the same reason the tool header does: only one
+   * display mode has anything to say in it. */
+  region = BKE_area_region_new();
+
+  BLI_addtail(&space_outliner->regionbase, region);
+  region->regiontype = RGN_TYPE_FOOTER;
+  region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_TOP : RGN_ALIGN_BOTTOM;
+  /* Hidden by the user, so the visibility sync keeps it collapsed until it is toggled on. */
+  region->flag = RGN_FLAG_HIDDEN | RGN_FLAG_HIDDEN_BY_USER;
+
   /* main region */
   region = BKE_area_region_new();
 
@@ -623,13 +682,14 @@ static void outliner_free(SpaceLink *sl)
   MEM_delete(space_outliner->runtime);
 }
 
-void outliner_tool_header_visibility_sync(bContext * /*C*/,
-                                          ScrArea *area,
-                                          const SpaceOutliner &space_outliner)
+/**
+ * Show or hide every region of \a region_type to match \a show, leaving a collapse the user made
+ * (#RGN_FLAG_HIDDEN_BY_USER) alone.
+ */
+static void outliner_region_visibility_apply(ScrArea *area, const int region_type, const bool show)
 {
-  const bool show = space_outliner.outlinevis == SO_STACK_LAYERS;
   for (ARegion &region : area->regionbase) {
-    if (region.regiontype != RGN_TYPE_TOOL_HEADER) {
+    if (region.regiontype != region_type) {
       continue;
     }
     const bool hidden = !show || (region.flag & RGN_FLAG_HIDDEN_BY_USER);
@@ -646,6 +706,31 @@ void outliner_tool_header_visibility_sync(bContext * /*C*/,
     ED_area_tag_region_size_update(area, &region);
     ED_region_tag_redraw(&region);
   }
+}
+
+void outliner_tool_header_visibility_sync(bContext * /*C*/,
+                                          ScrArea *area,
+                                          const SpaceOutliner &space_outliner)
+{
+  outliner_region_visibility_apply(
+      area, RGN_TYPE_TOOL_HEADER, space_outliner.outlinevis == SO_STACK_LAYERS);
+}
+
+bool outliner_stack_footer_wanted(const SpaceOutliner &space_outliner)
+{
+  /* The footer is the Stack Layers status strip: it belongs to the stack sub-view only. The
+   * objects list carries its controls in the tool header and has nothing for a footer to say. */
+  return space_outliner.outlinevis == SO_STACK_LAYERS &&
+         space_outliner.stack_layers_view == SO_SL_VIEW_STACK;
+}
+
+void outliner_stack_regions_visibility_sync(bContext *C,
+                                            ScrArea *area,
+                                            const SpaceOutliner &space_outliner)
+{
+  outliner_tool_header_visibility_sync(C, area, space_outliner);
+  outliner_region_visibility_apply(
+      area, RGN_TYPE_FOOTER, outliner_stack_footer_wanted(space_outliner));
 }
 
 /**
@@ -683,13 +768,55 @@ static void outliner_tool_header_ensure(ScrArea *area)
   }
 }
 
+/**
+ * Give an Outliner area created before the footer existed (startup file, saved layouts) its
+ * region. Same situation #outliner_tool_header_ensure covers: #outliner_create only runs for
+ * newly created spaces.
+ */
+static void outliner_footer_ensure(ScrArea *area)
+{
+  ARegion *tool_header = nullptr;
+  ARegion *header = nullptr;
+  for (ARegion &region : area->regionbase) {
+    if (region.regiontype == RGN_TYPE_FOOTER) {
+      return;
+    }
+    if (region.regiontype == RGN_TYPE_TOOL_HEADER) {
+      tool_header = &region;
+    }
+    else if (region.regiontype == RGN_TYPE_HEADER) {
+      header = &region;
+    }
+  }
+
+  ARegion *footer = BKE_area_region_new();
+  footer->regiontype = RGN_TYPE_FOOTER;
+  /* Same null-type caveat as the tool header above. */
+  if (area->type != nullptr) {
+    footer->runtime->type = BKE_regiontype_from_id(area->type, RGN_TYPE_FOOTER);
+  }
+  /* The footer sits on the edge opposite the header, like every other editor's footer. */
+  footer->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_TOP : RGN_ALIGN_BOTTOM;
+  footer->flag = RGN_FLAG_HIDDEN | RGN_FLAG_HIDDEN_BY_USER;
+  if (tool_header != nullptr) {
+    BLI_insertlinkafter(&area->regionbase, tool_header, footer);
+  }
+  else if (header != nullptr) {
+    BLI_insertlinkafter(&area->regionbase, header, footer);
+  }
+  else {
+    BLI_addhead(&area->regionbase, footer);
+  }
+}
+
 /* spacetype; init callback */
 static void outliner_init(wmWindowManager * /*wm*/, ScrArea *area)
 {
   outliner_tool_header_ensure(area);
+  outliner_footer_ensure(area);
   const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(area->spacedata.first);
   if (space_outliner != nullptr) {
-    outliner_tool_header_visibility_sync(nullptr, area, *space_outliner);
+    outliner_stack_regions_visibility_sync(nullptr, area, *space_outliner);
   }
 }
 
@@ -982,6 +1109,20 @@ void ED_spacetype_outliner()
   art->draw = outliner_header_region_draw;
   art->free = outliner_header_region_free;
   art->listener = outliner_header_region_listener;
+  BLI_addhead(&st->regiontypes, art);
+
+  /* regions: footer. An ordinary header region shown only in the stack sub-view of Stack Layers,
+   * where it acts as that mode's status strip. `ED_KEYMAP_FOOTER` carries the same Region Context
+   * Menu keymap `ED_KEYMAP_HEADER` does, and again no `ED_KEYMAP_FRAMES`. */
+  art = MEM_new_zeroed<ARegionType>("spacetype outliner footer region");
+  art->regionid = RGN_TYPE_FOOTER;
+  art->prefsizey = HEADERY;
+  art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D | ED_KEYMAP_FOOTER;
+
+  art->init = outliner_header_region_init;
+  art->draw = outliner_header_region_draw;
+  art->free = outliner_header_region_free;
+  art->listener = outliner_footer_region_listener;
   BLI_addhead(&st->regiontypes, art);
 
   BKE_spacetype_register(std::move(st));

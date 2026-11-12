@@ -3439,6 +3439,14 @@ static void region_scale_toggle_hidden(bContext *C, RegionMoveData *rmd, bool do
     ui::view2d_curRect_validate(&rmd->region->v2d);
   }
 
+  if (rmd->region->regiontype == RGN_TYPE_FOOTER && rmd->area->spacetype == SPACE_OUTLINER) {
+    /* The Outliner footer also hides itself with the display mode, and that sync re-runs on every
+     * stack edit. Recording the collapse as the user's keeps the sync from reopening it. This has
+     * to precede the toggle: the toggle re-initializes the area, which runs the sync. */
+    SET_FLAG_FROM_TEST(
+        rmd->region->flag, (rmd->region->flag & RGN_FLAG_HIDDEN) == 0, RGN_FLAG_HIDDEN_BY_USER);
+  }
+
   region_toggle_hidden(C, rmd->region, do_fade);
   region_scale_validate_size(rmd);
 

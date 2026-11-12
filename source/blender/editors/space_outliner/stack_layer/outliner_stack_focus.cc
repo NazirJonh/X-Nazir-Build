@@ -142,16 +142,21 @@ wmOperatorStatus stack_back_exec(bContext *C, wmOperator *op)
   if (!RNA_boolean_get(op->ptr, "keep_view")) {
     space_outliner->outlinevis = SO_VIEW_LAYER;
     space_outliner->stack_layers_view = SO_SL_VIEW_OBJECTS;
-    /* Leaving the mode through an operator skips #rna_SpaceOutliner_display_mode_update, so the
-     * tool header that carries only the Stack Layers controls is synced here through the same
-     * helper the RNA update calls. */
+    /* Leaving the mode through an operator skips #rna_SpaceOutliner_display_mode_update, so both
+     * strips are synced here through the same helper the RNA update calls. */
     if (ScrArea *area = CTX_wm_area(C)) {
-      outliner_tool_header_visibility_sync(C, area, *space_outliner);
+      outliner_stack_regions_visibility_sync(C, area, *space_outliner);
       ED_area_tag_redraw(area);
     }
   }
   else {
     space_outliner->stack_layers_view = SO_SL_VIEW_OBJECTS;
+    /* Back to the objects list: the footer is the stack view's strip and goes with the view. The
+     * tool header does not follow the sub-view, so it has nothing to change, but the shared helper
+     * keeps this call site from having to know that. */
+    if (ScrArea *area = CTX_wm_area(C)) {
+      outliner_stack_regions_visibility_sync(C, area, *space_outliner);
+    }
   }
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
   return OPERATOR_FINISHED;
@@ -388,6 +393,27 @@ bool outliner_stack_focus_sub_index_sync(const StackReadContext &ctx,
   return true;
 }
 
+int outliner_stack_layer_count_get(const SpaceOutliner &space_outliner)
+{
+  /* Only the row count is offered through RNA. Anything richer -- the active row, a mask, blend or
+   * opacity state -- must not grow into more getters over this cache: the cache is only valid
+   * after a draw (see #outliner_stack_rows_invalidate), so a reader that runs first gets nothing.
+   * Draw the status in C instead, as the spreadsheet footer does in `space_spreadsheet.cc`, and
+   * read the rows there. */
+  if (space_outliner.runtime == nullptr || !space_outliner.runtime->stack_rows_valid) {
+    return 0;
+  }
+  int count = 0;
+  /* Top-level rows only: the layers and the folders that group them. Attached rows (masks,
+   * corrections) and other sub-rows belong to one, not to the stack's own count. */
+  for (const StackRow &row : space_outliner.runtime->stack_rows) {
+    if (row.parent_ordinal < 0) {
+      count++;
+    }
+  }
+  return count;
+}
+
 ID *outliner_stack_owner_get(const StackReadContext &ctx, SpaceOutliner &space_outliner)
 {
   /* Resolving here, so that a focus left pointing at a deleted object drops itself, and the rows
@@ -445,8 +471,8 @@ bool outliner_stack_focus_set(bContext *C,
   space_outliner.stack_layers_view = SO_SL_VIEW_STACK;
   if (ScrArea *area = CTX_wm_area(C)) {
     /* Focusing a stack sets the display mode directly, so it skips the RNA update that would show
-     * the tool header; sync it here through the same helper that update calls. */
-    outliner_tool_header_visibility_sync(C, area, space_outliner);
+     * both strips; sync them here through the same helper that update calls. */
+    outliner_stack_regions_visibility_sync(C, area, space_outliner);
     ED_area_tag_redraw(area);
   }
 

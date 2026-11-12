@@ -7,6 +7,7 @@ from bpy.types import Header, Menu, Panel
 
 from bpy.app.translations import (
     contexts as i18n_contexts,
+    pgettext_iface as iface_,
 )
 
 
@@ -175,12 +176,6 @@ class OUTLINER_HT_tool_header(Header):
                 if add_menu is not None:
                     layout.menu(add_menu, text="", icon='ADD')
 
-        if space.show_stack_layer_move_buttons:
-            layout.separator()
-            row = layout.row(align=True)
-            row.operator("outliner.stack_layer_move", text="", icon='TRIA_UP').direction = 'UP'
-            row.operator("outliner.stack_layer_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
-
         layout.separator()
 
         row = layout.row(align=True)
@@ -343,6 +338,40 @@ class OUTLINER_MT_stack_layer_advanced(Menu):
             text="Use as Brush Source",
             icon='BRUSH_DATA',
         )
+
+
+class OUTLINER_HT_stack_footer(Header):
+    bl_space_type = 'OUTLINER'
+    bl_region_type = 'FOOTER'
+
+    @classmethod
+    def poll(cls, context):
+        # The C++ visibility rule is the single source of truth; repeating it here is what let the
+        # two drift apart.
+        return context.space_data.show_stack_footer
+
+    def draw(self, context):
+        layout = self.layout
+        space = context.space_data
+
+        # What the rows above belong to. The name is empty until the stack has been drawn once,
+        # so a strip that comes up before the first read carries the count only. The owner is not
+        # always an object (a paint stack belongs to a material, a shape key stack to a key), so
+        # the label carries no owner-type icon.
+        name = space.stack_focus_name
+        if name:
+            layout.label(text=name)
+
+        layout.separator_spacer()
+
+        if space.show_stack_layer_move_buttons:
+            row = layout.row(align=True)
+            row.operator("outliner.stack_layer_move", text="", icon='TRIA_UP').direction = 'UP'
+            row.operator("outliner.stack_layer_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
+
+        count = space.stack_layer_count
+        if count:
+            layout.label(text=iface_("Layers: {:d}").format(count), icon='IMAGE_RGB')
 
 
 class OUTLINER_HT_header(Header):
@@ -685,7 +714,7 @@ class OUTLINER_MT_context_menu(Menu):
 class OUTLINER_MT_context_menu_view(Menu):
     bl_label = "View"
 
-    def draw(self, _context):
+    def draw(self, context):
         layout = self.layout
 
         layout.operator("outliner.show_active")
@@ -702,6 +731,13 @@ class OUTLINER_MT_context_menu_view(Menu):
         layout.operator("outliner.show_hierarchy", text="Show Object Hierarchy")
         layout.operator("outliner.show_one_level", text="Show One Level")
         layout.operator("outliner.show_one_level", text="Hide One Level").open = False
+
+        space = context.space_data
+        if space.show_stack_footer:
+            # The footer is hidden by the display mode too, so this is only offered where it has
+            # content. Without it a strip collapsed by dragging its edge could not be brought back.
+            layout.separator()
+            layout.prop(space, "show_region_footer", text="Status Strip")
 
 
 class OUTLINER_MT_view_pie(Menu):
@@ -1153,6 +1189,7 @@ class OUTLINER_PT_options_filter(Panel):
 classes = (
     OUTLINER_HT_header,
     OUTLINER_HT_tool_header,
+    OUTLINER_HT_stack_footer,
     OUTLINER_MT_stack_layer_procedural_add,
     OUTLINER_MT_stack_layer_pattern_add,
     OUTLINER_MT_stack_layer_effect_add,

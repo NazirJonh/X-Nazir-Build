@@ -165,6 +165,51 @@ class StackLayersOutlinerTest(unittest.TestCase):
             self.space.display_mode = 'VIEW_LAYER'
             self.assertFalse(bpy.types.OUTLINER_HT_tool_header.poll(bpy.context))
 
+    def footer_region(self):
+        return next((region for region in self.area.regions if region.type == 'FOOTER'), None)
+
+    def test_footer_region_exists(self):
+        # The footer is the stack view's status strip. Like the tool header it belongs to the
+        # Outliner area whether or not the mode is active; the visibility sync shows and hides it.
+        region = self.footer_region()
+        self.assertIsNotNone(region)
+        self.assertEqual(region.type, 'FOOTER')
+        self.assertEqual(bpy.types.OUTLINER_HT_stack_footer.bl_region_type, 'FOOTER')
+
+    def test_footer_polls_only_in_the_stack_view(self):
+        # The strip says what stack is open and how many layers it holds, which is stack
+        # sub-view content; the objects list carries its controls in the tool header instead.
+        with self.outliner_override():
+            self.space.display_mode = 'STACK_LAYERS'
+            self.space.stack_layers_view = 'OBJECTS'
+            self.assertFalse(bpy.types.OUTLINER_HT_stack_footer.poll(bpy.context))
+            self.space.stack_layers_view = 'STACK'
+            self.assertTrue(bpy.types.OUTLINER_HT_stack_footer.poll(bpy.context))
+            self.space.display_mode = 'VIEW_LAYER'
+            self.assertFalse(bpy.types.OUTLINER_HT_stack_footer.poll(bpy.context))
+
+    def test_footer_shows_and_hides_with_the_stack_view(self):
+        # The region itself follows the sub-view: not laid out while the objects list is shown,
+        # full height once a stack is open. `region.height` reads the laid-out rectangle, so a
+        # full redraw has to run between the change and the read; a region the layout skipped
+        # keeps the empty rectangle's one-pixel floor rather than a real height.
+        object = self.add_object_with_shape_keys()
+        self.space.display_mode = 'STACK_LAYERS'
+        self.space.stack_source = 'SHAPE_KEYS'
+        self.space.stack_layers_view = 'OBJECTS'
+        self.redraw_window()
+        region = self.footer_region()
+        self.assertLessEqual(region.height, 2)
+        self.focus_and_draw_stack(object)
+        self.assertGreater(region.height, 10)
+
+    def test_stack_layer_count_follows_the_stack(self):
+        # The count the footer shows is the number of top-level rows: for shape keys that is the
+        # keys themselves, no folders or attached rows anywhere.
+        object = self.add_object_with_shape_keys()
+        self.focus_and_draw_stack(object)
+        self.assertEqual(self.space.stack_layer_count, 3)
+
     def test_stack_source_default_is_paint_material(self):
         # Paint layers are the mode's primary source and the one a space starts at; shape keys is
         # the other source a user can switch to.

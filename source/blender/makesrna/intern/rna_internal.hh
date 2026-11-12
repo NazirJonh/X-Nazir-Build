@@ -41,6 +41,8 @@ struct IDPropertyGroup;
 struct FreestyleLineSet;
 struct FreestyleModuleConfig;
 struct Main;
+struct Material;
+struct MaterialPaintLayer;
 struct MTex;
  struct Object;
   struct PropertyDefRNA;
@@ -309,6 +311,11 @@ void rna_def_mtex_common(BlenderRNA *brna,
                          const char *update_index);
 void rna_def_texpaint_slots(BlenderRNA *brna, StructRNA *srna);
 void rna_def_view_layer_common(BlenderRNA *brna, StructRNA *srna, bool scene);
+
+/* `rna_material_projection.hh`, included by `rna_material.cc`. */
+extern const EnumPropertyItem rna_enum_material_paint_layer_mapping_wrap_items[];
+void rna_def_material_paint_layer_projection(StructRNA *srna);
+Material *rna_paint_layer_material(PointerRNA *ptr, MaterialPaintLayer *layer);
 
 int rna_AssetMetaData_editable(const PointerRNA *ptr, const char **r_info);
 /**

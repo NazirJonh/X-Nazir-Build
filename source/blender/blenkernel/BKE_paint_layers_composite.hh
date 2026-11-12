@@ -35,6 +35,7 @@ struct Image;
 struct ImBuf;
 struct Material;
 struct MaterialPaintLayer;
+struct Object;
 struct ReportList;
 struct rcti;
 
@@ -107,7 +108,9 @@ bool BKE_paint_layers_composite_image_layers(
     Vector<PaintMaterialCompositeImageLayer> &r_layers,
     bool describe_only = false,
     std::shared_ptr<const PaintMaterialCompositeSurface> surface = nullptr,
-    PaintLayersHeightWonCache *height_won_cache = nullptr);
+    PaintLayersHeightWonCache *height_won_cache = nullptr,
+    int tile_number = PAINT_TILE_NUMBER_BASE,
+    const Object *painted_object = nullptr);
 
 /**
  * Drop every cached Anchor Point slice. The cache owns float canvases of its own (about 0.5 GiB per
@@ -158,7 +161,9 @@ void BKE_paint_layers_mask_effect_cache_free_material(const Material &ma);
 bool BKE_paint_layers_composite_channel(const Material &ma,
                                         int channel,
                                         ImBuf &r_dst,
-                                        const rcti *region = nullptr);
+                                        const rcti *region = nullptr,
+                                        int tile_number = PAINT_TILE_NUMBER_BASE,
+                                        const Object *painted_object = nullptr);
 
 /**
  * Composite \a channel of \a ma into \a dst, for a caller that holds an #Image rather than a bare
@@ -180,7 +185,9 @@ bool BKE_paint_layers_composite_image(const Material &ma,
                                       int channel,
                                       Image &dst,
                                       const rcti *region = nullptr,
-                                      ReportList *reports = nullptr);
+                                      ReportList *reports = nullptr,
+                                      int tile_number = PAINT_TILE_NUMBER_BASE,
+                                      const Object *painted_object = nullptr);
 
 /**
  * The row's mask items as the evaluator reads them, bottom to top: the same description
@@ -197,7 +204,9 @@ bool BKE_paint_layers_composite_image(const Material &ma,
 bool BKE_paint_layers_mask_items(const Material &ma,
                                  const MaterialPaintLayer &layer,
                                  Vector<PaintMaterialCompositeMaskItem> &r_items,
-                                 const bUUID *stop_before = nullptr);
+                                 const bUUID *stop_before = nullptr,
+                                 int tile_number = PAINT_TILE_NUMBER_BASE,
+                                 const Object *painted_object = nullptr);
 
 /**
  * Whether the correction \a effect lays in \a channel with the plain blend: Mix, or the combine
@@ -228,7 +237,8 @@ bool BKE_paint_layers_corrections_row_describe(const Material &ma,
                                                int tile_number,
                                                PaintMaterialCompositeImageLayer &r_row,
                                                const std::shared_ptr<const PaintMaterialCompositeSurface>
-                                                   &context_surface = nullptr);
+                                                   &context_surface = nullptr,
+                                               const Object *painted_object = nullptr);
 
 /**
  * Describe the slice \a reader lays in \a channel, without rendering it: the same entry
@@ -251,7 +261,8 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
                                      PaintMaterialCompositeImageLayer &r_entry,
                                      const int *slice_rect = nullptr,
                                      bool dimensions_only = false,
-                                     bool allow_empty_mask = false);
+                                     bool allow_empty_mask = false,
+                                     const Object *painted_object = nullptr);
 
 /**
  * Describe the **input** of a CPU-computed \a effect: the content \a row holds up to the effect's
@@ -298,7 +309,8 @@ bool BKE_paint_layers_slice_render(const Material &ma,
                                    std::shared_ptr<ImBuf> *r_color,
                                    std::shared_ptr<ImBuf> *r_coverage,
                                    const int *dst_rect = nullptr,
-                                   bool dimensions_only = false);
+                                   bool dimensions_only = false,
+                                   const Object *painted_object = nullptr);
 
 /**
  * Whether the combined preview computes \a effect itself, in an effect pass of its own whose result
@@ -823,7 +835,8 @@ class PaintLayersMaskSampler {
   PaintLayersMaskSampler(const Material &ma,
                          const MaterialPaintLayer &layer,
                          const bUUID *stop_before = nullptr,
-                         const bool hidden_with_base = true);
+                         const bool hidden_with_base = true,
+                         const Object *painted_object = nullptr);
   ~PaintLayersMaskSampler();
 
   PaintLayersMaskSampler(const PaintLayersMaskSampler &) = delete;

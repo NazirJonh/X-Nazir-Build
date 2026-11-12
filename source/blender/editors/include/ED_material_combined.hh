@@ -26,6 +26,7 @@ namespace blender {
 struct ImBuf;
 struct Main;
 struct Material;
+struct Object;
 struct PaintMaterialCompositeSurface;
 struct bContext;
 namespace gpu {
@@ -128,6 +129,9 @@ void gradient_preview_refresh_note(const Material &ma, double now);
  *                 null. Its key is part of the stack hash, so an exact and an approximate preview
  *                 never share a cache entry. The GPU path does not read it (see
  *                 #combined_preview_gpu_update).
+ * \param painted_object: the object a projected row bakes in the UV space of, or null, in which
+ *                        case such a row bakes transparent rather than reading its map at the
+ *                        wrong UV.
  * \return null when nothing resolves, which is the caller's cue to fall back to the plain image.
  */
 ImBuf *combined_preview_ensure(Main &bmain,
@@ -138,7 +142,8 @@ ImBuf *combined_preview_ensure(Main &bmain,
                                rcti *r_changed_region = nullptr,
                                CombinedEvalStats *r_stats = nullptr,
                                std::shared_ptr<const PaintMaterialCompositeSurface> surface =
-                                   nullptr);
+                                   nullptr,
+                               const Object *painted_object = nullptr);
 
 /**
  * Start an async bake of \a ma if any channel of the Combined preview would need one.

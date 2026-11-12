@@ -163,6 +163,11 @@ set(SRC
   mesh/paint_image_shape_ops.cc
   mesh/paint_image_shape_vector.cc
   mesh/paint_image_shape_gizmo.cc
+  projection/projection_gizmo.cc
+  projection/projection_ops.cc
+  projection/projection_ops.hh
+  projection/projection_target.cc
+  projection/projection_target.hh
   uv_mapping/paint_layer_mapping_gizmo.cc
   uv_mapping/paint_layer_mapping_ops.cc
   uv_mapping/paint_layer_mapping_pick_3d.cc

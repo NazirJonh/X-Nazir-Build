@@ -24,6 +24,7 @@
 #include <memory>
 
 #include "BLI_function_ref.hh"
+#include "BLI_math_base.h"
 #include "BLI_set.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -49,6 +50,7 @@ struct MaterialPaintLayer;
 struct MaterialPaintLayerChannel;
 struct MaterialPaintLayerCurvePatch;
 struct MaterialPaintLayerIdColor;
+struct MaterialPaintLayerProjection;
 struct MaterialSourceResolve;
 struct Object;
 struct Scene;
@@ -1696,6 +1698,270 @@ inline float BKE_paint_layers_mapping_mirror_side(const float coordinate, const 
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Row projection (Planar, Box, Triplanar, Cube, Cylinder, Sphere)
+ * \{ */
+
+/** Lower bound of a projection frame extent; a zero axis reads back as one. */
+constexpr float PAINT_LAYER_PROJECTION_SIZE_MIN = 1e-3f;
+
+/** Half extent of the projection frame: a frame-space axis is inside while `|q| < this`. */
+constexpr float PAINT_LAYER_PROJECTION_FRAME_EXTENT = 1.0f;
+
+/** Width of the smooth edge of the frame test, in frame-space units: about one texel of a ~400 px
+ * image mapped over the frame, so the clip factor has no hard seam at the frame border. */
+constexpr float PAINT_LAYER_PROJECTION_EDGE_SOFT = 0.005f;
+
+/** The facing limit a new frame gets, in degrees from the axis direction. */
+constexpr float PAINT_LAYER_PROJECTION_ANGLE_DEFAULT = 80.0f;
+
+/** Degrees below the facing limit where the weight is still full: the smooth band that keeps the
+ * interior of the decal crisp while the rim fades out. */
+constexpr float PAINT_LAYER_PROJECTION_ANGLE_BAND = 10.0f;
+
+/**
+ * Bumped when the projection's group inputs change shape (the depth, facing and aspect inputs
+ * joined): the topology hash mixes it, so a tree built before it rebuilds once and gets them.
+ */
+constexpr uint64_t PAINT_LAYER_PROJECTION_HASH_VERSION = 0x702;
+
+/**
+ * Smooth per-axis frame factor of \a value: one inside the frame edge, fading to zero over
+ * #PAINT_LAYER_PROJECTION_EDGE_SOFT. The generated graph builds the same two Multiply Add nodes,
+ * so the CPU has to repeat the predicate exactly here.
+ */
+inline float BKE_paint_layers_projection_axis_factor(const float value)
+{
+  const float depth = PAINT_LAYER_PROJECTION_FRAME_EXTENT - fabsf(value);
+  return clamp_f(depth / PAINT_LAYER_PROJECTION_EDGE_SOFT, 0.0f, 1.0f);
+}
+
+/**
+ * The frame factor of the frame-space position \a q: the product of the three axis factors. The
+ * generated graph builds the same chain (`projection_axis_factor` per axis), so the CPU has to
+ * repeat it.
+ */
+inline float BKE_paint_layers_projection_frame_factor(const float q[3])
+{
+  return BKE_paint_layers_projection_axis_factor(q[0]) *
+         BKE_paint_layers_projection_axis_factor(q[1]) *
+         BKE_paint_layers_projection_axis_factor(q[2]);
+}
+
+/**
+ * The facing weight of one frame-space normal component along the projection axis, from the scale
+ * and offset #BKE_paint_layers_projection_facing_weights bakes out of the facing limit and the
+ * flip: the component runs through the same clamped Multiply Add and hermite as the graph's Math
+ * nodes. A negative scale is the flip, not an error: the clamp is applied to the product.
+ */
+inline float BKE_paint_layers_projection_facing_weight(const float scale,
+                                                       const float offset,
+                                                       const float component)
+{
+  const float t = clamp_f(component * scale + offset, 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+
+/**
+ * Normalized extent of one projection axis: zero reads back as one, the magnitude never drops below
+ * #PAINT_LAYER_PROJECTION_SIZE_MIN. Shared by RNA, the value sync, the generator and the CPU.
+ */
+float BKE_paint_layers_projection_size_normalize(float size);
+
+/**
+ * The frame extents every reader uses: the row's stored size, normalized, or one per axis while the
+ * row takes its scale from the controller. Shared by the value sync, the CPU composite and the
+ * gizmo, so the frame they show and bake is the same.
+ */
+void BKE_paint_layers_projection_size_effective(const MaterialPaintLayer &layer, float r_size[3]);
+
+/**
+ * Normalized facing limit of one projection: zero (a file written before the field) or a value
+ * outside 0..180 reads back as #PAINT_LAYER_PROJECTION_ANGLE_DEFAULT. Shared by RNA, the value
+ * sync, the generator and the CPU.
+ */
+float BKE_paint_layers_projection_angle_normalize(float angle);
+
+/**
+ * The row's projection payload, allocated with defaults when the row has none. A UV row keeps no
+ * payload; callers only ensure one after #BKE_paint_layers_projection_set_space accepted a
+ * non-UV space.
+ */
+MaterialPaintLayerProjection *BKE_paint_layers_projection_ensure(MaterialPaintLayer &layer);
+
+/**
+ * Whether \a layer may project: a Fill that reads a map in at least one channel (Layer, correction)
+ * or through its mask image (mask item). A Material row's source graph is not wrapped for
+ * projection yet, a generator's own UV line is its parameter, and a map written by strokes is
+ * addressed at the raw UV. The one predicate UI, RNA, the generator and the CPU share.
+ *
+ * The space is read from the row; the payload need not exist yet.
+ */
+bool BKE_paint_layers_projection_supported(const Material &ma, const MaterialPaintLayer &layer);
+
+/** Whether \a layer projects right now: a non-UV space, supported, with a payload. */
+bool BKE_paint_layers_projection_applies(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Change the projection space of \a layer. Switching away from UV allocates the payload through
+ * #BKE_paint_layers_projection_ensure and mixes the mode into the generated topology; switching
+ * back to UV frees it and lets the row's Empty go. Refused for a space the row cannot project and
+ * for an unknown value.
+ */
+bool BKE_paint_layers_projection_set_space(Material &ma, MaterialPaintLayer *layer, int16_t space);
+
+/**
+ * Set the frame centre, extents and XYZ Euler rotation in one step (one tag per call, for
+ * per-event gizmo drags). Value-only: a slider or gizmo drag never rebuilds the graph.
+ */
+bool BKE_paint_layers_projection_set_values(Material &ma,
+                                            MaterialPaintLayer *layer,
+                                            const float center[3],
+                                            const float size[3],
+                                            const float rotation[3]);
+
+/** Set the frame centre. Value-only. */
+bool BKE_paint_layers_projection_set_center(Material &ma,
+                                            MaterialPaintLayer *layer,
+                                            const float center[3]);
+
+/** Set the frame extents, normalized per axis. Value-only. */
+bool BKE_paint_layers_projection_set_size(Material &ma,
+                                          MaterialPaintLayer *layer,
+                                          const float size[3]);
+
+/** Set the frame XYZ Euler rotation in radians. Value-only. */
+bool BKE_paint_layers_projection_set_rotation(Material &ma,
+                                              MaterialPaintLayer *layer,
+                                              const float rotation[3]);
+
+/** Whether the projection is clipped to its frame. */
+bool BKE_paint_layers_projection_clip_get(const MaterialPaintLayer &layer);
+
+/**
+ * Clip the projection to its frame or let it repeat over the whole surface. Structural: the clip
+ * adds the factor's nodes.
+ */
+bool BKE_paint_layers_projection_set_clip(Material &ma, MaterialPaintLayer *layer, bool clip);
+
+/** The properties of one projection space, so a new mode is one row of the table. */
+struct ProjectionModeInfo {
+  /** #eMaterialPaintLayerMappingSpace. */
+  int16_t space;
+  /** The mode projects along a local axis (#MaterialPaintLayerProjection::axis). */
+  bool uses_axis;
+  /** #eObject_EmptyDrawType the controller Empty shows for this mode. */
+  int8_t controller_display;
+};
+
+/**
+ * The table row of \a space; an out-of-range space reads as UV, which has no frame (and so no
+ * axis), matching how the stored value is normalized elsewhere.
+ */
+const ProjectionModeInfo &BKE_paint_layers_projection_mode_info(int16_t space);
+
+/** #eMaterialPaintLayerProjectionAxis of a Planar or Cylinder row. */
+int8_t BKE_paint_layers_projection_axis_get(const MaterialPaintLayer &layer);
+
+/** Set the axis of a Planar or Cylinder row. Structural: it changes the UV math. */
+bool BKE_paint_layers_projection_set_axis(Material &ma, MaterialPaintLayer *layer, int8_t axis);
+
+/** Whether the projection is limited to a depth slab along the axis (the frame's size on it). */
+bool BKE_paint_layers_projection_depth_get(const MaterialPaintLayer &layer);
+
+/** Toggle the depth slab. Value-only: the factor's nodes are always built. */
+bool BKE_paint_layers_projection_set_depth(Material &ma, MaterialPaintLayer *layer, bool depth);
+
+/** Whether faces that turn away from the axis fade the projection out. */
+bool BKE_paint_layers_projection_facing_get(const MaterialPaintLayer &layer);
+
+/** Toggle the facing fade. Value-only: the factor's nodes are always built. */
+bool BKE_paint_layers_projection_set_facing(Material &ma, MaterialPaintLayer *layer, bool facing);
+
+/** Whether the facing weight flips to the faces that point away from the projector. */
+bool BKE_paint_layers_projection_facing_invert_get(const MaterialPaintLayer &layer);
+
+/**
+ * Flip which side of the surface the facing weight keeps. Value-only: the weight's scale carries
+ * the sign, so the nodes are always built and stay as they are.
+ */
+bool BKE_paint_layers_projection_set_facing_invert(Material &ma,
+                                                   MaterialPaintLayer *layer,
+                                                   bool invert);
+
+/** Whether the controller keeps itself on the painted surface with a Shrinkwrap constraint. */
+bool BKE_paint_layers_projection_snap_get(const MaterialPaintLayer &layer);
+
+/**
+ * Toggle Snap to Surface. Only the flag: the editor adds or removes the controller's constraint,
+ * because that touches another object's data.
+ */
+bool BKE_paint_layers_projection_set_snap(Material &ma,
+                                          MaterialPaintLayer *layer,
+                                          bool snap);
+
+/** Whether the frame takes its scale from the controller instead of its inline extents. */
+bool BKE_paint_layers_projection_size_from_controller_get(const MaterialPaintLayer &layer);
+
+/** Toggle taking the frame scale from the controller. Value-only. */
+bool BKE_paint_layers_projection_set_size_from_controller(Material &ma,
+                                                          MaterialPaintLayer *layer,
+                                                          bool from_controller);
+
+/**
+ * The scale and offset the facing weight bakes out of \a angle and the flip: `component * scale +
+ * offset`, clamped to 0..1, is the entry the graph's Multiply Add and hermite read, so the face
+ * whose normal points back at the projector reads one and the faces past the limit read zero. The
+ * flip negates the scale rather than turning the component around, which keeps the one Facing
+ * input shared by the two normal paths -- a controller's baked direction and the shaded object's
+ * Vector Transform -- in step. \a angle is normalized by
+ * #BKE_paint_layers_projection_angle_normalize, so a file's zero reads as the default.
+ */
+void BKE_paint_layers_projection_facing_weights(float angle,
+                                                bool invert,
+                                                float &r_scale,
+                                                float &r_offset);
+
+/** Whether the frame's two footprint axes follow the row's source image aspect. */
+bool BKE_paint_layers_projection_fit_aspect_get(const MaterialPaintLayer &layer);
+
+/** Toggle the image aspect fit. Value-only: the factor's nodes are always built. */
+bool BKE_paint_layers_projection_set_fit_aspect(Material &ma,
+                                                MaterialPaintLayer *layer,
+                                                bool fit_aspect);
+
+/** The facing limit in degrees, normalized (zero or an out-of-range value reads as the default). */
+float BKE_paint_layers_projection_angle_get(const MaterialPaintLayer &layer);
+
+/** Set the facing limit in degrees, clamped to 0..180. Value-only. */
+bool BKE_paint_layers_projection_set_angle(Material &ma, MaterialPaintLayer *layer, float angle);
+
+/**
+ * The image whose pixel aspect the frame's footprint follows while the row fits the image aspect:
+ * the mask image of a mask item, else the first channel map the fill reads. Null when the row
+ * reads no map. Shared by the value sync and the CPU composite.
+ */
+const Image *BKE_paint_layers_projection_aspect_image(const Material &ma,
+                                                      const MaterialPaintLayer &layer);
+
+/**
+ * The U and V frame factors that fit the aspect of \a image onto the row's footprint axes: each
+ * below one when the image is wider or taller than square, both one for a square or unknown image.
+ * The generated graph and the CPU composite apply them the same way, before the 0.5 offset.
+ */
+void BKE_paint_layers_projection_aspect_factors(const Image *image, float r_factors[2]);
+
+/**
+ * Set the object whose space the frame is placed in (usually an Empty), or null to use the painted
+ * object's own object space. The row takes a user of the object through the ID walk. Structural:
+ * the generated Texture Coordinate node names it.
+ */
+bool BKE_paint_layers_projection_set_object(Material &ma,
+                                            MaterialPaintLayer *layer,
+                                            Object *object);
+
+/** \} */
+
 /** Rename \a layer. */
 bool BKE_paint_layers_rename(Material &ma, MaterialPaintLayer *layer, const char *name);
 
@@ -2522,14 +2788,16 @@ bool BKE_paint_layers_bake_render_node(
     float *r_color_rgba,
     float *r_coverage_gray,
     const int *dst_rect = nullptr,
-    const std::shared_ptr<const PaintMaterialCompositeSurface> &surface = nullptr);
+    const std::shared_ptr<const PaintMaterialCompositeSurface> &surface = nullptr,
+    const Object *painted_object = nullptr);
 
 /** The pixel dimensions of \a layer's content in \a channel, the size a bake defaults to. */
 bool BKE_paint_layers_row_dimensions(const Material &ma,
                                      const MaterialPaintLayer &layer,
                                      int channel,
                                      int &r_width,
-                                     int &r_height);
+                                     int &r_height,
+                                     const Object *painted_object = nullptr);
 
 /**
  * Whether \a layer's stored bake can stand in for its live subtree right now: a bake exists, its

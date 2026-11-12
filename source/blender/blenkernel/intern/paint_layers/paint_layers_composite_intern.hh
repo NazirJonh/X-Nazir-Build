@@ -45,6 +45,7 @@ bool composite_image_layer_build(const Material &ma,
                                  const bool isolating,
                                  const bool ignore_own_bake,
                                  PaintMaterialCompositeImageLayer &out,
+                                 const int tile_number,
                                  const bUUID *stop_before = nullptr,
                                  const int *slice_rect = nullptr,
                                  const bool dimensions_only = false,
@@ -52,7 +53,8 @@ bool composite_image_layer_build(const Material &ma,
                                  const std::shared_ptr<const PaintMaterialCompositeSurface>
                                      &context_surface = nullptr,
                                  PaintLayersHeightWonCache *height_won_cache = nullptr,
-                                 PaintLayerBakeScope scope = PaintLayerBakeScope::WholeRow);
+                                 PaintLayerBakeScope scope = PaintLayerBakeScope::WholeRow,
+                                 const Object *painted_object = nullptr);
 
 /**
  * Append the rows of \a list that take part in \a channel to \a r_layers, bottom to top. A folder is
@@ -66,11 +68,13 @@ void composite_image_layers_collect(const Material &ma,
                                     const std::shared_ptr<const PaintMaterialCompositeSurface>
                                         &context_surface,
                                     Vector<PaintMaterialCompositeImageLayer> &r_layers,
+                                    int tile_number,
                                     bool isolating = false,
                                     const int *slice_rect = nullptr,
                                     const bool dimensions_only = false,
                                     const bool describe_only = false,
-                                    PaintLayersHeightWonCache *height_won_cache = nullptr);
+                                    PaintLayersHeightWonCache *height_won_cache = nullptr,
+                                    const Object *painted_object = nullptr);
 
 /**
  * Whether nothing in \a layer moves a texel of a map: no mapping on the row, its corrections or

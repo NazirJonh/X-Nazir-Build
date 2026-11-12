@@ -166,6 +166,9 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
   }
   /* The registered payloads are plain numbers or flat arrays: no heap data of their own. */
   paint_layer_payload_free(*layer);
+  /* The projection frame is plain sub-data; its controller object is a user released by the
+   * generic free pass through #material_paint_layer_foreach_id. */
+  MEM_SAFE_DELETE(layer->projection);
   /* The ID users of the parameters are released by the generic free pass through
    * #material_paint_layer_foreach_id, like the channel maps. */
   if (layer->system_properties != nullptr) {
@@ -259,6 +262,11 @@ static MaterialPaintLayer *material_paint_layer_copy(Main *bmain,
     BKE_curvemapping_copy_data(&dst->curves->curve_mapping, &src.curves->curve_mapping);
   }
   paint_layer_payload_copy(src, *dst);
+  /* The projection frame is plain sub-data too; its controller pointer is remapped and its user
+   * added by the generic copy pass. */
+  dst->projection = (src.projection != nullptr) ?
+                        static_cast<MaterialPaintLayerProjection *>(MEM_dupalloc(src.projection)) :
+                        nullptr;
   /* Like the channel maps, the users of ID parameters are added by the generic copy pass. */
   if (src.system_properties != nullptr) {
     dst->system_properties = IDP_CopyProperty_ex(src.system_properties,
@@ -366,6 +374,9 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
     BKE_curvemapping_curves_blend_write(writer, &layer.curves->curve_mapping);
   }
   paint_layer_payload_write(*writer, layer);
+  if (layer.projection != nullptr) {
+    writer->write_struct(layer.projection);
+  }
   if (layer.system_properties != nullptr) {
     IDP_BlendWrite(writer, layer.system_properties);
   }
@@ -447,6 +458,14 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
     paint_layers_bake_tiles_clear(*layer.bake);
   }
   BLO_read_struct(reader, MaterialPaintLayerCurvePatch, &layer.curve_patch);
+  BLO_read_struct(reader, MaterialPaintLayerProjection, &layer.projection);
+  if (layer.mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_UV) {
+    /* The frame is on-demand: a file that came back to UV space should not carry one. */
+    MEM_SAFE_DELETE(layer.projection);
+  }
+  else {
+    BKE_paint_layers_projection_ensure(layer);
+  }
   BLO_read_struct(reader, IDProperty, &layer.system_properties);
   IDP_BlendDataRead(reader, &layer.system_properties);
   BLO_read_struct_list(reader, MaterialPaintLayerIdColor, &layer.id_colors);

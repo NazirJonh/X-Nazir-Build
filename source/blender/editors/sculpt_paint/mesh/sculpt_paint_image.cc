@@ -2575,8 +2575,9 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                                      *active_material) :
                                                  nullptr;
       if (mask_layer != nullptr) {
-        cache.paint_mask_sampler = std::make_unique<PaintLayersMaskSampler>(*active_material,
-                                                                            *mask_layer);
+        /* The sampler may bake a projected mask item in this object's UV space. */
+        cache.paint_mask_sampler = std::make_unique<PaintLayersMaskSampler>(
+            *active_material, *mask_layer, nullptr, true, &ob);
         if (cache.paint_mask_sampler->is_empty()) {
           cache.paint_mask_sampler.reset();
         }

@@ -459,7 +459,8 @@ ImBuf *combined_preview_ensure(Main &bmain,
                                uint64_t *r_revision,
                                rcti *r_changed_region,
                                CombinedEvalStats *r_stats,
-                               std::shared_ptr<const PaintMaterialCompositeSurface> surface)
+                               std::shared_ptr<const PaintMaterialCompositeSurface> surface,
+                               const Object *painted_object)
 {
   if (r_revision != nullptr) {
     *r_revision = 0;
@@ -517,7 +518,9 @@ ImBuf *combined_preview_ensure(Main &bmain,
                              stacks[i],
                              /*describe_only=*/true,
                              surface,
-                             &height_won_cache) :
+                             &height_won_cache,
+                             PAINT_TILE_NUMBER_BASE,
+                             painted_object) :
                          BKE_paint_material_composite_stack_from_material(
                              bmain, ma, combined_shading_channels[i], stacks[i]);
       stacks_found += has_stack[i] ? 1 : 0;
@@ -636,7 +639,14 @@ ImBuf *combined_preview_ensure(Main &bmain,
            * the exact one: approximate pixels behind an exact identity, and no edit of the surface
            * would ever invalidate them. */
           return BKE_paint_layers_composite_image_layers(
-              ma, channel, r_full, /*describe_only=*/false, surface, &height_won_cache);
+              ma,
+              channel,
+              r_full,
+              /*describe_only=*/false,
+              surface,
+              &height_won_cache,
+              PAINT_TILE_NUMBER_BASE,
+              painted_object);
         };
         /* The octave the gather decided for every channel, or zero for the canvas. Passed as a size
          * rather than as a display cap: the hysteresis is the preview's, not each channel's, or two

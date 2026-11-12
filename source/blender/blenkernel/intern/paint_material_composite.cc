@@ -8,21 +8,26 @@
 
 #include "BKE_paint_material_composite.hh"
 
+#include "BKE_attribute.hh"
 #include "BKE_colorband.hh"
+#include "BKE_customdata.hh"
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
+#include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_material_resolve.hh"
 
+#include "BLI_array.hh"
 #include "BLI_hash.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
@@ -31,6 +36,10 @@
 #include "BLI_math_color_blend.h"
 #include "BLI_math_interp.hh"
 #include "BLI_math_color.h"
+#include "BLI_math_geom.h"
+#include "BLI_math_matrix.h"
+#include "BLI_math_matrix.hh"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_rect.h"
@@ -40,6 +49,7 @@
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
+#include "BLI_virtual_array.hh"
 
 #include "BLT_translation.hh"
 
@@ -50,11 +60,14 @@
 
 #include "paint_layers/paint_material_generator_group_ids.hh"
 #include "paint_material_composite_internal.hh"
+#include "paint_material_composite_projection_internal.hh"
 
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_mesh_types.h"
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "IMB_colormanagement.hh"
@@ -65,6 +78,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 #include <iterator>
 #include <memory>
@@ -2069,7 +2083,8 @@ void paint_material_composite_height_won_resample_count_reset()
 
 static ImBuf *composite_image_acquire(Image *image,
                                       const ImageUser *iuser,
-                                      Vector<CompositeImageLock> &r_locks)
+                                      Vector<CompositeImageLock> &r_locks,
+                                      const int fallback_tile = 0)
 {
   if (image == nullptr) {
     return nullptr;
@@ -2081,6 +2096,12 @@ static ImBuf *composite_image_acquire(Image *image,
   }
   else {
     BKE_imageuser_default(&iuser_local);
+  }
+  /* A projected row bakes one UDIM tile at a time and reads the same tile of its source map. */
+  if (fallback_tile > 0 && image->source == IMA_SRC_TILED &&
+      (iuser == nullptr || iuser_local.tile == 0))
+  {
+    iuser_local.tile = fallback_tile;
   }
 
   CompositeImageLock entry;
@@ -2468,7 +2489,23 @@ static void composite_mapped_remap(ImBuf *&r_ibuf,
                                    const int ref_height,
                                    Vector<CompositeImageLock> &r_locks)
 {
-  if (!mapping.enabled || r_ibuf == nullptr) {
+  if (r_ibuf == nullptr) {
+    return;
+  }
+  if (mapping.projection.present) {
+    /* A projection bakes in the painted object's UV space. Without a recorded object (a material
+     * preview with no paint context) it reads transparent rather than at the wrong UV. */
+    ImBuf *projected = composite_resample_projected(r_ibuf, ref_width, ref_height, mapping);
+    if (projected == nullptr) {
+      projected = composite_alloc_transparent(ref_width, ref_height);
+    }
+    if (projected != nullptr) {
+      composite_image_own(projected, r_locks);
+      r_ibuf = projected;
+    }
+    return;
+  }
+  if (!mapping.enabled) {
     return;
   }
   if (ImBuf *mapped = composite_resample_mapped(r_ibuf, ref_width, ref_height, mapping)) {
@@ -2549,12 +2586,30 @@ ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
     return nullptr;
   }
 
-  /* A mapping resample first, exactly as the composite acquires a mapped item; the decode below
-   * then straightens whatever buffer the mapping left, the same way the evaluator reads it. */
+  /* A projection or UV-mapping resample first, exactly as the composite acquires a mapped item;
+   * the decode below then straightens whatever buffer was left, the same way the evaluator reads
+   * it. */
+  PaintMaterialCompositeMapping tile_mapping;
+  const PaintMaterialCompositeMapping *use_mapping = mapping;
+  if (mapping != nullptr) {
+    tile_mapping = *mapping;
+    tile_mapping.projection.tile_number = tile_number;
+    tile_mapping.projection.source_tiled = image->source == IMA_SRC_TILED;
+    use_mapping = &tile_mapping;
+  }
   const ImBuf *read = src;
   ImBuf *mapped = nullptr;
-  if (mapping != nullptr && mapping->enabled) {
-    mapped = composite_resample_mapped(src, ref_width, ref_height, *mapping);
+  if (use_mapping != nullptr && use_mapping->projection.present) {
+    mapped = composite_resample_projected(src, ref_width, ref_height, *use_mapping);
+    if (mapped == nullptr) {
+      mapped = composite_alloc_transparent(ref_width, ref_height);
+    }
+    if (mapped != nullptr) {
+      read = mapped;
+    }
+  }
+  else if (use_mapping != nullptr && use_mapping->enabled) {
+    mapped = composite_resample_mapped(src, ref_width, ref_height, *use_mapping);
     if (mapped != nullptr) {
       read = mapped;
     }
@@ -2739,8 +2794,10 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       continue;
     }
     if (image_layer.color_image != nullptr) {
-      layer.color_ibuf = composite_image_acquire(
-          image_layer.color_image, image_layer.color_iuser, r_locks);
+      layer.color_ibuf = composite_image_acquire(image_layer.color_image,
+                                                 image_layer.color_iuser,
+                                                 r_locks,
+                                                 image_layer.mapping.projection.tile_number);
       if (layer.color_ibuf == nullptr) {
         return false;
       }
@@ -2769,7 +2826,10 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
     }
     if (image_layer.mask_image != nullptr) {
       layer.mask_ibuf = composite_image_acquire(
-          image_layer.mask_image, image_layer.mask_iuser, r_locks);
+          image_layer.mask_image,
+          image_layer.mask_iuser,
+          r_locks,
+          image_layer.mapping.projection.tile_number);
       if (layer.mask_ibuf == nullptr) {
         return false;
       }
@@ -2800,7 +2860,8 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
                 std::end(item.filter_params),
                 std::begin(buffer.filter_params));
       if (item.image != nullptr) {
-        buffer.ibuf = composite_image_acquire(item.image, item.iuser, r_locks);
+        buffer.ibuf = composite_image_acquire(
+            item.image, item.iuser, r_locks, item.mapping.projection.tile_number);
         if (buffer.ibuf == nullptr) {
           return false;
         }
@@ -2830,8 +2891,10 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       buffer.coverage_output = item.coverage_output;
       buffer.coverage_colors = item.coverage_colors;
       if (item.coverage_image != nullptr) {
-        buffer.coverage_ibuf = composite_image_acquire(
-            item.coverage_image, item.coverage_iuser, r_locks);
+        buffer.coverage_ibuf = composite_image_acquire(item.coverage_image,
+                                                       item.coverage_iuser,
+                                                       r_locks,
+                                                       item.coverage_mapping.projection.tile_number);
         if (buffer.coverage_ibuf != nullptr) {
           composite_mapped_remap(
               buffer.coverage_ibuf, item.coverage_mapping, ref_width, ref_height, r_locks);
@@ -2877,7 +2940,10 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
             correction.anchor_point_coverage.get(), ref_width, ref_height, r_locks);
       }
       else if (correction.image != nullptr) {
-        buffer.ibuf = composite_image_acquire(correction.image, correction.iuser, r_locks);
+        buffer.ibuf = composite_image_acquire(correction.image,
+                                              correction.iuser,
+                                              r_locks,
+                                              correction.mapping.projection.tile_number);
         if (buffer.ibuf == nullptr) {
           return false;
         }
@@ -3329,19 +3395,80 @@ bool BKE_paint_material_composite_stack_dimensions(
  */
 static uint64_t composite_mapping_hash(uint64_t hash, const PaintMaterialCompositeMapping &mapping)
 {
-  if (!mapping.enabled) {
-    return hash;
+  /* The wrap also drives a projected lookup while the 2D adjust is off. */
+  if (mapping.enabled || mapping.projection.present) {
+    hash = get_default_hash(hash, mapping.wrap);
   }
-  hash = get_default_hash(hash, mapping.offset[0], mapping.offset[1], mapping.rotation);
-  hash = get_default_hash(hash, mapping.wrap);
-  /* The folded axes and the center move which texel a pixel reads, so they move the hash too, or
-   * an edit of either would keep serving the cached composite. */
-  hash = get_default_hash(hash, mapping.mirror_axes, mapping.mirror_center[0],
-                          mapping.mirror_center[1]);
-  return get_default_hash(hash,
-                          BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]),
-                          BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]),
-                          mapping.tangent_normal);
+  if (mapping.enabled) {
+    hash = get_default_hash(hash, mapping.offset[0], mapping.offset[1], mapping.rotation);
+    /* The folded axes and the center move which texel a pixel reads, so they move the hash too, or
+     * an edit of either would keep serving the cached composite. */
+    hash = get_default_hash(
+        hash, mapping.mirror_axes, mapping.mirror_center[0], mapping.mirror_center[1]);
+    hash = get_default_hash(hash,
+                            BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]),
+                            BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]),
+                            mapping.tangent_normal);
+  }
+  if (mapping.projection.present) {
+    const PaintMaterialCompositeProjection &projection = mapping.projection;
+    hash = get_default_hash(hash, int(projection.space), int(projection.axis));
+    hash = get_default_hash(
+        hash, projection.center[0], projection.center[1], projection.center[2]);
+    hash = get_default_hash(hash,
+                            BKE_paint_layers_projection_size_normalize(projection.size[0]),
+                            BKE_paint_layers_projection_size_normalize(projection.size[1]),
+                            BKE_paint_layers_projection_size_normalize(projection.size[2]));
+    hash = get_default_hash(
+        hash, projection.rotation[0], projection.rotation[1], projection.rotation[2]);
+    /* The clip, the depth slab and the facing fade all cut pixels without moving the frame, so
+     * each enters the key as well; the facing scale carries the Flip Facing sign, and the aspect
+     * factors scale the coordinates the frame factor reads. */
+    hash = get_default_hash(hash, projection.clip);
+    hash = get_default_hash(hash,
+                            projection.depth,
+                            projection.facing,
+                            projection.facing_scale,
+                            projection.facing_offset);
+    hash = get_default_hash(hash,
+                            projection.aspect[0],
+                            projection.aspect[1],
+                            projection.aspect[2]);
+    hash = get_default_hash(hash, projection.tile_number, projection.source_tiled);
+    const auto hash_object = [&](const Object *object, const bool with_matrix) {
+      if (object == nullptr) {
+        hash = get_default_hash(hash, 0);
+        return;
+      }
+      hash = get_default_hash(hash, object->id.session_uid);
+      if (!with_matrix) {
+        return;
+      }
+      const float(*matrix)[4] = object->object_to_world().ptr();
+      for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+          hash = get_default_hash(hash, matrix[i][j]);
+        }
+      }
+    };
+    /* A frame in object space does not move when the object does; a controller Empty's transform
+     * does move the projection, so both transforms enter the key then. */
+    hash_object(projection.object, projection.controller != nullptr);
+    hash_object(projection.controller, true);
+    if (projection.object != nullptr && projection.object->type == OB_MESH &&
+        projection.object->data != nullptr)
+    {
+      /* The bake reads the object's render UV and topology; a UV layer switch or a topology edit
+       * has to rebuild it even though neither moves the layer stack. */
+      const Mesh &mesh = *id_cast<const Mesh *>(projection.object->data);
+      const char *uv_name = CustomData_get_render_layer_name(&mesh.corner_data, CD_PROP_FLOAT2);
+      for (const char *c = uv_name; c != nullptr && *c != '\0'; c++) {
+        hash = get_default_hash(hash, int(*c));
+      }
+      hash = get_default_hash(hash, mesh.verts_num, mesh.faces_num, mesh.corners_num);
+    }
+  }
+  return hash;
 }
 
 uint64_t BKE_paint_material_composite_stack_hash(

@@ -832,6 +832,9 @@ static void paint_layer_release_users(MaterialPaintLayer &layer)
       id_us_min(&layer.curve_patch->brush->id);
     }
   }
+  if (layer.projection_object != nullptr) {
+    id_us_min(&layer.projection_object->id);
+  }
   for (const int i : IndexRange(layer.channels_num)) {
     if (layer.channels[i].image != nullptr) {
       id_us_min(&layer.channels[i].image->id);

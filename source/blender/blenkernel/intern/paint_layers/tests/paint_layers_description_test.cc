@@ -18,6 +18,7 @@
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_object.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
@@ -35,6 +36,7 @@
 #include "BLI_fileops.h"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
+#include "BLI_math_base.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
 #include "BLI_uuid.h"
@@ -51,6 +53,7 @@
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_object_types.h"
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
@@ -4585,6 +4588,441 @@ TEST_F(PaintLayersDescription, map_encoding_round_trips_a_smart_asset)
   ASSERT_NE(imported_rough, nullptr);
   EXPECT_EQ(imported_rough->map_encoding, int8_t(MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS));
   EXPECT_NE(imported_rough->image, nullptr);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Row projection
+ * \{ */
+
+TEST_F(PaintLayersDescription, projection_is_supported_by_a_fill_that_reads_a_map)
+{
+  Material &ma = *BKE_material_add(bmain, "ProjectionSupportMat");
+
+  MaterialPaintLayer *bare = BKE_paint_layers_add(ma, "Bare", nullptr, PaintLayerPlace::Above);
+  ASSERT_TRUE(BKE_paint_layers_set_source(ma, bare, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_FALSE(BKE_paint_layers_projection_supported(ma, *bare));
+  EXPECT_FALSE(BKE_paint_layers_projection_set_space(
+      ma, bare, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Projected");
+  EXPECT_TRUE(BKE_paint_layers_projection_supported(ma, *fill));
+  EXPECT_FALSE(BKE_paint_layers_projection_applies(ma, *fill))
+      << "supported is not switched on";
+  EXPECT_TRUE(fill->projection == nullptr) << "the payload is on demand";
+
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  EXPECT_EQ(fill->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
+  EXPECT_NE(fill->projection, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_projection_applies(ma, *fill));
+  EXPECT_TRUE(BKE_paint_layers_projection_clip_get(*fill));
+  EXPECT_EQ(BKE_paint_layers_projection_axis_get(*fill), MA_PAINT_LAYER_PROJECTION_AXIS_Z);
+
+  /* A painted map is written by strokes at the raw UV: no projection either. */
+  MaterialPaintLayer *paint = BKE_paint_layers_add(ma, "Paint", nullptr, PaintLayerPlace::Above);
+  Image *paint_map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "ProjectedPaintMap"));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      ma, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR, paint_map));
+  EXPECT_FALSE(BKE_paint_layers_projection_supported(ma, *paint));
+  EXPECT_FALSE(BKE_paint_layers_projection_set_space(
+      ma, paint, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  EXPECT_EQ(paint->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_UV);
+}
+
+TEST_F(PaintLayersDescription, projection_frame_values_are_normalized_and_value_only)
+{
+  Material &ma = *BKE_material_add(bmain, "ProjectionValuesMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Projected");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+
+  ma.paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  const float center[3] = {1.0f, 2.0f, 3.0f};
+  const float size[3] = {2.0f, 0.0f, -4.0f};
+  const float rotation[3] = {0.1f, 0.2f, 0.3f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values(ma, fill, center, size, rotation));
+  EXPECT_EQ(ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0)
+      << "a frame move never rebuilds the graph";
+  for (int i = 0; i < 3; i++) {
+    EXPECT_FLOAT_EQ(fill->projection->center[i], center[i]);
+    EXPECT_FLOAT_EQ(fill->projection->rotation[i], rotation[i]);
+  }
+  EXPECT_FLOAT_EQ(fill->projection->size[0], 2.0f);
+  EXPECT_FLOAT_EQ(fill->projection->size[1], 1.0f);
+  EXPECT_FLOAT_EQ(fill->projection->size[2], -4.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_size_normalize(0.0f), 1.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_size_normalize(1e-6f),
+                  PAINT_LAYER_PROJECTION_SIZE_MIN);
+
+  /* A zero or unknown frame cannot be written, and the clip toggle is a value too. */
+  const float bad[3] = {0.0f, 0.0f, std::numeric_limits<float>::infinity()};
+  EXPECT_FALSE(BKE_paint_layers_projection_set_center(ma, fill, bad));
+  ma.paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  ASSERT_TRUE(BKE_paint_layers_projection_set_clip(ma, fill, false));
+  EXPECT_FALSE(BKE_paint_layers_projection_clip_get(*fill));
+  EXPECT_EQ(ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0)
+      << "the clip toggle is a group value, not topology";
+  ASSERT_TRUE(BKE_paint_layers_projection_set_axis(ma, fill, MA_PAINT_LAYER_PROJECTION_AXIS_X));
+  EXPECT_NE(ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0) << "the axis changes the UV math";
+}
+
+TEST_F(PaintLayersDescription, projection_frame_inside_matches_the_graph_rule)
+{
+  /* Why the CPU calls this: the generated graph builds the same two Multiply Add factors per axis
+   * (see `projection_axis_factor`), one inside the frame and fading over
+   * #PAINT_LAYER_PROJECTION_EDGE_SOFT, so a frame-space point on either side of the frame has to
+   * answer the same on the CPU. */
+  const float inside[3] = {0.0f, 0.99f, -0.99f};
+  const float on_edge[3] = {1.0f, 0.0f, 0.0f};
+  const float halfway_out[3] = {1.0f + 0.25f * PAINT_LAYER_PROJECTION_EDGE_SOFT, 0.0f, 0.0f};
+  const float outside[3] = {1.01f, 0.0f, 0.0f};
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_frame_factor(inside), 1.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_frame_factor(on_edge), 0.0f);
+  EXPECT_NEAR(BKE_paint_layers_projection_frame_factor(halfway_out), 0.75f, 1e-5f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_frame_factor(outside), 0.0f);
+}
+
+TEST_F(PaintLayersDescription, projection_facing_weight_matches_the_graph_rule)
+{
+  /* The graph runs the frame-space normal component through one clamped Multiply Add and the
+   * t * t * (3 - 2 t) hermite (see `projection_facing_hermite_entry`); the CPU repeats both in
+   * #BKE_paint_layers_projection_facing_weight. The scale comes from the one helper the value
+   * sync and the bake share, so the sign it carries is the side the fade keeps. */
+  const float angle = 80.0f;
+  const float cos_min = cosf(DEG2RADF(angle));
+  const float cos_max = cosf(DEG2RADF(angle - PAINT_LAYER_PROJECTION_ANGLE_BAND));
+
+  /* The default is Ucupaint's decal: the frame's arrow enters the surface, so the faces whose
+   * normal points back at it -- the negative component -- are the ones kept at full weight. */
+  float scale = 0.0f;
+  float offset = 0.0f;
+  BKE_paint_layers_projection_facing_weights(angle, false, scale, offset);
+  EXPECT_LT(scale, 0.0f) << "the decal side is the negative component";
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_facing_weight(scale, offset, -1.0f), 1.0f);
+  EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(scale, offset, -cos_max), 1.0f, 1e-5f);
+  EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(scale, offset, -cos_min), 0.0f, 1e-5f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_facing_weight(scale, offset, 1.0f), 0.0f);
+  /* The band is symmetric: the fading rim's midpoint sits halfway up the hermite. */
+  EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(
+                  scale, offset, -0.5f * (cos_min + cos_max)),
+              0.5f,
+              1e-4f);
+
+  /* The flip mirrors the weight onto the other side of the surface without moving the limit. */
+  BKE_paint_layers_projection_facing_weights(angle, true, scale, offset);
+  EXPECT_GT(scale, 0.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_facing_weight(scale, offset, 1.0f), 1.0f);
+  EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(scale, offset, cos_max), 1.0f, 1e-5f);
+  EXPECT_NEAR(BKE_paint_layers_projection_facing_weight(scale, offset, cos_min), 0.0f, 1e-5f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_facing_weight(scale, offset, -1.0f), 0.0f);
+}
+
+TEST_F(PaintLayersDescription, projection_angle_is_stored_away_from_the_file_marker)
+{
+  Material &ma = *BKE_material_add(bmain, "ProjectionAngleMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Projected");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+
+  /* A zero limit would fade the whole projection out, so a stored limit never reaches it; a half
+   * turn or more is the widest limit there is. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_angle(ma, fill, 0.0f));
+  EXPECT_FLOAT_EQ(fill->projection->angle, 1.0f);
+  ASSERT_TRUE(BKE_paint_layers_projection_set_angle(ma, fill, -30.0f));
+  EXPECT_FLOAT_EQ(fill->projection->angle, 1.0f);
+  ASSERT_TRUE(BKE_paint_layers_projection_set_angle(ma, fill, 240.0f));
+  EXPECT_FLOAT_EQ(fill->projection->angle, 180.0f);
+  ASSERT_TRUE(BKE_paint_layers_projection_set_angle(ma, fill, 55.0f));
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_angle_get(*fill), 55.0f);
+}
+
+TEST_F(PaintLayersDescription, projection_angle_zero_reads_back_as_the_default)
+{
+  /* A zero limit would fade the whole projection out; the normalized read maps it, a negative
+   * value and anything past a half turn to the default. */
+  EXPECT_EQ(BKE_paint_layers_projection_angle_normalize(0.0f),
+            PAINT_LAYER_PROJECTION_ANGLE_DEFAULT);
+  EXPECT_EQ(BKE_paint_layers_projection_angle_normalize(-4.0f),
+            PAINT_LAYER_PROJECTION_ANGLE_DEFAULT);
+  EXPECT_EQ(BKE_paint_layers_projection_angle_normalize(250.0f),
+            PAINT_LAYER_PROJECTION_ANGLE_DEFAULT);
+  EXPECT_EQ(BKE_paint_layers_projection_angle_normalize(65.0f), 65.0f);
+}
+
+TEST_F(PaintLayersDescription, projection_mode_table_covers_every_space)
+{
+  for (int space = 0; space < MA_PAINT_LAYER_MAPPING_SPACE_NUM; space++) {
+    EXPECT_EQ(BKE_paint_layers_projection_mode_info(int16_t(space)).space, space);
+  }
+  EXPECT_FALSE(BKE_paint_layers_projection_mode_info(MA_PAINT_LAYER_MAPPING_SPACE_UV).uses_axis);
+  EXPECT_TRUE(BKE_paint_layers_projection_mode_info(MA_PAINT_LAYER_MAPPING_SPACE_PLANAR).uses_axis);
+  /* A stored value outside the table reads as UV, which has no frame. */
+  EXPECT_EQ(BKE_paint_layers_projection_mode_info(MA_PAINT_LAYER_MAPPING_SPACE_NUM).space,
+            MA_PAINT_LAYER_MAPPING_SPACE_UV);
+  EXPECT_EQ(BKE_paint_layers_projection_mode_info(-1).space, MA_PAINT_LAYER_MAPPING_SPACE_UV);
+}
+
+TEST_F(PaintLayersDescription, projection_snap_and_controller_scale_are_off_and_value_only)
+{
+  Material &ma = *BKE_material_add(bmain, "ProjectionOptionsMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Projected");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+
+  /* Both options keep the decal behaviour of every earlier frame until the user asks for them. */
+  EXPECT_FALSE(BKE_paint_layers_projection_snap_get(*fill));
+  EXPECT_FALSE(BKE_paint_layers_projection_size_from_controller_get(*fill));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_snap(ma, fill, true));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_size_from_controller(ma, fill, true));
+  EXPECT_TRUE(BKE_paint_layers_projection_snap_get(*fill));
+  EXPECT_TRUE(BKE_paint_layers_projection_size_from_controller_get(*fill));
+
+  const float center[3] = {0.0f, 0.0f, 0.0f};
+  const float size[3] = {2.0f, 3.0f, 4.0f};
+  const float rotation[3] = {0.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values(ma, fill, center, size, rotation));
+
+  /* The frame reads one on every axis while the controller carries the scale, but the inline
+   * extents stay stored so turning the option off restores them. */
+  float effective[3];
+  BKE_paint_layers_projection_size_effective(*fill, effective);
+  EXPECT_FLOAT_EQ(effective[0], 1.0f);
+  EXPECT_FLOAT_EQ(effective[1], 1.0f);
+  EXPECT_FLOAT_EQ(effective[2], 1.0f);
+  EXPECT_FLOAT_EQ(fill->projection->size[0], 2.0f);
+  EXPECT_FLOAT_EQ(fill->projection->size[1], 3.0f);
+  EXPECT_FLOAT_EQ(fill->projection->size[2], 4.0f);
+
+  ASSERT_TRUE(BKE_paint_layers_projection_set_size_from_controller(ma, fill, false));
+  BKE_paint_layers_projection_size_effective(*fill, effective);
+  EXPECT_FLOAT_EQ(effective[0], 2.0f);
+  EXPECT_FLOAT_EQ(effective[1], 3.0f);
+  EXPECT_FLOAT_EQ(effective[2], 4.0f);
+}
+
+TEST_F(PaintLayersDescription, projection_aspect_factors_follow_the_image)
+{
+  /* Ucupaint's decal Scale: the footprint of the image's wider axis grows by the aspect, so a
+   * non-square image is not stretched; a square image and an unknown one read one. */
+  float factors[2] = {0.0f, 0.0f};
+  BKE_paint_layers_projection_aspect_factors(nullptr, factors);
+  EXPECT_FLOAT_EQ(factors[0], 1.0f);
+  EXPECT_FLOAT_EQ(factors[1], 1.0f);
+
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *wide = BKE_image_add_generated(
+      bmain, 2000, 1000, "AspectWide", 32, false, IMA_GENTYPE_BLANK, color, false, true, false);
+  ASSERT_NE(wide, nullptr);
+  BKE_paint_layers_projection_aspect_factors(wide, factors);
+  EXPECT_FLOAT_EQ(factors[0], 0.5f);
+  EXPECT_FLOAT_EQ(factors[1], 1.0f);
+
+  Image *square = BKE_image_add_generated(
+      bmain, 512, 512, "AspectSquare", 32, false, IMA_GENTYPE_BLANK, color, false, true, false);
+  ASSERT_NE(square, nullptr);
+  BKE_paint_layers_projection_aspect_factors(square, factors);
+  EXPECT_FLOAT_EQ(factors[0], 1.0f);
+  EXPECT_FLOAT_EQ(factors[1], 1.0f);
+
+  /* A tall image stretches its Y footprint instead, on the same rule. */
+  Image *tall = BKE_image_add_generated(
+      bmain, 1000, 2000, "AspectTall", 32, false, IMA_GENTYPE_BLANK, color, false, true, false);
+  ASSERT_NE(tall, nullptr);
+  BKE_paint_layers_projection_aspect_factors(tall, factors);
+  EXPECT_FLOAT_EQ(factors[0], 1.0f);
+  EXPECT_FLOAT_EQ(factors[1], 0.5f);
+}
+
+TEST_F(PaintLayersDescription, projection_payload_copies_with_the_row_and_clears_with_uv)
+{
+  Material *ma = BKE_material_add(bmain, "ProjectionCopyMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, *ma, "Projected");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  const float center[3] = {0.5f, -1.0f, 2.0f};
+  const float size[3] = {3.0f, 4.0f, 5.0f};
+  const float rotation[3] = {0.25f, 0.5f, 0.75f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values(
+      *ma, fill, center, size, rotation));
+
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  const MaterialPaintLayer *copy_layer = paint_layers_first(*copy);
+  ASSERT_NE(copy_layer, nullptr);
+  ASSERT_NE(copy_layer->projection, nullptr);
+  EXPECT_EQ(copy_layer->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
+  EXPECT_FLOAT_EQ(copy_layer->projection->center[2], 2.0f);
+  EXPECT_FLOAT_EQ(copy_layer->projection->size[1], 4.0f);
+  BKE_id_free(bmain, copy);
+
+  MaterialPaintLayer *duplicate = BKE_paint_layers_duplicate(*bmain, *ma, fill);
+  ASSERT_NE(duplicate, nullptr);
+  ASSERT_NE(duplicate->projection, nullptr);
+  EXPECT_EQ(duplicate->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
+  /* Freeing a row with a frame releases the payload with it. */
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, duplicate));
+  EXPECT_EQ(paint_layers_first(*ma), fill);
+
+  /* Returning to UV frees the frame; the row keeps its mapping values. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_UV));
+  EXPECT_EQ(fill->projection, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_projection_applies(*ma, *fill));
+}
+
+TEST_F(PaintLayersDescription, projection_space_round_trip_resets_the_controller)
+{
+  Material &ma = *BKE_material_add(bmain, "ProjectionRoundTripStateMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Projected");
+  Object *controller = BKE_object_add_only_object(bmain, OB_EMPTY, "ProjectionController");
+  ASSERT_NE(controller, nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  ASSERT_NE(fill->projection, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_projection_set_object(ma, fill, controller));
+  EXPECT_EQ(fill->projection_object, controller);
+
+  /* UV frees the frame and lets the controller go with it. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_UV));
+  EXPECT_EQ(fill->projection, nullptr);
+  EXPECT_EQ(fill->projection_object, nullptr);
+
+  /* Switching back allocates a fresh frame with defaults and no controller. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  ASSERT_NE(fill->projection, nullptr);
+  EXPECT_EQ(fill->projection_object, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_projection_clip_get(*fill));
+  EXPECT_EQ(BKE_paint_layers_projection_axis_get(*fill), MA_PAINT_LAYER_PROJECTION_AXIS_Z);
+}
+
+TEST_F(PaintLayersDescription, projection_duplicate_owns_its_payload_and_takes_a_controller_user)
+{
+  Material &ma = *BKE_material_add(bmain, "ProjectionDuplicateMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Projected");
+  Object *controller = BKE_object_add_only_object(bmain, OB_EMPTY, "ProjectionController");
+  ASSERT_NE(controller, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_object(ma, fill, controller));
+  const int users = controller->id.us;
+
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, ma, fill);
+  ASSERT_NE(copy, nullptr);
+  ASSERT_NE(copy->projection, nullptr);
+  EXPECT_NE(copy->projection, fill->projection);
+  EXPECT_EQ(copy->projection_object, controller);
+  EXPECT_EQ(controller->id.us, users + 1);
+}
+
+TEST_F(PaintLayersDescription, projection_round_trips_through_a_file)
+{
+  Material *ma = BKE_material_add(bmain, "ProjectionRoundTripMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  id_us_plus(&ma->id);
+
+  Image *image = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "ProjectionRoundTripImage"));
+  id_us_plus(&image->id);
+
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "Projected");
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  paint_layer_channel_add(*layer, *image);
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, layer, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  const float center[3] = {1.0f, -2.0f, 0.5f};
+  const float size[3] = {2.0f, 3.0f, 4.0f};
+  const float rotation[3] = {0.1f, 0.2f, 0.3f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values(*ma, layer, center, size, rotation));
+  ASSERT_TRUE(BKE_paint_layers_projection_set_clip(*ma, layer, false));
+
+  char filepath[FILE_MAX];
+  BLI_path_join(filepath,
+                sizeof(filepath),
+                BKE_tempdir_session(),
+                "paint_layers_projection_round_trip.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+
+  Material *reloaded = nullptr;
+  for (Material &candidate : bfd->main->materials) {
+    if (STREQ(candidate.id.name + 2, "ProjectionRoundTripMat")) {
+      reloaded = &candidate;
+      break;
+    }
+  }
+  ASSERT_NE(reloaded, nullptr);
+  MaterialPaintLayer *reloaded_layer = paint_layers_first(*reloaded);
+  ASSERT_NE(reloaded_layer, nullptr);
+  EXPECT_EQ(reloaded_layer->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
+  ASSERT_NE(reloaded_layer->projection, nullptr);
+  EXPECT_FLOAT_EQ(reloaded_layer->projection->center[1], -2.0f);
+  EXPECT_FLOAT_EQ(reloaded_layer->projection->size[2], 4.0f);
+  EXPECT_FLOAT_EQ(reloaded_layer->projection->rotation[2], 0.3f);
+  EXPECT_FALSE(BKE_paint_layers_projection_clip_get(*reloaded_layer));
+  EXPECT_EQ(reloaded_layer->projection_object, nullptr);
+}
+
+TEST_F(PaintLayersDescription, projection_old_file_reads_the_facing_defaults)
+{
+  /* A file written before the facing limit and its flags existed carries the zeroed angle and
+   * none of the flags: the read has to give it the defaults the payload gives a new frame,
+   * except the flip, which stays off so the arrow still enters the surface. */
+  Material *ma = BKE_material_add(bmain, "ProjectionFacingMigrationMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  id_us_plus(&ma->id);
+
+  Image *image = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "ProjectionFacingMigrationImage"));
+  id_us_plus(&image->id);
+
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "Projected");
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  paint_layer_channel_add(*layer, *image);
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, layer, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  layer->projection->angle = 0.0f;
+  layer->projection->flag = MA_PAINT_LAYER_PROJECTION_CLIP;
+
+  char filepath[FILE_MAX];
+  BLI_path_join(filepath,
+                sizeof(filepath),
+                BKE_tempdir_session(),
+                "paint_layers_projection_facing_migration.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+
+  Material *reloaded = nullptr;
+  for (Material &candidate : bfd->main->materials) {
+    if (STREQ(candidate.id.name + 2, "ProjectionFacingMigrationMat")) {
+      reloaded = &candidate;
+      break;
+    }
+  }
+  ASSERT_NE(reloaded, nullptr);
+  MaterialPaintLayer *reloaded_layer = paint_layers_first(*reloaded);
+  ASSERT_NE(reloaded_layer, nullptr);
+  ASSERT_NE(reloaded_layer->projection, nullptr);
+  EXPECT_FLOAT_EQ(reloaded_layer->projection->angle, PAINT_LAYER_PROJECTION_ANGLE_DEFAULT);
+  EXPECT_TRUE(BKE_paint_layers_projection_depth_get(*reloaded_layer));
+  EXPECT_TRUE(BKE_paint_layers_projection_fit_aspect_get(*reloaded_layer));
+  EXPECT_TRUE(BKE_paint_layers_projection_facing_get(*reloaded_layer));
+  EXPECT_FALSE(BKE_paint_layers_projection_facing_invert_get(*reloaded_layer));
+  /* The two newer bits were not in the file: both read as their off state. */
+  EXPECT_FALSE(BKE_paint_layers_projection_snap_get(*reloaded_layer));
+  EXPECT_FALSE(BKE_paint_layers_projection_size_from_controller_get(*reloaded_layer));
+
+  BLO_blendfiledata_free(bfd);
 }
 
 /** \} */

@@ -1203,7 +1203,87 @@ struct MaterialPaintLayerChannelSettings {
 
 /** #MaterialPaintLayerMapping::space */
 enum eMaterialPaintLayerMappingSpace : int16_t {
+  /** The row's maps are read at the object's active UVs. */
   MA_PAINT_LAYER_MAPPING_SPACE_UV = 0,
+  /** A planar frame: the map is projected along the frame's local axis. */
+  MA_PAINT_LAYER_MAPPING_SPACE_PLANAR = 1,
+  /** Sentinel: the number of spaces, never stored. */
+  MA_PAINT_LAYER_MAPPING_SPACE_NUM = 2,
+};
+
+/** #MaterialPaintLayerProjection::axis: the projection axis of Planar and Cylinder. */
+enum eMaterialPaintLayerProjectionAxis : int8_t {
+  MA_PAINT_LAYER_PROJECTION_AXIS_X = 0,
+  MA_PAINT_LAYER_PROJECTION_AXIS_Y = 1,
+  MA_PAINT_LAYER_PROJECTION_AXIS_Z = 2,
+};
+
+/** #MaterialPaintLayerProjection::flag */
+enum eMaterialPaintLayerProjectionFlag : int16_t {
+  /** Hide the projection outside its frame; without it the map repeats over the whole surface. */
+  MA_PAINT_LAYER_PROJECTION_CLIP = 1 << 0,
+  /** Limit the projection to a slab along the axis, of the frame's full size on that axis. */
+  MA_PAINT_LAYER_PROJECTION_DEPTH = 1 << 1,
+  /** Scale the frame's two footprint axes to the row's source image aspect, so the map is not
+   * stretched by a non-square image. */
+  MA_PAINT_LAYER_PROJECTION_FIT_ASPECT = 1 << 2,
+  /** Fade the projection out on faces that turn away from the axis: hides the mirrored copy on
+   * the far side and the stretched sweep over faces parallel to the axis. */
+  MA_PAINT_LAYER_PROJECTION_FACING = 1 << 3,
+  /**
+   * Flip which side of the surface the facing weight keeps: its peak lands on the faces whose
+   * normal points away from the projector instead of on the ones it points at. Stored so that a
+   * zero -- a new frame, and every file written before the bit -- reads back as the decal
+   * convention, where the frame's arrow enters the surface and the weight peaks on the face it
+   * lands on.
+   */
+  MA_PAINT_LAYER_PROJECTION_FACING_INVERT = 1 << 4,
+  /**
+   * Keep the controller on the painted surface with a Shrinkwrap constraint. The constraint lives
+   * on the controller object and is added or removed by the editor, never by the payload setters;
+   * zero -- a new frame and every earlier file -- means the controller stays where the user puts
+   * it.
+   */
+  MA_PAINT_LAYER_PROJECTION_SNAP = 1 << 5,
+  /**
+   * Read the frame's extents as one and take the scale from the controller's own transform. The
+   * inline size stays stored, so turning the bit off brings the user's extents back; zero -- a new
+   * frame and every earlier file -- keeps the inline size.
+   */
+  MA_PAINT_LAYER_PROJECTION_SIZE_FROM_CONTROLLER = 1 << 6,
+};
+
+/**
+ * The frame and the parameters of a projected row, allocated only while #MaterialPaintLayerMapping::
+ * space is not #MA_PAINT_LAYER_MAPPING_SPACE_UV.
+ *
+ * The frame lives in the space of #MaterialPaintLayer::projection_object when one is set, else in
+ * the painted object's own object space; the inline center/rotation/size are then applied inside
+ * that space. A projection object (usually an Empty) therefore moves, turns and scales the whole
+ * projection through its own transform, while the inline values give the frame its extents.
+ */
+struct MaterialPaintLayerProjection {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerProjection)
+
+  /** Frame centre in the controller's space. */
+  float center[3] = {};
+  /** Full extents of the frame; zero reads back as one. */
+  float size[3] = {1.0f, 1.0f, 1.0f};
+  /** Frame rotation in radians, XYZ Euler, in the controller's space. */
+  float rotation[3] = {};
+  char _pad1[4] = {};
+  /** #eMaterialPaintLayerProjectionAxis. */
+  int8_t axis = MA_PAINT_LAYER_PROJECTION_AXIS_Z;
+  char _pad2 = 0;
+  /** #eMaterialPaintLayerProjectionFlag. */
+  int16_t flag = MA_PAINT_LAYER_PROJECTION_CLIP | MA_PAINT_LAYER_PROJECTION_DEPTH |
+                 MA_PAINT_LAYER_PROJECTION_FIT_ASPECT | MA_PAINT_LAYER_PROJECTION_FACING;
+  /**
+   * Facing limit in degrees: the facing weight is full this far below the limit and reaches zero
+   * at the limit itself, measured from the axis direction. Kept in `(0, 180]`; a value
+   * outside it reads back as #PAINT_LAYER_PROJECTION_ANGLE_DEFAULT.
+   */
+  float angle = 80.0f;
 };
 
 /** #MaterialPaintLayerMapping::flag */
@@ -1617,6 +1697,18 @@ struct MaterialPaintLayer {
    * `paint_layer_dependencies` and the row's `foreach_id`.
    */
   MaterialPaintLayerCurvePatch *curve_patch = nullptr;
+  /**
+   * The frame and parameters of a projected row, or null while #MaterialPaintLayerMapping::space is
+   * UV. Owned by the row (freed, copied and written with it); a pointer rather than a value because
+   * most rows never project. Appended last so the offsets of the older fields do not move.
+   */
+  struct MaterialPaintLayerProjection *projection = nullptr;
+  /**
+   * The object whose space the projection frame is placed in (usually an Empty), or null to use the
+   * painted object's own object space. A user of the object, reported through the row's
+   * dependencies; the material never needs it to be one of its own users.
+   */
+  struct Object *projection_object = nullptr;
 };
 
 /**

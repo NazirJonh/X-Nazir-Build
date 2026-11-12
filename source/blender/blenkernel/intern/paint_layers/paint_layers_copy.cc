@@ -33,6 +33,7 @@
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_object_types.h"
 #include "DNA_uuid_types.h"
 
 #include "MEM_guardedalloc.h"
@@ -298,6 +299,25 @@ static void paint_layer_curve_patch_duplicate(Main &bmain,
 }
 
 /**
+ * Deep-copy \a src's projection payload onto \a dst and take the user of its controller. The frame
+ * is plain sub-data; the object reference is an ID user like the row's maps.
+ */
+static void paint_layer_projection_duplicate(MaterialPaintLayer &dst,
+                                             const MaterialPaintLayer &src)
+{
+  /* \a dst is a freshly allocated row, so there is no earlier payload or controller user to
+   * release before the copy takes its own. */
+  BLI_assert(dst.projection == nullptr && dst.projection_object == nullptr);
+  if (src.projection != nullptr) {
+    dst.projection = static_cast<MaterialPaintLayerProjection *>(MEM_dupalloc(src.projection));
+  }
+  dst.projection_object = src.projection_object;
+  if (dst.projection_object != nullptr) {
+    id_us_plus(&dst.projection_object->id);
+  }
+}
+
+/**
  * An unlinked copy of the mask item or correction \a item: a marker of its own and maps of its own,
  * for the same reason as the channel maps.
  */
@@ -347,6 +367,7 @@ MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   paint_layer_channels_duplicate(bmain, *item_copy, item, options);
   paint_layer_id_colors_duplicate(*item_copy, item);
   paint_layer_properties_duplicate(*item_copy, item);
+  paint_layer_projection_duplicate(*item_copy, item);
   if (item.ramp != nullptr) {
     item_copy->ramp = static_cast<MaterialPaintLayerRamp *>(MEM_dupalloc(item.ramp));
   }
@@ -405,6 +426,7 @@ void paint_layer_branch_duplicate(Main &bmain,
   paint_layer_id_colors_duplicate(dst, src);
   paint_layer_properties_duplicate(dst, src);
   BKE_paint_layers_gradient_copy(dst, src);
+  paint_layer_projection_duplicate(dst, src);
   if (src.ramp != nullptr) {
     dst.ramp = static_cast<MaterialPaintLayerRamp *>(MEM_dupalloc(src.ramp));
   }

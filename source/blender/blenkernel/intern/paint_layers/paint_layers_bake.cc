@@ -1483,7 +1483,7 @@ void BKE_paint_layers_bake_finalize(Material &ma, MaterialPaintLayer &layer)
 }
 
 /**
- * Whether \a layer or anything under it applies a UV mapping: a mapped row stays live.
+ * Whether \a layer or anything under it applies a UV mapping or a projection: a mapped row stays live.
  *
  * \a scope is what the bake the question is asked for holds (#PaintLayerBakeScope): the own mask
  * of a content bake is laid live over the map, where the graph reads a mapped mask as well as the
@@ -1494,7 +1494,9 @@ static bool bake_mapping_blocks(const Material &ma,
                                 const MaterialPaintLayer &layer,
                                 const PaintLayerBakeScope scope)
 {
-  if (BKE_paint_layers_mapping_remaps(ma, layer)) {
+  if (BKE_paint_layers_mapping_remaps(ma, layer) ||
+      BKE_paint_layers_projection_applies(ma, layer))
+  {
     return true;
   }
   for (const MaterialPaintLayer &effect : layer.effects) {

@@ -21,9 +21,12 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_constants.h"
+#include "BLI_math_matrix.h"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_ustring.hh"
@@ -48,9 +51,11 @@
 #include "NOD_socket.hh"
 
 #include "DNA_ID.h"
+#include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
+#include "DNA_object_types.h"
 
 #include "paint_layers_generate_intern.hh"
 #include "paint_layers_intern.hh"
@@ -300,6 +305,37 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
+  if (STREQ(role, ROLE_PROJECTION_CENTER) || STREQ(role, ROLE_PROJECTION_SIZE) ||
+      STREQ(role, ROLE_PROJECTION_ROTATION))
+  {
+    if (socket.default_value == nullptr) {
+      return false;
+    }
+    float value[3] = {0.0f, 0.0f, 0.0f};
+    if (layer->projection != nullptr) {
+      if (STREQ(role, ROLE_PROJECTION_CENTER)) {
+        copy_v3_v3(value, layer->projection->center);
+      }
+      else if (STREQ(role, ROLE_PROJECTION_SIZE)) {
+        /* Shared with the CPU composite and the gizmo: one means the controller's scale is the
+         * frame's scale, so the inline extents are not applied twice. */
+        BKE_paint_layers_projection_size_effective(*layer, value);
+      }
+      else {
+        copy_v3_v3(value, layer->projection->rotation);
+      }
+    }
+    else if (STREQ(role, ROLE_PROJECTION_SIZE)) {
+      /* A group kept across a switch back to UV still carries the inputs; a stale one reads the
+       * identity rather than failing the sync and rebuilding forever. */
+      value[0] = value[1] = value[2] = 1.0f;
+    }
+    copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
+    if (iface.socket_data != nullptr) {
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);
+    }
+    return true;
+  }
   if (STREQ(role, ROLE_GRADIENT_MIDPOINT) || STREQ(role, ROLE_GRADIENT_TYPE) ||
       STREQ(role, ROLE_GRADIENT_REPEAT))
   {
@@ -348,6 +384,120 @@ bool values_sync_socket(Material &ma,
       value[0] = 0.0f;
       value[1] = 0.0f;
       value[2] = DEG2RADF(paint_layer_kind_param_get(*layer, PAINT_LAYER_GEN_ROTATION));
+    }
+    copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
+    if (iface.socket_data != nullptr) {
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_PROJECTION_CLIP)) {
+    if (socket.default_value == nullptr) {
+      return false;
+    }
+    const float value = (layer->projection == nullptr) ?
+                            1.0f :
+                            ((layer->projection->flag & MA_PAINT_LAYER_PROJECTION_CLIP) != 0) ?
+                                1.0f :
+                                0.0f;
+    static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
+    if (iface.socket_data != nullptr) {
+      static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_PROJECTION_DEPTH)) {
+    if (socket.default_value == nullptr) {
+      return false;
+    }
+    const float value = (layer->projection == nullptr) ?
+                            1.0f :
+                            ((layer->projection->flag & MA_PAINT_LAYER_PROJECTION_DEPTH) != 0) ?
+                                1.0f :
+                                0.0f;
+    static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
+    if (iface.socket_data != nullptr) {
+      static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_PROJECTION_FACING)) {
+    if (socket.default_value == nullptr) {
+      return false;
+    }
+    /* The hermite runs as one clamped Multiply Add (scale, offset) followed by the graph's two
+     * products, from the frame-space normal component along the axis. The band and the Flip Facing
+     * sign are baked out of the limit by the helper the CPU bakes with, so a drag or a flip only
+     * syncs these three floats. */
+    float value[3] = {1.0f, 0.0f, 1.0f};
+    if (layer->projection != nullptr) {
+      const float angle = BKE_paint_layers_projection_angle_get(*layer);
+      const bool invert = BKE_paint_layers_projection_facing_invert_get(*layer);
+      BKE_paint_layers_projection_facing_weights(angle, invert, value[0], value[1]);
+      value[2] = ((layer->projection->flag & MA_PAINT_LAYER_PROJECTION_FACING) != 0) ? 1.0f : 0.0f;
+    }
+    copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
+    if (iface.socket_data != nullptr) {
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_PROJECTION_FACING_DIR)) {
+    if (socket.default_value == nullptr) {
+      return false;
+    }
+    /* The world-space direction the world normal reads against: the controller's world-to-object
+     * is the one matrix a live node chain cannot name, so the sync bakes it, and the material's
+     * evaluation re-runs this sync, which keeps a turned or animated controller facing exactly.
+     * The frame's own axis: which side of it the weight keeps is the Facing scale's sign, so the
+     * two normal paths share one flip. Without a controller the graph reads the shaded object
+     * through a Vector Transform node and this input stays at its identity default. */
+    float value[3] = {0.0f, 0.0f, 1.0f};
+    if (layer->projection != nullptr && layer->projection_object != nullptr) {
+      float w2c[3][3];
+      const float4x4 w2c_mat = layer->projection_object->world_to_object();
+      for (const int i : IndexRange(3)) {
+        for (const int j : IndexRange(3)) {
+          w2c[i][j] = w2c_mat[i][j];
+        }
+      }
+      float inv_w2c[3][3];
+      invert_m3_m3(inv_w2c, w2c);
+      const int8_t axis = BKE_paint_layers_projection_axis_get(*layer);
+      value[0] = value[1] = value[2] = 0.0f;
+      value[axis] = 1.0f;
+      float rot[3][3];
+      eul_to_mat3(rot, layer->projection->rotation);
+      mul_m3_v3(rot, value);
+      mul_m3_v3(inv_w2c, value);
+      normalize_v3(value);
+    }
+    copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
+    if (iface.socket_data != nullptr) {
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_PROJECTION_ASPECT)) {
+    if (socket.default_value == nullptr) {
+      return false;
+    }
+    /* The fit scales the frame-space coordinates before the UV square and the frame factor read
+     * them, so one multiply per axis serves both. The factors sit on the row's two footprint axes
+     * (which depend on the projection axis) and the depth axis keeps one, so the slab is untouched:
+     * X projects y and z, Y projects x and z, Z projects x and y. */
+    float value[3] = {1.0f, 1.0f, 1.0f};
+    if (layer->projection != nullptr &&
+        (layer->projection->flag & MA_PAINT_LAYER_PROJECTION_FIT_ASPECT) != 0)
+    {
+      float factors[2];
+      const Image *image = BKE_paint_layers_projection_aspect_image(ma, *layer);
+      BKE_paint_layers_projection_aspect_factors(image, factors);
+      const int8_t axis = BKE_paint_layers_projection_axis_get(*layer);
+      const int u_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_X) ? 1 : 0;
+      const int v_index = (axis == MA_PAINT_LAYER_PROJECTION_AXIS_Z) ? 1 : 2;
+      value[u_index] = factors[0];
+      value[v_index] = factors[1];
     }
     copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
     if (iface.socket_data != nullptr) {

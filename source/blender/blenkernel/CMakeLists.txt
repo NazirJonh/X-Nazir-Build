@@ -301,6 +301,7 @@ set(SRC
   intern/paint_layers/paint_layers_generate_intern.hh
   intern/paint_layers/paint_layers_generate_layout.cc
   intern/paint_layers/paint_layers_generate_layout.hh
+  intern/paint_layers/paint_layers_generate_projection.cc
   intern/paint_layers/paint_layers_generate_regen.cc
   intern/paint_layers/paint_layers_generate_source_group.cc
   intern/paint_layers/paint_layers_generate_source_group_mapping.cc
@@ -310,6 +311,7 @@ set(SRC
   intern/paint_layers/paint_layers_object_mask.cc
   intern/paint_layers/paint_layers_source_cache.cc
   intern/paint_layers/paint_layers_source_graph.cc
+  intern/paint_layers/paint_layers_projection.cc
   intern/paint_layers/paint_layers_source_hash.cc
   intern/paint_layers/paint_layers_target.cc
   intern/paint_material_cache_common.cc
@@ -318,6 +320,7 @@ set(SRC
   intern/paint_material_blend_group_extended.cc
   intern/paint_material_composite.cc
   intern/paint_material_composite_generator.cc
+  intern/paint_material_composite_projection.cc
   intern/paint_material_gradient_group.cc
   intern/paint_material_grunge_group.cc
   intern/paint_material_normal_combine.cc

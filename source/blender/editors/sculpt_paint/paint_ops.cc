@@ -120,6 +120,8 @@
 #include "paint_image_curve_patch_edit.hh"
 #include "paint_intern.hh"
 #include "paint_layers_gradient.hh"
+
+#include "projection/projection_ops.hh"
 #include "shapes/paint_shape_op_props.hh"
 
 #include "curves/sculpt_intern.hh"
@@ -131,7 +133,6 @@
 #include "mesh/sculpt_expand.hh"
 #include "mesh/sculpt_intern.hh"
 #include "uv_mapping/paint_layer_mapping_ops.hh"
-#include "projection/projection_ops.hh"
 
 namespace blender {
 
@@ -1278,6 +1279,9 @@ static wmOperatorStatus stack_layer_paste_exec(bContext *C, wmOperator *op)
       return OPERATOR_CANCELLED;
     }
     BKE_paint_layers_active_set(*ma, copy->marker);
+    /* The pasted correction is the row the stack shows: follow it with the Projection Frame tool,
+     * like a stack row click does. */
+    ed::sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(C, *ma, copy);
     const ePaintLayerTargetMode pasted_mode = (copy->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ?
                                                   PAINT_LAYER_TARGET_MASK :
                                                   PAINT_LAYER_TARGET_CONTENT;
@@ -1312,6 +1316,10 @@ static wmOperatorStatus stack_layer_paste_exec(bContext *C, wmOperator *op)
       BKE_paint_layers_edit_move(*ma, *copy, anchor, PaintLayerPlace::Above);
     }
     BKE_paint_layers_active_set(*ma, copy->marker);
+    /* The pasted copy is the row the stack shows, and it keeps the copied row's projection: a
+     * duplicate of a volume row brings the Projection Frame tool with it, like a stack row click
+     * does. */
+    ed::sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(C, *ma, copy);
   }
 
   BKE_texpaint_slots_refresh_object(scene, ob);
@@ -3520,9 +3528,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_layer_mapping_mirror_set_point);
   WM_operatortype_append(PAINT_OT_layer_mapping_mirror_from_cursor);
   WM_operatortype_append(PAINT_OT_layer_mapping_mirror_pick_3d);
-  WM_operatortype_append(PAINT_OT_layer_projection_add_controller);
-  WM_operatortype_append(PAINT_OT_layer_projection_select_controller);
-  WM_operatortype_append(PAINT_OT_layer_projection_controller_to_cursor);
+  blender::ed::sculpt_paint::projection::operatortypes_register();
   WM_operatortype_append(PAINT_OT_stack_layer_copy);
   WM_operatortype_append(PAINT_OT_stack_layer_paste);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);

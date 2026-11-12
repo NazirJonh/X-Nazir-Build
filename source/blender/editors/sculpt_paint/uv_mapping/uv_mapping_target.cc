@@ -33,8 +33,11 @@ namespace {
  */
 bool mapping_is_edited(const Material &ma, const MaterialPaintLayer &layer)
 {
+  /* A projected row is addressed by its frame and follows only its UV wrap: no island-UV adjust
+   * applies, so there is nothing for this gizmo to move. */
   return BKE_paint_layers_mapping_enabled_get(layer) &&
-         BKE_paint_layers_mapping_available(ma, layer);
+         BKE_paint_layers_mapping_available(ma, layer) &&
+         !BKE_paint_layers_projection_applies(ma, layer);
 }
 
 }  // namespace

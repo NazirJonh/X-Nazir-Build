@@ -51,6 +51,7 @@
 #include "ED_grease_pencil.hh"
 #include "ED_object.hh"
 #include "ED_particle.hh"
+#include "ED_paint.hh"
 #include "ED_sculpt.hh"
 #include "ED_screen.hh"
 
@@ -2254,6 +2255,15 @@ static bool gizmo_replaced_by_sculpt_cursor(const bContext *C)
   return ob && scene && (ob->mode & OB_MODE_SCULPT) && sculpt_paint::cursor::is_enabled(*scene);
 }
 
+/**
+ * While the Projection Frame tool edits the shown row's inline frame, this gizmo would only draw a
+ * second handle set around the same frame.
+ */
+static bool gizmo_replaced_by_projection_frame(const bContext *C)
+{
+  return sculpt_paint::projection::ED_paint_projection_frame_tool_is_active(C);
+}
+
 static bool WIDGETGROUP_gizmo_poll_context(const bContext *C, wmGizmoGroupType * /*gzgt*/)
 {
   ScrArea *area = CTX_wm_area(C);
@@ -2261,7 +2271,7 @@ static bool WIDGETGROUP_gizmo_poll_context(const bContext *C, wmGizmoGroupType *
   if (!WIDGETGROUP_gizmo_poll_generic(v3d)) {
     return false;
   }
-  if (gizmo_replaced_by_sculpt_cursor(C)) {
+  if (gizmo_replaced_by_sculpt_cursor(C) || gizmo_replaced_by_projection_frame(C)) {
     return false;
   }
 
@@ -2297,7 +2307,7 @@ static bool WIDGETGROUP_gizmo_poll_tool(const bContext *C, wmGizmoGroupType *gzg
   if (v3d->gizmo_flag & V3D_GIZMO_HIDE_TOOL) {
     return false;
   }
-  if (gizmo_replaced_by_sculpt_cursor(C)) {
+  if (gizmo_replaced_by_sculpt_cursor(C) || gizmo_replaced_by_projection_frame(C)) {
     return false;
   }
 

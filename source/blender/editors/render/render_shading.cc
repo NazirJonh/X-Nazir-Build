@@ -974,6 +974,9 @@ static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator *op)
     BKE_paint_layers_channel_set_value(*ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_color);
   }
   BKE_paint_layers_active_set(*ma, base->marker);
+  /* The new base row is the one the stack shows: follow it with the Projection Frame tool, like a
+   * stack row click does. */
+  ed::sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(C, *ma, base);
   Scene *scene = CTX_data_scene(C);
   if (scene != nullptr) {
     /* The Stack Layers channel cursor is a scene setting that starts on Base Color; a material

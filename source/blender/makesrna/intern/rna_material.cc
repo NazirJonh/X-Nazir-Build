@@ -973,6 +973,19 @@ static void rna_Material_paint_layers_active_set(PointerRNA *ptr,
   BKE_paint_layers_active_set(*ma, layer->marker);
 }
 
+/* Assigning `paint_layers.active` (scripts, or a future UI that goes through the pointer) is the
+ * Projection Frame tool's cue when the row fills a volume: the shared helper keeps the tool inert
+ * for every other row and outside Sculpt Mode. The Outliner stack click goes through
+ * #paint_stack_row_activate, which calls the same helper. */
+static void rna_Material_paint_layers_active_update(bContext *C, PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (ma != nullptr) {
+    ed::sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(
+        C, *ma, BKE_paint_layers_active_layer_get(*ma));
+  }
+}
+
 /**
  * Whether \a layer is a row of \a ma's stack, judged by address: a stale pointer (a row freed
  * since the caller held it, or one of another material) must never be dereferenced.
@@ -1178,6 +1191,9 @@ static void rna_Material_paint_layer_add_material_do(bContext *C,
     return;
   }
   BKE_paint_layers_active_set(*ma, layer->marker);
+  /* The popover assignment shows the new row: follow it with the Projection Frame tool, like the
+   * paths that add a row through the Stack Layers operator. */
+  ed::sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(C, *ma, layer);
   /* This path adds the row without going through the Stack Layers Add operator, so the Outliner
    * has to be told the row it now has is the active one -- otherwise the rows it cached before the
    * Add keep the old row lit. */
@@ -7696,6 +7712,10 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
                                  nullptr);
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Active Layer", "Active paint layer of the material");
+  /* The update callback switches tools, it needs the context. */
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layers_active_update");
 
   /* `active` answers the item's row, so the tab needs the item itself to draw its own controls. */
   prop = RNA_def_property(srna, "active_mask_item", PROP_POINTER, PROP_NONE);

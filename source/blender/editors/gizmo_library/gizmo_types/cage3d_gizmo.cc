@@ -15,9 +15,12 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_index_range.hh"
+#include "BLI_math_constants.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_context.hh"
 
@@ -123,14 +126,14 @@ static void gizmo_rect_pivot_from_scale_part(int part,
 
 static void cage3d_draw_box_corners(const float r[3],
                                     const float margin[3],
-                                    const float color[3],
+                                    const float color[4],
                                     const float line_width)
 {
   uint pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32_32);
   UNUSED_VARS(margin);
 
   immBindBuiltinProgram(GPU_SHADER_3D_POLYLINE_UNIFORM_COLOR);
-  immUniformColor3fv(color);
+  immUniformColor4fv(color);
 
   float viewport[4];
   GPU_viewport_size_get_f(viewport);
@@ -138,6 +141,133 @@ static void cage3d_draw_box_corners(const float r[3],
   immUniform1f("lineWidth", line_width * U.pixelsize);
 
   imm_draw_cube_wire_3d(pos, float3(0.0f), r);
+
+  immUnbindProgram();
+}
+
+/** The box edges alone, dashed white and black so they read on any surface, whatever the color. */
+static void cage3d_draw_box_dashed(const float r[3], const float alpha, const float line_width)
+{
+  uint pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_LINE_DASHED_UNIFORM_COLOR);
+
+  float viewport[4];
+  GPU_viewport_size_get_f(viewport);
+  immUniform2f("viewport_size", viewport[2] / UI_SCALE_FAC, viewport[3] / UI_SCALE_FAC);
+  immUniform1i("colors_len", 2); /* "Advanced" mode: two alternating colors. */
+  immUniform4f("color", 1.0f, 1.0f, 1.0f, alpha);
+  immUniform4f("color2", 0.0f, 0.0f, 0.0f, alpha);
+  immUniform1f("dash_width", 6.0f);
+  immUniform1f("udash_factor", 0.5f);
+  GPU_line_width(line_width * U.pixelsize);
+
+  imm_draw_cube_wire_3d(pos, float3(0.0f), r);
+
+  immUnbindProgram();
+}
+
+/** Segments of one preview circle; every second pair of them is a white (or black) dash. */
+#define CAGE3D_SHAPE_CIRCLE_SEGMENTS 72
+/** Segments of one straight preview line, with the same dash grouping. */
+#define CAGE3D_SHAPE_LINE_SEGMENTS 12
+
+/** A point of the ellipse in the plane of axes \a b and \a c, at height \a h along axis \a a. */
+static float3 cage3d_shape_ellipse_point(
+    const float r[3], const int a, const float h, const float angle)
+{
+  const int b = (a + 1) % 3;
+  const int c = (a + 2) % 3;
+  float3 co(0.0f);
+  co[a] = h;
+  co[b] = r[b] * cosf(angle);
+  co[c] = r[c] * sinf(angle);
+  return co;
+}
+
+/**
+ * The preview shape as polylines in the cage's local space: a cylinder along axis \a axis (two
+ * end ellipses and four lines between them) or an ellipsoid (the three coordinate ellipses),
+ * both inside the half extents \a r.
+ */
+static void cage3d_shape_strips_build(const float r[3],
+                                      const int draw_style,
+                                      const int axis,
+                                      Vector<Vector<float3>> &r_strips)
+{
+  const auto add_ellipse = [&](const int a, const float h) {
+    r_strips.append(Vector<float3>());
+    Vector<float3> &strip = r_strips.last();
+    for (const int i : IndexRange(CAGE3D_SHAPE_CIRCLE_SEGMENTS + 1)) {
+      const float angle = float(i) / float(CAGE3D_SHAPE_CIRCLE_SEGMENTS) * float(2.0 * M_PI);
+      strip.append(cage3d_shape_ellipse_point(r, a, h, angle));
+    }
+  };
+
+  if (draw_style == ED_GIZMO_CAGE3D_STYLE_CYLINDER) {
+    add_ellipse(axis, r[axis]);
+    add_ellipse(axis, -r[axis]);
+    for (const int k : IndexRange(4)) {
+      const float angle = float(k) * float(M_PI_2);
+      r_strips.append(Vector<float3>());
+      Vector<float3> &line = r_strips.last();
+      for (const int i : IndexRange(CAGE3D_SHAPE_LINE_SEGMENTS + 1)) {
+        const float h = r[axis] * (1.0f - 2.0f * float(i) / float(CAGE3D_SHAPE_LINE_SEGMENTS));
+        line.append(cage3d_shape_ellipse_point(r, axis, h, angle));
+      }
+    }
+  }
+  else {
+    for (const int a : IndexRange(3)) {
+      add_ellipse(a, 0.0f);
+    }
+  }
+}
+
+/**
+ * The preview shape drawn as neutral dashes: the polylines are cut into short pieces that
+ * alternate white and black, since the dashed line shader restarts its pattern on every segment
+ * and so cannot dash a many-segment curve.
+ */
+static void cage3d_draw_shape_dashed(const float r[3],
+                                     const int draw_style,
+                                     const int axis,
+                                     const float alpha,
+                                     const float line_width)
+{
+  Vector<Vector<float3>> strips;
+  cage3d_shape_strips_build(r, draw_style, axis, strips);
+
+  uint pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_POLYLINE_UNIFORM_COLOR);
+
+  float viewport[4];
+  GPU_viewport_size_get_f(viewport);
+  immUniform2fv("viewportSize", &viewport[2]);
+  immUniform1f("lineWidth", line_width * U.pixelsize);
+
+  for (const int pass : IndexRange(2)) {
+    const float value = (pass == 0) ? 1.0f : 0.0f;
+    immUniformColor4f(value, value, value, alpha);
+    for (const Vector<float3> &strip : strips) {
+      /* A dash is two segments; even dashes are white, odd ones black. */
+      int segments = 0;
+      for (const int i : IndexRange(int(strip.size()) - 1)) {
+        segments += (((i / 2) % 2) == pass) ? 1 : 0;
+      }
+      if (segments == 0) {
+        continue;
+      }
+      immBegin(GPU_PRIM_LINES, uint(segments) * 2);
+      for (const int i : IndexRange(int(strip.size()) - 1)) {
+        if (((i / 2) % 2) == pass) {
+          immVertex3fv(pos, strip[i]);
+          immVertex3fv(pos, strip[i + 1]);
+        }
+      }
+      immEnd();
+    }
+  }
 
   immUnbindProgram();
 }
@@ -176,7 +306,7 @@ static void cage3d_draw_box_interaction(const RegionView3D *rv3d,
       uint pos = GPU_vertformat_attr_add(
           immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32_32);
       immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-      immUniformColor3fv(color);
+      immUniformColor4fv(color);
       imm_draw_cube_fill_3d(pos, co, rad_scale);
       immUnbindProgram();
     }
@@ -352,14 +482,23 @@ static void gizmo_cage3d_draw_intern(
     _r.ymax = size_real[1];
 #endif
     if (draw_style == ED_GIZMO_CAGE3D_STYLE_BOX) {
-      float color[4], black[3] = {0, 0, 0};
+      float color[4];
       gizmo_color_get(gz, highlight, color);
+      /* The outline follows the gizmo's alpha, so a see-through gizmo has no opaque black frame. */
+      const float black[4] = {0.0f, 0.0f, 0.0f, color[3]};
 
-      /* corner gizmos */
-      cage3d_draw_box_corners(size_real, margin, black, gz->line_width + 3.0f);
+      GPU_blend(GPU_BLEND_ALPHA);
 
-      /* corner gizmos */
-      cage3d_draw_box_corners(size_real, margin, color, gz->line_width);
+      if (draw_options & ED_GIZMO_CAGE_DRAW_FLAG_DASHED_OUTLINE) {
+        cage3d_draw_box_dashed(size_real, color[3], gz->line_width);
+      }
+      else {
+        /* corner gizmos */
+        cage3d_draw_box_corners(size_real, margin, black, gz->line_width + 3.0f);
+
+        /* corner gizmos */
+        cage3d_draw_box_corners(size_real, margin, color, gz->line_width);
+      }
 
       bool show = false;
       if (gz->highlight_part == ED_GIZMO_CAGE3D_PART_TRANSLATE) {
@@ -377,6 +516,20 @@ static void gizmo_cage3d_draw_intern(
         cage3d_draw_box_interaction(
             rv3d, matrix_final, gz->color, gz->highlight_part, size_real, margin);
       }
+
+      GPU_blend(GPU_BLEND_NONE);
+    }
+    else if (ELEM(draw_style, ED_GIZMO_CAGE3D_STYLE_CYLINDER, ED_GIZMO_CAGE3D_STYLE_SPHERE)) {
+      float color[4];
+      gizmo_color_get(gz, highlight, color);
+
+      GPU_blend(GPU_BLEND_ALPHA);
+      cage3d_draw_shape_dashed(
+          size_real, draw_style, RNA_int_get(gz->ptr, "shape_axis"), color[3], gz->line_width);
+      /* The scale handles stay on the bounding box corners, which the shape is scaled by. */
+      cage3d_draw_box_interaction(
+          rv3d, matrix_final, gz->color, gz->highlight_part, size_real, margin);
+      GPU_blend(GPU_BLEND_NONE);
     }
     else if (draw_style == ED_GIZMO_CAGE3D_STYLE_CIRCLE) {
       float color[4], black[3] = {0, 0, 0};
@@ -649,6 +802,8 @@ static void GIZMO_GT_cage_3d(wmGizmoType *gzt)
   static const EnumPropertyItem rna_enum_draw_style[] = {
       {ED_GIZMO_CAGE3D_STYLE_BOX, "BOX", 0, "Box", ""},
       {ED_GIZMO_CAGE3D_STYLE_CIRCLE, "CIRCLE", 0, "Circle", ""},
+      {ED_GIZMO_CAGE3D_STYLE_CYLINDER, "CYLINDER", 0, "Cylinder", ""},
+      {ED_GIZMO_CAGE3D_STYLE_SPHERE, "SPHERE", 0, "Sphere", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
   static const EnumPropertyItem rna_enum_transform[] = {
@@ -659,11 +814,21 @@ static void GIZMO_GT_cage_3d(wmGizmoType *gzt)
   };
   static const EnumPropertyItem rna_enum_draw_options[] = {
       {ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE, "XFORM_CENTER_HANDLE", 0, "Center Handle", ""},
+      {ED_GIZMO_CAGE_DRAW_FLAG_DASHED_OUTLINE, "DASHED_OUTLINE", 0, "Dashed Outline", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
   static const float unit_v3[3] = {1.0f, 1.0f, 1.0f};
   RNA_def_float_vector(
       gzt->srna, "dimensions", 3, unit_v3, 0, FLT_MAX, "Dimensions", "", 0.0f, FLT_MAX);
+  RNA_def_int(gzt->srna,
+              "shape_axis",
+              2,
+              0,
+              2,
+              "Shape Axis",
+              "The axis of the Cylinder draw style",
+              0,
+              2);
   RNA_def_enum_flag(gzt->srna, "transform", rna_enum_transform, 0, "Transform Options", "");
   RNA_def_enum(gzt->srna,
                "draw_style",

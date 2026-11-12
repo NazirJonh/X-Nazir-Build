@@ -4,11 +4,16 @@
 
 /** \file
  * \ingroup edsculpt
+ *
+ * The projection frame's controller operators (create, select and place the Empty) and the
+ * operator-type registration of the whole projection module, so #paint_ops.cc registers the module
+ * with one call.
  */
 
 #include "projection_ops.hh"
 
 #include <optional>
+#include <string>
 
 #include "DNA_collection_types.h"
 #include "DNA_constraint_types.h"
@@ -17,6 +22,7 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_windowmanager_types.h"
+#include "DNA_workspace_types.h"
 
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
@@ -30,6 +36,8 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_object.hh"
+#include "BKE_object_types.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_report.hh"
@@ -43,6 +51,8 @@
 #include "RNA_define.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
+#include "WM_types.hh"
 
 #include "../uv_mapping/uv_mapping_target.hh"
 
@@ -393,3 +403,77 @@ void ED_paint_layer_projection_controller_snap_update(Object &controller,
 }
 
 }  // namespace blender
+
+namespace blender::ed::sculpt_paint::projection {
+
+/* -------------------------------------------------------------------- */
+/** \name Projection Frame tool follow
+ * \{ */
+
+/** Idname of the tool in the 3D View's toolbar (`space_toolsystem_toolbar.py`). */
+static constexpr const char *PROJECTION_FRAME_TOOL_ID = "builtin.projection_frame";
+
+bool ED_paint_projection_frame_tool_is_active(const bContext *C)
+{
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  return tref != nullptr && tref->idname != nullptr && STREQ(tref->idname, PROJECTION_FRAME_TOOL_ID);
+}
+
+bool ED_paint_projection_frame_tool_activate_if_needed(bContext *C,
+                                                       Material &material,
+                                                       const MaterialPaintLayer *layer)
+{
+  /* The RNA update hooks may run without a context: the tool is a convenience that only a real
+   * viewport can take. */
+  if (C == nullptr) {
+    return false;
+  }
+  Object *object = CTX_data_active_object(C);
+  if (object == nullptr || (object->mode & OB_MODE_SCULPT) == 0 ||
+      object->runtime->sculpt_session == nullptr)
+  {
+    return false;
+  }
+  std::string &saved_tool_id = object->runtime->sculpt_session->layers.projection_saved_tool_id;
+
+  const bool volume_row = (layer != nullptr) &&
+                          BKE_paint_layers_projection_applies(material, *layer) &&
+                          BKE_paint_layers_projection_mode_info(layer->mapping.space).is_volume;
+  if (volume_row) {
+    if (!ED_paint_projection_frame_tool_is_active(C)) {
+      const std::string current_tool_id = ED_paint_view3d_tool_id_get(C);
+      if (current_tool_id != PROJECTION_FRAME_TOOL_ID) {
+        saved_tool_id = current_tool_id;
+      }
+      ED_paint_view3d_tool_id_set(C, PROJECTION_FRAME_TOOL_ID);
+    }
+    return true;
+  }
+  /* Only restored while the Projection Frame tool is still active: a tool the user picked during
+   * a volume row is a choice the row change should not overrule. */
+  if (!saved_tool_id.empty() && ED_paint_projection_frame_tool_is_active(C)) {
+    ED_paint_view3d_tool_id_set(C, saved_tool_id.c_str());
+  }
+  saved_tool_id.clear();
+  return false;
+}
+
+/** \} */
+
+void PAINT_OT_layer_projection_place(wmOperatorType *ot);
+void PAINT_OT_layer_projection_flip(wmOperatorType *ot);
+void PAINT_OT_layer_projection_move(wmOperatorType *ot);
+void PAINT_OT_projection_frame_tool(wmOperatorType *ot);
+
+void operatortypes_register()
+{
+  WM_operatortype_append(PAINT_OT_layer_projection_add_controller);
+  WM_operatortype_append(PAINT_OT_layer_projection_select_controller);
+  WM_operatortype_append(PAINT_OT_layer_projection_controller_to_cursor);
+  WM_operatortype_append(PAINT_OT_layer_projection_place);
+  WM_operatortype_append(PAINT_OT_layer_projection_flip);
+  WM_operatortype_append(PAINT_OT_layer_projection_move);
+  WM_operatortype_append(PAINT_OT_projection_frame_tool);
+}
+
+}  // namespace blender::ed::sculpt_paint::projection

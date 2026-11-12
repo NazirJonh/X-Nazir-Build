@@ -48,6 +48,7 @@
 #include "GPU_state.hh"
 
 #include "ED_gizmo_library.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
 #include "ED_transform.hh"
@@ -953,6 +954,12 @@ static bool gizmo_poll(const bContext *C, wmGizmoGroupType * /*gzgt*/)
 {
   Object *ob = CTX_data_active_object(C);
   if (!ob || !(ob->mode & OB_MODE_SCULPT)) {
+    return false;
+  }
+
+  /* The Projection Frame tool owns the viewport handles while it is active. */
+  /* The Projection Frame tool's gizmo owns the handles. */
+  if (sculpt_paint::projection::ED_paint_projection_frame_tool_is_active(C)) {
     return false;
   }
 

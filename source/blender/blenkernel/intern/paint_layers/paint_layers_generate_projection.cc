@@ -374,6 +374,75 @@ NodeOutput projection_face_uv(bNodeTree &tree,
   return projection_combine_xyz(tree, u, v, 0.0f, made, grid);
 }
 
+/** `value * mul + add` with all three operands linked: both the tiling multiplier and its
+ * center-keeping offset come from the row's tiling value, which no constant-affine node carries. */
+NodeOutput projection_multiply_add(bNodeTree &tree,
+                                   const NodeOutput value,
+                                   const NodeOutput mul,
+                                   const NodeOutput add,
+                                   Vector<bNode *> &made,
+                                   layout::LayoutGrid &grid)
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  if (node == nullptr) {
+    return {};
+  }
+  node->custom1 = NODE_MATH_MULTIPLY_ADD;
+  bNodeSocket *in_value = socket_in(*node, "Value");
+  bNodeSocket *in_mul = socket_in(*node, "Value_001");
+  bNodeSocket *in_add = socket_in(*node, "Value_002");
+  bNodeSocket *out = socket_out(*node, "Value");
+  if (in_value == nullptr || in_mul == nullptr || in_add == nullptr || out == nullptr ||
+      value.node == nullptr || value.socket == nullptr || mul.node == nullptr ||
+      mul.socket == nullptr || add.node == nullptr || add.socket == nullptr)
+  {
+    bke::node_remove_node(nullptr, tree, *node, true, false);
+    return {};
+  }
+  bke::node_add_link(tree, *value.node, *value.socket, *node, *in_value);
+  bke::node_add_link(tree, *mul.node, *mul.socket, *node, *in_mul);
+  bke::node_add_link(tree, *add.node, *add.socket, *node, *in_add);
+  made.append(node);
+  grid.place_extra(*node);
+  return {node, out};
+}
+
+/**
+ * One face's local UV in [0, 1], tiled around the face center: the map repeats `tiling` times
+ * inside the frame's footprint on the face, matching the CPU composite's
+ * `0.5 + (uv - 0.5) * tiling`. Face 0 is X, 1 is Y, 2 is Z.
+ */
+NodeOutput projection_face_uv_tiled(bNodeTree &tree,
+                                    const int face,
+                                    const NodeOutput q[3],
+                                    const SeparateOutputs &tiling,
+                                    Vector<bNode *> &made,
+                                    layout::LayoutGrid &grid)
+{
+  const NodeOutput uv = projection_face_uv(tree, face, q, made, grid);
+  if (uv.node == nullptr) {
+    return {};
+  }
+  const SeparateOutputs local = projection_separate(tree, uv, made, grid);
+  if (local.node == nullptr) {
+    return {};
+  }
+  /* The offset reads `0.5 - 0.5 * tiling`, which keeps the face center fixed while the tiling
+   * scales the UV away from it. */
+  const NodeOutput offset_u = projection_affine(
+      tree, tiling.component[0], -0.5f, 0.5f, made, grid);
+  const NodeOutput offset_v = projection_affine(
+      tree, tiling.component[1], -0.5f, 0.5f, made, grid);
+  if (offset_u.node == nullptr || offset_v.node == nullptr) {
+    return {};
+  }
+  const NodeOutput u = projection_multiply_add(
+      tree, local.component[0], tiling.component[0], offset_u, made, grid);
+  const NodeOutput v = projection_multiply_add(
+      tree, local.component[1], tiling.component[1], offset_v, made, grid);
+  return projection_combine_xyz(tree, u, v, 0.0f, made, grid);
+}
+
 /**
  * The floor of the painted object's UV, as the UDIM tile origin a tiled source map reads. Built on
  * first use and shared by every tiled map of the row.
@@ -855,12 +924,9 @@ ProjectionNodes *PaintLayersTreeBuilder::projection_nodes_ensure(
   NodeOutput weights[3];
   NodeOutput inside;
 
-  /* The frame-space component of the surface normal along the axis: a controller names one object,
-   * whose whole rotation a live node chain cannot name, so the value sync bakes the world-space
-   * direction the world normal reads against; without a controller the Vector Transform node names
-   * the shaded object and the inline rotation applies live. */
-  /* The Texture Coordinate "Normal" output is in the shaded object's space, so the facing weight
-   * reads the Geometry node's world-space normal instead. */
+  /* The world-space normal: the Texture Coordinate "Normal" output is in the shaded object's
+   * space, so the facing weight and the Box and Triplanar face weights read the Geometry node
+   * instead. */
   bNode *geometry = bke::node_add_static_node(nullptr, tree, SH_NODE_NEW_GEOMETRY);
   if (geometry == nullptr) {
     return fail();
@@ -872,72 +938,87 @@ ProjectionNodes *PaintLayersTreeBuilder::projection_nodes_ensure(
     return fail();
   }
   const NodeOutput normal = {geometry, world_normal_out};
-  NodeOutput facing_component;
-  if (row.projection_object != nullptr) {
-    NodeOutput dot = projection_vector_math(tree,
-                                            NODE_VECTOR_MATH_DOT_PRODUCT,
-                                            normal,
-                                            {group_input, facing_dir_socket},
-                                            0.0f,
-                                            made,
-                                            grid_);
-    if (dot.node != nullptr) {
-      bNodeSocket *value_out = socket_out(*dot.node, "Value");
-      if (value_out != nullptr) {
-        dot.socket = value_out;
+  /* The volume kinds receive the map from every direction, so a facing built on one frame axis
+   * would blank the faces that axis runs across: the facing fade is a Planar input, and the
+   * volume kinds build no facing nodes at all. The CPU composite skips the weight for them too. */
+  const bool volume_space = ELEM(space,
+                                 MA_PAINT_LAYER_MAPPING_SPACE_BOX,
+                                 MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR,
+                                 MA_PAINT_LAYER_MAPPING_SPACE_CUBE,
+                                 MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER,
+                                 MA_PAINT_LAYER_MAPPING_SPACE_SPHERE);
+  NodeOutput facing_factor;
+  if (!volume_space) {
+    /* The frame-space component of the surface normal along the axis: a controller names one
+     * object, whose whole rotation a live node chain cannot name, so the value sync bakes the
+     * world-space direction the world normal reads against; without a controller the Vector
+     * Transform node names the shaded object and the inline rotation applies live. */
+    NodeOutput facing_component;
+    if (row.projection_object != nullptr) {
+      NodeOutput dot = projection_vector_math(tree,
+                                              NODE_VECTOR_MATH_DOT_PRODUCT,
+                                              normal,
+                                              {group_input, facing_dir_socket},
+                                              0.0f,
+                                              made,
+                                              grid_);
+      if (dot.node != nullptr) {
+        bNodeSocket *value_out = socket_out(*dot.node, "Value");
+        if (value_out != nullptr) {
+          dot.socket = value_out;
+        }
       }
+      facing_component = dot;
     }
-    facing_component = dot;
-  }
-  else {
-    bNode *to_object = bke::node_add_static_node(nullptr, tree, SH_NODE_VECT_TRANSFORM);
-    if (to_object == nullptr) {
-      return fail();
-    }
-    if (NodeShaderVectTransform *storage =
-            static_cast<NodeShaderVectTransform *>(to_object->storage))
-    {
-      storage->type = SHD_VECT_TRANSFORM_TYPE_NORMAL;
-      storage->convert_from = SHD_VECT_TRANSFORM_SPACE_WORLD;
-      storage->convert_to = SHD_VECT_TRANSFORM_SPACE_OBJECT;
-    }
-    bNodeSocket *vt_in = socket_in(*to_object, "Vector");
-    bNodeSocket *vt_out = socket_out(*to_object, "Vector");
-    if (vt_in == nullptr || vt_out == nullptr) {
+    else {
+      bNode *to_object = bke::node_add_static_node(nullptr, tree, SH_NODE_VECT_TRANSFORM);
+      if (to_object == nullptr) {
+        return fail();
+      }
+      if (NodeShaderVectTransform *storage =
+              static_cast<NodeShaderVectTransform *>(to_object->storage))
+      {
+        storage->type = SHD_VECT_TRANSFORM_TYPE_NORMAL;
+        storage->convert_from = SHD_VECT_TRANSFORM_SPACE_WORLD;
+        storage->convert_to = SHD_VECT_TRANSFORM_SPACE_OBJECT;
+      }
+      bNodeSocket *vt_in = socket_in(*to_object, "Vector");
+      bNodeSocket *vt_out = socket_out(*to_object, "Vector");
+      if (vt_in == nullptr || vt_out == nullptr) {
+        made.append(to_object);
+        return fail();
+      }
+      bke::node_add_link(tree, *geometry, *world_normal_out, *to_object, *vt_in);
       made.append(to_object);
+      grid_.place_extra(*to_object);
+      const NodeOutput n_frame = projection_vector_rotate(
+          tree, {to_object, vt_out}, rotation_value, true, made, grid_);
+      const SeparateOutputs n_components = projection_separate(tree, n_frame, made, grid_);
+      if (n_components.node == nullptr) {
+        return fail();
+      }
+      facing_component = n_components.component[axis];
+    }
+    if (facing_component.node == nullptr) {
       return fail();
     }
-    bke::node_add_link(tree, *geometry, *world_normal_out, *to_object, *vt_in);
-    made.append(to_object);
-    grid_.place_extra(*to_object);
-    const NodeOutput n_frame = projection_vector_rotate(
-        tree, {to_object, vt_out}, rotation_value, true, made, grid_);
-    const SeparateOutputs n_components = projection_separate(tree, n_frame, made, grid_);
-    if (n_components.node == nullptr) {
+    /* The facing weight from the limit's baked scale and offset: one clamped entry, then the
+     * smooth t * t * (3 - 2 t), then the toggle mix. */
+    const SeparateOutputs facing = projection_separate(
+        tree, {group_input, facing_socket}, made, grid_);
+    if (facing.node == nullptr) {
       return fail();
     }
-    facing_component = n_components.component[axis];
-  }
-  if (facing_component.node == nullptr) {
-    return fail();
-  }
-  /* The facing weight from the limit's baked scale and offset: one clamped entry, then the smooth
-   * t * t * (3 - 2 t), then the toggle mix. */
-  const SeparateOutputs facing = projection_separate(
-      tree, {group_input, facing_socket}, made, grid_);
-  if (facing.node == nullptr) {
-    return fail();
-  }
-  const NodeOutput facing_entry = projection_facing_hermite_entry(
-      tree, facing_component, facing.component[0], facing.component[1], made, grid_);
-  const NodeOutput facing_hermite = projection_facing_hermite(tree, facing_entry, made, grid_);
-  if (facing_hermite.node == nullptr) {
-    return fail();
-  }
-  const NodeOutput facing_factor = projection_clip_mix(
-      tree, facing_hermite, facing.component[2], made, grid_);
-  if (facing_factor.node == nullptr) {
-    return fail();
+    const NodeOutput facing_entry = projection_facing_hermite_entry(
+        tree, facing_component, facing.component[0], facing.component[1], made, grid_);
+    const NodeOutput facing_hermite = projection_facing_hermite(tree, facing_entry, made, grid_);
+    if (facing_hermite.node == nullptr) {
+      return fail();
+    }
+    facing_factor = projection_clip_mix(tree, facing_hermite, facing.component[2], made, grid_);
+    if (facing_factor.node == nullptr) {
+      return fail();
+    }
   }
 
   /* The tiling multiplies the UV only: the frame factor reads q itself, so the footprint stays the
@@ -1017,9 +1098,11 @@ ProjectionNodes *PaintLayersTreeBuilder::projection_nodes_ensure(
     }
     case MA_PAINT_LAYER_MAPPING_SPACE_BOX:
     case MA_PAINT_LAYER_MAPPING_SPACE_TRIPLANAR: {
-      /* Face 0 is X, 1 is Y, 2 is Z; the weights split the frame-space normal between them. */
+      /* Face 0 is X, 1 is Y, 2 is Z; the weights split the frame-space normal between them. The
+       * tiling wraps each face's UV around the face center, exactly as the CPU composite does. */
       for (int face = 0; face < 3; face++) {
-        uv[face] = projection_face_uv(tree, face, q_components.component, made, grid_);
+        uv[face] = projection_face_uv_tiled(
+            tree, face, q_components.component, tiling, made, grid_);
       }
       const NodeOutput blend = {group_input, blend_socket};
       if (!projection_weights_add(tree,
@@ -1164,8 +1247,9 @@ ProjectionNodes *PaintLayersTreeBuilder::projection_nodes_ensure(
   NodeOutput clip_factor = projection_clip_mix(tree, inside, clip, made, grid_);
   /* The facing fade joins after the clip mix: the mirrored copy on the far side and the stretched
    * sweep over faces parallel to the axis are artifacts of the direction, not of the frame's
-   * bounds, so they hide even while the map repeats. */
-  if (clip_factor.node != nullptr) {
+   * bounds, so they hide even while the map repeats. The volume kinds build no facing, so their
+   * frame factor is the clip mix alone. */
+  if (clip_factor.node != nullptr && facing_factor.node != nullptr) {
     clip_factor = projection_math(
         tree, NODE_MATH_MULTIPLY, clip_factor, facing_factor, 0.0f, made, grid_);
   }

@@ -1205,7 +1205,7 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
 
     UV reads the active UVs; Planar, Box, Triplanar, Cube, Cylinder and Sphere project the map
     through a frame in object or controller space. The frame's Empty (optional) places, turns and
-    scales the projection, while the inline center/size/rotation give it its extents. The UV
+    scales the projection, while the inline center/size/roll give it its extents. The UV
     controls below the frame adjust the projected UVs (or the UVs themselves in UV mode).
     """
 
@@ -1238,70 +1238,43 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         self.layout.menu("LAYER_MT_mapping_reset", text="", icon='RECOVER_LAST')
 
     def _draw_projection(self, context, layout, row):
-        """The controller, frame and limits of a projected row."""
-        controller = layout.column(align=True)
-        controller.label(text="Controller")
-        controller.prop(row, "projection_object", text="")
-        sub = controller.row(align=True)
-        sub.operator("paint.layer_projection_add_controller", text="Add", icon='ADD')
-        sub.operator("paint.layer_projection_select_controller",
-                     text="Select",
-                     icon='RESTRICT_SELECT_OFF')
-        sub.operator("paint.layer_projection_controller_to_cursor",
-                     text="Set to Cursor",
-                     icon='CURSOR')
-        obj = row.projection_object
-        if obj is not None and context.scene not in obj.users_scene:
-            warn = controller.column(align=True)
-            warn.label(text="Controller is not in the current scene", icon='ERROR')
-        # The constraint lives on the controller, so there is nothing to snap without one.
-        snap = controller.row()
-        snap.enabled = obj is not None
-        snap.prop(row, "projection_snap", text="Snap to Surface")
+        """The main fields of a projected row: place, preset, frame size, roll and the limits."""
+        layout.operator("paint.layer_projection_place",
+                        text="Place on Surface",
+                        icon='RESTRICT_SELECT_OFF')
+        # Sculpt Mode only: the operator polls the mode and the volume kinds, and switches to
+        # the Projection Frame tool that draws the standard handles for the frame.
+        layout.operator("paint.projection_frame_tool", text="Edit Frame", icon='MESH_CUBE')
+        sculpt = context.tool_settings.sculpt
+        if sculpt is not None:
+            layout.prop(sculpt, "show_projection_gizmo", text="Show Gizmo", toggle=1)
+        layout.prop(row, "projection_preset", text="Preset")
 
-        frame = layout.column(align=True)
-        frame.label(text="Frame")
-        frame.prop(row, "projection_center", text="Center")
-        frame.prop(row, "projection_size", text="Size")
-        # The depth is the frame's size on the projection axis, the way Ucupaint's decal
-        # distance reads it; the Limit Depth toggle below switches it off.
-        if row.projection_uses_axis:
-            axis_index = 'XYZ'.index(row.projection_axis)
-            frame.prop(row, "projection_size", index=axis_index, text="Depth")
-        frame.prop(row, "projection_roll", text="Roll")
-        if row.projection_uses_axis:
-            frame.prop(row, "projection_axis", text="Axis")
-        if row.projection_uses_blend:
-            frame.prop(row, "projection_blend", text="Blend")
-        if row.projection_uses_cube_layout:
-            frame.prop(row, "projection_cube_layout", text="Layout")
-        # Ucupaint sizes its decal by the Empty itself; this mode makes the inline Size one
-        # and leaves the controller's scale as the only place the frame is sized.
-        size_from_empty = frame.row()
-        size_from_empty.enabled = obj is not None
-        size_from_empty.prop(row, "projection_size_from_controller", text="Size from Empty")
-        frame.prop(row, "projection_fit_aspect", text="Fit Image Aspect")
+        row_size = layout.row(align=True)
+        row_size.prop(row, "projection_size", index=0, text="Size X")
+        row_size.prop(row, "projection_size", index=1, text="Y")
+        layout.prop(row, "projection_roll", text="Roll")
+        # A volume kind bounds all three axes by the clip itself and has no single projection
+        # direction, so the Limit toggle and the facing fade stay Planar-only; the Depth field
+        # is the frame's Size Z and stays for every space.
+        # A volume space projects from every side, so the facing fade and the depth limit have no
+        # single direction to act along and the projection ignores them.
+        volume_space = row.projection_is_volume
+        depth_row = layout.row(align=True)
+        if not volume_space:
+            depth_row.prop(row, "projection_depth", text="Limit", toggle=1)
+        depth_row.prop(row, "projection_depth_size", text="Depth")
 
-        limits = layout.column(align=True)
-        limits.label(text="Limits")
-        limits.prop(row, "projection_preset", text="Preset")
-        limits.prop(row, "projection_clip", text="Clip to Frame")
-        limits.prop(row, "projection_depth", text="Limit Depth")
-        limits.prop(row, "projection_facing", text="Facing Fade")
-        angle = limits.row()
-        angle.enabled = row.projection_facing
-        angle.prop(row, "projection_angle", text="Facing Angle")
-        # The fade keeps the faces the frame's arrow enters by default; this keeps the ones it
-        # points away from instead, which reads better for a projection onto a back side.
-        flip = limits.row()
-        flip.enabled = row.projection_facing
-        flip.prop(row, "projection_facing_invert", text="Flip Facing")
+        if not volume_space:
+            facing_row = layout.row(align=True)
+            facing_row.prop(row, "projection_facing", text="Facing Fade")
+            angle_col = facing_row.column()
+            angle_col.enabled = row.projection_facing
+            angle_col.prop(row, "projection_angle", text="Angle")
+            flip_col = facing_row.column()
+            flip_col.enabled = row.projection_facing
+            flip_col.prop(row, "projection_facing_invert", text="Flip", toggle=1)
 
-        if row.projection_object is None:
-            note = layout.column(align=True)
-            note.enabled = False
-            note.label(text="No controller: the frame lives in object space", icon='INFO')
-            note.label(text="Assign an Empty to place it in the viewport", icon='BLANK1')
         layout.separator()
 
     def draw(self, context):
@@ -1317,29 +1290,102 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         if row.mapping_space != 'UV':
             self._draw_projection(context, layout, row)
 
-        layout.prop(row, "mapping_enabled", text="UV Adjust")
-        col = layout.column()
-        col.enabled = row.mapping_enabled
-        col.prop(row, "mapping_offset", text="Offset")
-        sub = col.row(align=True)
-        # The tile-holding RNA properties follow the offset so the tile stays put.
-        sub.prop(row, "tile_scale", text="Scale")
-        sub.prop(row,
-                 "tile_scale_lock",
-                 text="",
-                 icon='UNLOCKED',
-                 icon_only=True)
-        col.prop(row, "tile_rotation", text="Rotation")
-        col.prop(row, "mapping_wrap", text="UV Wrap")
+        if row.mapping_space == 'UV':
+            layout.prop(row, "mapping_enabled", text="UV Adjust")
+            col = layout.column()
+            col.enabled = row.mapping_enabled
+            col.prop(row, "mapping_offset", text="Offset")
+            sub = col.row(align=True)
+            # The tile-holding RNA properties follow the offset so the tile stays put.
+            sub.prop(row, "tile_scale", text="Scale")
+            sub.prop(row,
+                     "tile_scale_lock",
+                     text="",
+                     icon='LOCKED' if row.tile_scale_lock else 'UNLOCKED',
+                     icon_only=True)
+            col.prop(row, "tile_rotation", text="Rotation")
+            col.prop(row, "mapping_wrap", text="UV Wrap")
 
-        if row.mapping_enabled and row.source == 'MATERIAL':
-            # The wrapper moves the active UV layer (TexCoord UV and open Image Textures) of the
-            # source tree and of the groups on the path to its Principled BSDF; a coordinate-driven
-            # procedural texture, a named UV Map node and a group beside that path keep their own input.
-            note = layout.column(align=True)
-            note.enabled = False
-            note.label(text="Only the active UV of the main shader path is mapped", icon='BLANK1')
-            note.label(text="Procedural, named-UV and side-group textures are not", icon='BLANK1')
+            if row.mapping_enabled and row.source == 'MATERIAL':
+                # The wrapper moves the active UV layer (TexCoord UV and open Image Textures) of the
+                # source tree and of the groups on the path to its Principled BSDF; a coordinate-driven
+                # procedural texture, a named UV Map node and a group beside that path keep their own input.
+                note = layout.column(align=True)
+                note.enabled = False
+                note.label(text="Only the active UV of the main shader path is mapped",
+                           icon='BLANK1')
+                note.label(text="Procedural, named-UV and side-group textures are not",
+                           icon='BLANK1')
+        else:
+            # A projected row is addressed by its frame: the wrap and the tiling are the only mapping
+            # it follows, an offset or rotation would move the lookup away from the frame. The
+            # tiling is the row's mapping scale, applied to the UV only, so the footprint stays put.
+            sub = layout.row(align=True)
+            sub.prop(row, "mapping_scale", text="Tiling")
+            sub.prop(row,
+                     "tile_scale_lock",
+                     text="",
+                     icon='LOCKED' if row.tile_scale_lock else 'UNLOCKED',
+                     icon_only=True)
+            layout.prop(row, "mapping_wrap", text="UV Wrap")
+
+
+class LAYER_MATERIAL_PT_mapping_advanced(LayerMaterialButtonsPanel, Panel):
+    """Advanced projection fields: center, clip, axis, blend, cube layout and the controller."""
+
+    bl_idname = "LAYER_MATERIAL_PT_mapping_advanced"
+    bl_label = "Advanced"
+    bl_parent_id = "LAYER_MATERIAL_PT_mapping"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        row = LAYER_MATERIAL_PT_mapping._shown_row(context)
+        return row is not None and row.mapping_space != 'UV'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        row = LAYER_MATERIAL_PT_mapping._shown_row(context)
+        if row is None:
+            return
+
+        col = layout.column(align=True)
+        col.prop(row, "projection_center", text="Center")
+        col.prop(row, "projection_clip", text="Clip to Frame")
+        col.prop(row, "projection_fit_aspect", text="Fit Image Aspect")
+        if row.projection_uses_axis:
+            col.prop(row, "projection_axis", text="Axis")
+        if row.projection_uses_blend:
+            col.prop(row, "projection_blend", text="Normal Blend", slider=True)
+        if row.projection_uses_cube_layout:
+            col.prop(row, "projection_cube_layout", text="Layout")
+
+        layout.separator()
+        controller = layout.column(align=True)
+        controller.label(text="Controller")
+        controller.prop(row, "projection_object", text="")
+        sub = controller.row(align=True)
+        sub.operator("paint.layer_projection_add_controller", text="Add", icon='ADD')
+        sub.operator("paint.layer_projection_select_controller",
+                     text="Select",
+                     icon='RESTRICT_SELECT_OFF')
+        sub.operator("paint.layer_projection_controller_to_cursor",
+                     text="Set to Cursor",
+                     icon='CURSOR')
+        obj = row.projection_object
+        if obj is not None and context.scene not in obj.users_scene:
+            controller.label(text="Controller is not in the current scene", icon='ERROR')
+        # The constraint lives on the controller, so there is nothing to snap without one.
+        snap = controller.row()
+        snap.enabled = obj is not None
+        snap.prop(row, "projection_snap", text="Snap to Surface")
+        # Ucupaint sizes its decal by the Empty itself; this mode makes the inline Size one
+        # and leaves the controller's scale as the only place the frame is sized.
+        size_from_empty = controller.row()
+        size_from_empty.enabled = obj is not None
+        size_from_empty.prop(row, "projection_size_from_controller", text="Size from Empty")
 
 
 class LAYER_MATERIAL_PT_mapping_mirror(LayerMaterialButtonsPanel, Panel):
@@ -2056,6 +2102,7 @@ classes = (
     LAYER_MATERIAL_PT_layers,
     LAYER_MATERIAL_PT_normal_height,
     LAYER_MATERIAL_PT_mapping,
+    LAYER_MATERIAL_PT_mapping_advanced,
     LAYER_MATERIAL_PT_mapping_mirror,
     LAYER_MT_mapping_reset,
     LAYER_MATERIAL_PT_source_surface,

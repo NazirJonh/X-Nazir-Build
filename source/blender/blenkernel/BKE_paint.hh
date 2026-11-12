@@ -1039,6 +1039,10 @@ struct SculptSession : NonCopyable, NonMovable {
     /* Tool the Color Gradient tool replaced when a Gradient layer became active. Restored when a row
      * that is not a Gradient is picked, so the tool the user had comes back. Empty when none. */
     std::string gradient_saved_tool_id;
+    /* Tool the Projection Frame tool replaced when a row whose projection fills the frame's extents
+     * became active. Restored like #gradient_saved_tool_id, while the Projection Frame tool is
+     * still active. Empty when none. */
+    std::string projection_saved_tool_id;
   } layers;
 
   /* Contains information used by tools and brushes that require different logic based on boundary

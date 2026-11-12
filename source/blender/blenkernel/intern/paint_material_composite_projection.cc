@@ -352,8 +352,8 @@ ImBuf *composite_resample_projected(const ImBuf *src,
   const int tile_y = (tile_number - 1001) / 10;
   const float tile_origin_u = float(tile_x);
   const float tile_origin_v = float(tile_y);
-  /* The frame rotation is constant across the bake; the normal reads it too, for the facing
-   * weight's component along the axis. */
+  /* The frame rotation is constant across the bake; the normal reads it too, for the Box and
+   * Triplanar face weights and the Planar facing's component along the axis. */
   float frame_rot[3][3];
   float inv_frame_rot[3][3];
   eul_to_mat3(frame_rot, projection.rotation);
@@ -480,8 +480,11 @@ ImBuf *composite_resample_projected(const ImBuf *src,
 
         /* The frame factor the generated graph builds: the two footprint axes with their smooth
          * edges, the depth slab when its toggle asks, all under the frame's clip mix; the facing
-         * fade joins after it and applies even while the map repeats. Box and Triplanar have no
-         * axis: the frame factor is the box inside and the facing reads the frame's +Z. */
+         * fade joins after it and applies even while the map repeats. The facing is a Planar
+         * input: it fades the faces that look away from the one projection direction, which the
+         * volume kinds do not have -- the map reaches a surface from every side -- so they never
+         * read it. A single-axis facing would blank the faces the axis runs across, exactly the
+         * sides the map arrives from. */
         const int axis = clamp_i(projection.axis,
                                  MA_PAINT_LAYER_PROJECTION_AXIS_X,
                                  MA_PAINT_LAYER_PROJECTION_AXIS_Z);
@@ -492,14 +495,12 @@ ImBuf *composite_resample_projected(const ImBuf *src,
         float weight = 1.0f;
         if (projection.clip) {
           if (is_box || is_cube) {
-            /* Box, Triplanar and Cube share the box inside: the three footprint axes with their
-             * smooth edges. */
+            /* Box, Triplanar and Cube share the box inside: the three axes with their smooth
+             * edges. The depth toggle is a Planar input: the box inside already bounds all
+             * three axes, and the graph builds no depth slab for the volume kinds either. */
             weight = BKE_paint_layers_projection_axis_factor(q[0]) *
                      BKE_paint_layers_projection_axis_factor(q[1]) *
                      BKE_paint_layers_projection_axis_factor(q[2]);
-            if (projection.depth) {
-              weight *= BKE_paint_layers_projection_axis_factor(n_frame[2]);
-            }
           }
           else if (is_cylinder) {
             /* Cylinder: inside the unit circle around the axis, and within the height slab. */
@@ -522,8 +523,10 @@ ImBuf *composite_resample_projected(const ImBuf *src,
             }
           }
         }
-        if (weight > 0.0f && projection.facing) {
-          const float facing_component = is_box ? n_frame[2] : n_frame[axis];
+        if (weight > 0.0f && projection.facing &&
+            !(is_box || is_cube || is_cylinder || is_sphere))
+        {
+          const float facing_component = n_frame[axis];
           weight *= BKE_paint_layers_projection_facing_weight(
               projection.facing_scale, projection.facing_offset, facing_component);
         }

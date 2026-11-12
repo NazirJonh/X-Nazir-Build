@@ -1208,6 +1208,10 @@ bool paint_stack_row_activate(bContext &C,
       effect->curve_patch->vectors->active_item = curve_item_index;
     }
   }
+  /* The Projection Frame tool follows the row first, so a row that is both a volume projection and
+   * a Gradient ends up with the Gradient tool, like before the frame tool existed. */
+  projection::ED_paint_projection_frame_tool_activate_if_needed(
+      &C, material, BKE_paint_layers_find(material, row_marker));
   paint_stack_gradient_tool_activate(C, BKE_paint_layers_find(material, row_marker));
   if (MaterialPaintLayer *active = BKE_paint_layers_find(material, row_marker);
       active != nullptr && active->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH)

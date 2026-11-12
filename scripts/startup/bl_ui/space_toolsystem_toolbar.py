@@ -2539,6 +2539,25 @@ class _defs_sculpt:
             draw_settings=draw_settings,
         )
 
+    @ToolDef.from_fn
+    def projection_frame():
+        def draw_settings(context, layout, _tool):
+            sculpt = context.tool_settings.sculpt
+            layout.prop(sculpt, "projection_gizmo_set", expand=True)
+
+        return dict(
+            idname="builtin.projection_frame",
+            label="Projection Frame",
+            description=(
+                "Move, rotate and scale the inline projection frame of the active Fill layer "
+                "with a volume projection space"
+            ),
+            icon="ops.mesh.primitive_cube_add_gizmo",
+            widget=None,
+            keymap=None,
+            draw_settings=draw_settings,
+        )
+
 
 class _defs_vertex_paint:
 
@@ -5400,6 +5419,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_transform.transform,
             None,
             _defs_sculpt.sculpt_cursor,
+            _defs_sculpt.projection_frame,
             None,
             *_tools_annotate,
         ],
@@ -5596,6 +5616,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         _defs_transform.transform,
         None,
         _defs_sculpt.sculpt_cursor,
+        _defs_sculpt.projection_frame,
         None,
         *_tools_annotate,
     ]

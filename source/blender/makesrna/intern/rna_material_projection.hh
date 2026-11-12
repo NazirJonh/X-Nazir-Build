@@ -119,6 +119,12 @@ static bool rna_MaterialPaintLayer_projection_uses_axis_get(PointerRNA *ptr)
   return BKE_paint_layers_projection_mode_info(layer->mapping.space).uses_axis;
 }
 
+static bool rna_MaterialPaintLayer_projection_is_volume_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_projection_mode_info(layer->mapping.space).is_volume;
+}
+
 static bool rna_MaterialPaintLayer_projection_uses_blend_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -161,6 +167,22 @@ static void rna_MaterialPaintLayer_mapping_space_set(PointerRNA *ptr, int value)
         WM_main_add_notifier(NC_OBJECT | ND_DRAW, controller);
       }
     }
+  }
+}
+
+/* Defined below in rna_material.cc: the space switch keeps the material tag the plain update
+ * brings, on top of its own tool follow. */
+static void rna_Material_update(Main *bmain, Scene *scene, PointerRNA *ptr);
+
+static void rna_MaterialPaintLayer_mapping_space_update(bContext *C, PointerRNA *ptr)
+{
+  rna_Material_update(nullptr, nullptr, ptr);
+  /* A shown row switched into a volume space is the moment the Projection Frame tool comes up
+   * with it; every other space restores the tool it replaced, per the shared helper. */
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (ma != nullptr) {
+    ed::sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(
+        C, *ma, static_cast<const MaterialPaintLayer *>(ptr->data));
   }
 }
 
@@ -509,7 +531,10 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
   RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_space_editable");
   RNA_def_property_ui_text(
       prop, "Mapping Space", "Projection the row's map lookup works in");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+  /* The update callback switches tools, it needs the context. */
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayer_mapping_space_update");
 
   prop = RNA_def_property(srna, "mapping_offset", PROP_FLOAT, PROP_NONE);
   RNA_def_property_array(prop, 2);
@@ -897,6 +922,12 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
   RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_projection_uses_axis_get", nullptr);
   RNA_def_property_ui_text(
       prop, "Uses Axis", "The row's projection space runs along a local axis of the frame");
+
+  prop = RNA_def_property(srna, "projection_is_volume", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_projection_is_volume_get", nullptr);
+  RNA_def_property_ui_text(
+      prop, "Is Volume", "The row's projection space fills the frame's whole extents");
 
   prop = RNA_def_property(srna, "projection_uses_blend", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);

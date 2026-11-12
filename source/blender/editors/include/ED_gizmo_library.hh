@@ -125,6 +125,10 @@ enum {
   ED_GIZMO_CAGE3D_STYLE_BOX = 0,
   /* TODO: rename */
   ED_GIZMO_CAGE3D_STYLE_CIRCLE = 1,
+  /** Dashed cylinder along the "shape_axis" instead of the box, for volume previews. */
+  ED_GIZMO_CAGE3D_STYLE_CYLINDER = 2,
+  /** Dashed ellipsoid inside the box extents. */
+  ED_GIZMO_CAGE3D_STYLE_SPHERE = 3,
 };
 
 /* draw_options */

@@ -7,8 +7,9 @@
 /** \file
  * \ingroup edsculpt
  *
- * The Projection frame's controller operators: create, select and place the Empty that carries
- * the shown row's projection, the way Ucupaint manages its decal Empty.
+ * The projection module's operators: the Empty controller operators (create, select and place the
+ * Empty that carries the shown row's projection, the way Ucupaint manages its decal Empty) and the
+ * operator-type registration of the inline-frame operators (place, flip, move).
  */
 
 namespace blender {
@@ -26,5 +27,8 @@ void PAINT_OT_layer_projection_select_controller(wmOperatorType *ot);
 
 /** Move the shown row's projection controller to the 3D cursor. */
 void PAINT_OT_layer_projection_controller_to_cursor(wmOperatorType *ot);
+
+/** Append every operator type of the inline-frame part of the projection module. */
+void operatortypes_register();
 
 }  // namespace blender::ed::sculpt_paint::projection

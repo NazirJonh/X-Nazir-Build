@@ -922,6 +922,7 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_composite_mesh_map_test.cc
     intern/paint_layers/tests/paint_layers_description_test.cc
     intern/paint_layers/tests/paint_layers_effect_test.cc
+    intern/paint_layers/tests/paint_layers_description_test_fixture.hh
     intern/paint_layers/tests/paint_layers_generate_test.cc
     intern/paint_layers/tests/paint_layers_source_graph_test.cc
     intern/paint_layers/tests/paint_layers_gradient_test.cc
@@ -940,6 +941,7 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_material_source_test.cc
     intern/paint_layers/tests/paint_layers_filter_kinds_test.cc
     intern/paint_layers/tests/paint_layers_object_mask_test.cc
+    intern/paint_layers/tests/paint_layers_projection_test.cc
     intern/paint_layers/tests/paint_layers_refactor_test.cc
     intern/paint_layers/tests/paint_layers_target_test.cc
     intern/paint_material_channel_test.cc

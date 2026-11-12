@@ -3084,6 +3084,11 @@ class PaintLayersStackSource final : public StackSource,
       /* A fresh effect is the one being worked on: in Sculpt Mode its tool opens right away. */
       blender::ed::sculpt_paint::curve_patch_layer_enter_if_sculpting(C, material, *created);
     }
+    /* The row the stack shows changed: the Projection Frame tool follows it first, so a row that
+     * is both a volume projection and a Gradient ends up with the Gradient tool, like the stack
+     * row click. */
+    sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(
+        &C, material, created);
     sculpt_paint::paint_stack_gradient_tool_activate(C, created);
     /* The map the user is about to paint -- the active slot's, or the Paint mask correction's -- is
      * made together with the row, so the first stroke already lands in it; the other channels get
@@ -3257,6 +3262,10 @@ class PaintLayersStackSource final : public StackSource,
     }
     /* A mask the user just added is the one they mean to work on. */
     BKE_paint_layers_active_set(material, layer->marker);
+    /* The layer that now owns the mask is the row the stack shows: follow it with the Projection
+     * Frame tool, like a stack row click does. */
+    sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(
+        &C, material, layer);
     sculpt_paint::paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
     /* The mask's map is made together with the mask: a first stroke into a mapless mask would
      * create it and regenerate the graph before it can write (see #row_add). The map is filled
@@ -3788,6 +3797,10 @@ class PaintLayersStackSource final : public StackSource,
     }
     /* What was pasted is what the user works on next, in the mode it belongs to. */
     BKE_paint_layers_active_set(material, copy->marker);
+    /* The pasted correction is the row the stack shows: follow it with the Projection Frame tool,
+     * like a stack row click does. */
+    sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(
+        &C, material, copy);
     sculpt_paint::paint_stack_target_mode_set(C,
                            copy->role == MA_PAINT_LAYER_ROLE_MASK_ITEM ? PAINT_LAYER_TARGET_MASK :
                                                                          PAINT_LAYER_TARGET_CONTENT);

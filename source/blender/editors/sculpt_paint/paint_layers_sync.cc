@@ -113,6 +113,9 @@ MaterialPaintLayer *paint_layers_mask_add_image(bContext &C,
   /* The correction the pick just made is what the user works on: it holds the texture, so it is
    * the active mask item and the one Mask mode paints. */
   BKE_paint_layers_active_set(material, mask->marker);
+  /* The layer that now owns the mask is the row the stack shows: follow it with the Projection
+   * Frame tool, like a stack row click does. */
+  projection::ED_paint_projection_frame_tool_activate_if_needed(&C, material, &layer);
   paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
   /* The base mask's map is made together with the mask, so a stroke on that base later does not
    * lose its first dab. The refresh also covers the mode having already been Mask, where the mode

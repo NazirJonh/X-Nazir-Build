@@ -3409,6 +3409,48 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Cursor Mode", "What dragging the sculpt cursor gizmo does");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
+  static const EnumPropertyItem projection_gizmo_set_items[] = {
+      {SCULPT_PROJECTION_GIZMO_ALL,
+       "ALL",
+       0,
+       "All",
+       "Show the Move, Rotate and Scale handles of the projection frame together"},
+      {SCULPT_PROJECTION_GIZMO_MOVE,
+       "MOVE",
+       0,
+       "Move",
+       "Show the Move handles of the projection frame only"},
+      {SCULPT_PROJECTION_GIZMO_ROTATE,
+       "ROTATE",
+       0,
+       "Rotate",
+       "Show the Rotate handles of the projection frame only"},
+      {SCULPT_PROJECTION_GIZMO_SCALE,
+       "SCALE",
+       0,
+       "Scale",
+       "Show the Scale handles of the projection frame only"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "projection_gizmo_set", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "projection_gizmo_set");
+  RNA_def_property_enum_items(prop, projection_gizmo_set_items);
+  RNA_def_property_ui_text(prop,
+                           "Projection Frame Handles",
+                           "Which handle set the Projection Frame tool draws for the active "
+                           "layer's projection frame");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "show_projection_gizmo", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "projection_gizmo_hide", 1);
+  RNA_def_property_ui_text(prop,
+                           "Show Projection Gizmo",
+                           "Draw the gizmo of the active layer's projection frame in the 3D "
+                           "viewport");
+  /* The gizmo group's poll runs on every redraw, but a tool settings change does not redraw the
+   * viewport on its own, so the toggle would only take effect on the next unrelated redraw. */
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   static const EnumPropertyItem symmetry_cursor_source_items[] = {
       {SCULPT_SYMM_CURSOR_OBJECT,
        "OBJECT",

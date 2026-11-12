@@ -2671,6 +2671,22 @@ enum eSculptSymmetryCursorSource : int8_t {
   SCULPT_SYMM_CURSOR_SCULPT = 1,
 };
 
+/**
+ * #Sculpt::projection_gizmo_set: the handle set the Projection Frame tool draws for a row whose
+ * projection fills the frame's extents. ALL is zero so files and new scenes without the member
+ * read "show everything" with no versioning.
+ */
+enum eSculptProjectionGizmoSet : int8_t {
+  /** Show the Move, Rotate and Scale handle sets together. */
+  SCULPT_PROJECTION_GIZMO_ALL = 0,
+  /** Show the Move handles only. */
+  SCULPT_PROJECTION_GIZMO_MOVE = 1,
+  /** Show the Rotate handles only. */
+  SCULPT_PROJECTION_GIZMO_ROTATE = 2,
+  /** Show the Scale handles only. */
+  SCULPT_PROJECTION_GIZMO_SCALE = 3,
+};
+
 /** Sculpt. */
 struct Sculpt {
   DNA_DEFINE_CXX_METHODS(Sculpt)
@@ -2799,7 +2815,13 @@ struct Sculpt {
   uint8_t sculpt_cursor_gizmo_size = 100;
   /** #eSculptCursorSizeMode */
   int8_t sculpt_cursor_size_mode = SCULPT_CURSOR_SIZE_SCREEN;
-  char _pad_sculpt_cursor[3] = {};
+  /** #eSculptProjectionGizmoSet. Kept in this block's padding: the one replaced pad byte changes
+   * no offset, and files without it read 0 (#SCULPT_PROJECTION_GIZMO_ALL), so no versioning. */
+  int8_t projection_gizmo_set = SCULPT_PROJECTION_GIZMO_ALL;
+  /** Nonzero hides the projection frame gizmo. Takes the next pad byte for the same reason as
+   * #projection_gizmo_set: no offset changes and files without it read 0, so the gizmo shows. */
+  int8_t projection_gizmo_hide = 0;
+  char _pad_sculpt_cursor[1] = {};
 
   /* Curve gradient settings (`SCULPT_GRADIENT_CURVE`). Appended at the end for the same layout
    * reason as the other gradient members above; old files get the defaults below in

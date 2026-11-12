@@ -637,6 +637,29 @@ void ED_view3d_paint_layer_gradient_gizmo_setup(wmGizmoGroupType *gzgt);
 /** Register the Image Editor gizmo group for the same row (UV space only). */
 void ED_image_paint_layer_gradient_gizmo_setup(wmGizmoGroupType *gzgt);
 
+/* `sculpt_paint/projection/projection_place_op.cc` */
+
+namespace ed::sculpt_paint::projection {
+
+/** True when the 3D View's active tool is the Projection Frame tool. */
+bool ED_paint_projection_frame_tool_is_active(const bContext *C);
+
+/**
+ * Follow the shown row with the Projection Frame tool, like #paint_stack_gradient_tool_activate
+ * follows Gradient rows. Call this on the events that change which row is shown -- a stack row was
+ * picked, or a row's projection space changed. A row whose projection fills the frame's extents
+ * (Box, Triplanar, Cube, Cylinder, Sphere) switches the 3D View to the tool, remembering what the
+ * user held; any other row restores that remembered tool while the Projection Frame tool is still
+ * active. Inert outside Sculpt Mode.
+ *
+ * \return True when the Projection Frame tool is the active tool after the call.
+ */
+bool ED_paint_projection_frame_tool_activate_if_needed(bContext *C,
+                                                       Material &material,
+                                                       const MaterialPaintLayer *layer);
+
+}  // namespace ed::sculpt_paint::projection
+
 /* `paint_image_shape_gizmo.cc` */
 
 /** Register the gizmo group that draws the live Vector shape session's transform cage. */

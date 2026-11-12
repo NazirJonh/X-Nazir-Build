@@ -1750,10 +1750,11 @@ constexpr float PAINT_LAYER_PROJECTION_TRIPLANAR_EXPONENT_SOFT = 1.0f;
  * Bumped when the projection's group inputs change shape or its nodes change: the topology hash
  * mixes it, so a tree built before it rebuilds once and gets them. History: 0x702 was S1 (Planar
  * only: the depth, facing and aspect inputs, the axis factor clamp, the half-extent frame position);
- * 0x706 is S2 (Box, Triplanar, Cube, Cylinder and Sphere, normal+roll orientation). 0x703..0x705
- * were never used by a stored tree.
+ * 0x706 is S2 (Box, Triplanar, Cube, Cylinder and Sphere, normal+roll orientation); 0x707 is S3
+ * (the volume kinds stopped building the facing and the depth slab). 0x703..0x705 were never used
+ * by a stored tree.
  */
-constexpr uint64_t PAINT_LAYER_PROJECTION_HASH_VERSION = 0x706;
+constexpr uint64_t PAINT_LAYER_PROJECTION_HASH_VERSION = 0x707;
 
 /**
  * Smooth per-axis frame factor of \a value: one inside the frame edge, fading to zero over
@@ -1980,6 +1981,13 @@ bool BKE_paint_layers_projection_clip_get(const MaterialPaintLayer &layer);
  */
 bool BKE_paint_layers_projection_set_clip(Material &ma, MaterialPaintLayer *layer, bool clip);
 
+/** The volume a projection mode previews with its frame cage; the editors map it to their own style. */
+enum ProjectionCageStyle : int8_t {
+  PROJECTION_CAGE_BOX = 0,
+  PROJECTION_CAGE_CYLINDER,
+  PROJECTION_CAGE_SPHERE,
+};
+
 /** The properties of one projection space, so a new mode is one row of the table. */
 struct ProjectionModeInfo {
   /** #eMaterialPaintLayerMappingSpace. */
@@ -1994,6 +2002,10 @@ struct ProjectionModeInfo {
   bool uses_cube_layout;
   /** Map reads per point: three for Box and Triplanar, one face each, weighted by the normal. */
   int8_t samples_num;
+  /** The projection fills the frame's whole extents, so it is edited with the Projection Frame tool. */
+  bool is_volume;
+  /** The cage shape that previews the volume; only read for #is_volume modes. */
+  ProjectionCageStyle cage_style;
 };
 
 /**

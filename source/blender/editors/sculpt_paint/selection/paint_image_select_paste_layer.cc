@@ -34,6 +34,7 @@
 #include "BKE_paint_layers_target.hh"
 #include "BKE_report.hh"
 
+#include "ED_paint.hh"
 #include "ED_undo.hh"
 
 #include "IMB_imbuf.hh"
@@ -185,6 +186,9 @@ bool image_select_paste_clipboard(bContext *C,
       return true;
     }
     BKE_paint_layers_active_set(*ma, layer->marker);
+    /* The pasted row is the one the stack shows: follow it with the Projection Frame tool, like a
+     * stack row click does. */
+    projection::ED_paint_projection_frame_tool_activate_if_needed(C, *ma, layer);
     /* The new row is painted on its content, not on whatever mode the previous one was edited in. */
     if (Paint *paint = BKE_paint_get_active_from_context(C)) {
       BKE_paint_material_layer_target_mode_set(

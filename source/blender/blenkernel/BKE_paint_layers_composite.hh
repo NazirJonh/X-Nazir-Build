@@ -280,6 +280,8 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
  * \param describe_only: keep every reader's descriptor and the maps it subscribes to, but render no
  *        Anchor Point slice and compute no nested effect buffer: the GPU path lays the slices from
  *        its own slots and the nested effects from its own cache. A CPU caller must leave it false.
+ * \param painted_object: the object a projected row, correction or mask item of the input reads its
+ *        surface from, or null (the GPU path then refuses the projection).
  * \return false when the row cannot be described.
  */
 bool BKE_paint_layers_effect_input_describe(const Material &ma,
@@ -288,7 +290,8 @@ bool BKE_paint_layers_effect_input_describe(const Material &ma,
                                             int channel,
                                             bool dimensions_only,
                                             bool describe_only,
-                                            PaintMaterialCompositeImageLayer &r_entry);
+                                            PaintMaterialCompositeImageLayer &r_entry,
+                                            const Object *painted_object = nullptr);
 
 /**
  * Every map the described effect \a layer renders from, once each and none of them null. The effect
@@ -727,13 +730,16 @@ struct PaintLayersGpuCaptureJob {
  * \param stacks: one stack per entry of \a channels, same length.
  * \param channels: the channel enum each stack was derived for.
  * \param r_reason: a static string saying why no plan could be built, or null.
+ * \param painted_object: the object a projected row in a slice reads its surface from; without it
+ *        the slice's projection has no object and the GPU path refuses it.
  */
 bool BKE_paint_layers_gpu_capture_plan(
     const Material &ma,
     Span<Span<const PaintMaterialCompositeImageLayer>> stacks,
     Span<int> channels,
     Vector<PaintLayersGpuCaptureJob> &r_jobs,
-    const char **r_reason = nullptr);
+    const char **r_reason = nullptr,
+    const Object *painted_object = nullptr);
 
 /** The identity of a GPU slice slot: a point read in one channel enum. */
 struct PaintLayersGpuSlotKey {

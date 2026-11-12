@@ -19,6 +19,14 @@ struct PaintMaterialCompositeMapping;
  */
 const Mesh *composite_projection_mesh(const Object *object);
 
+/**
+ * A hash of \a mesh's positions, topology, render UV, material indices and corner normals. The
+ * heavy content hash is cached per mesh and re-run only when a cheap fingerprint (array pointers,
+ * counts, a strided sample) moves or the cached value is a second old, so calling it every frame
+ * costs a few thousand reads.
+ */
+uint64_t composite_mesh_content_hash(const Mesh &mesh);
+
 /** A premultiplied scene-linear transparent buffer of \a width by \a height, or null. */
 ImBuf *composite_alloc_transparent(int width, int height);
 

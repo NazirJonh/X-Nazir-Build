@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <utility>
 
 #include "BKE_image.hh"
@@ -27,9 +28,12 @@
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_material_composite.hh"
 
+#include "BLI_array.hh"
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
+#include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
+#include "BLI_math_rotation.h"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_memory_utils.hh"
@@ -38,6 +42,7 @@
 
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "GPU_compute.hh"
@@ -125,6 +130,272 @@ static void gpu_mapping_uniforms_set(gpu::Shader *shader, const GpuMappingUnifor
   GPU_shader_uniform_2fv(shader, "mapping_rotation", &uniforms.rotation.x);
   GPU_shader_uniform_2fv(shader, "mapping_mirror_center", &uniforms.mirror_center.x);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Projection surface map
+ *
+ * The painted surface per canvas texel (#BKE_paint_material_surface_map_get) uploaded as two
+ * RGBA32F textures: object-space position (`w` = 1 where covered) and normal. One entry, like the
+ * BKE cache: the textures live with the map they were made from and are freed when another map
+ * replaces it, with the shaders at draw exit, and from #combined_projection_gpu_free.
+ * \{ */
+
+static struct {
+  std::shared_ptr<const PaintMaterialSurfaceMap> map;
+  gpu::Texture *position = nullptr;
+  gpu::Texture *normal = nullptr;
+  /* What the textures were made for, to recognize them while a stroke freezes the map. */
+  uint32_t object_uid = 0;
+  uint32_t material_uid = 0;
+  int tile_number = 0;
+  int canvas = 0;
+} gpu_surface_cache;
+
+static void gpu_surface_cache_release()
+{
+  if (gpu_surface_cache.position != nullptr) {
+    GPU_texture_free(gpu_surface_cache.position);
+  }
+  if (gpu_surface_cache.normal != nullptr) {
+    GPU_texture_free(gpu_surface_cache.normal);
+  }
+  gpu_surface_cache.position = nullptr;
+  gpu_surface_cache.normal = nullptr;
+  gpu_surface_cache.map.reset();
+}
+
+void combined_projection_gpu_free()
+{
+  gpu_surface_cache_release();
+  /* The CPU twin is dropped with it: it is the same 0.5 GiB per 4K canvas and is rebuilt on demand. */
+  BKE_paint_material_surface_map_free();
+}
+
+static gpu::Texture *gpu_surface_texture_create(const char *name,
+                                                const int canvas,
+                                                const Array<float4> &texels,
+                                                const gpu::TextureFormat format)
+{
+  gpu::Texture *texture = GPU_texture_create_2d(name,
+                                                canvas,
+                                                canvas,
+                                                1,
+                                                format,
+                                                GPU_TEXTURE_USAGE_SHADER_READ,
+                                                &texels[0].x);
+  return texture;
+}
+
+bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projection,
+                                  const PaintMaterialCompositeMapping &mapping,
+                                  GpuProjection &r_projection)
+{
+  const Object *object = projection.object;
+  const Material *material = projection.material;
+  if (object == nullptr || material == nullptr) {
+    return gpu_refuse("a projected row has no painted object");
+  }
+  /* The canvas the stack is described at (#composite_channel_describe): the map is cut at it, and
+   * a screen texel reads the map texel under its canvas UV. */
+  const int canvas = material->paint_layers_image_size > 0 ? int(material->paint_layers_image_size) :
+                                                             4096;
+  const uint32_t object_uid = object->id.session_uid;
+  const uint32_t material_uid = material->id.session_uid;
+  const bool same_target = gpu_surface_cache.position != nullptr &&
+                           gpu_surface_cache.object_uid == object_uid &&
+                           gpu_surface_cache.material_uid == material_uid &&
+                           gpu_surface_cache.tile_number == projection.tile_number &&
+                           gpu_surface_cache.canvas == canvas;
+  /* During a stroke the mesh moves every dab (sculpt) and the map would be rebuilt at each: the
+   * last upload stands in until the stroke is over, and the first frame after it rebuilds. */
+  const bool frozen = same_target && BKE_paint_layers_bake_stroke_active_get();
+  if (!frozen) {
+    bke::paint_perf::ScopedTimer perf_map("proj.gpu.surface_map");
+    /* The texels are asked for only when they are about to be uploaded: a cache entry whose texels
+     * went to the GPU earlier is released, and a hit on it needs nothing but its identity. */
+    std::shared_ptr<const PaintMaterialSurfaceMap> map = BKE_paint_material_surface_map_get(
+        object, material, canvas, canvas, projection.tile_number, /*need_texels=*/false);
+    if (map != nullptr && map->texels_released && (!same_target || map != gpu_surface_cache.map)) {
+      /* The GPU copy of this entry is gone (another target took its place): rebuild with texels. */
+      map = BKE_paint_material_surface_map_get(
+          object, material, canvas, canvas, projection.tile_number, /*need_texels=*/true);
+    }
+    if (map == nullptr && !same_target) {
+      return gpu_refuse("a projected row's object has no surface map");
+    }
+    if (map == nullptr) {
+      /* The evaluated mesh can be missing for a moment after a mode switch or an edit: the previous
+       * map stands in rather than a 500 ms CPU composite, and the next frame rebuilds. */
+      perf_map.note("kept previous map canvas=%d", canvas);
+    }
+    else if (!same_target || map != gpu_surface_cache.map) {
+      gpu_surface_cache_release();
+      /* Both textures are 32-bit float. The position keeps full precision: it is divided by the
+       * frame size and a texel of error is a visible shift. The normal is the interpolated, not
+       * normalized, corner normal the CPU bake reads, and the shader's facing fade and Box weights
+       * depend on its length. Normalizing it or packing it into a narrower (snorm or half float)
+       * format would change those results, and 16-bit snorm texture usage as a compute-shader
+       * image is not guaranteed on every driver, so it is stored unmodified. */
+      gpu_surface_cache.position = gpu_surface_texture_create(
+          "combined_surface_position",
+          canvas,
+          map->position,
+          gpu::TextureFormat::SFLOAT_32_32_32_32);
+      gpu_surface_cache.normal = gpu_surface_texture_create(
+          "combined_surface_normal", canvas, map->normal, gpu::TextureFormat::SFLOAT_32_32_32_32);
+      if (gpu_surface_cache.position == nullptr || gpu_surface_cache.normal == nullptr) {
+        gpu_surface_cache_release();
+        return gpu_refuse("the surface map textures could not be allocated");
+      }
+      /* The upload is read by the dispatch that follows. */
+      GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE);
+      gpu_surface_cache.map = map;
+      /* The textures hold the texels now: the CPU copy (0.5 GiB at 4K) is no longer read. */
+      BKE_paint_material_surface_map_texels_release(map);
+      gpu_surface_cache.object_uid = object_uid;
+      gpu_surface_cache.material_uid = material_uid;
+      gpu_surface_cache.tile_number = projection.tile_number;
+      gpu_surface_cache.canvas = canvas;
+      perf_map.note("uploaded canvas=%d", canvas);
+    }
+    else {
+      perf_map.note("reused canvas=%d", canvas);
+    }
+  }
+  r_projection.position = gpu_surface_cache.position;
+  r_projection.normal = gpu_surface_cache.normal;
+  r_projection.canvas_size = int2(canvas);
+
+  /* The frame, as `composite_projection_position` and the bake's texel callback read it. */
+  float frame_rot[3][3];
+  eul_to_mat3(frame_rot, projection.rotation);
+  float inv_rot[3][3];
+  transpose_m3_m3(inv_rot, frame_rot);
+
+  /* The painted mesh is in its own space; a controller Empty moves the frame into its own, the
+   * point by the two matrices and the normal by their inverse transposes (`composite_projection_raster`). */
+  float4x4 p_to_controller = float4x4::identity();
+  float3x3 n_to_controller = float3x3::identity();
+  if (projection.controller != nullptr && projection.controller != object) {
+    const float4x4 object_to_world = object->object_to_world();
+    const float4x4 world_to_controller = projection.controller->world_to_object();
+    p_to_controller = world_to_controller * object_to_world;
+    n_to_controller = math::transpose(math::invert(float3x3(world_to_controller))) *
+                      math::transpose(math::invert(float3x3(object_to_world)));
+  }
+
+  /* `q = S R^-1 (p - center)`: S folds the half extent and the image-aspect fit, which the CPU
+   * applies in two steps. */
+  float4x4 rotation = float4x4::identity();
+  float3x3 rotation_3x3 = float3x3::identity();
+  for (const int column : IndexRange(3)) {
+    for (const int row : IndexRange(3)) {
+      rotation[column][row] = inv_rot[column][row];
+      rotation_3x3[column][row] = inv_rot[column][row];
+    }
+  }
+  float4x4 translation = float4x4::identity();
+  translation[3] = float4(-projection.center[0], -projection.center[1], -projection.center[2], 1.0f);
+  float4x4 scale = float4x4::identity();
+  for (const int i : IndexRange(3)) {
+    const float half_size = BKE_paint_layers_projection_size_normalize(projection.size[i]) * 0.5f;
+    scale[i][i] = projection.aspect[i] / half_size;
+  }
+  r_projection.p_to_q = scale * rotation * translation * p_to_controller;
+
+  const float3x3 n_to_frame = rotation_3x3 * n_to_controller;
+  r_projection.n_to_frame = float4x4::identity();
+  for (const int column : IndexRange(3)) {
+    r_projection.n_to_frame[column] = float4(n_to_frame[column], 0.0f);
+  }
+
+  const ProjectionModeInfo &mode = BKE_paint_layers_projection_mode_info(projection.space);
+  if (projection.space == MA_PAINT_LAYER_MAPPING_SPACE_CUBE) {
+    r_projection.mode = gpu_proj_cube;
+  }
+  else if (projection.space == MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER) {
+    r_projection.mode = gpu_proj_cylinder;
+  }
+  else if (projection.space == MA_PAINT_LAYER_MAPPING_SPACE_SPHERE) {
+    r_projection.mode = gpu_proj_sphere;
+  }
+  else if (mode.samples_num > 1) {
+    r_projection.mode = gpu_proj_box;
+  }
+  else {
+    r_projection.mode = gpu_proj_planar;
+  }
+  r_projection.axis = clamp_i(
+      projection.axis, MA_PAINT_LAYER_PROJECTION_AXIS_X, MA_PAINT_LAYER_PROJECTION_AXIS_Z);
+  r_projection.flags = (projection.clip ? gpu_proj_clip : 0) |
+                       (projection.depth ? gpu_proj_depth : 0) |
+                       (projection.facing ? gpu_proj_facing : 0) |
+                       (mapping.enabled ? gpu_proj_uv_adjust : 0) |
+                       (mapping.wrap == MA_PAINT_LAYER_MAPPING_WRAP_CLIP ? gpu_proj_wrap_clip : 0);
+  r_projection.params_0 = float4(
+      projection.tiling[0], projection.tiling[1], projection.facing_scale, projection.facing_offset);
+  const float exponent = mode.uses_blend ?
+                             BKE_paint_layers_projection_triplanar_exponent(projection.blend) :
+                             PAINT_LAYER_PROJECTION_BOX_EXPONENT;
+  r_projection.params_1 = float4(
+      exponent, PAINT_LAYER_PROJECTION_FRAME_EXTENT, PAINT_LAYER_PROJECTION_EDGE_SOFT, 0.0f);
+  const ProjectionCubeLayoutInfo &atlas = BKE_paint_layers_projection_cube_layout_info(
+      projection.cube_layout);
+  r_projection.atlas_0 = float4(
+      atlas.origin[0][0], atlas.origin[0][1], atlas.origin[1][0], atlas.origin[1][1]);
+  r_projection.atlas_1 = float4(
+      atlas.origin[2][0], atlas.origin[2][1], atlas.origin[3][0], atlas.origin[3][1]);
+  r_projection.atlas_2 = float4(
+      atlas.origin[4][0], atlas.origin[4][1], atlas.origin[5][0], atlas.origin[5][1]);
+  r_projection.atlas_cell = float2(atlas.cell_size[0], atlas.cell_size[1]);
+  return true;
+}
+
+/**
+ * Read a correction's or mask item's map through \a mapping's projection instead of the canvas UV,
+ * as the row's map is (#composite_mapped_remap is the CPU twin for all three): the frame and the
+ * surface map into \a r_frame, the projected bit into \a r_flags. The UV adjust stays in the
+ * mapping uniforms (the shader applies it per tap); the fold, repeat axes and tangent-space flip
+ * belong to the plain mapping, which a projection replaces. False, with the reason reported, when
+ * the frame cannot be laid.
+ */
+static bool gpu_projection_apply(const PaintMaterialCompositeMapping &mapping,
+                                 int &r_flags,
+                                 GpuProjection &r_frame,
+                                 const char *what)
+{
+  bke::paint_perf::ScopedTimer perf("proj.gpu.frame");
+  if (!combined_projection_gpu_make(mapping.projection, mapping, r_frame)) {
+    return false;
+  }
+  if (mapping.projection.source_tiled) {
+    /* A tiled source's GPU texture is not one tile the projected UV could wrap in. */
+    return gpu_refuse("a projected map is tiled, which the GPU path does not lay");
+  }
+  r_flags |= gpu_layer_projected;
+  r_flags &= ~(gpu_layer_mapped | gpu_layer_repeat_u | gpu_layer_repeat_v |
+               gpu_layer_tangent_normal | gpu_layer_mirror_u | gpu_layer_mirror_v);
+  perf.note("%s", what);
+  return true;
+}
+
+/** Upload \a frame to the mask or correction pass; a pass that is not projected gets the identity. */
+static void gpu_projection_uniforms_set(gpu::Shader *shader, const GpuProjection &frame)
+{
+  GPU_shader_uniform_mat4(shader, "proj_p_to_q", frame.p_to_q.ptr());
+  GPU_shader_uniform_mat4(shader, "proj_n_to_frame", frame.n_to_frame.ptr());
+  GPU_shader_uniform_4fv(shader, "proj_params_0", &frame.params_0.x);
+  GPU_shader_uniform_4fv(shader, "proj_params_1", &frame.params_1.x);
+  GPU_shader_uniform_4fv(shader, "proj_atlas_0", &frame.atlas_0.x);
+  GPU_shader_uniform_4fv(shader, "proj_atlas_1", &frame.atlas_1.x);
+  GPU_shader_uniform_4fv(shader, "proj_atlas_2", &frame.atlas_2.x);
+  GPU_shader_uniform_2fv(shader, "proj_atlas_cell", &frame.atlas_cell.x);
+  GPU_shader_uniform_2iv(shader, "proj_canvas_size", &frame.canvas_size.x);
+  GPU_shader_uniform_1i(shader, "proj_mode", frame.mode);
+  GPU_shader_uniform_1i(shader, "proj_axis", frame.axis);
+  GPU_shader_uniform_1i(shader, "proj_flags", frame.flags);
+}
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name CombinedPasses
@@ -241,8 +512,15 @@ bool CombinedPasses::lay(CombinedTarget &t,
                          const float *filter_params,
                          const ColorBand *filter_ramp,
                          const CurveMapping *filter_curves,
-                         gpu::Texture *slot_coverage)
+                         gpu::Texture *slot_coverage,
+                         const GpuProjection *projection)
 {
+  /* A row that is not projected still uploads the frame values (identity) and binds the
+   * placeholder, so the shared pass never reads stale ones. */
+  const GpuProjection no_projection;
+  const GpuProjection &frame = projection != nullptr ? *projection : no_projection;
+  gpu::Texture *proj_position = frame.position != nullptr ? frame.position : dummy;
+  gpu::Texture *proj_normal = frame.normal != nullptr ? frame.normal : dummy;
   gpu::Texture *sampled = map != nullptr ? map : dummy;
   gpu::Texture *mask_sampled = mask != nullptr ? mask : dummy;
   gpu::Texture *slot_cov_sampled = slot_coverage != nullptr ? slot_coverage : dummy;
@@ -253,6 +531,18 @@ bool CombinedPasses::lay(CombinedTarget &t,
   GPU_shader_uniform_4fv(layer_shader, "layer_color", &layer_color.x);
   GPU_shader_uniform_4fv(layer_shader, "init_color", &init_color.x);
   gpu_mapping_uniforms_set(layer_shader, mapping);
+  GPU_shader_uniform_mat4(layer_shader, "proj_p_to_q", frame.p_to_q.ptr());
+  GPU_shader_uniform_mat4(layer_shader, "proj_n_to_frame", frame.n_to_frame.ptr());
+  GPU_shader_uniform_4fv(layer_shader, "proj_params_0", &frame.params_0.x);
+  GPU_shader_uniform_4fv(layer_shader, "proj_params_1", &frame.params_1.x);
+  GPU_shader_uniform_4fv(layer_shader, "proj_atlas_0", &frame.atlas_0.x);
+  GPU_shader_uniform_4fv(layer_shader, "proj_atlas_1", &frame.atlas_1.x);
+  GPU_shader_uniform_4fv(layer_shader, "proj_atlas_2", &frame.atlas_2.x);
+  GPU_shader_uniform_2fv(layer_shader, "proj_atlas_cell", &frame.atlas_cell.x);
+  GPU_shader_uniform_2iv(layer_shader, "proj_canvas_size", &frame.canvas_size.x);
+  GPU_shader_uniform_1i(layer_shader, "proj_mode", frame.mode);
+  GPU_shader_uniform_1i(layer_shader, "proj_axis", frame.axis);
+  GPU_shader_uniform_1i(layer_shader, "proj_flags", frame.flags);
   GPU_shader_uniform_1f(layer_shader, "opacity", opacity);
   GPU_shader_uniform_1f(layer_shader, "lod", lod);
   /* The scene luminance the F0 map encoding reads a specular colour by: the coefficients the RGB
@@ -307,6 +597,8 @@ bool CombinedPasses::lay(CombinedTarget &t,
   GPU_texture_bind(slot_cov_sampled,
                    GPU_shader_get_sampler_binding(layer_shader, "slot_cov_tx"));
   GPU_texture_bind(filter_lut, GPU_shader_get_sampler_binding(layer_shader, "filter_lut_tx"));
+  GPU_texture_bind(proj_position, GPU_shader_get_sampler_binding(layer_shader, "proj_pos_tx"));
+  GPU_texture_bind(proj_normal, GPU_shader_get_sampler_binding(layer_shader, "proj_nrm_tx"));
   GPU_texture_image_bind(dest, GPU_shader_get_sampler_binding(layer_shader, "accum_img"));
   GPU_texture_image_bind(t.row_color,
                          GPU_shader_get_sampler_binding(layer_shader, "row_color_img"));
@@ -316,6 +608,8 @@ bool CombinedPasses::lay(CombinedTarget &t,
   GPU_texture_image_unbind(t.row_factor);
   GPU_texture_image_unbind(t.row_color);
   GPU_texture_image_unbind(dest);
+  GPU_texture_unbind(proj_normal);
+  GPU_texture_unbind(proj_position);
   GPU_texture_unbind(filter_lut);
   GPU_texture_unbind(slot_cov_sampled);
   GPU_texture_unbind(mask_sampled);
@@ -344,8 +638,14 @@ bool CombinedPasses::mask_step(CombinedTarget &t,
   gpu::Texture *sampled = map != nullptr ? map : dummy;
   int step_flags = flags;
   GpuMappingUniforms mapping_uniforms;
+  GpuProjection projection_frame;
   if (mapping != nullptr && map != nullptr) {
     gpu_mapping_setup(*mapping, step_flags, mapping_uniforms);
+    if (mapping->projection.present &&
+        !gpu_projection_apply(*mapping, step_flags, projection_frame, "mask"))
+    {
+      return false;
+    }
   }
   float4 params_0(0.0f);
   float4 params_1(0.0f);
@@ -369,6 +669,7 @@ bool CombinedPasses::mask_step(CombinedTarget &t,
   GPU_shader_uniform_mat4(mask_shader, "texel_to_uv", t.texel_to_uv_4x4.ptr());
   GPU_shader_uniform_2iv(mask_shader, "texture_size", &t.size.x);
   gpu_mapping_uniforms_set(mask_shader, mapping_uniforms);
+  gpu_projection_uniforms_set(mask_shader, projection_frame);
   GPU_shader_uniform_4fv(mask_shader, "filter_params_0", &params_0.x);
   GPU_shader_uniform_4fv(mask_shader, "filter_params_1", &params_1.x);
   GPU_shader_uniform_4fv(mask_shader, "filter_params_2", &params_2.x);
@@ -387,12 +688,18 @@ bool CombinedPasses::mask_step(CombinedTarget &t,
   gpu::Texture *mask_target = mask_source != nullptr ? mask_source : t.mask_accum;
   GPU_texture_bind(sampled, GPU_shader_get_sampler_binding(mask_shader, "mask_tx"));
   GPU_texture_bind(filter_lut, GPU_shader_get_sampler_binding(mask_shader, "filter_lut_tx"));
+  gpu::Texture *proj_position = projection_frame.position != nullptr ? projection_frame.position : dummy;
+  gpu::Texture *proj_normal = projection_frame.normal != nullptr ? projection_frame.normal : dummy;
+  GPU_texture_bind(proj_position, GPU_shader_get_sampler_binding(mask_shader, "proj_pos_tx"));
+  GPU_texture_bind(proj_normal, GPU_shader_get_sampler_binding(mask_shader, "proj_nrm_tx"));
   GPU_texture_image_bind(mask_target, GPU_shader_get_sampler_binding(mask_shader, "mask_img"));
   GPU_texture_image_bind(slot_dst != nullptr ? slot_dst : slot_dummy,
                          GPU_shader_get_sampler_binding(mask_shader, "slot_img"));
   GPU_compute_dispatch(mask_shader, uint(t.groups.x), uint(t.groups.y), 1);
   GPU_texture_image_unbind(slot_dst != nullptr ? slot_dst : slot_dummy);
   GPU_texture_image_unbind(mask_target);
+  GPU_texture_unbind(proj_normal);
+  GPU_texture_unbind(proj_position);
   GPU_texture_unbind(filter_lut);
   GPU_texture_unbind(sampled);
   dispatches++;
@@ -429,8 +736,15 @@ bool CombinedPasses::correction_step(CombinedTarget &t,
     step_flags |= gpu_layer_has_map | (premultiplied ? gpu_layer_premultiplied : 0);
   }
   GpuMappingUniforms mapping_uniforms;
+  GpuProjection projection_frame;
   if (map != nullptr && slot_color == nullptr && effect_result == nullptr) {
     gpu_mapping_setup(correction.mapping, step_flags, mapping_uniforms);
+    /* A mesh map is never projected: the CPU reads it through the mesh, not the frame. */
+    if (correction.mapping.projection.present && !correction.is_mesh_map &&
+        !gpu_projection_apply(correction.mapping, step_flags, projection_frame, "correction"))
+    {
+      return false;
+    }
   }
   gpu::Texture *sampled = (map != nullptr && effect_result == nullptr) ? map : dummy;
   gpu::Texture *effect_sampled = effect_result != nullptr ? effect_result : dummy;
@@ -465,6 +779,7 @@ bool CombinedPasses::correction_step(CombinedTarget &t,
   GPU_shader_uniform_2iv(correction_shader, "texture_size", &t.size.x);
   GPU_shader_uniform_4fv(correction_shader, "constant_color", &constant_color.x);
   gpu_mapping_uniforms_set(correction_shader, mapping_uniforms);
+  gpu_projection_uniforms_set(correction_shader, projection_frame);
   GPU_shader_uniform_4fv(correction_shader, "filter_params_0", &params_0.x);
   GPU_shader_uniform_4fv(correction_shader, "filter_params_1", &params_1.x);
   GPU_shader_uniform_4fv(correction_shader, "filter_params_2", &params_2.x);
@@ -483,6 +798,12 @@ bool CombinedPasses::correction_step(CombinedTarget &t,
                    GPU_shader_get_sampler_binding(correction_shader, "slot_cov_tx"));
   GPU_texture_bind(filter_lut,
                    GPU_shader_get_sampler_binding(correction_shader, "filter_lut_tx"));
+  gpu::Texture *proj_position = projection_frame.position != nullptr ? projection_frame.position : dummy;
+  gpu::Texture *proj_normal = projection_frame.normal != nullptr ? projection_frame.normal : dummy;
+  GPU_texture_bind(proj_position,
+                   GPU_shader_get_sampler_binding(correction_shader, "proj_pos_tx"));
+  GPU_texture_bind(proj_normal,
+                   GPU_shader_get_sampler_binding(correction_shader, "proj_nrm_tx"));
   GPU_texture_image_bind(t.row_color,
                          GPU_shader_get_sampler_binding(correction_shader, "row_color_img"));
   GPU_texture_image_bind(t.row_factor,
@@ -490,6 +811,8 @@ bool CombinedPasses::correction_step(CombinedTarget &t,
   GPU_compute_dispatch(correction_shader, uint(t.groups.x), uint(t.groups.y), 1);
   GPU_texture_image_unbind(t.row_factor);
   GPU_texture_image_unbind(t.row_color);
+  GPU_texture_unbind(proj_normal);
+  GPU_texture_unbind(proj_position);
   GPU_texture_unbind(filter_lut);
   GPU_texture_unbind(slot_sampled);
   GPU_texture_unbind(effect_sampled);
@@ -755,7 +1078,7 @@ bool CombinedPasses::mask_build(CombinedTarget &t,
                    item.filter_params,
                    item.filter_ramp,
                    item.filter_curves,
-                   live_reader ? nullptr : &item.mapping,
+                   (live_reader || item.is_mesh_map) ? nullptr : &item.mapping,
                    nullptr,
                    nullptr,
                    item.contrast))
@@ -773,6 +1096,10 @@ bool CombinedPasses::mask_build(CombinedTarget &t,
     if (layer.mask_from_alpha) {
       map_flags |= gpu_mask_from_alpha;
     }
+    /* A source coverage map reads through the row's mapping, projection included, as the CPU does;
+     * without the tangent-space flip, which would corrupt a coverage scalar. */
+    PaintMaterialCompositeMapping coverage_mapping = layer.mapping;
+    coverage_mapping.tangent_normal = false;
     if (!mask_step(t,
                    gpu_mask_map,
                    mask_map,
@@ -785,7 +1112,7 @@ bool CombinedPasses::mask_build(CombinedTarget &t,
                    nullptr,
                    nullptr,
                    nullptr,
-                   nullptr))
+                   layer.mapping.enabled ? &coverage_mapping : nullptr))
     {
       return false;
     }
@@ -837,6 +1164,8 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
   }
   float4 layer_color(layer.constant_color);
   GpuMappingUniforms mapping_uniforms;
+  GpuProjection projection_frame;
+  const GpuProjection *projection = nullptr;
   bool has_mask = false;
 
   if (layer.is_folder) {
@@ -911,6 +1240,20 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
     }
     if (map != nullptr && reader_slot == nullptr) {
       gpu_mapping_setup(layer.mapping, flags, mapping_uniforms);
+      if (layer.mapping.projection.present) {
+        /* A projected row is addressed by its frame: the UV adjust rides in the same uniforms but
+         * the fold, the repeat axes and the tangent-space flip belong to the plain mapping, which
+         * a projection replaces (the CPU bake never applies them to it). */
+        if (!combined_projection_gpu_make(
+                layer.mapping.projection, layer.mapping, projection_frame))
+        {
+          return false;
+        }
+        projection = &projection_frame;
+        flags |= gpu_layer_projected;
+        flags &= ~(gpu_layer_mapped | gpu_layer_repeat_u | gpu_layer_repeat_v |
+                   gpu_layer_tangent_normal | gpu_layer_mirror_u | gpu_layer_mirror_v);
+      }
     }
     if (row_in_textures) {
       if (!lay(t,
@@ -927,7 +1270,8 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
                layer.adjustment_params,
                layer.adjustment_ramp,
                layer.adjustment_curves,
-               reader_slot != nullptr ? reader_slot->coverage : nullptr))
+               reader_slot != nullptr ? reader_slot->coverage : nullptr,
+               projection))
       {
         return false;
       }
@@ -1030,7 +1374,8 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
            layer.adjustment_params,
            layer.adjustment_ramp,
            layer.adjustment_curves,
-           reader_slot != nullptr ? reader_slot->coverage : nullptr))
+           reader_slot != nullptr ? reader_slot->coverage : nullptr,
+           projection))
   {
     return false;
   }
@@ -1124,7 +1469,8 @@ bool combined_preview_gpu_effects_run(
     Span<bool> has_stack,
     int wanted_channel,
     CombinedPasses &passes,
-    Vector<GpuEffectJob> &r_jobs)
+    Vector<GpuEffectJob> &r_jobs,
+    const Object *painted_object)
 {
   /* GPU effects: the content each effect reads, then the effect's own passes into the cache. This
    * runs after the Anchor Point captures -- a content render may read their slots -- and before the
@@ -1191,8 +1537,14 @@ bool combined_preview_gpu_effects_run(
   int chain_halo = 0;
   for (GpuEffectJob &job : r_jobs) {
     if (!BKE_paint_layers_effect_input_describe(
-            ma, *job.row, *job.effect, job.channel, /*dimensions_only=*/false,
-            /*describe_only=*/true, job.input_entry))
+            ma,
+            *job.row,
+            *job.effect,
+            job.channel,
+            /*dimensions_only=*/false,
+            /*describe_only=*/true,
+            job.input_entry,
+            painted_object))
     {
       return gpu_refuse("an effect input cannot be described");
     }

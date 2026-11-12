@@ -11,7 +11,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstring>
+#include <memory>
+#include <mutex>
 
 #include "BKE_attribute.hh"
 #include "BKE_customdata.hh"
@@ -24,6 +28,7 @@
 #include "BKE_paint_material_composite.hh"
 
 #include "BLI_array.hh"
+#include "BLI_hash.hh"
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_color.h"
@@ -341,7 +346,8 @@ static void composite_projection_pad_colors(float *out,
                                             MutableSpan<uint8_t> island,
                                             const int width,
                                             const int height,
-                                            const Span<int4> band_boxes)
+                                            const Span<int4> band_boxes,
+                                            float *out_extra = nullptr)
 {
   int2 box_min(width, height);
   int2 box_max(-1, -1);
@@ -364,6 +370,9 @@ static void composite_projection_pad_colors(float *out,
       box_max,
       [&](const int64_t dst, const int64_t src) {
         copy_v4_v4(out + dst * 4, out + src * 4);
+        if (out_extra != nullptr) {
+          copy_v4_v4(out_extra + dst * 4, out_extra + src * 4);
+        }
       });
 }
 
@@ -530,11 +539,14 @@ struct CompositeProjectionTri {
  * a triangle covers: `(x, y, tri, p, n)`, the position and normal already in the
  * controller's space (the normal is zero when the context read none). Then pad the colors of
  * \a out past the islands. Bands own whole rows, so the callback may write its own texel.
+ * \a out_extra, when given, is a second RGBA buffer the callback fills; it is padded identically,
+ * so two maps of one surface never disagree about which island a padded texel borrows from.
  */
 template<typename TexelFn>
 static void composite_projection_raster(const CompositeProjectionBakeContext &ctx,
                                         float *out,
-                                        TexelFn &&texel_fn)
+                                        TexelFn &&texel_fn,
+                                        float *out_extra = nullptr)
 {
   const int ref_width = ctx.width;
   const int ref_height = ctx.height;
@@ -674,7 +686,7 @@ static void composite_projection_raster(const CompositeProjectionBakeContext &ct
       }
     }
   });
-  composite_projection_pad_colors(out, island, ref_width, ref_height, band_boxes);
+  composite_projection_pad_colors(out, island, ref_width, ref_height, band_boxes, out_extra);
 }
 
 /** The cube-cross atlas UV of the dominant frame axis: a cell is a quarter by a third of it,
@@ -984,5 +996,262 @@ ImBuf *BKE_paint_material_gradient_projected_render(
   composite_projection_raster(ctx, out, texel);
   return dst;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Surface map (object position and normal per texel)
+ * \{ */
+
+/**
+ * A threaded hash of a byte range. Chunks hash independently and combine in index order, so the
+ * result does not depend on the thread schedule.
+ */
+static uint64_t composite_surface_hash_bytes(const void *data, const int64_t size)
+{
+  constexpr int64_t chunk_size = 1 << 16;
+  const int64_t chunks_num = (size + chunk_size - 1) / chunk_size;
+  Array<uint64_t> chunk_hashes(chunks_num, uint64_t(0));
+  const uint8_t *bytes = static_cast<const uint8_t *>(data);
+  threading::parallel_for(IndexRange(chunks_num), 16, [&](const IndexRange chunks) {
+    for (const int64_t chunk : chunks) {
+      const int64_t begin = chunk * chunk_size;
+      const int64_t end = std::min(begin + chunk_size, size);
+      uint64_t hash = 0xcbf29ce484222325ull ^ uint64_t(chunk);
+      int64_t i = begin;
+      for (; i + 8 <= end; i += 8) {
+        uint64_t word;
+        memcpy(&word, bytes + i, 8);
+        hash = (hash ^ word) * 0x100000001b3ull;
+        hash ^= hash >> 29;
+      }
+      for (; i < end; i++) {
+        hash = (hash ^ uint64_t(bytes[i])) * 0x100000001b3ull;
+      }
+      chunk_hashes[chunk] = hash;
+    }
+  });
+  uint64_t hash = uint64_t(size);
+  for (const uint64_t chunk_hash : chunk_hashes) {
+    hash = (hash * 0x9e3779b97f4a7c15ull) ^ chunk_hash;
+    hash ^= hash >> 31;
+  }
+  return hash;
+}
+
+template<typename T> static uint64_t composite_surface_hash_span(const Span<T> span)
+{
+  return composite_surface_hash_bytes(span.data(), int64_t(span.size_in_bytes()));
+}
+
+/**
+ * A cheap fingerprint of a mesh's geometry: array pointers, counts and an evenly strided sample of
+ * the positions and UVs. It is only the validity test of the cached content hash.
+ */
+static uint64_t composite_mesh_fingerprint(const Mesh &mesh, const Span<float2> uvs)
+{
+  uint64_t hash = get_default_hash(mesh.verts_num, mesh.faces_num, mesh.corners_num);
+  hash = get_default_hash(hash,
+                          uintptr_t(&mesh),
+                          uintptr_t(mesh.vert_positions().data()),
+                          uintptr_t(mesh.face_offsets().data()),
+                          uintptr_t(mesh.corner_verts().data()));
+  const auto sample = [&](const auto span) {
+    constexpr int64_t samples_num = 2048;
+    const int64_t step = std::max<int64_t>(1, span.size() / samples_num);
+    for (int64_t i = 0; i < span.size(); i += step) {
+      hash = (hash ^ composite_surface_hash_bytes(&span[i], sizeof(span[i]))) * 0x100000001b3ull;
+    }
+  };
+  sample(mesh.vert_positions());
+  sample(uvs);
+  return hash;
+}
+
+static struct {
+  std::mutex mutex;
+  struct Entry {
+    const Mesh *mesh = nullptr;
+    uint64_t fingerprint = 0;
+    uint64_t content_hash = 0;
+    std::chrono::steady_clock::time_point time;
+  };
+  Vector<Entry> entries;
+} g_mesh_content_cache;
+
+uint64_t composite_mesh_content_hash(const Mesh &mesh)
+{
+  const StringRefNull uv_name = BKE_paint_layers_gradient_uv_map_name(mesh);
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  VArraySpan<float2> uvs;
+  if (!uv_name.is_empty()) {
+    if (const auto uv_attr = attributes.lookup<float2>(uv_name.c_str(), bke::AttrDomain::Corner)) {
+      uvs = VArraySpan<float2>(*uv_attr);
+    }
+  }
+  const uint64_t fingerprint = composite_mesh_fingerprint(mesh, uvs);
+  const auto now = std::chrono::steady_clock::now();
+  /* The sample can miss an in-place edit of a few vertices, so a trusted hash is re-verified after
+   * this long: a stale surface map lives at most that long, even when no pointer or count moved. */
+  constexpr std::chrono::milliseconds max_age(1000);
+  {
+    std::lock_guard lock(g_mesh_content_cache.mutex);
+    for (const auto &entry : g_mesh_content_cache.entries) {
+      if (entry.mesh == &mesh && entry.fingerprint == fingerprint && now - entry.time < max_age) {
+        return entry.content_hash;
+      }
+    }
+  }
+  const VArraySpan<int> material_indices = *attributes.lookup_or_default<int>(
+      "material_index", bke::AttrDomain::Face, 0);
+  uint64_t content = composite_surface_hash_span(mesh.vert_positions());
+  content = get_default_hash(content, composite_surface_hash_span(mesh.face_offsets()));
+  content = get_default_hash(content, composite_surface_hash_span(mesh.corner_verts()));
+  content = get_default_hash(content, composite_surface_hash_span<float2>(uvs));
+  content = get_default_hash(content, composite_surface_hash_span<int>(material_indices));
+  /* The corner normals follow sharp flags and custom normals, which positions do not cover. */
+  content = get_default_hash(content, composite_surface_hash_span(mesh.corner_normals()));
+
+  std::lock_guard lock(g_mesh_content_cache.mutex);
+  auto &entries = g_mesh_content_cache.entries;
+  for (auto &entry : entries) {
+    if (entry.mesh == &mesh) {
+      entry = {&mesh, fingerprint, content, now};
+      return content;
+    }
+  }
+  if (entries.size() >= 8) {
+    entries.remove(0);
+  }
+  entries.append({&mesh, fingerprint, content, now});
+  return content;
+}
+
+static struct {
+  std::mutex mutex;
+  std::shared_ptr<const PaintMaterialSurfaceMap> entry;
+} g_surface_map_cache;
+
+std::shared_ptr<const PaintMaterialSurfaceMap> BKE_paint_material_surface_map_get(
+    const Object *object,
+    const Material *material,
+    const int width,
+    const int height,
+    const int tile_number,
+    const bool need_texels)
+{
+  if (width <= 0 || height <= 0) {
+    return nullptr;
+  }
+  const Mesh *mesh_ptr = composite_projection_mesh(object);
+  if (mesh_ptr == nullptr || object->totcol <= 0) {
+    return nullptr;
+  }
+  const Mesh &mesh = *mesh_ptr;
+  const StringRefNull uv_name = BKE_paint_layers_gradient_uv_map_name(mesh);
+  if (uv_name.is_empty()) {
+    return nullptr;
+  }
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  const auto uv_attr = attributes.lookup<float2>(uv_name.c_str(), bke::AttrDomain::Corner);
+  if (!uv_attr) {
+    return nullptr;
+  }
+  const VArraySpan<float2> uvs(*uv_attr);
+  Array<bool> slot_matches(object->totcol, false);
+  if (composite_projection_slots_match(*object, material, slot_matches) == 0) {
+    return nullptr;
+  }
+  const VArraySpan<int> material_indices = *attributes.lookup_or_default<int>(
+      "material_index", bke::AttrDomain::Face, 0);
+
+  /* No pointers: the evaluated and the original copy of one object must find the same entry. The
+   * vertex positions are hashed by content, not versioned: a sculpt stroke moves them without a
+   * topology change, and the mesh has no cheap positions generation to read, while ~12 MB per
+   * million vertices hashes in a few milliseconds on all cores, against a rebuild of 100+ ms. */
+  PaintMaterialSurfaceMapKey key;
+  key.object_uid = object->id.session_uid;
+  key.material_uid = (material != nullptr) ? DEG_get_original(material)->id.session_uid : 0;
+  key.tile_number = tile_number;
+  key.width = width;
+  key.height = height;
+  key.verts_num = mesh.verts_num;
+  key.faces_num = mesh.faces_num;
+  key.corners_num = mesh.corners_num;
+  uint64_t content = composite_mesh_content_hash(mesh);
+  for (const bool match : slot_matches) {
+    content = get_default_hash(content, match);
+  }
+  key.content_hash = content;
+
+  {
+    std::lock_guard lock(g_surface_map_cache.mutex);
+    if (g_surface_map_cache.entry && g_surface_map_cache.entry->key == key &&
+        (!need_texels || !g_surface_map_cache.entry->texels_released))
+    {
+      return g_surface_map_cache.entry;
+    }
+  }
+
+  /* The map is in the painted object's space: a controller Empty is applied by the consumer, so one
+   * entry serves every frame of the object. */
+  PaintMaterialCompositeProjection projection;
+  projection.present = true;
+  projection.object = object;
+  projection.material = material;
+  CompositeProjectionBakeContext ctx(projection);
+  if (!composite_projection_context_init(ctx, true, width, height, tile_number)) {
+    return nullptr;
+  }
+  auto map = std::make_shared<PaintMaterialSurfaceMap>();
+  map->key = key;
+  map->width = width;
+  map->height = height;
+  const int64_t texels_num = int64_t(width) * height;
+  map->position = Array<float4>(texels_num, float4(0.0f));
+  map->normal = Array<float4>(texels_num, float4(0.0f));
+  float *position_out = &map->position[0].x;
+  float *normal_out = &map->normal[0].x;
+  const auto texel = [&](const int x,
+                         const int y,
+                         const CompositeProjectionTri & /*tri*/,
+                         const float p[3],
+                         const float n_interp[3]) {
+    const int64_t index = int64_t(y) * width + x;
+    /* W marks a texel a triangle (or its padding) owns; the normal stays the interpolated, not
+     * normalized one the CPU hands its own texel. */
+    map->position[index] = float4(p[0], p[1], p[2], 1.0f);
+    map->normal[index] = float4(n_interp[0], n_interp[1], n_interp[2], 0.0f);
+  };
+  composite_projection_raster(ctx, position_out, texel, normal_out);
+
+  std::shared_ptr<const PaintMaterialSurfaceMap> result = std::move(map);
+  {
+    std::lock_guard lock(g_surface_map_cache.mutex);
+    g_surface_map_cache.entry = result;
+  }
+  return result;
+}
+
+void BKE_paint_material_surface_map_texels_release(
+    const std::shared_ptr<const PaintMaterialSurfaceMap> &map)
+{
+  std::lock_guard lock(g_surface_map_cache.mutex);
+  if (map == nullptr || map != g_surface_map_cache.entry || map->texels_released) {
+    return;
+  }
+  /* The entry is shared as const so a reader cannot change it, but it is owned here and the one
+   * consumer that asked for this has copied the texels already. */
+  PaintMaterialSurfaceMap &entry = const_cast<PaintMaterialSurfaceMap &>(*map);
+  entry.position = Array<float4>();
+  entry.normal = Array<float4>();
+  entry.texels_released = true;
+}
+
+void BKE_paint_material_surface_map_free()
+{
+  std::lock_guard lock(g_surface_map_cache.mutex);
+  g_surface_map_cache.entry.reset();
+}
+
+/** \} */
 
 }  // namespace blender

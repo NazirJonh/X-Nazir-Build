@@ -43,6 +43,7 @@
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_query.hh"
 
+#include "ED_material_combined.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
@@ -90,6 +91,10 @@ static void place_free(wmOperator *op)
 {
   auto *data = static_cast<PlaceProjectionState *>(op->customdata);
   if (data != nullptr) {
+    /* Every exit of the gesture ends here; the next frame refines the previews to the canvas. */
+    if (const Material *ma = data->target.material()) {
+      ed::material_combined::gradient_interactive_end(ma->id.session_uid);
+    }
     MEM_delete(data);
   }
   op->customdata = nullptr;
@@ -102,6 +107,10 @@ static void place_cancel(bContext * /*C*/, wmOperator *op)
 
 static void place_notify(Material *ma)
 {
+  /* The projected maps are baked per texel, so a full-resolution rebuild on every mouse step lags a
+   * 4K canvas: the previews shade at an octave until the gesture ends (see #place_free). Re-armed
+   * on every step, as the mark expires by itself. */
+  ed::material_combined::gradient_interactive_begin(*ma);
   DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, ma);
 }
@@ -433,6 +442,9 @@ static void move_free(wmOperator *op)
 {
   auto *data = static_cast<MoveProjectionState *>(op->customdata);
   if (data != nullptr) {
+    if (const Material *ma = data->target.material()) {
+      ed::material_combined::gradient_interactive_end(ma->id.session_uid);
+    }
     MEM_delete(data);
   }
   op->customdata = nullptr;

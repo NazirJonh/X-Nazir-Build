@@ -56,6 +56,7 @@
 #include "DNA_uuid_types.h"
 
 #include "GPU_compute.hh"
+#include "GPU_context.hh"
 #include "GPU_shader.hh"
 #include "GPU_state.hh"
 #include "GPU_texture.hh"
@@ -985,11 +986,23 @@ void combined_preview_gpu_free()
   GPU_SHADER_FREE_SAFE(gpu_shaders.display);
   GPU_SHADER_FREE_SAFE(gpu_shaders.shade);
   gpu_shaders.created = false;
+  /* The projection surface map's textures, for the same reason as the effect cache below. */
+  combined_projection_gpu_free();
   /* The GPU effect cache owns textures of its own, which outlive one frame; they have to go while
    * this engine's context is still current, the same window the shaders above free in. The cache
    * drops each texture with the hook that made it, so it needs no GPU type to do so.
    */
   BKE_paint_layers_effect_gpu_cache_free_all();
+}
+
+void combined_preview_gpu_caches_free()
+{
+  /* Without an active context a texture cannot be released safely; the entry then waits for the
+   * draw engine exit, which frees it with the context current. */
+  if (GPU_context_active_get() == nullptr) {
+    return;
+  }
+  combined_projection_gpu_free();
 }
 
 bool combined_preview_gpu_pass_supported(const int pass)
@@ -1004,7 +1017,8 @@ bool combined_preview_gpu_update(const Material &ma,
                                  const CombinedPreviewLighting &lighting,
                                  const int pass,
                                  gpu::Texture *output,
-                                 const float3x3 &texel_to_uv)
+                                 const float3x3 &texel_to_uv,
+                                 const Object *painted_object)
 {
   if (output == nullptr) {
     return gpu_refuse("no display texture");
@@ -1043,8 +1057,14 @@ bool combined_preview_gpu_update(const Material &ma,
       has_stack[i] = false;
       continue;
     }
-    has_stack[i] = BKE_paint_layers_composite_image_layers(
-        ma, combined_shading_channels[i], stacks[i], /*describe_only=*/true);
+    has_stack[i] = BKE_paint_layers_composite_image_layers(ma,
+                                                           combined_shading_channels[i],
+                                                           stacks[i],
+                                                           /*describe_only=*/true,
+                                                           nullptr,
+                                                           nullptr,
+                                                           PAINT_TILE_NUMBER_BASE,
+                                                           painted_object);
     if (!has_stack[i]) {
       continue;
     }
@@ -1240,7 +1260,7 @@ bool combined_preview_gpu_update(const Material &ma,
       stack_spans.data(), int64_t(stack_spans.size()));
   const Span<int> channel_view(channel_enums.data(), int64_t(channel_enums.size()));
   if (!BKE_paint_layers_gpu_capture_plan(
-          ma, stack_view, channel_view, capture_jobs, &capture_reason))
+          ma, stack_view, channel_view, capture_jobs, &capture_reason, painted_object))
   {
     return gpu_refuse(capture_reason != nullptr ? capture_reason :
                                                  "the Anchor Point capture plan cannot be built");
@@ -1413,7 +1433,14 @@ bool combined_preview_gpu_update(const Material &ma,
   {
     const Span<bool> has_view(has_stack.data(), int64_t(has_stack.size()));
     if (!combined_preview_gpu_effects_run(
-            ma, stack_view, channel_view, has_view, wanted_channel, passes, effect_jobs))
+            ma,
+            stack_view,
+            channel_view,
+            has_view,
+            wanted_channel,
+            passes,
+            effect_jobs,
+            painted_object))
     {
       return false;
     }
@@ -1780,7 +1807,8 @@ void combined_preview_gpu_verify(Main &bmain,
                                  const Material &ma,
                                  const CombinedPreviewLighting &lighting,
                                  gpu::Texture *output,
-                                 const float3x3 &texel_to_uv)
+                                 const float3x3 &texel_to_uv,
+                                 const Object *painted_object)
 {
   /* Decided by the update that just shaded this frame, which also kept the channel accumulators. */
   if (!gpu_verify_due || output == nullptr) {
@@ -1805,7 +1833,8 @@ void combined_preview_gpu_verify(Main &bmain,
   Vector<float> gpu_pixels(int64_t(size.x) * size.y * 4);
   GPU_texture_read(output, GPU_DATA_FLOAT, 0, gpu_pixels.data());
 
-  const ImBuf *cpu = combined_preview_ensure(bmain, ma, lighting);
+  const ImBuf *cpu = combined_preview_ensure(
+      bmain, ma, lighting, {}, nullptr, nullptr, nullptr, nullptr, painted_object);
   if (cpu == nullptr || cpu->float_data() == nullptr || cpu->x <= 0 || cpu->y <= 0) {
     printf("[PBR-PERF] gpu_verify: the CPU preview produced nothing to compare with\n");
     return;
@@ -1904,7 +1933,15 @@ void combined_preview_gpu_verify(Main &bmain,
     bool cpu_known = false;
     float4 cpu_value(0.0f);
     Vector<PaintMaterialCompositeImageLayer> layers;
-    if (BKE_paint_layers_composite_image_layers(ma, channel, layers)) {
+    if (BKE_paint_layers_composite_image_layers(ma,
+                                                channel,
+                                                layers,
+                                                /*describe_only=*/false,
+                                                nullptr,
+                                                nullptr,
+                                                PAINT_TILE_NUMBER_BASE,
+                                                painted_object))
+    {
       const ImBuf *composite = BKE_paint_material_composite_cache_ensure(
           ma,
           channel,

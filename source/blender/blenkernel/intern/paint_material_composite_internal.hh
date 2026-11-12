@@ -11,6 +11,7 @@ namespace blender {
 
 struct PaintMaterialCompositeGradient;
 struct PaintMaterialCompositeImageLayer;
+struct PaintMaterialCompositeMapping;
 struct PaintMaterialCompositeProjection;
 
 /**
@@ -31,6 +32,12 @@ uint64_t composite_generator_hash(uint64_t hash, const PaintMaterialCompositeGra
  * projected read bakes. Shared by a map's mapping hash and a projected generator line's.
  */
 uint64_t composite_projection_hash(uint64_t hash, const PaintMaterialCompositeProjection &projection);
+
+/**
+ * Fold a 2D mapping (UV adjust and projection) into \a hash: every slider moves the pixels a
+ * mapped read produces. Shared by the stack hash and the effect input hash.
+ */
+uint64_t composite_mapping_hash(uint64_t hash, const PaintMaterialCompositeMapping &mapping);
 
 struct ID;
 struct Main;

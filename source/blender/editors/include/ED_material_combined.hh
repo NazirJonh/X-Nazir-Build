@@ -170,6 +170,13 @@ bool combined_preview_gpu_enabled(const Material *ma);
 void combined_preview_gpu_free();
 
 /**
+ * Free the GPU textures the Combined preview caches across frames (the projection surface map).
+ * Called when a file is closed or replaced, where the draw engine may still be alive; no-op when
+ * nothing is cached.
+ */
+void combined_preview_gpu_caches_free();
+
+/**
  * Shade the Combined preview of the layered material \a ma straight into \a output on
  * the GPU, one compute dispatch per row of every channel stack plus one for the lighting.
  *
@@ -178,6 +185,8 @@ void combined_preview_gpu_free();
  *                its own resolution.
  * \param texel_to_uv: maps an \a output texel (plus the half-texel centre) to the canvas UV in
  *                     [0, 1]; a texel that lands outside the canvas is written transparent.
+ * \param painted_object: the object a projected row reads its surface from, or null, in which case
+ *                        a projected row refuses the GPU path.
  * \return false, with \a output untouched or partly written, when the material or one of its rows
  *         is something the GPU path does not lay (an adjustment inside a folder, folders nested
  *         deeper than the accumulators it keeps), when a layer map has no GPU texture, or when
@@ -187,7 +196,8 @@ bool combined_preview_gpu_update(const Material &ma,
                                  const CombinedPreviewLighting &lighting,
                                  int pass,
                                  gpu::Texture *output,
-                                 const float3x3 &texel_to_uv);
+                                 const float3x3 &texel_to_uv,
+                                 const Object *painted_object = nullptr);
 
 /**
  * Whether the GPU path lays \a pass: the Combined preview, or the channel pass of one of
@@ -205,6 +215,7 @@ void combined_preview_gpu_verify(Main &bmain,
                                  const Material &ma,
                                  const CombinedPreviewLighting &lighting,
                                  gpu::Texture *output,
-                                 const float3x3 &texel_to_uv);
+                                 const float3x3 &texel_to_uv,
+                                 const Object *painted_object = nullptr);
 
 }  // namespace blender::ed::material_combined

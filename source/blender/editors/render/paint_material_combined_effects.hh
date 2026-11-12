@@ -67,6 +67,20 @@ static_assert(gpu_layer_map_glossiness_alpha == 8388608, "COMBINED_LAYER_MAP_GLO
 static_assert(gpu_layer_map_f0 == 16777216, "COMBINED_LAYER_MAP_F0");
 static_assert(gpu_layer_map_f0_glossiness_alpha == 33554432,
               "COMBINED_LAYER_MAP_F0_GLOSSINESS_ALPHA");
+/* The row's map is read through its projection frame. Mirrors COMBINED_LAYER_PROJECTED. */
+constexpr int gpu_layer_projected = 67108864;
+static_assert(gpu_layer_projected == 67108864, "COMBINED_LAYER_PROJECTED");
+/* The layer pass's projection modes and flag bits. Mirror the COMBINED_PROJ_* values. */
+constexpr int gpu_proj_planar = 0;
+constexpr int gpu_proj_box = 1;
+constexpr int gpu_proj_cube = 2;
+constexpr int gpu_proj_cylinder = 3;
+constexpr int gpu_proj_sphere = 4;
+constexpr int gpu_proj_clip = 1;
+constexpr int gpu_proj_depth = 2;
+constexpr int gpu_proj_facing = 4;
+constexpr int gpu_proj_uv_adjust = 8;
+constexpr int gpu_proj_wrap_clip = 16;
 constexpr int gpu_layer_has_mask = 2048;
 constexpr int gpu_layer_row_store = 4096;
 constexpr int gpu_layer_row_use = 8192;
@@ -127,6 +141,54 @@ static_assert((gpu_layer_mirror_u &
                 gpu_layer_empty_base | gpu_layer_tracks_alpha | gpu_layer_adjustment |
                 gpu_layer_slot | gpu_map_nearest)) == 0,
               "Mirror U overlaps another layer flag");
+static_assert((gpu_layer_projected &
+               (gpu_layer_init | gpu_layer_has_map | gpu_layer_alpha_coverage |
+                gpu_layer_premultiplied | gpu_layer_mapped | gpu_layer_repeat_u |
+                gpu_layer_repeat_v | gpu_layer_tangent_normal | gpu_layer_normal_directx |
+                gpu_layer_mirror_u | gpu_layer_mirror_v | gpu_layer_has_mask |
+                gpu_layer_row_store | gpu_layer_row_use | gpu_layer_empty_base |
+                gpu_layer_tracks_alpha | gpu_layer_adjustment | gpu_layer_slot |
+                gpu_map_nearest | gpu_layer_map_glossiness | gpu_layer_map_glossiness_alpha |
+                gpu_layer_map_f0 | gpu_layer_map_f0_glossiness_alpha)) == 0,
+              "Projected overlaps another layer flag");
+
+/**
+ * A projected row's frame as the layer pass reads it, made by #combined_projection_gpu_make: the
+ * surface map's textures (owned by the cache, not by this struct) and the push-constant values.
+ */
+struct GpuProjection {
+  gpu::Texture *position = nullptr;
+  gpu::Texture *normal = nullptr;
+  int2 canvas_size = int2(1);
+  /** Object-space point to frame-space `q` (controller and aspect included), and normal to frame. */
+  float4x4 p_to_q = float4x4::identity();
+  float4x4 n_to_frame = float4x4::identity();
+  /** Tiling (xy), facing scale and offset (zw). */
+  float4 params_0 = float4(1.0f, 1.0f, 0.0f, 0.0f);
+  /** Face exponent, frame extent, edge softness. */
+  float4 params_1 = float4(1.0f, 1.0f, 1.0f, 0.0f);
+  float4 atlas_0 = float4(0.0f);
+  float4 atlas_1 = float4(0.0f);
+  float4 atlas_2 = float4(0.0f);
+  float2 atlas_cell = float2(1.0f);
+  int mode = gpu_proj_planar;
+  int axis = 0;
+  int flags = 0;
+};
+
+/**
+ * Fill \a r_projection for \a projection (a row's frame) and upload its surface map to the GPU, or
+ * reuse the cached upload. False, with the reason reported, when the row has no painted object or
+ * mesh. While a paint or sculpt stroke runs the last upload of the same object, material, tile and
+ * size is reused without rebuilding the map: a sculpt step moves vertices every dab, and a rebuild
+ * is 100+ ms; the map is rebuilt on the first frame after the stroke.
+ */
+bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projection,
+                                  const PaintMaterialCompositeMapping &mapping,
+                                  GpuProjection &r_projection);
+
+/** Free the surface map textures. Needs the GPU context current; called with the shaders. */
+void combined_projection_gpu_free();
 
 /**
  * The UV mapping values a layer, mask or correction pass uploads as uniforms. The flags that go
@@ -329,7 +391,8 @@ struct CombinedPasses {
            const float *filter_params = nullptr,
            const ColorBand *filter_ramp = nullptr,
            const CurveMapping *filter_curves = nullptr,
-           gpu::Texture *slot_coverage = nullptr);
+           gpu::Texture *slot_coverage = nullptr,
+           const GpuProjection *projection = nullptr);
 
   /** One step of a row's mask factor, into the mask accumulator. */
   bool mask_step(CombinedTarget &t,
@@ -439,6 +502,7 @@ struct CombinedPasses {
  * \param r_jobs: the jobs of the frame, in collection order. The caller keeps it and releases each
  *        job's result reference when the frame ends; the results themselves are found through
  *        #CombinedPasses::effect_result_find.
+ * \param painted_object: the object a projected row of an effect's input reads its surface from.
  * \return false when the GPU path has to give up, with the reason already reported.
  */
 bool combined_preview_gpu_effects_run(
@@ -448,7 +512,8 @@ bool combined_preview_gpu_effects_run(
     Span<bool> has_stack,
     int wanted_channel,
     CombinedPasses &passes,
-    Vector<GpuEffectJob> &r_jobs);
+    Vector<GpuEffectJob> &r_jobs,
+    const Object *painted_object = nullptr);
 
 /**
  * Report why the GPU path refused, once per change of reason rather than once per frame, and

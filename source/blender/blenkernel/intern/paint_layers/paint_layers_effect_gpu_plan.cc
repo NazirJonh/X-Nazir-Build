@@ -33,6 +33,7 @@
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_gradient.hh"
 
+#include "../paint_material_composite_internal.hh"
 #include "paint_layers_composite_intern.hh"
 #include "paint_layers_kind.hh"
 
@@ -514,6 +515,10 @@ uint64_t BKE_paint_layers_effect_input_scalar_hash(
       hash = effect_hash_float(hash, input_entry.constant_color[c]);
     }
   }
+  /* A projected input is baked through a frame no map version carries: moving the frame moves the
+   * pixels the effect reads, so it keys the result like the flat colour does. */
+  hash = composite_mapping_hash(effect_hash_u64(hash, input_entry.mapping.enabled ? 1u : 0u),
+                                input_entry.mapping);
   hash = effect_hash_u64(hash, uint32_t(input_entry.adjustment_filter));
   if (input_entry.adjustment_filter != 0) {
     for (const float param : input_entry.adjustment_params) {
@@ -528,6 +533,8 @@ uint64_t BKE_paint_layers_effect_input_scalar_hash(
     }
     hash = effect_hash_float(hash, correction.opacity);
     hash = effect_hash_u64(hash, uint32_t(int(correction.blend)));
+    hash = composite_mapping_hash(effect_hash_u64(hash, correction.mapping.enabled ? 1u : 0u),
+                                  correction.mapping);
     if (correction.has_constant_color) {
       for (const int c : IndexRange(4)) {
         hash = effect_hash_float(hash, correction.constant_color[c]);

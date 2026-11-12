@@ -98,6 +98,7 @@
 #include "ED_image.hh"
 #include "ED_keyframes_edit.hh"
 #include "ED_keyframing.hh"
+#include "ED_material_combined.hh"
 #include "ED_node.hh"
 #include "ED_outliner.hh"
 #include "ED_paint.hh"
@@ -664,6 +665,8 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
   ed::material_bake::material_source_bake_invalidate(nullptr);
   ed::brush_layer_source::brush_layer_source_bake_invalidate(nullptr);
   BKE_paint_material_composite_cache_free_all();
+  /* The projection surface map holds float canvases of its own. */
+  BKE_paint_material_surface_map_free();
   BKE_paint_layers_slice_cache_free_all();
   /* Owns float canvases of its own, dropped with the other caches before the leak check. */
   BKE_paint_layers_effect_cache_free_all();
@@ -674,6 +677,7 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
    * GPU backend is destroyed -- the same window in which the image textures are released below. A
    * fallback too, if the engine was never torn down. */
   BKE_paint_layers_effect_gpu_cache_free_all();
+  ed::material_combined::combined_preview_gpu_caches_free();
   BKE_paint_material_combined_cache_free_all();
   ED_space_image_gpu_combined_stand_in_free();
   ED_outliner_rendered_previews_free();

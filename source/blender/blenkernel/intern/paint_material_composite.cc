@@ -3500,6 +3500,9 @@ uint64_t composite_projection_hash(uint64_t hash, const PaintMaterialCompositePr
       hash = get_default_hash(hash, int(*c));
     }
     hash = get_default_hash(hash, mesh.verts_num, mesh.faces_num, mesh.corners_num);
+    /* A sculpt stroke moves positions without a topology change; the cached content hash moves
+     * with them, so the effect and stack caches are not served stale. */
+    hash = get_default_hash(hash, composite_mesh_content_hash(mesh));
   }
   return hash;
 }
@@ -3508,7 +3511,7 @@ uint64_t composite_projection_hash(uint64_t hash, const PaintMaterialCompositePr
  * Fold \a mapping into \a hash. A mapping slider moves pixels without changing any image, so the
  * normalized values have to move the hash, or an edit would keep serving the cached composite.
  */
-static uint64_t composite_mapping_hash(uint64_t hash, const PaintMaterialCompositeMapping &mapping)
+uint64_t composite_mapping_hash(uint64_t hash, const PaintMaterialCompositeMapping &mapping)
 {
   /* The wrap also drives a projected lookup while the 2D adjust is off. */
   if (mapping.enabled || mapping.projection.present) {

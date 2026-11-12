@@ -2464,7 +2464,8 @@ bool BKE_paint_layers_effect_input_describe(const Material &ma,
                                             const int channel,
                                             const bool dimensions_only,
                                             const bool describe_only,
-                                            PaintMaterialCompositeImageLayer &r_entry)
+                                            PaintMaterialCompositeImageLayer &r_entry,
+                                            const Object *painted_object)
 {
   r_entry = PaintMaterialCompositeImageLayer{};
   if (!composite_image_layer_build(ma,
@@ -2480,7 +2481,9 @@ bool BKE_paint_layers_effect_input_describe(const Material &ma,
                                    dimensions_only,
                                    describe_only,
                                    nullptr,
-                                   nullptr))
+                                   nullptr,
+                                   PaintLayerBakeScope::WholeRow,
+                                   painted_object))
   {
     return false;
   }
@@ -3090,23 +3093,42 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
   if (layer.gradient.enabled) {
     return "a Gradient generator row is not laid by the GPU path";
   }
-  /* A projected map is baked into UV space on the CPU (#composite_resample_projected); the GPU
-   * layer pass only applies the UV adjust, so it would show the map stretched over the UVs instead
-   * of the frame the 3D viewport projects. Refused like the Gradient, so the CPU preview takes
-   * over. */
+  /* A projected map row is laid by the layer pass through the painted surface's map, in the six
+   * modes (#composite_resample_projected is its CPU twin). What stays with the CPU: a projected row
+   * that is not a plain map row (a folder, a flat colour, a slice reader), and a tiled map, whose
+   * GPU texture is not one tile the projected UV could wrap in. */
   if (layer.mapping.projection.present) {
-    return "a projected row is not laid by the GPU path";
+    if (layer.color_image == nullptr || reader) {
+      return "a projected row without a map is not laid by the GPU path";
+    }
+    if (layer.color_image->source == IMA_SRC_TILED) {
+      return "a projected row reads a tiled map, which the GPU path does not lay";
+    }
   }
+  /* A projected correction or mask item map is laid through the same frame as a row's. The CPU only
+   * projects a plain map (never a mesh map, a slice or a filter), so those carry no projection to
+   * lay; a tiled map stays with the CPU for the reason a row's does. */
   for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
-    if (correction.opacity > 0.0f && correction.mapping.projection.present) {
-      return "a projected correction is not laid by the GPU path";
+    if (correction.opacity > 0.0f && correction.mapping.projection.present &&
+        correction.image != nullptr && !correction.is_mesh_map &&
+        correction.image->source == IMA_SRC_TILED)
+    {
+      return "a projected correction reads a tiled map, which the GPU path does not lay";
     }
   }
   for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
-    if (item.opacity > 0.0f &&
-        (item.mapping.projection.present || item.coverage_mapping.projection.present))
+    if (item.opacity <= 0.0f) {
+      continue;
+    }
+    if (item.mapping.projection.present && item.image != nullptr && !item.is_mesh_map &&
+        item.image->source == IMA_SRC_TILED)
     {
-      return "a projected mask item is not laid by the GPU path";
+      return "a projected mask item reads a tiled map, which the GPU path does not lay";
+    }
+    if (item.coverage_mapping.projection.present && item.coverage_image != nullptr &&
+        item.coverage_image->source == IMA_SRC_TILED)
+    {
+      return "a projected coverage map is tiled, which the GPU path does not lay";
     }
   }
   /* The height modes are a delta-space step no shader branch reproduces, and a Compare row's win
@@ -3237,8 +3259,13 @@ class GpuCapturePlanner {
   GpuCapturePlanner(const Material &ma,
                     const int channel_num,
                     Vector<PaintLayersGpuCaptureJob> &r_jobs,
-                    const char **r_reason)
-      : ma_(ma), channel_num_(channel_num), jobs_(r_jobs), reason_(r_reason)
+                    const char **r_reason,
+                    const Object *painted_object)
+      : ma_(ma),
+        channel_num_(channel_num),
+        jobs_(r_jobs),
+        reason_(r_reason),
+        painted_object_(painted_object)
   {
   }
 
@@ -3278,7 +3305,8 @@ class GpuCapturePlanner {
       }
       const bool mask_kind = kind != PaintLayersGpuCaptureKind::Content;
       PaintMaterialCompositeImageLayer entry;
-      if (!BKE_paint_layers_slice_describe(ma_, *reader, channel, entry, nullptr, true, mask_kind))
+      if (!BKE_paint_layers_slice_describe(
+              ma_, *reader, channel, entry, nullptr, true, mask_kind, painted_object_))
       {
         return this->fail("an Anchor Point slice cannot be described");
       }
@@ -3307,6 +3335,8 @@ class GpuCapturePlanner {
   const int channel_num_;
   Vector<PaintLayersGpuCaptureJob> &jobs_;
   const char **reason_;
+  /** Describes a slice's projection against the painted surface; null leaves it without one. */
+  const Object *painted_object_;
   /** One depth per job, parallel to #jobs_: a job discovered inside another's description is one
    * level deeper. The hard limit bounds both recursion and work on a malicious description. */
   Vector<int> depths_;
@@ -3474,7 +3504,8 @@ bool BKE_paint_layers_gpu_capture_plan(
     const Span<Span<const PaintMaterialCompositeImageLayer>> stacks,
     const Span<int> channels,
     Vector<PaintLayersGpuCaptureJob> &r_jobs,
-    const char **r_reason)
+    const char **r_reason,
+    const Object *painted_object)
 {
   r_jobs.clear();
   if (r_reason != nullptr) {
@@ -3487,7 +3518,7 @@ bool BKE_paint_layers_gpu_capture_plan(
     return false;
   }
 
-  GpuCapturePlanner planner(ma, int(channels.size()), r_jobs, r_reason);
+  GpuCapturePlanner planner(ma, int(channels.size()), r_jobs, r_reason, painted_object);
   if (!planner.collect_stacks(stacks, channels) || !planner.describe_jobs()) {
     return false;
   }

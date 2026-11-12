@@ -46,6 +46,7 @@
 #include "ED_image.hh"
 #include "ED_brush_layer_source.hh"
 #include "ED_material_bake.hh"
+#include "ED_material_combined.hh"
 #include "ED_mesh.hh"
 #include "ED_object.hh"
 #include "ED_paint.hh"
@@ -286,8 +287,12 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
      * name, and an entry that can never be hit again would hold that VRAM until the budget evicts
      * it. A fallback too, if the engine was never torn down. */
     BKE_paint_layers_effect_gpu_cache_free_all();
+    /* The projection surface map textures hold 0.5 GiB of VRAM per 4K canvas. */
+    ed::material_combined::combined_preview_gpu_caches_free();
     /* The per-object Gradient surfaces are keyed on session UIDs too and own tens of megabytes. */
     BKE_paint_layers_gradient_surface_cache_clear();
+    /* The projection surface map is keyed on session UIDs too and holds 0.5 GiB per 4K canvas. */
+    BKE_paint_material_surface_map_free();
     /* The source-graph memos are process-static maps keyed on session UIDs too. */
     BKE_paint_layers_source_memo_free_all();
     BKE_paint_layers_source_cache_failure_free_all();

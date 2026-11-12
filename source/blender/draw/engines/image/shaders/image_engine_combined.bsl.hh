@@ -50,6 +50,10 @@
 #define COMBINED_LAYER_MAP_F0_GLOSSINESS_ALPHA 33554432
 /* The F0 a level of one is (`0.08`, #SPECULAR_LEVEL_F0_FULL on the CPU) rides in `map_luma.w` as
  * its reciprocal, so the pass multiplies by one value. */
+/* The row's map is read through its projection frame instead of the canvas UV: the position and
+ * normal of the painted surface at the texel come from the surface map (`proj_pos_tx`,
+ * `proj_nrm_tx`), the formulas are those of `composite_resample_projected`. */
+#define COMBINED_LAYER_PROJECTED 67108864
 #define COMBINED_LAYER_HAS_MASK 2048
 /* The row stage: the layer pass stores the row's colour and coverage instead of blending them, and a
  * later pass blends what the corrections left. */
@@ -717,6 +721,282 @@ float4 sample_map(sampler2D tx,
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Projection
+ *
+ * The frame of a projected map, shared by the mask, layer and correction passes: a pass reads the
+ * painted surface per texel (`proj_pos_tx`, `proj_nrm_tx`) instead of the canvas UV when
+ * #COMBINED_LAYER_PROJECTED is set in its flags.
+ * \{ */
+
+/* The projection modes of `proj_mode`, and the bits of `proj_flags`. */
+#define COMBINED_PROJ_PLANAR 0
+#define COMBINED_PROJ_BOX 1
+#define COMBINED_PROJ_CUBE 2
+#define COMBINED_PROJ_CYLINDER 3
+#define COMBINED_PROJ_SPHERE 4
+#define COMBINED_PROJ_CLIP 1
+#define COMBINED_PROJ_DEPTH 2
+#define COMBINED_PROJ_FACING 4
+#define COMBINED_PROJ_UV_ADJUST 8
+#define COMBINED_PROJ_WRAP_CLIP 16
+/* #PAINT_LAYER_PROJECTION_EPSILON, and the 1 / (2 pi) and 1 / pi of the angle to UV conversions. */
+#define COMBINED_PROJ_EPSILON 1e-6f
+#define COMBINED_PROJ_INV_TWO_PI 0.15915494309189535f
+#define COMBINED_PROJ_INV_PI 0.3183098861837907f
+
+/* A port of the helpers of `paint_material_composite_projection.cc` the projected bake is built
+ * from (`composite_projection_face_uv`, `_cube_uv`, `_cylinder_uv`, `_sphere_uv`, `_frame_weight`,
+ * `_uv_wrap`), so the CPU bake and this pass cannot disagree. */
+
+float projection_axis_factor(float value, float extent, float soft)
+{
+  return clamp((extent - abs(value)) / soft, 0.0f, 1.0f);
+}
+
+/** The face UV of Box and Triplanar: face 0 is X, 1 is Y, 2 is Z. */
+float2 projection_face_uv(int face, float3 q)
+{
+  float2 uv;
+  if (face == 0) {
+    uv = float2(0.5f - q.y * 0.5f, 0.5f + q.z * 0.5f);
+  }
+  else if (face == 1) {
+    uv = float2(0.5f + q.x * 0.5f, 0.5f + q.z * 0.5f);
+  }
+  else {
+    uv = float2(0.5f + q.x * 0.5f, 0.5f + q.y * 0.5f);
+  }
+  return uv;
+}
+
+/** The cube-cross atlas UV of the dominant frame axis; the six cell origins ride in three float4. */
+float2 projection_cube_uv(float3 q, float4 atlas_0, float4 atlas_1, float4 atlas_2, float2 cell)
+{
+  float ax = abs(q.x);
+  float ay = abs(q.y);
+  float az = abs(q.z);
+  int atlas_face;
+  if (ax + COMBINED_PROJ_EPSILON > ay && ax + COMBINED_PROJ_EPSILON > az) {
+    atlas_face = (q.x > 0.0f) ? 0 : 1;
+  }
+  else if (ay + COMBINED_PROJ_EPSILON > az) {
+    atlas_face = (q.y > 0.0f) ? 2 : 3;
+  }
+  else {
+    atlas_face = (q.z > 0.0f) ? 4 : 5;
+  }
+  float2 local_uv = projection_face_uv(atlas_face / 2, q);
+  float2 origin;
+  if (atlas_face == 0) {
+    origin = atlas_0.xy;
+  }
+  else if (atlas_face == 1) {
+    origin = atlas_0.zw;
+  }
+  else if (atlas_face == 2) {
+    origin = atlas_1.xy;
+  }
+  else if (atlas_face == 3) {
+    origin = atlas_1.zw;
+  }
+  else if (atlas_face == 4) {
+    origin = atlas_2.xy;
+  }
+  else {
+    origin = atlas_2.zw;
+  }
+  return origin + local_uv * cell;
+}
+
+/** Cylinder: U winds around the axis, V reads the height along it. */
+float2 projection_cylinder_uv(float3 q, int axis)
+{
+  int a = (axis + 1) % 3;
+  int b = (axis + 2) % 3;
+  float angle = atan2(q[b], q[a]);
+  return float2(angle * COMBINED_PROJ_INV_TWO_PI + 0.5f, 0.5f + q[axis] * 0.5f);
+}
+
+/** Sphere: U winds around the axis, V is the polar angle from it. */
+float2 projection_sphere_uv(float3 q, int axis)
+{
+  int a = (axis + 1) % 3;
+  int b = (axis + 2) % 3;
+  float len = sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+  float ratio = clamp(q[axis] / max(len, COMBINED_PROJ_EPSILON), -1.0f, 1.0f);
+  float angle = atan2(q[b], q[a]);
+  return float2(angle * COMBINED_PROJ_INV_TWO_PI + 0.5f, acos(ratio) * COMBINED_PROJ_INV_PI);
+}
+
+/** The frame factor: the footprint with its smooth edges under the clip, then the Planar facing. */
+float projection_frame_weight(int mode,
+                              int axis,
+                              int pflags,
+                              float3 q,
+                              float3 n_frame,
+                              float2 facing,
+                              float extent,
+                              float soft)
+{
+  float weight = 1.0f;
+  if ((pflags & COMBINED_PROJ_CLIP) != 0) {
+    if (mode == COMBINED_PROJ_BOX || mode == COMBINED_PROJ_CUBE) {
+      weight = projection_axis_factor(q.x, extent, soft) *
+               projection_axis_factor(q.y, extent, soft) *
+               projection_axis_factor(q.z, extent, soft);
+    }
+    else if (mode == COMBINED_PROJ_CYLINDER) {
+      int a = (axis + 1) % 3;
+      int b = (axis + 2) % 3;
+      float radial = q[a] * q[a] + q[b] * q[b];
+      weight = (radial < 1.0f) ? 1.0f : 0.0f;
+      weight *= projection_axis_factor(q[axis], extent, soft);
+    }
+    else if (mode == COMBINED_PROJ_SPHERE) {
+      float length_sq = q.x * q.x + q.y * q.y + q.z * q.z;
+      weight = (length_sq < 1.0f) ? 1.0f : 0.0f;
+    }
+    else {
+      int u_index = (axis == 0) ? 1 : 0;
+      int v_index = (axis == 2) ? 1 : 2;
+      weight = projection_axis_factor(q[u_index], extent, soft) *
+               projection_axis_factor(q[v_index], extent, soft);
+      if ((pflags & COMBINED_PROJ_DEPTH) != 0) {
+        weight *= projection_axis_factor(q[axis], extent, soft);
+      }
+    }
+  }
+  /* The facing is a Planar input: the volume kinds are reached from every side. */
+  if (weight > 0.0f && (pflags & COMBINED_PROJ_FACING) != 0 && mode == COMBINED_PROJ_PLANAR) {
+    float t = clamp(n_frame[axis] * facing.x + facing.y, 0.0f, 1.0f);
+    weight *= t * t * (3.0f - 2.0f * t);
+  }
+  return weight;
+}
+
+/**
+ * One tap of the row's map at a projected \a uv: the row's UV adjust and wrap first (the Cube atlas
+ * never wraps), then a bilinear read of the base level; a clipped tap reads zero. Straight colour
+ * and alpha, like `CompositeProjectionSampler::sample` followed by its straightening.
+ */
+float4 projection_tap(sampler2D tx,
+                      float2 uv,
+                      int layer_flags,
+                      int pflags,
+                      bool is_cube,
+                      float2 offset,
+                      float2 scale,
+                      float2 rotation)
+{
+  float2 p = uv;
+  if ((pflags & COMBINED_PROJ_UV_ADJUST) != 0) {
+    float ru = p.x * rotation.x - p.y * rotation.y;
+    float rv = p.x * rotation.y + p.y * rotation.x;
+    p = float2(ru, rv) * scale + offset;
+  }
+  bool repeat = !is_cube && (pflags & COMBINED_PROJ_WRAP_CLIP) == 0;
+  if (repeat) {
+    p -= floor(p);
+  }
+  float4 color = float4(0.0f);
+  if (repeat || (p.x >= 0.0f && p.x < 1.0f && p.y >= 0.0f && p.y < 1.0f)) {
+    color = textureLod(tx, p, 0.0f);
+    if ((layer_flags & COMBINED_LAYER_PREMULTIPLIED) != 0 && color.w > 0.0f) {
+      color.xyz = color.xyz / color.w;
+    }
+  }
+  return color;
+}
+
+/**
+ * The row's map as #composite_resample_projected bakes it, at the canvas \a uv: the texel's surface
+ * point through the frame, one tap (three for Box and Triplanar) weighted by the frame factor. A
+ * texel no triangle owns stays transparent, like the texel the rasterizer leaves untouched. Shared
+ * by the mask, layer and correction passes, so the three read a projected map alike. The result is
+ * straight colour and alpha, black where nothing is covered.
+ */
+float4 projection_sample_map(sampler2D tx,
+                             sampler2D pos_tx,
+                             sampler2D nrm_tx,
+                             float2 uv,
+                             int2 canvas_size,
+                             float4x4 p_to_q,
+                             float4x4 n_to_frame,
+                             float4 params_0,
+                             float4 params_1,
+                             float4 atlas_0,
+                             float4 atlas_1,
+                             float4 atlas_2,
+                             float2 atlas_cell,
+                             int mode,
+                             int axis,
+                             int pflags,
+                             int layer_flags,
+                             float2 offset,
+                             float2 scale,
+                             float2 rotation)
+{
+  float4 result = float4(0.0f);
+  int2 surface_texel = clamp(int2(floor(uv * float2(canvas_size))), int2(0), canvas_size - int2(1));
+  float4 surface_p = texelFetch(pos_tx, surface_texel, 0);
+  if (surface_p.w <= 0.0f) {
+    return result;
+  }
+  float4 surface_n = texelFetch(nrm_tx, surface_texel, 0);
+  float3 q = (p_to_q * float4(surface_p.xyz, 1.0f)).xyz;
+  float3 n_frame = (n_to_frame * float4(surface_n.xyz, 0.0f)).xyz;
+  float weight = projection_frame_weight(
+      mode, axis, pflags, q, n_frame, params_0.zw, params_1.y, params_1.z);
+  if (weight <= 0.0f) {
+    return result;
+  }
+  float3 straight = float3(0.0f);
+  float alpha = 0.0f;
+  if (mode == COMBINED_PROJ_BOX) {
+    /* The three face reads blended by the frame normal's powers, normalized. */
+    float3 powers = float3(pow(abs(n_frame.x), params_1.x),
+                           pow(abs(n_frame.y), params_1.x),
+                           pow(abs(n_frame.z), params_1.x));
+    float sum = max(powers.x + powers.y + powers.z, COMBINED_PROJ_EPSILON);
+    for (int face = 0; face < 3; face++) {
+      float2 face_uv = projection_face_uv(face, q);
+      float2 tap_uv = float2(0.5f) + (face_uv - float2(0.5f)) * params_0.xy;
+      float4 tap = projection_tap(tx, tap_uv, layer_flags, pflags, false, offset, scale, rotation);
+      float tap_weight = weight * powers[face] / sum;
+      straight += tap.xyz * tap_weight;
+      alpha += tap.w * tap_weight;
+    }
+  }
+  else {
+    float2 tap_uv;
+    if (mode == COMBINED_PROJ_CUBE) {
+      tap_uv = projection_cube_uv(q, atlas_0, atlas_1, atlas_2, atlas_cell);
+    }
+    else if (mode == COMBINED_PROJ_CYLINDER) {
+      tap_uv = projection_cylinder_uv(q, axis);
+    }
+    else if (mode == COMBINED_PROJ_SPHERE) {
+      tap_uv = projection_sphere_uv(q, axis);
+    }
+    else {
+      /* Planar: X reads Y/Z, Y reads X/Z and Z reads X/Y. */
+      int u_index = (axis == 0) ? 1 : 0;
+      int v_index = (axis == 2) ? 1 : 2;
+      tap_uv = float2(0.5f + q[u_index] * params_0.x * 0.5f, 0.5f + q[v_index] * params_0.y * 0.5f);
+    }
+    float4 tap = projection_tap(
+        tx, tap_uv, layer_flags, pflags, mode == COMBINED_PROJ_CUBE, offset, scale, rotation);
+    straight += tap.xyz * weight;
+    alpha += tap.w * weight;
+  }
+  /* The baked buffer is premultiplied and read back straightened: black where nothing is covered. */
+  result = float4((alpha > 0.0f) ? straight : float3(0.0f), alpha);
+  return result;
+}
+
+/** \}*/
+
+/* -------------------------------------------------------------------- */
 /** \name Mask Pass
  *
  * A row's mask factor `M` is built in an accumulator of its own, one pass per step, and the layer
@@ -753,6 +1033,9 @@ struct MaskResources {
   [[sampler(0)]] sampler2D mask_tx;
   /** A Color Ramp or RGB Curves table, or the gather's placeholder for other filters. */
   [[sampler(1)]] sampler2D filter_lut_tx;
+  /** The painted surface's position and normal per canvas texel, for #COMBINED_LAYER_PROJECTED. */
+  [[sampler(2)]] sampler2D proj_pos_tx;
+  [[sampler(3)]] sampler2D proj_nrm_tx;
   [[image(0, read_write, SFLOAT_16_16_16_16)]] image2D mask_img;
   /** The destination of #COMBINED_MASK_SLOT_STORE. */
   [[image(1, write, SFLOAT_16_16_16_16)]] image2D slot_img;
@@ -763,6 +1046,19 @@ struct MaskResources {
   [[push_constant]] const float2 mapping_rotation;
   /** The UV point the row's Mirror fold reflects around, on its folded axes. */
   [[push_constant]] const float2 mapping_mirror_center;
+  /** The projection frame of #projection_sample_map, read when #COMBINED_LAYER_PROJECTED is set. */
+  [[push_constant]] const float4x4 proj_p_to_q;
+  [[push_constant]] const float4x4 proj_n_to_frame;
+  [[push_constant]] const float4 proj_params_0;
+  [[push_constant]] const float4 proj_params_1;
+  [[push_constant]] const float4 proj_atlas_0;
+  [[push_constant]] const float4 proj_atlas_1;
+  [[push_constant]] const float4 proj_atlas_2;
+  [[push_constant]] const float2 proj_atlas_cell;
+  [[push_constant]] const int2 proj_canvas_size;
+  [[push_constant]] const int proj_mode;
+  [[push_constant]] const int proj_axis;
+  [[push_constant]] const int proj_flags;
   /** The filter's parameters in its schema order. */
   [[push_constant]] const float4 filter_params_0;
   [[push_constant]] const float4 filter_params_1;
@@ -829,14 +1125,39 @@ void mask_comp([[resource_table]] MaskResources &srt,
       m *= 1.0f + (match - 1.0f) * clamp(srt.opacity, 0.0f, 1.0f);
     }
     else {
-      float4 c = sample_map(srt.mask_tx,
-                            uv,
-                            srt.flags,
-                            srt.mapping_offset,
-                            srt.mapping_scale,
-                            srt.mapping_rotation,
-                            srt.mapping_mirror_center,
-                            srt.lod);
+      float4 c;
+      if ((srt.flags & COMBINED_LAYER_PROJECTED) != 0) {
+        c = projection_sample_map(srt.mask_tx,
+                                srt.proj_pos_tx,
+                                srt.proj_nrm_tx,
+                                uv,
+                                srt.proj_canvas_size,
+                                srt.proj_p_to_q,
+                                srt.proj_n_to_frame,
+                                srt.proj_params_0,
+                                srt.proj_params_1,
+                                srt.proj_atlas_0,
+                                srt.proj_atlas_1,
+                                srt.proj_atlas_2,
+                                srt.proj_atlas_cell,
+                                srt.proj_mode,
+                                srt.proj_axis,
+                                srt.proj_flags,
+                                srt.flags,
+                                srt.mapping_offset,
+                                srt.mapping_scale,
+                                srt.mapping_rotation);
+      }
+      else {
+        c = sample_map(srt.mask_tx,
+                       uv,
+                       srt.flags,
+                       srt.mapping_offset,
+                       srt.mapping_scale,
+                       srt.mapping_rotation,
+                       srt.mapping_mirror_center,
+                       srt.lod);
+      }
       if (srt.mode == COMBINED_MASK_COV_SCALAR) {
         match = clamp(c.x, 0.0f, 1.0f);
       }
@@ -892,14 +1213,39 @@ void mask_comp([[resource_table]] MaskResources &srt,
         gray = clamp(texelFetch(srt.mask_tx, texel, 0).x, 0.0f, 1.0f);
       }
       else if ((srt.flags & COMBINED_MASK_HAS_MAP) != 0) {
-        float4 c = sample_map(srt.mask_tx,
-                              uv,
-                              srt.flags,
-                              srt.mapping_offset,
-                              srt.mapping_scale,
-                              srt.mapping_rotation,
-                              srt.mapping_mirror_center,
-                              srt.lod);
+        float4 c;
+        if ((srt.flags & COMBINED_LAYER_PROJECTED) != 0) {
+          c = projection_sample_map(srt.mask_tx,
+                                  srt.proj_pos_tx,
+                                  srt.proj_nrm_tx,
+                                  uv,
+                                  srt.proj_canvas_size,
+                                  srt.proj_p_to_q,
+                                  srt.proj_n_to_frame,
+                                  srt.proj_params_0,
+                                  srt.proj_params_1,
+                                  srt.proj_atlas_0,
+                                  srt.proj_atlas_1,
+                                  srt.proj_atlas_2,
+                                  srt.proj_atlas_cell,
+                                  srt.proj_mode,
+                                  srt.proj_axis,
+                                  srt.proj_flags,
+                                  srt.flags,
+                                  srt.mapping_offset,
+                                  srt.mapping_scale,
+                                  srt.mapping_rotation);
+        }
+        else {
+          c = sample_map(srt.mask_tx,
+                         uv,
+                         srt.flags,
+                         srt.mapping_offset,
+                         srt.mapping_scale,
+                         srt.mapping_rotation,
+                         srt.mapping_mirror_center,
+                         srt.lod);
+        }
         gray = clamp((c.x + c.y + c.z) / 3.0f, 0.0f, 1.0f);
         weight = clamp(c.w, 0.0f, 1.0f) * opacity;
       }
@@ -920,14 +1266,39 @@ void mask_comp([[resource_table]] MaskResources &srt,
   }
   else {
     /* The row's own mask map. */
-    float4 c = sample_map(srt.mask_tx,
-                          uv,
-                          srt.flags,
-                          srt.mapping_offset,
-                          srt.mapping_scale,
-                          srt.mapping_rotation,
-                          srt.mapping_mirror_center,
-                          srt.lod);
+    float4 c;
+    if ((srt.flags & COMBINED_LAYER_PROJECTED) != 0) {
+      c = projection_sample_map(srt.mask_tx,
+                              srt.proj_pos_tx,
+                              srt.proj_nrm_tx,
+                              uv,
+                              srt.proj_canvas_size,
+                              srt.proj_p_to_q,
+                              srt.proj_n_to_frame,
+                              srt.proj_params_0,
+                              srt.proj_params_1,
+                              srt.proj_atlas_0,
+                              srt.proj_atlas_1,
+                              srt.proj_atlas_2,
+                              srt.proj_atlas_cell,
+                              srt.proj_mode,
+                              srt.proj_axis,
+                              srt.proj_flags,
+                              srt.flags,
+                              srt.mapping_offset,
+                              srt.mapping_scale,
+                              srt.mapping_rotation);
+    }
+    else {
+      c = sample_map(srt.mask_tx,
+                     uv,
+                     srt.flags,
+                     srt.mapping_offset,
+                     srt.mapping_scale,
+                     srt.mapping_rotation,
+                     srt.mapping_mirror_center,
+                     srt.lod);
+    }
     float value = ((srt.flags & COMBINED_MASK_FROM_ALPHA) != 0) ? c.w : (c.x + c.y + c.z) / 3.0f;
     m *= (1.0f - srt.influence) + srt.influence * clamp(value, 0.0f, 1.0f);
   }
@@ -948,6 +1319,10 @@ struct LayerResources {
   [[sampler(2)]] sampler2D slot_cov_tx;
   /** A Color Ramp or RGB Curves table, or the gather's placeholder for other filters. */
   [[sampler(3)]] sampler2D filter_lut_tx;
+  /** The painted surface's object-space position (`w` = 1 where covered) and normal per canvas
+   * texel, read with texelFetch when #COMBINED_LAYER_PROJECTED is set. */
+  [[sampler(4)]] sampler2D proj_pos_tx;
+  [[sampler(5)]] sampler2D proj_nrm_tx;
   [[image(0, read_write, SFLOAT_16_16_16_16)]] image2D accum_img;
   /** The row's colour and coverage while corrections are laid over it. */
   [[image(1, read_write, SFLOAT_16_16_16_16)]] image2D row_color_img;
@@ -955,6 +1330,28 @@ struct LayerResources {
   /** Output texel centre to canvas UV. An affine map, carried as a mat4 for the push constant. */
   [[push_constant]] const float4x4 texel_to_uv;
   [[push_constant]] const int2 texture_size;
+  /**
+   * The projection frame, for #COMBINED_LAYER_PROJECTED. `proj_p_to_q` takes an object-space point
+   * (through the controller when there is one) to the frame-space `q`, the aspect fit included;
+   * `proj_n_to_frame` takes the surface normal to the frame's axes.
+   */
+  [[push_constant]] const float4x4 proj_p_to_q;
+  [[push_constant]] const float4x4 proj_n_to_frame;
+  /** The tiling in `xy`, the facing scale and offset in `zw`. */
+  [[push_constant]] const float4 proj_params_0;
+  /** The Box and Triplanar face exponent, the frame extent and the edge softness. */
+  [[push_constant]] const float4 proj_params_1;
+  /** The Cube atlas: the origins of +X, -X, +Y, -Y, +Z, -Z in pairs, and the cell size. */
+  [[push_constant]] const float4 proj_atlas_0;
+  [[push_constant]] const float4 proj_atlas_1;
+  [[push_constant]] const float4 proj_atlas_2;
+  [[push_constant]] const float2 proj_atlas_cell;
+  /** The size of the surface map, in texels. */
+  [[push_constant]] const int2 proj_canvas_size;
+  /** A `COMBINED_PROJ_*` mode, the projection axis and the `COMBINED_PROJ_*` flag bits. */
+  [[push_constant]] const int proj_mode;
+  [[push_constant]] const int proj_axis;
+  [[push_constant]] const int proj_flags;
   /** The row's flat colour while it has no map. */
   [[push_constant]] const float4 layer_color;
   /** The value the accumulator is seeded with by the pass that carries #COMBINED_LAYER_INIT. */
@@ -1030,14 +1427,38 @@ void layer_comp([[resource_table]] LayerResources &srt,
       coverage = clamp(texelFetch(srt.slot_cov_tx, texel, 0).x, 0.0f, 1.0f);
     }
     else if ((srt.flags & COMBINED_LAYER_HAS_MAP) != 0) {
-      top = sample_map(srt.layer_tx,
-                       uv,
-                       srt.flags,
-                       srt.mapping_offset,
-                       srt.mapping_scale,
-                       srt.mapping_rotation,
-                       srt.mapping_mirror_center,
-                       srt.lod);
+      if ((srt.flags & COMBINED_LAYER_PROJECTED) != 0) {
+        top = projection_sample_map(srt.layer_tx,
+                                    srt.proj_pos_tx,
+                                    srt.proj_nrm_tx,
+                                    uv,
+                                    srt.proj_canvas_size,
+                                    srt.proj_p_to_q,
+                                    srt.proj_n_to_frame,
+                                    srt.proj_params_0,
+                                    srt.proj_params_1,
+                                    srt.proj_atlas_0,
+                                    srt.proj_atlas_1,
+                                    srt.proj_atlas_2,
+                                    srt.proj_atlas_cell,
+                                    srt.proj_mode,
+                                    srt.proj_axis,
+                                    srt.proj_flags,
+                                    srt.flags,
+                                    srt.mapping_offset,
+                                    srt.mapping_scale,
+                                    srt.mapping_rotation);
+      }
+      else {
+        top = sample_map(srt.layer_tx,
+                         uv,
+                         srt.flags,
+                         srt.mapping_offset,
+                         srt.mapping_scale,
+                         srt.mapping_rotation,
+                         srt.mapping_mirror_center,
+                         srt.lod);
+      }
       if ((srt.flags & COMBINED_LAYER_NORMAL_DIRECTX) != 0) {
         top.y = 1.0f - top.y;
       }
@@ -1118,6 +1539,9 @@ struct CorrectionResources {
   [[sampler(2)]] sampler2D filter_lut_tx;
   /** The result of a GPU effect pass, at the effect input's resolution. */
   [[sampler(3)]] sampler2D effect_tx;
+  /** The painted surface's position and normal per canvas texel, for #COMBINED_LAYER_PROJECTED. */
+  [[sampler(4)]] sampler2D proj_pos_tx;
+  [[sampler(5)]] sampler2D proj_nrm_tx;
   [[image(0, read_write, SFLOAT_16_16_16_16)]] image2D row_color_img;
   [[image(1, read_write, SFLOAT_16_16_16_16)]] image2D row_factor_img;
   [[push_constant]] const float4x4 texel_to_uv;
@@ -1129,6 +1553,19 @@ struct CorrectionResources {
   [[push_constant]] const float2 mapping_rotation;
   /** The UV point the row's Mirror fold reflects around, on its folded axes. */
   [[push_constant]] const float2 mapping_mirror_center;
+  /** The projection frame of #projection_sample_map, read when #COMBINED_LAYER_PROJECTED is set. */
+  [[push_constant]] const float4x4 proj_p_to_q;
+  [[push_constant]] const float4x4 proj_n_to_frame;
+  [[push_constant]] const float4 proj_params_0;
+  [[push_constant]] const float4 proj_params_1;
+  [[push_constant]] const float4 proj_atlas_0;
+  [[push_constant]] const float4 proj_atlas_1;
+  [[push_constant]] const float4 proj_atlas_2;
+  [[push_constant]] const float2 proj_atlas_cell;
+  [[push_constant]] const int2 proj_canvas_size;
+  [[push_constant]] const int proj_mode;
+  [[push_constant]] const int proj_axis;
+  [[push_constant]] const int proj_flags;
   [[push_constant]] const float4 filter_params_0;
   [[push_constant]] const float4 filter_params_1;
   /** A Color Balance's exponent triple; unused by every other filter. */
@@ -1193,14 +1630,38 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
     c = texelFetch(srt.correction_tx, texel, 0);
   }
   else if (has_map) {
-    c = sample_map(srt.correction_tx,
-                   uv,
-                   srt.flags,
-                   srt.mapping_offset,
-                   srt.mapping_scale,
-                   srt.mapping_rotation,
-                   srt.mapping_mirror_center,
-                   srt.lod);
+    if ((srt.flags & COMBINED_LAYER_PROJECTED) != 0) {
+      c = projection_sample_map(srt.correction_tx,
+                              srt.proj_pos_tx,
+                              srt.proj_nrm_tx,
+                              uv,
+                              srt.proj_canvas_size,
+                              srt.proj_p_to_q,
+                              srt.proj_n_to_frame,
+                              srt.proj_params_0,
+                              srt.proj_params_1,
+                              srt.proj_atlas_0,
+                              srt.proj_atlas_1,
+                              srt.proj_atlas_2,
+                              srt.proj_atlas_cell,
+                              srt.proj_mode,
+                              srt.proj_axis,
+                              srt.proj_flags,
+                              srt.flags,
+                              srt.mapping_offset,
+                              srt.mapping_scale,
+                              srt.mapping_rotation);
+    }
+    else {
+      c = sample_map(srt.correction_tx,
+                     uv,
+                     srt.flags,
+                     srt.mapping_offset,
+                     srt.mapping_scale,
+                     srt.mapping_rotation,
+                     srt.mapping_mirror_center,
+                     srt.lod);
+    }
   }
   /* A slice correction covers by the coverage its reader rendered with; its colour's alpha is
    * content alpha. A flat colour covers by its opacity alone. */

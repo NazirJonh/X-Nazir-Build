@@ -34,6 +34,7 @@
 #include <utility>
 #include <vector>
 
+#include "BLI_array.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_index_range.hh"
 #include "BLI_math_vector_types.hh"
@@ -1681,5 +1682,72 @@ bool BKE_paint_material_composite_cache_sizes_get(const Material &ma,
                                                  int channel,
                                                  int2 &r_canvas,
                                                  int2 &r_output);
+
+/**
+ * The identity of a surface map. No pointers: the evaluated and the original copy of an object
+ * share a #ID.session_uid, and the mesh is told apart by content, so a sculpt step that moves
+ * vertices without changing the topology still invalidates the entry.
+ */
+struct PaintMaterialSurfaceMapKey {
+  uint32_t object_uid = 0;
+  uint32_t material_uid = 0;
+  int tile_number = 0;
+  int width = 0;
+  int height = 0;
+  int verts_num = 0;
+  int faces_num = 0;
+  int corners_num = 0;
+  /** Positions, face offsets, corner verts, UVs, material indices, corner normals, slot matches. */
+  uint64_t content_hash = 0;
+
+  bool operator==(const PaintMaterialSurfaceMapKey &other) const = default;
+};
+
+/**
+ * The painted surface per texel of one UDIM tile: the object-space position (w = 1 on a texel a
+ * triangle or the island padding owns, else 0) and the interpolated, not normalized corner normal.
+ * Both are in the painted object's space, exactly the `p` and `n_interp` the CPU projection bake
+ * reads before applying a controller. Row-major, `y * width + x`, texel centre at `(x + 0.5) / width`.
+ */
+struct PaintMaterialSurfaceMap {
+  PaintMaterialSurfaceMapKey key;
+  int width = 0;
+  int height = 0;
+  Array<float4> position;
+  Array<float4> normal;
+  /** True once #BKE_paint_material_surface_map_texels_release dropped the arrays above: the entry
+   * keeps its key (so a hit is still recognized) but holds no texels. */
+  bool texels_released = false;
+};
+
+/**
+ * The cached surface map of \a object restricted to the slots holding \a material (every slot when
+ * null), at \a width by \a height for \a tile_number. One entry is kept: asking for another key
+ * replaces it. Null when the object has no mesh, render UV map, triangle or matching slot. The
+ * returned map stays valid for its holder after a replacement or #BKE_paint_material_surface_map_free.
+ *
+ * \param need_texels: false for a caller that only needs the identity of the entry because it already
+ *        holds the texels elsewhere (the GPU upload): a hit on an entry whose texels were released is
+ *        returned as it is. With true (the default) such an entry is rebuilt, so the arrays are
+ *        always filled.
+ */
+std::shared_ptr<const PaintMaterialSurfaceMap> BKE_paint_material_surface_map_get(
+    const Object *object,
+    const Material *material,
+    int width,
+    int height,
+    int tile_number,
+    bool need_texels = true);
+
+/**
+ * Free the position and normal arrays of \a map when it is the cached entry, once a consumer has
+ * copied them elsewhere (the GPU upload: they are 0.5 GiB at 4K). Main thread only, and only for
+ * a holder that no longer reads the arrays. No-op for a map that is not the current entry.
+ */
+void BKE_paint_material_surface_map_texels_release(
+    const std::shared_ptr<const PaintMaterialSurfaceMap> &map);
+
+/** Drop the cached surface map (mesh change, file close, leaving the paint context). */
+void BKE_paint_material_surface_map_free();
 
 }  // namespace blender

@@ -1255,4 +1255,193 @@ TEST_F(PaintLayersGraphEvalTest, every_projection_space_matches_the_cpu)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Surface map
+ * \{ */
+
+TEST_F(PaintLayersGraphEvalTest, surface_map_matches_the_rasterizer_and_caches_by_content)
+{
+  Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "SurfaceMapObject");
+  Mesh *mesh = BKE_mesh_add(bmain, "SurfaceMapMesh");
+  ob->data = id_cast<ID *>(mesh);
+  BKE_object_material_assign(bmain, ob, ma, 1, BKE_MAT_ASSIGN_OBDATA);
+  /* A quad over the lower-left quarter of the UV tile, lifted to z = 2 and scaled to 4 in XY, so a
+   * texel's position differs from its UV. */
+  Mesh *source = BKE_mesh_new_nomain(4, 0, 1, 4);
+  MutableSpan<float3> positions = source->vert_positions_for_write();
+  positions[0] = float3(0.0f, 0.0f, 2.0f);
+  positions[1] = float3(4.0f, 0.0f, 2.0f);
+  positions[2] = float3(4.0f, 4.0f, 2.0f);
+  positions[3] = float3(0.0f, 4.0f, 2.0f);
+  MutableSpan<int> face_offsets = source->face_offsets_for_write();
+  face_offsets[0] = 0;
+  face_offsets[1] = 4;
+  MutableSpan<int> corner_verts = source->corner_verts_for_write();
+  for (const int i : IndexRange(4)) {
+    corner_verts[i] = i;
+  }
+  bke::SpanAttributeWriter<float2> uvs =
+      source->attributes_for_write().lookup_or_add_for_write_span<float2>("UVMap",
+                                                                          bke::AttrDomain::Corner);
+  uvs.span[0] = float2(0.0f, 0.0f);
+  uvs.span[1] = float2(0.5f, 0.0f);
+  uvs.span[2] = float2(0.5f, 0.5f);
+  uvs.span[3] = float2(0.0f, 0.5f);
+  uvs.finish();
+  bke::mesh_calc_edges(*source, false, false);
+  source->tag_topology_changed();
+  source->tag_positions_changed();
+  BKE_mesh_nomain_to_mesh(source, mesh, ob);
+
+  BKE_paint_material_surface_map_free();
+  const int size = 16;
+  const std::shared_ptr<const PaintMaterialSurfaceMap> map = BKE_paint_material_surface_map_get(
+      ob, ma, size, size, 1001);
+  ASSERT_NE(map, nullptr);
+  ASSERT_EQ(map->position.size(), size * size);
+  ASSERT_EQ(map->normal.size(), size * size);
+
+  /* Texel (3, 2) lies inside the quarter: UV centre (3.5/16, 2.5/16) maps to XY = UV * 8. */
+  const float4 p = map->position[2 * size + 3];
+  const float4 n = map->normal[2 * size + 3];
+  EXPECT_NEAR(p.x, 3.5f / 16.0f * 8.0f, 1e-4f);
+  EXPECT_NEAR(p.y, 2.5f / 16.0f * 8.0f, 1e-4f);
+  EXPECT_NEAR(p.z, 2.0f, 1e-4f);
+  EXPECT_EQ(p.w, 1.0f);
+  EXPECT_NEAR(n.z, 1.0f, 1e-4f);
+  /* A texel far outside the island, beyond any padding, stays empty. */
+  EXPECT_EQ(map->position[(size - 1) * size + (size - 1)].w, 0.0f);
+
+  /* The same key answers from the cache; a moved vertex (same topology) is a new map. */
+  EXPECT_EQ(BKE_paint_material_surface_map_get(ob, ma, size, size, 1001), map);
+  mesh->vert_positions_for_write()[2].z = 3.0f;
+  mesh->tag_positions_changed();
+  const std::shared_ptr<const PaintMaterialSurfaceMap> moved = BKE_paint_material_surface_map_get(
+      ob, ma, size, size, 1001);
+  ASSERT_NE(moved, nullptr);
+  EXPECT_NE(moved, map);
+  EXPECT_NE(moved->key.content_hash, map->key.content_hash);
+
+  /* Freeing drops the entry but not a holder's map. */
+  BKE_paint_material_surface_map_free();
+  EXPECT_EQ(moved->width, size);
+  EXPECT_NE(BKE_paint_material_surface_map_get(ob, ma, size, size, 1001), moved);
+  BKE_paint_material_surface_map_free();
+}
+
+TEST_F(PaintLayersGraphEvalTest, surface_map_releases_texels_and_rebuilds_on_demand_and_pads_islands)
+{
+  Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "SurfaceReleaseObject");
+  Mesh *mesh = BKE_mesh_add(bmain, "SurfaceReleaseMesh");
+  ob->data = id_cast<ID *>(mesh);
+  BKE_object_material_assign(bmain, ob, ma, 1, BKE_MAT_ASSIGN_OBDATA);
+  /* The same quad over the lower-left quarter of the UV tile as the test above. */
+  Mesh *source = BKE_mesh_new_nomain(4, 0, 1, 4);
+  MutableSpan<float3> positions = source->vert_positions_for_write();
+  positions[0] = float3(0.0f, 0.0f, 2.0f);
+  positions[1] = float3(4.0f, 0.0f, 2.0f);
+  positions[2] = float3(4.0f, 4.0f, 2.0f);
+  positions[3] = float3(0.0f, 4.0f, 2.0f);
+  MutableSpan<int> face_offsets = source->face_offsets_for_write();
+  face_offsets[0] = 0;
+  face_offsets[1] = 4;
+  MutableSpan<int> corner_verts = source->corner_verts_for_write();
+  for (const int i : IndexRange(4)) {
+    corner_verts[i] = i;
+  }
+  bke::SpanAttributeWriter<float2> uvs =
+      source->attributes_for_write().lookup_or_add_for_write_span<float2>("UVMap",
+                                                                          bke::AttrDomain::Corner);
+  uvs.span[0] = float2(0.0f, 0.0f);
+  uvs.span[1] = float2(0.5f, 0.0f);
+  uvs.span[2] = float2(0.5f, 0.5f);
+  uvs.span[3] = float2(0.0f, 0.5f);
+  uvs.finish();
+  bke::mesh_calc_edges(*source, false, false);
+  source->tag_topology_changed();
+  source->tag_positions_changed();
+  BKE_mesh_nomain_to_mesh(source, mesh, ob);
+
+  BKE_paint_material_surface_map_free();
+  const int size = 16;
+  const std::shared_ptr<const PaintMaterialSurfaceMap> map = BKE_paint_material_surface_map_get(
+      ob, ma, size, size, 1001);
+  ASSERT_NE(map, nullptr);
+  ASSERT_EQ(map->position.size(), size * size);
+
+  /* Texel (8, 2) lies just outside the island (its centre is at 8.5 / 16 > 0.5): the padding owns
+   * it and copies the position and normal of the island texel next to it. */
+  const float4 padded_p = map->position[2 * size + 8];
+  const float4 padded_n = map->normal[2 * size + 8];
+  const float4 edge_p = map->position[2 * size + 7];
+  const float4 edge_n = map->normal[2 * size + 7];
+  EXPECT_EQ(edge_p.w, 1.0f);
+  EXPECT_EQ(padded_p.w, 1.0f);
+  EXPECT_NEAR(padded_p.x, edge_p.x, 1e-4f);
+  EXPECT_NEAR(padded_p.y, edge_p.y, 1e-4f);
+  EXPECT_NEAR(padded_p.z, edge_p.z, 1e-4f);
+  EXPECT_NEAR(padded_n.z, edge_n.z, 1e-4f);
+
+  /* Releasing the texels keeps the entry: a caller that does not need them gets it back as it is,
+   * and one that does need them gets a rebuilt map. */
+  BKE_paint_material_surface_map_texels_release(map);
+  EXPECT_TRUE(map->texels_released);
+  const std::shared_ptr<const PaintMaterialSurfaceMap> identity =
+      BKE_paint_material_surface_map_get(ob, ma, size, size, 1001, /*need_texels=*/false);
+  EXPECT_EQ(identity, map);
+  const std::shared_ptr<const PaintMaterialSurfaceMap> rebuilt =
+      BKE_paint_material_surface_map_get(ob, ma, size, size, 1001, /*need_texels=*/true);
+  ASSERT_NE(rebuilt, nullptr);
+  EXPECT_NE(rebuilt, map);
+  EXPECT_FALSE(rebuilt->texels_released);
+  EXPECT_EQ(rebuilt->position.size(), size * size);
+  EXPECT_EQ(rebuilt->key.content_hash, map->key.content_hash);
+  BKE_paint_material_surface_map_free();
+}
+
+TEST_F(PaintLayersGraphEvalTest, projected_effect_input_hash_follows_uv_adjust_and_frame)
+{
+  PaintMaterialCompositeImageLayer layer;
+  layer.mapping.projection.present = true;
+  const uint64_t base = BKE_paint_layers_effect_input_scalar_hash(layer);
+  EXPECT_EQ(BKE_paint_layers_effect_input_scalar_hash(layer), base);
+
+  PaintMaterialCompositeImageLayer frame_moved = layer;
+  frame_moved.mapping.projection.center[0] = 0.25f;
+  EXPECT_NE(BKE_paint_layers_effect_input_scalar_hash(frame_moved), base);
+
+  PaintMaterialCompositeImageLayer offset_moved = layer;
+  offset_moved.mapping.enabled = true;
+  const uint64_t adjust_on = BKE_paint_layers_effect_input_scalar_hash(offset_moved);
+  EXPECT_NE(adjust_on, base);
+  offset_moved.mapping.offset[0] = 0.1f;
+  const uint64_t offset_hash = BKE_paint_layers_effect_input_scalar_hash(offset_moved);
+  EXPECT_NE(offset_hash, adjust_on);
+  offset_moved.mapping.rotation = 0.5f;
+  EXPECT_NE(BKE_paint_layers_effect_input_scalar_hash(offset_moved), offset_hash);
+}
+
+TEST_F(PaintLayersGraphEvalTest, gpu_unsupported_reason_for_projected_rows)
+{
+  const uchar rgba[4] = {255, 0, 0, 255};
+  Image *image = add_image("ProjectedMap", 4, rgba);
+  PaintMaterialCompositeImageLayer layer;
+  layer.enabled = true;
+  layer.opacity = 1.0f;
+  layer.mapping.projection.present = true;
+
+  /* A projected row without a map is not laid. */
+  EXPECT_NE(BKE_paint_layers_gpu_unsupported_reason(layer), nullptr);
+
+  /* A plain projected map row is. */
+  layer.color_image = image;
+  EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layer), nullptr);
+
+  /* A tiled map is not. */
+  image->source = IMA_SRC_TILED;
+  EXPECT_NE(BKE_paint_layers_gpu_unsupported_reason(layer), nullptr);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

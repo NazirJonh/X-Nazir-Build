@@ -743,6 +743,8 @@ void ED_space_image_gpu_combined_stand_in_free()
   }
 }
 
+static const Object *space_image_projection_object_find(Main &bmain, const SpaceImage &sima);
+
 bool ED_space_image_update_gpu_combined(Main *bmain,
                                         SpaceImage *sima,
                                         gpu::Texture *texture,
@@ -757,14 +759,16 @@ bool ED_space_image_update_gpu_combined(Main *bmain,
   }
   CombinedPreviewLighting lighting = BKE_paint_material_combined_lighting_default();
   BKE_paint_material_combined_lighting_rotate_z(lighting, sima->material_paint_light_rot_z);
+  /* The object a projected row reads its surface from, as the CPU acquire resolves it. */
+  const Object *painted_object = space_image_projection_object_find(*bmain, *sima);
   if (!ed::material_combined::combined_preview_gpu_update(
-          *ma, lighting, sima->material_paint_pass, texture, texel_to_uv))
+          *ma, lighting, sima->material_paint_pass, texture, texel_to_uv, painted_object))
   {
     return false;
   }
   if (sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED) {
     ed::material_combined::combined_preview_gpu_verify(
-        *bmain, *ma, lighting, texture, texel_to_uv);
+        *bmain, *ma, lighting, texture, texel_to_uv, painted_object);
   }
   return true;
 }
@@ -886,8 +890,9 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
       ed::material_combined::gradient_preview_refresh_note(*ma, preview_now);
     }
     if (r_changed_region != nullptr) {
-      perf_total.note("call=%lld combined armed=%d clip=%dx%d changed=%dx%d out=%dx%d",
+      perf_total.note("call=%lld interactive=%d combined armed=%d clip=%dx%d changed=%dx%d out=%dx%d",
                       static_cast<long long>(perf_call_count),
+                      int(gradient_drag),
                       int(request.max_output.x > 0),
                       BLI_rcti_size_x(&request.clip),
                       BLI_rcti_size_y(&request.clip),

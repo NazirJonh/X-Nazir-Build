@@ -546,6 +546,11 @@ class GraphInterpreter {
         if (node.custom1 == NODE_VECTOR_MATH_FLOOR) {
           return {floorf(vector.r), floorf(vector.g), floorf(vector.b), 1.0f};
         }
+        if (node.custom1 == NODE_VECTOR_MATH_SCALE) {
+          const RGBA scale = eval_socket(
+              *bke::node_find_socket(mutable_node, SOCK_IN, "Scale"_ustr));
+          return {vector.r * scale.r, vector.g * scale.g, vector.b * scale.b, 1.0f};
+        }
         if (node.custom1 == NODE_VECTOR_MATH_DIVIDE) {
           /* Per component, zero where the divisor is zero: what an empty folder relies on. */
           const RGBA divisor = eval_socket(

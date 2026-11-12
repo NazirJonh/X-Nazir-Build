@@ -3412,7 +3412,8 @@ static uint64_t composite_mapping_hash(uint64_t hash, const PaintMaterialComposi
   }
   if (mapping.projection.present) {
     const PaintMaterialCompositeProjection &projection = mapping.projection;
-    hash = get_default_hash(hash, int(projection.space), int(projection.axis));
+    hash = get_default_hash(
+        hash, int(projection.space), int(projection.axis), int(projection.cube_layout));
     hash = get_default_hash(
         hash, projection.center[0], projection.center[1], projection.center[2]);
     hash = get_default_hash(hash,
@@ -3424,7 +3425,7 @@ static uint64_t composite_mapping_hash(uint64_t hash, const PaintMaterialComposi
     /* The clip, the depth slab and the facing fade all cut pixels without moving the frame, so
      * each enters the key as well; the facing scale carries the Flip Facing sign, and the aspect
      * factors scale the coordinates the frame factor reads. */
-    hash = get_default_hash(hash, projection.clip);
+    hash = get_default_hash(hash, projection.clip, projection.blend);
     hash = get_default_hash(hash,
                             projection.depth,
                             projection.facing,
@@ -3434,6 +3435,7 @@ static uint64_t composite_mapping_hash(uint64_t hash, const PaintMaterialComposi
                             projection.aspect[0],
                             projection.aspect[1],
                             projection.aspect[2]);
+    hash = get_default_hash(hash, projection.tiling[0], projection.tiling[1]);
     hash = get_default_hash(hash, projection.tile_number, projection.source_tiled);
     const auto hash_object = [&](const Object *object, const bool with_matrix) {
       if (object == nullptr) {

@@ -209,9 +209,14 @@ struct PaintMaterialCompositeProjection {
   int16_t space = 0;
   /** #eMaterialPaintLayerProjectionAxis. */
   int8_t axis = 0;
+  /** #eMaterialPaintLayerProjectionCubeLayout. */
+  int8_t cube_layout = 0;
   float center[3] = {};
+  /** The frame's full extent per axis: the composite divides the offset by its half. */
   float size[3] = {1.0f, 1.0f, 1.0f};
   float rotation[3] = {};
+  /** Face blend 0..1 of Box and Triplanar. */
+  float blend = 0.0f;
   /** #eMaterialPaintLayerProjectionFlag: clip the projection to its frame. */
   bool clip = true;
   /** Limit the projection to a depth slab along the axis, of the frame's size on it. */
@@ -229,6 +234,11 @@ struct PaintMaterialCompositeProjection {
    * and the frame factor read it; the depth axis keeps one.
    */
   float aspect[3] = {1.0f, 1.0f, 1.0f};
+  /**
+   * The tiling of the map over the frame per UV axis: it multiplies the UV only, never the frame
+   * factor, so the footprint stays the frame and the map repeats inside it.
+   */
+  float tiling[2] = {1.0f, 1.0f};
   /**
    * The destination UDIM tile of this bake, 1001 for the base tile. The source map is acquired and
    * sampled from the same tile when it is tiled.

@@ -266,6 +266,8 @@ inline constexpr const char *ROLE_PROJECTION_SIZE = "projection_size";
 /** #INPUT_ROLE_PROP value of a projected row's frame rotation (a Vector input, XYZ Euler radians).
  */
 inline constexpr const char *ROLE_PROJECTION_ROTATION = "projection_rotation";
+/** #INPUT_ROLE_PROP value of a projected row's face blend (a Float input, 0..1). */
+inline constexpr const char *ROLE_PROJECTION_BLEND = "projection_blend";
 /** #INPUT_ROLE_PROP value of a projected row's clip toggle (a Float input, 0 or 1). */
 inline constexpr const char *ROLE_PROJECTION_CLIP = "projection_clip";
 /** #INPUT_ROLE_PROP value of a projected row's depth-slab toggle (a Float input, 0 or 1): one
@@ -290,6 +292,12 @@ inline constexpr const char *ROLE_PROJECTION_FACING_DIR = "projection_facing_dir
  * fit is off or the row reads no image.
  */
 inline constexpr const char *ROLE_PROJECTION_ASPECT = "projection_aspect";
+/**
+ * On a projected row's group input: the tiling of the map over the frame, read from the row's
+ * mapping scale (X for the map's U, Y for its V; one while it is zero). It multiplies only the UV,
+ * never the frame factor, so the footprint stays the frame and the map repeats inside it.
+ */
+inline constexpr const char *ROLE_PROJECTION_TILING = "projection_tiling";
 /**
  * On a source-group wrapper's interface input: the row mapping value relayed into the wrapper.
  * The same three roles travel from the row group into the wrapper instance and down every private

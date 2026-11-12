@@ -154,11 +154,16 @@ static void composite_mapping_describe(const Material &ma,
     out.projection.present = true;
     out.projection.space = row.mapping.space;
     out.projection.axis = projection.axis;
+    out.projection.cube_layout = projection.cube_layout;
     copy_v3_v3(out.projection.center, projection.center);
     /* Same effective extents as the generated graph: the inline size reads one while the row takes
      * its scale from the controller. */
     BKE_paint_layers_projection_size_effective(row, out.projection.size);
-    copy_v3_v3(out.projection.rotation, projection.rotation);
+    /* Euler derived from normal+roll, matching the graph's ROLE_PROJECTION_ROTATION value. */
+    float frame_normal[3];
+    BKE_paint_layers_projection_normal_get(row, frame_normal);
+    BKE_paint_layers_projection_frame_euler(frame_normal, projection.roll, out.projection.rotation);
+    out.projection.blend = projection.blend;
     out.projection.clip = BKE_paint_layers_projection_clip_get(row);
     out.projection.depth = BKE_paint_layers_projection_depth_get(row);
     out.projection.facing = BKE_paint_layers_projection_facing_get(row);
@@ -180,6 +185,9 @@ static void composite_mapping_describe(const Material &ma,
       out.projection.aspect[u_index] = factors[0];
       out.projection.aspect[v_index] = factors[1];
     }
+    /* The row's mapping scale is its tiling here, like the graph's Tiling input. */
+    out.projection.tiling[0] = BKE_paint_layers_mapping_scale_normalize(row.mapping.scale[0]);
+    out.projection.tiling[1] = BKE_paint_layers_mapping_scale_normalize(row.mapping.scale[1]);
     out.projection.tile_number = tile_number;
     out.projection.source_tiled = source_image != nullptr &&
                                   source_image->source == IMA_SRC_TILED;

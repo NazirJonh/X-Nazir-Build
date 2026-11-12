@@ -76,7 +76,6 @@ const EnumPropertyItem rna_enum_ramp_blend_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
-
 /* What the row's maps do outside the unit UV square after the mapping. */
 const EnumPropertyItem rna_enum_material_paint_layer_mapping_wrap_items[] = {
     {MA_PAINT_LAYER_MAPPING_WRAP_REPEAT, "REPEAT", 0, "Repeat", "Repeat along both axes"},

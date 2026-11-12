@@ -279,6 +279,10 @@ void PaintLayersTreeBuilder::mapping_inputs_create(LayerGroup &group,
      * value sync writes, so a rebuilt group does not flash the ignored inline size. */
     float effective_size[3];
     BKE_paint_layers_projection_size_effective(row, effective_size);
+    float frame_normal[3];
+    BKE_paint_layers_projection_normal_get(row, frame_normal);
+    float initial_rotation[3];
+    BKE_paint_layers_projection_frame_euler(frame_normal, payload.roll, initial_rotation);
     struct ProjectionVectorInput {
       const char *suffix;
       const char *role;
@@ -294,7 +298,7 @@ void PaintLayersTreeBuilder::mapping_inputs_create(LayerGroup &group,
          projection_size_inputs_},
         {"Rotation",
          ROLE_PROJECTION_ROTATION,
-         {payload.rotation[0], payload.rotation[1], payload.rotation[2]},
+         {initial_rotation[0], initial_rotation[1], initial_rotation[2]},
          projection_rotation_inputs_},
     };
     for (const ProjectionVectorInput &input : vector_inputs) {
@@ -315,7 +319,8 @@ void PaintLayersTreeBuilder::mapping_inputs_create(LayerGroup &group,
     };
     /* The depth toggle and the facing weight ride on the factor's always-built nodes, so a toggle
      * or a slider drag only syncs their values. */
-    const ProjectionFloatInput float_inputs[2] = {
+    const ProjectionFloatInput float_inputs[3] = {
+        {"Blend", ROLE_PROJECTION_BLEND, payload.blend, projection_blend_inputs_},
         {"Clip",
          ROLE_PROJECTION_CLIP,
          (payload.flag & MA_PAINT_LAYER_PROJECTION_CLIP) != 0 ? 1.0f : 0.0f,
@@ -345,13 +350,14 @@ void PaintLayersTreeBuilder::mapping_inputs_create(LayerGroup &group,
      * reads against, plus the image-aspect fit: all synced without a rebuild. The direction is
      * unused while the row has no controller (the Vector Transform node names the shaded object
      * instead), but carrying it keeps the row group one shape. */
-    const ProjectionVector3Input factor_inputs[3] = {
+    const ProjectionVector3Input factor_inputs[4] = {
         {"Facing", ROLE_PROJECTION_FACING, {1.0f, 0.0f, 0.0f}, projection_facing_inputs_},
         {"Facing Direction",
          ROLE_PROJECTION_FACING_DIR,
          {0.0f, 0.0f, 1.0f},
          projection_facing_dir_inputs_},
         {"Aspect", ROLE_PROJECTION_ASPECT, {1.0f, 1.0f, 1.0f}, projection_aspect_inputs_},
+        {"Tiling", ROLE_PROJECTION_TILING, {1.0f, 1.0f, 1.0f}, projection_tiling_inputs_},
     };
     for (const ProjectionVector3Input &input : factor_inputs) {
       char base[200];
@@ -681,9 +687,12 @@ void PaintLayersTreeBuilder::nodes_discard(bNodeTree &tree, Span<bNode *> nodes)
   stale.clear();
   for (const auto item : projection_nodes_.items()) {
     const ProjectionNodes &projection = item.value;
-    const bool removed = nodes.contains(projection.tex_coord) || nodes.contains(projection.position) ||
-                         nodes.contains(projection.uv) || nodes.contains(projection.clip) ||
-                         nodes.contains(projection.tile_origin);
+    bool removed = nodes.contains(projection.tex_coord) || nodes.contains(projection.position) ||
+                   nodes.contains(projection.normal) || nodes.contains(projection.clip) ||
+                   nodes.contains(projection.tile_origin);
+    for (int i = 0; i < 3 && !removed; i++) {
+      removed = nodes.contains(projection.uv[i]) || nodes.contains(projection.weight[i]);
+    }
     if (removed) {
       stale.append(item.key);
     }

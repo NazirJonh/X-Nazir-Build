@@ -137,12 +137,17 @@ bool tree_root_hash_get(bNodeTree &tree, uint64_t &r_hash)
 /**
  * Mix what the UV wrap decides into \a hash: nothing while the wrap repeats on both axes (or the
  * mapping does not apply), the mode otherwise. A clip adds the factor's nodes; Repeat mixes
- * nothing, so a row that never clips hashes as it did before the option existed.
+ * nothing, so a row that never clips hashes as it did before the option existed. A projected row
+ * hashes every non-Repeat mode too: it builds no clip factor, but its map's image extension is
+ * set from the wrap at build time, so a wrap switch has to clear the kept group.
  */
 static void mapping_wrap_hash_mix(uint64_t &hash, const Material &ma, const MaterialPaintLayer &row)
 {
   const int16_t wrap = BKE_paint_layers_mapping_wrap_get(row);
-  if (wrap != MA_PAINT_LAYER_MAPPING_WRAP_REPEAT && BKE_paint_layers_mapping_remaps(ma, row)) {
+  if (wrap == MA_PAINT_LAYER_MAPPING_WRAP_REPEAT) {
+    return;
+  }
+  if (BKE_paint_layers_projection_applies(ma, row) || BKE_paint_layers_mapping_remaps(ma, row)) {
     hash = topology_hash_mix(hash, 0x100 + uint64_t(wrap));
   }
 }
@@ -485,6 +490,8 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, PAINT_LAYER_PROJECTION_HASH_VERSION);
     hash = topology_hash_mix(hash, 0x700 + uint64_t(uint16_t(layer.mapping.space)));
     hash = topology_hash_mix(hash, uint64_t(uint8_t(BKE_paint_layers_projection_axis_get(layer))));
+    hash = topology_hash_mix(
+        hash, uint64_t(uint8_t(BKE_paint_layers_projection_cube_layout_get(layer))));
     if (layer.projection_object != nullptr) {
       topology_hash_string(hash, layer.projection_object->id.name);
     }

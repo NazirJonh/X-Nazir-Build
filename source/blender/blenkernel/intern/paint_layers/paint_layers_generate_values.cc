@@ -322,7 +322,9 @@ bool values_sync_socket(Material &ma,
         BKE_paint_layers_projection_size_effective(*layer, value);
       }
       else {
-        copy_v3_v3(value, layer->projection->rotation);
+        float normal[3];
+        BKE_paint_layers_projection_normal_get(*layer, normal);
+        BKE_paint_layers_projection_frame_euler(normal, layer->projection->roll, value);
       }
     }
     else if (STREQ(role, ROLE_PROJECTION_SIZE)) {
@@ -391,12 +393,14 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
-  if (STREQ(role, ROLE_PROJECTION_CLIP)) {
+  if (STREQ(role, ROLE_PROJECTION_BLEND) || STREQ(role, ROLE_PROJECTION_CLIP)) {
     if (socket.default_value == nullptr) {
       return false;
     }
     const float value = (layer->projection == nullptr) ?
-                            1.0f :
+                            (STREQ(role, ROLE_PROJECTION_CLIP) ? 1.0f : 0.0f) :
+                        STREQ(role, ROLE_PROJECTION_BLEND) ?
+                            layer->projection->blend :
                             ((layer->projection->flag & MA_PAINT_LAYER_PROJECTION_CLIP) != 0) ?
                                 1.0f :
                                 0.0f;
@@ -449,9 +453,9 @@ bool values_sync_socket(Material &ma,
     /* The world-space direction the world normal reads against: the controller's world-to-object
      * is the one matrix a live node chain cannot name, so the sync bakes it, and the material's
      * evaluation re-runs this sync, which keeps a turned or animated controller facing exactly.
-     * The frame's own axis: which side of it the weight keeps is the Facing scale's sign, so the
-     * two normal paths share one flip. Without a controller the graph reads the shaded object
-     * through a Vector Transform node and this input stays at its identity default. */
+     * Keeps the faces that look toward the frame's +Z axis; Flip keeps the ones that look away.
+     * Without a controller the graph reads the shaded object through a Vector Transform node and
+     * this input stays at its identity default. */
     float value[3] = {0.0f, 0.0f, 1.0f};
     if (layer->projection != nullptr && layer->projection_object != nullptr) {
       float w2c[3][3];
@@ -466,8 +470,10 @@ bool values_sync_socket(Material &ma,
       const int8_t axis = BKE_paint_layers_projection_axis_get(*layer);
       value[0] = value[1] = value[2] = 0.0f;
       value[axis] = 1.0f;
+      float frame_normal[3];
+      BKE_paint_layers_projection_normal_get(*layer, frame_normal);
       float rot[3][3];
-      eul_to_mat3(rot, layer->projection->rotation);
+      BKE_paint_layers_projection_frame_matrix(frame_normal, layer->projection->roll, rot);
       mul_m3_v3(rot, value);
       mul_m3_v3(inv_w2c, value);
       normalize_v3(value);
@@ -499,6 +505,21 @@ bool values_sync_socket(Material &ma,
       value[u_index] = factors[0];
       value[v_index] = factors[1];
     }
+    copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
+    if (iface.socket_data != nullptr) {
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_PROJECTION_TILING)) {
+    if (socket.default_value == nullptr) {
+      return false;
+    }
+    /* A projected row has no UV Adjust; its mapping scale is the tiling of the map over the frame,
+     * one per UV axis, and a zeroed scale reads as one like everywhere else. */
+    const float value[3] = {BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]),
+                            BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[1]),
+                            1.0f};
     copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
     if (iface.socket_data != nullptr) {
       copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);

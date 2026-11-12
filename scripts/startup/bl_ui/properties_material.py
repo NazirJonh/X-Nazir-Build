@@ -1268,9 +1268,13 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         if row.projection_uses_axis:
             axis_index = 'XYZ'.index(row.projection_axis)
             frame.prop(row, "projection_size", index=axis_index, text="Depth")
-        frame.prop(row, "projection_rotation", text="Rotation")
+        frame.prop(row, "projection_roll", text="Roll")
         if row.projection_uses_axis:
             frame.prop(row, "projection_axis", text="Axis")
+        if row.projection_uses_blend:
+            frame.prop(row, "projection_blend", text="Blend")
+        if row.projection_uses_cube_layout:
+            frame.prop(row, "projection_cube_layout", text="Layout")
         # Ucupaint sizes its decal by the Empty itself; this mode makes the inline Size one
         # and leaves the controller's scale as the only place the frame is sized.
         size_from_empty = frame.row()
@@ -1280,6 +1284,7 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
 
         limits = layout.column(align=True)
         limits.label(text="Limits")
+        limits.prop(row, "projection_preset", text="Preset")
         limits.prop(row, "projection_clip", text="Clip to Frame")
         limits.prop(row, "projection_depth", text="Limit Depth")
         limits.prop(row, "projection_facing", text="Facing Fade")

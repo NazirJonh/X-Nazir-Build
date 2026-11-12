@@ -1377,6 +1377,14 @@ static bool region_azone_edge_poll(const ScrArea *area,
     return false;
   }
 
+  /* The Outliner footer that the display mode hides (rather than the user) is shown again by the
+   * very next visibility sync, so offering the toggle would be a button that does nothing. */
+  if (is_hidden && region->regiontype == RGN_TYPE_FOOTER && area->spacetype == SPACE_OUTLINER &&
+      (region->flag & RGN_FLAG_HIDDEN_BY_USER) == 0)
+  {
+    return false;
+  }
+
   if (!is_hidden && (U.app_flag & USER_APP_LOCK_EDGE_RESIZE)) {
     return false;
   }

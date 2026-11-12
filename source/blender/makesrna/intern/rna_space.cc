@@ -884,11 +884,12 @@ static void rna_SpaceOutliner_display_mode_update(bContext *C, PointerRNA *ptr)
   ScrArea *area = rna_area_from_space(ptr);
   if (area != nullptr) {
     /* The tool header only carries the Stack Layers controls, so it follows the display mode.
-     * `RGN_FLAG_HIDDEN_BY_USER` is left alone: a user who collapsed it keeps it collapsed. */
+     * `RGN_FLAG_HIDDEN_BY_USER` is left alone: a user who collapsed it keeps it collapsed.
+     * The footer only carries the stack view's status strip, so it follows the mode as well. */
     SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
     /* A mode the user picks is theirs: the follow no longer brings the stack back on its own. */
     ed::outliner::outliner_stack_follow_release_mode(*space_outliner);
-    ed::outliner::outliner_tool_header_visibility_sync(C, area, *space_outliner);
+    ed::outliner::outliner_stack_regions_visibility_sync(C, area, *space_outliner);
     ED_area_tag_redraw(area);
     ED_area_tag_refresh(area);
   }
@@ -930,6 +931,31 @@ static int rna_SpaceOutliner_stack_focus_name_length(PointerRNA *ptr)
   return int(strlen(ed::outliner::outliner_stack_focus_name_get(*space_outliner)));
 }
 
+static void rna_SpaceOutliner_stack_layers_view_update(bContext *C, PointerRNA *ptr)
+{
+  /* The footer belongs to the stack sub-view: switching to or from the objects list shows and
+   * hides it, the same way a display-mode change does for both strips. The sub-view also swaps
+   * the tree the main region draws. */
+  ScrArea *area = rna_area_from_space(ptr);
+  if (area != nullptr) {
+    SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+    ed::outliner::outliner_stack_regions_visibility_sync(C, area, *space_outliner);
+    ED_area_tag_redraw(area);
+  }
+}
+
+static int rna_SpaceOutliner_stack_layer_count_get(PointerRNA *ptr)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  return ed::outliner::outliner_stack_layer_count_get(*space_outliner);
+}
+
+static bool rna_SpaceOutliner_show_stack_footer_get(PointerRNA *ptr)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  return ed::outliner::outliner_stack_footer_wanted(*space_outliner);
+}
+
 static int rna_SpaceOutliner_stack_focus_sub_index_get(PointerRNA *ptr)
 {
   const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
@@ -962,8 +988,9 @@ static void rna_SpaceOutliner_follow_object_update(bContext *C, PointerRNA *ptr)
     return;
   }
   if (ScrArea *area = rna_area_from_space(ptr)) {
-    /* The follow may have changed the display mode, and the tool header exists only in one. */
-    ed::outliner::outliner_tool_header_visibility_sync(C, area, *space_outliner);
+    /* The follow may have changed the display mode or sub-view, and each strip exists only in one
+     * combination of them. */
+    ed::outliner::outliner_stack_regions_visibility_sync(C, area, *space_outliner);
     ED_area_tag_redraw(area);
   }
 }
@@ -990,7 +1017,7 @@ static void rna_SpaceOutliner_stack_pin_update(bContext *C, PointerRNA *ptr)
     return;
   }
   if (ed::outliner::outliner_stack_view_follow_resume(*C, *space_outliner) && area != nullptr) {
-    ed::outliner::outliner_tool_header_visibility_sync(C, area, *space_outliner);
+    ed::outliner::outliner_stack_regions_visibility_sync(C, area, *space_outliner);
   }
 }
 
@@ -1463,6 +1490,28 @@ static void rna_Space_show_region_footer_set(PointerRNA *ptr, bool value)
   rna_Space_bool_from_region_flag_set_by_type(ptr, RGN_TYPE_FOOTER, RGN_FLAG_HIDDEN, !value);
 }
 static void rna_Space_show_region_footer_update(bContext *C, PointerRNA *ptr)
+{
+  rna_Space_bool_from_region_flag_update_by_type(C, ptr, RGN_TYPE_FOOTER, RGN_FLAG_HIDDEN);
+}
+
+/* Outliner Footer region.
+ *
+ * The Outliner's footer visibility also follows the display mode, and that sync honors
+ * `RGN_FLAG_HIDDEN_BY_USER` so a strip the user closed stays closed. The generic property above
+ * only reads and writes `RGN_FLAG_HIDDEN`, which the next display-mode sync would undo; this
+ * variant mirrors the tool header and keeps the user's choice in the flag the sync respects. */
+static bool rna_SpaceOutliner_show_region_footer_get(PointerRNA *ptr)
+{
+  return !rna_Space_bool_from_region_flag_get_by_type(
+      ptr, RGN_TYPE_FOOTER, RGN_FLAG_HIDDEN_BY_USER);
+}
+static void rna_SpaceOutliner_show_region_footer_set(PointerRNA *ptr, bool value)
+{
+  rna_Space_bool_from_region_flag_set_by_type(
+      ptr, RGN_TYPE_FOOTER, RGN_FLAG_HIDDEN_BY_USER, !value);
+  rna_Space_bool_from_region_flag_set_by_type(ptr, RGN_TYPE_FOOTER, RGN_FLAG_HIDDEN, !value);
+}
+static void rna_SpaceOutliner_show_region_footer_update(bContext *C, PointerRNA *ptr)
 {
   rna_Space_bool_from_region_flag_update_by_type(C, ptr, RGN_TYPE_FOOTER, RGN_FLAG_HIDDEN);
 }
@@ -5623,12 +5672,23 @@ static void rna_def_space_outliner(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, "rna_SpaceOutliner_display_mode_update");
 
+  prop = RNA_def_property(srna, "show_region_footer", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_SpaceOutliner_show_region_footer_get",
+                                 "rna_SpaceOutliner_show_region_footer_set");
+  RNA_def_property_ui_text(
+      prop, "Footer", "Show the status strip below the Outliner's Stack Layers tree");
+  RNA_def_property_update(prop, 0, "rna_SpaceOutliner_show_region_footer_update");
+
   prop = RNA_def_property(srna, "stack_layers_view", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "stack_layers_view");
   RNA_def_property_enum_items(prop, stack_layers_view_items);
   RNA_def_property_ui_text(
       prop, "Stack Layers View", "Whether to browse objects or to show one object's stack");
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_SPACE_OUTLINER, "rna_SpaceOutliner_stack_layers_view_update");
 
   prop = RNA_def_property(srna, "stack_source", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "stack_source");
@@ -5692,6 +5752,23 @@ static void rna_def_space_outliner(BlenderRNA *brna)
                            "Name of the data-block the displayed stack belongs to, as the source "
                            "last resolved it; empty before the first stack is shown");
   RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_ID);
+
+  prop = RNA_def_property(srna, "stack_layer_count", PROP_INT, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_int_funcs(prop, "rna_SpaceOutliner_stack_layer_count_get", nullptr, nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Stack Layer Count",
+                           "Number of top-level layers the displayed stack reads as having; zero "
+                           "before the first stack is shown");
+
+  prop = RNA_def_property(srna, "show_stack_footer", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_boolean_funcs(prop, "rna_SpaceOutliner_show_stack_footer_get", nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Show Stack Footer",
+      "Whether the current display wants the Stack Layers status strip; the footer header's poll "
+      "reads this instead of repeating the display-mode condition");
 
   prop = RNA_def_property(srna, "stack_focus_sub_index", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_dummy_NULL_items);

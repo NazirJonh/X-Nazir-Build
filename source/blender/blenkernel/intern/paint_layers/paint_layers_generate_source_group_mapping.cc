@@ -15,12 +15,14 @@
  * owner node or its link state: owners are passed explicitly and links are read from the list.
  */
 
+#include <string>
 #include <utility>
 
 #include "BLI_map.hh"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_ustring.hh"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "BKE_lib_id.hh"
@@ -91,8 +93,28 @@ static bNodeTreeInterfaceSocket *source_group_mapping_input_ensure(bNodeTree &tr
   return socket;
 }
 
-/** The wrapper's row-mapping value inputs, in the order the chain reads them. */
-static bool source_group_mapping_interface_ensure(bNodeTree &tree)
+/** The wrapper input role of one transform effect's mapping values: the row's own role with the
+ * effect's marker appended, so an effect's inputs never collide with the row's own. */
+std::string source_group_effect_mapping_role(const char *base, const MaterialPaintLayer &effect)
+{
+  char marker_str[UUID_STRING_SIZE];
+  BLI_uuid_format(marker_str, effect.marker);
+  return std::string(base) + "_" + marker_str;
+}
+
+/** The wrapper interface input of \a effect's mapping value \a base role, or null. */
+static bNodeTreeInterfaceSocket *source_group_effect_mapping_input_find(
+    bNodeTree &tree, const char *base, const MaterialPaintLayer &effect)
+{
+  const std::string role = source_group_effect_mapping_role(base, effect);
+  return source_group_mapping_input_find(tree, role.c_str());
+}
+
+/** The wrapper's row-mapping value inputs -- the row's own, and one set per transform effect in
+ * \a effects (a Transform Mapping carries offset, scale and rotation; a Mirror its fold center;
+ * the axes are chain shape and never inputs) -- in the order the chains read them. */
+static bool source_group_mapping_interface_ensure(bNodeTree &tree,
+                                                  const Span<const MaterialPaintLayer *> effects)
 {
   static const float zero[3] = {0.0f, 0.0f, 0.0f};
   static const float one[3] = {1.0f, 1.0f, 1.0f};
@@ -122,26 +144,64 @@ static bool source_group_mapping_interface_ensure(bNodeTree &tree)
   {
     return false;
   }
+  for (const MaterialPaintLayer *effect : effects) {
+    if (effect == nullptr) {
+      continue;
+    }
+    char effect_name[160];
+    SNPRINTF(effect_name, "%s%s ", SOURCE_GROUP_MAPPING_INPUT_PREFIX, effect->name);
+    if (effect->kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR) {
+      const std::string role = source_group_effect_mapping_role(
+          SOURCE_GROUP_ROLE_MAPPING_MIRROR_CENTER, *effect);
+      if (source_group_mapping_input_ensure(
+              tree, effect_name, role.c_str(), center_default) == nullptr)
+      {
+        return false;
+      }
+      continue;
+    }
+    char label[192];
+    const std::string offset_role = source_group_effect_mapping_role(
+        SOURCE_GROUP_ROLE_MAPPING_OFFSET, *effect);
+    SNPRINTF(label, "%sOffset", effect_name);
+    if (source_group_mapping_input_ensure(tree, label, offset_role.c_str(), zero) == nullptr) {
+      return false;
+    }
+    const std::string scale_role = source_group_effect_mapping_role(
+        SOURCE_GROUP_ROLE_MAPPING_SCALE, *effect);
+    SNPRINTF(label, "%sScale", effect_name);
+    if (source_group_mapping_input_ensure(tree, label, scale_role.c_str(), one) == nullptr) {
+      return false;
+    }
+    const std::string rotation_role = source_group_effect_mapping_role(
+        SOURCE_GROUP_ROLE_MAPPING_ROTATION, *effect);
+    SNPRINTF(label, "%sRotation", effect_name);
+    if (source_group_mapping_input_ensure(tree, label, rotation_role.c_str(), zero) == nullptr) {
+      return false;
+    }
+  }
   return true;
 }
 
 /**
- * Drop the three row-mapping inputs again once the row applies no mapping. The root's interface
- * survives a refill, so inputs left by an earlier mapped build would otherwise stay. Path copies
- * need no such step: their interface is copied fresh from the source group.
+ * Drop the row-mapping inputs again once the row applies no mapping -- the row's own and any a
+ * transform effect left behind, found by their role prefix. The root's interface survives a
+ * refill, so inputs left by an earlier mapped build would otherwise stay. Path copies need no such
+ * step: their interface is copied fresh from the source group.
  */
 void source_group_mapping_interface_remove(bNodeTree &tree)
 {
-  const char *roles[4] = {SOURCE_GROUP_ROLE_MAPPING_OFFSET,
-                          SOURCE_GROUP_ROLE_MAPPING_SCALE,
-                          SOURCE_GROUP_ROLE_MAPPING_ROTATION,
-                          SOURCE_GROUP_ROLE_MAPPING_MIRROR_CENTER};
-  bool removed = false;
-  for (const char *role : roles) {
-    if (bNodeTreeInterfaceSocket *socket = source_group_mapping_input_find(tree, role)) {
-      tree.tree_interface.remove_item(reinterpret_cast<bNodeTreeInterfaceItem &>(*socket));
-      removed = true;
+  tree.ensure_interface_cache();
+  Vector<bNodeTreeInterfaceSocket *> stale;
+  for (bNodeTreeInterfaceSocket *socket : tree.interface_inputs()) {
+    const char *socket_role = prop_string_get(socket->properties, INPUT_ROLE_PROP);
+    if (socket_role != nullptr && BLI_str_startswith(socket_role, "source_mapping_")) {
+      stale.append(socket);
     }
+  }
+  bool removed = !stale.is_empty();
+  for (bNodeTreeInterfaceSocket *socket : stale) {
+    tree.tree_interface.remove_item(reinterpret_cast<bNodeTreeInterfaceItem &>(*socket));
   }
   if (!removed) {
     return;
@@ -252,15 +312,19 @@ static void source_group_image_textures_repeat(bNodeTree &tree)
  * node and every UV Map node with no layer named (the active UV; other named layers are the
  * source's own and stay untouched). The chain is the row's Mirror fold when \a mirror_axes folds
  * an axis, then `Vector Rotate` then `Mapping`, so the UVs go through the fold in the canvas UV
- * and then `S * R * uv + offset`. The rotation comes from the wrapper's rotation input, the offset
- * and scale from its other two and the fold center from its fourth; the Mapping's own Rotation
- * stays at its identity default. The outgoing links are read from #bNodeTree::links, not the
- * stale per-socket caches, and re-pointed through the Mapping. Generated nodes carry the
- * dot-prefixed names so the value sync never matches them against a source node.
+ * and then `S * R * uv + offset`. The transform effects of \a effects sit ahead of the row's own
+ * chain, first in the list closest to the UV reader, each driven by its own wrapper inputs: a
+ * Transform Mapping by its offset, scale and rotation, a Mirror by its center with the axes baked
+ * as constants. The rotation comes from the wrapper's rotation input, the offset and scale from
+ * its other two and the fold center from its fourth; the Mapping's own Rotation stays at its
+ * identity default. The outgoing links are read from #bNodeTree::links, not the stale per-socket
+ * caches, and re-pointed through the Mapping. Generated nodes carry the dot-prefixed names so the
+ * value sync never matches them against a source node.
  */
 static int source_group_mapping_insert(bNodeTree &tree,
                                        bNode &group_input,
-                                       const int16_t mirror_axes)
+                                       const int16_t mirror_axes,
+                                       const Span<const MaterialPaintLayer *> effects)
 {
   int inserted = 0;
   bNodeSocket *offset_out = source_group_mapping_input_socket(
@@ -297,9 +361,117 @@ static int source_group_mapping_insert(bNodeTree &tree,
       continue;
     }
 
+    /* The effects first, in list order: each chain reads the previous one's output, so a fold's
+     * side signs and a clip factor of a later step are evaluated where that step's fold acts.
+     * Everything one reader made is removed together when a later chain fails. */
+    Vector<bNode *> made;
+    const auto discard_made = [&]() {
+      for (bNode *node : made) {
+        bke::node_remove_node(nullptr, tree, *node, true, false);
+      }
+      return inserted;
+    };
+    bNode *uv_node = source;
+    bNodeSocket *uv_socket = uv_out;
+    float place_x = source->location[0] + 80.0f;
+    bool effects_failed = false;
+    for (const MaterialPaintLayer *effect : effects) {
+      if (effect == nullptr) {
+        continue;
+      }
+      const bool mirror = effect->kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR;
+      const int16_t axes = mirror ? BKE_paint_layers_mapping_mirror_get(*effect) : int16_t(0);
+      /* The input sockets are found through the Group Input by role; a missing one leaves the
+       * effect out rather than failing the whole wrapper. */
+      bNodeTreeInterfaceSocket *center_iface = (mirror) ? source_group_effect_mapping_input_find(
+                                                            tree,
+                                                            SOURCE_GROUP_ROLE_MAPPING_MIRROR_CENTER,
+                                                            *effect) :
+                                                          nullptr;
+      bNodeTreeInterfaceSocket *offset_iface = (!mirror) ? source_group_effect_mapping_input_find(
+                                                             tree,
+                                                             SOURCE_GROUP_ROLE_MAPPING_OFFSET,
+                                                             *effect) :
+                                                           nullptr;
+      bNodeTreeInterfaceSocket *scale_iface = (!mirror) ? source_group_effect_mapping_input_find(
+                                                            tree,
+                                                            SOURCE_GROUP_ROLE_MAPPING_SCALE,
+                                                            *effect) :
+                                                          nullptr;
+      bNodeTreeInterfaceSocket *rotation_iface = (!mirror) ?
+                                                     source_group_effect_mapping_input_find(
+                                                         tree,
+                                                         SOURCE_GROUP_ROLE_MAPPING_ROTATION,
+                                                         *effect) :
+                                                     nullptr;
+      bNodeSocket *effect_center = (center_iface != nullptr) ?
+                                       source_group_mapping_input_socket(
+                                           tree, group_input, center_iface->identifier) :
+                                       nullptr;
+      bNodeSocket *effect_offset = (offset_iface != nullptr) ?
+                                       source_group_mapping_input_socket(
+                                           tree, group_input, offset_iface->identifier) :
+                                       nullptr;
+      bNodeSocket *effect_scale = (scale_iface != nullptr) ?
+                                      source_group_mapping_input_socket(
+                                          tree, group_input, scale_iface->identifier) :
+                                      nullptr;
+      bNodeSocket *effect_rotation = (rotation_iface != nullptr) ?
+                                         source_group_mapping_input_socket(
+                                             tree, group_input, rotation_iface->identifier) :
+                                         nullptr;
+      if ((!mirror && (effect_offset == nullptr || effect_scale == nullptr ||
+                       effect_rotation == nullptr)) ||
+          (mirror && effect_center == nullptr))
+      {
+        /* The inputs a relay never wired would read identity defaults; leave the effect out. */
+        continue;
+      }
+      const MappingChain chain = mapping_chain_add(tree,
+                                                   *uv_node,
+                                                   *uv_socket,
+                                                   &group_input,
+                                                   effect_offset,
+                                                   effect_scale,
+                                                   effect_rotation,
+                                                   &group_input,
+                                                   effect_center,
+                                                   axes);
+      if (chain.mapping == nullptr) {
+        effects_failed = true;
+        break;
+      }
+      made.append(chain.rotate);
+      made.append(chain.mapping);
+      for (bNode *fold : chain.fold_nodes) {
+        made.append(fold);
+      }
+      /* Each chain sits on the source's line, after the ones before it. */
+      for (bNode *fold : chain.fold_nodes) {
+        fold->location[0] = place_x;
+        fold->location[1] = source->location[1];
+        place_x += 80.0f;
+      }
+      chain.rotate->location[0] = place_x;
+      chain.rotate->location[1] = source->location[1];
+      place_x += 80.0f;
+      chain.mapping->location[0] = place_x;
+      chain.mapping->location[1] = source->location[1];
+      place_x += 80.0f;
+      uv_node = chain.mapping;
+      uv_socket = socket_out(*chain.mapping, "Vector");
+      if (uv_socket == nullptr) {
+        effects_failed = true;
+        break;
+      }
+    }
+    if (effects_failed) {
+      return discard_made();
+    }
+
     const MappingChain chain = mapping_chain_add(tree,
-                                                 *source,
-                                                 *uv_out,
+                                                 *uv_node,
+                                                 *uv_socket,
                                                  &group_input,
                                                  offset_out,
                                                  scale_out,
@@ -308,7 +480,7 @@ static int source_group_mapping_insert(bNodeTree &tree,
                                                  center_out,
                                                  mirror_axes);
     if (chain.mapping == nullptr) {
-      return inserted;
+      return discard_made();
     }
     bNode *rotate = chain.rotate;
     bNode *mapping = chain.mapping;
@@ -319,10 +491,9 @@ static int source_group_mapping_insert(bNodeTree &tree,
       }
       bke::node_remove_node(nullptr, tree, *mapping, true, false);
       bke::node_remove_node(nullptr, tree, *rotate, true, false);
-      return inserted;
+      return discard_made();
     }
     /* The fold's nodes sit between the UV source and the rotate; place them on the same line. */
-    float place_x = source->location[0] + 80.0f;
     for (bNode *fold : chain.fold_nodes) {
       fold->location[0] = place_x;
       fold->location[1] = source->location[1];
@@ -332,6 +503,11 @@ static int source_group_mapping_insert(bNodeTree &tree,
     rotate->location[1] = source->location[1];
     mapping->location[0] = place_x + 80.0f;
     mapping->location[1] = source->location[1];
+    made.append(rotate);
+    made.append(mapping);
+    for (bNode *fold : chain.fold_nodes) {
+      made.append(fold);
+    }
 
     /* Re-point the readers: remove-and-add keeps the tree's own bookkeeping honest. */
     for (const std::pair<bNode *, bNodeSocket *> &reader : readers) {
@@ -380,15 +556,19 @@ bool source_group_mapping_present(const bNodeTree &tree)
 }
 
 /**
- * The row-mapping half of a mapped level: inputs, implicit UVs, Repeat, and the chain. Returns
- * whether a chain was actually inserted, so a source with no UV reader is not treated as mapped by
- * the clip factor or the Normal remap. \a mirror_axes names the axes the row's Mirror folds; the
- * chain then reads the fold center from the wrapper's fourth input.
+ * The row-mapping half of a mapped level: inputs (the row's own and one set per transform
+ * effect), implicit UVs, Repeat, and the chains. Returns whether a chain was actually inserted,
+ * so a source with no UV reader is not treated as mapped by the clip factor or the Normal remap.
+ * \a mirror_axes names the axes the row's Mirror folds; the chain then reads the fold center from
+ * the wrapper's fourth input. \a effects are the row's transform effects whose mapping remaps, in
+ * list order, each with its own inputs and its chain ahead of the row's own.
  */
-bool source_group_mapping_prepare(bNodeTree &tree, const int16_t mirror_axes)
+bool source_group_mapping_prepare(bNodeTree &tree,
+                                  const int16_t mirror_axes,
+                                  const Span<const MaterialPaintLayer *> effects)
 {
   source_group_implicit_uv_wire(tree);
-  if (!source_group_mapping_interface_ensure(tree)) {
+  if (!source_group_mapping_interface_ensure(tree, effects)) {
     return false;
   }
   bNode *group_input = source_group_group_input_ensure(tree);
@@ -396,7 +576,7 @@ bool source_group_mapping_prepare(bNodeTree &tree, const int16_t mirror_axes)
     return false;
   }
   nodes::update_node_declaration_and_sockets(tree, *group_input);
-  const int inserted = source_group_mapping_insert(tree, *group_input, mirror_axes);
+  const int inserted = source_group_mapping_insert(tree, *group_input, mirror_axes, effects);
   if (inserted > 0) {
     /* Tiling semantics only where the UV actually moves; a texture on Generated/Object
      * coordinates keeps the source's own extension. */
@@ -407,19 +587,21 @@ bool source_group_mapping_prepare(bNodeTree &tree, const int16_t mirror_axes)
 
 /**
  * Relay the parent's row-mapping inputs into the child path \a instance, each side found by role
- * on its own interface. An unlinked input leaves the child's Mapping at its identity default.
+ * on its own interface: the row's own four, and every transform effect's set, found by their
+ * shared role prefix. An unlinked input leaves the child's Mapping at its identity default.
  */
 void source_group_mapping_instance_wire(bNodeTree &tree,
                                                bNode &group_input,
                                                bNode &instance)
 {
-  const char *roles[4] = {SOURCE_GROUP_ROLE_MAPPING_OFFSET,
-                          SOURCE_GROUP_ROLE_MAPPING_SCALE,
-                          SOURCE_GROUP_ROLE_MAPPING_ROTATION,
-                          SOURCE_GROUP_ROLE_MAPPING_MIRROR_CENTER};
-  for (const char *role : roles) {
+  tree.ensure_interface_cache();
+  for (bNodeTreeInterfaceSocket *socket : tree.interface_inputs()) {
+    const char *socket_role = prop_string_get(socket->properties, INPUT_ROLE_PROP);
+    if (socket_role == nullptr || !BLI_str_startswith(socket_role, "source_mapping_")) {
+      continue;
+    }
     mapping_input_relay(
-        tree, group_input, source_group_mapping_input_find(tree, role), instance, role);
+        tree, group_input, socket, instance, socket_role);
   }
 }
 

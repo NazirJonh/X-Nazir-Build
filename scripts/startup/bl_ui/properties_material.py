@@ -950,6 +950,10 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         # A filter has no map or channel records: what it is told is the parameters of its kind.
         if layer.source == 'FILTER':
             layout.separator()
+            if layer.is_transform_effect:
+                # A transform effect keeps its mapping as its parameter set: the Mapping panel and
+                # the gizmo edit it, and there is nothing else on the row to draw.
+                return
             if layer.color_match_supported:
                 draw_material_color_match(layout, layer.kind_params)
             else:
@@ -1290,20 +1294,27 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
             self._draw_projection(context, layout, row)
 
         if row.mapping_space == 'UV':
+            # A transform effect keeps its mapping as its parameter set: a Mirror reads only the
+            # fold's axes and center, so the transform sliders would promise a move it never makes.
+            is_mirror_effect = row.is_transform_effect and row.filter_type == 'MIRROR'
             layout.prop(row, "mapping_enabled", text="UV Adjust")
-            col = layout.column()
-            col.enabled = row.mapping_enabled
-            col.prop(row, "mapping_offset", text="Offset")
-            sub = col.row(align=True)
-            # The tile-holding RNA properties follow the offset so the tile stays put.
-            sub.prop(row, "tile_scale", text="Scale")
-            sub.prop(row,
-                     "tile_scale_lock",
-                     text="",
-                     icon='LOCKED' if row.tile_scale_lock else 'UNLOCKED',
-                     icon_only=True)
-            col.prop(row, "tile_rotation", text="Rotation")
-            col.prop(row, "mapping_wrap", text="UV Wrap")
+            if not is_mirror_effect:
+                col = layout.column()
+                col.enabled = row.mapping_enabled
+                col.prop(row, "mapping_offset", text="Offset")
+                sub = col.row(align=True)
+                # The tile-holding RNA properties follow the offset so the tile stays put.
+                sub.prop(row, "tile_scale", text="Scale")
+                sub.prop(row,
+                         "tile_scale_lock",
+                         text="",
+                         icon='LOCKED' if row.tile_scale_lock else 'UNLOCKED',
+                         icon_only=True)
+                col.prop(row, "tile_rotation", text="Rotation")
+                if row.is_transform_effect:
+                    # Scale and Rotation turn about the pivot; moving it keeps what the effect shows.
+                    col.prop(row, "mapping_pivot", text="Pivot")
+                col.prop(row, "mapping_wrap", text="UV Wrap")
 
             if row.mapping_enabled and row.source == 'MATERIAL':
                 # The wrapper moves the active UV layer (TexCoord UV and open Image Textures) of the
@@ -1552,7 +1563,9 @@ class LAYER_MATERIAL_PT_mapping_mirror(LayerMaterialButtonsPanel, Panel):
 
     @classmethod
     def poll(cls, context):
-        return LAYER_MATERIAL_PT_mapping._shown_row(context) is not None
+        row = LAYER_MATERIAL_PT_mapping._shown_row(context)
+        # A Transform Mapping effect keeps its pivot in the mirror center: the fold is not its own.
+        return row is not None and not (row.is_transform_effect and row.filter_type == 'TRANSFORM')
 
     def draw_header(self, context):
         row = LAYER_MATERIAL_PT_mapping._shown_row(context)

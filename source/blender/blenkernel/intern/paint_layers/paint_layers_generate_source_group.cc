@@ -62,28 +62,50 @@ namespace blender::bke::paint_layers {
  */
 static constexpr uint64_t SOURCE_GROUP_FILL_VERSION = 7;
 
-uint64_t source_group_content_hash(const Material &source, const bool mapped, const int16_t mirror_axes)
+/**
+ * Mix the wrapper's mapping shape into \a hash. Whether the wrapper carries the row mapping is
+ * structural, but it lives in the hashes (with the version) so toggling it refills the group once.
+ * Slider values do not enter, so dragging a mapping value never refills. The folded axes change
+ * the wrapper's nodes the same way; the center is a value and never does. The transform effects
+ * ride the same rule: which ones remap, and each one's kind and fold axes, are chain shape; their
+ * values are relayed. The mix order is part of the stored value, so it must not change.
+ */
+static uint64_t source_group_mapping_hash_mix(uint64_t hash,
+                                              const bool mapped,
+                                              const int16_t mirror_axes,
+                                              const Span<const MaterialPaintLayer *> effects)
+{
+  hash = hash * 1000003u ^ (mapped ? 1u : 0u);
+  hash = hash * 1000003u ^ uint64_t(uint16_t(mirror_axes));
+  hash = hash * 1000003u ^ uint64_t(effects.size());
+  for (const MaterialPaintLayer *effect : effects) {
+    if (effect == nullptr) {
+      continue;
+    }
+    hash = hash * 1000003u ^ uint64_t(uint16_t(effect->kind_subtype));
+    hash = hash * 1000003u ^ uint64_t(uint16_t(BKE_paint_layers_mapping_mirror_get(*effect)));
+  }
+  return hash;
+}
+
+uint64_t source_group_content_hash(const Material &source,
+                                   const bool mapped,
+                                   const int16_t mirror_axes,
+                                   const Span<const MaterialPaintLayer *> effects)
 {
   uint64_t hash = BKE_paint_layers_source_material_tree_hash_cached(source);
   hash = hash * 1000003u ^ SOURCE_GROUP_FILL_VERSION;
-  /* Whether the wrapper carries the row mapping is structural, but it lives in the content hash
-   * (with the version) so toggling it refills the group once. Slider values do not enter here, so
-   * dragging a mapping value never refills. The folded axes change the wrapper's nodes the same
-   * way; the center is a value and never does. */
-  hash = hash * 1000003u ^ (mapped ? 1u : 0u);
-  hash = hash * 1000003u ^ uint64_t(uint16_t(mirror_axes));
-  return hash;
+  return source_group_mapping_hash_mix(hash, mapped, mirror_axes, effects);
 }
 
 uint64_t source_group_structure_hash(const Material &source,
                                      const bool mapped,
-                                     const int16_t mirror_axes)
+                                     const int16_t mirror_axes,
+                                     const Span<const MaterialPaintLayer *> effects)
 {
   uint64_t hash = BKE_paint_layers_source_structure_hash_cached(source);
   hash = hash * 1000003u ^ SOURCE_GROUP_FILL_VERSION;
-  hash = hash * 1000003u ^ (mapped ? 1u : 0u);
-  hash = hash * 1000003u ^ uint64_t(uint16_t(mirror_axes));
-  return hash;
+  return source_group_mapping_hash_mix(hash, mapped, mirror_axes, effects);
 }
 
 /** The node and socket of the source tree that feed an input, or an empty pair. */
@@ -163,10 +185,14 @@ struct SourceGroupBuild {
   const Vector<const bNode *> &path;
   const bUUID &owner_uid;
   const char *source_name;
-  /** Whether the row applies its UV mapping, so every level carries the mapping chain. */
+  /** Whether the row applies its UV mapping (or carries a remapping transform effect), so every
+   * level carries the mapping chain. */
   bool mapped;
   /** The axes the row's Mirror folds, so every mapped level grows the fold's nodes. */
   int16_t mirror_axes;
+  /** The row's transform effects whose mapping remaps, in list order: their chains sit ahead of
+   * the row's own, each driven by its own wrapper inputs. */
+  Span<const MaterialPaintLayer *> transform_effects;
 };
 
 /** One channel a level hands up: the node of the level's copy that feeds it. */
@@ -365,9 +391,10 @@ static bool source_group_level_build(const SourceGroupBuild &build,
   }
 
   if (build.mapped) {
-    /* Every level: the mapping inputs, the implicit UV wiring and the chain in front of every UV
-     * output. Path copies are fresh, so a mapped build always starts from no inputs. */
-    source_group_mapping_prepare(tree, build.mirror_axes);
+    /* Every level: the mapping inputs (the row's own and one set per transform effect), the
+     * implicit UV wiring and the chains in front of every UV output. Path copies are fresh, so a
+     * mapped build always starts from no inputs. */
+    source_group_mapping_prepare(tree, build.mirror_axes, build.transform_effects);
   }
   else if (depth == 0) {
     /* The root's interface survives a refill, so inputs left by an earlier mapped build go now. */
@@ -476,7 +503,8 @@ bool source_group_fill(Main &bmain,
                        bNodeTree &wrapper,
                        const Material &source,
                        const bool mapped,
-                       const int16_t mirror_axes)
+                       const int16_t mirror_axes,
+                       const Span<const MaterialPaintLayer *> transform_effects)
 {
   /* The interface stays: the instances of the group link into its outputs, and a refill that
    * changes no structure must not move them. */
@@ -499,8 +527,14 @@ bool source_group_fill(Main &bmain,
   if (principled == nullptr || int(group_path.size()) > SOURCE_GROUP_MAX_DEPTH) {
     return done(false);
   }
-  const SourceGroupBuild build{
-      bmain, *principled, group_path, owner_uid, source.id.name + 2, mapped, mirror_axes};
+  const SourceGroupBuild build{bmain,
+                               *principled,
+                               group_path,
+                               owner_uid,
+                               source.id.name + 2,
+                               mapped,
+                               mirror_axes,
+                               transform_effects};
   return done(source_group_level_build(build, wrapper, *source.nodetree, 0));
 }
 

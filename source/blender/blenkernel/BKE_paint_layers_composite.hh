@@ -302,6 +302,23 @@ void BKE_paint_layers_effect_input_images(const PaintMaterialCompositeImageLayer
                                           Vector<Image *> &r_images);
 
 /**
+ * The input transforms the transform effects (a Transform Mapping, a Mirror) of \a row lay over
+ * its own content: one entry per enabled effect whose own #MaterialPaintLayerMapping remaps, in
+ * the effects list's order, each with #enabled set and no projection, and a no-op effect left
+ * out. Each effect reads its own mapping -- a Transform Mapping the offset, rotation, scale and
+ * wrap; a Mirror the fold's axes and center -- so the mapping panel, the gizmo and the value sync
+ * are the ones every mapped row shares. \a channel decides whether the steps carry the
+ * tangent-Normal flag, exactly as a row mapping's description does. The one place that reads the
+ * transform kinds' mappings, so the CPU composite, the generated graph and the GPU preview cannot
+ * disagree on what a transform effect says. A correction or a mask item keeps its own placement:
+ * the transform moves what the row itself lays, not what is stamped over it.
+ */
+void BKE_paint_layers_input_transforms_get(const Material &ma,
+                                           const MaterialPaintLayer &row,
+                                           int channel,
+                                           Vector<PaintMaterialCompositeMapping> &r_steps);
+
+/**
  * Render the slice \a reader lays in \a channel at the source row's resolution. The buffers are
  * reference counted and outlive the slice cache; \a dst_rect limits a partial render to that
  * rectangle, leaving the rest zero, and is never cached. Used by the developer GPU verification.

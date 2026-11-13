@@ -226,6 +226,36 @@ static void composite_mapping_describe(const Material &ma,
   out.tangent_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
 }
 
+void BKE_paint_layers_input_transforms_get(const Material &ma,
+                                           const MaterialPaintLayer &row,
+                                           const int channel,
+                                           Vector<PaintMaterialCompositeMapping> &r_steps)
+{
+  for (const MaterialPaintLayer *effect_ptr : BKE_paint_layers_active_transform_effects(ma, row)) {
+    const MaterialPaintLayer &effect = *effect_ptr;
+    PaintMaterialCompositeMapping step;
+    step.enabled = true;
+    step.tangent_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+    if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR) {
+      /* The fold alone is the step: a Mirror reads its mapping's axes and center and nothing
+       * else, and its read repeats, the way the row mapping's Mirror does. */
+      step.mirror_axes = BKE_paint_layers_mapping_mirror_get(effect);
+      step.mirror_center[0] = effect.mapping.mirror_center[0];
+      step.mirror_center[1] = effect.mapping.mirror_center[1];
+    }
+    else {
+      /* A Transform Mapping reads the offset, rotation, scale and wrap; the fold stays the
+       * Mirror's alone. The numbers are the shared vocabulary's, so a zero scale axis reads back
+       * as one where the helpers use them. */
+      BKE_paint_layers_transform_effective_offset(effect, step.offset);
+      copy_v2_v2(step.scale, effect.mapping.scale);
+      step.rotation = effect.mapping.rotation;
+      step.wrap = effect.mapping.wrap;
+    }
+    r_steps.append(step);
+  }
+}
+
 /** The parameters of \a row's kind in the schema order the evaluator reads them in. */
 template<size_t N> static void composite_filter_params(const MaterialPaintLayer &row, float (&r_params)[N])
 {
@@ -439,6 +469,9 @@ static bool composite_row_source_describe(const Material &ma,
     const Image *mapping_image = (source.image != nullptr) ? source.image : coverage.image;
     composite_mapping_describe(
         ma, layer, channel, out.mapping, tile_number, painted_object, mapping_image);
+    /* The row's transform effects move what the row itself lays: the source's maps go through
+     * their steps first, the row's own mapping last, wherever the acquisition reads them. */
+    BKE_paint_layers_input_transforms_get(ma, layer, channel, out.input_transforms);
     /* A clipping wrap leaves the map transparent outside the unit square, but a Material row
      * covers by its source's transparency rather than by the map's alpha, so the clip has to
      * reach the coverage instead. The acquisition folds it in; a Fill or painted row keeps its
@@ -504,6 +537,9 @@ static bool composite_row_source_describe(const Material &ma,
     out.map_encoding = int8_t(paint_layer_map_encoding_get(*record));
     composite_mapping_describe(
         ma, layer, channel, out.mapping, tile_number, painted_object, record->image);
+    /* The same for a map of the row's own: a painted buffer or a Fill's image reads through the
+     * transform effects' steps first, the row's own mapping last. */
+    BKE_paint_layers_input_transforms_get(ma, layer, channel, out.input_transforms);
     return true;
   }
   /* A channel with no map: a flat value (it has some alpha, or the row would not take part). */
@@ -3093,6 +3129,11 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
   if (layer.gradient.enabled) {
     return "a Gradient generator row is not laid by the GPU path";
   }
+  /* The transform effects' steps are composed by the shader up to a fixed number; a row that
+   * carries more falls to the CPU rather than shading a step as if it were not there. */
+  if (layer.input_transforms.size() > PAINT_MATERIAL_COMBINED_INPUT_STEP_MAX) {
+    return "a row with too many transform effects is not laid by the GPU path";
+  }
   /* A projected map row is laid by the layer pass through the painted surface's map, in the six
    * modes (#composite_resample_projected is its CPU twin). What stays with the CPU: a projected row
    * that is not a plain map row (a folder, a flat colour, a slice reader), and a tiled map, whose
@@ -3103,6 +3144,12 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
     }
     if (layer.color_image->source == IMA_SRC_TILED) {
       return "a projected row reads a tiled map, which the GPU path does not lay";
+    }
+    /* A projection takes precedence over the transform effects on the CPU and in the graph, and the
+     * projected read of the shader takes no steps. Refused explicitly, so the contract is checked
+     * here instead of resting on three places happening to drop the same steps. */
+    if (!layer.input_transforms.is_empty()) {
+      return "a projected row with transform effects is not laid by the GPU path";
     }
   }
   /* A projected correction or mask item map is laid through the same frame as a row's. The CPU only

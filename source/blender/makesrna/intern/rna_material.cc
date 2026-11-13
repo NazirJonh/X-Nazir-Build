@@ -2257,6 +2257,30 @@ static void rna_MaterialPaintLayer_mapping_mirror_center_set(PointerRNA *ptr, co
   }
 }
 
+static void rna_MaterialPaintLayer_mapping_pivot_get(PointerRNA *ptr, float *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  BKE_paint_layers_mapping_mirror_center_get(*layer, value);
+}
+
+static void rna_MaterialPaintLayer_mapping_pivot_set(PointerRNA *ptr, const float *value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    /* The pivot moves without moving the content: the stored offset absorbs the difference. */
+    BKE_paint_layers_set_transform_pivot(*ma, layer, value);
+  }
+}
+
+static int rna_MaterialPaintLayer_mapping_pivot_editable(const PointerRNA *ptr, const char ** /*r_info*/)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (BKE_paint_layers_is_transform_effect(*layer) &&
+          layer->kind_subtype == MA_PAINT_LAYER_FILTER_TRANSFORM) ?
+             PROP_EDITABLE :
+             0;
+}
+
 static int rna_MaterialPaintLayer_blend_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -4149,6 +4173,11 @@ static bool rna_MaterialPaintLayer_is_map_coverage_get(PointerRNA *ptr)
   return BKE_paint_layers_is_map_coverage(*static_cast<const MaterialPaintLayer *>(ptr->data));
 }
 
+static bool rna_MaterialPaintLayer_is_transform_effect_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_is_transform_effect(*static_cast<const MaterialPaintLayer *>(ptr->data));
+}
+
 static bool rna_MaterialPaintLayer_map_paintable_get(PointerRNA *ptr)
 {
   return BKE_paint_layers_map_coverage_paintable(
@@ -5756,6 +5785,18 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      0,
      "Color Match",
      "Grade the colours of what is below from a source colour to a target one"},
+    {MA_PAINT_LAYER_FILTER_TRANSFORM,
+     "TRANSFORM",
+     0,
+     "Transform Mapping",
+     "Move, rotate and scale the UV the row's content is read at: the transform the row's own "
+     "mapping applies, as an effect over every map the row reads"},
+    {MA_PAINT_LAYER_FILTER_MIRROR,
+     "MIRROR",
+     0,
+     "Mirror",
+     "Fold the UV the row's content is read at about a center, per axis: what either side of the "
+     "center shows, both sides show"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -6970,6 +7011,16 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                            "Is Map Coverage",
                            "Whether this mask item restricts the coverage by a map (Color ID or UV "
                            "Island)");
+
+  prop = RNA_def_property(srna, "is_transform_effect", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_MaterialPaintLayer_is_transform_effect_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Is Transform Effect",
+                           "Whether this effect transforms the UV the row it hangs on reads its "
+                           "content at (a Transform Mapping or a Mirror), instead of correcting a "
+                           "colour");
 
   prop = RNA_def_property(srna, "map_paintable", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_map_paintable_get", nullptr);

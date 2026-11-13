@@ -526,6 +526,11 @@ static void VIEW3D_GGT_paint_projection(wmGizmoGroupType *gzgt)
   ED_view3d_projection_gizmo_setup(gzgt);
 }
 
+static void VIEW3D_GGT_paint_layer_uv_transform(wmGizmoGroupType *gzgt)
+{
+  ED_view3d_paint_layer_uv_transform_gizmo_setup(gzgt);
+}
+
 static void view3d_widgets()
 {
   wmGizmoMapType_Params params{SPACE_VIEW3D, RGN_TYPE_WINDOW};
@@ -535,11 +540,13 @@ static void view3d_widgets()
    * editor so an Image Editor opened before any 3D View still finds it; every space type's gizmo
    * callback runs at startup. */
   ED_gizmotypes_paint_layer_gradient();
+  ED_gizmotypes_paint_layer_uv_transform();
 
   WM_gizmogrouptype_append_and_link(gzmap_type, ed::transform::VIEW3D_GGT_xform_gizmo_context);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_paint_shape_transform);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_paint_layer_gradient);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_paint_projection);
+  WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_paint_layer_uv_transform);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_light_spot);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_light_point);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_light_area);

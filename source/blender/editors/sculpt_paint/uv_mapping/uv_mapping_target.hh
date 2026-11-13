@@ -81,6 +81,31 @@ class PaintLayerRowMappingTarget {
   /** Move the row's Mirror fold center. Value-only, so a drag never rebuilds anything. */
   bool write_mirror_center(const float2 &center);
 
+  /** Whether the row is a Transform Mapping effect, which keeps a saved pivot. */
+  bool has_pivot() const;
+
+  /** Whether the row is a Mirror effect: all fold, so the tile cage and anchor edit nothing. */
+  bool is_mirror_effect() const;
+
+  /** The effect's pivot in canvas UV. False when the row keeps none. */
+  bool read_pivot(float2 &r_pivot) const;
+
+  /** Move the effect's pivot without moving what it shows. Value-only. */
+  bool write_pivot(const float2 &pivot);
+
+  /**
+   * Set the scale (both axes) of a pivoted effect, leaving its stored offset alone: the effect's
+   * transform holds its pivot still, so a scale drag turns about it with no offset bookkeeping.
+   * Goes through the same BKE setter the Mapping panel's raw field uses, so the scale lock applies.
+   */
+  bool write_pivoted_scale(const float2 &scale);
+
+  /** As #write_pivoted_scale, for the stored rotation. */
+  bool write_pivoted_rotation(float rotation);
+
+  /** The undo step name of a pivot gesture. */
+  const char *pivot_undo_name() const;
+
   /** The undo step name of a Mirror center gesture. */
   const char *mirror_undo_name() const;
 

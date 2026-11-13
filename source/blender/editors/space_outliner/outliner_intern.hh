@@ -968,6 +968,11 @@ const EnumPropertyItem *stack_effect_correction_type_itemf(bContext *C,
                                                            PointerRNA * /*ptr*/,
                                                            PropertyRNA * /*prop*/,
                                                            bool *r_free);
+/** The effects of the "Transform" submenu: the ones that move what the row reads. */
+const EnumPropertyItem *stack_effect_transform_type_itemf(bContext *C,
+                                                          PointerRNA * /*ptr*/,
+                                                          PropertyRNA * /*prop*/,
+                                                          bool *r_free);
 /** The Anchor Point entries of the Add Effect menu, listed after its submenus. */
 const EnumPropertyItem *stack_effect_anchor_type_itemf(bContext *C,
                                                       PointerRNA * /*ptr*/,
@@ -1173,6 +1178,7 @@ void OUTLINER_OT_stack_layer_effect_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_new(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_pattern(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_correction(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_effect_add_transform(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_anchor(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_anchor_reader(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot);

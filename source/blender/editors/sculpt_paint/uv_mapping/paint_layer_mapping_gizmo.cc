@@ -110,6 +110,16 @@ struct LayerMappingGizmoGroup {
   bool custom_pivot = false;
   float2 custom_pivot_map = float2(0.5f);
   bUUID custom_pivot_marker = {};
+
+  /**
+   * The saved pivot of a Transform Mapping effect, in canvas UV, synced from the row on every draw
+   * and drag start. It replaces the session pivot above for such a row: it is a canvas point whose
+   * sample stays put while scale and rotation change, so rotate and scale drags turn about it and
+   * the anchor shows it.
+   */
+  bool has_pivot = false;
+  float2 pivot_uv = float2(0.0f);
+  float2 start_pivot = float2(0.0f);
 };
 
 /** The cage's corners (bottom-left, bottom-right, top-right, top-left) and centre in region px. */
@@ -200,10 +210,19 @@ UvMappingScaleAxes scale_axes(const MappingHandle handle)
 /** The anchor's pivot: the one the user placed, else the centre of the mapped tile. */
 float2 pivot_for_handle(const LayerMappingGizmoGroup &ggd, const UvMappingXform &xform)
 {
+  if (ggd.has_pivot) {
+    return ggd.pivot_uv;
+  }
   if (ggd.custom_pivot && BLI_uuid_equal(ggd.custom_pivot_marker, ggd.session_marker)) {
     return uv_mapping_footprint_point(xform, ggd.custom_pivot_map);
   }
   return uv_mapping_footprint_center(xform);
+}
+
+/** Take the saved pivot of a Transform Mapping effect from \a target, or drop it for any other row. */
+void pivot_sync(LayerMappingGizmoGroup &ggd, const PaintLayerRowMappingTarget &target)
+{
+  ggd.has_pivot = target.read_pivot(ggd.pivot_uv);
 }
 
 /**
@@ -360,6 +379,16 @@ void finish_drag(bContext *C, LayerMappingGizmoGroup &ggd, const bool commit)
           ED_undo_push(C, target.mirror_undo_name());
         }
       }
+      else if (ggd.handle == MappingHandle::Anchor && ggd.has_pivot) {
+        /* Moving the saved pivot leaves the mapping alone, so the xform comparison below would see
+         * nothing: its own step records it. */
+        float2 current;
+        if (target.read_pivot(current) &&
+            math::distance_squared(current, ggd.start_pivot) > 1e-12f)
+        {
+          ED_undo_push(C, target.pivot_undo_name());
+        }
+      }
       else {
         UvMappingXform current;
         if (target.read(current)) {
@@ -375,6 +404,9 @@ void finish_drag(bContext *C, LayerMappingGizmoGroup &ggd, const bool commit)
     }
     else if (ggd.handle == MappingHandle::MirrorCenter) {
       target.write_mirror_center(ggd.start_mirror_center);
+    }
+    else if (ggd.handle == MappingHandle::Anchor && ggd.has_pivot) {
+      target.write_pivot(ggd.start_pivot);
     }
     else {
       target.write(ggd.start_xform);
@@ -414,6 +446,9 @@ void begin_drag(bContext *C,
       ggd.start_mirror_center = float2(center[0], center[1]);
     }
   }
+
+  pivot_sync(ggd, target);
+  ggd.start_pivot = ggd.pivot_uv;
 
   /* The anchor keeps its place on a press and follows the mouse once it moves, so a plain click on
    * it changes nothing. */
@@ -536,6 +571,18 @@ wmOperatorStatus layer_mapping_gizmo_modal(bContext *C,
 
   if (ggd->handle == MappingHandle::Anchor) {
     anchor_place(*ggd, *region, *event);
+    if (ggd->has_pivot) {
+      /* A saved pivot follows the anchor live; the content stays where it is. */
+      PaintLayerRowMappingTarget target;
+      if (target.resolve(*C) && target.material() == ggd->session_material &&
+          BLI_uuid_equal(target.marker(), ggd->session_marker) &&
+          target.write_pivot(ggd->drag_pivot_uv))
+      {
+        ggd->pivot_uv = ggd->drag_pivot_uv;
+        notify_mapping_changed(C, target.material(), region);
+        return OPERATOR_RUNNING_MODAL;
+      }
+    }
     ED_region_tag_redraw(region);
     return OPERATOR_RUNNING_MODAL;
   }
@@ -714,9 +761,19 @@ void layer_mapping_gizmo_refresh(const bContext *C, wmGizmoGroup *gzgroup)
   PaintLayerRowMappingTarget target;
   const bool show = target.resolve(*C);
 
+  /* A Mirror effect is all fold: the tile cage and its anchor would edit values it never reads, so
+   * only its center cross is offered. */
+  const bool tile_handles = show && !target.is_mirror_effect();
+
   if (show) {
-    ggd->gz_cage->flag &= ~WM_GIZMO_HIDDEN;
-    ggd->gz_anchor->flag &= ~WM_GIZMO_HIDDEN;
+    if (tile_handles) {
+      ggd->gz_cage->flag &= ~WM_GIZMO_HIDDEN;
+      ggd->gz_anchor->flag &= ~WM_GIZMO_HIDDEN;
+    }
+    else {
+      ggd->gz_cage->flag |= WM_GIZMO_HIDDEN;
+      ggd->gz_anchor->flag |= WM_GIZMO_HIDDEN;
+    }
 
     const bool locked = target.scale_locked();
     RNA_enum_set(ggd->gz_cage->ptr,
@@ -725,15 +782,22 @@ void layer_mapping_gizmo_refresh(const bContext *C, wmGizmoGroup *gzgroup)
                      (locked ? ED_GIZMO_CAGE_XFORM_FLAG_SCALE_UNIFORM :
                                ED_GIZMO_CAGE_XFORM_FLAG_SCALE));
 
-    if (locked) {
-      ggd->gz_lock_locked->flag &= ~WM_GIZMO_HIDDEN;
+    if (!tile_handles) {
+      ggd->gz_lock_locked->flag |= WM_GIZMO_HIDDEN;
       ggd->gz_lock_unlocked->flag |= WM_GIZMO_HIDDEN;
+      ggd->gz_lock_outline->flag |= WM_GIZMO_HIDDEN;
     }
     else {
-      ggd->gz_lock_locked->flag |= WM_GIZMO_HIDDEN;
-      ggd->gz_lock_unlocked->flag &= ~WM_GIZMO_HIDDEN;
+      if (locked) {
+        ggd->gz_lock_locked->flag &= ~WM_GIZMO_HIDDEN;
+        ggd->gz_lock_unlocked->flag |= WM_GIZMO_HIDDEN;
+      }
+      else {
+        ggd->gz_lock_locked->flag |= WM_GIZMO_HIDDEN;
+        ggd->gz_lock_unlocked->flag &= ~WM_GIZMO_HIDDEN;
+      }
+      ggd->gz_lock_outline->flag &= ~WM_GIZMO_HIDDEN;
     }
-    ggd->gz_lock_outline->flag &= ~WM_GIZMO_HIDDEN;
     if (target.mirror_applies()) {
       ggd->gz_mirror->flag &= ~WM_GIZMO_HIDDEN;
     }
@@ -812,8 +876,12 @@ void layer_mapping_gizmo_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
   ggd->gz_cage->matrix_offset[3][0] = center.x;
   ggd->gz_cage->matrix_offset[3][1] = center.y;
 
+  pivot_sync(*ggd, target);
   float2 anchor_uv;
-  if (ggd->drag_active && ggd->handle == MappingHandle::Anchor) {
+  if (ggd->has_pivot) {
+    anchor_uv = ggd->pivot_uv;
+  }
+  else if (ggd->drag_active && ggd->handle == MappingHandle::Anchor) {
     anchor_uv = ggd->drag_pivot_uv;
   }
   else if (ggd->custom_pivot && BLI_uuid_equal(ggd->custom_pivot_marker, target.marker())) {

@@ -1136,12 +1136,37 @@ MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
   {
     return nullptr;
   }
+  /* A transform effect moves the maps its owner reads: only a row that lays or reads content of
+   * its own takes one, and the owner's own kind is the one place that rule lives. */
+  if ((kind->flags & PAINT_LAYER_KIND_TRANSFORMS_INPUT) != 0 &&
+      !BKE_paint_layers_transform_input_supported(*owner))
+  {
+    return nullptr;
+  }
   MaterialPaintLayer *effect = paint_layer_alloc(ma, name != nullptr ? name : kind->name);
   effect->role = MA_PAINT_LAYER_ROLE_EFFECT;
   effect->source = MA_PAINT_LAYER_SOURCE_FILTER;
   effect->kind_subtype = filter;
   paint_layer_kind_params_init(*effect);
   BLI_addtail(&owner->effects, effect);
+  /* A transform effect carries no channel records: it moves the UV every map its owner reads
+   * (#PAINT_LAYER_KIND_TRANSFORMS_INPUT), so a record would promise a per-channel choice the kind
+   * cannot make. */
+  if (paint_layer_kind_transforms_input(*effect)) {
+    if (filter == MA_PAINT_LAYER_FILTER_TRANSFORM) {
+      /* The pivot of a Transform Mapping lives in the mirror center the DNA starts at the canvas
+       * middle; it starts at the UV origin instead, where the unpivoted `S * R * uv + offset` of
+       * the row's own mapping turns, until the user moves it. */
+      zero_v2(effect->mapping.mirror_center);
+    }
+    if (filter == MA_PAINT_LAYER_FILTER_MIRROR) {
+      /* A Mirror is all fold: with the fold off and no axis it would lay nothing and expose no
+       * center to drag, so it starts folding U about the middle of the canvas. */
+      effect->mapping.flag |= MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED;
+    }
+    BKE_paint_layers_tag_edited(ma);
+    return effect;
+  }
   /* Linked first, as the record is added through the ownership check. An owner narrowed to one
    * channel gives the filter that channel; otherwise it starts working in the first channel of the
    * material's set (Base Color unless the user removed it), and the others are switched on like a
@@ -1755,6 +1780,28 @@ float BKE_paint_layers_mask_contrast_apply(const float coverage, const float con
 bool BKE_paint_layers_is_map_coverage(const MaterialPaintLayer &item)
 {
   return paint_layer_kind_is_map_coverage(item);
+}
+
+bool BKE_paint_layers_is_transform_effect(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_transforms_input(row);
+}
+
+bool BKE_paint_layers_transform_input_supported(const MaterialPaintLayer &owner)
+{
+  /* A transform effect moves the maps the owner itself reads: an owner that lays a map of its own
+   * (a Paint row, a Fill with a map or one that will carry one) or reads a source at its UV (a
+   * Material row) has something to move. A folder composites children rather than reading a map,
+   * a Mesh Map row reads the shared atlas without a mapping, and a generator's UV line is its own
+   * parameter, so none of them takes one. */
+  switch (owner.source) {
+    case MA_PAINT_LAYER_SOURCE_IMAGE:
+    case MA_PAINT_LAYER_SOURCE_CONSTANT:
+    case MA_PAINT_LAYER_SOURCE_MATERIAL:
+      return true;
+    default:
+      return false;
+  }
 }
 
 bool BKE_paint_layers_map_coverage_paintable(const MaterialPaintLayer &item)
@@ -2684,6 +2731,13 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, const
     return false;
   }
   SET_FLAG_FROM_TEST(layer->flag, enabled, MA_PAINT_LAYER_ENABLED);
+  if (paint_layer_kind_transforms_input(*layer)) {
+    /* A transform effect has no opacity input to fold the flag into: switching it off removes its
+     * chain from the owner's reads, and the clip and Normal remap with it. That is a different
+     * shape of graph, and of the CPU and GPU descriptions, so it takes the full rebuild. */
+    BKE_paint_layers_tag_edited(ma);
+    return true;
+  }
   /* The enabled flag is folded into the row's opacity input (see BKE_paint_layers_effective_opacity),
    * so switching a row off is a value, not a different shape of graph. */
   BKE_paint_layers_tag_value_edited(ma);
@@ -2746,6 +2800,14 @@ bool BKE_paint_layers_fill_reads_map(const Material &ma,
 
 bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintLayer &layer)
 {
+  /* A transform effect's mapping is its own parameter set, not a mapping of a map it owns: the
+   * fold and the transform it keeps are what the owner's content reads go through, wherever the
+   * owner reads a map (see #BKE_paint_layers_input_transforms_get). Its mapping is supported
+   * whatever the owner lays, so the panel, the gizmo and the value sync are the ones every
+   * mapped row shares. */
+  if (paint_layer_kind_transforms_input(layer)) {
+    return true;
+  }
   /* A Material row reads its source at the row's UV: a live Image Texture and a rendered channel
    * map are read through the row's Mapping, and the source graph is wrapped with the same
    * transform inside its wrapper. The source must exist; a material with no node tree has nothing
@@ -2828,6 +2890,20 @@ bool BKE_paint_layers_mapping_is_identity(const MaterialPaintLayer &layer)
          fabsf(BKE_paint_layers_mapping_scale_normalize(layer.mapping.scale[1]) - 1.0f) <=
              epsilon &&
          fabsf(layer.mapping.rotation) <= epsilon;
+}
+
+blender::Vector<const MaterialPaintLayer *, 4> BKE_paint_layers_active_transform_effects(
+    const Material &ma, const MaterialPaintLayer &row)
+{
+  blender::Vector<const MaterialPaintLayer *, 4> effects;
+  for (const MaterialPaintLayer &effect : row.effects) {
+    if ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 && paint_layer_kind_transforms_input(effect) &&
+        BKE_paint_layers_mapping_remaps(ma, effect))
+    {
+      effects.append(&effect);
+    }
+  }
+  return effects;
 }
 
 bool BKE_paint_layers_mapping_remaps(const Material &ma, const MaterialPaintLayer &layer)
@@ -2915,6 +2991,18 @@ bool BKE_paint_layers_mapping_set_scale(Material &ma,
   return true;
 }
 
+static void transform_pivot_term(const MaterialPaintLayerMapping &mapping,
+                                 const float scale[2],
+                                 float rotation,
+                                 float r_term[2]);
+
+/** Whether \a layer is a Transform Mapping effect, the one kind that keeps a pivot. */
+static bool transform_has_pivot(const MaterialPaintLayer &layer)
+{
+  return paint_layer_kind_transforms_input(layer) &&
+         layer.kind_subtype == MA_PAINT_LAYER_FILTER_TRANSFORM;
+}
+
 bool BKE_paint_layers_mapping_set_values(Material &ma,
                                          MaterialPaintLayer *layer,
                                          const float offset[2],
@@ -2932,6 +3020,14 @@ bool BKE_paint_layers_mapping_set_values(Material &ma,
     next[1] = next[0];
   }
   copy_v2_v2(layer->mapping.offset, offset);
+  if (transform_has_pivot(*layer)) {
+    /* The caller (the gizmo) speaks in the offset the canvas shows, the effective one: store what
+     * leaves that offset once the pivot's share is added back. */
+    float term[2];
+    transform_pivot_term(layer->mapping, next, rotation, term);
+    layer->mapping.offset[0] -= term[0];
+    layer->mapping.offset[1] -= term[1];
+  }
   copy_v2_v2(layer->mapping.scale, next);
   layer->mapping.rotation = rotation;
   mapping_tag_value_edit(ma, *layer, remapped_before);
@@ -3038,7 +3134,11 @@ static bool mapping_edit_holding_tile(Material &ma, MaterialPaintLayer *layer, E
   if (!edit()) {
     return false;
   }
-  mapping_hold_tile_center(layer, center);
+  /* A pivoted effect already holds its pivot still whatever the scale and rotation do, which is
+   * the point it turns about; only a row without one holds its tile. */
+  if (!transform_has_pivot(*layer)) {
+    mapping_hold_tile_center(layer, center);
+  }
   /* The edit tagged against the offset it found; the held offset may land the row on the other side
    * of the identity boundary, which only a rebuild can follow. */
   if (remapped_before != BKE_paint_layers_mapping_remaps(ma, *layer)) {
@@ -3068,6 +3168,59 @@ bool BKE_paint_layers_mapping_set_rotation_holding_tile(Material &ma,
   return mapping_edit_holding_tile(ma, layer, [&] {
     return BKE_paint_layers_mapping_set_rotation(ma, layer, rotation);
   });
+}
+
+/** What the pivot adds to the stored offset: `p - S * R * p`, for the given scale and rotation. */
+static void transform_pivot_term(const MaterialPaintLayerMapping &mapping,
+                                 const float scale[2],
+                                 const float rotation,
+                                 float r_term[2])
+{
+  const float *pivot = mapping.mirror_center;
+  const float cos_rot = cosf(rotation);
+  const float sin_rot = sinf(rotation);
+  const float scale_x = BKE_paint_layers_mapping_scale_normalize(scale[0]);
+  const float scale_y = BKE_paint_layers_mapping_scale_normalize(scale[1]);
+  r_term[0] = pivot[0] - scale_x * (cos_rot * pivot[0] - sin_rot * pivot[1]);
+  r_term[1] = pivot[1] - scale_y * (sin_rot * pivot[0] + cos_rot * pivot[1]);
+}
+
+void BKE_paint_layers_transform_effective_offset(const MaterialPaintLayer &layer, float r_offset[2])
+{
+  copy_v2_v2(r_offset, layer.mapping.offset);
+  if (!paint_layer_kind_transforms_input(layer) || layer.kind_subtype != MA_PAINT_LAYER_FILTER_TRANSFORM)
+  {
+    return;
+  }
+  /* `S * R * (uv - p) + p + offset` folded into the plain `S * R * uv + offset'` every backend
+   * already evaluates, so the pivot needs no change of the CPU, the graph or the GPU math. */
+  float term[2];
+  transform_pivot_term(layer.mapping, layer.mapping.scale, layer.mapping.rotation, term);
+  r_offset[0] += term[0];
+  r_offset[1] += term[1];
+}
+
+bool BKE_paint_layers_set_transform_pivot(Material &ma,
+                                          MaterialPaintLayer *layer,
+                                          const float pivot[2])
+{
+  if (!paint_layer_owned(ma, layer) || pivot == nullptr || !isfinite(pivot[0]) ||
+      !isfinite(pivot[1]) || !paint_layer_kind_transforms_input(*layer) ||
+      layer->kind_subtype != MA_PAINT_LAYER_FILTER_TRANSFORM)
+  {
+    return false;
+  }
+  /* Moving the pivot must not move the content: keep the effective offset, so the stored one
+   * absorbs the difference (the way Transform Selection moves its pivot). */
+  float effective[2];
+  BKE_paint_layers_transform_effective_offset(*layer, effective);
+  copy_v2_v2(layer->mapping.mirror_center, pivot);
+  float with_new_pivot[2];
+  BKE_paint_layers_transform_effective_offset(*layer, with_new_pivot);
+  layer->mapping.offset[0] += effective[0] - with_new_pivot[0];
+  layer->mapping.offset[1] += effective[1] - with_new_pivot[1];
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
 }
 
 bool BKE_paint_layers_mapping_set_scale_lock_holding_tile(Material &ma,
@@ -3160,6 +3313,11 @@ bool BKE_paint_layers_mapping_mirror_applies(const Material &ma, const MaterialP
 
 bool BKE_paint_layers_mapping_mirror_available(const Material &ma, const MaterialPaintLayer &layer)
 {
+  /* A Mirror effect row is all fold: its mapping's axes and center are its whole parameter set,
+   * so the Mirror UI is what edits it. Every other row keeps the rule it had. */
+  if (paint_layer_kind_transforms_input(layer)) {
+    return layer.kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR;
+  }
   return layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
          BKE_paint_layers_mapping_supported(ma, layer);
 }

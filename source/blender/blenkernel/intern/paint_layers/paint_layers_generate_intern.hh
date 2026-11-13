@@ -28,12 +28,16 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
 
+#include "BLI_listbase_iterator.hh"
 #include "BLI_map.hh"
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 
+#include "DNA_material_types.h"
 #include "DNA_uuid_types.h"
+
+#include "paint_layers_kind.hh"
 
 namespace blender {
 
@@ -763,7 +767,8 @@ bool source_group_fill(Main &bmain,
                        bNodeTree &wrapper,
                        const Material &source,
                        bool mapped = false,
-                       int16_t mirror_axes = 0);
+                       int16_t mirror_axes = 0,
+                       Span<const MaterialPaintLayer *> transform_effects = {});
 
 /** Delete the private group copies of \a owner_uid that no instance node uses any more. */
 void source_group_paths_prune(Main &bmain, const bUUID &owner_uid);
@@ -794,28 +799,43 @@ bool source_group_normal_live(const Material &source);
 struct SourceGroupMapping {
   bool mapped = false;
   int16_t axes = 0;
+  /** The row's transform effects whose mapping remaps, in the effects list's order: the chains
+   * the wrapper inserts ahead of the row's own, and the per-effect inputs it carries. */
+  Vector<const MaterialPaintLayer *> effects;
 };
 
-/** The mapping of the source group of  layer; the axes only count while the row remaps. */
+/** The mapping of the source group of layer; the axes only count while the row remaps, and the
+ * transform effects ride along: their chains are part of the same wrapper. */
 inline SourceGroupMapping source_group_mapping_get(const Material &ma,
                                                    const MaterialPaintLayer &layer)
 {
   SourceGroupMapping mapping;
   mapping.mapped = BKE_paint_layers_mapping_remaps(ma, layer);
   mapping.axes = mapping.mapped ? BKE_paint_layers_mapping_mirror_get(layer) : 0;
+  for (const MaterialPaintLayer *effect : BKE_paint_layers_active_transform_effects(ma, layer)) {
+    mapping.effects.append(effect);
+    mapping.mapped = true;
+  }
   return mapping;
 }
 
 /** The hash the source group stores in its topology words: the source's content and the fill's
  * version. \a mapped is part of it because a mapped wrapper carries Mapping nodes and their three
  * interface inputs, so toggling the row's mapping has to refill the group once; \a mirror_axes is
- * part of it the same way, because a folding wrapper carries the fold's nodes. */
+ * part of it the same way, because a folding wrapper carries the fold's nodes; \a effects is part
+ * of it because their chains and their own inputs are, and a fold's axes are chain shape. */
 uint64_t source_group_content_hash(const Material &source,
                                    bool mapped = false,
-                                   int16_t mirror_axes = 0);
+                                   int16_t mirror_axes = 0,
+                                   Span<const MaterialPaintLayer *> effects = {});
 
 /** The wrapper interface input whose #INPUT_ROLE_PROP is \a role, whatever its name. */
 bNodeTreeInterfaceSocket *source_group_mapping_input_find(bNodeTree &tree, const char *role);
+
+/** The wrapper input role of one transform effect's mapping values: \a base with the effect's
+ * marker appended, so an effect's inputs never collide with the row's own. The same words both
+ * sides of the relay speak. */
+std::string source_group_effect_mapping_role(const char *base, const MaterialPaintLayer &effect);
 
 /** Whether \a tree actually carries a generated row-mapping chain (a source with no UV reader
  * gets the interface inputs but no chain, and must not be treated as mapped). */
@@ -844,7 +864,15 @@ bNodeSocket *source_group_side_sign_find(bNodeTree &tree, bNode **r_node);
  * the chain grows the fold's nodes beside the transform. \return whether a chain was inserted, so
  * a level without a UV reader is not treated as mapped.
  */
-bool source_group_mapping_prepare(bNodeTree &tree, int16_t mirror_axes = 0);
+/**
+ * The mapping half of a mapped level: inputs (the row's own and one set per transform effect),
+ * the implicit UV wiring, the effects' chains and the row's chain in front of every UV reader.
+ * \a effects are the row's transform effects whose mapping remaps, in list order. Returns whether
+ * a chain was actually inserted.
+ */
+bool source_group_mapping_prepare(bNodeTree &tree,
+                                  int16_t mirror_axes = 0,
+                                  Span<const MaterialPaintLayer *> effects = {});
 
 /** Drop the value inputs again once the row applies no mapping (the root keeps its interface). */
 void source_group_mapping_interface_remove(bNodeTree &tree);
@@ -858,10 +886,11 @@ bool source_group_color_reads_mapped_uv(const bNodeTree &tree, const bNode &node
 /** The same without the socket values: what a group filled from the source keeps while they move.
  * \a mapped is part of it too: a mapped wrapper carries Mapping nodes, so a toggle must not be
  * mistaken for a value-only edit by the refresh's in-place sync; \a mirror_axes for the same
- * reason. */
+ * reason, and \a effects because their chains and their own inputs are. */
 uint64_t source_group_structure_hash(const Material &source,
                                      bool mapped = false,
-                                     int16_t mirror_axes = 0);
+                                     int16_t mirror_axes = 0,
+                                     Span<const MaterialPaintLayer *> effects = {});
 
 /** Remove every node of \a tree, leaving its interface untouched. */
 void tree_clear_nodes(Main &bmain, bNodeTree &tree);

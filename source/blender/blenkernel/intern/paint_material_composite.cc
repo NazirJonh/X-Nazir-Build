@@ -2150,18 +2150,21 @@ static void composite_image_own(ImBuf *ibuf, Vector<CompositeImageLock> &r_locks
  * canvas axes, then offset. An axis that repeats wraps with floor; one that clips is range-tested.
  */
 struct CompositeMappingTransform {
-  float scale_x;
-  float scale_y;
-  float cos_rot;
-  float sin_rot;
-  float offset_u;
-  float offset_v;
+  float scale_x = 1.0f;
+  float scale_y = 1.0f;
+  float cos_rot = 1.0f;
+  float sin_rot = 0.0f;
+  float offset_u = 0.0f;
+  float offset_v = 0.0f;
   bool mirror_u = false;
   bool mirror_v = false;
   float mirror_center_u = 0.5f;
   float mirror_center_v = 0.5f;
   bool repeat_u = true;
   bool repeat_v = true;
+
+  /* The identity; only the unused slots of #CompositeMappingChain::steps hold it. */
+  CompositeMappingTransform() = default;
 
   explicit CompositeMappingTransform(const PaintMaterialCompositeMapping &mapping)
       : scale_x(BKE_paint_layers_mapping_scale_normalize(mapping.scale[0])),
@@ -2197,10 +2200,10 @@ struct CompositeMappingTransform {
     return mirror_v ? BKE_paint_layers_mapping_mirror_side(v, mirror_center_v) : 1.0f;
   }
 
-  /** The mapped coordinate of the canvas point (\a u, \a v). \return false outside the square on
-   * an axis that clips. Only a clipping axis is range-tested: a wrapped one can round to 1. The
-   * fold reads the canvas UV the painting addresses, before the transform moves it. */
-  bool apply(const float u, const float v, float &r_u, float &r_v) const
+  /** The mapped coordinate of the canvas point (\a u, \a v), with no repeat: the chain floors the
+   * composed lookup at its end, and a step whose axis clips only reports the texel transparent.
+   * \return false outside the square on an axis that clips. */
+  bool apply_fold_affine(const float u, const float v, float &r_u, float &r_v) const
   {
     float fu = u;
     float fv = v;
@@ -2214,38 +2217,167 @@ struct CompositeMappingTransform {
     const float rv = fu * sin_rot + fv * cos_rot;
     r_u = ru * scale_x + offset_u;
     r_v = rv * scale_y + offset_v;
+    return !((!repeat_u && (r_u < 0.0f || r_u >= 1.0f)) ||
+             (!repeat_v && (r_v < 0.0f || r_v >= 1.0f)));
+  }
+
+  /** The mapped coordinate of the canvas point (\a u, \a v). \return false outside the square on
+   * an axis that clips. Only a clipping axis is range-tested: a wrapped one can round to 1. The
+   * fold reads the canvas UV the painting addresses, before the transform moves it. */
+  bool apply(const float u, const float v, float &r_u, float &r_v) const
+  {
+    if (!apply_fold_affine(u, v, r_u, r_v)) {
+      return false;
+    }
     if (repeat_u) {
       r_u -= floorf(r_u);
     }
     if (repeat_v) {
       r_v -= floorf(r_v);
     }
-    return !((!repeat_u && (r_u < 0.0f || r_u >= 1.0f)) ||
-             (!repeat_v && (r_v < 0.0f || r_v >= 1.0f)));
+    return true;
   }
 };
 
 /**
- * Resample \a src onto a \a ref_width x \a ref_height grid through a row's UV mapping, as a float
- * RGBA premultiplied scene-linear ImBuf the caller owns.
+ * The composed read of a row's own map: the transform effects' steps first, in the effects list's
+ * order, then the row's own mapping, the order the generated graph composes the same effects in.
+ * Every step folds about its center and then transforms; an axis a step clips makes the texel
+ * transparent, and the composed lookup repeats at the end, the way the graph's Image Texture
+ * extension repeats the composed lookup it is fed (a clipping step has already declared the texel
+ * transparent, so flooring an in-range coordinate is the identity it reads as).
+ */
+struct CompositeMappingChain {
+  /** The most steps one read composes (#PAINT_MATERIAL_COMPOSITE_INPUT_TRANSFORM_MAX transform
+   * effects plus the row's own mapping). The description leaves the extras out. */
+  static constexpr int MAX_STEPS = PAINT_MATERIAL_COMPOSITE_INPUT_TRANSFORM_MAX + 1;
+
+  CompositeMappingTransform steps[MAX_STEPS];
+  int steps_num = 0;
+  /** The composed map holds tangent-space normals: the read also remaps the vectors. */
+  bool tangent_normal = false;
+
+  bool is_identity() const
+  {
+    return steps_num == 0;
+  }
+
+  /** Whether any step clips an axis, so a texel can fall outside the square. */
+  bool clips() const
+  {
+    for (int i = 0; i < steps_num; i++) {
+      if (steps[i].clips()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The composed lookup of the canvas point (\a u, \a v). \return false when a step's clipping
+   * axis puts the texel outside the square. \a r_step_sides, when given, receives the fold's side
+   * sign per step at the coordinate that enters it, for the tangent-Normal remap below.
+   */
+  bool apply(const float u,
+             const float v,
+             float &r_u,
+             float &r_v,
+             float (*r_step_sides)[2] = nullptr) const
+  {
+    float cu = u;
+    float cv = v;
+    for (int i = 0; i < steps_num; i++) {
+      const CompositeMappingTransform &step = steps[i];
+      if (r_step_sides != nullptr) {
+        /* The side signs are per-texel, taken where the step's fold acts: on the coordinate the
+         * step reads, which is the previous step's output. */
+        r_step_sides[i][0] = step.side_u(cu);
+        r_step_sides[i][1] = step.side_v(cv);
+      }
+      if (!step.apply_fold_affine(cu, cv, cu, cv)) {
+        return false;
+      }
+    }
+    r_u = cu - floorf(cu);
+    r_v = cv - floorf(cv);
+    return true;
+  }
+
+  /**
+   * The covariant counterpart of the composed read, for an encoded tangent normal: the inverse
+   * Jacobian of the chain, applied from the last step to the first, each step's side signs the
+   * ones \a step_sides recorded for this texel. The magnitudes do not turn a direction, only the
+   * signs of the scales do.
+   */
+  void remap_tangent_normal(const float (*step_sides)[2], float r_xy[2]) const
+  {
+    float nx = r_xy[0];
+    float ny = r_xy[1];
+    for (int i = steps_num - 1; i >= 0; i--) {
+      const CompositeMappingTransform &step = steps[i];
+      const float fx = (step.scale_x < 0.0f ? -1.0f : 1.0f) * nx;
+      const float fy = (step.scale_y < 0.0f ? -1.0f : 1.0f) * ny;
+      /* The UV transform of a step is `S * R * fold`, whose inverse on a direction is
+       * `side * R^T * S^-1`, the fold's side signs acting on the canvas axes after the rotation
+       * back. Composing the steps, the last one's inverse acts first. */
+      nx = step_sides[i][0] * (step.cos_rot * fx + step.sin_rot * fy);
+      ny = step_sides[i][1] * (-step.sin_rot * fx + step.cos_rot * fy);
+    }
+    r_xy[0] = nx;
+    r_xy[1] = ny;
+  }
+};
+
+/**
+ * The chain a map read goes through: \a row's own mapping last, the transform effects' steps
+ * first in \a input_steps' order, only the enabled ones. The row's mapping joins only when it is
+ * enabled, so a row that maps through its effects alone composes them alone.
+ */
+static CompositeMappingChain composite_mapping_chain_build(
+    const PaintMaterialCompositeMapping &mapping,
+    const Span<PaintMaterialCompositeMapping> input_steps)
+{
+  CompositeMappingChain chain;
+  chain.tangent_normal = mapping.tangent_normal;
+  for (const PaintMaterialCompositeMapping &step : input_steps) {
+    if (chain.steps_num == CompositeMappingChain::MAX_STEPS) {
+      break;
+    }
+    chain.steps[chain.steps_num++] = CompositeMappingTransform(step);
+  }
+  if (mapping.enabled && chain.steps_num < CompositeMappingChain::MAX_STEPS) {
+    chain.steps[chain.steps_num++] = CompositeMappingTransform(mapping);
+  }
+  return chain;
+}
+
+/**
+ * Resample \a src onto a \a ref_width x \a ref_height grid through a composed UV mapping, as a
+ * float RGBA premultiplied scene-linear ImBuf the caller owns.
  *
  * Each reference texel centre `((x + 0.5) / W, (y + 0.5) / H)` is transformed exactly like the
- * generated Mapping node chain does -- rotate around Z, then scale, then offset -- and the source
- * is read bilinearly at `u * W_src - 0.5` with Repeat edges, the texel-centre convention of the
- * Image Texture node. The taps are decoded to linear and filtered premultiplied, the way that node
+ * generated node chain does -- the transform effects' fold and rotate/scale/offset steps first,
+ * the row's own mapping last, the composed lookup repeating at the end -- and the source is read
+ * bilinearly at `u * W_src - 0.5` with Repeat edges, the texel-centre convention of the Image
+ * Texture node. The taps are decoded to linear and filtered premultiplied, the way that node
  * filters before it un-premultiplies; the evaluator straightens the result on read, like every
  * float map. The grey a mask reduces (mean) is therefore read after the mapping.
  */
 static ImBuf *composite_resample_mapped(const ImBuf *src,
                                         const int ref_width,
                                         const int ref_height,
-                                        const PaintMaterialCompositeMapping &mapping)
+                                        const CompositeMappingChain &chain)
 {
   if (src == nullptr || ref_width <= 0 || ref_height <= 0 || src->x <= 0 || src->y <= 0) {
     return nullptr;
   }
   bke::paint_perf::ScopedTimer perf_timer("composite_resample_mapped");
-  perf_timer.note("src=%dx%d -> %dx%d wrap=%d", src->x, src->y, ref_width, ref_height, mapping.wrap);
+  perf_timer.note("src=%dx%d -> %dx%d steps=%d",
+                  src->x,
+                  src->y,
+                  ref_width,
+                  ref_height,
+                  chain.steps_num);
   const bool src_is_float = src->byte_buffer.data == nullptr && src->float_buffer.data != nullptr;
   if (!src_is_float && src->byte_buffer.data == nullptr) {
     return nullptr;
@@ -2277,12 +2409,6 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
   const bool decode_by_table = decode && !src_is_float && colorspace != nullptr &&
                                IMB_colormanagement_space_name_is_srgb(
                                    IMB_colormanagement_colorspace_get_name(colorspace));
-  const CompositeMappingTransform transform(mapping);
-  /* The direction remap of a tangent normal below needs the parts of the transform. */
-  const float scale_x = transform.scale_x;
-  const float scale_y = transform.scale_y;
-  const float cos_rot = transform.cos_rot;
-  const float sin_rot = transform.sin_rot;
   /* One straight-linear tap at texel (tx, ty), re-premultiplied for the filter below: byte buffers
    * are straight-stored, float buffers premultiplied-stored, the convention the tile decode
    * assumes. */
@@ -2332,13 +2458,16 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
     const float v = (float(y) + 0.5f) / float(ref_height);
     for (int x = 0; x < ref_width; x++) {
       const float u = (float(x) + 0.5f) / float(ref_width);
-      /* Rotate first, then scale along the canvas axes: the transform the gizmo's rectangle shows,
-       * which keeps a non-uniform scale from shearing the pattern. An axis that clips reads
-       * transparent outside [0, 1); the row covers by the map's own alpha, so the texel leaves the
-       * coverage there, which is what the generated graph's clip factor does to the map's Alpha. */
+      /* The transform effects' steps first, the row's own mapping last: rotate first, then scale
+       * along the canvas axes, the transform the gizmo's rectangle shows, which keeps a
+       * non-uniform scale from shearing the pattern. An axis that clips reads transparent outside
+       * [0, 1); the row covers by the map's own alpha, so the texel leaves the coverage there,
+       * which is what the generated graph's clip factor does to the map's Alpha. The composed
+       * lookup repeats at the end, the way the graph's Image Texture extension does. */
       float uu;
       float vv;
-      const bool inside = transform.apply(u, v, uu, vv);
+      float step_sides[CompositeMappingChain::MAX_STEPS][2];
+      const bool inside = chain.apply(u, v, uu, vv, step_sides);
       float *p = out + (int64_t(y) * ref_width + x) * 4;
       if (!inside) {
         p[0] = p[1] = p[2] = p[3] = 0.0f;
@@ -2359,25 +2488,20 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
         p[k] = (1.0f - a) * (1.0f - b) * t00[k] + a * (1.0f - b) * t10[k] +
                (1.0f - a) * b * t01[k] + a * b * t11[k];
       }
-      if (mapping.tangent_normal && p[3] > 0.0f) {
-        /* The mapping moved only the read point; the tangent-space vectors follow it. `R^T * S`
-         * (flipped by the scale's sign, then rotated back) is the covariant counterpart of the
-         * UV transform `S * R`; the magnitude of the scale does not turn a direction. The Mirror
-         * fold turns the component along each folded axis per texel, by the side of its center
-         * the canvas point reads from, the same per-texel flip the graph's side-sign vector does.
-         * Un-premultiply first so the alpha does not skew the decode. */
+      if (chain.tangent_normal && p[3] > 0.0f) {
+        /* The mapping moved only the read point; the tangent-space vectors follow it. Each step's
+         * inverse on a direction is `side * R^T * S^-1` (flipped by the scale's sign, then rotated
+         * back), the covariant counterpart of that step's `S * R * fold`; the magnitude of the
+         * scale does not turn a direction. A Mirror fold turns the component along each folded
+         * axis per texel, by the side of its center the coordinate entering the step reads from --
+         * the same per-texel flip the graph's side-sign vector does. The last step's inverse acts
+         * first. Un-premultiply first so the alpha does not skew the decode. */
         const float inv_alpha = 1.0f / p[3];
-        const float nx = 2.0f * p[0] * inv_alpha - 1.0f;
-        const float ny = 2.0f * p[1] * inv_alpha - 1.0f;
+        float normal_xy[2] = {2.0f * p[0] * inv_alpha - 1.0f, 2.0f * p[1] * inv_alpha - 1.0f};
         const float nz = 2.0f * p[2] * inv_alpha - 1.0f;
-        const float rx = (scale_x < 0.0f ? -1.0f : 1.0f);
-        const float ry = (scale_y < 0.0f ? -1.0f : 1.0f);
-        const float fx = rx * nx;
-        const float fy = ry * ny;
-        /* The fold's side signs act on the canvas axes, so they come after the rotation back: the
-         * UV transform is `S * R * fold`, whose inverse on a direction is `side * R^T * S^-1`. */
-        p[0] = (0.5f * transform.side_u(u) * (cos_rot * fx + sin_rot * fy) + 0.5f) * p[3];
-        p[1] = (0.5f * transform.side_v(v) * (-sin_rot * fx + cos_rot * fy) + 0.5f) * p[3];
+        chain.remap_tangent_normal(step_sides, normal_xy);
+        p[0] = (0.5f * normal_xy[0] + 0.5f) * p[3];
+        p[1] = (0.5f * normal_xy[1] + 0.5f) * p[3];
         p[2] = (0.5f * nz + 0.5f) * p[3];
       }
     }
@@ -2486,13 +2610,17 @@ static void composite_mesh_map_remap(ImBuf *&r_ibuf,
 }
 
 /**
- * Replace an acquired map buffer by its UV-mapped resample when the row remaps it. A null resample
- * keeps the acquired buffer, so a mapping never fails the stack, it just reads unmapped. One owned
- * buffer per mapped map, reused for every pixel and tile of the evaluation; nothing is allocated
- * per pixel.
+ * Replace an acquired map buffer by its UV-mapped resample when the row remaps it: the transform
+ * effects' steps first (\a input_steps, in the effects list's order), the row's own mapping last.
+ * A null resample keeps the acquired buffer, so a mapping never fails the stack, it just reads
+ * unmapped. One owned buffer per mapped map, reused for every pixel and tile of the evaluation;
+ * nothing is allocated per pixel. A projection takes precedence over the whole chain: the frame
+ * is the row's placement, and a transform effect left out of a projected read stays out (the
+ * generated graph leaves it out the same way).
  */
 static void composite_mapped_remap(ImBuf *&r_ibuf,
                                    const PaintMaterialCompositeMapping &mapping,
+                                   const Span<PaintMaterialCompositeMapping> input_steps,
                                    const int ref_width,
                                    const int ref_height,
                                    Vector<CompositeImageLock> &r_locks)
@@ -2513,10 +2641,11 @@ static void composite_mapped_remap(ImBuf *&r_ibuf,
     }
     return;
   }
-  if (!mapping.enabled) {
+  if (!mapping.enabled && input_steps.is_empty()) {
     return;
   }
-  if (ImBuf *mapped = composite_resample_mapped(r_ibuf, ref_width, ref_height, mapping)) {
+  const CompositeMappingChain chain = composite_mapping_chain_build(mapping, input_steps);
+  if (ImBuf *mapped = composite_resample_mapped(r_ibuf, ref_width, ref_height, chain)) {
     /* The source buffer stays locked; the owned resample is what the evaluator reads. */
     composite_image_own(mapped, r_locks);
     r_ibuf = mapped;
@@ -2617,7 +2746,8 @@ ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
     }
   }
   else if (use_mapping != nullptr && use_mapping->enabled) {
-    mapped = composite_resample_mapped(src, ref_width, ref_height, *use_mapping);
+    const CompositeMappingChain chain = composite_mapping_chain_build(*use_mapping, {});
+    mapped = composite_resample_mapped(src, ref_width, ref_height, chain);
     if (mapped != nullptr) {
       read = mapped;
     }
@@ -2660,17 +2790,19 @@ ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
  * owned buffer read as a grey with full influence, which the evaluator multiplies exactly like any
  * coverage map. The row's mask items still apply on top, in their usual order.
  *
- * The transform is the one #composite_resample_mapped applies: rotate around Z first, then scale,
- * then offset; an axis that repeats wraps with floor, a clipping one range-tests.
+ * The transform is the one #composite_resample_mapped applies: the transform effects' steps first,
+ * the row's own mapping last; an axis any step clips range-tests, and the composed lookup repeats
+ * at the end.
  */
 static void composite_clip_coverage_fold(PaintMaterialCompositeLayer &r_layer,
                                          const PaintMaterialCompositeMapping &mapping,
+                                         const Span<PaintMaterialCompositeMapping> input_steps,
                                          const int ref_width,
                                          const int ref_height,
                                          Vector<CompositeImageLock> &r_locks)
 {
-  const CompositeMappingTransform transform(mapping);
-  if (ref_width <= 0 || ref_height <= 0 || !transform.clips()) {
+  const CompositeMappingChain chain = composite_mapping_chain_build(mapping, input_steps);
+  if (ref_width <= 0 || ref_height <= 0 || !chain.clips()) {
     return;
   }
   const bool has_map = r_layer.mask_ibuf != nullptr;
@@ -2707,7 +2839,7 @@ static void composite_clip_coverage_fold(PaintMaterialCompositeLayer &r_layer,
         const float u = (float(x) + 0.5f) / float(ref_width);
         float uu;
         float vv;
-        const bool inside = transform.apply(u, v, uu, vv);
+        const bool inside = chain.apply(u, v, uu, vv);
         float value = 0.0f;
         if (inside) {
           value = 1.0f;
@@ -2753,7 +2885,8 @@ static ImBuf *composite_buffer_to_eval_grid(ImBuf *ibuf,
     return ibuf;
   }
   const PaintMaterialCompositeMapping identity;
-  ImBuf *resampled = composite_resample_mapped(ibuf, eval_width, eval_height, identity);
+  const CompositeMappingChain chain = composite_mapping_chain_build(identity, {});
+  ImBuf *resampled = composite_resample_mapped(ibuf, eval_width, eval_height, chain);
   if (resampled == nullptr) {
     return ibuf;
   }
@@ -2809,7 +2942,12 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       if (layer.color_ibuf == nullptr) {
         return false;
       }
-      composite_mapped_remap(layer.color_ibuf, image_layer.mapping, ref_width, ref_height, r_locks);
+      composite_mapped_remap(layer.color_ibuf,
+                             image_layer.mapping,
+                             image_layer.input_transforms,
+                             ref_width,
+                             ref_height,
+                             r_locks);
       if (image_layer.is_mesh_map) {
         composite_mesh_map_remap(layer.color_ibuf,
                                  ref_width,
@@ -2842,14 +2980,19 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         return false;
       }
       /* A source coverage map reads through the row's mapping too, the same transform the
-       * generated graph applies to it. It is resampled on its own even when it shares the colour
-       * image: the colour pass may carry the covariant Normal remap, which would corrupt a
-       * coverage scalar. */
-      if (image_layer.mapping.enabled) {
+       * generated graph applies to it, the transform effects' steps included: the coverage follows
+       * the content it decides the visibility of. It is resampled on its own even when it shares
+       * the colour image: the colour pass may carry the covariant Normal remap, which would
+       * corrupt a coverage scalar. */
+      if (image_layer.mapping.enabled || !image_layer.input_transforms.is_empty()) {
         PaintMaterialCompositeMapping coverage_mapping = image_layer.mapping;
         coverage_mapping.tangent_normal = false;
-        composite_mapped_remap(
-            layer.mask_ibuf, coverage_mapping, ref_width, ref_height, r_locks);
+        composite_mapped_remap(layer.mask_ibuf,
+                               coverage_mapping,
+                               image_layer.input_transforms,
+                               ref_width,
+                               ref_height,
+                               r_locks);
       }
       layer.mask_ibuf = composite_buffer_to_eval_grid(
           layer.mask_ibuf, ref_width, ref_height, r_locks);
@@ -2882,7 +3025,8 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         }
         else {
           /* Resampled before the grey is reduced, so the grey is read after the mapping. */
-          composite_mapped_remap(buffer.ibuf, item.mapping, ref_width, ref_height, r_locks);
+          composite_mapped_remap(
+              buffer.ibuf, item.mapping, {}, ref_width, ref_height, r_locks);
         }
         buffer.ibuf = composite_buffer_to_eval_grid(buffer.ibuf, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
@@ -2906,7 +3050,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
                                                        item.coverage_mapping.projection.tile_number);
         if (buffer.coverage_ibuf != nullptr) {
           composite_mapped_remap(
-              buffer.coverage_ibuf, item.coverage_mapping, ref_width, ref_height, r_locks);
+              buffer.coverage_ibuf, item.coverage_mapping, {}, ref_width, ref_height, r_locks);
           buffer.coverage_ibuf = composite_buffer_to_eval_grid(
               buffer.coverage_ibuf, ref_width, ref_height, r_locks);
           buffer.coverage_colorspace_name = composite_buffer_colorspace_name(
@@ -2986,7 +3130,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         }
         else {
           composite_mapped_remap(
-              buffer.ibuf, correction.mapping, ref_width, ref_height, r_locks);
+              buffer.ibuf, correction.mapping, {}, ref_width, ref_height, r_locks);
         }
         buffer.ibuf = composite_buffer_to_eval_grid(buffer.ibuf, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
@@ -3078,10 +3222,15 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
     }
     /* A clipping wrap of a Material row reaches its coverage as a 0/1 factor, since the row does
      * not cover through its map's alpha. Folded after the row's own coverage is acquired and
-     * before the mask items are read, which still multiply on top in the evaluator. */
+     * before the mask items are read, which still multiply on top in the evaluator. The transform
+     * effects' steps clip the coverage the same way, the whole chain being what the map reads. */
     if (image_layer.mapping_clips_coverage) {
-      composite_clip_coverage_fold(
-          layer, image_layer.mapping, ref_width, ref_height, r_locks);
+      composite_clip_coverage_fold(layer,
+                                   image_layer.mapping,
+                                   image_layer.input_transforms,
+                                   ref_width,
+                                   ref_height,
+                                   r_locks);
     }
     r_layers.append(std::move(layer));
   }
@@ -3592,6 +3741,12 @@ uint64_t BKE_paint_material_composite_stack_hash(
       hash = get_default_hash(hash, paint_layer_curves_hash(*layer.adjustment_curves));
     }
     hash = composite_mapping_hash(get_default_hash(hash, layer.mapping.enabled), layer.mapping);
+    /* The transform effects' steps move which texel the row's own maps read, so they move the hash
+     * the same way the row's own mapping does: a slider on a Transform Mapping or a Mirror is a
+     * pixel edit no image uid sees. */
+    for (const PaintMaterialCompositeMapping &step : layer.input_transforms) {
+      hash = composite_mapping_hash(get_default_hash(hash, true), step);
+    }
     /* A correction changes the colour and the coverage: its map (by session uid), its blend and its
      * opacity all have to move the hash, or an edit would keep serving the cached composite. */
     for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {

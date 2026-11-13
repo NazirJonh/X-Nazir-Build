@@ -2045,11 +2045,29 @@ static void live_image_settings_copy(bNode &map, const bNode *source_node)
   }
 }
 
+NodeOutput PaintLayersTreeBuilder::transform_normal_remap_apply(bNodeTree &tree,
+                                                                const MaterialPaintLayer &row,
+                                                                NodeOutput color,
+                                                                Vector<bNode *> *r_nodes)
+{
+  const Vector<const MaterialPaintLayer *, 4> transforms =
+      BKE_paint_layers_active_transform_effects(ma_, row);
+  for (const int index : transforms.index_range()) {
+    const MaterialPaintLayer &effect = *transforms[transforms.size() - 1 - index];
+    color = this->normal_remap_add(tree, effect, color, r_nodes);
+  }
+  return color;
+}
+
 void PaintLayersTreeBuilder::source_group_mapping_wire(bNodeTree &tree,
                                                        const MaterialPaintLayer &layer,
                                                        bNode &instance)
 {
-  if (!BKE_paint_layers_mapping_remaps(ma_, layer)) {
+  /* The wrapper carries the row's own mapping, and one set of inputs per transform effect: a row
+   * without a mapping of its own still wires its effects' values in. */
+  const Vector<const MaterialPaintLayer *, 4> transform_effects =
+      BKE_paint_layers_active_transform_effects(ma_, layer);
+  if (!BKE_paint_layers_mapping_remaps(ma_, layer) && transform_effects.is_empty()) {
     return;
   }
   bNode *group_input = nullptr;
@@ -2077,6 +2095,26 @@ void PaintLayersTreeBuilder::source_group_mapping_wire(bNodeTree &tree,
     bNodeTreeInterfaceSocket *const *iface = inputs->lookup_ptr(&layer);
     if (iface != nullptr) {
       mapping_input_relay(tree, *group_input, *iface, instance, role);
+    }
+  }
+  /* The transform effects' values travel into their own wrapper inputs, the roles the effect's
+   * marker names, exactly as the row's own four do. */
+  for (const MaterialPaintLayer *effect_ptr : transform_effects) {
+    const MaterialPaintLayer &effect = *effect_ptr;
+    const std::pair<Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> *, const char *>
+        effect_wires[4] = {
+            {&mapping_offset_inputs_, SOURCE_GROUP_ROLE_MAPPING_OFFSET},
+            {&mapping_scale_inputs_, SOURCE_GROUP_ROLE_MAPPING_SCALE},
+            {&mapping_rotation_inputs_, SOURCE_GROUP_ROLE_MAPPING_ROTATION},
+            {&mapping_mirror_center_inputs_, SOURCE_GROUP_ROLE_MAPPING_MIRROR_CENTER},
+        };
+    for (const auto &[inputs, base_role] : effect_wires) {
+      bNodeTreeInterfaceSocket *const *iface = inputs->lookup_ptr(&effect);
+      if (iface == nullptr) {
+        continue;
+      }
+      const std::string role = source_group_effect_mapping_role(base_role, effect);
+      mapping_input_relay(tree, *group_input, *iface, instance, role.c_str());
     }
   }
 }
@@ -2175,6 +2213,7 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
         shown = {map, map_color};
         if (mapped && ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
           shown = this->normal_remap_add(tree, ctx.layer, shown, &source_nodes);
+          shown = this->transform_normal_remap_apply(tree, ctx.layer, shown, &source_nodes);
         }
       }
       if (shown.socket == nullptr) {
@@ -2213,11 +2252,12 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
       }
       grid_.place(*map, layout::Column::Source, 0);
       /* A Material row reads its source at the row's UV: a live Image Texture and a map rendered
-       * from the source both take the row Mapping. */
+       * from the source both take the row Mapping, the transform effects' steps in front of it. */
       const bool mapped = this->mapping_apply(tree, ctx.layer, *map, source_nodes);
       out.color = {map, color_out};
       if (mapped && ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
         out.color = this->normal_remap_add(tree, ctx.layer, out.color, &source_nodes);
+        out.color = this->transform_normal_remap_apply(tree, ctx.layer, out.color, &source_nodes);
       }
       out.content_alpha = {map, alpha_out};
       break;
@@ -2301,42 +2341,53 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
    * the source's Alpha, never the colour map's own alpha, so clipping the map's alpha would not
    * hide the row. The same factor clips the content alpha, so a channel that tracks it agrees.
    * The mapping applies only to a source that reads the UVs, and the CPU clips on that same
-   * condition (#composite_row_source_describe), so the two never disagree on the row. */
-  if (BKE_paint_layers_mapping_remaps(ma_, ctx.layer)) {
-    const NodeOutput clip = this->mapping_clip_factor(tree, ctx.layer, source_nodes);
-    if (clip.node != nullptr && clip.socket != nullptr) {
-      const auto multiply = [&](const NodeOutput value) -> NodeOutput {
-        bNode *product = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
-        bNodeSocket *a = (product != nullptr) ? socket_in(*product, "Value") : nullptr;
-        bNodeSocket *b = (product != nullptr) ? socket_in(*product, "Value_001") : nullptr;
-        bNodeSocket *result = (product != nullptr) ? socket_out(*product, "Value") : nullptr;
-        if (product == nullptr || a == nullptr || b == nullptr || result == nullptr ||
-            value.node == nullptr || value.socket == nullptr)
-        {
-          return {};
-        }
-        product->custom1 = NODE_MATH_MULTIPLY;
-        grid_.place_extra(*product);
-        source_nodes.append(product);
-        bke::node_add_link(tree, *value.node, *value.socket, *product, *a);
-        bke::node_add_link(tree, *clip.node, *clip.socket, *product, *b);
-        return {product, result};
-      };
+   * condition (#composite_row_source_describe), so the two never disagree on the row. The
+   * transform effects clip over their own chains' lookups, the factors multiplied in like the
+   * CPU's per-step clip does. */
+  const Vector<const MaterialPaintLayer *, 4> transform_effects =
+      BKE_paint_layers_active_transform_effects(ma_, ctx.layer);
+  if (BKE_paint_layers_mapping_remaps(ma_, ctx.layer) || !transform_effects.is_empty()) {
+    const auto multiply = [&](const NodeOutput value, const NodeOutput mask) -> NodeOutput {
+      bNode *product = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+      bNodeSocket *a = (product != nullptr) ? socket_in(*product, "Value") : nullptr;
+      bNodeSocket *b = (product != nullptr) ? socket_in(*product, "Value_001") : nullptr;
+      bNodeSocket *result = (product != nullptr) ? socket_out(*product, "Value") : nullptr;
+      if (product == nullptr || a == nullptr || b == nullptr || result == nullptr ||
+          value.node == nullptr || value.socket == nullptr || mask.node == nullptr ||
+          mask.socket == nullptr)
+      {
+        return {};
+      }
+      product->custom1 = NODE_MATH_MULTIPLY;
+      grid_.place_extra(*product);
+      source_nodes.append(product);
+      bke::node_add_link(tree, *value.node, *value.socket, *product, *a);
+      bke::node_add_link(tree, *mask.node, *mask.socket, *product, *b);
+      return {product, result};
+    };
+    const auto fold = [&](const NodeOutput mask) {
+      if (mask.node == nullptr || mask.socket == nullptr) {
+        return;
+      }
       if (out.coverage.socket != nullptr) {
-        const NodeOutput clipped = multiply(out.coverage);
+        const NodeOutput clipped = multiply(out.coverage, mask);
         if (clipped.socket != nullptr) {
           out.coverage = clipped;
         }
       }
       else {
-        out.coverage = clip;
+        out.coverage = mask;
       }
       if (out.content_alpha.socket != nullptr) {
-        const NodeOutput clipped = multiply(out.content_alpha);
+        const NodeOutput clipped = multiply(out.content_alpha, mask);
         if (clipped.socket != nullptr) {
           out.content_alpha = clipped;
         }
       }
+    };
+    fold(this->mapping_clip_factor(tree, ctx.layer, source_nodes));
+    for (const MaterialPaintLayer *effect : transform_effects) {
+      fold(this->mapping_clip_factor(tree, *effect, source_nodes));
     }
   }
   layout::frame_add(tree, "Source", source_nodes);
@@ -2935,8 +2986,11 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
     }
     if (read.mapped && ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
         out.color.socket != nullptr) {
-      /* The Mapping moved only the read point; the tangent-space vectors follow it. */
+      /* The Mapping moved only the read point; the tangent-space vectors follow it. The row's own
+       * chain's inverse acts first, then the transform effects' in reverse list order: the
+       * composition the CPU resample applies to the same steps. */
       out.color = this->normal_remap_add(tree, ctx.layer, out.color, &source_nodes);
+      out.color = this->transform_normal_remap_apply(tree, ctx.layer, out.color, &source_nodes);
     }
     /* A projected read has already re-expressed its vectors inside #map_read_apply (it needs the
      * stored vectors, not the re-expressed ones); nothing follows it here. */
@@ -2957,8 +3011,14 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
      * say with `color_alpha_coverage = false`. An unwired coverage is the factor's one. */
     if (!paint_layer_map_alpha_is_data(ctx.record)) {
       /* A clipping UV wrap or the projection frame takes the part outside out of the coverage, and
-       * with it the content alpha, which starts from the coverage. */
+       * with it the content alpha, which starts from the coverage. The transform effects clip the
+       * same way, each over its own chain's lookup, exactly as the CPU's per-step clip does. */
       out.coverage = this->mapping_clip_alpha(tree, ctx.layer, read.alpha, source_nodes);
+      for (const MaterialPaintLayer *effect :
+           BKE_paint_layers_active_transform_effects(ma_, ctx.layer))
+      {
+        out.coverage = this->mapping_clip_alpha(tree, *effect, out.coverage, source_nodes);
+      }
       out.content_alpha = out.coverage;
     }
     layout::frame_add(tree, "Source", source_nodes);

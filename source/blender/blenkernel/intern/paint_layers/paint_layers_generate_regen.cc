@@ -173,7 +173,7 @@ class LayerTreeFactory {
       }
     }
     bool current = false;
-    const auto [mapped, mirror_axes] = source_group_mapping_get(ma_, layer);
+    const SourceGroupMapping mapping = source_group_mapping_get(ma_, layer);
     if (group == nullptr) {
       group = bke::node_tree_add_tree(&bmain_, name, "ShaderNodeTree");
       if (group == nullptr) {
@@ -188,7 +188,8 @@ class LayerTreeFactory {
     else {
       uint64_t stored = 0;
       current = tree_topology_hash_get(*group, stored) &&
-                stored == source_group_content_hash(*layer.material, mapped, mirror_axes);
+                stored == source_group_content_hash(
+                              *layer.material, mapping.mapped, mapping.axes, mapping.effects);
       if (!STREQ(group->id.name + 2, name)) {
         BKE_id_rename(bmain_, group->id, name);
       }
@@ -199,15 +200,25 @@ class LayerTreeFactory {
       /* A fill replaces the private copies of the groups the source is reached through, which are
        * ID references that appeared or disappeared. */
       created_ = true;
-      if (!source_group_fill(bmain_, *group, *layer.material, mapped, mirror_axes)) {
+      if (!source_group_fill(bmain_,
+                             *group,
+                             *layer.material,
+                             mapping.mapped,
+                             mapping.axes,
+                             mapping.effects))
+      {
         /* Remembered, so the other channels of the row do not fill it again. */
         source_handed_.add(&layer, nullptr);
         return nullptr;
       }
-      pending_hashes_.append(
-          {group, source_group_content_hash(*layer.material, mapped, mirror_axes)});
-      source_group_structure_hash_set(
-          *group, source_group_structure_hash(*layer.material, mapped, mirror_axes));
+      pending_hashes_.append({group,
+                              source_group_content_hash(
+                                  *layer.material, mapping.mapped, mapping.axes, mapping.effects)});
+      source_group_structure_hash_set(*group,
+                                      source_group_structure_hash(*layer.material,
+                                                                  mapping.mapped,
+                                                                  mapping.axes,
+                                                                  mapping.effects));
     }
     source_handed_.add(&layer, group);
     return group;
@@ -608,15 +619,17 @@ static void source_groups_refresh(Main &bmain, Material &ma)
     if (!STREQ(group->id.name + 2, group_name)) {
       BKE_id_rename(bmain, group->id, group_name);
     }
-    const auto [mapped, mirror_axes] = source_group_mapping_get(ma, *layer);
-    const uint64_t content = source_group_content_hash(*layer->material, mapped, mirror_axes);
+    const SourceGroupMapping mapping = source_group_mapping_get(ma, *layer);
+    const uint64_t content = source_group_content_hash(
+        *layer->material, mapping.mapped, mapping.axes, mapping.effects);
     uint64_t stored = 0;
     if (tree_topology_hash_get(*group, stored) && stored == content) {
       continue;
     }
     /* Only socket values moved (a slider dragged): the group takes them in place, with no
      * rebuild of its nodes and no change of relations. */
-    const uint64_t structure = source_group_structure_hash(*layer->material, mapped, mirror_axes);
+    const uint64_t structure = source_group_structure_hash(
+        *layer->material, mapping.mapped, mapping.axes, mapping.effects);
     uint64_t stored_structure = 0;
     if (source_group_structure_hash_get(*group, stored_structure) &&
         stored_structure == structure &&
@@ -627,7 +640,9 @@ static void source_groups_refresh(Main &bmain, Material &ma)
       continue;
     }
     tree_hash_clear(*group);
-    if (source_group_fill(bmain, *group, *layer->material, mapped, mirror_axes)) {
+    if (source_group_fill(
+            bmain, *group, *layer->material, mapping.mapped, mapping.axes, mapping.effects))
+    {
       tree_topology_hash_set(*group, content);
       source_group_structure_hash_set(*group, structure);
       /* The private copies of the groups on the source's path are new IDs. */

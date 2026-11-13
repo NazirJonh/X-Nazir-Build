@@ -776,15 +776,28 @@ class PaintLayersTreeBuilder {
 
   /**
    * Read \a map through the Mapping node of \a row: a `Point` Mapping fed by the object's UV and by
-   * the row's mapping inputs, built on first use and shared by every map of the row. Tiling needs
-   * Repeat, which is set on \a map. False, and \a map untouched, while the row's mapping does not
-   * apply. A Mapping made by this call is appended to \a r_nodes, so it joins the caller's frame
-   * and is removed with it when the caller rolls back.
+   * the row's mapping inputs, built on first use and shared by every map of the row. The transform
+   * effects of \a row sit between the object's UV and its own chain, first in the list closest to
+   * the coordinate, the order the CPU resample composes the same steps in; a row without a mapping
+   * of its own still reads through them. Tiling needs Repeat, which is set on \a map. False, and
+   * \a map untouched, while neither the row's mapping nor its transform effects apply. A Mapping
+   * made by this call is appended to \a r_nodes, so it joins the caller's frame and is removed with
+   * it when the caller rolls back.
    */
   bool mapping_apply(bNodeTree &tree,
                      const MaterialPaintLayer &row,
                      bNode &map,
                      Vector<bNode *> &r_nodes);
+
+  /**
+   * The UV \a row's own content reads start from: the chains of its transform effects, first in
+   * the list closest to the texture coordinate. The one place that order is written, so a map read
+   * and the clip factor and the Normal remap of the same row cannot disagree. An effect whose
+   * mapping does not remap is skipped, and a row with none reads the raw coordinate.
+   */
+  NodeOutput input_transforms_source_ensure(bNodeTree &tree,
+                                            const MaterialPaintLayer &row,
+                                            Vector<bNode *> &r_nodes);
 
   /**
    * Read \a map through \a row's projection when one applies, else through its UV mapping, and
@@ -962,6 +975,16 @@ class PaintLayersTreeBuilder {
                               const MaterialPaintLayer &row,
                               NodeOutput color,
                               Vector<bNode *> *r_nodes = nullptr);
+
+  /**
+   * The inverse Normal remaps of \a row's transform effects, in reverse list order, applied to
+   * \a color: they act after the row's own chain's inverse, the composition the CPU resample
+   * applies to the same steps.
+   */
+  NodeOutput transform_normal_remap_apply(bNodeTree &tree,
+                                          const MaterialPaintLayer &row,
+                                          NodeOutput color,
+                                          Vector<bNode *> *r_nodes);
 
   /** The interface and the group output node; false when the output node cannot be created. */
   bool result_interface_create();

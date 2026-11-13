@@ -665,6 +665,11 @@ static constexpr uint8_t filter_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE
 static constexpr uint8_t effect_or_mask_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
                                                 paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM);
 
+/* A transform effect exists as a content correction only, for now: its mask form would have to
+ * resample the coverage the mask has built up to it, which the pointwise mask walk has no pass
+ * for, so a Mirror in the mask waits for that pass rather than laying nothing silently. */
+static constexpr uint8_t effect_only_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT);
+
 /* A map-coverage operator only exists as an item of a row's mask; it is never a row or a content
  * correction of its own. */
 static constexpr uint8_t mask_item_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM);
@@ -982,6 +987,31 @@ static const PaintLayerKindInfo kinds[] = {
      int(std::size(coverage_params)),
      PAINT_LAYER_KIND_MAP_COVERAGE,
      true},
+    /* A transform effect does not correct the colour it reads: it moves the UV the row it hangs on
+     * reads its content at. The owner's reads go through the effect's fold and transform first,
+     * wherever a map of the owner is sampled, so the effect carries no channel records and takes
+     * no part in a pointwise walk. Its parameters are its own #MaterialPaintLayerMapping -- the
+     * same struct a Fill keeps, read by the same panel, gizmo and value sync -- so the kind has
+     * none of its own. A Transform Mapping reads the offset, rotation, scale and wrap; a Mirror
+     * reads the fold's axes and center alone. As an EFFECT the effect transforms the row's
+     * content, as a MASK ITEM the coverage the mask lays; it is never a row of the stack (an
+     * adjustment would have to resample the whole composite below it, which no backend builds). */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_TRANSFORM,
+     "Transform Mapping",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     nullptr,
+     0,
+     PAINT_LAYER_KIND_TRANSFORMS_INPUT},
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_MIRROR,
+     "Mirror",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     nullptr,
+     0,
+     PAINT_LAYER_KIND_TRANSFORMS_INPUT},
     /* TODO: Gradient Map filter, needs a ColorBand parameter. */
     /* An Anchor Point is an inert marker inside a row: it publishes the content after the
      * corrections above it (or the mask after the mask items above it) and lays nothing itself. It

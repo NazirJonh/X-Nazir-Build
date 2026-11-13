@@ -597,6 +597,11 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
    * marker names those inputs, so a removed and re-added correction is a different shape. */
   for (const MaterialPaintLayer &effect : layer.effects) {
     topology_hash_uid(hash, effect.marker);
+    if (paint_layer_kind_transforms_input(effect)) {
+      /* A transform effect has no opacity input to carry its enabled flag: switched off, its chain,
+       * its clip and its Normal remap are simply not built, so the flag is structure here. */
+      hash = topology_hash_mix(hash, (effect.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1 : 0);
+    }
     if (paint_layer_kind_is_anchor_point_marker(effect)) {
       /* A marker is a Group Output only while something reads it; which point that is, and where,
        * is structure. Its own marker is above, so moving it moves this hash. */

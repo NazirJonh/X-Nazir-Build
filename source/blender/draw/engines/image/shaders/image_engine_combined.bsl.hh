@@ -72,6 +72,20 @@
  * the input's own resolution, and is mixed into the row's colour with no coverage of its own. */
 #define COMBINED_LAYER_EFFECT_RESULT 1048576
 
+/* The transform effects' steps a pass applies ahead of the row's own mapping: at most
+ * #COMBINED_INPUT_STEP_MAX of them, each packed in two float4s (offset.xy, scale.xy |
+ * rotation.xy, mirror_center.xy) with five flag bits a step in `input_step_flags`. A CPU composite
+ * composes more; past the two the preview refuses the row to the CPU, so a stack is never shaded
+ * as if a step were not there. */
+/* Mirrors #PAINT_MATERIAL_COMBINED_INPUT_STEP_MAX (BKE_paint_material_composite.hh) and
+ * #gpu_input_step_max (paint_material_combined_effects.hh): change them together. */
+#define COMBINED_INPUT_STEP_MAX 2
+#define COMBINED_INPUT_STEP_MAPPED 1
+#define COMBINED_INPUT_STEP_MIRROR_U 2
+#define COMBINED_INPUT_STEP_MIRROR_V 4
+#define COMBINED_INPUT_STEP_REPEAT_U 8
+#define COMBINED_INPUT_STEP_REPEAT_V 16
+
 /* The `CompositeBlend` values, which are the `MA_RAMP_*` codes of the Mix node. */
 #define COMBINED_BLEND_MIX 0
 #define COMBINED_BLEND_ADD 1
@@ -657,20 +671,64 @@ float4 sample_map(sampler2D tx,
                   float2 mapping_scale,
                   float2 mapping_rotation,
                   float2 mapping_mirror_center,
+                  const int input_step_count,
+                  const float4 input_step_0_a,
+                  const float4 input_step_0_b,
+                  const float4 input_step_1_a,
+                  const float4 input_step_1_b,
+                  const int input_step_flags,
                   float lod)
 {
   float2 sample_uv = uv;
   float2 side = float2(1.0f);
   bool clipped = false;
+  /* The side signs each step's fold produced, for the tangent-Normal remap. The steps run first,
+   * in list order: each folds about its center and then rotates, scales and offsets; an axis a
+   * step clips makes the texel transparent. No step repeats -- the composed lookup repeats at the
+   * end, the way the graph's Image Texture extension repeats the lookup it is fed (a clipping
+   * step has already declared the texel transparent, so flooring an in-range coordinate is the
+   * identity it reads as). */
+  float2 step_side[COMBINED_INPUT_STEP_MAX];
+  bool stepped = false;
+  for (int s = 0; s < COMBINED_INPUT_STEP_MAX && s < input_step_count; s++) {
+    float4 a = (s == 0) ? input_step_0_a : input_step_1_a;
+    float4 b = (s == 0) ? input_step_0_b : input_step_1_b;
+    int step_flags = (input_step_flags >> (s * 5)) & 31;
+    float2 folded = sample_uv;
+    float2 step_side_sign = float2(1.0f);
+    if ((step_flags & COMBINED_INPUT_STEP_MIRROR_U) != 0) {
+      folded.x = abs(sample_uv.x - b.z) + b.z;
+      step_side_sign.x = (sample_uv.x >= b.z) ? 1.0f : -1.0f;
+    }
+    if ((step_flags & COMBINED_INPUT_STEP_MIRROR_V) != 0) {
+      folded.y = abs(sample_uv.y - b.w) + b.w;
+      step_side_sign.y = (sample_uv.y >= b.w) ? 1.0f : -1.0f;
+    }
+    float2 rotated = float2(folded.x * b.x - folded.y * b.y,
+                            folded.x * b.y + folded.y * b.x);
+    sample_uv = rotated * a.zw + a.xy;
+    step_side[s] = step_side_sign;
+    bool step_repeat_u = (step_flags & COMBINED_INPUT_STEP_REPEAT_U) != 0;
+    bool step_repeat_v = (step_flags & COMBINED_INPUT_STEP_REPEAT_V) != 0;
+    if ((!step_repeat_u && (sample_uv.x < 0.0f || sample_uv.x >= 1.0f)) ||
+        (!step_repeat_v && (sample_uv.y < 0.0f || sample_uv.y >= 1.0f)))
+    {
+      clipped = true;
+    }
+    stepped = true;
+  }
+  /* The coordinate the row's own fold reads: the steps' output, so its side signs and its clip
+   * test sit where the CPU's last step does. */
+  float2 row_input = sample_uv;
   if ((flags & COMBINED_LAYER_MAPPED) != 0) {
-    float2 folded = uv;
+    float2 folded = row_input;
     if ((flags & COMBINED_LAYER_MIRROR_U) != 0) {
-      folded.x = abs(uv.x - mapping_mirror_center.x) + mapping_mirror_center.x;
-      side.x = (uv.x >= mapping_mirror_center.x) ? 1.0f : -1.0f;
+      folded.x = abs(row_input.x - mapping_mirror_center.x) + mapping_mirror_center.x;
+      side.x = (row_input.x >= mapping_mirror_center.x) ? 1.0f : -1.0f;
     }
     if ((flags & COMBINED_LAYER_MIRROR_V) != 0) {
-      folded.y = abs(uv.y - mapping_mirror_center.y) + mapping_mirror_center.y;
-      side.y = (uv.y >= mapping_mirror_center.y) ? 1.0f : -1.0f;
+      folded.y = abs(row_input.y - mapping_mirror_center.y) + mapping_mirror_center.y;
+      side.y = (row_input.y >= mapping_mirror_center.y) ? 1.0f : -1.0f;
     }
     float2 rotated = float2(folded.x * mapping_rotation.x - folded.y * mapping_rotation.y,
                             folded.x * mapping_rotation.y + folded.y * mapping_rotation.x);
@@ -683,8 +741,12 @@ float4 sample_map(sampler2D tx,
     if (repeat_v) {
       sample_uv.y -= floor(sample_uv.y);
     }
-    clipped = (!repeat_u && (sample_uv.x < 0.0f || sample_uv.x >= 1.0f)) ||
-              (!repeat_v && (sample_uv.y < 0.0f || sample_uv.y >= 1.0f));
+    clipped = clipped || ((!repeat_u && (sample_uv.x < 0.0f || sample_uv.x >= 1.0f)) ||
+                          (!repeat_v && (sample_uv.y < 0.0f || sample_uv.y >= 1.0f)));
+  }
+  else if (stepped) {
+    /* Steps without a row mapping: the composed lookup is the read, and it repeats. */
+    sample_uv -= floor(sample_uv);
   }
   float4 color;
   if (clipped) {
@@ -704,16 +766,35 @@ float4 sample_map(sampler2D tx,
   }
   if ((flags & COMBINED_LAYER_TANGENT_NORMAL) != 0 && color.w > 0.0f) {
     float3 n = color.xyz * 2.0f - 1.0f;
-    float rx = (mapping_scale.x < 0.0f) ? -1.0f : 1.0f;
-    float ry = (mapping_scale.y < 0.0f) ? -1.0f : 1.0f;
-    float c = mapping_rotation.x;
-    float s = mapping_rotation.y;
-    float fx = rx * n.x;
-    float fy = ry * n.y;
-    /* The fold's side signs act on the canvas axes, after the rotation back. */
-    color.xyz = float3(0.5f * side.x * (c * fx + s * fy) + 0.5f,
-                       0.5f * side.y * (-s * fx + c * fy) + 0.5f,
-                       0.5f * n.z + 0.5f);
+    float2 v = n.xy;
+    /* The row's own chain's inverse acts first: `side * R^T * S^-1` (flipped by the scale's sign,
+     * then rotated back), the covariant counterpart of its `S * R * fold`; the magnitude of the
+     * scale does not turn a direction. */
+    if ((flags & COMBINED_LAYER_MAPPED) != 0) {
+      float rx = (mapping_scale.x < 0.0f) ? -1.0f : 1.0f;
+      float ry = (mapping_scale.y < 0.0f) ? -1.0f : 1.0f;
+      float c = mapping_rotation.x;
+      float s = mapping_rotation.y;
+      float fx = rx * v.x;
+      float fy = ry * v.y;
+      /* The fold's side signs act on the canvas axes, after the rotation back. */
+      v = float2(side.x * (c * fx + s * fy), side.y * (-s * fx + c * fy));
+    }
+    /* Then the steps' inverses, in reverse list order, each side sign taken where that step's
+     * fold reads -- the composition the CPU resample applies to the same steps. */
+    for (int s = input_step_count - 1; s >= 0; s--) {
+      float4 a = (s == 0) ? input_step_0_a : input_step_1_a;
+      float4 b = (s == 0) ? input_step_0_b : input_step_1_b;
+      float rx = (a.z < 0.0f) ? -1.0f : 1.0f;
+      float ry = (a.w < 0.0f) ? -1.0f : 1.0f;
+      float c = b.x;
+      float sv = b.y;
+      float fx = rx * v.x;
+      float fy = ry * v.y;
+      v = float2(step_side[s].x * (c * fx + sv * fy),
+                 step_side[s].y * (-sv * fx + c * fy));
+    }
+    color.xyz = float3(0.5f * v.x + 0.5f, 0.5f * v.y + 0.5f, 0.5f * n.z + 0.5f);
   }
   return color;
 }
@@ -1059,6 +1140,15 @@ struct MaskResources {
   [[push_constant]] const int proj_mode;
   [[push_constant]] const int proj_axis;
   [[push_constant]] const int proj_flags;
+  /** The transform effects' steps ahead of the row's own mapping: `a` carries offset.xy and
+   * scale.xy, `b` the rotation's cosine and sine and the fold center; five flag bits a step live
+   * in `input_step_flags`, and `input_step_count` says how many run. */
+  [[push_constant]] const float4 input_step_0_a;
+  [[push_constant]] const float4 input_step_0_b;
+  [[push_constant]] const float4 input_step_1_a;
+  [[push_constant]] const float4 input_step_1_b;
+  [[push_constant]] const int input_step_flags;
+  [[push_constant]] const int input_step_count;
   /** The filter's parameters in its schema order. */
   [[push_constant]] const float4 filter_params_0;
   [[push_constant]] const float4 filter_params_1;
@@ -1156,6 +1246,12 @@ void mask_comp([[resource_table]] MaskResources &srt,
                        srt.mapping_scale,
                        srt.mapping_rotation,
                        srt.mapping_mirror_center,
+                       srt.input_step_count,
+                       srt.input_step_0_a,
+                       srt.input_step_0_b,
+                       srt.input_step_1_a,
+                       srt.input_step_1_b,
+                       srt.input_step_flags,
                        srt.lod);
       }
       if (srt.mode == COMBINED_MASK_COV_SCALAR) {
@@ -1244,6 +1340,12 @@ void mask_comp([[resource_table]] MaskResources &srt,
                          srt.mapping_scale,
                          srt.mapping_rotation,
                          srt.mapping_mirror_center,
+                         srt.input_step_count,
+                         srt.input_step_0_a,
+                         srt.input_step_0_b,
+                         srt.input_step_1_a,
+                         srt.input_step_1_b,
+                         srt.input_step_flags,
                          srt.lod);
         }
         gray = clamp((c.x + c.y + c.z) / 3.0f, 0.0f, 1.0f);
@@ -1297,6 +1399,12 @@ void mask_comp([[resource_table]] MaskResources &srt,
                      srt.mapping_scale,
                      srt.mapping_rotation,
                      srt.mapping_mirror_center,
+                     srt.input_step_count,
+                     srt.input_step_0_a,
+                     srt.input_step_0_b,
+                     srt.input_step_1_a,
+                     srt.input_step_1_b,
+                     srt.input_step_flags,
                      srt.lod);
     }
     float value = ((srt.flags & COMBINED_MASK_FROM_ALPHA) != 0) ? c.w : (c.x + c.y + c.z) / 3.0f;
@@ -1362,6 +1470,15 @@ struct LayerResources {
   [[push_constant]] const float2 mapping_rotation;
   /** The UV point the row's Mirror fold reflects around, on its folded axes. */
   [[push_constant]] const float2 mapping_mirror_center;
+  /** The transform effects' steps ahead of the row's own mapping: `a` carries offset.xy and
+   * scale.xy, `b` the rotation's cosine and sine and the fold center; five flag bits a step live
+   * in `input_step_flags`, and `input_step_count` says how many run. */
+  [[push_constant]] const float4 input_step_0_a;
+  [[push_constant]] const float4 input_step_0_b;
+  [[push_constant]] const float4 input_step_1_a;
+  [[push_constant]] const float4 input_step_1_b;
+  [[push_constant]] const int input_step_flags;
+  [[push_constant]] const int input_step_count;
   /** The adjustment's filter and its parameters in the schema order. */
   [[push_constant]] const float4 filter_params_0;
   [[push_constant]] const float4 filter_params_1;
@@ -1457,6 +1574,12 @@ void layer_comp([[resource_table]] LayerResources &srt,
                          srt.mapping_scale,
                          srt.mapping_rotation,
                          srt.mapping_mirror_center,
+                         srt.input_step_count,
+                         srt.input_step_0_a,
+                         srt.input_step_0_b,
+                         srt.input_step_1_a,
+                         srt.input_step_1_b,
+                         srt.input_step_flags,
                          srt.lod);
       }
       if ((srt.flags & COMBINED_LAYER_NORMAL_DIRECTX) != 0) {
@@ -1566,6 +1689,13 @@ struct CorrectionResources {
   [[push_constant]] const int proj_mode;
   [[push_constant]] const int proj_axis;
   [[push_constant]] const int proj_flags;
+  /** The transform effects' steps ahead of the row's own mapping, as in #MaskResources. */
+  [[push_constant]] const float4 input_step_0_a;
+  [[push_constant]] const float4 input_step_0_b;
+  [[push_constant]] const float4 input_step_1_a;
+  [[push_constant]] const float4 input_step_1_b;
+  [[push_constant]] const int input_step_flags;
+  [[push_constant]] const int input_step_count;
   [[push_constant]] const float4 filter_params_0;
   [[push_constant]] const float4 filter_params_1;
   /** A Color Balance's exponent triple; unused by every other filter. */
@@ -1660,6 +1790,12 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
                      srt.mapping_scale,
                      srt.mapping_rotation,
                      srt.mapping_mirror_center,
+                     srt.input_step_count,
+                     srt.input_step_0_a,
+                     srt.input_step_0_b,
+                     srt.input_step_1_a,
+                     srt.input_step_1_b,
+                     srt.input_step_flags,
                      srt.lod);
     }
   }

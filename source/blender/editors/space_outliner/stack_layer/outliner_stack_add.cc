@@ -375,6 +375,8 @@ enum class StackAddKindsView {
   PatternEffects,
   /** Only the entries of the "Correction" submenu. */
   CorrectionEffects,
+  /** Only the entries of the "Transform" submenu. */
+  TransformEffects,
   /** Only the Anchor Point entries, listed after the submenus. */
   AnchorEffects,
 };
@@ -390,6 +392,9 @@ static StackAddKindsView stack_effect_menu_group(const StackEffectMenuKind &entr
   }
   if (entry.is_correction) {
     return StackAddKindsView::CorrectionEffects;
+  }
+  if (entry.is_transform) {
+    return StackAddKindsView::TransformEffects;
   }
   return entry.is_new ? StackAddKindsView::NewEffects : StackAddKindsView::Effects;
 }
@@ -470,6 +475,14 @@ const EnumPropertyItem *stack_effect_correction_type_itemf(bContext *C,
                                                            bool *r_free)
 {
   return stack_add_kinds_itemf(C, StackAddKindsView::CorrectionEffects, r_free);
+}
+
+const EnumPropertyItem *stack_effect_transform_type_itemf(bContext *C,
+                                                          PointerRNA * /*ptr*/,
+                                                          PropertyRNA * /*prop*/,
+                                                          bool *r_free)
+{
+  return stack_add_kinds_itemf(C, StackAddKindsView::TransformEffects, r_free);
 }
 
 const EnumPropertyItem *stack_effect_anchor_type_itemf(bContext *C,

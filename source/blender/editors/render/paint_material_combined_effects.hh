@@ -201,6 +201,41 @@ struct GpuMappingUniforms {
   float2 mirror_center = float2(0.5f, 0.5f);
 };
 
+/* The transform effects' steps the three passes apply ahead of the row's own mapping. The shader
+ * packs five flag bits per step into one word; the count and the packed float4s are uniforms of
+ * their own. A CPU composite composes more; past this many the preview refuses the row to the CPU,
+ * so a stack is never shaded as if a step were not there. */
+constexpr int gpu_input_step_mapped = 1;
+constexpr int gpu_input_step_mirror_u = 2;
+constexpr int gpu_input_step_mirror_v = 4;
+constexpr int gpu_input_step_repeat_u = 8;
+constexpr int gpu_input_step_repeat_v = 16;
+/* The one C++ definition of the cap; the shader's #COMBINED_INPUT_STEP_MAX and its two named
+ * `step_0_*` / `step_1_*` uniform blocks have to follow it by hand. */
+constexpr int gpu_input_step_max = PAINT_MATERIAL_COMBINED_INPUT_STEP_MAX;
+static_assert(gpu_input_step_max == 2,
+              "The shader declares exactly two named steps (step_0_*, step_1_*)");
+
+/**
+ * The packed steps of one pass: two float4s per step (`a` the offset in xy and the scale in zw,
+ * `b` the rotation's cosine and sine in xy and the fold center in zw) with the per-step flags in
+ * #flags, five bits a step. Built from the description's #PaintMaterialCompositeImageLayer::
+ * input_transforms, in its order; the first two steps are what the shader runs.
+ */
+struct GpuInputSteps {
+  float4 step_0_a = float4(0.0f, 0.0f, 1.0f, 1.0f);
+  float4 step_0_b = float4(1.0f, 0.0f, 0.5f, 0.5f);
+  float4 step_1_a = float4(0.0f, 0.0f, 1.0f, 1.0f);
+  float4 step_1_b = float4(1.0f, 0.0f, 0.5f, 0.5f);
+  int flags = 0;
+  int count = 0;
+
+  GpuInputSteps() = default;
+
+  /** Pack the first #gpu_input_step_max steps of \a steps, in the order the reads apply them. */
+  GpuInputSteps(Span<PaintMaterialCompositeMapping> steps);
+};
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -385,6 +420,7 @@ struct CombinedPasses {
            const float4 &init_color,
            const float opacity,
            const GpuMappingUniforms &mapping = {},
+           const GpuInputSteps &input_steps = {},
            const int blend = int(CompositeBlend::Mix),
            gpu::Texture *mask = nullptr,
            const int filter_kind = 0,

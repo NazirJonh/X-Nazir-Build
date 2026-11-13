@@ -65,6 +65,7 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_effect_add_new);
   WM_operatortype_append(OUTLINER_OT_stack_layer_effect_add_pattern);
   WM_operatortype_append(OUTLINER_OT_stack_layer_effect_add_correction);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_effect_add_transform);
   WM_operatortype_append(OUTLINER_OT_stack_layer_effect_add_anchor);
   WM_operatortype_append(OUTLINER_OT_stack_layer_effect_add_anchor_reader);
   WM_operatortype_append(OUTLINER_OT_stack_layer_remove);

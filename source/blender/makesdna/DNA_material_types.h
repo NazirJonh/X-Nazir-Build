@@ -1000,6 +1000,21 @@ enum eMaterialPaintLayerFilter : int16_t {
    * constant (a 3x3 matrix and three constants), optionally as a single grey.
    */
   MA_PAINT_LAYER_FILTER_CHANNEL_MIXER = 27,
+  /**
+   * Move, rotate and scale the UV the row's content is read at (a Transform Mapping): the same
+   * `offset + scale * (R * uv)` the row's own mapping applies, laid as an effect over every map
+   * the row it hangs on reads. It corrects no colour, so it is a #MA_PAINT_LAYER_SOURCE_FILTER
+   * kind of its own (#PAINT_LAYER_KIND_TRANSFORMS_INPUT), not a pointwise correction; its
+   * parameters are its kind's schema, in the vocabulary of #MaterialPaintLayerMapping.
+   */
+  MA_PAINT_LAYER_FILTER_TRANSFORM = 28,
+  /**
+   * Fold the UV the row's content is read at about a center, per axis (a Mirror): what either
+   * side of the center shows, both sides show, and a tangent-space Normal's component along a
+   * folded axis flips per texel. The axes and the center are the effect's own schema parameters.
+   * A transform effect like #MA_PAINT_LAYER_FILTER_TRANSFORM.
+   */
+  MA_PAINT_LAYER_FILTER_MIRROR = 29,
 };
 
 /** #MaterialPaintLayerColorBalance::method */
@@ -1626,7 +1641,9 @@ struct MaterialPaintLayer {
   /**
    * UV mapping of this row's own maps. Stored by value, so a flat copy carries it. Zeroes read back
    * as disabled; a zero scale axis reads back as one. General to the row, not a parameter of its
-   * kind: only a kind that lays a map of its own (a Fill) can use it.
+   * kind: a kind that lays a map of its own (a Fill) reads its maps through it, and a transform
+   * effect (#MA_PAINT_LAYER_FILTER_TRANSFORM / _MIRROR) keeps its whole parameter set here -- the
+   * fold and the transform the row's own content reads go through.
    */
   MaterialPaintLayerMapping mapping = {};
   /**

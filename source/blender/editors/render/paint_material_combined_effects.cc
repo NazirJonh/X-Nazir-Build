@@ -131,6 +131,58 @@ static void gpu_mapping_uniforms_set(gpu::Shader *shader, const GpuMappingUnifor
   GPU_shader_uniform_2fv(shader, "mapping_mirror_center", &uniforms.mirror_center.x);
 }
 
+GpuInputSteps::GpuInputSteps(Span<PaintMaterialCompositeMapping> steps)
+{
+  /* The CPU refusal in #BKE_paint_layers_gpu_unsupported_reason keeps a longer list from getting
+   * here; the clamp below only protects a release build if that contract ever breaks. */
+  BLI_assert(int(steps.size()) <= gpu_input_step_max);
+  for (const int index : IndexRange(std::min(int(steps.size()), gpu_input_step_max))) {
+    const PaintMaterialCompositeMapping &step = steps[index];
+    float4 &a = (index == 0) ? step_0_a : step_1_a;
+    float4 &b = (index == 0) ? step_0_b : step_1_b;
+    a = float4(step.offset[0],
+               step.offset[1],
+               BKE_paint_layers_mapping_scale_normalize(step.scale[0]),
+               BKE_paint_layers_mapping_scale_normalize(step.scale[1]));
+    b = float4(std::cos(step.rotation), std::sin(step.rotation),
+               step.mirror_center[0], step.mirror_center[1]);
+    const int shift = index * 5;
+    bool repeat_u = true;
+    bool repeat_v = true;
+    BKE_paint_layers_mapping_wrap_axes(step.wrap, repeat_u, repeat_v);
+    int step_flags = gpu_input_step_mapped;
+    if (repeat_u) {
+      step_flags |= gpu_input_step_repeat_u;
+    }
+    if (repeat_v) {
+      step_flags |= gpu_input_step_repeat_v;
+    }
+    if (step.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U)) {
+      step_flags |= gpu_input_step_mirror_u;
+    }
+    if (step.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V)) {
+      step_flags |= gpu_input_step_mirror_v;
+    }
+    flags |= step_flags << shift;
+    count++;
+  }
+}
+
+/** Upload the packed steps; the three passes name them alike. */
+static void gpu_input_steps_uniforms_set(gpu::Shader *shader, const GpuInputSteps &steps)
+{
+  GPU_shader_uniform_4fv(shader, "input_step_0_a", &steps.step_0_a.x);
+  GPU_shader_uniform_4fv(shader, "input_step_0_b", &steps.step_0_b.x);
+  GPU_shader_uniform_4fv(shader, "input_step_1_a", &steps.step_1_a.x);
+  GPU_shader_uniform_4fv(shader, "input_step_1_b", &steps.step_1_b.x);
+  GPU_shader_uniform_1i(shader, "input_step_flags", steps.flags);
+  GPU_shader_uniform_1i(shader, "input_step_count", steps.count);
+}
+
+/** The passes that keep their own placement (mask items, corrections) run with no steps: the row's
+ * transform effects move what the row itself lays. */
+static const GpuInputSteps gpu_input_steps_none;
+
 /* -------------------------------------------------------------------- */
 /** \name Projection surface map
  *
@@ -632,6 +684,7 @@ bool CombinedPasses::lay(CombinedTarget &t,
                          const float4 &init_color,
                          const float opacity,
                          const GpuMappingUniforms &mapping,
+                         const GpuInputSteps &input_steps,
                          const int blend,
                          gpu::Texture *mask,
                          const int filter_kind,
@@ -669,6 +722,7 @@ bool CombinedPasses::lay(CombinedTarget &t,
   GPU_shader_uniform_1i(layer_shader, "proj_mode", frame.mode);
   GPU_shader_uniform_1i(layer_shader, "proj_axis", frame.axis);
   GPU_shader_uniform_1i(layer_shader, "proj_flags", frame.flags);
+  gpu_input_steps_uniforms_set(layer_shader, input_steps);
   GPU_shader_uniform_1f(layer_shader, "opacity", opacity);
   GPU_shader_uniform_1f(layer_shader, "lod", lod);
   /* The scene luminance the F0 map encoding reads a specular colour by: the coefficients the RGB
@@ -796,6 +850,7 @@ bool CombinedPasses::mask_step(CombinedTarget &t,
   GPU_shader_uniform_2iv(mask_shader, "texture_size", &t.size.x);
   gpu_mapping_uniforms_set(mask_shader, mapping_uniforms);
   gpu_projection_uniforms_set(mask_shader, projection_frame);
+  gpu_input_steps_uniforms_set(mask_shader, gpu_input_steps_none);
   GPU_shader_uniform_4fv(mask_shader, "filter_params_0", &params_0.x);
   GPU_shader_uniform_4fv(mask_shader, "filter_params_1", &params_1.x);
   GPU_shader_uniform_4fv(mask_shader, "filter_params_2", &params_2.x);
@@ -906,6 +961,7 @@ bool CombinedPasses::correction_step(CombinedTarget &t,
   GPU_shader_uniform_4fv(correction_shader, "constant_color", &constant_color.x);
   gpu_mapping_uniforms_set(correction_shader, mapping_uniforms);
   gpu_projection_uniforms_set(correction_shader, projection_frame);
+  gpu_input_steps_uniforms_set(correction_shader, gpu_input_steps_none);
   GPU_shader_uniform_4fv(correction_shader, "filter_params_0", &params_0.x);
   GPU_shader_uniform_4fv(correction_shader, "filter_params_1", &params_1.x);
   GPU_shader_uniform_4fv(correction_shader, "filter_params_2", &params_2.x);
@@ -1292,6 +1348,8 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
   GpuMappingUniforms mapping_uniforms;
   GpuProjection projection_frame;
   const GpuProjection *projection = nullptr;
+  /* Outside the row branch: the final lay below reads it as well. */
+  const GpuInputSteps input_steps(layer.input_transforms);
   bool has_mask = false;
 
   if (layer.is_folder) {
@@ -1390,6 +1448,7 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
                float4(0.0f),
                1.0f,
                mapping_uniforms,
+               input_steps,
                int(CompositeBlend::Mix),
                nullptr,
                int(layer.adjustment_filter),
@@ -1494,6 +1553,7 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
            float4(0.0f),
            layer.opacity,
            mapping_uniforms,
+           input_steps,
            int(layer.blend),
            has_mask ? t.mask_accum : nullptr,
            int(layer.adjustment_filter),

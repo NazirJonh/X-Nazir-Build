@@ -572,6 +572,8 @@ struct StackEffectMenuKind {
   bool is_pattern = false;
   /** Listed under the "Correction" submenu: the filters of the original list. */
   bool is_correction = false;
+  /** Listed under the "Transform" submenu: the effects that move what the row reads. */
+  bool is_transform = false;
   /** Listed after the submenus, as a plain entry: the Anchor Point and its reader. */
   bool is_anchor = false;
   StackAddKindInfo info;

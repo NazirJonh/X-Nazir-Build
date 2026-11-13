@@ -567,6 +567,18 @@ void OUTLINER_OT_stack_layer_effect_add_correction(wmOperatorType *ot)
   RNA_def_enum_funcs(prop, stack_effect_correction_type_itemf);
 }
 
+void OUTLINER_OT_stack_layer_effect_add_transform(wmOperatorType *ot)
+{
+  /* As the other submenu operators: its own `type` enum, listing the effects that move what the
+   * row reads. */
+  OUTLINER_OT_stack_layer_add(ot);
+  ot->name = "Add Transform Effect";
+  ot->idname = "OUTLINER_OT_stack_layer_effect_add_transform";
+  ot->description = "Add an effect that moves what the active layer reads to the layer or its mask";
+  PropertyRNA *prop = RNA_struct_type_find_property(ot->srna, "type");
+  RNA_def_enum_funcs(prop, stack_effect_transform_type_itemf);
+}
+
 void OUTLINER_OT_stack_layer_effect_add_anchor(wmOperatorType *ot)
 {
   /* As the other group operators: its own `type` enum, for the Anchor Point entries the Add Effect

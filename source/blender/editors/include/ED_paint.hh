@@ -637,6 +637,15 @@ void ED_view3d_paint_layer_gradient_gizmo_setup(wmGizmoGroupType *gzgt);
 /** Register the Image Editor gizmo group for the same row (UV space only). */
 void ED_image_paint_layer_gradient_gizmo_setup(wmGizmoGroupType *gzgt);
 
+/* `sculpt_paint/uv_mapping/paint_layer_mapping_gizmo_3d.cc` */
+
+/** Register the custom gizmo type the transform effect handles use in the 3D View. */
+void ED_gizmotypes_paint_layer_uv_transform();
+
+/** Register the 3D View gizmo group that places the pivot (or the Mirror center) of the active
+ * transform effect on the surface and turns the effect about it. */
+void ED_view3d_paint_layer_uv_transform_gizmo_setup(wmGizmoGroupType *gzgt);
+
 /* `sculpt_paint/projection/projection_place_op.cc` */
 
 namespace ed::sculpt_paint::projection {

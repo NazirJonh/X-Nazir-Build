@@ -35,6 +35,10 @@ bool mapping_is_edited(const Material &ma, const MaterialPaintLayer &layer)
 {
   /* A projected row is addressed by its frame and follows only its UV wrap: no island-UV adjust
    * applies, so there is nothing for this gizmo to move. */
+  /* A transform effect that is switched off moves nothing, so its handles go with it. */
+  if (BKE_paint_layers_is_transform_effect(layer) && (layer.flag & MA_PAINT_LAYER_ENABLED) == 0) {
+    return false;
+  }
   return BKE_paint_layers_mapping_enabled_get(layer) &&
          BKE_paint_layers_mapping_available(ma, layer) &&
          !BKE_paint_layers_projection_applies(ma, layer);
@@ -136,7 +140,11 @@ bool PaintLayerRowMappingTarget::read(UvMappingXform &r_xform) const
   if (layer == nullptr) {
     return false;
   }
-  r_xform.offset = float2(layer->mapping.offset[0], layer->mapping.offset[1]);
+  /* The offset the canvas shows: a Transform Mapping effect keeps a pivot, which the cage has to
+   * follow; set_values takes the same effective offset back. */
+  float offset[2];
+  BKE_paint_layers_transform_effective_offset(*layer, offset);
+  r_xform.offset = float2(offset[0], offset[1]);
   r_xform.scale = float2(BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]),
                          BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[1]));
   r_xform.rotation = layer->mapping.rotation;
@@ -205,6 +213,66 @@ bool PaintLayerRowMappingTarget::write_mirror_center(const float2 &center)
   }
   const float values[2] = {center.x, center.y};
   return BKE_paint_layers_mapping_set_mirror_center(*material_, layer, values);
+}
+
+bool PaintLayerRowMappingTarget::has_pivot() const
+{
+  const MaterialPaintLayer *layer = row();
+  return layer != nullptr && BKE_paint_layers_is_transform_effect(*layer) &&
+         layer->kind_subtype == MA_PAINT_LAYER_FILTER_TRANSFORM;
+}
+
+bool PaintLayerRowMappingTarget::is_mirror_effect() const
+{
+  const MaterialPaintLayer *layer = row();
+  return layer != nullptr && BKE_paint_layers_is_transform_effect(*layer) &&
+         layer->kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR;
+}
+
+bool PaintLayerRowMappingTarget::read_pivot(float2 &r_pivot) const
+{
+  const MaterialPaintLayer *layer = row();
+  if (layer == nullptr || !has_pivot()) {
+    return false;
+  }
+  float pivot[2];
+  BKE_paint_layers_mapping_mirror_center_get(*layer, pivot);
+  r_pivot = float2(pivot[0], pivot[1]);
+  return true;
+}
+
+bool PaintLayerRowMappingTarget::write_pivot(const float2 &pivot)
+{
+  MaterialPaintLayer *layer = row();
+  if (layer == nullptr || !has_pivot()) {
+    return false;
+  }
+  const float values[2] = {pivot.x, pivot.y};
+  return BKE_paint_layers_set_transform_pivot(*material_, layer, values);
+}
+
+bool PaintLayerRowMappingTarget::write_pivoted_scale(const float2 &scale)
+{
+  MaterialPaintLayer *layer = row();
+  if (layer == nullptr || !has_pivot() || !std::isfinite(scale.x) || !std::isfinite(scale.y)) {
+    return false;
+  }
+  const float values[2] = {scale.x, scale.y};
+  return BKE_paint_layers_mapping_set_scale(*material_, layer, values);
+}
+
+bool PaintLayerRowMappingTarget::write_pivoted_rotation(const float rotation)
+{
+  MaterialPaintLayer *layer = row();
+  if (layer == nullptr || !has_pivot() || !std::isfinite(rotation)) {
+    return false;
+  }
+  return BKE_paint_layers_mapping_set_rotation(*material_, layer, rotation);
+}
+
+const char *PaintLayerRowMappingTarget::pivot_undo_name() const
+{
+  return "Move Layer Pivot";
 }
 
 const char *PaintLayerRowMappingTarget::mirror_undo_name() const

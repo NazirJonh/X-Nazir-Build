@@ -62,6 +62,25 @@ bool paint_layer_gradient_hit_at_mouse(bContext &C,
                                        PaintLayerGradientHit &r_hit);
 
 /**
+ * The surface point under \a mval and its UV on the active UV map, for the active object's
+ * evaluated mesh. Unlike #paint_layer_gradient_hit_at_mouse it belongs to no row's space, so a row
+ * that keeps a UV point (a transform effect's pivot) can place it from the 3D View. The hit's
+ * #PaintLayerGradientHit::has_uv is false for a mesh without a UV map.
+ */
+bool paint_layer_uv_hit_at_mouse(const bContext &C, const float2 &mval, PaintLayerGradientHit &r_hit);
+
+/**
+ * The world point of \a uv on \a mesh's active UV map, the inverse of the hit's UV. A UV outside
+ * every island lands on the nearest island point. \a r_tri_cache keeps the triangle the point was
+ * last found in, so a repeated call is constant time; pass -1 to start a search.
+ */
+bool paint_layer_uv_world_point(const Object &ob,
+                                const Mesh &mesh,
+                                const float2 &uv,
+                                int &r_tri_cache,
+                                float3 &r_world);
+
+/**
  * The evaluated mesh of \a ob: the geometry the material is shaded on, which every point the tools
  * and the gizmo handle has to be measured against. Null when it is not available.
  */

@@ -174,6 +174,22 @@ void BKE_paint_material_blend_apply(int code,
 inline constexpr int PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM = 12;
 
 /**
+ * The most transform effects (a Transform Mapping, a Mirror) one map read composes: the CPU
+ * resample builds one step per effect and the generated graph chains one per effect, so this is
+ * the CPU and the graph's shared cap -- a description leaves the extras out, the way it leaves a
+ * no-op effect out. The combined preview packs fewer still
+ * (#PAINT_MATERIAL_COMBINED_INPUT_STEP_MAX) and refuses the row to the CPU past its own limit.
+ */
+inline constexpr int PAINT_MATERIAL_COMPOSITE_INPUT_TRANSFORM_MAX = 8;
+
+/**
+ * The most transform steps the combined preview's shader composes ahead of a row's own mapping.
+ * The refusal reads it: past this many, the row falls to the CPU rather than shading a step as if
+ * it were not there.
+ */
+inline constexpr int PAINT_MATERIAL_COMBINED_INPUT_STEP_MAX = 2;
+
+/**
  * A flat colour standing in for a map, scene linear.
  *
  * A channel with no map reduces to a constant; carrying it here rather than manufacturing a
@@ -928,6 +944,16 @@ struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
    * clipping wrap; a Fill or painted row already clips through its map's alpha.
    */
   bool mapping_clips_coverage = false;
+  /**
+   * The transforms the row's transform effects (a Transform Mapping, a Mirror) lay over its own
+   * content: one entry per enabled #PAINT_LAYER_KIND_TRANSFORMS_INPUT effect, in the effects
+   * list's order, each in the vocabulary of #PaintMaterialCompositeMapping with #enabled set and
+   * #projection absent, and a no-op effect left out. The acquisition reads the row's own maps
+   * through these steps first and the row's #mapping last, the order the generated graph composes
+   * the same effects in. A correction or a mask item keeps its own placement: the transform moves
+   * what the row itself lays, not what is stamped over it.
+   */
+  Vector<PaintMaterialCompositeMapping> input_transforms;
   /**
    * A MESH_MAP row: #color_image is the material's shared atlas, read with Extend and no Mapping,
    * and #color_alpha_coverage stays false (the atlas alpha is data, not painted coverage).

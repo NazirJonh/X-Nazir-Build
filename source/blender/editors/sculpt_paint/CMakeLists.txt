@@ -177,6 +177,7 @@ set(SRC
   decal/decal_target.cc
   decal/decal_target.hh
   uv_mapping/paint_layer_mapping_gizmo.cc
+  uv_mapping/paint_layer_mapping_gizmo_3d.cc
   uv_mapping/paint_layer_mapping_ops.cc
   uv_mapping/paint_layer_mapping_pick_3d.cc
   uv_mapping/uv_mapping_math.cc

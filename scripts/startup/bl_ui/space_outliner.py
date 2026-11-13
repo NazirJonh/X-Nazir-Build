@@ -224,6 +224,10 @@ class OUTLINER_MT_stack_layer_effect_add(Menu):
         layout.operator_enum("outliner.stack_layer_effect_add", "type")
         layout.separator()
         layout.menu("OUTLINER_MT_stack_layer_effect_add_correction", text="Correction", icon='MODIFIER')
+        # The effects that move what the row reads: the entries land in the row's Effects list,
+        # and each one's own panel carries its offset, rotation, scale or fold center.
+        layout.menu(
+            "OUTLINER_MT_stack_layer_effect_add_transform", text="Transform", icon='MOD_UVPROJECT')
         layout.operator_menu_enum(
             "outliner.stack_layer_effect_add_new", "type", text="Filter", icon='SOLO_ON')
         # The generator registry's patterns (Noise, Voronoi, ...); the Gradient stays in the list
@@ -244,6 +248,13 @@ class OUTLINER_MT_stack_layer_effect_add_correction(Menu):
 
     def draw(self, _context):
         self.layout.operator_enum("outliner.stack_layer_effect_add_correction", "type")
+
+
+class OUTLINER_MT_stack_layer_effect_add_transform(Menu):
+    bl_label = "Transform"
+
+    def draw(self, _context):
+        self.layout.operator_enum("outliner.stack_layer_effect_add_transform", "type")
 
 
 class OUTLINER_MT_stack_layer_effect_add_pattern(Menu):
@@ -1194,6 +1205,7 @@ classes = (
     OUTLINER_MT_stack_layer_pattern_add,
     OUTLINER_MT_stack_layer_effect_add,
     OUTLINER_MT_stack_layer_effect_add_correction,
+    OUTLINER_MT_stack_layer_effect_add_transform,
     OUTLINER_MT_stack_layer_effect_add_pattern,
     OUTLINER_MT_stack_layer_mask_add,
     OUTLINER_OT_stack_layer_mask_add,

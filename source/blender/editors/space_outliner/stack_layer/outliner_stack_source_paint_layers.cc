@@ -470,6 +470,12 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_CHANNEL_MIXER:
       /* No glyph of its own yet: the RGB icon names the channels the filter mixes. */
       return {ICON_IMAGE_RGB, 0};
+    case MA_PAINT_LAYER_FILTER_TRANSFORM:
+      /* No glyph of its own yet: the UV-projection icon names the placement the effect moves. */
+      return {ICON_MOD_UVPROJECT, 0};
+    case MA_PAINT_LAYER_FILTER_MIRROR:
+      /* No glyph of its own yet: the modifier's own mirror icon names the fold. */
+      return {ICON_MOD_MIRROR, 0};
   }
   return {ICON_ARROW_LEFTRIGHT, 0};
 }
@@ -694,6 +700,14 @@ static bool paint_filter_is_new(const int16_t filter)
               MA_PAINT_LAYER_FILTER_GLOW,
               MA_PAINT_LAYER_FILTER_BEVEL,
               MA_PAINT_LAYER_FILTER_COLOR_MATCH);
+}
+
+/** The transform effects the Add Effect menu lists under "Transform" instead of the other lists. */
+static bool paint_filter_is_transform(const int16_t filter)
+{
+  return ELEM(eMaterialPaintLayerFilter(filter),
+              MA_PAINT_LAYER_FILTER_TRANSFORM,
+              MA_PAINT_LAYER_FILTER_MIRROR);
 }
 
 /** The row of one content correction, hung off the row \a owner_ordinal names. */
@@ -1839,6 +1853,29 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                   paint_look_for_source(MA_PAINT_LAYER_SOURCE_CURVE_PATCH, PaintLookRole::Content)),
         PaintLayerAddKind::CurvePatchEffect);
 
+    /* The transform effects: they move what the row itself reads, so the Add Effect menu lists
+     * them under "Transform". No mask twin yet: the mask form waits for a mask walk that can
+     * resample the coverage it has built up, so a Mirror in the mask is not offered rather than
+     * laid as nothing. */
+    add(with_look(effect({"TRANSFORM_MAPPING",
+                          N_("Transform Mapping"),
+                          "Move, rotate and scale the UV the row's content is read at; the "
+                          "transform the row's own mapping applies, as an effect"}),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_FILTER,
+                                        PaintLookRole::Content,
+                                        MA_PAINT_LAYER_FILTER_TRANSFORM)),
+        PaintLayerAddKind::Filter,
+        MA_PAINT_LAYER_FILTER_TRANSFORM);
+    add(with_look(effect({"MIRROR",
+                          N_("Mirror"),
+                          "Fold the UV the row's content is read at about a center, per axis; what "
+                          "either side of the center shows, both sides show"}),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_FILTER,
+                                        PaintLookRole::Content,
+                                        MA_PAINT_LAYER_FILTER_MIRROR)),
+        PaintLayerAddKind::Filter,
+        MA_PAINT_LAYER_FILTER_MIRROR);
+
     /* Resolve the mask roles the content entries named. The mask entry is flagged so the Effects
      * menu folds it into the content line; the content entry keeps its place in the table. */
     for (const int64_t twin : twin_rows.index_range()) {
@@ -2795,10 +2832,14 @@ class PaintLayersStackSource final : public StackSource,
       menu.kind = int(index);
       menu.is_new = ELEM(entry.kind, PaintLayerAddKind::Filter, PaintLayerAddKind::MaskFilter) &&
                     paint_filter_is_new(entry.filter);
+      /* The transform effects keep their own submenu: they move what the row reads rather than
+       * correcting a colour, so the menu groups them by what they do. */
+      menu.is_transform = ELEM(entry.kind, PaintLayerAddKind::Filter, PaintLayerAddKind::MaskFilter) &&
+                          paint_filter_is_transform(entry.filter);
       /* The Gradient stays in the main list: it is the one pattern with a line and a ramp of its
        * own, and the registry's other generators are the ones the submenu gathers. */
       /* The filters of the original list fold into one submenu; the newer ones keep their own. */
-      menu.is_correction = !menu.is_new &&
+      menu.is_correction = !menu.is_new && !menu.is_transform &&
                            ELEM(entry.kind, PaintLayerAddKind::Filter, PaintLayerAddKind::MaskFilter);
       menu.is_anchor = entry.kind == PaintLayerAddKind::AnchorPoint;
       menu.is_pattern = entry.kind == PaintLayerAddKind::GradientCorrection &&
@@ -2857,6 +2898,9 @@ class PaintLayersStackSource final : public StackSource,
     const bool is_adjustment = add_kind == PaintLayerAddKind::Adjustment;
     /* A filter correction hangs on a layer; an adjustment is a layer. */
     const bool is_filter = add_kind == PaintLayerAddKind::Filter;
+    /* A transform effect moves what the row reads: only an owner that lays or reads content takes
+     * one, and the warning says so when the Add is refused for it. */
+    const bool is_transform = is_filter && paint_filter_is_transform(entry.filter);
     Material &material = layers_owner(owner);
     MaterialPaintLayer *anchor = (ordinal < 0) ?
                                      nullptr :
@@ -3040,6 +3084,12 @@ class PaintLayersStackSource final : public StackSource,
         BKE_report(CTX_wm_reports(&C),
                    RPT_WARNING,
                    "An adjustment needs a Pass Through folder or the top of the stack");
+      }
+      if (is_transform) {
+        BKE_report(CTX_wm_reports(&C),
+                   RPT_WARNING,
+                   "A transform effect needs a layer that lays or reads content of its own: a "
+                   "Paint, Fill or Material row");
       }
       if (reads_material) {
         BKE_report(CTX_wm_reports(&C),

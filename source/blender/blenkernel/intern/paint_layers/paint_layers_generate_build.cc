@@ -246,10 +246,12 @@ void PaintLayersTreeBuilder::mapping_inputs_create(LayerGroup &group,
     };
     /* The mapping chain reads three Vectors: the offset in x, y; the scale in x, y; the angle in
      * z (fed to the Vector Rotate in front of the Mapping node). */
+    float effective_offset[2];
+    BKE_paint_layers_transform_effective_offset(row, effective_offset);
     const MappingInput inputs[3] = {
         {"Offset",
          ROLE_MAPPING_OFFSET,
-         {row.mapping.offset[0], row.mapping.offset[1], 0.0f},
+         {effective_offset[0], effective_offset[1], 0.0f},
          mapping_offset_inputs_},
         {"Scale",
          ROLE_MAPPING_SCALE,
@@ -417,6 +419,33 @@ static bNodeSocket *mapping_group_input_socket(bNode *group_input,
       *group_input, SOCK_OUT, UString::from_ptr_noinline((*iface)->identifier));
 }
 
+NodeOutput PaintLayersTreeBuilder::input_transforms_source_ensure(
+    bNodeTree &tree, const MaterialPaintLayer &row, Vector<bNode *> &r_nodes)
+{
+  bNode *coord = this->uv_coordinate_ensure(tree);
+  bNodeSocket *uv = (coord != nullptr) ? socket_out(*coord, "UV") : nullptr;
+  if (coord == nullptr || uv == nullptr) {
+    return {};
+  }
+  NodeOutput source = {coord, uv};
+  /* The effects first, in the list's order: the one closest to the coordinate is the one the
+   * row's reads go through first, the order the CPU resample composes the same steps in. Each
+   * chain reads the previous one's output, so a fold's side signs and a clip factor of a later
+   * step are evaluated where that step's fold acts. */
+  for (const MaterialPaintLayer *effect : BKE_paint_layers_active_transform_effects(ma_, row)) {
+    bNode *mapping = this->mapping_node_ensure(tree, *effect, r_nodes);
+    if (mapping == nullptr) {
+      continue;
+    }
+    bNodeSocket *out = socket_out(*mapping, "Vector");
+    if (out == nullptr) {
+      continue;
+    }
+    source = {mapping, out};
+  }
+  return source;
+}
+
 bNode *PaintLayersTreeBuilder::mapping_node_ensure(bNodeTree &tree,
                                                    const MaterialPaintLayer &row,
                                                    Vector<bNode *> &r_nodes)
@@ -427,9 +456,18 @@ bNode *PaintLayersTreeBuilder::mapping_node_ensure(bNodeTree &tree,
   if (bNode **found = mapping_nodes_.lookup_ptr(&row)) {
     return *found;
   }
-  bNode *coord = this->uv_coordinate_ensure(tree);
-  bNodeSocket *uv = (coord != nullptr) ? socket_out(*coord, "UV") : nullptr;
-  if (uv == nullptr) {
+  /* A transform effect builds from the raw coordinate (it has no effects of its own); any other
+   * row builds from its transform effects' composed output, so the row's own chain and the clip
+   * factor and the Normal remap read the same composed UV every map of the row reads. */
+  NodeOutput source = {nullptr, nullptr};
+  if (paint_layer_kind_transforms_input(row)) {
+    bNode *coord = this->uv_coordinate_ensure(tree);
+    source = (coord != nullptr) ? NodeOutput{coord, socket_out(*coord, "UV")} : NodeOutput{};
+  }
+  else {
+    source = this->input_transforms_source_ensure(tree, row, r_nodes);
+  }
+  if (source.node == nullptr || source.socket == nullptr) {
     return nullptr;
   }
   /* The values ride the row group's inputs; an input missing here leaves the socket at its
@@ -451,8 +489,8 @@ bNode *PaintLayersTreeBuilder::mapping_node_ensure(bNodeTree &tree,
                                   BKE_paint_layers_mapping_mirror_get(row) :
                                   int16_t(0);
   const MappingChain chain = mapping_chain_add(tree,
-                                               *coord,
-                                               *uv,
+                                               *source.node,
+                                               *source.socket,
                                                group_input,
                                                value_socket(mapping_offset_inputs_),
                                                value_socket(mapping_scale_inputs_),
@@ -483,25 +521,39 @@ bool PaintLayersTreeBuilder::mapping_apply(bNodeTree &tree,
                                            bNode &map,
                                            Vector<bNode *> &r_nodes)
 {
-  if (!BKE_paint_layers_mapping_remaps(ma_, row)) {
+  const bool own = BKE_paint_layers_mapping_remaps(ma_, row);
+  /* A row without a mapping of its own still reads through its transform effects: the composed
+   * source is what its maps take instead. */
+  const bool transforms = !own && !BKE_paint_layers_active_transform_effects(ma_, row).is_empty();
+  if (!own && !transforms) {
     return false;
   }
   bNodeSocket *vector = socket_in(map, "Vector");
   if (vector == nullptr) {
     return false;
   }
-  bNode *mapping = this->mapping_node_ensure(tree, row, r_nodes);
-  if (mapping == nullptr) {
-    return false;
+  bNodeSocket *source_out = nullptr;
+  bNode *source_node = nullptr;
+  if (own) {
+    bNode *mapping = this->mapping_node_ensure(tree, row, r_nodes);
+    if (mapping == nullptr) {
+      return false;
+    }
+    source_node = mapping;
+    source_out = socket_out(*mapping, "Vector");
   }
-  bNodeSocket *mapping_out = socket_out(*mapping, "Vector");
-  if (mapping_out == nullptr) {
+  else {
+    const NodeOutput source = this->input_transforms_source_ensure(tree, row, r_nodes);
+    source_node = source.node;
+    source_out = source.socket;
+  }
+  if (source_out == nullptr) {
     return false;
   }
   if (NodeTexImage *storage = static_cast<NodeTexImage *>(map.storage)) {
     storage->extension = SHD_IMAGE_EXTENSION_REPEAT;
   }
-  bke::node_add_link(tree, *mapping, *mapping_out, map, *vector);
+  bke::node_add_link(tree, *source_node, *source_out, map, *vector);
   return true;
 }
 

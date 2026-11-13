@@ -671,6 +671,20 @@ void BKE_paint_layers_channel_map_use_data(Main &bmain,
 bool BKE_paint_layers_is_map_coverage(const MaterialPaintLayer &item);
 
 /**
+ * Whether \a row is a transform effect (a Transform Mapping or a Mirror): it transforms the UV the
+ * row it hangs on reads its content at, instead of correcting a colour. It carries no channel
+ * records, and its opacity and blend lay nothing.
+ */
+bool BKE_paint_layers_is_transform_effect(const MaterialPaintLayer &row);
+
+/**
+ * Whether \a owner is the kind of row a transform effect may hang on: a row that lays a map of its
+ * own (a Paint row, a Fill) or reads a source at its UV (a Material row) has content to move. A
+ * folder, a Mesh Map row and a generator refuse, and so does any correction.
+ */
+bool BKE_paint_layers_transform_input_supported(const MaterialPaintLayer &owner);
+
+/**
  * The Image a map-coverage item samples, or null when it has none or its Base Color record is
  * disabled: the same rule the shader and the CPU mask follow.
  */
@@ -1539,6 +1553,14 @@ bool BKE_paint_layers_mapping_is_identity(const MaterialPaintLayer &layer);
 bool BKE_paint_layers_mapping_remaps(const Material &ma, const MaterialPaintLayer &layer);
 
 /**
+ * The transform effects of \a row that move its input right now, in the list's order: enabled,
+ * of a transform kind and remapping. The one place that rule lives, so the CPU composite, the
+ * generated graph and the GPU steps never disagree about which effects are active.
+ */
+blender::Vector<const MaterialPaintLayer *, 4> BKE_paint_layers_active_transform_effects(
+    const Material &ma, const MaterialPaintLayer &row);
+
+/**
  * Whether strokes may write into \a row's own channels. A Fill row lays a flat value (with an
  * optional map read through its mapping); painting it would turn that map into a stroke target.
  * Its content is edited by corrections instead. A row's mask is still paintable.
@@ -1603,6 +1625,23 @@ bool BKE_paint_layers_mapping_set_rotation(Material &ma, MaterialPaintLayer *lay
  * the Mapping panel's fields read to follow the offset themselves.
  */
 void BKE_paint_layers_mapping_tile_center(const MaterialPaintLayer &layer, float r_center[2]);
+
+/**
+ * The offset a backend evaluates for \a layer's mapping: the stored one, except for a Transform
+ * Mapping effect, whose scale and rotation turn about a pivot kept in its #mirror_center
+ * (`S * R * (uv - p) + p + offset`). Folding the pivot into this offset leaves the CPU, graph and
+ * GPU math untouched, so every backend and the graph's value sync read it from here.
+ */
+void BKE_paint_layers_transform_effective_offset(const MaterialPaintLayer &layer,
+                                                 float r_offset[2]);
+
+/**
+ * Move the pivot of the Transform Mapping effect \a layer to \a pivot (UV space) without moving
+ * what it shows: the stored offset absorbs the difference. False for any other row.
+ */
+bool BKE_paint_layers_set_transform_pivot(Material &ma,
+                                          MaterialPaintLayer *layer,
+                                          const float pivot[2]);
 
 /**
  * Set the mapping scale of \a layer the way the canvas shows it: the tile of the map stays

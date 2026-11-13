@@ -253,6 +253,16 @@ bool paint_layer_gradient_hit_at_mouse(bContext &C,
   return paint_layer_gradient_hit_on_mesh(C, *ob, mval, r_hit);
 }
 
+bool paint_layer_uv_hit_at_mouse(const bContext &C, const float2 &mval, PaintLayerGradientHit &r_hit)
+{
+  r_hit = PaintLayerGradientHit();
+  Object *ob = CTX_data_active_object(&C);
+  if (ob == nullptr || ob->type != OB_MESH) {
+    return false;
+  }
+  return paint_layer_gradient_hit_on_mesh(C, *ob, mval, r_hit);
+}
+
 /** Convert a sampled hit into the row's own space. */
 bool paint_layer_gradient_point_from_hit(const MaterialPaintLayerGradient &gradient,
                                          const Object *object,
@@ -523,6 +533,20 @@ bool paint_layer_gradient_object_point(const Object &ob,
       return paint_layer_gradient_uv_to_object(
           mesh, float2(point.x, point.y), r_tri_cache, r_object);
   }
+}
+
+bool paint_layer_uv_world_point(const Object &ob,
+                                const Mesh &mesh,
+                                const float2 &uv,
+                                int &r_tri_cache,
+                                float3 &r_world)
+{
+  float3 object_point;
+  if (!paint_layer_gradient_uv_to_object(mesh, uv, r_tri_cache, object_point)) {
+    return false;
+  }
+  r_world = math::transform_point(ob.object_to_world(), object_point);
+  return true;
 }
 
 bool paint_layer_gradient_world_point(const Object &ob,

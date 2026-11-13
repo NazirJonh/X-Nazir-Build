@@ -727,6 +727,21 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
       "The UV point the Mirror fold reflects around on every folded axis");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
+  /* The pivot of a Transform Mapping effect: scale and rotation turn about it, and moving it
+   * leaves what the effect shows where it is. Stored in the mirror center, which that kind does
+   * not use. */
+  prop = RNA_def_property(srna, "mapping_pivot", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_mapping_pivot_get",
+                               "rna_MaterialPaintLayer_mapping_pivot_set",
+                               nullptr);
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_pivot_editable");
+  RNA_def_property_ui_text(prop,
+                           "Pivot",
+                           "The UV point the Transform Mapping scales and rotates about");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
   /* Read-only: whether the row holds a map a projection could read at all. */
   prop = RNA_def_property(srna, "projection_supported", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_projection_supported_get", nullptr);

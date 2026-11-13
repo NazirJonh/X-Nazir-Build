@@ -213,8 +213,7 @@ bool values_sync_socket(Material &ma,
     }
     float value[3] = {0.0f, 0.0f, 0.0f};
     if (STREQ(role, ROLE_MAPPING_OFFSET)) {
-      value[0] = layer->mapping.offset[0];
-      value[1] = layer->mapping.offset[1];
+      BKE_paint_layers_transform_effective_offset(*layer, value);
     }
     else if (STREQ(role, ROLE_MAPPING_SCALE)) {
       value[0] = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]);

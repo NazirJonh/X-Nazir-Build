@@ -266,6 +266,17 @@ enum PaintLayerKindFlag : uint16_t {
    * every other property of a kind, so a new kind cannot lay a colored mask silently.
    */
   PAINT_LAYER_KIND_MASK_NEEDS_LUMA = 1 << 11,
+  /**
+   * A transform effect (a Transform Mapping, a Mirror): it lays no colour and corrects none.
+   * Instead it transforms the UV the row it hangs on reads its content at: every map the owner
+   * samples goes through the effect's fold and transform first, wherever that read happens (the
+   * generated graph's read sites, the CPU composite's resample and the combined preview's
+   * #sample_map). It owns no map, and its parameters are its kind's schema, so it carries no
+   * channel records and takes part through the owner's reads alone. Not
+   * #PAINT_LAYER_KIND_ACTS_ON_BELOW: the pointwise correction path has nothing to do here, and a
+   * kind without the flag is never asked to correct a colour.
+   */
+  PAINT_LAYER_KIND_TRANSFORMS_INPUT = 1 << 12,
 };
 
 struct PaintLayerKindInfo {
@@ -1409,6 +1420,13 @@ inline bool paint_layer_kind_has_flag(const MaterialPaintLayer &row, const Paint
 inline bool paint_layer_kind_is_map_coverage(const MaterialPaintLayer &row)
 {
   return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_MAP_COVERAGE);
+}
+
+/** Whether \a row is a transform effect (a Transform Mapping or a Mirror): it transforms the UV
+ * the row it hangs on reads its content at, instead of correcting a colour. */
+inline bool paint_layer_kind_transforms_input(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_TRANSFORMS_INPUT);
 }
 
 /** Whether \a row is the inert Anchor Point marker. */

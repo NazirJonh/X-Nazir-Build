@@ -36,6 +36,7 @@
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_object.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_report.hh"
@@ -118,6 +119,48 @@ void decal_rows_find(Material &ma, const char *decal_name, Vector<MaterialPaintL
       r_rows.append(&row);
     }
   }
+}
+
+Vector<MaterialPaintLayer *> decal_rows_create(Material &ma,
+                                               const char *decal_name,
+                                               const Span<DecalRowChannel> channels,
+                                               MaterialPaintLayer *anchor,
+                                               const projection::ProjectionFrame &frame,
+                                               const bool clip)
+{
+  Vector<MaterialPaintLayer *> created;
+  for (const DecalRowChannel &entry : channels) {
+    if (entry.image == nullptr) {
+      continue;
+    }
+    char row_name[64];
+    decal_row_name_make(decal_name, BKE_paint_material_channel_info(entry.channel).ui_name,
+                        row_name);
+    /* Added bare, not through the Add policy: the policy gives a Fill the default channel set,
+     * and the decal row takes part in the one channel the image maps and no other. */
+    MaterialPaintLayer *layer = BKE_paint_layers_add(ma, row_name, anchor, PaintLayerPlace::Above);
+    if (layer == nullptr) {
+      continue;
+    }
+    layer->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+    if (BKE_paint_layers_channel_add(ma, layer, entry.channel) == nullptr ||
+        !BKE_paint_layers_channel_set_image(ma, layer, entry.channel, entry.image))
+    {
+      BKE_paint_layers_remove(ma, layer);
+      continue;
+    }
+    BKE_paint_layers_projection_set_space(ma, layer, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
+    created.append(layer);
+    /* The next row stacks above the one before it, so the group keeps its list order. */
+    anchor = layer;
+  }
+  if (created.is_empty()) {
+    return created;
+  }
+  /* The rows project through the one frame; a refused frame write leaves the defaults, which
+   * still read a valid (unit) frame. */
+  decal_frame_apply(ma, created, frame, clip);
+  return created;
 }
 
 bool decal_target_find(const bContext &C,

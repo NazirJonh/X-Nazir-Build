@@ -30,6 +30,10 @@ class Batch;
 
 struct PaintSelectFloatingSession;
 
+namespace ed::sculpt_paint {
+struct ImageSelectEditorDecalHandoff;
+}
+
 /* Floating selection operation state for Image Paint mode.
  *
  * There is exactly one slot. The move / transform / warp tools lift pixels off the canvas and hold
@@ -44,6 +48,11 @@ struct PaintSelectFloatingSession;
  * from the sculpt_paint module. */
 struct PaintSelectSession {
   PaintSelectFloatingSession *active = nullptr;
+  /* The decal a Transform confirm hands to the exec that follows it (see
+   * #image_select_editor_decal_handoff_store). Owned: freed by
+   * #image_select_editor_decal_handoff_release, which the session cancel (editor free) calls, so
+   * the stamps it holds never outlive the editor. */
+  ed::sculpt_paint::ImageSelectEditorDecalHandoff *editor_decal_handoff = nullptr;
 };
 
 /** How the 2D preview of an Object/Generated Gradient is produced right now. */

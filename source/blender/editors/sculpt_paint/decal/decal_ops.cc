@@ -255,31 +255,27 @@ static wmOperatorStatus decal_add_rows(bContext *C,
     }
   }
 
-  /* Added bare, not through the Add policy: the policy gives a Fill the default channel set, and
-   * the decal row takes part in the one channel the image maps and no other. */
-  MaterialPaintLayer *layer = BKE_paint_layers_add(ma, row_name, nullptr, PaintLayerPlace::Above);
-  if (layer == nullptr) {
+  /* The row body is the shared creator (#decal_rows_create), so every decal add path builds rows
+   * the stack, the generator and the bake read alike. The row
+   * sits on top of the stack, as the inline body did (a null anchor appends). */
+  const Vector<MaterialPaintLayer *> created = decal_rows_create(
+      ma, decal_name, {DecalRowChannel{channel, &image}}, nullptr, frame, true);
+  if (created.is_empty()) {
     BKE_report(op->reports, RPT_ERROR, "Could not add the decal row");
     return OPERATOR_CANCELLED;
   }
-  layer->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
-  if (BKE_paint_layers_channel_add(ma, layer, channel) == nullptr ||
-      !BKE_paint_layers_channel_set_image(ma, layer, channel, &image))
-  {
-    BKE_paint_layers_remove(ma, layer);
-    BKE_report(op->reports, RPT_ERROR, "The image could not be assigned to the channel");
-    return OPERATOR_CANCELLED;
-  }
-  BKE_paint_layers_projection_set_space(ma, layer, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
-  /* The decal default reads through its front side, like the addon's backface mask: the facing
-   * fade is part of the payload's own default flag, so nothing is toggled here. */
+  /* The creator reads Planar; the operator's space property wins when it differs, as the inline
+   * body did. The facing fade stays part of the payload's own default flag, nothing toggled. */
   if (space != MA_PAINT_LAYER_MAPPING_SPACE_PLANAR) {
-    BKE_paint_layers_projection_set_space(ma, layer, space);
+    for (MaterialPaintLayer *row : created) {
+      BKE_paint_layers_projection_set_space(ma, row, space);
+    }
   }
-
-  rows.append(layer);
+  rows.extend(created);
+  /* The group reads through one frame: re-written to every row, so an existing decal keeps the
+   * rows it had aligned with the new one (the values are the ones read above, a no-op for them). */
   decal_frame_apply(ma, rows, frame, true);
-  BKE_paint_layers_active_set(ma, layer->marker);
+  BKE_paint_layers_active_set(ma, created[0]->marker);
   decal_done_notify(C, ma);
   return OPERATOR_FINISHED;
 }
@@ -1149,17 +1145,6 @@ void PAINT_OT_decal_propagate_to_selected(wmOperatorType *ot)
  * True only when there is an active 3D transform session with a live frame: the same condition
  * that makes the selection cage visible in the viewport.
  */
-/* TODO(S6): the live selection-cage transform session hands its destination frame over through
- * `image_select_transform3d_projection_frame_get`, which the Selection Mask patch (S6) defines in
- * `paint_image_select_view3d.hh`. Until that patch is applied there is no such session to read, so
- * the operator below stays unavailable. Remove this placeholder together with that patch's
- * declaration landing. */
-static bool image_select_transform3d_projection_frame_get(const bContext * /*C*/,
-                                                          projection::ProjectionFrame & /*r_frame*/)
-{
-  return false;
-}
-
 static bool decal_from_selection_poll(bContext *C)
 {
   if (!decal_target_poll(C)) {

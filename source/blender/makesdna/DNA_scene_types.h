@@ -2043,6 +2043,20 @@ enum eImagePaint_SelectionPasteMode : char {
   IMAGE_PAINT_SELECTION_PASTE_NEW_LAYER = 1,
 };
 
+/**
+ * #ImagePaintSettings::selection_transform_mode: the content mapping the Move / Transform Selection
+ * tools (3D Viewport and Image Editor) author. Zero is the UV affine, so files written before the
+ * option open on it.
+ */
+enum eImagePaint_SelectionTransformMode : char {
+  /** The affine in UV space (`dest_uv = pivot + L * (src - pivot) + T`); a UV seam tears the
+   * fragment. */
+  IMAGE_PAINT_SELECT_TRANSFORM_UV = 0,
+  /** The fragment is carried over the surface, unfolded from the mesh triangles around it, so
+   * seams, island borders and UV gaps do not tear it. Nothing of it enters the material. */
+  IMAGE_PAINT_SELECT_TRANSFORM_DECAL = 1,
+};
+
 /** #ImagePaintSettings::select_source_channel: values above the material channels are pseudo
  * channels (a char holds them both). */
 #define IMAGE_PAINT_SELECT_SOURCE_ACTIVE_PASS 100
@@ -2229,7 +2243,9 @@ struct ImagePaintSettings {
   /** #eImagePaint_SelectionPasteMode (appended last so existing files keep their field offsets;
    * #blo_do_versions_520 brings old files to the New Layer default). */
   char selection_paste_mode = IMAGE_PAINT_SELECTION_PASTE_NEW_LAYER;
-  char _pad_qs[1] = {};
+  /** #eImagePaint_SelectionTransformMode (appended last; zero reads as the UV affine, so old
+   * files need no versioning). */
+  char selection_transform_mode = IMAGE_PAINT_SELECT_TRANSFORM_UV;
 };
 
 /** \} */

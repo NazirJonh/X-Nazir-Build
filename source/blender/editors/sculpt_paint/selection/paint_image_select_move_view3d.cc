@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 #include "MEM_guardedalloc.h"
 
@@ -31,6 +32,8 @@
 #include "BLI_vector.hh"
 
 #include "DNA_image_types.h"
+#include "DNA_mesh_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_windowmanager_types.h"
@@ -68,10 +71,13 @@
 #include "../paint_intern.hh"
 #include "paint_image_select_floating.hh"
 #include "GEO_reverse_uv_sampler.hh"
+#include "paint_image_select_decal_log.hh"
+#include "paint_image_select_editor_decal.hh"
 #include "paint_image_select_fragment.hh"
 #include "paint_image_select_intern.hh"
 #include "paint_image_select_move_intern.hh"
 #include "paint_image_select_paste_layer.hh"
+#include "paint_image_select_surface_decal.hh"
 #include "paint_image_select_view3d.hh"
 #include "../mesh/sculpt_intern.hh"
 
@@ -122,6 +128,23 @@ struct ImageSelectMove3DState : PaintSelectView3DFloatingSession {
   int preview_target = -1;
   /** Neutral 1x1 stand-ins of the PBR composite, one per #PBRPreviewChannel. */
   gpu::Texture *pbr_default_textures[PBR_PREVIEW_CHANNEL_NUM] = {nullptr};
+  /**
+   * The content mapping of this session: #use_decal carries the fragment over the surface under
+   * the cursor (the Image Editor's decal frame, authored from #uv_drag_offset, which stays the one
+   * gesture state in both modes so the mode switches without loss); false is the UV offset. Read
+   * from the tool settings at invoke, switched live by #move3d_mode_switch.
+   */
+  bool use_decal = false;
+  ImageSelectEditorDecal decal;
+  /** Set when #uv_drag_offset changed outside a drag step (a step-back): the next draw callback,
+   * which always has a context, refreshes the decal patch. */
+  bool decal_dirty = false;
+  /** Decal drag: the cursor's last surface point (object space) for the delta that does not jump at
+   * UV seams, and the press offset of the center from the cursor, for the re-seat across a seam. */
+  float3 drag_prev_co = float3(0.0f);
+  bool drag_prev_valid = false;
+  float2 drag_grab_uv = float2(0.0f);
+  float drag_grab_len = 0.0f;
 
   explicit ImageSelectMove3DState()
       : PaintSelectView3DFloatingSession(PaintSelectView3DTool::Move)
@@ -151,6 +174,7 @@ struct ImageSelectMove3DState : PaintSelectView3DFloatingSession {
 
   ~ImageSelectMove3DState() override
   {
+    surface_decal_release(this->decal.session);
     this->preview_textures_free();
     for (Vector<SelectionTileFragment> &per_target : this->fragments) {
       selection_tile_fragments_free(per_target);
@@ -169,6 +193,218 @@ static void move3d_state_free_draw_handle(ImageSelectMove3DState &state)
 {
   image_select_view3d_floating_draw_handle_clear(state);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Decal mode
+ *
+ * The fragment rides the surface under the cursor instead of the UV offset: the decal frame is the
+ * Image Editor's (#ImageSelectEditorDecal, authored from #ImageSelectMove3DState::uv_drag_offset as
+ * the translation of the source cage center, no rotation, scale 1), so the orientation is the
+ * surface direction of +U at the center and the fragment never turns with the gesture. The preview
+ * and the bake are the shared surface-decal core's.
+ * \{ */
+
+/** Whether the tool settings ask for the Decal mapping. */
+static bool move3d_decal_requested(const bContext *C)
+{
+  const Scene *scene = CTX_data_scene(C);
+  return scene != nullptr && scene->toolsettings != nullptr &&
+         scene->toolsettings->imapaint.selection_transform_mode ==
+             IMAGE_PAINT_SELECT_TRANSFORM_DECAL;
+}
+
+/** Bring the decal frame and its patch to the current #ImageSelectMove3DState::uv_drag_offset. */
+static void move3d_decal_update(const bContext *C, ImageSelectMove3DState &state)
+{
+  if (state.anchor.object == nullptr) {
+    return;
+  }
+  ImageSelectEditorMapping mapping;
+  mapping.translation = state.uv_drag_offset;
+  image_select_editor_decal_update(C, *state.anchor.object, state.surface_map, state.decal, mapping);
+  state.decal_dirty = false;
+}
+
+/**
+ * Open the decal half of the session at the current offset. False (the session stays in UV mode)
+ * when the object is no mesh or no stamp or surface patch could be built.
+ */
+static bool move3d_decal_begin(const bContext *C, ImageSelectMove3DState &state)
+{
+  Object *ob = state.anchor.object;
+  if (ob == nullptr || ob->type != OB_MESH || state.surface_map.sampler == nullptr) {
+    return false;
+  }
+  ImageSelectEditorDecal decal;
+  if (!image_select_editor_decal_begin(C, *ob, state.surface_map, state.targets, state.fragments, decal))
+  {
+    return false;
+  }
+  surface_decal_release(state.decal.session);
+  state.decal = std::move(decal);
+  state.use_decal = true;
+  state.drag_prev_valid = false;
+  move3d_decal_update(C, state);
+  return true;
+}
+
+/** True when \a uv samples onto the surface within \a tolerance (object units) of \a expected_co. */
+static bool move3d_decal_uv_near(const bContext *C,
+                                 const ImageSelectMove3DState &state,
+                                 const float2 &uv,
+                                 const float3 &expected_co,
+                                 const float tolerance)
+{
+  const Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  if (depsgraph == nullptr || state.anchor.object == nullptr) {
+    return false;
+  }
+  SurfaceDecalFrame frame;
+  if (!surface_decal_frame_at_uv(
+          *state.anchor.object, *depsgraph, state.surface_map, uv, state.decal.tangent, frame))
+  {
+    return false;
+  }
+  return math::distance(frame.co, expected_co) <= tolerance;
+}
+
+/** Capture the cursor's surface point and its offset from the decal center at a press. */
+static void move3d_decal_drag_begin(bContext *C,
+                                    ImageSelectMove3DState &state,
+                                    const ARegion &region,
+                                    const int2 &mval)
+{
+  state.drag_prev_valid = false;
+  const Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  float2 uv;
+  float3 co;
+  if (depsgraph == nullptr || state.anchor.object == nullptr ||
+      !image_select_view3d_surface_point_at(C, *state.anchor.object, state.anchor, region, mval, uv, co))
+  {
+    return;
+  }
+  const float2 center_uv = state.decal.source_center_uv + state.uv_drag_offset;
+  state.drag_grab_uv = center_uv - uv;
+  state.drag_grab_len = 0.0f;
+  SurfaceDecalFrame frame;
+  if (surface_decal_frame_at_uv(
+          *state.anchor.object, *depsgraph, state.surface_map, center_uv, state.decal.tangent, frame))
+  {
+    state.drag_grab_len = math::distance(frame.co, co);
+  }
+  state.drag_prev_co = co;
+  state.drag_prev_valid = true;
+}
+
+/**
+ * One drag step in Decal mode: the center follows the surface point under the cursor. Its
+ * object-space delta is projected onto the center's frame and pushed through that frame's
+ * plane -> UV Jacobian, so crossing an edge inside an island keeps the fragment glued to the
+ * surface; past a seam or a gap (the Jacobian lands off the cursor's point) the center is re-seated
+ * from the cursor's own UV, shifted back by the press offset when that lands on the surface too. A
+ * center without a surface under it is never taken: the fragment stays where it last was.
+ */
+static void move3d_decal_drag_step(bContext *C,
+                                   ImageSelectMove3DState &state,
+                                   const ARegion &region,
+                                   const int2 &mval)
+{
+  const Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  if (depsgraph == nullptr || state.anchor.object == nullptr) {
+    return;
+  }
+  Object &ob = *state.anchor.object;
+  float2 uv_now;
+  float3 co_now;
+  if (!image_select_view3d_surface_point_at(C, ob, state.anchor, region, mval, uv_now, co_now)) {
+    return;
+  }
+  if (!state.drag_prev_valid) {
+    move3d_decal_drag_begin(C, state, region, mval);
+    return;
+  }
+  const float2 center_uv = state.decal.source_center_uv + state.uv_drag_offset;
+  const float3 d3 = co_now - state.drag_prev_co;
+  float2 new_center = uv_now;
+  bool found = false;
+  SurfaceDecalFrame frame;
+  const bool frame_ok = surface_decal_frame_at_uv(
+      ob, *depsgraph, state.surface_map, center_uv, state.decal.tangent, frame);
+  if (frame_ok && frame.jacobian_valid) {
+    const float2 d_plane = float2(math::dot(d3, frame.tangent), math::dot(d3, frame.bitangent));
+    const float2 advanced = center_uv + frame.plane_uv_jacobian * d_plane;
+    if (move3d_decal_uv_near(C, state, advanced, frame.co + d3, 0.6f * math::length(d3) + 1e-5f)) {
+      new_center = advanced;
+      found = true;
+    }
+  }
+  if (!found) {
+    const float2 shifted = uv_now + state.drag_grab_uv;
+    new_center = move3d_decal_uv_near(C, state, shifted, co_now, state.drag_grab_len * 1.5f + 1e-5f) ?
+                     shifted :
+                     uv_now;
+  }
+  state.drag_prev_co = co_now;
+  if (frame_ok) {
+    /* Kept continuous across the drag: the stamp is re-oriented by +U on the surface at the new
+     * center, the previous tangent is only the fallback where +U cannot be sampled. */
+    state.decal.tangent = frame.tangent;
+  }
+  if (!move3d_decal_uv_near(C, state, new_center, co_now, std::numeric_limits<float>::max())) {
+    /* No surface under the new center (a UV gap): the fragment stays on its last valid point. */
+    return;
+  }
+  state.uv_drag_offset = new_center - state.decal.source_center_uv;
+  move3d_decal_update(C, state);
+}
+
+/**
+ * Switch the live session between the UV offset and the Decal mapping. The gesture is the UV drag
+ * offset in both modes, so nothing is lost: Decal -> UV keeps the offset (the UV the decal center
+ * stands at), UV -> Decal opens the decal frame with its center at the fragment's current center.
+ * A running drag defers the switch (see #image_select_view3d_pending_mode_apply); the mode stays
+ * when the decal cannot be opened.
+ * \return true when the mode changed.
+ */
+static bool move3d_mode_switch(bContext *C, ImageSelectMove3DState &state, const bool want_decal)
+{
+  if (state.use_decal == want_decal) {
+    /* The setting went back to the session's mode: a change kept during the gesture is void. */
+    state.pending_decal = -1;
+    return false;
+  }
+  if (state.is_dragging) {
+    state.pending_decal = want_decal ? 1 : 0;
+    IMAGE_SELECT_DECAL_LOG(IMAGE_SELECT_DECAL_TAG_3D
+                           "move: mode change deferred until the drag ends\n");
+    return false;
+  }
+  state.pending_decal = -1;
+  /* The preview table holds stamp copies in Decal mode and fragment copies in UV mode, in the same
+   * slots: drop it so neither mode draws the other's textures. */
+  image_select_view3d_preview_textures_free(state.preview_textures);
+  if (!want_decal) {
+    surface_decal_release(state.decal.session);
+    state.decal = ImageSelectEditorDecal();
+    state.use_decal = false;
+    state.decal_dirty = false;
+    IMAGE_SELECT_DECAL_LOG(IMAGE_SELECT_DECAL_TAG_3D "move: live switch Decal -> UV\n");
+    return true;
+  }
+  if (!move3d_decal_begin(C, state)) {
+    IMAGE_SELECT_DECAL_LOG(IMAGE_SELECT_DECAL_TAG_3D
+                           "move: live switch to Decal refused: no mesh object, stamp or "
+                           "surface patch\n");
+    return false;
+  }
+  IMAGE_SELECT_DECAL_LOG(IMAGE_SELECT_DECAL_TAG_3D
+                         "move: live switch UV -> Decal at offset (%.4f, %.4f)\n",
+                         state.uv_drag_offset.x,
+                         state.uv_drag_offset.y);
+  return true;
+}
+
+/** \} */
 
 /** Boundary segments of one fragment's mask in global UV, at its lifted position. */
 static Vector<float2> move3d_fragment_outlines_uv(const SelectionTileFragment &frag)
@@ -194,10 +430,28 @@ static Vector<float2> move3d_fragment_outlines_uv(const SelectionTileFragment &f
 }
 
 /** The 3D preview: every fragment outline (translated by the drag offset) on the surface. */
-static void move3d_draw(const bContext * /*C*/, ARegion *region, void *arg)
+static void move3d_draw(const bContext *C, ARegion *region, void *arg)
 {
   auto *state = static_cast<ImageSelectMove3DState *>(arg);
   if (state == nullptr || state->anchor.object == nullptr || !state->surface_map.sampler) {
+    return;
+  }
+  if (state->use_decal) {
+    /* A step-back moved the offset outside a drag step: this callback is the one caller that always
+     * has a context, so the patch is brought up to date here. */
+    if (state->decal_dirty && C != nullptr) {
+      move3d_decal_update(C, *state);
+    }
+    /* The patch carries the stamp at the real surface positions; the UV-space path below does not
+     * apply (and the yellow outline would sit where the fragment was lifted, not where it is). */
+    surface_decal_draw_preview(region,
+                               state->decal.session,
+                               *state->anchor.object,
+                               state->surface_map,
+                               state->targets,
+                               state->preview_textures,
+                               state->pbr_default_textures,
+                               state->preview_target_resolved());
     return;
   }
   /* The fragment pixels at their dragged position, on the surface; the source region is already
@@ -274,10 +528,44 @@ static void move3d_draw(const bContext * /*C*/, ARegion *region, void *arg)
       *state->anchor.object, state->surface_map, polylines, yellow, 8.0f);
 }
 
+/**
+ * Bake the stamps through the decal patch at the final offset: one image undo step, the source
+ * regions cut like the UV commit's. False, with nothing written, when no patch can be built; the
+ * caller then commits the UV offset, which is the same gesture.
+ */
+static bool move3d_decal_commit(bContext *C, ImageSelectMove3DState &state)
+{
+  if (state.anchor.object == nullptr) {
+    return false;
+  }
+  move3d_decal_update(C, state);
+  if (state.decal.session.patch.tris.is_empty()) {
+    IMAGE_SELECT_DECAL_LOG(IMAGE_SELECT_DECAL_TAG_3D
+                           "move: commit has no surface patch, committing the UV offset\n");
+    return false;
+  }
+  surface_decal_commit(C,
+                       "Move Selection (Decal)",
+                       state.decal.session,
+                       state.surface_map,
+                       state.targets,
+                       state.fragments,
+                       [&](const Image *ima) { return image_select_view3d_image_is_alive(state, ima); });
+  IMAGE_SELECT_DECAL_LOG(IMAGE_SELECT_DECAL_TAG_3D
+                         "move: commit bake: %d target(s) through %d patch tris\n",
+                         int(state.targets.size()),
+                         int(state.decal.session.patch.tris.size()));
+  surface_decal_release(state.decal.session);
+  return true;
+}
+
 void ImageSelectMove3DState::commit(bContext *C)
 {
   move3d_state_free_draw_handle(*this);
   WM_cursor_modal_restore(CTX_wm_window(C));
+  if (this->use_decal && move3d_decal_commit(C, *this)) {
+    return;
+  }
 
   /* The committable targets, in resolve order: the whole commit lands in ONE image undo step, so
    * a single Ctrl+Z restores every Material canvas together (see
@@ -337,6 +625,7 @@ bool ImageSelectMove3DState::undo_step()
     return false;
   }
   this->uv_drag_offset = this->drag_offset_history.pop_last();
+  this->decal_dirty = true;
   if (this->owner_region != nullptr) {
     ED_region_tag_redraw(this->owner_region);
   }
@@ -346,6 +635,32 @@ bool ImageSelectMove3DState::undo_step()
 bool ImageSelectMove3DState::cursor_over_fragment(const bContext *C, const int2 &mval) const
 {
   ARegion *region = CTX_wm_region(C);
+  if (region != nullptr && this->use_decal && this->anchor.object != nullptr) {
+    /* The decal rides the surface, which the UV rect below cannot follow across a seam: the cursor
+     * grabs it within the circle around the stamp that the stamp's own extents span. */
+    const Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+    float2 uv;
+    float3 co;
+    SurfaceDecalFrame frame;
+    if (depsgraph == nullptr ||
+        !image_select_view3d_surface_point_at(const_cast<bContext *>(C),
+                                              *this->anchor.object,
+                                              this->anchor,
+                                              *region,
+                                              mval,
+                                              uv,
+                                              co) ||
+        !surface_decal_frame_at_uv(*this->anchor.object,
+                                   *depsgraph,
+                                   this->surface_map,
+                                   this->decal.source_center_uv + this->uv_drag_offset,
+                                   this->decal.tangent,
+                                   frame))
+    {
+      return false;
+    }
+    return math::distance(co, frame.co) <= 0.5f * math::length(this->decal.session.base_size);
+  }
   if (region == nullptr || !this->anchor.jacobian_valid || this->anchor.object == nullptr) {
     return false;
   }
@@ -398,6 +713,17 @@ static ImageSelectMove3DState *move3d_state_get()
   return image_select_view3d_session_get<ImageSelectMove3DState, PaintSelectView3DTool::Move>();
 }
 
+void image_select_move3d_mode_changed(bContext *C, const bool want_decal)
+{
+  ImageSelectMove3DState *state = move3d_state_get();
+  if (state == nullptr || C == nullptr) {
+    return;
+  }
+  if (move3d_mode_switch(C, *state, want_decal) && state->owner_region != nullptr) {
+    ED_region_tag_redraw(state->owner_region);
+  }
+}
+
 static bool move3d_lift_fragments(bContext *C,
                                   wmOperator *op,
                                   ImageSelectMove3DState &state,
@@ -447,6 +773,10 @@ static wmOperatorStatus move3d_invoke(bContext *C, wmOperator *op, const wmEvent
       floating->is_dragging = true;
       floating->prev_mouse_xy = int2(event->mval[0], event->mval[1]);
       floating->drag_offset_history.append(floating->uv_drag_offset);
+      if (floating->use_decal && CTX_wm_region(C) != nullptr) {
+        move3d_decal_drag_begin(
+            C, *floating, *CTX_wm_region(C), int2(event->mval[0], event->mval[1]));
+      }
       WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
       WM_event_add_modal_handler(C, op);
       return OPERATOR_RUNNING_MODAL;
@@ -475,6 +805,11 @@ static wmOperatorStatus move3d_invoke(bContext *C, wmOperator *op, const wmEvent
     BKE_report(op->reports, RPT_WARNING, "Selection is empty");
     return OPERATOR_CANCELLED;
   }
+  /* The content mapping is resolved now that the lift fixed the fragments: Decal needs the stamps
+   * and the surface patch, and falls back to the UV offset when they cannot be built. */
+  if (move3d_decal_requested(C) && !move3d_decal_begin(C, *state)) {
+    BKE_report(op->reports, RPT_WARNING, "Decal: no surface patch; moving in UV mode");
+  }
   for (const ImagePaintSelectionTarget &target : state->targets) {
     state->borrowed_images.append(target.image);
   }
@@ -488,6 +823,9 @@ static wmOperatorStatus move3d_invoke(bContext *C, wmOperator *op, const wmEvent
   state->is_dragging = true;
   state->prev_mouse_xy = int2(event->mval[0], event->mval[1]);
   state->drag_offset_history.append(float2(0.0f));
+  if (state->use_decal && CTX_wm_region(C) != nullptr) {
+    move3d_decal_drag_begin(C, *state, *CTX_wm_region(C), state->prev_mouse_xy);
+  }
   WM_event_add_modal_handler(C, op);
   ED_region_tag_redraw(CTX_wm_region(C));
   return OPERATOR_RUNNING_MODAL;
@@ -510,6 +848,12 @@ static wmOperatorStatus move3d_modal(bContext *C, wmOperator * /*op*/, const wmE
 
   if (event->type == MOUSEMOVE) {
     const int2 mval(event->mval[0], event->mval[1]);
+    if (state->use_decal) {
+      move3d_decal_drag_step(C, *state, *region, mval);
+      ED_region_tag_redraw(region);
+      state->prev_mouse_xy = mval;
+      return OPERATOR_RUNNING_MODAL | OPERATOR_PASS_THROUGH;
+    }
     float2 plane_now;
     if (image_select_view3d_mval_to_plane_px(state->anchor, *region, mval, plane_now)) {
       float2 plane_prev = plane_now;
@@ -527,6 +871,9 @@ static wmOperatorStatus move3d_modal(bContext *C, wmOperator * /*op*/, const wmE
   if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
     state->is_dragging = false;
     WM_cursor_modal_restore(CTX_wm_window(C));
+    /* A mode change requested during the gesture applies now that it is over. */
+    image_select_view3d_pending_mode_apply(C);
+    ED_region_tag_redraw(region);
     return OPERATOR_FINISHED;
   }
   if (event->type == EVT_MODAL_MAP) {
@@ -540,6 +887,7 @@ static wmOperatorStatus move3d_modal(bContext *C, wmOperator * /*op*/, const wmE
       case IMAGE_SELECT_FLOATING_MODAL_UNDO_STEP: {
         if (!state->drag_offset_history.is_empty()) {
           state->uv_drag_offset = state->drag_offset_history.pop_last();
+          state->decal_dirty = true;
           ED_region_tag_redraw(region);
         }
         else {

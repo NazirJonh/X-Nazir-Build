@@ -1945,6 +1945,27 @@ void BKE_paint_layers_projection_frame_from_matrix(const float mat[3][3],
                                                    float *r_roll);
 
 /**
+ * Re-express a tangent-space normal between a projection frame's own basis and the target
+ * surface's tangent basis — the one conversion a projected row's Normal map needs, shared by the
+ * CPU composite and mirrored by the generated graph's nodes, so a bake and the viewport shade the
+ * same relief.
+ *
+ * \a n_frame is decoded (in -1..1) in the frame's axes: +x along \a frame_axes' first column, +y
+ * along its second, +z along its third (the basis #BKE_paint_layers_projection_frame_matrix
+ * builds, in the space the frame's values live in). It is carried through that basis into the
+ * surface's space and encoded in the target tangent basis: x along \a tangent, y along
+ * \a bitangent, z along \a surface_normal (the triangle's interpolated normal). The result is
+ * renormalized in place; a degenerate input is passed through unchanged, so a caller never
+ * encodes a NaN.
+ */
+void BKE_paint_layers_projection_normal_frame_to_tangent(const float frame_axes[3][3],
+                                                         const float tangent[3],
+                                                         const float bitangent[3],
+                                                         const float surface_normal[3],
+                                                         const float n_frame[3],
+                                                         float r_n_tangent[3]);
+
+/**
  * Set the frame centre, extents, direction and roll in one step (one tag per call, for
  * per-event gizmo drags). Value-only: a slider or gizmo drag never rebuilds the graph.
  */

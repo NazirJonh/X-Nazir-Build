@@ -21,12 +21,15 @@
 
 namespace blender {
 struct bContext;
+struct Image;
 struct Main;
 struct Material;
 struct MaterialPaintLayer;
 struct Object;
 struct ReportList;
 struct wmOperatorType;
+
+enum eMaterialPaintChannel : int8_t;
 }  // namespace blender
 
 namespace blender::ed::sculpt_paint::projection {
@@ -70,6 +73,32 @@ bool decal_mode_supported(const Object &ob);
 
 /** The rows of the decal \a decal_name, in stack order (bottom of the stack first). */
 void decal_rows_find(Material &ma, const char *decal_name, Vector<MaterialPaintLayer *> &r_rows);
+
+/** One channel-image pair a decal row maps, the input of #decal_rows_create. */
+struct DecalRowChannel {
+  eMaterialPaintChannel channel;
+  Image *image;
+};
+
+/**
+ * Create the rows of the decal \a decal_name above \a anchor (null appends on top of the stack),
+ * one per entry of \a channels in list order, each a Constant Fill reading its image in its
+ * channel through a Planar projection, and write \a frame to the created rows (value-only) with
+ * the given clip. The row body of the decal add operators, kept separate from them so the rows
+ * the stack, the generator and the bake read are built in one place.
+ *
+ * Colorspace and per-row settings beyond the ones named above stay the caller's business (the
+ * add operator marks a Normal image Non-Color before calling; the session owns its rows after).
+ *
+ * \return the created rows in stack order (top last). Empty when no row could be created; a
+ * failure part-way removes the rows made so far, so no half group is left behind.
+ */
+Vector<MaterialPaintLayer *> decal_rows_create(Material &ma,
+                                               const char *decal_name,
+                                               const Span<DecalRowChannel> channels,
+                                               MaterialPaintLayer *anchor,
+                                               const projection::ProjectionFrame &frame,
+                                               bool clip);
 
 /**
  * The controller (\a projection_object) all \a rows share, or null when none of them has one.

@@ -833,6 +833,16 @@ void ED_image_paint_select_gradient_settings_revision_bump();
  */
 void ED_image_paint_select_warp_settings_revision_bump();
 
+/* `paint_image_select_floating.cc` */
+
+/**
+ * Bring the live Move / Transform Selection sessions (every Image Editor's, and the 3D Viewport's
+ * Transform) in line with #ImagePaintSettings::selection_transform_mode after it changed. Sessions
+ * already in that mode, and a session whose gesture is running, are left alone; no session means no
+ * effect.
+ */
+void ED_image_paint_select_transform_mode_changed(bContext *C);
+
 /* `paint_image_shape_vector.cc` */
 
 struct Main;

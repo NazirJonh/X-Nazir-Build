@@ -82,6 +82,10 @@ class Texture;
 
 namespace blender::ed::sculpt_paint {
 
+namespace projection {
+struct ProjectionFrame;
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Anchor and plane mapping
  * \{ */
@@ -214,6 +218,46 @@ bool image_select_transform3d_begin_paste(bContext *C,
                                           ReportList *reports,
                                           Vector<ImagePaintSelectionTarget> targets,
                                           Vector<Vector<SelectionTileFragment>> fragments);
+
+/**
+ * The live 3D transform session's destination frame as the projection system's inline frame
+ * (object-space centre, full extents, normal + roll) — the same shape #projection::ProjectionFrame
+ * carries for a projected material row. False when this Viewport has no live transform session.
+ *
+ * This is the hand-over point for a projected content mapping: it can consume the frame instead
+ * of re-deriving it from the selection tool's affine.
+ */
+bool image_select_transform3d_projection_frame_get(const bContext *C,
+                                                   projection::ProjectionFrame &r_frame);
+
+/**
+ * Apply the tool settings' transform mode to the live 3D Transform session, if there is one (see
+ * #transform3d_mode_switch). Redraws the Viewport when the session switched.
+ */
+void image_select_transform3d_mode_changed(bContext *C, bool want_decal);
+
+/** The Move Selection counterpart of #image_select_transform3d_mode_changed. */
+void image_select_move3d_mode_changed(bContext *C, bool want_decal);
+
+/**
+ * Apply the mode change the live 3D session kept while a gesture ran (see
+ * #PaintSelectView3DFloatingSession::pending_decal). Call after the gesture ended; no-op without a
+ * live session or a pending request. Defined in `paint_image_select_mode_switch.cc`.
+ */
+void image_select_view3d_pending_mode_apply(bContext *C);
+
+/**
+ * Resolve the cursor onto \a ob's surface: the object-space point and the UV it samples (the sculpt
+ * BVH raycast the paint cursor uses). Off the mesh the plane of \a anchor keeps the mapping, so a
+ * drag that leaves the silhouette still resolves. False when neither works.
+ */
+bool image_select_view3d_surface_point_at(bContext *C,
+                                          Object &ob,
+                                          const ImageSelectView3DAnchor &anchor,
+                                          const ARegion &region,
+                                          const int2 &mval,
+                                          float2 &r_uv,
+                                          float3 &r_co);
 
 /** Clear the selection masks of \a ob's canvas targets, as a click on empty space does (its own
  * "Deselect" undo step; nothing happens while no target holds a selection). */
@@ -379,6 +423,9 @@ struct PaintSelectView3DFloatingSession {
   void *draw_handle = nullptr;
   /** True only while a mouse drag is in progress. */
   bool is_dragging = false;
+  /** A UV <-> Decal change requested while a gesture ran (-1 none, 0 UV, 1 Decal), applied by
+   * #image_select_view3d_pending_mode_apply when the gesture ends. */
+  int pending_decal = -1;
   /** Canvas images this session borrowed (`paint_selection_borrowed_by`); cleared on end. */
   Vector<Image *> borrowed_images;
   /**
@@ -488,13 +535,31 @@ struct ImageSelectView3DSurfaceMap {
   bool ensure(const Object &ob, StringRef uv_name);
 
   /** Sample \a uv to an object-space position + normal: `corner_verts` / `vert_positions` come
-   * from the same mesh the sampler was built on (positions may be the evaluated ones). */
+   * from the same mesh the sampler was built on (positions may be the evaluated ones).
+   * \param r_tri_index: when non-null, the corner-triangle index the UV resolved to. */
   bool sample(const Span<int> corner_verts,
               const Span<float3> vert_positions,
               const float2 &uv,
               float3 &r_co,
-              float3 &r_no) const;
+              float3 &r_no,
+              int *r_tri_index = nullptr) const;
 };
+
+/**
+ * Build a full anchor at the surface UV \a uv of the scene's active mesh, reusing \a surface_map's
+ * UV/triangle layout: the surface point and normal, a frame whose tangent stays close to
+ * \a prev_tangent, the zoom-scaled `px_per_unit` and the plane-px -> UV Jacobian of the triangle
+ * under \a uv. False when \a uv is off the surface (a UV gap).
+ *
+ * This is the surface-local frame the floating transform tool follows as it moves across a mesh:
+ * unlike #image_select_view3d_anchor_from_mval it needs no raycast, so it can be rebuilt from the
+ * fragment's current UV on every drag step.
+ */
+bool image_select_view3d_anchor_from_uv(const bContext *C,
+                                        const ImageSelectView3DSurfaceMap &surface_map,
+                                        const float2 &uv,
+                                        const float3 &prev_tangent,
+                                        ImageSelectView3DAnchor &r_anchor);
 
 /**
  * Boundary segments of one tile's selection mask in global UV space: four border segments per

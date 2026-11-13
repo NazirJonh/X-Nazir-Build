@@ -912,6 +912,51 @@ ImBuf *composite_resample_projected(const ImBuf *src,
     if (!covered) {
       return;
     }
+    /* A tangent-space Normal map sampled through the frame: the stored vectors read in the
+     * frame's own basis and must be re-expressed in the destination triangle's tangent basis, or
+     * the relief would turn with the frame instead of staying glued to the surface (the same
+     * conversion the generated graph builds, through the shared
+     * #BKE_paint_layers_projection_normal_frame_to_tangent). */
+    if (mapping.tangent_normal) {
+      float frame_rot[3][3];
+      transpose_m3_m3(frame_rot, ctx.inv_frame_rot);
+      /* The destination triangle's tangent basis from its UV gradient (object space; the true
+       * bitangent, so a mirrored island keeps its relief's direction). */
+      const float2 duv1 = float2(tri.tri_uv[1][0] - tri.tri_uv[0][0],
+                                 tri.tri_uv[1][1] - tri.tri_uv[0][1]);
+      const float2 duv2 = float2(tri.tri_uv[2][0] - tri.tri_uv[0][0],
+                                 tri.tri_uv[2][1] - tri.tri_uv[0][1]);
+      const float det = duv1.x * duv2.y - duv1.y * duv2.x;
+      if (std::abs(det) > 1e-12f) {
+        const float r = 1.0f / det;
+        const float3 e1 = tri.p1 - tri.p0;
+        const float3 e2 = tri.p2 - tri.p0;
+        float3 tangent = (e1 * duv2.y - e2 * duv1.y) * r;
+        float3 bitangent = (e2 * duv1.x - e1 * duv2.x) * r;
+        if (ctx.has_controller) {
+          /* The frame axes live in the controller's space (that is what the rotation carries);
+           * the triangle basis is read there too, so the two never mix spaces. */
+          const float3x3 object_to_controller = ctx.normal_world_to_controller *
+                                                ctx.normal_object_to_world;
+          tangent = object_to_controller * tangent;
+          bitangent = object_to_controller * bitangent;
+        }
+        const float3 surface_normal = math::normalize(
+            float3(n_interp[0], n_interp[1], n_interp[2]));
+        /* The accumulated straight colour is the premultiplied mean of the encoded taps: un-
+         * multiply to the decoded vector, convert, and put it back premultiplied. */
+        const float inv_alpha = 1.0f / alpha;
+        const float n_frame[3] = {straight[0] * inv_alpha * 2.0f - 1.0f,
+                                  straight[1] * inv_alpha * 2.0f - 1.0f,
+                                  straight[2] * inv_alpha * 2.0f - 1.0f};
+        float n_tangent[3];
+        BKE_paint_layers_projection_normal_frame_to_tangent(
+            frame_rot, tangent, bitangent, surface_normal, n_frame, n_tangent);
+        straight[0] = (n_tangent[0] * 0.5f + 0.5f) * alpha;
+        straight[1] = (n_tangent[1] * 0.5f + 0.5f) * alpha;
+        straight[2] = (n_tangent[2] * 0.5f + 0.5f) * alpha;
+      }
+    }
     float *pixel = out + (int64_t(y) * ref_width + x) * 4;
     pixel[0] = straight[0] * alpha;
     pixel[1] = straight[1] * alpha;

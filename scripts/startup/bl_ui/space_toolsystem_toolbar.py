@@ -2550,7 +2550,7 @@ class _defs_sculpt:
             label="Projection Frame",
             description=(
                 "Move, rotate and scale the inline projection frame of the active Fill layer "
-                "with a volume projection space"
+                "with a projection space"
             ),
             icon="ops.mesh.primitive_cube_add_gizmo",
             widget=None,
@@ -2859,6 +2859,22 @@ class _defs_image_paint_select_view3d:
         )
 
     @ToolDef.from_fn
+    def transform():
+        def draw_settings(context, layout, _tool):
+            imapaint = context.tool_settings.image_paint
+            layout.prop(imapaint, "selection_transform_mode", text="Mode")
+
+        return dict(
+            idname="builtin.image_paint_select_transform",
+            label="Transform Selection",
+            icon="ops.transform.transform",
+            cursor='PAINT_CROSS',
+            widget=None,
+            keymap="3D View Tool: Sculpt, Image Select Transform",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def move():
         return dict(
             idname="builtin.image_paint_select_move",
@@ -2867,17 +2883,6 @@ class _defs_image_paint_select_view3d:
             cursor='PAINT_CROSS',
             widget=None,
             keymap="3D View Tool: Sculpt, Image Select Move",
-        )
-
-    @ToolDef.from_fn
-    def transform():
-        return dict(
-            idname="builtin.image_paint_select_transform",
-            label="Transform Selection",
-            icon="ops.transform.transform",
-            cursor='PAINT_CROSS',
-            widget=None,
-            keymap="3D View Tool: Sculpt, Image Select Transform",
         )
 
     @ToolDef.from_fn
@@ -2945,22 +2950,35 @@ class _defs_image_paint_select:
 
     @ToolDef.from_fn
     def move():
+        def draw_settings(context, layout, _tool):
+            # The content mapping the floating fragment is carried with: the UV affine, or a decal
+            # that follows the surface across seams. Read when the selection is lifted; shared with
+            # the 3D Viewport's Transform / Move Selection tools.
+            imapaint = context.tool_settings.image_paint
+            layout.prop(imapaint, "selection_transform_mode", text="Mode")
+
         return dict(
             idname="builtin.select_move",
             label="Move Selection",
             icon="ops.transform.translate",
             widget=None,
             keymap="Image Editor Tool: Paint, Move Selection",
+            draw_settings=draw_settings,
         )
 
     @ToolDef.from_fn
     def transform():
+        def draw_settings(context, layout, _tool):
+            imapaint = context.tool_settings.image_paint
+            layout.prop(imapaint, "selection_transform_mode", text="Mode")
+
         return dict(
             idname="builtin.select_transform",
             label="Transform Selection",
             icon="ops.transform.transform",
             widget=None,
             keymap="Image Editor Tool: Paint, Transform Select",
+            draw_settings=draw_settings,
         )
 
     @ToolDef.from_fn

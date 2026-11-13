@@ -6,23 +6,33 @@
  * \ingroup edsculpt
  *
  * Transform Selection in the 3D Viewport: move / rotate / scale the floating fragments with a
- * handle overlay drawn on the surface. The transform is authored on the anchor plane (plane px,
- * like the 3D paint-shape cage) and applied in UV space through the anchor's plane->UV Jacobian,
- * so the committed result is the correctly projected transform: `dest_uv = pivot + J * R * S *
- * J^-1 * (src - pivot) + J * translation`.
+ * handle overlay drawn on the surface.
  *
- * The commit resampling is the shared affine fragment writer; only the input mapping, the handle
- * interaction and the preview differ from the Image Editor's transform tool.
+ * The transform is authoritative in UV space: `dest_uv = pivot + L * (src_uv - pivot) +
+ * translation`. The *frame* it is authored in is surface-local: a #ImageSelectView3DAnchor is
+ * re-sampled at the transformed pivot as the fragment moves, so the cage, the rotate / scale plane
+ * and the cursor mapping all follow the face the content is on instead of the plane of the first
+ * click. Moving across a cube edge turns the gizmo onto the side face; the cage edges are resolved
+ * point by point on the surface, so they bend over the edge with it.
+ *
+ * #transform3d_mapping_get also carries the destination frame as the projection system's
+ * #projection::ProjectionFrame (see #image_select_transform3d_projection_frame_get): a projected content mapping can consume the
+ * frame instead of re-deriving it from the affine, replacing only the mapping -- the gizmo, the
+ * cage and the gestures stay untouched.
  */
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase_wrapper.hh"
+#include "BLI_kdopbvh.hh"
 #include "BLI_math_matrix.hh"
+#include "BLI_math_rotation.h"
+#include "BLI_math_rotation.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
@@ -32,6 +42,7 @@
 #include "BLI_vector.hh"
 
 #include "DNA_image_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
@@ -43,6 +54,9 @@
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
 #include "BKE_library.hh"
+#include "BKE_mesh.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_screen.hh"
 
 #include "ED_image.hh"
 #include "ED_screen.hh"
@@ -64,218 +78,109 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "../mesh/sculpt_intern.hh"
 #include "../paint_intern.hh"
+#include "../projection/projection_target.hh"
 #include "GEO_reverse_uv_sampler.hh"
 #include "paint_image_select_floating.hh"
 #include "paint_image_select_fragment.hh"
 #include "paint_image_select_intern.hh"
 #include "paint_image_select_move_intern.hh"
+#include "paint_image_select_transform_view3d_intern.hh"
 #include "paint_image_select_view3d.hh"
-#include "../mesh/sculpt_intern.hh"
-
-#include "BKE_mesh.hh"
-#include "BKE_screen.hh"
 
 namespace blender::ed::sculpt_paint {
 
-/* -------------------------------------------------------------------- */
-/** \name State
- * \{ */
-
-namespace image_select_v3d {
-
-enum class Transform3DHandle {
-  None,
-  Move,
-  Rotate,
-  Pivot,
-  Corner0,
-  Corner1,
-  Corner2,
-  Corner3,
-  /** Edge midpoints of the cage (bottom, right, top, left): scale along one axis only. */
-  Edge0,
-  Edge1,
-  Edge2,
-  Edge3,
-};
-
-/** One finished gesture's transform snapshot, for step-back. */
-struct Transform3DSnapshot {
-  float2 plane_translation;
-  float rotation;
-  float2 scale;
-  float2 plane_pivot;
-};
-
-/** Map a UV point through the forward affine transform. */
-inline float2 transform_uv(const float2x2 &linear,
-                           const float2 &pivot_uv,
-                           const float2 &translation_uv,
-                           const float2 &uv)
-{
-  return pivot_uv + linear * (uv - pivot_uv) + translation_uv;
-}
-
-/** Rotation by \a angle in the plane (columns, like the rest of the plane math). */
-inline float2x2 plane_rotation(const float angle)
-{
-  const float s = std::sin(angle);
-  const float c = std::cos(angle);
-  return float2x2({c, s}, {-s, c});
-}
-
-/**
- * The plane-space linear map (scale, then rotate) of the current transform. The scale acts along
- * the axes of the fragment frame (\a frame, the orientation of the selection's own edges), not
- * the plane axes: `R(rotation) * F * S * F^-1`.
- */
-inline float2x2 transform_plane_linear(const float rotation, const float2 &scale, const float frame)
-{
-  const float2x2 scale_matrix({scale.x, 0.0f}, {0.0f, scale.y});
-  return plane_rotation(rotation) * plane_rotation(frame) * scale_matrix * plane_rotation(-frame);
-}
-
-}  // namespace image_select_v3d
-
-struct ImageSelectTransform3DState : PaintSelectView3DFloatingSession {
-  ImageSelectView3DAnchor anchor;
-  Vector<ImagePaintSelectionTarget> targets;
-  Vector<Vector<SelectionTileFragment>> fragments;
-  /** Transform authored on the anchor plane. */
-  float2 plane_translation = float2(0.0f);
-  float rotation = 0.0f;
-  float2 scale = float2(1.0f);
-  float2 plane_pivot = float2(0.0f);
-  /**
-   * Orientation of the fragment frame on the anchor plane: the minimal oriented rectangle of the
-   * selection content (a box select gives its own edges), so the cage and the scale axes follow
-   * the selection instead of the screen or the canvas. #plane_min / #plane_max are in this frame.
-   */
-  float frame_angle = 0.0f;
-  Vector<image_select_v3d::Transform3DSnapshot> drag_history;
-  ImageSelectView3DSurfaceMap surface_map;
-  /** Fragment outlines in source UV space (segment pairs). */
-  Vector<Vector<float2>> outline_uv;
-  /** GPU copies of the fragments' display buffers for the on-surface preview, created lazily by
-   * the texture draw callback (a GPU context is current there), parallel to #fragments. */
-  Vector<Vector<gpu::Texture *>> preview_textures;
-  /** Which target the on-surface preview shows; -1 = the PBR composite (a Material canvas's maps
-   * shaded together), or the auto target when none is possible. Cycled by #preview_channel_cycle
-   * between the composite and the channels it cannot shade (stacking roughness / normal maps flat
-   * on top of each other reads as nothing). */
-  int preview_target = -1;
-  /** Neutral 1x1 stand-ins of the PBR composite, one per #PBRPreviewChannel. */
-  gpu::Texture *pbr_default_textures[PBR_PREVIEW_CHANNEL_NUM] = {nullptr};
-  /** Pasted content has no selection of its own on the canvas: the yellow selection outline is not
-   * drawn for it, only the cage handles. */
-  bool hide_outline = false;
-  /** POST_VIEW draw handle of the texture preview. Two callbacks because the handles / outline
-   * draw in region px (#draw_handle, POST_PIXEL) while the fragment pixels draw through the
-   * view-projection matrix (this one, POST_VIEW). */
-  void *draw_handle_texture = nullptr;
-  /**
-   * Bounds of the fragment in source plane px: the cage the handles sit on. Authored on the
-   * anchor plane (like the Shapes cage) so it stays a rectangle under any UV orientation, and
-   * so a handle lies exactly where the drag mapping (#image_select_view3d_mval_to_plane_px)
-   * puts the cursor.
-   */
-  float2 plane_min = float2(0.0f);
-  float2 plane_max = float2(0.0f);
-  bool plane_bounds_valid = false;
-  /** Screen-space handle positions, refreshed by the draw callback. */
-  float2 screen_corners[4] = {float2(0.0f), float2(0.0f), float2(0.0f), float2(0.0f)};
-  float2 screen_edges[4] = {float2(0.0f), float2(0.0f), float2(0.0f), float2(0.0f)};
-  float2 screen_rotate = float2(0.0f);
-  float2 screen_pivot = float2(0.0f);
-  bool screen_valid = false;
-  /** Handle under the cursor while idle, for the hover highlight. */
-  image_select_v3d::Transform3DHandle hover_handle = image_select_v3d::Transform3DHandle::None;
-  /** Live drag. */
-  image_select_v3d::Transform3DHandle active_handle = image_select_v3d::Transform3DHandle::None;
-  image_select_v3d::Transform3DSnapshot drag_start;
-  int2 press_xy = int2(0);
-  /** Press position on the anchor plane (plane px), captured at drag start. */
-  float2 press_plane = float2(0.0f);
-
-  explicit ImageSelectTransform3DState()
-      : PaintSelectView3DFloatingSession(PaintSelectView3DTool::Transform)
-  {
-  }
-
-  /** Resolve #preview_target: an explicit index while it stays valid, else the base-color map,
-   * else the first target. */
-  int preview_target_resolved() const
-  {
-    return image_select_preview_target_resolve(this->targets, this->preview_target);
-  }
-
-  void preview_channel_cycle() override
-  {
-    this->preview_target = image_select_preview_target_cycle(this->targets, this->preview_target);
-  }
-
-  ~ImageSelectTransform3DState() override
-  {
-    image_select_view3d_preview_textures_free(this->preview_textures);
-    for (gpu::Texture *&tex : this->pbr_default_textures) {
-      image_select_view3d_preview_texture_free(tex);
-    }
-    for (Vector<SelectionTileFragment> &per_target : this->fragments) {
-      selection_tile_fragments_free(per_target);
-    }
-    this->fragments.clear();
-  }
-
-  void commit(bContext *C) override;
-  void cancel(bContext *C) override;
-  bool undo_step() override;
-  bool cursor_over_fragment(const bContext *C, const int2 &mval) const override;
-
-  /* Current transform in UV space. */
-  float2x2 linear_uv() const;
-  float2 pivot_uv() const;
-  float2 translation_uv() const;
-
-  ImageSelectView3DSurfaceMap &surface_map_ref()
-  {
-    return this->surface_map;
-  }
-};
-
-using image_select_v3d::Transform3DHandle;
-using image_select_v3d::Transform3DSnapshot;
-
 float2x2 ImageSelectTransform3DState::linear_uv() const
 {
-  if (!this->anchor.jacobian_valid) {
-    return float2x2::identity();
-  }
-  const float2x2 plane_linear = image_select_v3d::transform_plane_linear(
-      this->rotation, this->scale, this->frame_angle);
-  bool invert_ok = false;
-  const float2x2 jacobian_inv = math::invert(this->anchor.plane_uv_jacobian, invert_ok);
-  if (!invert_ok) {
-    return float2x2::identity();
-  }
-  return this->anchor.plane_uv_jacobian * plane_linear * jacobian_inv;
+  return this->uv_linear;
 }
 
 float2 ImageSelectTransform3DState::pivot_uv() const
 {
-  if (!this->anchor.jacobian_valid) {
-    return float2(0.0f);
-  }
-  return this->anchor.anchor_uv +
-         this->anchor.plane_uv_jacobian * this->plane_pivot;
+  return this->uv_pivot;
 }
 
 float2 ImageSelectTransform3DState::translation_uv() const
 {
-  if (!this->anchor.jacobian_valid) {
-    return float2(0.0f);
+  return this->uv_translation;
+}
+
+/**
+ * The destination frame as the projection system's inline frame (object-space centre, full
+ * extents, normal + roll). The in-plane axes are the cage's own axes, so the values describe the
+ * content as the gizmo shows it. The depth extent stays neutral: a surface patch has no thickness,
+ * and a projected backend decides the depth from its own settings.
+ */
+static projection::ProjectionFrame transform3d_projection_frame(
+    const ImageSelectTransform3DState &state)
+{
+  projection::ProjectionFrame frame;
+  const ImageSelectView3DAnchor &dest = state.display_frame_valid ? state.display_anchor :
+                                                                    state.anchor;
+  frame.center[0] = dest.anchor.co.x;
+  frame.center[1] = dest.anchor.co.y;
+  frame.center[2] = dest.anchor.co.z;
+  frame.size[2] = 1.0f;
+
+  bool jacobian_ok = false;
+  const float2x2 dest_jacobian_inv = math::invert(dest.plane_uv_jacobian, jacobian_ok);
+  const float dest_px_per_unit = std::max(dest.anchor.px_per_unit, 1e-6f);
+  if (!state.anchor.jacobian_valid || !jacobian_ok) {
+    frame.size[0] = (state.plane_max.x - state.plane_min.x) /
+                    std::max(state.anchor.anchor.px_per_unit, 1e-6f);
+    frame.size[1] = (state.plane_max.y - state.plane_min.y) /
+                    std::max(state.anchor.anchor.px_per_unit, 1e-6f);
+    return frame;
   }
-  return this->anchor.plane_uv_jacobian * this->plane_translation;
+
+  const float2x2 frame_rotation = image_select_v3d::plane_rotation(state.frame_angle);
+  const float2 source_axis_x = frame_rotation * float2(1.0f, 0.0f);
+  const float2 source_axis_y = frame_rotation * float2(0.0f, 1.0f);
+  const float2 dest_axis_x = dest_jacobian_inv *
+                             (state.uv_linear *
+                              (state.anchor.plane_uv_jacobian * source_axis_x));
+  const float2 dest_axis_y = dest_jacobian_inv *
+                             (state.uv_linear *
+                              (state.anchor.plane_uv_jacobian * source_axis_y));
+  const float axis_x_len = math::length(dest_axis_x);
+  const float axis_y_len = math::length(dest_axis_y);
+  frame.size[0] = (state.plane_max.x - state.plane_min.x) * axis_x_len / dest_px_per_unit;
+  frame.size[1] = (state.plane_max.y - state.plane_min.y) * axis_y_len / dest_px_per_unit;
+
+  const float2 ex = (axis_x_len > 1e-6f) ? dest_axis_x / axis_x_len : float2(1.0f, 0.0f);
+  const float2 ey = (axis_y_len > 1e-6f) ? dest_axis_y / axis_y_len : float2(0.0f, 1.0f);
+  float3 axis_x = dest.frame.tangent * ex.x + dest.frame.bitangent * ex.y;
+  float3 axis_y = dest.frame.tangent * ey.x + dest.frame.bitangent * ey.y;
+  const float3 axis_z = dest.frame.normal;
+  if (math::dot(math::cross(axis_x, axis_y), axis_z) < 0.0f) {
+    axis_y = -axis_y;
+  }
+  /* Blender's matrix helpers read a row-major matrix; the frame stores columns. */
+  const float3 axes[3] = {axis_x, axis_y, axis_z};
+  float rot[3][3];
+  for (const int c : IndexRange(3)) {
+    for (const int r : IndexRange(3)) {
+      rot[r][c] = axes[c][r];
+    }
+  }
+  /* The projection frame stores normal + roll: the inverse of the same basis the gizmo builds. */
+  BKE_paint_layers_projection_frame_from_matrix(rot, frame.normal, &frame.roll);
+  return frame;
+}
+
+ImageSelectTransform3DMapping transform3d_mapping_get(
+    const ImageSelectTransform3DState &state)
+{
+  ImageSelectTransform3DMapping mapping;
+  mapping.linear = state.uv_linear;
+  mapping.pivot = state.uv_pivot;
+  mapping.translation = state.uv_translation;
+  mapping.frames_valid = state.display_frame_valid;
+  if (state.display_frame_valid) {
+    mapping.projection = transform3d_projection_frame(state);
+  }
+  return mapping;
 }
 
 /** \} */
@@ -361,9 +266,9 @@ static Bounds<float2> transform3d_source_bounds(
  * does not jitter between equivalent orientations.
  */
 static void transform3d_min_area_frame(const Span<float2> points,
-                                       float &r_angle,
-                                       float2 &r_lo,
-                                       float2 &r_hi)
+                                float &r_angle,
+                                float2 &r_lo,
+                                float2 &r_hi)
 {
   Vector<float2> sorted(points);
   std::sort(sorted.begin(), sorted.end(), [](const float2 &a, const float2 &b) {
@@ -523,8 +428,29 @@ static void transform3d_lift_fragments(bContext *C, ImageSelectTransform3DState 
   transform3d_min_area_frame(
       plane_points, state.frame_angle, state.plane_min, state.plane_max);
   state.plane_bounds_valid = true;
-  state.plane_pivot = image_select_v3d::plane_rotation(state.frame_angle) *
-                      ((state.plane_min + state.plane_max) * 0.5f);
+
+  /* The cage corners and the pivot in source UV: the affine's origin. Everything the tool does
+   * afterwards maps these through #uv_linear / #uv_translation, so the content, the cage and the
+   * drag math share one definition. */
+  const float2x2 frame = image_select_v3d::plane_rotation(state.frame_angle);
+  const float2 plane_corners[4] = {
+      frame * state.plane_min,
+      frame * float2(state.plane_max.x, state.plane_min.y),
+      frame * state.plane_max,
+      frame * float2(state.plane_min.x, state.plane_max.y),
+  };
+  for (const int i : IndexRange(4)) {
+    state.source_corner_uv[i] = state.anchor.anchor_uv +
+                                state.anchor.plane_uv_jacobian * plane_corners[i];
+  }
+  state.source_corners_valid = true;
+  const float2 plane_pivot = frame * ((state.plane_min + state.plane_max) * 0.5f);
+  state.uv_pivot = state.anchor.anchor_uv + state.anchor.plane_uv_jacobian * plane_pivot;
+  state.uv_linear = float2x2::identity();
+  state.uv_translation = float2(0.0f);
+  state.display_frame_valid = false;
+  state.prev_surface_valid = false;
+  transform3d_refresh_display_anchor(C, state, true);
 }
 
 /** \} */
@@ -533,10 +459,46 @@ static void transform3d_lift_fragments(bContext *C, ImageSelectTransform3DState 
 /** \name Screen mapping and handles
  * \{ */
 
-static bool transform3d_uv_to_screen(ImageSelectTransform3DState &state,
-                                     const ARegion &region,
-                                     const float2 &uv,
-                                     float2 &r_screen)
+/**
+ * Re-sample the surface-local frame at the transformed pivot. This is the frame the cage, the
+ * rotate / scale drag plane and the off-surface fallback use: as the fragment moves over an edge,
+ * the frame is rebuilt on the new face and the gizmo turns with it instead of staying in the plane
+ * it was created in.
+ *
+ * \param force: rebuild even when the pivot UV has not moved.
+ * \return false when the pivot is off the surface (a UV gap); the previous frame is kept.
+ */
+bool transform3d_refresh_display_anchor(const bContext *C,
+                                        ImageSelectTransform3DState &state,
+                                        const bool force)
+{
+  if (C == nullptr || state.anchor.object == nullptr) {
+    return false;
+  }
+  const float2 pivot_dest_uv = state.uv_pivot + state.uv_translation;
+  if (!force && state.display_frame_valid &&
+      math::distance_squared(pivot_dest_uv, state.display_uv) < 1e-12f)
+  {
+    return true;
+  }
+  const float3 prev_tangent = state.display_frame_valid ? state.display_anchor.frame.tangent :
+                                                          state.anchor.frame.tangent;
+  ImageSelectView3DAnchor anchor;
+  if (!image_select_view3d_anchor_from_uv(
+          C, state.surface_map, pivot_dest_uv, prev_tangent, anchor))
+  {
+    return false;
+  }
+  state.display_anchor = anchor;
+  state.display_uv = pivot_dest_uv;
+  state.display_frame_valid = true;
+  return true;
+}
+
+bool transform3d_uv_to_screen(ImageSelectTransform3DState &state,
+                              const ARegion &region,
+                              const float2 &uv,
+                              float2 &r_screen)
 {
   const Object *ob = state.anchor.object;
   const RegionView3D *rv3d = static_cast<const RegionView3D *>(region.regiondata);
@@ -551,20 +513,22 @@ static bool transform3d_uv_to_screen(ImageSelectTransform3DState &state,
   if (!state.surface_map_ref().sample(
           mesh->corner_verts(), mesh->vert_positions(), uv, co, no))
   {
-    /* Fallback: the anchor plane. The cage corners / rotate handle can sit outside the UV layout
-     * (a fragment next to an UV island border has no triangle there), and the handles must stay
-     * visible and grabbable -- #screen_valid gates the whole handle set, one missed projection
-     * used to hide them all and made rotate / scale unreachable. The move tool maps its drags on
-     * the same plane, so the handle position stays consistent with the drag math. */
-    if (!state.anchor.jacobian_valid) {
+    /* Fallback: the *current* local plane. The cage corners / rotate handle can sit outside the
+     * UV layout (a fragment next to an UV island border has no triangle there), and the handles
+     * must stay visible and grabbable -- #screen_valid gates the whole handle set, one missed
+     * projection used to hide them all and made rotate / scale unreachable. Using the display
+     * frame, not the frozen source anchor, keeps the fallback on the face the gizmo now sits on. */
+    const ImageSelectView3DAnchor &fallback = state.display_frame_valid ? state.display_anchor :
+                                                                          state.anchor;
+    if (!fallback.jacobian_valid) {
       return false;
     }
     bool ok = false;
-    const float2x2 jacobian_inv = math::invert(state.anchor.plane_uv_jacobian, ok);
+    const float2x2 jacobian_inv = math::invert(fallback.plane_uv_jacobian, ok);
     if (!ok) {
       return false;
     }
-    co = state.anchor.plane_px_to_object(jacobian_inv * (uv - state.anchor.anchor_uv));
+    co = fallback.plane_px_to_object(jacobian_inv * (uv - fallback.anchor_uv));
   }
   const float3 world = math::transform_point(float4x4(ob->object_to_world()), co);
   const float4 proj = float4x4(rv3d->persmat) * float4(world.x, world.y, world.z, 1.0f);
@@ -576,35 +540,38 @@ static bool transform3d_uv_to_screen(ImageSelectTransform3DState &state,
   return true;
 }
 
-/** The forward plane transform of the current rotation / scale / translation about the pivot. */
-static float2 transform3d_plane_forward(const ImageSelectTransform3DState &state, const float2 &p)
+/** The UV point a source point maps to through the current transform. */
+static float2 transform3d_dest_uv(const ImageSelectTransform3DState &state, const float2 &src_uv)
 {
-  const float2x2 linear = image_select_v3d::transform_plane_linear(
-      state.rotation, state.scale, state.frame_angle);
-  return state.plane_pivot + linear * (p - state.plane_pivot) + state.plane_translation;
+  return image_select_v3d::transform_uv(
+      state.uv_linear, state.uv_pivot, state.uv_translation, src_uv);
 }
 
-/** Region position of a plane-px point: the exact inverse of #image_select_view3d_mval_to_plane_px,
- * so a handle always sits under the cursor that drags it. */
-static bool transform3d_plane_to_screen(const ImageSelectTransform3DState &state,
-                                        const ARegion &region,
-                                        const float2 &plane_px,
-                                        float2 &r_screen)
+/**
+ * Sample one cage edge on the surface: the edge is a straight line in UV, but on the mesh it bends
+ * wherever it crosses a face, so it is resolved as a polyline whose points each lie on the surface.
+ * This is what makes the cage visibly follow the cube's side face instead of floating in the plane
+ * the transform was created in.
+ */
+static void transform3d_sample_cage_edge(ImageSelectTransform3DState &state,
+                                  const ARegion &region,
+                                  const float2 &src_a,
+                                  const float2 &src_b,
+                                  Vector<float2> &r_screen)
 {
-  const Object *ob = state.anchor.object;
-  const RegionView3D *rv3d = static_cast<const RegionView3D *>(region.regiondata);
-  if (ob == nullptr || rv3d == nullptr) {
-    return false;
+  constexpr int SEGMENTS = 16;
+  r_screen.clear();
+  r_screen.resize(SEGMENTS + 1);
+  bool all = true;
+  for (const int i : IndexRange(SEGMENTS + 1)) {
+    const float t = float(i) / float(SEGMENTS);
+    const float2 src = src_a + (src_b - src_a) * t;
+    all = all && transform3d_uv_to_screen(
+                     state, region, transform3d_dest_uv(state, src), r_screen[i]);
   }
-  const float3 world = math::transform_point(float4x4(ob->object_to_world()),
-                                             state.anchor.plane_px_to_object(plane_px));
-  const float4 proj = float4x4(rv3d->persmat) * float4(world.x, world.y, world.z, 1.0f);
-  if (proj.w <= 0.0f) {
-    return false;
+  if (!all) {
+    r_screen.clear();
   }
-  r_screen = float2((proj.x / proj.w * 0.5f + 0.5f) * float(region.winx),
-                    (proj.y / proj.w * 0.5f + 0.5f) * float(region.winy));
-  return true;
 }
 
 /** Distance of the rotate handle from the top edge of the cage, in region px. */
@@ -615,45 +582,40 @@ static float transform3d_rotate_offset_px()
 
 /** The cage (corners, edge midpoints, rotate handle, pivot) of the *transformed* fragment,
  * projected to the region. */
-static void transform3d_refresh_screen(ImageSelectTransform3DState &state, const ARegion &region)
+void transform3d_refresh_screen(ImageSelectTransform3DState &state, const ARegion &region)
 {
   state.screen_valid = false;
-  if (!state.plane_bounds_valid || state.fragments.is_empty()) {
+  if (!state.plane_bounds_valid || !state.source_corners_valid || state.fragments.is_empty()) {
     return;
   }
-  /* The cage lives in the fragment frame: its corners are turned onto the plane here. */
-  const float2x2 frame = image_select_v3d::plane_rotation(state.frame_angle);
-  const float2 lo = state.plane_min;
-  const float2 hi = state.plane_max;
-  const float2 corners_src[4] = {
-      frame * lo, frame * float2(hi.x, lo.y), frame * hi, frame * float2(lo.x, hi.y)};
   bool all = true;
   for (const int i : IndexRange(4)) {
-    all = all && transform3d_plane_to_screen(
-                     state, region, transform3d_plane_forward(state, corners_src[i]),
-                     state.screen_corners[i]);
-    const float2 edge_src = (corners_src[i] + corners_src[(i + 1) % 4]) * 0.5f;
-    all = all && transform3d_plane_to_screen(
-                     state, region, transform3d_plane_forward(state, edge_src),
-                     state.screen_edges[i]);
+    transform3d_sample_cage_edge(state,
+                                 region,
+                                 state.source_corner_uv[i],
+                                 state.source_corner_uv[(i + 1) % 4],
+                                 state.screen_cage[i]);
+    if (state.screen_cage[i].is_empty()) {
+      all = false;
+      continue;
+    }
+    state.screen_corners[i] = state.screen_cage[i][0];
+    state.screen_edges[i] = state.screen_cage[i][state.screen_cage[i].size() / 2];
   }
   /* The rotate handle stands off the top edge along the screen-space direction from the cage
    * center, so it keeps a constant distance whatever the rotation, scale or view perspective. */
   float2 center_screen;
-  all = all && transform3d_plane_to_screen(
-                   state, region, transform3d_plane_forward(state, frame * ((lo + hi) * 0.5f)),
-                   center_screen);
+  all = all && transform3d_uv_to_screen(
+                   state, region, state.uv_pivot + state.uv_translation, center_screen);
   if (all) {
     float2 dir = state.screen_edges[2] - center_screen;
     dir = math::length(dir) > 1e-6f ? math::normalize(dir) : float2(0.0f, 1.0f);
     state.screen_rotate = state.screen_edges[2] + dir * transform3d_rotate_offset_px();
+    /* Origin handle: the *transformed* pivot (rotation / scale fix the pivot, the translation
+     * carries it), so the handle rides with the fragment during a move like the Image Editor's
+     * anchor gizmo (#uv_anchor moves with the content there) and the Shapes origin ring. */
+    state.screen_pivot = center_screen;
   }
-  /* Origin handle: the *transformed* pivot (rotation / scale fix the pivot, the translation
-   * carries it), so the handle rides with the fragment during a move like the Image Editor's
-   * anchor gizmo (#uv_anchor moves with the content there) and the Shapes origin ring. */
-  all = all && transform3d_plane_to_screen(
-                   state, region, state.plane_pivot + state.plane_translation,
-                   state.screen_pivot);
   state.screen_valid = all;
 }
 
@@ -664,7 +626,7 @@ static float transform3d_handle_hit_px()
 
 /** The handle under \a mval, #Transform3DHandle::None when the cursor is on none of them. */
 static Transform3DHandle transform3d_hit_handle(const ImageSelectTransform3DState &state,
-                                                const int2 &mval)
+                                         const int2 &mval)
 {
   if (!state.screen_valid) {
     return Transform3DHandle::None;
@@ -692,424 +654,10 @@ static Transform3DHandle transform3d_hit_handle(const ImageSelectTransform3DStat
 
 /** The handle a press at \a mval grabs: a real handle, else a move of the whole fragment. */
 static Transform3DHandle transform3d_hit_test(const ImageSelectTransform3DState &state,
-                                              const int2 &mval)
+                                       const int2 &mval)
 {
   const Transform3DHandle handle = transform3d_hit_handle(state, mval);
   return handle == Transform3DHandle::None ? Transform3DHandle::Move : handle;
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Draw (POST_VIEW: fragment pixels on the surface)
- * \{ */
-
-/**
- * The on-surface fragment preview: every fragment's display buffer drawn where the commit will
- * write it, through the current affine transform. The move preview is the identity-linear special
- * case of this; here the texture coordinates map each mesh triangle's destination UV back to the
- * fragment's source space through the inverse transform.
- */
-static void transform3d_draw_texture(const bContext * /*C*/, ARegion *region, void *arg)
-{
-  auto *state = static_cast<ImageSelectTransform3DState *>(arg);
-  if (state == nullptr || state->anchor.object == nullptr || !state->surface_map_ref().sampler) {
-    return;
-  }
-  if (state->preview_textures.size() != state->fragments.size()) {
-    state->preview_textures.resize(state->fragments.size());
-  }
-  /* A Material canvas lifts one fragment set per PBR map: drawing them all flat would stack the
-   * maps. The composite shades them together; the channels it cannot shade are shown one at a
-   * time (the user-cycled target). */
-  const int target_i = state->preview_target_resolved();
-  if (target_i >= state->fragments.size()) {
-    return;
-  }
-  const float2x2 linear = state->linear_uv();
-  const float2 pivot = state->pivot_uv();
-  const float2 translation = state->translation_uv();
-  bool invert_ok = false;
-  const float2x2 linear_inv = math::invert(linear, invert_ok);
-  if (!invert_ok) {
-    return;
-  }
-  const auto src_uv_of = [&](const float2 &dest_uv) {
-    return pivot + linear_inv * (dest_uv - pivot - translation);
-  };
-  /* The preview triangles lie exactly on the mesh surface: without a depth offset the shared
-   * pixels z-fight and the texture shows through only in patches. */
-  if (region != nullptr && region->regiondata != nullptr) {
-    ED_view3d_polygon_offset(static_cast<const RegionView3D *>(region->regiondata), 1.0f);
-  }
-  if (target_i < 0) {
-    image_select_view3d_draw_pbr_composite(
-        *state->anchor.object,
-        state->surface_map_ref(),
-        region,
-        state->targets,
-        state->fragments,
-        state->preview_textures,
-        state->pbr_default_textures,
-        [&](const float2 &src_uv) {
-          return image_select_v3d::transform_uv(linear, pivot, translation, src_uv);
-        },
-        src_uv_of);
-    if (region != nullptr && region->regiondata != nullptr) {
-      ED_view3d_polygon_offset(static_cast<const RegionView3D *>(region->regiondata), 0.0f);
-    }
-    return;
-  }
-  const Vector<SelectionTileFragment> &per_target = state->fragments[target_i];
-  Vector<gpu::Texture *> &textures = state->preview_textures[target_i];
-  if (textures.size() != per_target.size()) {
-    textures.resize(per_target.size(), nullptr);
-  }
-  for (const int frag_i : per_target.index_range()) {
-    const SelectionTileFragment &frag = per_target[frag_i];
-    if (frag.preview.fragment_display_ibuf == nullptr) {
-      continue;
-    }
-    if (textures[frag_i] == nullptr) {
-      textures[frag_i] = IMB_create_gpu_texture(
-          "Transform3DFragment", frag.preview.fragment_display_ibuf, true, false, false);
-      if (textures[frag_i] != nullptr) {
-        /* Linear, not nearest: see #move3d_draw (heavy minification on the surface). */
-        GPU_texture_filter_mode(textures[frag_i], true);
-      }
-    }
-    const float2 tile_uv = image_select_udim_tile_uv_origin(frag.geom.tile_number);
-    const float2 tile_size = float2(frag.geom.tile_size_px);
-    const float2 src_origin_uv = tile_uv + float2(frag.geom.origin_px) / tile_size;
-    const float2 src_size_uv = float2(frag.geom.size_px) / tile_size;
-    /* Destination rect of this fragment: its four source corners through the forward transform. */
-    float2 dest_min(FLT_MAX, FLT_MAX);
-    float2 dest_max(-FLT_MAX, -FLT_MAX);
-    for (const int i : IndexRange(4)) {
-      const float2 corner_src = src_origin_uv +
-                                float2((i & 1) ? src_size_uv.x : 0.0f,
-                                       (i & 2) ? src_size_uv.y : 0.0f);
-      const float2 corner_dest = image_select_v3d::transform_uv(linear,
-                                                                pivot,
-                                                                translation,
-                                                                corner_src);
-      dest_min = math::min(dest_min, corner_dest);
-      dest_max = math::max(dest_max, corner_dest);
-    }
-    image_select_view3d_draw_uv_texture_ext(*state->anchor.object,
-                                            state->surface_map_ref(),
-                                            textures[frag_i],
-                                            dest_min,
-                                            dest_max,
-                                            [&](const float2 &dest_uv) {
-                                              return (src_uv_of(dest_uv) - src_origin_uv) /
-                                                     src_size_uv;
-                                            });
-  }
-  if (region != nullptr && region->regiondata != nullptr) {
-    ED_view3d_polygon_offset(static_cast<const RegionView3D *>(region->regiondata), 0.0f);
-  }
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Draw (POST_PIXEL: outline + handles)
- * \{ */
-
-static void transform3d_draw(const bContext * /*C*/, ARegion *region, void *arg)
-{
-  auto *state = static_cast<ImageSelectTransform3DState *>(arg);
-  if (state == nullptr || region == nullptr || state->anchor.object == nullptr) {
-    return;
-  }
-  const RegionView3D *rv3d = static_cast<const RegionView3D *>(region->regiondata);
-  if (rv3d == nullptr) {
-    return;
-  }
-  transform3d_refresh_screen(*state, *region);
-
-  /* Fragment outline (transformed), drawn in region px with the dashed shader. */
-  Vector<Vector<float2>> screen_polylines;
-  if (state->surface_map_ref().sampler && !state->hide_outline) {
-    const float2x2 linear = state->linear_uv();
-    const float2 pivot = state->pivot_uv();
-    const float2 translation = state->translation_uv();
-    for (const Vector<float2> &outline : state->outline_uv) {
-      Vector<float2> screen;
-      screen.resize(outline.size());
-      int drawn = 0;
-      for (const int i : outline.index_range()) {
-        const float2 uv = image_select_v3d::transform_uv(linear, pivot, translation, outline[i]);
-        if (transform3d_uv_to_screen(*state, *region, uv, screen[i])) {
-          drawn++;
-        }
-      }
-      if (drawn >= 2) {
-        screen_polylines.append(std::move(screen));
-      }
-    }
-  }
-
-  GPU_blend(GPU_BLEND_ALPHA);
-  GPU_depth_test(GPU_DEPTH_NONE);
-  const uint pos = GPU_vertformat_attr_add(immVertexFormat(), "pos",
-                                           gpu::VertAttrType::SFLOAT_32_32_32);
-
-  if (!screen_polylines.is_empty()) {
-    immBindBuiltinProgram(GPU_SHADER_3D_LINE_DASHED_UNIFORM_COLOR);
-    float viewport_size[4];
-    GPU_viewport_size_get_f(viewport_size);
-    immUniform2f("viewport_size", viewport_size[2], viewport_size[3]);
-    immUniform1i("colors_len", 2);
-    immUniform4f("color", 1.0f, 0.85f, 0.0f, 0.9f);
-    immUniform4f("color2", 1.0f, 1.0f, 1.0f, 1.0f);
-    immUniform1f("dash_width", 8.0f);
-    immUniform1f("udash_factor", 0.5f);
-    /* The inputs are segment pairs (#image_select_mask_boundary_segments), not connected
-     * polylines: chaining consecutive points joins unrelated boundary segments with long lines
-     * across the fragment (the move tool's outlines go through the same contract). */
-    int64_t total = 0;
-    for (const Vector<float2> &poly : screen_polylines) {
-      total += int64_t(poly.size());
-    }
-    immBegin(GPU_PRIM_LINES, uint(total));
-    for (const Vector<float2> &poly : screen_polylines) {
-      for (int64_t i = 0; i + 1 < poly.size(); i += 2) {
-        immVertex3f(pos, poly[i].x, poly[i].y, 0.0f);
-        immVertex3f(pos, poly[i + 1].x, poly[i + 1].y, 0.0f);
-      }
-    }
-    immEnd();
-    immUnbindProgram();
-  }
-
-  /* Handles: the cage, corner / edge squares, the rotate handle on a stem and the pivot ring. */
-  if (state->screen_valid) {
-    const float s = 5.0f * UI_SCALE_FAC;
-    const Transform3DHandle emphasized = state->is_dragging ? state->active_handle :
-                                                              state->hover_handle;
-    const float4 fill_color(1.0f, 1.0f, 1.0f, 0.95f);
-    const float4 fill_color_hot(1.0f, 0.65f, 0.1f, 1.0f);
-    const float4 edge_color(0.05f, 0.05f, 0.05f, 0.9f);
-
-    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-
-    /* Cage outline, a dark underlay one pixel off keeps it readable on any surface color. */
-    const auto draw_cage = [&](const float2 &offset) {
-      immBegin(GPU_PRIM_LINE_LOOP, 4);
-      for (const int i : IndexRange(4)) {
-        immVertex3f(pos,
-                    state->screen_corners[i].x + offset.x,
-                    state->screen_corners[i].y + offset.y,
-                    0.0f);
-      }
-      immEnd();
-    };
-    immUniformColor4f(0.0f, 0.0f, 0.0f, 0.45f);
-    draw_cage(float2(1.0f, -1.0f));
-    immUniformColor4f(1.0f, 1.0f, 1.0f, 0.9f);
-    draw_cage(float2(0.0f));
-
-    /* Stem between the top edge and the rotate handle. */
-    immBegin(GPU_PRIM_LINES, 2);
-    immVertex3f(pos, state->screen_edges[2].x, state->screen_edges[2].y, 0.0f);
-    immVertex3f(pos, state->screen_rotate.x, state->screen_rotate.y, 0.0f);
-    immEnd();
-
-    const auto draw_square = [&](const float2 &p, const float half, const bool hot) {
-      immUniformColor4fv(hot ? fill_color_hot : fill_color);
-      immBegin(GPU_PRIM_TRI_FAN, 4);
-      immVertex3f(pos, p.x - half, p.y - half, 0.0f);
-      immVertex3f(pos, p.x + half, p.y - half, 0.0f);
-      immVertex3f(pos, p.x + half, p.y + half, 0.0f);
-      immVertex3f(pos, p.x - half, p.y + half, 0.0f);
-      immEnd();
-      immUniformColor4fv(edge_color);
-      immBegin(GPU_PRIM_LINE_LOOP, 4);
-      immVertex3f(pos, p.x - half, p.y - half, 0.0f);
-      immVertex3f(pos, p.x + half, p.y - half, 0.0f);
-      immVertex3f(pos, p.x + half, p.y + half, 0.0f);
-      immVertex3f(pos, p.x - half, p.y + half, 0.0f);
-      immEnd();
-    };
-    constexpr int CIRCLE_SEGMENTS = 20;
-    const auto draw_circle = [&](const float2 &p,
-                                 const float radius,
-                                 const bool filled,
-                                 const float4 &color) {
-      if (filled) {
-        immUniformColor4fv(color);
-        immBegin(GPU_PRIM_TRI_FAN, CIRCLE_SEGMENTS + 2);
-        immVertex3f(pos, p.x, p.y, 0.0f);
-        for (const int i : IndexRange(CIRCLE_SEGMENTS + 1)) {
-          const float angle = float(i) / float(CIRCLE_SEGMENTS) * float(2.0 * M_PI);
-          immVertex3f(pos, p.x + std::cos(angle) * radius, p.y + std::sin(angle) * radius, 0.0f);
-        }
-        immEnd();
-      }
-      immUniformColor4fv(filled ? edge_color : color);
-      immBegin(GPU_PRIM_LINE_LOOP, CIRCLE_SEGMENTS);
-      for (const int i : IndexRange(CIRCLE_SEGMENTS)) {
-        const float angle = float(i) / float(CIRCLE_SEGMENTS) * float(2.0 * M_PI);
-        immVertex3f(pos, p.x + std::cos(angle) * radius, p.y + std::sin(angle) * radius, 0.0f);
-      }
-      immEnd();
-    };
-
-    for (const int i : IndexRange(4)) {
-      draw_square(state->screen_edges[i],
-                  s * 0.8f,
-                  emphasized == Transform3DHandle(int(Transform3DHandle::Edge0) + i));
-    }
-    for (const int i : IndexRange(4)) {
-      draw_square(state->screen_corners[i],
-                  s,
-                  emphasized == Transform3DHandle(int(Transform3DHandle::Corner0) + i));
-    }
-    draw_circle(state->screen_rotate,
-                s * 1.2f,
-                true,
-                emphasized == Transform3DHandle::Rotate ? fill_color_hot : fill_color);
-
-    /* Pivot: a ring with a cross, blue so it never reads as a scale handle. */
-    const float4 pivot_color = emphasized == Transform3DHandle::Pivot ?
-                                   fill_color_hot :
-                                   float4(0.2f, 0.6f, 1.0f, 1.0f);
-    draw_circle(state->screen_pivot, s * 1.2f, false, pivot_color);
-    immUniformColor4fv(pivot_color);
-    immBegin(GPU_PRIM_LINES, 4);
-    immVertex3f(pos, state->screen_pivot.x - s * 0.7f, state->screen_pivot.y, 0.0f);
-    immVertex3f(pos, state->screen_pivot.x + s * 0.7f, state->screen_pivot.y, 0.0f);
-    immVertex3f(pos, state->screen_pivot.x, state->screen_pivot.y - s * 0.7f, 0.0f);
-    immVertex3f(pos, state->screen_pivot.x, state->screen_pivot.y + s * 0.7f, 0.0f);
-    immEnd();
-    immUnbindProgram();
-  }
-
-  GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
-  GPU_blend(GPU_BLEND_NONE);
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Drag interaction
- * \{ */
-
-static Transform3DSnapshot transform3d_snapshot(const ImageSelectTransform3DState &state)
-{
-  return Transform3DSnapshot{state.plane_translation, state.rotation, state.scale,
-                             state.plane_pivot};
-}
-
-static void transform3d_restore(ImageSelectTransform3DState &state,
-                                const Transform3DSnapshot &snap)
-{
-  state.plane_translation = snap.plane_translation;
-  state.rotation = snap.rotation;
-  state.scale = snap.scale;
-  state.plane_pivot = snap.plane_pivot;
-}
-
-static void transform3d_apply_handle(ImageSelectTransform3DState &state,
-                                     const ARegion &region,
-                                     const int2 &mval,
-                                     const bool ctrl)
-{
-  float2 plane_now;
-  if (!image_select_view3d_mval_to_plane_px(state.anchor, region, mval, plane_now)) {
-    return;
-  }
-  switch (state.active_handle) {
-    case Transform3DHandle::Move:
-      state.plane_translation = state.drag_start.plane_translation + (plane_now - state.press_plane);
-      break;
-    case Transform3DHandle::Rotate: {
-      const float2 a = plane_now - state.plane_pivot;
-      const float2 b = state.press_plane - state.plane_pivot;
-      if (math::length(a) > 1e-6f && math::length(b) > 1e-6f) {
-        float angle = std::atan2(a.y, a.x) - std::atan2(b.y, b.x);
-        /* Ctrl snaps to 15 degree steps. */
-        if (ctrl) {
-          angle = std::floor(angle / (M_PI / 12.0f) + 0.5f) * (M_PI / 12.0f);
-        }
-        state.rotation = state.drag_start.rotation + angle;
-      }
-      break;
-    }
-    case Transform3DHandle::Pivot: {
-      /* The handle rides at the transformed pivot (plane_pivot + plane_translation, see
-       * #transform3d_refresh_screen); dragging it re-anchors the pivot under the mouse while the
-       * already-applied transform stays visually in place:
-       *   P' + L * (p - P') + T' == P + L * (p - P) + T   for every p
-       *   =>  T' = T + (I - L) * (P - P')
-       * which lands the handle exactly on \a plane_now through
-       *   P' = P + L^-1 * (plane_now - (P + T)).
-       * (The Image Editor reaches the same end state by moving its independent anchor marker and
-       * syncing the baked pivot via #image_select_transform_set_pivot_preserve_visual.) */
-      const float2x2 plane_linear = image_select_v3d::transform_plane_linear(
-          state.rotation, state.scale, state.frame_angle);
-      bool invert_ok = false;
-      const float2x2 plane_linear_inv = math::invert(plane_linear, invert_ok);
-      if (!invert_ok) {
-        break;
-      }
-      const float2 pivot_old = state.plane_pivot;
-      const float2 pivot_new = pivot_old + plane_linear_inv *
-                                                   (plane_now -
-                                                    (pivot_old + state.plane_translation));
-      const float2 pivot_delta = pivot_old - pivot_new;
-      state.plane_translation = state.plane_translation + pivot_delta -
-                                plane_linear * pivot_delta;
-      state.plane_pivot = pivot_new;
-      break;
-    }
-    default: {
-      /* Per-axis scale along the *start* rotation's axes, in plane space. */
-      const float s0 = std::sin(state.drag_start.rotation + state.frame_angle);
-      const float c0 = std::cos(state.drag_start.rotation + state.frame_angle);
-      const float2 ex0(c0, s0);
-      const float2 ey0(-s0, c0);
-      const float2 q0 = state.press_plane - state.plane_pivot;
-      const float2 q1 = plane_now - state.plane_pivot;
-      const float denom_x = math::dot(q0, ex0);
-      const float denom_y = math::dot(q0, ey0);
-      /* Corners scale both axes, an edge only the axis across it (the cage's own frame defines the
-       * directions): the left / right edges scale X, the bottom / top edges scale Y. */
-      const bool is_edge = ELEM(state.active_handle,
-                                Transform3DHandle::Edge0,
-                                Transform3DHandle::Edge1,
-                                Transform3DHandle::Edge2,
-                                Transform3DHandle::Edge3);
-      const bool scale_x = !is_edge || ELEM(state.active_handle,
-                                            Transform3DHandle::Edge1,
-                                            Transform3DHandle::Edge3);
-      const bool scale_y = !is_edge || ELEM(state.active_handle,
-                                            Transform3DHandle::Edge0,
-                                            Transform3DHandle::Edge2);
-      if ((scale_x && std::abs(denom_x) < 1e-6f) || (scale_y && std::abs(denom_y) < 1e-6f)) {
-        break;
-      }
-      float2 new_scale = state.drag_start.scale;
-      if (scale_x) {
-        new_scale.x = state.drag_start.scale.x * (math::dot(q1, ex0) / denom_x);
-      }
-      if (scale_y) {
-        new_scale.y = state.drag_start.scale.y * (math::dot(q1, ey0) / denom_y);
-      }
-      new_scale.x = std::clamp(new_scale.x, -1000.0f, 1000.0f);
-      new_scale.y = std::clamp(new_scale.y, -1000.0f, 1000.0f);
-      if (std::abs(new_scale.x) < 0.001f) {
-        new_scale.x = 0.001f * (new_scale.x < 0.0f ? -1.0f : 1.0f);
-      }
-      if (std::abs(new_scale.y) < 0.001f) {
-        new_scale.y = 0.001f * (new_scale.y < 0.0f ? -1.0f : 1.0f);
-      }
-      state.scale = new_scale;
-      break;
-    }
-  }
 }
 
 /** \} */
@@ -1122,9 +670,15 @@ void ImageSelectTransform3DState::commit(bContext *C)
 {
   transform3d_free_draw_handle(*this);
   WM_cursor_modal_restore(CTX_wm_window(C));
-  const float2x2 linear = this->linear_uv();
-  const float2 pivot = this->pivot_uv();
-  const float2 translation = this->translation_uv();
+  if (this->mode == image_select_v3d::Transform3DContentMode::Decal) {
+    /* The decal session owns its finish: the stamps bake into the canvases through the surface
+     * patch, then it cleans the session's own state up. */
+    transform3d_decal_commit(C, *this);
+    return;
+  }
+  const float2x2 linear = this->uv_linear;
+  const float2 pivot = this->uv_pivot;
+  const float2 translation = this->uv_translation;
 
   /* The committable targets, in resolve order: the whole commit lands in ONE image undo step, so
    * a single Ctrl+Z restores every Material canvas together (see
@@ -1166,6 +720,22 @@ void ImageSelectTransform3DState::cancel(bContext *C)
   transform3d_free_draw_handle(*this);
   if (C != nullptr) {
     WM_cursor_modal_restore(CTX_wm_window(C));
+  }
+  if (this->mode == image_select_v3d::Transform3DContentMode::Decal) {
+    /* The lift cut the source region like the UV mode's does: restore it (the canvas must come
+     * out of the cancel exactly as it went in), then the stamps and the patch go away. */
+    for (const int target_i : this->targets.index_range()) {
+      Image *ima = this->targets[target_i].image;
+      if (ima == nullptr || !image_select_view3d_image_is_alive(*this, ima)) {
+        continue;
+      }
+      image_select_fragment_restore_source(
+          C, ima, this->targets[target_i].iuser, Span<SelectionTileFragment>(this->fragments[target_i]));
+      Vector<ImagePaintSelectionTarget> single = {this->targets[target_i]};
+      image_paint_selection_targets_update(C, single);
+    }
+    transform3d_decal_release(this->decal);
+    return;
   }
   for (const int target_i : this->targets.index_range()) {
     Image *ima = this->targets[target_i].image;
@@ -1227,6 +797,32 @@ static ImageSelectTransform3DState *transform3d_state_get()
                                          PaintSelectView3DTool::Transform>();
 }
 
+void image_select_transform3d_mode_changed(bContext *C, const bool want_decal)
+{
+  ImageSelectTransform3DState *state = transform3d_state_get();
+  if (state == nullptr || C == nullptr) {
+    return;
+  }
+  if (transform3d_mode_switch(C, *state, want_decal) && state->owner_region != nullptr) {
+    ED_region_tag_redraw(state->owner_region);
+  }
+}
+
+bool image_select_transform3d_projection_frame_get(const bContext *C,
+                                                   projection::ProjectionFrame &r_frame)
+{
+  ImageSelectTransform3DState *state = transform3d_state_get();
+  if (state == nullptr || C == nullptr || state->owner_v3d != CTX_wm_view3d(C)) {
+    return false;
+  }
+  const ImageSelectTransform3DMapping mapping = transform3d_mapping_get(*state);
+  if (!mapping.frames_valid) {
+    return false;
+  }
+  r_frame = mapping.projection;
+  return true;
+}
+
 bool image_select_transform3d_begin_paste(bContext *C,
                                           ReportList *reports,
                                           Vector<ImagePaintSelectionTarget> targets,
@@ -1264,7 +860,8 @@ bool image_select_transform3d_begin_paste(bContext *C,
   }
   state->hide_outline = true;
   /* The fragment sits where it was copied from; move its center onto the anchor. */
-  state->plane_translation = -state->plane_pivot;
+  state->uv_translation = state->anchor.anchor_uv - state->uv_pivot;
+  state->display_frame_valid = false;
   for (const ImagePaintSelectionTarget &target : state->targets) {
     state->borrowed_images.append(target.image);
   }
@@ -1292,18 +889,11 @@ static wmOperatorStatus transform3d_invoke(bContext *C, wmOperator *op, const wm
       return OPERATOR_PASS_THROUGH;
     }
     floating->active_handle = transform3d_hit_test(*floating, int2(event->mval[0], event->mval[1]));
-    floating->drag_start = transform3d_snapshot(*floating);
-    floating->press_xy = int2(event->mval[0], event->mval[1]);
-    float2 plane_press;
-    if (image_select_view3d_mval_to_plane_px(floating->anchor,
-                                             *CTX_wm_region(C),
-                                             floating->press_xy,
-                                             plane_press))
-    {
-      floating->press_plane = plane_press;
+    floating->is_dragging = transform3d_begin_drag(
+        C, *floating, int2(event->mval[0], event->mval[1]));
+    if (floating->is_dragging) {
+      WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
     }
-    floating->is_dragging = true;
-    WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
     WM_event_add_modal_handler(C, op);
     return OPERATOR_RUNNING_MODAL;
   }
@@ -1344,6 +934,14 @@ static wmOperatorStatus transform3d_invoke(bContext *C, wmOperator *op, const wm
     return OPERATOR_CANCELLED;
   }
   transform3d_lift_fragments(C, *state);
+  /* The content mapping is resolved now that the lift fixed the cage: Decal needs the stamps and
+   * the surface patch, and falls back to the UV affine when they cannot be built. */
+  transform3d_mode_resolve(C, *state, op);
+  if (state->mode == image_select_v3d::Transform3DContentMode::Decal &&
+      !transform3d_decal_begin(C, *state, op))
+  {
+    state->mode = image_select_v3d::Transform3DContentMode::UV;
+  }
   for (const ImagePaintSelectionTarget &target : state->targets) {
     state->borrowed_images.append(target.image);
   }
@@ -1362,12 +960,8 @@ static wmOperatorStatus transform3d_invoke(bContext *C, wmOperator *op, const wm
    * drawn until the first redraw). A press that hit a real handle picks that handle instead
    * (#transform3d_hit_test falls back to Move when the handles are not projected yet). */
   state->active_handle = transform3d_hit_test(*state, int2(event->mval[0], event->mval[1]));
-  state->drag_start = transform3d_snapshot(*state);
-  state->press_xy = int2(event->mval[0], event->mval[1]);
-  if (image_select_view3d_mval_to_plane_px(
-          state->anchor, *CTX_wm_region(C), state->press_xy, state->press_plane))
-  {
-    state->is_dragging = true;
+  state->is_dragging = transform3d_begin_drag(C, *state, int2(event->mval[0], event->mval[1]));
+  if (state->is_dragging) {
     WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
   }
   WM_event_add_modal_handler(C, op);
@@ -1400,7 +994,8 @@ static wmOperatorStatus transform3d_modal(bContext *C, wmOperator * /*op*/, cons
 
   if (state->is_dragging) {
     if (event->type == MOUSEMOVE) {
-      transform3d_apply_handle(*state,
+      transform3d_apply_handle(C,
+                               *state,
                                *region,
                                int2(event->mval[0], event->mval[1]),
                                (event->modifier & KM_CTRL) != 0);
@@ -1410,8 +1005,13 @@ static wmOperatorStatus transform3d_modal(bContext *C, wmOperator * /*op*/, cons
     if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
       state->is_dragging = false;
       state->active_handle = Transform3DHandle::None;
+      /* The pivot may have crossed onto another face during the gesture: settle the frame there
+       * so the next drag starts from the surface the content is on. */
+      transform3d_refresh_display_anchor(C, *state, true);
       state->drag_history.append(transform3d_snapshot(*state));
       WM_cursor_modal_restore(CTX_wm_window(C));
+      /* A mode change requested during the gesture applies now that it is over. */
+      image_select_view3d_pending_mode_apply(C);
       ED_region_tag_redraw(region);
       return OPERATOR_FINISHED;
     }
@@ -1420,6 +1020,7 @@ static wmOperatorStatus transform3d_modal(bContext *C, wmOperator * /*op*/, cons
       state->is_dragging = false;
       state->active_handle = Transform3DHandle::None;
       WM_cursor_modal_restore(CTX_wm_window(C));
+      image_select_view3d_pending_mode_apply(C);
       ED_region_tag_redraw(region);
       return OPERATOR_FINISHED;
     }
@@ -1444,12 +1045,8 @@ static wmOperatorStatus transform3d_modal(bContext *C, wmOperator * /*op*/, cons
     /* LMB press picks a handle and starts a drag (the op stays modal the whole session, so
      * the tool keymap cannot re-invoke it -- the 2D transform modal does the same). */
     state->active_handle = transform3d_hit_test(*state, int2(event->mval[0], event->mval[1]));
-    state->drag_start = transform3d_snapshot(*state);
-    state->press_xy = int2(event->mval[0], event->mval[1]);
-    if (image_select_view3d_mval_to_plane_px(
-            state->anchor, *region, state->press_xy, state->press_plane))
-    {
-      state->is_dragging = true;
+    state->is_dragging = transform3d_begin_drag(C, *state, int2(event->mval[0], event->mval[1]));
+    if (state->is_dragging) {
       WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_NSEW_SCROLL);
     }
     return OPERATOR_RUNNING_MODAL;

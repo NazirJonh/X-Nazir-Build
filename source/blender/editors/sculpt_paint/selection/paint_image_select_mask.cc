@@ -103,6 +103,7 @@
 #include "../../space_image/image_runtime.hh"
 #include "../paint_intern.hh"
 #include "paint_face_selection_mask.hh"
+#include "paint_image_select_editor_decal.hh"
 #include "paint_image_select_gesture.hh"
 #include "paint_image_select_gradient.hh"
 #include "paint_image_select_intern.hh"
@@ -2544,6 +2545,10 @@ void ED_image_paint_select_session_cancel(bContext *C, SpaceImage *sima)
     return;
   }
   image_select_floating_sessions_cancel(C, sima);
+  /* Reached from the editor free and from an image change as well: the decal a Transform confirm
+   * handed over holds stamps that must not outlive the editor. No confirm is in flight here (the
+   * hand-over and its exec run back to back). */
+  ed::sculpt_paint::image_select_editor_decal_handoff_release(sima);
 }
 
 void ED_image_paint_select_session_settle(bContext *C, SpaceImage *sima)

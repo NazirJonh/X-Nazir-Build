@@ -19,6 +19,7 @@
 
 #include <cmath>
 
+#include "BLI_index_range.hh"
 #include "BLI_math_vector.h"
 #include "BLI_ustring.hh"
 
@@ -1436,7 +1437,8 @@ static bool projection_map_is_tiled(const bNode &map)
 MapRead PaintLayersTreeBuilder::map_read_apply(bNodeTree &tree,
                                                const MaterialPaintLayer &row,
                                                bNode &map,
-                                               Vector<bNode *> &r_nodes)
+                                               Vector<bNode *> &r_nodes,
+                                               const int channel)
 {
   MapRead read;
   read.node = &map;
@@ -1492,6 +1494,40 @@ MapRead PaintLayersTreeBuilder::map_read_apply(bNodeTree &tree,
     bke::node_add_link(tree, *mapped, *mapped_out, map, *vector);
     set_extension(map);
     read.projected = true;
+    if (channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
+        row.mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_PLANAR)
+    {
+      /* The sampled vectors read in the frame's own basis: re-express them in the surface tangent
+       * basis, the one conversion the CPU bake runs (see
+       * #BKE_paint_layers_projection_normal_frame_to_tangent). The record's own convention is read
+       * here rather than after the conversion, which a caller would apply too late for. */
+      bool directx = false;
+      for (const int i : IndexRange(row.channels_num)) {
+        if (row.channels[i].channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+          directx = (row.channels[i].flag & MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX) != 0;
+          break;
+        }
+      }
+      Vector<bNode *> made;
+      bNode *encode = nullptr;
+      NodeOutput color_in = {&map, socket_out(map, "Color")};
+      if (directx && color_in.socket != nullptr) {
+        color_in = this->normal_green_flip_nodes_add(tree, color_in, made);
+      }
+      if (color_in.socket == nullptr) {
+        return read;
+      }
+      const ProjectionSockets sockets = this->projection_sockets_get(tree, row);
+      bNodeSocket *converted = normal_frame_tangent_nodes_add(
+          tree, *color_in.node, *color_in.socket, sockets.group_input, sockets.rotation, made, encode);
+      if (converted != nullptr) {
+        for (bNode *node : made) {
+          grid_.place_extra(*node);
+          r_nodes.append(node);
+        }
+        read.color = {encode, converted};
+      }
+    }
     return read;
   }
 

@@ -65,6 +65,9 @@ wmOperatorStatus image_select_transform_adopt_move_state(bContext *C,
 bool image_select_transform_is_floating_in_space(const SpaceImage *sima);
 ImageSelectTransformState *image_select_transform_state_get(SpaceImage *sima);
 
+/** The transform counterpart of #image_select_move_live_decal_set. */
+bool image_select_transform_live_decal_set(bContext *C, SpaceImage *sima, bool want_decal);
+
 ImageSelectTransformHandleType image_select_transform_cage_part_to_handle_type(int cage_part);
 void image_select_transform_begin_drag(ImageSelectTransformState *state,
                                        const wmEvent *event,

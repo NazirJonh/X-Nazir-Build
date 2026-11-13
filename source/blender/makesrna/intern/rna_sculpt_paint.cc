@@ -893,6 +893,14 @@ static void rna_ImagePaintSettings_warp_update(Main * /*bmain*/,
   WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
 }
 
+static void rna_ImagePaintSettings_selection_transform_mode_update(bContext *C,
+                                                                   PointerRNA * /*ptr*/)
+{
+  /* A floating Move / Transform Selection session reads the mode at its lift; this switches the
+   * live ones (Image Editor and 3D Viewport) without ending them. */
+  ED_image_paint_select_transform_mode_changed(C);
+}
+
 /** The wireframe is drawn by the viewport overlays, so both spaces need a redraw. */
 static void rna_ImagePaintSettings_show_wire_update(Main * /*bmain*/,
                                                     Scene * /*scene*/,
@@ -5348,6 +5356,34 @@ static void rna_def_image_paint(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Selection Paste", "Where a Paste Selection puts the copied fragment");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  static const EnumPropertyItem selection_transform_mode_items[] = {
+      {IMAGE_PAINT_SELECT_TRANSFORM_DECAL,
+       "DECAL",
+       ICON_IMAGE_ZDEPTH,
+       "Decal",
+       "Carry the fragment over the surface, unfolded from the mesh triangles around it: it wraps "
+       "over edges and curves, and seams, island borders and UV gaps do not tear it"},
+      {IMAGE_PAINT_SELECT_TRANSFORM_UV,
+       "UV",
+       ICON_UV_DATA,
+       "UV",
+       "Transform the fragment with the affine in UV space (seams and island borders tear it)"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "selection_transform_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "selection_transform_mode");
+  /* The update reaches the live Selection sessions through the context. */
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_enum_items(prop, selection_transform_mode_items);
+  RNA_def_property_ui_text(prop,
+                           "Transform Mode",
+                           "The content mapping the 3D Viewport's Transform Selection authors; "
+                           "the mode is read when the tool lifts the selection and applied to a "
+                           "floating selection when changed");
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_ImagePaintSettings_selection_transform_mode_update");
 
   prop = RNA_def_property(srna, "warp_grid_size", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "warp_grid_size");

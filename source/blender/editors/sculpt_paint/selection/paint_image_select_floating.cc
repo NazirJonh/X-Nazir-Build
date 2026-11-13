@@ -6,6 +6,7 @@
  * \ingroup edsculpt
  */
 
+#include "BLI_listbase.h"
 #include "BLI_utildefines.h"
 
 #include "BKE_context.hh"
@@ -14,9 +15,12 @@
 
 /* #SpaceImage must be complete: #image_select_floating_sessions_end reaches through
  * `sima->runtime`. */
+#include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 #include "DNA_windowmanager_types.h"
 
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 
@@ -34,7 +38,9 @@
 /* This file is the one true consumer of every tool's teardown entry points (see the dispatch
  * table below), so unlike other consumers of the umbrella above it needs all of them. */
 #include "paint_image_select_move_intern.hh"
+#include "paint_image_select_preview_view3d.hh"
 #include "paint_image_select_transform_intern.hh"
+#include "paint_image_select_view3d.hh"
 #include "paint_image_select_warp_intern.hh"
 #include "../mesh/paint_image_shape_composite.hh"
 
@@ -56,6 +62,9 @@ void image_select_floating_draw_handle_clear(PaintSelectFloatingSession &session
     ED_region_draw_cb_exit(session.owner_region_type, session.draw_handle);
   }
   session.draw_handle = nullptr;
+  /* The Viewport preview shares the lifetime of the Image Editor's: this is reached from every
+   * state free, so no callback outlives the session (or survives a Move -> Transform hand-over). */
+  ed::sculpt_paint::image_select_preview_view3d_detach(session);
 }
 
 void image_select_floating_drag_end(bContext *C, PaintSelectFloatingSession *session)

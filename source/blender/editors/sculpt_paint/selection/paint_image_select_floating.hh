@@ -55,6 +55,10 @@ struct wmOperatorType;
 
 namespace blender {
 
+namespace ed::sculpt_paint {
+struct ImageSelect3DPreview;
+}
+
 /* The per-tool states derive from #PaintSelectFloatingSession and are defined in their own
  * translation units. Declared here because the runtime slot used to declare them. */
 struct ImageSelectMoveState;
@@ -109,6 +113,20 @@ struct PaintSelectFloatingSession {
   void *draw_handle = nullptr;
   /** True only while a mouse drag gesture is in progress (a modal handler is running). */
   bool is_dragging = false;
+  /**
+   * A UV <-> Decal mode change requested while a gesture ran: -1 none, 0 UV, 1 Decal. The live
+   * switch ignores a running gesture, so the desired mode waits here and
+   * #image_select_floating_pending_mode_apply applies it when the gesture ends. Opaque to this
+   * base: it names no tool.
+   */
+  int pending_decal = -1;
+  /**
+   * The 3D Viewport preview of the session (Image Editor Transform / Move only, see
+   * `paint_image_select_preview_view3d.hh`). Owned: freed by
+   * #image_select_floating_draw_handle_clear, so every exit path that removes the Image Editor's
+   * preview callback removes the Viewport's too.
+   */
+  ed::sculpt_paint::ImageSelect3DPreview *preview_3d = nullptr;
 
   explicit PaintSelectFloatingSession(const PaintSelectTool tool) : tool(tool) {}
 };
@@ -248,6 +266,14 @@ void image_select_floating_draw_handle_clear(PaintSelectFloatingSession &session
  * the state has already been freed.
  */
 void image_select_floating_drag_end(bContext *C, PaintSelectFloatingSession *session);
+
+/**
+ * Apply the UV <-> Decal change that #PaintSelectFloatingSession::pending_decal kept while a gesture
+ * ran, through the tool's own live switch (which drops it again when the setting went back to the
+ * session's mode). Call after a gesture ended. Defined in `paint_image_select_mode_switch.cc`, the
+ * one place that knows the concrete tools. No-op without a pending request.
+ */
+void image_select_floating_pending_mode_apply(bContext *C, SpaceImage *sima);
 
 /**
  * True when the runtime selection mask \a mask can be indexed with bounds derived from \a ibuf.

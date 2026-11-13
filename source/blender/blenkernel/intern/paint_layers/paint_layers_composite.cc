@@ -34,6 +34,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_task.hh"
+#include "BLI_time.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
@@ -43,7 +44,9 @@
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_generator_registry.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_layers_source_graph.hh"
+#include "BKE_paint_material_decal_map.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_report.hh"
 
@@ -226,34 +229,162 @@ static void composite_mapping_describe(const Material &ma,
   out.tangent_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
 }
 
+/**
+ * Describe the Decal frame of a transform effect's step: the frame a Decal-space step reads its
+ * owner's map through (see paint_material_composite_effect_space.cc). The user does not place it:
+ * \a frame is derived from the effect's Mirror center / pivot, a UV point (see
+ * #BKE_paint_material_decal_frame_from_uv), so the same handle as in UV drives it. It lies on the
+ * painted object's surface, so it has no controller, depth slab, facing fade or aspect fit. It does
+ * not clip: past the patch (which reaches the whole object) the owner's map is read as it is.
+ */
+static void composite_effect_decal_describe(const Material &ma,
+                                            const PaintMaterialDecalUvFrame &frame,
+                                            const int tile_number,
+                                            const Object *painted_object,
+                                            PaintMaterialCompositeProjection &out)
+{
+  out.present = true;
+  out.space = MA_PAINT_LAYER_MAPPING_SPACE_DECAL;
+  out.axis = MA_PAINT_LAYER_PROJECTION_AXIS_Z;
+  copy_v3_v3(out.center, frame.center);
+  /* The size is the surface length of one UV unit per axis, so one unit of the step's coordinate is
+   * one UV unit at the frame's center. */
+  out.size[0] = 2.0f * frame.half_size.x;
+  out.size[1] = 2.0f * frame.half_size.y;
+  out.size[2] = 1.0f;
+  copy_v3_v3(out.rotation, frame.rotation);
+  out.patch_radius = frame.radius;
+  out.clip = false;
+  out.depth = false;
+  out.facing = false;
+  copy_v3_fl(out.aspect, 1.0f);
+  out.tiling[0] = 1.0f;
+  out.tiling[1] = 1.0f;
+  out.tile_number = tile_number;
+  out.object = painted_object;
+  out.controller = nullptr;
+  out.material = &ma;
+}
+
+/**
+ * The numbers of the transform effect \a effect as one UV step: a Mirror's fold, or a Transform
+ * Mapping's offset, rotation, scale and wrap. The one place both the content effects' steps and a
+ * mask item's step are read, so the two cannot move a map differently.
+ */
+static void composite_transform_step_numbers_get(const MaterialPaintLayer &effect,
+                                                 PaintMaterialCompositeMapping &step)
+{
+  if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR) {
+    /* The fold alone is the step: a Mirror reads its mapping's axes and center and nothing
+     * else, and its read repeats, the way the row mapping's Mirror does. */
+    step.mirror_axes = BKE_paint_layers_mapping_mirror_get(effect);
+    step.mirror_center[0] = effect.mapping.mirror_center[0];
+    step.mirror_center[1] = effect.mapping.mirror_center[1];
+  }
+  else {
+    /* A Transform Mapping reads the offset, rotation, scale and wrap; the fold stays the
+     * Mirror's alone. The numbers are the shared vocabulary's, so a zero scale axis reads back
+     * as one where the helpers use them. */
+    BKE_paint_layers_transform_effective_offset(effect, step.offset);
+    copy_v2_v2(step.scale, effect.mapping.scale);
+    step.rotation = effect.mapping.rotation;
+    step.wrap = BKE_paint_layers_mapping_wrap_get(effect);
+  }
+}
+
+/**
+ * The numbers of the transform effect \a effect as one step in the Decal frame derived from the UV
+ * point \a frame_uv. The frame's center is that UV point, and the step coordinate is the frame's
+ * `c = 0.5 + 0.5 q` (one unit is one UV unit at the center), so the effect's UV point \a p lands at
+ * `0.5 + (p - frame_uv)`: exactly the frame's center for the effect that placed the frame, and the
+ * local UV offset from it for a later Decal effect with its own center (exact where the UV is
+ * locally an isometry, an approximation across seams). The Mirror's fold and the Transform
+ * Mapping's pivot use that point instead of the UV coordinate, which would be a position in the
+ * frame's own coordinates.
+ */
+static void composite_decal_step_numbers_get(const MaterialPaintLayer &effect,
+                                             const float frame_uv[2],
+                                             PaintMaterialCompositeMapping &step)
+{
+  const float pivot[2] = {0.5f + (effect.mapping.mirror_center[0] - frame_uv[0]),
+                          0.5f + (effect.mapping.mirror_center[1] - frame_uv[1])};
+  if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR) {
+    step.mirror_axes = BKE_paint_layers_mapping_mirror_get(effect);
+    step.mirror_center[0] = pivot[0];
+    step.mirror_center[1] = pivot[1];
+    return;
+  }
+  copy_v2_v2(step.scale, effect.mapping.scale);
+  step.rotation = effect.mapping.rotation;
+  step.wrap = BKE_paint_layers_mapping_wrap_get(effect);
+  /* `S * R * (c - p) + p + offset` folded into the plain `S * R * c + offset'` the step evaluates,
+   * as #BKE_paint_layers_transform_effective_offset does for the UV pivot. */
+  const float cos_rot = cosf(step.rotation);
+  const float sin_rot = sinf(step.rotation);
+  const float scale_x = BKE_paint_layers_mapping_scale_normalize(step.scale[0]);
+  const float scale_y = BKE_paint_layers_mapping_scale_normalize(step.scale[1]);
+  step.offset[0] = effect.mapping.offset[0] +
+                   (pivot[0] - scale_x * (cos_rot * pivot[0] - sin_rot * pivot[1]));
+  step.offset[1] = effect.mapping.offset[1] +
+                   (pivot[1] - scale_y * (sin_rot * pivot[0] + cos_rot * pivot[1]));
+}
+
 void BKE_paint_layers_input_transforms_get(const Material &ma,
                                            const MaterialPaintLayer &row,
                                            const int channel,
-                                           Vector<PaintMaterialCompositeMapping> &r_steps)
+                                           Vector<PaintMaterialCompositeMapping> &r_steps,
+                                           const int tile_number,
+                                           const Object *painted_object)
 {
+  /* One Decal frame per row: the first Decal effect's Mirror center / pivot places it, and a later
+   * Decal effect composes over the same map coordinate, so consecutive Decal steps need no
+   * conversion between them. */
+  bool frame_derived = false;
+  bool frame_valid = false;
+  PaintMaterialDecalUvFrame frame;
+  float frame_uv[2] = {0.5f, 0.5f};
   for (const MaterialPaintLayer *effect_ptr : BKE_paint_layers_active_transform_effects(ma, row)) {
     const MaterialPaintLayer &effect = *effect_ptr;
     PaintMaterialCompositeMapping step;
     step.enabled = true;
     step.tangent_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-    if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR) {
-      /* The fold alone is the step: a Mirror reads its mapping's axes and center and nothing
-       * else, and its read repeats, the way the row mapping's Mirror does. */
-      step.mirror_axes = BKE_paint_layers_mapping_mirror_get(effect);
-      step.mirror_center[0] = effect.mapping.mirror_center[0];
-      step.mirror_center[1] = effect.mapping.mirror_center[1];
+    if (BKE_paint_layers_effect_decal_applies(ma, row, effect)) {
+      if (painted_object == nullptr) {
+        /* No surface to unfold (a material preview with no paint context): the effect has no
+         * meaning in UV, so it is left out rather than read as a UV fold. */
+        continue;
+      }
+      if (!frame_derived) {
+        frame_derived = true;
+        copy_v2_v2(frame_uv, effect.mapping.mirror_center);
+        frame_valid = BKE_paint_material_decal_frame_from_uv(
+            painted_object, &ma, tile_number, float2(frame_uv[0], frame_uv[1]), frame);
+      }
+      if (!frame_valid) {
+        /* The center lies on no triangle the material uses: there is no surface to walk. */
+        continue;
+      }
+      composite_effect_decal_describe(ma, frame, tile_number, painted_object, step.projection);
+      composite_decal_step_numbers_get(effect, frame_uv, step);
     }
     else {
-      /* A Transform Mapping reads the offset, rotation, scale and wrap; the fold stays the
-       * Mirror's alone. The numbers are the shared vocabulary's, so a zero scale axis reads back
-       * as one where the helpers use them. */
-      BKE_paint_layers_transform_effective_offset(effect, step.offset);
-      copy_v2_v2(step.scale, effect.mapping.scale);
-      step.rotation = effect.mapping.rotation;
-      step.wrap = effect.mapping.wrap;
+      composite_transform_step_numbers_get(effect, step);
     }
     r_steps.append(step);
   }
+}
+
+bool paint_layer_mask_transform_step_get(const MaterialPaintLayer &item,
+                                         PaintMaterialCompositeMapping &r_step)
+{
+  if (!paint_layer_mask_item_is_transform(item)) {
+    return false;
+  }
+  /* UV space only, so no frame is described: the grey is resampled on the canvas. */
+  r_step = PaintMaterialCompositeMapping{};
+  r_step.enabled = true;
+  composite_transform_step_numbers_get(item, r_step);
+  return true;
 }
 
 /** The parameters of \a row's kind in the schema order the evaluator reads them in. */
@@ -471,7 +602,8 @@ static bool composite_row_source_describe(const Material &ma,
         ma, layer, channel, out.mapping, tile_number, painted_object, mapping_image);
     /* The row's transform effects move what the row itself lays: the source's maps go through
      * their steps first, the row's own mapping last, wherever the acquisition reads them. */
-    BKE_paint_layers_input_transforms_get(ma, layer, channel, out.input_transforms);
+    BKE_paint_layers_input_transforms_get(
+        ma, layer, channel, out.input_transforms, tile_number, painted_object);
     /* A clipping wrap leaves the map transparent outside the unit square, but a Material row
      * covers by its source's transparency rather than by the map's alpha, so the clip has to
      * reach the coverage instead. The acquisition folds it in; a Fill or painted row keeps its
@@ -539,7 +671,8 @@ static bool composite_row_source_describe(const Material &ma,
         ma, layer, channel, out.mapping, tile_number, painted_object, record->image);
     /* The same for a map of the row's own: a painted buffer or a Fill's image reads through the
      * transform effects' steps first, the row's own mapping last. */
-    BKE_paint_layers_input_transforms_get(ma, layer, channel, out.input_transforms);
+    BKE_paint_layers_input_transforms_get(
+        ma, layer, channel, out.input_transforms, tile_number, painted_object);
     return true;
   }
   /* A channel with no map: a flat value (it has some alpha, or the row would not take part). */
@@ -683,7 +816,11 @@ static void composite_mask_item_filter(const MaskItemDescribeContext &context,
    * item with the kernel over it, and the item reads like a painted map with its invert, blend
    * and opacity. In describe-only the grey is left out and the kind named, so the combined
    * preview refuses the stack instead of shading the item as a no-op. */
-  if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_NEEDS_BAKE)) {
+  if (paint_layer_kind_transforms_input(mask) && !paint_layer_mask_item_bakes_effect(mask)) {
+    /* A transform that moves nothing leaves the coverage as it is. */
+    return;
+  }
+  if (paint_layer_mask_item_bakes_effect(mask)) {
     PaintMaterialCompositeMaskItem effect;
     effect.opacity = BKE_paint_layers_effective_opacity(mask);
     effect.contrast = BKE_paint_layers_mask_contrast_get(mask);
@@ -909,7 +1046,7 @@ static void composite_mask_items_describe(
     else if (paint_layer_kind_is_map_coverage(mask)) {
       composite_mask_item_map_coverage(context, mask, r_items);
     }
-    else if (paint_layer_effect_is_filter(mask)) {
+    else if (paint_layer_effect_is_filter(mask) || paint_layer_kind_transforms_input(mask)) {
       composite_mask_item_filter(context, mask, r_items);
     }
     else if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_GENERATES)) {
@@ -1798,6 +1935,7 @@ PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
     buffer.blend = item.blend;
     buffer.invert = item.invert;
     buffer.filter = item.filter;
+    buffer.effect_filter = item.effect_filter;
     buffer.filter_ramp = item.filter_ramp;
     buffer.filter_curves = item.filter_curves;
     std::copy(std::begin(item.filter_params),
@@ -2468,6 +2606,19 @@ uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int cha
   for (const float param : params) {
     mix_float(param);
   }
+  /* A transform effect has no schema parameters: its numbers are its mapping, which a mask item's
+   * cached grey is the result of. */
+  if (paint_layer_kind_transforms_input(effect)) {
+    mix_u32(uint32_t(effect.mapping.flag));
+    mix_u32(uint32_t(effect.mapping.wrap));
+    mix_float(effect.mapping.offset[0]);
+    mix_float(effect.mapping.offset[1]);
+    mix_float(effect.mapping.scale[0]);
+    mix_float(effect.mapping.scale[1]);
+    mix_float(effect.mapping.rotation);
+    mix_float(effect.mapping.mirror_center[0]);
+    mix_float(effect.mapping.mirror_center[1]);
+  }
   /* A Color parameter reads as zero in the scalar fold above, so its channels join the hash here;
    * otherwise a Glow's or a Color Match's colour edit would keep the cached result. */
   if (const PaintLayerKindInfo *kind = paint_layer_kind_of(effect)) {
@@ -2511,7 +2662,7 @@ bool BKE_paint_layers_effect_input_describe(const Material &ma,
                                    false,
                                    true,
                                    r_entry,
-                                   PAINT_TILE_NUMBER_BASE,
+                                   BKE_paint_layers_gradient_surface_object_tile(painted_object),
                                    &effect.marker,
                                    nullptr,
                                    dimensions_only,
@@ -2903,6 +3054,11 @@ static bool composite_bake_entry(
   {
     return false;
   }
+  /* The surface knows the UDIM tile of the UVs it was rasterized from; without one the painted
+   * object's own UVs decide, and the base tile stays the answer for everything else. */
+  const int tile_number = surface != nullptr ?
+                              surface->tile_number :
+                              BKE_paint_layers_gradient_surface_object_tile(painted_object);
   /* The surface is a row input of the description, not a stop point: it rides the context
    * arguments after the size ones. */
   return composite_image_layer_build(ma,
@@ -2912,7 +3068,7 @@ static bool composite_bake_entry(
                                     false,
                                     true,
                                     r_entry,
-                                    PAINT_TILE_NUMBER_BASE,
+                                    tile_number,
                                     nullptr,
                                     slice_rect,
                                     dimensions_only,
@@ -2937,6 +3093,8 @@ bool BKE_paint_layers_bake_render_node(
   if (size <= 0 || r_color_rgba == nullptr || r_coverage_gray == nullptr) {
     return false;
   }
+  /* Tags the effect-space log lines of this render, to tell a bake's resample from a preview's. */
+  const bke::paint_perf::CallerScope caller_scope("bake");
   /* A subtree whose generators the bake cannot evaluate is never a cache. */
   if (!BKE_paint_layers_generator_subtree_is_bakeable(layer)) {
     return false;
@@ -2969,6 +3127,20 @@ bool BKE_paint_layers_bake_render_node(
       width <= 0 || height <= 0)
   {
     return false;
+  }
+  /* A result smaller than the stack (the drag-reduced bake of a Decal row, while the drag lasts) composites on a grid of
+   * its own size: the Decal resample and every map read cost by texels, and a 4K grid would only be
+   * thrown away by the nearest resample below. A partial rectangle keeps the stack grid, as the
+   * nested slice rectangle is in its pixels. */
+  int eval_width = 0;
+  int eval_height = 0;
+  if (dst_rect == nullptr && (width > size || height > size) &&
+      BKE_paint_layers_bake_drag_is_active(ma.id.session_uid))
+  {
+    eval_width = min_ii(width, size);
+    eval_height = min_ii(height, size);
+    width = eval_width;
+    height = eval_height;
   }
   /* The rectangle of the `size`-square result to produce, and the source pixels it samples. A full
    * render produces all of it; a partial re-bake passes the changed tile so the composite runs over
@@ -3017,7 +3189,7 @@ bool BKE_paint_layers_bake_render_node(
   Vector<float> content_coverage(int64_t(area_w) * area_h);
   const rcti region = area;
   if (!BKE_paint_material_composite_eval_row_content(
-          entry, content_color.data(), content_coverage.data(), &region, channel))
+          entry, content_color.data(), content_coverage.data(), &region, channel, eval_width, eval_height))
   {
     return false;
   }
@@ -3134,23 +3306,29 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
   if (layer.input_transforms.size() > PAINT_MATERIAL_COMBINED_INPUT_STEP_MAX) {
     return "a row with too many transform effects is not laid by the GPU path";
   }
+  /* A step in the effect's own Decal frame walks the unfolded surface: the shader has no inverse
+   * map of the frame, so the whole row stays with the CPU rather than folding the lookup in UV. */
+  for (const PaintMaterialCompositeMapping &step : layer.input_transforms) {
+    if (step.projection.present && step.projection.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL) {
+      return "a transform effect in a Decal frame is not laid by the GPU path";
+    }
+  }
   /* A projected map row is laid by the layer pass through the painted surface's map, in the six
    * modes (#composite_resample_projected is its CPU twin). What stays with the CPU: a projected row
    * that is not a plain map row (a folder, a flat colour, a slice reader), and a tiled map, whose
    * GPU texture is not one tile the projected UV could wrap in. */
   if (layer.mapping.projection.present) {
+    /* A Decal row is laid too: the host uploads its unfolded patch in place of the surface
+     * position (#combined_projection_gpu_make), and the Decal map itself is built by the CPU. */
     if (layer.color_image == nullptr || reader) {
       return "a projected row without a map is not laid by the GPU path";
     }
     if (layer.color_image->source == IMA_SRC_TILED) {
       return "a projected row reads a tiled map, which the GPU path does not lay";
     }
-    /* A projection takes precedence over the transform effects on the CPU and in the graph, and the
-     * projected read of the shader takes no steps. Refused explicitly, so the contract is checked
-     * here instead of resting on three places happening to drop the same steps. */
-    if (!layer.input_transforms.is_empty()) {
-      return "a projected row with transform effects is not laid by the GPU path";
-    }
+    /* The transform effects' steps are laid in every projection space, Cube inside its atlas cell.
+     * A projected tangent-space Normal row is laid in full: the steps' per-tap covariant remap and
+     * the frame-to-tangent conversion run in the projected read, with the controller's space. */
   }
   /* A projected correction or mask item map is laid through the same frame as a row's. The CPU only
    * projects a plain map (never a mesh map, a slice or a filter), so those carry no projection to
@@ -3215,6 +3393,9 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
       const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
                                                              item.effect_filter);
       if (kind != nullptr) {
+        if ((kind->flags & PAINT_LAYER_KIND_TRANSFORMS_INPUT) != 0) {
+          return "a transform effect in a mask is not laid by the GPU path";
+        }
         return paint_layer_cpu_computed_reason(*kind);
       }
     }

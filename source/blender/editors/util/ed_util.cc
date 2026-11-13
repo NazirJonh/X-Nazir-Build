@@ -296,6 +296,8 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
     /* The source-graph memos are process-static maps keyed on session UIDs too. */
     BKE_paint_layers_source_memo_free_all();
     BKE_paint_layers_source_cache_failure_free_all();
+    /* The bake-drag marks name materials by session uid: a replaced file makes them stale. */
+    BKE_paint_layers_bake_drag_clear_all();
     /* And the Combined preview derived from them, which owns a float buffer of its own. */
     BKE_paint_material_combined_cache_free_all();
     /* The paint-layers bake debounce keeps its armed timer and pending set as process-static

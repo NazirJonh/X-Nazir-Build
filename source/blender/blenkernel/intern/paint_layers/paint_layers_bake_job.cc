@@ -241,6 +241,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
     return true;
   });
 
+  bool surface_sync_due = false;
   PaintLayersBakeJob *job = MEM_new<PaintLayersBakeJob>(__func__);
   job->bmain = &bmain;
   job->material = &ma;
@@ -258,6 +259,10 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
       continue;
     }
     if (!BKE_paint_layers_bake_is_heavy(ma, layer)) {
+      /* A due row that is light but reads the surface (a transform effect in its Decal frame) is
+       * the synchronous planner's, which needs this view: the regeneration's own plan has no scene,
+       * so without the run below nothing would ever bake it. */
+      surface_sync_due = surface_sync_due || paint_layers_bake_subtree_needs_surface(layer);
       continue;
     }
     const int size = bake_size_for(ma, layer);
@@ -323,6 +328,11 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
     job->rows.append(std::move(row));
   }
 
+  if (surface_sync_due && scene != nullptr && view_layer != nullptr) {
+    /* On the main thread, which is where the evaluated mesh behind the Decal map may be read. It
+     * tags the regeneration itself when a row landed. */
+    BKE_paint_layers_bake_plan_run(bmain, ma, nullptr, scene, view_layer);
+  }
   if (job->rows.is_empty()) {
     MEM_delete(job);
     return nullptr;

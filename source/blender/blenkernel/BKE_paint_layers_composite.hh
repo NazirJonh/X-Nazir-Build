@@ -312,11 +312,17 @@ void BKE_paint_layers_effect_input_images(const PaintMaterialCompositeImageLayer
  * transform kinds' mappings, so the CPU composite, the generated graph and the GPU preview cannot
  * disagree on what a transform effect says. A correction or a mask item keeps its own placement:
  * the transform moves what the row itself lays, not what is stamped over it.
+ *
+ * An effect in its own Decal frame (#BKE_paint_layers_effect_decal_applies) carries that frame as
+ * its step's projection (space Decal, on \a painted_object's surface in \a tile_number); every Decal
+ * step of the row carries the first one's frame. Without \a painted_object such a step is left out.
  */
 void BKE_paint_layers_input_transforms_get(const Material &ma,
                                            const MaterialPaintLayer &row,
                                            int channel,
-                                           Vector<PaintMaterialCompositeMapping> &r_steps);
+                                           Vector<PaintMaterialCompositeMapping> &r_steps,
+                                           int tile_number = PAINT_TILE_NUMBER_BASE,
+                                           const Object *painted_object = nullptr);
 
 /**
  * Render the slice \a reader lays in \a channel at the source row's resolution. The buffers are

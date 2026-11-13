@@ -19,6 +19,7 @@
 #include <cstdlib>
 
 #include "BLI_time.h"
+#include "BLI_utildefines.h"
 
 namespace blender::bke::paint_perf {
 
@@ -35,6 +36,21 @@ inline double min_ms()
 inline bool enabled()
 {
   return min_ms() >= 0.0;
+}
+
+/**
+ * Prints regardless of `BLENDER_PBR_PERF`, for diagnostics that must stay visible without setting
+ * the environment variable. Kept separate from #ScopedTimer so the environment switch keeps its
+ * meaning.
+ */
+/* TODO: remove after perf sign-off. */
+inline void printf_always(const char *format, ...)
+{
+  va_list args;
+  va_start(args, format);
+  printf("[PBR-PERF] ");
+  vprintf(format, args);
+  va_end(args);
 }
 
 /** Prints its label, duration and the note when it leaves scope. */
@@ -83,6 +99,43 @@ class ScopedTimer {
 
   ScopedTimer(const ScopedTimer &) = delete;
   ScopedTimer &operator=(const ScopedTimer &) = delete;
+};
+
+/**
+ * Who asks for a composite on this thread, for the `[PBR-PERF] effect_space call` log line only: a
+ * short tag ("bake", "gather", "cache", "preview"), "other" outside any scope. It exists so a
+ * repeated Decal resample can be told apart by its caller; it never changes a result.
+ */
+inline const char *&caller_storage()
+{
+  static thread_local const char *caller = "other";
+  return caller;
+}
+
+inline const char *caller_get()
+{
+  return caller_storage();
+}
+
+/** Sets the caller tag for the scope's lifetime; with \a keep_outer an enclosing tag wins. */
+class CallerScope {
+ public:
+  explicit CallerScope(const char *caller, const bool keep_outer = false)
+      : previous_(caller_get())
+  {
+    if (!(keep_outer && !STREQ(previous_, "other"))) {
+      caller_storage() = caller;
+    }
+  }
+  ~CallerScope()
+  {
+    caller_storage() = previous_;
+  }
+  CallerScope(const CallerScope &) = delete;
+  CallerScope &operator=(const CallerScope &) = delete;
+
+ private:
+  const char *previous_;
 };
 
 }  // namespace blender::bke::paint_perf

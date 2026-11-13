@@ -29,6 +29,7 @@
 #include "BKE_paint_layers_target.hh"
 #include "BKE_report.hh"
 
+#include "ED_material_combined.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
 #include "ED_undo.hh"
@@ -282,6 +283,9 @@ static void layer_mapping_mirror_point_finish(bContext *C,
   auto *data = static_cast<LayerMappingMirrorPointData *>(op->customdata);
   ARegion *region = CTX_wm_region(C);
   Material *material = data->target.material();
+  if (material != nullptr) {
+    ed::material_combined::gradient_interactive_end(material->id.session_uid);
+  }
   if (!commit) {
     data->target.write_mirror_center(float2(data->start_center[0], data->start_center[1]));
   }
@@ -369,6 +373,11 @@ static wmOperatorStatus layer_mapping_mirror_set_point_modal(bContext *C,
   /* The center is a canvas UV point; keep it inside the tile the fold is authored for. */
   center[0] = std::clamp(center[0], 0.0f, 1.0f);
   center[1] = std::clamp(center[1], 0.0f, 1.0f);
+  /* Marked before the write: the first bake after the value changes must already see the drag. */
+  if (Material *material = data->target.material()) {
+    /* Coarse composites while the point follows the cursor; the finish clears the mark. */
+    ed::material_combined::gradient_interactive_begin(*material, true);
+  }
   if (!data->target.write_mirror_center(float2(center[0], center[1]))) {
     layer_mapping_mirror_point_finish(C, op, false);
     return OPERATOR_CANCELLED;
@@ -475,8 +484,12 @@ static wmOperatorStatus layer_mapping_mirror_toggle_exec(bContext *C, wmOperator
   }
   const int16_t axes = (BKE_paint_layers_mapping_mirror_get(*layer) != 0) ?
                            int16_t(0) :
+                           /* The stored directions stay, so the toggle never loses a chosen "-". */
                            int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U |
-                                   MA_PAINT_LAYER_MAPPING_MIRROR_V);
+                                   MA_PAINT_LAYER_MAPPING_MIRROR_V |
+                                   (BKE_paint_layers_mapping_mirror_axes_get(*layer) &
+                                    (MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE |
+                                     MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE)));
   if (axes != 0 && !BKE_paint_layers_mapping_applies(*ma, *layer)) {
     /* One click is the whole gesture: a row whose mapping is off would otherwise switch the fold on
      * invisibly. The fold implies the mapping, so turning it on is part of the toggle. */

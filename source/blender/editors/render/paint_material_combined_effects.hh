@@ -54,6 +54,11 @@ constexpr int gpu_layer_tangent_normal = 256;
 constexpr int gpu_layer_normal_directx = 262144;
 constexpr int gpu_layer_mirror_u = 1048576;
 constexpr int gpu_layer_mirror_v = 2097152;
+/* The fold's negative direction per axis. Mirror COMBINED_LAYER_MIRROR_U_NEG / _V_NEG. */
+constexpr int gpu_layer_mirror_u_neg = 134217728;
+constexpr int gpu_layer_mirror_v_neg = 268435456;
+static_assert(gpu_layer_mirror_u_neg == 134217728, "COMBINED_LAYER_MIRROR_U_NEG");
+static_assert(gpu_layer_mirror_v_neg == 268435456, "COMBINED_LAYER_MIRROR_V_NEG");
 /* What the row's map stores (#eMaterialPaintLayerMapEncoding): the read-time conversion the layer
  * pass runs on the sampled texel, before the coverage. The spec-gloss alpha packing and the F0
  * colour with gloss alpha are the two `*_alpha` ones; their map alpha is data, so
@@ -81,6 +86,9 @@ constexpr int gpu_proj_depth = 2;
 constexpr int gpu_proj_facing = 4;
 constexpr int gpu_proj_uv_adjust = 8;
 constexpr int gpu_proj_wrap_clip = 16;
+/* The frame is a Decal: the "position" texture holds the unfolded map coordinate and the patch
+ * triangle id, and the Normal conversion reads that triangle's frame. Mirrors COMBINED_PROJ_DECAL. */
+constexpr int gpu_proj_decal = 32;
 constexpr int gpu_layer_has_mask = 2048;
 constexpr int gpu_layer_row_store = 4096;
 constexpr int gpu_layer_row_use = 8192;
@@ -159,10 +167,20 @@ static_assert((gpu_layer_projected &
 struct GpuProjection {
   gpu::Texture *position = nullptr;
   gpu::Texture *normal = nullptr;
+  /** The per-triangle tangent basis the normal's `w` names; read by a projected Normal row only. */
+  gpu::Texture *tri_basis = nullptr;
+  /** A Decal frame's per-triangle axes (three texels each), read by the triangle id `position`
+   * carries. Null for the other modes. */
+  gpu::Texture *decal_frames = nullptr;
   int2 canvas_size = int2(1);
   /** Object-space point to frame-space `q` (controller and aspect included), and normal to frame. */
   float4x4 p_to_q = float4x4::identity();
   float4x4 n_to_frame = float4x4::identity();
+  /** The frame's rotation alone (the inverse of its orientation), and the object-to-controller
+   * normal matrix: the two factors of #n_to_frame the Normal map's frame-to-tangent conversion uses
+   * apart. */
+  float4x4 frame_rot = float4x4::identity();
+  float4x4 n_to_controller = float4x4::identity();
   /** Tiling (xy), facing scale and offset (zw). */
   float4 params_0 = float4(1.0f, 1.0f, 0.0f, 0.0f);
   /** Face exponent, frame extent, edge softness. */
@@ -202,7 +220,7 @@ struct GpuMappingUniforms {
 };
 
 /* The transform effects' steps the three passes apply ahead of the row's own mapping. The shader
- * packs five flag bits per step into one word; the count and the packed float4s are uniforms of
+ * packs seven flag bits per step into one word; the count and the packed float4s are uniforms of
  * their own. A CPU composite composes more; past this many the preview refuses the row to the CPU,
  * so a stack is never shaded as if a step were not there. */
 constexpr int gpu_input_step_mapped = 1;
@@ -210,6 +228,10 @@ constexpr int gpu_input_step_mirror_u = 2;
 constexpr int gpu_input_step_mirror_v = 4;
 constexpr int gpu_input_step_repeat_u = 8;
 constexpr int gpu_input_step_repeat_v = 16;
+constexpr int gpu_input_step_mirror_u_neg = 32;
+constexpr int gpu_input_step_mirror_v_neg = 64;
+/* Bits a step takes in the packed word (COMBINED_INPUT_STEP_BITS in the shader). */
+constexpr int gpu_input_step_bits = 7;
 /* The one C++ definition of the cap; the shader's #COMBINED_INPUT_STEP_MAX and its two named
  * `step_0_*` / `step_1_*` uniform blocks have to follow it by hand. */
 constexpr int gpu_input_step_max = PAINT_MATERIAL_COMBINED_INPUT_STEP_MAX;
@@ -219,7 +241,7 @@ static_assert(gpu_input_step_max == 2,
 /**
  * The packed steps of one pass: two float4s per step (`a` the offset in xy and the scale in zw,
  * `b` the rotation's cosine and sine in xy and the fold center in zw) with the per-step flags in
- * #flags, five bits a step. Built from the description's #PaintMaterialCompositeImageLayer::
+ * #flags, seven bits a step. Built from the description's #PaintMaterialCompositeImageLayer::
  * input_transforms, in its order; the first two steps are what the shader runs.
  */
 struct GpuInputSteps {

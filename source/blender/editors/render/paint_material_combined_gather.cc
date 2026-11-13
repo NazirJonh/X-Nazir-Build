@@ -20,6 +20,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BKE_global.hh"
 #include "BKE_image.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
@@ -90,9 +91,15 @@ static_assert(PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM >= 3 * 4);
  * gizmo is destroyed, the operator is cancelled, the file is closed, and the clear that should have
  * come with it never runs. Expiry turns that from a permanent loss of resolution into a delay.
  */
-static Map<uint32_t, double> &gradient_interactive_marks()
+struct GradientInteractiveMark {
+  double stamp = 0.0;
+  /** The drag asks for the fixed coarse cap rather than the display's octave alone. */
+  bool coarse = false;
+};
+
+static Map<uint32_t, GradientInteractiveMark> &gradient_interactive_marks()
 {
-  static Map<uint32_t, double> marks;
+  static Map<uint32_t, GradientInteractiveMark> marks;
   return marks;
 }
 
@@ -103,30 +110,52 @@ static constexpr double GRADIENT_INTERACTIVE_TIMEOUT_SECONDS = 60.0;
 /** The times the Gradient preview was last rebuilt, declared here for the release path below. */
 static Map<uint32_t, double> &gradient_preview_last_refresh();
 
-void gradient_interactive_begin(const Material &ma)
+void gradient_interactive_begin(const Material &ma, const bool coarse)
 {
   /* Insert or move the mark forward: a drag re-arms its own stamp on every step. */
-  gradient_interactive_marks().add_overwrite(ma.id.session_uid, BLI_time_now_seconds());
+  gradient_interactive_marks().add_overwrite(ma.id.session_uid,
+                                             GradientInteractiveMark{BLI_time_now_seconds(), coarse});
+  if (coarse) {
+    /* The 3D viewport reads a Decal row through its bake, whose size the octave above does not
+     * reach: the planner needs the drag state of its own. */
+    if (G_MAIN != nullptr) {
+      BKE_paint_layers_bake_drag_set(*G_MAIN, ma.id.session_uid, true);
+    }
+  }
 }
 
 void gradient_interactive_end(const uint32_t material_session_uid)
 {
   gradient_interactive_marks().remove(material_session_uid);
+  if (G_MAIN != nullptr) {
+    BKE_paint_layers_bake_drag_set(*G_MAIN, material_session_uid, false);
+  }
   /* Release always refines to the canvas, and the next drag starts with an immediate first frame. */
   gradient_preview_last_refresh().remove(material_session_uid);
 }
 
 bool gradient_interactive_is(const Material &ma)
 {
-  const double *started = gradient_interactive_marks().lookup_ptr(ma.id.session_uid);
-  if (started == nullptr) {
+  const GradientInteractiveMark *mark = gradient_interactive_marks().lookup_ptr(ma.id.session_uid);
+  if (mark == nullptr) {
     return false;
   }
-  if (BLI_time_now_seconds() - *started > GRADIENT_INTERACTIVE_TIMEOUT_SECONDS) {
+  if (BLI_time_now_seconds() - mark->stamp > GRADIENT_INTERACTIVE_TIMEOUT_SECONDS) {
     gradient_interactive_marks().remove(ma.id.session_uid);
+    /* A drag that expired without an end still owes its full bake: this also tags the material. */
+    if (G_MAIN != nullptr) {
+      BKE_paint_layers_bake_drag_set(*G_MAIN, ma.id.session_uid, false);
+    }
     return false;
   }
   return true;
+}
+
+bool gradient_interactive_is_coarse(const Material &ma)
+{
+  /* Through #gradient_interactive_is, so an expired mark is dropped before its flag is believed. */
+  return gradient_interactive_is(ma) &&
+         gradient_interactive_marks().lookup_ptr(ma.id.session_uid)->coarse;
 }
 
 /**
@@ -590,9 +619,15 @@ ImBuf *combined_preview_ensure(Main &bmain,
   int2 previous_input = int2(0);
   int2 previous_output = int2(0);
   BKE_paint_material_combined_cache_sizes_get(ma, previous_input, previous_output);
+  /* A transform effect's drag also caps the octave at a fixed size: the display alone leaves the
+   * canvas whenever it is not known (a 3D viewport) or is large. */
+  const int2 interactive_max_output = gradient_interactive_is_coarse(ma) ?
+                                          BKE_paint_material_interactive_max_output(
+                                              request.max_output) :
+                                          request.max_output;
   const int2 input_size = gradient_interactive ?
                               BKE_paint_material_preview_octave_size_for(
-                                  canvas_size, request.max_output, previous_input) :
+                                  canvas_size, interactive_max_output, previous_input) :
                               canvas_size;
   const int2 output_size = gradient_interactive ?
                                input_size :
@@ -653,6 +688,7 @@ ImBuf *combined_preview_ensure(Main &bmain,
          * rather than as a display cap: the hysteresis is the preview's, not each channel's, or two
          * channels of one material could settle on two octaves. */
         const int2 stack_output_size = gradient_interactive ? input_size : int2(0);
+        const bke::paint_perf::CallerScope caller_scope("gather");
         composite = BKE_paint_material_composite_cache_ensure(
             ma,
             channel,

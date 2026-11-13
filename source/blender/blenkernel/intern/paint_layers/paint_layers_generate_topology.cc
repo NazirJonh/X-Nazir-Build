@@ -159,8 +159,10 @@ static void mapping_wrap_hash_mix(uint64_t &hash, const Material &ma, const Mate
  * 2: the fold hands the transform its folded UV through #MappingChain::fold_out, and biases the
  * side signs so a texel sitting on the fold line reads as +1 -- "at or beyond the center" -- on
  * all three paths (graph, CPU resample, compute shader).
+ * 3: the fold's add is a MULTIPLY_ADD carrying the per-axis direction (the negative fold), and
+ * the side sign scales by that direction.
  */
-static constexpr uint64_t MAPPING_MIRROR_CHAIN_VERSION = 2;
+static constexpr uint64_t MAPPING_MIRROR_CHAIN_VERSION = 3;
 
 /**
  * Mix which axes the row's Mirror folds into \a hash: nothing while the mapping does not apply,
@@ -599,8 +601,11 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     topology_hash_uid(hash, effect.marker);
     if (paint_layer_kind_transforms_input(effect)) {
       /* A transform effect has no opacity input to carry its enabled flag: switched off, its chain,
-       * its clip and its Normal remap are simply not built, so the flag is structure here. */
+       * its clip and its Normal remap are simply not built, so the flag is structure here. Its
+       * space is structure too: a Decal step is laid by the CPU/GPU paths and leaves the graph,
+       * while a UV step is a chain of its own. */
       hash = topology_hash_mix(hash, (effect.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1 : 0);
+      hash = topology_hash_mix(hash, effect.mapping.space);
     }
     if (paint_layer_kind_is_anchor_point_marker(effect)) {
       /* A marker is a Group Output only while something reads it; which point that is, and where,

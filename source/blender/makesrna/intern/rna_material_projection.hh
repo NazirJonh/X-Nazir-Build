@@ -76,6 +76,30 @@ static const EnumPropertyItem rna_enum_material_paint_layer_mapping_space_items[
      0,
      "Sphere",
      "Wrap the map around the frame's spherical surface"},
+    {MA_PAINT_LAYER_MAPPING_SPACE_DECAL,
+     "DECAL",
+     0,
+     "Decal",
+     "Lay the map over the surface around the frame's center, across seams and edges"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* A transform effect moves where its owner's map is read: it acts in UV, or in a Decal frame of
+ * its own that follows the surface. The projection spaces of a row are not its own. */
+static const EnumPropertyItem rna_enum_material_paint_layer_effect_space_items[] = {
+    {MA_PAINT_LAYER_MAPPING_SPACE_UV, "UV", 0, "UV", "Move the map lookup in UV space"},
+    {MA_PAINT_LAYER_MAPPING_SPACE_DECAL,
+     "DECAL",
+     0,
+     "Decal",
+     "Move the lookup in a frame laid over the surface, across seams and edges"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* A transform effect in a mask moves the grey the mask has built up on the canvas, which has no
+ * surface frame to walk, so UV is the only space it is offered. */
+static const EnumPropertyItem rna_enum_material_paint_layer_mask_effect_space_items[] = {
+    {MA_PAINT_LAYER_MAPPING_SPACE_UV, "UV", 0, "UV", "Move the mask's coverage in UV space"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -112,6 +136,20 @@ static int rna_MaterialPaintLayer_mapping_space_get(PointerRNA *ptr)
   return (space >= MA_PAINT_LAYER_MAPPING_SPACE_UV && space < MA_PAINT_LAYER_MAPPING_SPACE_NUM) ?
              int(space) :
              int(MA_PAINT_LAYER_MAPPING_SPACE_UV);
+}
+
+static const EnumPropertyItem *rna_MaterialPaintLayer_mapping_space_itemf(bContext * /*C*/,
+                                                                          PointerRNA *ptr,
+                                                                          PropertyRNA * /*prop*/,
+                                                                          bool * /*r_free*/)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  if (BKE_paint_layers_is_transform_effect(*layer)) {
+    return layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM ?
+               rna_enum_material_paint_layer_mask_effect_space_items :
+               rna_enum_material_paint_layer_effect_space_items;
+  }
+  return rna_enum_material_paint_layer_mapping_space_items;
 }
 
 static bool rna_MaterialPaintLayer_projection_uses_axis_get(PointerRNA *ptr)
@@ -200,6 +238,31 @@ static int rna_MaterialPaintLayer_mapping_space_editable(const PointerRNA *ptr,
   if (ma == nullptr) {
     return 0;
   }
+  if (BKE_paint_layers_is_transform_effect(*layer)) {
+    if (layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+      /* UV is the one space a mask transform has: nothing to choose. */
+      if (r_info != nullptr) {
+        *r_info = N_("A transform in a mask acts in UV only");
+      }
+      return 0;
+    }
+    /* An effect on a projected layer keeps acting in that projection: its Decal frame is offered
+     * only where the owner reads its map at the surface UV. An effect already in Decal may always
+     * switch back to UV, even after its owner was switched to a projection. */
+    bool decal_available = false;
+    if (const MaterialPaintLayer *owner = BKE_paint_layers_correction_owner(*ma, *layer)) {
+      decal_available = !BKE_paint_layers_projection_applies(*ma, *owner) &&
+                        BKE_paint_layers_effect_space_supported(
+                            *layer, MA_PAINT_LAYER_MAPPING_SPACE_DECAL);
+    }
+    if (layer->mapping.space != MA_PAINT_LAYER_MAPPING_SPACE_UV || decal_available) {
+      return PROP_EDITABLE;
+    }
+    if (r_info != nullptr) {
+      *r_info = N_("The layer above projects: its effect acts in that projection");
+    }
+    return 0;
+  }
   if (layer->mapping.space != MA_PAINT_LAYER_MAPPING_SPACE_UV ||
       BKE_paint_layers_projection_supported(*ma, *layer))
   {
@@ -253,6 +316,17 @@ static bool rna_MaterialPaintLayer_projection_applies_get(PointerRNA *ptr)
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   Material *ma = rna_paint_layer_material(ptr, layer);
   return ma != nullptr && BKE_paint_layers_projection_applies(*ma, *layer);
+}
+
+static bool rna_MaterialPaintLayer_effect_decal_applies_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  if (ma == nullptr || !BKE_paint_layers_is_transform_effect(*layer)) {
+    return false;
+  }
+  const MaterialPaintLayer *owner = BKE_paint_layers_correction_owner(*ma, *layer);
+  return owner != nullptr && BKE_paint_layers_effect_decal_applies(*ma, *owner, *layer);
 }
 
 static int rna_MaterialPaintLayer_projection_editable(const PointerRNA *ptr,
@@ -558,7 +632,7 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
   RNA_def_property_enum_funcs(prop,
                               "rna_MaterialPaintLayer_mapping_space_get",
                               "rna_MaterialPaintLayer_mapping_space_set",
-                              nullptr);
+                              "rna_MaterialPaintLayer_mapping_space_itemf");
   RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_space_editable");
   RNA_def_property_ui_text(
       prop, "Mapping Space", "Projection the row's map lookup works in");
@@ -708,6 +782,28 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
                            "Fold the row's maps along V: both sides of the center show the same");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
+  prop = RNA_def_property(srna, "mapping_mirror_u_negative", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_mapping_mirror_u_negative_get",
+                                 "rna_MaterialPaintLayer_mapping_mirror_u_negative_set");
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
+  RNA_def_property_ui_text(prop,
+                           "Mirror U Negative",
+                           "Fold U the other way: the smaller side of the center is copied onto the "
+                           "larger one");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "mapping_mirror_v_negative", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_mapping_mirror_v_negative_get",
+                                 "rna_MaterialPaintLayer_mapping_mirror_v_negative_set");
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
+  RNA_def_property_ui_text(prop,
+                           "Mirror V Negative",
+                           "Fold V the other way: the smaller side of the center is copied onto the "
+                           "larger one");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
   prop = RNA_def_property(srna, "mapping_mirror_center", PROP_FLOAT, PROP_NONE);
   RNA_def_property_array(prop, 2);
   RNA_def_property_float_funcs(prop,
@@ -755,6 +851,14 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Projection Applies", "Whether the row's maps are read through the projection");
+
+  /* Read-only: whether a transform effect acts in its Decal frame (derived from its Mirror center)
+   * right now, which is not the case while its layer projects. */
+  prop = RNA_def_property(srna, "effect_decal_applies", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_effect_decal_applies_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Effect Decal Applies", "Whether the effect acts in the Decal frame of its center");
 
   prop = RNA_def_property(srna, "projection_center", PROP_FLOAT, PROP_TRANSLATION);
   RNA_def_property_array(prop, 3);

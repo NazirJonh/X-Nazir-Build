@@ -693,6 +693,12 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
      * item reads its map. Without one the item lays nothing: the live graph cannot express the
      * effect, and the bake catches up outside the stroke. */
     Image *item_effect_bake = paint_layer_mask_effect_bake_map(ma_, item);
+    if (paint_layer_mask_item_bakes_effect(item) && item_effect_bake == nullptr) {
+      /* Pass-through until the bake stands. Falling on to the record or flat-value paths below
+       * would lay a grey the effect never computed (zero for a record without a map), blacking the
+       * mask out for the whole wait. */
+      continue;
+    }
     /* The map the item lays: the effect's baked grey, or the painted record's. One read serves
      * both, the item's own mapping over it either way. */
     Image *item_image = item_effect_bake;
@@ -783,7 +789,12 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
         discard();
         return {};
       }
-      map_node_key_set(*item_map, item, item_record->channel);
+      /* An effect item reads the grey its bake holds and owns no record: the mask's channel is
+       * Base Color, the one its bake is written in. */
+      map_node_key_set(*item_map,
+                       item,
+                       item_record != nullptr ? int(item_record->channel) :
+                                                int(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
       nodes.append(item_map);
       grid_.place(*item_map, layout::Column::Mask, row++);
       const MapRead item_read = this->map_read_apply(tree, item, *item_map, nodes);
@@ -2051,7 +2062,7 @@ NodeOutput PaintLayersTreeBuilder::transform_normal_remap_apply(bNodeTree &tree,
                                                                 Vector<bNode *> *r_nodes)
 {
   const Vector<const MaterialPaintLayer *, 4> transforms =
-      BKE_paint_layers_active_transform_effects(ma_, row);
+      BKE_paint_layers_active_uv_transform_effects(ma_, row);
   for (const int index : transforms.index_range()) {
     const MaterialPaintLayer &effect = *transforms[transforms.size() - 1 - index];
     color = this->normal_remap_add(tree, effect, color, r_nodes);
@@ -2066,7 +2077,7 @@ void PaintLayersTreeBuilder::source_group_mapping_wire(bNodeTree &tree,
   /* The wrapper carries the row's own mapping, and one set of inputs per transform effect: a row
    * without a mapping of its own still wires its effects' values in. */
   const Vector<const MaterialPaintLayer *, 4> transform_effects =
-      BKE_paint_layers_active_transform_effects(ma_, layer);
+      BKE_paint_layers_active_uv_transform_effects(ma_, layer);
   if (!BKE_paint_layers_mapping_remaps(ma_, layer) && transform_effects.is_empty()) {
     return;
   }
@@ -2345,7 +2356,7 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
    * transform effects clip over their own chains' lookups, the factors multiplied in like the
    * CPU's per-step clip does. */
   const Vector<const MaterialPaintLayer *, 4> transform_effects =
-      BKE_paint_layers_active_transform_effects(ma_, ctx.layer);
+      BKE_paint_layers_active_uv_transform_effects(ma_, ctx.layer);
   if (BKE_paint_layers_mapping_remaps(ma_, ctx.layer) || !transform_effects.is_empty()) {
     const auto multiply = [&](const NodeOutput value, const NodeOutput mask) -> NodeOutput {
       bNode *product = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
@@ -3014,10 +3025,14 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
        * with it the content alpha, which starts from the coverage. The transform effects clip the
        * same way, each over its own chain's lookup, exactly as the CPU's per-step clip does. */
       out.coverage = this->mapping_clip_alpha(tree, ctx.layer, read.alpha, source_nodes);
-      for (const MaterialPaintLayer *effect :
-           BKE_paint_layers_active_transform_effects(ma_, ctx.layer))
-      {
-        out.coverage = this->mapping_clip_alpha(tree, *effect, out.coverage, source_nodes);
+      /* A projected row's steps already clipped inside #map_read_apply, over their own per-face
+       * chains: the UV chains of the effects do not exist for it. */
+      if (!read.projected) {
+        for (const MaterialPaintLayer *effect :
+             BKE_paint_layers_active_uv_transform_effects(ma_, ctx.layer))
+        {
+          out.coverage = this->mapping_clip_alpha(tree, *effect, out.coverage, source_nodes);
+        }
       }
       out.content_alpha = out.coverage;
     }

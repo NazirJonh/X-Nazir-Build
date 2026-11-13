@@ -26,6 +26,7 @@
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_material_decal_map.hh"
 
 #include "BLI_array.hh"
 #include "BLI_hash.hh"
@@ -57,136 +58,125 @@
 
 namespace blender {
 
-/**
- * A sampler over an acquired source buffer, decoded exactly like #composite_resample_mapped's
- * taps: byte storage is straight and decoded to scene-linear, float storage is premultiplied and
- * straightened for the filter, and the result is premultiplied again.
- */
-struct CompositeProjectionSampler {
-  const ImBuf *src = nullptr;
-  bool src_is_float = false;
-  int src_channels = 4;
-  const ColorSpace *colorspace = nullptr;
-  bool decode = false;
-  bool decode_by_table = false;
+CompositeProjectionSampler::CompositeProjectionSampler(const ImBuf *source,
+                                                       const bool grey_single_channel)
+    : src(source), grey_one_channel(grey_single_channel)
+{
+  if (src == nullptr) {
+    return;
+  }
+  src_is_float = src->byte_buffer.data == nullptr && src->float_buffer.data != nullptr;
+  src_channels = src->channels == 0 ? 4 : src->channels;
+  colorspace = src_is_float ? src->float_buffer.colorspace : src->byte_buffer.colorspace;
+  decode = BKE_paint_material_composite_colorspace_is_converted(colorspace);
+  decode_by_table = decode && !src_is_float && colorspace != nullptr &&
+                    IMB_colormanagement_space_name_is_srgb(
+                        IMB_colormanagement_colorspace_get_name(colorspace));
+}
 
-  explicit CompositeProjectionSampler(const ImBuf *source) : src(source)
-  {
-    if (src == nullptr) {
-      return;
+bool CompositeProjectionSampler::valid() const
+{
+  return src != nullptr && (src_is_float || src->byte_buffer.data != nullptr);
+}
+
+static const std::array<float, 256> &composite_sampler_srgb_table()
+{
+  static const std::array<float, 256> table = []() {
+    std::array<float, 256> values;
+    for (const int i : IndexRange(256)) {
+      values[i] = srgb_to_linearrgb(float(i) * (1.0f / 255.0f));
     }
-    src_is_float = src->byte_buffer.data == nullptr && src->float_buffer.data != nullptr;
-    src_channels = src->channels == 0 ? 4 : src->channels;
-    colorspace = src_is_float ? src->float_buffer.colorspace : src->byte_buffer.colorspace;
-    decode = BKE_paint_material_composite_colorspace_is_converted(colorspace);
-    decode_by_table = decode && !src_is_float && colorspace != nullptr &&
-                      IMB_colormanagement_space_name_is_srgb(
-                          IMB_colormanagement_colorspace_get_name(colorspace));
-  }
+    return values;
+  }();
+  return table;
+}
 
-  bool valid() const
-  {
-    return src != nullptr && (src_is_float || src->byte_buffer.data != nullptr);
-  }
-
-  static const std::array<float, 256> &srgb_table()
-  {
-    static const std::array<float, 256> table = []() {
-      std::array<float, 256> values;
-      for (const int i : IndexRange(256)) {
-        values[i] = srgb_to_linearrgb(float(i) * (1.0f / 255.0f));
-      }
-      return values;
-    }();
-    return table;
-  }
-
-  void tap_straight(const int tx, const int ty, float r_tap[4]) const
-  {
-    if (!src_is_float) {
-      const uchar *pixel = src->byte_data() + (int64_t(ty) * src->x + tx) * 4;
-      if (decode_by_table) {
-        const std::array<float, 256> &table = srgb_table();
-        r_tap[0] = table[pixel[0]];
-        r_tap[1] = table[pixel[1]];
-        r_tap[2] = table[pixel[2]];
-      }
-      else {
-        r_tap[0] = float(pixel[0]) / 255.0f;
-        r_tap[1] = float(pixel[1]) / 255.0f;
-        r_tap[2] = float(pixel[2]) / 255.0f;
-      }
-      r_tap[3] = float(pixel[3]) / 255.0f;
+void CompositeProjectionSampler::tap_straight(const int tx, const int ty, float r_tap[4]) const
+{
+  if (!src_is_float) {
+    const uchar *pixel = src->byte_data() + (int64_t(ty) * src->x + tx) * 4;
+    if (decode_by_table) {
+      const std::array<float, 256> &table = composite_sampler_srgb_table();
+      r_tap[0] = table[pixel[0]];
+      r_tap[1] = table[pixel[1]];
+      r_tap[2] = table[pixel[2]];
     }
     else {
-      const float *pixel = src->float_buffer.data + (int64_t(ty) * src->x + tx) * src_channels;
-      r_tap[0] = pixel[0];
+      r_tap[0] = float(pixel[0]) / 255.0f;
+      r_tap[1] = float(pixel[1]) / 255.0f;
+      r_tap[2] = float(pixel[2]) / 255.0f;
+    }
+    r_tap[3] = float(pixel[3]) / 255.0f;
+  }
+  else {
+    const float *pixel = src->float_buffer.data + (int64_t(ty) * src->x + tx) * src_channels;
+    r_tap[0] = pixel[0];
+    if (grey_one_channel && src_channels == 1) {
+      r_tap[1] = pixel[0];
+      r_tap[2] = pixel[0];
+    }
+    else {
       r_tap[1] = src_channels > 1 ? pixel[1] : 0.0f;
       r_tap[2] = src_channels > 2 ? pixel[2] : 0.0f;
-      r_tap[3] = src_channels == 4 ? pixel[3] : 1.0f;
-      if (r_tap[3] > 0.0f) {
-        const float inv = 1.0f / r_tap[3];
-        r_tap[0] *= inv;
-        r_tap[1] *= inv;
-        r_tap[2] *= inv;
-      }
     }
-    if (decode && !decode_by_table) {
-      IMB_colormanagement_colorspace_to_scene_linear_v4(r_tap, false, colorspace);
+    r_tap[3] = src_channels == 4 ? pixel[3] : 1.0f;
+    if (r_tap[3] > 0.0f) {
+      const float inv = 1.0f / r_tap[3];
+      r_tap[0] *= inv;
+      r_tap[1] *= inv;
+      r_tap[2] *= inv;
     }
-    r_tap[0] *= r_tap[3];
-    r_tap[1] *= r_tap[3];
-    r_tap[2] *= r_tap[3];
   }
-
-  /** Bilinear, premultiplied scene-linear tap. False when the coordinate is clipped away. */
-  bool sample(float u,
-              float v,
-              const bool repeat_u,
-              const bool repeat_v,
-              float r_rgba[4]) const
-  {
-    r_rgba[0] = r_rgba[1] = r_rgba[2] = r_rgba[3] = 0.0f;
-    if (!valid()) {
-      return false;
-    }
-    if (!repeat_u && (u < 0.0f || u >= 1.0f)) {
-      return false;
-    }
-    if (!repeat_v && (v < 0.0f || v >= 1.0f)) {
-      return false;
-    }
-    if (repeat_u) {
-      u -= floorf(u);
-    }
-    if (repeat_v) {
-      v -= floorf(v);
-    }
-    const float su = u * float(src->x) - 0.5f;
-    const float sv = v * float(src->y) - 0.5f;
-    const int x0 = int(floorf(su));
-    const int y0 = int(floorf(sv));
-    const float a = su - float(x0);
-    const float b = sv - float(y0);
-    const auto wrap_texel = [](int i, const int n) {
-      const int r = i % n;
-      return r < 0 ? r + n : r;
-    };
-    float t00[4], t10[4], t01[4], t11[4];
-    tap_straight(wrap_texel(x0, src->x), wrap_texel(y0, src->y), t00);
-    tap_straight(wrap_texel(x0 + 1, src->x), wrap_texel(y0, src->y), t10);
-    tap_straight(wrap_texel(x0, src->x), wrap_texel(y0 + 1, src->y), t01);
-    tap_straight(wrap_texel(x0 + 1, src->x), wrap_texel(y0 + 1, src->y), t11);
-    for (const int k : IndexRange(4)) {
-      r_rgba[k] = (1.0f - a) * (1.0f - b) * t00[k] + a * (1.0f - b) * t10[k] +
-                  (1.0f - a) * b * t01[k] + a * b * t11[k];
-    }
-    return true;
+  if (decode && !decode_by_table) {
+    IMB_colormanagement_colorspace_to_scene_linear_v4(r_tap, false, colorspace);
   }
-};
+  r_tap[0] *= r_tap[3];
+  r_tap[1] *= r_tap[3];
+  r_tap[2] *= r_tap[3];
+}
 
-/** The straight colour and alpha of a premultiplied tap. */
-static void composite_straight_from_premul(const float premul[4], float r_rgb[3], float &r_alpha)
+bool CompositeProjectionSampler::sample(
+    float u, float v, const bool repeat_u, const bool repeat_v, float r_rgba[4]) const
+{
+  r_rgba[0] = r_rgba[1] = r_rgba[2] = r_rgba[3] = 0.0f;
+  if (!valid()) {
+    return false;
+  }
+  if (!repeat_u && (u < 0.0f || u >= 1.0f)) {
+    return false;
+  }
+  if (!repeat_v && (v < 0.0f || v >= 1.0f)) {
+    return false;
+  }
+  if (repeat_u) {
+    u -= floorf(u);
+  }
+  if (repeat_v) {
+    v -= floorf(v);
+  }
+  const float su = u * float(src->x) - 0.5f;
+  const float sv = v * float(src->y) - 0.5f;
+  const int x0 = int(floorf(su));
+  const int y0 = int(floorf(sv));
+  const float a = su - float(x0);
+  const float b = sv - float(y0);
+  const auto wrap_texel = [](int i, const int n) {
+    const int r = i % n;
+    return r < 0 ? r + n : r;
+  };
+  float t00[4], t10[4], t01[4], t11[4];
+  tap_straight(wrap_texel(x0, src->x), wrap_texel(y0, src->y), t00);
+  tap_straight(wrap_texel(x0 + 1, src->x), wrap_texel(y0, src->y), t10);
+  tap_straight(wrap_texel(x0, src->x), wrap_texel(y0 + 1, src->y), t01);
+  tap_straight(wrap_texel(x0 + 1, src->x), wrap_texel(y0 + 1, src->y), t11);
+  for (const int k : IndexRange(4)) {
+    r_rgba[k] = (1.0f - a) * (1.0f - b) * t00[k] + a * (1.0f - b) * t10[k] +
+                (1.0f - a) * b * t01[k] + a * b * t11[k];
+  }
+  return true;
+}
+
+void composite_straight_from_premul(const float premul[4], float r_rgb[3], float &r_alpha)
 {
   r_alpha = premul[3];
   if (r_alpha > 0.0f) {
@@ -532,6 +522,8 @@ struct CompositeProjectionTri {
   float tri_uv[3][2];
   float3 p0, p1, p2;
   float3 n0, n1, n2;
+  /** The triangle's index in the mesh's corner triangles. */
+  int index = 0;
 };
 
 /**
@@ -614,6 +606,7 @@ static void composite_projection_raster(const CompositeProjectionBakeContext &ct
           continue;
         }
         CompositeProjectionTri tri;
+        tri.index = tri_index;
         tri.tri_uv[0][0] = local_uv0.x;
         tri.tri_uv[0][1] = local_uv0.y;
         tri.tri_uv[1][0] = local_uv1.x;
@@ -693,7 +686,8 @@ static void composite_projection_raster(const CompositeProjectionBakeContext &ct
  * placed by the cross origins the graph's CUBE case uses. */
 static void composite_projection_cube_uv(const CompositeProjectionKind &kind,
                                          const float q[3],
-                                         float r_uv[2])
+                                         float r_uv[2],
+                                         int &r_face)
 {
   const float ax = fabsf(q[0]);
   const float ay = fabsf(q[1]);
@@ -713,6 +707,7 @@ static void composite_projection_cube_uv(const CompositeProjectionKind &kind,
   const ProjectionCubeLayoutInfo &atlas = *kind.atlas;
   r_uv[0] = atlas.origin[atlas_face][0] + local_uv[0] * atlas.cell_size[0];
   r_uv[1] = atlas.origin[atlas_face][1] + local_uv[1] * atlas.cell_size[1];
+  r_face = atlas_face;
 }
 
 /** Cylinder: U winds around the axis, V reads the height along it. */
@@ -804,15 +799,45 @@ static float composite_projection_frame_weight(const PaintMaterialCompositeProje
 ImBuf *composite_resample_projected(const ImBuf *src,
                                     const int ref_width,
                                     const int ref_height,
-                                    const PaintMaterialCompositeMapping &mapping)
+                                    const PaintMaterialCompositeMapping &mapping,
+                                    const Span<PaintMaterialCompositeMapping> input_steps)
 {
-  const PaintMaterialCompositeProjection &projection = mapping.projection;
+  const PaintMaterialCompositeProjection &mapping_projection = mapping.projection;
+  /* A Decal lives in the painted object's space and its unfolded plane has no depth or facing, so
+   * the controller, the depth slab and the facing fade are left out of its frame. */
+  PaintMaterialCompositeProjection decal_projection;
+  const bool is_decal = mapping_projection.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL;
+  if (is_decal) {
+    decal_projection = mapping_projection;
+    decal_projection.controller = nullptr;
+    decal_projection.depth = false;
+    decal_projection.facing = false;
+  }
+  const PaintMaterialCompositeProjection &projection = is_decal ? decal_projection :
+                                                                  mapping_projection;
   CompositeProjectionBakeContext ctx(projection);
   if (!composite_projection_context_init(
           ctx, true, ref_width, ref_height, projection.tile_number))
   {
     return nullptr;
   }
+  std::shared_ptr<const PaintMaterialDecalMap> decal_map;
+  if (is_decal) {
+    decal_map = BKE_paint_material_decal_map_get(projection, ref_width, ref_height);
+    if (decal_map == nullptr) {
+      return nullptr;
+    }
+  }
+  /* The transform effects' steps only; the row's own mapping stays the UV adjust of
+   * #composite_projection_uv_wrap, which runs after them. */
+  CompositeMappingChain steps_chain;
+  for (const PaintMaterialCompositeMapping &step : input_steps) {
+    if (steps_chain.steps_num == CompositeMappingChain::MAX_STEPS) {
+      break;
+    }
+    steps_chain.steps[steps_chain.steps_num++] = CompositeMappingTransform(step);
+  }
+  const bool use_steps = !steps_chain.is_identity();
   CompositeProjectionSampler sampler(src);
   if (!sampler.valid()) {
     return nullptr;
@@ -839,7 +864,23 @@ ImBuf *composite_resample_projected(const ImBuf *src,
                          const float p[3],
                          const float n_interp[3]) {
     float q[3];
-    composite_projection_position(projection, ctx.inv_frame_rot, p, q);
+    const PaintMaterialDecalFrame *decal_frame = nullptr;
+    if (decal_map != nullptr) {
+      /* The map coordinate comes from the unfolded patch, not from `p - center`; the rest is
+       * Planar's. The depth axis is zero: the texel is on the surface. */
+      const int64_t decal_index = int64_t(y) * ref_width + x;
+      const int decal_tri = decal_map->patch_tri[decal_index];
+      if (decal_tri < 0) {
+        return;
+      }
+      decal_frame = &decal_map->frames[decal_tri];
+      q[kind.axis] = 0.0f;
+      q[kind.u_index] = decal_map->q[decal_index].x;
+      q[kind.v_index] = decal_map->q[decal_index].y;
+    }
+    else {
+      composite_projection_position(projection, ctx.inv_frame_rot, p, q);
+    }
     /* The image-aspect fit scales the frame-space coordinates before anything reads them,
      * exactly as the generated graph's Aspect input does; the depth axis keeps one. */
     for (int i = 0; i < 3; i++) {
@@ -857,7 +898,29 @@ ImBuf *composite_resample_projected(const ImBuf *src,
     float alpha = 0.0f;
     bool covered = false;
 
-    const auto accumulate_sample = [&](const float uu, const float vv, const float weight) {
+    const auto accumulate_sample =
+        [&](float uu, float vv, const float weight, const int cube_face = -1) {
+      /* The steps move the map coordinate, before the row's UV adjust. A step that clips leaves the
+       * texel transparent outside the unit square of that coordinate (not of the canvas or the
+       * island). A Cube tap is an atlas coordinate: the steps run in the local [0, 1] space of its
+       * own cell, so a fold, a wrap or a clip never reaches over a neighbouring cell, and the result
+       * returns to the atlas before the row's UV adjust. */
+      float step_sides[CompositeMappingChain::MAX_STEPS][2];
+      if (use_steps) {
+        if (cube_face >= 0) {
+          const ProjectionCubeLayoutInfo &atlas = *kind.atlas;
+          float local_u = (uu - atlas.origin[cube_face][0]) / atlas.cell_size[0];
+          float local_v = (vv - atlas.origin[cube_face][1]) / atlas.cell_size[1];
+          if (!steps_chain.apply_unwrapped(local_u, local_v, local_u, local_v, step_sides)) {
+            return;
+          }
+          uu = atlas.origin[cube_face][0] + local_u * atlas.cell_size[0];
+          vv = atlas.origin[cube_face][1] + local_v * atlas.cell_size[1];
+        }
+        else if (!steps_chain.apply_unwrapped(uu, vv, uu, vv, step_sides)) {
+          return;
+        }
+      }
       float tap[4];
       if (!sample_uv(uu, vv, tap)) {
         return;
@@ -865,6 +928,15 @@ ImBuf *composite_resample_projected(const ImBuf *src,
       float sample_rgb[3];
       float sample_alpha;
       composite_straight_from_premul(tap, sample_rgb, sample_alpha);
+      if (use_steps && mapping.tangent_normal && sample_alpha > 0.0f) {
+        /* The covariant counterpart of the steps, per tap: Box blends taps whose fold sides
+         * differ. It runs before the frame-to-tangent conversion below, the order the UV path
+         * composes them in. */
+        float normal_xy[2] = {sample_rgb[0] * 2.0f - 1.0f, sample_rgb[1] * 2.0f - 1.0f};
+        steps_chain.remap_tangent_normal(step_sides, normal_xy);
+        sample_rgb[0] = normal_xy[0] * 0.5f + 0.5f;
+        sample_rgb[1] = normal_xy[1] * 0.5f + 0.5f;
+      }
       straight[0] += sample_rgb[0] * weight;
       straight[1] += sample_rgb[1] * weight;
       straight[2] += sample_rgb[2] * weight;
@@ -891,8 +963,9 @@ ImBuf *composite_resample_projected(const ImBuf *src,
     }
     else if (kind.cube || kind.cylinder || kind.sphere) {
       float uv[2];
+      int cube_face = -1;
       if (kind.cube) {
-        composite_projection_cube_uv(kind, q, uv);
+        composite_projection_cube_uv(kind, q, uv, cube_face);
       }
       else if (kind.cylinder) {
         composite_projection_cylinder_uv(kind, q, uv);
@@ -900,7 +973,7 @@ ImBuf *composite_resample_projected(const ImBuf *src,
       else {
         composite_projection_sphere_uv(kind, q, uv);
       }
-      accumulate_sample(uv[0], uv[1], weight);
+      accumulate_sample(uv[0], uv[1], weight, cube_face);
     }
     else {
       /* Planar: X reads Y/Z, Y reads X/Z and Z reads X/Y. */
@@ -919,7 +992,13 @@ ImBuf *composite_resample_projected(const ImBuf *src,
      * #BKE_paint_layers_projection_normal_frame_to_tangent). */
     if (mapping.tangent_normal) {
       float frame_rot[3][3];
-      transpose_m3_m3(frame_rot, ctx.inv_frame_rot);
+      if (decal_frame != nullptr) {
+        /* The frame turns with the unfold: the axes this triangle was laid on. */
+        memcpy(frame_rot, decal_frame->axes, sizeof(frame_rot));
+      }
+      else {
+        transpose_m3_m3(frame_rot, ctx.inv_frame_rot);
+      }
       /* The destination triangle's tangent basis from its UV gradient (object space; the true
        * bitangent, so a mirrored island keeps its relief's direction). */
       const float2 duv1 = float2(tri.tri_uv[1][0] - tri.tri_uv[0][0],
@@ -941,6 +1020,10 @@ ImBuf *composite_resample_projected(const ImBuf *src,
           tangent = object_to_controller * tangent;
           bitangent = object_to_controller * bitangent;
         }
+        /* The UV gradient carries the island's scale: unit directions, or the tangent components
+         * would outweigh the unit surface normal in the encoding below. */
+        tangent = math::normalize(tangent);
+        bitangent = math::normalize(bitangent);
         const float3 surface_normal = math::normalize(
             float3(n_interp[0], n_interp[1], n_interp[2]));
         /* The accumulated straight colour is the premultiplied mean of the encoded taps: un-
@@ -1014,7 +1097,8 @@ ImBuf *BKE_paint_material_gradient_projected_render(
       composite_projection_face_uv(0, q, uv);
     }
     else if (kind.cube) {
-      composite_projection_cube_uv(kind, q, uv);
+      int cube_face = 0;
+      composite_projection_cube_uv(kind, q, uv, cube_face);
     }
     else if (kind.cylinder) {
       composite_projection_cylinder_uv(kind, q, uv);
@@ -1170,11 +1254,59 @@ uint64_t composite_mesh_content_hash(const Mesh &mesh)
   return content;
 }
 
-/** What one entry holds: the two RGBA32F texel arrays while they have not been released, else
- * nothing. */
+/** What one entry holds: the two RGBA32F texel arrays and the triangle basis while they have not
+ * been released, else nothing. */
 static size_t surface_map_cache_bytes(const PaintMaterialSurfaceMap &map)
 {
-  return map.texels_released ? 0 : size_t(map.width) * size_t(map.height) * sizeof(float[4]) * 2;
+  return map.texels_released ? 0 :
+                               size_t(map.width) * size_t(map.height) * sizeof(float[4]) * 2 +
+                                   size_t(map.tri_basis.size()) * sizeof(float4);
+}
+
+/**
+ * The tangent basis of every corner triangle for the GPU's frame-to-tangent conversion of a
+ * projected Normal map: the very `tangent` and `bitangent` the texel callback of
+ * #composite_resample_projected derives from the triangle's UV gradient (object space, the true
+ * bitangent, so a mirrored island keeps its relief's direction), laid as two texels per triangle id
+ * (see #PaintMaterialSurfaceMap::tri_basis). A degenerate UV mapping stays zero, which the
+ * conversion reads as "no basis" exactly as the CPU skips it.
+ */
+static Array<float4> surface_map_tri_basis_build(const CompositeProjectionBakeContext &ctx)
+{
+  const int basis_tris_num = std::min(int(ctx.tris.size()), PAINT_MATERIAL_SURFACE_TRI_BASIS_MAX);
+  /* Pair 0 is the "none" id, so the table holds one pair more than there are triangles. */
+  const int64_t texels_num = (int64_t(basis_tris_num) + 1) * 2;
+  const int64_t rows_num = (texels_num + PAINT_MATERIAL_SURFACE_TRI_BASIS_WIDTH - 1) /
+                           PAINT_MATERIAL_SURFACE_TRI_BASIS_WIDTH;
+  Array<float4> basis(rows_num * PAINT_MATERIAL_SURFACE_TRI_BASIS_WIDTH, float4(0.0f));
+  const float2 tile_origin(float(ctx.tile_x), float(ctx.tile_y));
+  threading::parallel_for(IndexRange(basis_tris_num), 4096, [&](const IndexRange range) {
+    for (const int64_t tri_index : range) {
+      const int3 &corners = ctx.tris[tri_index];
+      /* The tile-local UVs, as the rasterizer hands the texel callback, so the sums round alike. */
+      const float2 uv0 = ctx.uvs[corners[0]] - tile_origin;
+      const float2 uv1 = ctx.uvs[corners[1]] - tile_origin;
+      const float2 uv2 = ctx.uvs[corners[2]] - tile_origin;
+      const float2 duv1 = float2(uv1.x - uv0.x, uv1.y - uv0.y);
+      const float2 duv2 = float2(uv2.x - uv0.x, uv2.y - uv0.y);
+      const float det = duv1.x * duv2.y - duv1.y * duv2.x;
+      if (!(std::abs(det) > 1e-12f)) {
+        continue;
+      }
+      const float r = 1.0f / det;
+      const float3 p0 = ctx.positions[ctx.corner_verts[corners[0]]];
+      const float3 e1 = ctx.positions[ctx.corner_verts[corners[1]]] - p0;
+      const float3 e2 = ctx.positions[ctx.corner_verts[corners[2]]] - p0;
+      /* Unit directions (the gradient carries the island's scale), as the CPU bake and the graph's
+       * normalized Tangent read them. */
+      const float3 tangent = math::normalize((e1 * duv2.y - e2 * duv1.y) * r);
+      const float3 bitangent = math::normalize((e2 * duv1.x - e1 * duv2.x) * r);
+      const int64_t texel = (tri_index + 1) * 2;
+      basis[texel] = float4(tangent, 1.0f);
+      basis[texel + 1] = float4(bitangent, 0.0f);
+    }
+  });
+  return basis;
 }
 
 /** What the store holds in sum: two 4K maps with texels are 1 GiB, a smaller canvas fits more. */
@@ -1286,16 +1418,20 @@ std::shared_ptr<const PaintMaterialSurfaceMap> BKE_paint_material_surface_map_ge
   float *normal_out = &map->normal[0].x;
   const auto texel = [&](const int x,
                          const int y,
-                         const CompositeProjectionTri & /*tri*/,
+                         const CompositeProjectionTri &tri,
                          const float p[3],
                          const float n_interp[3]) {
     const int64_t index = int64_t(y) * width + x;
     /* W marks a texel a triangle (or its padding) owns; the normal stays the interpolated, not
-     * normalized one the CPU hands its own texel. */
+     * normalized one the CPU hands its own texel. The normal's W names the owning triangle, for the
+     * tangent basis the GPU reads per triangle (id 0, "none", past what a float names exactly). */
+    const float tri_id = (tri.index < PAINT_MATERIAL_SURFACE_TRI_BASIS_MAX) ? float(tri.index + 1) :
+                                                                              0.0f;
     map->position[index] = float4(p[0], p[1], p[2], 1.0f);
-    map->normal[index] = float4(n_interp[0], n_interp[1], n_interp[2], 0.0f);
+    map->normal[index] = float4(n_interp[0], n_interp[1], n_interp[2], tri_id);
   };
   composite_projection_raster(ctx, position_out, texel, normal_out);
+  map->tri_basis = surface_map_tri_basis_build(ctx);
 
   std::shared_ptr<const PaintMaterialSurfaceMap> result = std::move(map);
   const size_t bytes = surface_map_cache_bytes(*result);
@@ -1339,6 +1475,7 @@ void BKE_paint_material_surface_map_texels_release(
       PaintMaterialSurfaceMap &released = const_cast<PaintMaterialSurfaceMap &>(*map);
       released.position = Array<float4>();
       released.normal = Array<float4>();
+      released.tri_basis = Array<float4>();
       released.texels_released = true;
       g_surface_map_cache.total_bytes -= bytes;
       return;
@@ -1351,6 +1488,8 @@ void BKE_paint_material_surface_map_free()
   std::lock_guard lock(g_surface_map_cache.mutex);
   g_surface_map_cache.entries.clear_and_shrink();
   g_surface_map_cache.total_bytes = 0;
+  /* The Decal maps are rebuilt from the same mesh data, so they leave with the surface map. */
+  BKE_paint_material_decal_map_free();
 }
 
 /** \} */

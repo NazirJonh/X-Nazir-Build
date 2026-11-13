@@ -27,6 +27,7 @@
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_material_decal_map.hh"
 
 #include "BLI_array.hh"
 #include "BLI_index_range.hh"
@@ -56,6 +57,76 @@
 #include "IMB_imbuf_types.hh"
 
 namespace blender::ed::material_combined {
+
+/**
+ * A draw-thread LRU of GPU entries: oldest first, a byte budget, and the entries the budget evicted
+ * parked in `pending_free` until the next call can hand them to the driver. The release hook is the
+ * caller's, since the surface and Decal entries free different textures. It holds no mutex: only the
+ * draw thread touches these, unlike the CPU stores.
+ */
+template<typename Entry> struct GpuLruStore {
+  Vector<Entry> entries;
+  size_t total_bytes = 0;
+  Vector<Entry> pending_free;
+
+  void pending_free_apply(void (*release)(Entry &))
+  {
+    for (Entry &entry : pending_free) {
+      release(entry);
+    }
+    pending_free.clear_and_shrink();
+  }
+
+  void free_all(void (*release)(Entry &))
+  {
+    this->pending_free_apply(release);
+    for (Entry &entry : entries) {
+      release(entry);
+    }
+    entries.clear_and_shrink();
+    total_bytes = 0;
+  }
+
+  /** Make \a index the youngest entry; the returned pointer is valid until the next change. */
+  const Entry *touch(const int index)
+  {
+    Entry touched = std::move(entries[index]);
+    entries.remove(index);
+    entries.append(std::move(touched));
+    return &entries.last();
+  }
+
+  /** Take \a index out of the store, leaving its bytes accounted for. */
+  Entry take(const int index)
+  {
+    Entry entry = std::move(entries[index]);
+    total_bytes -= entry.bytes;
+    entries.remove(index);
+    return entry;
+  }
+
+  void append(Entry entry)
+  {
+    total_bytes += entry.bytes;
+    entries.append(std::move(entry));
+  }
+
+  /** Evict from the front until \a bytes fit; the evicted entries are parked for release. */
+  void evict_for(const size_t bytes,
+                 const size_t max_bytes,
+                 size_t *r_evicted_bytes = nullptr)
+  {
+    while (!entries.is_empty() && total_bytes + bytes > max_bytes) {
+      Entry oldest = std::move(entries[0]);
+      total_bytes -= oldest.bytes;
+      if (r_evicted_bytes != nullptr) {
+        *r_evicted_bytes += oldest.bytes;
+      }
+      pending_free.append(std::move(oldest));
+      entries.remove(0);
+    }
+  }
+};
 
 /**
  * The GPU texture of \a image read through \a image_user (null selects the default), and whether it
@@ -115,6 +186,17 @@ static void gpu_mapping_setup(const PaintMaterialCompositeMapping &mapping,
   if (mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V)) {
     r_flags |= gpu_layer_mirror_v;
   }
+  /* The direction bits only matter with their axis set; the shader reads them with it. */
+  if (mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U) &&
+      mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE))
+  {
+    r_flags |= gpu_layer_mirror_u_neg;
+  }
+  if (mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V) &&
+      mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE))
+  {
+    r_flags |= gpu_layer_mirror_v_neg;
+  }
   r_uniforms.offset = float2(mapping.offset[0], mapping.offset[1]);
   r_uniforms.scale = float2(BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]),
                             BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]));
@@ -146,7 +228,7 @@ GpuInputSteps::GpuInputSteps(Span<PaintMaterialCompositeMapping> steps)
                BKE_paint_layers_mapping_scale_normalize(step.scale[1]));
     b = float4(std::cos(step.rotation), std::sin(step.rotation),
                step.mirror_center[0], step.mirror_center[1]);
-    const int shift = index * 5;
+    const int shift = index * gpu_input_step_bits;
     bool repeat_u = true;
     bool repeat_v = true;
     BKE_paint_layers_mapping_wrap_axes(step.wrap, repeat_u, repeat_v);
@@ -162,6 +244,16 @@ GpuInputSteps::GpuInputSteps(Span<PaintMaterialCompositeMapping> steps)
     }
     if (step.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V)) {
       step_flags |= gpu_input_step_mirror_v;
+    }
+    if (step.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U) &&
+        step.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE))
+    {
+      step_flags |= gpu_input_step_mirror_u_neg;
+    }
+    if (step.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V) &&
+        step.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE))
+    {
+      step_flags |= gpu_input_step_mirror_v_neg;
     }
     flags |= step_flags << shift;
     count++;
@@ -206,6 +298,8 @@ struct GpuSurfaceMapEntry {
   std::shared_ptr<const PaintMaterialSurfaceMap> map;
   gpu::Texture *position = nullptr;
   gpu::Texture *normal = nullptr;
+  /** The per-triangle tangent basis the normal's `w` indexes (#PaintMaterialSurfaceMap::tri_basis). */
+  gpu::Texture *tri_basis = nullptr;
   uint32_t object_uid = 0;
   uint32_t material_uid = 0;
   int tile_number = 0;
@@ -214,15 +308,7 @@ struct GpuSurfaceMapEntry {
   size_t bytes = 0;
 };
 
-static struct {
-  /* The entries, oldest first: the vector is the LRU order, as the effect caches' store keeps its
-   * own. Draw-thread only, like the passes that read it. */
-  Vector<GpuSurfaceMapEntry> entries;
-  size_t total_bytes = 0;
-  /* The entries the budget evicted, whose textures a pass of this frame may still read: they wait
-   * here for the next call to hand them to the driver. */
-  Vector<GpuSurfaceMapEntry> pending_free;
-} gpu_surface_cache;
+static GpuLruStore<GpuSurfaceMapEntry> gpu_surface_cache;
 
 static void gpu_surface_entry_release(GpuSurfaceMapEntry &entry)
 {
@@ -232,8 +318,12 @@ static void gpu_surface_entry_release(GpuSurfaceMapEntry &entry)
   if (entry.normal != nullptr) {
     GPU_texture_free(entry.normal);
   }
+  if (entry.tri_basis != nullptr) {
+    GPU_texture_free(entry.tri_basis);
+  }
   entry.position = nullptr;
   entry.normal = nullptr;
+  entry.tri_basis = nullptr;
   entry.map.reset();
 }
 
@@ -241,22 +331,17 @@ static void gpu_surface_entry_release(GpuSurfaceMapEntry &entry)
  * reads the textures any longer. */
 static void gpu_surface_cache_pending_free()
 {
-  for (GpuSurfaceMapEntry &entry : gpu_surface_cache.pending_free) {
-    gpu_surface_entry_release(entry);
-  }
-  gpu_surface_cache.pending_free.clear_and_shrink();
+  gpu_surface_cache.pending_free_apply(gpu_surface_entry_release);
 }
+
+static void gpu_decal_cache_free();
 
 void combined_projection_gpu_free()
 {
-  gpu_surface_cache_pending_free();
-  for (GpuSurfaceMapEntry &entry : gpu_surface_cache.entries) {
-    gpu_surface_entry_release(entry);
-  }
-  gpu_surface_cache.entries.clear_and_shrink();
-  gpu_surface_cache.total_bytes = 0;
+  gpu_surface_cache.free_all(gpu_surface_entry_release);
   /* The CPU twin is dropped with it: it is the same 0.5 GiB per 4K canvas and is rebuilt on demand. */
   BKE_paint_material_surface_map_free();
+  gpu_decal_cache_free();
 }
 
 static gpu::Texture *gpu_surface_texture_create(const char *name,
@@ -272,6 +357,203 @@ static gpu::Texture *gpu_surface_texture_create(const char *name,
                                                 GPU_TEXTURE_USAGE_SHADER_READ,
                                                 &texels[0].x);
   return texture;
+}
+
+/** The triangle basis table (#PaintMaterialSurfaceMap::tri_basis): full-float, since the basis is
+ * unnormalized and the conversion's result depends on its magnitude. */
+static gpu::Texture *gpu_surface_tri_basis_texture_create(const Array<float4> &basis)
+{
+  const int height = int(basis.size() / PAINT_MATERIAL_SURFACE_TRI_BASIS_WIDTH);
+  if (height <= 0) {
+    return nullptr;
+  }
+  return GPU_texture_create_2d("combined_surface_tri_basis",
+                               PAINT_MATERIAL_SURFACE_TRI_BASIS_WIDTH,
+                               height,
+                               1,
+                               gpu::TextureFormat::SFLOAT_32_32_32_32,
+                               GPU_TEXTURE_USAGE_SHADER_READ,
+                               &basis[0].x);
+}
+
+/** The bytes the GPU holds for \a map: the two canvas textures and the triangle basis. */
+static size_t gpu_surface_map_bytes(const PaintMaterialSurfaceMap &map, const int canvas)
+{
+  return size_t(canvas) * size_t(canvas) * sizeof(float[4]) * 2 +
+         size_t(map.tri_basis.size()) * sizeof(float4);
+}
+
+/* -------------------------------------------------------------------- */
+/* Decal map
+ *
+ * A Decal row's unfolded patch (#BKE_paint_material_decal_map_get) on the GPU, as two textures:
+ * - a canvas-sized RGBA32F "position" `(q.x, q.y, triangle id, 1)`, with all zeros where the patch
+ *   does not reach. It takes the place of the surface position texture in the shader's
+ *   projection read, so `p_to_q` (a diagonal aspect matrix for a Decal) yields exactly the CPU's
+ *   `q` and a texel outside the patch is the transparent one the surface map's `w = 0` already is.
+ *   Full-float: `q` steps visibly in a half on a 4K canvas, and a triangle id is exact in a float
+ *   up to 2^24 (the patch holds at most #PAINT_MATERIAL_DECAL_MAX_TRIS). One texture instead of an
+ *   RG32F plus an R32I saves a sampler in every pass and the shader's integer-sampler path, for
+ *   4 bytes a texel more (256 MiB against 192 MiB at 4K).
+ * - the frames table: three RGBA32F texels per patch triangle (its three axes), a few hundred KiB.
+ *
+ * The entries are keyed by the BKE map's key, so a rebuilt-but-identical map reuses its textures.
+ * A gizmo drag makes a new key per frame: the byte budget evicts the old ones, parked like the
+ * surface entries until the next call. */
+
+constexpr size_t GPU_DECAL_CACHE_BYTES = size_t(768) * 1024 * 1024;
+/** The frames table's row width in texels; a multiple of three, so a triangle's texels never
+ * straddle a row. The shader reads the width back with textureSize. */
+constexpr int GPU_DECAL_FRAME_TABLE_WIDTH = 1536;
+/* A patch triangle's three axes share one row: a width that is not a multiple of three would
+ * straddle the row end and the shader's `tri * 3` indexing would read the wrong texels. */
+static_assert(GPU_DECAL_FRAME_TABLE_WIDTH % 3 == 0);
+/** Rows of the canvas texture uploaded per call, so the staging copy stays a few MiB. */
+constexpr int GPU_DECAL_UPLOAD_ROWS = 64;
+
+struct GpuDecalMapEntry {
+  PaintMaterialDecalMapKey key;
+  gpu::Texture *position = nullptr;
+  gpu::Texture *frames = nullptr;
+  size_t bytes = 0;
+};
+
+static GpuLruStore<GpuDecalMapEntry> gpu_decal_cache;
+
+static void gpu_decal_entry_release(GpuDecalMapEntry &entry)
+{
+  if (entry.position != nullptr) {
+    GPU_texture_free(entry.position);
+  }
+  if (entry.frames != nullptr) {
+    GPU_texture_free(entry.frames);
+  }
+  entry.position = nullptr;
+  entry.frames = nullptr;
+}
+
+static void gpu_decal_cache_pending_free()
+{
+  gpu_decal_cache.pending_free_apply(gpu_decal_entry_release);
+}
+
+static void gpu_decal_cache_free()
+{
+  gpu_decal_cache.free_all(gpu_decal_entry_release);
+  /* The CPU twin goes with it, as the surface map's does. */
+  BKE_paint_material_decal_map_free();
+}
+
+/** Upload \a map into \a entry's textures; false when a texture could not be allocated. */
+static bool gpu_decal_entry_upload(const PaintMaterialDecalMap &map,
+                                   const int canvas,
+                                   GpuDecalMapEntry &entry)
+{
+  entry.position = GPU_texture_create_2d("combined_decal_position",
+                                         canvas,
+                                         canvas,
+                                         1,
+                                         gpu::TextureFormat::SFLOAT_32_32_32_32,
+                                         GPU_TEXTURE_USAGE_SHADER_READ,
+                                         nullptr);
+  const int64_t tris_num = map.frames.size();
+  const int64_t texels_num = std::max<int64_t>(tris_num * 3, 3);
+  const int rows_num = int((texels_num + GPU_DECAL_FRAME_TABLE_WIDTH - 1) /
+                           GPU_DECAL_FRAME_TABLE_WIDTH);
+  Array<float4> table(int64_t(rows_num) * GPU_DECAL_FRAME_TABLE_WIDTH, float4(0.0f));
+  for (const int64_t tri : IndexRange(tris_num)) {
+    for (const int axis : IndexRange(3)) {
+      const float *v = map.frames[tri].axes[axis];
+      table[tri * 3 + axis] = float4(v[0], v[1], v[2], 0.0f);
+    }
+  }
+  entry.frames = GPU_texture_create_2d("combined_decal_frames",
+                                       GPU_DECAL_FRAME_TABLE_WIDTH,
+                                       rows_num,
+                                       1,
+                                       gpu::TextureFormat::SFLOAT_32_32_32_32,
+                                       GPU_TEXTURE_USAGE_SHADER_READ,
+                                       &table[0].x);
+  if (entry.position == nullptr || entry.frames == nullptr) {
+    return false;
+  }
+  Array<float4> strip(int64_t(GPU_DECAL_UPLOAD_ROWS) * canvas);
+  for (int y0 = 0; y0 < canvas; y0 += GPU_DECAL_UPLOAD_ROWS) {
+    const int rows = std::min(GPU_DECAL_UPLOAD_ROWS, canvas - y0);
+    for (const int row : IndexRange(rows)) {
+      for (const int x : IndexRange(canvas)) {
+        const int64_t index = int64_t(y0 + row) * canvas + x;
+        const int tri = map.patch_tri[index];
+        strip[int64_t(row) * canvas + x] = tri >= 0 ? float4(map.q[index].x,
+                                                             map.q[index].y,
+                                                             float(tri),
+                                                             1.0f) :
+                                                       float4(0.0f);
+      }
+    }
+    GPU_texture_update_sub(
+        entry.position, GPU_DATA_FLOAT, &strip[0].x, 0, y0, 0, canvas, rows, 0);
+  }
+  return true;
+}
+
+static size_t gpu_decal_map_bytes(const PaintMaterialDecalMap &map, const int canvas)
+{
+  return size_t(canvas) * size_t(canvas) * sizeof(float4) +
+         (size_t(map.frames.size()) * 3 + GPU_DECAL_FRAME_TABLE_WIDTH) * sizeof(float4);
+}
+
+/**
+ * The textures of \a projection's Decal map at \a canvas, uploaded or reused, as the youngest
+ * entry. While a stroke runs the last entry of the same object, tile and size stands in: a sculpt
+ * step moves vertices every dab and the patch would be rebuilt at each.
+ */
+static const GpuDecalMapEntry *gpu_decal_entry_get(const PaintMaterialCompositeProjection &projection,
+                                                   const int canvas)
+{
+  gpu_decal_cache_pending_free();
+  const uint32_t object_uid = projection.object->id.session_uid;
+  const auto touch = [&](const int index) -> const GpuDecalMapEntry * {
+    return gpu_decal_cache.touch(index);
+  };
+  if (BKE_paint_layers_bake_stroke_active_get()) {
+    for (int i = gpu_decal_cache.entries.size() - 1; i >= 0; i--) {
+      const PaintMaterialDecalMapKey &key = gpu_decal_cache.entries[i].key;
+      if (key.object_uid == object_uid && key.tile_number == projection.tile_number &&
+          key.width == canvas)
+      {
+        return touch(i);
+      }
+    }
+  }
+  bke::paint_perf::ScopedTimer perf_map("proj.gpu.decal_map");
+  const std::shared_ptr<const PaintMaterialDecalMap> map = BKE_paint_material_decal_map_get(
+      projection, canvas, canvas);
+  if (map == nullptr) {
+    gpu_refuse("a Decal row has no unfolded patch");
+    return nullptr;
+  }
+  for (const int i : gpu_decal_cache.entries.index_range()) {
+    if (gpu_decal_cache.entries[i].key == map->key) {
+      perf_map.note("reused canvas=%d", canvas);
+      return touch(i);
+    }
+  }
+  const size_t bytes = gpu_decal_map_bytes(*map, canvas);
+  gpu_decal_cache.evict_for(bytes, GPU_DECAL_CACHE_BYTES);
+  GpuDecalMapEntry entry;
+  entry.key = map->key;
+  entry.bytes = bytes;
+  if (!gpu_decal_entry_upload(*map, canvas, entry)) {
+    gpu_decal_entry_release(entry);
+    gpu_refuse("the Decal map textures could not be allocated");
+    return nullptr;
+  }
+  /* The upload is read by the dispatch that follows. */
+  GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE);
+  gpu_decal_cache.append(std::move(entry));
+  perf_map.note("uploaded canvas=%d tris=%d", canvas, int(map->frames.size()));
+  return &gpu_decal_cache.entries.last();
 }
 
 bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projection,
@@ -308,9 +590,7 @@ bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projec
   const bool frozen = same_target && BKE_paint_layers_bake_stroke_active_get();
   if (frozen) {
     /* Still the youngest: the stroke keeps standing on this entry. */
-    GpuSurfaceMapEntry touched = std::move(gpu_surface_cache.entries[entry_index]);
-    gpu_surface_cache.entries.remove(entry_index);
-    gpu_surface_cache.entries.append(std::move(touched));
+    gpu_surface_cache.touch(entry_index);
     entry_index = gpu_surface_cache.entries.size() - 1;
   }
   else {
@@ -336,25 +616,24 @@ bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projec
       perf_map.note("kept previous map canvas=%d", canvas);
     }
     else if (same_target && map == gpu_surface_cache.entries[entry_index].map) {
-      /* The textures are this map's already: the entry is only made the youngest one, moved out
-       * first as the effect caches' store does, since the append may reallocate the vector. */
-      GpuSurfaceMapEntry touched = std::move(gpu_surface_cache.entries[entry_index]);
-      gpu_surface_cache.entries.remove(entry_index);
-      gpu_surface_cache.entries.append(std::move(touched));
+      /* The textures are this map's already: the entry is only made the youngest one. */
+      gpu_surface_cache.touch(entry_index);
       entry_index = gpu_surface_cache.entries.size() - 1;
       perf_map.note("reused canvas=%d", canvas);
     }
     else if (same_target) {
       /* The map was rebuilt since the textures were made (the mesh moved outside a stroke): the
        * entry keeps its place in the store, its textures are remade from the new map. */
-      GpuSurfaceMapEntry &entry = gpu_surface_cache.entries[entry_index];
+      GpuSurfaceMapEntry entry = gpu_surface_cache.take(entry_index);
       /* The old textures are parked, not freed: a pass of this frame may still read them. */
       GpuSurfaceMapEntry stale;
       stale.position = entry.position;
       stale.normal = entry.normal;
+      stale.tri_basis = entry.tri_basis;
       gpu_surface_cache.pending_free.append(std::move(stale));
       entry.position = nullptr;
       entry.normal = nullptr;
+      entry.tri_basis = nullptr;
       entry.map.reset();
       /* Both textures are 32-bit float. The position keeps full precision: it is divided by the
        * frame size and a texel of error is a visible shift. The normal is the interpolated, not
@@ -369,37 +648,30 @@ bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projec
           gpu::TextureFormat::SFLOAT_32_32_32_32);
       entry.normal = gpu_surface_texture_create(
           "combined_surface_normal", canvas, map->normal, gpu::TextureFormat::SFLOAT_32_32_32_32);
-      if (entry.position == nullptr || entry.normal == nullptr) {
+      /* The normal's `w` is a triangle id into this table (the tangent basis of a projected Normal
+       * row): one 32-byte pair per triangle, instead of a basis per texel. */
+      entry.tri_basis = gpu_surface_tri_basis_texture_create(map->tri_basis);
+      if (entry.position == nullptr || entry.normal == nullptr || entry.tri_basis == nullptr) {
         gpu_surface_entry_release(entry);
-        gpu_surface_cache.total_bytes -= entry.bytes;
-        gpu_surface_cache.entries.remove(entry_index);
         return gpu_refuse("the surface map textures could not be allocated");
       }
+      /* The table's size follows the mesh, so the entry's bytes are counted again. */
+      entry.bytes = gpu_surface_map_bytes(*map, canvas);
       /* The upload is read by the dispatch that follows. */
       GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE);
       entry.map = map;
       /* The textures hold the texels now: the CPU copy (0.5 GiB at 4K) is no longer read. */
       BKE_paint_material_surface_map_texels_release(map);
-      /* The entry is made the youngest one: a copy, since the append may reallocate the vector. */
-      GpuSurfaceMapEntry touched = entry;
-      gpu_surface_cache.entries.remove(entry_index);
-      gpu_surface_cache.entries.append(std::move(touched));
+      /* The entry is made the youngest one. */
+      gpu_surface_cache.append(std::move(entry));
       entry_index = gpu_surface_cache.entries.size() - 1;
       perf_map.note("uploaded canvas=%d", canvas);
     }
     else {
       /* A target the store does not hold: make room from the front, parking the evicted entries
        * for the next call to free, and upload the new one. */
-      const size_t bytes = size_t(canvas) * size_t(canvas) * sizeof(float[4]) * 2;
-      while (!gpu_surface_cache.entries.is_empty() &&
-             gpu_surface_cache.total_bytes + bytes > GPU_SURFACE_CACHE_BYTES)
-      {
-        GpuSurfaceMapEntry oldest = std::move(gpu_surface_cache.entries[0]);
-        gpu_surface_cache.total_bytes -= oldest.bytes;
-        evicted_bytes += oldest.bytes;
-        gpu_surface_cache.pending_free.append(std::move(oldest));
-        gpu_surface_cache.entries.remove(0);
-      }
+      const size_t bytes = gpu_surface_map_bytes(*map, canvas);
+      gpu_surface_cache.evict_for(bytes, GPU_SURFACE_CACHE_BYTES, &evicted_bytes);
       GpuSurfaceMapEntry entry;
       entry.map = map;
       entry.object_uid = object_uid;
@@ -420,7 +692,8 @@ bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projec
           gpu::TextureFormat::SFLOAT_32_32_32_32);
       entry.normal = gpu_surface_texture_create(
           "combined_surface_normal", canvas, map->normal, gpu::TextureFormat::SFLOAT_32_32_32_32);
-      if (entry.position == nullptr || entry.normal == nullptr) {
+      entry.tri_basis = gpu_surface_tri_basis_texture_create(map->tri_basis);
+      if (entry.position == nullptr || entry.normal == nullptr || entry.tri_basis == nullptr) {
         gpu_surface_entry_release(entry);
         return gpu_refuse("the surface map textures could not be allocated");
       }
@@ -428,8 +701,7 @@ bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projec
       GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE);
       /* The textures hold the texels now: the CPU copy (0.5 GiB at 4K) is no longer read. */
       BKE_paint_material_surface_map_texels_release(map);
-      gpu_surface_cache.total_bytes += bytes;
-      gpu_surface_cache.entries.append(std::move(entry));
+      gpu_surface_cache.append(std::move(entry));
       entry_index = gpu_surface_cache.entries.size() - 1;
       if (evicted_bytes == 0) {
         perf_map.note("uploaded canvas=%d", canvas);
@@ -442,6 +714,7 @@ bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projec
   const GpuSurfaceMapEntry &entry = gpu_surface_cache.entries[entry_index];
   r_projection.position = entry.position;
   r_projection.normal = entry.normal;
+  r_projection.tri_basis = entry.tri_basis;
   r_projection.canvas_size = int2(canvas);
 
   /* The frame, as `composite_projection_position` and the bake's texel callback read it. */
@@ -454,7 +727,10 @@ bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projec
    * point by the two matrices and the normal by their inverse transposes (`composite_projection_raster`). */
   float4x4 p_to_controller = float4x4::identity();
   float3x3 n_to_controller = float3x3::identity();
-  if (projection.controller != nullptr && projection.controller != object) {
+  /* A Decal lives in the painted object's space: the controller is left out of its frame, as
+   * #composite_resample_projected leaves it out. */
+  const bool is_decal = projection.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL;
+  if (!is_decal && projection.controller != nullptr && projection.controller != object) {
     const float4x4 object_to_world = object->object_to_world();
     const float4x4 world_to_controller = projection.controller->world_to_object();
     p_to_controller = world_to_controller * object_to_world;
@@ -480,11 +756,45 @@ bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projec
     scale[i][i] = projection.aspect[i] / half_size;
   }
   r_projection.p_to_q = scale * rotation * translation * p_to_controller;
+  if (is_decal) {
+    /* The "position" texture holds the unfolded `q` already (over the half extent): the point
+     * matrix only places it on the map's U and V axes and applies the image-aspect fit, the depth
+     * axis staying zero, as the CPU's Decal texel does. The triangle id in `z` is dropped. */
+    const GpuDecalMapEntry *decal = gpu_decal_entry_get(projection, canvas);
+    if (decal == nullptr) {
+      return false;
+    }
+    const int axis_index = clamp_i(
+        projection.axis, MA_PAINT_LAYER_PROJECTION_AXIS_X, MA_PAINT_LAYER_PROJECTION_AXIS_Z);
+    const int u_index = (axis_index == 0) ? 1 : 0;
+    const int v_index = (axis_index == 2) ? 1 : 2;
+    r_projection.p_to_q = float4x4::zero();
+    r_projection.p_to_q[0][u_index] = projection.aspect[u_index];
+    r_projection.p_to_q[1][v_index] = projection.aspect[v_index];
+    r_projection.p_to_q[3][3] = 1.0f;
+    r_projection.position = decal->position;
+    r_projection.decal_frames = decal->frames;
+  }
 
   const float3x3 n_to_frame = rotation_3x3 * n_to_controller;
   r_projection.n_to_frame = float4x4::identity();
   for (const int column : IndexRange(3)) {
     r_projection.n_to_frame[column] = float4(n_to_frame[column], 0.0f);
+  }
+  /* The two halves of that normal matrix the tangent-space Normal conversion needs apart: the
+   * frame's rotation, and the object-to-controller normal matrix its triangle basis and surface
+   * normal move through (identity without a controller, as the CPU skips it). */
+  /* The frame's rotation itself, not the `R^-1` that `rotation` holds for the point: the Normal
+   * conversion carries a vector out of the frame, like the CPU helper (`R * n_frame`). */
+  r_projection.frame_rot = float4x4::identity();
+  for (const int column : IndexRange(3)) {
+    for (const int row : IndexRange(3)) {
+      r_projection.frame_rot[column][row] = frame_rot[column][row];
+    }
+  }
+  r_projection.n_to_controller = float4x4::identity();
+  for (const int column : IndexRange(3)) {
+    r_projection.n_to_controller[column] = float4(n_to_controller[column], 0.0f);
   }
 
   const ProjectionModeInfo &mode = BKE_paint_layers_projection_mode_info(projection.space);
@@ -506,8 +816,9 @@ bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projec
   r_projection.axis = clamp_i(
       projection.axis, MA_PAINT_LAYER_PROJECTION_AXIS_X, MA_PAINT_LAYER_PROJECTION_AXIS_Z);
   r_projection.flags = (projection.clip ? gpu_proj_clip : 0) |
-                       (projection.depth ? gpu_proj_depth : 0) |
-                       (projection.facing ? gpu_proj_facing : 0) |
+                       (!is_decal && projection.depth ? gpu_proj_depth : 0) |
+                       (!is_decal && projection.facing ? gpu_proj_facing : 0) |
+                       (is_decal ? gpu_proj_decal : 0) |
                        (mapping.enabled ? gpu_proj_uv_adjust : 0) |
                        (mapping.wrap == MA_PAINT_LAYER_MAPPING_WRAP_CLIP ? gpu_proj_wrap_clip : 0);
   r_projection.params_0 = float4(
@@ -552,7 +863,8 @@ static bool gpu_projection_apply(const PaintMaterialCompositeMapping &mapping,
   }
   r_flags |= gpu_layer_projected;
   r_flags &= ~(gpu_layer_mapped | gpu_layer_repeat_u | gpu_layer_repeat_v |
-               gpu_layer_tangent_normal | gpu_layer_mirror_u | gpu_layer_mirror_v);
+               gpu_layer_tangent_normal | gpu_layer_mirror_u | gpu_layer_mirror_v |
+               gpu_layer_mirror_u_neg | gpu_layer_mirror_v_neg);
   perf.note("%s", what);
   return true;
 }
@@ -700,6 +1012,8 @@ bool CombinedPasses::lay(CombinedTarget &t,
   const GpuProjection &frame = projection != nullptr ? *projection : no_projection;
   gpu::Texture *proj_position = frame.position != nullptr ? frame.position : dummy;
   gpu::Texture *proj_normal = frame.normal != nullptr ? frame.normal : dummy;
+  gpu::Texture *proj_tri_basis = frame.tri_basis != nullptr ? frame.tri_basis : dummy;
+  gpu::Texture *proj_decal_frames = frame.decal_frames != nullptr ? frame.decal_frames : dummy;
   gpu::Texture *sampled = map != nullptr ? map : dummy;
   gpu::Texture *mask_sampled = mask != nullptr ? mask : dummy;
   gpu::Texture *slot_cov_sampled = slot_coverage != nullptr ? slot_coverage : dummy;
@@ -712,6 +1026,8 @@ bool CombinedPasses::lay(CombinedTarget &t,
   gpu_mapping_uniforms_set(layer_shader, mapping);
   GPU_shader_uniform_mat4(layer_shader, "proj_p_to_q", frame.p_to_q.ptr());
   GPU_shader_uniform_mat4(layer_shader, "proj_n_to_frame", frame.n_to_frame.ptr());
+  GPU_shader_uniform_mat4(layer_shader, "proj_frame_rot", frame.frame_rot.ptr());
+  GPU_shader_uniform_mat4(layer_shader, "proj_n_to_controller", frame.n_to_controller.ptr());
   GPU_shader_uniform_4fv(layer_shader, "proj_params_0", &frame.params_0.x);
   GPU_shader_uniform_4fv(layer_shader, "proj_params_1", &frame.params_1.x);
   GPU_shader_uniform_4fv(layer_shader, "proj_atlas_0", &frame.atlas_0.x);
@@ -779,6 +1095,9 @@ bool CombinedPasses::lay(CombinedTarget &t,
   GPU_texture_bind(filter_lut, GPU_shader_get_sampler_binding(layer_shader, "filter_lut_tx"));
   GPU_texture_bind(proj_position, GPU_shader_get_sampler_binding(layer_shader, "proj_pos_tx"));
   GPU_texture_bind(proj_normal, GPU_shader_get_sampler_binding(layer_shader, "proj_nrm_tx"));
+  GPU_texture_bind(proj_tri_basis, GPU_shader_get_sampler_binding(layer_shader, "proj_tri_tx"));
+  GPU_texture_bind(proj_decal_frames,
+                   GPU_shader_get_sampler_binding(layer_shader, "proj_decal_tx"));
   GPU_texture_image_bind(dest, GPU_shader_get_sampler_binding(layer_shader, "accum_img"));
   GPU_texture_image_bind(t.row_color,
                          GPU_shader_get_sampler_binding(layer_shader, "row_color_img"));
@@ -788,6 +1107,8 @@ bool CombinedPasses::lay(CombinedTarget &t,
   GPU_texture_image_unbind(t.row_factor);
   GPU_texture_image_unbind(t.row_color);
   GPU_texture_image_unbind(dest);
+  GPU_texture_unbind(proj_decal_frames);
+  GPU_texture_unbind(proj_tri_basis);
   GPU_texture_unbind(proj_normal);
   GPU_texture_unbind(proj_position);
   GPU_texture_unbind(filter_lut);
@@ -1426,8 +1747,9 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
       gpu_mapping_setup(layer.mapping, flags, mapping_uniforms);
       if (layer.mapping.projection.present) {
         /* A projected row is addressed by its frame: the UV adjust rides in the same uniforms but
-         * the fold, the repeat axes and the tangent-space flip belong to the plain mapping, which
-         * a projection replaces (the CPU bake never applies them to it). */
+         * the fold and the repeat axes belong to the plain mapping, which a projection replaces
+         * (the CPU bake never applies them to it). The tangent-space flag stays: the projected read
+         * remaps and converts the Normal's vectors itself, as the CPU bake does. */
         if (!combined_projection_gpu_make(
                 layer.mapping.projection, layer.mapping, projection_frame))
         {
@@ -1436,7 +1758,8 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
         projection = &projection_frame;
         flags |= gpu_layer_projected;
         flags &= ~(gpu_layer_mapped | gpu_layer_repeat_u | gpu_layer_repeat_v |
-                   gpu_layer_tangent_normal | gpu_layer_mirror_u | gpu_layer_mirror_v);
+                   gpu_layer_mirror_u | gpu_layer_mirror_v | gpu_layer_mirror_u_neg |
+                   gpu_layer_mirror_v_neg);
       }
     }
     if (row_in_textures) {

@@ -391,6 +391,14 @@ bool BKE_paint_material_combined_cache_sizes_get(const Material &ma,
 int2 BKE_paint_material_preview_octave_size_for(int2 canvas, int2 max_output, int2 previous);
 
 /**
+ * \a max_output capped to what an interactive drag of a transform effect may shade at, to feed
+ * #BKE_paint_material_preview_octave_size_for: the octave then lands at 1024 on a larger canvas
+ * (a canvas of 1024 or less is unchanged), whatever the display, and a smaller display still wins.
+ * A zero \a max_output (the display is not known) becomes the cap itself.
+ */
+int2 BKE_paint_material_interactive_max_output(int2 max_output);
+
+/**
  * \a rect, read in \a from's texels, expressed in \a to's -- rounded outwards, so a dab or a clip
  * that lands between two texels of the coarser grid covers both of them and leaves no stale fringe.
  *

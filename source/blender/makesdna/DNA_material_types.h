@@ -1232,8 +1232,14 @@ enum eMaterialPaintLayerMappingSpace : int16_t {
   MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER = 5,
   /** Spherical projection around the frame's local origin. */
   MA_PAINT_LAYER_MAPPING_SPACE_SPHERE = 6,
+  /**
+   * A planar frame laid over the surface: the map coordinate follows the mesh (an unfolded patch of
+   * triangles around the frame's center) instead of the straight projection, so the content crosses
+   * UV seams and cube edges. Lives in the painted object's space; the controller is ignored.
+   */
+  MA_PAINT_LAYER_MAPPING_SPACE_DECAL = 7,
   /** Sentinel: the number of spaces, never stored. */
-  MA_PAINT_LAYER_MAPPING_SPACE_NUM = 7,
+  MA_PAINT_LAYER_MAPPING_SPACE_NUM = 8,
 };
 
 /** #MaterialPaintLayerProjection::axis: the projection axis of Planar and Cylinder. */
@@ -1360,6 +1366,14 @@ enum eMaterialPaintLayerMappingFlag : int16_t {
    * so switching Mirror off keeps what was configured. Zeroed rows start with Mirror off.
    */
   MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED = 1 << 5,
+  /**
+   * Mirror U keeps the smaller side instead: the fold is `u' = mirror_center.x - |u - mirror_center.x|`,
+   * so the larger side shows what the smaller one does. Read only with #MA_PAINT_LAYER_MAPPING_MIRROR_U;
+   * zero (the default) is the original fold, so older files read back as before.
+   */
+  MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE = 1 << 6,
+  /** The negative fold of #MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE, on V. */
+  MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE = 1 << 7,
 };
 ENUM_OPERATORS(eMaterialPaintLayerMappingFlag)
 

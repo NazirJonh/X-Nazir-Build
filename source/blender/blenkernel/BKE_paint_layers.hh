@@ -1548,7 +1548,8 @@ bool BKE_paint_layers_mapping_is_identity(const MaterialPaintLayer &layer);
  * axis (#BKE_paint_layers_mapping_mirror_get). An identity mapping with Repeat and no fold is
  * skipped, so a row whose mapping was switched on before it had a value builds the same graph as an
  * unmapped one. A projected row never remaps: it is addressed by its frame, and only its UV wrap
- * applies.
+ * applies. Nor does a transform effect in a mask: its mapping moves the grey the mask has built up,
+ * which its own bake already holds, so no read of a map of its own goes through it.
  */
 bool BKE_paint_layers_mapping_remaps(const Material &ma, const MaterialPaintLayer &layer);
 
@@ -1719,7 +1720,8 @@ bool BKE_paint_layers_mapping_set_mirror_enabled(Material &ma,
 
 /**
  * Fold the axes of \a layer's maps around its #MaterialPaintLayerMapping::mirror_center. \a axes is
- * a mask of #MA_PAINT_LAYER_MAPPING_MIRROR_U / _V; 0 folds nothing. The fold reads the map through
+ * a mask of #MA_PAINT_LAYER_MAPPING_MIRROR_U / _V, each optionally with its _NEGATIVE direction bit
+ * (a direction bit without its axis is dropped); 0 folds nothing. The fold reads the map through
  * `|uv - center| + center` per folded axis before the transform, so what either side of the center
  * shows, both sides show -- the same nodes the generated graph builds and the CPU and GPU composites
  * apply. Structural: the row's chain gains or loses the fold and its per-texel Normal flip.
@@ -1765,9 +1767,13 @@ constexpr float BKE_PAINT_LAYERS_MIRROR_SIDE_BIAS = 1e-6f;
  * The Mirror fold of one coordinate around \a center on one axis, the formula the generated graph,
  * the CPU resample and the shader all apply: `|coordinate - center| + center`.
  */
-inline float BKE_paint_layers_mapping_mirror_fold(const float coordinate, const float center)
+inline float BKE_paint_layers_mapping_mirror_fold(const float coordinate,
+                                                  const float center,
+                                                  const bool negative)
 {
-  return fabsf(coordinate - center) + center;
+  /* The negative direction keeps the smaller side: `center - |coordinate - center|`. */
+  const float distance = fabsf(coordinate - center);
+  return negative ? center - distance : center + distance;
 }
 
 /**
@@ -1775,9 +1781,13 @@ inline float BKE_paint_layers_mapping_mirror_fold(const float coordinate, const 
  * the folded axis is multiplied by at that coordinate, the covariant counterpart of the fold (the
  * per-texel generalization of the negative-scale flip). Exactly at the center the side reads +1.
  */
-inline float BKE_paint_layers_mapping_mirror_side(const float coordinate, const float center)
+inline float BKE_paint_layers_mapping_mirror_side(const float coordinate,
+                                                  const float center,
+                                                  const bool negative)
 {
-  return coordinate >= center ? 1.0f : -1.0f;
+  /* The negative fold's derivative is the positive one's, negated. */
+  const float side = coordinate >= center ? 1.0f : -1.0f;
+  return negative ? -side : side;
 }
 
 /** \} */
@@ -1834,10 +1844,10 @@ constexpr float PAINT_LAYER_PROJECTION_TRIPLANAR_EXPONENT_SOFT = 1.0f;
  * mixes it, so a tree built before it rebuilds once and gets them. History: 0x702 was S1 (Planar
  * only: the depth, facing and aspect inputs, the axis factor clamp, the half-extent frame position);
  * 0x706 is S2 (Box, Triplanar, Cube, Cylinder and Sphere, normal+roll orientation); 0x707 is S3
- * (the volume kinds stopped building the facing and the depth slab). 0x703..0x705 were never used
- * by a stored tree.
+ * (the volume kinds stopped building the facing and the depth slab); 0x708 is S4 (the transform
+ * effects' step chains in the projected UVs). 0x703..0x705 were never used by a stored tree.
  */
-constexpr uint64_t PAINT_LAYER_PROJECTION_HASH_VERSION = 0x707;
+constexpr uint64_t PAINT_LAYER_PROJECTION_HASH_VERSION = 0x708;
 
 /**
  * Smooth per-axis frame factor of \a value: one inside the frame edge, fading to zero over
@@ -1952,6 +1962,61 @@ bool BKE_paint_layers_projection_supported(const Material &ma, const MaterialPai
 
 /** Whether \a layer projects right now: a non-UV space, supported, with a payload. */
 bool BKE_paint_layers_projection_applies(const Material &ma, const MaterialPaintLayer &layer);
+
+/* -------------------------------------------------------------------- */
+/** \name Transform effect space
+ * \{ */
+
+/**
+ * Whether the transform effect \a effect (a Transform Mapping, a Mirror) may act in \a space: UV,
+ * or a Decal frame of its own. Separate from #BKE_paint_layers_projection_supported, which keeps
+ * refusing filters: the effect does not project a map, it moves where its owner's map is read.
+ */
+bool BKE_paint_layers_effect_space_supported(const MaterialPaintLayer &effect, int16_t space);
+
+/**
+ * Whether \a effect acts in its own Decal frame on \a owner_row: it is a transform effect set to
+ * #MA_PAINT_LAYER_MAPPING_SPACE_DECAL (its frame is derived from its Mirror center / pivot on every
+ * read, #BKE_paint_material_decal_frame_from_uv), and the owner reads its map at the surface UV
+ * (a projected owner keeps reading the effect in its projection's map coordinate, as before).
+ */
+bool BKE_paint_layers_effect_decal_applies(const Material &ma,
+                                           const MaterialPaintLayer &owner_row,
+                                           const MaterialPaintLayer &effect);
+
+/**
+ * Whether the transform \a effect would act in its Decal frame (enabled, remapping, with a frame),
+ * independent of its owner. The row that carries one is baked for the live graph, which cannot walk
+ * the surface; the UI offers the same Update Now as for a Blur.
+ */
+bool BKE_paint_layers_effect_decal_frame_active(const MaterialPaintLayer &effect);
+
+/**
+ * #BKE_paint_layers_active_transform_effects of \a row that act as UV steps: every one except
+ * those #BKE_paint_layers_effect_decal_applies answers true for, which act in their Decal frame.
+ * On a projected row this is every active transform effect.
+ */
+blender::Vector<const MaterialPaintLayer *, 4> BKE_paint_layers_active_uv_transform_effects(
+    const Material &ma, const MaterialPaintLayer &row);
+
+/** \} */
+
+/** \name Row projection (continued)
+ * \{ */
+
+/**
+ * Give \a effect a Decal frame with the effect defaults: the frame clips at the patch's edge (a
+ * texel the patch does not reach is transparent, the boundary the unfolded surface gives instead
+ * of the UV islands), and the depth, facing and aspect options a projected row uses are off, since
+ * an effect's frame lies on the surface. \a center and \a normal (object space, either may be null)
+ * place it; \a size above zero sets its extents. The space itself is not changed. \return false
+ * when \a effect is not a transform effect.
+ */
+bool BKE_paint_layers_effect_decal_frame_init(Material &ma,
+                                              MaterialPaintLayer &effect,
+                                              const float center[3],
+                                              const float normal[3],
+                                              float size);
 
 /**
  * Change the projection space of \a layer. Switching away from UV allocates the payload through
@@ -2631,7 +2696,8 @@ MaterialPaintLayer *BKE_paint_layers_mask_material_add(Material &ma,
 /**
  * Add a filter to the mask of \a layer, over the items already there: it changes the coverage built
  * so far (`M = lerp(M, f(M), opacity)`), owns no map or grey, and works in no channel. The row needs
- * a base mask first, as for any mask correction.
+ * a base mask first, as for any mask correction. A transform effect (#MA_PAINT_LAYER_FILTER_TRANSFORM
+ * or #MA_PAINT_LAYER_FILTER_MIRROR) is accepted too: it moves the coverage built so far, in UV.
  * \return The new item, or null when \a layer has no base mask, is not in the stack, or \a filter is
  * unknown.
  */
@@ -2899,6 +2965,21 @@ void BKE_paint_layers_bake_scheduled_set(Material &ma, bool scheduled);
  */
 void BKE_paint_layers_bake_stroke_active_set(bool active);
 bool BKE_paint_layers_bake_stroke_active_get();
+
+/**
+ * Hand the planner the state of a handle drag on \a material_uid (a Transform or Mirror center in
+ * Decal space). While it lasts, the bake of a row with a Decal effect is rendered at a reduced size
+ * instead of the canvas, since it is redone at every step; ending it tags the material so the full
+ * bake follows once. Runtime only; an end that never arrives expires on its own. \a bmain names the
+ * material to tag, so the release does not walk `G_MAIN` from this module.
+ */
+void BKE_paint_layers_bake_drag_set(Main &bmain, uint32_t material_uid, bool active);
+
+/** Whether a handle drag (see #BKE_paint_layers_bake_drag_set) is running on \a material_uid. */
+bool BKE_paint_layers_bake_drag_is_active(uint32_t material_uid);
+
+/** Forget every drag mark and the reduced rows they owe, when the file is replaced or closed. */
+void BKE_paint_layers_bake_drag_clear_all();
 
 /**
  * Append every layered material of \a bmain that has a Material row reading \a source, once each.

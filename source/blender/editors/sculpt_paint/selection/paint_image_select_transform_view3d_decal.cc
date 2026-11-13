@@ -95,7 +95,7 @@
 #include "paint_image_select_fragment.hh"
 #include "paint_image_select_intern.hh"
 #include "paint_image_select_surface_decal.hh"
-#include "paint_image_select_surface_unfold.hh"
+#include "BKE_surface_unfold.hh"
 #include "paint_image_select_transform_view3d_intern.hh"
 #include "paint_image_select_view3d.hh"
 

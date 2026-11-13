@@ -58,6 +58,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_material_composite_surface.hh"
+#include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_material_resolve.hh"
 #include "BKE_scene.hh"
 
@@ -142,6 +143,7 @@ std::atomic<bool> &paint_layers_bake_stroke_active()
 
 void BKE_paint_layers_bake_runtime_free(Material &ma)
 {
+  bake_drag_forget_material(ma.id.session_uid);
   BKE_paint_layers_source_material_hash_forget(ma);
   std::lock_guard lock(bake_runtime_mutex());
   BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
@@ -518,6 +520,13 @@ bool BKE_paint_layers_bake_stroke_active_get()
   return paint_layers_bake_stroke_active().load();
 }
 
+/* The bake of a Decal row is re-rendered at every step of a handle drag; at the canvas side that is
+ * hundreds of milliseconds on the main thread, so the drag bakes at this side at most. */
+constexpr int BAKE_DRAG_SIZE_MAX = 1024;
+/* A drag bake still has to be a valid map side, and the reduced build must cost less than the
+ * full one it stands in for. */
+static_assert(BAKE_DRAG_SIZE_MAX >= 64 && BAKE_DRAG_SIZE_MAX <= 4096);
+
 /** Let go of the users \a layer's bake holds; the maps stay in `Main` as orphans if nothing else uses them. */
 static void bake_release_users(MaterialPaintLayerBake &bake)
 {
@@ -535,6 +544,8 @@ static void bake_release_users(MaterialPaintLayerBake &bake)
 
 bool BKE_paint_layers_bake_clear(Material &ma, MaterialPaintLayer &layer)
 {
+  /* A row that goes away cannot owe a full bake later. */
+  bake_drag_reduced_forget(ma, layer);
   if (!bake_row_owned(ma, layer)) {
     return false;
   }
@@ -1175,6 +1186,42 @@ static uint64_t bake_hash_layer(uint64_t h,
   if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     h = bake_hash_mix(h, BKE_paint_layers_mapping_remaps(ma, layer) ? 1 : 0);
   }
+  /* An effect in its Decal frame is rendered into the cache, unlike a UV mapping that keeps the row
+   * live, so every number of its step and of its frame is part of what the cache holds. The frame
+   * decides the surface patch the step walks; the mesh behind it is the tile identity's. */
+  /* A transform item of a mask is rendered into its cache the same way: its grey is the mask moved
+   * by the step, in UV, so the step's numbers are what the cache holds. */
+  if (paint_layer_kind_transforms_input(layer) &&
+      (layer.mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL ||
+       layer.role == MA_PAINT_LAYER_ROLE_MASK_ITEM))
+  {
+    h = bake_hash_mix(h, uint16_t(layer.mapping.space));
+    h = bake_hash_mix(h, uint16_t(layer.mapping.flag));
+    h = bake_hash_mix(h, uint16_t(layer.mapping.wrap));
+    h = bake_hash_float(h, layer.mapping.offset[0]);
+    h = bake_hash_float(h, layer.mapping.offset[1]);
+    h = bake_hash_float(h, layer.mapping.scale[0]);
+    h = bake_hash_float(h, layer.mapping.scale[1]);
+    h = bake_hash_float(h, layer.mapping.rotation);
+    h = bake_hash_float(h, layer.mapping.mirror_center[0]);
+    h = bake_hash_float(h, layer.mapping.mirror_center[1]);
+    h = bake_hash_mix(h, layer.projection != nullptr ? 1 : 0);
+    if (layer.projection != nullptr) {
+      const MaterialPaintLayerProjection &frame = *layer.projection;
+      for (const float value : frame.center) {
+        h = bake_hash_float(h, value);
+      }
+      for (const float value : frame.size) {
+        h = bake_hash_float(h, value);
+      }
+      for (const float value : frame.normal) {
+        h = bake_hash_float(h, value);
+      }
+      h = bake_hash_float(h, frame.roll);
+      h = bake_hash_mix(h, uint8_t(frame.axis));
+      h = bake_hash_mix(h, uint16_t(frame.flag));
+    }
+  }
   for (int i = 0; i < layer.channels_num; i++) {
     const MaterialPaintLayerChannel &record = layer.channels[i];
     /* A channel outside the material's set is not part of the result, so its record must not move
@@ -1332,6 +1379,10 @@ bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer
   if (layer.bake == nullptr) {
     return false;
   }
+  if (bake_drag_reduced_owes(ma, layer)) {
+    /* Baked below its size for a drag that is over: the full bake is owed. */
+    return false;
+  }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     /* Reads the source's node trees: main thread only. The generator and the CPU composite ask
      * #paint_layer_row_material_map instead, which reads the row alone. */
@@ -1397,6 +1448,12 @@ static bool bake_mapping_blocks(const Material &ma,
     return true;
   }
   for (const MaterialPaintLayer &effect : layer.effects) {
+    /* An effect in its Decal frame is what the bake renders (CPU effect-space resampling over the
+     * object's surface), so it must not keep the row live; the graph leaves it out of the row anyway
+     * (#BKE_paint_layers_active_uv_transform_effects), so the baked map is not transformed twice. */
+    if (BKE_paint_layers_effect_decal_applies(ma, layer, effect)) {
+      continue;
+    }
     if (bake_mapping_blocks(ma, effect, PaintLayerBakeScope::Child)) {
       return true;
     }
@@ -2483,8 +2540,30 @@ static bool bake_generator_auto_allowed(const Material &ma, const MaterialPaintL
   return true;
 }
 
+/** Whether anything in \a layer's subtree is a transform effect acting in its Decal frame. */
+static bool bake_subtree_has_decal_effect(const MaterialPaintLayer &layer)
+{
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (paint_layer_effect_acts_in_decal_frame(effect)) {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &child : layer.children) {
+    if (bake_subtree_has_decal_effect(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer &layer)
 {
+  if (bake_subtree_has_decal_effect(layer)) {
+    /* The Decal map and its inverse are cached per object and built from the evaluated mesh, which
+     * only the main thread may read: the worker job gets the rasterized surface and nothing else.
+     * Such a row is baked by the planner, synchronously, one object at a time. */
+    return false;
+  }
   if (paint_layer_mask_item_bakes_effect(layer)) {
     /* The worker job renders a row's subtree from a localized copy; a mask effect's grey is the
      * mask effect cache's compute, which only the main thread reaches. Calling it heavy would leave
@@ -2742,6 +2821,10 @@ static int bake_size_from_content(const Material &ma, const MaterialPaintLayer &
  */
 int bake_size_for(const Material &ma, const MaterialPaintLayer &row)
 {
+  /* The stored size of a row baked reduced for a drag is the drag's, not the row's. */
+  if (const int drag_full = bake_drag_full_size(ma, row); drag_full > 0) {
+    return drag_full;
+  }
   if (row.bake != nullptr && (row.bake->flag & MA_PAINT_LAYER_BAKE_SIZE_EXPLICIT) != 0 &&
       row.bake->size > 0)
   {
@@ -3266,7 +3349,12 @@ std::shared_ptr<const PaintMaterialCompositeSurface> bake_surface_build(
                                                 size,
                                                 padding,
                                                 BKE_paint_layers_generator_subtree_holds_generated(
-                                                    layer));
+                                                    layer),
+                                                /* The tile of the object's UVs, not the tile the
+                                                 * result is written to: the surface and the source
+                                                 * maps read through it follow the UVs. */
+                                                BKE_paint_layers_gradient_surface_uv_tile(
+                                                    *target.mesh, target.uv_map_name));
 }
 
 /** Whether any row of \a ma reads object geometry, so a view has to be resolved for the plan. */
@@ -3297,7 +3385,8 @@ static bool bake_object_tile_write(
     const int tile_number,
     const int *rect,
     const bool reuse_cache,
-    Vector<int> &r_written_channels)
+    Vector<int> &r_written_channels,
+    const Object *painted_object)
 {
   Vector<float> color(int64_t(size) * size * 4);
   Vector<float> coverage(int64_t(size) * size);
@@ -3310,7 +3399,15 @@ static bool bake_object_tile_write(
     const int *channel_rect = (rect != nullptr && layer.bake->images[channel] != nullptr) ? rect :
                                                                                            nullptr;
     if (!BKE_paint_layers_bake_render_node(
-            ma, layer, channel, size, color.data(), coverage.data(), channel_rect, surface))
+            ma,
+            layer,
+            channel,
+            size,
+            color.data(),
+            coverage.data(),
+            channel_rect,
+            surface,
+            painted_object))
     {
       continue;
     }
@@ -3421,10 +3518,25 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
       if (heavy) {
         continue;
       }
-      const int size = bake_size_for(ma, layer);
+      int size = bake_size_for(ma, layer);
       if (size <= 0) {
         /* No map has known dimensions yet: nothing to allocate a bake structure for. */
         continue;
+      }
+      const int full_size = size;
+      if (size > BAKE_DRAG_SIZE_MAX && bake_subtree_has_decal_effect(layer) &&
+          bake_drag_active(ma))
+      {
+        /* A handle drag re-renders this row at every step: the maps are re-created at the drag
+         * size, and the full bake is owed once the drag ends (#BKE_paint_layers_bake_drag_set). */
+        size = BAKE_DRAG_SIZE_MAX;
+        bake_drag_reduced_remember(ma, layer, full_size);
+        bke::paint_perf::printf_always("bake drag reduced row \"%s\" %dx%d -> %dx%d\n",
+                                       layer.name,
+                                       full_size,
+                                       full_size,
+                                       size,
+                                       size);
       }
       if (paint_layer_mask_item_bakes_effect(layer)) {
         /* The item's grey is one map of its own, written whole: a stroke into the mask defers it
@@ -3473,6 +3585,11 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
       uint32_t current_hash[2];
       BKE_paint_layers_bake_hash(ma, layer, current_hash);
       if (current_hash[0] != bake->hash[0] || current_hash[1] != bake->hash[1]) {
+        has_region = false;
+      }
+      /* A Decal step moves texels across the surface (a fold, a rotation): a changed rectangle of the
+       * source lands anywhere in the result, so the whole cache is rendered again. */
+      if (bake_subtree_has_decal_effect(layer)) {
         has_region = false;
       }
       const bool reuse_cache = bake->coverage != nullptr;
@@ -3532,7 +3649,9 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
                                     tile_number,
                                     rect_ptr,
                                     reuse_cache,
-                                    tile_channels))
+                                    tile_channels,
+                                    object_num > 0 ? targets.objects[object_index].object :
+                                                     nullptr))
         {
           all_objects = false;
           continue;
@@ -3563,6 +3682,10 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
       if (object_num > 0) {
         bake_object_identity_record(
             ma, layer, paint_layers_bake_target_identity(targets.objects[0], size));
+      }
+      if (size == full_size && bake_drag_reduced_forget(ma, layer)) {
+        bke::paint_perf::printf_always(
+            "bake full after drag row \"%s\" %dx%d\n", layer.name, size, size);
       }
       if (gradient_row) {
         /* A synchronous bake writes and drops each channel as it renders, so it holds no results

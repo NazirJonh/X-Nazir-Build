@@ -24,7 +24,7 @@
 
 #include "paint_image_select_fragment.hh"
 #include "paint_image_select_intern.hh"
-#include "paint_image_select_surface_unfold.hh"
+#include "BKE_surface_unfold.hh"
 #include "paint_image_select_view3d.hh"
 
 struct ARegion;
@@ -84,11 +84,11 @@ struct SurfaceDecalSession {
    * the patch stays seeded at the last valid point. */
   float2 plane_offset = float2(0.0f);
   /** Triangle adjacency of the session's surface map, built on the first patch. */
-  SurfaceUnfoldAdjacency adjacency;
+  bke::SurfaceUnfoldAdjacency adjacency;
   /** The mesh triangles around the frame center flattened into the plane of the center's triangle
    * (origin at the center, X along #patch_tangent). Rebuilt when the center moves or the stamp
    * outgrows it; a roll or a scale only re-maps it onto the stamp. */
-  SurfaceUnfoldPatch patch;
+  bke::SurfaceUnfoldPatch patch;
   /** What #patch was built from, to tell when it is stale. */
   int patch_seed_tri = -1;
   float3 patch_seed_co = float3(0.0f);

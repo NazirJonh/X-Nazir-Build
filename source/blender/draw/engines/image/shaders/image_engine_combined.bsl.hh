@@ -38,6 +38,10 @@
  * it reads from -- the per-texel counterpart of the negative-scale flip. */
 #define COMBINED_LAYER_MIRROR_U 1048576
 #define COMBINED_LAYER_MIRROR_V 2097152
+/* The fold's direction on a set axis: with the bit the map is read through
+ * `center - |uv - center|` (the smaller side shows on both) and the Normal's side sign flips. */
+#define COMBINED_LAYER_MIRROR_U_NEG 134217728
+#define COMBINED_LAYER_MIRROR_V_NEG 268435456
 /* What the row's map stores (`#eMaterialPaintLayerMapEncoding`), read into the channel's value
  * before the coverage: a glossiness map is `1 - rgb`, the spec-gloss packing reads `1 - alpha`
  * with the map's alpha as data (no `COMBINED_LAYER_ALPHA_COVERAGE` alongside), an F0 colour reads
@@ -74,7 +78,7 @@
 
 /* The transform effects' steps a pass applies ahead of the row's own mapping: at most
  * #COMBINED_INPUT_STEP_MAX of them, each packed in two float4s (offset.xy, scale.xy |
- * rotation.xy, mirror_center.xy) with five flag bits a step in `input_step_flags`. A CPU composite
+ * rotation.xy, mirror_center.xy) with seven flag bits a step in `input_step_flags`. A CPU composite
  * composes more; past the two the preview refuses the row to the CPU, so a stack is never shaded
  * as if a step were not there. */
 /* Mirrors #PAINT_MATERIAL_COMBINED_INPUT_STEP_MAX (BKE_paint_material_composite.hh) and
@@ -85,6 +89,11 @@
 #define COMBINED_INPUT_STEP_MIRROR_V 4
 #define COMBINED_INPUT_STEP_REPEAT_U 8
 #define COMBINED_INPUT_STEP_REPEAT_V 16
+#define COMBINED_INPUT_STEP_MIRROR_U_NEG 32
+#define COMBINED_INPUT_STEP_MIRROR_V_NEG 64
+/* Bits a step takes in `input_step_flags`. */
+#define COMBINED_INPUT_STEP_BITS 7
+#define COMBINED_INPUT_STEP_MASK 127
 
 /* The `CompositeBlend` values, which are the `MA_RAMP_*` codes of the Mix node. */
 #define COMBINED_BLEND_MIX 0
@@ -655,6 +664,26 @@ float texel_hash_uniform(int2 texel, int seed, uint salt)
 #define COMBINED_MAP_NEAREST 131072
 
 /**
+ * The Mirror fold of one coordinate around \a center. The reference is
+ * `BKE_paint_layers_mapping_mirror_fold` (BKE_paint_layers.hh); \a negative keeps the smaller side.
+ */
+float combined_mirror_fold(float coordinate, float center, bool negative)
+{
+  float distance = abs(coordinate - center);
+  return negative ? center - distance : center + distance;
+}
+
+/**
+ * The side sign the fold gives a coordinate, as `BKE_paint_layers_mapping_mirror_side`: +1 at and
+ * beyond the center. The negative fold's derivative is the positive one's, negated.
+ */
+float combined_mirror_side(float coordinate, float center, bool negative)
+{
+  float side = (coordinate >= center) ? 1.0f : -1.0f;
+  return negative ? -side : side;
+}
+
+/**
  * One straight, scene-linear texel of a map at the canvas \a uv, read through the row's UV mapping.
  *
  * `uv' = (R * fold(uv)) * scale + offset` is the transform of the generated Mapping node chain and
@@ -693,16 +722,19 @@ float4 sample_map(sampler2D tx,
   for (int s = 0; s < COMBINED_INPUT_STEP_MAX && s < input_step_count; s++) {
     float4 a = (s == 0) ? input_step_0_a : input_step_1_a;
     float4 b = (s == 0) ? input_step_0_b : input_step_1_b;
-    int step_flags = (input_step_flags >> (s * 5)) & 31;
+    int step_flags = (input_step_flags >> (s * COMBINED_INPUT_STEP_BITS)) & COMBINED_INPUT_STEP_MASK;
     float2 folded = sample_uv;
     float2 step_side_sign = float2(1.0f);
+    /* The direction multiplies both the fold and the side sign, as the CPU's `negative` fold. */
+    const bool step_negative_u = (step_flags & COMBINED_INPUT_STEP_MIRROR_U_NEG) != 0;
+    const bool step_negative_v = (step_flags & COMBINED_INPUT_STEP_MIRROR_V_NEG) != 0;
     if ((step_flags & COMBINED_INPUT_STEP_MIRROR_U) != 0) {
-      folded.x = abs(sample_uv.x - b.z) + b.z;
-      step_side_sign.x = (sample_uv.x >= b.z) ? 1.0f : -1.0f;
+      folded.x = combined_mirror_fold(sample_uv.x, b.z, step_negative_u);
+      step_side_sign.x = combined_mirror_side(sample_uv.x, b.z, step_negative_u);
     }
     if ((step_flags & COMBINED_INPUT_STEP_MIRROR_V) != 0) {
-      folded.y = abs(sample_uv.y - b.w) + b.w;
-      step_side_sign.y = (sample_uv.y >= b.w) ? 1.0f : -1.0f;
+      folded.y = combined_mirror_fold(sample_uv.y, b.w, step_negative_v);
+      step_side_sign.y = combined_mirror_side(sample_uv.y, b.w, step_negative_v);
     }
     float2 rotated = float2(folded.x * b.x - folded.y * b.y,
                             folded.x * b.y + folded.y * b.x);
@@ -722,13 +754,15 @@ float4 sample_map(sampler2D tx,
   float2 row_input = sample_uv;
   if ((flags & COMBINED_LAYER_MAPPED) != 0) {
     float2 folded = row_input;
+    const bool row_negative_u = (flags & COMBINED_LAYER_MIRROR_U_NEG) != 0;
+    const bool row_negative_v = (flags & COMBINED_LAYER_MIRROR_V_NEG) != 0;
     if ((flags & COMBINED_LAYER_MIRROR_U) != 0) {
-      folded.x = abs(row_input.x - mapping_mirror_center.x) + mapping_mirror_center.x;
-      side.x = (row_input.x >= mapping_mirror_center.x) ? 1.0f : -1.0f;
+      folded.x = combined_mirror_fold(row_input.x, mapping_mirror_center.x, row_negative_u);
+      side.x = combined_mirror_side(row_input.x, mapping_mirror_center.x, row_negative_u);
     }
     if ((flags & COMBINED_LAYER_MIRROR_V) != 0) {
-      folded.y = abs(row_input.y - mapping_mirror_center.y) + mapping_mirror_center.y;
-      side.y = (row_input.y >= mapping_mirror_center.y) ? 1.0f : -1.0f;
+      folded.y = combined_mirror_fold(row_input.y, mapping_mirror_center.y, row_negative_v);
+      side.y = combined_mirror_side(row_input.y, mapping_mirror_center.y, row_negative_v);
     }
     float2 rotated = float2(folded.x * mapping_rotation.x - folded.y * mapping_rotation.y,
                             folded.x * mapping_rotation.y + folded.y * mapping_rotation.x);
@@ -820,6 +854,10 @@ float4 sample_map(sampler2D tx,
 #define COMBINED_PROJ_FACING 4
 #define COMBINED_PROJ_UV_ADJUST 8
 #define COMBINED_PROJ_WRAP_CLIP 16
+/* A Decal frame: `proj_pos_tx` holds `(q.xy, patch triangle id, covered)` instead of the surface
+ * position, and `proj_p_to_q` only places `q` on the frame's axes (the host builds both), so
+ * #projection_sample_map runs the Planar path unchanged. */
+#define COMBINED_PROJ_DECAL 32
 /* #PAINT_LAYER_PROJECTION_EPSILON, and the 1 / (2 pi) and 1 / pi of the angle to UV conversions. */
 #define COMBINED_PROJ_EPSILON 1e-6f
 #define COMBINED_PROJ_INV_TWO_PI 0.15915494309189535f
@@ -850,8 +888,11 @@ float2 projection_face_uv(int face, float3 q)
   return uv;
 }
 
-/** The cube-cross atlas UV of the dominant frame axis; the six cell origins ride in three float4. */
-float2 projection_cube_uv(float3 q, float4 atlas_0, float4 atlas_1, float4 atlas_2, float2 cell)
+/**
+ * The cube-cross atlas UV of the dominant frame axis in `xy` and that face's cell origin in `zw`;
+ * the six cell origins ride in three float4.
+ */
+float4 projection_cube_uv(float3 q, float4 atlas_0, float4 atlas_1, float4 atlas_2, float2 cell)
 {
   float ax = abs(q.x);
   float ay = abs(q.y);
@@ -886,7 +927,7 @@ float2 projection_cube_uv(float3 q, float4 atlas_0, float4 atlas_1, float4 atlas
   else {
     origin = atlas_2.zw;
   }
-  return origin + local_uv * cell;
+  return float4(origin + local_uv * cell, origin);
 }
 
 /** Cylinder: U winds around the axis, V reads the height along it. */
@@ -965,11 +1006,62 @@ float4 projection_tap(sampler2D tx,
                       int layer_flags,
                       int pflags,
                       bool is_cube,
+                      float2 cube_origin,
+                      float2 cube_cell,
                       float2 offset,
                       float2 scale,
-                      float2 rotation)
+                      float2 rotation,
+                      const int input_step_count,
+                      const float4 input_step_0_a,
+                      const float4 input_step_0_b,
+                      const float4 input_step_1_a,
+                      const float4 input_step_1_b,
+                      const int input_step_flags)
 {
   float2 p = uv;
+  /* The transform effects' steps move the map coordinate (after the tiling, before the UV adjust),
+   * as `composite_resample_projected` does. A step that clips leaves the tap transparent outside
+   * the unit square of that coordinate. A Cube tap runs them in the local [0, 1] space of its own
+   * atlas cell and returns to the atlas before the UV adjust, as the CPU does. The fold's side
+   * signs are kept per step for the tangent-Normal covariant remap below. */
+  float2 step_side[COMBINED_INPUT_STEP_MAX];
+  {
+    bool cube_local = is_cube && input_step_count > 0;
+    if (cube_local) {
+      p = (uv - cube_origin) / cube_cell;
+    }
+    for (int s = 0; s < COMBINED_INPUT_STEP_MAX && s < input_step_count; s++) {
+      float4 a = (s == 0) ? input_step_0_a : input_step_1_a;
+      float4 b = (s == 0) ? input_step_0_b : input_step_1_b;
+      int step_flags = (input_step_flags >> (s * COMBINED_INPUT_STEP_BITS)) &
+                       COMBINED_INPUT_STEP_MASK;
+      float2 folded = p;
+      float2 step_side_sign = float2(1.0f);
+      const bool step_negative_u = (step_flags & COMBINED_INPUT_STEP_MIRROR_U_NEG) != 0;
+      const bool step_negative_v = (step_flags & COMBINED_INPUT_STEP_MIRROR_V_NEG) != 0;
+      if ((step_flags & COMBINED_INPUT_STEP_MIRROR_U) != 0) {
+        folded.x = combined_mirror_fold(p.x, b.z, step_negative_u);
+        step_side_sign.x = combined_mirror_side(p.x, b.z, step_negative_u);
+      }
+      if ((step_flags & COMBINED_INPUT_STEP_MIRROR_V) != 0) {
+        folded.y = combined_mirror_fold(p.y, b.w, step_negative_v);
+        step_side_sign.y = combined_mirror_side(p.y, b.w, step_negative_v);
+      }
+      step_side[s] = step_side_sign;
+      float2 rotated = float2(folded.x * b.x - folded.y * b.y, folded.x * b.y + folded.y * b.x);
+      p = rotated * a.zw + a.xy;
+      bool step_repeat_u = (step_flags & COMBINED_INPUT_STEP_REPEAT_U) != 0;
+      bool step_repeat_v = (step_flags & COMBINED_INPUT_STEP_REPEAT_V) != 0;
+      if ((!step_repeat_u && (p.x < 0.0f || p.x >= 1.0f)) ||
+          (!step_repeat_v && (p.y < 0.0f || p.y >= 1.0f)))
+      {
+        return float4(0.0f);
+      }
+    }
+    if (cube_local) {
+      p = cube_origin + p * cube_cell;
+    }
+  }
   if ((pflags & COMBINED_PROJ_UV_ADJUST) != 0) {
     float ru = p.x * rotation.x - p.y * rotation.y;
     float rv = p.x * rotation.y + p.y * rotation.x;
@@ -985,8 +1077,107 @@ float4 projection_tap(sampler2D tx,
     if ((layer_flags & COMBINED_LAYER_PREMULTIPLIED) != 0 && color.w > 0.0f) {
       color.xyz = color.xyz / color.w;
     }
+    if ((layer_flags & COMBINED_LAYER_TANGENT_NORMAL) != 0 && input_step_count > 0 &&
+        color.w > 0.0f)
+    {
+      /* The covariant counterpart of the steps, per tap (Box blends taps whose fold sides differ):
+       * the steps' inverses in reverse list order, `side * R^T * S^-1` each, as
+       * `CompositeMappingChain::remap_tangent_normal` does. It runs before the frame-to-tangent
+       * conversion of #projection_normal_to_tangent, the order the CPU composes them in. */
+      float2 v = color.xy * 2.0f - 1.0f;
+      for (int s = COMBINED_INPUT_STEP_MAX - 1; s >= 0; s--) {
+        if (s >= input_step_count) {
+          continue;
+        }
+        float4 a = (s == 0) ? input_step_0_a : input_step_1_a;
+        float4 b = (s == 0) ? input_step_0_b : input_step_1_b;
+        float rx = (a.z < 0.0f) ? -1.0f : 1.0f;
+        float ry = (a.w < 0.0f) ? -1.0f : 1.0f;
+        float fx = rx * v.x;
+        float fy = ry * v.y;
+        v = float2(step_side[s].x * (b.x * fx + b.y * fy), step_side[s].y * (-b.y * fx + b.x * fy));
+      }
+      color.xy = v * 0.5f + 0.5f;
+    }
   }
   return color;
+}
+
+/**
+ * The frame-to-tangent conversion of a projected tangent-space Normal row, the port of the tail of
+ * #composite_resample_projected's texel callback (#BKE_paint_layers_projection_normal_frame_to_tangent).
+ * \a mapped is #projection_sample_map's result (the straight colour weighted by the frame factor,
+ * and the alpha sum); the vectors it holds read in the frame's own basis and leave in the tangent
+ * basis of the triangle that owns the canvas \a uv. The basis is the triangle's UV gradient, read
+ * from the table `proj_tri_tx` by the id in the normal map's `w`, both moved to the controller's
+ * space as the CPU moves them. A texel without a basis (a degenerate UV triangle, an id the table
+ * does not hold) keeps the unconverted vector, as the CPU keeps it.
+ */
+float4 projection_normal_to_tangent(float4 mapped,
+                                    sampler2D pos_tx,
+                                    sampler2D nrm_tx,
+                                    sampler2D tri_tx,
+                                    sampler2D decal_tx,
+                                    int pflags,
+                                    float2 uv,
+                                    int2 canvas_size,
+                                    float4x4 frame_rot,
+                                    float4x4 n_to_controller)
+{
+  if (mapped.w <= 0.0f) {
+    return mapped;
+  }
+  int2 surface_texel = clamp(int2(floor(uv * float2(canvas_size))), int2(0), canvas_size - int2(1));
+  float4 surface_n = texelFetch(nrm_tx, surface_texel, 0);
+  int tri_id = int(surface_n.w + 0.5f);
+  int2 table_size = textureSize(tri_tx, 0);
+  int basis_index = tri_id * 2;
+  int2 basis_texel = int2(basis_index % max(table_size.x, 1), basis_index / max(table_size.x, 1));
+  if (tri_id <= 0 || table_size.x < 2 || basis_texel.y >= table_size.y) {
+    return mapped;
+  }
+  float4 tangent_texel = texelFetch(tri_tx, basis_texel, 0);
+  if (tangent_texel.w < 0.5f) {
+    return mapped;
+  }
+  float3 tangent = (n_to_controller * float4(tangent_texel.xyz, 0.0f)).xyz;
+  float3 bitangent =
+      (n_to_controller * float4(texelFetch(tri_tx, basis_texel + int2(1, 0), 0).xyz, 0.0f)).xyz;
+  /* Unit directions, as the CPU normalizes them after the controller's normal matrix. */
+  tangent = normalize(tangent);
+  bitangent = normalize(bitangent);
+  float3 surface_normal = (n_to_controller * float4(surface_n.xyz, 0.0f)).xyz;
+  float surface_normal_length = length(surface_normal);
+  surface_normal = (surface_normal_length > 0.0f) ? surface_normal / surface_normal_length :
+                                                    float3(0.0f);
+  /* The accumulated colour is the weighted mean of the encoded taps: decode it, carry it through
+   * the frame's basis exactly as the CPU helper indexes it, and encode it in the triangle's basis,
+   * renormalized. */
+  float3 n_frame = mapped.xyz * (1.0f / mapped.w) * 2.0f - 1.0f;
+  float3 n_world = (frame_rot * float4(n_frame, 0.0f)).xyz;
+  if ((pflags & COMBINED_PROJ_DECAL) != 0) {
+    /* The frame turns with the unfold: the axes of the patch triangle this texel was laid on, the
+     * sum of the axes weighted by the vector's components (`decal_frame->axes` on the CPU). The
+     * table holds three texels per triangle id, `textureSize` texels a row. */
+    int decal_tri = int(texelFetch(pos_tx, surface_texel, 0).z + 0.5f);
+    int2 frames_size = textureSize(decal_tx, 0);
+    int frame_index = decal_tri * 3;
+    int2 frame_texel = int2(frame_index % max(frames_size.x, 1), frame_index / max(frames_size.x, 1));
+    if (frame_texel.y >= frames_size.y) {
+      return mapped;
+    }
+    float3 axis_0 = texelFetch(decal_tx, frame_texel, 0).xyz;
+    float3 axis_1 = texelFetch(decal_tx, frame_texel + int2(1, 0), 0).xyz;
+    float3 axis_2 = texelFetch(decal_tx, frame_texel + int2(2, 0), 0).xyz;
+    n_world = axis_0 * n_frame.x + axis_1 * n_frame.y + axis_2 * n_frame.z;
+  }
+  float3 encoded = float3(dot(n_world, tangent), dot(n_world, bitangent), dot(n_world, surface_normal));
+  float encoded_length = length(encoded);
+  if (!(encoded_length > 0.0f)) {
+    return mapped;
+  }
+  encoded = encoded / encoded_length;
+  return float4((encoded * 0.5f + 0.5f) * mapped.w, mapped.w);
 }
 
 /**
@@ -1015,7 +1206,13 @@ float4 projection_sample_map(sampler2D tx,
                              int layer_flags,
                              float2 offset,
                              float2 scale,
-                             float2 rotation)
+                             float2 rotation,
+                             const int input_step_count,
+                             const float4 input_step_0_a,
+                             const float4 input_step_0_b,
+                             const float4 input_step_1_a,
+                             const float4 input_step_1_b,
+                             const int input_step_flags)
 {
   float4 result = float4(0.0f);
   int2 surface_texel = clamp(int2(floor(uv * float2(canvas_size))), int2(0), canvas_size - int2(1));
@@ -1042,7 +1239,22 @@ float4 projection_sample_map(sampler2D tx,
     for (int face = 0; face < 3; face++) {
       float2 face_uv = projection_face_uv(face, q);
       float2 tap_uv = float2(0.5f) + (face_uv - float2(0.5f)) * params_0.xy;
-      float4 tap = projection_tap(tx, tap_uv, layer_flags, pflags, false, offset, scale, rotation);
+      float4 tap = projection_tap(tx,
+                                  tap_uv,
+                                  layer_flags,
+                                  pflags,
+                                  false,
+                                  float2(0.0f),
+                                  float2(1.0f),
+                                  offset,
+                                  scale,
+                                  rotation,
+                                  input_step_count,
+                                  input_step_0_a,
+                                  input_step_0_b,
+                                  input_step_1_a,
+                                  input_step_1_b,
+                                  input_step_flags);
       float tap_weight = weight * powers[face] / sum;
       straight += tap.xyz * tap_weight;
       alpha += tap.w * tap_weight;
@@ -1050,8 +1262,11 @@ float4 projection_sample_map(sampler2D tx,
   }
   else {
     float2 tap_uv;
+    float2 cube_origin = float2(0.0f);
     if (mode == COMBINED_PROJ_CUBE) {
-      tap_uv = projection_cube_uv(q, atlas_0, atlas_1, atlas_2, atlas_cell);
+      float4 cube_tap = projection_cube_uv(q, atlas_0, atlas_1, atlas_2, atlas_cell);
+      tap_uv = cube_tap.xy;
+      cube_origin = cube_tap.zw;
     }
     else if (mode == COMBINED_PROJ_CYLINDER) {
       tap_uv = projection_cylinder_uv(q, axis);
@@ -1065,8 +1280,22 @@ float4 projection_sample_map(sampler2D tx,
       int v_index = (axis == 2) ? 1 : 2;
       tap_uv = float2(0.5f + q[u_index] * params_0.x * 0.5f, 0.5f + q[v_index] * params_0.y * 0.5f);
     }
-    float4 tap = projection_tap(
-        tx, tap_uv, layer_flags, pflags, mode == COMBINED_PROJ_CUBE, offset, scale, rotation);
+    float4 tap = projection_tap(tx,
+                                tap_uv,
+                                layer_flags,
+                                pflags,
+                                mode == COMBINED_PROJ_CUBE,
+                                cube_origin,
+                                atlas_cell,
+                                offset,
+                                scale,
+                                rotation,
+                                input_step_count,
+                                input_step_0_a,
+                                input_step_0_b,
+                                input_step_1_a,
+                                input_step_1_b,
+                                input_step_flags);
     straight += tap.xyz * weight;
     alpha += tap.w * weight;
   }
@@ -1141,7 +1370,7 @@ struct MaskResources {
   [[push_constant]] const int proj_axis;
   [[push_constant]] const int proj_flags;
   /** The transform effects' steps ahead of the row's own mapping: `a` carries offset.xy and
-   * scale.xy, `b` the rotation's cosine and sine and the fold center; five flag bits a step live
+   * scale.xy, `b` the rotation's cosine and sine and the fold center; seven flag bits a step live
    * in `input_step_flags`, and `input_step_count` says how many run. */
   [[push_constant]] const float4 input_step_0_a;
   [[push_constant]] const float4 input_step_0_b;
@@ -1236,7 +1465,13 @@ void mask_comp([[resource_table]] MaskResources &srt,
                                 srt.flags,
                                 srt.mapping_offset,
                                 srt.mapping_scale,
-                                srt.mapping_rotation);
+                                srt.mapping_rotation,
+                                srt.input_step_count,
+                                srt.input_step_0_a,
+                                srt.input_step_0_b,
+                                srt.input_step_1_a,
+                                srt.input_step_1_b,
+                                srt.input_step_flags);
       }
       else {
         c = sample_map(srt.mask_tx,
@@ -1330,7 +1565,13 @@ void mask_comp([[resource_table]] MaskResources &srt,
                                   srt.flags,
                                   srt.mapping_offset,
                                   srt.mapping_scale,
-                                  srt.mapping_rotation);
+                                  srt.mapping_rotation,
+                                  srt.input_step_count,
+                                  srt.input_step_0_a,
+                                  srt.input_step_0_b,
+                                  srt.input_step_1_a,
+                                  srt.input_step_1_b,
+                                  srt.input_step_flags);
         }
         else {
           c = sample_map(srt.mask_tx,
@@ -1389,7 +1630,13 @@ void mask_comp([[resource_table]] MaskResources &srt,
                               srt.flags,
                               srt.mapping_offset,
                               srt.mapping_scale,
-                              srt.mapping_rotation);
+                              srt.mapping_rotation,
+                              srt.input_step_count,
+                              srt.input_step_0_a,
+                              srt.input_step_0_b,
+                              srt.input_step_1_a,
+                              srt.input_step_1_b,
+                              srt.input_step_flags);
     }
     else {
       c = sample_map(srt.mask_tx,
@@ -1431,6 +1678,12 @@ struct LayerResources {
    * texel, read with texelFetch when #COMBINED_LAYER_PROJECTED is set. */
   [[sampler(4)]] sampler2D proj_pos_tx;
   [[sampler(5)]] sampler2D proj_nrm_tx;
+  /** The tangent basis per triangle id (the `w` of `proj_nrm_tx`), two texels each, read when a
+   * projected tangent-space Normal row converts its vectors to the surface's tangent basis. */
+  [[sampler(6)]] sampler2D proj_tri_tx;
+  /** A Decal frame's axes per patch triangle (three texels each), read when #COMBINED_PROJ_DECAL
+   * is set in `proj_flags` and the row is a tangent-space Normal. */
+  [[sampler(7)]] sampler2D proj_decal_tx;
   [[image(0, read_write, SFLOAT_16_16_16_16)]] image2D accum_img;
   /** The row's colour and coverage while corrections are laid over it. */
   [[image(1, read_write, SFLOAT_16_16_16_16)]] image2D row_color_img;
@@ -1445,6 +1698,10 @@ struct LayerResources {
    */
   [[push_constant]] const float4x4 proj_p_to_q;
   [[push_constant]] const float4x4 proj_n_to_frame;
+  /** The frame's rotation alone and the object-to-controller normal matrix, the two factors of
+   * `proj_n_to_frame` the tangent-space Normal conversion uses apart. */
+  [[push_constant]] const float4x4 proj_frame_rot;
+  [[push_constant]] const float4x4 proj_n_to_controller;
   /** The tiling in `xy`, the facing scale and offset in `zw`. */
   [[push_constant]] const float4 proj_params_0;
   /** The Box and Triplanar face exponent, the frame extent and the edge softness. */
@@ -1471,7 +1728,7 @@ struct LayerResources {
   /** The UV point the row's Mirror fold reflects around, on its folded axes. */
   [[push_constant]] const float2 mapping_mirror_center;
   /** The transform effects' steps ahead of the row's own mapping: `a` carries offset.xy and
-   * scale.xy, `b` the rotation's cosine and sine and the fold center; five flag bits a step live
+   * scale.xy, `b` the rotation's cosine and sine and the fold center; seven flag bits a step live
    * in `input_step_flags`, and `input_step_count` says how many run. */
   [[push_constant]] const float4 input_step_0_a;
   [[push_constant]] const float4 input_step_0_b;
@@ -1564,7 +1821,27 @@ void layer_comp([[resource_table]] LayerResources &srt,
                                     srt.flags,
                                     srt.mapping_offset,
                                     srt.mapping_scale,
-                                    srt.mapping_rotation);
+                                    srt.mapping_rotation,
+                                    srt.input_step_count,
+                                    srt.input_step_0_a,
+                                    srt.input_step_0_b,
+                                    srt.input_step_1_a,
+                                    srt.input_step_1_b,
+                                    srt.input_step_flags);
+        if ((srt.flags & COMBINED_LAYER_TANGENT_NORMAL) != 0) {
+          /* After the per-tap remap of the steps and before the DirectX flip below, the order the
+           * CPU bake and its decode compose them in. */
+          top = projection_normal_to_tangent(top,
+                                             srt.proj_pos_tx,
+                                             srt.proj_nrm_tx,
+                                             srt.proj_tri_tx,
+                                             srt.proj_decal_tx,
+                                             srt.proj_flags,
+                                             uv,
+                                             srt.proj_canvas_size,
+                                             srt.proj_frame_rot,
+                                             srt.proj_n_to_controller);
+        }
       }
       else {
         top = sample_map(srt.layer_tx,
@@ -1780,7 +2057,13 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
                               srt.flags,
                               srt.mapping_offset,
                               srt.mapping_scale,
-                              srt.mapping_rotation);
+                              srt.mapping_rotation,
+                              srt.input_step_count,
+                              srt.input_step_0_a,
+                              srt.input_step_0_b,
+                              srt.input_step_1_a,
+                              srt.input_step_1_b,
+                              srt.input_step_flags);
     }
     else {
       c = sample_map(srt.correction_tx,

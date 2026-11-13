@@ -812,7 +812,7 @@ inline SourceGroupMapping source_group_mapping_get(const Material &ma,
   SourceGroupMapping mapping;
   mapping.mapped = BKE_paint_layers_mapping_remaps(ma, layer);
   mapping.axes = mapping.mapped ? BKE_paint_layers_mapping_mirror_get(layer) : 0;
-  for (const MaterialPaintLayer *effect : BKE_paint_layers_active_transform_effects(ma, layer)) {
+  for (const MaterialPaintLayer *effect : BKE_paint_layers_active_uv_transform_effects(ma, layer)) {
     mapping.effects.append(effect);
     mapping.mapped = true;
   }

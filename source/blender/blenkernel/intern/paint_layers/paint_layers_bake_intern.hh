@@ -289,6 +289,25 @@ bool bake_any_row_needs_surface(const Material &ma);
 std::shared_ptr<const PaintMaterialCompositeSurface> bake_surface_build(
     const MaterialPaintLayer &layer, const PaintLayersBakeTarget &target, int size);
 
+/* The bake-drag state lives in `paint_layers_bake_drag.cc`; the planner and the bake read it. */
+
+/** Whether a handle drag marks \a ma now (an expired mark reads as ended). */
+bool bake_drag_active(const Material &ma);
+
+/** The size \a layer owes when it was baked reduced by a drag, or 0. */
+int bake_drag_full_size(const Material &ma, const MaterialPaintLayer &layer);
+
+/** Whether \a layer holds a reduced bake and no drag is running any more: the full bake is due. */
+bool bake_drag_reduced_owes(const Material &ma, const MaterialPaintLayer &layer);
+
+void bake_drag_reduced_remember(const Material &ma, const MaterialPaintLayer &layer, int size);
+
+/** Drop the record of \a layer; true when it had one. */
+bool bake_drag_reduced_forget(const Material &ma, const MaterialPaintLayer &layer);
+
+/** Drop every mark and reduced row that names \a material_uid. */
+void bake_drag_forget_material(uint32_t material_uid);
+
 /** \} */
 
 }  // namespace blender

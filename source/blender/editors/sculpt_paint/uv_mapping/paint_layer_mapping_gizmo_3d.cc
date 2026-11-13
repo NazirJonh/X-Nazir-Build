@@ -434,8 +434,9 @@ void drag_begin(bContext &C, wmGizmo *gz, const wmEvent &event)
     ggd.drag_axis_v = ggd.axis_v_px;
   }
   /* The composite previews shade at an octave while the drag lasts and refine when it ends: a full
-   * rebuild on every mouse move is what makes a large canvas lag. */
-  ed::material_combined::gradient_interactive_begin(*target.material());
+   * rebuild on every mouse move is what makes a large canvas lag. Coarse: a Decal-space resample
+   * at the canvas costs hundreds of milliseconds a step, so the octave is also capped. */
+  ed::material_combined::gradient_interactive_begin(*target.material(), true);
 }
 
 void drag_apply(bContext &C, wmGizmo *gz, const wmEvent &event)
@@ -450,7 +451,7 @@ void drag_apply(bContext &C, wmGizmo *gz, const wmEvent &event)
     return;
   }
   /* Re-armed on every step: the mark expires on its own, and a drag held still must not lose it. */
-  ed::material_combined::gradient_interactive_begin(*target.material());
+  ed::material_combined::gradient_interactive_begin(*target.material(), true);
   const float2 mval(float(event.mval[0]), float(event.mval[1]));
   const float precision = (event.modifier & KM_SHIFT) ? 0.1f : 1.0f;
 
@@ -682,6 +683,15 @@ wmOperatorStatus gizmo_modal(bContext *C,
   return OPERATOR_RUNNING_MODAL;
 }
 
+void gizmo_exit(bContext *C, wmGizmo *gz, const bool cancel)
+{
+  /* The native tweak operator ends on the release (or Esc / right click) before #gizmo_modal sees
+   * it, so this is the only place that reliably settles the drag and clears the coarse bake mark. */
+  if (C != nullptr) {
+    drag_finish(*C, gz, !cancel);
+  }
+}
+
 void gizmo_invoke_prepare(const bContext *C,
                           wmGizmoGroup * /*gzgroup*/,
                           wmGizmo *gz,
@@ -768,6 +778,7 @@ void gizmo_type_setup(wmGizmoType *gzt)
   gzt->draw = gizmo_draw;
   gzt->test_select = gizmo_test_select;
   gzt->cursor_get = gizmo_cursor_get;
+  gzt->exit = gizmo_exit;
 }
 
 }  // namespace

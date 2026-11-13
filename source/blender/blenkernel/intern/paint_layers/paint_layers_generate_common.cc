@@ -1495,7 +1495,8 @@ enum FoldNode {
 static constexpr std::array<FoldNodeSpec, FoldNodeNum> FOLD_NODE_SPECS = {{
     {"mirror_sub", NODE_VECTOR_MATH_SUBTRACT, true, false},
     {"mirror_abs", NODE_VECTOR_MATH_ABSOLUTE, false, false},
-    {"mirror_add", NODE_VECTOR_MATH_ADD, true, false},
+    /* `|uv - center| * direction + center`: the direction is +1, or -1 for the negative fold. */
+    {"mirror_add", NODE_VECTOR_MATH_MULTIPLY_ADD, true, true},
     {"mirror_delta", NODE_VECTOR_MATH_SUBTRACT, true, false},
     {"mirror_mask", NODE_VECTOR_MATH_MULTIPLY, true, false},
     {"mirror_out", NODE_VECTOR_MATH_ADD, true, false},
@@ -1525,8 +1526,15 @@ static MappingChain mapping_fold_nodes_add(bNodeTree &tree,
 {
   const bool fold_u = (mirror_axes & MA_PAINT_LAYER_MAPPING_MIRROR_U) != 0;
   const bool fold_v = (mirror_axes & MA_PAINT_LAYER_MAPPING_MIRROR_V) != 0;
+  const bool negative_u = fold_u && (mirror_axes & MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE) != 0;
+  const bool negative_v = fold_v && (mirror_axes & MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE) != 0;
   const float mask[3] = {fold_u ? 1.0f : 0.0f, fold_v ? 1.0f : 0.0f, 0.0f};
   const float inv_mask[3] = {fold_u ? 0.0f : 1.0f, fold_v ? 0.0f : 1.0f, 1.0f};
+  /* The fold's direction per axis (the negative fold's derivative is the positive one's negated,
+   * so the same signs also turn the Normal's side sign). */
+  const float direction[3] = {negative_u ? -1.0f : 1.0f, negative_v ? -1.0f : 1.0f, 1.0f};
+  const float side_scale[3] = {
+      fold_u ? direction[0] : 0.0f, fold_v ? direction[1] : 0.0f, 0.0f};
   /**
    * A fraction of a texel added to `uv - center` before the sign. SIGN reads zero exactly at the
    * center, while #BKE_paint_layers_mapping_mirror_side and the compute shader read the side as
@@ -1579,7 +1587,8 @@ static MappingChain mapping_fold_nodes_add(bNodeTree &tree,
    * serves every combination and the center stays the only value. */
   write_const(socket_b(FoldMask), mask);
   write_const(socket_b(FoldBias), side_bias);
-  write_const(socket_b(FoldSide), mask);
+  write_const(socket_b(FoldAdd), direction);
+  write_const(socket_b(FoldSide), side_scale);
   write_const(socket_c(FoldSide), inv_mask);
 
   bke::node_add_link(tree, uv_node, uv_out, *nodes[FoldSub], *socket_a(FoldSub));
@@ -1588,7 +1597,7 @@ static MappingChain mapping_fold_nodes_add(bNodeTree &tree,
                      *socket_a(FoldAbs));
   bke::node_add_link(tree, *nodes[FoldAbs], *socket_out_of(FoldAbs), *nodes[FoldAdd],
                      *socket_a(FoldAdd));
-  bke::node_add_link(tree, center_node, center_socket, *nodes[FoldAdd], *socket_b(FoldAdd));
+  bke::node_add_link(tree, center_node, center_socket, *nodes[FoldAdd], *socket_c(FoldAdd));
   bke::node_add_link(tree, *nodes[FoldAdd], *socket_out_of(FoldAdd), *nodes[FoldDelta],
                      *socket_a(FoldDelta));
   bke::node_add_link(tree, uv_node, uv_out, *nodes[FoldDelta], *socket_b(FoldDelta));

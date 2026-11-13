@@ -76,13 +76,22 @@ struct CombinedPreviewRequest {
  * cancelled operator with no finish -- cannot pin every preview of that material to a coarse
  * octave for the rest of the session.
  */
-void gradient_interactive_begin(const Material &ma);
+void gradient_interactive_begin(const Material &ma, bool coarse = false);
 
 /** Clear the mark of \a ma; a preview built under it refines to the canvas on the next redraw. */
 void gradient_interactive_end(uint32_t material_session_uid);
 
 /** Whether \a ma's Gradient handles are being dragged right now. */
 bool gradient_interactive_is(const Material &ma);
+
+/**
+ * Whether the drag of \a ma asked for the coarse cap (see #BKE_paint_material_interactive_max_output).
+ *
+ * Set by the drags of a transform effect: their Decal-space resample is the dearest read of a
+ * composite, and an octave chosen from the display alone is the canvas whenever the display is not
+ * known or is large.
+ */
+bool gradient_interactive_is_coarse(const Material &ma);
 
 /**
  * How long the interactive Gradient preview may go without a rebuild while the handles are

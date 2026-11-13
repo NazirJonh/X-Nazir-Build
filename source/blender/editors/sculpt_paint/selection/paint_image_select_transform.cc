@@ -81,6 +81,10 @@
 /* #image_select_move_is_floating_in_space / #image_select_move_state_get for the move -> transform
  * hand-over. */
 #include "paint_image_select_move_intern.hh"
+/* The 3D Viewport preview of the floating fragment and the Decal commit. */
+#include "paint_image_select_decal_log.hh"
+#include "paint_image_select_editor_decal.hh"
+#include "paint_image_select_preview_view3d.hh"
 
 namespace blender {
 
@@ -116,6 +120,9 @@ struct ImageSelectTransformState : public PaintSelectFloatingSession {
    */
   float2 uv_pivot = {0.0f, 0.0f};
   bool use_proportional_scale = true;
+  /* The session carries its content over the mesh surface (Decal) instead of the UV affine: set
+   * when the 3D preview could open a decal at invoke, read by the commit. */
+  bool use_surface_decal = false;
 
   /* Snapping state */
   /* True if the anchor point is magnetically snapped. */
@@ -569,15 +576,21 @@ static void draw_select_transform_textured_quad(const float2 scr_coords[4], gpu:
   immUnbindProgram();
 }
 
-static void draw_select_transform_texture(const bContext * /*C*/,
-                                          ARegion *region,
-                                          void *clientdata)
+static void draw_select_transform_texture(const bContext *C, ARegion *region, void *clientdata)
 {
   ImageSelectTransformState *state = static_cast<ImageSelectTransformState *>(clientdata);
   if (!state || state->fragments.is_empty()) {
     return;
   }
   if (state->owner_region && region != state->owner_region) {
+    return;
+  }
+  /* Decal: the 2D view shows the patch the bake writes (the triangles on their own UVs, both sides
+   * of a seam), not the UV quad. Falls through to the quad when no patch is available. */
+  if (state->use_surface_decal && state->owner_sima != nullptr &&
+      ed::sculpt_paint::image_select_editor_decal_draw_2d(
+          C, *state, region, state->owner_sima->image))
+  {
     return;
   }
 
@@ -634,6 +647,85 @@ static void draw_select_transform_texture(const bContext * /*C*/,
   }
 
   GPU_blend(GPU_BLEND_NONE);
+}
+
+/**
+ * The session as the 3D preview / Decal commit read it: the fragment set of every canvas target and
+ * the forward UV mapping `dest = pivot + L * (src - pivot) + translation`.
+ *
+ * The gesture is authored as translate, then scale + rotate around #uv_pivot, with the rotation in
+ * *screen* space (see #image_select_transform_commit_write_final): in UV space that is
+ * `L = J^-1 R J S` with `J` the UV -> region Jacobian of \a region (a view with unequal axis
+ * zoom keeps its rotation a rotation on screen). Folding the translation into the mapping makes it
+ * `L * uv_translation`.
+ */
+/** The state's affine as the Decal mapping reads it (the screen-space rotation turned into UV). */
+static ed::sculpt_paint::ImageSelectEditorMapping image_select_transform_editor_mapping(
+    const ImageSelectTransformState &state, const ARegion *region)
+{
+  const float2x2 rotation = image_select_rotation_matrix_2d(state.rotation);
+  const float2x2 scale = math::from_scale<float2x2>(state.scale);
+  float2x2 linear = rotation * scale;
+  if (region) {
+    float x0, y0, x1, y1, x2, y2;
+    ui::view2d_view_to_region_fl(&region->v2d, state.uv_pivot.x, state.uv_pivot.y, &x0, &y0);
+    ui::view2d_view_to_region_fl(&region->v2d, state.uv_pivot.x + 1.0f, state.uv_pivot.y, &x1, &y1);
+    ui::view2d_view_to_region_fl(&region->v2d, state.uv_pivot.x, state.uv_pivot.y + 1.0f, &x2, &y2);
+    const float2x2 jacobian(float2(x1 - x0, y1 - y0), float2(x2 - x0, y2 - y0));
+    bool jacobian_ok = false;
+    const float2x2 jacobian_inv = math::invert(jacobian, jacobian_ok);
+    if (jacobian_ok) {
+      linear = jacobian_inv * rotation * jacobian * scale;
+    }
+  }
+  ed::sculpt_paint::ImageSelectEditorMapping mapping;
+  mapping.linear = linear;
+  mapping.pivot = state.uv_pivot;
+  mapping.translation = linear * state.uv_translation;
+  mapping.rotation = state.rotation;
+  mapping.scale = state.scale;
+  return mapping;
+}
+
+static bool image_select_transform_editor_frame(
+    const ImageSelectTransformState &state,
+    const ARegion *region,
+    const Span<ImagePaintSelectionTarget> targets,
+    ed::sculpt_paint::ImageSelect3DPreviewFrame &r_frame)
+{
+  const SpaceImage *sima = state.owner_sima;
+  if (!sima || !sima->image) {
+    return false;
+  }
+  r_frame.fragments.clear();
+  for (const ImagePaintSelectionTarget &target : targets) {
+    if (target.image == sima->image) {
+      r_frame.fragments.append(state.fragments);
+      continue;
+    }
+    blender::Vector<SelectionTileFragment> match;
+    for (const ImageSelectTransformTarget &material_target : state.material_targets) {
+      if (material_target.image == target.image) {
+        match = material_target.fragments;
+        break;
+      }
+    }
+    r_frame.fragments.append(std::move(match));
+  }
+  r_frame.mapping = image_select_transform_editor_mapping(state, region);
+  return true;
+}
+
+static bool image_select_transform_preview_frame_get(
+    const PaintSelectFloatingSession &session,
+    const Span<ImagePaintSelectionTarget> targets,
+    ed::sculpt_paint::ImageSelect3DPreviewFrame &r_frame)
+{
+  if (session.tool != PaintSelectTool::Transform) {
+    return false;
+  }
+  const ImageSelectTransformState &state = static_cast<const ImageSelectTransformState &>(session);
+  return image_select_transform_editor_frame(state, state.owner_region, targets, r_frame);
 }
 
 static void image_select_transform_lift_source(bContext *C, ImageSelectTransformState *state)
@@ -822,6 +914,15 @@ static wmOperatorStatus image_select_transform_confirm_exec(bContext *C, wmOpera
   RNA_float_set_array(&props_ptr, "scale", scale);
   RNA_float_set_array(&props_ptr, "uv_anchor", uv_anchor);
 
+  /* The exec below rebuilds the session from the operator's properties and would re-derive a Decal
+   * placement by walking from the source; keep the decal the drag ended with for it to bake. */
+  if (state->use_surface_decal) {
+    ed::sculpt_paint::image_select_editor_decal_handoff_store(
+        *state,
+        image_select_transform_editor_mapping(
+            *state, state->owner_region ? state->owner_region : CTX_wm_region(C)));
+  }
+
   image_select_session_clear(state->owner_sima);
   image_select_transform_restore_source(C, state);
   image_select_transform_state_free(state);
@@ -977,6 +1078,35 @@ ImageSelectTransformState *image_select_transform_state_get(SpaceImage *sima)
   return image_select_session_get<ImageSelectTransformState>(sima);
 }
 
+bool image_select_transform_live_decal_set(bContext *C, SpaceImage *sima, const bool want_decal)
+{
+  ImageSelectTransformState *state = image_select_transform_state_get(sima);
+  if (state == nullptr) {
+    return false;
+  }
+  if (state->use_surface_decal == want_decal) {
+    /* The setting went back to the session's mode: a change kept during the gesture is void. */
+    state->pending_decal = -1;
+    return false;
+  }
+  /* The gizmo drags leave #is_dragging false and only hold an active handle. */
+  if (state->is_dragging || state->active_handle != ImageSelectTransformState::HANDLE_NONE) {
+    /* The gesture keeps the mapping it started with; the change is applied when it ends (see
+     * #image_select_floating_pending_mode_apply). */
+    state->pending_decal = want_decal ? 1 : 0;
+    IMAGE_SELECT_DECAL_LOG(IMAGE_SELECT_DECAL_TAG_EDITOR
+                           "transform: mode change deferred until the drag ends\n");
+    return false;
+  }
+  state->pending_decal = -1;
+  /* The gesture is the same UV affine in both modes (translation, rotation, scale, pivot), so only
+   * the preview and the commit mapping change: the bridge rebuilds them from the session. */
+  bool decal_active = false;
+  ed::sculpt_paint::image_select_preview_view3d_mode_switch(C, *state, want_decal, decal_active);
+  state->use_surface_decal = decal_active;
+  return true;
+}
+
 bool ED_image_paint_select_is_transforming(SpaceImage *sima)
 {
   return image_select_transform_state_get(sima) != nullptr;
@@ -1124,15 +1254,17 @@ void image_select_transform_gizmo_refresh_tweak(const bContext *C,
       image_select_transform_has_active_handle(state))
   {
     image_select_transform_end_drag(state);
+    image_select_floating_pending_mode_apply(const_cast<bContext *>(C),
+                                             const_cast<SpaceImage *>(sima));
   }
   *r_was_modal_tweak = is_our_modal;
 }
 
-void image_select_transform_apply_handle(bContext *C,
-                                         ImageSelectTransformState *state,
-                                         const wmEvent *event,
-                                         const ImageSelectTransformHandleType handle,
-                                         ARegion *region)
+static void image_select_transform_apply_handle_impl(bContext *C,
+                                                     ImageSelectTransformState *state,
+                                                     const wmEvent *event,
+                                                     const ImageSelectTransformHandleType handle,
+                                                     ARegion *region)
 {
   if (!state || !event || !region || handle == ImageSelectTransformHandleType::None) {
     return;
@@ -1340,6 +1472,79 @@ void image_select_transform_apply_handle(bContext *C,
   }
 
   ED_region_tag_redraw(region);
+  /* The 3D Viewport shows the floating fragment too: it follows the drag. */
+  ed::sculpt_paint::image_select_preview_view3d_tag_redraw(C, *state);
+}
+
+/** The part of the state a gesture edits, restored together when a step has to be cut short. */
+struct ImageSelectTransformGestureValues {
+  float2 translation;
+  float2 anchor;
+  float2 pivot;
+  float rotation;
+  float2 scale;
+};
+
+static ImageSelectTransformGestureValues image_select_transform_gesture_values_get(
+    const ImageSelectTransformState &state)
+{
+  return {state.uv_translation, state.uv_anchor, state.uv_pivot, state.rotation, state.scale};
+}
+
+static void image_select_transform_gesture_values_lerp(
+    ImageSelectTransformState &state,
+    const ImageSelectTransformGestureValues &from,
+    const ImageSelectTransformGestureValues &to,
+    const float t)
+{
+  state.uv_translation = math::interpolate(from.translation, to.translation, t);
+  state.uv_anchor = math::interpolate(from.anchor, to.anchor, t);
+  state.uv_pivot = math::interpolate(from.pivot, to.pivot, t);
+  state.rotation = math::interpolate(from.rotation, to.rotation, t);
+  state.scale = math::interpolate(from.scale, to.scale, t);
+}
+
+void image_select_transform_apply_handle(bContext *C,
+                                         ImageSelectTransformState *state,
+                                         const wmEvent *event,
+                                         const ImageSelectTransformHandleType handle,
+                                         ARegion *region)
+{
+  if (!state || !region) {
+    image_select_transform_apply_handle_impl(C, state, event, handle, region);
+    return;
+  }
+  const ImageSelectTransformGestureValues before = image_select_transform_gesture_values_get(*state);
+  image_select_transform_apply_handle_impl(C, state, event, handle, region);
+  if (!state->use_surface_decal) {
+    return;
+  }
+
+  /* A Decal fragment cannot leave the surface: past a UV gap the patch stays where it was while
+   * the cage and the gizmo kept going, and the two fell out of step. The step is cut at the last
+   * mapping whose center is still on the surface, so the gizmo stops where the fragment stops. */
+  const auto on_surface = [&]() {
+    return ed::sculpt_paint::image_select_editor_decal_mapping_valid(
+        C, *state, image_select_transform_editor_mapping(*state, region));
+  };
+  if (on_surface()) {
+    return;
+  }
+  const ImageSelectTransformGestureValues after = image_select_transform_gesture_values_get(*state);
+  float valid_t = 0.0f;
+  float invalid_t = 1.0f;
+  for (int i = 0; i < 8; i++) {
+    const float mid = 0.5f * (valid_t + invalid_t);
+    image_select_transform_gesture_values_lerp(*state, before, after, mid);
+    if (on_surface()) {
+      valid_t = mid;
+    }
+    else {
+      invalid_t = mid;
+    }
+  }
+  image_select_transform_gesture_values_lerp(*state, before, after, valid_t);
+  ed::sculpt_paint::image_select_preview_view3d_tag_redraw(C, *state);
 }
 
 bool image_select_transform_calc_gizmo_matrices(const bContext *C,
@@ -1548,6 +1753,27 @@ static void image_select_transform_commit_material_targets(bContext *C,
 }
 
 /**
+ * Decal commit: the active mesh object's surface carries the content (see
+ * #ed::sculpt_paint::image_select_editor_decal_commit). False, with nothing written, when no decal
+ * can be opened; the caller then commits through the UV affine.
+ */
+static bool image_select_transform_commit_decal(bContext *C, ImageSelectTransformState *state)
+{
+  const Vector<ImagePaintSelectionTarget> targets = ed::sculpt_paint::image_select_editor_targets_get(
+      C, state->owner_sima, false);
+  if (targets.is_empty()) {
+    return false;
+  }
+  ed::sculpt_paint::ImageSelect3DPreviewFrame frame;
+  const ARegion *region = state->owner_region ? state->owner_region : CTX_wm_region(C);
+  if (!image_select_transform_editor_frame(*state, region, targets, frame)) {
+    return false;
+  }
+  return ed::sculpt_paint::image_select_editor_decal_commit(
+      C, "Transform Selection (Decal)", state, targets, frame.fragments, frame.mapping);
+}
+
+/**
  * Runs entirely inside #image_select_fragment_commit_with_undo's self-contained undo step: that
  * helper restores the source region to its pre-lift original first, then
  * #image_select_transform_commit_write_final re-clears it (matching what lift_source did
@@ -1563,6 +1789,10 @@ static void image_select_transform_commit(bContext *C, ImageSelectTransformState
   Image *ima = sima->image;
 
   if (state->fragments.is_empty()) {
+    return;
+  }
+
+  if (state->use_surface_decal && image_select_transform_commit_decal(C, state)) {
     return;
   }
 
@@ -1983,6 +2213,7 @@ static wmOperatorStatus image_select_transform_exec(bContext *C, wmOperator *op)
 
   blender::Vector<SelectionTileFragment> fragments;
   if (!image_select_extract_per_tile(op, ima, iuser, &fragments)) {
+    ed::sculpt_paint::image_select_editor_decal_handoff_release(sima);
     return OPERATOR_CANCELLED;
   }
 
@@ -2007,10 +2238,16 @@ static wmOperatorStatus image_select_transform_exec(bContext *C, wmOperator *op)
   state->rotation = RNA_float_get(op->ptr, "rotation");
   state->use_proportional_scale = RNA_boolean_get(op->ptr, "proportional");
   state->material_targets = image_select_transform_material_targets_extract(C, op, sima);
+  /* No live session here (the confirm / redo path): the mode is read from the tool settings, and a
+   * decal that cannot open falls back to the affine inside the commit. */
+  state->use_surface_decal = ed::sculpt_paint::image_select_editor_decal_requested(C);
 
   image_select_transform_lift_source(C, state);
   image_select_transform_commit(C, state);
   image_select_transform_state_free(state);
+  /* The decal a confirm handed over is consumed by the commit above; one it did not use (the
+   * commit fell back to the affine, or had nothing to bake) must not linger. */
+  ed::sculpt_paint::image_select_editor_decal_handoff_release(sima);
 
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
   return OPERATOR_FINISHED;
@@ -2133,6 +2370,15 @@ static wmOperatorStatus image_select_transform_invoke(bContext *C,
 
   state->draw_handle = ED_region_draw_cb_activate(
       state->owner_region_type, draw_select_transform_texture, state, REGION_DRAW_POST_VIEW);
+  /* The 3D Viewport shows the floating fragment too (the lift left a hole on the canvas it reads);
+   * in Decal mode it also carries the commit. */
+  state->use_surface_decal = ed::sculpt_paint::image_select_preview_view3d_attach(
+      C,
+      *state,
+      image_select_transform_preview_frame_get,
+      false,
+      ed::sculpt_paint::image_select_editor_decal_requested(C),
+      op->reports);
 
   image_select_session_set(sima, state);
   op->customdata = nullptr;
@@ -2245,6 +2491,8 @@ static wmOperatorStatus image_select_transform_modal(bContext *C,
       if (event->val == KM_RELEASE) {
         image_select_transform_end_drag(state);
         state->is_dragging = false;
+        /* A mode change requested during the gesture applies now that it is over. */
+        image_select_floating_pending_mode_apply(C, sima);
         op->customdata = nullptr;
         ED_region_tag_redraw(region);
         return OPERATOR_RUNNING_MODAL;
@@ -2353,6 +2601,15 @@ wmOperatorStatus image_select_transform_adopt_move_state(
 
   state->draw_handle = ED_region_draw_cb_activate(
       state->owner_region_type, draw_select_transform_texture, state, REGION_DRAW_POST_VIEW);
+  /* The move's own Viewport preview was removed with its draw handle; this one carries the adopted
+   * fragments (and the channel maps lifted above). */
+  state->use_surface_decal = ed::sculpt_paint::image_select_preview_view3d_attach(
+      C,
+      *state,
+      image_select_transform_preview_frame_get,
+      false,
+      ed::sculpt_paint::image_select_editor_decal_requested(C),
+      op->reports);
 
   /* #image_select_move_convert_to_transform emptied the slot before calling this, so the assert
    * inside also checks that the move session really was handed over and not merely forgotten. */

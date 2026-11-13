@@ -414,6 +414,34 @@ void BKE_paint_layers_projection_frame_from_matrix(const float mat[3][3],
   *r_roll = atan2f(dot_v3v3(mat[0], y_ref), dot_v3v3(mat[0], x_ref));
 }
 
+void BKE_paint_layers_projection_normal_frame_to_tangent(const float frame_axes[3][3],
+                                                         const float tangent[3],
+                                                         const float bitangent[3],
+                                                         const float surface_normal[3],
+                                                         const float n_frame[3],
+                                                         float r_n_tangent[3])
+{
+  /* The frame carries the vector into the surface's space (the axes are the matrix's columns, so
+   * a row reads the component over them directly). */
+  float n_world[3];
+  for (const int i : IndexRange(3)) {
+    n_world[i] = frame_axes[i][0] * n_frame[0] + frame_axes[i][1] * n_frame[1] +
+                 frame_axes[i][2] * n_frame[2];
+  }
+  /* Encoded in the target tangent basis; the components renormalized, since a surface tangent
+   * basis is only approximately orthonormal and the decoded vector came out of an interpolation. */
+  float encoded[3] = {dot_v3v3(n_world, tangent),
+                      dot_v3v3(n_world, bitangent),
+                      dot_v3v3(n_world, surface_normal)};
+  if (!normalize_v3(encoded)) {
+    /* A degenerate input (a zero vector, a degenerate basis) passes through unchanged rather than
+     * encoding a NaN. */
+    copy_v3_v3(r_n_tangent, n_frame);
+    return;
+  }
+  copy_v3_v3(r_n_tangent, encoded);
+}
+
 /**
  * Frame orientation for a surface hit.
  *

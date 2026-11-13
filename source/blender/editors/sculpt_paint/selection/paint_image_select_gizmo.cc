@@ -67,6 +67,8 @@ static wmOperatorStatus paint_select_transform_cage_modal(bContext *C,
 
   if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
     image_select_transform_end_drag(state);
+    /* A mode change requested during the gesture applies now that it is over. */
+    image_select_floating_pending_mode_apply(C, CTX_wm_space_image(C));
     ED_region_tag_redraw(region);
     return OPERATOR_FINISHED;
   }
@@ -108,6 +110,7 @@ static wmOperatorStatus paint_select_transform_anchor_modal(bContext *C,
 
   if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
     image_select_transform_end_drag(state);
+    image_select_floating_pending_mode_apply(C, CTX_wm_space_image(C));
     ED_region_tag_redraw(region);
     return OPERATOR_FINISHED;
   }

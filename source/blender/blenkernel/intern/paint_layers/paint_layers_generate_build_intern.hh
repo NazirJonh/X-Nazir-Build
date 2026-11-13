@@ -793,11 +793,17 @@ class PaintLayersTreeBuilder {
    * up to three copies of \a map through their face UVs and blend the colour and alpha by the
    * surface normal. \a r_nodes receives every node made for this map, so a caller that rolls back
    * removes them.
+   *
+   * \a channel is the channel \a map drives (-1 for a read outside a channel's content, a mask or
+   * a coverage item): a Planar projection that reads a Normal channel re-expresses the sampled
+   * vectors from the frame's basis into the surface tangent basis (see
+   * #normal_frame_tangent_nodes_add), the one conversion the CPU bake runs too.
    */
   MapRead map_read_apply(bNodeTree &tree,
                          const MaterialPaintLayer &row,
                          bNode &map,
-                         Vector<bNode *> &r_nodes);
+                         Vector<bNode *> &r_nodes,
+                         int channel = -1);
 
   /**
    * The shared projection nodes of \a row in \a tree, built on first use: the Texture Coordinate

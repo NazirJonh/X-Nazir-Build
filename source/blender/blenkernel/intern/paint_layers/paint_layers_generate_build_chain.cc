@@ -1848,7 +1848,7 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
     read.alpha = {map, socket_out(*map, "Alpha")};
   }
   else if (map != nullptr) {
-    read = this->map_read_apply(tree, effect, *map, nodes);
+    read = this->map_read_apply(tree, effect, *map, nodes, channel);
     if (read.color.socket == nullptr || read.alpha.socket == nullptr) {
       this->nodes_discard(tree, nodes);
       return false;
@@ -2913,19 +2913,20 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
     grid_.place(*map, layout::Column::Source, 0);
     Vector<bNode *> source_nodes;
     source_nodes.append(map);
-    const MapRead read = this->map_read_apply(tree, ctx.layer, *map, source_nodes);
+    const MapRead read = this->map_read_apply(tree, ctx.layer, *map, source_nodes, ctx.channel);
     if (read.color.socket == nullptr || read.alpha.socket == nullptr) {
       this->nodes_discard(tree, source_nodes);
       return {};
     }
     out.color = read.color;
     if (ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL && out.color.socket != nullptr &&
-        (ctx.record->flag & MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX) != 0)
+        !read.projected && (ctx.record->flag & MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX) != 0)
     {
       /* A DirectX map has its green pointing down; the Normal Map node reads OpenGL, so the green
        * is flipped in nodes the user can see in the Shader Editor. Alpha stays the map's. Done
        * before the remap below, which expects OpenGL vectors, as the composite and the GPU
-       * preview do. */
+       * preview do. A projected read flips inside #map_read_apply instead, where the frame
+       * conversion consumes the stored vectors. */
       const NodeOutput flipped = this->normal_green_flip_nodes_add(
           tree, out.color, source_nodes);
       if (flipped.node != nullptr) {
@@ -2937,6 +2938,8 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
       /* The Mapping moved only the read point; the tangent-space vectors follow it. */
       out.color = this->normal_remap_add(tree, ctx.layer, out.color, &source_nodes);
     }
+    /* A projected read has already re-expressed its vectors inside #map_read_apply (it needs the
+     * stored vectors, not the re-expressed ones); nothing follows it here. */
     if (out.color.socket != nullptr &&
         paint_layer_map_encoding_get(*ctx.record) != MA_PAINT_LAYER_MAP_ENCODING_CHANNEL)
     {

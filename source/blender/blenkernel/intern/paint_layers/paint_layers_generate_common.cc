@@ -1814,6 +1814,172 @@ bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
   return encode_out;
 }
 
+bNodeSocket *normal_frame_tangent_nodes_add(bNodeTree &tree,
+                                            bNode &color_node,
+                                            bNodeSocket &color_socket,
+                                            bNode *rotation_node,
+                                            bNodeSocket *rotation,
+                                            Vector<bNode *> &r_made,
+                                            bNode *&r_encode)
+{
+  enum NodeIndex {
+    Decode,
+    RotateFrame,
+    TangentDir,
+    TangentNormal,
+    VectorToWorldTangent,
+    VectorToWorldNormal,
+    Cross,
+    NormT,
+    NormN,
+    DotX,
+    DotY,
+    DotZ,
+    Combine,
+    NormalizeVec,
+    Encode,
+    NumNodes,
+  };
+  const std::array<UString, NumNodes> names = {"ShaderNodeVectorMath"_ustr,
+                                                    "ShaderNodeVectorRotate"_ustr,
+                                                    "ShaderNodeTangent"_ustr,
+                                                    "ShaderNodeNewGeometry"_ustr,
+                                                    "ShaderNodeVectorTransform"_ustr,
+                                                    "ShaderNodeVectorTransform"_ustr,
+                                                    "ShaderNodeVectorMath"_ustr,
+                                                    "ShaderNodeVectorMath"_ustr,
+                                                    "ShaderNodeVectorMath"_ustr,
+                                                    "ShaderNodeVectorMath"_ustr,
+                                                    "ShaderNodeVectorMath"_ustr,
+                                                    "ShaderNodeVectorMath"_ustr,
+                                                    "ShaderNodeCombineXYZ"_ustr,
+                                                    "ShaderNodeVectorMath"_ustr,
+                                                    "ShaderNodeVectorMath"_ustr};
+  std::array<bNode *, NumNodes> nodes = {};
+  const auto discard = [&]() -> bNodeSocket * {
+    for (bNode *node : nodes) {
+      if (node != nullptr) {
+        bke::node_remove_node(nullptr, tree, *node, true, false);
+      }
+    }
+    return nullptr;
+  };
+  for (const int i : IndexRange(NumNodes)) {
+    bNode *node = bke::node_add_node(nullptr, tree, names[i]);
+    if (node == nullptr) {
+      return discard();
+    }
+    nodes[i] = node;
+  }
+  nodes[Decode]->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
+  nodes[RotateFrame]->custom1 = NODE_VECTOR_ROTATE_TYPE_EULER_XYZ;
+  nodes[Cross]->custom1 = NODE_VECTOR_MATH_CROSS_PRODUCT;
+  nodes[NormT]->custom1 = NODE_VECTOR_MATH_NORMALIZE;
+  nodes[NormN]->custom1 = NODE_VECTOR_MATH_NORMALIZE;
+  nodes[DotX]->custom1 = NODE_VECTOR_MATH_DOT_PRODUCT;
+  nodes[DotY]->custom1 = NODE_VECTOR_MATH_DOT_PRODUCT;
+  nodes[DotZ]->custom1 = NODE_VECTOR_MATH_DOT_PRODUCT;
+  nodes[NormalizeVec]->custom1 = NODE_VECTOR_MATH_NORMALIZE;
+  nodes[Encode]->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
+  /* The surface tangent basis comes from the active render UV map (an empty uv_map reads that),
+   * the same UV the bake's triangle gradient walks, both as world-space directions that go to the
+   * shaded object's space through the transforms. */
+  if (NodeShaderTangent *tangent_storage = static_cast<NodeShaderTangent *>(
+          nodes[TangentDir]->storage))
+  {
+    tangent_storage->direction_type = SHD_TANGENT_UVMAP;
+    tangent_storage->uv_map[0] = '\0';
+  }
+  if (NodeShaderVectTransform *tangent_transform = static_cast<NodeShaderVectTransform *>(
+          nodes[VectorToWorldTangent]->storage))
+  {
+    tangent_transform->type = SHD_VECT_TRANSFORM_TYPE_VECTOR;
+    tangent_transform->convert_from = SHD_VECT_TRANSFORM_SPACE_WORLD;
+    tangent_transform->convert_to = SHD_VECT_TRANSFORM_SPACE_OBJECT;
+  }
+  if (NodeShaderVectTransform *normal_transform = static_cast<NodeShaderVectTransform *>(
+          nodes[VectorToWorldNormal]->storage))
+  {
+    normal_transform->type = SHD_VECT_TRANSFORM_TYPE_NORMAL;
+    normal_transform->convert_from = SHD_VECT_TRANSFORM_SPACE_WORLD;
+    normal_transform->convert_to = SHD_VECT_TRANSFORM_SPACE_OBJECT;
+  }
+  {
+    /* decode: `rgb * 2 - 1`, encode: `rgb * 0.5 + 0.5` — the same Multiply Add pairs
+     * #normal_remap_nodes_add builds. */
+    const auto set_madd = [&](const NodeIndex node, const float multiplier, const float addend) {
+      const char *names_in[2] = {"Vector_001", "Vector_002"};
+      const float values[2] = {multiplier, addend};
+      for (const int i : IndexRange(2)) {
+        bNodeSocket *socket = socket_in(*nodes[node], names_in[i]);
+        if (socket != nullptr && socket->default_value != nullptr) {
+          copy_v3_fl(static_cast<bNodeSocketValueVector *>(socket->default_value)->value,
+                     values[i]);
+        }
+      }
+    };
+    set_madd(Decode, 2.0f, -1.0f);
+    set_madd(Encode, 0.5f, 0.5f);
+  }
+  const auto link = [&](const NodeIndex from, const char *from_name, const NodeIndex to,
+                        const char *to_name) -> bool {
+    bNodeSocket *from_socket = socket_out(*nodes[from], from_name);
+    bNodeSocket *to_socket = socket_in(*nodes[to], to_name);
+    if (from_socket == nullptr || to_socket == nullptr) {
+      return false;
+    }
+    bke::node_add_link(tree, *nodes[from], *from_socket, *nodes[to], *to_socket);
+    return true;
+  };
+  /* decode -> rotate (frame basis into the shaded object's space) -> dots -> combine -> normalize
+   * -> encode. */
+  if (!link(Decode, "Vector", RotateFrame, "Vector") ||
+      !link(RotateFrame, "Vector", DotX, "Vector") ||
+      !link(RotateFrame, "Vector", DotY, "Vector") ||
+      !link(RotateFrame, "Vector", DotZ, "Vector") ||
+      !link(DotX, "Value", Combine, "X") ||
+      !link(DotY, "Value", Combine, "Y") ||
+      !link(DotZ, "Value", Combine, "Z") ||
+      !link(Combine, "Vector", NormalizeVec, "Vector") ||
+      !link(NormalizeVec, "Vector", Encode, "Vector"))
+  {
+    return discard();
+  }
+  /* The tangent basis: tangent (world -> object), surface normal (world -> object), the
+   * bitangent as the normal's cross with the tangent, the pair normalized. The dots read x along
+   * the tangent, y along the bitangent, z along the surface normal. */
+  if (!link(TangentDir, "Tangent", VectorToWorldTangent, "Vector") ||
+      !link(VectorToWorldTangent, "Vector", NormT, "Vector") ||
+      !link(TangentNormal, "Normal", VectorToWorldNormal, "Vector") ||
+      !link(VectorToWorldNormal, "Vector", NormN, "Vector") ||
+      !link(NormN, "Vector", Cross, "Vector") ||
+      !link(NormT, "Vector", Cross, "Vector_001") ||
+      !link(NormT, "Vector", DotX, "Vector_001") ||
+      !link(Cross, "Vector", DotY, "Vector_001") ||
+      !link(NormN, "Vector", DotZ, "Vector_001"))
+  {
+    return discard();
+  }
+  if (rotation != nullptr && rotation_node != nullptr) {
+    bNodeSocket *rotate_rotation = socket_in(*nodes[RotateFrame], "Rotation");
+    if (rotate_rotation == nullptr) {
+      return discard();
+    }
+    bke::node_add_link(tree, *rotation_node, *rotation, *nodes[RotateFrame], *rotate_rotation);
+  }
+  bNodeSocket *decode_vector = socket_in(*nodes[Decode], "Vector");
+  if (decode_vector == nullptr) {
+    return discard();
+  }
+  bke::node_add_link(tree, color_node, color_socket, *nodes[Decode], *decode_vector);
+
+  for (bNode *node : nodes) {
+    r_made.append(node);
+  }
+  r_encode = nodes[Encode];
+  return socket_out(*nodes[Encode], "Vector");
+}
+
 void mapping_input_relay(bNodeTree &tree,
                          bNode &group_input,
                          const bNodeTreeInterfaceSocket *from_iface,

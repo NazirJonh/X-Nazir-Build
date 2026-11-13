@@ -529,6 +529,25 @@ bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
                                     Vector<bNode *> &r_made,
                                     bNode *&r_encode);
 
+/**
+ * Add the frame-to-tangent re-expression of a projected row's encoded tangent-space normal read
+ * from \a color_socket: decode, rotate through the projection frame's own basis into the surface's
+ * space, encode in the surface tangent basis (the tangent the active render UV map gives at the
+ * shaded point, the bitangent as its cross with the surface normal), and renormalize. The one
+ * conversion #BKE_paint_layers_projection_normal_frame_to_tangent runs on the CPU bake, built as
+ * the matching node chain, so the viewport and the bake shade the same relief. \a rotation is the
+ * frame's orientation value (the row's projection rotation socket; null is the identity). The
+ * nodes made are appended to \a r_made, unplaced. \return the encoded output, or null with
+ * nothing left in \a tree.
+ */
+bNodeSocket *normal_frame_tangent_nodes_add(bNodeTree &tree,
+                                            bNode &color_node,
+                                            bNodeSocket &color_socket,
+                                            bNode *rotation_node,
+                                            bNodeSocket *rotation,
+                                            Vector<bNode *> &r_made,
+                                            bNode *&r_encode);
+
 /** The same without a Mirror side-sign vector: the old signature, for callers and tests that do
  * not fold anything. */
 inline bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,

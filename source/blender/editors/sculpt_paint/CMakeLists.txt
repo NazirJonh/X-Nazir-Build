@@ -193,11 +193,29 @@ set(SRC
   selection/paint_image_select_warp.cc
   selection/paint_image_select_gizmo.cc
   selection/paint_image_select_view3d.cc
+  selection/paint_image_select_view3d_fragments.cc
+  selection/paint_image_select_view3d_gesture.cc
+  selection/paint_image_select_view3d_surface_overlay.cc
+  selection/paint_image_select_transform_view3d_draw.cc
+  selection/paint_image_select_transform_view3d_drag.cc
+  selection/paint_image_select_transform_view3d_intern.hh
   selection/paint_image_select_view3d.hh
   selection/paint_image_select_move_view3d.cc
   selection/paint_image_select_paste_layer.cc
   selection/paint_image_select_paste_layer.hh
   selection/paint_image_select_transform_view3d.cc
+  selection/paint_image_select_transform_view3d_decal.cc
+  selection/paint_image_select_surface_decal.cc
+  selection/paint_image_select_surface_decal.hh
+  selection/paint_image_select_surface_unfold.cc
+  selection/paint_image_select_surface_unfold.hh
+  selection/paint_image_select_preview_view3d.cc
+  selection/paint_image_select_preview_view3d.hh
+  selection/paint_image_select_preview_view3d_intern.hh
+  selection/paint_image_select_editor_decal.cc
+  selection/paint_image_select_editor_decal.hh
+  selection/paint_image_select_decal_log.hh
+  selection/paint_image_select_mode_switch.cc
   selection/paint_image_select_warp_view3d.cc
   mesh/paint_image_canvas_symmetry.cc
   mesh/paint_image_symmetry_line.cc
@@ -442,6 +460,7 @@ if(WITH_GTESTS)
     paint_gradient_curve_test.cc
     mesh/paint_test.cc
     tests/paint_image_select_warp_tests.cc
+    tests/paint_image_select_surface_unfold_test.cc
     tests/paint_image_select_region_tests.cc
     tests/paint_image_select_tile_bound_tests.cc
     tests/paint_material_source_correction_test.cc

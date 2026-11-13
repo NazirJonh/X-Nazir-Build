@@ -27,6 +27,13 @@ void image_select_move_state_free(ImageSelectMoveState *state);
  */
 ImageSelectMoveState *image_select_move_state_get(SpaceImage *sima);
 
+/**
+ * Switch the live move session of \a sima between the UV and the Decal mapping (see
+ * #image_select_preview_view3d_mode_switch). No-op without a move session, with an equal mode or
+ * while a drag runs. \return true when the session was touched (redraw).
+ */
+bool image_select_move_live_decal_set(bContext *C, SpaceImage *sima, bool want_decal);
+
 /** Tag-dispatched entry point of #image_select_floating_session_free. */
 void image_select_move_session_free(PaintSelectFloatingSession *session);
 

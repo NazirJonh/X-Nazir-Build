@@ -4321,6 +4321,26 @@ TEST(PaintMaterialPreviewOctave, one_rule_answers_the_size_of_a_preview)
             int2(250, 200));
 }
 
+/** A transform effect's drag shades at 1024 at most, whatever the display says. */
+TEST(PaintMaterialPreviewOctave, interactive_cap_settles_a_large_canvas_on_1024)
+{
+  const auto settled = [](const int2 canvas, const int2 display) {
+    return BKE_paint_material_preview_octave_size_for(
+        canvas, BKE_paint_material_interactive_max_output(display), int2(0));
+  };
+  /* An unknown display, a display as large as the canvas and a larger one all cap the same. */
+  EXPECT_EQ(settled(int2(4096, 4096), int2(0)), int2(1024, 1024));
+  EXPECT_EQ(settled(int2(4096, 4096), int2(4096, 4096)), int2(1024, 1024));
+  EXPECT_EQ(settled(int2(2048, 2048), int2(0)), int2(1024, 1024));
+  /* A canvas at or below the cap is never reduced by it; a smaller display still wins. */
+  EXPECT_EQ(settled(int2(1024, 1024), int2(0)), int2(1024, 1024));
+  EXPECT_EQ(settled(int2(512, 512), int2(0)), int2(512, 512));
+  EXPECT_EQ(settled(int2(4096, 4096), int2(200, 200)), int2(512, 512));
+  /* Without the cap the same unknown display leaves the canvas: the default is not interactive. */
+  EXPECT_EQ(BKE_paint_material_preview_octave_size_for(int2(4096, 4096), int2(0), int2(0)),
+            int2(4096, 4096));
+}
+
 TEST(PaintMaterialPreviewOctave, a_rectangle_scales_outwards_between_two_grids)
 {
   rcti rect;

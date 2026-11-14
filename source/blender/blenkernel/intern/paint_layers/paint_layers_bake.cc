@@ -142,6 +142,7 @@ std::atomic<bool> &paint_layers_bake_stroke_active()
 
 void BKE_paint_layers_bake_runtime_free(Material &ma)
 {
+  bake_drag_forget_material(ma.id.session_uid);
   BKE_paint_layers_source_material_hash_forget(ma);
   std::lock_guard lock(bake_runtime_mutex());
   BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
@@ -518,6 +519,13 @@ bool BKE_paint_layers_bake_stroke_active_get()
   return paint_layers_bake_stroke_active().load();
 }
 
+/* The bake of a Decal row is re-rendered at every step of a handle drag; at the canvas side that is
+ * hundreds of milliseconds on the main thread, so the drag bakes at this side at most. */
+constexpr int BAKE_DRAG_SIZE_MAX = 1024;
+/* A drag bake still has to be a valid map side, and the reduced build must cost less than the
+ * full one it stands in for. */
+static_assert(BAKE_DRAG_SIZE_MAX >= 64 && BAKE_DRAG_SIZE_MAX <= 4096);
+
 /** Let go of the users \a layer's bake holds; the maps stay in `Main` as orphans if nothing else uses them. */
 static void bake_release_users(MaterialPaintLayerBake &bake)
 {
@@ -535,6 +543,8 @@ static void bake_release_users(MaterialPaintLayerBake &bake)
 
 bool BKE_paint_layers_bake_clear(Material &ma, MaterialPaintLayer &layer)
 {
+  /* A row that goes away cannot owe a full bake later. */
+  bake_drag_reduced_forget(ma, layer);
   if (!bake_row_owned(ma, layer)) {
     return false;
   }
@@ -1366,6 +1376,10 @@ void BKE_paint_layers_bake_hash(const Material &ma,
 bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer &layer)
 {
   if (layer.bake == nullptr) {
+    return false;
+  }
+  if (bake_drag_reduced_owes(ma, layer)) {
+    /* Baked below its size for a drag that is over: the full bake is owed. */
     return false;
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
@@ -2806,6 +2820,10 @@ static int bake_size_from_content(const Material &ma, const MaterialPaintLayer &
  */
 int bake_size_for(const Material &ma, const MaterialPaintLayer &row)
 {
+  /* The stored size of a row baked reduced for a drag is the drag's, not the row's. */
+  if (const int drag_full = bake_drag_full_size(ma, row); drag_full > 0) {
+    return drag_full;
+  }
   if (row.bake != nullptr && (row.bake->flag & MA_PAINT_LAYER_BAKE_SIZE_EXPLICIT) != 0 &&
       row.bake->size > 0)
   {
@@ -3499,10 +3517,19 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
       if (heavy) {
         continue;
       }
-      const int size = bake_size_for(ma, layer);
+      int size = bake_size_for(ma, layer);
       if (size <= 0) {
         /* No map has known dimensions yet: nothing to allocate a bake structure for. */
         continue;
+      }
+      const int full_size = size;
+      if (size > BAKE_DRAG_SIZE_MAX && bake_subtree_has_decal_effect(layer) &&
+          bake_drag_active(ma))
+      {
+        /* A handle drag re-renders this row at every step: the maps are re-created at the drag
+         * size, and the full bake is owed once the drag ends (#BKE_paint_layers_bake_drag_set). */
+        size = BAKE_DRAG_SIZE_MAX;
+        bake_drag_reduced_remember(ma, layer, full_size);
       }
       if (paint_layer_mask_item_bakes_effect(layer)) {
         /* The item's grey is one map of its own, written whole: a stroke into the mask defers it
@@ -3648,6 +3675,9 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
       if (object_num > 0) {
         bake_object_identity_record(
             ma, layer, paint_layers_bake_target_identity(targets.objects[0], size));
+      }
+      if (size == full_size) {
+        bake_drag_reduced_forget(ma, layer);
       }
       if (gradient_row) {
         /* A synchronous bake writes and drops each channel as it renders, so it holds no results

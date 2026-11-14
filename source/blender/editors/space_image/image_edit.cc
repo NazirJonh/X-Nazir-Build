@@ -1000,7 +1000,10 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
           *ma, pass, previous_canvas, previous_output);
       stack_output_size = BKE_paint_material_preview_octave_size_for(
           int2(stack_width, stack_height),
-          sima->runtime->combined_preview_draw.display_size,
+          ed::material_combined::gradient_interactive_is_coarse(*ma) ?
+              BKE_paint_material_interactive_max_output(
+                  sima->runtime->combined_preview_draw.display_size) :
+              sima->runtime->combined_preview_draw.display_size,
           previous_output);
     }
   }

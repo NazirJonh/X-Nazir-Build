@@ -1284,7 +1284,7 @@ class PaintMaterialCompositeLinearSession {
    * #BKE_paint_material_composite_eval_row_content renders. The row has to outlive the session.
    */
   static PaintMaterialCompositeLinearSession session_open_row(
-      const PaintMaterialCompositeImageLayer &row);
+      const PaintMaterialCompositeImageLayer &row, int eval_width = 0, int eval_height = 0);
 
   /** Whether the stack was built: false leaves nothing to evaluate. */
   bool ok() const
@@ -1376,7 +1376,9 @@ bool BKE_paint_material_composite_eval_row_content(const PaintMaterialCompositeI
                                                    float *r_color_rgba,
                                                    float *r_coverage_gray,
                                                    const rcti *region,
-                                                   int channel);
+                                                   int channel,
+                                                   int eval_width = 0,
+                                                   int eval_height = 0);
 
 /**
  * Whether scene-linear values must be converted to or from \a colorspace: it is a known colour

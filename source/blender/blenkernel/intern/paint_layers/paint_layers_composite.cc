@@ -1640,6 +1640,9 @@ void composite_image_layers_collect(const Material &ma,
                                      describe_only,
                                      height_won_cache,
                                      painted_object);
+      if (&layer == list.last) {
+        break;
+      }
       continue;
     }
     PaintMaterialCompositeImageLayer out;
@@ -1674,6 +1677,11 @@ void composite_image_layers_collect(const Material &ma,
             ma, prefix, layer, context_surface, isolating, height_won_cache);
       }
       r_layers.append(std::move(out));
+    }
+    /* A Compare row's prefix is a sub-range of its siblings whose `last` is the row below it; the
+     * range-for walks `next` to the end of the whole list, so the bound is checked here. */
+    if (&layer == list.last) {
+      break;
     }
   }
 }

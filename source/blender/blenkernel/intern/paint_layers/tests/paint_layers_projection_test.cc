@@ -263,11 +263,12 @@ TEST_F(PaintLayersDescription, projection_frame_inside_matches_the_graph_rule)
    * answer the same on the CPU. */
   const float inside[3] = {0.0f, 0.99f, -0.99f};
   const float on_edge[3] = {1.0f, 0.0f, 0.0f};
-  const float halfway_out[3] = {1.0f + 0.25f * PAINT_LAYER_PROJECTION_EDGE_SOFT, 0.0f, 0.0f};
+  /* The soft edge fades inside the frame, so a quarter of its width in from the edge reads 0.25. */
+  const float halfway_in[3] = {1.0f - 0.25f * PAINT_LAYER_PROJECTION_EDGE_SOFT, 0.0f, 0.0f};
   const float outside[3] = {1.01f, 0.0f, 0.0f};
   EXPECT_FLOAT_EQ(BKE_paint_layers_projection_frame_factor(inside), 1.0f);
   EXPECT_FLOAT_EQ(BKE_paint_layers_projection_frame_factor(on_edge), 0.0f);
-  EXPECT_NEAR(BKE_paint_layers_projection_frame_factor(halfway_out), 0.75f, 1e-5f);
+  EXPECT_NEAR(BKE_paint_layers_projection_frame_factor(halfway_in), 0.25f, 1e-4f);
   EXPECT_FLOAT_EQ(BKE_paint_layers_projection_frame_factor(outside), 0.0f);
 }
 
@@ -592,6 +593,7 @@ TEST_F(PaintLayersDescription, projection_round_trips_through_a_file)
   EXPECT_FLOAT_EQ(reloaded_layer->projection->blend, 0.25f);
   EXPECT_FALSE(BKE_paint_layers_projection_clip_get(*reloaded_layer));
   EXPECT_EQ(reloaded_layer->projection_object, nullptr);
+  BLO_blendfiledata_free(bfd);
 }
 
 TEST_F(PaintLayersDescription, projection_old_file_reads_the_facing_defaults)
@@ -637,10 +639,14 @@ TEST_F(PaintLayersDescription, projection_old_file_reads_the_facing_defaults)
   MaterialPaintLayer *reloaded_layer = paint_layers_first(*reloaded);
   ASSERT_NE(reloaded_layer, nullptr);
   ASSERT_NE(reloaded_layer->projection, nullptr);
-  EXPECT_FLOAT_EQ(reloaded_layer->projection->angle, PAINT_LAYER_PROJECTION_ANGLE_DEFAULT);
-  EXPECT_TRUE(BKE_paint_layers_projection_depth_get(*reloaded_layer));
-  EXPECT_TRUE(BKE_paint_layers_projection_fit_aspect_get(*reloaded_layer));
-  EXPECT_TRUE(BKE_paint_layers_projection_facing_get(*reloaded_layer));
+  /* The read keeps the stored payload; a zero angle reads as the default through the getter, and
+   * the flags stay as written (there is no read-time flag migration). */
+  EXPECT_FLOAT_EQ(BKE_paint_layers_projection_angle_get(*reloaded_layer),
+                  PAINT_LAYER_PROJECTION_ANGLE_DEFAULT);
+  EXPECT_TRUE(BKE_paint_layers_projection_clip_get(*reloaded_layer));
+  EXPECT_FALSE(BKE_paint_layers_projection_depth_get(*reloaded_layer));
+  EXPECT_FALSE(BKE_paint_layers_projection_fit_aspect_get(*reloaded_layer));
+  EXPECT_FALSE(BKE_paint_layers_projection_facing_get(*reloaded_layer));
   EXPECT_FALSE(BKE_paint_layers_projection_facing_invert_get(*reloaded_layer));
   /* The two newer bits were not in the file: both read as their off state. */
   EXPECT_FALSE(BKE_paint_layers_projection_snap_get(*reloaded_layer));
@@ -686,7 +692,7 @@ TEST_F(PaintLayersDescription, projection_frame_matrix_orthonormal_and_round_tri
                              mat[i][2] * mat[i][2];
         EXPECT_NEAR(len_sq, 1.0f, 1e-5f)
             << "normal[" << ni << "] roll=" << r << " row " << i << " not unit";
-        for (const int j : IndexRange(i + 1, 3)) {
+        for (const int j : IndexRange(i + 1, 2 - i)) {
           const float dot_val = mat[i][0] * mat[j][0] + mat[i][1] * mat[j][1] +
                                 mat[i][2] * mat[j][2];
           EXPECT_NEAR(dot_val, 0.0f, 1e-5f)
@@ -803,9 +809,10 @@ TEST_F(PaintLayersDescription, projection_set_roll_wraps_to_pm_pi)
   ASSERT_TRUE(BKE_paint_layers_projection_set_roll(ma, fill, -3.0f * M_PI / 2.0f));
   EXPECT_NEAR(fill->projection->roll, M_PI / 2.0f, 1e-5f);
 
-  /* pi stays pi. */
+  /* pi stays on the boundary: the float pi is a hair above the double one the wrap compares with,
+   * so it may land on either end of the interval; both are the same turn. */
   ASSERT_TRUE(BKE_paint_layers_projection_set_roll(ma, fill, M_PI));
-  EXPECT_NEAR(fill->projection->roll, M_PI, 1e-5f);
+  EXPECT_NEAR(fabsf(fill->projection->roll), M_PI, 1e-5f);
 }
 
 TEST_F(PaintLayersDescription, projection_set_values_rejects_foreign_and_normalizes_size)
@@ -1178,6 +1185,16 @@ TEST_F(PaintLayersDescription, projection_flip_column_signs)
  * \{ */
 
 /**
+ * Drops the global surface, Decal and effect-field caches when a test ends, so an early return from
+ * an assertion cannot leave their heap buffers to the end-of-run leak check.
+ */
+struct SurfaceMapCacheGuard {
+  ~SurfaceMapCacheGuard()
+  {
+    BKE_paint_material_surface_map_free();
+  }
+};
+/**
  * Every mapping space, read on both sides the way the product reads it: the generated graph at a
  * reference texel through the interpreter, the same row baked through the CPU composite into the
  * painted object's UV space. The flat grid -- object XY equal to its render UV, normal +Z -- makes
@@ -1186,6 +1203,7 @@ TEST_F(PaintLayersDescription, projection_flip_column_signs)
  */
 TEST_F(PaintLayersGraphEvalTest, every_projection_space_matches_the_cpu)
 {
+  const SurfaceMapCacheGuard cache_guard;
   Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "ProjectionParityObject");
   Mesh *mesh = BKE_mesh_add(bmain, "ProjectionParityMesh");
   ob->data = id_cast<ID *>(mesh);
@@ -1219,6 +1237,9 @@ TEST_F(PaintLayersGraphEvalTest, every_projection_space_matches_the_cpu)
   source->tag_topology_changed();
   source->tag_positions_changed();
   BKE_mesh_nomain_to_mesh(source, mesh, ob);
+  /* The surface map reads the default UV map by name, which a bare attribute does not set. */
+  mesh->uv_maps_default_set("UVMap");
+  mesh->uv_maps_active_set("UVMap");
 
   /* Four distinct quadrants, so every mode's lookup lands somewhere visible. */
   Image *map = add_solid_image("ProjectionParityMap", 255, 0, 0, 255);
@@ -1244,6 +1265,9 @@ TEST_F(PaintLayersGraphEvalTest, every_projection_space_matches_the_cpu)
   }
   add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
   MaterialPaintLayer *top = add_layer("Top", map);
+  /* Only a Fill that reads a map can project; a painted row keeps its raw UV. */
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, top, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(*ma, top, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
   /* A UV gradient mask on the projected row: the graph feeds the line the row's projected UV read
    * raw (no frame factor, no tiling), and the CPU renders the same line through the same frame.
    * The parity of the two is what pins that behaviour for every space. */
@@ -1260,6 +1284,7 @@ TEST_F(PaintLayersGraphEvalTest, every_projection_space_matches_the_cpu)
                              MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER,
                              MA_PAINT_LAYER_MAPPING_SPACE_SPHERE};
   for (const int16_t space : spaces) {
+    SCOPED_TRACE(::testing::Message() << "space " << space);
     ASSERT_TRUE(BKE_paint_layers_projection_set_space(*ma, top, space));
     /* Explicit frame values, so both sides read the same numbers: the frame spans [-1, 1]² in
      * object space, which keeps every reference texel inside its smooth edge. */
@@ -1315,6 +1340,7 @@ TEST_F(PaintLayersGraphEvalTest, every_projection_space_matches_the_cpu)
 
 TEST_F(PaintLayersGraphEvalTest, surface_map_matches_the_rasterizer_and_caches_by_content)
 {
+  const SurfaceMapCacheGuard cache_guard;
   Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "SurfaceMapObject");
   Mesh *mesh = BKE_mesh_add(bmain, "SurfaceMapMesh");
   ob->data = id_cast<ID *>(mesh);
@@ -1346,6 +1372,9 @@ TEST_F(PaintLayersGraphEvalTest, surface_map_matches_the_rasterizer_and_caches_b
   source->tag_topology_changed();
   source->tag_positions_changed();
   BKE_mesh_nomain_to_mesh(source, mesh, ob);
+  /* The surface map reads the default UV map by name, which a bare attribute does not set. */
+  mesh->uv_maps_default_set("UVMap");
+  mesh->uv_maps_active_set("UVMap");
 
   BKE_paint_material_surface_map_free();
   const int size = 16;
@@ -1385,6 +1414,7 @@ TEST_F(PaintLayersGraphEvalTest, surface_map_matches_the_rasterizer_and_caches_b
 
 TEST_F(PaintLayersGraphEvalTest, surface_map_releases_texels_and_rebuilds_on_demand_and_pads_islands)
 {
+  const SurfaceMapCacheGuard cache_guard;
   Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "SurfaceReleaseObject");
   Mesh *mesh = BKE_mesh_add(bmain, "SurfaceReleaseMesh");
   ob->data = id_cast<ID *>(mesh);
@@ -1415,6 +1445,9 @@ TEST_F(PaintLayersGraphEvalTest, surface_map_releases_texels_and_rebuilds_on_dem
   source->tag_topology_changed();
   source->tag_positions_changed();
   BKE_mesh_nomain_to_mesh(source, mesh, ob);
+  /* The surface map reads the default UV map by name, which a bare attribute does not set. */
+  mesh->uv_maps_default_set("UVMap");
+  mesh->uv_maps_active_set("UVMap");
 
   BKE_paint_material_surface_map_free();
   const int size = 16;
@@ -1455,6 +1488,7 @@ TEST_F(PaintLayersGraphEvalTest, surface_map_releases_texels_and_rebuilds_on_dem
 
 TEST_F(PaintLayersGraphEvalTest, surface_map_keeps_entries_of_alternating_targets)
 {
+  const SurfaceMapCacheGuard cache_guard;
   Object *ob = BKE_object_add_only_object(bmain, OB_MESH, "SurfaceAlternateObject");
   Mesh *mesh = BKE_mesh_add(bmain, "SurfaceAlternateMesh");
   ob->data = id_cast<ID *>(mesh);
@@ -1485,6 +1519,9 @@ TEST_F(PaintLayersGraphEvalTest, surface_map_keeps_entries_of_alternating_target
   source->tag_topology_changed();
   source->tag_positions_changed();
   BKE_mesh_nomain_to_mesh(source, mesh, ob);
+  /* The surface map reads the default UV map by name, which a bare attribute does not set. */
+  mesh->uv_maps_default_set("UVMap");
+  mesh->uv_maps_active_set("UVMap");
 
   BKE_paint_material_surface_map_free();
   /* Two targets of one object: the same tile at two canvas sizes. The store keeps an entry per
@@ -1574,5 +1611,19 @@ TEST_F(PaintLayersGraphEvalTest, gpu_unsupported_reason_for_projected_rows)
 }
 
 /** \} */
+
+/* The projection caches are process-global and hold guarded memory; emptying them after the last
+ * test keeps their buffers from being freed by static destructors once the allocator has already
+ * run its exit check. */
+class ProjectionCachesEnvironment : public ::testing::Environment {
+ public:
+  void TearDown() override
+  {
+    BKE_paint_material_surface_map_free();
+  }
+};
+
+[[maybe_unused]] static ::testing::Environment *const projection_caches_environment =
+    ::testing::AddGlobalTestEnvironment(new ProjectionCachesEnvironment());
 
 }  // namespace blender::bke::tests

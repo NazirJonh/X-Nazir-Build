@@ -1491,6 +1491,10 @@ void BKE_paint_material_surface_map_free()
   /* The Decal maps are rebuilt from the same mesh data, so they leave with the surface map. */
   BKE_paint_material_decal_map_free();
   composite_effect_space_field_cache_free();
+  /* The mesh hashes are keyed on mesh pointers: a file being replaced frees those meshes, and the
+   * entries' buffer is guarded memory a static destructor would free too late. */
+  std::lock_guard mesh_lock(g_mesh_content_cache.mutex);
+  g_mesh_content_cache.entries.clear_and_shrink();
 }
 
 /** \} */

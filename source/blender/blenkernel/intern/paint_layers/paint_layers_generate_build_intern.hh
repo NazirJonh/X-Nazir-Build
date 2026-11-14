@@ -117,6 +117,9 @@ struct ProjectionNodes {
   bNode *uv[3] = {};
   /** Normalized face weights for Box and Triplanar; unused for the single-sample modes. */
   bNode *weight[3] = {};
+  /** Cube only, and only while the row has transform effects: the local `[0, 1]` UV of the cell the
+   * hard face weights pick, the coordinate the steps run on before they return to the atlas. */
+  bNode *cube_local = nullptr;
   /** The frame's factor: one inside, fading out at the frame edge, the depth slab and the facing
    * limit mixed in, then with the clip toggle. */
   bNode *clip = nullptr;
@@ -841,6 +844,32 @@ class PaintLayersTreeBuilder {
                               bNode &uv,
                               Vector<bNode *> &r_nodes);
 
+  /** What #projection_steps_apply made for one projected UV. */
+  struct ProjectionSteps {
+    /** The node whose "Vector" output is the stepped UV: \a uv itself when no step applies. */
+    bNode *uv_node = nullptr;
+    /** The product of the steps' wrap-Clip factors; empty when no step clips. */
+    NodeOutput clip;
+    struct Step {
+      const MaterialPaintLayer *effect = nullptr;
+      /** The fold's side signs, empty when the step folds nothing. */
+      NodeOutput side_sign;
+    };
+    Vector<Step, 4> steps;
+  };
+
+  /**
+   * Run \a uv (one face UV or the single-sample UV of the projected \a row, after tiling) through
+   * the chains of the row's transform effects, in list order, the steps the CPU resample applies
+   * to the map coordinate before the row's own UV adjust (#projection_uv_mapped). Cube runs them on
+   * the picked cell's local UV (#ProjectionNodes::cube_local) and returns to the atlas. The values ride the effects' group inputs, the chains are made per
+   * call (a Box face has a chain of its own). \a r_nodes receives what was made.
+   */
+  ProjectionSteps projection_steps_apply(bNodeTree &tree,
+                                         const MaterialPaintLayer &row,
+                                         bNode &uv,
+                                         Vector<bNode *> &r_nodes);
+
   /**
    * The frame clip factor of \a row: `mix(1, inside, clip)`, where `inside` is one inside the
    * frame's bounds and zero outside. Shared by every channel of the row. Empty while the row does
@@ -869,7 +898,8 @@ class PaintLayersTreeBuilder {
    */
   bNode *mapping_node_ensure(bNodeTree &tree,
                              const MaterialPaintLayer &row,
-                             Vector<bNode *> &r_nodes);
+                             Vector<bNode *> &r_nodes,
+                             const NodeOutput *effect_source = nullptr);
 
   /**
    * The clip factor of \a row's UV wrap: one inside the unit square, zero outside along every axis
@@ -880,6 +910,16 @@ class PaintLayersTreeBuilder {
                                  const MaterialPaintLayer &row,
                                  Vector<bNode *> &r_nodes,
                                  bool create_mapping = true);
+
+  /**
+   * The inside-the-unit-square test of \a row's UV wrap read over \a mapped, an arbitrary chain
+   * output: what #mapping_clip_factor builds over the row's own Mapping, without the cache. The
+   * projected rows build their per-face chains' factors with it. Empty while both axes repeat.
+   */
+  NodeOutput mapping_clip_inside_add(bNodeTree &tree,
+                                     const MaterialPaintLayer &row,
+                                     NodeOutput mapped,
+                                     Vector<bNode *> &r_nodes);
 
   /**
    * Remove \a nodes from \a tree, forgetting any row Mapping among them. A Mapping made by an

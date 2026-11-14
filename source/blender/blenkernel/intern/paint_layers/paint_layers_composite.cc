@@ -3191,11 +3191,11 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
     if (layer.color_image->source == IMA_SRC_TILED) {
       return "a projected row reads a tiled map, which the GPU path does not lay";
     }
-    /* A projection takes precedence over the transform effects on the CPU and in the graph, and the
-     * projected read of the shader takes no steps. Refused explicitly, so the contract is checked
-     * here instead of resting on three places happening to drop the same steps. */
-    if (!layer.input_transforms.is_empty()) {
-      return "a projected row with transform effects is not laid by the GPU path";
+    /* The transform effects' steps are laid in every projection space, Cube inside its atlas cell.
+     * A projected tangent-space Normal row stays with the CPU: the steps' per-tap covariant remap
+     * and the frame-to-tangent conversion of its vectors are not run by the projected read. */
+    if (layer.mapping.tangent_normal && !layer.input_transforms.is_empty()) {
+      return "a projected Normal row with transform effects is not laid by the GPU path";
     }
   }
   /* A projected correction or mask item map is laid through the same frame as a row's. The CPU only

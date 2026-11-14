@@ -433,7 +433,9 @@ NodeOutput PaintLayersTreeBuilder::input_transforms_source_ensure(
    * chain reads the previous one's output, so a fold's side signs and a clip factor of a later
    * step are evaluated where that step's fold acts. */
   for (const MaterialPaintLayer *effect : BKE_paint_layers_active_transform_effects(ma_, row)) {
-    bNode *mapping = this->mapping_node_ensure(tree, *effect, r_nodes);
+    /* The chain starts from the previous effect's output, not from the raw coordinate: without it
+     * every effect would restart from the UV and only the last one would show. */
+    bNode *mapping = this->mapping_node_ensure(tree, *effect, r_nodes, &source);
     if (mapping == nullptr) {
       continue;
     }
@@ -448,7 +450,8 @@ NodeOutput PaintLayersTreeBuilder::input_transforms_source_ensure(
 
 bNode *PaintLayersTreeBuilder::mapping_node_ensure(bNodeTree &tree,
                                                    const MaterialPaintLayer &row,
-                                                   Vector<bNode *> &r_nodes)
+                                                   Vector<bNode *> &r_nodes,
+                                                   const NodeOutput *effect_source)
 {
   if (!BKE_paint_layers_mapping_remaps(ma_, row)) {
     return nullptr;
@@ -456,13 +459,19 @@ bNode *PaintLayersTreeBuilder::mapping_node_ensure(bNodeTree &tree,
   if (bNode **found = mapping_nodes_.lookup_ptr(&row)) {
     return *found;
   }
-  /* A transform effect builds from the raw coordinate (it has no effects of its own); any other
-   * row builds from its transform effects' composed output, so the row's own chain and the clip
-   * factor and the Normal remap read the same composed UV every map of the row reads. */
+  /* A transform effect builds from \a effect_source, the previous effect's output (the raw
+   * coordinate for the first one); any other row builds from its transform effects' composed
+   * output, so the row's own chain and the clip factor and the Normal remap read the same composed
+   * UV every map of the row reads. */
   NodeOutput source = {nullptr, nullptr};
   if (paint_layer_kind_transforms_input(row)) {
-    bNode *coord = this->uv_coordinate_ensure(tree);
-    source = (coord != nullptr) ? NodeOutput{coord, socket_out(*coord, "UV")} : NodeOutput{};
+    if (effect_source != nullptr) {
+      source = *effect_source;
+    }
+    else {
+      bNode *coord = this->uv_coordinate_ensure(tree);
+      source = (coord != nullptr) ? NodeOutput{coord, socket_out(*coord, "UV")} : NodeOutput{};
+    }
   }
   else {
     source = this->input_transforms_source_ensure(tree, row, r_nodes);
@@ -583,16 +592,6 @@ NodeOutput PaintLayersTreeBuilder::mapping_clip_factor(bNodeTree &tree,
     return *cached;
   }
 
-  /* An axis is inside the unit square exactly when `floor(a) == 0`; Compare with an epsilon of
-   * one half reads that without a pair of range tests, the CPU's `0 <= a < 1`. Everything made
-   * is kept apart until the factor is complete, so a failure leaves nothing behind. */
-  Vector<bNode *> made;
-  const auto fail = [&]() {
-    for (bNode *node : made) {
-      bke::node_remove_node(nullptr, tree, *node, true, false);
-    }
-    return NodeOutput{};
-  };
   bNode *mapping = nullptr;
   if (bNode **found = mapping_nodes_.lookup_ptr(&row)) {
     mapping = *found;
@@ -603,7 +602,40 @@ NodeOutput PaintLayersTreeBuilder::mapping_clip_factor(bNodeTree &tree,
   if (mapping == nullptr) {
     return {};
   }
-  bNodeSocket *mapping_out = socket_out(*mapping, "Vector");
+  const NodeOutput inside = this->mapping_clip_inside_add(
+      tree, row, {mapping, socket_out(*mapping, "Vector")}, r_nodes);
+  if (inside.node != nullptr) {
+    mapping_clip_masks_.add(&row, inside);
+  }
+  return inside;
+}
+
+NodeOutput PaintLayersTreeBuilder::mapping_clip_inside_add(bNodeTree &tree,
+                                                           const MaterialPaintLayer &row,
+                                                           const NodeOutput mapped,
+                                                           Vector<bNode *> &r_nodes)
+{
+  bool repeat_u = true;
+  bool repeat_v = true;
+  BKE_paint_layers_mapping_wrap_axes(BKE_paint_layers_mapping_wrap_get(row), repeat_u, repeat_v);
+  if (repeat_u && repeat_v) {
+    return {};
+  }
+  /* An axis is inside the unit square exactly when `floor(a) == 0`; Compare with an epsilon of
+   * one half reads that without a pair of range tests, the CPU's `0 <= a < 1`. Everything made
+   * is kept apart until the factor is complete, so a failure leaves nothing behind. */
+  Vector<bNode *> made;
+  const auto fail = [&]() {
+    for (bNode *node : made) {
+      bke::node_remove_node(nullptr, tree, *node, true, false);
+    }
+    return NodeOutput{};
+  };
+  bNode *mapping = mapped.node;
+  bNodeSocket *mapping_out = mapped.socket;
+  if (mapping == nullptr || mapping_out == nullptr) {
+    return {};
+  }
   bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
   if (separate != nullptr) {
     made.append(separate);
@@ -669,7 +701,6 @@ NodeOutput PaintLayersTreeBuilder::mapping_clip_factor(bNodeTree &tree,
   if (inside.node == nullptr) {
     return fail();
   }
-  mapping_clip_masks_.add(&row, inside);
   for (bNode *node : made) {
     r_nodes.append(node);
   }

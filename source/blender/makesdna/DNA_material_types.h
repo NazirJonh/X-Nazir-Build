@@ -1360,6 +1360,14 @@ enum eMaterialPaintLayerMappingFlag : int16_t {
    * so switching Mirror off keeps what was configured. Zeroed rows start with Mirror off.
    */
   MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED = 1 << 5,
+  /**
+   * Mirror U keeps the smaller side instead: the fold is `u' = mirror_center.x - |u - mirror_center.x|`,
+   * so the larger side shows what the smaller one does. Read only with #MA_PAINT_LAYER_MAPPING_MIRROR_U;
+   * zero (the default) is the original fold, so older files read back as before.
+   */
+  MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE = 1 << 6,
+  /** The negative fold of #MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE, on V. */
+  MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE = 1 << 7,
 };
 ENUM_OPERATORS(eMaterialPaintLayerMappingFlag)
 

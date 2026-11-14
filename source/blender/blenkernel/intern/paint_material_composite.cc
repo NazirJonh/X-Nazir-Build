@@ -1281,6 +1281,11 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
       continue;
     }
     const float *sample = item_samples[item_i];
+    if (item.effect_filter != 0 && sample == nullptr) {
+      /* A CPU-computed effect whose grey is not there (a size the tile does not match, a bake not
+       * written yet): the mask stays as it is below, instead of the constant replacing it. */
+      continue;
+    }
     /* A Gradient has no map: its ramp is computed at the texel, so no canvas-sized buffer of it
      * exists. A texel outside the surface's islands samples as zero, which covers nothing. */
     float gradient_rgba[4];
@@ -2158,6 +2163,9 @@ struct CompositeMappingTransform {
   float offset_v = 0.0f;
   bool mirror_u = false;
   bool mirror_v = false;
+  /* The fold keeps the smaller side of the center instead of the larger one. */
+  bool mirror_negative_u = false;
+  bool mirror_negative_v = false;
   float mirror_center_u = 0.5f;
   float mirror_center_v = 0.5f;
   bool repeat_u = true;
@@ -2175,6 +2183,10 @@ struct CompositeMappingTransform {
         offset_v(mapping.offset[1]),
         mirror_u(mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U)),
         mirror_v(mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V)),
+        mirror_negative_u(mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U) &&
+                          mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE)),
+        mirror_negative_v(mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V) &&
+                          mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE)),
         mirror_center_u(mapping.mirror_center[0]),
         mirror_center_v(mapping.mirror_center[1])
   {
@@ -2191,13 +2203,15 @@ struct CompositeMappingTransform {
    * The covariant counterpart of the fold, the flip a tangent normal's U component takes. */
   float side_u(const float u) const
   {
-    return mirror_u ? BKE_paint_layers_mapping_mirror_side(u, mirror_center_u) : 1.0f;
+    return mirror_u ? BKE_paint_layers_mapping_mirror_side(u, mirror_center_u, mirror_negative_u) :
+                      1.0f;
   }
 
   /** #side_u along V. */
   float side_v(const float v) const
   {
-    return mirror_v ? BKE_paint_layers_mapping_mirror_side(v, mirror_center_v) : 1.0f;
+    return mirror_v ? BKE_paint_layers_mapping_mirror_side(v, mirror_center_v, mirror_negative_v) :
+                      1.0f;
   }
 
   /** The mapped coordinate of the canvas point (\a u, \a v), with no repeat: the chain floors the
@@ -2208,10 +2222,10 @@ struct CompositeMappingTransform {
     float fu = u;
     float fv = v;
     if (mirror_u) {
-      fu = BKE_paint_layers_mapping_mirror_fold(u, mirror_center_u);
+      fu = BKE_paint_layers_mapping_mirror_fold(u, mirror_center_u, mirror_negative_u);
     }
     if (mirror_v) {
-      fv = BKE_paint_layers_mapping_mirror_fold(v, mirror_center_v);
+      fv = BKE_paint_layers_mapping_mirror_fold(v, mirror_center_v, mirror_negative_v);
     }
     const float ru = fu * cos_rot - fv * sin_rot;
     const float rv = fu * sin_rot + fv * cos_rot;
@@ -2607,6 +2621,21 @@ static void composite_mesh_map_remap(ImBuf *&r_ibuf,
     composite_image_own(resampled, r_locks);
     r_ibuf = resampled;
   }
+}
+
+ImBuf *BKE_paint_material_composite_buffer_remap(const ImBuf *src,
+                                                 const int width,
+                                                 const int height,
+                                                 const Span<PaintMaterialCompositeMapping> steps)
+{
+  /* The same chain and the same resample a map read goes through, so a grey moved here lands where
+   * the row's own mapping would put a map. No row mapping joins: the steps are all there is. */
+  const PaintMaterialCompositeMapping no_row_mapping;
+  const CompositeMappingChain chain = composite_mapping_chain_build(no_row_mapping, steps);
+  if (chain.is_identity()) {
+    return nullptr;
+  }
+  return composite_resample_mapped(src, width, height, chain);
 }
 
 /**
@@ -3006,6 +3035,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       buffer.blend = item.blend;
       buffer.invert = item.invert;
       buffer.filter = item.filter;
+      buffer.effect_filter = item.effect_filter;
       buffer.filter_ramp = item.filter_ramp;
       buffer.filter_curves = item.filter_curves;
       std::copy(std::begin(item.filter_params),

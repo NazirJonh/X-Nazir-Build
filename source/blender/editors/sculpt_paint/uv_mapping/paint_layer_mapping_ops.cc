@@ -475,8 +475,12 @@ static wmOperatorStatus layer_mapping_mirror_toggle_exec(bContext *C, wmOperator
   }
   const int16_t axes = (BKE_paint_layers_mapping_mirror_get(*layer) != 0) ?
                            int16_t(0) :
+                           /* The stored directions stay, so the toggle never loses a chosen "-". */
                            int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U |
-                                   MA_PAINT_LAYER_MAPPING_MIRROR_V);
+                                   MA_PAINT_LAYER_MAPPING_MIRROR_V |
+                                   (BKE_paint_layers_mapping_mirror_axes_get(*layer) &
+                                    (MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE |
+                                     MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE)));
   if (axes != 0 && !BKE_paint_layers_mapping_applies(*ma, *layer)) {
     /* One click is the whole gesture: a row whose mapping is off would otherwise switch the fold on
      * invisibly. The fold implies the mapping, so turning it on is part of the toggle. */

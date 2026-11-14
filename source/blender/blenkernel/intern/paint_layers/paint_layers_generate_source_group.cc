@@ -59,8 +59,9 @@ namespace blender::bke::paint_layers {
 /**
  * Bumped when what a fill produces changes, so groups made by an older fill are rebuilt once.
  * 7: the Mirror fold hands the wrapper's transform its folded UV and biases its side signs.
+ * 8: the Mirror fold's add carries the per-axis direction (the negative fold).
  */
-static constexpr uint64_t SOURCE_GROUP_FILL_VERSION = 7;
+static constexpr uint64_t SOURCE_GROUP_FILL_VERSION = 8;
 
 /**
  * Mix the wrapper's mapping shape into \a hash. Whether the wrapper carries the row mapping is

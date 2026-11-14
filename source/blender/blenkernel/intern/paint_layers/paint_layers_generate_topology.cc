@@ -159,8 +159,10 @@ static void mapping_wrap_hash_mix(uint64_t &hash, const Material &ma, const Mate
  * 2: the fold hands the transform its folded UV through #MappingChain::fold_out, and biases the
  * side signs so a texel sitting on the fold line reads as +1 -- "at or beyond the center" -- on
  * all three paths (graph, CPU resample, compute shader).
+ * 3: the fold's add is a MULTIPLY_ADD carrying the per-axis direction (the negative fold), and
+ * the side sign scales by that direction.
  */
-static constexpr uint64_t MAPPING_MIRROR_CHAIN_VERSION = 2;
+static constexpr uint64_t MAPPING_MIRROR_CHAIN_VERSION = 3;
 
 /**
  * Mix which axes the row's Mirror folds into \a hash: nothing while the mapping does not apply,

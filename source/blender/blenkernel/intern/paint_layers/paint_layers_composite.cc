@@ -226,6 +226,32 @@ static void composite_mapping_describe(const Material &ma,
   out.tangent_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
 }
 
+/**
+ * The numbers of the transform effect \a effect as one UV step: a Mirror's fold, or a Transform
+ * Mapping's offset, rotation, scale and wrap. The one place both the content effects' steps and a
+ * mask item's step are read, so the two cannot move a map differently.
+ */
+static void composite_transform_step_numbers_get(const MaterialPaintLayer &effect,
+                                                 PaintMaterialCompositeMapping &step)
+{
+  if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR) {
+    /* The fold alone is the step: a Mirror reads its mapping's axes and center and nothing
+     * else, and its read repeats, the way the row mapping's Mirror does. */
+    step.mirror_axes = BKE_paint_layers_mapping_mirror_get(effect);
+    step.mirror_center[0] = effect.mapping.mirror_center[0];
+    step.mirror_center[1] = effect.mapping.mirror_center[1];
+  }
+  else {
+    /* A Transform Mapping reads the offset, rotation, scale and wrap; the fold stays the
+     * Mirror's alone. The numbers are the shared vocabulary's, so a zero scale axis reads back
+     * as one where the helpers use them. */
+    BKE_paint_layers_transform_effective_offset(effect, step.offset);
+    copy_v2_v2(step.scale, effect.mapping.scale);
+    step.rotation = effect.mapping.rotation;
+    step.wrap = BKE_paint_layers_mapping_wrap_get(effect);
+  }
+}
+
 void BKE_paint_layers_input_transforms_get(const Material &ma,
                                            const MaterialPaintLayer &row,
                                            const int channel,
@@ -236,24 +262,22 @@ void BKE_paint_layers_input_transforms_get(const Material &ma,
     PaintMaterialCompositeMapping step;
     step.enabled = true;
     step.tangent_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-    if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR) {
-      /* The fold alone is the step: a Mirror reads its mapping's axes and center and nothing
-       * else, and its read repeats, the way the row mapping's Mirror does. */
-      step.mirror_axes = BKE_paint_layers_mapping_mirror_get(effect);
-      step.mirror_center[0] = effect.mapping.mirror_center[0];
-      step.mirror_center[1] = effect.mapping.mirror_center[1];
-    }
-    else {
-      /* A Transform Mapping reads the offset, rotation, scale and wrap; the fold stays the
-       * Mirror's alone. The numbers are the shared vocabulary's, so a zero scale axis reads back
-       * as one where the helpers use them. */
-      BKE_paint_layers_transform_effective_offset(effect, step.offset);
-      copy_v2_v2(step.scale, effect.mapping.scale);
-      step.rotation = effect.mapping.rotation;
-      step.wrap = effect.mapping.wrap;
-    }
+    composite_transform_step_numbers_get(effect, step);
     r_steps.append(step);
   }
+}
+
+bool paint_layer_mask_transform_step_get(const MaterialPaintLayer &item,
+                                         PaintMaterialCompositeMapping &r_step)
+{
+  if (!paint_layer_mask_item_is_transform(item)) {
+    return false;
+  }
+  /* UV space only, so no frame is described: the grey is resampled on the canvas. */
+  r_step = PaintMaterialCompositeMapping{};
+  r_step.enabled = true;
+  composite_transform_step_numbers_get(item, r_step);
+  return true;
 }
 
 /** The parameters of \a row's kind in the schema order the evaluator reads them in. */
@@ -683,7 +707,11 @@ static void composite_mask_item_filter(const MaskItemDescribeContext &context,
    * item with the kernel over it, and the item reads like a painted map with its invert, blend
    * and opacity. In describe-only the grey is left out and the kind named, so the combined
    * preview refuses the stack instead of shading the item as a no-op. */
-  if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_NEEDS_BAKE)) {
+  if (paint_layer_kind_transforms_input(mask) && !paint_layer_mask_item_bakes_effect(mask)) {
+    /* A transform that moves nothing leaves the coverage as it is. */
+    return;
+  }
+  if (paint_layer_mask_item_bakes_effect(mask)) {
     PaintMaterialCompositeMaskItem effect;
     effect.opacity = BKE_paint_layers_effective_opacity(mask);
     effect.contrast = BKE_paint_layers_mask_contrast_get(mask);
@@ -909,7 +937,7 @@ static void composite_mask_items_describe(
     else if (paint_layer_kind_is_map_coverage(mask)) {
       composite_mask_item_map_coverage(context, mask, r_items);
     }
-    else if (paint_layer_effect_is_filter(mask)) {
+    else if (paint_layer_effect_is_filter(mask) || paint_layer_kind_transforms_input(mask)) {
       composite_mask_item_filter(context, mask, r_items);
     }
     else if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_GENERATES)) {
@@ -1798,6 +1826,7 @@ PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
     buffer.blend = item.blend;
     buffer.invert = item.invert;
     buffer.filter = item.filter;
+    buffer.effect_filter = item.effect_filter;
     buffer.filter_ramp = item.filter_ramp;
     buffer.filter_curves = item.filter_curves;
     std::copy(std::begin(item.filter_params),
@@ -2467,6 +2496,23 @@ uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int cha
   composite_filter_params(effect, params);
   for (const float param : params) {
     mix_float(param);
+  }
+  /* A transform effect has no schema parameters: its numbers are its mapping, which a mask item's
+   * cached grey is the result of. They are read through the accessors the step reads them by, so a
+   * stored but unused bit (a direction without its axis, a Mirror that is off) never re-bakes. */
+  if (paint_layer_kind_transforms_input(effect)) {
+    float offset[2];
+    BKE_paint_layers_transform_effective_offset(effect, offset);
+    mix_u32(BKE_paint_layers_mapping_enabled_get(effect) ? 1u : 0u);
+    mix_u32(uint32_t(BKE_paint_layers_mapping_wrap_get(effect)));
+    mix_u32(uint32_t(BKE_paint_layers_mapping_mirror_get(effect)));
+    mix_float(offset[0]);
+    mix_float(offset[1]);
+    mix_float(effect.mapping.scale[0]);
+    mix_float(effect.mapping.scale[1]);
+    mix_float(effect.mapping.rotation);
+    mix_float(effect.mapping.mirror_center[0]);
+    mix_float(effect.mapping.mirror_center[1]);
   }
   /* A Color parameter reads as zero in the scalar fold above, so its channels join the hash here;
    * otherwise a Glow's or a Color Match's colour edit would keep the cached result. */
@@ -3215,6 +3261,9 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
       const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
                                                              item.effect_filter);
       if (kind != nullptr) {
+        if ((kind->flags & PAINT_LAYER_KIND_TRANSFORMS_INPUT) != 0) {
+          return "a transform effect in a mask is not laid by the GPU path";
+        }
         return paint_layer_cpu_computed_reason(*kind);
       }
     }

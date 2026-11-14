@@ -1123,6 +1123,25 @@ static int paint_layer_filter_owner_channel(const Material &ma, const MaterialPa
   return (count == 1) ? found : -1;
 }
 
+/**
+ * The starting values of a transform effect, whether it hangs on a row's content or sits in its
+ * mask: both read the same mapping struct, so a new one starts the same way in either place.
+ */
+static void paint_layer_transform_defaults_init(MaterialPaintLayer &effect)
+{
+  if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_TRANSFORM) {
+    /* The pivot of a Transform Mapping lives in the mirror center the DNA starts at the canvas
+     * middle; it starts at the UV origin instead, where the unpivoted `S * R * uv + offset` of
+     * the row's own mapping turns, until the user moves it. */
+    zero_v2(effect.mapping.mirror_center);
+  }
+  if (effect.kind_subtype == MA_PAINT_LAYER_FILTER_MIRROR) {
+    /* A Mirror is all fold: with the fold off and no axis it would lay nothing and expose no
+     * center to drag, so it starts folding U about the middle of the canvas. */
+    effect.mapping.flag |= MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED;
+  }
+}
+
 MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
                                                 MaterialPaintLayer *owner,
                                                 const eMaterialPaintLayerFilter filter,
@@ -1153,17 +1172,7 @@ MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
    * (#PAINT_LAYER_KIND_TRANSFORMS_INPUT), so a record would promise a per-channel choice the kind
    * cannot make. */
   if (paint_layer_kind_transforms_input(*effect)) {
-    if (filter == MA_PAINT_LAYER_FILTER_TRANSFORM) {
-      /* The pivot of a Transform Mapping lives in the mirror center the DNA starts at the canvas
-       * middle; it starts at the UV origin instead, where the unpivoted `S * R * uv + offset` of
-       * the row's own mapping turns, until the user moves it. */
-      zero_v2(effect->mapping.mirror_center);
-    }
-    if (filter == MA_PAINT_LAYER_FILTER_MIRROR) {
-      /* A Mirror is all fold: with the fold off and no axis it would lay nothing and expose no
-       * center to drag, so it starts folding U about the middle of the canvas. */
-      effect->mapping.flag |= MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED;
-    }
+    paint_layer_transform_defaults_init(*effect);
     BKE_paint_layers_tag_edited(ma);
     return effect;
   }
@@ -1461,6 +1470,11 @@ MaterialPaintLayer *BKE_paint_layers_mask_filter_add(Material &ma,
   item->kind_subtype = filter;
   item->flag = MA_PAINT_LAYER_ENABLED;
   paint_layer_kind_params_init(*item);
+  /* A transform item moves the grey the mask has built up to it, so the base mask above is the
+   * whole of what it needs (checked above); it owns no channel record, like the CPU effects. */
+  if (paint_layer_kind_transforms_input(*item)) {
+    paint_layer_transform_defaults_init(*item);
+  }
   BLI_addtail(&layer->mask_stack, item);
   if (paint_layer_kind_is_map_coverage(*item)) {
     /* The Base Color record is structural: it holds the map the operator samples, with no user
@@ -2911,6 +2925,12 @@ bool BKE_paint_layers_mapping_remaps(const Material &ma, const MaterialPaintLaye
   if (!BKE_paint_layers_mapping_applies(ma, layer)) {
     return false;
   }
+  /* A transform effect in the mask resamples the grey the mask has built up (the mask effect
+   * cache), so the grey it bakes is already moved. Remapping that map once more through the item's
+   * own mapping on read would transform it twice. */
+  if (layer.role == MA_PAINT_LAYER_ROLE_MASK_ITEM && paint_layer_kind_transforms_input(layer)) {
+    return false;
+  }
   /* An identity transform with Repeat reads the map exactly as the unmapped path does. Clip still
    * needs the mapping to test the unit square, and a Mirror fold moves the UVs on its own. */
   return !BKE_paint_layers_mapping_is_identity(layer) ||
@@ -3273,7 +3293,27 @@ constexpr int mapping_flag_bits[] = {MA_PAINT_LAYER_MAPPING_ENABLED_DEPRECATED,
                                      MA_PAINT_LAYER_MAPPING_DISABLED,
                                      MA_PAINT_LAYER_MAPPING_MIRROR_U,
                                      MA_PAINT_LAYER_MAPPING_MIRROR_V,
-                                     MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED};
+                                     MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED,
+                                     MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE,
+                                     MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE};
+
+/* The axes and their direction bits, which travel together as one "axes" word. */
+constexpr int16_t MIRROR_AXES_ALL =
+    MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V |
+    MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE | MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE;
+
+/* A direction bit means nothing without its axis; dropping it keeps equal folds equal in the
+ * hashes and the graph shape. */
+int16_t mirror_axes_drop_orphans(int16_t axes)
+{
+  if ((axes & MA_PAINT_LAYER_MAPPING_MIRROR_U) == 0) {
+    axes &= ~MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE;
+  }
+  if ((axes & MA_PAINT_LAYER_MAPPING_MIRROR_V) == 0) {
+    axes &= ~MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE;
+  }
+  return axes;
+}
 constexpr bool mapping_flag_bits_are_disjoint()
 {
   int seen = 0;
@@ -3291,7 +3331,7 @@ static_assert(mapping_flag_bits_are_disjoint(),
 
 int16_t BKE_paint_layers_mapping_mirror_axes_get(const MaterialPaintLayer &layer)
 {
-  return layer.mapping.flag & (MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V);
+  return layer.mapping.flag & MIRROR_AXES_ALL;
 }
 
 bool BKE_paint_layers_mapping_mirror_enabled_get(const MaterialPaintLayer &layer)
@@ -3302,7 +3342,7 @@ bool BKE_paint_layers_mapping_mirror_enabled_get(const MaterialPaintLayer &layer
 int16_t BKE_paint_layers_mapping_mirror_get(const MaterialPaintLayer &layer)
 {
   return BKE_paint_layers_mapping_mirror_enabled_get(layer) ?
-             BKE_paint_layers_mapping_mirror_axes_get(layer) :
+             mirror_axes_drop_orphans(BKE_paint_layers_mapping_mirror_axes_get(layer)) :
              int16_t(0);
 }
 
@@ -3328,7 +3368,7 @@ bool BKE_paint_layers_mapping_set_mirror(Material &ma, MaterialPaintLayer *layer
     return false;
   }
   /* A foreign bit is dropped rather than refused, so a caller may pass a raw flag word. */
-  axes &= (MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V);
+  axes = mirror_axes_drop_orphans(axes & MIRROR_AXES_ALL);
   if (axes != 0 && !BKE_paint_layers_mapping_supported(ma, *layer)) {
     return false;
   }
@@ -3341,7 +3381,7 @@ bool BKE_paint_layers_mapping_set_mirror(Material &ma, MaterialPaintLayer *layer
     layer->mapping.flag &= ~MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED;
   }
   else {
-    layer->mapping.flag &= ~(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V);
+    layer->mapping.flag &= ~MIRROR_AXES_ALL;
     layer->mapping.flag |= axes | MA_PAINT_LAYER_MAPPING_MIRROR_ENABLED;
   }
   /* The row's chain gains or loses the fold and its Normal flip, which is a different shape. */
@@ -3354,11 +3394,13 @@ bool BKE_paint_layers_mapping_set_mirror_axes(Material &ma, MaterialPaintLayer *
   if (!paint_layer_owned(ma, layer)) {
     return false;
   }
-  axes &= (MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V);
+  /* Orphan direction bits stay stored: a direction picked before its axis is switched on must
+   * survive until the axis is. */
+  axes &= MIRROR_AXES_ALL;
   if (axes == BKE_paint_layers_mapping_mirror_axes_get(*layer)) {
     return true;
   }
-  layer->mapping.flag &= ~(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V);
+  layer->mapping.flag &= ~MIRROR_AXES_ALL;
   layer->mapping.flag |= axes;
   if (BKE_paint_layers_mapping_mirror_enabled_get(*layer)) {
     BKE_paint_layers_tag_edited(ma);

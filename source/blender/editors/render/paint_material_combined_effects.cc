@@ -115,6 +115,17 @@ static void gpu_mapping_setup(const PaintMaterialCompositeMapping &mapping,
   if (mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V)) {
     r_flags |= gpu_layer_mirror_v;
   }
+  /* The direction bits only matter with their axis set; the shader reads them with it. */
+  if (mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U) &&
+      mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE))
+  {
+    r_flags |= gpu_layer_mirror_u_neg;
+  }
+  if (mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V) &&
+      mapping.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE))
+  {
+    r_flags |= gpu_layer_mirror_v_neg;
+  }
   r_uniforms.offset = float2(mapping.offset[0], mapping.offset[1]);
   r_uniforms.scale = float2(BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]),
                             BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]));
@@ -146,7 +157,7 @@ GpuInputSteps::GpuInputSteps(Span<PaintMaterialCompositeMapping> steps)
                BKE_paint_layers_mapping_scale_normalize(step.scale[1]));
     b = float4(std::cos(step.rotation), std::sin(step.rotation),
                step.mirror_center[0], step.mirror_center[1]);
-    const int shift = index * 5;
+    const int shift = index * gpu_input_step_bits;
     bool repeat_u = true;
     bool repeat_v = true;
     BKE_paint_layers_mapping_wrap_axes(step.wrap, repeat_u, repeat_v);
@@ -162,6 +173,16 @@ GpuInputSteps::GpuInputSteps(Span<PaintMaterialCompositeMapping> steps)
     }
     if (step.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V)) {
       step_flags |= gpu_input_step_mirror_v;
+    }
+    if (step.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U) &&
+        step.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE))
+    {
+      step_flags |= gpu_input_step_mirror_u_neg;
+    }
+    if (step.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V) &&
+        step.mirror_axis(MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE))
+    {
+      step_flags |= gpu_input_step_mirror_v_neg;
     }
     flags |= step_flags << shift;
     count++;
@@ -552,7 +573,8 @@ static bool gpu_projection_apply(const PaintMaterialCompositeMapping &mapping,
   }
   r_flags |= gpu_layer_projected;
   r_flags &= ~(gpu_layer_mapped | gpu_layer_repeat_u | gpu_layer_repeat_v |
-               gpu_layer_tangent_normal | gpu_layer_mirror_u | gpu_layer_mirror_v);
+               gpu_layer_tangent_normal | gpu_layer_mirror_u | gpu_layer_mirror_v |
+               gpu_layer_mirror_u_neg | gpu_layer_mirror_v_neg);
   perf.note("%s", what);
   return true;
 }
@@ -1436,7 +1458,8 @@ bool CombinedPasses::row_emit(CombinedTarget &t,
         projection = &projection_frame;
         flags |= gpu_layer_projected;
         flags &= ~(gpu_layer_mapped | gpu_layer_repeat_u | gpu_layer_repeat_v |
-                   gpu_layer_tangent_normal | gpu_layer_mirror_u | gpu_layer_mirror_v);
+                   gpu_layer_tangent_normal | gpu_layer_mirror_u | gpu_layer_mirror_v |
+                   gpu_layer_mirror_u_neg | gpu_layer_mirror_v_neg);
       }
     }
     if (row_in_textures) {

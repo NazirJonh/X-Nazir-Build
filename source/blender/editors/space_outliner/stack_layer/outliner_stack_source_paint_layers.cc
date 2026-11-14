@@ -1854,9 +1854,8 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
         PaintLayerAddKind::CurvePatchEffect);
 
     /* The transform effects: they move what the row itself reads, so the Add Effect menu lists
-     * them under "Transform". No mask twin yet: the mask form waits for a mask walk that can
-     * resample the coverage it has built up, so a Mirror in the mask is not offered rather than
-     * laid as nothing. */
+     * them under "Transform". While a mask slot is the one showing, the line makes the mask form:
+     * the effect moves the grey the mask has built up to it, in UV. */
     add(with_look(effect({"TRANSFORM_MAPPING",
                           N_("Transform Mapping"),
                           "Move, rotate and scale the UV the row's content is read at; the "
@@ -1865,7 +1864,8 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                                         PaintLookRole::Content,
                                         MA_PAINT_LAYER_FILTER_TRANSFORM)),
         PaintLayerAddKind::Filter,
-        MA_PAINT_LAYER_FILTER_TRANSFORM);
+        MA_PAINT_LAYER_FILTER_TRANSFORM,
+        PaintLayerAddKind::MaskFilter);
     add(with_look(effect({"MIRROR",
                           N_("Mirror"),
                           "Fold the UV the row's content is read at about a center, per axis; what "
@@ -1874,6 +1874,25 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                                         PaintLookRole::Content,
                                         MA_PAINT_LAYER_FILTER_MIRROR)),
         PaintLayerAddKind::Filter,
+        MA_PAINT_LAYER_FILTER_MIRROR,
+        PaintLayerAddKind::MaskFilter);
+    add(with_look(effect({"MASK_TRANSFORM_MAPPING",
+                          N_("Mask Transform Mapping"),
+                          "Move, rotate and scale the grey the active layer's mask has built up "
+                          "to it, in UV"}),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_FILTER,
+                                        PaintLookRole::MaskItem,
+                                        MA_PAINT_LAYER_FILTER_TRANSFORM)),
+        PaintLayerAddKind::MaskFilter,
+        MA_PAINT_LAYER_FILTER_TRANSFORM);
+    add(with_look(effect({"MASK_MIRROR",
+                          N_("Mask Mirror"),
+                          "Fold the grey the active layer's mask has built up to it about a "
+                          "center, per axis, in UV"}),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_FILTER,
+                                        PaintLookRole::MaskItem,
+                                        MA_PAINT_LAYER_FILTER_MIRROR)),
+        PaintLayerAddKind::MaskFilter,
         MA_PAINT_LAYER_FILTER_MIRROR);
 
     /* Resolve the mask roles the content entries named. The mask entry is flagged so the Effects

@@ -654,6 +654,17 @@ TEST_F(PaintLayersMappingEvalTest, a_mirrored_fill_layer_matches_the_cpu)
       {MA_PAINT_LAYER_MAPPING_MIRROR_V, {0.6f, 0.35f}},
       {int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V), {0.4f, 0.6f}},
       {int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V), {0.25f, 0.25f}},
+      /* The negative direction (keeps the smaller side). */
+      {int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE),
+       {0.3f, 0.7f}},
+      {int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_V | MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE),
+       {0.6f, 0.35f}},
+      {int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V |
+               MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE | MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE),
+       {0.4f, 0.6f}},
+      {int16_t(MA_PAINT_LAYER_MAPPING_MIRROR_U | MA_PAINT_LAYER_MAPPING_MIRROR_V |
+               MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE),
+       {0.4f, 0.6f}},
   };
   for (const MirrorCase &test : all) {
     SCOPED_TRACE(::testing::Message() << "axes=" << test.axes << " center=" << test.center[0]

@@ -1035,6 +1035,9 @@ struct PaintMaterialCompositeMaskBuffer {
   ImBuf *grey_buffer = nullptr;
   /** A Gradient mask item's payload; #enabled false for a map or a constant. */
   PaintMaterialCompositeGradient gradient;
+  /** See #PaintMaterialCompositeMaskItem::effect_filter. Such an item with no sample is a
+   * pass-through: it lays a grey that is not computed (yet), never its constant. */
+  int16_t effect_filter = 0;
 };
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */
@@ -1132,6 +1135,17 @@ ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
                                            const PaintMaterialCompositeMapping *mapping,
                                            int ref_width,
                                            int ref_height);
+
+/**
+ * Resample \a src onto a \a width x \a height grid through the UV \a steps (the transform effects'
+ * vocabulary of #PaintMaterialCompositeMapping), the transform a map read goes through, as a
+ * float RGBA buffer the caller owns and frees with #IMB_freeImBuf. Null when the steps are the
+ * identity -- the caller keeps \a src -- or the source cannot be read.
+ */
+ImBuf *BKE_paint_material_composite_buffer_remap(const ImBuf *src,
+                                                 int width,
+                                                 int height,
+                                                 Span<PaintMaterialCompositeMapping> steps);
 
 /** Layers bottom to top: index 0 is composited first and everything else lands on top of it. */
 struct PaintMaterialCompositeStack {

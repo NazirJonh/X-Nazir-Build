@@ -309,14 +309,41 @@ void BKE_paint_layers_mask_effect_input_images(const Material &ma,
                                                blender::Vector<Image *> &r_images);
 
 /**
+ * Whether the transform effect \a item (a Transform Mapping or a Mirror) moves anything: its
+ * mapping is on and is not the identity, or it wraps or folds. The same test as
+ * #BKE_paint_layers_mapping_remaps, without the Material the owner lookup of that one needs, so
+ * the predicates below can stay Material-free.
+ */
+inline bool paint_layer_transform_moves(const MaterialPaintLayer &item)
+{
+  return BKE_paint_layers_mapping_enabled_get(item) &&
+         (!BKE_paint_layers_mapping_is_identity(item) ||
+          BKE_paint_layers_mapping_wrap_get(item) != MA_PAINT_LAYER_MAPPING_WRAP_REPEAT ||
+          BKE_paint_layers_mapping_mirror_get(item) != 0);
+}
+
+/**
+ * Whether the mask item \a item is a transform effect that moves the grey the mask has built up to
+ * it. It acts in UV only: the grey it moves is computed on the canvas. One that moves nothing
+ * lays nothing.
+ */
+inline bool paint_layer_mask_item_is_transform(const MaterialPaintLayer &item)
+{
+  return item.role == MA_PAINT_LAYER_ROLE_MASK_ITEM && paint_layer_kind_transforms_input(item) &&
+         paint_layer_transform_moves(item);
+}
+
+/**
  * Whether the mask item \a item carries a CPU-computed effect of its own: an element the mask
  * effect cache computes a grey for, and the bake plan bakes one into a map of its own, the way it
- * bakes a reader's slice.
+ * bakes a reader's slice. A transform effect in the mask is one: it resamples the accumulated grey,
+ * which no pointwise node of the live graph can do.
  */
 inline bool paint_layer_mask_item_bakes_effect(const MaterialPaintLayer &item)
 {
   return item.role == MA_PAINT_LAYER_ROLE_MASK_ITEM &&
-         paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_NEEDS_BAKE);
+         (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_NEEDS_BAKE) ||
+          paint_layer_mask_item_is_transform(item));
 }
 
 /**
@@ -949,6 +976,10 @@ inline bool paint_layer_mask_item_lays(const MaterialPaintLayer &item)
   if (paint_layer_effect_is_filter(item)) {
     return true;
   }
+  /* A transform item owns no record either: it lays the moved grey it computes. */
+  if (paint_layer_mask_item_is_transform(item)) {
+    return true;
+  }
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(
       item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   /* A mesh-map mask item reads the material's atlas; its record carries no image. */
@@ -1558,6 +1589,14 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(const Material &ma,
                                                           const MaterialPaintLayer &effect,
                                                           const bool describe_only,
                                                           blender::Vector<Image *> *r_images);
+
+/**
+ * The UV step of the transform item \a item of a mask (#paint_layer_mask_item_is_transform), in the
+ * vocabulary the content effects' steps use. False, leaving \a r_step alone, when the item is not
+ * a transform in the mask or moves nothing.
+ */
+bool paint_layer_mask_transform_step_get(const MaterialPaintLayer &item,
+                                         PaintMaterialCompositeMapping &r_step);
 
 /**
  * Drop the cache's entry of the mask effect \a effect: its bake holds the grey now, and the entry

@@ -197,6 +197,35 @@ static void mask_effect_grey_normalize(ImBuf &buffer, const MaterialPaintLayer &
   paint_layer_effect_to_luminance(buffer);
 }
 
+/**
+ * Resample the grey in \a buffer through the transform \a step, in place. The resample filters
+ * premultiplied, so a texel the step reads from outside a clipped edge, or from nothing, lands as
+ * no coverage rather than as a transparent hole the item's blend would see through to the mask
+ * below: the item says what the mask is there, and a moved mask has no coverage past its edge.
+ */
+static void mask_effect_transform_apply(ImBuf &buffer, const PaintMaterialCompositeMapping &step)
+{
+  ImBuf *moved = BKE_paint_material_composite_buffer_remap(
+      &buffer, buffer.x, buffer.y, Span<PaintMaterialCompositeMapping>(&step, 1));
+  if (moved == nullptr || moved->float_data() == nullptr) {
+    /* The identity, or a source that could not be read: the grey stays as it is. */
+    if (moved != nullptr) {
+      IMB_freeImBuf(moved);
+    }
+    return;
+  }
+  const float *in = moved->float_data();
+  float *out = buffer.float_data_for_write();
+  const int64_t texels = int64_t(buffer.x) * buffer.y;
+  for (const int64_t i : IndexRange(texels)) {
+    out[i * 4 + 0] = in[i * 4 + 0];
+    out[i * 4 + 1] = in[i * 4 + 0];
+    out[i * 4 + 2] = in[i * 4 + 0];
+    out[i * 4 + 3] = 1.0f;
+  }
+  IMB_freeImBuf(moved);
+}
+
 /** Render the input of \a effect -- the mask built up to it -- and apply its kernel. */
 static bool paint_layer_mask_effect_compute(const Material &ma,
                                             const MaterialPaintLayer &row,
@@ -234,9 +263,16 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
     }
     perf_input.note("kind=%d size=%dx%d", int(effect.kind_subtype), width, height);
   }
-  /* The kernel reads the buffer the block above filled and leaves the alpha alone. */
-  paint_layer_effect_kernel_apply(*color, effect);
-  mask_effect_grey_normalize(*color, effect);
+  PaintMaterialCompositeMapping transform_step;
+  if (paint_layer_mask_transform_step_get(effect, transform_step)) {
+    /* A transform effect moves the grey instead of correcting it. */
+    mask_effect_transform_apply(*color, transform_step);
+  }
+  else {
+    /* The kernel reads the buffer the block above filled and leaves the alpha alone. */
+    paint_layer_effect_kernel_apply(*color, effect);
+    mask_effect_grey_normalize(*color, effect);
+  }
   /* The versions are taken after the render: an edit that landed while it ran is read next time. */
   Vector<Image *> images;
   BKE_paint_layers_mask_effect_input_images(ma, row, effect, images);

@@ -155,7 +155,29 @@ class GraphInterpreter {
     if (ibuf == nullptr) {
       return out;
     }
-    if (x >= ibuf->x || y >= ibuf->y || ibuf->byte_buffer.data == nullptr) {
+    if (x >= ibuf->x || y >= ibuf->y) {
+      BKE_image_release_ibuf(image, ibuf, lock);
+      return out;
+    }
+    if (ibuf->byte_buffer.data == nullptr && ibuf->float_buffer.data != nullptr) {
+      /* A float map is stored premultiplied; the node hands out the straight colour. A data map
+       * (the Height one) is not converted, and neither is a scene-linear one. */
+      const int channels = ibuf->channels == 0 ? 4 : ibuf->channels;
+      const float *p = ibuf->float_buffer.data + (int64_t(y) * ibuf->x + x) * channels;
+      const float alpha = channels == 4 ? p[3] : 1.0f;
+      const float inv = alpha > 0.0f ? 1.0f / alpha : 0.0f;
+      BKE_image_release_ibuf(image, ibuf, lock);
+      if (STREQ(output, "Alpha")) {
+        out.r = out.g = out.b = out.a = alpha;
+        return out;
+      }
+      out.r = p[0] * inv;
+      out.g = (channels > 1 ? p[1] : p[0]) * inv;
+      out.b = (channels > 2 ? p[2] : p[0]) * inv;
+      out.a = alpha;
+      return out;
+    }
+    if (ibuf->byte_buffer.data == nullptr) {
       BKE_image_release_ibuf(image, ibuf, lock);
       return out;
     }
@@ -413,6 +435,30 @@ class GraphInterpreter {
           const float value = a * (1.0f - fac) + b * fac;
           return {value, value, value, value};
         }
+        if (storage.data_type == SOCK_VECTOR) {
+          /* The node's Vector mode is a plain interpolation, per component when the factor is
+           * non-uniform: the blend group's per-channel choice of two branches. */
+          const RGBA a = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "A_Vector"_ustr));
+          const RGBA b = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "B_Vector"_ustr));
+          RGBA fac;
+          if (storage.factor_mode == NODE_MIX_MODE_NON_UNIFORM) {
+            fac = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Factor_Vector"_ustr));
+          }
+          else {
+            const float value =
+                eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Factor_Float"_ustr)).r;
+            fac = {value, value, value, value};
+          }
+          if (storage.clamp_factor) {
+            fac.r = clamp_f(fac.r, 0.0f, 1.0f);
+            fac.g = clamp_f(fac.g, 0.0f, 1.0f);
+            fac.b = clamp_f(fac.b, 0.0f, 1.0f);
+          }
+          return {a.r * (1.0f - fac.r) + b.r * fac.r,
+                  a.g * (1.0f - fac.g) + b.g * fac.g,
+                  a.b * (1.0f - fac.b) + b.b * fac.b,
+                  1.0f};
+        }
         const RGBA bottom = eval_socket(
             *bke::node_find_socket(mutable_node, SOCK_IN, "A_Color"_ustr));
         const RGBA top = eval_socket(
@@ -585,6 +631,10 @@ class GraphInterpreter {
           const RGBA other = eval_socket(
               *bke::node_find_socket(mutable_node, SOCK_IN, "Vector_001"_ustr));
           return {vector.r - other.r, vector.g - other.g, vector.b - other.b, 1.0f};
+        }
+        if (node.custom1 == NODE_VECTOR_MATH_ABSOLUTE) {
+          /* The Mirror fold reads |uv - center|; left out, the fold would silently be the identity. */
+          return {fabsf(vector.r), fabsf(vector.g), fabsf(vector.b), 1.0f};
         }
         if (node.custom1 == NODE_VECTOR_MATH_FLOOR) {
           return {floorf(vector.r), floorf(vector.g), floorf(vector.b), 1.0f};

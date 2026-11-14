@@ -616,7 +616,9 @@ class PaintMaterialCompositeMapEncodingTest : public PaintMaterialCompositeEvalT
     stack.width = 2;
     stack.height = 2;
     PaintMaterialCompositeLayer bottom;
-    bottom.color_ibuf = add_buffer(128, 128, 128, 255);
+    /* The bottom has to match the 2x2 frame, or the evaluator rejects the stack. */
+    const uchar mid_grey[4] = {128, 128, 128, 128};
+    bottom.color_ibuf = add_grey_buffer(mid_grey);
     make_data(bottom.color_ibuf);
     stack.layers.append(bottom);
     stack.layers.append(layer);
@@ -686,14 +688,18 @@ TEST_F(PaintMaterialCompositeMapEncodingTest, f0_colour_reads_as_the_specular_le
    * lies when no encoding says otherwise. The values are grey, so any scene luminance reads the
    * value itself. */
   const uchar f0_dielectric = uchar(0.04f * 255.0f + 0.5f);
+  const uchar f0_values[4] = {f0_dielectric, f0_dielectric, 255, 255};
+  const float f0_level_stored = float(f0_dielectric) / 255.0f / SPECULAR_LEVEL_F0_FULL;
   PaintMaterialCompositeLayer layer;
-  layer.color_ibuf = add_grey_buffer({f0_dielectric, f0_dielectric, 255, 255});
+  layer.color_ibuf = add_grey_buffer(f0_values);
   make_data(layer.color_ibuf);
   layer.map_encoding = int8_t(MA_PAINT_LAYER_MAP_ENCODING_F0);
   layer.color_alpha_coverage = true;
 
   const std::array<float, 4> dielectric = encoded_pixel(layer, 0);
-  EXPECT_NEAR(dielectric[0], 0.5f, 1.0f / 255.0f + 1e-5f);
+  /* The byte quantizes the F0 itself, and the level divides it by 0.08, so the level is exact only
+   * for the stored byte. */
+  EXPECT_NEAR(dielectric[0], f0_level_stored, 1e-4f);
   const std::array<float, 4> metal = encoded_pixel(layer, 2);
   EXPECT_NEAR(metal[0], 1.0f, 1e-5f);
   /* The F0 map's own alpha stays the coverage (only the spec-gloss packing takes it out). */
@@ -713,7 +719,7 @@ TEST_F(PaintMaterialCompositeMapEncodingTest, f0_with_gloss_alpha_is_level_and_o
   layer.color_alpha_coverage = false;
 
   const std::array<float, 4> texel = encoded_pixel(layer, 1);
-  EXPECT_NEAR(texel[0], 0.5f, 1.0f / 255.0f + 1e-5f);
+  EXPECT_NEAR(texel[0], float(f0_dielectric) / 255.0f / SPECULAR_LEVEL_F0_FULL, 1e-4f);
   EXPECT_NEAR(texel[3], 1.0f, 1e-5f);
 }
 
@@ -795,9 +801,10 @@ TEST_F(PaintMaterialCompositeEvalTest,
     return linear_pixel(stack, 0, 0);
   };
 
-  /* Flat over flat: both formulas keep the flat normal exactly. */
+  /* Flat over flat: both formulas keep the flat normal. Byte 128 decodes to a slope of 1/255, not to
+   * zero, and the whiteout adds the two slopes, so the result may sit one byte away. */
   const std::array<float, 4> flat = combine({128, 128, 255}, {128, 128, 255});
-  EXPECT_NEAR(flat[0], 128.0f / 255.0f, 1e-4f);
+  EXPECT_NEAR(flat[0], 128.0f / 255.0f, 3e-3f);
   EXPECT_NEAR(flat[2], 1.0f, 1e-4f);
 
   /* A flat base under a 45-degree X tilt: both formulas give the detail's own tilt, which is why
@@ -1098,6 +1105,12 @@ TEST_F(PaintMaterialCompositeEvalTest, an_anchor_point_slice_is_resampled_withou
   Vector<PaintMaterialCompositeImageLayer> layers;
   PaintMaterialCompositeImageLayer layer;
   layer.anchor_point_color = owned;
+  /* A slice carries no map of its own to size the stack by; the base row under the reader names
+   * its side, as the description does while it sizes a point's slice. */
+  PaintMaterialCompositeImageLayer sizer;
+  sizer.empty_base = true;
+  sizer.empty_base_size = slice_size;
+  layers.append(sizer);
   layers.append(layer);
 
   /* Half the slice's grid: a resample the description must not see. */
@@ -2469,9 +2482,13 @@ TEST_F(PaintLayersCompositeTest, directx_normal_map_is_converted_to_opengl_befor
   ASSERT_TRUE(BKE_paint_layers_normal_set_directx(*ma, row, true));
 
   const std::array<float, 4> result = linear_pixel(PAINT_MATERIAL_CHANNEL_NORMAL, 1, 1);
-  EXPECT_NEAR(result[0], 128.0f / 255.0f, 1e-4f);
-  EXPECT_NEAR(result[1], 191.0f / 255.0f, 1e-4f);
-  EXPECT_NEAR(result[2], 240.0f / 255.0f, 1e-4f);
+  /* The conversion flips the green slope and renormalizes: the byte triple is not a unit normal,
+   * so the expected value is computed the same way instead of read off the flipped bytes. */
+  float expected[3] = {128.0f / 127.5f - 1.0f, -(64.0f / 127.5f - 1.0f), 240.0f / 127.5f - 1.0f};
+  normalize_v3(expected);
+  EXPECT_NEAR(result[0], expected[0] * 0.5f + 0.5f, 2e-3f);
+  EXPECT_NEAR(result[1], expected[1] * 0.5f + 0.5f, 2e-3f);
+  EXPECT_NEAR(result[2], expected[2] * 0.5f + 0.5f, 2e-3f);
 }
 
 TEST_F(PaintLayersCompositeTest, normal_channel_export_is_unit_length)
@@ -3261,6 +3278,9 @@ TEST_F(PaintLayersCompositeTest, a_projected_rows_gradient_mask_item_follows_the
   source->tag_topology_changed();
   source->tag_positions_changed();
   BKE_mesh_nomain_to_mesh(source, mesh, ob);
+  /* The surface reads the default UV map by name, which a bare attribute does not set. */
+  mesh->uv_maps_default_set("UVMap");
+  mesh->uv_maps_active_set("UVMap");
 
   add_paint_layer("Bottom", add_solid_image("Bottom", 4, 255, 0, 0, 255));
   MaterialPaintLayer *top = add_paint_layer("Top", add_solid_image("Top", 4, 0, 0, 255, 255));
@@ -3273,12 +3293,16 @@ TEST_F(PaintLayersCompositeTest, a_projected_rows_gradient_mask_item_follows_the
    * test is about the projected read, not about that default. The frame spans [-2, 2]² (full
    * extents 4) in object space, so the quad's projected UV runs (0.5, 0.5) to (1, 1). The default
    * line reads (0, 0.5) to (1, 0.5) with a black-to-white ramp, so the factor is the projected u. */
+  /* Only a Fill that reads a map can project; a painted row keeps its raw UV. */
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, top, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, top, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_solid_image("TopMap", 4, 0, 0, 255, 255)));
   ASSERT_TRUE(BKE_paint_layers_projection_set_space(
       *ma, top, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
   const float frame_center[3] = {0.0f, 0.0f, 0.0f};
   const float frame_size[3] = {4.0f, 4.0f, 4.0f};
   const float frame_rotation[3] = {0.0f, 0.0f, 0.0f};
-  ASSERT_TRUE(BKE_paint_layers_projection_set_values(
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values_euler(
       *ma, top, frame_center, frame_size, frame_rotation));
 
   /* Texel (0, 0): destination UV (0.125, 0.125), object (0.5, 0.5), projected u 0.625. */
@@ -3334,6 +3358,9 @@ TEST_F(PaintLayersCompositeTest, a_projected_gradient_ignores_the_rows_tiling)
   source->tag_topology_changed();
   source->tag_positions_changed();
   BKE_mesh_nomain_to_mesh(source, mesh, ob);
+  /* The surface reads the default UV map by name, which a bare attribute does not set. */
+  mesh->uv_maps_default_set("UVMap");
+  mesh->uv_maps_active_set("UVMap");
 
   add_paint_layer("Bottom", add_solid_image("Bottom", 4, 255, 0, 0, 255));
   MaterialPaintLayer *top = add_paint_layer("Top", add_solid_image("Top", 4, 0, 0, 255, 255));
@@ -3342,11 +3369,15 @@ TEST_F(PaintLayersCompositeTest, a_projected_gradient_ignores_the_rows_tiling)
       *ma, top, MA_PAINT_LAYER_SOURCE_GENERATOR, "Mask Gradient", 1.0f);
   ASSERT_NE(item, nullptr);
   ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *item, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  /* Only a Fill that reads a map can project; a painted row keeps its raw UV. */
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, top, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, top, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_solid_image("TopMap", 4, 0, 0, 255, 255)));
   ASSERT_TRUE(BKE_paint_layers_projection_set_space(*ma, top, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
   const float center[3] = {0.0f, 0.0f, 0.0f};
   const float size[3] = {2.0f, 2.0f, 2.0f};
   const float rotation[3] = {0.0f, 0.0f, 0.0f};
-  ASSERT_TRUE(BKE_paint_layers_projection_set_values(
+  ASSERT_TRUE(BKE_paint_layers_projection_set_values_euler(
       *ma, top, center, size, rotation));
 
   const auto linear_frame = [&]() {
@@ -4678,5 +4709,22 @@ TEST_F(PaintLayersCompositeTest, the_gpu_path_lays_the_color_balance_filter)
 }
 
 /** \} */
+
+/* The projection caches are process-global and hold guarded memory; emptying them after the last
+ * test keeps their buffers from being freed by static destructors once the allocator has already
+ * run its exit check. */
+class ProjectionCachesEnvironment : public ::testing::Environment {
+ public:
+  void TearDown() override
+  {
+    BKE_paint_material_surface_map_free();
+    /* Freeing a material removes its entries but keeps the map's grown slot storage, which only
+     * #BKE_paint_material_composite_cache_free_all releases, as #WM_exit does. */
+    BKE_paint_material_composite_cache_free_all();
+  }
+};
+
+[[maybe_unused]] static ::testing::Environment *const projection_caches_environment =
+    ::testing::AddGlobalTestEnvironment(new ProjectionCachesEnvironment());
 
 }  // namespace blender::bke::tests

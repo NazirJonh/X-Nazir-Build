@@ -2039,7 +2039,7 @@ TEST_F(PaintLayersGenerateTest, box_projection_samples_three_faces_and_blends_th
   ASSERT_NE(group, nullptr);
   EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 3) << "one map copy per face";
   EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 0);
-  EXPECT_GE(count_type(*group, SH_NODE_SEPARATE_XYZ), 1);
+  EXPECT_GE(count_type(*group, SH_NODE_SEPXYZ), 1);
   EXPECT_GE(count_type(*group, SH_NODE_MIX), 2) << "Y over Z, then X over that";
   EXPECT_GE(count_type(*group, SH_NODE_MATH), 10) << "weights, clip factor and UV math";
 }

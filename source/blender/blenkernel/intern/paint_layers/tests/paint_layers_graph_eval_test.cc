@@ -510,20 +510,25 @@ class PaintLayersMappingEvalTest : public PaintLayersGraphEvalTest {
     return Span<const Case>(all, int64_t(std::size(all)));
   }
 
-  /** A 2x2 byte map of four distinct colours. */
+  /** A 4x4 byte map of four distinct colour quadrants, the size of the evaluated grid: a row that reads
+   * it unmapped then reads the same texels in the graph and in the CPU composite, which resamples a
+   * map of another size onto that grid. */
   Image *add_quad_image(const char *name)
   {
     const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     Image *image = BKE_image_add_generated(
-        bmain, 2, 2, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+        bmain, 4, 4, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
     image->alpha_mode = IMA_ALPHA_STRAIGHT;
     const uchar texels[4][4] = {
         {220, 40, 30, 255}, {30, 200, 60, 255}, {40, 60, 230, 255}, {200, 170, 90, 255}};
     void *lock = nullptr;
     ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
     uchar *pixels = ibuf->byte_data_for_write();
-    for (const int i : IndexRange(4)) {
-      memcpy(pixels + i * 4, texels[i], 4);
+    for (const int y : IndexRange(4)) {
+      for (const int x : IndexRange(4)) {
+        const int quadrant = (y >= 2 ? 2 : 0) + (x >= 2 ? 1 : 0);
+        memcpy(pixels + (y * 4 + x) * 4, texels[quadrant], 4);
+      }
     }
     BKE_image_release_ibuf(image, ibuf, lock);
     return image;
@@ -1089,7 +1094,13 @@ TEST_F(PaintLayersGraphEvalTest, height_compare_first_row_of_a_folder_matches_th
 
   /* The comparer is the first row of its own folder, so it compares against the empty
    * accumulation rather than against anything the stack holds below it. */
-  ASSERT_NE(BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(&comparer, 1)), nullptr);
+  MaterialPaintLayer *folder = BKE_paint_layers_group(
+      *ma, Span<MaterialPaintLayer *>(&comparer, 1));
+  ASSERT_NE(folder, nullptr);
+  /* A plain Mix folder at full opacity is inlined (pass-through), which would put the comparer
+   * over the neutral bottom instead; a full mask keeps the folder isolating without weighing it. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, folder, 1.0f), nullptr);
+  ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*folder));
   expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   const RGBA hidden = cpu_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   EXPECT_NEAR(hidden.r, 200.0f / 255.0f, 2e-3f);
@@ -1155,6 +1166,10 @@ TEST_F(PaintLayersGraphEvalTest, height_compare_mask_acquires_its_stacks_once)
   }
   add_layer("BelowHeight", below_height, PAINT_MATERIAL_CHANNEL_HEIGHT);
   MaterialPaintLayer *comparer = add_layer("Comparer", color);
+  /* Only a Fill's own maps take a mapping; a painted row keeps the raw UV its strokes wrote at. */
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, comparer, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, comparer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, color));
   EXPECT_NE(BKE_paint_layers_channel_add(*ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT), nullptr);
   EXPECT_TRUE(BKE_paint_layers_channel_set_image(
       *ma, comparer, PAINT_MATERIAL_CHANNEL_HEIGHT, row_height));

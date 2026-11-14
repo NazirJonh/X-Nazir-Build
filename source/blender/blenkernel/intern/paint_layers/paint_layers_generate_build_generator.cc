@@ -213,6 +213,8 @@ NodeOutput PaintLayersTreeBuilder::gradient_factor_ensure(bNodeTree &tree,
   bNodeSocket *coordinate = (coord != nullptr) ?
                                 this->gradient_coordinate_socket(*coord, *layer.gradient) :
                                 nullptr;
+  /* The link has to name the node that owns #coordinate, which the projected read replaces. */
+  bNode *coordinate_node = coord;
   if (coordinate != nullptr && layer.gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_UV) {
     /* A UV line under a projected row reads the frame's projected UV instead of the surface's, so
      * a gradient mask follows the decal frame. The frame is the mask item's owner row's; either
@@ -222,7 +224,10 @@ NodeOutput PaintLayersTreeBuilder::gradient_factor_ensure(bNodeTree &tree,
       Vector<bNode *> made;
       if (ProjectionNodes *projection = this->projection_nodes_ensure(tree, *row, made)) {
         if (projection->uv[0] != nullptr) {
-          coordinate = socket_out(*projection->uv[0], "Vector");
+          if (bNodeSocket *projected = socket_out(*projection->uv[0], "Vector")) {
+            coordinate = projected;
+            coordinate_node = projection->uv[0];
+          }
         }
       }
     }
@@ -232,7 +237,7 @@ NodeOutput PaintLayersTreeBuilder::gradient_factor_ensure(bNodeTree &tree,
   if (coord == nullptr || coordinate == nullptr || coordinate_in == nullptr) {
     return discard();
   }
-  bke::node_add_link(tree, *coord, *coordinate, *instance, *coordinate_in);
+  bke::node_add_link(tree, *coordinate_node, *coordinate, *instance, *coordinate_in);
 
   struct GradientInput {
     Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> *inputs;

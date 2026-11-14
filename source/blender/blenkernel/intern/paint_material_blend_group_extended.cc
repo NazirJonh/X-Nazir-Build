@@ -243,15 +243,19 @@ BlendBranch blend_branch_extended_add(bNodeTree &group,
       if (choice == nullptr) {
         return {};
       }
-      static_cast<NodeShaderMix *>(choice->storage)->factor_mode = NODE_MIX_MODE_NON_UNIFORM;
+      /* Only the Vector mode of the Mix node has a per-component factor: in RGBA mode the vector
+       * factor is unavailable and the node reads its float factor, which would always pick B. */
+      NodeShaderMix *choice_storage = static_cast<NodeShaderMix *>(choice->storage);
+      choice_storage->data_type = SOCK_VECTOR;
+      choice_storage->factor_mode = NODE_MIX_MODE_NON_UNIFORM;
       if (!link(mask, BLEND_NODE_COMBINE_VALUE, choice, BLEND_NODE_MIX_FACTOR_VECTOR) ||
-          !link(hard, BLEND_NODE_MIX_RESULT, choice, BLEND_NODE_MIX_A) ||
-          !link(soft, BLEND_NODE_MIX_RESULT, choice, BLEND_NODE_MIX_B))
+          !link(hard, BLEND_NODE_MIX_RESULT, choice, BLEND_NODE_MIX_VECTOR_A) ||
+          !link(soft, BLEND_NODE_MIX_RESULT, choice, BLEND_NODE_MIX_VECTOR_B))
       {
         return {};
       }
       full = choice;
-      full_output = BLEND_NODE_MIX_RESULT;
+      full_output = BLEND_NODE_MIX_VECTOR_RESULT;
       break;
     }
     case MA_PAINT_BLEND_LIGHTER_COLOR:

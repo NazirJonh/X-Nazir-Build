@@ -35,6 +35,7 @@
 
 #include "ED_gizmo_library.hh"
 #include "ED_image.hh"
+#include "ED_material_combined.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_undo.hh"
@@ -345,6 +346,11 @@ void notify_mapping_changed(bContext *C, Material *ma, ARegion *region)
 
 void reset_drag(LayerMappingGizmoGroup &ggd)
 {
+  /* By uid: the material may be gone by the time the drag ends. Every end of a drag comes through
+   * here, so the coarse mark cannot outlive the gesture short of its own timeout. */
+  if (ggd.session_material != nullptr) {
+    ed::material_combined::gradient_interactive_end(ggd.session_material->id.session_uid);
+  }
   ggd.drag_active = false;
   ggd.handle = MappingHandle::None;
   ggd.session_material = nullptr;
@@ -455,6 +461,8 @@ void begin_drag(bContext *C,
   ggd.drag_pivot_uv = pivot_for_handle(ggd, xform);
 
   ggd.drag_active = true;
+  /* The composites shade at a capped octave while the drag lasts and refine on release. */
+  ed::material_combined::gradient_interactive_begin(*ggd.session_material, true);
   update_status_text(C, xform);
 }
 
@@ -471,6 +479,8 @@ void apply_drag(bContext *C,
     finish_drag(C, ggd, false);
     return;
   }
+  /* Re-armed on every step: the mark expires on its own. */
+  ed::material_combined::gradient_interactive_begin(*ggd.session_material, true);
 
   const float precision = (event->modifier & KM_SHIFT) ? 0.1f : 1.0f;
   if (ggd.handle == MappingHandle::MirrorCenter) {
@@ -692,7 +702,12 @@ void layer_mapping_gizmo_setup(const bContext * /*C*/, wmGizmoGroup *gzgroup)
   LayerMappingGizmoGroup *ggd = MEM_new<LayerMappingGizmoGroup>(__func__);
   gzgroup->customdata = ggd;
   gzgroup->customdata_free = [](void *customdata) {
-    MEM_delete(static_cast<LayerMappingGizmoGroup *>(customdata));
+    LayerMappingGizmoGroup *group = static_cast<LayerMappingGizmoGroup *>(customdata);
+    /* A drag this group never got to finish leaves a mark nothing else clears. */
+    if (group->drag_active && group->session_material != nullptr) {
+      ed::material_combined::gradient_interactive_end(group->session_material->id.session_uid);
+    }
+    MEM_delete(group);
   };
 
   /* The lock buttons come first: the first gizmo hit wins, and the button sits inside the cage's

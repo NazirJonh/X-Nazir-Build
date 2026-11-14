@@ -2967,6 +2967,21 @@ void BKE_paint_layers_bake_stroke_active_set(bool active);
 bool BKE_paint_layers_bake_stroke_active_get();
 
 /**
+ * Hand the planner the state of a handle drag on \a material_uid (a Transform or Mirror center in
+ * Decal space). While it lasts, the bake of a row with a Decal effect is rendered at a reduced size
+ * instead of the canvas, since it is redone at every step; ending it tags the material so the full
+ * bake follows once. Runtime only; an end that never arrives expires on its own. \a bmain names the
+ * material to tag, so the release does not walk `G_MAIN` from this module.
+ */
+void BKE_paint_layers_bake_drag_set(Main &bmain, uint32_t material_uid, bool active);
+
+/** Whether a handle drag (see #BKE_paint_layers_bake_drag_set) is running on \a material_uid. */
+bool BKE_paint_layers_bake_drag_is_active(uint32_t material_uid);
+
+/** Forget every drag mark and the reduced rows they owe, when the file is replaced or closed. */
+void BKE_paint_layers_bake_drag_clear_all();
+
+/**
  * Append every layered material of \a bmain that has a Material row reading \a source, once each.
  *
  * The render of a row is keyed on the row, not on its source, so an edit of the source reaches the

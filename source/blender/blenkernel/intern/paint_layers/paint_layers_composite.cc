@@ -34,6 +34,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_task.hh"
+#include "BLI_time.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
@@ -3129,6 +3130,20 @@ bool BKE_paint_layers_bake_render_node(
   {
     return false;
   }
+  /* A result smaller than the stack (the drag-reduced bake of a Decal row, while the drag lasts) composites on a grid of
+   * its own size: the Decal resample and every map read cost by texels, and a 4K grid would only be
+   * thrown away by the nearest resample below. A partial rectangle keeps the stack grid, as the
+   * nested slice rectangle is in its pixels. */
+  int eval_width = 0;
+  int eval_height = 0;
+  if (dst_rect == nullptr && (width > size || height > size) &&
+      BKE_paint_layers_bake_drag_is_active(ma.id.session_uid))
+  {
+    eval_width = min_ii(width, size);
+    eval_height = min_ii(height, size);
+    width = eval_width;
+    height = eval_height;
+  }
   /* The rectangle of the `size`-square result to produce, and the source pixels it samples. A full
    * render produces all of it; a partial re-bake passes the changed tile so the composite runs over
    * that source rectangle alone. */
@@ -3176,7 +3191,7 @@ bool BKE_paint_layers_bake_render_node(
   Vector<float> content_coverage(int64_t(area_w) * area_h);
   const rcti region = area;
   if (!BKE_paint_material_composite_eval_row_content(
-          entry, content_color.data(), content_coverage.data(), &region, channel))
+          entry, content_color.data(), content_coverage.data(), &region, channel, eval_width, eval_height))
   {
     return false;
   }

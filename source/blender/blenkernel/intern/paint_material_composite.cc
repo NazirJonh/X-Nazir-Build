@@ -3219,14 +3219,18 @@ PaintMaterialCompositeLinearSession PaintMaterialCompositeLinearSession::session
 }
 
 PaintMaterialCompositeLinearSession PaintMaterialCompositeLinearSession::session_open_row(
-    const PaintMaterialCompositeImageLayer &row)
+    const PaintMaterialCompositeImageLayer &row, const int eval_width, const int eval_height)
 {
   PaintMaterialCompositeLinearSession session;
   session.gradient_items_ = composite_stack_generator_count(
       Span<PaintMaterialCompositeImageLayer>(&row, 1));
-  /* Always the stack's own size: a bake renders at the canvas, never at a preview octave. */
-  session.ok_ = composite_stack_build_linear(
-      Span<PaintMaterialCompositeImageLayer>(&row, 1), session.locks_, session.stack_, 0, 0);
+  /* The stack's own size unless the caller asks for less: a bake renders at the canvas, except a
+   * drag-reduced one, whose result is smaller than the canvas and would only be resampled down. */
+  session.ok_ = composite_stack_build_linear(Span<PaintMaterialCompositeImageLayer>(&row, 1),
+                                             session.locks_,
+                                             session.stack_,
+                                             eval_width,
+                                             eval_height);
   return session;
 }
 
@@ -3301,10 +3305,12 @@ bool BKE_paint_material_composite_eval_row_content(const PaintMaterialCompositeI
                                                    float *r_color_rgba,
                                                    float *r_coverage_gray,
                                                    const rcti *region,
-                                                   const int channel)
+                                                   const int channel,
+                                                   const int eval_width,
+                                                   const int eval_height)
 {
   PaintMaterialCompositeLinearSession session =
-      PaintMaterialCompositeLinearSession::session_open_row(row);
+      PaintMaterialCompositeLinearSession::session_open_row(row, eval_width, eval_height);
   return session.eval_row_content(region, channel, r_color_rgba, r_coverage_gray);
 }
 

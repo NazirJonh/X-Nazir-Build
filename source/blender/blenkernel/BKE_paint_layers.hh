@@ -1548,7 +1548,8 @@ bool BKE_paint_layers_mapping_is_identity(const MaterialPaintLayer &layer);
  * axis (#BKE_paint_layers_mapping_mirror_get). An identity mapping with Repeat and no fold is
  * skipped, so a row whose mapping was switched on before it had a value builds the same graph as an
  * unmapped one. A projected row never remaps: it is addressed by its frame, and only its UV wrap
- * applies.
+ * applies. Nor does a transform effect in a mask: its mapping moves the grey the mask has built up,
+ * which its own bake already holds, so no read of a map of its own goes through it.
  */
 bool BKE_paint_layers_mapping_remaps(const Material &ma, const MaterialPaintLayer &layer);
 
@@ -1719,7 +1720,8 @@ bool BKE_paint_layers_mapping_set_mirror_enabled(Material &ma,
 
 /**
  * Fold the axes of \a layer's maps around its #MaterialPaintLayerMapping::mirror_center. \a axes is
- * a mask of #MA_PAINT_LAYER_MAPPING_MIRROR_U / _V; 0 folds nothing. The fold reads the map through
+ * a mask of #MA_PAINT_LAYER_MAPPING_MIRROR_U / _V, each optionally with its _NEGATIVE direction bit
+ * (a direction bit without its axis is dropped); 0 folds nothing. The fold reads the map through
  * `|uv - center| + center` per folded axis before the transform, so what either side of the center
  * shows, both sides show -- the same nodes the generated graph builds and the CPU and GPU composites
  * apply. Structural: the row's chain gains or loses the fold and its per-texel Normal flip.
@@ -1765,9 +1767,13 @@ constexpr float BKE_PAINT_LAYERS_MIRROR_SIDE_BIAS = 1e-6f;
  * The Mirror fold of one coordinate around \a center on one axis, the formula the generated graph,
  * the CPU resample and the shader all apply: `|coordinate - center| + center`.
  */
-inline float BKE_paint_layers_mapping_mirror_fold(const float coordinate, const float center)
+inline float BKE_paint_layers_mapping_mirror_fold(const float coordinate,
+                                                  const float center,
+                                                  const bool negative)
 {
-  return fabsf(coordinate - center) + center;
+  /* The negative direction keeps the smaller side: `center - |coordinate - center|`. */
+  const float distance = fabsf(coordinate - center);
+  return negative ? center - distance : center + distance;
 }
 
 /**
@@ -1775,9 +1781,13 @@ inline float BKE_paint_layers_mapping_mirror_fold(const float coordinate, const 
  * the folded axis is multiplied by at that coordinate, the covariant counterpart of the fold (the
  * per-texel generalization of the negative-scale flip). Exactly at the center the side reads +1.
  */
-inline float BKE_paint_layers_mapping_mirror_side(const float coordinate, const float center)
+inline float BKE_paint_layers_mapping_mirror_side(const float coordinate,
+                                                  const float center,
+                                                  const bool negative)
 {
-  return coordinate >= center ? 1.0f : -1.0f;
+  /* The negative fold's derivative is the positive one's, negated. */
+  const float side = coordinate >= center ? 1.0f : -1.0f;
+  return negative ? -side : side;
 }
 
 /** \} */
@@ -2631,7 +2641,8 @@ MaterialPaintLayer *BKE_paint_layers_mask_material_add(Material &ma,
 /**
  * Add a filter to the mask of \a layer, over the items already there: it changes the coverage built
  * so far (`M = lerp(M, f(M), opacity)`), owns no map or grey, and works in no channel. The row needs
- * a base mask first, as for any mask correction.
+ * a base mask first, as for any mask correction. A transform effect (#MA_PAINT_LAYER_FILTER_TRANSFORM
+ * or #MA_PAINT_LAYER_FILTER_MIRROR) is accepted too: it moves the coverage built so far, in UV.
  * \return The new item, or null when \a layer has no base mask, is not in the stack, or \a filter is
  * unknown.
  */

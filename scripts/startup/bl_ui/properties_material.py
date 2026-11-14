@@ -1584,9 +1584,21 @@ class LAYER_MATERIAL_PT_mapping_mirror(LayerMaterialButtonsPanel, Panel):
         # same content in real time, useful for symmetric painting.
         layout.active = row.mapping_mirror_enabled
         mirror_col = layout.column(align=True)
-        mirror_row = mirror_col.row(align=True)
+        # The toggles are plain buttons: with property split on, each lands in the value column and
+        # rows of different nesting no longer line up, so the split is off for this block only.
+        toggle_col = mirror_col.column(align=True)
+        toggle_col.use_property_split = False
+        mirror_row = toggle_col.row(align=True)
         mirror_row.prop(row, "mapping_mirror_u", text="U", toggle=True)
         mirror_row.prop(row, "mapping_mirror_v", text="V", toggle=True)
+        # Direction per axis: off copies the larger side onto the smaller one, on does the opposite.
+        flip_row = toggle_col.row(align=True)
+        sub = flip_row.row(align=True)
+        sub.active = row.mapping_mirror_u
+        sub.prop(row, "mapping_mirror_u_negative", text="Flip U", toggle=True)
+        sub = flip_row.row(align=True)
+        sub.active = row.mapping_mirror_v
+        sub.prop(row, "mapping_mirror_v_negative", text="Flip V", toggle=True)
         # The center is a value of the row, so the field below can be typed before an axis is
         # switched on: the natural order (place the point, then fold around it) works. The sculpt 3D
         # cursor is projected through the active object's surface, so it places the point from

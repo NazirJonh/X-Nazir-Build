@@ -693,6 +693,12 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
      * item reads its map. Without one the item lays nothing: the live graph cannot express the
      * effect, and the bake catches up outside the stroke. */
     Image *item_effect_bake = paint_layer_mask_effect_bake_map(ma_, item);
+    if (paint_layer_mask_item_bakes_effect(item) && item_effect_bake == nullptr) {
+      /* Pass-through until the bake stands. Falling on to the record or flat-value paths below
+       * would lay a grey the effect never computed (zero for a record without a map), blacking the
+       * mask out for the whole wait. */
+      continue;
+    }
     /* The map the item lays: the effect's baked grey, or the painted record's. One read serves
      * both, the item's own mapping over it either way. */
     Image *item_image = item_effect_bake;
@@ -783,7 +789,12 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
         discard();
         return {};
       }
-      map_node_key_set(*item_map, item, item_record->channel);
+      /* An effect item reads the grey its bake holds and owns no record: the mask's channel is
+       * Base Color, the one its bake is written in. */
+      map_node_key_set(*item_map,
+                       item,
+                       item_record != nullptr ? int(item_record->channel) :
+                                                int(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
       nodes.append(item_map);
       grid_.place(*item_map, layout::Column::Mask, row++);
       const MapRead item_read = this->map_read_apply(tree, item, *item_map, nodes);

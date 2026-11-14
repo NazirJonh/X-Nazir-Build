@@ -38,6 +38,10 @@
  * it reads from -- the per-texel counterpart of the negative-scale flip. */
 #define COMBINED_LAYER_MIRROR_U 1048576
 #define COMBINED_LAYER_MIRROR_V 2097152
+/* The fold's direction on a set axis: with the bit the map is read through
+ * `center - |uv - center|` (the smaller side shows on both) and the Normal's side sign flips. */
+#define COMBINED_LAYER_MIRROR_U_NEG 134217728
+#define COMBINED_LAYER_MIRROR_V_NEG 268435456
 /* What the row's map stores (`#eMaterialPaintLayerMapEncoding`), read into the channel's value
  * before the coverage: a glossiness map is `1 - rgb`, the spec-gloss packing reads `1 - alpha`
  * with the map's alpha as data (no `COMBINED_LAYER_ALPHA_COVERAGE` alongside), an F0 colour reads
@@ -74,7 +78,7 @@
 
 /* The transform effects' steps a pass applies ahead of the row's own mapping: at most
  * #COMBINED_INPUT_STEP_MAX of them, each packed in two float4s (offset.xy, scale.xy |
- * rotation.xy, mirror_center.xy) with five flag bits a step in `input_step_flags`. A CPU composite
+ * rotation.xy, mirror_center.xy) with seven flag bits a step in `input_step_flags`. A CPU composite
  * composes more; past the two the preview refuses the row to the CPU, so a stack is never shaded
  * as if a step were not there. */
 /* Mirrors #PAINT_MATERIAL_COMBINED_INPUT_STEP_MAX (BKE_paint_material_composite.hh) and
@@ -85,6 +89,11 @@
 #define COMBINED_INPUT_STEP_MIRROR_V 4
 #define COMBINED_INPUT_STEP_REPEAT_U 8
 #define COMBINED_INPUT_STEP_REPEAT_V 16
+#define COMBINED_INPUT_STEP_MIRROR_U_NEG 32
+#define COMBINED_INPUT_STEP_MIRROR_V_NEG 64
+/* Bits a step takes in `input_step_flags`. */
+#define COMBINED_INPUT_STEP_BITS 7
+#define COMBINED_INPUT_STEP_MASK 127
 
 /* The `CompositeBlend` values, which are the `MA_RAMP_*` codes of the Mix node. */
 #define COMBINED_BLEND_MIX 0
@@ -655,6 +664,26 @@ float texel_hash_uniform(int2 texel, int seed, uint salt)
 #define COMBINED_MAP_NEAREST 131072
 
 /**
+ * The Mirror fold of one coordinate around \a center. The reference is
+ * `BKE_paint_layers_mapping_mirror_fold` (BKE_paint_layers.hh); \a negative keeps the smaller side.
+ */
+float combined_mirror_fold(float coordinate, float center, bool negative)
+{
+  float distance = abs(coordinate - center);
+  return negative ? center - distance : center + distance;
+}
+
+/**
+ * The side sign the fold gives a coordinate, as `BKE_paint_layers_mapping_mirror_side`: +1 at and
+ * beyond the center. The negative fold's derivative is the positive one's, negated.
+ */
+float combined_mirror_side(float coordinate, float center, bool negative)
+{
+  float side = (coordinate >= center) ? 1.0f : -1.0f;
+  return negative ? -side : side;
+}
+
+/**
  * One straight, scene-linear texel of a map at the canvas \a uv, read through the row's UV mapping.
  *
  * `uv' = (R * fold(uv)) * scale + offset` is the transform of the generated Mapping node chain and
@@ -693,16 +722,19 @@ float4 sample_map(sampler2D tx,
   for (int s = 0; s < COMBINED_INPUT_STEP_MAX && s < input_step_count; s++) {
     float4 a = (s == 0) ? input_step_0_a : input_step_1_a;
     float4 b = (s == 0) ? input_step_0_b : input_step_1_b;
-    int step_flags = (input_step_flags >> (s * 5)) & 31;
+    int step_flags = (input_step_flags >> (s * COMBINED_INPUT_STEP_BITS)) & COMBINED_INPUT_STEP_MASK;
     float2 folded = sample_uv;
     float2 step_side_sign = float2(1.0f);
+    /* The direction multiplies both the fold and the side sign, as the CPU's `negative` fold. */
+    const bool step_negative_u = (step_flags & COMBINED_INPUT_STEP_MIRROR_U_NEG) != 0;
+    const bool step_negative_v = (step_flags & COMBINED_INPUT_STEP_MIRROR_V_NEG) != 0;
     if ((step_flags & COMBINED_INPUT_STEP_MIRROR_U) != 0) {
-      folded.x = abs(sample_uv.x - b.z) + b.z;
-      step_side_sign.x = (sample_uv.x >= b.z) ? 1.0f : -1.0f;
+      folded.x = combined_mirror_fold(sample_uv.x, b.z, step_negative_u);
+      step_side_sign.x = combined_mirror_side(sample_uv.x, b.z, step_negative_u);
     }
     if ((step_flags & COMBINED_INPUT_STEP_MIRROR_V) != 0) {
-      folded.y = abs(sample_uv.y - b.w) + b.w;
-      step_side_sign.y = (sample_uv.y >= b.w) ? 1.0f : -1.0f;
+      folded.y = combined_mirror_fold(sample_uv.y, b.w, step_negative_v);
+      step_side_sign.y = combined_mirror_side(sample_uv.y, b.w, step_negative_v);
     }
     float2 rotated = float2(folded.x * b.x - folded.y * b.y,
                             folded.x * b.y + folded.y * b.x);
@@ -722,13 +754,15 @@ float4 sample_map(sampler2D tx,
   float2 row_input = sample_uv;
   if ((flags & COMBINED_LAYER_MAPPED) != 0) {
     float2 folded = row_input;
+    const bool row_negative_u = (flags & COMBINED_LAYER_MIRROR_U_NEG) != 0;
+    const bool row_negative_v = (flags & COMBINED_LAYER_MIRROR_V_NEG) != 0;
     if ((flags & COMBINED_LAYER_MIRROR_U) != 0) {
-      folded.x = abs(row_input.x - mapping_mirror_center.x) + mapping_mirror_center.x;
-      side.x = (row_input.x >= mapping_mirror_center.x) ? 1.0f : -1.0f;
+      folded.x = combined_mirror_fold(row_input.x, mapping_mirror_center.x, row_negative_u);
+      side.x = combined_mirror_side(row_input.x, mapping_mirror_center.x, row_negative_u);
     }
     if ((flags & COMBINED_LAYER_MIRROR_V) != 0) {
-      folded.y = abs(row_input.y - mapping_mirror_center.y) + mapping_mirror_center.y;
-      side.y = (row_input.y >= mapping_mirror_center.y) ? 1.0f : -1.0f;
+      folded.y = combined_mirror_fold(row_input.y, mapping_mirror_center.y, row_negative_v);
+      side.y = combined_mirror_side(row_input.y, mapping_mirror_center.y, row_negative_v);
     }
     float2 rotated = float2(folded.x * mapping_rotation.x - folded.y * mapping_rotation.y,
                             folded.x * mapping_rotation.y + folded.y * mapping_rotation.x);
@@ -1141,7 +1175,7 @@ struct MaskResources {
   [[push_constant]] const int proj_axis;
   [[push_constant]] const int proj_flags;
   /** The transform effects' steps ahead of the row's own mapping: `a` carries offset.xy and
-   * scale.xy, `b` the rotation's cosine and sine and the fold center; five flag bits a step live
+   * scale.xy, `b` the rotation's cosine and sine and the fold center; seven flag bits a step live
    * in `input_step_flags`, and `input_step_count` says how many run. */
   [[push_constant]] const float4 input_step_0_a;
   [[push_constant]] const float4 input_step_0_b;
@@ -1471,7 +1505,7 @@ struct LayerResources {
   /** The UV point the row's Mirror fold reflects around, on its folded axes. */
   [[push_constant]] const float2 mapping_mirror_center;
   /** The transform effects' steps ahead of the row's own mapping: `a` carries offset.xy and
-   * scale.xy, `b` the rotation's cosine and sine and the fold center; five flag bits a step live
+   * scale.xy, `b` the rotation's cosine and sine and the fold center; seven flag bits a step live
    * in `input_step_flags`, and `input_step_count` says how many run. */
   [[push_constant]] const float4 input_step_0_a;
   [[push_constant]] const float4 input_step_0_b;

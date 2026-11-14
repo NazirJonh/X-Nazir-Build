@@ -1017,19 +1017,24 @@ bool paint_layers_maps_sync(Material &ma, Main &bmain)
         continue;
       }
       const MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer, channel);
-      if (record == nullptr || record->image == nullptr) {
+      Image *wanted = (record != nullptr) ? record->image : nullptr;
+      if (wanted == nullptr && layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+        /* A mask effect item shows the grey its bake holds and owns no map of its own. */
+        wanted = paint_layer_mask_effect_bake_map(ma, *layer);
+      }
+      if (wanted == nullptr) {
         /* The map was removed: that is a different node, and the topology hash should have rebuilt
          * the group instead of leaving this sync to fail. */
         ok = false;
         continue;
       }
-      if (node.id == &record->image->id) {
+      if (node.id == &wanted->id) {
         continue;
       }
       if (node.id != nullptr) {
         id_us_min(node.id);
       }
-      node.id = &record->image->id;
+      node.id = &wanted->id;
       id_us_plus(node.id);
       BKE_ntree_update_tag_node_property(group, &node);
       group_changed = true;

@@ -2932,6 +2932,142 @@ TEST_F(PaintLayersEffectTest, the_combined_preview_refuses_a_stack_with_a_mask_e
   EXPECT_NE(reason, nullptr) << "the GPU path refuses the stack instead of shading a no-op";
 }
 
+TEST_F(PaintLayersEffectTest, a_mask_mirror_folds_the_mask_built_up_to_it)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  MaterialPaintLayer *mirror = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_MIRROR);
+
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_MIRROR);
+  ASSERT_NE(laid, nullptr);
+  std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *mirror);
+  ASSERT_NE(input, nullptr);
+
+  /* A fold about the middle of the canvas shows both sides alike, and the ramp is not symmetric. */
+  const float *laid_px = laid->float_data();
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      EXPECT_NEAR(laid_px[(y * 8 + x) * 4], laid_px[(y * 8 + (7 - x)) * 4], 1e-5f)
+          << "texel " << x << "," << y;
+      EXPECT_NEAR(laid_px[(y * 8 + x) * 4 + 3], 1.0f, 1e-6f) << "an opaque grey";
+    }
+  }
+  EXPECT_TRUE(mask_grey_differs(*laid, *input, 1e-4f)) << "a fold of a ramp is not the ramp";
+}
+
+TEST_F(PaintLayersEffectTest, a_mask_transform_moves_the_mask_and_acts_in_uv_only)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  MaterialPaintLayer *transform = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_TRANSFORM);
+  EXPECT_EQ(mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_TRANSFORM), nullptr)
+      << "a transform at the identity moves nothing and lays nothing";
+
+  /* Two texels of the 8-texel canvas, so the bilinear read lands on texel centers exactly. */
+  const float offset[2] = {0.25f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, transform, offset));
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_TRANSFORM);
+  ASSERT_NE(laid, nullptr);
+  std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *transform);
+  ASSERT_NE(input, nullptr);
+
+  /* The sign of the move is the mapping's own vocabulary; either way the mask shifted by two
+   * texels, wrapping at the edge as the default Repeat does. */
+  const auto shifted_by = [&](const int shift) {
+    for (const int y : IndexRange(8)) {
+      for (const int x : IndexRange(8)) {
+        const int source_x = ((x + shift) % 8 + 8) % 8;
+        if (std::abs(laid->float_data()[(y * 8 + x) * 4] -
+                     input->float_data()[(y * 8 + source_x) * 4]) > 1e-4f)
+        {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+  EXPECT_TRUE(shifted_by(2) || shifted_by(-2)) << "the mask moved by the offset";
+}
+
+TEST_F(PaintLayersEffectTest, a_shifted_constant_mask_does_not_vanish)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *transform = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_TRANSFORM);
+
+  const float offset[2] = {0.25f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, transform, offset));
+  /* Repeat: a constant shifted around the canvas is the same constant everywhere. */
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_TRANSFORM);
+  ASSERT_NE(laid, nullptr);
+  for (const int64_t i : IndexRange(int64_t(laid->x) * laid->y)) {
+    EXPECT_NEAR(laid->float_data()[i * 4], 1.0f, 1e-5f) << "texel " << i;
+  }
+
+  /* Clip: only the strip the shift uncovers is lost, not the whole mask. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, transform, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_TRANSFORM);
+  ASSERT_NE(laid, nullptr);
+  int lit = 0;
+  int dark = 0;
+  for (const int64_t i : IndexRange(int64_t(laid->x) * laid->y)) {
+    (laid->float_data()[i * 4] > 0.5f ? lit : dark)++;
+  }
+  EXPECT_GT(lit, 0) << "the mask survives a clipped shift";
+  EXPECT_GT(dark, 0) << "the uncovered strip lays no coverage";
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Mirror fold parity
+ * \{ */
+
+/**
+ * The CPU fold and side are the single source of the formula the generated graph and the shader
+ * copy. A coordinate on either side of the center, exactly on it, and the negative direction cover
+ * the branches a divergence would show in.
+ */
+struct MirrorFoldCase {
+  float coordinate;
+  float center;
+  bool negative;
+  /* Written out by hand, so a change of the formula cannot change the expectation with it. */
+  float expected_fold;
+  float expected_side;
+};
+
+class PaintLayersMirrorFoldTest : public testing::TestWithParam<MirrorFoldCase> {};
+
+TEST_P(PaintLayersMirrorFoldTest, matches_the_reference_fold_and_side)
+{
+  const MirrorFoldCase &test = GetParam();
+  SCOPED_TRACE(::testing::Message() << "coordinate=" << test.coordinate
+                                    << " center=" << test.center
+                                    << " negative=" << test.negative);
+  EXPECT_NEAR(BKE_paint_layers_mapping_mirror_fold(
+                  test.coordinate, test.center, test.negative),
+              test.expected_fold,
+              1e-6f);
+
+  EXPECT_NEAR(BKE_paint_layers_mapping_mirror_side(
+                  test.coordinate, test.center, test.negative),
+              test.expected_side,
+              1e-6f);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    PaintLayersEffectTest,
+    PaintLayersMirrorFoldTest,
+    testing::Values(MirrorFoldCase{0.1f, 0.5f, false, 0.9f, -1.0f},
+                    MirrorFoldCase{0.9f, 0.5f, false, 0.9f, 1.0f},
+                    MirrorFoldCase{0.5f, 0.5f, false, 0.5f, 1.0f},
+                    MirrorFoldCase{0.1f, 0.5f, true, 0.1f, 1.0f},
+                    MirrorFoldCase{0.9f, 0.5f, true, 0.1f, -1.0f},
+                    MirrorFoldCase{0.5f, 0.5f, true, 0.5f, -1.0f},
+                    MirrorFoldCase{0.35f, 0.25f, false, 0.35f, 1.0f},
+                    MirrorFoldCase{0.35f, 0.25f, true, 0.15f, -1.0f}));
+
 /** \} */
 
 }  // namespace blender::bke::tests

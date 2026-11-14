@@ -2205,42 +2205,64 @@ static void rna_MaterialPaintLayer_mapping_mirror_enabled_set(PointerRNA *ptr, b
   }
 }
 
-static bool rna_MaterialPaintLayer_mapping_mirror_u_get(PointerRNA *ptr)
+/** Whether \a flag is set in the layer's configured Mirror axes. */
+static bool rna_mirror_axes_flag_get(PointerRNA *ptr, const int16_t flag)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
-  return (BKE_paint_layers_mapping_mirror_axes_get(*layer) & MA_PAINT_LAYER_MAPPING_MIRROR_U) != 0;
+  return (BKE_paint_layers_mapping_mirror_axes_get(*layer) & flag) != 0;
+}
+
+/** Set or clear one Mirror axis bit without changing whether Mirror is enabled. */
+static void rna_mirror_axes_flag_set(PointerRNA *ptr, const int16_t flag, const bool value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  if (ma == nullptr) {
+    return;
+  }
+  const int16_t current = BKE_paint_layers_mapping_mirror_axes_get(*layer);
+  const int16_t axes = value ? (current | flag) : (current & ~flag);
+  BKE_paint_layers_mapping_set_mirror_axes(*ma, layer, axes);
+}
+
+static bool rna_MaterialPaintLayer_mapping_mirror_u_get(PointerRNA *ptr)
+{
+  return rna_mirror_axes_flag_get(ptr, MA_PAINT_LAYER_MAPPING_MIRROR_U);
 }
 
 static void rna_MaterialPaintLayer_mapping_mirror_u_set(PointerRNA *ptr, bool value)
 {
-  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
-  Material *ma = rna_paint_layer_material(ptr, layer);
-  if (ma == nullptr) {
-    return;
-  }
-  const int16_t current = BKE_paint_layers_mapping_mirror_axes_get(*layer);
-  const int16_t axes = value ? (current | MA_PAINT_LAYER_MAPPING_MIRROR_U) :
-                               (current & ~MA_PAINT_LAYER_MAPPING_MIRROR_U);
-  BKE_paint_layers_mapping_set_mirror_axes(*ma, layer, axes);
+  rna_mirror_axes_flag_set(ptr, MA_PAINT_LAYER_MAPPING_MIRROR_U, value);
 }
 
 static bool rna_MaterialPaintLayer_mapping_mirror_v_get(PointerRNA *ptr)
 {
-  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
-  return (BKE_paint_layers_mapping_mirror_axes_get(*layer) & MA_PAINT_LAYER_MAPPING_MIRROR_V) != 0;
+  return rna_mirror_axes_flag_get(ptr, MA_PAINT_LAYER_MAPPING_MIRROR_V);
 }
 
 static void rna_MaterialPaintLayer_mapping_mirror_v_set(PointerRNA *ptr, bool value)
 {
-  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
-  Material *ma = rna_paint_layer_material(ptr, layer);
-  if (ma == nullptr) {
-    return;
-  }
-  const int16_t current = BKE_paint_layers_mapping_mirror_axes_get(*layer);
-  const int16_t axes = value ? (current | MA_PAINT_LAYER_MAPPING_MIRROR_V) :
-                               (current & ~MA_PAINT_LAYER_MAPPING_MIRROR_V);
-  BKE_paint_layers_mapping_set_mirror_axes(*ma, layer, axes);
+  rna_mirror_axes_flag_set(ptr, MA_PAINT_LAYER_MAPPING_MIRROR_V, value);
+}
+
+static bool rna_MaterialPaintLayer_mapping_mirror_u_negative_get(PointerRNA *ptr)
+{
+  return rna_mirror_axes_flag_get(ptr, MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE);
+}
+
+static void rna_MaterialPaintLayer_mapping_mirror_u_negative_set(PointerRNA *ptr, bool value)
+{
+  rna_mirror_axes_flag_set(ptr, MA_PAINT_LAYER_MAPPING_MIRROR_U_NEGATIVE, value);
+}
+
+static bool rna_MaterialPaintLayer_mapping_mirror_v_negative_get(PointerRNA *ptr)
+{
+  return rna_mirror_axes_flag_get(ptr, MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE);
+}
+
+static void rna_MaterialPaintLayer_mapping_mirror_v_negative_set(PointerRNA *ptr, bool value)
+{
+  rna_mirror_axes_flag_set(ptr, MA_PAINT_LAYER_MAPPING_MIRROR_V_NEGATIVE, value);
 }
 
 static void rna_MaterialPaintLayer_mapping_mirror_center_get(PointerRNA *ptr, float *value)

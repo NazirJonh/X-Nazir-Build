@@ -708,6 +708,28 @@ void rna_def_material_paint_layer_projection(StructRNA *srna)
                            "Fold the row's maps along V: both sides of the center show the same");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
+  prop = RNA_def_property(srna, "mapping_mirror_u_negative", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_mapping_mirror_u_negative_get",
+                                 "rna_MaterialPaintLayer_mapping_mirror_u_negative_set");
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
+  RNA_def_property_ui_text(prop,
+                           "Mirror U Negative",
+                           "Fold U the other way: the smaller side of the center is copied onto the "
+                           "larger one");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "mapping_mirror_v_negative", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_mapping_mirror_v_negative_get",
+                                 "rna_MaterialPaintLayer_mapping_mirror_v_negative_set");
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_mirror_editable");
+  RNA_def_property_ui_text(prop,
+                           "Mirror V Negative",
+                           "Fold V the other way: the smaller side of the center is copied onto the "
+                           "larger one");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
   prop = RNA_def_property(srna, "mapping_mirror_center", PROP_FLOAT, PROP_NONE);
   RNA_def_property_array(prop, 2);
   RNA_def_property_float_funcs(prop,

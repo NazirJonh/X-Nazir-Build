@@ -659,6 +659,25 @@ void WM_jobs_kill_type(wmWindowManager *wm, const void *owner, int job_type)
   }
 }
 
+void WM_jobs_kill_type_if(wmWindowManager *wm,
+                          int job_type,
+                          bool (*should_kill)(void *customdata, void (*free_fn)(void *)))
+{
+  BLI_assert(job_type != WM_JOB_TYPE_ANY);
+
+  for (wmJob &wm_job : wm->runtime->jobs.items_mutable()) {
+    if (wm_job.job_type != job_type) {
+      continue;
+    }
+    /* A running job keeps its data separately, see #wmJob.run_customdata. */
+    void *customdata = wm_job.customdata ? wm_job.customdata : wm_job.run_customdata;
+    void (*free_fn)(void *) = wm_job.customdata ? wm_job.free : wm_job.run_free;
+    if (should_kill(customdata, free_fn)) {
+      wm_jobs_kill_job(wm, &wm_job);
+    }
+  }
+}
+
 void WM_jobs_kill_all_from_owner(wmWindowManager *wm, const void *owner)
 {
   for (wmJob &wm_job : wm->runtime->jobs.items_mutable()) {

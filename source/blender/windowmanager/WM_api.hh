@@ -2141,6 +2141,13 @@ void WM_jobs_kill_all_except(wmWindowManager *wm, const void *owner);
  */
 void WM_jobs_kill_type(wmWindowManager *wm, const void *owner, int job_type);
 /**
+ * Terminate all jobs of this type for which \a should_kill returns true. It receives the job's
+ * custom-data and the callback that frees it, which tells apart jobs of the same type.
+ */
+void WM_jobs_kill_type_if(wmWindowManager *wm,
+                          int job_type,
+                          bool (*should_kill)(void *customdata, void (*free_fn)(void *)));
+/**
  * Terminate thread and timer of all jobs from this owner.
  *
  * Beware of the impact of calling this. For example passing the scene will kill **all** jobs

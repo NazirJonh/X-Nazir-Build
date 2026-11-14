@@ -124,6 +124,11 @@ void ED_preview_icon_job(
 void ED_preview_restart_work(const bContext *C);
 
 void ED_preview_kill_jobs(wmWindowManager *wm, Main *bmain);
+/**
+ * Like #ED_preview_kill_jobs, but keeps the texture and image icon previews, which cannot share
+ * data with a material.
+ */
+void ED_preview_kill_jobs_sharing_trees(wmWindowManager *wm);
 void ED_preview_kill_jobs_for_id(wmWindowManager *wm, const ID *id);
 
 /**

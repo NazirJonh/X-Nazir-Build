@@ -72,7 +72,7 @@ void ED_spacetypes_init()
   /* A shader preview shares the generated paint-layers tree with its material; stop the jobs before
    * a regeneration rewrites it. */
   BKE_paint_layers_regenerate_pre_hook_set([](Main &bmain) {
-    ED_preview_kill_jobs(static_cast<wmWindowManager *>(bmain.wm.first), &bmain);
+    ED_preview_kill_jobs_sharing_trees(static_cast<wmWindowManager *>(bmain.wm.first));
   });
 
   /* Create space types. */

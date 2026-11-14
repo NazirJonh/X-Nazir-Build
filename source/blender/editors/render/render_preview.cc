@@ -156,6 +156,8 @@ struct IconPreview {
   ListBase child_copies;
   /* Which icon sizes to render. */
   bool render_size[NUM_ICON_SIZES];
+  /** Set when the render was stopped before it finished (the job was killed while running). */
+  bool aborted;
 
   /* May be nullptr, is used for rendering IDs that require some other object for it to be applied
    * on before the ID can be represented as an image, for example when rendering an Action. */
@@ -1729,6 +1731,8 @@ static void icon_preview_startjob_all_sizes(void *customdata, wmJobWorkerStatus 
     }
     other_id_types_preview_render(prv, ip, icon_size, pr_method, worker_status);
   }
+
+  ip->aborted = worker_status->stop;
 }
 
 static void icon_preview_endjob(void *customdata, const PreviewImageRenderEndStatus status)
@@ -1737,10 +1741,22 @@ static void icon_preview_endjob(void *customdata, const PreviewImageRenderEndSta
 
   if (ip->owner) {
     PreviewImage *prv_img = static_cast<PreviewImage *>(ip->owner);
+    /* A job killed before it finished leaves a blank placeholder rect, and nothing asks for the
+     * preview again unless it is flagged as changed. */
+    const bool unfinished = (status == PRV_RENDER_STATUS_CANCELLED || ip->aborted) &&
+                            !prv_img->runtime->deferred_loading_data;
 
     for (int i = 0; i < NUM_ICON_SIZES; i++) {
       if (ip->render_size[i]) {
+        if (unfinished) {
+          prv_img->flag[i] |= PRV_CHANGED;
+        }
         BKE_previewimg_render_end(prv_img, eIconSizes(i), status);
+        if (unfinished) {
+          /* A cancelled end keeps #PRV_RENDERING for an undo to resume, which would also keep
+           * every owner that waits for the render to end from asking again. */
+          prv_img->flag[i] &= ~PRV_RENDERING;
+        }
       }
     }
 
@@ -2529,6 +2545,21 @@ void ED_preview_kill_jobs(wmWindowManager *wm, Main * /*bmain*/)
      * avoid invalid memory access. */
     WM_jobs_kill_type(wm, nullptr, WM_JOB_TYPE_RENDER_PREVIEW);
   }
+}
+
+void ED_preview_kill_jobs_sharing_trees(wmWindowManager *wm)
+{
+  if (wm == nullptr) {
+    return;
+  }
+  WM_jobs_kill_type_if(wm, WM_JOB_TYPE_RENDER_PREVIEW, [](void *customdata, void (*free_fn)(void *)) {
+    if (free_fn != icon_preview_free) {
+      return true;
+    }
+    /* Texture and image icons render a copy of the texture, they never touch a material tree. */
+    const IconPreview *ip = static_cast<const IconPreview *>(customdata);
+    return ip->id == nullptr || !ELEM(GS(ip->id->name), ID_TE, ID_IM);
+  });
 }
 
 void ED_preview_kill_jobs_for_id(wmWindowManager *wm, const ID *id)

@@ -546,7 +546,8 @@ static bool rendered_preview_sphere_draw(const bContext *C,
    * render for this hash is in flight there is nothing to ask, and a re-ask on every redraw would
    * restart the job on every one of them. */
   const bool render_needed = entry.rendered_hash != hash ||
-                             (entry.prv->rect[ICON_SIZE_ICON] == nullptr &&
+                             ((entry.prv->rect[ICON_SIZE_ICON] == nullptr ||
+                               (entry.prv->flag[ICON_SIZE_ICON] & PRV_CHANGED) != 0) &&
                               !BKE_previewimg_is_rendering(entry.prv, ICON_SIZE_ICON));
   if (render_needed) {
     if (!stack_sphere_render_ask(C, entry.prv, color, metallic, roughness, map_uid, ICON_SIZE_ICON))
@@ -580,8 +581,10 @@ static bool rendered_preview_material_draw(const bContext *C,
     entry.prv = BKE_previewimg_create();
   }
   /* As for the sphere: ask once per hash, never on every redraw while the job is in flight. */
+  /* A render job killed before it finished flags its size as changed again, which asks anew. */
   const bool render_needed = entry.rendered_hash != hash ||
-                             (entry.prv->rect[ICON_SIZE_ICON] == nullptr &&
+                             ((entry.prv->rect[ICON_SIZE_ICON] == nullptr ||
+                               (entry.prv->flag[ICON_SIZE_ICON] & PRV_CHANGED) != 0) &&
                               !BKE_previewimg_is_rendering(entry.prv, ICON_SIZE_ICON));
   if (render_needed) {
     if (entry.prv->rect[ICON_SIZE_ICON] != nullptr) {

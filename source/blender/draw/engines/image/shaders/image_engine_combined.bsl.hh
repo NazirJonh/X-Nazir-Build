@@ -884,8 +884,11 @@ float2 projection_face_uv(int face, float3 q)
   return uv;
 }
 
-/** The cube-cross atlas UV of the dominant frame axis; the six cell origins ride in three float4. */
-float2 projection_cube_uv(float3 q, float4 atlas_0, float4 atlas_1, float4 atlas_2, float2 cell)
+/**
+ * The cube-cross atlas UV of the dominant frame axis in `xy` and that face's cell origin in `zw`;
+ * the six cell origins ride in three float4.
+ */
+float4 projection_cube_uv(float3 q, float4 atlas_0, float4 atlas_1, float4 atlas_2, float2 cell)
 {
   float ax = abs(q.x);
   float ay = abs(q.y);
@@ -920,7 +923,7 @@ float2 projection_cube_uv(float3 q, float4 atlas_0, float4 atlas_1, float4 atlas
   else {
     origin = atlas_2.zw;
   }
-  return origin + local_uv * cell;
+  return float4(origin + local_uv * cell, origin);
 }
 
 /** Cylinder: U winds around the axis, V reads the height along it. */
@@ -999,11 +1002,58 @@ float4 projection_tap(sampler2D tx,
                       int layer_flags,
                       int pflags,
                       bool is_cube,
+                      float2 cube_origin,
+                      float2 cube_cell,
                       float2 offset,
                       float2 scale,
-                      float2 rotation)
+                      float2 rotation,
+                      const int input_step_count,
+                      const float4 input_step_0_a,
+                      const float4 input_step_0_b,
+                      const float4 input_step_1_a,
+                      const float4 input_step_1_b,
+                      const int input_step_flags)
 {
   float2 p = uv;
+  /* The transform effects' steps move the map coordinate (after the tiling, before the UV adjust),
+   * as `composite_resample_projected` does. A step that clips leaves the tap transparent outside
+   * the unit square of that coordinate. A Cube tap runs them in the local [0, 1] space of its own
+   * atlas cell and returns to the atlas before the UV adjust, as the CPU does. A projected
+   * tangent-Normal row with steps never reaches here (#BKE_paint_layers_gpu_unsupported_reason), so
+   * the fold's side signs the covariant remap needs are not kept. */
+  {
+    bool cube_local = is_cube && input_step_count > 0;
+    if (cube_local) {
+      p = (uv - cube_origin) / cube_cell;
+    }
+    for (int s = 0; s < COMBINED_INPUT_STEP_MAX && s < input_step_count; s++) {
+      float4 a = (s == 0) ? input_step_0_a : input_step_1_a;
+      float4 b = (s == 0) ? input_step_0_b : input_step_1_b;
+      int step_flags = (input_step_flags >> (s * COMBINED_INPUT_STEP_BITS)) &
+                       COMBINED_INPUT_STEP_MASK;
+      float2 folded = p;
+      const bool step_negative_u = (step_flags & COMBINED_INPUT_STEP_MIRROR_U_NEG) != 0;
+      const bool step_negative_v = (step_flags & COMBINED_INPUT_STEP_MIRROR_V_NEG) != 0;
+      if ((step_flags & COMBINED_INPUT_STEP_MIRROR_U) != 0) {
+        folded.x = combined_mirror_fold(p.x, b.z, step_negative_u);
+      }
+      if ((step_flags & COMBINED_INPUT_STEP_MIRROR_V) != 0) {
+        folded.y = combined_mirror_fold(p.y, b.w, step_negative_v);
+      }
+      float2 rotated = float2(folded.x * b.x - folded.y * b.y, folded.x * b.y + folded.y * b.x);
+      p = rotated * a.zw + a.xy;
+      bool step_repeat_u = (step_flags & COMBINED_INPUT_STEP_REPEAT_U) != 0;
+      bool step_repeat_v = (step_flags & COMBINED_INPUT_STEP_REPEAT_V) != 0;
+      if ((!step_repeat_u && (p.x < 0.0f || p.x >= 1.0f)) ||
+          (!step_repeat_v && (p.y < 0.0f || p.y >= 1.0f)))
+      {
+        return float4(0.0f);
+      }
+    }
+    if (cube_local) {
+      p = cube_origin + p * cube_cell;
+    }
+  }
   if ((pflags & COMBINED_PROJ_UV_ADJUST) != 0) {
     float ru = p.x * rotation.x - p.y * rotation.y;
     float rv = p.x * rotation.y + p.y * rotation.x;
@@ -1049,7 +1099,13 @@ float4 projection_sample_map(sampler2D tx,
                              int layer_flags,
                              float2 offset,
                              float2 scale,
-                             float2 rotation)
+                             float2 rotation,
+                             const int input_step_count,
+                             const float4 input_step_0_a,
+                             const float4 input_step_0_b,
+                             const float4 input_step_1_a,
+                             const float4 input_step_1_b,
+                             const int input_step_flags)
 {
   float4 result = float4(0.0f);
   int2 surface_texel = clamp(int2(floor(uv * float2(canvas_size))), int2(0), canvas_size - int2(1));
@@ -1076,7 +1132,22 @@ float4 projection_sample_map(sampler2D tx,
     for (int face = 0; face < 3; face++) {
       float2 face_uv = projection_face_uv(face, q);
       float2 tap_uv = float2(0.5f) + (face_uv - float2(0.5f)) * params_0.xy;
-      float4 tap = projection_tap(tx, tap_uv, layer_flags, pflags, false, offset, scale, rotation);
+      float4 tap = projection_tap(tx,
+                                  tap_uv,
+                                  layer_flags,
+                                  pflags,
+                                  false,
+                                  float2(0.0f),
+                                  float2(1.0f),
+                                  offset,
+                                  scale,
+                                  rotation,
+                                  input_step_count,
+                                  input_step_0_a,
+                                  input_step_0_b,
+                                  input_step_1_a,
+                                  input_step_1_b,
+                                  input_step_flags);
       float tap_weight = weight * powers[face] / sum;
       straight += tap.xyz * tap_weight;
       alpha += tap.w * tap_weight;
@@ -1084,8 +1155,11 @@ float4 projection_sample_map(sampler2D tx,
   }
   else {
     float2 tap_uv;
+    float2 cube_origin = float2(0.0f);
     if (mode == COMBINED_PROJ_CUBE) {
-      tap_uv = projection_cube_uv(q, atlas_0, atlas_1, atlas_2, atlas_cell);
+      float4 cube_tap = projection_cube_uv(q, atlas_0, atlas_1, atlas_2, atlas_cell);
+      tap_uv = cube_tap.xy;
+      cube_origin = cube_tap.zw;
     }
     else if (mode == COMBINED_PROJ_CYLINDER) {
       tap_uv = projection_cylinder_uv(q, axis);
@@ -1099,8 +1173,22 @@ float4 projection_sample_map(sampler2D tx,
       int v_index = (axis == 2) ? 1 : 2;
       tap_uv = float2(0.5f + q[u_index] * params_0.x * 0.5f, 0.5f + q[v_index] * params_0.y * 0.5f);
     }
-    float4 tap = projection_tap(
-        tx, tap_uv, layer_flags, pflags, mode == COMBINED_PROJ_CUBE, offset, scale, rotation);
+    float4 tap = projection_tap(tx,
+                                tap_uv,
+                                layer_flags,
+                                pflags,
+                                mode == COMBINED_PROJ_CUBE,
+                                cube_origin,
+                                atlas_cell,
+                                offset,
+                                scale,
+                                rotation,
+                                input_step_count,
+                                input_step_0_a,
+                                input_step_0_b,
+                                input_step_1_a,
+                                input_step_1_b,
+                                input_step_flags);
     straight += tap.xyz * weight;
     alpha += tap.w * weight;
   }
@@ -1270,7 +1358,13 @@ void mask_comp([[resource_table]] MaskResources &srt,
                                 srt.flags,
                                 srt.mapping_offset,
                                 srt.mapping_scale,
-                                srt.mapping_rotation);
+                                srt.mapping_rotation,
+                                srt.input_step_count,
+                                srt.input_step_0_a,
+                                srt.input_step_0_b,
+                                srt.input_step_1_a,
+                                srt.input_step_1_b,
+                                srt.input_step_flags);
       }
       else {
         c = sample_map(srt.mask_tx,
@@ -1364,7 +1458,13 @@ void mask_comp([[resource_table]] MaskResources &srt,
                                   srt.flags,
                                   srt.mapping_offset,
                                   srt.mapping_scale,
-                                  srt.mapping_rotation);
+                                  srt.mapping_rotation,
+                                  srt.input_step_count,
+                                  srt.input_step_0_a,
+                                  srt.input_step_0_b,
+                                  srt.input_step_1_a,
+                                  srt.input_step_1_b,
+                                  srt.input_step_flags);
         }
         else {
           c = sample_map(srt.mask_tx,
@@ -1423,7 +1523,13 @@ void mask_comp([[resource_table]] MaskResources &srt,
                               srt.flags,
                               srt.mapping_offset,
                               srt.mapping_scale,
-                              srt.mapping_rotation);
+                              srt.mapping_rotation,
+                              srt.input_step_count,
+                              srt.input_step_0_a,
+                              srt.input_step_0_b,
+                              srt.input_step_1_a,
+                              srt.input_step_1_b,
+                              srt.input_step_flags);
     }
     else {
       c = sample_map(srt.mask_tx,
@@ -1598,7 +1704,13 @@ void layer_comp([[resource_table]] LayerResources &srt,
                                     srt.flags,
                                     srt.mapping_offset,
                                     srt.mapping_scale,
-                                    srt.mapping_rotation);
+                                    srt.mapping_rotation,
+                                    srt.input_step_count,
+                                    srt.input_step_0_a,
+                                    srt.input_step_0_b,
+                                    srt.input_step_1_a,
+                                    srt.input_step_1_b,
+                                    srt.input_step_flags);
       }
       else {
         top = sample_map(srt.layer_tx,
@@ -1814,7 +1926,13 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
                               srt.flags,
                               srt.mapping_offset,
                               srt.mapping_scale,
-                              srt.mapping_rotation);
+                              srt.mapping_rotation,
+                              srt.input_step_count,
+                              srt.input_step_0_a,
+                              srt.input_step_0_b,
+                              srt.input_step_1_a,
+                              srt.input_step_1_b,
+                              srt.input_step_flags);
     }
     else {
       c = sample_map(srt.correction_tx,

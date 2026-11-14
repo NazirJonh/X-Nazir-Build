@@ -1844,10 +1844,10 @@ constexpr float PAINT_LAYER_PROJECTION_TRIPLANAR_EXPONENT_SOFT = 1.0f;
  * mixes it, so a tree built before it rebuilds once and gets them. History: 0x702 was S1 (Planar
  * only: the depth, facing and aspect inputs, the axis factor clamp, the half-extent frame position);
  * 0x706 is S2 (Box, Triplanar, Cube, Cylinder and Sphere, normal+roll orientation); 0x707 is S3
- * (the volume kinds stopped building the facing and the depth slab). 0x703..0x705 were never used
- * by a stored tree.
+ * (the volume kinds stopped building the facing and the depth slab); 0x708 is S4 (the transform
+ * effects' step chains in the projected UVs). 0x703..0x705 were never used by a stored tree.
  */
-constexpr uint64_t PAINT_LAYER_PROJECTION_HASH_VERSION = 0x707;
+constexpr uint64_t PAINT_LAYER_PROJECTION_HASH_VERSION = 0x708;
 
 /**
  * Smooth per-axis frame factor of \a value: one inside the frame edge, fading to zero over

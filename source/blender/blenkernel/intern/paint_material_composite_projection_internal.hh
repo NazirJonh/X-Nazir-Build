@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "BLI_span.hh"
+
 struct ImBuf;
 
 namespace blender {
@@ -33,10 +35,16 @@ ImBuf *composite_alloc_transparent(int width, int height);
 /**
  * Bake \a src into the painted object's UV space through the projection of \a mapping. Null when
  * the mapping names no object, mesh or render UV map.
+ *
+ * \a input_steps are the row's transform effects (Transform Mapping, Mirror), in the effects list's
+ * order. They act on the map coordinate the projection computes, before the row's own UV adjust;
+ * a clipping wrap on a step makes the texel transparent outside that coordinate's unit square. The
+ * Cube mode runs them in the local [0, 1] space of the tap's own atlas cell.
  */
 ImBuf *composite_resample_projected(const ImBuf *src,
                                     int ref_width,
                                     int ref_height,
-                                    const PaintMaterialCompositeMapping &mapping);
+                                    const PaintMaterialCompositeMapping &mapping,
+                                    Span<PaintMaterialCompositeMapping> input_steps);
 
 }  // namespace blender

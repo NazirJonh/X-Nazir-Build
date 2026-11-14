@@ -841,6 +841,9 @@ struct ProjectionBuild {
   NodeOutput uv[3];
   NodeOutput weights[3];
   NodeOutput inside;
+  /** Cube: whether to make the picked cell's local UV, for the transform effects' steps. */
+  bool cube_local_wanted = false;
+  NodeOutput cube_local;
 };
 
 /** Add a static node and record it in \a made at once, so a failing step removes it too. */
@@ -1166,6 +1169,33 @@ bool projection_cube_build(ProjectionBuild &b)
     }
   }
   b.uv[0] = weighted;
+  if (b.cube_local_wanted) {
+    /* The picked face's local UV: the hard weights make the pair sum of an axis one on exactly that
+     * axis, so the sum over the three axes is the local UV of the selected cell. */
+    NodeOutput selected = {};
+    for (int axis = 0; axis < 3; axis++) {
+      const NodeOutput pair = projection_math(b.tree,
+                                              NODE_MATH_ADD,
+                                              cube_weights[axis * 2],
+                                              cube_weights[axis * 2 + 1],
+                                              0.0f,
+                                              b.made,
+                                              b.grid);
+      const NodeOutput scaled = projection_vector_math(
+          b.tree, NODE_VECTOR_MATH_SCALE, local[axis], pair, 1.0f, b.made, b.grid);
+      if (scaled.node == nullptr) {
+        return false;
+      }
+      selected = (selected.node == nullptr) ?
+                     scaled :
+                     projection_vector_math(
+                         b.tree, NODE_VECTOR_MATH_ADD, selected, scaled, 0.0f, b.made, b.grid);
+      if (selected.node == nullptr) {
+        return false;
+      }
+    }
+    b.cube_local = selected;
+  }
   b.inside = projection_inside_all(b.tree, b.q_components.component, b.made, b.grid);
   return true;
 }
@@ -1336,6 +1366,8 @@ ProjectionNodes *PaintLayersTreeBuilder::projection_nodes_ensure(
   ProjectionBuild build{tree, row, sockets, made, grid_};
   build.space = row.mapping.space;
   build.axis = BKE_paint_layers_projection_axis_get(row);
+  build.cube_local_wanted = build.space == MA_PAINT_LAYER_MAPPING_SPACE_CUBE &&
+                            !BKE_paint_layers_active_transform_effects(ma_, row).is_empty();
 
   /* The order is the node creation order of the graph: the frame-space position, the world normal,
    * the facing fade, the tiling, the frame normal, then the per-space UVs. */
@@ -1354,6 +1386,7 @@ ProjectionNodes *PaintLayersTreeBuilder::projection_nodes_ensure(
   projection.tex_coord = build.tex_coord;
   projection.position = build.q.node;
   projection.normal = build.frame_normal.node;
+  projection.cube_local = build.cube_local.node;
   projection.samples = BKE_paint_layers_projection_mode_info(build.space).samples_num;
   for (int i = 0; i < projection.samples; i++) {
     projection.uv[i] = build.uv[i].node;
@@ -1373,8 +1406,8 @@ bNode *PaintLayersTreeBuilder::projection_uv_mapped(bNodeTree &tree,
                                                     bNode &uv,
                                                     Vector<bNode *> &r_nodes)
 {
-  /* A projected row follows only its UV wrap; the 2D adjust would move the lookup away from the
-   * frame the gizmo shows, so #BKE_paint_layers_mapping_remaps answers false for it. */
+  /* The row's own 2D adjust, the CPU's #composite_projection_uv_wrap: it follows the effects' steps
+   * (#projection_steps_apply). A row without a remapping mapping follows only its UV wrap. */
   if (!BKE_paint_layers_mapping_remaps(ma_, row)) {
     return &uv;
   }
@@ -1407,6 +1440,148 @@ bNode *PaintLayersTreeBuilder::projection_uv_mapped(bNodeTree &tree,
   r_nodes.append(chain.mapping);
   r_nodes.append(chain.rotate);
   return chain.mapping;
+}
+
+/** The Group Input socket of \a effect's value input in \a inputs, or null. */
+static bNodeSocket *projection_effect_value_socket(
+    bNode *group_input,
+    const Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &inputs,
+    const MaterialPaintLayer &effect)
+{
+  if (group_input == nullptr) {
+    return nullptr;
+  }
+  bNodeTreeInterfaceSocket *const *iface = inputs.lookup_ptr(&effect);
+  if (iface == nullptr || *iface == nullptr || (*iface)->identifier == nullptr) {
+    return nullptr;
+  }
+  return bke::node_find_socket(
+      *group_input, SOCK_OUT, UString::from_ptr_noinline((*iface)->identifier));
+}
+
+PaintLayersTreeBuilder::ProjectionSteps PaintLayersTreeBuilder::projection_steps_apply(
+    bNodeTree &tree, const MaterialPaintLayer &row, bNode &uv, Vector<bNode *> &r_nodes)
+{
+  ProjectionSteps result;
+  result.uv_node = &uv;
+  /* Cube reads atlas cells, so the steps run on the picked cell's local UV (#ProjectionNodes::
+   * cube_local) and the result returns to the atlas below, the CPU's per-tap local-cell handling. */
+  const bool is_cube = row.mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_CUBE;
+  bNode *cube_local = nullptr;
+  if (is_cube) {
+    const ProjectionNodes *cube_nodes = projection_nodes_.lookup_ptr(&row);
+    cube_local = (cube_nodes != nullptr) ? cube_nodes->cube_local : nullptr;
+    if (cube_local == nullptr) {
+      return result;
+    }
+  }
+  const Vector<const MaterialPaintLayer *, 4> effects =
+      BKE_paint_layers_active_transform_effects(ma_, row);
+  bNode *group_input = projection_group_input(tree);
+  bNode &start = is_cube ? *cube_local : uv;
+  bNodeSocket *uv_out = socket_out(start, "Vector");
+  if (effects.is_empty() || group_input == nullptr || uv_out == nullptr) {
+    return result;
+  }
+  NodeOutput source = {&start, uv_out};
+  for (const MaterialPaintLayer *effect : effects) {
+    bNodeSocket *center_socket = projection_effect_value_socket(
+        group_input, mapping_mirror_center_inputs_, *effect);
+    const int16_t mirror_axes = (center_socket != nullptr) ?
+                                    BKE_paint_layers_mapping_mirror_get(*effect) :
+                                    int16_t(0);
+    const MappingChain chain = mapping_chain_add(
+        tree,
+        *source.node,
+        *source.socket,
+        group_input,
+        projection_effect_value_socket(group_input, mapping_offset_inputs_, *effect),
+        projection_effect_value_socket(group_input, mapping_scale_inputs_, *effect),
+        projection_effect_value_socket(group_input, mapping_rotation_inputs_, *effect),
+        group_input,
+        center_socket,
+        mirror_axes);
+    bNodeSocket *chain_out = (chain.mapping != nullptr) ? socket_out(*chain.mapping, "Vector") :
+                                                           nullptr;
+    if (chain_out == nullptr) {
+      continue;
+    }
+    grid_.place_extra(*chain.mapping);
+    grid_.place_extra(*chain.rotate);
+    for (bNode *fold : chain.fold_nodes) {
+      grid_.place_extra(*fold);
+      r_nodes.append(fold);
+    }
+    r_nodes.append(chain.mapping);
+    r_nodes.append(chain.rotate);
+    source = {chain.mapping, chain_out};
+
+    /* The step clips on its own output, the coordinate the next step (or the row's adjust) reads. */
+    const NodeOutput inside = this->mapping_clip_inside_add(tree, *effect, source, r_nodes);
+    if (inside.node != nullptr) {
+      result.clip = (result.clip.node != nullptr) ?
+                        projection_math(
+                            tree, NODE_MATH_MULTIPLY, result.clip, inside, 0.0f, r_nodes, grid_) :
+                        inside;
+    }
+    ProjectionSteps::Step step;
+    step.effect = effect;
+    if (chain.side_sign != nullptr) {
+      step.side_sign = {chain.side_sign_node, chain.side_sign};
+    }
+    result.steps.append(step);
+  }
+  if (is_cube && source.node != cube_local) {
+    /* Back to the atlas: `atlas + (stepped - local) * cell`, per component, where `atlas` is the
+     * un-stepped atlas UV the row would have read. This is the CPU's `origin + stepped * cell`
+     * (the atlas UV is `origin + local * cell`), and the row's UV adjust follows it as before. */
+    const ProjectionCubeLayoutInfo &layout_info = BKE_paint_layers_projection_cube_layout_info(
+        BKE_paint_layers_projection_cube_layout_get(row));
+    const SeparateOutputs atlas_parts = projection_separate(
+        tree, {&uv, socket_out(uv, "Vector")}, r_nodes, grid_);
+    const SeparateOutputs local_parts = projection_separate(
+        tree, {cube_local, socket_out(*cube_local, "Vector")}, r_nodes, grid_);
+    const SeparateOutputs stepped_parts = projection_separate(tree, source, r_nodes, grid_);
+    /* The atlas could not be rebuilt: the steps are left out, as the Cube read was before. */
+    const auto steps_abandon = [&]() {
+      result.uv_node = &uv;
+      result.clip = {};
+      result.steps.clear();
+      return result;
+    };
+    NodeOutput atlas_stepped[2];
+    for (int c = 0; c < 2; c++) {
+      NodeOutput moved;
+      if (atlas_parts.node != nullptr && local_parts.node != nullptr &&
+          stepped_parts.node != nullptr)
+      {
+        const NodeOutput delta = projection_math(tree,
+                                                 NODE_MATH_SUBTRACT,
+                                                 stepped_parts.component[c],
+                                                 local_parts.component[c],
+                                                 0.0f,
+                                                 r_nodes,
+                                                 grid_);
+        const NodeOutput scaled = projection_affine(
+            tree, delta, layout_info.cell_size[c], 0.0f, r_nodes, grid_);
+        moved = projection_math(
+            tree, NODE_MATH_ADD, atlas_parts.component[c], scaled, 0.0f, r_nodes, grid_);
+      }
+      if (moved.node == nullptr) {
+        return steps_abandon();
+      }
+      atlas_stepped[c] = moved;
+    }
+    const NodeOutput atlas = projection_combine_xyz(
+        tree, atlas_stepped[0], atlas_stepped[1], 0.0f, r_nodes, grid_);
+    if (atlas.node == nullptr) {
+      return steps_abandon();
+    }
+    result.uv_node = atlas.node;
+    return result;
+  }
+  result.uv_node = source.node;
+  return result;
 }
 
 NodeOutput PaintLayersTreeBuilder::projection_clip_factor(
@@ -1483,8 +1658,53 @@ MapRead PaintLayersTreeBuilder::map_read_apply(bNodeTree &tree,
     return projection_tile_local_uv(tree, mapped, *origin, r_nodes, grid_);
   };
 
+  /* The transform effects' covariant counterpart on a sampled tangent normal, the CPU's
+   * #CompositeMappingChain::remap_tangent_normal: the steps' inverses in reverse list order, before
+   * the frame-to-tangent conversion. */
+  bNode *steps_group_input = projection_group_input(tree);
+  const auto steps_normal_remap = [&](NodeOutput color,
+                                      const ProjectionSteps &steps,
+                                      Vector<bNode *> &made) -> NodeOutput {
+    for (const int index : steps.steps.index_range()) {
+      const ProjectionSteps::Step &step = steps.steps[steps.steps.size() - 1 - index];
+      if (color.node == nullptr || color.socket == nullptr) {
+        break;
+      }
+      bNode *encode = nullptr;
+      bNodeSocket *encoded = normal_remap_nodes_add(
+          tree,
+          *color.node,
+          *color.socket,
+          steps_group_input,
+          projection_effect_value_socket(steps_group_input, mapping_rotation_inputs_, *step.effect),
+          steps_group_input,
+          projection_effect_value_socket(steps_group_input, mapping_scale_inputs_, *step.effect),
+          step.side_sign.node,
+          step.side_sign.socket,
+          made,
+          encode);
+      if (encoded != nullptr) {
+        color = {encode, encoded};
+      }
+    }
+    return color;
+  };
+  /* A step's wrap-Clip takes the part outside its coordinate's unit square out of the alpha. */
+  const auto steps_clip_alpha = [&](const NodeOutput alpha,
+                                    const ProjectionSteps &steps,
+                                    Vector<bNode *> &made) -> NodeOutput {
+    if (steps.clip.node == nullptr || alpha.node == nullptr) {
+      return alpha;
+    }
+    const NodeOutput clipped = projection_math(
+        tree, NODE_MATH_MULTIPLY, alpha, steps.clip, 0.0f, made, grid_);
+    return (clipped.node != nullptr) ? clipped : alpha;
+  };
+
   if (projection->samples <= 1) {
-    bNode *mapped = tiled_uv(*projection_uv_mapped(tree, row, *projection->uv[0], r_nodes));
+    const ProjectionSteps steps = this->projection_steps_apply(
+        tree, row, *projection->uv[0], r_nodes);
+    bNode *mapped = tiled_uv(*projection_uv_mapped(tree, row, *steps.uv_node, r_nodes));
     bNodeSocket *mapped_out = socket_out(*mapped, "Vector");
     bNodeSocket *vector = socket_in(map, "Vector");
     if (mapped_out == nullptr || vector == nullptr) {
@@ -1494,6 +1714,19 @@ MapRead PaintLayersTreeBuilder::map_read_apply(bNodeTree &tree,
     bke::node_add_link(tree, *mapped, *mapped_out, map, *vector);
     set_extension(map);
     read.projected = true;
+    read.alpha = steps_clip_alpha(read.alpha, steps, r_nodes);
+    if (channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
+        row.mapping.space != MA_PAINT_LAYER_MAPPING_SPACE_PLANAR && !steps.steps.is_empty())
+    {
+      /* Cylinder and Sphere have no frame conversion; the steps still turn the sampled vectors. */
+      Vector<bNode *> made;
+      const NodeOutput remapped = steps_normal_remap(read.color, steps, made);
+      for (bNode *node : made) {
+        grid_.place_extra(*node);
+        r_nodes.append(node);
+      }
+      read.color = remapped;
+    }
     if (channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
         row.mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_PLANAR)
     {
@@ -1517,6 +1750,7 @@ MapRead PaintLayersTreeBuilder::map_read_apply(bNodeTree &tree,
       if (color_in.socket == nullptr) {
         return read;
       }
+      color_in = steps_normal_remap(color_in, steps, made);
       const ProjectionSockets sockets = this->projection_sockets_get(tree, row);
       bNodeSocket *converted = normal_frame_tangent_nodes_add(
           tree, *color_in.node, *color_in.socket, sockets.group_input, sockets.rotation, made, encode);
@@ -1615,8 +1849,6 @@ MapRead PaintLayersTreeBuilder::map_read_apply(bNodeTree &tree,
     }
     return read;
   }
-  bke::node_add_link(tree, *maps[2], *socket_out(*maps[2], "Color"), *mix_yz, *mix_yz_a);
-  bke::node_add_link(tree, *maps[1], *socket_out(*maps[1], "Color"), *mix_yz, *mix_yz_b);
   if (y_factor.node != nullptr) {
     bke::node_add_link(tree, *y_factor.node, *y_factor.socket, *mix_yz, *mix_yz_fac);
   }
@@ -1644,15 +1876,21 @@ MapRead PaintLayersTreeBuilder::map_read_apply(bNodeTree &tree,
     return read;
   }
   bke::node_add_link(tree, *mix_yz, *mix_yz_out, *mix_xyz, *mix_xyz_a);
-  bke::node_add_link(tree, *maps[0], *socket_out(*maps[0], "Color"), *mix_xyz, *mix_xyz_b);
   bke::node_add_link(tree, *projection->weight[0], *weight_x, *mix_xyz, *mix_xyz_fac);
   made.append(mix_xyz);
   grid_.place_extra(*mix_xyz);
 
   /* The per-face UVs and the map links are only made once every node exists, so a failure above
    * leaves the row's map untouched. */
+  /* Every face takes the same steps over its own UV, before the blend by the normal weights, as the
+   * CPU applies them per face tap. A face's clip rides its alpha and its normal remap its color,
+   * the weights then mix both. */
+  NodeOutput face_color[3];
+  NodeOutput face_alpha[3];
   for (int face = 0; face < 3; face++) {
-    bNode *mapped_uv = tiled_uv(*projection_uv_mapped(tree, row, *projection->uv[face], r_nodes));
+    const ProjectionSteps steps = this->projection_steps_apply(
+        tree, row, *projection->uv[face], r_nodes);
+    bNode *mapped_uv = tiled_uv(*projection_uv_mapped(tree, row, *steps.uv_node, r_nodes));
     bNodeSocket *mapped_out = socket_out(*mapped_uv, "Vector");
     bNodeSocket *vector = socket_in(*maps[face], "Vector");
     if (mapped_out == nullptr || vector == nullptr) {
@@ -1662,14 +1900,27 @@ MapRead PaintLayersTreeBuilder::map_read_apply(bNodeTree &tree,
       return read;
     }
     bke::node_add_link(tree, *mapped_uv, *mapped_out, *maps[face], *vector);
+    face_color[face] = {maps[face], socket_out(*maps[face], "Color")};
+    if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && !steps.steps.is_empty()) {
+      const int remap_start = int(made.size());
+      face_color[face] = steps_normal_remap(face_color[face], steps, made);
+      for (const int i : IndexRange(remap_start, int(made.size()) - remap_start)) {
+        grid_.place_extra(*made[i]);
+      }
+    }
+    face_alpha[face] = steps_clip_alpha(
+        {maps[face], socket_out(*maps[face], "Alpha")}, steps, made);
   }
+  bke::node_add_link(tree, *face_color[2].node, *face_color[2].socket, *mix_yz, *mix_yz_a);
+  bke::node_add_link(tree, *face_color[1].node, *face_color[1].socket, *mix_yz, *mix_yz_b);
+  bke::node_add_link(tree, *face_color[0].node, *face_color[0].socket, *mix_xyz, *mix_xyz_b);
 
   /* Alpha is the weighted sum: the three map alphas times the same normalized weights. */
   NodeOutput alpha_terms[3];
   for (int face = 0; face < 3; face++) {
     alpha_terms[face] = projection_math(tree,
                                         NODE_MATH_MULTIPLY,
-                                        {maps[face], socket_out(*maps[face], "Alpha")},
+                                        face_alpha[face],
                                         {projection->weight[face],
                                          socket_out(*projection->weight[face], "Value")},
                                         0.0f,

@@ -3025,10 +3025,14 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
        * with it the content alpha, which starts from the coverage. The transform effects clip the
        * same way, each over its own chain's lookup, exactly as the CPU's per-step clip does. */
       out.coverage = this->mapping_clip_alpha(tree, ctx.layer, read.alpha, source_nodes);
-      for (const MaterialPaintLayer *effect :
-           BKE_paint_layers_active_transform_effects(ma_, ctx.layer))
-      {
-        out.coverage = this->mapping_clip_alpha(tree, *effect, out.coverage, source_nodes);
+      /* A projected row's steps already clipped inside #map_read_apply, over their own per-face
+       * chains: the UV chains of the effects do not exist for it. */
+      if (!read.projected) {
+        for (const MaterialPaintLayer *effect :
+             BKE_paint_layers_active_transform_effects(ma_, ctx.layer))
+        {
+          out.coverage = this->mapping_clip_alpha(tree, *effect, out.coverage, source_nodes);
+        }
       }
       out.content_alpha = out.coverage;
     }

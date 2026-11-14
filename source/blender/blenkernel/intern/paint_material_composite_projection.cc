@@ -53,6 +53,7 @@
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
+#include "paint_material_composite_mapping_internal.hh"
 #include "paint_material_composite_projection_internal.hh"
 
 namespace blender {
@@ -693,7 +694,8 @@ static void composite_projection_raster(const CompositeProjectionBakeContext &ct
  * placed by the cross origins the graph's CUBE case uses. */
 static void composite_projection_cube_uv(const CompositeProjectionKind &kind,
                                          const float q[3],
-                                         float r_uv[2])
+                                         float r_uv[2],
+                                         int &r_face)
 {
   const float ax = fabsf(q[0]);
   const float ay = fabsf(q[1]);
@@ -713,6 +715,7 @@ static void composite_projection_cube_uv(const CompositeProjectionKind &kind,
   const ProjectionCubeLayoutInfo &atlas = *kind.atlas;
   r_uv[0] = atlas.origin[atlas_face][0] + local_uv[0] * atlas.cell_size[0];
   r_uv[1] = atlas.origin[atlas_face][1] + local_uv[1] * atlas.cell_size[1];
+  r_face = atlas_face;
 }
 
 /** Cylinder: U winds around the axis, V reads the height along it. */
@@ -804,7 +807,8 @@ static float composite_projection_frame_weight(const PaintMaterialCompositeProje
 ImBuf *composite_resample_projected(const ImBuf *src,
                                     const int ref_width,
                                     const int ref_height,
-                                    const PaintMaterialCompositeMapping &mapping)
+                                    const PaintMaterialCompositeMapping &mapping,
+                                    const Span<PaintMaterialCompositeMapping> input_steps)
 {
   const PaintMaterialCompositeProjection &projection = mapping.projection;
   CompositeProjectionBakeContext ctx(projection);
@@ -813,6 +817,16 @@ ImBuf *composite_resample_projected(const ImBuf *src,
   {
     return nullptr;
   }
+  /* The transform effects' steps only; the row's own mapping stays the UV adjust of
+   * #composite_projection_uv_wrap, which runs after them. */
+  CompositeMappingChain steps_chain;
+  for (const PaintMaterialCompositeMapping &step : input_steps) {
+    if (steps_chain.steps_num == CompositeMappingChain::MAX_STEPS) {
+      break;
+    }
+    steps_chain.steps[steps_chain.steps_num++] = CompositeMappingTransform(step);
+  }
+  const bool use_steps = !steps_chain.is_identity();
   CompositeProjectionSampler sampler(src);
   if (!sampler.valid()) {
     return nullptr;
@@ -857,7 +871,29 @@ ImBuf *composite_resample_projected(const ImBuf *src,
     float alpha = 0.0f;
     bool covered = false;
 
-    const auto accumulate_sample = [&](const float uu, const float vv, const float weight) {
+    const auto accumulate_sample =
+        [&](float uu, float vv, const float weight, const int cube_face = -1) {
+      /* The steps move the map coordinate, before the row's UV adjust. A step that clips leaves the
+       * texel transparent outside the unit square of that coordinate (not of the canvas or the
+       * island). A Cube tap is an atlas coordinate: the steps run in the local [0, 1] space of its
+       * own cell, so a fold, a wrap or a clip never reaches over a neighbouring cell, and the result
+       * returns to the atlas before the row's UV adjust. */
+      float step_sides[CompositeMappingChain::MAX_STEPS][2];
+      if (use_steps) {
+        if (cube_face >= 0) {
+          const ProjectionCubeLayoutInfo &atlas = *kind.atlas;
+          float local_u = (uu - atlas.origin[cube_face][0]) / atlas.cell_size[0];
+          float local_v = (vv - atlas.origin[cube_face][1]) / atlas.cell_size[1];
+          if (!steps_chain.apply_unwrapped(local_u, local_v, local_u, local_v, step_sides)) {
+            return;
+          }
+          uu = atlas.origin[cube_face][0] + local_u * atlas.cell_size[0];
+          vv = atlas.origin[cube_face][1] + local_v * atlas.cell_size[1];
+        }
+        else if (!steps_chain.apply_unwrapped(uu, vv, uu, vv, step_sides)) {
+          return;
+        }
+      }
       float tap[4];
       if (!sample_uv(uu, vv, tap)) {
         return;
@@ -865,6 +901,15 @@ ImBuf *composite_resample_projected(const ImBuf *src,
       float sample_rgb[3];
       float sample_alpha;
       composite_straight_from_premul(tap, sample_rgb, sample_alpha);
+      if (use_steps && mapping.tangent_normal && sample_alpha > 0.0f) {
+        /* The covariant counterpart of the steps, per tap: Box blends taps whose fold sides
+         * differ. It runs before the frame-to-tangent conversion below, the order the UV path
+         * composes them in. */
+        float normal_xy[2] = {sample_rgb[0] * 2.0f - 1.0f, sample_rgb[1] * 2.0f - 1.0f};
+        steps_chain.remap_tangent_normal(step_sides, normal_xy);
+        sample_rgb[0] = normal_xy[0] * 0.5f + 0.5f;
+        sample_rgb[1] = normal_xy[1] * 0.5f + 0.5f;
+      }
       straight[0] += sample_rgb[0] * weight;
       straight[1] += sample_rgb[1] * weight;
       straight[2] += sample_rgb[2] * weight;
@@ -891,8 +936,9 @@ ImBuf *composite_resample_projected(const ImBuf *src,
     }
     else if (kind.cube || kind.cylinder || kind.sphere) {
       float uv[2];
+      int cube_face = -1;
       if (kind.cube) {
-        composite_projection_cube_uv(kind, q, uv);
+        composite_projection_cube_uv(kind, q, uv, cube_face);
       }
       else if (kind.cylinder) {
         composite_projection_cylinder_uv(kind, q, uv);
@@ -900,7 +946,7 @@ ImBuf *composite_resample_projected(const ImBuf *src,
       else {
         composite_projection_sphere_uv(kind, q, uv);
       }
-      accumulate_sample(uv[0], uv[1], weight);
+      accumulate_sample(uv[0], uv[1], weight, cube_face);
     }
     else {
       /* Planar: X reads Y/Z, Y reads X/Z and Z reads X/Y. */
@@ -1014,7 +1060,8 @@ ImBuf *BKE_paint_material_gradient_projected_render(
       composite_projection_face_uv(0, q, uv);
     }
     else if (kind.cube) {
-      composite_projection_cube_uv(kind, q, uv);
+      int cube_face = 0;
+      composite_projection_cube_uv(kind, q, uv, cube_face);
     }
     else if (kind.cylinder) {
       composite_projection_cylinder_uv(kind, q, uv);

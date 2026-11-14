@@ -2915,6 +2915,27 @@ void ramp_blend(int type, float r_col[4], const float fac, const float col[4])
   }
 }
 
+/** Collect the images sampled by \a ntree and by the group trees nested in it. */
+static void material_collect_tree_images(const bNodeTree &ntree,
+                                         Set<const bNodeTree *> &r_visited,
+                                         Set<const Image *> &r_images)
+{
+  if (!r_visited.add(&ntree)) {
+    return;
+  }
+  for (const bNode *node : ntree.all_nodes()) {
+    if (node->id == nullptr) {
+      continue;
+    }
+    if (node->is_group()) {
+      material_collect_tree_images(*id_cast<const bNodeTree *>(node->id), r_visited, r_images);
+    }
+    else if (GS(node->id->name) == ID_IM) {
+      r_images.add(id_cast<const Image *>(node->id));
+    }
+  }
+}
+
 void BKE_material_eval(Depsgraph *depsgraph, Material *material)
 {
   DEG_debug_print_eval(depsgraph, __func__, material->id.name, material);
@@ -2924,6 +2945,19 @@ void BKE_material_eval(Depsgraph *depsgraph, Material *material)
    * of the description carries the animated value. */
   if (BKE_paint_layers_is_layered(*material)) {
     BKE_paint_layers_values_sync(*material);
+    /* The builds carried over from the replaced evaluated copy keep raw image pointers, and an
+     * image the update removed (an undone layer or mask) is freed with its own evaluated copy. Drop
+     * every build that still names one, fallbacks included, before anything reads its textures. */
+    if (material->gpumaterial.first != nullptr) {
+      Set<const bNodeTree *> visited;
+      Set<const Image *> live_images;
+      for (const bNodeTree *ntree : {material->nodetree, material->paint_layers_tree}) {
+        if (ntree != nullptr) {
+          material_collect_tree_images(*ntree, visited, live_images);
+        }
+      }
+      GPU_materials_free_stale_images(&material->gpumaterial, live_images);
+    }
     /* A value edit changes no socket set, so the builds of the previous update can stay: their
      * uniform buffers re-read the values (#GPU_material_values_update) instead of being rebuilt.
      * Anything else -- an edit that moved the shape, values driven outside the description, a

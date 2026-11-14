@@ -445,6 +445,29 @@ void GPU_material_rebuild_begin(ListBaseT<LinkData> *gpumaterials)
   }
 }
 
+void GPU_materials_free_stale_images(ListBaseT<LinkData> *gpumaterials,
+                                     const Set<const Image *> &live_images)
+{
+  LinkData *link = static_cast<LinkData *>(gpumaterials->first);
+  while (link != nullptr) {
+    LinkData *next = link->next;
+    GPUMaterial *material = static_cast<GPUMaterial *>(link->data);
+    bool is_stale = false;
+    for (const GPUMaterialTexture &tex : material->graph.textures) {
+      if (tex.ima != nullptr && !live_images.contains(tex.ima)) {
+        is_stale = true;
+        break;
+      }
+    }
+    if (is_stale) {
+      BLI_remlink(gpumaterials, link);
+      MEM_delete(link);
+      GPU_material_free_single(material);
+    }
+    link = next;
+  }
+}
+
 const bNodeSocket *GPU_material_uniform_value_origin(const GPUMaterial *mat,
                                                      const bNodeSocket *socket)
 {

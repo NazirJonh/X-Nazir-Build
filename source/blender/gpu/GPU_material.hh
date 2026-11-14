@@ -160,6 +160,17 @@ void GPU_material_free(ListBaseT<LinkData> *gpumaterial);
 void GPU_material_rebuild_begin(ListBaseT<LinkData> *gpumaterials);
 
 /**
+ * Free every build in \a gpumaterials that samples an image outside \a live_images.
+ *
+ * A build keeps raw image pointers, which stay valid only while the evaluated copy it was made
+ * for does. Builds carried across the replacement of that copy (see #MaterialBackup) must be checked
+ * against the images the new copy references. Pointers are only compared, never dereferenced, so
+ * an already freed image is safe to test.
+ */
+void GPU_materials_free_stale_images(ListBaseT<LinkData> *gpumaterials,
+                                     const Set<const Image *> &live_images);
+
+/**
  * Re-read the uniform values a layered material's edits changed and upload them into the node-tree
  * uniform buffer of \a mat, instead of rebuilding the material.
  *

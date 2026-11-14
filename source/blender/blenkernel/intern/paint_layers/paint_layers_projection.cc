@@ -130,6 +130,15 @@ static const ProjectionModeInfo projection_mode_table[MA_PAINT_LAYER_MAPPING_SPA
      1,
      true,
      PROJECTION_CAGE_SPHERE},
+    /* Decal is a flat frame with a pickable axis like Planar; only its map coordinate differs. */
+    {MA_PAINT_LAYER_MAPPING_SPACE_DECAL,
+     true,
+     OB_SINGLE_ARROW,
+     false,
+     false,
+     1,
+     false,
+     PROJECTION_CAGE_BOX},
 };
 
 /* Indexed by #eMaterialPaintLayerProjectionCubeLayout. The origins are the lower-left corner of
@@ -243,6 +252,17 @@ static bool paint_layer_projection_space_supported(const Material &ma,
                                                    const MaterialPaintLayer &layer,
                                                    const int16_t space)
 {
+  /* A transform effect owns no map: its Decal frame moves where its owner's map is read, and the
+   * first iteration supports no other space on it. */
+  if (paint_layer_kind_transforms_input(layer)) {
+    return space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL &&
+           BKE_paint_layers_effect_space_supported(layer, space);
+  }
+  /* A Gradient owns no map to unfold over the surface: its Decal would read as a Planar frame,
+   * which is not what the mode promises. */
+  if (space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL && BKE_paint_layers_gradient_supported(layer)) {
+    return false;
+  }
   return paint_layer_projection_space_valid(space) &&
          space != MA_PAINT_LAYER_MAPPING_SPACE_UV &&
          paint_layer_projection_payload_supported(ma, layer);
@@ -250,15 +270,108 @@ static bool paint_layer_projection_space_supported(const Material &ma,
 
 bool BKE_paint_layers_projection_supported(const Material &ma, const MaterialPaintLayer &layer)
 {
+  /* A transform effect's Decal frame is derived from its Mirror center / pivot, never placed: the
+   * Projection Frame tool and the frame fields have nothing to edit on it. */
+  if (paint_layer_kind_transforms_input(layer)) {
+    return false;
+  }
   return paint_layer_projection_payload_supported(ma, layer);
 }
 
 bool BKE_paint_layers_projection_applies(const Material &ma, const MaterialPaintLayer &layer)
 {
+  if (paint_layer_kind_transforms_input(layer)) {
+    /* An effect in Decal has no projection frame of the user's: its frame is derived from its
+     * Mirror center (#BKE_paint_layers_effect_decal_applies), so the frame tools, the Decal gizmo
+     * and the projection nodes never see it. */
+    return false;
+  }
   return layer.projection != nullptr &&
          paint_layer_projection_space_valid(layer.mapping.space) &&
          layer.mapping.space != MA_PAINT_LAYER_MAPPING_SPACE_UV &&
          paint_layer_projection_payload_supported(ma, layer);
+}
+
+bool BKE_paint_layers_effect_space_supported(const MaterialPaintLayer &effect,
+                                             const int16_t space)
+{
+  if (!paint_layer_kind_transforms_input(effect)) {
+    return false;
+  }
+  /* A mask item moves the grey the mask has built up on the canvas. The Decal frame walks the
+   * painted object's surface, and the mask's grey is computed without one, so the mask form acts
+   * in UV only. */
+  if (effect.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return space == MA_PAINT_LAYER_MAPPING_SPACE_UV;
+  }
+  return ELEM(space, MA_PAINT_LAYER_MAPPING_SPACE_UV, MA_PAINT_LAYER_MAPPING_SPACE_DECAL);
+}
+
+bool BKE_paint_layers_effect_decal_applies(const Material &ma,
+                                           const MaterialPaintLayer &owner_row,
+                                           const MaterialPaintLayer &effect)
+{
+  /* A projected owner reads its map at the projection's map coordinate, where an effect's step
+   * already acts; a Decal frame on top would be a second surface walk the first iteration leaves
+   * out, so the effect keeps its old meaning there. */
+  return effect.mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL &&
+         BKE_paint_layers_effect_space_supported(effect, effect.mapping.space) &&
+         !BKE_paint_layers_projection_applies(ma, owner_row);
+}
+
+bool BKE_paint_layers_effect_decal_frame_active(const MaterialPaintLayer &effect)
+{
+  return paint_layer_effect_acts_in_decal_frame(effect);
+}
+
+blender::Vector<const MaterialPaintLayer *, 4> BKE_paint_layers_active_uv_transform_effects(
+    const Material &ma, const MaterialPaintLayer &row)
+{
+  blender::Vector<const MaterialPaintLayer *, 4> effects;
+  for (const MaterialPaintLayer *effect : BKE_paint_layers_active_transform_effects(ma, row)) {
+    if (!BKE_paint_layers_effect_decal_applies(ma, row, *effect)) {
+      effects.append(effect);
+    }
+  }
+  return effects;
+}
+
+bool BKE_paint_layers_effect_decal_frame_init(Material &ma,
+                                              MaterialPaintLayer &effect,
+                                              const float center[3],
+                                              const float normal[3],
+                                              const float size)
+{
+  if (!paint_layer_kind_transforms_input(effect)) {
+    return false;
+  }
+  MaterialPaintLayerProjection *projection = BKE_paint_layers_projection_ensure(effect);
+  /* The row defaults are a projected decal's (clip, depth slab, aspect fit, facing fade); on the
+   * surface only the clip means anything: the effect acts inside the patch and reads transparent
+   * past its edge, the boundary the unfolded surface gives instead of the UV islands. */
+  projection->flag = MA_PAINT_LAYER_PROJECTION_CLIP;
+  projection->axis = MA_PAINT_LAYER_PROJECTION_AXIS_Z;
+  projection->roll = 0.0f;
+  projection->blend = 0.0f;
+  projection->angle = PAINT_LAYER_PROJECTION_ANGLE_DEFAULT;
+  if (center != nullptr && std::isfinite(center[0]) && std::isfinite(center[1]) &&
+      std::isfinite(center[2]))
+  {
+    copy_v3_v3(projection->center, center);
+  }
+  else {
+    copy_v3_fl(projection->center, 0.0f);
+  }
+  const float default_normal[3] = {0.0f, 0.0f, 1.0f};
+  const bool normal_valid = normal != nullptr && std::isfinite(normal[0]) &&
+                            std::isfinite(normal[1]) && std::isfinite(normal[2]);
+  paint_layer_projection_normal_unit(normal_valid ? normal : default_normal, projection->normal);
+  const float extent = (std::isfinite(size) && size > 0.0f) ?
+                           BKE_paint_layers_projection_size_normalize(size) :
+                           1.0f;
+  copy_v3_fl(projection->size, extent);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
 }
 
 MaterialPaintLayerProjection *BKE_paint_layers_projection_ensure(MaterialPaintLayer &layer)
@@ -308,6 +421,27 @@ bool BKE_paint_layers_projection_set_space(Material &ma,
     return false;
   }
   if (layer->mapping.space == space) {
+    return true;
+  }
+  if (paint_layer_kind_transforms_input(*layer)) {
+    /* An effect's spaces are UV and a Decal frame derived from its Mirror center, and the frame
+     * never acts on a projected owner (the effect keeps its old meaning in the projection's map
+     * coordinate). */
+    if (!BKE_paint_layers_effect_space_supported(*layer, space)) {
+      return false;
+    }
+    if (space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL) {
+      const MaterialPaintLayer *owner = BKE_paint_layers_correction_owner(ma, *layer);
+      if (owner == nullptr || BKE_paint_layers_projection_applies(ma, *owner)) {
+        return false;
+      }
+    }
+    /* The frame is derived from the Mirror center on every read, so the effect keeps no payload of
+     * its own (a file saved with the placed-frame version leaves one behind; it is dropped here
+     * and never read). */
+    MEM_SAFE_DELETE(layer->projection);
+    layer->mapping.space = space;
+    BKE_paint_layers_tag_edited(ma);
     return true;
   }
   if (space != MA_PAINT_LAYER_MAPPING_SPACE_UV) {
@@ -421,13 +555,14 @@ void BKE_paint_layers_projection_normal_frame_to_tangent(const float frame_axes[
                                                          const float n_frame[3],
                                                          float r_n_tangent[3])
 {
-  /* The frame carries the vector into the surface's space (the axes are the matrix's columns, so
-   * a row reads the component over them directly). */
+  /* The frame carries the vector into the surface's space: `frame_axes[c]` is the c-th axis (a
+   * column of the rotation, as `eul_to_mat3` stores it), so the result is the sum of the axes
+   * weighted by the vector's components, `R * n_frame`. Reading `frame_axes[i][c]` as row `i`
+   * would apply the inverse rotation. */
   float n_world[3];
-  for (const int i : IndexRange(3)) {
-    n_world[i] = frame_axes[i][0] * n_frame[0] + frame_axes[i][1] * n_frame[1] +
-                 frame_axes[i][2] * n_frame[2];
-  }
+  mul_v3_v3fl(n_world, frame_axes[0], n_frame[0]);
+  madd_v3_v3fl(n_world, frame_axes[1], n_frame[1]);
+  madd_v3_v3fl(n_world, frame_axes[2], n_frame[2]);
   /* Encoded in the target tangent basis; the components renormalized, since a surface tangent
    * basis is only approximately orthonormal and the decoded vector came out of an interpolation. */
   float encoded[3] = {dot_v3v3(n_world, tangent),

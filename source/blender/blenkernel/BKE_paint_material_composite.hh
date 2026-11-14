@@ -232,6 +232,11 @@ struct PaintMaterialCompositeProjection {
   /** The frame's full extent per axis: the composite divides the offset by its half. */
   float size[3] = {1.0f, 1.0f, 1.0f};
   float rotation[3] = {};
+  /**
+   * A Decal frame derived from a UV point (a transform effect's) sets the radius its patch grows
+   * to, in object units; zero keeps the radius the frame's size gives (a Decal row's).
+   */
+  float patch_radius = 0.0f;
   /** Face blend 0..1 of Box and Triplanar. */
   float blend = 0.0f;
   /** #eMaterialPaintLayerProjectionFlag: clip the projection to its frame. */
@@ -1138,9 +1143,9 @@ ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
 
 /**
  * Resample \a src onto a \a width x \a height grid through the UV \a steps (the transform effects'
- * vocabulary of #PaintMaterialCompositeMapping), the transform a map read goes through, as a
- * float RGBA buffer the caller owns and frees with #IMB_freeImBuf. Null when the steps are the
- * identity -- the caller keeps \a src -- or the source cannot be read.
+ * vocabulary of #PaintMaterialCompositeMapping, a Decal step ignored), the transform a map read
+ * goes through, as a float RGBA buffer the caller owns and frees with #IMB_freeImBuf. Null when the
+ * steps are the identity -- the caller keeps \a src -- or the source cannot be read.
  */
 ImBuf *BKE_paint_material_composite_buffer_remap(const ImBuf *src,
                                                  int width,
@@ -1743,11 +1748,21 @@ struct PaintMaterialSurfaceMapKey {
   bool operator==(const PaintMaterialSurfaceMapKey &other) const = default;
 };
 
+/** Texels per row of #PaintMaterialSurfaceMap::tri_basis, a texture the GPU reads by `texelFetch`. */
+constexpr int PAINT_MATERIAL_SURFACE_TRI_BASIS_WIDTH = 2048;
+/** The most triangles the id in #PaintMaterialSurfaceMap::normal's `w` can name exactly (a float
+ * holds integers up to 2^24); a triangle past it has no tangent basis on the GPU. */
+constexpr int PAINT_MATERIAL_SURFACE_TRI_BASIS_MAX = (1 << 24) - 1;
+
 /**
  * The painted surface per texel of one UDIM tile: the object-space position (w = 1 on a texel a
  * triangle or the island padding owns, else 0) and the interpolated, not normalized corner normal.
  * Both are in the painted object's space, exactly the `p` and `n_interp` the CPU projection bake
  * reads before applying a controller. Row-major, `y * width + x`, texel centre at `(x + 0.5) / width`.
+ *
+ * The normal's `w` is the id (corner triangle index + 1, 0 for none) of the triangle that owns the
+ * texel, the key into #tri_basis: a tangent basis per triangle is 32 bytes, where one per texel
+ * would be 128 to 256 MiB more at 4K.
  */
 struct PaintMaterialSurfaceMap {
   PaintMaterialSurfaceMapKey key;
@@ -1755,6 +1770,14 @@ struct PaintMaterialSurfaceMap {
   int height = 0;
   Array<float4> position;
   Array<float4> normal;
+  /**
+   * Two texels per triangle id, `PAINT_MATERIAL_SURFACE_TRI_BASIS_WIDTH` per row, texel pair `id`
+   * at `2 * id`: the object-space tangent (xyz, w = 1) and bitangent (xyz, w = 0) of the triangle's
+   * UV gradient, the exact basis `composite_resample_projected` converts a tangent-space Normal
+   * with. Pair 0, and a triangle with a degenerate UV mapping, is all zero. Released with the
+   * arrays above.
+   */
+  Array<float4> tri_basis;
   /** True once #BKE_paint_material_surface_map_texels_release dropped the arrays above: the entry
    * keeps its key (so a hit is still recognized) but holds no texels. */
   bool texels_released = false;
@@ -1783,8 +1806,8 @@ std::shared_ptr<const PaintMaterialSurfaceMap> BKE_paint_material_surface_map_ge
     bool need_texels = true);
 
 /**
- * Free the position and normal arrays of \a map when it is in the cache store, once a consumer
- * has copied them elsewhere (the GPU upload: they are 0.5 GiB at 4K). Main thread only, and only
+ * Free the position, normal and triangle basis arrays of \a map when it is in the cache store, once
+ * a consumer has copied them elsewhere (the GPU upload: the first two are 0.5 GiB at 4K). Main thread only, and only
  * for a holder that no longer reads the arrays. No-op for a map that is not in the store.
  */
 void BKE_paint_material_surface_map_texels_release(

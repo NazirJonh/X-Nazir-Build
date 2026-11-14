@@ -432,7 +432,7 @@ NodeOutput PaintLayersTreeBuilder::input_transforms_source_ensure(
    * row's reads go through first, the order the CPU resample composes the same steps in. Each
    * chain reads the previous one's output, so a fold's side signs and a clip factor of a later
    * step are evaluated where that step's fold acts. */
-  for (const MaterialPaintLayer *effect : BKE_paint_layers_active_transform_effects(ma_, row)) {
+  for (const MaterialPaintLayer *effect : BKE_paint_layers_active_uv_transform_effects(ma_, row)) {
     /* The chain starts from the previous effect's output, not from the raw coordinate: without it
      * every effect would restart from the UV and only the last one would show. */
     bNode *mapping = this->mapping_node_ensure(tree, *effect, r_nodes, &source);
@@ -533,7 +533,8 @@ bool PaintLayersTreeBuilder::mapping_apply(bNodeTree &tree,
   const bool own = BKE_paint_layers_mapping_remaps(ma_, row);
   /* A row without a mapping of its own still reads through its transform effects: the composed
    * source is what its maps take instead. */
-  const bool transforms = !own && !BKE_paint_layers_active_transform_effects(ma_, row).is_empty();
+  const bool transforms = !own &&
+                          !BKE_paint_layers_active_uv_transform_effects(ma_, row).is_empty();
   if (!own && !transforms) {
     return false;
   }

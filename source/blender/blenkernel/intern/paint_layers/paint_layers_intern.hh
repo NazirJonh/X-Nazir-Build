@@ -324,8 +324,9 @@ inline bool paint_layer_transform_moves(const MaterialPaintLayer &item)
 
 /**
  * Whether the mask item \a item is a transform effect that moves the grey the mask has built up to
- * it. It acts in UV only: the grey it moves is computed on the canvas. One that moves nothing
- * lays nothing.
+ * it. It acts in UV only: the Decal frame of a content effect walks the surface of the painted
+ * object, which a mask grey computed on the canvas has no access to (see
+ * #BKE_paint_layers_effect_space_supported). One that moves nothing lays nothing.
  */
 inline bool paint_layer_mask_item_is_transform(const MaterialPaintLayer &item)
 {
@@ -795,6 +796,22 @@ inline bool paint_layer_filter_is_gpu_computed(const int16_t filter)
 }
 
 /**
+ * Whether the transform \a effect would act in its own Decal frame: enabled, remapping and holding a
+ * frame. The live graph has no form for it (it walks the surface), so the row that carries one is
+ * baked for the viewport like a Blur is. It is the Material-free half of
+ * #BKE_paint_layers_effect_decal_applies, which also needs the owner not to be projected: this one
+ * can err only toward "not projected", and the bake then renders the effect for nothing, never
+ * the other way round. Kept out of #paint_layer_effect_is_cpu_computed on purpose: the effect is no
+ * #PAINT_LAYER_KIND_NEEDS_BAKE kind, so the effect cache and the graph's skip rules stay as they are.
+ */
+inline bool paint_layer_effect_acts_in_decal_frame(const MaterialPaintLayer &effect)
+{
+  return (effect.flag & MA_PAINT_LAYER_ENABLED) != 0 && paint_layer_kind_transforms_input(effect) &&
+         effect.mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL &&
+         paint_layer_transform_moves(effect);
+}
+
+/**
  * Whether \a row carries a CPU-computed effect anywhere in its content corrections. The mask and
  * the children come with the row's bake either way (such a kind only ever corrects a row's colour,
  * so it cannot be a mask item), and it is the row itself that has to be baked for the live graph to
@@ -803,7 +820,8 @@ inline bool paint_layer_filter_is_gpu_computed(const int16_t filter)
 inline bool paint_layer_row_needs_bake(const MaterialPaintLayer &row)
 {
   for (const MaterialPaintLayer &effect : row.effects) {
-    if (paint_layer_effect_is_cpu_computed(effect)) {
+    if (paint_layer_effect_is_cpu_computed(effect) || paint_layer_effect_acts_in_decal_frame(effect))
+    {
       return true;
     }
   }

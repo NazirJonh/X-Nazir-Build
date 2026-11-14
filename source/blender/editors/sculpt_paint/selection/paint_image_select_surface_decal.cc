@@ -89,7 +89,7 @@
 #include "paint_image_select_fragment.hh"
 #include "paint_image_select_intern.hh"
 #include "paint_image_select_surface_decal.hh"
-#include "paint_image_select_surface_unfold.hh"
+#include "BKE_surface_unfold.hh"
 #include "paint_image_select_view3d.hh"
 
 namespace blender::ed::sculpt_paint {
@@ -198,7 +198,7 @@ void surface_decal_release(SurfaceDecalSession &decal)
     }
   }
   decal.stamps.clear();
-  decal.patch = SurfaceUnfoldPatch();
+  decal.patch = bke::SurfaceUnfoldPatch();
   decal.patch_seed_tri = -1;
 }
 
@@ -449,10 +449,10 @@ bool surface_decal_patch_ensure(const bContext *C,
   /* The evaluated positions, the same source the anchor and the cage sampling use. */
   const Span<float3> positions = bke::pbvh::vert_positions_eval(*depsgraph, *ob);
   if (decal.adjacency.neighbors.size() != corner_tris.size()) {
-    decal.adjacency = surface_unfold_adjacency_build(corner_tris, corner_verts);
+    decal.adjacency = bke::surface_unfold_adjacency_build(corner_tris, corner_verts);
   }
-  SurfaceUnfoldPatch patch;
-  if (!surface_unfold_build(corner_tris,
+  bke::SurfaceUnfoldPatch patch;
+  if (!bke::surface_unfold_build(corner_tris,
                             corner_verts,
                             positions,
                             decal.adjacency,
@@ -506,7 +506,7 @@ void surface_decal_draw_preview(const ARegion *region,
   positions.reserve(vertex_num);
   normals.reserve(vertex_num);
   stamp_uvs.reserve(vertex_num);
-  for (const SurfaceUnfoldTri &tri : decal.patch.tris) {
+  for (const bke::SurfaceUnfoldTri &tri : decal.patch.tris) {
     if (tri.tri_index < 0 || tri.tri_index >= corner_tris.size()) {
       continue;
     }
@@ -639,7 +639,7 @@ void surface_decal_patch_uv_vertices(const SurfaceDecalSession &decal,
   r_stamp_uv.clear();
   const Span<int3> corner_tris = surface_map.corner_tris.as_span();
   const float2 size = surface_decal_stamp_size(decal);
-  for (const SurfaceUnfoldTri &tri : decal.patch.tris) {
+  for (const bke::SurfaceUnfoldTri &tri : decal.patch.tris) {
     if (tri.tri_index < 0 || tri.tri_index >= corner_tris.size()) {
       continue;
     }
@@ -733,7 +733,7 @@ static void surface_decal_bake_target(bContext *C,
      * extrapolates affinely past the edge, which continues the content across the seam. */
     for (const int pass : IndexRange(2)) {
     const bool gutter = pass == 1;
-    for (const SurfaceUnfoldTri &tri : decal.patch.tris) {
+    for (const bke::SurfaceUnfoldTri &tri : decal.patch.tris) {
       if (tri.tri_index < 0 || tri.tri_index >= corner_tris.size()) {
         continue;
       }

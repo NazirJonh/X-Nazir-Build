@@ -41,6 +41,12 @@ struct PaintMaterialCompositeSurface {
   /** Identity of the source: object, UV map, size and geometry revision. */
   uint64_t key = 0;
   /**
+   * The UDIM tile of the object's UVs this surface rasterizes, 1001 for the base tile. The UV that
+   * is rasterized is the object's UV minus the tile origin, so every reader of the surface sees a
+   * 0..1 square; a source map or Decal map built for the surface must be read from the same tile.
+   */
+  int tile_number = 1001;
+  /**
    * Monotonic content revision, bumped every time this surface is rebuilt. The map cache key stays
    * #key, but the composite caches need this to notice a rebuilt surface under an unchanged
    * identity: without it a notifier-cleared surface would be sampled through an old ImBuf.

@@ -2016,7 +2016,7 @@ TEST_F(PaintLayersGenerateTest, planar_projection_feeds_the_map_through_its_fram
   EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 0) << "the 2D UV adjust is off";
   const Vector<int> sources = image_vector_sources(*group);
   ASSERT_EQ(sources.size(), 1);
-  EXPECT_EQ(sources[0], SH_NODE_COMBINE_XYZ) << "the map reads the projection UV";
+  EXPECT_EQ(sources[0], SH_NODE_COMBXYZ) << "the map reads the projection UV";
   EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Center", false));
   EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Size", false));
   EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Rotation", false));

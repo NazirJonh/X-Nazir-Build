@@ -1232,8 +1232,14 @@ enum eMaterialPaintLayerMappingSpace : int16_t {
   MA_PAINT_LAYER_MAPPING_SPACE_CYLINDER = 5,
   /** Spherical projection around the frame's local origin. */
   MA_PAINT_LAYER_MAPPING_SPACE_SPHERE = 6,
+  /**
+   * A planar frame laid over the surface: the map coordinate follows the mesh (an unfolded patch of
+   * triangles around the frame's center) instead of the straight projection, so the content crosses
+   * UV seams and cube edges. Lives in the painted object's space; the controller is ignored.
+   */
+  MA_PAINT_LAYER_MAPPING_SPACE_DECAL = 7,
   /** Sentinel: the number of spaces, never stored. */
-  MA_PAINT_LAYER_MAPPING_SPACE_NUM = 7,
+  MA_PAINT_LAYER_MAPPING_SPACE_NUM = 8,
 };
 
 /** #MaterialPaintLayerProjection::axis: the projection axis of Planar and Cylinder. */

@@ -319,7 +319,7 @@ class GraphInterpreter {
         /* One space in the interpreter's convention: the world and the object coincide, so every
          * transform the generated chains build is the identity. */
         return eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
-      case SH_NODE_COMBINE_XYZ: {
+      case SH_NODE_COMBXYZ: {
         const RGBA x = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "X"_ustr));
         const RGBA y = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Y"_ustr));
         const RGBA z = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Z"_ustr));
@@ -493,12 +493,6 @@ class GraphInterpreter {
           case NODE_MATH_ABSOLUTE:
             value = fabsf(a);
             break;
-          case NODE_MATH_MINIMUM:
-            value = std::min(a, b);
-            break;
-          case NODE_MATH_MAXIMUM:
-            value = std::max(a, b);
-            break;
           case NODE_MATH_ARCTAN2:
             value = (a == 0.0f && b == 0.0f) ? 0.0f : atan2f(a, b);
             break;
@@ -529,14 +523,6 @@ class GraphInterpreter {
         }
         return {value, value, value, value};
       }
-      case SH_NODE_VALTORGB: {
-        /* The gradient's colour band, the one #BKE_colorband_evaluate walks on the CPU. */
-        const float factor = eval_socket(
-            *bke::node_find_socket(mutable_node, SOCK_IN, "Fac"_ustr)).r;
-        float color[4];
-        BKE_colorband_evaluate(static_cast<const ColorBand *>(node.storage), factor, color);
-        return {color[0], color[1], color[2], color[3]};
-      }
       case SH_NODE_COMPOSE_COLOR_ALPHA: {
         /* The content alpha composed over the colour: the colour's own alpha is replaced. */
         const RGBA color = eval_socket(
@@ -553,12 +539,6 @@ class GraphInterpreter {
                             STREQ(out_identifier, "Y") ? vector.g :
                                                          vector.b;
         return {value, value, value, value};
-      }
-      case SH_NODE_COMBXYZ: {
-        const RGBA x = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "X"_ustr));
-        const RGBA y = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Y"_ustr));
-        const RGBA z = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Z"_ustr));
-        return {x.r, y.r, z.r, 1.0f};
       }
       case SH_NODE_VECTOR_MATH: {
         const RGBA vector = eval_socket(

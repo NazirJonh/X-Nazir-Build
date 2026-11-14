@@ -109,6 +109,7 @@ TEST_F(PaintLayersDescription, projection_is_supported_by_a_fill_that_reads_a_ma
   /* A painted map is written by strokes at the raw UV: no projection either. */
   MaterialPaintLayer *paint = BKE_paint_layers_add(ma, "Paint", nullptr, PaintLayerPlace::Above);
   Image *paint_map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "ProjectedPaintMap"));
+  ASSERT_NE(BKE_paint_layers_channel_add(ma, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
   ASSERT_TRUE(BKE_paint_layers_channel_set_image(
       ma, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR, paint_map));
   EXPECT_FALSE(BKE_paint_layers_projection_supported(ma, *paint));
@@ -159,6 +160,59 @@ TEST_F(PaintLayersDescription, projection_is_supported_by_a_uv_gradient_row_only
   EXPECT_FALSE(BKE_paint_layers_projection_supported(ma, *item));
   EXPECT_FALSE(BKE_paint_layers_projection_set_space(
       ma, item, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+}
+
+/** A transform effect has a Decal frame of its own on a row that reads its map at the surface UV;
+ * on a projected row the choice is refused and the effect keeps acting in that projection. */
+TEST_F(PaintLayersDescription, transform_effect_switches_between_uv_and_its_decal_frame)
+{
+  Material &ma = *BKE_material_add(bmain, "EffectSpaceMat");
+  MaterialPaintLayer *paint = BKE_paint_layers_add(ma, "Paint", nullptr, PaintLayerPlace::Above);
+  Image *paint_map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "EffectSpacePaintMap"));
+  ASSERT_NE(BKE_paint_layers_channel_add(ma, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      ma, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR, paint_map));
+
+  MaterialPaintLayer *effect = BKE_paint_layers_filter_add(
+      ma, paint, MA_PAINT_LAYER_FILTER_MIRROR, "Mirror");
+  ASSERT_NE(effect, nullptr);
+  /* A Mirror is active only while its fold is not the identity. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_mirror(ma, effect, MA_PAINT_LAYER_MAPPING_MIRROR_U));
+  EXPECT_TRUE(BKE_paint_layers_is_transform_effect(*effect));
+  EXPECT_EQ(effect->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_UV);
+  /* The frame is derived from the Mirror center, never placed: no frame tool applies to an effect. */
+  EXPECT_FALSE(BKE_paint_layers_projection_supported(ma, *effect));
+  EXPECT_FALSE(BKE_paint_layers_projection_applies(ma, *effect));
+  EXPECT_FALSE(BKE_paint_layers_effect_decal_applies(ma, *paint, *effect));
+
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, effect, MA_PAINT_LAYER_MAPPING_SPACE_DECAL));
+  EXPECT_EQ(effect->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_DECAL);
+  EXPECT_EQ(effect->projection, nullptr) << "the frame is derived on every read";
+  EXPECT_FALSE(BKE_paint_layers_projection_applies(ma, *effect));
+  EXPECT_TRUE(BKE_paint_layers_effect_decal_applies(ma, *paint, *effect));
+  EXPECT_TRUE(BKE_paint_layers_active_uv_transform_effects(ma, *paint).is_empty());
+  EXPECT_EQ(BKE_paint_layers_active_transform_effects(ma, *paint).size(), 1);
+
+  /* Back to UV: the frame is on demand, as for a row's projection. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, effect, MA_PAINT_LAYER_MAPPING_SPACE_UV));
+  EXPECT_EQ(effect->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_UV);
+  EXPECT_EQ(effect->projection, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_projection_applies(ma, *effect));
+
+  /* A projected owner reads the effect in its projection's map coordinate: no second frame. */
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Projected");
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  MaterialPaintLayer *fill_effect = BKE_paint_layers_filter_add(
+      ma, fill, MA_PAINT_LAYER_FILTER_TRANSFORM, "Transform");
+  ASSERT_NE(fill_effect, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_projection_set_space(
+      ma, fill_effect, MA_PAINT_LAYER_MAPPING_SPACE_DECAL));
+  EXPECT_EQ(fill_effect->mapping.space, MA_PAINT_LAYER_MAPPING_SPACE_UV);
+  EXPECT_FALSE(BKE_paint_layers_projection_applies(ma, *fill_effect));
+  EXPECT_FALSE(BKE_paint_layers_effect_decal_applies(ma, *fill, *fill_effect));
 }
 
 TEST_F(PaintLayersDescription, projection_frame_values_are_normalized_and_value_only)
@@ -1212,7 +1266,7 @@ TEST_F(PaintLayersGraphEvalTest, every_projection_space_matches_the_cpu)
     const float center[3] = {0.0f, 0.0f, 0.0f};
     const float size[3] = {2.0f, 2.0f, 2.0f};
     const float rotation[3] = {0.0f, 0.0f, 0.0f};
-    ASSERT_TRUE(BKE_paint_layers_projection_set_values(*ma, top, center, size, rotation));
+    ASSERT_TRUE(BKE_paint_layers_projection_set_values_euler(*ma, top, center, size, rotation));
 
     ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
     Vector<PaintMaterialCompositeImageLayer> layers;

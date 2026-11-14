@@ -4035,7 +4035,9 @@ static PointerRNA rna_MaterialPaintLayer_kind_curves_get(PointerRNA *ptr)
 static bool rna_MaterialPaintLayer_kind_needs_bake_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
-  return layer != nullptr && BKE_paint_layers_kind_needs_bake(*layer);
+  /* A transform effect in its Decal frame is baked for the viewport like a Blur is. */
+  return layer != nullptr && (BKE_paint_layers_kind_needs_bake(*layer) ||
+                              BKE_paint_layers_effect_decal_frame_active(*layer));
 }
 
 static bool rna_MaterialPaintLayer_color_balance_supported_get(PointerRNA *ptr)

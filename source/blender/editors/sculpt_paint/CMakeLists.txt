@@ -208,8 +208,6 @@ set(SRC
   selection/paint_image_select_transform_view3d_decal.cc
   selection/paint_image_select_surface_decal.cc
   selection/paint_image_select_surface_decal.hh
-  selection/paint_image_select_surface_unfold.cc
-  selection/paint_image_select_surface_unfold.hh
   selection/paint_image_select_preview_view3d.cc
   selection/paint_image_select_preview_view3d.hh
   selection/paint_image_select_preview_view3d_intern.hh
@@ -461,7 +459,6 @@ if(WITH_GTESTS)
     paint_gradient_curve_test.cc
     mesh/paint_test.cc
     tests/paint_image_select_warp_tests.cc
-    tests/paint_image_select_surface_unfold_test.cc
     tests/paint_image_select_region_tests.cc
     tests/paint_image_select_tile_bound_tests.cc
     tests/paint_material_source_correction_test.cc

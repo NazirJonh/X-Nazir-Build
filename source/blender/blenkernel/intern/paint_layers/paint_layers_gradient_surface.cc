@@ -171,6 +171,17 @@ static SurfaceIdentity surface_identity(const Object &object,
   return identity;
 }
 
+/* The UDIM numbering: 1001 is the first tile and a row holds ten. */
+static constexpr int surface_udim_first = 1001;
+static constexpr int surface_udim_row_len = 10;
+
+/** The UV of the lower-left corner of UDIM \a tile_number; a number below the first is the base. */
+static float2 surface_tile_origin(const int tile_number)
+{
+  const int tile = std::max(tile_number, surface_udim_first) - surface_udim_first;
+  return float2(float(tile % surface_udim_row_len), float(tile / surface_udim_row_len));
+}
+
 /** The surface's own use of #BKE_paint_composite_pad_islands: the position grids follow the mask. */
 static int64_t surface_pad_islands(MutableSpan<float3> positions,
                                    MutableSpan<float3> generated_positions,
@@ -216,7 +227,8 @@ std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Mesh &mesh,
                                                              const float3 &texspace_size,
                                                              const bool bbox_valid,
                                                              const int padding_texels,
-                                                             const bool store_generated)
+                                                             const bool store_generated,
+                                                             const int tile_number)
 {
   const bke::AttributeAccessor attributes = mesh.attributes();
   const auto uv_attr = attributes.lookup<float2>(uv_map_name, bke::AttrDomain::Corner);
@@ -229,7 +241,11 @@ std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Mesh &mesh,
   surface->width = size;
   surface->height = size;
   surface->key = key;
+  surface->tile_number = tile_number;
   surface->revision = ++next_surface_revision;
+  /* The UVs are moved into the 0..1 square before rasterizing, so a tile other than the base one
+   * fills the same texel grid and every reader of the surface stays tile-agnostic. */
+  const float2 tile_origin = surface_tile_origin(tile_number);
 
   const int64_t texel_count = int64_t(size) * size;
   surface->positions = Vector<float3>(texel_count, float3(0.0f));
@@ -282,9 +298,9 @@ std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Mesh &mesh,
     {
       continue;
     }
-    const float2 uv0 = uvs[c0];
-    const float2 uv1 = uvs[c1];
-    const float2 uv2 = uvs[c2];
+    const float2 uv0 = uvs[c0] - tile_origin;
+    const float2 uv1 = uvs[c1] - tile_origin;
+    const float2 uv2 = uvs[c2] - tile_origin;
     if (!std::isfinite(uv0.x) || !std::isfinite(uv0.y) || !std::isfinite(uv1.x) ||
         !std::isfinite(uv1.y) || !std::isfinite(uv2.x) || !std::isfinite(uv2.y))
     {
@@ -537,7 +553,8 @@ std::shared_ptr<const PaintMaterialCompositeSurface> BKE_paint_layers_gradient_s
                                                                        identity.texspace_size,
                                                                        identity.bbox_valid,
                                                                        0,
-                                                                       true);
+                                                                       true,
+                                                                       surface_udim_first);
   if (!built) {
     return nullptr;
   }
@@ -561,7 +578,8 @@ std::shared_ptr<const PaintMaterialCompositeSurface> BKE_paint_layers_gradient_s
     const char *uv_map_name,
     const int size,
     const int padding_texels,
-    const bool need_generated)
+    const bool need_generated,
+    const int tile_number)
 {
   if (uv_map_name == nullptr || uv_map_name[0] == '\0') {
     return nullptr;
@@ -570,17 +588,23 @@ std::shared_ptr<const PaintMaterialCompositeSurface> BKE_paint_layers_gradient_s
    * may be larger than any preview surface, so nothing of it enters the cache. */
   const int clamped_size = std::clamp(size, bake_surface_size_min, bake_surface_size_max);
   const SurfaceIdentity identity = surface_identity(object, mesh, uv_map_name, clamped_size);
+  /* The surface key doubles as the cache key of the maps sampled through it, so another tile of
+   * the same mesh must not share it. The base tile keeps the key it always had. */
+  const uint64_t key = (tile_number > surface_udim_first) ?
+                           get_default_hash(identity.key, tile_number) :
+                           identity.key;
   const double time_start = BLI_time_now_seconds();
   const size_t memory_start = MEM_get_memory_in_use();
   std::shared_ptr<PaintMaterialCompositeSurface> built = surface_build(mesh,
                                                                        uv_map_name,
                                                                        clamped_size,
-                                                                       identity.key,
+                                                                       key,
                                                                        identity.texspace_location,
                                                                        identity.texspace_size,
                                                                        identity.bbox_valid,
                                                                        padding_texels,
-                                                                       need_generated);
+                                                                       need_generated,
+                                                                       tile_number);
   /* A diagnostic for the sizes that make a Merge stall: the rasterization is single-threaded and
    * a 4096 surface is hundreds of MiB next to the bake's own strips. Printed only with `--debug`,
    * so a release run stays silent, and only for the sizes worth measuring. The delta is what
@@ -727,6 +751,65 @@ StringRefNull BKE_paint_layers_gradient_uv_map_name(const Mesh &mesh)
   /* `Texture Coordinate.UV` reads the render-active/default map, not the editable active one. */
   const StringRefNull name = mesh.default_uv_map_name();
   return name.is_empty() ? mesh.active_or_default_uv_map_name() : name;
+}
+
+int BKE_paint_layers_gradient_surface_uv_tile(const Mesh &mesh, const char *uv_map_name)
+{
+  if (uv_map_name == nullptr || uv_map_name[0] == '\0') {
+    return surface_udim_first;
+  }
+  const auto uv_attr = mesh.attributes().lookup<float2>(uv_map_name, bke::AttrDomain::Corner);
+  if (!uv_attr) {
+    return surface_udim_first;
+  }
+  const VArraySpan<float2> uvs(*uv_attr);
+  int found_tile = 0;
+  for (const int3 &tri : mesh.corner_tris()) {
+    if (tri.x < 0 || tri.y < 0 || tri.z < 0 || tri.x >= uvs.size() || tri.y >= uvs.size() ||
+        tri.z >= uvs.size())
+    {
+      continue;
+    }
+    /* The centroid decides the tile of a triangle: a corner sitting exactly on a tile border (an
+     * island that fills its tile reaches 1.0) would otherwise count for the neighbouring tile. */
+    const float2 center = (uvs[tri.x] + uvs[tri.y] + uvs[tri.z]) / 3.0f;
+    if (!std::isfinite(center.x) || !std::isfinite(center.y)) {
+      continue;
+    }
+    const int tile_u = int(std::floor(center.x));
+    const int tile_v = int(std::floor(center.y));
+    /* Outside the ten-column UDIM grid there is no tile number to name. */
+    if (tile_u < 0 || tile_u >= surface_udim_row_len || tile_v < 0) {
+      return surface_udim_first;
+    }
+    const int tile = surface_udim_first + tile_u + surface_udim_row_len * tile_v;
+    if (found_tile != 0 && found_tile != tile) {
+      /* Several tiles have no single answer: the base tile keeps the behavior of a one-tile bake. */
+      return surface_udim_first;
+    }
+    found_tile = tile;
+  }
+  return found_tile != 0 ? found_tile : surface_udim_first;
+}
+
+int BKE_paint_layers_gradient_surface_object_tile(const Object *object)
+{
+  if (object == nullptr || object->type != OB_MESH) {
+    return surface_udim_first;
+  }
+  /* The mesh the bake surface is rasterized from: the evaluated one when it exists. */
+  const Mesh *mesh = nullptr;
+  if (DEG_is_evaluated(object)) {
+    mesh = BKE_object_get_evaluated_mesh(object);
+  }
+  else if (object->data != nullptr) {
+    mesh = id_cast<const Mesh *>(object->data);
+  }
+  if (mesh == nullptr) {
+    return surface_udim_first;
+  }
+  const StringRefNull uv_name = BKE_paint_layers_gradient_uv_map_name(*mesh);
+  return BKE_paint_layers_gradient_surface_uv_tile(*mesh, uv_name.c_str());
 }
 
 bool BKE_paint_layers_gradient_generated_box_get(const Object *object,

@@ -1243,6 +1243,23 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         # right-aligned slot, which puts the button at the header's far edge.
         self.layout.menu("LAYER_MT_mapping_reset", text="", icon='RECOVER_LAST')
 
+    def _draw_mapping_transform(self, layout, row, label_wrap):
+        """The offset, scale and rotation a mapping moves by, with the wrap it ends at."""
+        col = layout.column()
+        col.enabled = row.mapping_enabled
+        col.prop(row, "mapping_offset", text="Offset")
+        sub = col.row(align=True)
+        # The tile-holding RNA properties follow the offset so the tile stays put.
+        sub.prop(row, "tile_scale", text="Scale")
+        sub.prop(row,
+                 "tile_scale_lock",
+                 text="",
+                 icon='LOCKED' if row.tile_scale_lock else 'UNLOCKED',
+                 icon_only=True)
+        col.prop(row, "tile_rotation", text="Rotation")
+        col.prop(row, "mapping_wrap", text=label_wrap)
+        return col
+
     def _draw_projection(self, context, layout, row):
         """The main fields of a projected row: place, preset, frame size, roll and the limits."""
         layout.operator("paint.layer_projection_place",
@@ -1251,34 +1268,39 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         sculpt = context.tool_settings.sculpt
         if sculpt is not None:
             layout.prop(sculpt, "show_projection_gizmo", text="Show Gizmo", toggle=1)
-        layout.prop(row, "projection_preset", text="Preset")
+        # The Decal space unfolds the surface around its center: its depth limit and facing fade are
+        # not read, so the preset (clip, depth and facing) and those fields stay out of its panel.
+        is_decal = row.mapping_space == 'DECAL'
+        if not is_decal:
+            layout.prop(row, "projection_preset", text="Preset")
 
         row_size = layout.row(align=True)
         row_size.prop(row, "projection_size", index=0, text="Size X")
         row_size.prop(row, "projection_size", index=1, text="Y")
         layout.prop(row, "projection_roll", text="Roll")
-        # A volume kind bounds all three axes by the clip itself and has no single projection
-        # direction, so the Limit toggle and the facing fade stay Planar-only; the Depth field
-        # is the frame's Size Z and stays for every space.
-        # A volume space projects from every side, so the facing fade and the depth limit have no
-        # single direction to act along and the projection ignores them.
-        volume_space = row.projection_is_volume
-        depth_row = layout.row(align=True)
-        if not volume_space:
-            depth_row.prop(row, "projection_depth", text="Limit", toggle=1)
-        depth_row.prop(row, "projection_depth_size", text="Depth")
+        if not is_decal:
+            # A volume kind bounds all three axes by the clip itself and has no single projection
+            # direction, so the Limit toggle and the facing fade stay Planar-only; the Depth field
+            # is the frame's Size Z and stays for every space.
+            # A volume space projects from every side, so the facing fade and the depth limit have
+            # no single direction to act along and the projection ignores them.
+            volume_space = row.projection_is_volume
+            depth_row = layout.row(align=True)
+            if not volume_space:
+                depth_row.prop(row, "projection_depth", text="Limit", toggle=1)
+            depth_row.prop(row, "projection_depth_size", text="Depth")
 
-        if not volume_space:
-            facing_row = layout.row(align=True)
-            facing_row.prop(row, "projection_facing", text="Facing Fade")
-            angle_col = facing_row.column()
-            angle_col.enabled = row.projection_facing
-            angle_col.prop(row, "projection_angle", text="Angle")
-            flip_col = facing_row.column()
-            flip_col.enabled = row.projection_facing
-            flip_col.prop(row, "projection_facing_invert", text="Flip", toggle=1)
+            if not volume_space:
+                facing_row = layout.row(align=True)
+                facing_row.prop(row, "projection_facing", text="Facing Fade")
+                angle_col = facing_row.column()
+                angle_col.enabled = row.projection_facing
+                angle_col.prop(row, "projection_angle", text="Angle")
+                flip_col = facing_row.column()
+                flip_col.enabled = row.projection_facing
+                flip_col.prop(row, "projection_facing_invert", text="Flip", toggle=1)
 
-        layout.separator()
+            layout.separator()
 
     def draw(self, context):
         layout = self.layout
@@ -1288,33 +1310,42 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         if row is None:
             return
 
-        layout.prop(row, "mapping_space", text="Projection")
+        if row.is_transform_effect:
+            # The effect moves where its layer reads its map: in UV, or in a Decal frame of its
+            # own. On a projected layer the effect keeps acting in that projection, and the Decal
+            # choice is disabled with that explanation (the RNA editable callback).
+            layout.prop(row, "mapping_space", text="Space")
+            if (row.mapping_space == 'DECAL' and not row.effect_decal_applies):
+                col = layout.column(align=True)
+                col.enabled = False
+                col.label(text="The layer projects: the effect acts in that projection",
+                          icon='INFO')
+            elif row.mapping_space == 'DECAL' and row.kind_needs_bake:
+                # The viewport shows a Decal effect through the layer's bake, like a Blur.
+                draw_material_update_now(layout, self._owner_material(context))
+        else:
+            layout.prop(row, "mapping_space", text="Projection")
 
-        if row.mapping_space != 'UV':
+        # An effect in Decal has no frame to place: it is derived from the Mirror center / pivot, the
+        # same handle as in UV, so only a row's own projection shows the frame fields.
+        if row.mapping_space != 'UV' and not row.is_transform_effect:
             self._draw_projection(context, layout, row)
 
-        if row.mapping_space == 'UV':
-            # A transform effect keeps its mapping as its parameter set: a Mirror reads only the
-            # fold's axes and center, so the transform sliders would promise a move it never makes.
-            is_mirror_effect = row.is_transform_effect and row.filter_type == 'MIRROR'
-            layout.prop(row, "mapping_enabled", text="UV Adjust")
+        if row.is_transform_effect:
+            # The effect's step is its parameter set in both spaces: a Mirror reads only the fold's
+            # axes and center, so the transform sliders would promise a move it never makes. In
+            # Decal the same offset (in UV units at the center), scale, rotation and pivot act in
+            # the plane of the surface around the center.
+            is_mirror_effect = row.filter_type == 'MIRROR'
+            layout.prop(row, "mapping_enabled", text="Enabled")
             if not is_mirror_effect:
-                col = layout.column()
-                col.enabled = row.mapping_enabled
-                col.prop(row, "mapping_offset", text="Offset")
-                sub = col.row(align=True)
-                # The tile-holding RNA properties follow the offset so the tile stays put.
-                sub.prop(row, "tile_scale", text="Scale")
-                sub.prop(row,
-                         "tile_scale_lock",
-                         text="",
-                         icon='LOCKED' if row.tile_scale_lock else 'UNLOCKED',
-                         icon_only=True)
-                col.prop(row, "tile_rotation", text="Rotation")
-                if row.is_transform_effect:
-                    # Scale and Rotation turn about the pivot; moving it keeps what the effect shows.
-                    col.prop(row, "mapping_pivot", text="Pivot")
-                col.prop(row, "mapping_wrap", text="UV Wrap")
+                col = self._draw_mapping_transform(
+                    layout, row, "Wrap" if row.mapping_space == 'DECAL' else "UV Wrap")
+                # Scale and Rotation turn about the pivot; moving it keeps what the effect shows.
+                col.prop(row, "mapping_pivot", text="Pivot")
+        elif row.mapping_space == 'UV':
+            layout.prop(row, "mapping_enabled", text="UV Adjust")
+            self._draw_mapping_transform(layout, row, "UV Wrap")
 
             if row.mapping_enabled and row.source == 'MATERIAL':
                 # The wrapper moves the active UV layer (TexCoord UV and open Image Textures) of the
@@ -1522,6 +1553,10 @@ class LAYER_MATERIAL_PT_mapping_advanced(LayerMaterialButtonsPanel, Panel):
             col.prop(row, "projection_blend", text="Normal Blend", slider=True)
         if row.projection_uses_cube_layout:
             col.prop(row, "projection_cube_layout", text="Layout")
+
+        if row.mapping_space == 'DECAL':
+            # A Decal lives in the object's space: there is no controller to place or snap.
+            return
 
         layout.separator()
         controller = layout.column(align=True)

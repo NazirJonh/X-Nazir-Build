@@ -2062,7 +2062,7 @@ NodeOutput PaintLayersTreeBuilder::transform_normal_remap_apply(bNodeTree &tree,
                                                                 Vector<bNode *> *r_nodes)
 {
   const Vector<const MaterialPaintLayer *, 4> transforms =
-      BKE_paint_layers_active_transform_effects(ma_, row);
+      BKE_paint_layers_active_uv_transform_effects(ma_, row);
   for (const int index : transforms.index_range()) {
     const MaterialPaintLayer &effect = *transforms[transforms.size() - 1 - index];
     color = this->normal_remap_add(tree, effect, color, r_nodes);
@@ -2077,7 +2077,7 @@ void PaintLayersTreeBuilder::source_group_mapping_wire(bNodeTree &tree,
   /* The wrapper carries the row's own mapping, and one set of inputs per transform effect: a row
    * without a mapping of its own still wires its effects' values in. */
   const Vector<const MaterialPaintLayer *, 4> transform_effects =
-      BKE_paint_layers_active_transform_effects(ma_, layer);
+      BKE_paint_layers_active_uv_transform_effects(ma_, layer);
   if (!BKE_paint_layers_mapping_remaps(ma_, layer) && transform_effects.is_empty()) {
     return;
   }
@@ -2356,7 +2356,7 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
    * transform effects clip over their own chains' lookups, the factors multiplied in like the
    * CPU's per-step clip does. */
   const Vector<const MaterialPaintLayer *, 4> transform_effects =
-      BKE_paint_layers_active_transform_effects(ma_, ctx.layer);
+      BKE_paint_layers_active_uv_transform_effects(ma_, ctx.layer);
   if (BKE_paint_layers_mapping_remaps(ma_, ctx.layer) || !transform_effects.is_empty()) {
     const auto multiply = [&](const NodeOutput value, const NodeOutput mask) -> NodeOutput {
       bNode *product = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
@@ -3029,7 +3029,7 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
        * chains: the UV chains of the effects do not exist for it. */
       if (!read.projected) {
         for (const MaterialPaintLayer *effect :
-             BKE_paint_layers_active_transform_effects(ma_, ctx.layer))
+             BKE_paint_layers_active_uv_transform_effects(ma_, ctx.layer))
         {
           out.coverage = this->mapping_clip_alpha(tree, *effect, out.coverage, source_nodes);
         }

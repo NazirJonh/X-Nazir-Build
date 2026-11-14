@@ -342,7 +342,7 @@ static int editor_decal_patch_tris_in_tiles(const ImageSelectEditorDecal &decal,
 {
   const Span<int3> corner_tris = surface_map.corner_tris.as_span();
   int count = 0;
-  for (const SurfaceUnfoldTri &tri : decal.session.patch.tris) {
+  for (const bke::SurfaceUnfoldTri &tri : decal.session.patch.tris) {
     if (tri.tri_index < 0 || tri.tri_index >= corner_tris.size()) {
       continue;
     }

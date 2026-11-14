@@ -931,20 +931,42 @@ bool curve_patch_layer_enter_if_sculpting(bContext &C, Material &ma, MaterialPai
   return curve_patch_layer_activate(C, ma, row);
 }
 
-void curve_patch_layer_store_document(CurvePatchSession &session)
+/** The write half the two document stores share: resolve the row the session was entered from,
+ * follow the container's active item, and write the live document into the row's PaintVector.
+ * Returns the row, or null when there is nothing to write (no row, or its PaintVector is gone). */
+static MaterialPaintLayer *curve_patch_layer_document_to_row(CurvePatchSession &session)
 {
   MaterialPaintLayer *row = curve_patch_layer_session_row(session);
   if (row == nullptr || row->curve_patch->vectors == nullptr) {
-    return;
+    return nullptr;
   }
   /* A look edit in the list is only picked up by the modal's poll; the last one may not have been. */
   curve_patch_layer_active_item_follow(session);
   PaintVector &pv = *row->curve_patch->vectors;
   curve_patch_document_to_vector(session.doc, pv);
+  return row;
+}
+
+void curve_patch_layer_store_document(CurvePatchSession &session)
+{
+  MaterialPaintLayer *row = curve_patch_layer_document_to_row(session);
+  if (row == nullptr) {
+    return;
+  }
+  PaintVector &pv = *row->curve_patch->vectors;
   BKE_paint_vector_tag_changed(pv);
   /* The row's content is its own channel maps: the changed document invalidates the bake, which
    * re-renders the maps in the background the next time the plan runs. */
   BKE_paint_layers_bake_request(*row);
+}
+
+void curve_patch_layer_store_document_for_save(CurvePatchSession &session)
+{
+  /* The file write only carries the curves into the container: the live maps are not stale, and a
+   * loaded file re-bakes anyway -- the blend read clears the row's bake hash, so the first bake
+   * plan renders the row again. Tagging the PaintVector changed here would therefore mark a
+   * staleness nobody acts on, so neither the revision nor the bake is touched. */
+  curve_patch_layer_document_to_row(session);
 }
 
 void curve_patch_layer_commit_document(bContext &C, CurvePatchSession &session)

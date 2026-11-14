@@ -147,10 +147,32 @@ void ED_curve_patch_session_undo_push(Object &ob);
 void ED_curve_patch_sessions_preview_swap(Main &bmain);
 
 /**
- * Keeps every live Curve Patch preview out of a blend-file written while the guard is alive, the
- * same way #bke::sculpt_layers::MaskEditSuspendGuard keeps a layer mask session out of it: only
- * committed edits are user data. Must span the write itself. The session stays live, so saving does
- * not cancel the edit.
+ * Write every live Curve Patch session's document into the Stack Layers row's PaintVector it was
+ * entered from, so a blend file written right after this carries the curves exactly as the user
+ * sees them. A live session edits its curves in runtime memory only -- the container is updated on
+ * commit and on the mode exit -- so without this a file saved mid-session keeps the point
+ * positions of the session start. Called from #CurvePatchPreviewWriteGuard, which every writer of
+ * a blend file brackets the write with.
+ *
+ * The write may run while a modal gesture (a point drag, a G/R/S) is live: the document then holds
+ * the in-progress state, which is the one on screen, and it is self-consistent at every gesture
+ * tick. When the gesture is cancelled afterwards, the container follows the document again at the
+ * next store (commit, mode exit, or the next save), so the cancelled state reaches no file written
+ * from then on.
+ *
+ * No-op for a session that was not entered from a Stack Layers row (it has nothing persisted) and
+ * for a row that was deleted while the session ran. The session itself stays live: the write
+ * carries the curves but touches neither the row's bake revision nor its bake (see
+ * #curve_patch_layer_store_document_for_save), and it has no undo step and no notifier.
+ */
+void ED_curve_patch_sessions_store_for_save(Main &bmain);
+
+/**
+ * Writes every live Curve Patch session's curves into its row's PaintVector and keeps every live
+ * preview out of a blend-file written while the guard is alive, the same way
+ * #bke::sculpt_layers::MaskEditSuspendGuard keeps a layer mask session out of it: only committed
+ * edits are user data, but a live session's curves are. Must span the write itself. The session
+ * stays live, so saving does not cancel the edit.
  */
 class CurvePatchPreviewWriteGuard {
   Main &bmain_;
@@ -158,6 +180,10 @@ class CurvePatchPreviewWriteGuard {
  public:
   explicit CurvePatchPreviewWriteGuard(Main &bmain) : bmain_(bmain)
   {
+    /* The curves of a live session are user data, its uncommitted surface is not; the two calls
+     * are independent (the store writes the row's PaintVector, the swap the stamped surface), so
+     * the order between them carries no meaning. */
+    ED_curve_patch_sessions_store_for_save(bmain_);
     ED_curve_patch_sessions_preview_swap(bmain_);
   }
   ~CurvePatchPreviewWriteGuard()

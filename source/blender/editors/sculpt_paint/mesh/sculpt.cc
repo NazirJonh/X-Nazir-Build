@@ -6047,7 +6047,8 @@ void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
                                   Object &ob,
                                   const BrushActionFunc action,
                                   PaintModeSettings &paint_mode_settings,
-                                  std::optional<float> forced_bstrength)
+                                  std::optional<float> forced_bstrength,
+                                  const SymmetryOverride *symmetry_override)
 {
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   SculptSession &ss = *ob.runtime->sculpt_session;
@@ -6066,7 +6067,10 @@ void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
   const bool shared_origin = cache.symm_reference_object != nullptr;
   const Object &symm_ob = cache.symm_reference_object ? *cache.symm_reference_object : ob;
   const Mesh &symm_mesh = *id_cast<const Mesh *>(symm_ob.data);
-  const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(symm_ob);
+  const ePaintSymmetryFlags extra_axes = symmetry_override ? symmetry_override->extra_mirror_axes :
+                                                             PAINT_SYMM_NONE;
+  const ePaintSymmetryFlags symm =
+      ePaintSymmetryFlags((mesh_symmetry_xyz_get(symm_ob) | extra_axes) & PAINT_SYMM_AXIS_ALL);
 
   /* Overlap feathering measures how much mirror/radial passes overlap; for parity it must be the
    * same geometric measure for every object, so evaluate it in the reference space. Derive the
@@ -6077,7 +6081,10 @@ void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
   const float3 feather_location = shared_origin ? math::transform_point(cache.symm_ref_from_cur,
                                                                         cache.location) :
                                                   cache.location;
-  float feather = calc_symmetry_feather(sd, symm, symm_mesh, feather_location, cache.radius);
+  const bool feather_disabled = symmetry_override && symmetry_override->disable_feather;
+  float feather = feather_disabled ?
+                      1.0f :
+                      calc_symmetry_feather(sd, symm, symm_mesh, feather_location, cache.radius);
 
   /* PBR Strength Random (#BrushMaterialPaint::strength_random via
    * #PaintRuntime::strength_random_value): scale this step's dab strength. The stroke step draws

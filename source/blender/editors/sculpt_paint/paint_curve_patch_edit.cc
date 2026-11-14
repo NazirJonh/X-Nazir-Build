@@ -53,6 +53,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_rand.hh"
 #include "BLI_string.h"
+#include "BLI_time.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
@@ -82,7 +83,9 @@
 
 #include "BLT_translation.hh"
 
+#include "ED_brush_layer_source.hh"
 #include "ED_curves.hh"
+#include "ED_material_bake.hh"
 #include "ED_object.hh"
 #include "ED_paint.hh"
 #include "ED_paint_curve_draw.hh"
@@ -118,6 +121,43 @@
 #include "paint_image_curve_patch.hh"
 
 namespace blender::ed::sculpt_paint {
+
+/* Keeps the bake of the brush's Material source running while the session is open.
+ *
+ * The properties that pick the source start a bake from their RNA update, but that bake can be
+ * superseded, fail or never start (a source set through a path without an update). The only other
+ * trigger is the paint cursor, which does not draw during this modal, so without this the live
+ * digest keeps seeing "no bake" and the patch keeps the placeholder indefinitely. Idempotent:
+ * #material_source_bake_ensure returns at once for a cached or already running bake. Rate limited
+ * because building the bake key walks the material's node trees. */
+static void curve_patch_edit_material_source_bake_ensure(const bContext &C, const Brush &brush)
+{
+  if (brush.material_paint == nullptr ||
+      brush.material_paint->source_mode != BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL)
+  {
+    return;
+  }
+  /* Main thread only, so a plain static is enough. */
+  constexpr double check_interval_seconds = 0.25;
+  static double last_check_seconds = 0.0;
+  const double now_seconds = BLI_time_now_seconds();
+  if (now_seconds - last_check_seconds < check_interval_seconds) {
+    return;
+  }
+  last_check_seconds = now_seconds;
+
+  const BrushMaterialPaint &brush_paint = *brush.material_paint;
+  if (BKE_paint_material_source_is_layer(brush_paint)) {
+    if (brush_paint.source_layer_owner != nullptr) {
+      brush_layer_source::brush_layer_source_bake_ensure(C, brush);
+    }
+    return;
+  }
+  if (brush_paint.source_material != nullptr) {
+    material_bake::material_source_bake_ensure(
+        C, *brush_paint.source_material, brush_paint.source_bake_size);
+  }
+}
 
 /* #curve_patch_live_inputs_capture plus the one live input only a mesh target has. The shared
  * capture deliberately leaves `symm` at its sentinel -- see its doc-string. */
@@ -957,8 +997,11 @@ void curve_patch_edit_status_set(bContext *C, const CurvePatchSession &patch)
   WorkspaceStatus status(C);
   const wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_curve_patch_edit", true);
   if (ot && ot->modalkeymap) {
-    status.opmodal(IFACE_("Commit"), ot, CURVE_PATCH_MODAL_CONFIRM);
-    status.opmodal(IFACE_("Cancel"), ot, CURVE_PATCH_MODAL_CANCEL);
+    /* A Stack Layers effect has neither: Enter and Esc are inert for it. */
+    if (!patch.is_layer_effect()) {
+      status.opmodal(IFACE_("Commit"), ot, CURVE_PATCH_MODAL_CONFIRM);
+      status.opmodal(IFACE_("Cancel"), ot, CURVE_PATCH_MODAL_CANCEL);
+    }
     status.opmodal(IFACE_("Undo"), ot, CURVE_PATCH_MODAL_UNDO);
     status.opmodal(patch.active_item().params.swap_axis ? IFACE_("Swap Texture Axis (now U)") :
                                                           IFACE_("Swap Texture Axis (now V)"),
@@ -1199,7 +1242,7 @@ static bool curve_patch_edit_try_safe_supersede(bContext *C,
     return false;
   }
   const CurvePatchSession *live = ob->runtime->sculpt_session->curve_patch_session;
-  if (live == nullptr || live->layer_material == nullptr) {
+  if (live == nullptr || !live->is_layer_effect()) {
     return false;
   }
 
@@ -1359,6 +1402,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   if (tool_settings && tool_settings->sculpt) {
     const Sculpt &sd = *tool_settings->sculpt;
     if (const Brush *brush = BKE_paint_brush_for_read(&sd.paint)) {
+      curve_patch_edit_material_source_bake_ensure(*C, *brush);
       const CurvePatchLiveInputs live_inputs = curve_patch_live_inputs_capture_sculpt(
           sd.paint, *brush, ob);
       /* The one watchdog that arbitrates rather than merely triggers -- see
@@ -1372,7 +1416,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
 
       const int brush_size = BKE_brush_size_get(&sd.paint, brush);
       CurvePatchItem &active_item = patch.active_item();
-      const bool radius_is_per_curve = patch.layer_material != nullptr;
+      const bool radius_is_per_curve = patch.is_layer_effect();
       const bke::CurvePatchParams live = curve_patch_params_live_overlay(
           *brush, active_item.params, brush_size, brush_swap_axis_changed, radius_is_per_curve);
 
@@ -1526,8 +1570,30 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   if (event->type == EVT_MODAL_MAP) {
     switch (event->val) {
       case CURVE_PATCH_MODAL_CONFIRM:
+        /* An effect of the Stack Layers lives as long as its row is selected in the Outliner, so
+         * Enter has nothing to commit: the session ends with the selection, not with a key. The
+         * event is consumed (it is already #EVT_MODAL_MAP, so passing it on would not re-deliver
+         * the raw key anyway). */
+        if (patch.is_layer_effect()) {
+          return OPERATOR_RUNNING_MODAL;
+        }
         return curve_patch_edit_finish(C, op, false) ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
       case CURVE_PATCH_MODAL_CANCEL:
+        /* Esc during a point, handle, radius, strength, angle or segment drag abandons that drag
+         * only, in every mode. The explicit reset and snap-context free are needed HERE because
+         * this path bypasses the drag-end check below, which frees the snap context when a drag
+         * ends inside the core; an Alt+S radius drag is the case that actually carries the flag.
+         * (The 2D canvas host has neither a snap context nor a key-started radius drag, and its
+         * raw Esc hits #CurvePatchCurveEditor::handle_event directly.) */
+        if (data.editor.drag_cancel(*C, host)) {
+          data.radius_drag_from_key = false;
+          curve_patch_edit_snap_ctx_free(data);
+          return OPERATOR_RUNNING_MODAL;
+        }
+        /* Same reason as Confirm: Esc must not hide the curves of a selected layer row. */
+        if (patch.is_layer_effect()) {
+          return OPERATOR_RUNNING_MODAL;
+        }
         curve_patch_edit_finish(C, op, true);
         return OPERATOR_CANCELLED;
       case CURVE_PATCH_MODAL_UNDO:
@@ -1792,7 +1858,7 @@ static bool curve_patch_edit_session_finish(bContext *C, const bool is_cancel, O
     /* An effect of the Stack Layers has no Cancel: its curves are chosen and edited in place, and
      * the container already holds the structural changes (Add, Delete, Duplicate), so discarding
      * only the maps would leave the two disagreeing. Esc therefore applies. */
-    const bool cancel_patch = is_cancel && patch->layer_material == nullptr;
+    const bool cancel_patch = is_cancel && !patch->is_layer_effect();
     if (cancel_patch) {
       /* No undo bookkeeping HERE: the modal never opened a transaction (the one the anchor stroke
        * opened is discarded the moment the editor starts, see `SculptPaintStroke::done()` in

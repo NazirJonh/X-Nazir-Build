@@ -380,19 +380,28 @@ static bool session_apply(const Scene &scene,
    * composited over it, which needs the earlier patch's result on the accumulator before the later
    * one is folded in. Not a restore between patches -- that would erase the earlier contribution. */
   const Span<CurvePatchItem> items = session.items_for(target);
+  /* Feathering is always off for a Curve Patch: the encompassing sphere overlaps its own mirror, so
+   * the overlap measure would dim the whole patch even when the axes come only from the mesh --
+   * the effect's per-pass blend already accounts for overlaps. */
+  SymmetryOverride symmetry_override;
+  symmetry_override.disable_feather = true;
   for (const int rank : items.index_range()) {
     const CurvePatchItem &item = items[items.size() - 1 - rank];
     if (item.params.hidden || !session_item_is_buildable(item)) {
       continue;
     }
     target.apply.patch_rank = rank;
+    /* The curve's own axes add to the mesh's. Set per patch because each curve mirrors on its own
+     * (the pass set is rebuilt inside `do_symmetrical_brush_actions()` on every call). */
+    symmetry_override.extra_mirror_axes = ePaintSymmetryFlags(item.params.symmetry_flags);
     do_symmetrical_brush_actions(depsgraph,
                                  scene,
                                  sd,
                                  ob,
                                  curve_patch_apply_effect_action,
                                  paint_mode_settings,
-                                 std::nullopt);
+                                 std::nullopt,
+                                 &symmetry_override);
   }
 
   /* Final-quality smoothing (commit only) and whatever else this target has to close off. */
@@ -909,15 +918,22 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
   return committed;
 }
 
+/** The live Curve Patch session \a ob owns, or null. A session is published on every target, but
+ * its document lives on the owner, so anything that stores or commits it runs once, there. */
+static CurvePatchSession *curve_patch_session_owned(Object &ob)
+{
+  SculptSession *ss = ob.runtime ? ob.runtime->sculpt_session : nullptr;
+  CurvePatchSession *session = ss != nullptr ? ss->curve_patch_session : nullptr;
+  return (session != nullptr && session->owner == &ob) ? session : nullptr;
+}
+
 void curve_patch_store_on_mode_exit(Object &ob)
 {
-  SculptSession *ss = ob.runtime->sculpt_session;
-  if (ss && ss->curve_patch_session && ss->curve_patch_session->owner == &ob) {
+  if (CurvePatchSession *session = curve_patch_session_owned(ob)) {
     /* The pixels of a session that ends without a commit are put back, but the curves of an effect
      * of the Stack Layers are not a preview: they are kept, and the bake is stale. Not part of the
-     * discard itself, which also runs while the object is freed, when the material may be gone.
-     * Owner-gated: the document is stored once, not once per published target. */
-    curve_patch_layer_store_document(*ss->curve_patch_session);
+     * discard itself, which also runs while the object is freed, when the material may be gone. */
+    curve_patch_layer_store_document(*session);
   }
 }
 
@@ -2021,6 +2037,21 @@ void ED_curve_patch_sessions_preview_swap(Main &bmain)
       continue;
     }
     target->effect->preview_swap(ob);
+  }
+}
+
+void ED_curve_patch_sessions_store_for_save(Main &bmain)
+{
+  for (Object &ob : bmain.objects) {
+    ed::sculpt_paint::CurvePatchSession *session = ed::sculpt_paint::curve_patch_session_owned(ob);
+    if (session == nullptr) {
+      /* A non-owner target: the session is published on it as well, but the document is stored
+       * once, by the owner. */
+      continue;
+    }
+    /* The store itself refuses a session that was not entered from a Stack Layers row, and a row
+     * that was deleted while the session ran. */
+    ed::sculpt_paint::curve_patch_layer_store_document_for_save(*session);
   }
 }
 

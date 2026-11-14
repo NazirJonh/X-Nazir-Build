@@ -14,6 +14,7 @@
 #include <cstdlib>
 
 #include "DNA_paint_vector_types.h"
+#include "DNA_scene_enums.h"
 
 #include "RNA_define.hh"
 
@@ -150,6 +151,26 @@ static void rna_def_paint_vector_item(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "curve_patch_params.opacity");
   RNA_def_property_range(prop, 0.0f, 1.0f);
   RNA_def_property_ui_text(prop, "Opacity", "Multiplier on the stamp strength of the curve");
+  RNA_def_property_editable_func(prop, "rna_PaintVectorItem_curve_look_editable");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_PaintVectorItem_curve_look_update");
+
+  /* Added to the mesh's own symmetry, not substituted for it: the stamped pass set is
+   * their union. */
+  prop = RNA_def_property(srna, "use_symmetry_x", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "curve_patch_params.symmetry_flags", PAINT_SYMM_X);
+  RNA_def_property_ui_text(prop, "Symmetry X", "Mirror this curve across the X axis");
+  RNA_def_property_editable_func(prop, "rna_PaintVectorItem_curve_look_editable");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_PaintVectorItem_curve_look_update");
+
+  prop = RNA_def_property(srna, "use_symmetry_y", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "curve_patch_params.symmetry_flags", PAINT_SYMM_Y);
+  RNA_def_property_ui_text(prop, "Symmetry Y", "Mirror this curve across the Y axis");
+  RNA_def_property_editable_func(prop, "rna_PaintVectorItem_curve_look_editable");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_PaintVectorItem_curve_look_update");
+
+  prop = RNA_def_property(srna, "use_symmetry_z", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "curve_patch_params.symmetry_flags", PAINT_SYMM_Z);
+  RNA_def_property_ui_text(prop, "Symmetry Z", "Mirror this curve across the Z axis");
   RNA_def_property_editable_func(prop, "rna_PaintVectorItem_curve_look_editable");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_PaintVectorItem_curve_look_update");
 

@@ -17,6 +17,8 @@
 #include "BKE_brush.hh"
 #include "BKE_paint.hh"
 
+#include "ED_material_bake.hh"
+
 #include "DNA_brush_types.h"
 #include "DNA_color_types.h"
 #include "DNA_texture_types.h"
@@ -112,6 +114,13 @@ static uint64_t curve_patch_material_paint_digest(const Brush &brush)
   fold(uint64_t(uint8_t(brush_paint->use_alpha_map)));
   fold(uint64_t(uint8_t(brush_paint->use_alpha_stroke_mask)));
   digest = curve_patch_mtex_mapping_digest(digest, brush_paint->shared_source_mapping);
+
+  /* Source: Material, folded as one block by its owner. The channels above are only what Maps
+   * mode reads; in Material mode the sampler takes its pixels from a bake of the source material
+   * instead, so without the source's fields a dropped material (or a finished bake) changes
+   * nothing the live session compares and the patch keeps showing the previous source until an
+   * unrelated edit forces a re-stamp. */
+  fold(material_bake::source_digest(*brush_paint));
   return digest;
 }
 

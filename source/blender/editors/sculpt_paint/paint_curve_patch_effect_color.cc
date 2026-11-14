@@ -570,8 +570,13 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
       /* The patches stamped so far, composited with this one: `over.xyz` is the pre-multiplied
        * color they leave and `over.w` their coverage of the element. A curve stamped over another
        * keeps the lower curve's color wherever its own coverage is partial. */
-      const float4 over = curve_patch_blend_over(
-          target.apply, write.idx, write.weight, float4(paint_rgb * pass_factor, pass_factor));
+      /* The coverage-weighted form: a pass that is transparent here (texture alpha, point opacity)
+       * must not average a mirrored or radial partner's color down to half. */
+      const float4 over = curve_patch_blend_over_coverage(target.apply,
+                                                          write.idx,
+                                                          write.weight,
+                                                          float4(paint_rgb * pass_factor,
+                                                                 pass_factor));
       const float factor = over.w;
 
       /* The original alpha is carried through untouched, textured or not: `BKE_brush_color_get()`
@@ -661,7 +666,7 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
           const float orig = scalar.orig_values.lookup_or_add(write.vert, values[write.vert]);
           const float pass_factor = curve_patch_color_mix_factor(
               write.value, write.tex_color, write.tex_valid, strength);
-          const float4 over = curve_patch_blend_over(
+          const float4 over = curve_patch_blend_over_coverage(
               target.apply,
               -(write.vert + 1),
               write.weight,

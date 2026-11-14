@@ -423,7 +423,7 @@ struct BrushMaterialPaint {
    * #PaintModeSettings.new_channel_image_size: this is a scratch buffer several channels of which
    * are held at once, not a paint target.
    */
-  int source_bake_size = 1024;
+  int source_bake_size = 2048;
   /** Channel source when #source_mode is #BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL. */
   struct Material *source_material = nullptr;
   /** #eBrushMaterialPaintMaterialSourceKind. Only read in Material source mode. */

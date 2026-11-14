@@ -91,7 +91,7 @@ bool curve_patch_undo_step_back(bContext &C, Object & /*ob*/, CurvePatchSession 
 {
   if (patch.doc.undo_step_current <= 0) {
     /* An effect of the Stack Layers has no patch to cancel: running out of history just stops. */
-    return patch.doc.undo_anchor_trimmed || patch.layer_material != nullptr;
+    return patch.doc.undo_anchor_trimmed || patch.is_layer_effect();
   }
   patch.doc.undo_step_current--;
   curve_patch_undo_restore(C, patch);

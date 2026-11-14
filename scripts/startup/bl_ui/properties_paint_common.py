@@ -5500,6 +5500,14 @@ class CURVE_PATCH_LAYER_PT_curves(Panel):
                     text="",
                     icon='SMOOTHCURVE',
                 )
+                # Per curve, and added to the mesh's own symmetry rather than replacing it.
+                col.separator()
+                symm_col = col.column(align=True)
+                symm_col.label(text="Mirror")
+                symm_row = symm_col.row(align=True)
+                symm_row.prop(active, "use_symmetry_x", text="X", toggle=True)
+                symm_row.prop(active, "use_symmetry_y", text="Y", toggle=True)
+                symm_row.prop(active, "use_symmetry_z", text="Z", toggle=True)
 
 
 classes = (

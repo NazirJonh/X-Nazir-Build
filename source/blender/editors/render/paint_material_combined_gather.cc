@@ -298,7 +298,7 @@ static bool combined_channel_is_color(const eMaterialPaintChannel channel)
  * preview asking for one size while the paint path bakes another would keep two bakes of the same
  * material alive and never find the one it started.
  */
-static constexpr int combined_bake_resolution = 1024;
+static constexpr int combined_bake_resolution = 2048;
 
 /** Where a channel's value came from. Folded into `inputs_hash`, so it is an explicit enum. */
 enum class CombinedChannelSource : uint8_t {

@@ -235,6 +235,7 @@ bke::CurvePatchParams curve_patch_params_live_overlay(const Brush &brush,
   /* The per-curve look is the curve's own, never the brush's. */
   live.opacity = frozen.opacity;
   live.hidden = frozen.hidden;
+  live.symmetry_flags = frozen.symmetry_flags;
   return live;
 }
 

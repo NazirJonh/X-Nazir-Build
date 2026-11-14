@@ -88,7 +88,8 @@ struct CurvePatchLiveInputs {
 
   /** PBR Paint / Poly Paint: everything a re-stamp reads out of #BrushMaterialPaint -- every
    * channel's paint value, blend mode and enable flag, the Base Color, both Alpha switches and
-   * the shared source mapping.
+   * the shared source mapping, plus the Material source's identity and its current bake (folded
+   * as one block from #material_bake::source_digest, next to the data it describes).
    *
    * A digest rather than ten spelled-out channels: #BrushMaterialPaint carries
    * `PAINT_MATERIAL_CHANNEL_NUM` of them, and listing the fields one by one is exactly the

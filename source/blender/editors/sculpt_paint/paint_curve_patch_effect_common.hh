@@ -148,6 +148,36 @@ inline float4 curve_patch_blend_over(CurvePatchApplyState &apply,
 }
 
 /**
+ * #curve_patch_blend_over for a pass whose payload carries its own opacity in `premultiplied.w`
+ * (texture alpha, point opacity). The same factor has to scale the falloff `weight` too, so it is
+ * folded in here and the caller passes the raw weight: a pass that is transparent at this element
+ * then claims no weight either. Passing the raw weight to the base overload instead lets a
+ * transparent mirror or radial partner average an opaque partner's coverage down (to half for two
+ * passes), and the layer below shows through a texel the patch fully covers.
+ *
+ * Deliberately a separate form, not a change to the base one: #curve_patch_blend_across_passes
+ * supplies `premultiplied.w == clamp(weight)`, where folding the coverage into the weight again
+ * would square it.
+ */
+inline float4 curve_patch_blend_over_coverage(CurvePatchOverAccum &accum,
+                                              const int patch_rank,
+                                              const float weight,
+                                              const float4 &premultiplied)
+{
+  return curve_patch_blend_over(accum, patch_rank, weight * premultiplied.w, premultiplied);
+}
+
+/** The #CurvePatchApplyState-keyed counterpart of #curve_patch_blend_over_coverage. */
+inline float4 curve_patch_blend_over_coverage(CurvePatchApplyState &apply,
+                                              const int key,
+                                              const float weight,
+                                              const float4 &premultiplied)
+{
+  return curve_patch_blend_over_coverage(
+      apply.pass_weight_accum.lookup_or_add_default(key), apply.patch_rank, weight, premultiplied);
+}
+
+/**
  * #curve_patch_blend_over for a single scalar (a relief height, a mask value), whose coverage is
  * the pass weight itself. Returns the composited scalar.
  */

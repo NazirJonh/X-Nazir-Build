@@ -37,6 +37,7 @@
 #include "BKE_paint.hh"
 
 #include "DNA_material_types.h"
+#include "DNA_scene_enums.h"
 
 #include "BLO_read_write.hh"
 
@@ -747,6 +748,11 @@ bke::CurvePatchParams BKE_paint_vector_curve_params_decode(const PaintVectorCurv
   /* Zero-filled data from before the field existed reads as fully opaque. */
   out.opacity = p.version >= 1 ? std::clamp(p.opacity, 0.0f, 1.0f) : 1.0f;
   out.hidden = (p.hidden != 0);
+  /* The single normalization point for a persisted value: garbage outside the axis bits (a bad
+   * write, hand-assembled Python data) must not reach revision_hash_params, operator== or the
+   * stamped pass set. Zero-filled data from before the field existed already decodes as 0, so no
+   * version bump is needed. */
+  out.symmetry_flags = p.symmetry_flags & PAINT_SYMM_AXIS_ALL;
   return out;
 }
 
@@ -778,6 +784,7 @@ PaintVectorCurveParams BKE_paint_vector_curve_params_encode(const bke::CurvePatc
   out.final_quality = p.final_quality ? 1 : 0;
   out.opacity = p.opacity;
   out.hidden = p.hidden ? 1 : 0;
+  out.symmetry_flags = p.symmetry_flags;
   out.version = 1;
   return out;
 }

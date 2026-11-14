@@ -486,6 +486,7 @@ if(WITH_GTESTS)
     tests/paint_shape_uv_trace_test.cc
     tests/paint_vector_editor_test.cc
     tests/paint_curve_patch_layer_convert_test.cc
+    tests/paint_curve_patch_params_revision_test.cc
     tests/paint_vector_serialize_test.cc
     tests/roll_spline_test.cc
   )

@@ -109,6 +109,7 @@ bool CurvePatchCurveEditor::radius_drag_begin(bContext &C,
   paintcurve_radius_handle_screen_get_from_geometry(
       curve, screen_points.data(), active_point, &radius_handle_);
   dragging_radius_ = true;
+  drag_backup_ = host.curve();
   return true;
 }
 
@@ -120,6 +121,24 @@ void CurvePatchCurveEditor::drag_end()
   dragging_strength_ = false;
   dragging_angle_ = false;
   dragging_segment_ = false;
+  drag_backup_.reset();
+}
+
+bool CurvePatchCurveEditor::drag_cancel(bContext &C, CurvePatchEditorHost &host)
+{
+  if (this->is_xform_active() || !this->is_dragging() || !drag_backup_) {
+    return false;
+  }
+  bke::CurvesGeometry &curve = host.curve();
+  curve = *drag_backup_;
+  curve.tag_positions_changed();
+  curve.tag_radii_changed();
+  this->drag_end();
+  /* No `undo_push()`: the curve is what the last step already holds. */
+  host.restamp(C);
+  host.interaction_end(C);
+  host.redraw(C);
+  return true;
 }
 
 /* -------------------------------------------------------------------- */
@@ -892,6 +911,13 @@ CurvePatchCurveEditor::Status CurvePatchCurveEditor::handle_event(bContext &C,
 
     case EVT_ESCKEY:
       if (event.val == KM_PRESS) {
+        /* Esc during a drag abandons that drag, not the patch. RAW Esc reaches here only from a
+         * host that forwards events without the modal keymap (the 2D canvas); the 3D sculpt modal
+         * converts it to #CURVE_PATCH_MODAL_CANCEL instead and applies the same drag_cancel first
+         * (paint_curve_patch_edit.cc) -- one semantic, two entry points, one per host. */
+        if (this->drag_cancel(C, host)) {
+          return Status::Running;
+        }
         host.cancel(C);
         return Status::Cancelled;
       }
@@ -911,6 +937,12 @@ CurvePatchCurveEditor::Status CurvePatchCurveEditor::handle_event(bContext &C,
            * Applying the patch is Enter's job alone. */
           return Status::Running;
         }
+        /* After the pick: `pickable_curve_activate()` has chosen which curve `host.curve()` is.
+         * This one copy backs EVERY mouse drag -- all six kinds (point, handle, radius, strength,
+         * angle, segment) are started by #drag_start_from_press, so a press that reaches here
+         * always has one in flight. The keyboard radius drag is the one other entry and takes its
+         * own copy in #radius_drag_begin. */
+        drag_backup_ = host.curve();
         host.redraw(C);
       }
       else if (event.val == KM_RELEASE) {

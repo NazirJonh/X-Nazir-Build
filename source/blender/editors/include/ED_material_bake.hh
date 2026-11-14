@@ -139,6 +139,23 @@ void material_source_bake_ensure(Main &bmain, Material &ma, int resolution);
 void material_source_bake_invalidate(const Material *ma);
 
 /**
+ * Change-detection digest of everything a Material source
+ * (#BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) stamps from: the source mode, kind and scope, the bake
+ * size, the addressed source -- a Default Material, or a Layer row's owner and marker -- and the
+ * identity of the bake that would serve the sampler right now.
+ *
+ * Identity, never address: a source folds its #ID::session_uid and a bake folds
+ * #MaterialSourceBake::revision, both monotonic for the session, so a freed block re-used at the
+ * same address cannot read as "unchanged". A missing bake folds as 0 (revisions start at 1), which
+ * makes the landing a change.
+ *
+ * Purely observational: never starts and never waits for a bake, exactly like
+ * #material_source_bake_get. Consumers that sample a bake through the same accessors fold this
+ * where they compare the rest of their inputs, instead of re-listing the source fields themselves.
+ */
+uint64_t source_digest(const BrushMaterialPaint &brush_paint);
+
+/**
  * Mark every cached bake that sampled \a image as out of date.
  *
  * An image's pixels cannot be part of the bake's cache key -- there is no content version to hash,

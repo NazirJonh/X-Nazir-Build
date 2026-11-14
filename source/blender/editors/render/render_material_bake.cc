@@ -25,6 +25,7 @@
  * Paint Channel Requests" section, and a second consumer of the bake would replace only that.
  */
 
+#include "ED_brush_layer_source.hh"
 #include "ED_image.hh"
 #include "ED_material_bake.hh"
 #include "ED_paint_layers_bake.hh"
@@ -173,6 +174,46 @@ uint64_t MaterialSourceBake::revision() const
   return revision_;
 }
 
+uint64_t source_digest(const BrushMaterialPaint &brush_paint)
+{
+  /* Same combinator the Curve Patch live digests use; the seed only needs to differ from theirs,
+   * and folding a digest into another digest's combinator keeps the shapes composable. */
+  uint64_t digest = 1469598103934665603ull;
+  const auto fold = [&digest](const uint64_t value) {
+    digest = (digest ^ value) * 1099511628211ull;
+  };
+  fold(uint64_t(uint8_t(brush_paint.source_mode)));
+  if (brush_paint.source_mode != BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
+    return digest;
+  }
+  fold(uint64_t(uint8_t(brush_paint.material_source_kind)));
+  fold(uint64_t(uint8_t(brush_paint.layer_source_scope)));
+  fold(uint64_t(uint32_t(brush_paint.source_bake_size)));
+  /* The source's identity, never its address: a freed ID block re-used at the same address is a
+   * different source. Session UIDs are never recycled within a session -- the same property the
+   * bake cache above keys on. */
+  fold(brush_paint.source_material != nullptr ? brush_paint.source_material->id.session_uid : 0);
+  fold(brush_paint.source_layer_owner != nullptr ?
+           brush_paint.source_layer_owner->id.session_uid :
+           0);
+  /* The marker is a `bUUID`: 16 content bytes and no padding, so the existing per-UUID hash covers
+   * exactly its fields, deterministically. */
+  fold(UUID(brush_paint.source_layer_marker).hash());
+  /* Which bake would serve the sampler right now. #MaterialSourceBake::revision is the bake's
+   * monotonic identity, so a fresh bake of the same material and size still changes this digest
+   * where a stable address might not; a null bake (still rendering) folds as 0, which makes the
+   * landing a change. */
+  std::shared_ptr<const MaterialSourceBake> bake;
+  if (BKE_paint_material_source_is_layer(brush_paint)) {
+    bake = brush_layer_source::brush_layer_source_bake_get(brush_paint);
+  }
+  else if (brush_paint.source_material != nullptr) {
+    bake = material_source_bake_get(*brush_paint.source_material, brush_paint.source_bake_size);
+  }
+  fold(bake ? bake->revision() : 0);
+  return digest;
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -297,8 +338,15 @@ static uint64_t g_bake_use_serial = 0;
  */
 static constexpr int64_t BAKE_CACHE_BYTE_BUDGET = 512 * 1024 * 1024;
 
-/** Drop least recently used entries until the cache is inside #BAKE_CACHE_BYTE_BUDGET. */
-static void bake_cache_trim_to_budget()
+/**
+ * Drop least recently used entries until the cache is inside #BAKE_CACHE_BYTE_BUDGET.
+ *
+ * \a keep is never dropped, even when it alone is over the budget. At Bake Size 4096 one channel
+ * is 256 MB, so a handful of baked channels exceed the budget by themselves; without this the bake
+ * that just landed was evicted at once, the cache stayed empty and the source material vanished
+ * from the brush entirely instead of merely costing memory.
+ */
+static void bake_cache_trim_to_budget(const BakeCacheKey &keep)
 {
   int64_t total = 0;
   for (const auto item : g_bake_cache.items()) {
@@ -309,6 +357,9 @@ static void bake_cache_trim_to_budget()
     uint64_t oldest_serial = UINT64_MAX;
     int64_t oldest_size = 0;
     for (const auto item : g_bake_cache.items()) {
+      if (item.key == keep) {
+        continue;
+      }
       if (item.value.last_used_serial < oldest_serial) {
         oldest_serial = item.value.last_used_serial;
         oldest_key = &item.key;
@@ -1349,7 +1400,7 @@ static void material_bake_startjob(void *customdata, wmJobWorkerStatus *worker_s
       return item.key.material_session_uid == job.key.material_session_uid &&
              !(item.key == job.key);
     });
-    bake_cache_trim_to_budget();
+    bake_cache_trim_to_budget(job.key);
   }
 
   /* Frees the bake material, its embedded tree, the scene and the quad. */

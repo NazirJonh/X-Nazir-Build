@@ -96,6 +96,7 @@ void revision_hash_params(uint64_t &hash, const CurvePatchParams &params)
                plane_normal,
                opacity,
                hidden,
+               symmetry_flags,
                final_quality] = params;
 
   revision_hash_value(hash, radius);
@@ -124,6 +125,7 @@ void revision_hash_params(uint64_t &hash, const CurvePatchParams &params)
   revision_hash_value(hash, plane_normal.z);
   revision_hash_value(hash, opacity);
   revision_hash_value(hash, hidden);
+  revision_hash_value(hash, symmetry_flags);
   revision_hash_value(hash, final_quality);
 }
 
@@ -200,6 +202,13 @@ void revision_hash_curve(uint64_t &hash, const bke::CurvesGeometry &curve)
 }
 
 }  // namespace
+
+uint64_t curve_patch_params_revision(const CurvePatchParams &params)
+{
+  uint64_t hash = revision_seed;
+  revision_hash_params(hash, params);
+  return hash;
+}
 
 uint64_t curve_patch_document_content_revision(const CurvePatchDocument &document)
 {

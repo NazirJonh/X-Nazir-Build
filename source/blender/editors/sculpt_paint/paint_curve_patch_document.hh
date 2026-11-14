@@ -281,6 +281,11 @@ struct CurvePatchDocument {
   }
 };
 
+/** Hash of every field of \a params that a secondary target mirrors: the part of
+ * #curve_patch_document_content_revision that covers the parameters, exposed so a test can tell
+ * that a new field takes part in it. */
+uint64_t curve_patch_params_revision(const CurvePatchParams &params);
+
 /** Hash every authored field a secondary target mirrors: identity, parameters and the full control
  * curve (all point and curve attributes). Stored in #CurvePatchDocument::revision by the session. */
 uint64_t curve_patch_document_content_revision(const CurvePatchDocument &document);

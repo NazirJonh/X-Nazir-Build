@@ -487,6 +487,15 @@ struct CurvePatchSession {
   Material *layer_material = nullptr;
   bUUID layer_row_marker = {};
 
+  /** Whether this session is a Stack Layers effect (#layer_material set). Such a session has no
+   * Enter/Esc of its own -- it lives and dies with the row's selection, its curves belong to the
+   * container, and its radius is per curve -- so every branch on the effect kind goes through
+   * here rather than testing the pointer again. */
+  bool is_layer_effect() const
+  {
+    return this->layer_material != nullptr;
+  }
+
   /**
    * The previous-brush restore of a layer session: the single path that puts the user's own brush
    * back on every exit (commit, cancel, refused invoke, object death). Owned here rather than by

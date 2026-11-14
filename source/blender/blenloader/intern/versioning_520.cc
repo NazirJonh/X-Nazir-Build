@@ -1097,7 +1097,7 @@ static void version_material_paint_channel_source_mtex_defaults(Main &bmain)
 static void version_material_paint_source_defaults_one(BrushMaterialPaint *material_paint)
 {
   if (material_paint != nullptr && material_paint->source_bake_size == 0) {
-    material_paint->source_bake_size = 1024;
+    material_paint->source_bake_size = 2048;
   }
 }
 

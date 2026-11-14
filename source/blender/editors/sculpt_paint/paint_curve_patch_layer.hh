@@ -113,12 +113,20 @@ bool curve_patch_layer_enter_if_sculpting(bContext &C, Material &ma, MaterialPai
 void curve_patch_layer_commit_document(bContext &C, CurvePatchSession &session);
 
 /**
- * Write the live document into the row's container and mark the row's bake stale, with no undo step
- * and no notifier: for the teardown paths that have no context to commit through (the pixels of
- * such a session are put back, the curves must not be lost). No-op for a session that was not
- * entered from a row.
+ * Write the live document into the row's container, tag the PaintVector changed and mark the row's
+ * bake stale, with no undo step and no notifier: for the teardown paths that have no context to
+ * commit through (the pixels of such a session are put back, the curves must not be lost). No-op
+ * for a session that was not entered from a row.
  */
 void curve_patch_layer_store_document(CurvePatchSession &session);
+
+/**
+ * The save half of the same write: carry the live document into the row's container for a file
+ * write, without tagging the PaintVector changed and without a bake request -- the live maps are
+ * not stale, and a loaded file re-bakes anyway (the blend read clears the row's bake hash). No-op
+ * for a session that was not entered from a row.
+ */
+void curve_patch_layer_store_document_for_save(CurvePatchSession &session);
 
 /**
  * Sync the row's `PaintVector::active_item` with the session's active patch (through each patch's

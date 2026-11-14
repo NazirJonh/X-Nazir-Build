@@ -2100,11 +2100,14 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
              !paint_target.is_material_channel) ?
                 BKE_paint_stroke_color_jitter_apply_color(dab_color_jitter, pass_rgb_raw) :
                 pass_rgb_raw;
-        const float4 over = curve_patch_blend_over(
-            accum,
-            target.apply.patch_rank,
-            pixel.weight,
-            float4(pass_rgb * pass_factor, pass_factor));
+        /* The coverage-weighted form: a pass that is transparent at this texel (texture alpha,
+         * point opacity) claims nothing, so it cannot average the opaque colour of a mirrored or
+         * radial partner down and let the layer below show through. */
+        const float4 over = curve_patch_blend_over_coverage(accum,
+                                                            target.apply.patch_rank,
+                                                            pixel.weight,
+                                                            float4(pass_rgb * pass_factor,
+                                                                   pass_factor));
         /* The color the patches stamped so far leave here, and their coverage of the texel. */
         const float over_alpha = over.w;
         const float3 paint_rgb = over_alpha > 0.0f ?

@@ -179,6 +179,9 @@ struct PaintVectorCurveParams {
   float opacity = 1.0f;
   /** The curve is skipped when stamping; it stays in the list and keeps its overlay. */
   int hidden = 0;
+  /** Mirror axes of this curve (#ePaintSymmetryFlags X/Y/Z bits), OR-ed with the mesh's own
+   * symmetry when stamping. 0 (off) for data written before the field existed. */
+  int symmetry_flags = 0;
   /** 0 for data written before opacity existed: its zero-filled members mean "unset". */
   int version = 1;
 };
@@ -274,9 +277,9 @@ struct PaintVectorItem {
    * before the id existed). Unlike the array index it survives deleting and re-adding the other
    * curves, which is what lets a live session keep the item's other fields. */
   int curve_id = 0;
-  /* Explicit padding: #PaintVectorCurveParams::radius_interp made the preceding block 4 bytes
-   * longer, and the 8-byte aligned binding below must still start on a multiple of 8. */
-  int _pad1 = 0;
+  /* No padding here: #PaintVectorCurveParams::symmetry_flags made the preceding block 4 bytes
+   * longer, which is exactly what the former `_pad1` supplied, so the 8-byte aligned binding below
+   * still starts on a multiple of 8. */
   /** Surface anchoring of the curve's control points. */
   PaintVectorSurfaceBinding surface_binding = {};
 };

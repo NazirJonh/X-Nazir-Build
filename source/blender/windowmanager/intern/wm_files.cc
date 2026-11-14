@@ -2082,7 +2082,8 @@ bool write_crash_blend()
    * The accepted consequence: if a sculpt layer weight-mask editing session is open, the crash
    * file carries that layer's weights in place of the user's sculpt mask. That is correct for a
    * post-mortem snapshot, which should show the session as it actually was, and the file is not
-   * one the user loads and keeps working in. */
+   * one the user loads and keeps working in. The same holds for a live Curve Patch session: no
+   * #CurvePatchPreviewWriteGuard and no curve store run here, deliberately. */
   char filepath[FILE_MAX];
 
   STRNCPY(filepath, BKE_main_blendfile_path_from_global());

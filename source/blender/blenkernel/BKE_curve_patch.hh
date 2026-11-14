@@ -226,6 +226,9 @@ struct CurvePatchParams {
    * stamp strength, and whether the curve is skipped when stamping. */
   float opacity = 1.0f;
   bool hidden = false;
+  /** Mirror axes of this curve (#PAINT_SYMM_X / Y / Z bits), OR-ed with the mesh's own symmetry
+   * when stamping. Per curve, so two curves of one patch set can mirror differently. */
+  int symmetry_flags = 0;
 
   /** Commit-time build: supersampled texture reads and a higher-resolution ribbon. An input to
    * the build, not session state -- which is why it lives here and not on the session. */

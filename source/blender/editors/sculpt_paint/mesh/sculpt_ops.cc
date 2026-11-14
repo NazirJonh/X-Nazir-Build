@@ -808,7 +808,7 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
         /* A secondary's pointer does not own the session. */
         continue;
       }
-      if (ob->runtime->sculpt_session->curve_patch_session->layer_material != nullptr) {
+      if (ob->runtime->sculpt_session->curve_patch_session->is_layer_effect()) {
         /* An effect of the Stack Layers keeps its curves in its container: leaving the mode just
          * commits them there, and the next entry resumes the edit, so there is nothing to ask. */
         curve_patch_commit_on_session_end(*C, *ob);

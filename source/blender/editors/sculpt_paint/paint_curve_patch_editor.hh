@@ -21,6 +21,8 @@
  * that leaking in here.
  */
 
+#include <optional>
+
 #include "BLI_math_vector_types.hh"
 #include "BLI_vector.hh"
 
@@ -236,6 +238,19 @@ class CurvePatchCurveEditor {
   void drag_end();
 
   /**
+   * Abandon the mouse drag in flight and put the control curve back as it was when the drag began.
+   *
+   * Records no history step: nothing changed. Leaves a running G / R / S alone, which cancels
+   * itself. False when no mouse drag is in flight, so the caller can fall back to its own Esc
+   * meaning.
+   *
+   * A whole-geometry copy is a COMPLETE rollback: all six drag kinds mutate nothing but
+   * #CurvesGeometry attributes (positions, handle types, per-point radius, strength, angle), and
+   * a drag never touches the selection, the active point or the item's params.
+   */
+  bool drag_cancel(bContext &C, CurvePatchEditorHost &host);
+
+  /**
    * Start a G / R / S transform of the active point and its two handles.
    *
    * While one is in flight the core owns EVERY event -- #handle_event routes them all to the
@@ -292,6 +307,12 @@ class CurvePatchCurveEditor {
   bool dragging_strength_ = false;
   bool dragging_angle_ = false;
   bool dragging_segment_ = false;
+  /** The control curve as it was when the current mouse drag began, for #drag_cancel. A whole copy
+   * rather than per-kind initial values: the six drag kinds touch different attributes, and a
+   * curve is a handful of points. Taken once per drag -- a pick that starts one always ends in a
+   * drag, so there is no click-selection copy to defer; the keyboard radius drag backs itself up
+   * in #radius_drag_begin. */
+  std::optional<bke::CurvesGeometry> drag_backup_;
   /** Which Bezier tangent handle #dragging_handle_ is moving. */
   bool handle_is_left_ = false;
 

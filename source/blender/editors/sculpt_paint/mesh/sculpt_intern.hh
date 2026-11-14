@@ -1589,10 +1589,31 @@ void do_brush_action(const Depsgraph &depsgraph,
                      const Brush &brush,
                      PaintModeSettings &paint_mode_settings);
 
+/** Per-call additions to the symmetry pass set, for callers whose stroke is not an ordinary brush
+ * dab. Kept as an optional argument so every existing call keeps the mesh-only behavior. */
+struct SymmetryOverride {
+  /** OR-ed with the mesh's own #Mesh.symmetry axes; never replaces them. Axes are plain bit
+   * selectors -- the mirror PLANE comes from the existing machinery: the reference object's in a
+   * shared-origin multi-object stroke, this object's own otherwise. A Curve Patch re-stamp always
+   * takes the latter (its stand-in caches never set #StrokeCache::symm_reference_object), and each
+   * target's curves were already mirrored into that object's own space, so the axes always land in
+   * the space the curve data lives in. */
+  ePaintSymmetryFlags extra_mirror_axes = PAINT_SYMM_NONE;
+  /** Skip #calc_symmetry_feather(). Curve Patch stamps the whole curve through an encompassing
+   * sphere that almost always overlaps its own mirror, which would feather down the entire patch;
+   * its own cross-pass blend already accounts for overlap. A deliberate behavior change for the
+   * mesh's OWN axes too: with #PAINT_SYMMETRY_FEATHER on, a stamp that previously feathered no
+   * longer does. Neutral by construction -- every #feather consumer multiplies by it, so `1.0f`
+   * is the no-op value. */
+  bool disable_feather = false;
+};
+
 /** Applies `action` once per valid symmetry/tile/radial pass for the current stroke step.
  * \param forced_bstrength: If set, used as `cache.bstrength` instead of the value computed from
  * the live brush/paint settings. Used by callers (e.g. Curve Patch re-stamp) that need the
- * strength frozen to a value captured earlier, rather than reactive to live brush-panel edits. */
+ * strength frozen to a value captured earlier, rather than reactive to live brush-panel edits.
+ * \param symmetry_override: If set, adds mirror axes and can disable overlap feathering for this
+ * call only. The pass set stays identical for every object in a multi-object stroke. */
 void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
                                   const Scene &scene,
                                   Sculpt &sd,
@@ -1604,7 +1625,8 @@ void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
                                                  const Brush &brush,
                                                  PaintModeSettings &paint_mode_settings),
                                   PaintModeSettings &paint_mode_settings,
-                                  std::optional<float> forced_bstrength = std::nullopt);
+                                  std::optional<float> forced_bstrength = std::nullopt,
+                                  const SymmetryOverride *symmetry_override = nullptr);
 
 /** Restores the mesh to its last-undo-step state for brush types that compute their deformation
  * as an offset from original coordinates (Grab/Elastic Deform/Thumb/Rotate), and for the

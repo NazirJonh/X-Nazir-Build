@@ -88,7 +88,22 @@ BKE_paint_layers_gradient_surface_build(const Object &object,
                                         const char *uv_map_name,
                                         int size,
                                         int padding_texels = 0,
-                                        bool need_generated = true);
+                                        bool need_generated = true,
+                                        int tile_number = 1001);
+
+/**
+ * The UDIM tile \a uv_map_name of \a mesh lives in, for #BKE_paint_layers_gradient_surface_build's
+ * \a tile_number. Only a mesh whose UVs sit in exactly one tile (judged per triangle centroid)
+ * names it; an empty mesh, a missing map, UVs outside the ten-column grid or several tiles answer
+ * the base tile 1001, which is what a bake used before tiles were told apart.
+ */
+int BKE_paint_layers_gradient_surface_uv_tile(const Mesh &mesh, const char *uv_map_name);
+
+/**
+ * The same answer for \a object's render UV map, from the mesh a bake surface is built from (the
+ * evaluated one for an evaluated object). Base tile 1001 for a null or non-mesh object.
+ */
+int BKE_paint_layers_gradient_surface_object_tile(const Object *object);
 
 /**
  * The identity a surface is keyed on: the object, the UV map, the resolution and the geometry the

@@ -280,13 +280,23 @@ static wmOperatorStatus place_modal(bContext *C, wmOperator *op, const wmEvent *
     Object *space_ob = data->target.space_object();
     float world_loc[3], world_no[3];
     bool got_hit = false;
+    const MaterialPaintLayer *place_layer = (data->target.material() != nullptr) ?
+                                                BKE_paint_layers_find(*data->target.material(),
+                                                                      data->target.marker()) :
+                                                nullptr;
+    const bool is_decal = place_layer != nullptr &&
+                          place_layer->mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL;
     if (ob != nullptr &&
         projection_frame_raycast(*C, region, v3d, *ob, mval, world_loc, world_no))
     {
       got_hit = true;
     }
-    else if (place_plane_fallback(C, region, v3d, rv3d, mval, world_loc, world_no)) {
+    else if (!is_decal && place_plane_fallback(C, region, v3d, rv3d, mval, world_loc, world_no)) {
       got_hit = true;
+    }
+    if (is_decal && !got_hit) {
+      /* The Decal map unfolds the surface around the center, so a miss must not leave it in the air. */
+      return OPERATOR_RUNNING_MODAL;
     }
     if (got_hit) {
       projection_frame_point_from_world(
@@ -600,7 +610,8 @@ static bool projection_frame_tool_poll(bContext *C)
     return false;
   }
   const MaterialPaintLayer *layer = BKE_paint_layers_find(*target.material(), target.marker());
-  return layer != nullptr && projection_gizmo_mode_get(*layer) == PROJECTION_GIZMO_VOLUME;
+  return layer != nullptr && (projection_gizmo_mode_get(*layer) == PROJECTION_GIZMO_VOLUME ||
+                              layer->mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL);
 }
 
 static wmOperatorStatus projection_frame_tool_exec(bContext *C, wmOperator * /*op*/)

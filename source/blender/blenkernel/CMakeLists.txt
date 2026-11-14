@@ -321,8 +321,10 @@ set(SRC
   intern/paint_material_blend_group.cc
   intern/paint_material_blend_group_extended.cc
   intern/paint_material_composite.cc
+  intern/paint_material_composite_effect_space.cc
   intern/paint_material_composite_generator.cc
   intern/paint_material_composite_projection.cc
+  intern/paint_material_decal_map.cc
   intern/paint_material_gradient_group.cc
   intern/paint_material_grunge_group.cc
   intern/paint_material_normal_combine.cc
@@ -375,6 +377,7 @@ set(SRC
   intern/subdiv_modifier.cc
   intern/subdiv_stats.cc
   intern/subdiv_topology.cc
+  intern/surface_unfold.cc
   intern/text.cc
   intern/text_suggestions.cc
   intern/texture.cc
@@ -608,6 +611,7 @@ set(SRC
   BKE_paint_material_combined.hh
   BKE_paint_material_composite.hh
   BKE_paint_material_composite_surface.hh
+  BKE_paint_material_decal_map.hh
   BKE_paint_material_resolve.hh
   BKE_paint_perf_debug.hh
   BKE_paint_vector.hh
@@ -641,6 +645,7 @@ set(SRC
   BKE_subdiv_mesh.hh
   BKE_subdiv_modifier.hh
   BKE_subdiv_topology.hh
+  BKE_surface_unfold.hh
   BKE_text.h
   BKE_text_suggestions.h
   BKE_texture.h
@@ -950,6 +955,8 @@ if(WITH_GTESTS)
     intern/paint_material_combined_cache_test.cc
     intern/paint_material_combined_test.cc
     intern/paint_material_composite_test.cc
+    intern/paint_lru_cache_test.cc
+    intern/paint_material_decal_map_test.cc
     intern/paint_material_resolve_test.cc
     intern/paint_strength_random_test.cc
     intern/paint_test.cc
@@ -961,6 +968,7 @@ if(WITH_GTESTS)
     intern/sculpt_layers_mask_test.cc
     intern/sculpt_layers_tree_test.cc
     intern/subdiv_ccg_test.cc
+    intern/surface_unfold_test.cc
     intern/tracking_test.cc
     intern/volume_test.cc
   )

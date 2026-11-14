@@ -264,6 +264,11 @@ bool BKE_paint_layers_generator_subtree_is_shared_bakeable(const MaterialPaintLa
   {
     return false;
   }
+  /* A transform effect in its Decal frame walks the surface of the object it is shaded on: its map
+   * is per object, like an Object generator's, and needs the object's surface to be rendered. */
+  if (paint_layer_effect_acts_in_decal_frame(layer)) {
+    return false;
+  }
   for (const MaterialPaintLayer &child : layer.children) {
     if (!BKE_paint_layers_generator_subtree_is_shared_bakeable(child)) {
       return false;

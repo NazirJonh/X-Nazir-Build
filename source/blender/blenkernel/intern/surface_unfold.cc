@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /** \file
- * \ingroup edsculpt
+ * \ingroup bke
  */
 
 #include <algorithm>
@@ -15,9 +15,9 @@
 #include "BLI_math_vector.hh"
 #include "BLI_set.hh"
 
-#include "paint_image_select_surface_unfold.hh"
+#include "BKE_surface_unfold.hh"
 
-namespace blender::ed::sculpt_paint {
+namespace blender::bke {
 
 /* -------------------------------------------------------------------- */
 /** \name Adjacency
@@ -247,4 +247,4 @@ bool surface_unfold_build(const Span<int3> corner_tris,
 
 /** \} */
 
-}  // namespace blender::ed::sculpt_paint
+}  // namespace blender::bke

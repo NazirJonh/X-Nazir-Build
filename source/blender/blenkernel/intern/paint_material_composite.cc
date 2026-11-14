@@ -61,7 +61,6 @@
 
 #include "paint_layers/paint_material_generator_group_ids.hh"
 #include "paint_material_composite_internal.hh"
-#include "paint_material_composite_mapping_internal.hh"
 #include "paint_material_composite_projection_internal.hh"
 
 #include "DNA_image_types.h"
@@ -2154,7 +2153,7 @@ static void composite_image_own(ImBuf *ibuf, Vector<CompositeImageLock> &r_locks
  * first in \a input_steps' order, only the enabled ones. The row's mapping joins only when it is
  * enabled, so a row that maps through its effects alone composes them alone.
  */
-static CompositeMappingChain composite_mapping_chain_build(
+CompositeMappingChain composite_mapping_chain_build(
     const PaintMaterialCompositeMapping &mapping,
     const Span<PaintMaterialCompositeMapping> input_steps)
 {
@@ -2163,6 +2162,11 @@ static CompositeMappingChain composite_mapping_chain_build(
   for (const PaintMaterialCompositeMapping &step : input_steps) {
     if (chain.steps_num == CompositeMappingChain::MAX_STEPS) {
       break;
+    }
+    /* A Decal-space step has no UV form: #composite_resample_effect_space reads it, and a read
+     * that cannot (no frame to build, a coverage clip) leaves it out rather than folding UVs. */
+    if (composite_mapping_step_is_decal(step)) {
+      continue;
     }
     chain.steps[chain.steps_num++] = CompositeMappingTransform(step);
   }
@@ -2184,10 +2188,10 @@ static CompositeMappingChain composite_mapping_chain_build(
  * filters before it un-premultiplies; the evaluator straightens the result on read, like every
  * float map. The grey a mask reduces (mean) is therefore read after the mapping.
  */
-static ImBuf *composite_resample_mapped(const ImBuf *src,
-                                        const int ref_width,
-                                        const int ref_height,
-                                        const CompositeMappingChain &chain)
+ImBuf *composite_resample_mapped(const ImBuf *src,
+                                 const int ref_width,
+                                 const int ref_height,
+                                 const CompositeMappingChain &chain)
 {
   if (src == nullptr || ref_width <= 0 || ref_height <= 0 || src->x <= 0 || src->y <= 0) {
     return nullptr;
@@ -2430,21 +2434,6 @@ static void composite_mesh_map_remap(ImBuf *&r_ibuf,
   }
 }
 
-ImBuf *BKE_paint_material_composite_buffer_remap(const ImBuf *src,
-                                                 const int width,
-                                                 const int height,
-                                                 const Span<PaintMaterialCompositeMapping> steps)
-{
-  /* The same chain and the same resample a map read goes through, so a grey moved here lands where
-   * the row's own mapping would put a map. No row mapping joins: the steps are all there is. */
-  const PaintMaterialCompositeMapping no_row_mapping;
-  const CompositeMappingChain chain = composite_mapping_chain_build(no_row_mapping, steps);
-  if (chain.is_identity()) {
-    return nullptr;
-  }
-  return composite_resample_mapped(src, width, height, chain);
-}
-
 /**
  * Replace an acquired map buffer by its UV-mapped resample when the row remaps it: the transform
  * effects' steps first (\a input_steps, in the effects list's order), the row's own mapping last.
@@ -2481,7 +2470,21 @@ static void composite_mapped_remap(ImBuf *&r_ibuf,
   if (!mapping.enabled && input_steps.is_empty()) {
     return;
   }
+  /* A transform effect in its own Decal frame reads through the surface patch. A frame that cannot
+   * be built (no paint context, no seed) falls through to the UV steps alone. */
+  if (std::any_of(input_steps.begin(), input_steps.end(), composite_mapping_step_is_decal)) {
+    if (ImBuf *mapped = composite_resample_effect_space(
+            r_ibuf, ref_width, ref_height, mapping, input_steps))
+    {
+      composite_image_own(mapped, r_locks);
+      r_ibuf = mapped;
+      return;
+    }
+  }
   const CompositeMappingChain chain = composite_mapping_chain_build(mapping, input_steps);
+  if (chain.is_identity()) {
+    return;
+  }
   if (ImBuf *mapped = composite_resample_mapped(r_ibuf, ref_width, ref_height, chain)) {
     /* The source buffer stays locked; the owned resample is what the evaluator reads. */
     composite_image_own(mapped, r_locks);
@@ -2772,6 +2775,11 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
     {
       continue;
     }
+    /* The colour's source buffer and what its mapping made of it, so a coverage map that is the very
+     * same buffer reads the finished resample instead of repeating it (a Decal-space step resamples
+     * through the surface patch, which is the dearest read there is). */
+    const ImBuf *color_source = nullptr;
+    ImBuf *color_mapped = nullptr;
     if (image_layer.color_image != nullptr) {
       layer.color_ibuf = composite_image_acquire(image_layer.color_image,
                                                  image_layer.color_iuser,
@@ -2780,12 +2788,14 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       if (layer.color_ibuf == nullptr) {
         return false;
       }
+      color_source = layer.color_ibuf;
       composite_mapped_remap(layer.color_ibuf,
                              image_layer.mapping,
                              image_layer.input_transforms,
                              ref_width,
                              ref_height,
                              r_locks);
+      color_mapped = layer.color_ibuf;
       if (image_layer.is_mesh_map) {
         composite_mesh_map_remap(layer.color_ibuf,
                                  ref_width,
@@ -2823,14 +2833,27 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
        * the colour image: the colour pass may carry the covariant Normal remap, which would
        * corrupt a coverage scalar. */
       if (image_layer.mapping.enabled || !image_layer.input_transforms.is_empty()) {
-        PaintMaterialCompositeMapping coverage_mapping = image_layer.mapping;
-        coverage_mapping.tangent_normal = false;
-        composite_mapped_remap(layer.mask_ibuf,
-                               coverage_mapping,
-                               image_layer.input_transforms,
-                               ref_width,
-                               ref_height,
-                               r_locks);
+        /* The same buffer through the same steps reads the same, unless a Normal flag makes the
+         * colour pass remap vectors the coverage pass must not. */
+        bool normal_flag = image_layer.mapping.tangent_normal;
+        for (const PaintMaterialCompositeMapping &step : image_layer.input_transforms) {
+          normal_flag |= step.tangent_normal;
+        }
+        if (!normal_flag && color_source != nullptr && layer.mask_ibuf == color_source &&
+            color_mapped != nullptr && color_mapped != color_source)
+        {
+          layer.mask_ibuf = color_mapped;
+        }
+        else {
+          PaintMaterialCompositeMapping coverage_mapping = image_layer.mapping;
+          coverage_mapping.tangent_normal = false;
+          composite_mapped_remap(layer.mask_ibuf,
+                                 coverage_mapping,
+                                 image_layer.input_transforms,
+                                 ref_width,
+                                 ref_height,
+                                 r_locks);
+        }
       }
       layer.mask_ibuf = composite_buffer_to_eval_grid(
           layer.mask_ibuf, ref_width, ref_height, r_locks);
@@ -2864,8 +2887,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         }
         else {
           /* Resampled before the grey is reduced, so the grey is read after the mapping. */
-          composite_mapped_remap(
-              buffer.ibuf, item.mapping, {}, ref_width, ref_height, r_locks);
+          composite_mapped_remap(buffer.ibuf, item.mapping, {}, ref_width, ref_height, r_locks);
         }
         buffer.ibuf = composite_buffer_to_eval_grid(buffer.ibuf, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);

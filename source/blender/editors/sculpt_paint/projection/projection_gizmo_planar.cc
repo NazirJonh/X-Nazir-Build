@@ -454,7 +454,11 @@ bool projection_gizmo_planar_place(const bContext *C,
   if (ggd.gz_depth != nullptr) {
     const MaterialPaintLayer *layer = BKE_paint_layers_find(*ggd.target.material(),
                                                            ggd.target.marker());
-    const bool depth_on = (layer != nullptr) && BKE_paint_layers_projection_depth_get(*layer);
+    /* A Decal never limits by depth (its map is unfolded over the surface), so the handle would
+     * promise a slab the bake ignores. */
+    const bool depth_on = (layer != nullptr) &&
+                          layer->mapping.space != MA_PAINT_LAYER_MAPPING_SPACE_DECAL &&
+                          BKE_paint_layers_projection_depth_get(*layer);
     if (depth_on) {
       ggd.gz_depth->flag &= ~WM_GIZMO_HIDDEN;
       if (ggd.drag_gz != ggd.gz_depth) {

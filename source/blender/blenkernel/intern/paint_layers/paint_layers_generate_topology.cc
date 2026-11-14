@@ -601,8 +601,11 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     topology_hash_uid(hash, effect.marker);
     if (paint_layer_kind_transforms_input(effect)) {
       /* A transform effect has no opacity input to carry its enabled flag: switched off, its chain,
-       * its clip and its Normal remap are simply not built, so the flag is structure here. */
+       * its clip and its Normal remap are simply not built, so the flag is structure here. Its
+       * space is structure too: a Decal step is laid by the CPU/GPU paths and leaves the graph,
+       * while a UV step is a chain of its own. */
       hash = topology_hash_mix(hash, (effect.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1 : 0);
+      hash = topology_hash_mix(hash, effect.mapping.space);
     }
     if (paint_layer_kind_is_anchor_point_marker(effect)) {
       /* A marker is a Group Output only while something reads it; which point that is, and where,

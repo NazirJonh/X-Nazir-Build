@@ -1963,6 +1963,61 @@ bool BKE_paint_layers_projection_supported(const Material &ma, const MaterialPai
 /** Whether \a layer projects right now: a non-UV space, supported, with a payload. */
 bool BKE_paint_layers_projection_applies(const Material &ma, const MaterialPaintLayer &layer);
 
+/* -------------------------------------------------------------------- */
+/** \name Transform effect space
+ * \{ */
+
+/**
+ * Whether the transform effect \a effect (a Transform Mapping, a Mirror) may act in \a space: UV,
+ * or a Decal frame of its own. Separate from #BKE_paint_layers_projection_supported, which keeps
+ * refusing filters: the effect does not project a map, it moves where its owner's map is read.
+ */
+bool BKE_paint_layers_effect_space_supported(const MaterialPaintLayer &effect, int16_t space);
+
+/**
+ * Whether \a effect acts in its own Decal frame on \a owner_row: it is a transform effect set to
+ * #MA_PAINT_LAYER_MAPPING_SPACE_DECAL (its frame is derived from its Mirror center / pivot on every
+ * read, #BKE_paint_material_decal_frame_from_uv), and the owner reads its map at the surface UV
+ * (a projected owner keeps reading the effect in its projection's map coordinate, as before).
+ */
+bool BKE_paint_layers_effect_decal_applies(const Material &ma,
+                                           const MaterialPaintLayer &owner_row,
+                                           const MaterialPaintLayer &effect);
+
+/**
+ * Whether the transform \a effect would act in its Decal frame (enabled, remapping, with a frame),
+ * independent of its owner. The row that carries one is baked for the live graph, which cannot walk
+ * the surface; the UI offers the same Update Now as for a Blur.
+ */
+bool BKE_paint_layers_effect_decal_frame_active(const MaterialPaintLayer &effect);
+
+/**
+ * #BKE_paint_layers_active_transform_effects of \a row that act as UV steps: every one except
+ * those #BKE_paint_layers_effect_decal_applies answers true for, which act in their Decal frame.
+ * On a projected row this is every active transform effect.
+ */
+blender::Vector<const MaterialPaintLayer *, 4> BKE_paint_layers_active_uv_transform_effects(
+    const Material &ma, const MaterialPaintLayer &row);
+
+/** \} */
+
+/** \name Row projection (continued)
+ * \{ */
+
+/**
+ * Give \a effect a Decal frame with the effect defaults: the frame clips at the patch's edge (a
+ * texel the patch does not reach is transparent, the boundary the unfolded surface gives instead
+ * of the UV islands), and the depth, facing and aspect options a projected row uses are off, since
+ * an effect's frame lies on the surface. \a center and \a normal (object space, either may be null)
+ * place it; \a size above zero sets its extents. The space itself is not changed. \return false
+ * when \a effect is not a transform effect.
+ */
+bool BKE_paint_layers_effect_decal_frame_init(Material &ma,
+                                              MaterialPaintLayer &effect,
+                                              const float center[3],
+                                              const float normal[3],
+                                              float size);
+
 /**
  * Change the projection space of \a layer. Switching away from UV allocates the payload through
  * #BKE_paint_layers_projection_ensure and mixes the mode into the generated topology; switching

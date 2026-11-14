@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 /** \file
- * \ingroup edsculpt
+ * \ingroup bke
  *
  * Surface unfold: lays a patch of adjacent mesh triangles flat into the plane of a seed triangle.
  * The Transform Selection tool's decal mode uses it to carry a stamp over cube edges and curved
@@ -21,7 +21,7 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
-namespace blender::ed::sculpt_paint {
+namespace blender::bke {
 
 /**
  * Corner-triangle adjacency across edges, built once per topology (the unfold itself runs on every
@@ -60,8 +60,8 @@ struct SurfaceUnfoldPatch {
  * Grow a patch around \a seed_tri and flatten it into the seed's plane.
  *
  * The plane has its origin at \a seed_point, its X axis along \a tangent projected into the seed
- * triangle's plane, its Z along the seed triangle's normal (corner-order winding, as
- * #ImageSelectView3DSurfaceMap::sample reports it) and Y = Z x X. A neighbor across a shared edge
+ * triangle's plane, its Z along the seed triangle's normal (corner-order winding,
+ * the same as a surface sampler reports) and Y = Z x X. A neighbor across a shared edge
  * is placed by its edge lengths on the side away from the triangle it was reached from (a rotation
  * about the edge), so the layout is isometric per triangle.
  *
@@ -85,4 +85,4 @@ bool surface_unfold_build(Span<int3> corner_tris,
                           int max_tris,
                           SurfaceUnfoldPatch &r_patch);
 
-}  // namespace blender::ed::sculpt_paint
+}  // namespace blender::bke

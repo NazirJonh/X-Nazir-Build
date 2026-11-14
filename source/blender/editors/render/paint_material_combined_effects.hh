@@ -88,6 +88,9 @@ constexpr int gpu_proj_depth = 2;
 constexpr int gpu_proj_facing = 4;
 constexpr int gpu_proj_uv_adjust = 8;
 constexpr int gpu_proj_wrap_clip = 16;
+/* The frame is a Decal: the "position" texture holds the unfolded map coordinate and the patch
+ * triangle id, and the Normal conversion reads that triangle's frame. Mirrors COMBINED_PROJ_DECAL. */
+constexpr int gpu_proj_decal = 32;
 constexpr int gpu_layer_has_mask = 2048;
 constexpr int gpu_layer_row_store = 4096;
 constexpr int gpu_layer_row_use = 8192;
@@ -166,10 +169,20 @@ static_assert((gpu_layer_projected &
 struct GpuProjection {
   gpu::Texture *position = nullptr;
   gpu::Texture *normal = nullptr;
+  /** The per-triangle tangent basis the normal's `w` names; read by a projected Normal row only. */
+  gpu::Texture *tri_basis = nullptr;
+  /** A Decal frame's per-triangle axes (three texels each), read by the triangle id `position`
+   * carries. Null for the other modes. */
+  gpu::Texture *decal_frames = nullptr;
   int2 canvas_size = int2(1);
   /** Object-space point to frame-space `q` (controller and aspect included), and normal to frame. */
   float4x4 p_to_q = float4x4::identity();
   float4x4 n_to_frame = float4x4::identity();
+  /** The frame's rotation alone (the inverse of its orientation), and the object-to-controller
+   * normal matrix: the two factors of #n_to_frame the Normal map's frame-to-tangent conversion uses
+   * apart. */
+  float4x4 frame_rot = float4x4::identity();
+  float4x4 n_to_controller = float4x4::identity();
   /** Tiling (xy), facing scale and offset (zw). */
   float4 params_0 = float4(1.0f, 1.0f, 0.0f, 0.0f);
   /** Face exponent, frame extent, edge softness. */

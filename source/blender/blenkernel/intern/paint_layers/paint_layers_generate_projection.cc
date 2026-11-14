@@ -1283,6 +1283,17 @@ bool projection_space_build(ProjectionBuild &b)
     case MA_PAINT_LAYER_MAPPING_SPACE_SPHERE:
       ok = projection_sphere_build(b);
       break;
+    case MA_PAINT_LAYER_MAPPING_SPACE_DECAL:
+      /* The graph cannot walk triangles, so it does not read the Decal map: the row's nodes keep
+       * Planar's structure (so the topology and the map count stay stable) but the inside factor is
+       * zeroed, which makes the row contribute nothing to the graph. Falling back to a UV read of
+       * the map would show the content in the wrong place. The Decal itself is laid by the CPU
+       * composite and the GPU combined preview, which read the unfolded patch. */
+      ok = projection_planar_build(b);
+      if (ok) {
+        b.inside = projection_math(b.tree, NODE_MATH_MULTIPLY, b.inside, {}, 0.0f, b.made, b.grid);
+      }
+      break;
     default:
       break;
   }
@@ -1299,6 +1310,12 @@ NodeOutput projection_frame_clip_build(ProjectionBuild &b)
 {
   const NodeOutput clip = {b.sockets.group_input, b.sockets.clip};
   NodeOutput clip_factor = projection_clip_mix(b.tree, b.inside, clip, b.made, b.grid);
+  if (clip_factor.node != nullptr && b.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL) {
+    /* Limit off would let the zeroed inside factor mix back to one; a Decal row stays out of the
+     * graph whatever the flags say. */
+    clip_factor = projection_math(
+        b.tree, NODE_MATH_MULTIPLY, clip_factor, {}, 0.0f, b.made, b.grid);
+  }
   if (clip_factor.node != nullptr && b.facing_factor.node != nullptr) {
     clip_factor = projection_math(
         b.tree, NODE_MATH_MULTIPLY, clip_factor, b.facing_factor, 0.0f, b.made, b.grid);
@@ -1367,7 +1384,7 @@ ProjectionNodes *PaintLayersTreeBuilder::projection_nodes_ensure(
   build.space = row.mapping.space;
   build.axis = BKE_paint_layers_projection_axis_get(row);
   build.cube_local_wanted = build.space == MA_PAINT_LAYER_MAPPING_SPACE_CUBE &&
-                            !BKE_paint_layers_active_transform_effects(ma_, row).is_empty();
+                            !BKE_paint_layers_active_uv_transform_effects(ma_, row).is_empty();
 
   /* The order is the node creation order of the graph: the frame-space position, the world normal,
    * the facing fade, the tiling, the frame normal, then the per-space UVs. */
@@ -1476,7 +1493,7 @@ PaintLayersTreeBuilder::ProjectionSteps PaintLayersTreeBuilder::projection_steps
     }
   }
   const Vector<const MaterialPaintLayer *, 4> effects =
-      BKE_paint_layers_active_transform_effects(ma_, row);
+      BKE_paint_layers_active_uv_transform_effects(ma_, row);
   bNode *group_input = projection_group_input(tree);
   bNode &start = is_cube ? *cube_local : uv;
   bNodeSocket *uv_out = socket_out(start, "Vector");

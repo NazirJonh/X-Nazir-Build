@@ -442,7 +442,12 @@ bool ED_paint_projection_frame_tool_activate_if_needed(bContext *C,
   /* A transform effect (Transform Mapping, Mirror) places its pivot or fold center on the mesh
    * through the same tool, so the viewport edits it while its row is the active one. */
   const bool transform_row = (layer != nullptr) && BKE_paint_layers_is_transform_effect(*layer);
-  if (volume_row || transform_row) {
+  /* A Decal frame is placed by a click on the surface like the volume frames, though its cage is
+   * the flat planar one. */
+  const bool decal_row = (layer != nullptr) &&
+                         BKE_paint_layers_projection_applies(material, *layer) &&
+                         layer->mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL;
+  if (volume_row || transform_row || decal_row) {
     if (!ED_paint_projection_frame_tool_is_active(C)) {
       const std::string current_tool_id = ED_paint_view3d_tool_id_get(C);
       if (current_tool_id != PROJECTION_FRAME_TOOL_ID) {

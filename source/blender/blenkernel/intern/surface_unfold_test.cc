@@ -2,14 +2,14 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-#include "../selection/paint_image_select_surface_unfold.hh"
+#include "BKE_surface_unfold.hh"
 
 #include "BLI_math_vector.hh"
 #include "BLI_set.hh"
 
 #include "testing/testing.h"
 
-namespace blender::ed::sculpt_paint::tests {
+namespace blender::bke::tests {
 
 /* Corner triangle `t` uses corners `3t..3t+2`, so corner indices differ from vertex indices. */
 struct UnfoldMesh {
@@ -247,4 +247,4 @@ TEST(SurfaceUnfold, EachTriangleVisitedOnce)
   expect_isometric(patch);
 }
 
-}  // namespace blender::ed::sculpt_paint::tests
+}  // namespace blender::bke::tests

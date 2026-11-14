@@ -2987,6 +2987,17 @@ TEST_F(PaintLayersEffectTest, a_mask_transform_moves_the_mask_and_acts_in_uv_onl
     return true;
   };
   EXPECT_TRUE(shifted_by(2) || shifted_by(-2)) << "the mask moved by the offset";
+
+  /* The Decal frame walks the painted object's surface, which a mask's canvas grey has no access
+   * to: the mask form is UV only, the content form keeps both. */
+  EXPECT_TRUE(BKE_paint_layers_effect_space_supported(*transform, MA_PAINT_LAYER_MAPPING_SPACE_UV));
+  EXPECT_FALSE(
+      BKE_paint_layers_effect_space_supported(*transform, MA_PAINT_LAYER_MAPPING_SPACE_DECAL));
+  MaterialPaintLayer *content = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_TRANSFORM, nullptr);
+  ASSERT_NE(content, nullptr);
+  EXPECT_TRUE(
+      BKE_paint_layers_effect_space_supported(*content, MA_PAINT_LAYER_MAPPING_SPACE_DECAL));
 }
 
 TEST_F(PaintLayersEffectTest, a_shifted_constant_mask_does_not_vanish)

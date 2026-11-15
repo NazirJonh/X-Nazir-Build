@@ -2260,6 +2260,7 @@ void noise_apply(float3 &rgb, int2 texel, float4 params, float3 luma_coefficient
 #define COMBINED_PASS_EMBOSS_3X3 7
 #define COMBINED_PASS_UNSHARP_TAIL 8
 #define COMBINED_PASS_HIGH_PASS_TAIL 9
+#define COMBINED_PASS_BLUR_DIRECTIONAL 10
 
 /**
  * The scalar `linearrgb_to_srgb` / `srgb_to_linearrgb` of `BLI_math_color`, ported verbatim (both
@@ -2360,6 +2361,33 @@ float3 emboss(const float3 t00,
   return clamp(sum, 0.0f, 1.0f);
 }
 
+/**
+ * The line average of a Blur Directional: `\a r` texel steps each way along the direction the
+ * angle names, every tap clamped to the canvas the CPU's line kernel clamps it, the average mixed
+ * over the source by the intensity. The angle rides in `filter_params_0.x` (degrees,
+ * counter-clockwise off the map's +X) and the mix in `filter_params_0.z`, as the correction pass
+ * is given them; the reach is the pass's own clamped `radius`. Alpha is not read here; the caller
+ * carries it through.
+ */
+float3 blur_directional(sampler2D tx,
+                        const int2 texel,
+                        const int r,
+                        const float angle_deg,
+                        const float mix,
+                        const int2 size)
+{
+  const float angle_rad = radians(angle_deg);
+  const float2 direction = float2(cos(angle_rad), sin(angle_rad));
+  float3 sum = float3(0.0f);
+  for (int k = -r; k <= r; k++) {
+    const int2 at = int2(clamp(texel.x + int(floor(direction.x * float(k) + 0.5f)), 0, size.x - 1),
+                         clamp(texel.y + int(floor(direction.y * float(k) + 0.5f)), 0, size.y - 1));
+    sum += texelFetch(tx, at, 0).xyz;
+  }
+  const float3 averaged = sum / float(2 * r + 1);
+  return texelFetch(tx, texel, 0).xyz + (averaged - texelFetch(tx, texel, 0).xyz) * clamp(mix, 0.0f, 1.0f);
+}
+
 struct EffectResources {
   /** This pass's source: the effect input, a ping-pong buffer, the luminance buffer for a High Pass
    * tail, or the original for a Sharpen tail. */
@@ -2425,6 +2453,14 @@ void effect_comp([[resource_table]] EffectResources &srt,
       break;
     case COMBINED_PASS_BLUR_V:
       rgb = box_blur_axis(srt.input_tx, texel, 1, srt.radius, srt.texture_size);
+      break;
+    case COMBINED_PASS_BLUR_DIRECTIONAL:
+      rgb = blur_directional(srt.input_tx,
+                             texel,
+                             srt.radius,
+                             srt.filter_params_0.x,
+                             srt.filter_params_0.z,
+                             srt.texture_size);
       break;
     case COMBINED_PASS_EXTREMUM_H:
       rgb = extremum_axis(srt.input_tx, texel, 0, srt.radius, srt.maximum != 0, srt.texture_size);

@@ -5917,6 +5917,12 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      0,
      "Blur",
      "Blur the colours of what is below with a box or gaussian kernel"},
+    {MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL,
+     "BLUR_DIRECTIONAL",
+     0,
+     "Blur Directional",
+     "Streak the colours of what is below along a fixed angle: a line average the radius reaches "
+     "along, mixed over the colour by its intensity"},
     {MA_PAINT_LAYER_FILTER_SHARPEN,
      "SHARPEN",
      0,

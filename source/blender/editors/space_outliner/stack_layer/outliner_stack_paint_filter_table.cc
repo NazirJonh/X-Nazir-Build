@@ -89,6 +89,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
       return {ICON_IMAGE_ALPHA, paint_glyph::LEVELS};
     case MA_PAINT_LAYER_FILTER_BLUR:
       return {ICON_MATFLUID, 0};
+    case MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL:
+      /* No glyph of its own yet: the fluid icon names the streak the line average lays. */
+      return {ICON_MATFLUID, 0};
     case MA_PAINT_LAYER_FILTER_SHARPEN:
       return {ICON_SHARPCURVE, 0};
     case MA_PAINT_LAYER_FILTER_HIGH_PASS:
@@ -277,6 +280,11 @@ static const PaintFilterAddKind paint_effect_add_kinds_table[] = {
      N_("Blur"),
      "Blur the active layer's colours with a box or gaussian kernel",
      MA_PAINT_LAYER_FILTER_BLUR},
+    {"EFFECT_BLUR_DIRECTIONAL",
+     N_("Blur Directional"),
+     "Streak the active layer's colours along a fixed angle: a line average the radius reaches "
+     "along, mixed over the colour by its intensity",
+     MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL},
     {"EFFECT_SHARPEN",
      N_("Sharpen"),
      "Sharpen the active layer's colours around the details a blur removes",

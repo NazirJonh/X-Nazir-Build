@@ -20,6 +20,8 @@
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_color.h"
+#include "BLI_math_constants.h"
+#include "BLI_math_vector_types.hh"
 #include "BLI_task.hh"
 #include "BLI_vector.hh"
 
@@ -169,6 +171,59 @@ static bool paint_layer_effect_blur_copy(const ImBuf &source,
   }
   paint_layer_effect_blur_box(*r_blurred, radius);
   return true;
+}
+
+/**
+ * A line average at \a angle_deg over the RGB of \a buffer, mixed over the colour by \a mix: the
+ * samples walk the line the angle names, one texel at a time, `\a radius` steps each way of the
+ * centre, each read clamped to the canvas edge like a box pass's window. The samples average
+ * plainly -- the streak the filter lays is the direction, not a weighted tail. Alpha is untouched.
+ */
+static void paint_layer_effect_blur_directional(ImBuf &buffer,
+                                                const float angle_deg,
+                                                const int radius,
+                                                const float mix)
+{
+  if (mix <= 0.0f) {
+    return;
+  }
+  std::shared_ptr<ImBuf> source = paint_layer_anchor_slice_buffer_clone(buffer);
+  if (source == nullptr) {
+    return;
+  }
+  const int width = buffer.x;
+  const int height = buffer.y;
+  /* The angle names the direction the samples walk, counter-clockwise off the map's +X: the same
+   * reading the angle of a gradient or a mapping has. The step is whole texels, so a diagonal
+   * angle's reach is the radius along the line, not along either axis alone. */
+  const float angle_rad = angle_deg * float(M_PI) / 180.0f;
+  const float2 direction = {std::cos(angle_rad), std::sin(angle_rad)};
+  const int reach = std::clamp(radius, 1, std::max(width, height));
+  const float weight = std::clamp(mix, 0.0f, 1.0f);
+  const float *src = source->float_buffer.data;
+  float *pixels = buffer.float_data_for_write();
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    for (const int y : range) {
+      float *dst = pixels + int64_t(y) * width * 4;
+      for (const int x : IndexRange(width)) {
+        float sum[3] = {0.0f, 0.0f, 0.0f};
+        for (const int k : IndexRange(-reach, reach + 1)) {
+          /* One texel along the line per step, clamped to the canvas the window is. */
+          const int sx = std::clamp(x + int(std::floor(direction.x * float(k) + 0.5f)), 0, width - 1);
+          const int sy = std::clamp(y + int(std::floor(direction.y * float(k) + 0.5f)), 0, height - 1);
+          const float *tap = src + (int64_t(sy) * width + sx) * 4;
+          sum[0] += tap[0];
+          sum[1] += tap[1];
+          sum[2] += tap[2];
+        }
+        const float inv = 1.0f / float(2 * reach + 1);
+        for (const int c : IndexRange(3)) {
+          const float averaged = sum[c] * inv;
+          dst[int64_t(x) * 4 + c] += (averaged - dst[int64_t(x) * 4 + c]) * weight;
+        }
+      }
+    }
+  });
 }
 
 /**
@@ -813,6 +868,15 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &ef
       else {
         paint_layer_effect_blur_soft(buffer, radius);
       }
+      break;
+    }
+    case MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL: {
+      /* The line average at the angle, softened over the colour by the intensity. */
+      paint_layer_effect_blur_directional(
+          buffer,
+          paint_layer_kind_param_get(effect, PAINT_LAYER_BLUR_DIRECTIONAL_ANGLE),
+          paint_layer_kind_param_int_get(effect, PAINT_LAYER_BLUR_DIRECTIONAL_RADIUS),
+          paint_layer_kind_param_get(effect, PAINT_LAYER_BLUR_DIRECTIONAL_MIX));
       break;
     }
     case MA_PAINT_LAYER_FILTER_SHARPEN: {

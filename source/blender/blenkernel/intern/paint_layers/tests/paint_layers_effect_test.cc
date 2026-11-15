@@ -644,6 +644,78 @@ TEST_F(PaintLayersEffectTest, an_emboss_lights_the_white_side_of_a_hard_edge)
   EXPECT_NEAR(linear_pixel(pixels, width, 7, 4), 0.0f, 2e-3f);
 }
 
+TEST_F(PaintLayersEffectTest, a_blur_directional_of_a_solid_row_is_the_solid)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+
+  /* The line average of a flat colour is the flat colour, whichever way the angle points. */
+  add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL);
+  Vector<float> pixels;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  ASSERT_EQ(pixels.size(), before.size());
+  for (int64_t i = 0; i < pixels.size(); i++) {
+    EXPECT_NEAR(pixels[i], before[i], 2e-3f) << "a directional blur of a flat input is the "
+                                                "input, texel "
+                                             << i;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_blur_directional_streaks_along_the_angle)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL);
+  /* The angle stays at its zero default: the line runs along the map's +X, so a row of the
+   * vertical edge is the line the kernel averages. A radius of two at the zero texel walks
+   * clamped into the white side only, at the middle it crosses the edge, and past it into the
+   * black. The intensity reads one, so the average is what the texel shows. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_DIRECTIONAL_RADIUS, 2));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 0, 4), 1.0f, 2e-3f) << "the clamped window [0, 2] "
+                                                                "reads white only";
+  EXPECT_NEAR(linear_pixel(pixels, width, 1, 4), 1.0f, 2e-3f) << "the window [0, 3] is white "
+                                                                "only";
+  EXPECT_NEAR(linear_pixel(pixels, width, 2, 4), 0.8f, 2e-3f) << "the window [0, 4] reads four "
+                                                                "white of five";
+  EXPECT_NEAR(linear_pixel(pixels, width, 3, 4), 0.6f, 2e-3f) << "the window [1, 5] reads three "
+                                                                "white of five";
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 4), 0.4f, 2e-3f) << "the window [2, 6] reads two "
+                                                                "white of five";
+  EXPECT_NEAR(linear_pixel(pixels, width, 6, 4), 0.0f, 2e-3f) << "the window [4, 6] is black "
+                                                                "only";
+  EXPECT_NEAR(linear_pixel(pixels, width, 7, 4), 0.0f, 2e-3f) << "the clamped window [5, 7] "
+                                                                "reads black only";
+}
+
+TEST_F(PaintLayersEffectTest, a_blur_directional_sweeps_the_angles_at_the_map_edges)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0, true));
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_DIRECTIONAL_RADIUS, 3));
+
+  /* Every angle the slider can name walks the same clamped line: the samples stay inside the map,
+   * so no texel becomes a value the map never held and none leaves the colour range. */
+  for (const float angle : {0.0f, 45.0f, 90.0f, 135.0f}) {
+    ASSERT_TRUE(paint_layer_kind_param_set(*blur, PAINT_LAYER_BLUR_DIRECTIONAL_ANGLE, angle));
+    Vector<float> pixels;
+    int width = 0;
+    int height = 0;
+    ASSERT_TRUE(render_channel(pixels, width, height)) << "angle " << angle;
+    for (int64_t i = 0; i < pixels.size(); i++) {
+      EXPECT_TRUE(std::isfinite(pixels[i])) << "angle " << angle << " texel " << i;
+      EXPECT_GE(pixels[i], -1e-4f) << "angle " << angle << " texel " << i;
+      EXPECT_LE(pixels[i], 1.0f + 1e-4f) << "angle " << angle << " texel " << i;
+    }
+  }
+}
+
 TEST_F(PaintLayersEffectTest, an_erode_and_a_dilate_leave_a_solid_alone)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
@@ -2055,6 +2127,9 @@ TEST_F(PaintLayersEffectTest, the_halo_matches_each_kernels_total_coverage)
   const auto erode = [](const int mode, const int radius) {
     return std::array<float, 2>{float(mode), float(radius)};
   };
+  const auto blur_directional = [](const float angle, const int radius, const float mix) {
+    return std::array<float, 3>{angle, float(radius), mix};
+  };
 
   /* A box blur reaches its radius; a soft blur three passes of `max(radius / 2, 1)`. */
   EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_BLUR, blur(PAINT_LAYER_BLUR_BOX, 5).data(), 100, 100), 5);
@@ -2079,6 +2154,10 @@ TEST_F(PaintLayersEffectTest, the_halo_matches_each_kernels_total_coverage)
             6);
   EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_EDGE_DETECT, nullptr, 100, 100), 1);
   EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_EMBOSS, nullptr, 100, 100), 1);
+  /* The directional line reaches its radius along the line, whichever way the angle points. */
+  EXPECT_EQ(BKE_paint_layers_effect_halo(
+                MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL, blur_directional(30.0f, 7, 1.0f).data(), 100, 100),
+            7);
   /* A pointwise kind has no neighbourhood to reach. */
   EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_NOISE, nullptr, 100, 100), 0);
 }
@@ -2161,6 +2240,19 @@ TEST_F(PaintLayersEffectTest, the_pass_plan_matches_each_kernels_shape)
   EXPECT_EQ(passes[1].reach, 6);
   EXPECT_EQ(passes[1].axis_mask, PAINT_LAYER_EFFECT_AXIS_Y);
 
+  /* A directional blur is one pass of one kernel: the line average at the angle, whose direction
+   * and mix ride in the effect's parameters, its reach the clamped radius. */
+  const std::array<float, 3> directional{30.0f, 7.0f, 1.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL, directional.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 1);
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::BlurDirectional);
+  EXPECT_EQ(passes[0].radius, 7);
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
+  EXPECT_EQ(passes[0].reach, 7);
+  EXPECT_EQ(passes[0].axis_mask, PAINT_LAYER_EFFECT_AXIS_XY);
+
   BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_EDGE_DETECT, nullptr, 100, 100, passes);
   ASSERT_EQ(passes.size(), 1);
   EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::Edge3x3);
@@ -2196,7 +2288,7 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
    * nothing. */
   Set<int> gpu_computed_filters;
   for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT);
-       filter <= int(MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT);
+       filter <= int(MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL);
        filter++)
   {
     const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
@@ -2229,6 +2321,7 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
    * pointwise kernel being the one pass the plan names. */
   EXPECT_FALSE(gpu_computed_filters.is_empty());
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BLUR)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL)));
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_SHARPEN)));
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_HIGH_PASS)));
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_EDGE_DETECT)));
@@ -2848,6 +2941,7 @@ TEST_F(PaintLayersEffectTest, every_mask_effect_kind_lays_one_grey)
    * the three channels equal do it themselves; the ones that can colorize are brought back through
    * the luminance, and the kind table's #PAINT_LAYER_KIND_MASK_NEEDS_LUMA says which. */
   const eMaterialPaintLayerFilter filters[] = {MA_PAINT_LAYER_FILTER_BLUR,
+                                               MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL,
                                                MA_PAINT_LAYER_FILTER_SHARPEN,
                                                MA_PAINT_LAYER_FILTER_HIGH_PASS,
                                                MA_PAINT_LAYER_FILTER_EDGE_DETECT,

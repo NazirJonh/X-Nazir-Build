@@ -185,6 +185,22 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
       }
       break;
     }
+    case MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL: {
+      /* One pass of one kernel: the line average at the angle, whose reach walks the line the
+       * effect's angle names. The angle and the mix ride in the effect's parameters, as the
+       * correction pass is given them. */
+      add(ePaintLayerEffectPass::BlurDirectional,
+          effect_pass_clamp_radius(
+              effect_pass_param_int(params, PAINT_LAYER_BLUR_DIRECTIONAL_RADIUS), width, height));
+      PaintLayerEffectPass &pass = r_passes.last();
+      pass.source = ePaintLayerEffectPassSource::Input;
+      pass.aux = ePaintLayerEffectPassAux::None;
+      /* A diagonal line reaches along both axes the way a square window of the same radius does,
+       * so the halo and the region growth read the reach across both. */
+      pass.reach = pass.radius;
+      pass.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+      break;
+    }
     case MA_PAINT_LAYER_FILTER_SHARPEN: {
       const int radius = effect_pass_clamp_radius(
           effect_pass_param_int(params, PAINT_LAYER_SHARPEN_RADIUS), width, height);

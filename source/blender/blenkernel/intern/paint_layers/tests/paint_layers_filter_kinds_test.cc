@@ -650,6 +650,57 @@ TEST_F(PaintLayersFilterKindsTest, histogram_shift_kind_is_a_pointwise_filter_wi
   EXPECT_EQ(RNA_property_string_get(&param_ptr, label), "Position");
 }
 
+TEST_F(PaintLayersFilterKindsTest, blur_directional_kind_is_a_neighborhood_filter_with_a_schema)
+{
+  Material *ma = BKE_material_add(bmain, "RnaBlurDirectionalParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *blur = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL);
+  ASSERT_NE(blur, nullptr);
+
+  /* A neighborhood filter reads a neighbourhood of the row's map: it is CPU-computed, and the
+   * combined preview computes it on the GPU like the Blur. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*blur, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*blur, PAINT_LAYER_KIND_NEEDS_BAKE));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*blur, PAINT_LAYER_KIND_GPU_COMPUTED));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*blur, PAINT_LAYER_KIND_NO_GPU_BRANCH));
+
+  /* The angle defaults to the map's +X, the radius to a visible streak, the intensity to all
+   * average. */
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*blur, PAINT_LAYER_BLUR_DIRECTIONAL_ANGLE), 0.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*blur, PAINT_LAYER_BLUR_DIRECTIONAL_RADIUS), 8.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*blur, PAINT_LAYER_BLUR_DIRECTIONAL_MIX), 1.0f);
+  /* The radius is a whole texels parameter: a float write of a fractional value is refused. */
+  EXPECT_FALSE(paint_layer_kind_param_set(*blur, PAINT_LAYER_BLUR_DIRECTIONAL_RADIUS, 4.5f));
+
+  /* The RNA enum names the kind: a filter row reads back its BLUR_DIRECTIONAL identifier. */
+  PointerRNA blur_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, blur);
+  PropertyRNA *filter_prop = RNA_struct_find_property(&blur_ptr, "filter_type");
+  ASSERT_NE(filter_prop, nullptr);
+  const char *identifier = nullptr;
+  ASSERT_TRUE(RNA_property_enum_identifier(nullptr,
+                                           &blur_ptr,
+                                           filter_prop,
+                                           MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL,
+                                           &identifier));
+  EXPECT_STREQ(identifier, "BLUR_DIRECTIONAL");
+  /* The collection lists exactly the schema's three parameters, labelled. */
+  PropertyRNA *params = RNA_struct_find_property(&blur_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&blur_ptr, params), 3);
+  const char *names[3] = {"angle", "radius", "mix"};
+  const char *labels[3] = {"Angle", "Radius", "Intensity"};
+  for (const int i : IndexRange(3)) {
+    PointerRNA param_ptr;
+    ASSERT_TRUE(RNA_property_collection_lookup_string(&blur_ptr, params, names[i], &param_ptr))
+        << names[i];
+    PropertyRNA *label = RNA_struct_find_property(&param_ptr, "label");
+    ASSERT_NE(label, nullptr);
+    EXPECT_EQ(RNA_property_string_get(&param_ptr, label), labels[i]);
+  }
+}
+
 TEST_F(PaintLayersFilterKindsTest, deband_kind_is_a_pointwise_filter_with_a_mode_and_two_integers)
 {
   Material *ma = BKE_material_add(bmain, "RnaDebandParamMat");

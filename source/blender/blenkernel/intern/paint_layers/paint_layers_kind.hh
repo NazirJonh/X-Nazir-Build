@@ -780,6 +780,17 @@ enum PaintLayerBlurParam : int {
   PAINT_LAYER_BLUR_PARAM_NUM = 2,
 };
 
+/** The positions of the Blur Directional filter's parameters in its schema. */
+enum PaintLayerBlurDirectionalParam : int {
+  /** The angle the line of samples runs at, in degrees, counter-clockwise off the +X of the map. */
+  PAINT_LAYER_BLUR_DIRECTIONAL_ANGLE = 0,
+  /** Whole texels: the line's half reach. */
+  PAINT_LAYER_BLUR_DIRECTIONAL_RADIUS = 1,
+  /** How much of the average the result takes: zero is the colour as it is, one is all average. */
+  PAINT_LAYER_BLUR_DIRECTIONAL_MIX = 2,
+  PAINT_LAYER_BLUR_DIRECTIONAL_PARAM_NUM = 3,
+};
+
 /** The positions of the Sharpen filter's parameters in its schema. */
 enum PaintLayerSharpenParam : int {
   PAINT_LAYER_SHARPEN_RADIUS = 0,

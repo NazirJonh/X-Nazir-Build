@@ -208,6 +208,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   }
   /* The CPU-computed effects follow: corrections of a row only, no adjustment or mask form. */
   for (const char *effect : {"EFFECT_BLUR",
+                             "EFFECT_BLUR_DIRECTIONAL",
                              "EFFECT_SHARPEN",
                              "EFFECT_HIGH_PASS",
                              "EFFECT_EDGE_DETECT",

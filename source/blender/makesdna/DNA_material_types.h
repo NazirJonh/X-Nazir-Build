@@ -1100,6 +1100,12 @@ enum eMaterialPaintLayerFilter : int16_t {
    * #MA_PAINT_LAYER_FILTER_THRESHOLD.
    */
   MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT = 31,
+  /**
+   * Streak the colours below along a fixed angle (a Blur Directional): a line average the radius
+   * reaches along, mixed over the colour by its intensity. A neighborhood filter like the Blur,
+   * though its kernel is a line rather than a square.
+   */
+  MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL = 32,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

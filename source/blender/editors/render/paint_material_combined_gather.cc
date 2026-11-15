@@ -918,6 +918,7 @@ static_assert(int(ePaintLayerEffectPass::Edge3x3) == 6, "COMBINED_PASS_EDGE_3X3"
 static_assert(int(ePaintLayerEffectPass::Emboss3x3) == 7, "COMBINED_PASS_EMBOSS_3X3");
 static_assert(int(ePaintLayerEffectPass::UnsharpTail) == 8, "COMBINED_PASS_UNSHARP_TAIL");
 static_assert(int(ePaintLayerEffectPass::HighPassTail) == 9, "COMBINED_PASS_HIGH_PASS_TAIL");
+static_assert(int(ePaintLayerEffectPass::BlurDirectional) == 10, "COMBINED_PASS_BLUR_DIRECTIONAL");
 
 /** What a capture job produces: a content pair, a mask rendered as content, or a mask slot. The
  * plan itself lives in BKE, so its ordering and dedup rules are testable without a GPU. */

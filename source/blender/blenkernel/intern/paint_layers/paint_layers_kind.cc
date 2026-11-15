@@ -270,6 +270,17 @@ static const PaintLayerKindParam blur_params[] = {
 };
 static_assert(std::size(blur_params) == PAINT_LAYER_BLUR_PARAM_NUM);
 
+static const PaintLayerKindParam blur_directional_params[] = {
+    /* Degrees, counter-clockwise off the map's +X: the direction the streaks run along. */
+    {"angle", "Angle", 0.0f, 0.0f, 360.0f},
+    /* Whole texels: the line's half reach, the distance the average walks each way. */
+    {"radius", "Radius", 8.0f, 1.0f, 64.0f, PaintLayerKindParamType::Int},
+    /* How much of the line average the result takes: zero is the colour as it is, one is all
+     * average, and the values between soften the streak into the colour. */
+    {"mix", "Intensity", 1.0f, 0.0f, 1.0f},
+};
+static_assert(std::size(blur_directional_params) == PAINT_LAYER_BLUR_DIRECTIONAL_PARAM_NUM);
+
 static const PaintLayerKindEnumItem glow_mode_items[] = {
     {PAINT_LAYER_GLOW_SOFT, "SOFT", "Soft"},
     {PAINT_LAYER_GLOW_PRECISE, "PRECISE", "Precise"},
@@ -860,6 +871,17 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      blur_params,
      int(std::size(blur_params)),
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED)},
+    /* A line average at an angle: one pass of one kernel, not separable like the box blur's pair,
+     * which reaches both ways at once along the line it samples. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL,
+     "Blur Directional",
+     PaintLayerKindCategory::Operator,
+     effect_or_mask_roles,
+     blur_directional_params,
+     int(std::size(blur_directional_params)),
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same

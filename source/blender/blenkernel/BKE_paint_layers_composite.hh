@@ -439,6 +439,9 @@ enum class ePaintLayerEffectPass : uint8_t {
   UnsharpTail,
   /** The High Pass combine tail: the detail against the mid grey, through the sRGB curve. */
   HighPassTail,
+  /** The line average at an angle of a Blur Directional: taps clamped to the canvas edge, the
+   * mix read off the effect's parameters. */
+  BlurDirectional,
 };
 
 /** Which buffer a pass's `input_tx` reads. The gather binds the texture the role names. */

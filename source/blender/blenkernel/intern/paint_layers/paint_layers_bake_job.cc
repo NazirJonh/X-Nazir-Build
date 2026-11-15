@@ -10,6 +10,7 @@
 
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_asset.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_target.hh"
@@ -179,6 +180,22 @@ struct PaintLayersBakeJob {
     Vector<ObjectResult> objects;
   };
   Vector<RowResult> rows;
+  /**
+   * The result of a CPU-computed effect that owns it (#paint_layer_effect_owns_result), computed on
+   * the worker from #material_copy. The channels to compute are decided on the main thread at
+   * creation, so the worker reads no state of the live material.
+   */
+  struct EffectResult {
+    bUUID marker = {};
+    int size = 0;
+    /** The bake hash of the effect when the job was created; the commit drops a result whose live
+     * hash moved (see #RowResult::hash). */
+    uint32_t hash[2] = {};
+    /** The channels the effect filters; the worker fills #channels from them. */
+    Vector<int> wanted_channels;
+    Vector<ChannelResult> channels;
+  };
+  Vector<EffectResult> effects;
   /** The worker stopped early; nothing it produced is written. */
   bool cancelled = false;
 };
@@ -328,12 +345,53 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
     job->rows.append(std::move(row));
   }
 
+  /* The effects that own their result are queued here, on the main thread: what the worker needs
+   * from the live material (the due check, the canvas size, the channels the effect filters, the
+   * hash it stamps) is decided now, and the worker only computes from the localized copy. The lower
+   * effect comes first, so the one above it finds its input in the effect cache. */
+  BKE_paint_layers_foreach(ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
+    for (MaterialPaintLayer &effect : layer.effects) {
+      if (!paint_layer_effect_is_cpu_computed(effect)) {
+        continue;
+      }
+      BakeRowRelease release = BakeRowRelease::Keep;
+      if (!bake_row_is_due(ma, effect, view, release)) {
+        bake_row_release_apply(bmain, ma, effect, release);
+        continue;
+      }
+      if (!paint_layer_is_owned_effect(ma, effect) || !BKE_paint_layers_bake_is_heavy(ma, effect)) {
+        continue;
+      }
+      const int size = bake_size_for(ma, effect);
+      if (size <= 0) {
+        continue;
+      }
+      PaintLayersBakeJob::EffectResult queued;
+      queued.marker = effect.marker;
+      queued.size = size;
+      for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+        if (paint_layer_effect_filters(ma, effect, int(info.channel))) {
+          queued.wanted_channels.append(int(info.channel));
+        }
+      }
+      if (queued.wanted_channels.is_empty()) {
+        continue;
+      }
+      /* Every gate has passed: only here is the bake structure allocated, so an effect nothing
+       * computes never carries a permanently invalid one. */
+      BKE_paint_layers_bake_struct_ensure(effect)->size = size;
+      BKE_paint_layers_bake_hash(ma, effect, queued.hash);
+      job->effects.append(std::move(queued));
+    }
+    return true;
+  });
+
   if (surface_sync_due && scene != nullptr && view_layer != nullptr) {
     /* On the main thread, which is where the evaluated mesh behind the Decal map may be read. It
      * tags the regeneration itself when a row landed. */
     BKE_paint_layers_bake_plan_run(bmain, ma, nullptr, scene, view_layer);
   }
-  if (job->rows.is_empty()) {
+  if (job->rows.is_empty() && job->effects.is_empty()) {
     MEM_delete(job);
     return nullptr;
   }
@@ -346,6 +404,70 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
     return nullptr;
   }
   return job;
+}
+
+/**
+ * Compute \a effect's result in \a channel from the localized material \a ma and store it in the
+ * map's own format at the \a size-square the map will have (the format and the resampling are what
+ * #bake_effect_row_write gives the main-thread path). False when the channel has no result.
+ */
+static bool bake_effect_channel_compute(const Material &ma,
+                                        const MaterialPaintLayer &effect,
+                                        const int size,
+                                        const MaterialPaintChannelInfo &info,
+                                        PaintLayersBakeJob::ChannelResult &r_result)
+{
+  const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
+  if (row == nullptr) {
+    return false;
+  }
+  const int channel = int(info.channel);
+  std::shared_ptr<ImBuf> result = paint_layer_owned_effect_result_compute(
+      ma, *row, effect, channel, PAINT_TILE_NUMBER_BASE);
+  if (result == nullptr || result->float_buffer.data == nullptr || result->x <= 0 ||
+      result->y <= 0)
+  {
+    return false;
+  }
+  const int width = result->x;
+  const int height = result->y;
+  const float *src = result->float_buffer.data;
+  const int64_t pixel_num = int64_t(size) * size;
+  r_result.channel = channel;
+  r_result.is_color = info.is_color;
+  r_result.stored_float = bake_channel_needs_float(effect, info);
+  const ColorSpace *byte_colorspace = nullptr;
+  if (r_result.stored_float) {
+    r_result.color = Vector<float>(pixel_num * 4);
+  }
+  else {
+    r_result.color_bytes = Vector<uchar>(pixel_num * 4);
+    if (info.is_color) {
+      byte_colorspace = IMB_colormanagement_space_get_named(
+          IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DEFAULT_BYTE));
+    }
+  }
+  /* The nearest sample of the result, each axis independently. The effect cache's buffer is
+   * premultiplied by the input's content alpha and the map holds the straight colour, so the alpha
+   * is not part of the result (see #bake_effect_row_write). */
+  for (int y = 0; y < size; y++) {
+    const int src_y = min_ii(int(int64_t(y) * height / size), height - 1);
+    const float *src_row = src + int64_t(src_y) * width * 4;
+    for (int x = 0; x < size; x++) {
+      const int src_x = min_ii(int(int64_t(x) * width / size), width - 1);
+      const float *texel = src_row + int64_t(src_x) * 4;
+      const float inv = texel[3] > 0.0f ? 1.0f / texel[3] : 1.0f;
+      const float straight[4] = {texel[0] * inv, texel[1] * inv, texel[2] * inv, 1.0f};
+      const int64_t i = int64_t(y) * size + x;
+      if (r_result.stored_float) {
+        bake_pixel_store_float(straight, &r_result.color[i * 4]);
+      }
+      else {
+        bake_pixel_store_byte(straight, info.is_color, byte_colorspace, &r_result.color_bytes[i * 4]);
+      }
+    }
+  }
+  return true;
 }
 
 void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
@@ -361,6 +483,9 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
   int64_t total_pairs = 0;
   for (const PaintLayersBakeJob::RowResult &row : job.rows) {
     total_pairs += int64_t(row.objects.size()) * BKE_paint_material_channels().size();
+  }
+  for (const PaintLayersBakeJob::EffectResult &effect : job.effects) {
+    total_pairs += effect.wanted_channels.size();
   }
   int64_t done_pairs = 0;
   const auto report = [&]() {
@@ -389,6 +514,7 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
            * rows once this mark is set. */
           job.cancelled = true;
           job.rows = Vector<PaintLayersBakeJob::RowResult>();
+          job.effects = Vector<PaintLayersBakeJob::EffectResult>();
           return;
         }
         const int channel = int(info.channel);
@@ -462,6 +588,39 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
                                retained_results,
                                retained_mib);
     }
+  }
+  for (PaintLayersBakeJob::EffectResult &effect_result : job.effects) {
+    const MaterialPaintLayer *effect = BKE_paint_layers_find(ma, effect_result.marker);
+    if (effect == nullptr) {
+      done_pairs += effect_result.wanted_channels.size();
+      report();
+      continue;
+    }
+    for (const int channel : effect_result.wanted_channels) {
+      if (is_cancelled && is_cancelled()) {
+        job.cancelled = true;
+        job.rows = Vector<PaintLayersBakeJob::RowResult>();
+        job.effects = Vector<PaintLayersBakeJob::EffectResult>();
+        BKE_paint_layers_effect_cache_free_material(ma);
+        return;
+      }
+      PaintLayersBakeJob::ChannelResult result;
+      if (bake_effect_channel_compute(ma,
+                                      *effect,
+                                      effect_result.size,
+                                      BKE_paint_material_channel_info(eMaterialPaintChannel(channel)),
+                                      result))
+      {
+        effect_result.channels.append(std::move(result));
+      }
+      done_pairs++;
+      report();
+    }
+  }
+  /* The effect cache entries a lower effect left for the one above it are worth nothing once the
+   * results are held: they belong to the localized copy and would sit in the budget until it ends. */
+  if (!job.effects.is_empty()) {
+    BKE_paint_layers_effect_cache_free_material(ma);
   }
 }
 
@@ -660,6 +819,63 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     }
     changed = true;
   }
+  for (PaintLayersBakeJob::EffectResult &effect_result : job.effects) {
+    MaterialPaintLayer *effect = BKE_paint_layers_find(*ma, effect_result.marker);
+    /* The effect was removed, switched to Never or stopped owning its result while the worker
+     * ran: nothing to write. */
+    if (effect == nullptr || effect->bake == nullptr || !paint_layer_is_owned_effect(*ma, *effect) ||
+        BKE_paint_layers_bake_mode_get(*effect) == MA_PAINT_LAYER_BAKE_NEVER)
+    {
+      continue;
+    }
+    uint32_t current_hash[2];
+    BKE_paint_layers_bake_hash(*ma, *effect, current_hash);
+    if (current_hash[0] != effect_result.hash[0] || current_hash[1] != effect_result.hash[1]) {
+      /* A parameter, the row's mapping or the source moved while the worker ran: the pixels are
+       * the old description's and are dropped. The effect is invalid, so the next plan queues it
+       * again. */
+      continue;
+    }
+    Vector<int> written_channels;
+    for (PaintLayersBakeJob::ChannelResult &channel : effect_result.channels) {
+      const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+          eMaterialPaintChannel(channel.channel));
+      effect->bake->size = effect_result.size;
+      Image *color_image = bake_service_image(bmain,
+                                             *effect,
+                                             channel.channel,
+                                             effect_result.size,
+                                             channel.is_color,
+                                             bake_channel_needs_float(*effect, info),
+                                             0);
+      if (color_image == nullptr) {
+        continue;
+      }
+      bake_write_stored_image(
+          *color_image,
+          channel.stored_float,
+          channel.stored_float ? static_cast<const void *>(channel.color.data()) :
+                                 static_cast<const void *>(channel.color_bytes.data()),
+          nullptr,
+          0);
+      channel.color = Vector<float>();
+      channel.color_bytes = Vector<uchar>();
+      written_channels.append(channel.channel);
+    }
+    if (written_channels.is_empty()) {
+      continue;
+    }
+    bake_stale_channel_maps_release(bmain, *effect, written_channels);
+    BKE_paint_layers_bake_finalize(*ma, *effect);
+    /* The map holds the result now: a copy the main thread's effect cache kept is for nothing. */
+    for (const int channel : written_channels) {
+      paint_layer_owned_effect_cache_drop(*ma, *effect, channel, PAINT_TILE_NUMBER_BASE);
+    }
+    /* The graph lays the map from now on, which is a new shape; unlike a row's bake there is no live
+     * form of the effect that was being painted, so no hold waits for the hand to stop. */
+    need_regen = true;
+    changed = true;
+  }
   if (changed) {
     /* A row that was live stays live and a partially re-baked one keeps its baked shape: neither
      * needs a rebuild. #BKE_paint_layers_bake_subscribe marks one unconditionally, so the flag is
@@ -683,6 +899,11 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
         pending = layer.bake != nullptr && layer.bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
                   bake_row_is_candidate(*ma, layer, bake_row_object_issue(*ma, layer, view)) &&
                   !BKE_paint_layers_bake_is_valid(*ma, layer) && !bake_row_is_hidden(*ma, layer);
+        for (const MaterialPaintLayer &effect : layer.effects) {
+          /* An effect that owns its result and has none yet (or waits for a stroke to end) keeps the
+           * signal up like a row does. */
+          pending = pending || bake_owned_effect_pending(*ma, effect);
+        }
         return !pending;
       });
   if (!pending) {
@@ -701,6 +922,12 @@ int64_t BKE_paint_layers_bake_job_retained_bytes(const PaintLayersBakeJob &job)
                  channel.color_bytes.size() * int64_t(sizeof(uchar));
       }
       bytes += object.common.size() * int64_t(sizeof(float));
+    }
+  }
+  for (const PaintLayersBakeJob::EffectResult &effect : job.effects) {
+    for (const PaintLayersBakeJob::ChannelResult &channel : effect.channels) {
+      bytes += channel.color.size() * int64_t(sizeof(float)) +
+               channel.color_bytes.size() * int64_t(sizeof(uchar));
     }
   }
   return bytes;

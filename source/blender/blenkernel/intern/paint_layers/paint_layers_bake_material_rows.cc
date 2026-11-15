@@ -150,6 +150,25 @@ static void bake_source_hash_split(const uint64_t hash, uint32_t r_words[2])
 }
 
 /**
+ * Whether a CPU-computed effect of \a layer that owns its result filters \a channel: the effect is
+ * computed from the map rendered from the source, even where the graph shows the source's own nodes
+ * live, so the map is wanted there whatever the graph shows.
+ */
+static bool bake_row_effect_reads_map(const Material &ma,
+                                      const MaterialPaintLayer &layer,
+                                      const int channel)
+{
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (paint_layer_effect_owns_result(ma, layer, effect) &&
+        paint_layer_effect_filters(ma, effect, channel))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Whether the render of \a layer is partial: Auto, no Image Editor reading the maps, and the source
  * supplies everything but the Normal live. Then only the Normal is rendered, only what the Normal
  * reads can make the map stale, and an edit of a colour or a roughness renders nothing. The maps
@@ -165,7 +184,8 @@ static bool bake_row_maps_partial(const Material &ma, const MaterialPaintLayer &
   bool normal_needs_map = false;
   for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
     if (!BKE_paint_layers_material_channel_needs_render(ma, layer, channel) ||
-        paint_layer_material_source_group_channel(ma, layer, channel))
+        (paint_layer_material_source_group_channel(ma, layer, channel) &&
+         !bake_row_effect_reads_map(ma, layer, channel)))
     {
       continue;
     }
@@ -185,7 +205,8 @@ bool BKE_paint_layers_material_channel_render_wanted(const Material &ma,
     return false;
   }
   return !bake_row_maps_partial(ma, layer) ||
-         !paint_layer_material_source_group_channel(ma, layer, channel);
+         !paint_layer_material_source_group_channel(ma, layer, channel) ||
+         bake_row_effect_reads_map(ma, layer, channel);
 }
 
 bool BKE_paint_layers_material_row_stale(const Material &ma, const MaterialPaintLayer &layer)

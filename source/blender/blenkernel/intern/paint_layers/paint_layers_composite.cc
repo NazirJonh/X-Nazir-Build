@@ -1121,12 +1121,13 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                                                             const int channel,
                                                             const int tile_number,
                                                             const bool describe_only,
-                                                            Vector<Image *> *r_images);
+                                                            Vector<Image *> *r_images,
+                                                            Image **r_bake_image = nullptr);
 
 /**
  * Append the CPU-computed effect \a effect to \a out as a correction carrying the map the effect
- * cache computed. Nothing is appended while the effect lays nothing or its input cannot be
- * rendered.
+ * cache computed, or the map of the effect's own bake when it owns its result and that bake stands.
+ * Nothing is appended while the effect lays nothing or its input cannot be rendered.
  */
 static void composite_effect_append_cpu_computed(const Material &ma,
                                                  const MaterialPaintLayer *owner_row,
@@ -1153,14 +1154,21 @@ static void composite_effect_append_cpu_computed(const Material &ma,
   /* The GPU path keys its result texture on the effect instance, which a parameter hash cannot do
    * across rows: name the marker the correction was made from. */
   effect_correction.effect_marker = effect.marker;
-  effect_correction.effect_color = paint_layer_effect_buffer_get(ma,
-                                                                *owner_row,
-                                                                effect,
-                                                                channel,
-                                                                tile_number,
-                                                                describe_only,
-                                                                &effect_correction.effect_images);
-  if (!describe_only && effect_correction.effect_color == nullptr) {
+  /* An effect that owns its result reads the map of its bake while that stands: switching it off and
+   * on moves no pixel, and a stroke elsewhere costs it no recompute. */
+  effect_correction.effect_color = paint_layer_effect_buffer_get(
+      ma,
+      *owner_row,
+      effect,
+      channel,
+      tile_number,
+      describe_only,
+      &effect_correction.effect_images,
+      paint_layer_effect_owns_result(ma, *owner_row, effect) ? &effect_correction.effect_image :
+                                                               nullptr);
+  if (!describe_only && effect_correction.effect_color == nullptr &&
+      effect_correction.effect_image == nullptr)
+  {
     /* The input could not be rendered: the correction is left out, as the generator leaves it
      * out of the live graph. */
     return;
@@ -2964,7 +2972,8 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                                                             const int channel,
                                                             const int tile_number,
                                                             const bool describe_only,
-                                                            Vector<Image *> *r_images)
+                                                            Vector<Image *> *r_images,
+                                                            Image **r_bake_image)
 {
   /* The maps the input reads and its size, described without rendering anything: the maps go to
    * the composite cache's subscriptions, the size decides hits. */
@@ -2994,6 +3003,17 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
   if (describe_only) {
     return {};
   }
+  if (r_bake_image != nullptr &&
+      ELEM(tile_number, PAINT_TILE_NUMBER_BASE, PAINT_TILE_NUMBER_AUTO))
+  {
+    /* The bake of an effect that owns its result is the answer while it stands: nothing is computed,
+     * and the maps above stay the subscriptions of the caller, who is told when they change. The
+     * bake is laid for the base tile only, so another tile keeps the cache. */
+    if (Image *bake_map = paint_layer_owned_effect_bake_map(ma, effect, channel)) {
+      *r_bake_image = bake_map;
+      return {};
+    }
+  }
 
   const EffectCacheKey key{ma.id.session_uid,
                            effect.marker,
@@ -3012,6 +3032,104 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
         return paint_layer_effect_compute(
             ma, row, effect, channel, tile_number, r_color, r_synced);
       });
+}
+
+void paint_layer_owned_effect_cache_drop(const Material &ma,
+                                         const MaterialPaintLayer &effect,
+                                         const int channel,
+                                         const int tile_number)
+{
+  const EffectCacheKey key{ma.id.session_uid,
+                           effect.marker,
+                           channel,
+                           tile_number,
+                           paint_layer_effect_hash(effect, channel)};
+  std::lock_guard<std::mutex> lock(g_paint_effect_cache_mutex);
+  const auto no_release = [](EffectCacheEntry &) {};
+  g_paint_effect_cache.drop_instance(key, no_release);
+}
+
+std::shared_ptr<ImBuf> paint_layer_owned_effect_result_compute(const Material &ma,
+                                                               const MaterialPaintLayer &row,
+                                                               const MaterialPaintLayer &effect,
+                                                               const int channel,
+                                                               const int tile_number)
+{
+  /* The cache's key does not see the row's mapping or the effects below, which the bake's hash does:
+   * an entry kept from before such an edit would be written into a bake as the current result. */
+  paint_layer_owned_effect_cache_drop(ma, effect, channel, tile_number);
+  return paint_layer_effect_buffer_get(
+      ma, row, effect, channel, tile_number, /*describe_only=*/false, nullptr, nullptr);
+}
+
+void paint_layer_owned_effect_input_images(const Material &ma,
+                                           const MaterialPaintLayer &row,
+                                           const MaterialPaintLayer &effect,
+                                           Vector<Image *> &r_images)
+{
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (!paint_layer_effect_filters(ma, effect, channel)) {
+      continue;
+    }
+    PaintMaterialCompositeImageLayer entry;
+    if (!BKE_paint_layers_effect_input_describe(
+            ma,
+            row,
+            effect,
+            channel,
+            /*dimensions_only=*/true,
+            /*describe_only=*/false,
+            entry,
+            PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}))
+    {
+      continue;
+    }
+    Vector<Image *> images;
+    BKE_paint_layers_effect_input_images(entry, images);
+    for (Image *image : images) {
+      if (!r_images.contains(image)) {
+        r_images.append(image);
+      }
+    }
+  }
+}
+
+uint64_t paint_layer_owned_effect_input_hash(const Material &ma,
+                                             const MaterialPaintLayer &row,
+                                             const MaterialPaintLayer &effect)
+{
+  uint64_t hash = 1469598103934665603ull;
+  const auto mix = [&](const uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ull;
+  };
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (!paint_layer_effect_filters(ma, effect, channel)) {
+      continue;
+    }
+    mix(uint64_t(channel) + 1);
+    /* Only described, never rendered: a lower effect that is not baked yet must not compute inside a
+     * hash. The description is the input the effect is computed from -- the row's source, its
+     * mapping and transform steps, the effects below -- so the hash moves exactly when the input
+     * does, and the maps' pixels stay the subscription's business. */
+    PaintMaterialCompositeImageLayer entry;
+    if (!BKE_paint_layers_effect_input_describe(
+            ma,
+            row,
+            effect,
+            channel,
+            /*dimensions_only=*/true,
+            /*describe_only=*/true,
+            entry,
+            PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}))
+    {
+      /* An input that cannot be described yet (the source is not rendered) hashes as nothing. */
+      mix(0);
+      continue;
+    }
+    mix(BKE_paint_material_composite_stack_hash(Span<PaintMaterialCompositeImageLayer>(&entry, 1)));
+  }
+  return hash;
 }
 
 /** \} */

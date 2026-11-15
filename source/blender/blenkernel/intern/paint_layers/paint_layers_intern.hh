@@ -769,6 +769,61 @@ inline bool paint_layer_effect_is_cpu_computed(const MaterialPaintLayer &effect)
 }
 
 /**
+ * Whether the CPU-computed \a effect of \a row owns the map of its result: a row that no bake of its
+ * own can stand in for (a Material row, whose maps are its rendered source, or an Anchor Point
+ * reader, whose bake is the slice) cannot hold the effect inside its cache the way a painted row
+ * does, so the effect keeps its result in a bake of its own, the way a mask effect item does. The
+ * live graph lays that map over the row's content and the CPU composite reads it instead of the
+ * effect cache. The one question for the hash, the planner, the graph and the composite, so they
+ * cannot disagree about where such an effect's result lives.
+ *
+ * A projected row is left out: its source is read through the surface, which the effect's canvas
+ * computation cannot reproduce, so the effect stays without a live form there.
+ */
+inline bool paint_layer_effect_owns_result(const Material &ma,
+                                           const MaterialPaintLayer &row,
+                                           const MaterialPaintLayer &effect)
+{
+  return effect.role == MA_PAINT_LAYER_ROLE_EFFECT && paint_layer_effect_is_cpu_computed(effect) &&
+         (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) ||
+          paint_layer_kind_reads_anchor_point(row)) &&
+         !BKE_paint_layers_projection_applies(ma, row);
+}
+
+/**
+ * #paint_layer_effect_owns_result for a caller that holds the effect alone: the row it hangs on is
+ * looked up. False for anything that is not a content correction of a stack row.
+ */
+inline bool paint_layer_is_owned_effect(const Material &ma, const MaterialPaintLayer &effect)
+{
+  if (effect.role != MA_PAINT_LAYER_ROLE_EFFECT || !paint_layer_effect_is_cpu_computed(effect)) {
+    return false;
+  }
+  const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
+  return row != nullptr && paint_layer_effect_owns_result(ma, *row, effect);
+}
+
+/**
+ * The map the effect \a effect lays in \a channel when it owns its result and its bake stands: the
+ * result the bake holds, read like a painted map. Null when the effect owns nothing, its bake is
+ * stale or the channel has no map yet (the transitional state before the first bake). The one test
+ * for the topology hash, the generator, the CPU composite and the planner.
+ */
+inline Image *paint_layer_owned_effect_bake_map(const Material &ma,
+                                                const MaterialPaintLayer &effect,
+                                                const int channel)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM || effect.bake == nullptr ||
+      effect.bake->images[channel] == nullptr)
+  {
+    return nullptr;
+  }
+  return (paint_layer_is_owned_effect(ma, effect) && BKE_paint_layers_bake_is_valid(ma, effect)) ?
+             effect.bake->images[channel] :
+             nullptr;
+}
+
+/**
  * The same question for an effect row the preview has to answer: a #PAINT_LAYER_KIND_GPU_COMPUTED kind
  * is one the gather lays an effect pass for, so it must not queue a pass the shader has no case for.
  */
@@ -1630,6 +1685,47 @@ void paint_layer_effect_to_luminance(ImBuf &buffer);
 
 /** The kernel of \a effect over \a buffer in place, at full strength, RGB only. */
 void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &effect);
+
+/**
+ * Compute the result of \a effect, which owns it (#paint_layer_effect_owns_result), on \a row's
+ * content in \a channel for \a tile_number, ignoring the bake it keeps: the entry of the effect
+ * cache is dropped first, so the result is computed from the description as it is now (the row's
+ * mapping is no part of the cache key). The buffer is float RGBA, premultiplied, at the input's
+ * size. Null when the input cannot be rendered.
+ */
+std::shared_ptr<ImBuf> paint_layer_owned_effect_result_compute(const Material &ma,
+                                                               const MaterialPaintLayer &row,
+                                                               const MaterialPaintLayer &effect,
+                                                               int channel,
+                                                               int tile_number);
+
+/**
+ * Drop the cache's entry of the effect \a effect in \a channel: its bake holds the result now, and
+ * the entry is a copy kept for nothing while the bake stands.
+ */
+void paint_layer_owned_effect_cache_drop(const Material &ma,
+                                         const MaterialPaintLayer &effect,
+                                         int channel,
+                                         int tile_number);
+
+/**
+ * Append to \a r_images the maps the input of \a effect (which owns its result) is rendered from,
+ * over every channel the effect filters: the maps whose pixel edits make its bake stale.
+ */
+void paint_layer_owned_effect_input_images(const Material &ma,
+                                           const MaterialPaintLayer &row,
+                                           const MaterialPaintLayer &effect,
+                                           blender::Vector<Image *> &r_images);
+
+/**
+ * A hash of the description of the input \a effect (which owns its result) is computed from, over
+ * every channel it filters: the row's source and its mapping, the effects below, and the maps by
+ * identity. Never renders anything. The effect's own parameters are not part of it (the bake's hash
+ * folds them), and neither is its visibility.
+ */
+uint64_t paint_layer_owned_effect_input_hash(const Material &ma,
+                                             const MaterialPaintLayer &row,
+                                             const MaterialPaintLayer &effect);
 
 /** \} */
 

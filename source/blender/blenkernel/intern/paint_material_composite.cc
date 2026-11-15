@@ -1457,7 +1457,10 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
         continue;
       }
       correction_storage.resize(count * 4);
-      composite_decode_tile(correction.effect_color, nullptr, tile, correction_storage.data());
+      composite_decode_tile(correction.effect_color,
+                            correction.effect_colorspace_name,
+                            tile,
+                            correction_storage.data());
       for (int64_t i = 0; i < count; i++) {
         float *s = r_color + i * 4;
         const float *filtered = correction_storage.data() + i * 4;
@@ -2992,6 +2995,18 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       buffer.filter_curves = correction.filter_curves;
       /* A CPU-computed effect's result is owned by the description; the evaluation borrows it. */
       buffer.effect_color = correction.effect_color.get();
+      if (correction.effect_image != nullptr) {
+        /* An effect that owns its result keeps it in a map of its own: read at the composite's grid
+         * like any other map, then mixed in exactly as the effect cache's buffer is. A map that
+         * cannot be read fails the composite, as a correction's map does. */
+        ImBuf *effect_map = composite_image_acquire(correction.effect_image, nullptr, r_locks);
+        if (effect_map == nullptr) {
+          return false;
+        }
+        buffer.effect_color = composite_buffer_to_eval_grid(
+            effect_map, ref_width, ref_height, r_locks);
+        buffer.effect_colorspace_name = composite_buffer_colorspace_name(buffer.effect_color);
+      }
       std::copy(std::begin(correction.filter_params),
                 std::end(correction.filter_params),
                 std::begin(buffer.filter_params));
@@ -3704,6 +3719,10 @@ uint64_t BKE_paint_material_composite_stack_hash(
         /* A CPU-computed effect's result depends on the input's pixels, which the gathered images
          * watch; the hash carries the kind and the parameters. */
         hash = get_default_hash(hash, correction.effect_hash);
+        /* Whether the result comes from the effect's own map, and which one: the switch from the
+         * cache's buffer to the map moves the hash, its pixels are the gathered images'. */
+        hash = get_default_hash(
+            hash, correction.effect_image != nullptr ? correction.effect_image->id.session_uid : 0);
       }
       hash = get_default_hash(hash, correction.anchor_point_hash);
       hash = composite_mapping_hash(get_default_hash(hash, correction.mapping.enabled),
@@ -3933,6 +3952,7 @@ static void composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>
       /* A CPU-computed effect reads the row's maps through the effect cache, no Image of its own:
        * its input's maps are carried so a stroke on one reaches the cache. */
       r_images.extend(correction.effect_images);
+      r_images.append(correction.effect_image);
     }
     if (layer.is_folder) {
       /* The images a folder holds are read through it, so a stroke deep inside still reaches the

@@ -740,6 +740,12 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
    */
   Vector<Image *> effect_images;
   /**
+   * The map of a CPU-computed effect that owns its result (a bake of the effect's own), read in place
+   * of #effect_color: the same lerp towards the effect's colour, the colour taken from the map. Null
+   * while the effect's bake is stale or absent -- #effect_color is then the result.
+   */
+  Image *effect_image = nullptr;
+  /**
    * The marker of the effect row this correction was made from, for a caller that has to name it --
    * the GPU result cache keys its texture on the effect instance, and a parameter hash cannot tell
    * two effects with the same parameters on two rows apart. Nil for every other correction.
@@ -800,6 +806,8 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   const CurveMapping *filter_curves = nullptr;
   /** Borrowed from #PaintMaterialCompositeCorrection::effect_color, which keeps it alive. */
   ImBuf *effect_color = nullptr;
+  /** Colorspace name of #effect_color's own buffer when it is an effect's map, or null. */
+  const char *effect_colorspace_name = nullptr;
   ImBuf *ibuf = nullptr;
   /** Colorspace name of #ibuf's own buffer, or null for scene linear. */
   const char *colorspace_name = nullptr;

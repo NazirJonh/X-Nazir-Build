@@ -10,6 +10,10 @@
  * coverage, no regions -- so its input collection, its stroke deferral and its render live here
  * beside the effect itself (`paint_layers_mask_effect.cc`), and the planner keeps only the
  * one-line branches that route to them.
+ *
+ * The same file holds the bake side of a CPU-computed *content* effect that owns its result
+ * (#paint_layer_effect_owns_result): one map per channel the effect filters, written whole from the
+ * effect cache's compute.
  */
 
 #include <memory>
@@ -20,6 +24,7 @@
 
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_perf_debug.hh"
 
 #include "DNA_material_types.h"
 
@@ -65,8 +70,16 @@ bool mask_effect_deferred_by_stroke(const Material &ma, const MaterialPaintLayer
     return false;
   }
   /* The first bake has nothing to defer to. */
+  /* A mask effect's grey lives in Base Color; an effect that owns its result may hold any channel's
+   * map, so the first map it holds decides. */
   const MaterialPaintLayerBake *bake = layer.bake;
-  if (bake == nullptr || bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] == nullptr) {
+  bool has_map = false;
+  if (bake != nullptr) {
+    for (const Image *image : bake->images) {
+      has_map = has_map || image != nullptr;
+    }
+  }
+  if (!has_map) {
     return false;
   }
   if (!bake_row_subscription_changed(ma, layer)) {
@@ -175,5 +188,106 @@ bool bake_mask_effect_row_write(Main &bmain,
   paint_layer_mask_effect_cache_drop(ma, *owner, layer);
   return true;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Effect that owns its result
+ * \{ */
+
+int bake_effect_size_for(const Material &ma, const MaterialPaintLayer &effect)
+{
+  const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
+  if (row == nullptr) {
+    return 0;
+  }
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    int width = 0;
+    int height = 0;
+    if (paint_layer_effect_filters(ma, effect, channel) &&
+        BKE_paint_layers_row_dimensions(ma, *row, channel, width, height) && width > 0 &&
+        height > 0)
+    {
+      /* The side is the content's width, as a mask effect's grey and a row's bake take it (see
+       * #bake_mask_effect_size_for): one size number travels with a bake and its maps are square. */
+      return width;
+    }
+  }
+  return 0;
+}
+
+bool bake_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &effect)
+{
+  const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, effect);
+  if (row == nullptr) {
+    return false;
+  }
+  bke::paint_perf::ScopedTimer perf_total("effect.own_bake.total");
+  Vector<int> written_channels;
+  int size = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    const int channel = int(info.channel);
+    if (!paint_layer_effect_filters(ma, effect, channel)) {
+      continue;
+    }
+    /* One channel at a time: the compute is a whole canvas of float RGBA, and the buffer is let go
+     * before the next channel's is made, so the peak holds one buffer and one map. */
+    std::shared_ptr<ImBuf> result = paint_layer_owned_effect_result_compute(
+        ma, *row, effect, channel, PAINT_TILE_NUMBER_BASE);
+    if (result == nullptr || result->float_buffer.data == nullptr) {
+      continue;
+    }
+    const int width = result->x;
+    const int height = result->y;
+    /* The side the first channel lands at is the bake's: the maps share one size number. */
+    if (size == 0) {
+      size = width;
+    }
+    if (width <= 0 || height <= 0 || size <= 0) {
+      continue;
+    }
+    MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(effect);
+    bake->size = size;
+    Image *image = bake_service_image(
+        bmain, effect, channel, size, info.is_color, bake_channel_needs_float(effect, info), 0);
+    if (image == nullptr) {
+      continue;
+    }
+    /* The nearest sample of the result, each axis independently, written straight into the map's own
+     * buffer (see #bake_mask_effect_row_write). The effect cache's buffer is premultiplied by the
+     * input's content alpha, the composite straightens it before it mixes, and the map holds the
+     * straight colour the same way: the alpha is not part of the result. */
+    const float *src = result->float_buffer.data;
+    bake_write_image_rows(
+        *image, info.is_color, nullptr, 0,
+        [&](const int y, const int map_width, float *r_row) {
+          const int src_y = min_ii(int(int64_t(y) * height / size), height - 1);
+          const float *src_row = src + int64_t(src_y) * width * 4;
+          for (const int x : IndexRange(map_width)) {
+            const int src_x = min_ii(int(int64_t(x) * width / size), width - 1);
+            const float *texel = src_row + int64_t(src_x) * 4;
+            const float inv = texel[3] > 0.0f ? 1.0f / texel[3] : 1.0f;
+            r_row[x * 4 + 0] = texel[0] * inv;
+            r_row[x * 4 + 1] = texel[1] * inv;
+            r_row[x * 4 + 2] = texel[2] * inv;
+            r_row[x * 4 + 3] = 1.0f;
+          }
+        });
+    written_channels.append(channel);
+    result.reset();
+    /* The bake holds the result now: the cache entry is a copy kept for nothing while it stands. */
+    paint_layer_owned_effect_cache_drop(ma, effect, channel, PAINT_TILE_NUMBER_BASE);
+  }
+  if (written_channels.is_empty()) {
+    return false;
+  }
+  bake_stale_channel_maps_release(bmain, effect, written_channels);
+  BKE_paint_layers_bake_finalize(ma, effect);
+  perf_total.note("kind=%d size=%d channels=%d",
+                  int(effect.kind_subtype),
+                  size,
+                  int(written_channels.size()));
+  return true;
+}
+
+/** \} */
 
 }  // namespace blender

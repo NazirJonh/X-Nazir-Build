@@ -650,6 +650,13 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     }
     for (const int channel : wired_channels) {
       hash = topology_hash_mix(hash, paint_layer_effect_filters(ma, effect, channel) ? 1 : 0);
+      if (paint_layer_effect_owns_result(ma, layer, effect)) {
+        /* The effect builds as a map read only once its bake stands in the channel: the presence of
+         * the map is topology, its pixels are not (those follow the bake's own freshness) and
+         * neither is the effect's visibility, which is the opacity input's value. */
+        hash = topology_hash_mix(
+            hash, paint_layer_owned_effect_bake_map(ma, effect, channel) != nullptr ? 0x4 : 0x5);
+      }
       if (paint_layer_effect_lays(ma, effect, channel)) {
         /* A reader has no records either: what it lays is the slice it names. */
         const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);

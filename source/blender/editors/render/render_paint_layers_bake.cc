@@ -1099,7 +1099,12 @@ static double paint_layers_bake_hold_tick(uintptr_t /*uuid*/, void * /*user_data
     return -1.0;
   }
   const double now = BLI_time_now_seconds();
-  BKE_paint_layers_bake_hold_due(*G_MAIN, now);
+  if (BKE_paint_layers_bake_hold_due(*G_MAIN, now)) {
+    /* The hold only tags the depsgraph. A timer is no event, so without a notifier nothing redraws
+     * and the regeneration waits for the user's next input, which is why a landed bake showed up
+     * only after toggling a row's visibility. */
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, nullptr);
+  }
   const double next = BKE_paint_layers_bake_hold_next_deadline();
   return next < 0.0 ? -1.0 : std::max(next - now, 0.0);
 }

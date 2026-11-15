@@ -1274,20 +1274,33 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
        * so it gets no inputs: its parameters and its opacity would be sockets nothing consumes,
        * dead weight in the interface and in the topology the hash is taken from. Its parameters
        * reach the bake and the effect cache through the row's system properties instead. */
-      if (paint_layer_effect_is_cpu_computed(effect)) {
+      const bool cpu_computed = paint_layer_effect_is_cpu_computed(effect);
+      /* One that owns its result (a bake of its own, on a row no bake can hold it for) is laid as
+       * that map: only its opacity is an input, the toggle and the slider of a value. */
+      const bool owns_result = cpu_computed && paint_layer_effect_owns_result(ma_, layer, effect);
+      if (cpu_computed && !owns_result) {
         continue;
       }
-      filter_params_create(effect, false);
       char effect_label[224];
       effect_input_label(layer_name, effect, nullptr, effect_label, sizeof(effect_label));
-      this->mapping_inputs_create(group, effect, effect_label);
-      const bool effect_generates = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES);
-      if (effect_generates) {
-        this->generator_row_inputs_create(group, effect, effect_label);
+      bool effect_generates = false;
+      if (!owns_result) {
+        filter_params_create(effect, false);
+        this->mapping_inputs_create(group, effect, effect_label);
+        effect_generates = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES);
+        if (effect_generates) {
+          this->generator_row_inputs_create(group, effect, effect_label);
+        }
       }
       for (const int channel : wired_channels_) {
         const bool filters = paint_layer_effect_filters(ma_, effect, channel);
         if (!filters && !paint_layer_effect_lays(ma_, effect, channel)) {
+          continue;
+        }
+        if (owns_result && paint_layer_owned_effect_bake_map(ma_, effect, channel) == nullptr) {
+          /* No result in this channel yet: the effect lays nothing there, so it gets no input. The
+           * map appearing is topology (#paint_layers_layer_topology_hash), which rebuilds the group
+           * with the input. */
           continue;
         }
         const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(

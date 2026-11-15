@@ -17,17 +17,22 @@
 #include <array>
 #include <string>
 
+#include "MEM_guardedalloc.h"
+
 #include "BKE_image.hh"
+#include "BKE_image_partial_update.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_node_tree_interface.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_wm_runtime.hh"
 
 #include "BLI_uuid.h"
 
 #include "NOD_socket.hh"
 
 #include "DNA_node_tree_interface_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "../paint_layers_generate_intern.hh"
 #include "../paint_layers_intern.hh"
@@ -1744,6 +1749,288 @@ TEST_F(PaintLayersMaterialMaskTest, an_edit_of_the_source_concerns_the_material_
                                       });
   ASSERT_EQ(rows.size(), 1);
   EXPECT_EQ(rows[0], item);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name A CPU-computed effect on a Material row
+ *
+ * A Material row's maps are its rendered source, so no bake of the row can hold a Blur: the effect
+ * keeps its result in a bake of its own (#paint_layer_effect_owns_result), which the live graph
+ * lays over the row's content and the CPU composite reads instead of the effect cache.
+ * \{ */
+
+class PaintLayersOwnedEffectTest : public PaintLayersMaterialBakeTest {
+ public:
+  void SetUp() override
+  {
+    PaintLayersMaterialBakeTest::SetUp();
+    /* A dummy window manager, the way the bake tests make one: the bake path notifies image
+     * editors by walking bmain->wm, which a bare test Main has none of. */
+    wmWindowManager *wm = BKE_id_new<wmWindowManager>(bmain, "WMdummy");
+    wm->runtime = MEM_new<bke::WindowManagerRuntime>(__func__);
+    BKE_paint_layers_effect_cache_free_all();
+  }
+
+  void TearDown() override
+  {
+    BKE_paint_layers_effect_cache_free_all();
+    BKE_paint_layers_bake_stroke_active_set(false);
+    PaintLayersMaterialBakeTest::TearDown();
+  }
+
+  /** A Material row whose Base Color and Roughness maps have landed, with a box Blur on it. */
+  MaterialPaintLayer *add_row_with_blur(MaterialPaintLayer **r_blur)
+  {
+    MaterialPaintLayer *row = add_material_row(*source);
+    EXPECT_NE(row, nullptr);
+    uint32_t hash[2], source_hash[2];
+    start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
+    EXPECT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
+    MaterialPaintLayer *blur = BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_BLUR);
+    EXPECT_NE(blur, nullptr);
+    EXPECT_TRUE(
+        paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_SHAPE, PAINT_LAYER_BLUR_BOX));
+    EXPECT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 1));
+    BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+    *r_blur = blur;
+    return row;
+  }
+
+  /** The Image Textures reading \a image in \a tree and the groups under it. */
+  static int image_reader_count(const bNodeTree &tree, const Image *image)
+  {
+    int count = 0;
+    for (const bNode &node : tree.nodes) {
+      if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id == &image->id) {
+        count++;
+      }
+      if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT) {
+        count += image_reader_count(*reinterpret_cast<const bNodeTree *>(node.id), image);
+      }
+    }
+    return count;
+  }
+
+  static void hash_get(const Material &material, const MaterialPaintLayer &layer, uint32_t r_hash[2])
+  {
+    BKE_paint_layers_bake_hash(material, layer, r_hash);
+  }
+
+  /**
+   * Run the worker job the way the editor does: create on the main thread, compute, commit. False
+   * when no job was queued or the commit wrote nothing. \a between runs after the compute, where an
+   * edit that lands while the worker ran belongs.
+   */
+  bool run_bake_job(const FunctionRef<void()> between = {})
+  {
+    PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+    if (job == nullptr) {
+      return false;
+    }
+    BKE_paint_layers_bake_job_compute(*job, {}, {});
+    if (between) {
+      between();
+    }
+    const bool landed = BKE_paint_layers_bake_job_commit(*job);
+    BKE_paint_layers_bake_job_free(*job);
+    return landed;
+  }
+};
+
+TEST_F(PaintLayersOwnedEffectTest, only_an_effect_on_a_row_without_a_bake_of_its_own_owns_its_result)
+{
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+  EXPECT_TRUE(paint_layer_effect_owns_result(*ma, *row, *blur));
+  EXPECT_TRUE(paint_layer_is_owned_effect(*ma, *blur));
+
+  /* A painted row holds the effect inside its own content bake: the effect owns nothing there. */
+  PaintLayerAddParams params;
+  MaterialPaintLayer *painted = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(painted, nullptr);
+  MaterialPaintLayer *painted_blur = BKE_paint_layers_filter_add(
+      *ma, painted, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(painted_blur, nullptr);
+  EXPECT_FALSE(paint_layer_effect_owns_result(*ma, *painted, *painted_blur));
+  EXPECT_FALSE(paint_layer_is_owned_effect(*ma, *painted_blur));
+}
+
+TEST_F(PaintLayersOwnedEffectTest, the_hash_follows_the_parameters_and_not_the_visibility)
+{
+  MaterialPaintLayer *blur = nullptr;
+  add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+  uint32_t before[2], after[2];
+  hash_get(*ma, *blur, before);
+
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, blur, false));
+  hash_get(*ma, *blur, after);
+  EXPECT_EQ(before[0], after[0]);
+  EXPECT_EQ(before[1], after[1]) << "switching the effect off moves no pixel of its result";
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, blur, true));
+
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, blur, 0.4f));
+  hash_get(*ma, *blur, after);
+  EXPECT_TRUE(before[0] == after[0] && before[1] == after[1])
+      << "the opacity is laid live over the map";
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, blur, 1.0f));
+
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 3));
+  hash_get(*ma, *blur, after);
+  EXPECT_FALSE(before[0] == after[0] && before[1] == after[1])
+      << "a wider radius is another result";
+}
+
+TEST_F(PaintLayersOwnedEffectTest, the_planner_bakes_the_result_and_a_toggle_asks_for_nothing)
+{
+  MaterialPaintLayer *blur = nullptr;
+  add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  /* The synchronous plan computes nothing: the whole-canvas compute is the worker job's. */
+  bool changed = false;
+  BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed);
+  EXPECT_FALSE(changed);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *blur));
+  EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma));
+
+  ASSERT_TRUE(run_bake_job());
+  ASSERT_NE(blur->bake, nullptr);
+  EXPECT_NE(blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr)
+      << "the result is a map of the effect's own";
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 0)
+      << "the map holds the result, the cache keeps no copy";
+  EXPECT_FALSE(run_bake_job()) << "nothing is left due";
+
+  /* The visibility is the graph's opacity input: the map stays current and no job is queued. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, blur, false));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  EXPECT_FALSE(run_bake_job());
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, blur, true));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  EXPECT_FALSE(run_bake_job());
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 0) << "the toggle computed nothing";
+
+  /* A parameter is another result: the effect is due and the job bakes it again. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 3));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma));
+  EXPECT_TRUE(run_bake_job());
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_result_that_went_stale_while_the_worker_ran_is_not_written)
+{
+  MaterialPaintLayer *blur = nullptr;
+  add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+
+  /* The radius changes after the worker computed the old one: its pixels must not be stamped as the
+   * current result. */
+  EXPECT_FALSE(run_bake_job([&]() {
+    ASSERT_TRUE(paint_layer_kind_param_int_set(*blur, PAINT_LAYER_BLUR_RADIUS, 3));
+  }));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma)) << "the next plan queues it again";
+
+  EXPECT_TRUE(run_bake_job());
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_cancelled_job_writes_no_result)
+{
+  MaterialPaintLayer *blur = nullptr;
+  add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job, {}, []() { return true; });
+  EXPECT_FALSE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+}
+
+TEST_F(PaintLayersOwnedEffectTest, a_new_render_of_the_source_stales_the_result)
+{
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(run_bake_job());
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  /* A pixel edit of the map the effect reads reaches it through its subscription. */
+  Image *source_map = row->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(source_map, nullptr);
+  BKE_image_partial_update_mark_full_update(source_map);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  EXPECT_TRUE(run_bake_job());
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+}
+
+TEST_F(PaintLayersOwnedEffectTest, the_composite_reads_the_map_the_planner_wrote)
+{
+  MaterialPaintLayer *blur = nullptr;
+  add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+
+  /* Before the bake the composite computes the result into the cache. */
+  {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    ASSERT_TRUE(
+        BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    ASSERT_EQ(layers.size(), 1);
+    ASSERT_EQ(layers[0].content_corrections.size(), 1);
+    EXPECT_NE(layers[0].content_corrections[0].effect_color, nullptr);
+    EXPECT_EQ(layers[0].content_corrections[0].effect_image, nullptr);
+  }
+
+  ASSERT_TRUE(run_bake_job());
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  /* After it the composite lays the map: no buffer is computed again. */
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  ASSERT_EQ(layers[0].content_corrections.size(), 1);
+  const PaintMaterialCompositeCorrection &laid = layers[0].content_corrections[0];
+  EXPECT_EQ(laid.effect_color, nullptr);
+  EXPECT_EQ(laid.effect_image, blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  EXPECT_EQ(paint_layer_effect_cache_entry_count(), 0);
+}
+
+TEST_F(PaintLayersOwnedEffectTest, the_graph_lays_the_map_and_a_toggle_is_a_value)
+{
+  MaterialPaintLayer *blur = nullptr;
+  add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+
+  /* Before the bake the graph has nothing to lay for the effect. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+
+  ASSERT_TRUE(run_bake_job());
+  ASSERT_NE(blur->bake, nullptr);
+  Image *result = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(result, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, result), 1)
+      << "the effect is an Image Texture over the row's content";
+
+  /* Visibility is the opacity input's value: the shape the group has is the right one. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, blur, false));
+  EXPECT_TRUE(BKE_paint_layers_values_sync(*ma));
+  EXPECT_TRUE(paint_layers::paint_layers_maps_sync(*ma, *bmain));
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, result), 1);
 }
 
 /** \} */

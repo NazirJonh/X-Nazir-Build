@@ -134,6 +134,27 @@ void bake_write_image_rows(
  */
 bool bake_mask_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &layer, int size);
 
+/**
+ * The side the result of \a effect (which owns it, #paint_layer_effect_owns_result) lays on: its
+ * row's canvas. Zero when no map of the row has dimensions yet.
+ */
+int bake_effect_size_for(const Material &ma, const MaterialPaintLayer &effect);
+
+/**
+ * Compute the result of the effect \a effect that owns it and write it into the effect's own bake:
+ * one map per channel the effect filters, written whole, then the bake's hash and subscription. The
+ * effect cache's copies are dropped once their map holds them. True when any map was written.
+ */
+bool bake_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &effect);
+
+/**
+ * Whether the effect \a effect that owns its result has none current and nothing keeps it from
+ * getting one: its bake is not valid, it is not switched off or hidden and its row has a canvas.
+ * A stroke that defers the compute does not clear it, so the stale signal stays up until the plan
+ * after the stroke has had it computed.
+ */
+bool bake_owned_effect_pending(const Material &ma, const MaterialPaintLayer &effect);
+
 
 /* -------------------------------------------------------------------- */
 /** \name Runtime

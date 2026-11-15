@@ -1711,8 +1711,52 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
       /* A CPU-computed effect reads its result outside the graph (a Blur's neighbourhood, a Noise's
        * hash), which no chain of nodes expresses: the correction is left out of the live tree, and
        * the row is baked for it (the planner forces a row that carries one). Until the bake lands
-       * the row shows without the effect, the way an unbaked heavy row shows without its weight. */
-      return false;
+       * the row shows without the effect, the way an unbaked heavy row shows without its weight.
+       *
+       * A row no bake can hold the effect for (a Material row) keeps the effect's result in a map
+       * of the effect's own instead: laid here as `Mix(content, map, opacity)`, the CPU composite's
+       * lerp. The map is read at the canvas UV with no mapping of its own -- the result is already
+       * after the row's mapping -- and the content alpha and the coverage stay as the row has them.
+       * Visibility is the opacity input's value, so a toggle moves no node. */
+      Image *result = paint_layer_is_owned_effect(ma_, effect) ?
+                          paint_layer_owned_effect_bake_map(ma_, effect, channel) :
+                          nullptr;
+      Map<int, bNodeTreeInterfaceSocket *> *result_inputs = effect_opacity_inputs_.lookup_ptr(
+          &effect);
+      bNodeTreeInterfaceSocket **result_iface = (result_inputs != nullptr) ?
+                                                    result_inputs->lookup_ptr(channel) :
+                                                    nullptr;
+      bNodeSocket *result_opacity = (result_iface != nullptr) ?
+                                        group_input_socket(group, **result_iface) :
+                                        nullptr;
+      if (result == nullptr || result_opacity == nullptr || content.socket == nullptr ||
+          !paint_layer_effect_filters(ma_, effect, channel))
+      {
+        return false;
+      }
+      bNode *result_map = this->image_map_node_add(tree, *result);
+      if (result_map == nullptr) {
+        return false;
+      }
+      map_node_key_set(*result_map, effect, channel);
+      grid_.place_extra(*result_map);
+      Vector<bNode *> result_nodes;
+      result_nodes.append(result_map);
+      const MapRead result_read = this->map_read_apply(
+          tree, effect, *result_map, result_nodes, channel);
+      if (result_read.color.socket == nullptr ||
+          !filter_result_mix_add(tree,
+                                 grid_,
+                                 result_nodes,
+                                 content,
+                                 result_read.color,
+                                 {group.group_input, result_opacity},
+                                 effect.name))
+      {
+        this->nodes_discard(tree, result_nodes);
+        return false;
+      }
+      return true;
     }
     /* A filter lays no coverage and no content alpha: those stay as the row has them. */
     return this->filter_lay(tree, group, effect, channel, content);

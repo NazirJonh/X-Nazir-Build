@@ -427,13 +427,16 @@ int BKE_paint_layers_bake_mode_get(const MaterialPaintLayer &layer)
 /**
  * Whether \a layer is a row \a ma keeps a bake for: a row of its stack, a content or mask
  * correction that reads a material, whose maps are rendered from the source like a Material row's,
- * or a mask effect item, whose grey is a cache of its own keyed under the item's marker.
+ * a mask effect item, whose grey is a cache of its own keyed under the item's marker, or a
+ * CPU-computed effect that owns its result (#paint_layer_effect_owns_result), whose bake is the
+ * effect's result alone.
  */
 bool bake_row_owned(Material &ma, const MaterialPaintLayer &layer)
 {
   return BKE_paint_layers_owner_list(ma, layer) != nullptr ||
          (paint_layer_mask_item_bakes_effect(layer) &&
           BKE_paint_layers_mask_item_owner(ma, layer) != nullptr) ||
+         paint_layer_is_owned_effect(ma, layer) ||
          ((paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) ||
            paint_layer_kind_reads_anchor_point(layer)) &&
           (BKE_paint_layers_correction_owner(ma, layer) != nullptr ||
@@ -786,6 +789,15 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
     }
     return;
   }
+  if (paint_layer_is_owned_effect(ma, layer)) {
+    /* The result the effect bakes reads the row's content below it: the maps that input is rendered
+     * from are the effect's sources. Its own bake maps are not -- the planner's write would read as
+     * an edit of its source and start the compute again. */
+    if (const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, layer)) {
+      paint_layer_owned_effect_input_images(ma, *row, layer, r_images);
+    }
+    return;
+  }
   if (paint_layer_kind_reads_anchor_point(layer)) {
     Vector<bUUID> visited;
     bake_collect_slice_images(ma, layer, r_images, visited);
@@ -1117,6 +1129,19 @@ static uint64_t bake_hash_layer(uint64_t h,
    * of them may move the hash of what was rendered; a child of another row's cache keeps its mask
    * inside, being part of the picture that cache holds (#paint_layer_bake_scope). */
   const PaintLayerBakeScope scope = paint_layer_bake_scope(layer, is_child);
+  /* An effect that owns its result bakes that result alone: the effect's opacity (its own and its
+   * per-channel one) and its visibility are the graph's opacity input over the map, so none of them
+   * may move the hash -- switching the effect off and on again must find the map still current. */
+  const MaterialPaintLayer *owned_row = nullptr;
+  if (!is_child && layer.role == MA_PAINT_LAYER_ROLE_EFFECT &&
+      paint_layer_effect_is_cpu_computed(layer))
+  {
+    owned_row = BKE_paint_layers_correction_owner(ma, layer);
+    if (owned_row != nullptr && !paint_layer_effect_owns_result(ma, *owned_row, layer)) {
+      owned_row = nullptr;
+    }
+  }
+  const bool owns_result = owned_row != nullptr;
   /* Bumped when what a bake stores changes meaning, so older caches invalidate once. */
   h = bake_hash_mix(h, uint64_t(0x9e3779b97f4a7c15ull));
   h = bake_hash_mix(h, uint8_t(layer.source));
@@ -1167,7 +1192,8 @@ static uint64_t bake_hash_layer(uint64_t h,
    * opacity -- the reader lays that live over the map. A child is rendered inside the parent's
    * picture, so the parent's opacity is baked with it. */
   const bool opacity_is_live_over_map = scope == PaintLayerBakeScope::ContentOnly ||
-                                        (paint_layer_mask_item_bakes_effect(layer) && !is_child);
+                                        (paint_layer_mask_item_bakes_effect(layer) && !is_child) ||
+                                        owns_result;
   if (!opacity_is_live_over_map) {
     h = bake_hash_float(h, layer.opacity);
   }
@@ -1246,7 +1272,7 @@ static uint64_t bake_hash_layer(uint64_t h,
     if (is_child) {
       h = bake_hash_mix(h, uint8_t(settings.blend));
     }
-    if (scope != PaintLayerBakeScope::ContentOnly) {
+    if (scope != PaintLayerBakeScope::ContentOnly && !owns_result) {
       h = bake_hash_float(h, settings.opacity);
     }
     /* The Height record's own mode and scale are baked into the row's Height result the same way,
@@ -1306,6 +1332,11 @@ static uint64_t bake_hash_layer(uint64_t h,
     if (const uint64_t input_hash = bake_mask_effect_input_hash(ma, layer)) {
       h = bake_hash_mix(h, input_hash);
     }
+  }
+  if (owns_result) {
+    /* The effect is computed from the row's content below it: the description of that input folds
+     * in, beside the effect's own parameters hashed below. The pixels are the subscription's. */
+    h = bake_hash_mix(h, paint_layer_owned_effect_input_hash(ma, *owned_row, layer));
   }
   /* A kind's parameters (a filter's, a coverage operator's) change the pixels. A ramp filter keeps
    * its stops outside the properties, in its own payload; a curves filter its Bézier points. */
@@ -2580,6 +2611,11 @@ bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer
      * it to a job that never picks it up, so after its first bake an edit would not bake it again. */
     return false;
   }
+  if (paint_layer_is_owned_effect(ma, layer)) {
+    /* An effect's own result is a whole-canvas compute (a 4K Blur): it leaves the main thread. The
+     * worker job computes it from the localized copy and the commit writes the map. */
+    return true;
+  }
   if (BKE_paint_layers_generator_subtree_is_bakeable(layer) &&
       paint_layers_bake_subtree_needs_surface(layer))
   {
@@ -2610,6 +2646,11 @@ bool BKE_paint_layers_bake_row_is_deferred(const Material &ma, const MaterialPai
      * mask live -- fresh, without the effect -- instead of recomputing the whole-canvas grey at
      * every dab. Which marker is active does not decide it: the subscription only reports the maps
      * the grey reads, so a stroke into the row's colour never holds it. */
+    return mask_effect_deferred_by_stroke(ma, layer);
+  }
+  if (paint_layer_is_owned_effect(ma, layer)) {
+    /* The same policy for the result an effect keeps on a row that cannot hold it: a stroke into a
+     * map the effect reads must not recompute the whole canvas at every dab. */
     return mask_effect_deferred_by_stroke(ma, layer);
   }
   /* The active row and its ancestors stay live: the user is editing inside them, and the bake
@@ -2644,6 +2685,16 @@ static bool bake_hidden_find(const ListBaseT<MaterialPaintLayer> &list,
     }
   }
   return false;
+}
+
+bool bake_owned_effect_pending(const Material &ma, const MaterialPaintLayer &effect)
+{
+  /* The size test keeps an effect whose row has no map yet from holding the stale signal up for a
+   * result nobody can compute. */
+  return paint_layer_is_owned_effect(ma, effect) &&
+         BKE_paint_layers_bake_mode_get(effect) != MA_PAINT_LAYER_BAKE_NEVER &&
+         !BKE_paint_layers_bake_is_valid(ma, effect) && !bake_row_is_hidden(ma, effect) &&
+         bake_size_for(ma, effect) > 0;
 }
 
 /** Whether \a layer, or a folder it sits in, is switched off: a hidden row is never baked. */
@@ -2848,6 +2899,9 @@ int bake_size_for(const Material &ma, const MaterialPaintLayer &row)
   else if (paint_layer_mask_item_bakes_effect(row)) {
     size = bake_mask_effect_size_for(ma, row);
   }
+  else if (paint_layer_is_owned_effect(ma, row)) {
+    size = bake_effect_size_for(ma, row);
+  }
   else if (row.bake != nullptr) {
     size = row.bake->size;
   }
@@ -3045,6 +3099,11 @@ bool bake_row_is_candidate(const Material &ma,
      * like a reader's, so the mode is its only gate (the due check asks the rest). */
     return BKE_paint_layers_bake_mode_get(layer) != MA_PAINT_LAYER_BAKE_NEVER;
   }
+  if (paint_layer_is_owned_effect(ma, layer)) {
+    /* An effect that owns its result is baked like a mask effect: the cache is what the live graph
+     * reads, so the mode is its only gate (the due check asks the rest). */
+    return BKE_paint_layers_bake_mode_get(layer) != MA_PAINT_LAYER_BAKE_NEVER;
+  }
   if (layer.role != MA_PAINT_LAYER_ROLE_LAYER || paint_layer_row_is_adjustment(layer)) {
     return false;
   }
@@ -3090,6 +3149,26 @@ bool bake_row_is_due(const Material &ma,
       return false;
     }
     if (layer.bake != nullptr && BKE_paint_layers_bake_is_valid(ma, layer)) {
+      return false;
+    }
+    return !BKE_paint_layers_bake_row_is_deferred(ma, layer) && !bake_row_is_hidden(ma, layer);
+  }
+  if (layer.role == MA_PAINT_LAYER_ROLE_EFFECT && paint_layer_effect_is_cpu_computed(layer)) {
+    if (!paint_layer_is_owned_effect(ma, layer)) {
+      /* The row stopped being one the effect keeps a result for (a projection was switched on): the
+       * result it baked is not read by anything, so the maps go. */
+      r_release = bake_row_has_maps(layer) ? BakeRowRelease::FreeStructure : BakeRowRelease::Keep;
+      return false;
+    }
+    /* An effect that owns its result is due like a mask effect: its result has no live form the graph
+     * could lay, so the mode is the only standing gate. The visibility is not part of the hash: a
+     * hidden effect keeps its bake (Keep), and showing it again finds the map still current. */
+    if (BKE_paint_layers_bake_mode_get(layer) == MA_PAINT_LAYER_BAKE_NEVER) {
+      r_release = bake_row_has_maps(layer) ? BakeRowRelease::ReleaseMaps : BakeRowRelease::Keep;
+      return false;
+    }
+    const bool valid = layer.bake != nullptr && BKE_paint_layers_bake_is_valid(ma, layer);
+    if (valid) {
       return false;
     }
     return !BKE_paint_layers_bake_row_is_deferred(ma, layer) && !bake_row_is_hidden(ma, layer);
@@ -3499,6 +3578,23 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
                                    rows.append(&effect);
                                  }
                                }
+                               /* A CPU-computed effect that owns its result is a row of the plan,
+                                * and so is one that holds a bake it no longer has a reason for (the
+                                * due check releases it). Appended last-first, because the plan walks
+                                * the rows backwards: the lower effect bakes before the one above it
+                                * reads it as its input, and is not computed twice. */
+                               Vector<MaterialPaintLayer *> effect_rows;
+                               for (MaterialPaintLayer &effect : layer.effects) {
+                                 if (paint_layer_effect_is_cpu_computed(effect) &&
+                                     (effect.bake != nullptr ||
+                                      paint_layer_effect_owns_result(ma, layer, effect)))
+                                 {
+                                   effect_rows.append(&effect);
+                                 }
+                               }
+                               for (int i = int(effect_rows.size()) - 1; i >= 0; i--) {
+                                 rows.append(effect_rows[i]);
+                               }
                                for (MaterialPaintLayer &item : layer.mask_stack) {
                                  if (paint_layer_kind_reads_anchor_point(item) ||
                                      paint_layer_mask_item_bakes_effect(item))
@@ -3525,7 +3621,19 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
              layer.name,
              int(heavy),
              heavy ? "left to the worker job" : "baked now on the main thread");
-      if (heavy) {
+      /* A background session has no window to own a worker job, so nothing would ever bake the
+       * effect: it computes here, as it did before it left the main thread. */
+      const bool owned_effect_inline = G.background && paint_layer_is_owned_effect(ma, layer);
+      if (heavy && !owned_effect_inline) {
+        continue;
+      }
+      if (paint_layer_is_owned_effect(ma, layer)) {
+        /* The effect's result is one map per channel it filters, written whole from the effect
+         * cache's compute: a stroke defers it (#BKE_paint_layers_bake_row_is_deferred), so no region
+         * path is wanted here. */
+        if (bake_effect_row_write(bmain, ma, layer)) {
+          changed = true;
+        }
         continue;
       }
       int size = bake_size_for(ma, layer);
@@ -3726,6 +3834,11 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
           {
             pending = true;
           }
+          /* An effect that owns its result and waits for the stroke to end is pending like a
+           * deferred row: the signal stays up until the plan after the stroke bakes it. */
+          for (const MaterialPaintLayer &effect : layer.effects) {
+            pending = pending || bake_owned_effect_pending(ma, effect);
+          }
           return !pending;
         });
   }
@@ -3758,6 +3871,13 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma,
         BakeRowRelease release = BakeRowRelease::Keep;
         pending = bake_row_is_due(ma, layer, view, release) &&
                   BKE_paint_layers_bake_is_heavy(ma, layer);
+        for (const MaterialPaintLayer &effect : layer.effects) {
+          /* The worker job computes an effect's own result like a heavy row's render. An effect
+           * with no canvas size yet is no work for it (the job skips it too). */
+          pending = pending || (paint_layer_is_owned_effect(ma, effect) &&
+                                bake_row_is_due(ma, effect, view, release) &&
+                                bake_size_for(ma, effect) > 0);
+        }
         return !pending;
       });
   return pending;

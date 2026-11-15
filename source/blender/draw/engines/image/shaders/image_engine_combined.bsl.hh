@@ -2373,7 +2373,7 @@ float3 blur_directional(sampler2D tx,
                         const int2 texel,
                         const int r,
                         const float angle_deg,
-                        const float mix,
+                        const float amount,
                         const int2 size)
 {
   const float angle_rad = radians(angle_deg);
@@ -2385,7 +2385,8 @@ float3 blur_directional(sampler2D tx,
     sum += texelFetch(tx, at, 0).xyz;
   }
   const float3 averaged = sum / float(2 * r + 1);
-  return texelFetch(tx, texel, 0).xyz + (averaged - texelFetch(tx, texel, 0).xyz) * clamp(mix, 0.0f, 1.0f);
+  const float3 center = texelFetch(tx, texel, 0).xyz;
+  return center + (averaged - center) * clamp(amount, 0.0f, 1.0f);
 }
 
 struct EffectResources {

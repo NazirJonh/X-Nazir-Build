@@ -1022,6 +1022,10 @@ bool paint_layers_maps_sync(Material &ma, Main &bmain)
         /* A mask effect item shows the grey its bake holds and owns no map of its own. */
         wanted = paint_layer_mask_effect_bake_map(ma, *layer);
       }
+      if (wanted == nullptr && layer->role == MA_PAINT_LAYER_ROLE_EFFECT) {
+        /* An effect that owns its result shows the map its bake holds in this channel. */
+        wanted = paint_layer_owned_effect_bake_map(ma, *layer, channel);
+      }
       if (wanted == nullptr) {
         /* The map was removed: that is a different node, and the topology hash should have rebuilt
          * the group instead of leaving this sync to fail. */

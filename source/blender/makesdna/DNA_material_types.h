@@ -1088,6 +1088,18 @@ enum eMaterialPaintLayerFilter : int16_t {
    * A transform effect like #MA_PAINT_LAYER_FILTER_TRANSFORM.
    */
   MA_PAINT_LAYER_FILTER_MIRROR = 29,
+  /**
+   * Remap each channel through a smoothstep centered on a position (a Histogram Scan): a soft
+   * threshold the contrast opens into a ramp, the one that grows and shrinks a mask by eating the
+   * dark side away. Per channel, like #MA_PAINT_LAYER_FILTER_THRESHOLD.
+   */
+  MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN = 30,
+  /**
+   * Shift each channel by a position and wrap the overrange back through zero (a Histogram
+   * Shift): the whole tonal range rolled by one amount, `fract(x + position)`. Per channel, like
+   * #MA_PAINT_LAYER_FILTER_THRESHOLD.
+   */
+  MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT = 31,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

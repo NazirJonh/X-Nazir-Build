@@ -573,6 +573,8 @@ struct StackEffectMenuKind {
   int kind = 0;
   /** Listed under the "New Effects" submenu instead of the main Add Effect list. */
   bool is_new = false;
+  /** Listed under the "Filter 2" submenu; never together with #is_new. */
+  bool is_filter2 = false;
   /** Listed under the "Generate Patterns" submenu; never together with #is_new. */
   bool is_pattern = false;
   /** Listed under the "Correction" submenu: the filters of the original list. */

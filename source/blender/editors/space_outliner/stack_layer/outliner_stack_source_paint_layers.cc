@@ -106,40 +106,11 @@
 
 #include "../outliner_intern.hh"
 #include "outliner_stack_layers_intern.hh"
+#include "outliner_stack_paint_filter_table.hh"
 #include "outliner_stack_source.hh"
 #include "outliner_stack_source_paint_layers_intern.hh"
 
 namespace blender::ed::outliner {
-
-/**
- * Material Symbols codepoints the paint stack draws its icons from.
- *
- * The codepoints come from `scripts/startup/bl_ui/glyph_library/data/material_symbols.json`; the
- * font that renders them ships with Blender, so a codepoint is stable for the bundled library
- * version. Each icon keeps its built-in #ICON_* as the fallback for headless builds and as the
- * name a user finds in the rest of Blender.
- *
- * #BRUSH, #FILL and #GRADIENT are the three `space_outliner.py` repeats for its header buttons.
- * `outliner_stack_source_paint_layers_test.cc` pins their values, so a change here fails the test
- * and sends the reader to the Python comment that names the test.
- */
-namespace paint_glyph {
-const uint32_t BRUSH = 0xE3AE;          /* brush */
-const uint32_t FILL = 0xE997;           /* colors */
-const uint32_t GRADIENT = 0xE3E9;       /* gradient */
-constexpr uint32_t TEXTURE = 0xE421;    /* texture */
-constexpr uint32_t INVERT = 0xE891;     /* invert_colors */
-constexpr uint32_t LEVELS = 0xE429;     /* tune */
-constexpr uint32_t BRIGHTNESS = 0xE3F6; /* exposure */
-/* Hue/Saturation/Value's own lens, not `colors`: that one is the Fill layer's. */
-constexpr uint32_t HSL = 0xE40A;        /* color_lens */
-constexpr uint32_t ANCHOR = 0xF1CD;     /* anchor */
-constexpr uint32_t CELL_TOWER = 0xEBBA; /* cell_tower: the Anchor Point reader */
-constexpr uint32_t COLORIZE = 0xE3B8;   /* colorize */
-constexpr uint32_t SELECT_ALL = 0xE162; /* select_all */
-/* The procedural patterns (Noise, Voronoi, ...), kept apart from the Gradient's own glyph. */
-constexpr uint32_t PATTERN = 0xE3A5;    /* blur_on */
-}  // namespace paint_glyph
 
 /* -------------------------------------------------------------------- */
 /** \name Description helpers
@@ -368,352 +339,10 @@ void paint_row_mode_target_set(StackRow &row,
   row.mode_inherited = settings.blend < 0 && channel != PAINT_MATERIAL_CHANNEL_NORMAL;
 }
 
-
 /** Whether \a layer is an adjustment: a filter that is a row of the stack. */
 static bool paint_layer_row_is_adjustment_view(const MaterialPaintLayer &layer)
 {
   return layer.source == MA_PAINT_LAYER_SOURCE_FILTER && layer.role == MA_PAINT_LAYER_ROLE_LAYER;
-}
-
-/** The pair a paint row shows for its kind: the built-in icon and its Material Symbols glyph. */
-struct PaintKindLook {
-  int icon;
-  /** Material Symbols codepoint, or 0 when the kind has no glyph and shows #icon alone. */
-  uint32_t glyph;
-};
-
-/**
- * The role a row of one source plays. Only a Paint row looks different in the two -- the mask's
- * Add entry names it by the Grease Pencil icon -- but every row asks through this one function so
- * a role cannot drift from the Add menu that names it.
- */
-enum class PaintLookRole {
-  /** A layer's content, or a correction laid over it. */
-  Content,
-  /** A correction laid over the layer's mask. */
-  MaskItem,
-};
-
-/**
- * The built-in gradient icon: a Color Theme icon used as the nearest stand-in for a ramp, the same
- * one the Gradient tool wears. Rows draw the `gradient` glyph instead where it exists; this is the
- * fallback (headless builds, and Python's `icon=`), kept here once for the rows and the Add table.
- */
-constexpr int PAINT_GRADIENT_ICON = ICON_COLORSET_13_VEC;
-
-/**
- * The filter's own look: an icon with a glyph for every filter the stack has one for. The default
- * is the generic adjustment arrow, kept for a filter whose subtype the UI does not know yet.
- */
-static PaintKindLook paint_filter_look(const int16_t filter)
-{
-  switch (filter) {
-    case MA_PAINT_LAYER_FILTER_INVERT:
-      return {ICON_ARROW_LEFTRIGHT, paint_glyph::INVERT};
-    case MA_PAINT_LAYER_FILTER_LEVELS:
-      return {ICON_SEQ_HISTOGRAM, 0};
-    case MA_PAINT_LAYER_FILTER_HSL:
-      return {ICON_COLOR, paint_glyph::HSL};
-    case MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST:
-      return {ICON_COLOR, paint_glyph::BRIGHTNESS};
-    case MA_PAINT_LAYER_FILTER_COLOR_RAMP:
-      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
-      return {ICON_COLOR, 0};
-    case MA_PAINT_LAYER_FILTER_POSTERIZE:
-      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
-      return {ICON_MOD_SMOOTH, 0};
-    case MA_PAINT_LAYER_FILTER_MATH:
-      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
-      return {ICON_DRIVER, 0};
-    case MA_PAINT_LAYER_FILTER_THRESHOLD:
-      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
-      return {ICON_MOD_THICKNESS, 0};
-    case MA_PAINT_LAYER_FILTER_CLAMP:
-      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
-      return {ICON_RESTRICT_COLOR_ON, 0};
-    case MA_PAINT_LAYER_FILTER_CURVES:
-      /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
-      return {ICON_RNDCURVE, 0};
-    case MA_PAINT_LAYER_FILTER_COLOR_BALANCE:
-      /* The sliders Levels wore before it took the histogram. */
-      return {ICON_IMAGE_ALPHA, paint_glyph::LEVELS};
-    case MA_PAINT_LAYER_FILTER_BLUR:
-      return {ICON_MATFLUID, 0};
-    case MA_PAINT_LAYER_FILTER_SHARPEN:
-      return {ICON_SHARPCURVE, 0};
-    case MA_PAINT_LAYER_FILTER_HIGH_PASS:
-      return {ICON_MOD_WIREFRAME, 0};
-    case MA_PAINT_LAYER_FILTER_EDGE_DETECT:
-      return {ICON_MOD_EDGESPLIT, 0};
-    case MA_PAINT_LAYER_FILTER_EMBOSS:
-      return {ICON_MOD_BEVEL, 0};
-    case MA_PAINT_LAYER_FILTER_ERODE_DILATE:
-      return {ICON_MOD_MULTIRES, 0};
-    case MA_PAINT_LAYER_FILTER_COLOR_ID:
-      return {ICON_COLOR, paint_glyph::COLORIZE};
-    case MA_PAINT_LAYER_FILTER_UV_ISLAND:
-      return {ICON_UV_ISLANDSEL, paint_glyph::SELECT_ALL};
-    case MA_PAINT_LAYER_FILTER_EXPOSURE:
-      /* No glyph of its own yet: the filter icon names a tone scale without a color of its own. */
-      return {ICON_FILTER, 0};
-    case MA_PAINT_LAYER_FILTER_DEBAND:
-      /* No glyph of its own yet: the image-data icon names a quantization of the pixels. */
-      return {ICON_IMAGE_DATA, 0};
-    case MA_PAINT_LAYER_FILTER_NOISE:
-      /* No glyph of its own yet: the particle-point icon names a scatter of grains. */
-      return {ICON_PARTICLE_POINT, 0};
-    case MA_PAINT_LAYER_FILTER_GLOW:
-      return {ICON_LIGHT, 0};
-    case MA_PAINT_LAYER_FILTER_BEVEL:
-      return {ICON_MOD_BEVEL, 0};
-    case MA_PAINT_LAYER_FILTER_COLOR_MATCH:
-      return {ICON_NODE_COMPOSITING, 0};
-    case MA_PAINT_LAYER_FILTER_NORMAL_CONVERT:
-      /* No glyph of its own yet: the vertex-normals icon names what the filter converts. */
-      return {ICON_NORMALS_VERTEX, 0};
-    case MA_PAINT_LAYER_FILTER_CHANNEL_MIXER:
-      /* No glyph of its own yet: the RGB icon names the channels the filter mixes. */
-      return {ICON_IMAGE_RGB, 0};
-    case MA_PAINT_LAYER_FILTER_TRANSFORM:
-      /* No glyph of its own yet: the UV-projection icon names the placement the effect moves. */
-      return {ICON_MOD_UVPROJECT, 0};
-    case MA_PAINT_LAYER_FILTER_MIRROR:
-      /* No glyph of its own yet: the modifier's own mirror icon names the fold. */
-      return {ICON_MOD_MIRROR, 0};
-  }
-  return {ICON_ARROW_LEFTRIGHT, 0};
-}
-
-/**
- * The icon and glyph every row and Add entry of \a source shows, in \a role. This is the one place
- * the pair is written: the rows, the effects and the Add menu all ask here, so a kind cannot read
- * one way in the menu and another in the stack.
- */
-static PaintKindLook paint_look_for_source(const eMaterialPaintLayerSource source,
-                                           const PaintLookRole role,
-                                           const int16_t subtype = 0)
-{
-  switch (source) {
-    case MA_PAINT_LAYER_SOURCE_IMAGE:
-      /* The mask's Add entry keeps the Grease Pencil icon the user knows; the glyph keeps it the
-       * same Brush wherever it is drawn. */
-      return {role == PaintLookRole::MaskItem ? ICON_GREASEPENCIL : ICON_BRUSH_DATA,
-              paint_glyph::BRUSH};
-    case MA_PAINT_LAYER_SOURCE_CONSTANT:
-      return {ICON_GP_DRAW_FILL, paint_glyph::FILL};
-    case MA_PAINT_LAYER_SOURCE_MATERIAL:
-      return {ICON_MATERIAL, paint_glyph::TEXTURE};
-    case MA_PAINT_LAYER_SOURCE_GENERATOR:
-      /* A pattern wears its own glyph so it is not read as a Gradient; the Gradient, and a subtype
-       * the caller does not name, keep the ramp. */
-      if (!ELEM(subtype, 0, MA_PAINT_LAYER_GENERATOR_GRADIENT)) {
-        return {ICON_TEXTURE, paint_glyph::PATTERN};
-      }
-      return {PAINT_GRADIENT_ICON, paint_glyph::GRADIENT};
-    case MA_PAINT_LAYER_SOURCE_FILTER:
-      return paint_filter_look(subtype);
-    case MA_PAINT_LAYER_SOURCE_CURVE_PATCH:
-      return {ICON_CURVE_DATA, 0};
-    case MA_PAINT_LAYER_SOURCE_TEXT:
-      return {ICON_FONT_DATA, 0};
-    case MA_PAINT_LAYER_SOURCE_ANCHOR_POINT:
-      return {ICON_EMPTY_AXIS, paint_glyph::ANCHOR};
-    case MA_PAINT_LAYER_SOURCE_STACK:
-      return {ICON_FILE_FOLDER, 0};
-    case MA_PAINT_LAYER_SOURCE_MESH_MAP:
-      /* A geometry map of the object; the glyph keeps the texture look, the icon names the mesh
-       * the map is baked from. */
-      return {ICON_MESH_DATA, paint_glyph::TEXTURE};
-  }
-  return {ICON_IMAGE_RGB, 0};
-}
-
-/** The look of an Anchor Point marker, whichever list it sits in. */
-static PaintKindLook paint_look_for_anchor_point()
-{
-  return {ICON_EMPTY_AXIS, paint_glyph::ANCHOR};
-}
-
-/** The look of an Anchor Point reader: what it lays, not the marker it reads. */
-static PaintKindLook paint_look_for_anchor_reader()
-{
-  return {ICON_LINKED, paint_glyph::CELL_TOWER};
-}
-
-/**
- * A filter the Add Effect menu offers. The vocabulary is the editor's (a name and a tooltip);
- * which filters exist is #eMaterialPaintLayerFilter. The icon and glyph come from
- * #paint_look_for_source, the same place a row asks, so the menu and the row cannot disagree.
- * #row_add reads the position back, so a new filter is one entry here and one in the kernel's kind
- * table.
- */
-struct PaintFilterAddKind {
-  const char *identifier;
-  const char *name;
-  const char *description;
-  int16_t filter;
-};
-
-static const PaintFilterAddKind paint_filter_add_kinds[] = {
-    {"FILTER_INVERT",
-     N_("Invert"),
-     "Invert the active layer's colour, by the filter's opacity",
-     MA_PAINT_LAYER_FILTER_INVERT},
-    {"FILTER_LEVELS",
-     N_("Levels"),
-     "Remap the active layer's tones: black and white points, gamma and output range",
-     MA_PAINT_LAYER_FILTER_LEVELS},
-    {"FILTER_HSL",
-     N_("Hue Saturation Value"),
-     "Shift the active layer's hue, saturation and value",
-     MA_PAINT_LAYER_FILTER_HSL},
-    {"FILTER_BRIGHTNESS_CONTRAST",
-     N_("Brightness/Contrast"),
-     "Brighten or darken the active layer and scale its contrast",
-     MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST},
-    {"FILTER_COLOR_RAMP",
-     N_("Color Ramp"),
-     "Remap the active layer's luminance through a color band",
-     MA_PAINT_LAYER_FILTER_COLOR_RAMP},
-    {"FILTER_POSTERIZE",
-     N_("Posterize"),
-     "Quantize the active layer's colours to a whole number of steps per channel",
-     MA_PAINT_LAYER_FILTER_POSTERIZE},
-    {"FILTER_MATH",
-     N_("Math"),
-     "Combine the active layer with a constant operand, per channel",
-     MA_PAINT_LAYER_FILTER_MATH},
-    {"FILTER_THRESHOLD",
-     N_("Threshold"),
-     "Turn the active layer's channels into the two states of a comparison",
-     MA_PAINT_LAYER_FILTER_THRESHOLD},
-    {"FILTER_CLAMP",
-     N_("Clamp"),
-     "Keep the active layer's channels inside a constant range",
-     MA_PAINT_LAYER_FILTER_CLAMP},
-    {"FILTER_CURVES",
-     N_("RGB Curves"),
-     "Remap the active layer's channels through their own curves",
-     MA_PAINT_LAYER_FILTER_CURVES},
-    {"FILTER_COLOR_BALANCE",
-     N_("Color Balance"),
-     "Balance the active layer's colours through lift, gamma and gain (or slope, offset and power)",
-     MA_PAINT_LAYER_FILTER_COLOR_BALANCE},
-    {"FILTER_EXPOSURE",
-     N_("Exposure"),
-     "Scale the active layer's colours by a power of two, shift them and raise the result to a gamma",
-     MA_PAINT_LAYER_FILTER_EXPOSURE},
-    {"FILTER_DEBAND",
-     N_("Deband / Dither"),
-     "Break the active layer's bands up with a triangular noise, or round its colours to fewer bits",
-     MA_PAINT_LAYER_FILTER_DEBAND},
-    {"FILTER_NORMAL_CONVERT",
-     N_("Normal Convert"),
-     "Convert the active layer's normal encoding: flip the green, rebuild or clear the blue, or "
-     "move the channels between linear and sRGB",
-     MA_PAINT_LAYER_FILTER_NORMAL_CONVERT},
-    {"FILTER_CHANNEL_MIXER",
-     N_("Channel Mixer"),
-     "Mix the active layer's colour channels: each output is a weighted sum of the inputs plus a "
-     "constant",
-     MA_PAINT_LAYER_FILTER_CHANNEL_MIXER},
-};
-
-/**
- * The CPU-computed filters the Add Effect menu offers: either they read a neighbourhood of the
- * row's map (a Blur) or their sequence is not the graph's (a Noise), so they exist only as
- * corrections of a row's color -- the effect cache computes them and the row is baked for the
- * live graph. No adjustment or mask form is offered, because neither has a map of the row's to
- * read.
- */
-static const PaintFilterAddKind paint_effect_add_kinds[] = {
-    {"EFFECT_BLUR",
-     N_("Blur"),
-     "Blur the active layer's colours with a box or gaussian kernel",
-     MA_PAINT_LAYER_FILTER_BLUR},
-    {"EFFECT_SHARPEN",
-     N_("Sharpen"),
-     "Sharpen the active layer's colours around the details a blur removes",
-     MA_PAINT_LAYER_FILTER_SHARPEN},
-    {"EFFECT_HIGH_PASS",
-     N_("High Pass"),
-     "Keep the active layer's details above a blurred copy of them",
-     MA_PAINT_LAYER_FILTER_HIGH_PASS},
-    {"EFFECT_EDGE_DETECT",
-     N_("Edge Detect"),
-     "Outline the active layer's edges with the Sobel gradient magnitude",
-     MA_PAINT_LAYER_FILTER_EDGE_DETECT},
-    {"EFFECT_EMBOSS",
-     N_("Emboss"),
-     "Emboss the active layer's colours with a diagonal lighting kernel",
-     MA_PAINT_LAYER_FILTER_EMBOSS},
-    {"EFFECT_ERODE_DILATE",
-     N_("Erode / Dilate"),
-     "Shrink or grow the bright regions of the active layer by the kernel's radius",
-     MA_PAINT_LAYER_FILTER_ERODE_DILATE},
-    {"EFFECT_NOISE",
-     N_("Noise"),
-     "Lay a grain (gaussian, uniform, speckle or salt and pepper) over the active layer's colours",
-     MA_PAINT_LAYER_FILTER_NOISE},
-    {"EFFECT_GLOW",
-     N_("Glow"),
-     "Bleed a coloured glow off the active layer's own light",
-     MA_PAINT_LAYER_FILTER_GLOW},
-    {"EFFECT_BEVEL",
-     N_("Bevel"),
-     "Lay a distance ramp from the borders of the active layer's content inward",
-     MA_PAINT_LAYER_FILTER_BEVEL},
-    {"EFFECT_COLOR_MATCH",
-     N_("Color Match"),
-     "Grade the active layer's colours from a source colour to a target one",
-     MA_PAINT_LAYER_FILTER_COLOR_MATCH},
-};
-
-/**
- * The map-driven filters the Add Effect menu offers over the mask. They only exist in a mask (their
- * role is a mask item), so they have no correction or adjustment form like #paint_filter_add_kinds.
- */
-static const PaintFilterAddKind paint_coverage_add_kinds[] = {
-    {"FILTER_COLOR_ID",
-     N_("Color ID"),
-     "Keep the active layer's mask only where an ID Map matches the listed colors",
-     MA_PAINT_LAYER_FILTER_COLOR_ID},
-    {"FILTER_UV_ISLAND",
-     N_("UV Island"),
-     "Keep the active layer's mask only on the UV islands captured from the Image Editor",
-     MA_PAINT_LAYER_FILTER_UV_ISLAND},
-};
-
-/**
- * Whether a filter is listed in the "Filter" submenu of the Add Effect menu instead of the main
- * list. The submenu holds the filters added after the original set, so the main list keeps the
- * place the older ones have always had; a filter not named here stays in the main list rather than
- * disappearing from the menu.
- */
-static bool paint_filter_is_new(const int16_t filter)
-{
-  return ELEM(eMaterialPaintLayerFilter(filter),
-              MA_PAINT_LAYER_FILTER_SHARPEN,
-              MA_PAINT_LAYER_FILTER_HIGH_PASS,
-              MA_PAINT_LAYER_FILTER_EDGE_DETECT,
-              MA_PAINT_LAYER_FILTER_EMBOSS,
-              MA_PAINT_LAYER_FILTER_ERODE_DILATE,
-              MA_PAINT_LAYER_FILTER_EXPOSURE,
-              MA_PAINT_LAYER_FILTER_DEBAND,
-              MA_PAINT_LAYER_FILTER_NORMAL_CONVERT,
-              MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
-              MA_PAINT_LAYER_FILTER_NOISE,
-              MA_PAINT_LAYER_FILTER_GLOW,
-              MA_PAINT_LAYER_FILTER_BEVEL,
-              MA_PAINT_LAYER_FILTER_COLOR_MATCH);
-}
-
-/** The transform effects the Add Effect menu lists under "Transform" instead of the other lists. */
-static bool paint_filter_is_transform(const int16_t filter)
-{
-  return ELEM(eMaterialPaintLayerFilter(filter),
-              MA_PAINT_LAYER_FILTER_TRANSFORM,
-              MA_PAINT_LAYER_FILTER_MIRROR);
 }
 
 /** The row of one content correction, hung off the row \a owner_ordinal names. */
@@ -1674,7 +1303,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
         PaintLayerAddKind::MaskCorrectionFill);
 
     /* Every filter as a correction of a layer's color. */
-    for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
+    for (const PaintFilterAddKind &filter : paint_filter_add_kinds()) {
       add(with_look(effect({filter.identifier, filter.name, filter.description}),
                     paint_look_for_source(
                         MA_PAINT_LAYER_SOURCE_FILTER, PaintLookRole::Content, filter.filter)),
@@ -1686,7 +1315,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
      * mask slot is the one showing. The mask slot of a row is no Outliner row, so the line has to
      * name the mask form itself: an Add aimed at the row would otherwise land in its color. No
      * adjustment form is offered, as it has no map of the row's to read. */
-    for (const PaintFilterAddKind &filter : paint_effect_add_kinds) {
+    for (const PaintFilterAddKind &filter : paint_effect_add_kinds()) {
       add(with_look(effect({filter.identifier, filter.name, filter.description}),
                     paint_look_for_source(
                         MA_PAINT_LAYER_SOURCE_FILTER, PaintLookRole::Content, filter.filter)),
@@ -1696,7 +1325,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
     }
     /* Then the same filters as rows of the stack: an adjustment changes the whole stack below it
      * instead of one layer's color. */
-    for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
+    for (const PaintFilterAddKind &filter : paint_filter_add_kinds()) {
       add(with_look({std::string("ADJUSTMENT") + (filter.identifier + std::strlen("FILTER")),
                      std::string(filter.name) + " Adjustment",
                      "Apply the filter to everything below this layer, with the layer's own opacity, "
@@ -1709,7 +1338,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
     /* And once more in the mask: the filter changes the mask's coverage, a single grey, so it has
      * no channels to choose. They are corrections of the mask, listed with the other effects, and
      * carry the filter's own icon so a line reads the same whichever target is active. */
-    for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
+    for (const PaintFilterAddKind &filter : paint_filter_add_kinds()) {
       add(with_look(effect({std::string("MASK_") + filter.identifier,
                             std::string("Mask ") + filter.name,
                             "Apply the filter to the active layer's mask coverage"}),
@@ -1720,7 +1349,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
     }
     /* The mask form of each CPU-computed effect: the effect works on the grey the mask has built up
      * to it. Folded into the content line by the Effects menu, like the pointwise filters above. */
-    for (const PaintFilterAddKind &filter : paint_effect_add_kinds) {
+    for (const PaintFilterAddKind &filter : paint_effect_add_kinds()) {
       add(with_look(effect({std::string("MASK_") + filter.identifier,
                             std::string("Mask ") + filter.name,
                             "Apply the effect to the grey the active layer's mask has built up"}),
@@ -1731,7 +1360,7 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
     }
     /* The map-driven filters of the mask. They have no content form, so the Effects menu leaves them
      * out and the Add Mask menu offers them. */
-    for (const PaintFilterAddKind &filter : paint_coverage_add_kinds) {
+    for (const PaintFilterAddKind &filter : paint_coverage_add_kinds()) {
       add(with_look(effect({std::string("MASK_") + filter.identifier,
                             std::string("Mask ") + filter.name,
                             filter.description}),
@@ -2975,8 +2604,10 @@ class PaintLayersStackSource final : public StackSource,
       }
       StackEffectMenuKind menu;
       menu.kind = int(index);
-      menu.is_new = ELEM(entry.kind, PaintLayerAddKind::Filter, PaintLayerAddKind::MaskFilter) &&
-                    paint_filter_is_new(entry.filter);
+      const bool is_filter = ELEM(
+          entry.kind, PaintLayerAddKind::Filter, PaintLayerAddKind::MaskFilter);
+      menu.is_new = is_filter && paint_filter_is_new(entry.filter);
+      menu.is_filter2 = is_filter && paint_filter_is_filter2(entry.filter);
       /* The transform effects keep their own submenu: they move what the row reads rather than
        * correcting a colour, so the menu groups them by what they do. */
       menu.is_transform = ELEM(entry.kind, PaintLayerAddKind::Filter, PaintLayerAddKind::MaskFilter) &&
@@ -2984,8 +2615,7 @@ class PaintLayersStackSource final : public StackSource,
       /* The Gradient stays in the main list: it is the one pattern with a line and a ramp of its
        * own, and the registry's other generators are the ones the submenu gathers. */
       /* The filters of the original list fold into one submenu; the newer ones keep their own. */
-      menu.is_correction = !menu.is_new && !menu.is_transform &&
-                           ELEM(entry.kind, PaintLayerAddKind::Filter, PaintLayerAddKind::MaskFilter);
+      menu.is_correction = !menu.is_new && !menu.is_filter2 && !menu.is_transform && is_filter;
       menu.is_anchor = entry.kind == PaintLayerAddKind::AnchorPoint;
       menu.is_pattern = entry.kind == PaintLayerAddKind::GradientCorrection &&
                         !ELEM(entry.generator, MA_PAINT_LAYER_GENERATOR_GRADIENT);

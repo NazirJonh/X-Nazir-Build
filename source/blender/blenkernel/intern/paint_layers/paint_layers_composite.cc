@@ -3307,10 +3307,14 @@ bool BKE_paint_layers_bake_render_node(
   {
     return false;
   }
-  /* A result smaller than the stack (the drag-reduced bake of a Decal row, while the drag lasts) composites on a grid of
-   * its own size: the Decal resample and every map read cost by texels, and a 4K grid would only be
-   * thrown away by the nearest resample below. A partial rectangle keeps the stack grid, as the
-   * nested slice rectangle is in its pixels. */
+  /* A result smaller than the stack (the drag-reduced bake of a Decal row, while the drag lasts)
+   * composites on a grid of its own size: the Decal resample and every map read cost by texels, and
+   * a 4K grid would only be thrown away by the nearest resample below. A partial rectangle keeps
+   * the stack grid, as the nested slice rectangle is in its pixels. The CPU-computed effects are
+   * not part of this smaller grid: their input is always described, rendered and filtered at the
+   * stack's own resolution, so a texel parameter (a blur radius, an offset, an outline width) keeps
+   * its meaning and the reduced frame is a resample of the full result. It is deliberately
+   * approximate while the drag lasts; the full bake is owed once it ends. */
   int eval_width = 0;
   int eval_height = 0;
   if (dst_rect == nullptr && (width > size || height > size) &&

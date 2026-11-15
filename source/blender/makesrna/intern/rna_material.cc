@@ -5852,6 +5852,9 @@ static const EnumPropertyItem rna_enum_material_paint_layer_gradient_gizmo_chann
 };
 
 /* Values are #eMaterialPaintLayerFilter; 0 is "not a filter" and is only ever read. */
+/* TODO: the names and tooltips here are a second copy of the kind records in
+ * `paint_layers_kind.cc`; when the kind API can expose its own RNA items, build this list from it
+ * instead of naming every filter by hand. */
 static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
     {0, "NONE", 0, "None", "Not a filter"},
     {MA_PAINT_LAYER_FILTER_INVERT, "INVERT", 0, "Invert", "Invert the colour or coverage below"},
@@ -5887,6 +5890,18 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      0,
      "Clamp",
      "Keep each channel of what is below inside a constant range"},
+    {MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN,
+     "HISTOGRAM_SCAN",
+     0,
+     "Histogram Scan",
+     "Remap each channel of what is below through a smoothstep: a soft threshold the contrast "
+     "opens into a ramp, the one that grows and shrinks a mask"},
+    {MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT,
+     "HISTOGRAM_SHIFT",
+     0,
+     "Histogram Shift",
+     "Roll the tonal range of each channel of what is below by one amount, wrapping back through "
+     "zero"},
     {MA_PAINT_LAYER_FILTER_CURVES,
      "CURVES",
      0,

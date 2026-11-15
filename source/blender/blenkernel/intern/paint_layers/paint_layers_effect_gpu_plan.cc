@@ -132,6 +132,10 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
     return r_passes.size() == 1 ? ePaintLayerEffectPassSource::Input :
                                   ePaintLayerEffectPassSource::Previous;
   };
+  /* Every reach below is in the texel grid of the effect's input, which is the row already moved by
+   * its Transform and Mirror effects: those ride the input description, not the pass chain, so a
+   * neighbourhood pass never reads a halo measured before the transform. A Transform above the
+   * effect therefore grows the region in the transformed grid the shader samples. */
   /* One horizontal window pass and its vertical twin, both of \a radius: each reads the pass before
    * it and reaches \a radius along its own axis, so the regions fold per axis. The source is asked
    * per pass, so the pair's vertical half reads the horizontal one's result. \a maximum is the

@@ -310,6 +310,8 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_COLOR_BALANCE 13
 #define COMBINED_FILTER_EXPOSURE 23
 #define COMBINED_FILTER_CHANNEL_MIXER 27
+#define COMBINED_FILTER_HISTOGRAM_SCAN 30
+#define COMBINED_FILTER_HISTOGRAM_SHIFT 31
 
 float levels_channel(float value, float4 p0, float4 p1)
 {
@@ -544,6 +546,34 @@ float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, float4 p2
       result = float3(min(max(rgb.x, p0.x), p0.y),
                       min(max(rgb.y, p0.x), p0.y),
                       min(max(rgb.z, p0.x), p0.y));
+      break;
+    }
+    case COMBINED_FILTER_HISTOGRAM_SCAN: {
+      /* The CPU's `paint_layer_histogram_scan_apply`: the smoothstep centered on the position and
+       * opened by the contrast into a ramp of the same width each side; `contrast = 0` is the
+       * Threshold the position alone makes. `p0.x` is the position, `p0.y` the contrast and
+       * `p0.z` the invert switch. The step is written out per component, the floor of the span
+       * keeping a zero contrast defined (the built-in smoothstep's equal-edge pair is not): what
+       * the CPU's own clamp does. An inverted position flips the two states, `1 - out`. */
+      float edge = p0.y * 0.5f;
+      float lo = p0.x - edge;
+      float span = max(edge * 2.0f, 1e-6f);
+      float tx = clamp((rgb.x - lo) / span, 0.0f, 1.0f);
+      float ty = clamp((rgb.y - lo) / span, 0.0f, 1.0f);
+      float tz = clamp((rgb.z - lo) / span, 0.0f, 1.0f);
+      result = float3(tx * tx * (3.0f - 2.0f * tx),
+                      ty * ty * (3.0f - 2.0f * ty),
+                      tz * tz * (3.0f - 2.0f * tz));
+      if (p0.z > 0.5f) {
+        result = 1.0f - result;
+      }
+      break;
+    }
+    case COMBINED_FILTER_HISTOGRAM_SHIFT: {
+      /* The CPU's `paint_layer_histogram_shift_apply`: the value plus the position, wrapped back
+       * through zero when it passes one -- the Math node's Wrap, cyclic, so a full turn is the
+       * value again. `p0.x` is the position. */
+      result = fract(rgb + float3(p0.x));
       break;
     }
     case COMBINED_FILTER_COLOR_BALANCE: {

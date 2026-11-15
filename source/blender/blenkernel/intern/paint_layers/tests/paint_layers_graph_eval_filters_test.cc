@@ -3108,4 +3108,69 @@ TEST_F(PaintLayersChannelMixerTest, the_mixer_adjustment_and_mask_item_follow_th
   EXPECT_NEAR(row_weight(*row, bottom, row_alone_weight_one), lifted, 3e-3f);
 }
 
+class PaintLayersHistogramScanTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_scan(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+};
+
+TEST_F(PaintLayersHistogramScanTest, histogram_scan_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *scan = add_scan(*row, 0.7f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*scan, PAINT_LAYER_HISTOGRAM_SCAN_POSITION, 0.45f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*scan, PAINT_LAYER_HISTOGRAM_SCAN_CONTRAST, 0.2f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersHistogramScanTest, the_invert_switch_flips_the_two_states)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *scan = add_scan(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*scan, PAINT_LAYER_HISTOGRAM_SCAN_POSITION, 0.5f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*scan, PAINT_LAYER_HISTOGRAM_SCAN_CONTRAST, 0.0f));
+  EXPECT_TRUE(paint_layer_kind_param_bool_set(*scan, PAINT_LAYER_HISTOGRAM_SCAN_INVERT, true));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+class PaintLayersHistogramShiftTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_shift(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+};
+
+TEST_F(PaintLayersHistogramShiftTest, histogram_shift_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *shift = add_shift(*row, 0.7f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*shift, PAINT_LAYER_HISTOGRAM_SHIFT_POSITION, 0.2f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersHistogramShiftTest, a_negative_shift_wraps_the_same_way_as_the_cpu)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *shift = add_shift(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*shift, PAINT_LAYER_HISTOGRAM_SHIFT_POSITION, -0.2f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
 }  // namespace blender::bke::tests

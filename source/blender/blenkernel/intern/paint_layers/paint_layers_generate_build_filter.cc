@@ -22,6 +22,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_paint_layers.hh"
 
+#include "DNA_customdata_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
@@ -902,6 +903,174 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
                                  strength,
                                  effect.name))
       {
+        return discard();
+      }
+      return true;
+    }
+    case MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN: {
+      /* `smoothstep(pos - edge, pos + edge, c)` per channel, one Map Range node per channel with
+       * the Smoothstep interpolation and its clamp on -- the node's own evaluation is the CPU's
+       * `paint_layer_histogram_scan_apply`. The edges are Math nodes off the schema's inputs, so
+       * an edit of one is a value and not a different graph; the invert flips the two states the
+       * way the mask item's own invert does, `1 - out`, after the ramp. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_HISTOGRAM_SCAN_PARAM_NUM ||
+          (*params)[PAINT_LAYER_HISTOGRAM_SCAN_POSITION] == nullptr ||
+          (*params)[PAINT_LAYER_HISTOGRAM_SCAN_CONTRAST] == nullptr ||
+          (*params)[PAINT_LAYER_HISTOGRAM_SCAN_INVERT] == nullptr)
+      {
+        return false;
+      }
+      const NodeOutput position{group.group_input,
+                                group_input_socket(group, *(*params)[PAINT_LAYER_HISTOGRAM_SCAN_POSITION])};
+      const NodeOutput contrast{group.group_input,
+                                group_input_socket(group, *(*params)[PAINT_LAYER_HISTOGRAM_SCAN_CONTRAST])};
+      const NodeOutput invert{group.group_input,
+                              group_input_socket(group, *(*params)[PAINT_LAYER_HISTOGRAM_SCAN_INVERT])};
+      if (position.socket == nullptr || contrast.socket == nullptr || invert.socket == nullptr) {
+        return false;
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      /* The edge pair: the position opened by half the contrast each side. The span is floored
+       * like the CPU's, because the Map Range node reads equal edges as zero, which would turn the
+       * hard edge of a zero contrast into an all-black result instead of the Threshold's step. */
+      bNode *half_node = math_constant_node_add(
+          tree, grid_, nodes, NODE_MATH_MULTIPLY, contrast, 0.5f);
+      bNode *span_node = math_constant_node_add(
+          tree, grid_, nodes, NODE_MATH_MAXIMUM, contrast, 1e-6f);
+      if (half_node == nullptr || span_node == nullptr) {
+        return discard();
+      }
+      const NodeOutput half{half_node, socket_out(*half_node, "Value")};
+      const NodeOutput span{span_node, socket_out(*span_node, "Value")};
+      const NodeOutput lo = math_node_add(
+          tree, grid_, nodes, NODE_MATH_SUBTRACT, position, half);
+      const NodeOutput hi = math_node_add(tree, grid_, nodes, NODE_MATH_ADD, lo, span);
+      if (half.socket == nullptr || span.socket == nullptr || lo.socket == nullptr ||
+          hi.socket == nullptr)
+      {
+        return discard();
+      }
+
+      NodeOutput xyz[3];
+      if (!separate_xyz_node_add(tree, grid_, nodes, content, xyz)) {
+        return discard();
+      }
+      NodeOutput ramped[3];
+      for (const int i : IndexRange(3)) {
+        bNode *range = bke::node_add_static_node(nullptr, tree, SH_NODE_MAP_RANGE);
+        bNodeSocket *value = (range != nullptr) ? socket_in(*range, "Value") : nullptr;
+        bNodeSocket *from_min = (range != nullptr) ? socket_in(*range, "From Min") : nullptr;
+        bNodeSocket *from_max = (range != nullptr) ? socket_in(*range, "From Max") : nullptr;
+        bNodeSocket *result = (range != nullptr) ? socket_out(*range, "Result") : nullptr;
+        if (value == nullptr || from_min == nullptr || from_max == nullptr || result == nullptr) {
+          if (range != nullptr) {
+            nodes.append(range);
+          }
+          return discard();
+        }
+        if (NodeMapRange *storage = static_cast<NodeMapRange *>(range->storage)) {
+          storage->data_type = CD_PROP_FLOAT;
+          storage->interpolation_type = NODE_MAP_RANGE_SMOOTHSTEP;
+          storage->clamp = 1;
+        }
+        grid_.place_extra(*range);
+        nodes.append(range);
+        bke::node_add_link(tree, *xyz[i].node, *xyz[i].socket, *range, *value);
+        bke::node_add_link(tree, *lo.node, *lo.socket, *range, *from_min);
+        bke::node_add_link(tree, *hi.node, *hi.socket, *range, *from_max);
+        ramped[i] = {range, result};
+      }
+
+      NodeOutput combined = combine_xyz_node_add(tree, grid_, nodes, ramped);
+      if (combined.socket == nullptr) {
+        return discard();
+      }
+      /* The inverted position flips the two states: `1 - out`, blended by the switch as
+       * `combined + (1 - 2 * combined) * invert`, the Math nodes' own arithmetic; the schema's
+       * zero keeps the blend at `combined` until the switch is up. */
+      bNode *twice_node = math_constant_node_add(
+          tree, grid_, nodes, NODE_MATH_MULTIPLY, combined, 2.0f);
+      if (twice_node == nullptr) {
+        return discard();
+      }
+      const NodeOutput twice{twice_node, socket_out(*twice_node, "Value")};
+      const NodeOutput one_minus = math_node_add(
+          tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, twice, 1.0f);
+      const NodeOutput scaled = math_node_add(tree, grid_, nodes, NODE_MATH_MULTIPLY,
+                                              one_minus, invert);
+      const NodeOutput scan = math_node_add(tree, grid_, nodes, NODE_MATH_ADD, combined, scaled);
+      if (one_minus.socket == nullptr || scaled.socket == nullptr || scan.socket == nullptr) {
+        return discard();
+      }
+
+      if (!filter_result_mix_add(tree, grid_, nodes, content, scan, strength, effect.name)) {
+        return discard();
+      }
+      return true;
+    }
+    case MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT: {
+      /* `fract(c + position)` per channel, the Math node's Fraction of the Add with the schema's
+       * input, so an edit of it is a value and not a different graph. The Fraction node's own
+       * `x - floor(x)` is the CPU's wrap, positive on both sides of zero. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_HISTOGRAM_SHIFT_PARAM_NUM ||
+          (*params)[PAINT_LAYER_HISTOGRAM_SHIFT_POSITION] == nullptr)
+      {
+        return false;
+      }
+      bNodeSocket *position_socket = group_input_socket(
+          group, *(*params)[PAINT_LAYER_HISTOGRAM_SHIFT_POSITION]);
+      if (position_socket == nullptr) {
+        return false;
+      }
+      const NodeOutput position{group.group_input, position_socket};
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      NodeOutput xyz[3];
+      if (!separate_xyz_node_add(tree, grid_, nodes, content, xyz)) {
+        return discard();
+      }
+      NodeOutput shifted[3];
+      for (const int i : IndexRange(3)) {
+        const NodeOutput added = math_node_add(
+            tree, grid_, nodes, NODE_MATH_ADD, xyz[i], position);
+        if (added.socket == nullptr) {
+          return discard();
+        }
+        /* The Fraction is the wrap: `x - floor(x)`, positive on both sides of zero. The node is
+         * laid by hand -- the shared helper wants a second operand, which this operation reads
+         * none of. */
+        bNode *wrapped = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+        bNodeSocket *value_in = (wrapped != nullptr) ? socket_in(*wrapped, "Value") : nullptr;
+        bNodeSocket *out = (wrapped != nullptr) ? socket_out(*wrapped, "Value") : nullptr;
+        if (wrapped == nullptr || value_in == nullptr || out == nullptr) {
+          if (wrapped != nullptr) {
+            nodes.append(wrapped);
+          }
+          return discard();
+        }
+        wrapped->custom1 = NODE_MATH_FRACTION;
+        grid_.place_extra(*wrapped);
+        nodes.append(wrapped);
+        bke::node_add_link(tree, *added.node, *added.socket, *wrapped, *value_in);
+        shifted[i] = {wrapped, out};
+      }
+      NodeOutput combined = combine_xyz_node_add(tree, grid_, nodes, shifted);
+      if (combined.socket == nullptr) {
+        return discard();
+      }
+
+      if (!filter_result_mix_add(tree, grid_, nodes, content, combined, strength, effect.name)) {
         return discard();
       }
       return true;

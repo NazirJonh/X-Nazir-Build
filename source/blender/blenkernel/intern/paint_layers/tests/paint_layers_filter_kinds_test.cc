@@ -561,6 +561,95 @@ TEST_F(PaintLayersFilterKindsTest, exposure_kind_is_a_pointwise_filter_with_a_fl
   }
 }
 
+TEST_F(PaintLayersFilterKindsTest, histogram_scan_kind_is_a_pointwise_filter_with_a_float_schema)
+{
+  Material *ma = BKE_material_add(bmain, "RnaHistogramScanParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *scan = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN);
+  ASSERT_NE(scan, nullptr);
+
+  /* A pointwise filter takes a colour from below and reads no map: it is not CPU-computed, so it
+   * carries the below flag alone -- no NEEDS_BAKE, and a shader branch exists. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*scan, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*scan, PAINT_LAYER_KIND_NEEDS_BAKE));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*scan, PAINT_LAYER_KIND_NO_GPU_BRANCH));
+
+  /* The position defaults to the Threshold's own crossover, the contrast to the hard edge it
+   * reads as, the invert to the two states as they are. */
+  EXPECT_EQ(paint_layer_kind_param_type(*scan, PAINT_LAYER_HISTOGRAM_SCAN_POSITION),
+            PaintLayerKindParamType::Float);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*scan, PAINT_LAYER_HISTOGRAM_SCAN_POSITION), 0.5f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*scan, PAINT_LAYER_HISTOGRAM_SCAN_CONTRAST), 0.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*scan, PAINT_LAYER_HISTOGRAM_SCAN_INVERT), 0.0f);
+
+  /* The RNA enum names the kind, and the collection lists exactly the schema's three parameters,
+   * labelled. */
+  PointerRNA scan_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, scan);
+  PropertyRNA *filter_prop = RNA_struct_find_property(&scan_ptr, "filter_type");
+  ASSERT_NE(filter_prop, nullptr);
+  const char *identifier = nullptr;
+  ASSERT_TRUE(RNA_property_enum_identifier(nullptr,
+                                           &scan_ptr,
+                                           filter_prop,
+                                           MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN,
+                                           &identifier));
+  EXPECT_STREQ(identifier, "HISTOGRAM_SCAN");
+  PropertyRNA *params = RNA_struct_find_property(&scan_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&scan_ptr, params), 3);
+  const char *names[3] = {"position", "contrast", "invert_position"};
+  const char *labels[3] = {"Position", "Contrast", "Invert Position"};
+  for (const int i : IndexRange(3)) {
+    PointerRNA param_ptr;
+    ASSERT_TRUE(RNA_property_collection_lookup_string(&scan_ptr, params, names[i], &param_ptr))
+        << names[i];
+    PropertyRNA *label = RNA_struct_find_property(&param_ptr, "label");
+    ASSERT_NE(label, nullptr);
+    EXPECT_EQ(RNA_property_string_get(&param_ptr, label), labels[i]);
+  }
+}
+
+TEST_F(PaintLayersFilterKindsTest, histogram_shift_kind_is_a_pointwise_filter_with_one_float)
+{
+  Material *ma = BKE_material_add(bmain, "RnaHistogramShiftParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *shift = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT);
+  ASSERT_NE(shift, nullptr);
+
+  EXPECT_TRUE(paint_layer_kind_has_flag(*shift, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*shift, PAINT_LAYER_KIND_NEEDS_BAKE));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*shift, PAINT_LAYER_KIND_NO_GPU_BRANCH));
+
+  /* One float: the shift defaults to no shift at all. */
+  EXPECT_EQ(paint_layer_kind_param_type(*shift, PAINT_LAYER_HISTOGRAM_SHIFT_POSITION),
+            PaintLayerKindParamType::Float);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*shift, PAINT_LAYER_HISTOGRAM_SHIFT_POSITION), 0.0f);
+
+  PointerRNA shift_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, shift);
+  PropertyRNA *filter_prop = RNA_struct_find_property(&shift_ptr, "filter_type");
+  ASSERT_NE(filter_prop, nullptr);
+  const char *identifier = nullptr;
+  ASSERT_TRUE(RNA_property_enum_identifier(nullptr,
+                                           &shift_ptr,
+                                           filter_prop,
+                                           MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT,
+                                           &identifier));
+  EXPECT_STREQ(identifier, "HISTOGRAM_SHIFT");
+  PropertyRNA *params = RNA_struct_find_property(&shift_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&shift_ptr, params), 1);
+  PointerRNA param_ptr;
+  ASSERT_TRUE(RNA_property_collection_lookup_string(
+      &shift_ptr, params, "position", &param_ptr));
+  PropertyRNA *label = RNA_struct_find_property(&param_ptr, "label");
+  ASSERT_NE(label, nullptr);
+  EXPECT_EQ(RNA_property_string_get(&param_ptr, label), "Position");
+}
+
 TEST_F(PaintLayersFilterKindsTest, deband_kind_is_a_pointwise_filter_with_a_mode_and_two_integers)
 {
   Material *ma = BKE_material_add(bmain, "RnaDebandParamMat");

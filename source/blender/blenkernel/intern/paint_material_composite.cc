@@ -1199,6 +1199,21 @@ static float composite_filter_color(const int16_t filter,
                                          params[PAINT_LAYER_CLAMP_MAX]);
       }
       break;
+    case MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN:
+      for (const int k : IndexRange(3)) {
+        rgb[k] = paint_layer_histogram_scan_apply(
+            rgb[k],
+            params[PAINT_LAYER_HISTOGRAM_SCAN_POSITION],
+            params[PAINT_LAYER_HISTOGRAM_SCAN_CONTRAST],
+            params[PAINT_LAYER_HISTOGRAM_SCAN_INVERT] > 0.5f);
+      }
+      break;
+    case MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT:
+      for (const int k : IndexRange(3)) {
+        rgb[k] = paint_layer_histogram_shift_apply(
+            rgb[k], params[PAINT_LAYER_HISTOGRAM_SHIFT_POSITION]);
+      }
+      break;
     case MA_PAINT_LAYER_FILTER_COLOR_BALANCE:
       /* `pow(max(rgb * A + B, 0), E)` per channel, the folded triples the CPU description, the
        * graph and the GPU share (#paint_layer_color_balance_fold). No payload pointer: the folded

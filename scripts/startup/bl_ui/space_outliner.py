@@ -230,6 +230,9 @@ class OUTLINER_MT_stack_layer_effect_add(Menu):
             "OUTLINER_MT_stack_layer_effect_add_transform", text="Transform", icon='MOD_UVPROJECT')
         layout.operator_menu_enum(
             "outliner.stack_layer_effect_add_new", "type", text="Filter", icon='SOLO_ON')
+        # The Painter-parity filters; an operator of its own, as its `type` enum lists only them.
+        layout.operator_menu_enum(
+            "outliner.stack_layer_effect_add_filter2", "type", text="Filter 2", icon='SOLO_ON')
         # The generator registry's patterns (Noise, Voronoi, ...); the Gradient stays in the list
         # above, and the pattern glyph keeps the two apart.
         # A menu of its own rather than an enum button: `operator_menu_enum` takes no glyph value.

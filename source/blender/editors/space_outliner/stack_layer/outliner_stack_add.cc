@@ -401,6 +401,8 @@ enum class StackAddKindsView {
   Effects,
   /** Only the entries of the "Filter" submenu. */
   NewEffects,
+  /** Only the entries of the "Filter 2" submenu. */
+  Filter2Effects,
   /** Only the entries of the "Generate Patterns" submenu. */
   PatternEffects,
   /** Only the entries of the "Correction" submenu. */
@@ -425,6 +427,9 @@ static StackAddKindsView stack_effect_menu_group(const StackEffectMenuKind &entr
   }
   if (entry.is_transform) {
     return StackAddKindsView::TransformEffects;
+  }
+  if (entry.is_filter2) {
+    return StackAddKindsView::Filter2Effects;
   }
   return entry.is_new ? StackAddKindsView::NewEffects : StackAddKindsView::Effects;
 }
@@ -489,6 +494,14 @@ const EnumPropertyItem *stack_effect_new_type_itemf(bContext *C,
                                                     bool *r_free)
 {
   return stack_add_kinds_itemf(C, StackAddKindsView::NewEffects, r_free);
+}
+
+const EnumPropertyItem *stack_effect_filter2_type_itemf(bContext *C,
+                                                        PointerRNA * /*ptr*/,
+                                                        PropertyRNA * /*prop*/,
+                                                        bool *r_free)
+{
+  return stack_add_kinds_itemf(C, StackAddKindsView::Filter2Effects, r_free);
 }
 
 const EnumPropertyItem *stack_effect_pattern_type_itemf(bContext *C,

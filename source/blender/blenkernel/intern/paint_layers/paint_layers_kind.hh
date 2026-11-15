@@ -401,6 +401,24 @@ enum PaintLayerThresholdParam : int {
   PAINT_LAYER_THRESHOLD_PARAM_NUM = 1,
 };
 
+/** The positions of the Histogram Scan filter's parameters in its schema. */
+enum PaintLayerHistogramScanParam : int {
+  /** The crossover point of the remap, the brightness the ramp is centered on. */
+  PAINT_LAYER_HISTOGRAM_SCAN_POSITION = 0,
+  /** The half-width of the soft transition around the position; zero reads as a hard edge. */
+  PAINT_LAYER_HISTOGRAM_SCAN_CONTRAST = 1,
+  /** On: the two states flip, `1 - out`, the way an inverted mask item does. */
+  PAINT_LAYER_HISTOGRAM_SCAN_INVERT = 2,
+  PAINT_LAYER_HISTOGRAM_SCAN_PARAM_NUM = 3,
+};
+
+/** The positions of the Histogram Shift filter's parameters in its schema. */
+enum PaintLayerHistogramShiftParam : int {
+  /** The fraction of the tonal range the value rolls by; one is the value again. */
+  PAINT_LAYER_HISTOGRAM_SHIFT_POSITION = 0,
+  PAINT_LAYER_HISTOGRAM_SHIFT_PARAM_NUM = 1,
+};
+
 /** The positions of the Clamp filter's parameters in its schema. */
 enum PaintLayerClampParam : int {
   PAINT_LAYER_CLAMP_MIN = 0,
@@ -1224,6 +1242,38 @@ inline float paint_layer_math_apply(const float value,
 inline float paint_layer_threshold_apply(const float value, const float threshold)
 {
   return (value > threshold) ? 1.0f : 0.0f;
+}
+
+/**
+ * One channel of the Histogram Scan filter: the smoothstep the Math node's own Smooth Step
+ * evaluates, centered on \a position and opened by \a contrast into a ramp of the same width each
+ * side, so `contrast = 0` reads as the Threshold the position alone makes. An inverted position
+ * flips the two states, `1 - out`, the way an inverted mask item does.
+ */
+inline float paint_layer_histogram_scan_apply(const float value,
+                                              const float position,
+                                              const float contrast,
+                                              const bool invert_position)
+{
+  /* The transition spans the same width each side of the position, so a full contrast is the
+   * ramp the value walks from zero at the position's low edge to one at its high one. */
+  const float edge = contrast * 0.5f;
+  const float lo = position - edge;
+  const float span = std::max(edge * 2.0f, 1e-6f);
+  const float t = std::clamp((value - lo) / span, 0.0f, 1.0f);
+  const float result = t * t * (3.0f - 2.0f * t);
+  return invert_position ? 1.0f - result : result;
+}
+
+/**
+ * One channel of the Histogram Shift filter: the value plus the position, wrapped back through
+ * zero when it passes one, the Math node's own Wrap. The shift is cyclic: a position of one is
+ * the value again.
+ */
+inline float paint_layer_histogram_shift_apply(const float value, const float position)
+{
+  const float shifted = value + position;
+  return shifted - std::floor(shifted);
 }
 
 /**

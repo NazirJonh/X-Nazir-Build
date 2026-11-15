@@ -102,9 +102,10 @@ const Material &layers_owner(const ID &owner);
  * The Material Symbols codepoints `space_outliner.py` repeats by hand for its header buttons.
  * The test pins these values so the Python constants cannot drift silently from the C++ ones.
  *
- * These three have external linkage -- `extern` here, defined in the .cc -- because the test needs
- * to read them; the rest of `paint_glyph` stays `constexpr` in the .cc, since only the code there
- * draws those glyphs and nothing outside has to name them.
+ * These three have external linkage -- declared `extern` here and in
+ * `outliner_stack_paint_filter_table.hh`, defined in `outliner_stack_paint_filter_table.cc` --
+ * because the test needs to read them. The rest of `paint_glyph` lives in the table header and is
+ * named only by the table code.
  */
 namespace paint_glyph {
 extern const uint32_t BRUSH;

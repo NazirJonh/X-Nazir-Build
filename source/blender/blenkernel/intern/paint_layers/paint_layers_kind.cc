@@ -222,6 +222,25 @@ static const PaintLayerKindParam threshold_params[] = {
 };
 static_assert(std::size(threshold_params) == PAINT_LAYER_THRESHOLD_PARAM_NUM);
 
+static const PaintLayerKindParam histogram_scan_params[] = {
+    /* The crossover point of the remap: the brightness the ramp walks from zero to one around.
+     * Half, the Threshold's own default, keeps the midtones where they are. */
+    {"position", "Position", 0.5f, 0.0f, 1.0f},
+    /* The half-width of the transition each side of the position; zero is the hard edge the
+     * Threshold alone makes, a full one is the ramp a value of the position's width walks. */
+    {"contrast", "Contrast", 0.0f, 0.0f, 1.0f},
+    /* The two states flip: what the position grew stays what it shrinks. */
+    {"invert_position", "Invert Position", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Bool},
+};
+static_assert(std::size(histogram_scan_params) == PAINT_LAYER_HISTOGRAM_SCAN_PARAM_NUM);
+
+static const PaintLayerKindParam histogram_shift_params[] = {
+    /* The fraction of the tonal range the value rolls by, cyclic: a full turn is the value
+     * again, so the slider's ends read as the same image. */
+    {"position", "Position", 0.0f, 0.0f, 1.0f},
+};
+static_assert(std::size(histogram_shift_params) == PAINT_LAYER_HISTOGRAM_SHIFT_PARAM_NUM);
+
 static const PaintLayerKindParam clamp_params[] = {
     {"min", "Min", 0.0f, 0.0f, 1.0f},
     {"max", "Max", 1.0f, 0.0f, 1.0f},
@@ -792,6 +811,26 @@ static const PaintLayerKindInfo kinds[] = {
      filter_roles,
      clamp_params,
      int(std::size(clamp_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    /* A soft threshold: the contrast opens the position into a smoothstep ramp, so a mask grows
+     * and shrinks by eating its dark side away rather than cutting at one point. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN,
+     "Histogram Scan",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     histogram_scan_params,
+     int(std::size(histogram_scan_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    /* The whole tonal range rolled by one amount: `fract(x + position)`, cyclic, so a full turn
+     * is the value again. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT,
+     "Histogram Shift",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     histogram_shift_params,
+     int(std::size(histogram_shift_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_CURVES,

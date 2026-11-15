@@ -562,6 +562,17 @@ void OUTLINER_OT_stack_layer_effect_add_new(wmOperatorType *ot)
   RNA_def_enum_funcs(prop, stack_effect_new_type_itemf);
 }
 
+void OUTLINER_OT_stack_layer_effect_add_filter2(wmOperatorType *ot)
+{
+  /* As the "Filter" operator: its own `type` enum, listing the "Filter 2" submenu's filters. */
+  OUTLINER_OT_stack_layer_add(ot);
+  ot->name = "Add Filter 2 Effect";
+  ot->idname = "OUTLINER_OT_stack_layer_effect_add_filter2";
+  ot->description = "Add one of the Painter-parity filters to the active layer or its mask";
+  PropertyRNA *prop = RNA_struct_type_find_property(ot->srna, "type");
+  RNA_def_enum_funcs(prop, stack_effect_filter2_type_itemf);
+}
+
 void OUTLINER_OT_stack_layer_effect_add_pattern(wmOperatorType *ot)
 {
   /* Same reason as the "Filter" operator: the enum an operator validates `type` against is its

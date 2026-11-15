@@ -41,6 +41,7 @@ set(SRC
   stack_layer/outliner_stack_dragdrop.cc
   stack_layer/outliner_stack_drop_actions.cc
   stack_layer/outliner_stack_row_builder.cc
+  stack_layer/outliner_stack_paint_filter_table.cc
   stack_layer/outliner_stack_source.cc
   stack_layer/outliner_stack_source_paint_layers.cc
   stack_layer/outliner_stack_source_python.cc
@@ -152,6 +153,7 @@ set(SRC
   tree/tree_element_view_collection.hh
   tree/tree_element_view_layer.hh
   tree/tree_iterator.hh
+  stack_layer/outliner_stack_paint_filter_table.hh
   stack_layer/outliner_stack_source.hh
   stack_layer/outliner_stack_source_paint_layers_intern.hh
   stack_layer/outliner_stack_source_python.hh

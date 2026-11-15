@@ -958,6 +958,11 @@ const EnumPropertyItem *stack_effect_new_type_itemf(bContext *C,
                                                     PointerRNA * /*ptr*/,
                                                     PropertyRNA * /*prop*/,
                                                     bool *r_free);
+/** The filters of the "Filter 2" submenu: the Painter-parity set. */
+const EnumPropertyItem *stack_effect_filter2_type_itemf(bContext *C,
+                                                        PointerRNA * /*ptr*/,
+                                                        PropertyRNA * /*prop*/,
+                                                        bool *r_free);
 /** The corrections of the "Generate Patterns" submenu: the procedural patterns, Gradient apart. */
 const EnumPropertyItem *stack_effect_pattern_type_itemf(bContext *C,
                                                         PointerRNA * /*ptr*/,
@@ -1176,6 +1181,7 @@ void OUTLINER_OT_stack_layer_mask_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_new(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_effect_add_filter2(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_pattern(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_correction(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_effect_add_transform(wmOperatorType *ot);

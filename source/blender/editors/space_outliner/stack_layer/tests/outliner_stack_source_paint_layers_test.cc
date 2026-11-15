@@ -181,10 +181,14 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_TRUE(kinds[14].is_effect);
   EXPECT_EQ(kinds[15].identifier, "FILTER_CLAMP");
   EXPECT_TRUE(kinds[15].is_effect);
-  EXPECT_EQ(kinds[16].identifier, "FILTER_CURVES");
+  EXPECT_EQ(kinds[16].identifier, "FILTER_HISTOGRAM_SCAN");
   EXPECT_TRUE(kinds[16].is_effect);
-  EXPECT_EQ(kinds[17].identifier, "FILTER_COLOR_BALANCE");
+  EXPECT_EQ(kinds[17].identifier, "FILTER_HISTOGRAM_SHIFT");
   EXPECT_TRUE(kinds[17].is_effect);
+  EXPECT_EQ(kinds[18].identifier, "FILTER_CURVES");
+  EXPECT_TRUE(kinds[18].is_effect);
+  EXPECT_EQ(kinds[19].identifier, "FILTER_COLOR_BALANCE");
+  EXPECT_TRUE(kinds[19].is_effect);
   /* Every kind past the head is found by identifier; `at` also fails the test if it is missing. */
   const auto at = [&](const char *identifier) {
     const int index = kind_index(kinds, identifier);
@@ -193,6 +197,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   };
   /* The filters as corrections of a row's colour. */
   for (const char *filter : {"FILTER_EXPOSURE",
+                             "FILTER_HISTOGRAM_SCAN",
+                             "FILTER_HISTOGRAM_SHIFT",
                              "FILTER_DEBAND",
                              "FILTER_NORMAL_CONVERT",
                              "FILTER_CHANNEL_MIXER"})
@@ -226,6 +232,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
                                  "ADJUSTMENT_MATH",
                                  "ADJUSTMENT_THRESHOLD",
                                  "ADJUSTMENT_CLAMP",
+                                 "ADJUSTMENT_HISTOGRAM_SCAN",
+                                 "ADJUSTMENT_HISTOGRAM_SHIFT",
                                  "ADJUSTMENT_CURVES",
                                  "ADJUSTMENT_COLOR_BALANCE",
                                  "ADJUSTMENT_EXPOSURE",
@@ -246,6 +254,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
                            "MASK_FILTER_MATH",
                            "MASK_FILTER_THRESHOLD",
                            "MASK_FILTER_CLAMP",
+                           "MASK_FILTER_HISTOGRAM_SCAN",
+                           "MASK_FILTER_HISTOGRAM_SHIFT",
                            "MASK_FILTER_CURVES",
                            "MASK_FILTER_COLOR_BALANCE",
                            "MASK_FILTER_EXPOSURE",
@@ -333,6 +343,14 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
     }
     return false;
   };
+  const auto is_filter2 = [](const Vector<StackEffectMenuKind> &kinds, const char *identifier) {
+    for (const StackEffectMenuKind &entry : kinds) {
+      if (entry.info.identifier == identifier) {
+        return entry.is_filter2;
+      }
+    }
+    return false;
+  };
 
   const Vector<StackEffectMenuKind> content = kinds_for(PAINT_LAYER_TARGET_CONTENT);
   const Vector<StackEffectMenuKind> mask = kinds_for(PAINT_LAYER_TARGET_MASK);
@@ -351,6 +369,17 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
                                  "EFFECT_ERODE_DILATE"})
   {
     EXPECT_TRUE(is_new(content, identifier)) << identifier;
+    EXPECT_FALSE(is_filter2(content, identifier)) << identifier;
+  }
+  /* The "Filter 2" submenu holds the Painter-parity filters, in the content and the mask lists
+   * alike, and none of them is also in the "Filter" one. */
+  for (const char *identifier : {"FILTER_HISTOGRAM_SCAN", "FILTER_HISTOGRAM_SHIFT"}) {
+    EXPECT_TRUE(is_filter2(content, identifier)) << identifier;
+    EXPECT_FALSE(is_new(content, identifier)) << identifier;
+  }
+  for (const char *identifier : {"MASK_FILTER_HISTOGRAM_SCAN", "MASK_FILTER_HISTOGRAM_SHIFT"}) {
+    EXPECT_TRUE(is_filter2(mask, identifier)) << identifier;
+    EXPECT_FALSE(is_new(mask, identifier)) << identifier;
   }
   for (const char *identifier : {"FILTER_INVERT",
                                  "FILTER_LEVELS",
@@ -362,6 +391,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
   {
     EXPECT_TRUE(has_identifier(content, identifier)) << identifier;
     EXPECT_FALSE(is_new(content, identifier)) << identifier;
+    EXPECT_FALSE(is_filter2(content, identifier)) << identifier;
   }
 
   /* One line per thing: in the content mode a mask twin is not offered, in the mask mode the line

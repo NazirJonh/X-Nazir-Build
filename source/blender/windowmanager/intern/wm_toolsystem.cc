@@ -458,6 +458,14 @@ void WM_toolsystem_brush_bindings_update_from_active(bContext *C, Paint *paint)
       paint, BKE_paintmode_get_active_from_context(C), active_tool->runtime->brush_type);
 }
 
+void WM_toolsystem_brush_binding_main_update_from_active(Paint *paint)
+{
+  if (paint == nullptr) {
+    return;
+  }
+  toolsystem_main_brush_binding_update_from_active(paint);
+}
+
 static void toolsystem_brush_activate_from_toolref_for_object_particle(const Main *bmain,
                                                                        const WorkSpace *workspace,
                                                                        const bToolRef *tref)

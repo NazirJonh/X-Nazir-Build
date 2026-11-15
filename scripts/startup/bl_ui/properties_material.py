@@ -13,6 +13,7 @@ from bl_ui.space_properties import PropertiesAnimationMixin
 
 from bl_ui.properties_paint_common import (
     _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS,
+    draw_curve_patch_brush_drop_row,
     paint_shape_tool_active,
 )
 
@@ -1032,6 +1033,10 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             layout.separator()
             draw_material_layer_channels(layout, context, owner, layer)
             return
+        # A Curve Patch effect draws its channels in its own sub-panel, below the Curve Patch one:
+        # sub-panels draw after the whole body, so the brush slot could not sit above them here.
+        if layer.source == 'CURVE_PATCH' and layer.curve_patch is not None:
+            return
         # A folder holds what its rows hold, so it has no channel records to add: its per-channel
         # blend and opacity are edited in the Outliner stack, and this tab keeps the overall ones.
         if layer.source != 'STACK':
@@ -1804,6 +1809,56 @@ class LAYER_MATERIAL_PT_text_decal(LayerMaterialButtonsPanel, Panel):
         row.operator("paint.text_decal_rebake", text="Re-bake", icon='FILE_REFRESH')
 
 
+class LAYER_MATERIAL_PT_curve_patch(LayerMaterialButtonsPanel, Panel):
+    """The brush a Curve Patch effect stamps with: its private snapshot, replaced by assignment.
+
+    The slot is a drop target (see CurvePatchLayerBrushDropTarget): a brush dragged from the Asset
+    Browser or the Asset Shelf becomes the effect's new snapshot.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_curve_patch"
+    bl_label = "Curve Patch"
+    bl_parent_id = "LAYER_MATERIAL_PT_layers"
+
+    @classmethod
+    def poll(cls, context):
+        if cls._object_mask_editing(context):
+            return False
+        _owner, layer = cls._active_layer(context)
+        return layer is not None and layer.source == 'CURVE_PATCH' and layer.curve_patch is not None
+
+    def draw(self, context):
+        _owner, layer = self._active_layer(context)
+        if layer is None or layer.curve_patch is None:
+            return
+        draw_curve_patch_brush_drop_row(self.layout, layer.curve_patch)
+
+
+class LAYER_MATERIAL_PT_curve_patch_channels(LayerMaterialButtonsPanel, Panel):
+    """The channels of a Curve Patch effect, below its Curve Patch sub-panel.
+
+    The same widgets the Layer panel draws for every other row; a Curve Patch row has them here so
+    the brush slot comes first.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_curve_patch_channels"
+    bl_label = "Channels"
+    bl_parent_id = "LAYER_MATERIAL_PT_layers"
+
+    @classmethod
+    def poll(cls, context):
+        return LAYER_MATERIAL_PT_curve_patch.poll(context)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        owner, layer = self._active_layer(context)
+        if owner is None or layer is None:
+            return
+        draw_material_layer_channels(layout, context, owner, layer)
+        draw_material_layer_height(layout, owner, layer)
+
+
 class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):
     """The source material's Surface inputs of the active Material layer, edited in place.
 
@@ -2468,6 +2523,8 @@ classes = (
     LAYER_MATERIAL_PT_mapping,
     LAYER_MATERIAL_PT_decal,
     LAYER_MATERIAL_PT_text_decal,
+    LAYER_MATERIAL_PT_curve_patch,
+    LAYER_MATERIAL_PT_curve_patch_channels,
     LAYER_MATERIAL_PT_mapping_advanced,
     LAYER_MATERIAL_PT_mapping_mirror,
     LAYER_MT_mapping_reset,

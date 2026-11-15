@@ -41,6 +41,7 @@
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_shelf.hh"
+#include "ED_asset_shelf_brush_set_temp.hh"
 #include "ED_screen.hh"
 
 /* Recent/Favorites asset-list registry (#ShelfAssetRef, #shelf_asset_lists_recent/favorites).
@@ -556,14 +557,29 @@ const EnumPropertyItem *id_browser_library_rna_itemf(const bContext *C, bool *r_
    * only, it never starts background jobs. */
   material_options.C = C;
 
+  /* Brushes: the Brush Libraries and the plain "Add Local Asset Library" ones assigned to Paint or
+   * Both, plus the current file. Image and material libraries could only come up empty. */
+  const bool browse_brushes = target_idcode == ID_BR;
+  ed::asset::LibraryEnumFilterOptions brush_options;
+  brush_options.exclude_material_libraries = true;
+  brush_options.required_brush_set = int(ed::asset::shelf::brush_set_temp::Category::Paint);
+
+  const ed::asset::LibraryEnumFilterOptions *filter_options = nullptr;
+  if (browse_materials) {
+    filter_options = &material_options;
+  }
+  else if (browse_brushes) {
+    filter_options = &brush_options;
+  }
+
   const EnumPropertyItem *items = ed::asset::library_reference_to_rna_enum_itemf(
       /*include_readonly=*/true,
       /*include_current_file=*/true,
       /*include_remote_libraries=*/false,
       /*include_separate_online_essentials=*/false,
-      /*exclude_image_libraries=*/browse_materials,
+      /*exclude_image_libraries=*/browse_materials || browse_brushes,
       only_image_libraries,
-      browse_materials ? &material_options : nullptr);
+      filter_options);
   *r_free = (items != nullptr);
   return items;
 }

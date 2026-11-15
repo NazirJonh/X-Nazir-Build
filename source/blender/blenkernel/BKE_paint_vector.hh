@@ -123,4 +123,16 @@ bke::CurvePatchParams BKE_paint_vector_curve_params_decode(const PaintVectorCurv
 /** The inverse of #BKE_paint_vector_curve_params_decode. */
 PaintVectorCurveParams BKE_paint_vector_curve_params_encode(const bke::CurvePatchParams &params);
 
+/**
+ * The user-facing Width of a curve: a friendly scale over the stored world-space `radius`, where
+ * one unit is 5 px of the brush size the curve was made with, so 100 is a 500 px brush. Shared by
+ * the list slider and the layer session's radial control so both read the same value. Data written
+ * before the `radius_per_size` ratio existed (or a curve whose brush had a zero Size) treats its
+ * current radius as the 500 px reference, so the scale still opens on a usable value.
+ */
+float BKE_paint_vector_curve_width_get(const PaintVectorCurveParams &params);
+/** The inverse of #BKE_paint_vector_curve_width_get: \a width is in the same slider units. A
+ * curve with no usable ratio cannot be scaled and stays untouched. */
+void BKE_paint_vector_curve_width_set(PaintVectorCurveParams &params, float width);
+
 }  // namespace blender

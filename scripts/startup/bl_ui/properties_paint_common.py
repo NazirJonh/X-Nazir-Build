@@ -239,13 +239,17 @@ class BrushAssetShelf:
             return
 
         display_name = brush.name if (brush and show_name) else None
-        if display_name and brush.has_unsaved_changes:
+        # A Curve Patch layer's brush snapshot is not a user brush: the user knows the brush it was
+        # made from, so that name is shown, and the button is marked so the popover does not look
+        # like the place to switch brushes mid-session.
+        is_curve_patch_snapshot = bool(display_name) and brush.is_curve_patch_snapshot
+        if is_curve_patch_snapshot:
+            display_name = brush.curve_patch_source_name or iface_("Curve Patch")
+        elif display_name and brush.has_unsaved_changes:
             # Show "*" to the left for consistency with unsaved files in the title bar.
             display_name = "* " + display_name
 
-        # A Curve Patch layer's brush snapshot ("`.CP Brush <row>`") is not a user brush: mark the
-        # button so the popover does not look like the place to switch brushes mid-session.
-        if display_name and display_name.startswith(".CP Brush "):
+        if is_curve_patch_snapshot:
             layout.label(text="", icon='CURVE_BEZCURVE')
 
         layout.template_asset_shelf_popover(
@@ -366,6 +370,11 @@ class UnifiedPaintPanel:
             :param unified_paint_settings_override allows a caller to pass in a specific object for usage. Needed for
             some 'brush-like' tools."""
         row = layout.row(align=True)
+        # A Curve Patch effect's brush snapshot stamps with the opacity of each curve, which is
+        # edited on the curve (and by the Strength ring): its own Strength would silently scale
+        # every stamp, so the slider is shown but locked.
+        if prop_name == "strength" and brush is not None and brush.is_curve_patch_snapshot:
+            row.enabled = False
         if unified_paint_settings_override:
             ups = unified_paint_settings_override
         else:
@@ -834,6 +843,35 @@ def draw_texture_drop_row(layout, data, propname, label):
         # data-block manager.
         use_users=False,
     )
+    return row
+
+
+def draw_curve_patch_brush_drop_row(layout, payload):
+    """Brush slot of a Curve Patch effect: the ID browser of the brush it was made from.
+
+    The effect stamps with a private snapshot whose own name means nothing to the user, so the
+    browser edits `source_brush`: it shows the name and preview of the brush the snapshot was
+    duplicated from, and picking another one in its popover replaces the snapshot with a duplicate
+    of that brush. Dropping a brush (Asset Browser, Asset Shelf), the menu next to the browser and
+    the property's update all end in the same editor entry (ED_curve_patch_layer_brush_assign),
+    which ends a live session and renews the curves. The context pointer marks the row as a drop
+    target (CurvePatchLayerBrushDropTarget); it is inherited only by children of the layout it is
+    set on, so it is set on the row.
+    """
+    row = layout.row(align=True)
+    row.context_pointer_set("curve_patch_layer_brush", payload)
+    row.template_ID_browser(
+        payload,
+        "source_brush",
+        text=iface_("Drop brush: Curve Patch"),
+        filter_type="PAINT_IDF_curve_patch_brush",
+        # The snapshot is private to the effect: no user count and no rename of a brush the effect
+        # does not own, and no unlink (an effect without a snapshot has nothing to stamp with).
+        use_users=False,
+        use_unlink=False,
+        use_rename=False,
+    )
+    row.menu("PAINT_MT_curve_patch_layer_brush", text="", icon='DOWNARROW_HLT')
     return row
 
 
@@ -5454,13 +5492,17 @@ class PAINT_MT_curve_patch_layer_brush(Menu):
         )
         layout.separator()
         shown = False
+        # A grid of brush previews, like the image browser the slot used to open. Every entry goes
+        # through the assign operator, which ends in the same editor entry as the ID browser's
+        # pick and a brush drop.
+        grid = layout.column_flow(columns=3)
         for brush in bpy.data.brushes:
-            # A layer's own snapshot is not a source: listing `.CP Brush <row>` here would let
-            # one layer adopt another's private state by accident.
-            if (not brush.use_paint_sculpt or brush.name.startswith(".CP Brush ") or
+            # A layer's own snapshot is not a source: listing it here would let one layer adopt
+            # another's private state by accident.
+            if (not brush.use_paint_sculpt or brush.is_curve_patch_snapshot or
                     not curve_patch_brush_supported(brush)):
                 continue
-            props = layout.operator(
+            props = grid.operator(
                 "paint.curve_patch_layer_brush_assign",
                 text=brush.name,
                 icon_value=layout.icon(brush),
@@ -5521,9 +5563,7 @@ class CURVE_PATCH_LAYER_PT_curves(Panel):
         # The effect's tool state: a private snapshot, replaced (never shared) by assignment. The
         # field takes a brush dropped from the Asset Shelf or the Asset Browser, or picked from its
         # dropdown; either way the effect gets a duplicate of that brush.
-        brush_row = layout.row(align=True)
-        brush_row.prop(row_data.curve_patch, "brush", text="Brush")
-        brush_row.menu("PAINT_MT_curve_patch_layer_brush", text="", icon='DOWNARROW_HLT')
+        draw_curve_patch_brush_drop_row(layout, row_data.curve_patch)
 
         layout.separator()
         row = layout.row()

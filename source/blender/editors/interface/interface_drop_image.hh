@@ -132,6 +132,22 @@ std::unique_ptr<ui::DropTargetInterface> curve_patch_texture_list_drop_target_ge
 std::unique_ptr<ui::DropTargetInterface> curve_patch_slot_channel_drop_target_get(
     bContext *C, const ARegion *region, const wmEvent *event);
 
+/**
+ * The button context pointer that marks a Curve Patch layer Brush slot; its value is the
+ * #MaterialPaintLayerCurvePatch payload the dropped brush is assigned to.
+ */
+inline constexpr const char *CURVE_PATCH_LAYER_BRUSH_CONTEXT = "curve_patch_layer_brush";
+
+/**
+ * Return a drop target for the Curve Patch layer panel's Brush row under the cursor (the row
+ * #CURVE_PATCH_LAYER_PT_curves draws: the dropped brush becomes the effect's new private snapshot
+ * through #ED_curve_patch_layer_brush_assign), or null if there is none. The Python UI publishes the
+ * payload through the `curve_patch_layer_brush` layout context pointer. Used by the generic
+ * button drop dispatch.
+ */
+std::unique_ptr<ui::DropTargetInterface> curve_patch_layer_brush_drop_target_get(
+    bContext *C, const ARegion *region, const wmEvent *event);
+
 /** The button context string that marks a Decal panel drop zone; its value is the channel. */
 inline constexpr const char *DECAL_DROP_CHANNEL_CONTEXT = "decal_drop_channel";
 

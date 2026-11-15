@@ -32,6 +32,7 @@ struct ARegionType;
 struct Brush;
 struct BrushCurvePatchTextureSlot;
 struct bToolRef;
+struct bUUID;
 struct Depsgraph;
 struct EnumPropertyItem;
 struct Image;
@@ -921,6 +922,15 @@ void paint_stack_texpaint_slots_refresh(bContext &C);
 
 /** Set the target a layered material's stroke paints (content or mask); true when it changed. */
 bool paint_stack_target_mode_set(bContext &C, ePaintLayerTargetMode mode);
+
+/**
+ * Make \a marker the active row of \a material. The single entry point for an editor that moves
+ * the stack's active row: a live Curve Patch session of any other row commits first, so the
+ * switch hands the user's own brush back instead of leaving the effect's snapshot in the hand.
+ * Call it before a target-mode switch that follows, since that is what swaps the brush. Code
+ * without a context (RNA, BKE) keeps using #BKE_paint_layers_active_set.
+ */
+void paint_stack_active_row_set(bContext &C, Material &material, const bUUID &marker);
 
 /** The map of \a row's base mask, created when it has none, with the slots refreshed to hold it.
  * Nothing to create means nothing to refresh, so a call on a mask that already has its map is a

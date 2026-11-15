@@ -1280,7 +1280,7 @@ static wmOperatorStatus stack_layer_paste_exec(bContext *C, wmOperator *op)
       BKE_report(op->reports, RPT_INFO, "Could not paste the correction onto this layer");
       return OPERATOR_CANCELLED;
     }
-    BKE_paint_layers_active_set(*ma, copy->marker);
+    ed::sculpt_paint::paint_stack_active_row_set(*C, *ma, copy->marker);
     /* The pasted correction is the row the stack shows: follow it with the Projection Frame tool,
      * like a stack row click does. */
     ed::sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(C, *ma, copy);
@@ -1317,7 +1317,7 @@ static wmOperatorStatus stack_layer_paste_exec(bContext *C, wmOperator *op)
     if (anchor != copy) {
       BKE_paint_layers_edit_move(*ma, *copy, anchor, PaintLayerPlace::Above);
     }
-    BKE_paint_layers_active_set(*ma, copy->marker);
+    ed::sculpt_paint::paint_stack_active_row_set(*C, *ma, copy->marker);
     /* The pasted copy is the row the stack shows, and it keeps the copied row's projection: a
      * duplicate of a volume row brings the Projection Frame tool with it, like a stack row click
      * does. */

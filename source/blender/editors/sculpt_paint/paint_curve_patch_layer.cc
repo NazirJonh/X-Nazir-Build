@@ -18,6 +18,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_function_ref.hh"
 #include "BLI_index_range.hh"
 #include "BLI_hash.h"
 #include "BLI_listbase_iterator.hh"
@@ -108,6 +109,14 @@ PrevBrushRestore::~PrevBrushRestore()
   /* The same user-facing switch the entry used, so the outgoing PBR state (here: the snapshot's)
    * is snapshotted before the previous brush comes back with its own. */
   BKE_paint_brush_set_synced(*this->scene_, *this->paint_, this->prev_brush_);
+  /* The entry went through the tool system, which recorded the snapshot as its tool's brush; a
+   * restore that only swaps the pointer would leave that binding behind, and the next tool refresh
+   * (an undo step, a tool round-trip, a mode re-entry) would silently put the snapshot back in the
+   * hand after the restore had already run -- the "the wrong brush stays active" reports. The
+   * restored brush IS the active one now, so the binding follows the hand again. Only the main
+   * binding is written: no context exists here for the per-type ones (and Sculpt Mode's Paint tool,
+   * where the session's tool runs, binds through the main binding). */
+  WM_toolsystem_brush_binding_main_update_from_active(this->paint_);
 }
 
 bool PrevBrushRestore::activate(Brush &brush)
@@ -285,18 +294,37 @@ static void curve_patch_layer_curve_ids_ensure(PaintVector &pv)
   }
 }
 
+/** The radius (half the brush's Unprojected Size, the DIAMETER) and its ratio to the snapshot's own
+ * Size slider that a curve made from \a brush freezes. */
+static void curve_patch_layer_brush_radius(const Brush *brush,
+                                           float &r_radius,
+                                           float &r_radius_per_size)
+{
+  const float diameter = (brush != nullptr) ? brush->unprojected_size : 0.0f;
+  r_radius = diameter > 0.0f ? diameter * 0.5f : 0.1f;
+  const int brush_size = (brush != nullptr && brush->size > 0) ? brush->size : 1;
+  r_radius_per_size = r_radius / float(brush_size);
+}
+
+/** The stamp seed of a curve made (or renewed) from \a brush. One function for both, so a curve
+ * keeps the same texture distribution whichever path built it; it follows the snapshot's name,
+ * which stays unique per snapshot (`.CP <source>`, `.CP <source>.001`, ...). */
+static uint32_t curve_patch_layer_brush_stamp_seed(const Brush &brush)
+{
+  return BLI_hash_string(brush.id.name + 2);
+}
+
 /** Append one default curve item to \a pv: a two-point segment sized from \a brush, with the
  * frozen parameters the brush would stamp with. Used by the row seed and the curve-add operator. */
 static PaintVectorItem &curve_patch_layer_curve_item_default(PaintVector &pv, const Brush *brush)
 {
   /* The brush's Unprojected Size is the DIAMETER in Blender units; the patch works with the
    * radius (the same value a stroke freezes as #StrokeCache::initial_radius). */
-  const float diameter = (brush != nullptr) ? brush->unprojected_size : 0.0f;
-  const float radius = diameter > 0.0f ? diameter * 0.5f : 0.1f;
   /* The snapshot's own size slider, not the unified setting: at Add time there is no Paint the
    * unified state could be read from, and the frozen ratio belongs to the snapshot anyway. */
-  const int brush_size = (brush != nullptr && brush->size > 0) ? brush->size : 1;
-  const float radius_per_size = radius / float(brush_size);
+  float radius;
+  float radius_per_size;
+  curve_patch_layer_brush_radius(brush, radius, radius_per_size);
 
   const int curve_id = curve_patch_layer_next_curve_id(pv);
   PaintVectorItem &item = BKE_paint_vector_item_add(pv);
@@ -315,7 +343,7 @@ static PaintVectorItem &curve_patch_layer_curve_item_default(PaintVector &pv, co
                                            radius,
                                            radius_per_size,
                                            float3(0.0f, 0.0f, 1.0f),
-                                           BLI_hash_string(brush->id.name + 2),
+                                           curve_patch_layer_brush_stamp_seed(*brush),
                                            brush->curve_patch.swap_axis != 0);
   }
   else {
@@ -338,6 +366,44 @@ static PaintVectorItem &curve_patch_layer_curve_item_default(PaintVector &pv, co
     geom.tag_positions_changed();
   }
   return item;
+}
+
+/** Re-derive every curve's frozen stamp parameters from the effect's (new) brush snapshot, the way
+ * a curve made from it would get them. What the user shaped on the curve itself stays: its points,
+ * Width (radius and its ratio to the brush size), Opacity, visibility, mirror axes and axis swap. */
+static void curve_patch_layer_curves_reset_from_brush(MaterialPaintLayerCurvePatch &payload)
+{
+  if (payload.vectors == nullptr || payload.brush == nullptr) {
+    return;
+  }
+  PaintVector &pv = *payload.vectors;
+  float default_radius;
+  float default_radius_per_size;
+  curve_patch_layer_brush_radius(payload.brush, default_radius, default_radius_per_size);
+  for (const int i : IndexRange(pv.items_num)) {
+    PaintVectorItem &item = pv.items[i];
+    if (item.type != PAINT_VECTOR_ITEM_CURVE_PATCH) {
+      continue;
+    }
+    const bke::CurvePatchParams old_params = BKE_paint_vector_curve_params_decode(
+        item.curve_patch_params);
+    /* A curve with no usable Width (data from before the ratio existed) takes the brush's. */
+    const float radius = old_params.radius > 0.0f ? old_params.radius : default_radius;
+    const float radius_per_size = old_params.radius_per_size > 0.0f ? old_params.radius_per_size :
+                                                                      default_radius_per_size;
+    bke::CurvePatchParams params = curve_patch_params_from_brush(
+        *payload.brush,
+        radius,
+        radius_per_size,
+        old_params.plane_normal,
+        curve_patch_layer_brush_stamp_seed(*payload.brush),
+        old_params.swap_axis);
+    params.opacity = old_params.opacity;
+    params.hidden = old_params.hidden;
+    params.symmetry_flags = old_params.symmetry_flags;
+    item.curve_patch_params = BKE_paint_vector_curve_params_encode(params);
+  }
+  BKE_paint_vector_tag_changed(pv);
 }
 
 void ED_paint_layers_curve_patch_row_seed_curve(MaterialPaintLayerCurvePatch &payload)
@@ -741,7 +807,11 @@ bool curve_patch_layer_activate(bContext &C, Material &ma, MaterialPaintLayer &r
    * not the vertex-color or Poly Paint one, or the strokes would land where the row never reads. */
   PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
   paint_mode.canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
-  paint_mode.layer_target_mode = PAINT_LAYER_TARGET_CONTENT;
+  /* Through the BKE switch, not a plain write: leaving a Mask target mode restores the saved
+   * content brush and clears #mask_saved_brush, so the restore below captures the brush the user
+   * actually holds on content -- and a later Mask entry does not remember the snapshot. */
+  BKE_paint_material_layer_target_mode_set(
+      *CTX_data_main(&C), *scene, sd->paint, paint_mode, PAINT_LAYER_TARGET_CONTENT);
 
   /* The row must be the active one: the image effect resolves its targets through it, and the
    * operator also activates the object mask editing target. */
@@ -1165,6 +1235,94 @@ bool curve_patch_layer_session_blocks_row(const Object &ob, const MaterialPaintL
          curve_patch_layer_session_blocks_row(*session, row);
 }
 
+/** Whether some object runs a live layer session for the row \a row_marker of \a material. */
+static bool curve_patch_layer_row_is_live(const Main &bmain,
+                                          const Material &material,
+                                          const bUUID &row_marker)
+{
+  for (const Object &ob : bmain.objects) {
+    const CurvePatchSession *session = ED_curve_patch_session_get(ob);
+    if (session != nullptr && session->layer_material == &material &&
+        BLI_uuid_equal(session->layer_row_marker, row_marker))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+void curve_patch_layer_commit_live_sessions(bContext &C, const bUUID *target_marker)
+{
+  Main *bmain = CTX_data_main(&C);
+  if (bmain == nullptr) {
+    return;
+  }
+  /* Sessions are published on objects, and a secondary target's owner can hold one while another
+   * object is active -- so the search cannot be narrowed by the scene or the active object: every
+   * live layer session the switch would strand (its brush still in the hand, its stroke polls
+   * blocking the paint) commits. The session of the row being (re)activated stays, unless \a
+   * target_marker is null: a switch into mask work ends it even when it is its own row. */
+  for (Object &ob : bmain->objects) {
+    const CurvePatchSession *session = ED_curve_patch_session_get(ob);
+    if (session == nullptr || session->layer_material == nullptr) {
+      continue;
+    }
+    if (target_marker != nullptr &&
+        BLI_uuid_equal(session->layer_row_marker, *target_marker))
+    {
+      continue;
+    }
+    curve_patch_layer_commit_live_session(C, ob);
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Active curve look (the radial control)
+ *
+ * While a layer session runs, the brush Size ring is the ACTIVE curve's Width and the Strength
+ * ring its Opacity: the per-curve look belongs to the curve, and the snapshot brush's own Size and
+ * Strength are frozen for it, so the rings must write the row's container item instead of the
+ * brush. A write goes to the persisted item only -- the modal editor's poll syncs it into the
+ * live document on the next event (its re-stamp), and the RNA update callback re-stamps once for
+ * callers that bypass a running modal.
+ * \{ */
+
+/** The persisted container item of the session's active patch: null when the session was not
+ * entered from a row, the row was deleted, or the active patch has no curve item yet. */
+static PaintVectorItem *curve_patch_layer_active_curve_item(const CurvePatchSession &session)
+{
+  const MaterialPaintLayer *row = curve_patch_layer_session_row(session);
+  if (row == nullptr || row->curve_patch->vectors == nullptr || !session.doc.has_active_item()) {
+    return nullptr;
+  }
+  PaintVector &pv = *row->curve_patch->vectors;
+  const int item_i = session.doc.active_item().source_curve_index;
+  if (item_i < 0 || item_i >= pv.items_num ||
+      pv.items[item_i].type != PAINT_VECTOR_ITEM_CURVE_PATCH)
+  {
+    return nullptr;
+  }
+  return &pv.items[item_i];
+}
+
+/** Edit the active curve's persisted params and tag the container, so the modal's poll re-syncs. */
+static bool curve_patch_layer_active_curve_params_edit(
+    const Object &ob, FunctionRef<void(PaintVectorCurveParams &)> edit)
+{
+  const CurvePatchSession *session = ED_curve_patch_session_get(ob);
+  PaintVectorItem *item = (session != nullptr) ?
+                              curve_patch_layer_active_curve_item(*session) :
+                              nullptr;
+  if (item == nullptr) {
+    return false;
+  }
+  edit(item->curve_patch_params);
+  BKE_paint_vector_tag_changed(*curve_patch_layer_session_row(*session)->curve_patch->vectors);
+  return true;
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -1213,13 +1371,10 @@ bool paint_stack_row_activate(bContext &C,
   }
   /* A live Curve Patch session owns the tool while it runs. Switching the active row away from
    * its effect is a deliberate step the user can undo, so the session just commits its curves
-   * into the effect and the switch goes on, with no question and no warning. */
-  if (Object *ob = CTX_data_active_object(&C)) {
-    const MaterialPaintLayer *target = BKE_paint_layers_find(material, row_marker);
-    if (target != nullptr && curve_patch_layer_session_blocks_row(*ob, *target)) {
-      curve_patch_layer_commit_live_session(C, *ob);
-    }
-  }
+   * into the effect and the switch goes on, with no question and no warning. Every live layer
+   * session commits, whatever object runs it: a session on a secondary target's owner would
+   * otherwise keep that effect's brush in the hand after the switch restored the user's own. */
+  curve_patch_layer_commit_live_sessions(C, &row_marker);
   BKE_paint_layers_active_set(material, row_marker);
   if (curve_item_index >= 0) {
     /* The session builds its document from the container's active item, so the clicked curve is
@@ -1729,11 +1884,6 @@ static bool curve_patch_layer_brush_assign_poll(bContext *C)
 
 static wmOperatorStatus curve_patch_layer_brush_assign_exec(bContext *C, wmOperator *op)
 {
-  /* Replacing the snapshot would free the brush the live modal is editing through. */
-  if (curve_patch_layer_live_session(C) != nullptr) {
-    BKE_report(op->reports, RPT_WARNING, "Finish the live Curve Patch first");
-    return OPERATOR_CANCELLED;
-  }
   const CurvePatchLayerTarget target = curve_patch_layer_target_get(C);
   if (target.row == nullptr) {
     BKE_report(op->reports, RPT_WARNING, "Activate a Curve Patch effect first");
@@ -1765,24 +1915,13 @@ static wmOperatorStatus curve_patch_layer_brush_assign_exec(bContext *C, wmOpera
     return OPERATOR_CANCELLED;
   }
   /* A linked brush is a valid source: the snapshot is a local copy, so it stays editable even
-   * when the source came from an asset library. */
-  if (!bke::brush::supports_curve_patch(*source)) {
-    BKE_reportf(op->reports,
-                RPT_WARNING,
-                "Brush \"%s\" cannot stamp a Curve Patch; pick a Draw, Clay, Crease or Paint "
-                "type brush",
-                source->id.name + 2);
-    return OPERATOR_CANCELLED;
-  }
-  if (!BKE_paint_layers_curve_patch_brush_set(
-          *target.material, *CTX_data_main(C), *target.row, *source))
+   * when the source came from an asset library. The assign entry validates the brush, ends a live
+   * session, renews the curves and pushes the one undo step (hence no OPTYPE_UNDO below). */
+  if (!ED_curve_patch_layer_brush_assign(
+          *C, *target.material, *target.row->curve_patch, *source, op->reports))
   {
-    BKE_report(op->reports, RPT_ERROR, "Could not duplicate that brush for the effect");
     return OPERATOR_CANCELLED;
   }
-  ED_undo_memfile_push(C, "Assign Curve Patch Brush");
-  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, nullptr);
-  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &target.material->id);
   return OPERATOR_FINISHED;
 }
 
@@ -1795,7 +1934,7 @@ void PAINT_OT_curve_patch_layer_brush_assign(wmOperatorType *ot)
       "brush is given)";
   ot->exec = curve_patch_layer_brush_assign_exec;
   ot->poll = curve_patch_layer_brush_assign_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 
   RNA_def_string(ot->srna,
                  "brush_name",
@@ -1809,3 +1948,124 @@ void PAINT_OT_curve_patch_layer_brush_assign(wmOperatorType *ot)
 /** \} */
 
 }  // namespace blender::ed::sculpt_paint
+
+/* The public entry points are declared in `ED_curve_patch.hh` under `blender::`, so they are
+ * defined here, in one block outside the sculpt_paint namespace, to link with their callers (RNA,
+ * the drop target, windowmanager). */
+namespace blender {
+
+/* -------------------------------------------------------------------- */
+/** \name Public Curve Patch layer entry points
+ * \{ */
+
+bool ED_curve_patch_layer_brush_assign(bContext &C,
+                                       Material &material,
+                                       MaterialPaintLayerCurvePatch &payload,
+                                       const Brush &source,
+                                       ReportList *reports)
+{
+  using namespace ed::sculpt_paint;
+  Main *bmain = CTX_data_main(&C);
+  if (bmain == nullptr) {
+    return false;
+  }
+  if (!BKE_paint_layers_curve_patch_brush_usable(source)) {
+    BKE_report(reports, RPT_WARNING, "That brush cannot stamp a Curve Patch");
+    return false;
+  }
+  MaterialPaintLayer *row = BKE_paint_layers_curve_patch_row_find(material, payload);
+  if (row == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Could not assign that brush to the Curve Patch");
+    return false;
+  }
+  const bUUID row_marker = row->marker;
+  const bool was_live = curve_patch_layer_row_is_live(*bmain, material, row_marker);
+  /* The snapshot is the active brush while a session runs, so it commits before the old snapshot
+   * is freed. */
+  curve_patch_layer_commit_live_sessions(C);
+
+  if (!BKE_paint_layers_curve_patch_brush_set(material, *bmain, *row, source)) {
+    BKE_report(reports, RPT_ERROR, "Could not assign that brush to the Curve Patch");
+    return false;
+  }
+  /* The brush set already invalidated the bake and tagged the material as edited. */
+  curve_patch_layer_curves_reset_from_brush(payload);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, nullptr);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &material.id);
+
+  if (was_live) {
+    /* The same entry a click on the row takes: the new snapshot comes into the hand. */
+    paint_stack_row_activate(C, material, row_marker);
+  }
+  ED_undo_memfile_push(&C, "Assign Curve Patch Brush");
+  return true;
+}
+
+bool ED_curve_patch_radial_control_retarget(bContext &C, PointerRNA &r_ptr, PropertyRNA *&r_prop)
+{
+  Object *ob = CTX_data_active_object(&C);
+  const ed::sculpt_paint::CurvePatchSession *session = (ob != nullptr) ?
+                                                           ED_curve_patch_session_get(*ob) :
+                                                           nullptr;
+  if (session == nullptr || !session->is_layer_effect()) {
+    return false;
+  }
+  /* Keyed on the property the keymap asked for, so it works for any binding of the ring and
+   * leaves every other ring (the texture angle) untouched. The ring then reads `ui_range`, unit
+   * and value from the retargeted property: `curve_width` has the list slider's 0..100 soft range,
+   * and Esc restores the old value through the same setter. */
+  const char *prop_id = RNA_property_identifier(r_prop);
+  const char *retarget_id = STREQ(prop_id, "size")     ? "curve_width" :
+                            STREQ(prop_id, "strength") ? "curve_opacity" :
+                                                         nullptr;
+  if (retarget_id == nullptr) {
+    return false;
+  }
+  PointerRNA session_ptr = RNA_pointer_create_discrete(
+      &ob->id, RNA_CurvePatchSession, const_cast<ed::sculpt_paint::CurvePatchSession *>(session));
+  PropertyRNA *retarget_prop = RNA_struct_find_property(&session_ptr, retarget_id);
+  if (retarget_prop == nullptr) {
+    return false;
+  }
+  r_ptr = session_ptr;
+  r_prop = retarget_prop;
+  return true;
+}
+
+float ED_curve_patch_session_curve_width(const Object &ob)
+{
+  const ed::sculpt_paint::CurvePatchSession *session = ED_curve_patch_session_get(ob);
+  if (session == nullptr) {
+    return 0.0f;
+  }
+  const PaintVectorItem *item = ed::sculpt_paint::curve_patch_layer_active_curve_item(*session);
+  return item != nullptr ? BKE_paint_vector_curve_width_get(item->curve_patch_params) : 0.0f;
+}
+
+bool ED_curve_patch_session_curve_width_set(const Object &ob, float width)
+{
+  return ed::sculpt_paint::curve_patch_layer_active_curve_params_edit(
+      ob, [&](PaintVectorCurveParams &params) { BKE_paint_vector_curve_width_set(params, width); });
+}
+
+float ED_curve_patch_session_curve_opacity(const Object &ob)
+{
+  const ed::sculpt_paint::CurvePatchSession *session = ED_curve_patch_session_get(ob);
+  if (session == nullptr) {
+    return 0.0f;
+  }
+  const PaintVectorItem *item = ed::sculpt_paint::curve_patch_layer_active_curve_item(*session);
+  return item != nullptr ? item->curve_patch_params.opacity : 0.0f;
+}
+
+bool ED_curve_patch_session_curve_opacity_set(const Object &ob, float opacity)
+{
+  return ed::sculpt_paint::curve_patch_layer_active_curve_params_edit(
+      ob, [&](PaintVectorCurveParams &params) {
+        params.opacity = std::clamp(opacity, 0.0f, 1.0f);
+      });
+}
+
+/** \} */
+
+}  // namespace blender

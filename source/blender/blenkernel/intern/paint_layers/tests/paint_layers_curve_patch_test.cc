@@ -91,7 +91,7 @@ TEST_F(PaintLayersCurvePatch, AddCreatesOwnedPayload)
   EXPECT_EQ(vectors->id.us, 1);
   EXPECT_EQ(snapshot->id.us, 1);
   EXPECT_NE(snapshot, brush);
-  EXPECT_EQ(std::strncmp(snapshot->id.name + 2, ".CP Brush ", 10), 0);
+  EXPECT_EQ(std::strncmp(snapshot->id.name + 2, ".CP ", 4), 0);
   /* A container the Add created starts empty; the editors wrapper seeds the first curve. */
   EXPECT_EQ(vectors->items_num, 0);
 

@@ -23,8 +23,14 @@
 namespace blender {
 
 struct bContext;
+struct Brush;
 struct Main;
+struct Material;
+struct MaterialPaintLayerCurvePatch;
 struct Object;
+struct PointerRNA;
+struct PropertyRNA;
+struct ReportList;
 
 namespace bke {
 class CurvesGeometry;
@@ -138,6 +144,60 @@ void ED_curve_patch_session_restamp(bContext &C, Object &ob);
 /** Record the session's current state as a new step on its own undo stack, so Ctrl+Z inside a
  * live Curve Patch edit can step back over a finished G/R/S transform. */
 void ED_curve_patch_session_undo_push(Object &ob);
+
+/**
+ * Replace the brush snapshot of a Curve Patch effect with a duplicate of \a source. The single
+ * entry for every UI path (a brush dropped on the slot, the slot's ID browser, the assign
+ * operator); the context-free RNA `brush` setter is only for scripts. It validates \a source
+ * (#BKE_paint_layers_curve_patch_brush_usable) and wraps the replacement with what it needs:
+ * - live layer sessions commit first, since the snapshot is the active brush while one runs and
+ *   cannot be freed under it;
+ * - every curve of the effect takes the new brush's parameters (stamp mode, layout, spacing,
+ *   caps, falloff, randomness, Width and Opacity), because a curve freezes them from the brush
+ *   when it is made and would otherwise keep the old brush's look. The geometry, visibility and
+ *   mirror axes of a curve stay;
+ * - the effect's tool is entered again when it was running, now with the new snapshot;
+ * - the notifiers and the one undo step ("Assign Curve Patch Brush") are sent here, so callers
+ *   push nothing themselves.
+ *
+ * Refusals are reported to \a reports (may be null). Returns whether the snapshot changed.
+ */
+bool ED_curve_patch_layer_brush_assign(bContext &C,
+                                       Material &material,
+                                       MaterialPaintLayerCurvePatch &payload,
+                                       const Brush &source,
+                                       ReportList *reports);
+
+/**
+ * Radial control hook: while a LAYER session runs on the active object, the brush Size ring is the
+ * ACTIVE curve's Width and the Strength ring its Opacity, because the effect's snapshot brush has
+ * its own Size and Strength frozen (the per-curve radius belongs to the curve). Keyed on the
+ * property \a r_prop the keymap asked for ("size"/"strength"); on a match \a r_ptr and \a r_prop
+ * are replaced by the session's `curve_width` / `curve_opacity`. Any other property, or no layer
+ * session, leaves them untouched. Returns whether the ring was retargeted.
+ */
+bool ED_curve_patch_radial_control_retarget(bContext &C, PointerRNA &r_ptr, PropertyRNA *&r_prop);
+
+/**
+ * The ACTIVE curve's persisted Width, in the layer panel's slider units (1 unit is 5 px of brush
+ * size, so 100 is a 500 px brush), read from the row's container item. Zero when no layer session
+ * runs, its active patch has no persisted curve yet, or the row was deleted. This is what the
+ * brush Size ring is retargeted to while the session runs: the per-curve radius is the curve's
+ * own, so the snapshot brush's Size is frozen and the ring must not touch it.
+ */
+float ED_curve_patch_session_curve_width(const Object &ob);
+/** Write the active curve's persisted Width (\a width in the same slider units). Only the row's
+ * container item changes; the modal editor's poll syncs it into the live document (its re-stamp),
+ * and the RNA update callback re-stamps once for callers that bypass a running modal. Returns
+ * false when there was nothing to write. */
+bool ED_curve_patch_session_curve_width_set(const Object &ob, float width);
+/** The ACTIVE curve's persisted Opacity, in [0, 1]: the multiplier on the stamp strength that
+ * stands in for the snapshot brush's own Strength while a layer session runs. Zero when there is
+ * nothing to read, like #ED_curve_patch_session_curve_width. */
+float ED_curve_patch_session_curve_opacity(const Object &ob);
+/** Write the active curve's persisted Opacity. Same contract as
+ * #ED_curve_patch_session_curve_width_set. */
+bool ED_curve_patch_session_curve_opacity_set(const Object &ob, float opacity);
 
 /**
  * Exchange every live Curve Patch preview in \a bmain with its pre-patch snapshot; calling it twice

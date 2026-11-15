@@ -3281,6 +3281,10 @@ class PaintLayersStackSource final : public StackSource,
       }
       return -1;
     }
+    /* A live Curve Patch session owns the tool while it runs; the Add makes another row the active
+     * one (or enters a new effect's tool right away), so it commits first -- otherwise the
+     * effect's snapshot brush would stay in the hand after the new row took over. */
+    sculpt_paint::curve_patch_layer_commit_live_sessions(C);
     /* A new layer is painted on its content, not on the mask the previous one was edited in; a mask
      * correction is the mask the user means to paint. */
     const bool anchor_in_mask = (is_anchor_point || is_anchor_point_reader) &&
@@ -3491,7 +3495,7 @@ class PaintLayersStackSource final : public StackSource,
       return false;
     }
     /* A mask the user just added is the one they mean to work on. */
-    BKE_paint_layers_active_set(material, layer->marker);
+    sculpt_paint::paint_stack_active_row_set(C, material, layer->marker);
     /* The layer that now owns the mask is the row the stack shows: follow it with the Projection
      * Frame tool, like a stack row click does. */
     sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(
@@ -4026,7 +4030,7 @@ class PaintLayersStackSource final : public StackSource,
       return -1;
     }
     /* What was pasted is what the user works on next, in the mode it belongs to. */
-    BKE_paint_layers_active_set(material, copy->marker);
+    sculpt_paint::paint_stack_active_row_set(C, material, copy->marker);
     /* The pasted correction is the row the stack shows: follow it with the Projection Frame tool,
      * like a stack row click does. */
     sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(

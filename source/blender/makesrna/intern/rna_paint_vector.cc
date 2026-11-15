@@ -58,47 +58,20 @@ static void rna_PaintVectorItem_curve_look_update(Main * /*bmain*/,
   }
 }
 
-/* The Width slider is a friendly scale over the stored world-space `radius`: one unit is 5 px of
- * the brush size the curve was made with, so 100 is a 500 px brush and a value above 100 can still
- * be typed. `radius_per_size` is the curve's own world-units-per-pixel ratio, set when the curve is
- * created and kept fixed by the layer sync -- that is what keeps the mapping stable while the
- * radius is edited. */
-static constexpr float CURVE_PATCH_WIDTH_PX_PER_UNIT = 5.0f;
-static constexpr float CURVE_PATCH_WIDTH_FALLBACK_BRUSH_PX = 500.0f;
-
-static float rna_PaintVectorItem_width_ratio_get(const PaintVectorCurveParams &params)
-{
-  if (params.radius_per_size > 0.0f) {
-    return params.radius_per_size;
-  }
-  /* Data written before the ratio existed, or a curve whose brush had a zero Size: treat its
-   * current radius as the 500 px reference, so the slider still opens on a usable value. */
-  if (params.radius > 0.0f) {
-    return params.radius / CURVE_PATCH_WIDTH_FALLBACK_BRUSH_PX;
-  }
-  return 0.0f;
-}
+/* The Width slider is a friendly scale over the stored world-space `radius`; the conversion (and
+ * its `radius_per_size` rationale) is shared with the layer session's radial control in
+ * #BKE_paint_vector_curve_width_get / _set. */
 
 static float rna_PaintVectorItem_width_get(PointerRNA *ptr)
 {
   const PaintVectorItem *item = static_cast<const PaintVectorItem *>(ptr->data);
-  const PaintVectorCurveParams &params = item->curve_patch_params;
-  const float ratio = rna_PaintVectorItem_width_ratio_get(params);
-  if (ratio <= 0.0f) {
-    return 0.0f;
-  }
-  return params.radius / (ratio * CURVE_PATCH_WIDTH_PX_PER_UNIT);
+  return BKE_paint_vector_curve_width_get(item->curve_patch_params);
 }
 
 static void rna_PaintVectorItem_width_set(PointerRNA *ptr, float value)
 {
   PaintVectorItem *item = static_cast<PaintVectorItem *>(ptr->data);
-  PaintVectorCurveParams &params = item->curve_patch_params;
-  const float ratio = rna_PaintVectorItem_width_ratio_get(params);
-  if (ratio <= 0.0f) {
-    return;
-  }
-  params.radius = std::max(value, 0.0f) * ratio * CURVE_PATCH_WIDTH_PX_PER_UNIT;
+  BKE_paint_vector_curve_width_set(item->curve_patch_params, value);
 }
 
 }  // namespace blender

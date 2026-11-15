@@ -70,6 +70,7 @@
 #include "ED_asset_import.hh"
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_menu_utils.hh"
+#include "ED_curve_patch.hh"
 #include "ED_image_grid.hh"
 #include "ED_paint.hh"
 #include "ED_render.hh"
@@ -2199,6 +2200,159 @@ std::unique_ptr<ui::DropTargetInterface> curve_patch_slot_channel_drop_target_ge
     return nullptr;
   }
   return std::make_unique<CurvePatchSlotChannelDropTarget>(target);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Curve Patch Layer Brush drop target
+ * \{ */
+
+/**
+ * What the Curve Patch layer panel's Brush row offers as a drop target: the dropped brush (an
+ * Asset Browser drag, local or external) becomes the effect's new private snapshot, the whole
+ * gesture the RNA setter documents. The Python UI publishes the payload
+ * (#MaterialPaintLayerCurvePatch) through the `curve_patch_layer_brush` layout context pointer
+ * (see #CURVE_PATCH_LAYER_PT_curves), so a drop never has to guess which effect the user meant.
+ */
+struct CurvePatchLayerBrushTarget {
+  /** The payload as an RNA pointer: the owner ID is the material, so editability is checked on it. */
+  PointerRNA curve_patch_ptr{};
+  Material *material = nullptr;
+};
+
+static bool curve_patch_layer_brush_button_target(const ui::Button &but,
+                                                  CurvePatchLayerBrushTarget *r_target)
+{
+  const PointerRNA *ptr = ui::button_context_ptr_get(
+      &but, CURVE_PATCH_LAYER_BRUSH_CONTEXT, nullptr);
+  if (ptr == nullptr) {
+    return false;
+  }
+  const bool type_ok = ptr->type && RNA_struct_is_a(ptr->type, RNA_MaterialPaintLayerCurvePatch);
+  const bool owner_ok = ptr->owner_id && GS(ptr->owner_id->name) == ID_MA;
+  if (type_ok && owner_ok) {
+    r_target->curve_patch_ptr = *ptr;
+    r_target->material = id_cast<Material *>(ptr->owner_id);
+    return true;
+  }
+  return false;
+}
+
+/** The whole-selection deferral of the Asset Browser (see #drag_prefer_asset_list_sibling). */
+static const wmDrag &curve_patch_layer_brush_effective_drag(const wmDrag &drag)
+{
+  return drag_prefer_asset_list_sibling(drag, [](const wmDrag &asset_list_drag) {
+    return drag_asset_list_first_of(asset_list_drag, {ID_BR}) != nullptr;
+  });
+}
+
+class CurvePatchLayerBrushDropTarget : public ui::DropTargetInterface {
+  CurvePatchLayerBrushTarget target_;
+
+ public:
+  explicit CurvePatchLayerBrushDropTarget(const CurvePatchLayerBrushTarget &target)
+      : target_(target)
+  {
+  }
+
+  bool can_drop(bContext & /*C*/, const wmDrag &drag, const char **r_disabled_hint) const override
+  {
+    if (target_.material == nullptr || !paint_slot_owner_editable(&target_.material->id)) {
+      *r_disabled_hint = TIP_("Cannot edit linked material data");
+      return false;
+    }
+    /* The brush type is checked here when the brush is already local, so the cursor shows the
+     * refusal at once; an external asset is only known by its name until it is imported, and its
+     * type is checked by the assign entry on drop. */
+    if (ID *id = WM_drag_get_local_ID(&drag, ID_BR)) {
+      if (!BKE_paint_layers_curve_patch_brush_usable(*id_cast<Brush *>(id))) {
+        *r_disabled_hint = TIP_("That brush cannot stamp a Curve Patch");
+        return false;
+      }
+      return true;
+    }
+    if (drag.type == WM_DRAG_ASSET_LIST) {
+      const wmDragAssetListItem *item = drag_asset_list_first_of(drag, {ID_BR});
+      if (item != nullptr && !item->is_external && item->asset_data.local_id != nullptr &&
+          !BKE_paint_layers_curve_patch_brush_usable(
+              *id_cast<Brush *>(item->asset_data.local_id)))
+      {
+        *r_disabled_hint = TIP_("That brush cannot stamp a Curve Patch");
+        return false;
+      }
+      return item != nullptr;
+    }
+    return WM_drag_is_ID_type(&drag, ID_BR);
+  }
+
+  std::string drop_tooltip(const ui::DragInfo &drag_info) const override
+  {
+    const wmDrag &drag = curve_patch_layer_brush_effective_drag(drag_info.drag_data);
+    const std::string name = WM_drag_get_item_name(const_cast<wmDrag *>(&drag));
+    return fmt::format(fmt::runtime(TIP_("Assign {} as the Curve Patch effect's brush")),
+                       !name.empty() ? name : std::string(IFACE_("brush")));
+  }
+
+  /** The dropped brush, imported when it lives in another library: a local copy is what the
+   * snapshot needs, and "Append & Reuse" keeps one shared copy per drop like the other slot
+   * targets do. */
+  static Brush *resolve_drag_brush(bContext *C, const wmDrag &drag)
+  {
+    if (ID *id = WM_drag_get_local_ID(&drag, ID_BR)) {
+      return id_cast<Brush *>(id);
+    }
+    const auto import_brush = [&](const asset_system::AssetRepresentation &asset) -> Brush * {
+      return ed::asset::asset_local_brush_ensure_imported(
+          *CTX_data_main(C), asset, CTX_wm_reports(C));
+    };
+    if (drag.type == WM_DRAG_ASSET_LIST) {
+      const wmDragAssetListItem *item = drag_asset_list_first_of(drag, {ID_BR});
+      if (!item) {
+        return nullptr;
+      }
+      if (item->is_external) {
+        return import_brush(*item->asset_data.external_info->asset);
+      }
+      return id_cast<Brush *>(item->asset_data.local_id);
+    }
+    if (const wmDragAsset *asset_drag = WM_drag_get_asset_data(&drag, ID_BR)) {
+      return import_brush(*asset_drag->asset);
+    }
+    return nullptr;
+  }
+
+  bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override
+  {
+    const wmDrag &drag = curve_patch_layer_brush_effective_drag(drag_info.drag_data);
+    Brush *brush = resolve_drag_brush(C, drag);
+    if (brush == nullptr || target_.material == nullptr) {
+      return false;
+    }
+    /* The drop callbacks are const, the payload is edited: work on a copy of the pointer. The
+     * assign entry validates the brush, ends a live session, renews the curves and pushes the
+     * undo step; its reports are the drop's feedback. */
+    PointerRNA curve_patch_ptr = target_.curve_patch_ptr;
+    auto *payload = static_cast<MaterialPaintLayerCurvePatch *>(curve_patch_ptr.data);
+    if (payload == nullptr) {
+      return false;
+    }
+    return ED_curve_patch_layer_brush_assign(
+        *C, *target_.material, *payload, *brush, CTX_wm_reports(C));
+  }
+};
+
+std::unique_ptr<ui::DropTargetInterface> curve_patch_layer_brush_drop_target_get(
+    bContext * /*C*/, const ARegion *region, const wmEvent *event)
+{
+  CurvePatchLayerBrushTarget target;
+  if (!find_button_at(region, event, [&](const ui::Button &but) {
+        return curve_patch_layer_brush_button_target(but, &target);
+      }))
+  {
+    return nullptr;
+  }
+  return std::make_unique<CurvePatchLayerBrushDropTarget>(target);
 }
 
 /** \} */

@@ -86,6 +86,7 @@
 
 #include "ED_fileselect.hh"
 #include "ED_brush_layer_source.hh"
+#include "ED_curve_patch.hh"
 #include "ED_material_bake.hh"
 #include "ED_gpencil_legacy.hh"
 #include "ED_grease_pencil.hh"
@@ -3163,6 +3164,9 @@ static int radial_control_get_properties(bContext *C, wmOperator *op)
   if (!rc->prop) {
     return 0;
   }
+
+  /* Curve Patch layer sessions retarget the Size/Strength rings to the active curve's look. */
+  ED_curve_patch_radial_control_retarget(*C, rc->ptr, rc->prop);
 
   if (!radial_control_get_path(
           &ctx_ptr, op, "rotation_path", &rc->rot_ptr, &rc->rot_prop, 0, RC_PROP_REQUIRE_FLOAT))

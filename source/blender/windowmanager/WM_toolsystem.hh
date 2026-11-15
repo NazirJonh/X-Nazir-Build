@@ -78,6 +78,19 @@ bool WM_toolsystem_activate_brush_and_tool(bContext *C, Paint *paint, Brush *bru
 void WM_toolsystem_brush_bindings_update_from_active(bContext *C, Paint *paint);
 
 /**
+ * Re-point the MAIN brush binding at \a paint's current brush, without a context and without
+ * switching tool.
+ *
+ * For a brush restore that happens where no valid context exists (teardown paths of a session that
+ * swapped the brush through the tool system): the binding must follow the restored hand, or the
+ * next tool refresh -- an undo, a tool round-trip -- would put the swapped-out brush back. Only the
+ * main binding is written: the per-type bindings need the active tool, which a context-less caller
+ * cannot ask for (Sculpt Mode's Paint tool, where the Curve Patch tool runs, binds through the main
+ * binding).
+ */
+void WM_toolsystem_brush_binding_main_update_from_active(Paint *paint);
+
+/**
  * Get an asset reference to the last activated brush asset of a specific brush type.
  */
 std::optional<AssetWeakReference> WM_toolsystem_last_brush_asset_from_brush_type(

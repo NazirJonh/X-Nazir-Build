@@ -2028,14 +2028,16 @@ void BKE_paint_layers_image_mark_internal(Image &image)
  * Whether the channel records of \a row hold maps the stack created.
  *
  * A Paint row paints into maps the stack mints (including the "Use Row Result" renders), and a
- * UV Island mask item captures into one. A Constant/Fill row, a generator or a Material row owns no
- * channel map: an image in such a record was assigned by the user, so it must stay browsable. A
- * Color ID item samples the user's ID Map; it does not own it.
+ * Curve Patch effect's maps are minted by its tool entry the same way. A UV Island mask item
+ * captures into one. A Constant/Fill row, a generator or a Material row owns no channel map: an
+ * image in such a record was assigned by the user, so it must stay browsable. A Color ID item
+ * samples the user's ID Map; it does not own it.
  */
 static bool paint_layer_row_owns_channel_maps(const MaterialPaintLayer &row)
 {
   switch (row.source) {
     case MA_PAINT_LAYER_SOURCE_IMAGE:
+    case MA_PAINT_LAYER_SOURCE_CURVE_PATCH:
       return true;
     case MA_PAINT_LAYER_SOURCE_FILTER:
       return BKE_paint_layers_is_map_coverage(row) &&

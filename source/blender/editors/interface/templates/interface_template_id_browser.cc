@@ -54,6 +54,7 @@
 
 #include "DNA_asset_types.h"
 #include "DNA_ID.h"
+#include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
@@ -78,6 +79,7 @@
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_menu_utils.hh"
+#include "ED_asset_shelf_brush_set_temp.hh"
 #include "ED_image_grid.hh"
 #include "ED_render.hh"
 #include "ED_screen.hh"
@@ -1336,6 +1338,14 @@ class IDBrowserView : public AbstractGridView {
         if (!id_browser_asset_passes_name_match(name_match_resolved, asset)) {
           return true;
         }
+        /* Brushes: only the ones usable for painting (Paint or Both), like the brush shelf of a
+         * paint tool; a sculpt-only brush could not stamp a Curve Patch. */
+        if (idcode_ == ID_BR &&
+            !ed::asset::shelf::brush_set_temp::asset_passes(
+                asset, ed::asset::shelf::brush_set_temp::Category::Paint))
+        {
+          return true;
+        }
         this->add_asset_item(asset, active_id, wrap_images);
         return true;
       };
@@ -1413,12 +1423,23 @@ class IDBrowserView : public AbstractGridView {
            * (falling back to "Append & Reuse"). Same path as an asset drag-and-drop. A real
            * #ReportList is required: import can fail (asset deleted / file moved), and without
            * reports the click would silently look like a no-op. */
-          ID *id = ed::asset::asset_local_id_ensure_imported(*bmain,
-                                                             *asset_ptr,
-                                                             /*flags*/ 0,
-                                                             /*import_method*/ std::nullopt,
-                                                             /*instantiate_context*/ std::nullopt,
-                                                             CTX_wm_reports(&C));
+          ID *id = nullptr;
+          if (idcode == ID_BR) {
+            /* Brushes keep the asset's thumbnail and are always appended & reused. */
+            if (Brush *brush = ed::asset::asset_local_brush_ensure_imported(
+                    *bmain, *asset_ptr, CTX_wm_reports(&C)))
+            {
+              id = &brush->id;
+            }
+          }
+          else {
+            id = ed::asset::asset_local_id_ensure_imported(*bmain,
+                                                           *asset_ptr,
+                                                           /*flags*/ 0,
+                                                           /*import_method*/ std::nullopt,
+                                                           /*instantiate_context*/ std::nullopt,
+                                                           CTX_wm_reports(&C));
+          }
           bool id_has_extra_user = false;
           /* #asset_local_id_ensure_imported only handles assets stored inside a .blend library; it
            * returns null when #AssetRepresentation::full_library_path is empty, which is the case

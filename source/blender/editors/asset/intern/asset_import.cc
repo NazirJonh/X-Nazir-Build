@@ -8,7 +8,11 @@
 
 #include "AS_asset_representation.hh"
 
+#include "DNA_ID.h"
+#include "DNA_brush_types.h"
 #include "DNA_space_types.h"
+
+#include "BKE_preview_image.hh"
 
 #include "BLO_readfile.hh"
 
@@ -104,4 +108,29 @@ ID *asset_local_id_ensure_imported(
   return nullptr;
 }
 
+Brush *asset_local_brush_ensure_imported(Main &bmain,
+                                         const asset_system::AssetRepresentation &asset,
+                                         ReportList *reports)
+{
+  const bool was_local = asset.local_id() != nullptr;
+  ID *id = asset_local_id_ensure_imported(
+      bmain, asset, 0, ASSET_IMPORT_APPEND_REUSE, std::nullopt, reports);
+  if (id == nullptr || GS(id->name) != ID_BR) {
+    return nullptr;
+  }
+  /* An appended brush arrives without the thumbnail its asset had (the asset data is cleared on
+   * append), so it would show a blank icon in every browser that lists the file's own data. The
+   * asset's preview is loaded by then (the user picked it from a grid), so the brush keeps a
+   * copy. */
+  if (!was_local) {
+    PreviewImage **id_preview = BKE_previewimg_id_get_p(id);
+    const PreviewImage *preview = asset.get_preview();
+    if (id_preview != nullptr && *id_preview == nullptr && preview != nullptr &&
+        BKE_previewimg_is_finished(preview, ICON_SIZE_PREVIEW))
+    {
+      *id_preview = BKE_previewimg_copy(preview);
+    }
+  }
+  return id_cast<Brush *>(id);
+}
 }  // namespace blender::ed::asset

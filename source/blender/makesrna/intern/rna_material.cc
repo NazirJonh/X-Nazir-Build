@@ -468,6 +468,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_kind_param_type_item
 #  include "DEG_depsgraph.hh"
 #  include "DEG_depsgraph_build.hh"
 
+#  include "ED_curve_patch.hh"
 #  include "ED_gpencil_legacy.hh"
 #  include "ED_image.hh"
 #  include "ED_node.hh"
@@ -870,15 +871,17 @@ static PointerRNA rna_MaterialPaintLayerCurvePatch_brush_get(PointerRNA *ptr)
 
 /** Only a brush a Curve Patch can stamp with is offered (and accepted from a drop); the effects'
  * own private snapshots are not sources, so one effect cannot adopt another's state by accident. */
-static bool rna_MaterialPaintLayerCurvePatch_brush_poll(PointerRNA * /*ptr*/, const PointerRNA value)
+static bool rna_MaterialPaintLayerCurvePatch_brush_poll(PointerRNA * /*ptr*/,
+                                                        const PointerRNA value)
 {
   const Brush *brush = static_cast<const Brush *>(value.data);
-  return brush != nullptr && bke::brush::supports_curve_patch(*brush) &&
-         !STRPREFIX(brush->id.name + 2, ".CP Brush ");
+  return brush != nullptr && BKE_paint_layers_curve_patch_brush_usable(*brush);
 }
 
 /** Assigning a brush gives the effect a fresh private duplicate of it (the effect never shares a
- * brush with the user's library), so a drop of a brush asset onto the field is the whole gesture. */
+ * brush with the user's library). This is the context-free path for Python scripts; the UI goes
+ * through #ED_curve_patch_layer_brush_assign, which also ends a live session and renews the
+ * curves. */
 static void rna_MaterialPaintLayerCurvePatch_brush_set(PointerRNA *ptr,
                                                        PointerRNA value,
                                                        ReportList *reports)
@@ -908,22 +911,88 @@ static void rna_MaterialPaintLayerCurvePatch_brush_set(PointerRNA *ptr,
       return;
     }
   }
-  MaterialPaintLayer *owner = nullptr;
-  BKE_paint_layers_foreach(*ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) {
-    for (MaterialPaintLayer &effect : layer.effects) {
-      if (effect.curve_patch == payload) {
-        owner = &effect;
-        return false;
-      }
-    }
-    return true;
-  });
+  MaterialPaintLayer *owner = BKE_paint_layers_curve_patch_row_find(*ma, *payload);
   if (owner == nullptr || !BKE_paint_layers_curve_patch_brush_set(*ma, *bmain, *owner, *source)) {
     BKE_report(reports, RPT_ERROR, "Could not assign that brush to the Curve Patch");
     return;
   }
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, nullptr);
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+}
+
+/* The ID browser's view of the snapshot: the brush it was duplicated from, found by the recorded
+ * name. The browser then shows that brush's own name and preview instead of the private
+ * `.CP <source>` one.
+ *
+ * The browser can only write an RNA pointer, and a setter has no context, while the replacement
+ * needs one (it ends a live session and re-enters the tool). The pick is therefore parked here
+ * for the update callback, which runs right after the setter on the same thread and has a context;
+ * it is keyed by the payload so a stale pick can never be applied to another effect. The name
+ * lookup is a limitation of recording a name: a renamed or deleted source shows an empty slot, and
+ * a linked brush that shares its name with a local one resolves to the first match. */
+static struct {
+  const MaterialPaintLayerCurvePatch *payload = nullptr;
+  Brush *brush = nullptr;
+} rna_curve_patch_pending_pick;
+
+static PointerRNA rna_MaterialPaintLayerCurvePatch_source_brush_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerCurvePatch *payload = static_cast<const MaterialPaintLayerCurvePatch *>(
+      ptr->data);
+  Main *bmain = G_MAIN;
+  if (payload == nullptr || bmain == nullptr) {
+    return PointerRNA_NULL;
+  }
+  const char *name = BKE_paint_layers_curve_patch_brush_source_name(*payload);
+  if (name[0] == '\0') {
+    return PointerRNA_NULL;
+  }
+  ID *id = BKE_libblock_find_name(bmain, ID_BR, name);
+  return id != nullptr ? RNA_id_pointer_create(id) : PointerRNA_NULL;
+}
+
+static void rna_MaterialPaintLayerCurvePatch_source_brush_set(PointerRNA *ptr,
+                                                              PointerRNA value,
+                                                              ReportList *reports)
+{
+  if (!rna_MaterialPaintLayerCurvePatch_brush_poll(ptr, value)) {
+    BKE_report(reports, RPT_WARNING, "That brush cannot stamp a Curve Patch");
+    return;
+  }
+  rna_curve_patch_pending_pick.payload = static_cast<const MaterialPaintLayerCurvePatch *>(
+      ptr->data);
+  rna_curve_patch_pending_pick.brush = static_cast<Brush *>(value.data);
+}
+
+static void rna_MaterialPaintLayerCurvePatch_source_brush_update(bContext *C, PointerRNA *ptr)
+{
+  MaterialPaintLayerCurvePatch *payload = static_cast<MaterialPaintLayerCurvePatch *>(ptr->data);
+  Brush *source = (rna_curve_patch_pending_pick.payload == payload) ?
+                      rna_curve_patch_pending_pick.brush :
+                      nullptr;
+  rna_curve_patch_pending_pick = {};
+  Material *ma = (ptr->owner_id != nullptr && GS(ptr->owner_id->name) == ID_MA) ?
+                     id_cast<Material *>(ptr->owner_id) :
+                     nullptr;
+  if (source == nullptr || payload == nullptr || ma == nullptr) {
+    return;
+  }
+  ED_curve_patch_layer_brush_assign(*C, *ma, *payload, *source, CTX_wm_reports(C));
+}
+
+static void rna_MaterialPaintLayerCurvePatch_brush_source_name_get(PointerRNA *ptr, char *value)
+{
+  const MaterialPaintLayerCurvePatch *payload = static_cast<const MaterialPaintLayerCurvePatch *>(
+      ptr->data);
+  const char *name = payload ? BKE_paint_layers_curve_patch_brush_source_name(*payload) : "";
+  BLI_strncpy(value, name, strlen(name) + 1);
+}
+
+static int rna_MaterialPaintLayerCurvePatch_brush_source_name_length(PointerRNA *ptr)
+{
+  const MaterialPaintLayerCurvePatch *payload = static_cast<const MaterialPaintLayerCurvePatch *>(
+      ptr->data);
+  return payload ? int(strlen(BKE_paint_layers_curve_patch_brush_source_name(*payload))) : 0;
 }
 
 /** The Text Decal row \a payload belongs to, or null when it is detached. */
@@ -6372,6 +6441,35 @@ static void rna_def_material_paint_layer_curve_patch(BlenderRNA *brna)
                            "Brush",
                            "The private brush snapshot this Curve Patch paints with; drop or pick "
                            "a brush to replace it with a duplicate of that brush");
+
+  /* What the brush slot's ID browser edits: the source brush, whose name and preview the user
+   * knows. Assigning replaces the snapshot with a duplicate and renews the curves (see the
+   * update callback), exactly as a drop does. */
+  prop = RNA_def_property(srna, "source_brush", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Brush");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_MaterialPaintLayerCurvePatch_source_brush_get",
+                                 "rna_MaterialPaintLayerCurvePatch_source_brush_set",
+                                 nullptr,
+                                 "rna_MaterialPaintLayerCurvePatch_brush_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_NEVER_UNLINK | PROP_CONTEXT_UPDATE);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerCurvePatch_source_brush_update");
+  RNA_def_property_ui_text(prop,
+                           "Source Brush",
+                           "The brush the Curve Patch's snapshot was duplicated from; pick one to "
+                           "replace the snapshot with a duplicate of it");
+
+  prop = RNA_def_property(srna, "brush_source_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayerCurvePatch_brush_source_name_get",
+                                "rna_MaterialPaintLayerCurvePatch_brush_source_name_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Brush Source",
+                           "Name of the brush the snapshot was duplicated from; empty when unknown");
 }
 
 /* Values match #eMaterialPaintLayerColorBalanceMethod. */

@@ -791,4 +791,53 @@ PaintVectorCurveParams BKE_paint_vector_curve_params_encode(const bke::CurvePatc
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Curve Width scale
+ *
+ * The user-facing Width over the stored world-space `radius`: one unit is 5 px of brush size, so
+ * 100 is a 500 px brush. Shared by the list slider (RNA) and the layer session's radial control so
+ * both read and write the same value; `radius_per_size` is deliberately left alone here -- it is
+ * the curve's world-units-per-pixel ratio, kept fixed by the layer sync, and scaling it with the
+ * radius would make Width snap back to its old value on every edit.
+ * \{ */
+
+/** One Width unit is this many px of the brush size the curve was made with. */
+static constexpr float CURVE_PATCH_WIDTH_PX_PER_UNIT = 5.0f;
+/** The reference brush size of data written before the ratio existed: 500 px. */
+static constexpr float CURVE_PATCH_WIDTH_FALLBACK_BRUSH_PX = 500.0f;
+
+/** The curve's world-units-per-Width-unit ratio, or 0 when the scale is unusable. */
+static float curve_patch_width_ratio_get(const PaintVectorCurveParams &params)
+{
+  if (params.radius_per_size > 0.0f) {
+    return params.radius_per_size;
+  }
+  /* Data written before the ratio existed, or a curve whose brush had a zero Size: treat its
+   * current radius as the 500 px reference, so the slider still opens on a usable value. */
+  if (params.radius > 0.0f) {
+    return params.radius / CURVE_PATCH_WIDTH_FALLBACK_BRUSH_PX;
+  }
+  return 0.0f;
+}
+
+float BKE_paint_vector_curve_width_get(const PaintVectorCurveParams &params)
+{
+  const float ratio = curve_patch_width_ratio_get(params);
+  if (ratio <= 0.0f) {
+    return 0.0f;
+  }
+  return params.radius / (ratio * CURVE_PATCH_WIDTH_PX_PER_UNIT);
+}
+
+void BKE_paint_vector_curve_width_set(PaintVectorCurveParams &params, float width)
+{
+  const float ratio = curve_patch_width_ratio_get(params);
+  if (ratio <= 0.0f) {
+    return;
+  }
+  params.radius = std::max(width, 0.0f) * ratio * CURVE_PATCH_WIDTH_PX_PER_UNIT;
+}
+
+/** \} */
+
 }  // namespace blender

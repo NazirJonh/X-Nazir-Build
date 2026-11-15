@@ -484,6 +484,37 @@ static void rna_CurvePatchSession_active_point_opacity_falloff_set(PointerRNA *p
   }
 }
 
+/** The ACTIVE curve's persisted look: what the brush Size ring is retargeted to while a layer
+ * session runs, since the snapshot brush's own Size and Strength are frozen for it. The setters
+ * write the row's container item; the update callback re-stamps. */
+static float rna_CurvePatchSession_curve_width_get(PointerRNA *ptr)
+{
+  const Object *ob = rna_curve_patch_session_object(ptr);
+  return ob != nullptr ? ED_curve_patch_session_curve_width(*ob) : 0.0f;
+}
+
+static void rna_CurvePatchSession_curve_width_set(PointerRNA *ptr, float value)
+{
+  Object *ob = rna_curve_patch_session_object(ptr);
+  if (ob != nullptr) {
+    ED_curve_patch_session_curve_width_set(*ob, value);
+  }
+}
+
+static float rna_CurvePatchSession_curve_opacity_get(PointerRNA *ptr)
+{
+  const Object *ob = rna_curve_patch_session_object(ptr);
+  return ob != nullptr ? ED_curve_patch_session_curve_opacity(*ob) : 0.0f;
+}
+
+static void rna_CurvePatchSession_curve_opacity_set(PointerRNA *ptr, float value)
+{
+  Object *ob = rna_curve_patch_session_object(ptr);
+  if (ob != nullptr) {
+    ED_curve_patch_session_curve_opacity_set(*ob, value);
+  }
+}
+
 static void rna_CurvePatchSession_look_update(bContext *C, PointerRNA *ptr)
 {
   Object *ob = rna_curve_patch_session_object(ptr);
@@ -4957,6 +4988,40 @@ static void rna_def_curve_patch_session(BlenderRNA *brna)
   RNA_def_property_float_funcs(prop, "rna_CurvePatchSession_radius_get", nullptr, nullptr);
   RNA_def_property_ui_text(
       prop, "Radius", "World-space brush radius frozen when the patch started");
+
+  prop = RNA_def_property(srna, "curve_width", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_CurvePatchSession_curve_width_get",
+                               "rna_CurvePatchSession_curve_width_set",
+                               nullptr);
+  /* The same scale as the list's per-curve Width slider: the soft range stops at 100 (a 500 px
+   * brush) and the hard range lets the user type a bigger value. This is the property the brush
+   * Size ring is retargeted to while the session runs. */
+  RNA_def_property_range(prop, 0.0f, 100000.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 100.0f, 1.0f, 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Curve Width",
+      "Width of the ACTIVE curve's ribbon: 1 unit is 5 px of brush size, so 100 is a 500 px brush");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_CurvePatchSession_look_update");
+
+  prop = RNA_def_property(srna, "curve_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(prop,
+                               "rna_CurvePatchSession_curve_opacity_get",
+                               "rna_CurvePatchSession_curve_opacity_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
+  RNA_def_property_ui_text(
+      prop,
+      "Curve Opacity",
+      "Opacity multiplier of the ACTIVE curve, the value the brush Strength ring is retargeted to "
+      "while the session runs");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_CurvePatchSession_look_update");
 
   prop = RNA_def_property(srna, "active_point_opacity", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_funcs(prop,

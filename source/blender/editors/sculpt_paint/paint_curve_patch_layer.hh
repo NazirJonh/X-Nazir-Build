@@ -177,6 +177,15 @@ bool curve_patch_layer_session_blocks_row(const Object &ob, const MaterialPaintL
 void curve_patch_layer_commit_live_session(bContext &C, Object &ob);
 
 /**
+ * Commit EVERY live layer session of the file, whatever object runs it, except (when \a
+ * target_marker is given) the session of the row that is being (re)activated. A session that
+ * stayed behind would keep its effect's brush in the hand after the user's brush was restored,
+ * and its stroke polls would keep blocking the paint -- so every switch of the active row, every
+ * Add and every step into mask work commits the strays first.
+ */
+void curve_patch_layer_commit_live_sessions(bContext &C, const bUUID *target_marker = nullptr);
+
+/**
  * The data-level activation of a stack row, shared by the Outliner's row click and the viewport
  * pick: a live Curve Patch session the switch would leave half-edited commits first, the row
  * becomes the active one, a Curve Patch effect enters its tool, the target mode follows the row's

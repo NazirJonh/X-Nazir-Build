@@ -810,6 +810,19 @@ class PAINT_IDF_layer_material(bpy.types.IDFilter):
         return getattr(id, "is_layered", False)
 
 
+class PAINT_IDF_curve_patch_brush(bpy.types.IDFilter):
+    """Offer only the brushes a Curve Patch effect can be made from in the ID browser of its slot"""
+
+    bl_idname = "PAINT_IDF_curve_patch_brush"
+
+    @classmethod
+    def filter_id(cls, _context, id):
+        from bl_ui.properties_paint_common import curve_patch_brush_supported
+        # An effect's own snapshot is private state, never a source.
+        return (id.use_paint_sculpt and not id.is_curve_patch_snapshot and
+                curve_patch_brush_supported(id))
+
+
 # Mesh Maps ###################################################################
 
 # The bake operators, the source add/remove wrappers and the helpers the Mesh Maps panel reads.
@@ -1314,6 +1327,7 @@ classes = (
     MATERIAL_OT_paint_layer_decal_import_decal_master,
     PAINT_OT_brush_layer_source_row_search,
     PAINT_IDF_layer_material,
+    PAINT_IDF_curve_patch_brush,
     OBJECT_OT_mesh_map_refresh,
     MATERIAL_OT_mesh_map_add_layer,
     OBJECT_OT_mesh_map_source_add,

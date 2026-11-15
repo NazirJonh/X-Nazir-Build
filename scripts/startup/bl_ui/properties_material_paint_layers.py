@@ -110,10 +110,11 @@ def draw_material_channel_set(layout, material):
 def _layer_images_locked(layer):
     """Whether a row's channel maps belong to the row and must not be replaced or unlinked.
 
-    A Paint (IMAGE) layer creates and owns its maps, which the brush writes into; a Fill (CONSTANT)
-    is never painted, so the user may assign their own maps there.
+    A Paint (IMAGE) layer creates and owns its maps, which the brush writes into; a Curve Patch
+    effect's maps are minted the same way (when its tool is entered) and stamped from its curves;
+    a Fill (CONSTANT) is never painted, so the user may assign their own maps there.
     """
-    return layer.source == 'IMAGE'
+    return layer.source in {'IMAGE', 'CURVE_PATCH'}
 
 
 def _developer_ui_enabled(context):
@@ -137,11 +138,12 @@ def _map_is_internal_hidden(context, record):
 def _layer_channel_subpanel_hidden(context, layer, record):
     """Whether a layer channel's whole subpanel is debug-only.
 
-    A Paint row owns the map of every channel it carries, so with Developer Extras off the
-    subpanel is hidden even before that map exists: AO is in the default channel set but has no map
-    until the first stroke, and its subpanel has only the stack's own slot and channel settings to
-    show. A Fill row's map is the user's to assign, so its subpanel stays and only an internal map
-    on it, if one ever lands there, hides it.
+    A Paint row owns the map of every channel it carries, and a Curve Patch effect's maps are
+    minted by its tool entry the same way, so with Developer Extras off the subpanel is hidden even
+    before that map exists: AO is in the default channel set but has no map until the first stroke,
+    and its subpanel has only the stack's own slot and channel settings to show. A Fill row's map
+    is the user's to assign, so its subpanel stays and only an internal map on it, if one ever
+    lands there, hides it.
     """
     if _layer_images_locked(layer):
         return not _developer_ui_enabled(context)

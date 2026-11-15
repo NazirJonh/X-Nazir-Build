@@ -12,6 +12,7 @@
 
 namespace blender {
 
+struct Brush;
 struct ID;
 struct Main;
 struct ReportList;
@@ -47,6 +48,16 @@ ID *asset_local_id_ensure_imported(
     const std::optional<eAssetImportMethod> import_method = std::nullopt,
     const std::optional<ImportInstantiateContext> instantiate_context = std::nullopt,
     ReportList *reports = nullptr);
+
+/**
+ * #asset_local_id_ensure_imported for a brush asset, always "Append & Reuse", plus the asset's
+ * thumbnail copied onto a freshly appended brush (its asset data, preview included, is cleared on
+ * append). Only for the brush pickers that list the file's own brushes; every other caller keeps
+ * the plain import. Null when the import failed or the asset is not a brush.
+ */
+Brush *asset_local_brush_ensure_imported(Main &bmain,
+                                         const asset_system::AssetRepresentation &asset,
+                                         ReportList *reports = nullptr);
 
 }  // namespace ed::asset
 }  // namespace blender

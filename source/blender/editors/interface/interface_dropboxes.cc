@@ -30,6 +30,7 @@
 #include "UI_interface.hh"
 
 #include "interface_drop_image.hh"
+#include "interface_intern.hh"
 
 namespace blender::ui {
 
@@ -96,9 +97,24 @@ static void view_drop_draw_droptip(bContext *C, wmWindow *win, wmDrag *drag, con
 /** \name Name Drag/Drop Callbacks
  * \{ */
 
+/**
+ * Whether the search button under a name drop belongs to a dedicated drop target instead. The
+ * Curve Patch brush slot is a search button too, but its drop must reach
+ * #CurvePatchLayerBrushDropTarget: a name drop would look the brush up by name in the file and
+ * silently do nothing for an Asset Browser brush that is not imported yet.
+ */
+static bool drop_name_button_yields_to_target(bContext *C)
+{
+  const Button *but = button_active_drop_name_button(C);
+  return but != nullptr && button_context_ptr_get(but, CURVE_PATCH_LAYER_BRUSH_CONTEXT, nullptr);
+}
+
 static bool drop_name_poll(bContext *C, wmDrag *drag, const wmEvent * /*event*/)
 {
-  return button_active_drop_name(C) && ELEM(drag->type, WM_DRAG_ID, WM_DRAG_ASSET);
+  if (!button_active_drop_name(C) || !ELEM(drag->type, WM_DRAG_ID, WM_DRAG_ASSET)) {
+    return false;
+  }
+  return !drop_name_button_yields_to_target(C);
 }
 
 static void drop_name_copy(bContext *C, wmDrag *drag, wmDropBox *drop)
@@ -212,6 +228,14 @@ std::unique_ptr<DropTargetInterface> region_but_find_drop_target_at(bContext *C,
     return target;
   }
   if (std::unique_ptr<DropTargetInterface> target = curve_patch_slot_channel_drop_target_get(
+          C, region, event))
+  {
+    return target;
+  }
+  /* The Curve Patch layer panel's Brush row: a brush drag (Asset Browser, local or external)
+   * assigns the effect's private snapshot. The row's brush browser is keyed by the context pointer
+   * and the image browser target above only takes image buttons, so the two do not overlap. */
+  if (std::unique_ptr<DropTargetInterface> target = curve_patch_layer_brush_drop_target_get(
           C, region, event))
   {
     return target;

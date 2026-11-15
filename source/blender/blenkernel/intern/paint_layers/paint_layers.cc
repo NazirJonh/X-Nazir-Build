@@ -976,6 +976,33 @@ MaterialPaintLayer *BKE_paint_layers_correction_add_material(Material &ma,
   return effect;
 }
 
+bool BKE_paint_layers_is_curve_patch_snapshot(const Brush &brush)
+{
+  return STRPREFIX(brush.id.name + 2, BKE_PAINT_LAYERS_CP_BRUSH_PREFIX);
+}
+
+bool BKE_paint_layers_curve_patch_brush_usable(const Brush &brush)
+{
+  return bke::brush::supports_curve_patch(brush) && !BKE_paint_layers_is_curve_patch_snapshot(brush);
+}
+
+/**
+ * The name of the brush \a brush was duplicated from (see
+ * #BKE_PAINT_LAYERS_CP_BRUSH_SOURCE_NAME_PROP); empty when none is recorded.
+ */
+static const char *paint_layer_cp_brush_source_name_of(const Brush &brush)
+{
+  if (brush.id.properties == nullptr) {
+    return "";
+  }
+  const IDProperty *prop = IDP_GetPropertyFromGroup_null(
+      brush.id.properties, BKE_PAINT_LAYERS_CP_BRUSH_SOURCE_NAME_PROP);
+  if (prop == nullptr || prop->type != IDP_STRING) {
+    return "";
+  }
+  return IDP_string_get(prop);
+}
+
 /**
  * A Curve Patch row's private brush snapshot: a full duplicate of \a source (or a fresh sculpt
  * brush), named after the row and forced into the Curve Patch tool. The copy is local, so it can
@@ -986,18 +1013,36 @@ static Brush *paint_layer_curve_patch_brush_snapshot_create(Main &bmain,
                                                             const char *row_name,
                                                             const Brush *source)
 {
-  std::string brush_name = std::string(".CP Brush ") +
-                           ((row_name != nullptr && row_name[0] != '\0') ? row_name :
-                                                                          "Curve Patch");
+  std::string brush_name;
   Brush *snapshot = nullptr;
   /* Only a brush whose type can actually stamp a patch is worth duplicating: an unsupported source
    * (a Mask brush, a Voxel Remesh brush, ...) would produce a row whose tool refuses to start. */
   if (source != nullptr && bke::brush::supports_curve_patch(*source)) {
-    snapshot = id_cast<Brush *>(BKE_id_copy_ex(&bmain,
-                                               &source->id,
-                                               nullptr,
-                                               LIB_ID_COPY_NO_ANIMDATA |
-                                                   LIB_ID_COPY_NO_PREVIEW));
+    /* The preview is copied too: the snapshot's own name is a private one, so the source's
+     * preview and name (below) are what identify the brush to the user. */
+    snapshot = id_cast<Brush *>(
+        BKE_id_copy_ex(&bmain, &source->id, nullptr, LIB_ID_COPY_NO_ANIMDATA));
+    /* A source that is itself an effect's snapshot (the active brush while another effect's tool
+     * runs) keeps the name it carried over in the copied properties: its own name is private. */
+    if (snapshot != nullptr && !BKE_paint_layers_is_curve_patch_snapshot(*source)) {
+      IDP_ReplaceInGroup(IDP_EnsureProperties(&snapshot->id),
+                         bke::idprop::create(BKE_PAINT_LAYERS_CP_BRUSH_SOURCE_NAME_PROP,
+                                             StringRefNull(source->id.name + 2))
+                             .release());
+    }
+  }
+  /* The ID name keeps the hidden ".CP " prefix (the marker of a private snapshot) and carries the
+   * name of the brush it was made from, so even a data-block name tooltip reads as that brush. A
+   * snapshot with no known source falls back to the row name. */
+  const char *source_label = (snapshot != nullptr && snapshot->id.properties != nullptr) ?
+                                 paint_layer_cp_brush_source_name_of(*snapshot) :
+                                 "";
+  if (source_label[0] != '\0') {
+    brush_name = std::string(BKE_PAINT_LAYERS_CP_BRUSH_PREFIX) + source_label;
+  }
+  else {
+    brush_name = std::string(BKE_PAINT_LAYERS_CP_BRUSH_PREFIX) + "Brush " +
+                 ((row_name != nullptr && row_name[0] != '\0') ? row_name : "Curve Patch");
   }
   if (snapshot == nullptr) {
     snapshot = BKE_brush_add(&bmain, brush_name.c_str(), OB_MODE_SCULPT);
@@ -1020,6 +1065,33 @@ static Brush *paint_layer_curve_patch_brush_snapshot_create(Main &bmain,
   snapshot->ob_mode |= OB_MODE_SCULPT;
   BKE_brush_material_paint_ensure(snapshot);
   return snapshot;
+}
+
+const char *BKE_paint_layers_curve_patch_snapshot_source_name(const Brush &brush)
+{
+  return paint_layer_cp_brush_source_name_of(brush);
+}
+
+const char *BKE_paint_layers_curve_patch_brush_source_name(
+    const MaterialPaintLayerCurvePatch &payload)
+{
+  return payload.brush != nullptr ? paint_layer_cp_brush_source_name_of(*payload.brush) : "";
+}
+
+MaterialPaintLayer *BKE_paint_layers_curve_patch_row_find(
+    Material &ma, const MaterialPaintLayerCurvePatch &payload)
+{
+  MaterialPaintLayer *found = nullptr;
+  BKE_paint_layers_foreach(ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer *) {
+    for (MaterialPaintLayer &effect : layer.effects) {
+      if (effect.curve_patch == &payload) {
+        found = &effect;
+        return false;
+      }
+    }
+    return true;
+  });
+  return found;
 }
 
 MaterialPaintLayerCurvePatch *BKE_paint_layers_curve_patch_payload_create(Main &bmain,
@@ -1066,7 +1138,10 @@ bool BKE_paint_layers_curve_patch_brush_set(Material &ma,
     if (previous->id.us == 0 && !ID_IS_LINKED(&previous->id) &&
         ID_FAKE_USERS(&previous->id) == 0)
     {
-      BKE_id_free(&bmain, &previous->id);
+      /* Deleted, not just freed: #Paint::brush is not user-counted, so a Paint (the sculpt one, or
+       * the image-paint one the material sync mirrors it to) may still point at the old snapshot
+       * and would hand a freed brush to the next brush switch. The delete remaps those to null. */
+      BKE_id_delete(&bmain, &previous->id);
     }
   }
   if (row.curve_patch->vectors != nullptr) {

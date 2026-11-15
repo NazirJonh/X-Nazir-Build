@@ -28,6 +28,8 @@
 #include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
+#include "paint_curve_patch_layer.hh"
+
 namespace blender::ed::sculpt_paint {
 
 void paint_stack_texpaint_slots_refresh(bContext &C)
@@ -44,6 +46,14 @@ void paint_stack_texpaint_slots_refresh(bContext &C)
       WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, BKE_paint_brush(paint));
     }
   }
+}
+
+void paint_stack_active_row_set(bContext &C, Material &material, const bUUID &marker)
+{
+  /* Commit before the switch: leaving for Mask would otherwise remember the effect's snapshot
+   * brush as the content brush to give back. The session of the row becoming active stays. */
+  curve_patch_layer_commit_live_sessions(C, &marker);
+  BKE_paint_layers_active_set(material, marker);
 }
 
 bool paint_stack_target_mode_set(bContext &C, const ePaintLayerTargetMode mode)
@@ -112,7 +122,7 @@ MaterialPaintLayer *paint_layers_mask_add_image(bContext &C,
   }
   /* The correction the pick just made is what the user works on: it holds the texture, so it is
    * the active mask item and the one Mask mode paints. */
-  BKE_paint_layers_active_set(material, mask->marker);
+  paint_stack_active_row_set(C, material, mask->marker);
   /* The layer that now owns the mask is the row the stack shows: follow it with the Projection
    * Frame tool, like a stack row click does. */
   projection::ED_paint_projection_frame_tool_activate_if_needed(&C, material, &layer);

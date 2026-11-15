@@ -991,6 +991,24 @@ static PointerRNA rna_Brush_capabilities_get(PointerRNA *ptr)
   return RNA_pointer_create_with_parent(*ptr, RNA_BrushCapabilities, ptr->data);
 }
 
+static bool rna_Brush_is_curve_patch_snapshot_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_is_curve_patch_snapshot(*static_cast<const Brush *>(ptr->data));
+}
+
+static void rna_Brush_curve_patch_source_name_get(PointerRNA *ptr, char *value)
+{
+  const char *name = BKE_paint_layers_curve_patch_snapshot_source_name(
+      *static_cast<const Brush *>(ptr->data));
+  BLI_strncpy(value, name, strlen(name) + 1);
+}
+
+static int rna_Brush_curve_patch_source_name_length(PointerRNA *ptr)
+{
+  return int(strlen(BKE_paint_layers_curve_patch_snapshot_source_name(
+      *static_cast<const Brush *>(ptr->data))));
+}
+
 static void rna_Brush_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   Brush *br = static_cast<Brush *>(ptr->data);
@@ -6153,6 +6171,24 @@ static void rna_def_brush(BlenderRNA *brna)
       srna, "Brush", "Brush data-block for storing brush settings for painting and sculpting");
   RNA_def_struct_ui_icon(srna, ICON_BRUSH_DATA);
 
+  prop = RNA_def_property(srna, "is_curve_patch_snapshot", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Brush_is_curve_patch_snapshot_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Is Curve Patch Snapshot",
+                           "The brush is the private snapshot a Curve Patch effect stamps with, "
+                           "not a brush the user manages");
+
+  prop = RNA_def_property(srna, "curve_patch_source_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_Brush_curve_patch_source_name_get",
+                                "rna_Brush_curve_patch_source_name_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Curve Patch Source Name",
+                           "For a Curve Patch snapshot, the name of the brush it was duplicated "
+                           "from; empty otherwise or when unknown");
   prop = RNA_def_property(srna, "has_unsaved_changes", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop,

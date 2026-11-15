@@ -832,6 +832,43 @@ MaterialPaintLayer *BKE_paint_layers_correction_add_material(Material &ma,
                                                              Material *source);
 
 /**
+ * Name of the string ID property on a Curve Patch brush snapshot that holds the name of the brush
+ * it was duplicated from: the snapshot's own name is private (`.CP <source>`), so this is what
+ * identifies the brush to the user.
+ */
+#define BKE_PAINT_LAYERS_CP_BRUSH_SOURCE_NAME_PROP "cp_source_brush_name"
+
+/** The hidden name prefix that marks a brush as a Curve Patch effect's private snapshot. */
+inline constexpr const char *BKE_PAINT_LAYERS_CP_BRUSH_PREFIX = ".CP ";
+
+/** Whether \a brush is a Curve Patch effect's private snapshot (never a source for another). */
+bool BKE_paint_layers_is_curve_patch_snapshot(const Brush &brush);
+
+/**
+ * Whether \a brush can be the source of a Curve Patch effect's snapshot: its type can stamp a
+ * patch and it is not itself a snapshot. The single rule behind the RNA poll, the drop target and
+ * the Python filters.
+ */
+bool BKE_paint_layers_curve_patch_brush_usable(const Brush &brush);
+
+/**
+ * The name of the brush \a brush (a snapshot) was duplicated from; empty when unknown (a fresh
+ * snapshot, or one made before the name was recorded). Never null.
+ */
+const char *BKE_paint_layers_curve_patch_snapshot_source_name(const Brush &brush);
+
+/**
+ * The name of the brush \a payload's snapshot was duplicated from; empty when unknown (a fresh
+ * snapshot, or one made before the name was recorded). Never null.
+ */
+const char *BKE_paint_layers_curve_patch_brush_source_name(
+    const MaterialPaintLayerCurvePatch &payload);
+
+/** The Curve Patch row (an effect of some layer of \a ma) that owns \a payload, or null. */
+MaterialPaintLayer *BKE_paint_layers_curve_patch_row_find(
+    Material &ma, const MaterialPaintLayerCurvePatch &payload);
+
+/**
  * Create the owned payload of a Curve Patch row or effect: an empty PaintVector and a private
  * brush snapshot. The snapshot is a full duplicate of \a source_brush when that brush's type can
  * stamp a patch, and a fresh sculpt brush otherwise (null included), named

@@ -158,6 +158,13 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
     MEM_delete(layer->curve_patch);
     layer->curve_patch = nullptr;
   }
+  /* The Text object's user was released by the generic free pass through #paint_layer_dependencies
+   * (the pointer is already null by the time this runs); the payload block itself is owned sub-data
+   * like the records. */
+  if (layer->text_decal != nullptr) {
+    MEM_delete(layer->text_decal);
+    layer->text_decal = nullptr;
+  }
   MEM_SAFE_DELETE(layer->ramp);
   if (layer->curves != nullptr) {
     /* The curves' points and tables are heap data the wrapper owns by value. */
@@ -234,6 +241,11 @@ static void paint_layer_curve_patch_copy(Main *bmain,
   }
 }
 
+/**
+ * The copy of a Text Decal row shares the Text object: the content belongs to the object, so every
+ * row reading it bakes the same raster and the object keeps its other users. The generic copy pass
+ * adds the copy's own user through the row's dependencies.
+ */
 static MaterialPaintLayer *material_paint_layer_copy(Main *bmain,
                                                      const int flag,
                                                      const MaterialPaintLayer &src)
@@ -287,6 +299,8 @@ static MaterialPaintLayer *material_paint_layer_copy(Main *bmain,
   }
   dst->curve_patch = nullptr;
   paint_layer_curve_patch_copy(bmain, flag, *dst, src);
+  dst->text_decal = nullptr;
+  paint_layer_text_decal_copy(*dst, src, false);
   /* The duplicate above copied the list heads: the items and children are owned sub-data, so each
    * gets its own. */
   dst->mask_stack = {nullptr, nullptr};
@@ -364,6 +378,9 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
   }
   if (layer.curve_patch != nullptr) {
     writer->write_struct(layer.curve_patch);
+  }
+  if (layer.text_decal != nullptr) {
+    writer->write_struct(layer.text_decal);
   }
   if (layer.ramp != nullptr) {
     writer->write_struct(layer.ramp);
@@ -458,6 +475,7 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
     paint_layers_bake_tiles_clear(*layer.bake);
   }
   BLO_read_struct(reader, MaterialPaintLayerCurvePatch, &layer.curve_patch);
+  BLO_read_struct(reader, MaterialPaintLayerText, &layer.text_decal);
   BLO_read_struct(reader, MaterialPaintLayerProjection, &layer.projection);
   if (layer.mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_UV) {
     /* The frame is on-demand: a file that came back to UV space should not carry one. */
@@ -769,6 +787,10 @@ static void material_undo_preserve(BlendLibReader * /*reader*/, ID *id_new, ID *
   }
   BKE_paint_layers_bake_runtime_owner_transfer(*id_cast<Material *>(id_new),
                                                *id_cast<Material *>(id_old));
+  /* The maps rolled back with the undo, but the runtime hash did not: it would claim the old
+   * raster still matches the text the re-read payload now names. Forget it and let the next
+   * refresh render the map the file came back with. */
+  BKE_paint_layers_text_decal_invalidate(*id_cast<Material *>(id_new));
 }
 
 IDTypeInfo IDType_ID_MA = {

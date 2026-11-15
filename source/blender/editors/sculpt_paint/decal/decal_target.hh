@@ -249,6 +249,15 @@ void PAINT_OT_decal_world_anchor_set(wmOperatorType *ot);
 /** Copy the decal group into the layered material of every other selected object. */
 void PAINT_OT_decal_propagate_to_selected(wmOperatorType *ot);
 
+/** Place the active Text Decal effect's frame from the view, the way a decal is placed. */
+void PAINT_OT_text_decal_place_from_view(wmOperatorType *ot);
+/** Make the active Text Decal's Text object active and enter its Edit Mode. */
+void PAINT_OT_text_decal_edit_text(wmOperatorType *ot);
+/** Re-render the active Text Decal's raster whatever changed since the last bake. */
+void PAINT_OT_text_decal_rebake(wmOperatorType *ot);
+/** Halve or double the active Text Decal's raster size and re-bake it. */
+void PAINT_OT_text_decal_size_step(wmOperatorType *ot);
+
 /** The operator-type registration of the decal module, so #paint_ops.cc registers the module with
  * one call instead of naming its operators. */
 void operatortypes_register();

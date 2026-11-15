@@ -2184,6 +2184,29 @@ void DepsgraphNodeBuilder::build_material(Material *material)
           }
           return true;
         });
+    /* A Text Decal's source object (of an effect or of a mask item) is normally not assigned to the
+     * material, so it would have no node in the graph at all and an edit to it would never reach
+     * the material's raster. Build it here; the relation builder ties its geometry to this
+     * material's update. Visible on build, because the raster reads its evaluated geometry even
+     * when no view layer shows it. When the object is also in the view layer, `build_object` merges
+     * the two builds (linked state raised to direct, base index kept), as it does for a parent. */
+    const auto build_text_object = [&](const MaterialPaintLayer &row) {
+      if (row.source == MA_PAINT_LAYER_SOURCE_TEXT && row.text_decal != nullptr &&
+          row.text_decal->text_object != nullptr)
+      {
+        build_object(-1, row.text_decal->text_object, DEG_ID_LINKED_INDIRECTLY, true);
+      }
+    };
+    BKE_paint_layers_foreach(
+        *material, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) {
+          for (const MaterialPaintLayer &effect : layer.effects) {
+            build_text_object(effect);
+          }
+          for (const MaterialPaintLayer &item : layer.mask_stack) {
+            build_text_object(item);
+          }
+          return true;
+        });
   }
 }
 

@@ -1298,6 +1298,23 @@ static bool composite_effect_map_describe(const Material &ma,
     copy_v4_v4(correction.constant_color, effect_record->value);
     correction.has_constant_color = true;
   }
+  if (effect.source == MA_PAINT_LAYER_SOURCE_TEXT && effect.role == MA_PAINT_LAYER_ROLE_EFFECT &&
+      effect.text_decal != nullptr && effect.text_decal->coverage != nullptr)
+  {
+    /* The text is only the decal's mask: it scales whatever the channel lays, flat or textured.
+     * The mapping is described even for a flat value, as the coverage is read through it. */
+    correction.coverage_image = effect.text_decal->coverage;
+    correction.coverage_iuser = nullptr;
+    if (effect_record->image == nullptr) {
+      composite_mapping_describe(ma,
+                                 effect,
+                                 channel,
+                                 correction.mapping,
+                                 tile_number,
+                                 painted_object,
+                                 correction.coverage_image);
+    }
+  }
   return true;
 }
 
@@ -2806,6 +2823,7 @@ void BKE_paint_layers_effect_input_images(const PaintMaterialCompositeImageLayer
   add(layer.mask_image);
   for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
     add(correction.image);
+    add(correction.coverage_image);
     add(correction.anchor_point_coverage_image);
     for (Image *image : correction.grey_input_images) {
       add(image);
@@ -3542,6 +3560,11 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
   for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
     if (correction.opacity > 0.0f && correction.gradient.enabled) {
       return "a Gradient correction is not laid by the GPU path";
+    }
+    if (correction.opacity > 0.0f && correction.coverage_image != nullptr) {
+      /* NOTE: the generated shader samples no coverage map, so this row falls back to the CPU
+       * composite instead of shading a picture without the text. */
+      return "a Text Decal covers by a coverage map the GPU path does not read";
     }
   }
   for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {

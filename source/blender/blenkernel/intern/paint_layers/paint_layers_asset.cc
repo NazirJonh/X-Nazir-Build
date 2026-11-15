@@ -62,7 +62,8 @@ constexpr const char *ASSET_INSTANCE_NUMBER_PROP = "number";
 constexpr const char *ASSET_SOURCE_PROP = PAINT_ASSET_SOURCE_PROP_NAME;
 /** A Smart asset always brings the channels its rows use; this is the one policy both paths use. */
 constexpr uint16_t SMART_ASSET_IMPORT_FLAGS = PAINT_LAYER_IMPORT_ENABLE_SOURCE_CHANNELS |
-                                             PAINT_LAYER_IMPORT_SKIP_CURVE_PATCH;
+                                             PAINT_LAYER_IMPORT_SKIP_CURVE_PATCH |
+                                             PAINT_LAYER_IMPORT_SKIP_TEXT_DECAL;
 
 /** The source-label member naming the material the instance came from. */
 constexpr const char *ASSET_SOURCE_NAME_PROP = "name";
@@ -551,6 +552,9 @@ void portability_walk(const MaterialPaintLayer &row,
   if (row.source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH) {
     r_portability.curve_patch_num++;
   }
+  if (row.source == MA_PAINT_LAYER_SOURCE_TEXT) {
+    r_portability.text_decal_num++;
+  }
   if (row.source == MA_PAINT_LAYER_SOURCE_MATERIAL && row.material != nullptr) {
     r_portability.material_source_num++;
   }
@@ -593,6 +597,9 @@ void portability_mask_walk(const MaterialPaintLayer &row,
     /* Only the mask stack is saved: the item's own content and children stay behind. */
     if (item.source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH) {
       r_portability.curve_patch_num++;
+    }
+    if (item.source == MA_PAINT_LAYER_SOURCE_TEXT) {
+      r_portability.text_decal_num++;
     }
     if (item.source == MA_PAINT_LAYER_SOURCE_MATERIAL && item.material != nullptr) {
       r_portability.material_source_num++;

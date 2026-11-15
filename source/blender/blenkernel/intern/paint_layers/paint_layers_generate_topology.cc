@@ -629,6 +629,13 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     gradient_payload_hash_mix(hash, effect);
     generator_topology_hash_mix(hash, effect);
     filter_payload_hash_mix(hash, effect);
+    if (effect.source == MA_PAINT_LAYER_SOURCE_TEXT && effect.text_decal != nullptr &&
+        effect.text_decal->coverage != nullptr)
+    {
+      /* The decal's text is a node of its own that scales every channel it lays; which map it
+       * is is structure, as a bake's coverage map is. */
+      topology_hash_string(hash, effect.text_decal->coverage->id.name);
+    }
     const bool reads_source = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE);
     if (reads_source) {
       /* A correction that reads a material has nodes that follow its source, as a Material row's

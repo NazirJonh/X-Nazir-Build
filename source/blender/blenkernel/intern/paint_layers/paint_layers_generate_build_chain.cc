@@ -1887,6 +1887,40 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
     alpha = this->mapping_clip_alpha(tree, effect, alpha, nodes);
   }
 
+  /* A Text Decal covers only where its text is: the coverage map scales whatever the channel lays,
+   * a flat value or the texture dropped on it, and is read through the same mapping and frame as
+   * that texture. */
+  NodeOutput text_alpha;
+  if (effect.source == MA_PAINT_LAYER_SOURCE_TEXT && effect.role == MA_PAINT_LAYER_ROLE_EFFECT &&
+      effect.text_decal != nullptr && effect.text_decal->coverage != nullptr)
+  {
+    bNode *coverage_map = this->image_map_node_add(tree, *effect.text_decal->coverage);
+    if (coverage_map == nullptr || socket_out(*coverage_map, "Alpha") == nullptr) {
+      if (coverage_map != nullptr) {
+        bke::node_remove_node(nullptr, tree, *coverage_map, true, false);
+      }
+      this->nodes_discard(tree, nodes);
+      return false;
+    }
+    nodes.append(coverage_map);
+    grid_.place_extra(*coverage_map);
+    const MapRead coverage_read = this->map_read_apply(tree, effect, *coverage_map, nodes, channel);
+    if (coverage_read.alpha.socket == nullptr) {
+      this->nodes_discard(tree, nodes);
+      return false;
+    }
+    text_alpha = this->mapping_clip_alpha(tree, effect, coverage_read.alpha, nodes);
+    if (alpha.socket != nullptr) {
+      text_alpha = this->multiply_nodes_add(tree, alpha, text_alpha);
+      if (text_alpha.node == nullptr) {
+        this->nodes_discard(tree, nodes);
+        return false;
+      }
+      nodes.append(text_alpha.node);
+    }
+    alpha = text_alpha;
+  }
+
   /* The factor sits in its own `Opacity x Factor` frame, so it stays out of this correction's. */
   bNode *factor_node_for_frame = nullptr;
   const auto frame = [&]() {
@@ -1901,7 +1935,7 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   /* The correction's own factor: its opacity times the map's alpha. A flat colour and a mesh-map
    * atlas cover by opacity alone, as a Fill row does. */
   NodeOutput factor = {group.group_input, opacity};
-  if (!flat && !mesh_map) {
+  if ((!flat && !mesh_map) || text_alpha.socket != nullptr) {
     factor = this->multiply_nodes_add(tree, {group.group_input, opacity}, alpha);
     if (factor.node == nullptr) {
       return discard();

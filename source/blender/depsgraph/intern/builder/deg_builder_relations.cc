@@ -3217,6 +3217,24 @@ void DepsgraphRelationBuilder::build_nodetree(bNodeTree *ntree)
   }
 }
 
+/** Whether \a object or its Curve data lists \a material in its slots. */
+static bool text_decal_object_uses_material(const Object &object, const Material &material)
+{
+  for (int i = 0; i < object.totcol; i++) {
+    if (object.mat != nullptr && object.mat[i] == &material) {
+      return true;
+    }
+  }
+  if (const Curve *curve_data = id_cast<const Curve *>(object.data)) {
+    for (int i = 0; i < curve_data->totcol; i++) {
+      if (curve_data->mat != nullptr && curve_data->mat[i] == &material) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /* Recursively build graph for material */
 void DepsgraphRelationBuilder::build_material(Material *material, ID *owner)
 {
@@ -3270,6 +3288,52 @@ void DepsgraphRelationBuilder::build_material(Material *material, ID *owner)
               OperationKey(&material->id, NodeType::SHADING, OperationCode::MATERIAL_UPDATE),
               "Paint Layer Source Material -> Layered Material",
               RELATION_CHECK_BEFORE_ADD);
+          return true;
+        });
+    /* A Text Decal (an effect of a row, or an item of its mask) updates its maps from the
+     * evaluated Text object: the object's geometry and the animated parameters of its Curve data
+     * have to finish before the material's update reads them. The object is built indirectly, so
+     * it needs no view layer.
+     *
+     * The relation only orders the two; the raster itself runs after the whole evaluation (see
+     * #BKE_paint_layers_text_decal_refresh_tagged). That is why it can be dropped without a loss
+     * wherever it could close a loop: a material feeds its owners' SHADING, so a Text object that
+     * is itself an owner of this material (or whose Curve data is) would wait on a shading its own
+     * geometry then feeds. Such a text gets no edge and the raster still follows it, since the
+     * refresh runs on every update. The target is `MATERIAL_UPDATE`, which only owners' SHADING
+     * and the editors depend on, never a node a geometry can be reached from. */
+    const auto relate_text_decal = [&](const MaterialPaintLayer &row) {
+      if (row.source != MA_PAINT_LAYER_SOURCE_TEXT || row.text_decal == nullptr ||
+          row.text_decal->text_object == nullptr)
+      {
+        return;
+      }
+      Object *text_object = row.text_decal->text_object;
+      build_object(text_object);
+      if (text_decal_object_uses_material(*text_object, *material)) {
+        return;
+      }
+      const OperationKey material_update_key(
+          &material->id, NodeType::SHADING, OperationCode::MATERIAL_UPDATE);
+      add_relation(ComponentKey(&text_object->id, NodeType::GEOMETRY),
+                   material_update_key,
+                   "Text Decal Object -> Layered Material",
+                   RELATION_CHECK_BEFORE_ADD);
+      if (text_object->data != nullptr) {
+        add_relation(ComponentKey(text_object->data, NodeType::PARAMETERS),
+                     material_update_key,
+                     "Text Decal Data Parameters -> Layered Material",
+                     RELATION_CHECK_BEFORE_ADD);
+      }
+    };
+    BKE_paint_layers_foreach(
+        *material, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) {
+          for (const MaterialPaintLayer &effect : layer.effects) {
+            relate_text_decal(effect);
+          }
+          for (const MaterialPaintLayer &item : layer.mask_stack) {
+            relate_text_decal(item);
+          }
           return true;
         });
   }

@@ -144,13 +144,13 @@ static void paint_layers_map_bind_selection(Material &ma, Image *image)
   }
 }
 
-static Image *paint_layers_map_create(Main &bmain,
-                                      const char *name,
-                                      const int size,
-                                      const bool is_color,
-                                      const float rgba[4],
-                                      const bool tiled = false,
-                                      const bool is_float = false)
+Image *paint_layers_map_create(Main &bmain,
+                               const char *name,
+                               const int size,
+                               const bool is_color,
+                               const float rgba[4],
+                               const bool tiled,
+                               const bool is_float)
 {
   /* 32 planes, not 24: the buffer's color mode decides how many channels a PNG pack writes, and a
    * map's alpha is its coverage, so a 24-plane map would reopen fully opaque. Each scalar map
@@ -238,6 +238,13 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
   const PaintLayersTargetStatus ok_status = BKE_paint_layers_hidden_blocker(ma, *layer) != nullptr ?
                                                 PaintLayersTargetStatus::Hidden :
                                                 PaintLayersTargetStatus::Ok;
+  /* A Text Decal effect is generated from its Text object: a stroke into its maps would be lost at
+   * the next raster. The same Content answer as for a generator, whatever the mode. */
+  if (mode == PaintLayersTargetMode::Content &&
+      paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_NO_STROKES))
+  {
+    return PaintLayersTargetStatus::RowTakesNoStrokes;
+  }
   if (mode == PaintLayersTargetMode::Content) {
     /* A filter's records only say which channels it works in: there is no map to write into, and
      * a stroke must not make one. The mask of its row is still paintable. */
@@ -293,6 +300,10 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
   if (paint_layer_kind_has_flag(*r_target.mask_item, PAINT_LAYER_KIND_GENERATES)) {
     return PaintLayersTargetStatus::RowTakesNoStrokes;
   }
+  /* A generated mask item (Text Decal) is rewritten by its source, so a stroke would not last. */
+  if (paint_layer_kind_has_flag(*r_target.mask_item, PAINT_LAYER_KIND_NO_STROKES)) {
+    return PaintLayersTargetStatus::RowTakesNoStrokes;
+  }
   /* A mesh-map mask item reads the material's atlas; there is no map a stroke writes into. */
   if (r_target.mask_item->source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
     return PaintLayersTargetStatus::RowTakesNoStrokes;
@@ -325,6 +336,17 @@ Material *BKE_paint_layers_active_material_get(Object *ob)
   }
   Material *ma = BKE_object_material_get(ob, ob->actcol);
   return (ma != nullptr && BKE_paint_layers_is_layered(*ma)) ? ma : nullptr;
+}
+
+bool BKE_paint_layers_row_takes_no_strokes(const MaterialPaintLayer &layer)
+{
+  return paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_NO_STROKES);
+}
+
+const char *BKE_paint_layers_row_no_stroke_reason(const MaterialPaintLayer &layer)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_of(layer);
+  return info != nullptr ? info->no_stroke_reason : nullptr;
 }
 
 bool BKE_paint_layers_find_image_use(Material &ma,

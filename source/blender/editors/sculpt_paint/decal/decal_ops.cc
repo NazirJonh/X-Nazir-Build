@@ -18,12 +18,14 @@
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
+#include "BLI_span.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
 #include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
@@ -40,12 +42,14 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
+#include "ED_object.hh"
 #include "ED_paint.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "decal_target.hh"
@@ -1214,6 +1218,279 @@ void operatortypes_register()
   WM_operatortype_append(PAINT_OT_decal_from_selection);
   WM_operatortype_append(PAINT_OT_decal_world_anchor_set);
   WM_operatortype_append(PAINT_OT_decal_propagate_to_selected);
+  WM_operatortype_append(PAINT_OT_text_decal_place_from_view);
+  WM_operatortype_append(PAINT_OT_text_decal_edit_text);
+  WM_operatortype_append(PAINT_OT_text_decal_rebake);
+  WM_operatortype_append(PAINT_OT_text_decal_size_step);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Text Decal
+ *
+ * A Text Decal is one projected effect row, not a decal group: it shares the frame placement with
+ * the decal operators above, and adds the jump into its object's Edit Mode.
+ * \{ */
+
+/**
+ * The row the Layer tab shows for \a ma, as the panel resolves it: the active mask item, else the
+ * base mask while the brush works in Mask mode, else the active row. Sharing the answer keeps the
+ * buttons working on the Text Decal the panel displays, whether it is an effect or a mask item.
+ */
+static MaterialPaintLayer *text_decal_shown_row_get(const bContext &C, Material &ma)
+{
+  MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(ma);
+  if (row == nullptr) {
+    return nullptr;
+  }
+  if (MaterialPaintLayer *item = BKE_paint_layers_active_mask_item_get(ma)) {
+    return item;
+  }
+  const Scene *scene = CTX_data_scene(&C);
+  if (scene != nullptr &&
+      BKE_paint_layers_target_mode(&scene->toolsettings->paint_mode) == PaintLayersTargetMode::Mask)
+  {
+    if (MaterialPaintLayer *base = BKE_paint_layers_mask_base(*row)) {
+      return base;
+    }
+  }
+  return row;
+}
+
+/**
+ * The Text Decal the Layer tab works on: the shown row, when it is a Text Decal. \a r_object is the
+ * painted object the frame is placed against.
+ */
+static MaterialPaintLayer *text_decal_active_row_find(const bContext &C,
+                                                      Object **r_object,
+                                                      Material **r_material)
+{
+  *r_object = nullptr;
+  *r_material = nullptr;
+  Object *ob = nullptr;
+  Material *ma = nullptr;
+  if (!decal_context_poll(&C, &ob, &ma)) {
+    return nullptr;
+  }
+  MaterialPaintLayer *row = text_decal_shown_row_get(C, *ma);
+  if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_TEXT ||
+      row->text_decal == nullptr)
+  {
+    return nullptr;
+  }
+  *r_object = ob;
+  *r_material = ma;
+  return row;
+}
+
+static bool text_decal_place_poll(bContext *C)
+{
+  Object *ob = nullptr;
+  Material *ma = nullptr;
+  MaterialPaintLayer *row = text_decal_active_row_find(*C, &ob, &ma);
+  return row != nullptr && BKE_paint_layers_projection_applies(*ma, *row);
+}
+
+static wmOperatorStatus text_decal_place_from_view_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = nullptr;
+  Material *ma = nullptr;
+  MaterialPaintLayer *row = text_decal_active_row_find(*C, &ob, &ma);
+  if (row == nullptr || !BKE_paint_layers_projection_applies(*ma, *row)) {
+    BKE_report(op->reports, RPT_ERROR, "No Text Decal to place");
+    return OPERATOR_CANCELLED;
+  }
+  float mval[2];
+  decal_mval_get(op, mval);
+  projection::ProjectionFrame frame;
+  decal_frame_from_view(*C, *ob, mval, frame);
+  /* The clip toggle belongs to the row: placing the frame only moves it. */
+  const bool clip = (row->projection != nullptr) ?
+                        BKE_paint_layers_projection_clip_get(*row) :
+                        true;
+  decal_frame_apply(*ma, Span<MaterialPaintLayer *>{&row, 1}, frame, clip);
+  decal_done_notify(C, *ma);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus text_decal_place_from_view_invoke(bContext *C,
+                                                          wmOperator *op,
+                                                          const wmEvent *event)
+{
+  decal_mval_store(C, op, event);
+  return text_decal_place_from_view_exec(C, op);
+}
+
+void PAINT_OT_text_decal_place_from_view(wmOperatorType *ot)
+{
+  ot->name = "Place Text Decal from View";
+  ot->description =
+      "Place the Text Decal's frame through the current viewport view: the centre at the surface "
+      "under the mouse, the extents over the object";
+  ot->idname = "PAINT_OT_text_decal_place_from_view";
+
+  ot->invoke = text_decal_place_from_view_invoke;
+  ot->exec = text_decal_place_from_view_exec;
+  ot->poll = text_decal_place_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna, "mouse_x", -1, INT32_MIN, INT32_MAX, "Mouse X", "", -1, INT32_MAX);
+  RNA_def_int(ot->srna, "mouse_y", -1, INT32_MIN, INT32_MAX, "Mouse Y", "", -1, INT32_MAX);
+}
+
+/** The active row, when it is a Text Decal with a Text object to edit. */
+static MaterialPaintLayer *text_decal_edit_row_find(const bContext &C)
+{
+  Object *ob = CTX_data_active_object(&C);
+  if (ob == nullptr) {
+    return nullptr;
+  }
+  Material *ma = BKE_paint_layers_active_material_get(ob);
+  if (ma == nullptr || !BKE_paint_layers_is_layered(*ma) || !ID_IS_EDITABLE(&ma->id)) {
+    return nullptr;
+  }
+  MaterialPaintLayer *row = text_decal_shown_row_get(C, *ma);
+  if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_TEXT ||
+      row->text_decal == nullptr || row->text_decal->text_object == nullptr)
+  {
+    return nullptr;
+  }
+  return row;
+}
+
+static bool text_decal_edit_poll(bContext *C)
+{
+  return text_decal_edit_row_find(*C) != nullptr;
+}
+
+static wmOperatorStatus text_decal_edit_text_exec(bContext *C, wmOperator *op)
+{
+  MaterialPaintLayer *row = text_decal_edit_row_find(*C);
+  if (row == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  Object *text = row->text_decal->text_object;
+
+  /* Leave the painted object's mode first: the mode belongs to the active object, and the Text
+   * object takes the view layer's active slot below. */
+  if (Object *obact = CTX_data_active_object(C)) {
+    if (obact->mode != OB_MODE_OBJECT &&
+        !ed::object::mode_compat_set(C, obact, OB_MODE_OBJECT, op->reports))
+    {
+      return OPERATOR_CANCELLED;
+    }
+  }
+
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  BKE_view_layer_base_deselect_all(*bmain, scene, view_layer);
+  if (Base *base = BKE_view_layer_base_find(view_layer, text)) {
+    BKE_view_layer_base_select_and_set_active(view_layer, base);
+  }
+  if (!ed::object::editmode_enter_ex(bmain, scene, text, 0)) {
+    BKE_report(op->reports, RPT_ERROR, "Cannot enter Edit Mode on the Text object");
+    return OPERATOR_CANCELLED;
+  }
+  WM_event_add_notifier(C, NC_SCENE | ND_OB_SELECT, scene);
+  WM_event_add_notifier(C, NC_SCENE | ND_MODE, scene);
+  WM_toolsystem_update_from_context_view3d(C);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_text_decal_edit_text(wmOperatorType *ot)
+{
+  ot->name = "Edit Text";
+  ot->description =
+      "Edit the Text object the active Text Decal reads: make it active and enter its Edit Mode";
+  ot->idname = "PAINT_OT_text_decal_edit_text";
+
+  ot->exec = text_decal_edit_text_exec;
+  ot->poll = text_decal_edit_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static bool text_decal_rebake_poll(bContext *C)
+{
+  Object *ob = nullptr;
+  Material *ma = nullptr;
+  return text_decal_active_row_find(*C, &ob, &ma) != nullptr;
+}
+
+static wmOperatorStatus text_decal_rebake_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = nullptr;
+  Material *ma = nullptr;
+  MaterialPaintLayer *row = text_decal_active_row_find(*C, &ob, &ma);
+  if (row == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No Text Decal to re-bake");
+    return OPERATOR_CANCELLED;
+  }
+  /* The refresh follows the hash; the re-bake forces the raster out again. */
+  BKE_paint_layers_text_decal_invalidate(*ma);
+  BKE_paint_layers_text_decal_refresh(
+      *CTX_data_main(C), *ma, CTX_data_ensure_evaluated_depsgraph(C));
+  decal_done_notify(C, *ma);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_text_decal_rebake(wmOperatorType *ot)
+{
+  ot->name = "Re-bake Text";
+  ot->description =
+      "Rasterize the Text object's content into the effect's map again, whatever changed since "
+      "the last bake";
+  ot->idname = "PAINT_OT_text_decal_rebake";
+
+  ot->exec = text_decal_rebake_exec;
+  ot->poll = text_decal_rebake_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus text_decal_size_step_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = nullptr;
+  Material *ma = nullptr;
+  MaterialPaintLayer *row = text_decal_active_row_find(*C, &ob, &ma);
+  if (row == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No Text Decal to resize");
+    return OPERATOR_CANCELLED;
+  }
+  const int next = BKE_paint_layers_text_decal_size_step(*row->text_decal,
+                                                         RNA_enum_get(op->ptr, "direction"));
+  if (next == BKE_paint_layers_text_decal_size_get(*row->text_decal)) {
+    return OPERATOR_CANCELLED;
+  }
+  row->text_decal->size = next;
+  /* Re-bake at once: the step changes the resolution, and the user should see the sharpness of
+   * the size just chosen rather than the previous one until the next edit. */
+  BKE_paint_layers_text_decal_invalidate(*ma);
+  BKE_paint_layers_text_decal_refresh(
+      *CTX_data_main(C), *ma, CTX_data_ensure_evaluated_depsgraph(C));
+  BKE_paint_layers_tag_value_edited(*ma);
+  decal_done_notify(C, *ma);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_text_decal_size_step(wmOperatorType *ot)
+{
+  static const EnumPropertyItem direction_items[] = {
+      {-1, "DOWN", 0, "Smaller", "Halve the raster size"},
+      {1, "UP", 0, "Larger", "Double the raster size"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  ot->name = "Step Text Decal Size";
+  ot->description =
+      "Halve or double the Text Decal's raster size (256 up to 4096 px) and re-bake it";
+  ot->idname = "PAINT_OT_text_decal_size_step";
+
+  ot->exec = text_decal_size_step_exec;
+  ot->poll = text_decal_rebake_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_enum(ot->srna, "direction", direction_items, 1, "Direction", "");
 }
 
 /** \} */

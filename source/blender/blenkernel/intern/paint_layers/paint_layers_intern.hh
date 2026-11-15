@@ -1194,6 +1194,20 @@ void paint_layers_blend_tier_prune(Material &ma);
 
 }  // namespace bke::paint_layers
 
+/**
+ * Create a paint-layer map of \a size with the stack's one convention: a straight-alpha byte
+ * buffer, 32 planes, the given colour filled in, Non-Color data when \a is_color is false. The
+ * channel edit that attaches it is the caller's, so a map for a Text Decal row -- whose size is
+ * the payload's, not the material's map size -- is made by the same maker a stroke target uses.
+ */
+Image *paint_layers_map_create(Main &bmain,
+                               const char *name,
+                               const int size,
+                               const bool is_color,
+                               const float rgba[4],
+                               const bool tiled = false,
+                               const bool is_float = false);
+
 /* -------------------------------------------------------------------- */
 /** \name Row bake
  *
@@ -1479,6 +1493,8 @@ struct PaintLayerCopyOptions {
   uint16_t flags = 0;
   /** Receives the number of Curve Patch items left out, when the skip flag is set. */
   int *r_dropped_curve_patches = nullptr;
+  /** Receives the number of Text Decal items left out, when the skip flag is set. */
+  int *r_dropped_text_decals = nullptr;
   /** How the maps of the copied records travel; the legacy copy by default. */
   PaintLayerImageImportPolicy image_policy = PaintLayerImageImportPolicy::Copy;
   /** Receives the number of painted maps left behind, when the policy is Strip. */

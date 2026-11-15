@@ -85,6 +85,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_pointcache.h"
@@ -3235,6 +3236,10 @@ static void scene_graph_update_tagged(Depsgraph *depsgraph, Main *bmain, bool on
     /* Update all objects: drivers, matrices, etc. flags set
      * by depsgraph or manual, no layer check here, gets correct flushed. */
     DEG_evaluate_on_refresh(depsgraph, DEG_EVALUATE_SYNC_WRITEBACK_YES);
+    /* A Text Decal rasterizes from the evaluated Text object, so it runs after the graph has
+     * produced it. The refresh tags the material when it writes a map, which the second pass below
+     * picks up when the build needs the new pixels. */
+    BKE_paint_layers_text_decal_refresh_tagged(*bmain, *depsgraph);
     /* Update sound system. */
     BKE_scene_update_sound(depsgraph, bmain);
     /* Notify python about depsgraph update. */
@@ -3330,6 +3335,8 @@ void BKE_scene_graph_update_for_newframe_ex(Depsgraph *depsgraph, const bool cle
     else {
       DEG_evaluate_on_refresh(depsgraph, DEG_EVALUATE_SYNC_WRITEBACK_YES);
     }
+    /* Text Decals read the evaluated Text objects; see the tagged update above. */
+    BKE_paint_layers_text_decal_refresh_tagged(*bmain, *depsgraph);
     /* Update sound system animation. */
     BKE_scene_update_sound(depsgraph, bmain);
 

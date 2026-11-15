@@ -725,6 +725,79 @@ enum eMaterialPaintLayerSource : int8_t {
    * #MaterialPaintLayer::curve_patch. Only as an effect of another row.
    */
   MA_PAINT_LAYER_SOURCE_CURVE_PATCH = 9,
+  /**
+   * A Text Decal effect: it paints its channels with the content of a Text object (#Object, type
+   * OB_FONT), rasterized into its channel maps and re-baked whenever the object's text or
+   * formatting changes. The payload is #MaterialPaintLayer::text_decal. Only as an effect of
+   * another row.
+   */
+  MA_PAINT_LAYER_SOURCE_TEXT = 10,
+};
+
+/**
+ * #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_TEXT row. The effect and the mask
+ * item are two kinds: the effect is a Fill-like row (channel values and textures, with the text as
+ * the mask of the whole effect), the mask item is the text's coverage alone.
+ */
+enum eMaterialPaintLayerTextKind : int16_t {
+  MA_PAINT_LAYER_TEXT_EFFECT = 0,
+  MA_PAINT_LAYER_TEXT_MASK = 1,
+};
+
+/** #MaterialPaintLayerText::fit: how the text's bounds map onto the square raster. */
+enum eMaterialPaintLayerTextFit : int8_t {
+  /** Fit the longer side into the square minus padding; centre the other one. */
+  MA_PAINT_LAYER_TEXT_FIT_CONTAIN = 0,
+  /** Stretch X and Y independently into the square minus padding. */
+  MA_PAINT_LAYER_TEXT_FIT_STRETCH = 1,
+};
+
+/** The raster side a Text Decal bakes at when #MaterialPaintLayerText::size does not name one. */
+enum {
+  MA_PAINT_LAYER_TEXT_SIZE_DEFAULT = 1024,
+  /** The smallest and largest raster side a Text Decal may bake at. */
+  MA_PAINT_LAYER_TEXT_SIZE_MIN = 256,
+  /**
+   * The sizes on offer are the powers of two from the minimum to this cap, reached by stepping, so
+   * the user never types one. A float RGBA raster of this side is 256 MiB and the coverage pass
+   * streams it row by row, but the map, its byte copy and the temporary stretch buffer still add
+   * up: the steps exist to keep a typo from freezing the session.
+   */
+  MA_PAINT_LAYER_TEXT_SIZE_MAX = 4096,
+};
+
+/**
+ * The owned payload of a #MA_PAINT_LAYER_SOURCE_TEXT row: the Text object the content is baked
+ * from and the bake options. The object's own formatting (fonts, size, spacing, alignment, text
+ * boxes, per-character styles) is the single source of truth -- this payload stores no copy of it.
+ * The raster lives in #coverage for an effect and in the Base Color record for a mask item.
+ */
+struct MaterialPaintLayerText {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerText)
+
+  /**
+   * The Text object (type OB_FONT) the content is read from. A user of the object, reported
+   * through the row's dependencies; it never needs to be a user of the material.
+   */
+  struct Object *text_object = nullptr;
+  /**
+   * The rasterized text as a coverage map (alpha), owned by the effect. Only a Text Decal effect
+   * has one: the channels keep the user's values and textures, and this map is the mask of the
+   * whole effect. A mask item keeps its coverage in its own Base Color record instead. Reported to
+   * the ID walk through the row's dependencies.
+   */
+  struct Image *coverage = nullptr;
+  /**
+   * The square side in pixels the text is rasterized at. 0 reads back as the default
+   * (#MA_PAINT_LAYER_TEXT_SIZE_DEFAULT). The text is fitted into it with #padding.
+   */
+  int size = 0;
+  /** Padding around the text's bounds as a fraction of the raster side, 0..0.5. */
+  float padding = 0.05f;
+  /** #eMaterialPaintLayerTextFit. */
+  int8_t fit = MA_PAINT_LAYER_TEXT_FIT_CONTAIN;
+  /* Two 8-byte pointers + int + float + int8 = 25 bytes; padded to 32 for DNA alignment. */
+  char _pad[7] = {};
 };
 
 /**
@@ -1773,6 +1846,12 @@ struct MaterialPaintLayer {
   float mask_contrast = 0.0f;
   /** Keeps the struct size a multiple of 8 so an array of rows stays aligned. */
   char _pad[4] = {};
+  /**
+   * The owned payload of a #MA_PAINT_LAYER_SOURCE_TEXT row, or null for every other source. Owned
+   * by the row (freed, copied and written with it); the Text object it names is a user, reported
+   * through the row's dependencies. Appended last so the offsets of the older fields do not move.
+   */
+  MaterialPaintLayerText *text_decal = nullptr;
 };
 
 /**

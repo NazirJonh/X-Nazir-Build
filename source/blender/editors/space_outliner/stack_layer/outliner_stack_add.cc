@@ -116,7 +116,20 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
    * data-block again. */
   char source_name[MAX_ID_NAME - 2];
   RNA_string_get(op->ptr, "source", source_name);
-  if (kind_info.source_id_type != 0) {
+  if (kind_info.source_creatable && RNA_boolean_get(op->ptr, "create_source")) {
+    /* The Add makes the data-block itself, so no existing one is named. */
+    args.create_source = true;
+    if (RNA_boolean_get(op->ptr, "use_collection_pick")) {
+      char collection_name[MAX_ID_NAME - 2];
+      RNA_string_get(op->ptr, "source_collection", collection_name);
+      if (collection_name[0] == '\0') {
+        BKE_report(op->reports, RPT_ERROR, "Choose a collection for the new object");
+        return OPERATOR_CANCELLED;
+      }
+      args.source_collection = collection_name;
+    }
+  }
+  else if (kind_info.source_id_type != 0) {
     args.source = (source_name[0] != '\0') ?
                       BKE_libblock_find_name(
                           CTX_data_main(C), kind_info.source_id_type, source_name) :
@@ -182,6 +195,8 @@ static const char *stack_add_source_collection_name(const short idcode)
       return "materials";
     case ID_ME:
       return "meshes";
+    case ID_OB:
+      return "objects";
     case ID_NT:
       return "node_groups";
     case ID_TE:
@@ -205,7 +220,9 @@ wmOperatorStatus stack_row_add_invoke(bContext *C, wmOperator *op, const wmEvent
   const bool kind_known = space_outliner != nullptr && space_outliner->runtime != nullptr &&
                           stack_add_kind_info_get(*C, RNA_enum_get(op->ptr, "type"), kind_info);
   PropertyRNA *source_prop = RNA_struct_find_property(op->ptr, "source");
-  const bool needs_source = kind_known && kind_info.source_id_type != 0 &&
+  const bool creates_source =
+      kind_known && kind_info.source_creatable && RNA_boolean_get(op->ptr, "create_source");
+  const bool needs_source = kind_known && kind_info.source_id_type != 0 && !creates_source &&
                             source_prop != nullptr && !RNA_property_is_set(op->ptr, source_prop);
   if (!kind_known || (!kind_info.takes_color && !needs_source)) {
     return stack_row_add_exec(C, op);
@@ -290,7 +307,20 @@ void stack_row_add_ui(bContext *C, wmOperator *op)
       op->layout->prop(op->ptr, "fill_color", UI_ITEM_NONE, std::nullopt, ICON_NONE);
     }
   }
-  if (kind_info.source_id_type != 0) {
+  const bool creates_source = kind_info.source_creatable &&
+                              RNA_boolean_get(op->ptr, "create_source");
+  if (kind_info.source_creatable) {
+    op->layout->prop(op->ptr, "create_source", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    if (creates_source) {
+      op->layout->prop(op->ptr, "use_collection_pick", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+      if (RNA_boolean_get(op->ptr, "use_collection_pick")) {
+        PointerRNA main_ptr = RNA_main_pointer_create(CTX_data_main(C));
+        op->layout->prop_search(
+            op->ptr, "source_collection", &main_ptr, "collections", std::nullopt, ICON_NONE);
+      }
+    }
+  }
+  if (kind_info.source_id_type != 0 && !creates_source) {
     const char *collection_name = stack_add_source_collection_name(kind_info.source_id_type);
     if (collection_name != nullptr) {
       PointerRNA main_ptr = RNA_main_pointer_create(CTX_data_main(C));

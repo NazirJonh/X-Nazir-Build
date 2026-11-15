@@ -57,6 +57,11 @@ const char *BKE_paint_layers_asset_type_label(PaintLayerAssetType type);
 struct PaintLayerAssetPortability {
   /** Blocking. */
   int curve_patch_num = 0;
+  /**
+   * Blocking. A Text Decal names a Text object, which a Smart asset does not carry: the inserted
+   * rows would point at an object that may not exist in the target file.
+   */
+  int text_decal_num = 0;
   /** Reader names an Anchor Point outside the saved set. */
   int foreign_reader_num = 0;
   /** File image that is neither packed nor generated. */
@@ -76,7 +81,7 @@ struct PaintLayerAssetPortability {
 
   bool blocking() const
   {
-    return curve_patch_num > 0;
+    return curve_patch_num > 0 || text_decal_num > 0;
   }
 };
 

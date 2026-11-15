@@ -265,6 +265,12 @@ void smart_asset_portability_report(wmOperator &op, const PaintLayerAssetPortabi
                 "bake them there",
                 portability.mesh_map_num);
   }
+  if (portability.text_decal_num > 0) {
+    BKE_reportf(op.reports,
+                RPT_WARNING,
+                "%d Text Decal effect(s) name Text objects that a Smart asset cannot carry",
+                portability.text_decal_num);
+  }
   if (portability.object_mask_num > 0) {
     BKE_report(op.reports, RPT_WARNING, "Object masks are not saved");
   }
@@ -284,7 +290,15 @@ std::optional<PaintLayerAssetPortability> smart_asset_portability_check(
   PaintLayerAssetPortability portability = BKE_paint_layers_asset_portability_check(
       material, rows, type);
   if (portability.blocking()) {
-    BKE_report(op.reports, RPT_ERROR, "Curve Patch effects cannot be saved in a Smart asset");
+    if (portability.text_decal_num > 0) {
+      BKE_report(op.reports,
+                 RPT_ERROR,
+                 "Text Decal effects cannot be saved in a Smart asset: their Text objects would "
+                 "not travel with it");
+    }
+    else {
+      BKE_report(op.reports, RPT_ERROR, "Curve Patch effects cannot be saved in a Smart asset");
+    }
     return std::nullopt;
   }
   return portability;

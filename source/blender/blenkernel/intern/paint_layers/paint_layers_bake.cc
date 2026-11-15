@@ -91,8 +91,10 @@
 #include "DNA_uuid_types.h"
 
 #include "paint_layers_bake_intern.hh"
+#include "paint_layers_hash_intern.hh"
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
+#include "paint_layers_text_decal_intern.hh"
 
 namespace blender {
 
@@ -145,28 +147,33 @@ void BKE_paint_layers_bake_runtime_free(Material &ma)
 {
   bake_drag_forget_material(ma.id.session_uid);
   BKE_paint_layers_source_material_hash_forget(ma);
-  std::lock_guard lock(bake_runtime_mutex());
-  BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
-  /* Only the owning material may drop the entry: a same-uid old ID freed during a memfile undo must
-   * leave the re-read ID's subscriptions (and their `PartialUpdateUser`s) in place. */
-  if (runtime == nullptr || runtime->owner != &ma) {
-    return;
-  }
-  for (BakeLayerSubscription &entry : runtime->layers) {
-    for (BakeSubscriptionSource &source : entry.sources) {
-      BKE_image_partial_update_free(source.user);
+  {
+    std::lock_guard lock(bake_runtime_mutex());
+    BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
+    /* Only the owning material may drop the entry: a same-uid old ID freed during a memfile undo
+     * must leave the re-read ID's subscriptions (and their `PartialUpdateUser`s) in place. */
+    if (runtime != nullptr && runtime->owner == &ma) {
+      for (BakeLayerSubscription &entry : runtime->layers) {
+        for (BakeSubscriptionSource &source : entry.sources) {
+          BKE_image_partial_update_free(source.user);
+        }
+      }
+      bake_runtime().remove(ma.id.session_uid);
     }
   }
-  bake_runtime().remove(ma.id.session_uid);
+  text_decal_runtime_free(ma);
 }
 
 void BKE_paint_layers_bake_runtime_owner_transfer(Material &dst, Material &src)
 {
-  std::lock_guard lock(bake_runtime_mutex());
-  BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(src.id.session_uid);
-  if (runtime != nullptr && runtime->owner == &src) {
-    runtime->owner = &dst;
+  {
+    std::lock_guard lock(bake_runtime_mutex());
+    BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(src.id.session_uid);
+    if (runtime != nullptr && runtime->owner == &src) {
+      runtime->owner = &dst;
+    }
   }
+  text_decal_runtime_owner_transfer(dst, src);
 }
 
 /** \} */
@@ -1059,18 +1066,6 @@ static bool bake_content_row_deferred_by_stroke(const Material &ma, const Materi
  * pixels of the row's result, and nothing that is only a view of them. Pixel edits of the source
  * maps do not move it; the subscription above reports those.
  * \{ */
-
-static uint64_t bake_hash_mix(uint64_t h, const uint64_t value)
-{
-  return h * 1000003u ^ value;
-}
-
-static uint64_t bake_hash_float(uint64_t h, const float value)
-{
-  uint32_t bits;
-  memcpy(&bits, &value, sizeof(bits));
-  return bake_hash_mix(h, bits);
-}
 
 static uint64_t bake_hash_idprops(uint64_t h, const IDProperty *group)
 {

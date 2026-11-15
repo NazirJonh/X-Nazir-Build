@@ -50,6 +50,11 @@ enum PaintLayerImportFlag : uint16_t {
    * are in the source geometry's space, so an imported copy would show nothing meaningful.
    */
   PAINT_LAYER_IMPORT_SKIP_CURVE_PATCH = 1 << 2,
+  /**
+   * Drop Text Decal effects instead of copying them. A Smart asset sets it: the payload names a
+   * Text object of the source file, and not copying the link is safer than leaving a dangling one.
+   */
+  PAINT_LAYER_IMPORT_SKIP_TEXT_DECAL = 1 << 3,
 };
 
 /**
@@ -114,6 +119,8 @@ struct PaintLayerImportResult {
   bool dropped_object_masks = false;
   /** Curve Patch effects left out because #PAINT_LAYER_IMPORT_SKIP_CURVE_PATCH is set. */
   int dropped_curve_patches = 0;
+  /** Text Decal effects left out because #PAINT_LAYER_IMPORT_SKIP_TEXT_DECAL is set. */
+  int dropped_text_decals = 0;
   /**
    * Number of channel records whose map was replaced by its flat value because
    * #PaintLayerImportParams::image_policy was #PaintLayerImageImportPolicy::Strip: painted maps

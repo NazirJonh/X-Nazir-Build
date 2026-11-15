@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 
@@ -160,6 +162,11 @@ struct BakeFailure {
   /** The render that failed was a preview; the render at the row's own size is another one. */
   bool preview = false;
 };
+
+/**
+ * The raster state of a Text Decal row lives in `paint_layers_text_decal_intern.hh`: it is parallel
+ * to this planner, not one of its caches.
+ */
 
 struct BakeMaterialRuntime {
   /**

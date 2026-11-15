@@ -317,6 +317,7 @@ set(SRC
   intern/paint_layers/paint_layers_projection.cc
   intern/paint_layers/paint_layers_source_hash.cc
   intern/paint_layers/paint_layers_target.cc
+  intern/paint_layers/paint_layers_text_decal.cc
   intern/paint_material_cache_common.cc
   intern/paint_material_combined.cc
   intern/paint_material_blend_group.cc
@@ -396,6 +397,7 @@ set(SRC
   intern/uvproject.cc
   intern/vfont.cc
   intern/vfont_curve.cc
+  intern/vfont_render.cc
   intern/vfontdata_freetype.cc
   intern/viewer_path.cc
   intern/volume.cc
@@ -955,6 +957,7 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_projection_test.cc
     intern/paint_layers/tests/paint_layers_refactor_test.cc
     intern/paint_layers/tests/paint_layers_target_test.cc
+    intern/paint_layers/tests/paint_layers_text_decal_test.cc
     intern/paint_material_channel_test.cc
     intern/paint_material_combined_cache_test.cc
     intern/paint_material_combined_test.cc
@@ -974,6 +977,7 @@ if(WITH_GTESTS)
     intern/subdiv_ccg_test.cc
     intern/surface_unfold_test.cc
     intern/tracking_test.cc
+    intern/vfont_render_test.cc
     intern/volume_test.cc
   )
   set(TEST_INC

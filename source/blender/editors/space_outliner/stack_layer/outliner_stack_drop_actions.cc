@@ -733,6 +733,9 @@ class SmartMaterialAssetAction final : public StackDropAction {
     if (result.dropped_curve_patches > 0) {
       BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Curve Patch effects were not imported");
     }
+    if (result.dropped_text_decals > 0) {
+      BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Text Decal effects were not imported");
+    }
 
     const int ordinal = (result.first != nullptr) ? paint_layers_ordinal_of(material, result.first) :
                                                     -1;

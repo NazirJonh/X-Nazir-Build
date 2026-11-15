@@ -328,6 +328,16 @@ static void paint_layer_curve_patch_duplicate(Main &bmain,
 }
 
 /**
+ * The copy of a Text Decal effect shares the Text object: the raster is baked from the object's own
+ * content, so a duplicated effect shows the same text, and a change of the object updates both. The
+ * copy takes its own user on the object, like #paint_layer_projection_duplicate does.
+ */
+static void paint_layer_text_decal_duplicate(MaterialPaintLayer &dst, const MaterialPaintLayer &src)
+{
+  paint_layer_text_decal_copy(dst, src, true);
+}
+
+/**
  * Deep-copy \a src's projection payload onto \a dst and take the user of its controller. The frame
  * is plain sub-data; the object reference is an ID user like the row's maps.
  */
@@ -364,6 +374,14 @@ MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
     }
     return nullptr;
   }
+  if ((options.flags & PAINT_LAYER_IMPORT_SKIP_TEXT_DECAL) != 0 &&
+      item.source == MA_PAINT_LAYER_SOURCE_TEXT)
+  {
+    if (options.r_dropped_text_decals != nullptr) {
+      (*options.r_dropped_text_decals)++;
+    }
+    return nullptr;
+  }
   MaterialPaintLayer *item_copy = paint_layer_alloc(ma, item.name);
   item_copy->role = item.role;
   item_copy->source = item.source;
@@ -395,6 +413,9 @@ MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   /* A Curve Patch effect carries its payload (its own curve container and brush snapshot) like a
    * Curve Patch row does: the copy owns duplicates of both, never shared. */
   paint_layer_curve_patch_duplicate(bmain, *item_copy, item);
+  /* A Text Decal effect carries its payload too, but shares the Text object: the content belongs
+   * to the object. */
+  paint_layer_text_decal_duplicate(*item_copy, item);
   paint_layer_channels_duplicate(bmain, *item_copy, item, options);
   paint_layer_id_colors_duplicate(*item_copy, item);
   paint_layer_properties_duplicate(*item_copy, item);
@@ -453,6 +474,7 @@ void paint_layer_branch_duplicate(Main &bmain,
   dst.mapping = dna::shallow_copy(src.mapping);
   paint_layer_material_duplicate(bmain, dst, src);
   paint_layer_curve_patch_duplicate(bmain, dst, src);
+  paint_layer_text_decal_duplicate(dst, src);
   paint_layer_channels_duplicate(bmain, dst, src, options);
   paint_layer_id_colors_duplicate(dst, src);
   paint_layer_properties_duplicate(dst, src);
@@ -534,6 +556,9 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
   paint_layer_branch_duplicate(bmain, ma, *copy, *layer, &marker_map, copy_options);
   paint_layer_anchor_point_refs_remap(*copy, marker_map);
 
+  /* The copy may have brought a Text Decal into a material that had none: the cached absence has
+   * to be re-asked before the next refresh. */
+  BKE_paint_layers_text_decal_invalidate(ma);
   BKE_paint_layers_tag_edited(ma);
   return copy;
 }
@@ -692,9 +717,11 @@ bool BKE_paint_layers_import_rows(Main &bmain,
     Vector<MaterialPaintLayer *> staged_items;
     int stripped_maps = 0;
     int dropped_curve_patches = 0;
+    int dropped_text_decals = 0;
     PaintLayerCopyOptions copy_options;
     copy_options.flags = params.flags;
     copy_options.r_dropped_curve_patches = &dropped_curve_patches;
+    copy_options.r_dropped_text_decals = &dropped_text_decals;
     copy_options.image_policy = params.image_policy;
     copy_options.r_stripped_maps = &stripped_maps;
     copy_options.copy_assigned_maps = params.copy_assigned_maps;
@@ -741,12 +768,14 @@ bool BKE_paint_layers_import_rows(Main &bmain,
     BKE_paint_layers_asset_params_mark_imported(src, staged_items.as_span());
 
     dst.paint_layers_flag |= MA_PAINT_LAYERED;
+    BKE_paint_layers_text_decal_invalidate(dst);
     BKE_paint_layers_tag_edited(dst);
     if (r_result != nullptr) {
       *r_result = {};
       r_result->first = params.anchor;
       r_result->rows = int(staged_items.size());
       r_result->dropped_curve_patches = dropped_curve_patches;
+      r_result->dropped_text_decals = dropped_text_decals;
       r_result->stripped_maps = stripped_maps;
       r_result->imported_mask_items = staged_items;
     }
@@ -794,9 +823,11 @@ bool BKE_paint_layers_import_rows(Main &bmain,
   Vector<MaterialPaintLayer *> inserted;
   int stripped_maps = 0;
   int dropped_curve_patches = 0;
+  int dropped_text_decals = 0;
   PaintLayerCopyOptions copy_options;
   copy_options.flags = params.flags;
   copy_options.r_dropped_curve_patches = &dropped_curve_patches;
+  copy_options.r_dropped_text_decals = &dropped_text_decals;
   copy_options.image_policy = params.image_policy;
   copy_options.r_stripped_maps = &stripped_maps;
   copy_options.copy_assigned_maps = params.copy_assigned_maps;
@@ -827,6 +858,7 @@ bool BKE_paint_layers_import_rows(Main &bmain,
   BKE_paint_layers_asset_params_mark_imported(src, inserted.as_span());
 
   dst.paint_layers_flag |= MA_PAINT_LAYERED;
+  BKE_paint_layers_text_decal_invalidate(dst);
   BKE_paint_layers_tag_edited(dst);
   if (r_result != nullptr) {
     *r_result = {};
@@ -835,6 +867,7 @@ bool BKE_paint_layers_import_rows(Main &bmain,
     r_result->skipped_channels = skipped_channels;
     r_result->dropped_object_masks = dropped_object_masks;
     r_result->dropped_curve_patches = dropped_curve_patches;
+    r_result->dropped_text_decals = dropped_text_decals;
     r_result->stripped_maps = stripped_maps;
     r_result->imported = inserted;
   }

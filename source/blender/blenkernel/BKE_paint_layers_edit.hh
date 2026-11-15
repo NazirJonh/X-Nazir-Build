@@ -29,6 +29,7 @@
 namespace blender {
 
 struct Brush;
+struct Object;
 
 /** What kind of row the Add creates. */
 enum class PaintLayerAddKind : int8_t {
@@ -120,6 +121,21 @@ enum class PaintLayerAddKind : int8_t {
    */
   CurvePatchEffect,
   /**
+   * A Text Decal as a content effect of a row (or of the row an effect hangs on): the rasterized
+   * styled text of #PaintLayerAddParams::text_object is baked into its maps and re-baked when the
+   * object changes, and the text is placed through the effect's own projection frame. Refused
+   * without #PaintLayerAddParams::bmain (the Base Color map needs a database) or a Text object.
+   * There is deliberately no standalone Text Decal row.
+   */
+  TextDecalEffect,
+  /**
+   * A Text Decal as an item of the anchor row's mask: the coverage of the rasterized text of
+   * #PaintLayerAddParams::text_object is the mask value (one channel, the Base Color map's grey).
+   * Made over the base mask, which is added white first when missing. Same refusals as
+   * #TextDecalEffect.
+   */
+  MaskTextDecal,
+  /**
    * A row reading one of the material's shared mesh map atlases
    * (#MaterialPaintLayer::mesh_map_type). It owns Base Color channel records, all reading the same
    * atlas, and never a map of its own.
@@ -194,6 +210,11 @@ struct PaintLayerAddParams {
    * falls back to a fresh default brush, so the row always carries a tool state of its own.
    */
   Brush *curve_patch_brush = nullptr;
+  /**
+   * The Text object a #PaintLayerAddKind::TextDecalEffect bakes its raster from. The object is
+   * referenced, never copied: its text and formatting are the single source of truth.
+   */
+  Object *text_object = nullptr;
   /**
    * Where an #PaintLayerAddKind::AnchorPoint marker lands: the anchor row's effects or its mask.
    * The three reader kinds take their list from the kind itself. \a insert_after names the item

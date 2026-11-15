@@ -210,6 +210,18 @@ const ProjectionModeInfo &BKE_paint_layers_projection_mode_info(const int16_t sp
                                    MA_PAINT_LAYER_MAPPING_SPACE_UV];
 }
 
+/** Whether any channel record of \a layer is live and holds a map. */
+static bool paint_layer_has_live_map(const MaterialPaintLayer &layer)
+{
+  for (const int i : IndexRange(layer.channels_num)) {
+    const MaterialPaintLayerChannel &record = layer.channels[i];
+    if (paint_layer_channel_live(&record) && record.image != nullptr) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Whether \a layer's kind holds a map a projection can read. The projection wraps a map's lookup
  * exactly as the UV mapping does, so the support rules are the same, except that a Material row's
@@ -222,6 +234,17 @@ static bool paint_layer_projection_payload_supported(const Material &ma,
     /* The source wrapper rewrites every UV reader in a copied source tree; projecting that tree
      * needs the same rewrite once per face, which is a later step. */
     return false;
+  }
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_PROJECTS_OWN_MAP)) {
+    /* A Text Decal reads its coverage map through its own frame, exactly like a decal: the frame
+     * replaces the UV the map would be read at, whatever the kind flags say about flat values. An
+     * effect always has the coverage, so its flat channel values are projected with it; the
+     * textures dropped on its channels follow the same frame. As a mask item the map is the one
+     * Base Color record, the same shape a Fill mask correction has when it carries a map. */
+    if (layer.role == MA_PAINT_LAYER_ROLE_EFFECT) {
+      return layer.text_decal != nullptr && layer.text_decal->coverage != nullptr;
+    }
+    return layer.role == MA_PAINT_LAYER_ROLE_MASK_ITEM && paint_layer_has_live_map(layer);
   }
   if (BKE_paint_layers_gradient_supported(layer)) {
     /* A Gradient owns no map: the projection replaces the UV its line reads, which is only

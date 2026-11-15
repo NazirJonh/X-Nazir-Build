@@ -926,6 +926,99 @@ static void rna_MaterialPaintLayerCurvePatch_brush_set(PointerRNA *ptr,
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
 }
 
+/** The Text Decal row \a payload belongs to, or null when it is detached. */
+static MaterialPaintLayer *rna_MaterialPaintLayerText_row_find(
+    Material &ma, const MaterialPaintLayerText &payload)
+{
+  MaterialPaintLayer *owner = nullptr;
+  BKE_paint_layers_foreach(ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) {
+    for (MaterialPaintLayer &effect : layer.effects) {
+      if (effect.text_decal == &payload) {
+        owner = &effect;
+        return false;
+      }
+    }
+    for (MaterialPaintLayer &item : layer.mask_stack) {
+      if (item.text_decal == &payload) {
+        owner = &item;
+        return false;
+      }
+    }
+    return true;
+  });
+  return owner;
+}
+
+/** The material an attached payload belongs to, via the pointer's owning ID. */
+static Material *rna_MaterialPaintLayerText_material_get(PointerRNA *ptr)
+{
+  return (ptr->owner_id != nullptr && GS(ptr->owner_id->name) == ID_MA) ?
+             id_cast<Material *>(ptr->owner_id) :
+             nullptr;
+}
+
+/** The Text object of a Text Decal row's payload, as an ID pointer. */
+static PointerRNA rna_MaterialPaintLayerText_text_object_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerText *payload = static_cast<const MaterialPaintLayerText *>(ptr->data);
+  if (payload == nullptr || payload->text_object == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_id_pointer_create(&payload->text_object->id);
+}
+
+/** Only a Text object can be the source: the content and its formatting live on the object. */
+static bool rna_MaterialPaintLayerText_text_object_poll(PointerRNA * /*ptr*/, PointerRNA value)
+{
+  const Object *object = static_cast<const Object *>(value.data);
+  return object != nullptr && object->type == OB_FONT;
+}
+
+/** Assigning the object re-points the row at it: a user swap, never a copy of the content. */
+static void rna_MaterialPaintLayerText_text_object_set(PointerRNA *ptr,
+                                                       PointerRNA value,
+                                                       ReportList * /*reports*/)
+{
+  MaterialPaintLayerText *payload = static_cast<MaterialPaintLayerText *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayerText_material_get(ptr);
+  Object *object = static_cast<Object *>(value.data);
+  if (payload == nullptr || ma == nullptr ||
+      (object != nullptr && object->type != OB_FONT))
+  {
+    return;
+  }
+  MaterialPaintLayer *owner = rna_MaterialPaintLayerText_row_find(*ma, *payload);
+  if (owner == nullptr || !BKE_paint_layers_text_decal_object_set(*ma, *owner, object)) {
+    return;
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+}
+
+/** The size the raster really bakes at, so a payload that stores 0 reads as the default. */
+static int rna_MaterialPaintLayerText_size_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_text_decal_size_get(
+      *static_cast<const MaterialPaintLayerText *>(ptr->data));
+}
+
+/** A value of the bake options: stored on the payload, invalidated through the value-edited tag
+ * so the next scene update re-bakes the raster (the refresh runs in that path). */
+static void rna_MaterialPaintLayerText_update(Main * /*bmain*/,
+                                              Scene * /*scene*/,
+                                              PointerRNA *ptr)
+{
+  MaterialPaintLayerText *payload = static_cast<MaterialPaintLayerText *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayerText_material_get(ptr);
+  if (payload == nullptr || ma == nullptr) {
+    return;
+  }
+  if (rna_MaterialPaintLayerText_row_find(*ma, *payload) == nullptr) {
+    return;
+  }
+  BKE_paint_layers_tag_value_edited(*ma);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+}
+
 static void rna_Material_paint_layers_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
 {
   Material *ma = static_cast<Material *>(ptr->data);
@@ -1072,6 +1165,10 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
     case MA_PAINT_LAYER_SOURCE_CURVE_PATCH:
       /* A Curve Patch is only ever an effect of a layer, never a layer of its own. */
       BKE_report(reports, RPT_ERROR, "A Curve Patch can only be added as an effect of a layer");
+      return nullptr;
+    case MA_PAINT_LAYER_SOURCE_TEXT:
+      /* A Text Decal is only ever an effect of a layer, never a layer of its own. */
+      BKE_report(reports, RPT_ERROR, "A Text Decal can only be added as an effect of a layer");
       return nullptr;
     default:
       params.kind = PaintLayerAddKind::Paint;
@@ -5554,6 +5651,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
      0,
      "Curve Patch",
      "Maps stamped from 3D control curves through a private brush snapshot"},
+    {MA_PAINT_LAYER_SOURCE_TEXT,
+     "TEXT",
+     0,
+     "Text Decal",
+     "The styled text of a Text object, baked into maps and projected through a frame"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -6382,6 +6484,78 @@ static void rna_def_material_paint_layer_channel_mixer(BlenderRNA *brna)
       prop, NC_MATERIAL | ND_SHADING_DRAW, "rna_MaterialPaintLayerChannelMixer_update");
 }
 
+/* Values match #eMaterialPaintLayerTextFit. */
+static const EnumPropertyItem rna_enum_material_paint_layer_text_fit_items[] = {
+    {MA_PAINT_LAYER_TEXT_FIT_CONTAIN,
+     "CONTAIN",
+     0,
+     "Contain",
+     "Fit the longer side into the square minus padding; centre the other one"},
+    {MA_PAINT_LAYER_TEXT_FIT_STRETCH,
+     "STRETCH",
+     0,
+     "Stretch",
+     "Stretch X and Y independently into the square minus padding"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static void rna_def_material_paint_layer_text(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "MaterialPaintLayerText", nullptr);
+  RNA_def_struct_sdna(srna, "MaterialPaintLayerText");
+  RNA_def_struct_ui_text(
+      srna,
+      "Paint Layer Text Decal",
+      "The owned payload of a Text Decal layer: the Text object the content is baked from and the "
+      "bake options. The object's own formatting is the single source of truth");
+
+  /* Assigning re-points the row at another Text object: a user swap, never a copy. */
+  prop = RNA_def_property(srna, "text_object", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_MaterialPaintLayerText_text_object_get",
+                                 "rna_MaterialPaintLayerText_text_object_set",
+                                 nullptr,
+                                 "rna_MaterialPaintLayerText_text_object_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Text Object",
+                           "The Text object whose styled content is rasterized and re-baked "
+                           "whenever the text or its formatting changes");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* Zero reads back as the default (1024) through #BKE_paint_layers_text_decal_size_get; the
+   * bake resizes the map on the next scene update. */
+  prop = RNA_def_property(srna, "size", PROP_INT, PROP_PIXEL);
+  RNA_def_property_int_funcs(prop, "rna_MaterialPaintLayerText_size_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_range(prop, MA_PAINT_LAYER_TEXT_SIZE_MIN, MA_PAINT_LAYER_TEXT_SIZE_MAX);
+  RNA_def_property_ui_text(prop,
+                           "Size",
+                           "The square side in pixels the text is rasterized at, changed in "
+                           "powers of two by the step operator");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerText_update");
+
+  prop = RNA_def_property(srna, "padding", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "padding");
+  RNA_def_property_range(prop, 0.0f, 0.5f);
+  RNA_def_property_ui_text(
+      prop, "Padding", "Padding around the text's bounds as a fraction of the raster side");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerText_update");
+
+  prop = RNA_def_property(srna, "fit", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "fit");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_text_fit_items);
+  RNA_def_property_ui_text(prop, "Fit", "How the text's bounds map onto the square raster");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerText_update");
+}
+
 static void rna_def_material_paint_layer(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -6441,6 +6615,14 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_pointer_sdna(prop, nullptr, "curve_patch");
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Curve Patch", "The curve container and brush snapshot the row owns");
+
+  /* The payload of a Text Decal row; null for every other kind. */
+  prop = RNA_def_property(srna, "text_decal", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerText");
+  RNA_def_property_pointer_sdna(prop, nullptr, "text_decal");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Text Decal", "The Text object and bake options the row bakes its raster from");
 
   /* The channel of its source a mask correction that reads a material takes its grey from. Only
    * the channels a grey can be taken from are offered. */
@@ -9140,6 +9322,7 @@ void RNA_def_material(BlenderRNA *brna)
   rna_def_material_paint_layer_kind_param(brna);
   rna_def_material_paint_layer_id_color(brna);
   rna_def_material_paint_layer_curve_patch(brna);
+  rna_def_material_paint_layer_text(brna);
   rna_def_material_paint_layer_color_balance(brna);
   rna_def_material_paint_layer_channel_mixer(brna);
   rna_def_material_paint_layer(brna);

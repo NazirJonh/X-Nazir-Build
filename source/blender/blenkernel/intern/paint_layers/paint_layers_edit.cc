@@ -17,6 +17,7 @@
 #include "BLI_vector.hh"
 
 #include "DNA_material_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "BKE_lib_id.hh"
@@ -72,6 +73,17 @@ static std::string numbered_filter_name(const ListBaseT<MaterialPaintLayer> &lis
   return name != nullptr ? std::string(name) :
                            std::string(kind.name) + " " +
                                std::to_string(paint_layer_name_number_max(list, kind.name) + 1);
+}
+
+/** A content effect's own name: \a name when given, otherwise numbered among the effects of this
+ * one row. */
+static std::string numbered_effect_name(const ListBaseT<MaterialPaintLayer> &effects,
+                                        const char *base,
+                                        const char *name)
+{
+  return name != nullptr ? std::string(name) :
+                           std::string(base) + " " +
+                               std::to_string(paint_layer_name_number_max(effects, base) + 1);
 }
 
 /** \} */
@@ -278,14 +290,57 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
       return nullptr;
     }
     /* Numbered among the effects of this one row only, like the corrections are. */
-    const std::string name = (params.name != nullptr) ?
-                                 std::string(params.name) :
-                                 std::string("Curve Patch") + " " +
-                                     std::to_string(
-                                         paint_layer_name_number_max(owner->effects, "Curve Patch") +
-                                         1);
+    const std::string name = numbered_effect_name(owner->effects, "Curve Patch", params.name);
     return BKE_paint_layers_curve_patch_effect_add(
         ma, owner, name.c_str(), *params.bmain, params.curve_patch_brush);
+  }
+  if (params.kind == PaintLayerAddKind::TextDecalEffect) {
+    /* An Add aimed at an effect means another one on the row it hangs on. */
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+    }
+    if (owner == nullptr || params.bmain == nullptr || params.text_object == nullptr ||
+        params.text_object->type != OB_FONT)
+    {
+      return nullptr;
+    }
+    /* Numbered among the effects of this one row only, like the corrections are. */
+    const std::string name = numbered_effect_name(owner->effects, "Text Decal", params.name);
+    return BKE_paint_layers_text_decal_effect_add(
+        ma, owner, name.c_str(), *params.bmain, *params.text_object);
+  }
+  if (params.kind == PaintLayerAddKind::MaskTextDecal) {
+    /* Aimed at a correction or a mask item, an Add means one more on the row it hangs on. */
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+      else if (MaterialPaintLayer *item_parent = BKE_paint_layers_mask_item_owner(ma, *owner)) {
+        owner = item_parent;
+      }
+    }
+    if (owner == nullptr || params.bmain == nullptr || params.text_object == nullptr ||
+        params.text_object->type != OB_FONT)
+    {
+      return nullptr;
+    }
+    /* Like any mask correction, it lays over the base mask: made first, white. */
+    const bool base_added = BKE_paint_layers_mask_base(*owner) == nullptr;
+    if (base_added && BKE_paint_layers_mask_add(ma, owner, 1.0f) == nullptr) {
+      return nullptr;
+    }
+    const std::string name = numbered_effect_name(owner->mask_stack, "Mask Text Decal", params.name);
+    MaterialPaintLayer *item = BKE_paint_layers_text_decal_mask_add(
+        ma, owner, name.c_str(), *params.bmain, *params.text_object);
+    if (item == nullptr && base_added) {
+      /* A refused Add leaves nothing behind, the base mask it made included. */
+      BKE_paint_layers_mask_remove(ma, owner);
+    }
+    return item;
   }
   if (params.kind == PaintLayerAddKind::Filter) {
     /* An effect aimed at the mask -- the base mask or one of its items -- is a mask item: it works

@@ -46,6 +46,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
@@ -310,6 +311,19 @@ static bool image_paint_poll_ex(bContext *C, bool check_tool)
         (!ID_IS_EDITABLE(sima->image) || ID_IS_OVERRIDE_LIBRARY(sima->image)))
     {
       return false;
+    }
+    /* A generated map (a Text Decal's coverage) is rebuilt from its source, and a texture on such
+     * a row is a Fill-style source that strokes never target: a stroke in the Image Editor would
+     * be overwritten or ignored, so the brush is not offered on it. */
+    if (sima->image != nullptr) {
+      Object *active = CTX_data_active_object(C);
+      Material *ma = (active != nullptr) ? BKE_paint_layers_active_material_get(active) : nullptr;
+      PaintLayersImageUse use;
+      if (ma != nullptr && BKE_paint_layers_find_image_use(*ma, *sima->image, use) &&
+          BKE_paint_layers_row_takes_no_strokes(*use.layer))
+      {
+        return false;
+      }
     }
     if (sima->mode == SI_MODE_PAINT) {
       const ARegion *region = CTX_wm_region(C);

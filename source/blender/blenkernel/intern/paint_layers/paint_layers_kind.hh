@@ -59,6 +59,18 @@ enum class PaintLayerDependencyKind : uint8_t {
    * reference.
    */
   ProjectionObject = 5,
+  /**
+   * The Text object a Text Decal row bakes its raster from. A user of the object, never a map to
+   * paint: its content only decides the pixels of the row's maps, so a change of it invalidates
+   * the pixels and the ownership, not the shape of the generated graph.
+   */
+  TextDecalObject = 6,
+  /**
+   * The coverage map a Text Decal effect rasterizes its text into. Owned like a bake cache map:
+   * its pixels are made from the Text object, so they invalidate the pixels but never the shape of
+   * the generated graph, and it is never a stroke target.
+   */
+  TextDecalCoverage = 7,
 };
 
 /** What a change to the dependency invalidates. */
@@ -277,6 +289,19 @@ enum PaintLayerKindFlag : uint16_t {
    * kind without the flag is never asked to correct a colour.
    */
   PAINT_LAYER_KIND_TRANSFORMS_INPUT = 1 << 12,
+  /**
+   * The kind owns a map whose content is placed by the row's own projection frame rather than the
+   * UV it would be painted at. A Text Decal is the first: its raster lives in the row's channel
+   * maps, but the frame is what places the text on the surface. The generator and the CPU stack
+   * read the map like any other; only the projection rules and the stroke target have to know.
+   */
+  PAINT_LAYER_KIND_PROJECTS_OWN_MAP = 1 << 13,
+  /**
+   * The kind owns a map that is generated from something else (a Text Decal's raster), so a stroke
+   * would only be overwritten by the next regeneration. The target resolve refuses it in Content
+   * and Mask mode alike with #PaintLayersTargetStatus::RowTakesNoStrokes.
+   */
+  PAINT_LAYER_KIND_NO_STROKES = 1 << 14,
 };
 
 struct PaintLayerKindInfo {
@@ -298,6 +323,12 @@ struct PaintLayerKindInfo {
    * refuse to select it for painting. Meaningless for a kind that owns no map.
    */
   bool map_paintable = false;
+  /**
+   * Why the kind takes no stroke (#PAINT_LAYER_KIND_NO_STROKES), for the UI that refuses one; null
+   * for a kind whose maps a stroke may write. A new generated kind sets its own reason here instead
+   * of adding an `if (source == ...)` at every refusal site.
+   */
+  const char *no_stroke_reason = nullptr;
 };
 
 /** The positions of the Levels filter's parameters in its schema. */
@@ -1302,6 +1333,16 @@ void paint_layer_payload_free(MaterialPaintLayer &row);
 /** Copy every registered payload of \a src into \a dst, allocating a duplicate of each. */
 void paint_layer_payload_copy(const MaterialPaintLayer &src, MaterialPaintLayer &dst);
 
+/**
+ * Copy the Text Decal payload of \a src onto \a dst as owned sub-data. The Text object is shared,
+ * because the content belongs to it; \a take_object_user adds the copy's user where the caller's
+ * copy path does not add it through the row's dependencies. The coverage map is never shared: a
+ * copy starts without one and rebuilds its own raster.
+ */
+void paint_layer_text_decal_copy(MaterialPaintLayer &dst,
+                                 const MaterialPaintLayer &src,
+                                 bool take_object_user);
+
 /** A hash of every payload \a row holds, for the bake and composite caches. */
 uint64_t paint_layer_payload_hash(const MaterialPaintLayer &row);
 
@@ -1497,6 +1538,25 @@ inline void paint_layer_dependencies(MaterialPaintLayer &row,
                              -1};
     fn(dep);
   }
+  /* The Text Decal's source: its content is baked into the row's maps, so the row keeps it alive
+   * and its pixels invalidate the baked raster. The text does not change the structure of the
+   * generated graph, so unlike a projection controller it is not topology. */
+  if (row.text_decal != nullptr && row.text_decal->text_object != nullptr) {
+    PaintLayerDependency dep{reinterpret_cast<ID **>(&row.text_decal->text_object),
+                             PaintLayerDependencyKind::TextDecalObject,
+                             PAINT_LAYER_DEP_PIXELS | PAINT_LAYER_DEP_OWNERSHIP,
+                             -1};
+    fn(dep);
+  }
+  if (row.text_decal != nullptr && row.text_decal->coverage != nullptr) {
+    /* Topology too: the generated graph samples the map, so a new one rebuilds the row. */
+    PaintLayerDependency dep{reinterpret_cast<ID **>(&row.text_decal->coverage),
+                             PaintLayerDependencyKind::TextDecalCoverage,
+                             PAINT_LAYER_DEP_TOPOLOGY | PAINT_LAYER_DEP_PIXELS |
+                                 PAINT_LAYER_DEP_OWNERSHIP,
+                             -1};
+    fn(dep);
+  }
   /* The bake cache: the colour maps by channel, then the shared coverage map. */
   if (row.bake != nullptr) {
     for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
@@ -1559,6 +1619,8 @@ inline LibraryForeachIDCallbackFlag paint_layer_dependency_foreach_flag(const Pa
     case PaintLayerDependencyKind::CurvePatchVectors:
     case PaintLayerDependencyKind::BrushPreset:
     case PaintLayerDependencyKind::ProjectionObject:
+    case PaintLayerDependencyKind::TextDecalObject:
+    case PaintLayerDependencyKind::TextDecalCoverage:
       return IDWALK_CB_USER;
   }
   return IDWALK_CB_NOP;

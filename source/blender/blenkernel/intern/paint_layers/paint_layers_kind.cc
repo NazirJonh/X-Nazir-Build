@@ -23,10 +23,12 @@
 #include "MEM_guardedalloc.h"
 
 #include "DNA_ID.h"
+#include "DNA_material_types.h"
 
 #include "BKE_colorband.hh"
 #include "BKE_colortools.hh"
 #include "BKE_idprop.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_material_composite.hh"
@@ -678,6 +680,8 @@ static constexpr uint8_t mask_item_roles = paint_layer_role_bit(MA_PAINT_LAYER_R
  * it, so what is deferred shows up in a search of this file. The generator kinds are the
  * exception: their schemas live in `paint_layers_kind_generators.cc`, beside the generator table
  * they answer for, and #paint_layer_kind_find walks them right after this list. */
+static const char *const text_decal_no_stroke_reason =
+    "A Text Decal is generated from its Text object and cannot be painted; edit the text instead";
 static const PaintLayerKindInfo kinds[] = {
     {MA_PAINT_LAYER_SOURCE_IMAGE, 0, "Image", PaintLayerKindCategory::Source, all_roles},
     {MA_PAINT_LAYER_SOURCE_CONSTANT,
@@ -1052,6 +1056,35 @@ static const PaintLayerKindInfo kinds[] = {
      0,
      0,
      true},
+    /* A Text Decal effect is a Fill-like row: each channel holds a constant value or the texture
+     * the user dropped on it (#PAINT_LAYER_KIND_FLAT_VALUE, so a value edit is the cheap
+     * values-only sync and a Fill's rules for textures, mapping and strokes apply). The rasterized
+     * text of a Text object is only the mask of the whole effect, kept in the payload's coverage
+     * map, which is why the kind projects "its own map" through its frame even when every channel
+     * is a flat value. The coverage belongs to the object, so no stroke may write into it
+     * (#PAINT_LAYER_KIND_NO_STROKES). Never a row of the stack: a content correction of a row. */
+    {MA_PAINT_LAYER_SOURCE_TEXT,
+     MA_PAINT_LAYER_TEXT_EFFECT,
+     "Text Decal",
+     PaintLayerKindCategory::Source,
+     uint8_t(paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT)),
+     nullptr,
+     0,
+     PAINT_LAYER_KIND_FLAT_VALUE | PAINT_LAYER_KIND_PROJECTS_OWN_MAP | PAINT_LAYER_KIND_NO_STROKES,
+     false,
+     text_decal_no_stroke_reason},
+    /* The mask form: the text's coverage is the grey of the item's single Base Color map. Not a
+     * flat value: the item has no constant of its own, and it is never a stroke target. */
+    {MA_PAINT_LAYER_SOURCE_TEXT,
+     MA_PAINT_LAYER_TEXT_MASK,
+     "Mask Text Decal",
+     PaintLayerKindCategory::Source,
+     uint8_t(paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM)),
+     nullptr,
+     0,
+     PAINT_LAYER_KIND_PROJECTS_OWN_MAP | PAINT_LAYER_KIND_NO_STROKES,
+     false,
+     text_decal_no_stroke_reason},
 };
 
 const PaintLayerKindInfo *paint_layer_kind_find(const int8_t source, const int16_t subtype)
@@ -2151,6 +2184,24 @@ void paint_layer_payload_copy(const MaterialPaintLayer &src, MaterialPaintLayer 
   for (const PaintLayerPayloadInfo &info : payload_infos) {
     const void *payload = payload_slot_get(src, info);
     *payload_slot(dst, info) = (payload != nullptr) ? info.copy(payload) : nullptr;
+  }
+}
+
+void paint_layer_text_decal_copy(MaterialPaintLayer &dst,
+                                 const MaterialPaintLayer &src,
+                                 const bool take_object_user)
+{
+  if (src.text_decal == nullptr) {
+    return;
+  }
+  MaterialPaintLayerText *payload = MEM_new<MaterialPaintLayerText>(__func__);
+  dst.text_decal = payload;
+  *payload = dna::shallow_copy(*src.text_decal);
+  /* The raster is rebuilt for the copy: a shared coverage map would be resized and rewritten by two
+   * rows. */
+  payload->coverage = nullptr;
+  if (take_object_user && payload->text_object != nullptr) {
+    id_us_plus(&payload->text_object->id);
   }
 }
 

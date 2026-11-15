@@ -1656,6 +1656,97 @@ class LAYER_MATERIAL_PT_mapping_mirror(LayerMaterialButtonsPanel, Panel):
             gizmo_note.label(text="Drag the mirror handle in the Image Editor", icon='BLANK1')
 
 
+_TEXT_DECAL_FORMATTING_PROPS = (
+    "body",
+    "font",
+    "size",
+    "space_character",
+    "space_word",
+    "space_line",
+    "shear",
+    "offset_x",
+    "offset_y",
+    "align_x",
+    "align_y",
+    "underline_position",
+    "underline_height",
+    "small_caps_scale",
+)
+
+
+class LAYER_MATERIAL_PT_text_decal(LayerMaterialButtonsPanel, Panel):
+    """The source, the formatting and the bake of the active Text Decal effect.
+
+    A Text Decal reads its content from a Text object: the object's own formatting (fonts, size,
+    alignment, text boxes, per-character styles) is the single source of truth, so the panel draws
+    the object's data in place and re-bakes follow whatever the object changes.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_text_decal"
+    bl_label = "Text Decal"
+    bl_parent_id = "LAYER_MATERIAL_PT_layers"
+
+    @classmethod
+    def poll(cls, context):
+        if cls._object_mask_editing(context):
+            return False
+        layer = cls._shown_row(context)
+        return layer is not None and layer.source == 'TEXT' and layer.text_decal is not None
+
+    @classmethod
+    def _shown_row(cls, context):
+        """The mask item the tab shows, or else the active row."""
+        owner, layer = cls._active_layer(context)
+        if owner is None or layer is None:
+            return None
+        item = cls._shown_mask_item(context, owner, layer)
+        return item if item is not None else layer
+
+    def draw(self, context):
+        layout = self.layout
+        layer = self._shown_row(context)
+        if layer is None or layer.text_decal is None:
+            return
+        payload = layer.text_decal
+
+        col = layout.column(align=True)
+        col.label(text="Source")
+        col.use_property_split = True
+        col.prop(payload, "text_object")
+        col.use_property_split = False
+        col.operator("paint.text_decal_edit_text", text="Edit Text", icon='EDITMODE_HLT')
+
+        text_object = payload.text_object
+        if text_object is not None and text_object.data is not None:
+            # The object's own formatting is the single source of truth: no copy of it lives on
+            # the payload, so the panel draws the object's data.
+            body = text_object.data
+            col = layout.column(align=True)
+            col.use_property_split = True
+            col.label(text="Formatting")
+            for prop_name in _TEXT_DECAL_FORMATTING_PROPS:
+                col.prop(body, prop_name)
+
+        col = layout.column(align=True)
+        col.use_property_split = True
+        col.label(text="Bake")
+        # The size is only stepped (powers of two), never typed: a stray value would allocate a map
+        # big enough to freeze the session.
+        size_row = col.row(align=True)
+        size_row.label(text="Size")
+        size_row.label(text="{:d} px".format(payload.size))
+        down = size_row.operator("paint.text_decal_size_step", text="", icon='TRIA_DOWN')
+        down.direction = 'DOWN'
+        up = size_row.operator("paint.text_decal_size_step", text="", icon='TRIA_UP')
+        up.direction = 'UP'
+        col.prop(payload, "padding")
+        col.prop(payload, "fit")
+        col.use_property_split = False
+        row = col.row(align=True)
+        row.operator("paint.text_decal_place_from_view", text="Place from View", icon='VIEW_CAMERA')
+        row.operator("paint.text_decal_rebake", text="Re-bake", icon='FILE_REFRESH')
+
+
 class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):
     """The source material's Surface inputs of the active Material layer, edited in place.
 
@@ -2313,6 +2404,7 @@ classes = (
     LAYER_MATERIAL_PT_normal_height,
     LAYER_MATERIAL_PT_mapping,
     LAYER_MATERIAL_PT_decal,
+    LAYER_MATERIAL_PT_text_decal,
     LAYER_MATERIAL_PT_mapping_advanced,
     LAYER_MATERIAL_PT_mapping_mirror,
     LAYER_MT_mapping_reset,

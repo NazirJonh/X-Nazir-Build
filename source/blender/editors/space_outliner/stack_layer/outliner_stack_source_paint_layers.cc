@@ -26,6 +26,7 @@
 
 #include "DNA_ID.h"
 #include "DNA_asset_types.h"
+#include "DNA_collection_types.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
@@ -36,7 +37,9 @@
 #include "DNA_userdef_types.h"
 #include "DNA_uuid_types.h"
 
+#include "BKE_collection.hh"
 #include "BKE_context.hh"
+#include "BKE_layer.hh"
 #include "BKE_editmesh.hh"
 #include "BKE_icons.hh"
 #include "BKE_idprop.hh"
@@ -72,6 +75,7 @@
 
 #include "BLT_translation.hh"
 
+#include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph_query.hh"
 
@@ -510,6 +514,8 @@ static PaintKindLook paint_look_for_source(const eMaterialPaintLayerSource sourc
       return paint_filter_look(subtype);
     case MA_PAINT_LAYER_SOURCE_CURVE_PATCH:
       return {ICON_CURVE_DATA, 0};
+    case MA_PAINT_LAYER_SOURCE_TEXT:
+      return {ICON_FONT_DATA, 0};
     case MA_PAINT_LAYER_SOURCE_ANCHOR_POINT:
       return {ICON_EMPTY_AXIS, paint_glyph::ANCHOR};
     case MA_PAINT_LAYER_SOURCE_STACK:
@@ -732,6 +738,7 @@ StackRow paint_correction_row_build(const Material &material,
   const bool fill = effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
   const bool from_material = effect.source == MA_PAINT_LAYER_SOURCE_MATERIAL;
   const bool curve_patch = effect.source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH;
+  const bool text_decal = effect.source == MA_PAINT_LAYER_SOURCE_TEXT;
   row.name = effect.name[0] != '\0' ?
                  effect.name :
                  (from_material ? "Material Correction" :
@@ -747,6 +754,11 @@ StackRow paint_correction_row_build(const Material &material,
     /* The effect's action is its tool entrance, the same one the row's own action icon is. */
     row.action_icon = ICON_CURVE_DATA;
     row.action_tooltip = TIP_("Edit Curves: enter the Curve Patch tool of this effect");
+  }
+  if (text_decal) {
+    /* The effect's action is its source's Edit Mode, the way the panel's Edit Text button is. */
+    row.action_icon = ICON_FONT_DATA;
+    row.action_tooltip = TIP_("Edit Text: enter the Edit Mode of the Text object this effect reads");
   }
   if (BKE_paint_layers_is_anchor_point(effect)) {
     /* A marker is a place, not a correction: it publishes a slice and has no opacity, blend or map
@@ -845,10 +857,18 @@ StackRow paint_mask_item_row_build(const Material &material,
   row.enabled = (item.flag & MA_PAINT_LAYER_ENABLED) != 0;
   row.locked = BKE_paint_layers_is_locked(item);
   row.supported = true;
+  const bool text_decal = item.source == MA_PAINT_LAYER_SOURCE_TEXT;
   row.name = item.name[0] != '\0' ?
                  item.name :
-                 (from_material ? "Material Mask" : (fill ? "Mask Fill" : "Mask Paint"));
+                 (from_material ? "Material Mask" :
+                                  (text_decal ? "Mask Text Decal" :
+                                                (fill ? "Mask Fill" : "Mask Paint")));
   row.name_buffer = const_cast<char *>(item.name);
+  if (text_decal) {
+    /* As the effect form: the action jumps into the source Text object's Edit Mode. */
+    row.action_icon = ICON_FONT_DATA;
+    row.action_tooltip = TIP_("Edit Text: enter the Edit Mode of the Text object this mask reads");
+  }
   /* The icons and glyphs the Add Effect menu names these roles by, through the one look: a Mask
    * Paint Correction is the Grease Pencil paint icon there, so the row it makes reads the same. */
   const PaintKindLook look = paint_look_for_source(
@@ -1594,6 +1614,17 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
       info.source_browse_prop = browse_prop;
       return info;
     };
+    /* A kind made from an existing object, named and resolved by the Add dialog. */
+    const auto from_object = [](StackAddKindInfo info) {
+      info.source_id_type = ID_OB;
+      return info;
+    };
+    /* A kind whose Add dialog may also make the object, instead of naming an existing one. */
+    const auto from_new_text_object = [&](StackAddKindInfo info) {
+      info = from_object(std::move(info));
+      info.source_creatable = true;
+      return info;
+    };
 
     add(with_look({"PAINT",
                    N_("Paint Layer"),
@@ -1853,6 +1884,26 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                   paint_look_for_source(MA_PAINT_LAYER_SOURCE_CURVE_PATCH, PaintLookRole::Content)),
         PaintLayerAddKind::CurvePatchEffect);
 
+    /* The styled text of a Text object, baked into the effect's maps. Only an effect: there is no
+     * Text Decal layer. The Add names the Text object, which row_add checks. */
+    add(with_look(effect(from_new_text_object({"TEXT_DECAL",
+                                      N_("Text Decal"),
+                                      "The styled text of a Text object, rasterized into maps and "
+                                      "projected through its own frame, laid over the active "
+                                      "layer's colour, below the layer's own blend"})),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_TEXT, PaintLookRole::Content)),
+        PaintLayerAddKind::TextDecalEffect,
+        0,
+        PaintLayerAddKind::MaskTextDecal,
+        N_("Text Decal"));
+    add(with_look(effect(from_new_text_object({"MASK_TEXT_DECAL",
+                                      N_("Mask Text Decal"),
+                                      "The coverage of a Text object's styled text, rasterized and "
+                                      "projected through its own frame, laid over the active "
+                                      "layer's mask"})),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_TEXT, PaintLookRole::MaskItem)),
+        PaintLayerAddKind::MaskTextDecal);
+
     /* The transform effects: they move what the row itself reads, so the Add Effect menu lists
      * them under "Transform". While a mask slot is the one showing, the line makes the mask form:
      * the effect moves the grey the mask has built up to it, in UV. */
@@ -1923,6 +1974,62 @@ static bool paint_effect_menu_target_is_mask(bContext &C)
   const Scene *scene = CTX_data_scene(&C);
   return scene != nullptr && scene->toolsettings != nullptr &&
          scene->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK;
+}
+
+/**
+ * The collection a new Text Decal object goes to: the one the user picked, else "Text Decals"
+ * under the scene's master collection, made and linked when it does not exist yet. A named
+ * collection that is missing or not editable is an error rather than a silent fallback, so the
+ * object never lands somewhere the user did not choose.
+ */
+static Collection *paint_text_decal_collection_get(bContext &C, const std::string &picked)
+{
+  Main *bmain = CTX_data_main(&C);
+  Scene *scene = CTX_data_scene(&C);
+  if (!picked.empty()) {
+    Collection *collection = id_cast<Collection *>(
+        BKE_libblock_find_name(bmain, ID_GR, picked.c_str()));
+    return (collection != nullptr && ID_IS_EDITABLE(&collection->id)) ? collection : nullptr;
+  }
+  if (scene == nullptr || scene->master_collection == nullptr) {
+    return nullptr;
+  }
+  const char *default_name = "Text Decals";
+  for (CollectionChild &child : scene->master_collection->children) {
+    if (child.collection != nullptr && STREQ(child.collection->id.name + 2, default_name)) {
+      return child.collection;
+    }
+  }
+  Collection *created = BKE_collection_add(bmain, scene->master_collection, default_name);
+  DEG_relations_tag_update(bmain);
+  return created;
+}
+
+/**
+ * A new Text object at the world origin, in \a picked or the default Text Decals collection.
+ * Unlike #BKE_object_add it neither selects nor activates the object: the Add comes from the
+ * Outliner while the user paints, and the active object and its mode must stay as they are.
+ */
+static Object *paint_text_decal_object_create(bContext &C, const std::string &picked)
+{
+  Main *bmain = CTX_data_main(&C);
+  Collection *collection = bmain != nullptr ? paint_text_decal_collection_get(C, picked) :
+                                              nullptr;
+  if (collection == nullptr) {
+    return nullptr;
+  }
+  const char *name = "Text Decal Text";
+  Object *object = BKE_object_add_only_object(bmain, OB_FONT, name);
+  object->data = static_cast<ID *>(BKE_object_obdata_add_from_type(bmain, OB_FONT, name));
+  if (!BKE_collection_object_add(bmain, collection, object)) {
+    BKE_id_delete(bmain, object);
+    return nullptr;
+  }
+  DEG_id_tag_update_ex(
+      bmain, &object->id, ID_RECALC_TRANSFORM | ID_RECALC_GEOMETRY | ID_RECALC_ANIMATION);
+  DEG_relations_tag_update(bmain);
+  WM_event_add_notifier(&C, NC_SCENE | ND_LAYER_CONTENT, CTX_data_scene(&C));
+  return object;
 }
 
 /** \} */
@@ -2555,6 +2662,25 @@ class PaintLayersStackSource final : public StackSource,
         return blender::ed::sculpt_paint::curve_patch_layer_activate(C, material, *effect);
       }
     }
+    /* The action button of a Text Decal effect jumps into its object's Edit Mode: activate the
+     * effect, then run the same operator the panel's Edit Text button is. */
+    {
+      Material &material = layers_owner(owner);
+      if (MaterialPaintLayer *effect = BKE_paint_layers_find(material, row.stable_id);
+          effect != nullptr && effect->source == MA_PAINT_LAYER_SOURCE_TEXT)
+      {
+        outliner_stack_row_activate(&C, *space_outliner, ordinal);
+        wmOperatorType *ot = WM_operatortype_find("PAINT_OT_text_decal_edit_text", false);
+        if (ot == nullptr) {
+          return false;
+        }
+        PointerRNA props = WM_operator_properties_create_ptr(ot);
+        const wmOperatorStatus status = WM_operator_name_call_ptr(
+            &C, ot, wm::OpCallContext::InvokeDefault, &props, nullptr);
+        WM_operator_properties_free(&props);
+        return status == OPERATOR_FINISHED;
+      }
+    }
     PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
     if (row.action_active) {
       paint_mode.layer_object_mask_edit = 0;
@@ -3050,7 +3176,8 @@ class PaintLayersStackSource final : public StackSource,
                                          PaintLayerAddKind::MaskCorrectionMaterial,
                                          PaintLayerAddKind::MaskFilter,
                                          PaintLayerAddKind::AnchorPointMaskCorrection,
-                                         PaintLayerAddKind::MaskGradient);
+                                         PaintLayerAddKind::MaskGradient,
+                                         PaintLayerAddKind::MaskTextDecal);
     const bool is_correction = is_mask_correction || is_filter ||
                                ELEM(params.kind,
                                     PaintLayerAddKind::Correction,
@@ -3058,7 +3185,8 @@ class PaintLayersStackSource final : public StackSource,
                                     PaintLayerAddKind::CorrectionMaterial,
                                     PaintLayerAddKind::AnchorPointCorrection,
                                     PaintLayerAddKind::GradientCorrection,
-                                    PaintLayerAddKind::CurvePatchEffect);
+                                    PaintLayerAddKind::CurvePatchEffect,
+                                    PaintLayerAddKind::TextDecalEffect);
     if (anchor != nullptr && !is_correction) {
       /* A correction is not a place a row can be added next to: the row it hangs on is. */
       if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(material, *anchor)) {
@@ -3092,8 +3220,41 @@ class PaintLayersStackSource final : public StackSource,
     {
       params.fill_color = args.color;
     }
+    /* The Text object is made as late as possible: every validation above can still cancel the
+     * Add, and an object made earlier would then be left without a row. */
+    Object *created_text_object = nullptr;
+    if (ELEM(params.kind, PaintLayerAddKind::TextDecalEffect, PaintLayerAddKind::MaskTextDecal)) {
+      /* The Add resolved the data-block it names: a Text Decal bakes a Text object. */
+      Object *text_object = nullptr;
+      if (args.create_source) {
+        text_object = paint_text_decal_object_create(C, args.source_collection);
+        if (text_object == nullptr) {
+          BKE_report(CTX_wm_reports(&C),
+                     RPT_WARNING,
+                     "The Text object could not be created in that collection");
+          return -1;
+        }
+        created_text_object = text_object;
+      }
+      else if (args.source != nullptr && GS(args.source->name) == ID_OB &&
+               id_cast<Object *>(args.source)->type == OB_FONT)
+      {
+        text_object = id_cast<Object *>(args.source);
+      }
+      if (text_object == nullptr) {
+        BKE_report(CTX_wm_reports(&C), RPT_WARNING, "A Text Decal needs a Text object");
+        return -1;
+      }
+      params.bmain = CTX_data_main(&C);
+      params.text_object = text_object;
+    }
+
     MaterialPaintLayer *created = BKE_paint_layers_add_with_policy(material, params);
     if (created == nullptr) {
+      if (created_text_object != nullptr) {
+        /* The row that would have owned the object was not added: leave no orphan behind. */
+        BKE_id_delete(CTX_data_main(&C), created_text_object);
+      }
       if (is_anchor_point || is_anchor_point_reader) {
         BKE_report(CTX_wm_reports(&C),
                    RPT_WARNING,

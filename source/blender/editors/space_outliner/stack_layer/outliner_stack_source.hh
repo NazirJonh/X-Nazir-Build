@@ -536,6 +536,11 @@ struct StackAddKindInfo {
    */
   short source_id_type = 0;
   /**
+   * Whether the Add dialog may make the #source_id_type data-block instead of naming an existing
+   * one (`create_source`), into a collection it names or a default one.
+   */
+  bool source_creatable = false;
+  /**
    * The name of a pointer property of the owner ID that adds the row when a data-block is assigned
    * to it, or null. A kind that sets it is picked from the ID Browser popover (asset libraries
    * included) instead of the search dialog: the popover can only assign to a property of an ID, and
@@ -618,6 +623,10 @@ struct StackAddArgs {
   uint32_t channel_mask = 0;
   /** The data-block a kind with #StackAddKindInfo::source_id_type is made from; null otherwise. */
   ID *source = nullptr;
+  /** Make the source data-block instead of resolving one; only for #StackAddKindInfo::source_creatable. */
+  bool create_source = false;
+  /** The collection the made data-block goes to; empty for the source's own default. */
+  std::string source_collection;
   /**
    * The #StackContentSection active on the anchor row when the Add was invoked, or empty. A
    * source whose kinds depend on what the user is looking at reads it; others ignore it.

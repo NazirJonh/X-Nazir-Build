@@ -515,6 +515,25 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
                                             "Name of the data-block the new layer is made from, "
                                             "for a kind that is made from one");
   RNA_def_property_flag(source_prop, PROP_HIDDEN);
+  /* The Add dialog's options for a kind whose source data-block it may make itself. */
+  RNA_def_boolean(ot->srna,
+                  "create_source",
+                  false,
+                  "Create Source Object",
+                  "Make the source object at the world origin instead of naming an existing one");
+  RNA_def_boolean(ot->srna,
+                  "use_collection_pick",
+                  false,
+                  "Choose Collection",
+                  "Pick the collection the new object goes to; otherwise a default collection of the "
+                  "scene is used, and made when it does not exist");
+  PropertyRNA *collection_prop = RNA_def_string(ot->srna,
+                                                "source_collection",
+                                                nullptr,
+                                                MAX_ID_NAME - 2,
+                                                "Collection",
+                                                "Name of the collection the new object goes to");
+  RNA_def_property_flag(collection_prop, PROP_HIDDEN);
   rna_def_stack_row_marker(ot);
 }
 

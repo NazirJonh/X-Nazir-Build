@@ -527,6 +527,21 @@ bool paint_layers_stroke_gate_report(Object &ob,
       int(PAINT_MATERIAL_CHANNEL_BASE_COLOR),
       BKE_paint_layers_target_mode(&settings),
       target);
+  if (status == PaintLayersTargetStatus::RowTakesNoStrokes) {
+    /* A generated kind names its own reason in the kind table; the other rows that take no stroke
+     * have their own answers further along the stroke start, and a refusal here would pre-empt
+     * them. */
+    const MaterialPaintLayer *generated = (target.mode == PaintLayersTargetMode::Mask) ?
+                                              target.mask_item :
+                                              target.layer;
+    if (generated != nullptr && BKE_paint_layers_row_takes_no_strokes(*generated)) {
+      const char *reason = BKE_paint_layers_row_no_stroke_reason(*generated);
+      BKE_report(reports,
+                 RPT_ERROR,
+                 TIP_(reason != nullptr ? reason : "This row is generated and cannot be painted"));
+      return true;
+    }
+  }
   return paint_layers_status_report(*ma, status, reports);
 }
 

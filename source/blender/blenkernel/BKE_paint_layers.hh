@@ -45,9 +45,11 @@ namespace blender {
 using PaintChannelMask = uint32_t;
 
 struct Image;
+struct Depsgraph;
 struct Main;
 struct Material;
 struct MaterialPaintLayer;
+struct MaterialPaintLayerText;
 struct MaterialPaintLayerChannel;
 struct MaterialPaintLayerCurvePatch;
 struct MaterialPaintLayerIdColor;
@@ -874,6 +876,50 @@ MaterialPaintLayer *BKE_paint_layers_curve_patch_effect_add(Material &ma,
                                                             const char *name,
                                                             Main &bmain,
                                                             const Brush *snapshot_source);
+
+/**
+ * Add a Text Decal content effect to \a owner: its channels are painted with the rasterized styled
+ * text of the Text object \a text_object (type #OB_FONT), baked into the effect's maps and re-baked
+ * whenever the object's text or formatting changes. The object is referenced, not copied -- its
+ * content is the single source of truth -- so rows and materials can share it. The projection frame
+ * is created with the effect, in PLANAR space: the text is placed like any decal, through the frame,
+ * and the Base Color map exists (at the payload's resolved size) before the first raster.
+ *
+ * \param bmain: the database the effect's Base Color map is created in.
+ * \return the new effect, or null when \a owner is not a row of \a ma's stack or \a text_object is
+ * not a Text object. A folder takes one, like any correction.
+ */
+MaterialPaintLayer *BKE_paint_layers_text_decal_effect_add(Material &ma,
+                                                           MaterialPaintLayer *owner,
+                                                           const char *name,
+                                                           Main &bmain,
+                                                           Object &text_object);
+
+/**
+ * Add a Text Decal to \a layer's mask stack: an item whose single Base Color map holds the text's
+ * coverage as an opaque grey, the mask value, in the Mix blend over the base mask. It is projected
+ * through its own PLANAR frame like the effect form. Needs a base mask (the Add policy makes one).
+ *
+ * \return the new item, or null when \a layer is not a row of \a ma's stack, has no base mask, or
+ * \a text_object is not a Text object.
+ */
+MaterialPaintLayer *BKE_paint_layers_text_decal_mask_add(Material &ma,
+                                                         MaterialPaintLayer *layer,
+                                                         const char *name,
+                                                         Main &bmain,
+                                                         Object &text_object);
+
+/**
+ * Point \a row's Text Decal at \a new_object instead. The old object loses the row's user, the new
+ * one gains it, and the row is tagged edited: the next scene update re-bakes the raster from the
+ * new content.
+ *
+ * \return false when \a row is not a Text Decal row or \a new_object is not a Text object. Null
+ * clears the source and is accepted.
+ */
+bool BKE_paint_layers_text_decal_object_set(Material &ma,
+                                            MaterialPaintLayer &row,
+                                            Object *new_object);
 
 /**
  * Remove the content correction \a effect from its owner, letting go of its maps. The active
@@ -1800,6 +1846,20 @@ inline float BKE_paint_layers_mapping_mirror_side(const float coordinate,
 /** Lower bound of a projection frame extent; a zero axis reads back as one. */
 constexpr float PAINT_LAYER_PROJECTION_SIZE_MIN = 1e-3f;
 
+/**
+ * The raster side of \a payload's text: the stored size, clamped, or the default while the payload
+ * carries 0 (a row created before the option, or one that follows the material's size). The bounds
+ * live with the payload in `DNA_material_types.h`.
+ */
+int BKE_paint_layers_text_decal_size_get(const MaterialPaintLayerText &payload);
+
+/**
+ * The next raster side after \a payload's current one: the next power of two above it for a
+ * positive \a direction, below it otherwise, held at the bounds. The editor offers these steps
+ * instead of a typed size, so a stray value cannot allocate a huge map.
+ */
+int BKE_paint_layers_text_decal_size_step(const MaterialPaintLayerText &payload, int direction);
+
 /** Frame-space extent of the frame: a frame-space axis is inside while `|q| < this`. Size stores
  * the frame's full extent, so in world units this is half of it. */
 constexpr float PAINT_LAYER_PROJECTION_FRAME_EXTENT = 1.0f;
@@ -2299,6 +2359,45 @@ bool BKE_paint_layers_projection_apply_preset(Material &ma,
 /** Infer the current preset from the flag set; returns CUSTOM when neither matches. */
 ePaintLayerProjectionPreset BKE_paint_layers_projection_preset_get(
     const MaterialPaintLayer &layer);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Text Decal raster
+ * \{ */
+
+/**
+ * Re-render the text raster of every Text Decal row of \a ma whose source object, formatting or
+ * bake options changed since the last fill, into the row's Base Color map, and drop the state of
+ * rows that stopped being Text Decals. A row's map follows the payload's size: a changed size
+ * resizes it in place. The add path calls this directly; the scene update calls it after the
+ * depsgraph has evaluated the scene, so an edit of the text (in the object's Edit Mode, or through
+ * the payload) reaches the map without a subscription of its own. Main thread only: the BLF font
+ * map is global.
+ *
+ * \param depsgraph: when given, the object is read from its evaluated copy, so animation, drivers,
+ *                   shape keys and modifiers reach the raster. A live text edit (the object's
+ *                   EditFont) is read from the original, because that is where the edit buffer
+ *                   lives; every other field is still the evaluated one.
+ */
+void BKE_paint_layers_text_decal_refresh(Main &bmain,
+                                         Material &ma,
+                                         const Depsgraph *depsgraph = nullptr);
+
+/**
+ * Re-render the rasters of the materials in \a bmain whose Text Decals changed since the last
+ * evaluation. Called on the main thread after the depsgraph has evaluated the scene, so animated
+ * and driven Text objects rasterize from their evaluated state; materials with no Text Decal
+ * return from their runtime cache without walking the layer tree.
+ */
+void BKE_paint_layers_text_decal_refresh_tagged(Main &bmain, const Depsgraph &depsgraph);
+
+/**
+ * Forget what every Text Decal row of \a ma was last baked from, so the next refresh re-renders
+ * the rasters however they changed. The "Re-bake" button's force: the refresh itself only follows
+ * the hash.
+ */
+void BKE_paint_layers_text_decal_invalidate(Material &ma);
 
 /** \} */
 

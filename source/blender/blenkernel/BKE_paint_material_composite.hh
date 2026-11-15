@@ -748,6 +748,15 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   /** A description hash of the effect's kind and parameters, folded into the stack hash. */
   uint64_t effect_hash = 0;
   Image *image = nullptr;
+  /**
+   * A Text Decal effect's coverage map: the alpha of the rasterized text, read through the same
+   * mapping and projection as #image. It scales the correction's factor on top of the colour's own
+   * (the flat value, or the texture dropped on the channel), so the decal covers only where the
+   * text is.
+   */
+  Image *coverage_image = nullptr;
+  /** Null selects the default #ImageUser. Belongs to #coverage_image, not to #image. */
+  const ImageUser *coverage_iuser = nullptr;
   /** Null selects the default #ImageUser. */
   const ImageUser *iuser = nullptr;
   /** Whether #image is a MESH_MAP atlas: resampled with Extend, no Mapping, alpha ignored. */
@@ -804,6 +813,9 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   /** See #PaintMaterialCompositeCorrection::anchor_point_coverage_image. */
   ImBuf *anchor_point_coverage_ibuf = nullptr;
   const char *anchor_point_coverage_colorspace_name = nullptr;
+  /** The decoded #PaintMaterialCompositeCorrection::coverage_image, or null. */
+  ImBuf *coverage_ibuf = nullptr;
+  const char *coverage_colorspace_name = nullptr;
   /** A Gradient correction's payload; #enabled false for a map or a constant. */
   PaintMaterialCompositeGradient gradient;
 };

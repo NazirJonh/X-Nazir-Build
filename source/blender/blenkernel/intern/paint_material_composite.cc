@@ -1512,6 +1512,14 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       composite_decode_tile(
           correction.ibuf, correction.colorspace_name, tile, correction_storage.data());
     }
+    Vector<float> text_coverage_tile;
+    if (correction.coverage_ibuf != nullptr) {
+      text_coverage_tile.resize(count * 4);
+      composite_decode_tile(correction.coverage_ibuf,
+                            correction.coverage_colorspace_name,
+                            tile,
+                            text_coverage_tile.data());
+    }
     const int tile_width = BLI_rcti_size_x(&tile);
     for (int64_t i = 0; i < count; i++) {
       /* A flat colour covers by its opacity alone: its alpha is content alpha, which a Fill row's
@@ -1549,6 +1557,10 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
                correction.gradient.enabled)
       {
         correction_factor = c[3];
+      }
+      if (!text_coverage_tile.is_empty()) {
+        /* A Text Decal covers only where its text is, whatever colour the channel holds. */
+        correction_factor *= clamp_f(text_coverage_tile[i * 4 + 3], 0.0f, 1.0f);
       }
       const float f = clamp_f(correction.opacity * correction_factor, 0.0f, 1.0f);
       const float a = clamp_f(r_factor[i], 0.0f, 1.0f);
@@ -1808,6 +1820,11 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
   }
   for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
     if (correction.ibuf != nullptr && !composite_ibuf_is_rgba(correction.ibuf, width, height)) {
+      return false;
+    }
+    if (correction.coverage_ibuf != nullptr &&
+        !composite_ibuf_is_rgba(correction.coverage_ibuf, width, height))
+    {
       return false;
     }
     if (correction.effect_color != nullptr &&
@@ -2996,6 +3013,24 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         buffer.ibuf = composite_buffer_to_eval_grid(buffer.ibuf, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
+      if (correction.coverage_image != nullptr) {
+        /* The text's coverage follows the colour map's mapping and frame exactly, so the decal and
+         * the texture dropped on the channel can never drift apart. The coverage map itself is not
+         * tiled: the fallback tile is ignored for it and its single tile is read at every UDIM tile
+         * the material bakes. */
+        buffer.coverage_ibuf = composite_image_acquire(correction.coverage_image,
+                                                       correction.coverage_iuser,
+                                                       r_locks,
+                                                       correction.mapping.projection.tile_number);
+        if (buffer.coverage_ibuf == nullptr) {
+          return false;
+        }
+        composite_mapped_remap(
+            buffer.coverage_ibuf, correction.mapping, {}, ref_width, ref_height, r_locks);
+        buffer.coverage_ibuf = composite_buffer_to_eval_grid(
+            buffer.coverage_ibuf, ref_width, ref_height, r_locks);
+        buffer.coverage_colorspace_name = composite_buffer_colorspace_name(buffer.coverage_ibuf);
+      }
       if (correction.anchor_point_coverage_image != nullptr) {
         buffer.anchor_point_coverage_ibuf = composite_image_acquire(
             correction.anchor_point_coverage_image,
@@ -3387,8 +3422,9 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
     const ImageUser *size_iuser = layer.color_iuser;
     if (size_image == nullptr) {
       for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
-        if (correction.image != nullptr) {
-          size_image = correction.image;
+        Image *own_map = correction.image != nullptr ? correction.image : correction.coverage_image;
+        if (own_map != nullptr) {
+          size_image = own_map;
           size_iuser = correction.iuser;
           break;
         }
@@ -3630,6 +3666,9 @@ uint64_t BKE_paint_material_composite_stack_hash(
       hash *= 0x100000001b3ULL;
       hash = get_default_hash(hash,
                               correction.image != nullptr ? correction.image->id.session_uid : 0,
+                              correction.coverage_image != nullptr ?
+                                  correction.coverage_image->id.session_uid :
+                                  0,
                               correction.anchor_point_coverage_image != nullptr ?
                                   correction.anchor_point_coverage_image->id.session_uid :
                                   0,
@@ -3873,6 +3912,7 @@ static void composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>
     }
     for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
       r_images.append(correction.image);
+      r_images.append(correction.coverage_image);
       r_images.append(correction.anchor_point_coverage_image);
       r_images.extend(correction.grey_input_images);
       /* A CPU-computed effect reads the row's maps through the effect cache, no Image of its own:

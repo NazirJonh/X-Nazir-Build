@@ -1305,6 +1305,9 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     report_out();
     return false;
   }
+  /* A Text Decal's raster is a parallel CPU bake: the scene update refreshes it after the
+   * depsgraph has evaluated the Text object, and the add path fills the first map directly. The
+   * tree build below only needs the maps that exist; a map made later tags a rebuild itself. */
   if (BLI_uuid_is_nil(ma.paint_layers_owner_uid)) {
     ma.paint_layers_owner_uid = BLI_uuid_generate_random();
   }

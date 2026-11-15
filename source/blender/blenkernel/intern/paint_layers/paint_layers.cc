@@ -59,11 +59,13 @@
 #include "BLT_translation.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 
 #include "DNA_ID.h"
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_uuid_types.h"
 
@@ -833,6 +835,14 @@ static void paint_layer_release_users(MaterialPaintLayer &layer)
       id_us_min(&layer.curve_patch->brush->id);
     }
   }
+  /* The Text Decal's object loses the row's user the same way; it is another ID's data-block, so
+   * it stays in `Main` when the row is the last user. */
+  if (layer.text_decal != nullptr && layer.text_decal->text_object != nullptr) {
+    id_us_min(&layer.text_decal->text_object->id);
+  }
+  if (layer.text_decal != nullptr && layer.text_decal->coverage != nullptr) {
+    id_us_min(&layer.text_decal->coverage->id);
+  }
   if (layer.projection_object != nullptr) {
     id_us_min(&layer.projection_object->id);
   }
@@ -1099,6 +1109,173 @@ MaterialPaintLayer *BKE_paint_layers_curve_patch_effect_add(Material &ma,
 
   BKE_paint_layers_tag_edited(ma);
   return effect;
+}
+
+/**
+ * Give the freshly linked Text Decal row \a row (an effect or a mask item, with its channel
+ * records in place) its payload, its first raster and its projection frame.
+ */
+static void paint_layer_text_decal_setup(Material &ma,
+                                         Main &bmain,
+                                         MaterialPaintLayer &row,
+                                         Object &text_object)
+{
+  /* The payload holds no copy of the text or its formatting: the object is the single source of
+   * truth, so it is referenced, never duplicated. */
+  MaterialPaintLayerText *payload = MEM_new<MaterialPaintLayerText>(__func__);
+  payload->text_object = &text_object;
+  id_us_plus(&text_object.id);
+  /* Zero reads back as the default size, so a material without one bakes at 1024. The material's
+   * map size may be above the Text Decal cap; the payload stores what it will really bake at. */
+  payload->size = (ma.paint_layers_image_size > 0) ?
+                      std::min(int(ma.paint_layers_image_size),
+                               int(MA_PAINT_LAYER_TEXT_SIZE_MAX)) :
+                      0;
+  payload->padding = 0.05f;
+  payload->fit = MA_PAINT_LAYER_TEXT_FIT_CONTAIN;
+  row.text_decal = payload;
+
+  /* The text is baked right away, into the maps the refresh creates at the payload's size: the row
+   * is created with its content in place, the way the Image Editor and the 3D view show it
+   * immediately. It runs before the space is set, because a projection is only accepted on a row
+   * that already holds a live map. */
+  BKE_paint_layers_text_decal_invalidate(ma);
+  BKE_paint_layers_text_decal_refresh(bmain, ma);
+
+  /* The raster is projected, not UV-mapped: the frame comes up in PLANAR space, so the map read
+   * goes through the frame. The space set allocates the projection payload itself. */
+  BKE_paint_layers_projection_set_space(ma, &row, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR);
+  BKE_paint_layers_projection_ensure(row);
+
+  /* The Text object is a new ID reference of the material: the depsgraph has to rebuild its
+   * relations before the object can be evaluated for the raster. */
+  DEG_relations_tag_update(&bmain);
+  BKE_paint_layers_tag_edited(ma);
+}
+
+MaterialPaintLayer *BKE_paint_layers_text_decal_effect_add(Material &ma,
+                                                           MaterialPaintLayer *owner,
+                                                           const char *name,
+                                                           Main &bmain,
+                                                           Object &text_object)
+{
+  if (text_object.type != OB_FONT) {
+    return nullptr;
+  }
+  /* A folder takes one too: like any correction, it corrects the isolated result of what the
+   * folder holds. */
+  if (!paint_layer_in_stack(ma, owner)) {
+    return nullptr;
+  }
+  MaterialPaintLayer *effect = paint_layer_alloc(ma, name != nullptr ? name : "Text Decal");
+  effect->role = MA_PAINT_LAYER_ROLE_EFFECT;
+  effect->source = MA_PAINT_LAYER_SOURCE_TEXT;
+  BLI_addtail(&owner->effects, effect);
+  /* Linked first: the channel records are added through the ownership check. Like a Fill, the
+   * effect starts with a Base Color alone, a constant the text's coverage lays; the other channels
+   * are opted into with the row's channel switches, so a fresh decal does not overwrite them. */
+  if (MaterialPaintLayerChannel *base = BKE_paint_layers_channel_add(
+          ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
+  {
+    const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    copy_v4_v4(base->value, white);
+  }
+
+  paint_layer_text_decal_setup(ma, bmain, *effect, text_object);
+  return effect;
+}
+
+MaterialPaintLayer *BKE_paint_layers_text_decal_mask_add(Material &ma,
+                                                         MaterialPaintLayer *layer,
+                                                         const char *name,
+                                                         Main &bmain,
+                                                         Object &text_object)
+{
+  /* Lays over the base mask like any mask correction, so there has to be one; making it is the
+   * caller's call (the Add policy does, white). */
+  if (text_object.type != OB_FONT || !paint_layer_in_stack(ma, layer) ||
+      BKE_paint_layers_mask_base(*layer) == nullptr)
+  {
+    return nullptr;
+  }
+  MaterialPaintLayer *item = paint_layer_alloc(ma, name != nullptr ? name : "Mask Text Decal");
+  item->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  item->source = MA_PAINT_LAYER_SOURCE_TEXT;
+  item->kind_subtype = MA_PAINT_LAYER_TEXT_MASK;
+  /* Mix: the item says what the coverage is where it covers, rather than scaling it as the base
+   * does. The blend is the item's own setting, like a row's. */
+  item->blend = MA_PAINT_LAYER_BLEND_MIX;
+  item->flag = MA_PAINT_LAYER_ENABLED;
+  BLI_addtail(&layer->mask_stack, item);
+  /* One channel, as every map-based mask item: its grey is the mask. The record is added once the
+   * item is part of the material, which the record edit checks. */
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+      ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  if (record == nullptr) {
+    BLI_remlink(&layer->mask_stack, item);
+    BKE_material_paint_layer_free(item);
+    BKE_paint_layers_tag_edited(ma);
+    return nullptr;
+  }
+  record->value[0] = record->value[1] = record->value[2] = record->value[3] = 1.0f;
+  paint_layer_text_decal_setup(ma, bmain, *item, text_object);
+  return item;
+}
+
+bool BKE_paint_layers_text_decal_object_set(Material &ma,
+                                            MaterialPaintLayer &row,
+                                            Object *new_object)
+{
+  if (row.text_decal == nullptr || row.source != MA_PAINT_LAYER_SOURCE_TEXT) {
+    return false;
+  }
+  if (!ID_IS_EDITABLE(&ma.id)) {
+    return false;
+  }
+  if (new_object != nullptr && (new_object->type != OB_FONT || !ID_IS_EDITABLE(&new_object->id))) {
+    return false;
+  }
+  if (row.text_decal->text_object == new_object) {
+    return true;
+  }
+  Object *previous = row.text_decal->text_object;
+  row.text_decal->text_object = new_object;
+  if (new_object != nullptr) {
+    id_us_plus(&new_object->id);
+  }
+  if (previous != nullptr) {
+    id_us_min(&previous->id);
+  }
+  /* The content changed wholesale: the row is rebuilt, and the next refresh re-bakes the raster
+   * from the new object (the runtime hash no longer matches). */
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+int BKE_paint_layers_text_decal_size_get(const MaterialPaintLayerText &payload)
+{
+  if (payload.size <= 0) {
+    return MA_PAINT_LAYER_TEXT_SIZE_DEFAULT;
+  }
+  return std::clamp(
+      payload.size, int(MA_PAINT_LAYER_TEXT_SIZE_MIN), int(MA_PAINT_LAYER_TEXT_SIZE_MAX));
+}
+
+int BKE_paint_layers_text_decal_size_step(const MaterialPaintLayerText &payload, const int direction)
+{
+  const int current = BKE_paint_layers_text_decal_size_get(payload);
+  if (direction > 0) {
+    int next = MA_PAINT_LAYER_TEXT_SIZE_MIN;
+    while (next <= current && next < MA_PAINT_LAYER_TEXT_SIZE_MAX) {
+      next *= 2;
+    }
+    return next;
+  }
+  int next = MA_PAINT_LAYER_TEXT_SIZE_MAX;
+  while (next >= current && next > MA_PAINT_LAYER_TEXT_SIZE_MIN) {
+    next /= 2;
+  }
+  return next;
 }
 
 /**
@@ -2193,10 +2370,11 @@ bool BKE_paint_layers_channel_set_value(Material &ma,
     BKE_paint_layers_gradient_channel_ramp_ends_set(
         *record->gradient_ramp, channel, value[0], value[1]);
   }
-  /* A Fill row lays its Base-Color (and every other map-less channel's) constant through a group
-   * input, so changing a value there is value-only. A Paint row's value alpha decides whether the
+  /* A Fill row (and a Text Decal effect, which is Fill-like) lays its Base-Color and every other
+   * map-less channel's constant through a group input, so changing a value there is value-only: no
+   * map is rewritten and the tree keeps its nodes. A Paint row's value alpha decides whether the
    * channel takes part at all, which is topology: it stays a regeneration. */
-  if (layer != nullptr && layer->source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+  if (layer != nullptr && paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_FLAT_VALUE)) {
     BKE_paint_layers_tag_value_edited(ma);
   }
   else {
@@ -2315,7 +2493,8 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
    * changes nothing until its own value is edited. Normal keeps the flat tangent and Height the
    * neutral mid height above: a Fill lays nothing there, and the copied Base Color would read as a
    * bent normal or a dent in the relief. */
-  if (layer->role == MA_PAINT_LAYER_ROLE_EFFECT && layer->source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
+  if (layer->role == MA_PAINT_LAYER_ROLE_EFFECT &&
+      paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_FLAT_VALUE) &&
       !ELEM(channel,
             PAINT_MATERIAL_CHANNEL_BASE_COLOR,
             PAINT_MATERIAL_CHANNEL_NORMAL,
@@ -3777,7 +3956,7 @@ PaintLayerMaterialSourceIssue BKE_paint_layers_material_source_issue(const Mater
 PaintLayerImageMapIssue BKE_paint_layers_row_image_map_issue(const MaterialPaintLayer &row)
 {
   const bool is_fill = ELEM(row.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT) &&
-                       row.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
+                       paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_FLAT_VALUE);
   if (is_fill) {
     return PaintLayerImageMapIssue::None;
   }
@@ -4402,6 +4581,8 @@ void BKE_paint_layers_stack_tiles_collect(const Material &ma, Vector<int> &r_til
 void BKE_paint_layers_bake_cache_maps_collect(const Main &bmain, Vector<Image *> &r_images)
 {
   paint_layers_slot_images_collect(bmain, PaintLayerDependencyKind::BakeCache, r_images);
+  /* A Text Decal's coverage is a cache too: the text is rasterized again after a load. */
+  paint_layers_slot_images_collect(bmain, PaintLayerDependencyKind::TextDecalCoverage, r_images);
 }
 
 void BKE_paint_layers_internal_images_collect(const Main &bmain, Set<const Image *> &r_images)

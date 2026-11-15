@@ -69,6 +69,16 @@ bool BKE_paint_layers_find_image_use(Material &ma,
                                      const Image &image,
                                      PaintLayersImageUse &r_use);
 
+/**
+ * Whether the kind of \a layer owns a map that a stroke must not write: it is generated from
+ * something else and the next regeneration would overwrite the stroke. The refusal sites call this
+ * instead of comparing the row's source.
+ */
+bool BKE_paint_layers_row_takes_no_strokes(const MaterialPaintLayer &layer);
+
+/** The kind's reason for refusing a stroke, or null when it has none to give. */
+const char *BKE_paint_layers_row_no_stroke_reason(const MaterialPaintLayer &layer);
+
 /** What a stroke of a layered material paints: the row's channel content, or its mask. */
 enum class PaintLayersTargetMode : int8_t {
   Content = 0,

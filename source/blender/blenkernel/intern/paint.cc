@@ -5755,17 +5755,26 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     Object &ob,
     PaintModeSettings &mode_settings,
     const BrushMaterialPaint *brush_paint,
-    const int visible_material_channels)
+    const int visible_material_channels,
+    const uint32_t extra_channel_mask)
 {
   if (brush_paint == nullptr) {
     return {};
   }
   uint32_t mask = 0;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    const uint32_t bit = 1u << int(info.channel);
     if (BKE_paint_material_channel_writes_to_target(
             *brush_paint, mode_settings, visible_material_channels, info.channel))
     {
-      mask |= (1u << int(info.channel));
+      mask |= bit;
+    }
+    else if ((extra_channel_mask & bit) != 0 && info.channel != PAINT_MATERIAL_CHANNEL_CUSTOM &&
+             (visible_material_channels & bit) != 0 &&
+             BKE_paint_material_channel_info(info.channel).socket_name != nullptr)
+    {
+      /* A channel the brush's own list stamps from: hiding it still removes its target. */
+      mask |= bit;
     }
   }
   return paint_material_image_targets_get_for_mask(ob, mode_settings, mask, brush_paint);

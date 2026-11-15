@@ -42,6 +42,11 @@ enum class PaintSlotOwner {
   Brush,
   /** A #PaintShapeTexture property: a plain write to the part's own source. */
   Shape,
+  /**
+   * A #BrushCurvePatchTextureSlot.material: the slot is switched to the Material kind with the
+   * assignment, and the owner brush decides editability like any texture slot of the list.
+   */
+  CurvePatchSlot,
 };
 
 /** The paint slot a button draws: the RNA property it assigns and the owner of that property. */

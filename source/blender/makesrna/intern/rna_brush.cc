@@ -2798,7 +2798,7 @@ static void rna_BrushCurvePatchSettings_texture_active_index_range(
 static int rna_BrushCurvePatchTextureSlot_name_length(PointerRNA *ptr)
 {
   const BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(ptr->data);
-  return slot->tex ? strlen(slot->tex->id.name + 2) : 0;
+  return int(BKE_brush_curve_patch_slot_display_name(*slot).size());
 }
 
 static void rna_BrushCurvePatchTextureSlot_update(Main * /*bmain*/,
@@ -2811,6 +2811,25 @@ static void rna_BrushCurvePatchTextureSlot_update(Main * /*bmain*/,
   Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
   BKE_brush_tag_unsaved_changes(br);
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
+}
+
+/** Update for the properties that select a MATERIAL slot's source. Starts the bake right away, for
+ * the same reason #rna_BrushMaterialPaint_source_update does: a stamp never waits for a bake, so
+ * waiting for the next redraw would leave the patch on its placeholder meanwhile. Idempotent. */
+static void rna_BrushCurvePatchTextureSlot_material_update(Main *bmain,
+                                                           Scene *scene,
+                                                           PointerRNA *ptr)
+{
+  rna_BrushCurvePatchTextureSlot_update(bmain, scene, ptr);
+
+  const BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(ptr->data);
+  if (bmain == nullptr || slot->kind != BRUSH_CURVE_PATCH_SLOT_MATERIAL ||
+      slot->material == nullptr)
+  {
+    return;
+  }
+  ed::material_bake::material_source_bake_ensure(
+      *bmain, *slot->material, BKE_brush_curve_patch_slot_bake_size(*slot));
 }
 
 static std::optional<std::string> rna_BrushCurvePatchTextureSlot_path(const PointerRNA *ptr)
@@ -2891,12 +2910,8 @@ static void rna_BrushCurvePatchSettings_texture_active_set(PointerRNA *ptr,
 static void rna_BrushCurvePatchTextureSlot_name_get(PointerRNA *ptr, char *value)
 {
   const BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(ptr->data);
-  if (slot->tex) {
-    BLI_strncpy(value, slot->tex->id.name + 2, strlen(slot->tex->id.name + 2) + 1);
-  }
-  else {
-    value[0] = '\0';
-  }
+  const StringRefNull name = BKE_brush_curve_patch_slot_display_name(*slot);
+  BLI_strncpy(value, name.c_str(), name.size() + 1);
 }
 
 /* The per-point browse target lives inside an editor session the RNA layer cannot reach, so the
@@ -2930,6 +2945,152 @@ static void rna_BrushCurvePatchSettings_point_image_set(PointerRNA *ptr,
   }
   hooks->set(*G_MAIN, *br, *image);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Curve Patch PBR slot channels
+ *
+ * A PBR-kind slot (`#BRUSH_CURVE_PATCH_SLOT_PBR`) declares the material paint channels it covers
+ * through the fixed #BrushCurvePatchSlotChannel array on the slot node, indexed by
+ * #eMaterialPaintChannel. The collection exposes that array the same way
+ * #rna_BrushMaterialPaint_channels_begin exposes the material paint ones, and a channel's own
+ * index is recovered from where it sits inside the owning slot -- which, unlike the material paint
+ * case, is not reachable by pointer arithmetic against a single base: the slot has to be FOUND
+ * first.
+ * \{ */
+
+/** The owning slot and the channel's index inside it, resolved in one pass. A fixed-array
+ * collection exposes raw element pointers with no back-pointer, so the BKE lookup
+ * `BKE_brush_curve_patch_slot_from_channel` is the single place that recovers both. */
+struct RnaCurvePatchSlotChannelRef {
+  BrushCurvePatchTextureSlot *slot = nullptr;
+  int index = -1;
+};
+
+static RnaCurvePatchSlotChannelRef rna_BrushCurvePatchSlotChannel_ref(const PointerRNA *ptr)
+{
+  RnaCurvePatchSlotChannelRef ref;
+  Brush *brush = reinterpret_cast<Brush *>(ptr->owner_id);
+  BrushCurvePatchSlotChannel *channel = static_cast<BrushCurvePatchSlotChannel *>(ptr->data);
+  if (brush == nullptr || channel == nullptr) {
+    return ref;
+  }
+  ref.slot = BKE_brush_curve_patch_slot_from_channel(*brush, *channel, &ref.index);
+  return ref;
+}
+
+static int rna_BrushCurvePatchSlotChannel_channel_get_rna(PointerRNA *ptr)
+{
+  const RnaCurvePatchSlotChannelRef ref = rna_BrushCurvePatchSlotChannel_ref(ptr);
+  /* An unresolved channel (a stale pointer to a removed slot) reads as the first channel; the
+   * value is only a read-only label then, nothing branches on it. */
+  return ref.slot != nullptr ? ref.index : PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+}
+
+static void rna_BrushCurvePatchSlotChannel_name_get(PointerRNA *ptr, char *value)
+{
+  const RnaCurvePatchSlotChannelRef ref = rna_BrushCurvePatchSlotChannel_ref(ptr);
+  if (ref.slot == nullptr) {
+    value[0] = '\0';
+    return;
+  }
+  const char *ui_name = BKE_paint_material_channel_info(eMaterialPaintChannel(ref.index)).ui_name;
+  BLI_strncpy(value, ui_name, strlen(ui_name) + 1);
+}
+
+static int rna_BrushCurvePatchSlotChannel_name_length(PointerRNA *ptr)
+{
+  const RnaCurvePatchSlotChannelRef ref = rna_BrushCurvePatchSlotChannel_ref(ptr);
+  if (ref.slot == nullptr) {
+    return 0;
+  }
+  return int(strlen(BKE_paint_material_channel_info(eMaterialPaintChannel(ref.index)).ui_name));
+}
+
+/* The generic ID-to-property path walk cannot address collection elements reached through a
+ * fixed-array iterator on its own (see #rna_BrushMaterialPaintChannel_path for the same reason).
+ */
+static std::optional<std::string> rna_BrushCurvePatchSlotChannel_path(const PointerRNA *ptr)
+{
+  const Brush *brush = reinterpret_cast<const Brush *>(ptr->owner_id);
+  const BrushCurvePatchSlotChannel *channel = static_cast<const BrushCurvePatchSlotChannel *>(
+      ptr->data);
+  if (brush == nullptr || channel == nullptr) {
+    return std::nullopt;
+  }
+  int channel_index = -1;
+  if (BKE_brush_curve_patch_slot_from_channel(*brush, *channel, &channel_index) == nullptr) {
+    return std::nullopt;
+  }
+  const int slot_index = BKE_brush_curve_patch_slot_index_from_channel(*brush, *channel);
+  if (slot_index == -1) {
+    return std::nullopt;
+  }
+  return fmt::format("curve_patch.texture_slots[{}].channels[{}]", slot_index, channel_index);
+}
+
+static void rna_BrushCurvePatchSlotChannel_enabled_set(PointerRNA *ptr, bool value)
+{
+  const RnaCurvePatchSlotChannelRef ref = rna_BrushCurvePatchSlotChannel_ref(ptr);
+  if (ref.slot == nullptr) {
+    return;
+  }
+  BKE_brush_curve_patch_slot_channel_enable(*ref.slot, ref.index, value);
+  /* The property's update callback tags the brush and sends the notifier; doing it here as well
+   * would notify twice for one assignment. */
+}
+
+static PointerRNA rna_BrushCurvePatchSlotChannel_image_get(PointerRNA *ptr)
+{
+  const RnaCurvePatchSlotChannelRef ref = rna_BrushCurvePatchSlotChannel_ref(ptr);
+  if (ref.slot == nullptr) {
+    return PointerRNA_NULL;
+  }
+  Image *image = BKE_brush_curve_patch_slot_image_get(*ref.slot, ref.index);
+  if (image == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_id_pointer_create(&image->id);
+}
+
+static void rna_BrushCurvePatchSlotChannel_image_set(PointerRNA *ptr,
+                                                     PointerRNA value,
+                                                     ReportList * /*reports*/)
+{
+  const RnaCurvePatchSlotChannelRef ref = rna_BrushCurvePatchSlotChannel_ref(ptr);
+  if (ref.slot == nullptr) {
+    return;
+  }
+  Image *image = static_cast<Image *>(value.data);
+  BKE_brush_curve_patch_slot_image_set(*ref.slot, ref.index, image);
+  /* Same data-space rule the PBR Paint channels apply: a scalar channel's stamp image is raw
+   * data, so an sRGB-tagged file must not be silently gamma-decoded into wrong values. Color
+   * channels (Base Color, Emission, ...) keep their own space. `G_MAIN` matches the existing
+   * `BrushMaterialPaintChannel.source_image` setter, which has no Main to thread through RNA
+   * property assignment either. */
+  rna_BrushMaterialPaintChannel_source_image_apply_non_color_default(
+      G_MAIN, eMaterialPaintChannel(ref.index), image);
+  /* Tagging and the notifier come from the property's update callback. */
+}
+
+static void rna_BrushCurvePatchTextureSlot_channels_begin(CollectionPropertyIterator *iter,
+                                                          PointerRNA *ptr)
+{
+  BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(ptr->data);
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           slot->channels,
+                           sizeof(BrushCurvePatchSlotChannel),
+                           ARRAY_SIZE(slot->channels),
+                           0,
+                           nullptr);
+}
+
+static int rna_BrushCurvePatchTextureSlot_channels_length(PointerRNA * /*ptr*/)
+{
+  return ARRAY_SIZE((static_cast<BrushCurvePatchTextureSlot *>(nullptr))->channels);
+}
+
+/** \} */
 
 }  // namespace blender
 
@@ -2991,6 +3152,94 @@ static const EnumPropertyItem brush_write_color_mode_items[] = {
      "Primary Face Set color above threshold; secondary Face Set color below threshold"},
     {0, nullptr, 0, nullptr, nullptr},
 };
+/* Every kind offered here is read by the stamps: an enum item a user can set but nothing reads
+ * would silently stamp nothing. */
+static const EnumPropertyItem prop_curve_patch_slot_kind_items[] = {
+    {BRUSH_CURVE_PATCH_SLOT_TEXTURE, "TEXTURE", ICON_TEXTURE_DATA, "Texture", "Stamp one texture"},
+    {BRUSH_CURVE_PATCH_SLOT_PBR,
+     "PBR",
+     ICON_IMAGE_DATA,
+     "PBR Set",
+     "Stamp a set of per-channel images (Base Color, Roughness, Normal, ...) the slot stores"},
+    {BRUSH_CURVE_PATCH_SLOT_MATERIAL,
+     "MATERIAL",
+     ICON_MATERIAL,
+     "Material",
+     "Stamp the images linked to a material's Principled BSDF inputs, read live from the material"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Same sizes as #BrushMaterialPaint.source_bake_size. */
+static const EnumPropertyItem prop_curve_patch_slot_bake_size_items[] = {
+    {256, "SIZE_256", 0, "256", ""},
+    {512, "SIZE_512", 0, "512", ""},
+    {1024, "SIZE_1024", 0, "1024", ""},
+    {2048, "SIZE_2048", 0, "2048", ""},
+    {4096, "SIZE_4096", 0, "4096", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static void rna_def_brush_curve_patch_slot_channel(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "BrushCurvePatchSlotChannel", nullptr);
+  RNA_def_struct_sdna(srna, "BrushCurvePatchSlotChannel");
+  RNA_def_struct_path_func(srna, "rna_BrushCurvePatchSlotChannel_path");
+  RNA_def_struct_ui_text(srna,
+                         "Curve Patch Slot Channel",
+                         "One material paint channel of a PBR-kind Curve Patch texture slot");
+
+  /* Read-only: which row of the channel table this entry configures, so Python can iterate
+   * #channels and branch on it instead of hard-coding indices (see the same property on
+   * #BrushMaterialPaintChannel). */
+  prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_BrushCurvePatchSlotChannel_channel_get_rna", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Channel", "Which material paint channel this entry configures");
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_BrushCurvePatchSlotChannel_name_get",
+                                "rna_BrushCurvePatchSlotChannel_name_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Name", "UI name of this material paint channel");
+  RNA_def_struct_name_property(srna, prop);
+
+  /* Whether the slot declares this channel. Declaring is intent: an enabled channel without an
+   * image is skipped by the stamps and shown as "missing" in the UI, so a half-filled set never
+   * paints the brush's own sources by surprise. */
+  prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "enabled", 1);
+  RNA_def_property_boolean_funcs(prop, nullptr, "rna_BrushCurvePatchSlotChannel_enabled_set");
+  RNA_def_property_ui_text(prop, "Enabled", "Stamp this channel from the slot's set");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushCurvePatchTextureSlot_update");
+
+  /* The user picks an #Image; the list's user-count is kept by the setter through the BKE helper,
+   * so the drop rows and the Image Browser both assign through here. */
+  prop = RNA_def_property(srna, "image", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Image");
+  /* Virtual properties (get+set funcs) never get PROP_ID_REFCOUNT auto-set from Image's
+   * STRUCT_ID_REFCOUNT; the setter does its own id_us_plus()/id_us_min(), so this must be set
+   * explicitly or RNA_property_pointer_set's user-count consistency check asserts. */
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_BrushCurvePatchSlotChannel_image_get",
+                                 "rna_BrushCurvePatchSlotChannel_image_set",
+                                 nullptr,
+                                 nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Image",
+                           "Image stamped into this channel by every stamp that drew the slot; "
+                           "assigning one to a scalar channel also switches it to the Non-Color "
+                           "colorspace, as the PBR Paint channel sources do");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushCurvePatchTextureSlot_update");
+}
+
 static void rna_def_brush_curve_patch_texture_slot(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3000,14 +3249,64 @@ static void rna_def_brush_curve_patch_texture_slot(BlenderRNA *brna)
   RNA_def_struct_sdna(srna, "BrushCurvePatchTextureSlot");
   RNA_def_struct_path_func(srna, "rna_BrushCurvePatchTextureSlot_path");
   RNA_def_struct_ui_text(
-      srna, "Curve Patch Texture Slot", "One texture in a brush's Curve Patch texture list");
+      srna,
+      "Curve Patch Texture Slot",
+      "One entry in a brush's Curve Patch texture list: a texture or a PBR set");
+
+  /* What the slot holds. */
+  prop = RNA_def_property(srna, "kind", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "kind");
+  RNA_def_property_enum_items(prop, prop_curve_patch_slot_kind_items);
+  RNA_def_property_ui_text(prop,
+                           "Kind",
+                           "What this slot stamps: a single texture, or a set of per-channel "
+                           "images (a PBR set)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushCurvePatchTextureSlot_material_update");
+
+  prop = RNA_def_property(srna, "material", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "material");
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Material",
+                           "Material whose Principled BSDF image inputs are stamped by a Material "
+                           "slot; read on every re-stamp");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushCurvePatchTextureSlot_material_update");
+
+  prop = RNA_def_property(srna, "bake_size", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "bake_size");
+  RNA_def_property_enum_items(prop, prop_curve_patch_slot_bake_size_items);
+  RNA_def_property_ui_text(prop,
+                           "Bake Size",
+                           "Resolution of the cached bake of the slot's material, used for the "
+                           "inputs driven by a node graph rather than a plain image");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushCurvePatchTextureSlot_material_update");
 
   prop = RNA_def_property(srna, "texture", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "tex");
   RNA_def_property_struct_type(prop, "Texture");
   RNA_def_property_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(prop, "Texture", "Texture stamped for this slot");
+  RNA_def_property_ui_text(prop,
+                           "Texture",
+                           "Texture stamped for this slot; for a PBR set it doubles as the "
+                           "stamp's coverage mask");
   RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushCurvePatchTextureSlot_update");
+
+  /* Fixed DNA array exposed as a collection, same pattern as the material paint channels. */
+  prop = RNA_def_property(srna, "channels", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "channels", "");
+  RNA_def_property_struct_type(prop, "BrushCurvePatchSlotChannel");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_BrushCurvePatchTextureSlot_channels_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_BrushCurvePatchTextureSlot_channels_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop, "Channels", "Per-channel images of a PBR set, indexed by material paint channel");
 
   prop = RNA_def_property(srna, "weight", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "weight");
@@ -7671,6 +7970,7 @@ void RNA_def_brush(BlenderRNA *brna)
   rna_def_curves_sculpt_options(brna);
   rna_def_brush_material_paint(brna);
   rna_def_brush_clone_stamp_mesh_settings(brna);
+  rna_def_brush_curve_patch_slot_channel(brna);
   rna_def_brush_curve_patch_texture_slot(brna);
   rna_def_brush_curve_patch_settings(brna);
   rna_def_brush_texture_slot(brna);

@@ -123,6 +123,15 @@ std::unique_ptr<ui::DropTargetInterface> image_id_browser_drop_target_get(bConte
 std::unique_ptr<ui::DropTargetInterface> curve_patch_texture_list_drop_target_get(
     bContext *C, const ARegion *region, const wmEvent *event);
 
+/**
+ * Return a drop target for one per-channel image row of a PBR-kind Curve Patch slot under the
+ * cursor (the rows #_draw_curve_patch_pbr_slot_channels draws: the dropped image is assigned to
+ * THAT channel of the set), or null if there is none. Used by the generic button drop dispatch,
+ * after the texture-list target.
+ */
+std::unique_ptr<ui::DropTargetInterface> curve_patch_slot_channel_drop_target_get(
+    bContext *C, const ARegion *region, const wmEvent *event);
+
 /** The button context string that marks a Decal panel drop zone; its value is the channel. */
 inline constexpr const char *DECAL_DROP_CHANNEL_CONTEXT = "decal_drop_channel";
 

@@ -117,7 +117,11 @@ Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
       const BrushMaterialPaint *brush_paint = brush ? brush->material_paint : nullptr;
       const Vector<PaintMaterialImageTarget> material_targets =
           BKE_paint_material_image_targets_get(
-              ob, paint_mode_settings, brush_paint, visible_material_channels);
+              ob,
+              paint_mode_settings,
+              brush_paint,
+              visible_material_channels,
+              brush ? BKE_brush_curve_patch_slot_channel_mask(*brush) : 0);
       /* What the object mask hides belongs to the active row, so every channel map of the stroke
        * shares it. */
       bool object_masked = false;
@@ -2502,7 +2506,11 @@ bool SCULPT_use_image_paint_brush(PaintModeSettings &settings,
       /* Multi-channel Principled maps; empty target list is a no-op (no texpaint fallback). */
       const BrushMaterialPaint *brush_paint = brush ? brush->material_paint : nullptr;
       return !BKE_paint_material_image_targets_get(
-                  ob, settings, brush_paint, visible_material_channels)
+                  ob,
+                  settings,
+                  brush_paint,
+                  visible_material_channels,
+                  brush ? BKE_brush_curve_patch_slot_channel_mask(*brush) : 0)
                   .is_empty();
     }
     case PAINT_CANVAS_SOURCE_MATERIAL_PAINT:

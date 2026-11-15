@@ -2175,14 +2175,17 @@ bool BKE_paint_is_mask_target(bool mask_stroke, eMaterialPaintChannel channel);
  * Principled Image Texture, or the active row's channel map of a layered material (whose
  * #PaintMaterialImageTarget::iuser is null).
  * Missing maps are skipped. Channels without a socket (Custom) are never included.
- * Order follows #BKE_paint_material_channels.
  * When \a brush_paint is null, returns an empty list (no channels enabled).
+ * \a extra_channel_mask adds visible channels the brush does not switch on itself (a bit per
+ * channel): the Curve Patch slots supply their own set, see
+ * #BKE_brush_curve_patch_slot_channel_mask.
  */
 Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     Object &ob,
     PaintModeSettings &mode_settings,
     const BrushMaterialPaint *brush_paint,
-    int visible_material_channels);
+    int visible_material_channels,
+    uint32_t extra_channel_mask = 0);
 
 /**
  * Same as #BKE_paint_material_image_targets_get, but for an explicit set of channels

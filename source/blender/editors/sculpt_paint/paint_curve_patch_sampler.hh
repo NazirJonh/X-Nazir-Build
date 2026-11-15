@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <optional>
 
+#include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_map.hh"
@@ -29,6 +30,7 @@
 namespace blender {
 struct Brush;
 struct CCGKey;
+struct ImBuf;
 struct ImagePool;
 struct Object;
 struct SubdivCCG;
@@ -102,6 +104,18 @@ float3 curve_patch_decanonicalize_dir(const CurvePatchStrokeContext &ctx, const 
  * #curve_patch_max_radius can be pinned down by a test without standing up a sculpt session.
  */
 float curve_patch_cull_tube_radius(const bke::CurvePatchGeometry &geometry, float max_radius);
+
+/**
+ * Bilinear sample of \a ibuf at the stamp's raw patch uv: the [-1, 1] stamp domain maps to the
+ * image's [0, 1] domain with no half-texel offset, matching the placement every stamp image uses.
+ * Returns raw RGBA in 0..1 (a byte buffer is normalised, NOT decoded); the caller owns any
+ * colorspace conversion, because a PBR slot's images each carry their own. Null when the buffer
+ * has no pixel storage or no valid size.
+ *
+ * Shared by the coverage-mask alpha read in the sampler and the PBR slot sampler in the image
+ * effect, which would otherwise carry two copies of the same float/byte branch.
+ */
+std::optional<float4> curve_patch_sample_image_bilinear(const ImBuf &ibuf, float2 patch_uv);
 
 /**
  * Pre-patch state the sampler reads. An effect that mutates geometry (relief) serves positions
@@ -185,6 +199,18 @@ struct CurvePatchSample {
    * it -- turns underneath. */
   float3 patch_axis_u{1.0f, 0.0f, 0.0f};
   float3 patch_axis_v{0.0f, 1.0f, 0.0f};
+  /**
+   * Which STAMPS texture slot the reported frame's stamp came from: an index into the binding's
+   * `stamp_texture_variants` / `stamp_slots`, or -1 when the sample did not come from a slot --
+   * Ribbon mode, the brush's own texture, or an out-of-range index.
+   *
+   * A PBR slot carries one image per material paint channel, so an effect that paints a channel
+   * canvas needs to know WHICH slot won here before it can pick that slot's image for the channel
+   * it writes: the frame and `patch_uv` alone describe where, not what set. The dominant stamp of
+   * the merge reports its own index; overlapping stamps composite, so this is the same
+   * "least discontinuous frame" choice #patch_uv makes.
+   */
+  int tex_index = -1;
 };
 
 class CurvePatchSampler {
@@ -254,6 +280,22 @@ class CurvePatchSampler {
   float end_endpoint_radius_;
   float2 mtex_size_;
   float2 mtex_ofs_;
+  /** Coverage of a tex-less PBR / Material slot: the Base Color alpha. */
+  struct PbrMask {
+    /** Null for a constant Base Color. */
+    const ImBuf *ibuf = nullptr;
+    float constant_alpha = 1.0f;
+    /** False when the slot has no usable Base Color, so its stamps are skipped. */
+    bool valid = false;
+  };
+  /**
+   * Coverage masks of the tex-less PBR / Material slots, one entry per slot row: such a slot
+   * stamps its Base Color's ALPHA as the coverage mask, so it is fully usable without a separate
+   * stamp texture. An image's buffer comes from the stroke's shared image pool, acquired in the
+   * constructor (thread-safe: the pool guards its own entries) and kept until the pool dies with
+   * the stroke; a baked buffer is owned by the binding's bake.
+   */
+  Array<PbrMask> pbr_masks_;
 #if CURVE_PATCH_PROFILING
   /* DEBUG-cpatch-image funnel counters. `mutable` because `sample()` is `const`; no atomics needed
    * because a sampler is constructed per chunk and a chunk is processed by a single thread. */

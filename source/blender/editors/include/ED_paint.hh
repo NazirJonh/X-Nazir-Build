@@ -30,6 +30,7 @@ struct ARegion;
 struct bContext;
 struct ARegionType;
 struct Brush;
+struct BrushCurvePatchTextureSlot;
 struct bToolRef;
 struct Depsgraph;
 struct EnumPropertyItem;
@@ -939,6 +940,26 @@ MaterialPaintLayer *paint_layers_mask_add_image(bContext &C,
                                                 Material &material,
                                                 MaterialPaintLayer &layer,
                                                 Image &image);
+
+}  // namespace ed::sculpt_paint
+
+/* `paint_ops.cc` — the one way an image enters a Curve Patch PBR slot channel */
+
+namespace ed::sculpt_paint {
+
+/**
+ * Assign \a image to \a channel_index of \a slot through the channel's RNA setter, so the list's
+ * user bookkeeping and the Non-Color default of a scalar channel apply. With \a enable the channel
+ * is switched on as well: an image on a disabled channel is invisible data (no stamp reads it and
+ * no UI row shows it). Tagging, notifiers and the undo push stay the caller's.
+ *
+ * \return false when the image could not be stored.
+ */
+bool curve_patch_slot_channel_assign(Brush &brush,
+                                     BrushCurvePatchTextureSlot &slot,
+                                     int channel_index,
+                                     Image &image,
+                                     bool enable);
 
 }  // namespace ed::sculpt_paint
 

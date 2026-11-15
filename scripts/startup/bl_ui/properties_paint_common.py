@@ -837,12 +837,50 @@ def draw_texture_drop_row(layout, data, propname, label):
     return row
 
 
+def _draw_curve_patch_pbr_slot_channels(layout, slot):
+    """Channel block of a PBR-kind Curve Patch slot: the channel toggles, then an image drop row
+    per enabled channel, in the shared material paint display order.
+
+    A PBR set stamps every enabled channel that carries an image; an enabled channel without one
+    is skipped by the stamps (its drop row stays, so filling it does not need re-toggling). Each
+    drop row publishes the `curve_patch_slot_channel` context pointer, so dropping an image on it
+    assigns the image to that channel exactly (see the drop target in interface_drop_image.cc).
+    """
+    channels = {channel.channel: channel for channel in slot.channels}
+    toggles = layout.grid_flow(
+        row_major=True, columns=0, even_columns=False, even_rows=False, align=False)
+    toggles.use_property_split = False
+    toggles.use_property_decorate = False
+    for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
+        col = toggles.column(align=False)
+        col.ui_units_x = _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X
+        col.prop(
+            channels[channel_id],
+            "enabled",
+            text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id],
+            toggle=True)
+    layout.separator(factor=0.4)
+    for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
+        channel = channels[channel_id]
+        if not channel.enabled:
+            continue
+        row = layout.row(align=True)
+        # A context pointer set on a layout is inherited only by its children, so the channel
+        # target is published on the row hosting its own drop button.
+        row.context_pointer_set("curve_patch_slot_channel", channel)
+        draw_texture_drop_row(row, channel, "image", channel.name)
+
+
 class SCULPT_UL_curve_patch_textures(UIList):
     def draw_item(self, _context, layout, _data, item, _icon, _active_data, _active_propname, _index):
         # Marks the row's buttons as the target of a texture drop: dropping on a row replaces
         # that slot's texture (the list context below appends new slots instead).
         layout.context_pointer_set("curve_patch_texture_slot", item)
-        if item.texture:
+        if item.kind in {'PBR', 'MATERIAL'}:
+            # A PBR set / material names itself after its first stamped image or the material, so the
+            # row reads like what the user dropped; an unfilled one shows the generic label instead.
+            layout.label(text=item.name, icon='MATERIAL' if item.kind == 'MATERIAL' else 'OUTLINER_OB_IMAGE')
+        elif item.texture:
             layout.prop(item.texture, "name", text="", emboss=False, icon_value=layout.icon(item.texture))
         else:
             layout.label(text="Empty", icon='TEXTURE_DATA')
@@ -963,7 +1001,32 @@ class StrokePanel(BrushPanel):
                     index = cp.texture_active_index
                     if 0 <= index < len(slots):
                         active_slot = slots[index]
-                        draw_texture_drop_row(col, active_slot, "texture", active_slot.name or "Stamp")
+                        # What this slot stamps: one texture, or a whole per-channel image set
+                        # (a PBR set) the brush stores for it.
+                        col.row().prop(active_slot, "kind", text="Slot Kind", expand=True)
+                        if active_slot.kind == 'TEXTURE':
+                            draw_texture_drop_row(col, active_slot, "texture", active_slot.name or "Stamp")
+                        elif active_slot.kind == 'MATERIAL':
+                            # Live reference to the whole material (a Material can also be dropped
+                            # on the slot row): every Principled input is read on each restamp,
+                            # plain images directly and node graphs from a cached bake.
+                            # The paint-slot browser (same as Source: Material): a drop target for
+                            # materials and assets, with copy/paste, Browse and Unlink.
+                            col.template_ID_browser(
+                                active_slot,
+                                "material",
+                                text=iface_("Drop material"),
+                                use_users=False,
+                            )
+                            col.prop(active_slot, "bake_size", text="Bake Size")
+                        else:
+                            _draw_curve_patch_pbr_slot_channels(col, active_slot)
+                            # Seed the set from the brush's own PBR Paint channel sources, so an
+                            # already-configured brush becomes a stamp set without re-dropping.
+                            col.operator(
+                                "brush.curve_patch_pbr_slot_from_brush",
+                                text="From Brush Channels",
+                                icon='UV_DATA')
                         col.prop(active_slot, "weight", text="Weight")
             else:
                 col.row().prop(cp, "ribbon_texture_source", text="Textures", expand=True)

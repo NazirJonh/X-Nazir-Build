@@ -22,6 +22,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "BLI_array.hh"
@@ -30,12 +31,23 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "DNA_brush_types.h"
+#include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
 
 #include "BKE_curve_patch.hh"
 #include "BKE_curves.hh"
 
 #include "paint_curve_patch_live.hh"
+
+namespace blender {
+struct Image;
+struct ImBuf;
+}  // namespace blender
+
+namespace blender::ed::material_bake {
+class MaterialSourceBake;
+}  // namespace blender::ed::material_bake
 
 namespace blender::ed::sculpt_paint {
 
@@ -90,6 +102,46 @@ struct CurvePatchEditStep {
   int active_patch = 0;
 };
 
+/** Where one channel of a PBR / Material stamp slot gets its pixels from. */
+enum class CurvePatchStampChannelKind : int8_t {
+  /** The slot does not stamp this channel. */
+  None = 0,
+  /** An #Image sampled directly (a PBR set's channel image, or an Image Texture node's). */
+  Image,
+  /** A buffer baked from a material's node graph; owned by #CurvePatchStampSlot::bake. */
+  Baked,
+  /** A material input left unlinked: its default value is the whole answer. */
+  Constant,
+};
+
+struct CurvePatchStampChannel {
+  CurvePatchStampChannelKind kind = CurvePatchStampChannelKind::None;
+  /** #CurvePatchStampChannelKind::Image only. */
+  const Image *image = nullptr;
+  /** #CurvePatchStampChannelKind::Baked only. */
+  const ImBuf *baked = nullptr;
+  /** #CurvePatchStampChannelKind::Constant only: scalar channels use `x`, color ones `xyz`. */
+  float4 constant = float4(0.0f);
+};
+
+/** The non-#MTex half of one stamp slot: what kind it is (#eBrushCurvePatchSlotKind) and, for a
+ * PBR set or a Material, where each channel's pixels come from. Kept parallel to
+ * #stamp_texture_variants because `MTex` deletes its copy assignment and must stay in its own
+ * #Array. The pointers are as transient as the `tex` inside a variant (see the note on
+ * #stamp_texture_variants), safe within one restamp. */
+struct CurvePatchStampSlot {
+  /** The slot's real #eBrushCurvePatchSlotKind. Consumers that only care whether the slot stamps
+   * per-channel sources read #has_channel_sources instead, so a MATERIAL slot need not pose as a
+   * PBR one. */
+  int8_t kind = BRUSH_CURVE_PATCH_SLOT_TEXTURE;
+  /** True when at least one of #channels has a kind other than #CurvePatchStampChannelKind::None. */
+  bool has_channel_sources = false;
+  std::array<CurvePatchStampChannel, PAINT_MATERIAL_CHANNEL_NUM> channels = {};
+  /** Keeps the buffers behind the #CurvePatchStampChannelKind::Baked channels alive for as long as
+   * the binding is, however the bake cache replaces its own entry meanwhile. */
+  std::shared_ptr<const ed::material_bake::MaterialSourceBake> bake;
+};
+
 /** Resolved texture slots for one build. Stays in the editor layer because `MTex` is DNA and the
  * core must not depend on it. */
 struct CurvePatchTextureBinding {
@@ -113,6 +165,20 @@ struct CurvePatchTextureBinding {
   /** Cumulative weight table over `stamp_texture_variants`, one entry per variant, non-decreasing.
    * Empty unless STAMPS + LIST is active with at least one positive weight. */
   Vector<float> stamp_texture_weights_cdf;
+  /** Kind and per-channel images of the variant at the same index. Rebuilt together with the
+   * variants; empty in SINGLE mode. */
+  Array<CurvePatchStampSlot> stamp_slots;
+
+  /** The stamp slot of the variant \a tex_index (a #CurvePatchSample::tex_index), or null when the
+   * index is negative or out of range. The arrays are parallel only by index, so every reader goes
+   * through here instead of re-checking bounds. */
+  const CurvePatchStampSlot *stamp_slot(const int tex_index) const
+  {
+    if (tex_index < 0 || tex_index >= stamp_slots.size()) {
+      return nullptr;
+    }
+    return &stamp_slots[tex_index];
+  }
   /** Ribbon CAPS variants indexed by #CurvePatchTextureZone. An entry with a null `tex` marks a
    * zone the user left empty; the relief returns no displacement there. Left default-constructed
    * rather than `= {}`-initialized: `MTex`'s deleted copy assignment (see #DNA_DEFINE_CXX_METHODS)

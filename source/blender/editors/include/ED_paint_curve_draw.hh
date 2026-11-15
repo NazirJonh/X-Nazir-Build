@@ -259,6 +259,14 @@ void ED_paint_curve_overlay_tag_redraw_all(bContext *C);
 /** Register #SCULPT_OT_curve_patch_edit modal handlers on every open window (idempotent). */
 void ED_paint_curve_patch_modal_handlers_ensure(bContext *C);
 
+/**
+ * Keep the cached bakes of the brush's Curve Patch Material slots current (idempotent: returns at
+ * once for a cached or already running bake). Rate limited internally because building a bake key
+ * walks the material's node trees; the one backstop for the paint cursor and the edit modal, since
+ * the properties that pick a slot's material start a bake from RNA only. Main thread only.
+ */
+void ED_paint_curve_patch_slot_bakes_ensure(const bContext &C, const Brush &brush);
+
 bool ED_paint_curve_slide_is_active();
 
 /**

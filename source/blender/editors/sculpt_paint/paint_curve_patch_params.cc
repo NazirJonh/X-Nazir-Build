@@ -27,6 +27,13 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 
+#include "BKE_brush.hh"
+#include "BKE_paint_material_resolve.hh"
+
+#include "ED_material_bake.hh"
+
+#include "IMB_imbuf_types.hh"
+
 #include "paint_curve_patch_session.hh"
 
 namespace blender::ed::sculpt_paint {
@@ -243,6 +250,7 @@ void curve_patch_texture_binding_clear(CurvePatchTextureBinding &r_binding)
 {
   r_binding.stamp_texture_variants.reinitialize(0);
   r_binding.stamp_texture_weights_cdf.clear();
+  r_binding.stamp_slots.reinitialize(0);
   /* Element-wise rather than `std::array::fill()`: `MTex` deletes its copy assignment (see
    * #DNA_DEFINE_CXX_METHODS), so DNA's explicit shallow-copy path is the only way to write one. */
   for (MTex &zone_variant : r_binding.ribbon_zone_variants) {
@@ -251,6 +259,64 @@ void curve_patch_texture_binding_clear(CurvePatchTextureBinding &r_binding)
   r_binding.caps_enabled = false;
   r_binding.world_cap_start = 0.0f;
   r_binding.world_cap_end = 0.0f;
+}
+
+/**
+ * Fill \a r_stamp_slot from the live state of \a slot's material, with the same per-channel
+ * resolution the brush's Source: Material uses (#BKE_paint_material_source_resolve): an unlinked
+ * input is its default value, a plain Image Texture is sampled directly, and any other node graph
+ * (Math, Mix, procedural, groups) comes from the cached bake of the whole material. A bake that
+ * has not landed yet leaves its channels unstamped for this restamp; the live digest folds the
+ * bake's identity, so landing re-stamps. Starting the bake is the caller's job (see
+ * #curve_patch_texture_slot_material_bake_ensure).
+ */
+static void curve_patch_stamp_slot_from_material(const BrushCurvePatchTextureSlot &slot,
+                                                 CurvePatchStampSlot &r_stamp_slot)
+{
+  const Material &material = *slot.material;
+  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(&material);
+
+  const bool any_baked = std::any_of(resolve.channels.begin(),
+                                     resolve.channels.end(),
+                                     [](const ChannelResolution res) {
+                                       return res == ChannelResolution::Baked;
+                                     });
+  if (any_baked) {
+    r_stamp_slot.bake = material_bake::material_source_bake_get(material,
+                                                                BKE_brush_curve_patch_slot_bake_size(slot));
+  }
+
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    CurvePatchStampChannel &stamp_channel = r_stamp_slot.channels[channel];
+    switch (resolve.channels[channel]) {
+      case ChannelResolution::Constant:
+        stamp_channel.kind = CurvePatchStampChannelKind::Constant;
+        stamp_channel.constant = resolve.constants[channel];
+        break;
+      case ChannelResolution::Image:
+        if (resolve.images[channel].image != nullptr) {
+          stamp_channel.kind = CurvePatchStampChannelKind::Image;
+          stamp_channel.image = resolve.images[channel].image;
+        }
+        break;
+      case ChannelResolution::Baked: {
+        const ImBuf *ibuf = r_stamp_slot.bake ? r_stamp_slot.bake->channel_image(
+                                                    eMaterialPaintChannel(channel)) :
+                                                nullptr;
+        /* The direct samplers stride a float buffer by four; anything else stays unstamped. */
+        if (ibuf != nullptr && ibuf->float_data() != nullptr && ibuf->channels == 4) {
+          stamp_channel.kind = CurvePatchStampChannelKind::Baked;
+          stamp_channel.baked = ibuf;
+        }
+        break;
+      }
+      case ChannelResolution::Unavailable:
+        break;
+    }
+    if (stamp_channel.kind != CurvePatchStampChannelKind::None) {
+      r_stamp_slot.has_channel_sources = true;
+    }
+  }
 }
 
 void curve_patch_texture_binding_from_brush(const Brush &brush,
@@ -270,6 +336,7 @@ void curve_patch_texture_binding_from_brush(const Brush &brush,
     const int slot_num = settings.texture_slots.count();
     r_binding.stamp_texture_variants.reinitialize(slot_num);
     r_binding.stamp_texture_weights_cdf.reserve(slot_num);
+    r_binding.stamp_slots.reinitialize(slot_num);
     float running = 0.0f;
     int slot_index = 0;
     /* Range-for, NOT `LISTBASE_FOREACH`: that macro is private to `listbase.cc` in this branch.
@@ -282,12 +349,31 @@ void curve_patch_texture_binding_from_brush(const Brush &brush,
       MTex &variant = r_binding.stamp_texture_variants[slot_index];
       variant = dna::shallow_copy(mtex);
       variant.tex = slot.tex;
+      CurvePatchStampSlot &stamp_slot = r_binding.stamp_slots[slot_index];
+      stamp_slot.kind = int8_t(slot.kind);
+      if (slot.kind == BRUSH_CURVE_PATCH_SLOT_PBR) {
+        for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+          /* Only ENABLED channels stamp from the set: a disabled channel keeps an image the user
+           * dropped earlier without the stamps reaching it, exactly what the UI shows. */
+          if (BKE_brush_curve_patch_slot_channel_active(slot, channel)) {
+            CurvePatchStampChannel &stamp_channel = stamp_slot.channels[channel];
+            stamp_channel.kind = CurvePatchStampChannelKind::Image;
+            stamp_channel.image = BKE_brush_curve_patch_slot_image_get(slot, channel);
+            stamp_slot.has_channel_sources = true;
+          }
+        }
+      }
+      else if (slot.kind == BRUSH_CURVE_PATCH_SLOT_MATERIAL && slot.material != nullptr) {
+        curve_patch_stamp_slot_from_material(slot, stamp_slot);
+      }
       /* Negative weights would make the table decrease and break the search; clamp rather than
        * reject, so a Python-set value cannot corrupt the layout. */
       running += std::max(slot.weight, 0.0f);
       r_binding.stamp_texture_weights_cdf.append(running);
       slot_index++;
     }
+    /* The sampler and effects index the slot arrays by the same `tex_index`. */
+    BLI_assert(r_binding.stamp_slots.size() == r_binding.stamp_texture_variants.size());
   }
 
   if (settings.ribbon_texture_source == BRUSH_CURVE_PATCH_TEX_MULTI) {

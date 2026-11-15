@@ -132,6 +132,10 @@ namespace blender::ed::sculpt_paint {
  * because building the bake key walks the material's node trees. */
 static void curve_patch_edit_material_source_bake_ensure(const bContext &C, const Brush &brush)
 {
+  /* The Material slots of the texture list bake the same way the brush source does; the shared
+   * helper rate limits itself. */
+  ED_paint_curve_patch_slot_bakes_ensure(C, brush);
+
   if (brush.material_paint == nullptr ||
       brush.material_paint->source_mode != BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL)
   {
@@ -2818,7 +2822,8 @@ static const EnumPropertyItem *curve_patch_point_texture_slot_itemf(bContext *C,
     if (brush != nullptr) {
       int index = 0;
       for (const BrushCurvePatchTextureSlot &slot : brush->curve_patch.texture_slots) {
-        const char *name = slot.tex ? slot.tex->id.name + 2 : IFACE_("Empty");
+        const StringRefNull slot_name = BKE_brush_curve_patch_slot_display_name(slot);
+        const char *name = slot_name.is_empty() ? IFACE_("Empty") : slot_name.c_str();
         slots.append({index, "SLOT", 0, name, nullptr});
         index++;
       }

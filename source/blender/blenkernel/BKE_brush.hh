@@ -19,6 +19,7 @@
 #include "BLI_math_base.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
+#include "BLI_string_ref.hh"
 #include "BLI_utildefines.h"
 
 #include "DNA_brush_enums.h"
@@ -31,9 +32,11 @@ namespace blender {
 enum class PaintMode : int8_t;
 enum ePaintMaterialEraseMode : int8_t;
 struct Brush;
+struct BrushCurvePatchSlotChannel;
 struct BrushCurvePatchTextureSlot;
 struct BrushMaterialPaint;
 struct ImBuf;
+struct Image;
 struct ImagePool;
 struct Main;
 struct MTex;
@@ -270,6 +273,85 @@ BrushCurvePatchTextureSlot *BKE_brush_curve_patch_texture_slot_add(Brush &brush)
  * \return false when `slot` is not in this brush's list, in which case nothing is changed.
  */
 bool BKE_brush_curve_patch_texture_slot_remove(Brush &brush, BrushCurvePatchTextureSlot &slot);
+
+/* PBR slots.
+ *
+ * A slot of kind #BRUSH_CURVE_PATCH_SLOT_PBR declares which material paint channels it covers
+ * (#BrushCurvePatchTextureSlot::channels, one entry per #eMaterialPaintChannel) and carries one
+ * #Image per channel. The list owns a user on every non-null channel image, exactly as it does on
+ * a TEXTURE slot's texture, so assigning and clearing an image cannot be open-coded by every
+ * caller either. */
+
+/** The slot's image for \a channel (#eMaterialPaintChannel), or null. The answer describes the
+ * DATA, independent of the slot kind: a slot flipped away from PBR keeps its images, so a caller
+ * that reads them (Python, a UI row) still sees what is there. Stamps and counts filter by kind
+ * where they consume the image. */
+Image *BKE_brush_curve_patch_slot_image_get(const BrushCurvePatchTextureSlot &slot, int channel);
+
+/**
+ * Assign \a image to \a channel (#eMaterialPaintChannel), keeping the list's user bookkeeping:
+ * takes a user on the new image, drops the one held on the previous. The slot's kind is left
+ * alone -- setting an image does not flip an unrelated slot to PBR, and a PBR slot may pre-fill
+ * its channels before (or after) the user switches the kind. Null clears the channel.
+ */
+void BKE_brush_curve_patch_slot_image_set(BrushCurvePatchTextureSlot &slot,
+                                          int channel,
+                                          Image *image);
+
+/** Whether the slot DECLARES \a channel (its #BrushCurvePatchSlotChannel::enabled is set).
+ * Declaring is intent, not data: an enabled channel without an image is skipped by the stamps. */
+bool BKE_brush_curve_patch_slot_channel_enabled(const BrushCurvePatchTextureSlot &slot,
+                                                int channel);
+
+/** Enable / disable \a channel in the slot's declared set. */
+void BKE_brush_curve_patch_slot_channel_enable(BrushCurvePatchTextureSlot &slot,
+                                               int channel,
+                                               bool enable);
+
+/** How many enabled channels of a PBR slot actually hold an image (for UI row labels). */
+int BKE_brush_curve_patch_slot_image_count(const BrushCurvePatchTextureSlot &slot);
+
+/** Whether \a channel takes part in a stamp: declared AND carrying an image. The one predicate
+ * stamps, counts, names and digests share, so they cannot disagree on what a half-filled set
+ * contributes. */
+bool BKE_brush_curve_patch_slot_channel_active(const BrushCurvePatchTextureSlot &slot, int channel);
+
+/** The channel (#eMaterialPaintChannel) a dropped image should fill: the first enabled channel
+ * without an image, otherwise Base Color. */
+int BKE_brush_curve_patch_slot_drop_channel(const BrushCurvePatchTextureSlot &slot);
+
+/**
+ * The slot that owns \a channel, or null when the channel is not one of this brush's slot rows.
+ * A channel is only addressable through its owner, and every caller (RNA collection accessors, the
+ * drop-target lookup) needs both the slot and the channel's index inside it, so the lookup and the
+ * arithmetic live here once.
+ *
+ * \param r_channel_index: Optionally returns the index inside the slot (#eMaterialPaintChannel).
+ */
+BrushCurvePatchTextureSlot *BKE_brush_curve_patch_slot_from_channel(
+    Brush &brush, const BrushCurvePatchSlotChannel &channel, int *r_channel_index = nullptr);
+const BrushCurvePatchTextureSlot *BKE_brush_curve_patch_slot_from_channel(
+    const Brush &brush, const BrushCurvePatchSlotChannel &channel, int *r_channel_index = nullptr);
+
+/** Index of the slot owning \a channel in the brush's texture list, or -1. */
+int BKE_brush_curve_patch_slot_index_from_channel(const Brush &brush,
+                                                  const BrushCurvePatchSlotChannel &channel);
+
+/**
+ * The material paint channels (bit per #eMaterialPaintChannel) the brush's Curve Patch texture list
+ * supplies stamps for: the enabled, filled channels of its PBR slots and every channel a Material
+ * slot's material can supply. Zero unless the brush stamps its list (STAMPS + Texture List). A
+ * stroke paints these channels as well as the ones the brush switches on itself, so a slot's set
+ * does not need the same channels enabled a second time on the brush.
+ */
+uint32_t BKE_brush_curve_patch_slot_channel_mask(const Brush &brush);
+
+/** Resolution of a MATERIAL slot's bake: the slot's own size, or the default when it is unset. */
+int BKE_brush_curve_patch_slot_bake_size(const BrushCurvePatchTextureSlot &slot);
+
+/** The name a slot shows in the texture list: the first enabled channel image's name for a PBR
+ * set ("PBR Set" while it is empty), the texture's name for a TEXTURE slot, empty when unset. */
+StringRefNull BKE_brush_curve_patch_slot_display_name(const BrushCurvePatchTextureSlot &slot);
 
 float2 BKE_brush_jitter_pos(const Paint &paint, const Brush &brush, const float2 &pos);
 void BKE_brush_randomize_texture_coords(Paint *paint, bool mask);

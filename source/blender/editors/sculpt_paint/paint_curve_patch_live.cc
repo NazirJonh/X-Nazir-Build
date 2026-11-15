@@ -9,21 +9,108 @@
 #include "paint_curve_patch_live.hh"
 
 #include <cstring>
+#include <memory>
 
 /* `BrushCurvePatchSettings::texture_slots` is a `ListBaseT<T>`; the range-for over it below needs
  * the iterator definition, which `DNA_brush_types.h` only forward-declares. */
+#include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
+#include "BLI_time.h"
 
 #include "BKE_brush.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_resolve.hh"
 
 #include "ED_material_bake.hh"
+#include "ED_paint_curve_draw.hh"
 
 #include "DNA_brush_types.h"
 #include "DNA_color_types.h"
 #include "DNA_texture_types.h"
 
 namespace blender::ed::sculpt_paint {
+
+/* Fold what a PBR / Material slot stamps from into \a digest: the kind, the enabled channels and
+ * their images, and for a Material the material's identity, bake size and what its channels
+ * currently resolve to -- an unlinked input's value, a direct image, and the identity of the bake
+ * serving the rest. Identity by session UID / bake revision, never by address, so a freed block
+ * re-used at the same address cannot read as "unchanged". Observational like
+ * #material_bake::source_digest: never starts or waits for a bake, so a landing bake is itself the
+ * change that re-stamps. */
+static void curve_patch_slot_content_digest(uint64_t &digest, const BrushCurvePatchTextureSlot &slot)
+{
+  const auto fold = [&digest](const uint64_t value) {
+    digest = (digest ^ value) * 1099511628211ull;
+  };
+  fold(uint64_t(uint8_t(slot.kind)));
+  if (slot.kind == BRUSH_CURVE_PATCH_SLOT_PBR) {
+    /* Enabled and image folded separately on purpose: flipping the toggle or swapping the image
+     * must each change the digest even when the other half leaves the channel inactive. */
+    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      fold(uint64_t(BKE_brush_curve_patch_slot_channel_enabled(slot, channel)));
+      fold(uint64_t(uintptr_t(BKE_brush_curve_patch_slot_image_get(slot, channel))));
+    }
+    return;
+  }
+  if (slot.kind != BRUSH_CURVE_PATCH_SLOT_MATERIAL || slot.material == nullptr) {
+    return;
+  }
+  fold(slot.material->id.session_uid);
+  const int bake_size = BKE_brush_curve_patch_slot_bake_size(slot);
+  fold(uint64_t(uint32_t(bake_size)));
+  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(slot.material);
+  bool any_baked = false;
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    fold(uint64_t(uint8_t(resolve.channels[channel])));
+    switch (resolve.channels[channel]) {
+      case ChannelResolution::Constant:
+        for (const int i : {0, 1, 2, 3}) {
+          uint32_t bits;
+          memcpy(&bits, &resolve.constants[channel][i], sizeof(bits));
+          fold(uint64_t(bits));
+        }
+        break;
+      case ChannelResolution::Image:
+        fold(uint64_t(uintptr_t(resolve.images[channel].image)));
+        break;
+      case ChannelResolution::Baked:
+        any_baked = true;
+        break;
+      case ChannelResolution::Unavailable:
+        break;
+    }
+  }
+  if (any_baked) {
+    /* A missing bake folds as 0 (revisions start at 1), which makes the landing a change. */
+    const std::shared_ptr<const material_bake::MaterialSourceBake> bake =
+        material_bake::material_source_bake_get(*slot.material, bake_size);
+    fold(bake ? bake->revision() : 0);
+  }
+}
+
+void ED_paint_curve_patch_slot_bakes_ensure(const bContext &C, const Brush &brush)
+{
+  /* Main thread only, so a plain static is enough. */
+  constexpr double check_interval_seconds = 0.25;
+  static double last_check_seconds = 0.0;
+  const double now_seconds = BLI_time_now_seconds();
+  bool checked = false;
+  for (const BrushCurvePatchTextureSlot &slot : brush.curve_patch.texture_slots) {
+    if (slot.kind != BRUSH_CURVE_PATCH_SLOT_MATERIAL || slot.material == nullptr) {
+      continue;
+    }
+    /* Checked lazily so a brush without Material slots never touches the timer. */
+    if (!checked) {
+      if (now_seconds - last_check_seconds < check_interval_seconds) {
+        return;
+      }
+      last_check_seconds = now_seconds;
+      checked = true;
+    }
+    material_bake::material_source_bake_ensure(
+        C, *slot.material, BKE_brush_curve_patch_slot_bake_size(slot));
+  }
+}
 
 /* Cheap order-sensitive digest of a brush's Curve Patch texture list, used only to detect that the
  * list changed and the patch must be re-stamped. Not a hash with any security or collision
@@ -39,6 +126,7 @@ static uint64_t curve_patch_texture_list_digest(const Brush &brush)
     uint32_t weight_bits;
     memcpy(&weight_bits, &slot.weight, sizeof(weight_bits));
     digest = (digest ^ uint64_t(weight_bits)) * 1099511628211ull;
+    curve_patch_slot_content_digest(digest, slot);
   }
   return digest;
 }

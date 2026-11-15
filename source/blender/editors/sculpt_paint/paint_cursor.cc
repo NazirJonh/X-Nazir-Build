@@ -2015,6 +2015,26 @@ static void paint_cursor_ensure_material_source_bake(const bContext &C,
 }
 
 /**
+ * Keep the bakes of the brush's Curve Patch Material slots current: the same backstop as
+ * #paint_cursor_ensure_material_source_bake, for the materials the texture list stamps from. Never
+ * mid-stroke, and rate limited for the same reasons; the properties that pick a slot's material
+ * start a bake directly from RNA.
+ */
+static void paint_cursor_ensure_curve_patch_slot_bakes(const bContext &C,
+                                                       const PaintCursorContext &pcontext)
+{
+  if (pcontext.brush == nullptr || pcontext.brush->curve_patch.stamp_texture_source !=
+                                       BRUSH_CURVE_PATCH_TEX_MULTI)
+  {
+    return;
+  }
+  if (pcontext.paint != nullptr && pcontext.paint->runtime->stroke_active) {
+    return;
+  }
+  ED_paint_curve_patch_slot_bakes_ensure(C, *pcontext.brush);
+}
+
+/**
  * Dashed line from the end of the previous stroke to the cursor while Shift is held.
  *
  * Shift+click continues the previous stroke as a line, and the line itself is painted while the
@@ -2106,6 +2126,7 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
   /* Before the enabled check below: a brush whose cursor the user turned off still paints, so it
    * still needs its source material baked. */
   paint_cursor_ensure_material_source_bake(*C, pcontext);
+  paint_cursor_ensure_curve_patch_slot_bakes(*C, pcontext);
 
   if (!paint_cursor_is_brush_cursor_enabled(pcontext)) {
     /* For Grease Pencil draw mode, we want to we only render a small mouse cursor (dot) if the

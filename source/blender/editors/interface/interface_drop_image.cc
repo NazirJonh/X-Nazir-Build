@@ -164,6 +164,18 @@ static const Tex *drag_local_texture(const wmDrag &drag)
   return id ? id_cast<const Tex *>(id) : nullptr;
 }
 
+/** Resolve the dragged #Material for a Curve Patch slot: a local ID, or an asset imported the way
+ * the Asset Browser's import method says (Link keeps a library reference, Append embeds a copy in
+ * the file, so the brush asset saves it with itself). Unlike #resolve_drag_material, which
+ * always appends for the Brush Material source, the choice stays the user's. */
+static Material *resolve_drag_material_for_slot(bContext *C, const wmDrag &drag)
+{
+  if (ID *id = WM_drag_get_local_ID_or_import_from_asset(C, &drag, ID_MA)) {
+    return (GS(id->name) == ID_MA) ? id_cast<Material *>(id) : nullptr;
+  }
+  return nullptr;
+}
+
 /** Resolve the dragged #Tex: a local #WM_DRAG_ID, an imported #WM_DRAG_ASSET, or the first
  * texture of a multi-select #WM_DRAG_ASSET_LIST. Null when the drag carries no texture. */
 static Tex *resolve_drag_texture(bContext *C, const wmDrag &drag)
@@ -842,6 +854,10 @@ class MaterialSlotDropTarget : public ui::DropTargetInterface {
       }
       return fmt::format(fmt::runtime(TIP_("Assign material \"{}\" to shape")), material_name);
     }
+    if (target_.owner == PaintSlotOwner::CurvePatchSlot) {
+      return fmt::format(fmt::runtime(TIP_("Use material \"{}\" as the slot's source")),
+                         material_name);
+    }
     return fmt::format(fmt::runtime(TIP_("Assign material \"{}\" to brush")), material_name);
   }
 
@@ -849,7 +865,11 @@ class MaterialSlotDropTarget : public ui::DropTargetInterface {
   {
     const wmDrag &drag = drag_info.drag_data;
 
-    Material *ma = resolve_drag_material(C, drag);
+    /* A Curve Patch slot keeps the material the Asset Browser's import method hands out (linked
+     * or embedded in the brush), where the other owners always append. */
+    Material *ma = target_.owner == PaintSlotOwner::CurvePatchSlot ?
+                       resolve_drag_material_for_slot(C, drag) :
+                       resolve_drag_material(C, drag);
     if (!ma) {
       /* Nothing usable came out of the drag (a failed asset import, most likely). Reporting is up
        * to whatever failed; extending the drop target with its own error would only add a second,
@@ -869,6 +889,23 @@ class MaterialSlotDropTarget : public ui::DropTargetInterface {
       PointerRNA ptr = target_.ptr;
       return paint_slot_assign_id_to_prop(
           *C, ptr, target_.prop, ma->id, "Assign Material to Shape");
+    }
+
+    if (target_.owner == PaintSlotOwner::CurvePatchSlot) {
+      const Brush *brush = target_.ptr.owner_id && GS(target_.ptr.owner_id->name) == ID_BR ?
+                               id_cast<const Brush *>(target_.ptr.owner_id) :
+                               nullptr;
+      /* A linked brush can only reference linked data. */
+      if (brush == nullptr || (ID_IS_LINKED(&brush->id) && !ID_IS_LINKED(&ma->id))) {
+        BKE_report(CTX_wm_reports(C), RPT_ERROR, "A linked brush cannot use a local material");
+        return false;
+      }
+      PointerRNA ptr = target_.ptr;
+      /* The kind first: the material property's update starts the bake only for the Material
+       * kind. */
+      RNA_enum_set(&ptr, "kind", BRUSH_CURVE_PATCH_SLOT_MATERIAL);
+      return paint_slot_assign_id_to_prop(
+          *C, ptr, target_.prop, ma->id, "Assign Material to Curve Patch Slot");
     }
 
     return paint_slot_assign_material_to_brush(*C, *ma);
@@ -995,6 +1032,178 @@ Tex *ED_paint_texture_property_assign_image(bContext *C,
   return tex;
 }
 
+/** All image file paths carried by a path drag, absolute and normalized. */
+static Vector<std::string> drag_image_paths(const wmDrag &drag)
+{
+  Vector<std::string> image_paths;
+  if (drag.type != WM_DRAG_PATH) {
+    return image_paths;
+  }
+  for (const std::string &path : WM_drag_get_paths(&drag)) {
+    if (!BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+      continue;
+    }
+    char abs[FILE_MAX];
+    BLI_strncpy(abs, path.c_str(), sizeof(abs));
+    BLI_path_abs(abs, BKE_main_blendfile_path_from_global());
+    BLI_path_normalize(abs);
+    image_paths.append(abs);
+  }
+  return image_paths;
+}
+
+/**
+ * The Asset Browser starts a #WM_DRAG_ASSET for the item under the cursor together with a
+ * #WM_DRAG_ASSET_LIST carrying the whole selection, and #drop_target_apply_drop() applies
+ * whichever of the two comes first. A paint channel takes the whole selection, so the
+ * single-asset drag defers to its list sibling.
+ */
+static const wmDrag &paint_channel_effective_drag(const wmDrag &drag)
+{
+  return drag_prefer_asset_list_sibling(
+      drag, [](const wmDrag &asset_list_drag) {
+        return drag_asset_list_first_of(asset_list_drag, {ID_IM}) != nullptr;
+      });
+}
+
+/** Number of image assets carried by an asset/asset-list drag, without resolving them. */
+static int drag_asset_image_count(const wmDrag &drag)
+{
+  if (drag.type == WM_DRAG_ASSET) {
+    return WM_drag_get_asset_data(&drag, ID_IM) ? 1 : 0;
+  }
+  if (drag.type == WM_DRAG_ASSET_LIST) {
+    return drag_asset_list_count_of(drag, ID_IM);
+  }
+  return 0;
+}
+
+static void add_local_image_item(PointerRNA &props, const ID &image_id)
+{
+  PointerRNA itemptr{};
+  RNA_collection_add(&props, "images", &itemptr);
+  RNA_string_set(&itemptr, "name", image_id.name + 2);
+}
+
+/**
+ * Add an "images" entry for an image asset without importing it: the operator only brings it
+ * into the file once the user confirms, and not at all for rows the user unticks.
+ */
+static void add_asset_image_item(PointerRNA &props, const asset_system::AssetRepresentation &asset)
+{
+  if (const ID *local_id = asset.local_id()) {
+    add_local_image_item(props, *local_id);
+    return;
+  }
+  PointerRNA itemptr{};
+  RNA_collection_add(&props, "images", &itemptr);
+  if (asset.full_library_path().empty()) {
+    /* An on-disk image asset is just its file, see #ed::asset::resolve_image_from_asset(). */
+    RNA_string_set(&itemptr, "filepath", asset.full_path().c_str());
+    return;
+  }
+  ed::asset::operator_asset_reference_props_set(asset, itemptr);
+  RNA_string_set(&itemptr, "name", asset.get_name().c_str());
+}
+
+static void add_drag_asset_image_items(PointerRNA &props, const wmDrag &drag)
+{
+  if (drag.type == WM_DRAG_ASSET) {
+    if (const wmDragAsset *asset_drag = WM_drag_get_asset_data(&drag, ID_IM)) {
+      add_asset_image_item(props, *asset_drag->asset);
+    }
+    return;
+  }
+  if (drag.type != WM_DRAG_ASSET_LIST) {
+    return;
+  }
+  const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
+  if (!asset_drags) {
+    return;
+  }
+  for (const wmDragAssetListItem &item : *asset_drags) {
+    if (item.is_external) {
+      const asset_system::AssetRepresentation &asset = *item.asset_data.external_info->asset;
+      if (asset.get_id_type() == ID_IM) {
+        add_asset_image_item(props, asset);
+      }
+    }
+    else if (item.asset_data.local_id && GS(item.asset_data.local_id->name) == ID_IM) {
+      add_local_image_item(props, *item.asset_data.local_id);
+    }
+  }
+}
+
+static int paint_channel_drag_image_count(const wmDrag &drag)
+{
+  const wmDrag &effective_drag = paint_channel_effective_drag(drag);
+  return int(drag_image_paths(effective_drag).size()) + drag_asset_image_count(effective_drag);
+}
+
+/**
+ * Hand a multi-image drop to #PAINT_OT_material_paint_channels_assign_images: the operator's
+ * dialog prefills a channel for every file through the Preferences name-matching map types and
+ * assigns them on confirm, so one drop fills a whole PBR set (Base Color, Normal, ...).
+ *
+ * The one place that turns a drag into the operator's call; what the images are assigned to is
+ * the \a set_target callback's business (the operator's brush / layer / slot properties), so a
+ * new kind of drop target adds a callback, not another copy of this routing.
+ */
+static bool drag_to_assign_images_operator(bContext *C,
+                                           const ui::DragInfo &drag_info,
+                                           const FunctionRef<void(PointerRNA &props)> set_target)
+{
+  const wmDrag &drag = paint_channel_effective_drag(drag_info.drag_data);
+
+  PointerRNA props = WM_operator_properties_create(
+      "PAINT_OT_material_paint_channels_assign_images");
+  for (const std::string &path : drag_image_paths(drag)) {
+    PointerRNA itemptr{};
+    RNA_collection_add(&props, "images", &itemptr);
+    RNA_string_set(&itemptr, "filepath", path.c_str());
+  }
+  add_drag_asset_image_items(props, drag);
+  RNA_boolean_set(&props, "use_name_matching", true);
+  set_target(props);
+
+  const wmOperatorStatus status = WM_operator_name_call(
+      C,
+      "PAINT_OT_material_paint_channels_assign_images",
+      wm::OpCallContext::InvokeDefault,
+      &props,
+      &drag_info.event);
+  WM_operator_properties_free(&props);
+  /* The confirm dialog keeps the operator running modal until the user accepts it. */
+  return (status & (OPERATOR_FINISHED | OPERATOR_RUNNING_MODAL | OPERATOR_INTERFACE)) != 0;
+}
+
+/** Number of images (files plus image assets) a drag carries, for the Curve Patch targets that
+ * route a multi-image drop through the assign operator. */
+static int curve_patch_drag_image_count(const wmDrag &drag)
+{
+  const wmDrag &effective_drag = paint_channel_effective_drag(drag);
+  return int(drag_image_paths(effective_drag).size()) + drag_asset_image_count(effective_drag);
+}
+
+/** A multi-image drop on a Curve Patch PBR slot: the images go to that slot's channels. A
+ * negative \a slot_index adds a new PBR slot for them when the dialog is confirmed. */
+static bool curve_patch_drop_to_assign_operator(bContext *C,
+                                                const ui::DragInfo &drag_info,
+                                                const Brush &brush,
+                                                const int slot_index)
+{
+  return drag_to_assign_images_operator(C, drag_info, [&](PointerRNA &props) {
+    /* The slot belongs to this brush, which is not necessarily the active one. */
+    RNA_int_set(&props, "brush_session_uid", int(brush.id.session_uid));
+    if (slot_index >= 0) {
+      RNA_int_set(&props, "curve_patch_slot_index", slot_index);
+    }
+    else {
+      RNA_boolean_set(&props, "curve_patch_new_slot", true);
+    }
+  });
+}
+
 /**
  * Drop target for the labelled Image #template_ID_browser control. The button's context identifies
  * the target property, so the same target works for every specialized image browser template.
@@ -1021,7 +1230,8 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
   {
     return !wrap_in_texture_ && target_ptr_.type &&
            (RNA_struct_is_a(target_ptr_.type, RNA_BrushMaterialPaintChannel) ||
-            RNA_struct_is_a(target_ptr_.type, RNA_MaterialPaintLayerChannel));
+            RNA_struct_is_a(target_ptr_.type, RNA_MaterialPaintLayerChannel) ||
+            RNA_struct_is_a(target_ptr_.type, RNA_BrushCurvePatchSlotChannel));
   }
 
   /** The stack row that holds the dropped-on #MaterialPaintLayerChannel, with its marker as a
@@ -1070,153 +1280,34 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
     return layer_target_get(material_name, layer_marker);
   }
 
-  /** All image file paths carried by a path drag, absolute and normalized. */
-  static Vector<std::string> drag_image_paths(const wmDrag &drag)
-  {
-    Vector<std::string> image_paths;
-    if (drag.type != WM_DRAG_PATH) {
-      return image_paths;
-    }
-    for (const std::string &path : WM_drag_get_paths(&drag)) {
-      if (!BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
-        continue;
-      }
-      char abs[FILE_MAX];
-      BLI_strncpy(abs, path.c_str(), sizeof(abs));
-      BLI_path_abs(abs, BKE_main_blendfile_path_from_global());
-      BLI_path_normalize(abs);
-      image_paths.append(abs);
-    }
-    return image_paths;
-  }
 
-  /**
-   * The Asset Browser starts a #WM_DRAG_ASSET for the item under the cursor together with a
-   * #WM_DRAG_ASSET_LIST carrying the whole selection, and #drop_target_apply_drop() applies
-   * whichever of the two comes first. A paint channel takes the whole selection, so the
-   * single-asset drag defers to its list sibling.
-   */
-  static const wmDrag &paint_channel_effective_drag(const wmDrag &drag)
-  {
-    return drag_prefer_asset_list_sibling(
-        drag, [](const wmDrag &asset_list_drag) {
-          return drag_asset_list_first_of(asset_list_drag, {ID_IM}) != nullptr;
-        });
-  }
-
-  /** Number of image assets carried by an asset/asset-list drag, without resolving them. */
-  static int drag_asset_image_count(const wmDrag &drag)
-  {
-    if (drag.type == WM_DRAG_ASSET) {
-      return WM_drag_get_asset_data(&drag, ID_IM) ? 1 : 0;
-    }
-    if (drag.type == WM_DRAG_ASSET_LIST) {
-      return drag_asset_list_count_of(drag, ID_IM);
-    }
-    return 0;
-  }
-
-  static void add_local_image_item(PointerRNA &props, const ID &image_id)
-  {
-    PointerRNA itemptr{};
-    RNA_collection_add(&props, "images", &itemptr);
-    RNA_string_set(&itemptr, "name", image_id.name + 2);
-  }
-
-  /**
-   * Add an "images" entry for an image asset without importing it: the operator only brings it
-   * into the file once the user confirms, and not at all for rows the user unticks.
-   */
-  static void add_asset_image_item(PointerRNA &props, const asset_system::AssetRepresentation &asset)
-  {
-    if (const ID *local_id = asset.local_id()) {
-      add_local_image_item(props, *local_id);
-      return;
-    }
-    PointerRNA itemptr{};
-    RNA_collection_add(&props, "images", &itemptr);
-    if (asset.full_library_path().empty()) {
-      /* An on-disk image asset is just its file, see #ed::asset::resolve_image_from_asset(). */
-      RNA_string_set(&itemptr, "filepath", asset.full_path().c_str());
-      return;
-    }
-    ed::asset::operator_asset_reference_props_set(asset, itemptr);
-    RNA_string_set(&itemptr, "name", asset.get_name().c_str());
-  }
-
-  static void add_drag_asset_image_items(PointerRNA &props, const wmDrag &drag)
-  {
-    if (drag.type == WM_DRAG_ASSET) {
-      if (const wmDragAsset *asset_drag = WM_drag_get_asset_data(&drag, ID_IM)) {
-        add_asset_image_item(props, *asset_drag->asset);
-      }
-      return;
-    }
-    if (drag.type != WM_DRAG_ASSET_LIST) {
-      return;
-    }
-    const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
-    if (!asset_drags) {
-      return;
-    }
-    for (const wmDragAssetListItem &item : *asset_drags) {
-      if (item.is_external) {
-        const asset_system::AssetRepresentation &asset = *item.asset_data.external_info->asset;
-        if (asset.get_id_type() == ID_IM) {
-          add_asset_image_item(props, asset);
-        }
-      }
-      else if (item.asset_data.local_id && GS(item.asset_data.local_id->name) == ID_IM) {
-        add_local_image_item(props, *item.asset_data.local_id);
-      }
-    }
-  }
-
-  int paint_channel_drag_image_count(const wmDrag &drag) const
-  {
-    const wmDrag &effective_drag = paint_channel_effective_drag(drag);
-    return int(drag_image_paths(effective_drag).size()) + drag_asset_image_count(effective_drag);
-  }
-
-  /**
-   * Hand a multi-image drop on a PBR paint channel to
-   * #PAINT_OT_material_paint_channels_assign_images: the operator's dialog prefills a channel for
-   * every file through the Preferences name-matching map types and assigns them on confirm, so one
-   * drop fills the whole PBR set (Base Color, Normal, ...).
-   */
+  /** A multi-image drop on a PBR paint channel: the images go to the target's brush channels, or
+   * to the Layer Material slot's stack row. */
   bool drop_to_channel_assign_operator(bContext *C, const ui::DragInfo &drag_info) const
   {
-    const wmDrag &drag = paint_channel_effective_drag(drag_info.drag_data);
-
-    PointerRNA props = WM_operator_properties_create(
-        "PAINT_OT_material_paint_channels_assign_images");
-    for (const std::string &path : drag_image_paths(drag)) {
-      PointerRNA itemptr{};
-      RNA_collection_add(&props, "images", &itemptr);
-      RNA_string_set(&itemptr, "filepath", path.c_str());
-    }
-    add_drag_asset_image_items(props, drag);
-    RNA_boolean_set(&props, "use_name_matching", true);
-    /* The channel belongs to this brush, which is not necessarily the active one. */
-    if (target_ptr_.owner_id && GS(target_ptr_.owner_id->name) == ID_BR) {
-      RNA_int_set(&props, "brush_session_uid", int(target_ptr_.owner_id->session_uid));
-    }
-    /* A Layer Material slot names its stack row, so the images go to that row's channels. */
-    std::string material_name, layer_marker;
-    if (layer_target_get(material_name, layer_marker)) {
-      RNA_string_set(&props, "material_name", material_name.c_str());
-      RNA_string_set(&props, "layer_marker", layer_marker.c_str());
-    }
-
-    const wmOperatorStatus status = WM_operator_name_call(
-        C,
-        "PAINT_OT_material_paint_channels_assign_images",
-        wm::OpCallContext::InvokeDefault,
-        &props,
-        &drag_info.event);
-    WM_operator_properties_free(&props);
-    /* The confirm dialog keeps the operator running modal until the user accepts it. */
-    return (status & (OPERATOR_FINISHED | OPERATOR_RUNNING_MODAL | OPERATOR_INTERFACE)) != 0;
+    return drag_to_assign_images_operator(C, drag_info, [&](PointerRNA &props) {
+      /* The channel belongs to this brush, which is not necessarily the active one. */
+      if (target_ptr_.owner_id && GS(target_ptr_.owner_id->name) == ID_BR) {
+        RNA_int_set(&props, "brush_session_uid", int(target_ptr_.owner_id->session_uid));
+      }
+      /* A Curve Patch PBR slot's channel: the images go to that slot's channels. */
+      if (target_ptr_.type && RNA_struct_is_a(target_ptr_.type, RNA_BrushCurvePatchSlotChannel) &&
+          target_ptr_.owner_id && GS(target_ptr_.owner_id->name) == ID_BR)
+      {
+        const Brush &brush = *id_cast<const Brush *>(target_ptr_.owner_id);
+        const int slot_index = BKE_brush_curve_patch_slot_index_from_channel(
+            brush, *static_cast<const BrushCurvePatchSlotChannel *>(target_ptr_.data));
+        if (slot_index != -1) {
+          RNA_int_set(&props, "curve_patch_slot_index", slot_index);
+        }
+      }
+      /* A Layer Material slot names its stack row, so the images go to that row's channels. */
+      std::string material_name, layer_marker;
+      if (layer_target_get(material_name, layer_marker)) {
+        RNA_string_set(&props, "material_name", material_name.c_str());
+        RNA_string_set(&props, "layer_marker", layer_marker.c_str());
+      }
+    });
   }
 
  public:
@@ -1426,6 +1517,12 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
     if (targets_paint_channel() && RNA_struct_find_property(&target_ptr, "use") != nullptr) {
       RNA_boolean_set(&target_ptr, "use", true);
     }
+    /* A Curve Patch slot channel keeps the same switch under its own name. */
+    if (targets_paint_channel() && RNA_struct_find_property(&target_ptr, "enabled") != nullptr &&
+        RNA_struct_is_a(target_ptr.type, RNA_BrushCurvePatchSlotChannel))
+    {
+      RNA_boolean_set(&target_ptr, "enabled", true);
+    }
     RNA_property_update(C, &target_ptr, target_prop_);
     ED_undo_memfile_push(C, "Assign Image");
     return true;
@@ -1604,6 +1701,58 @@ static Vector<DragResolvedImage> drag_resolve_images(bContext *C, const wmDrag &
 }
 
 /**
+ * Resolve \a drag to the one image a Curve Patch channel stores. A dragged image-wrapping #Tex is
+ * unwrapped to its #Image first -- a channel stores an image, not a texture -- and a procedural
+ * texture has none to store. Otherwise this is the ordinary image resolution; only the first image
+ * is used because one channel holds one image.
+ */
+static std::optional<DragResolvedImage> curve_patch_resolve_channel_drag_image(bContext *C,
+                                                                               const wmDrag &drag)
+{
+  if (Tex *tex = resolve_drag_texture(C, drag)) {
+    if (tex->type == TEX_IMAGE && tex->ima != nullptr) {
+      return DragResolvedImage{tex->ima, false};
+    }
+    return std::nullopt;
+  }
+  const Vector<DragResolvedImage> images = drag_resolve_images(C, drag);
+  if (images.is_empty()) {
+    return std::nullopt;
+  }
+  return images[0];
+}
+
+/**
+ * Assign \a image to \a channel_index of \a slot through #curve_patch_slot_channel_assign: the
+ * setter keeps the list's user bookkeeping and applies the Non-Color default a scalar channel's
+ * stamp image needs, and the channel is switched on so the drop is never an invisible entry. When
+ * \a release_extra_user is set, the drag's own load reference (a fresh file drop) is released
+ * here, after the setter took its reference.
+ */
+static bool curve_patch_assign_channel_image(bContext *C,
+                                             Brush &brush,
+                                             BrushCurvePatchTextureSlot &slot,
+                                             const int channel_index,
+                                             Image &image,
+                                             const bool release_extra_user)
+{
+  const bool assigned = ed::sculpt_paint::curve_patch_slot_channel_assign(
+      brush, slot, channel_index, image, true);
+  if (release_extra_user) {
+    id_us_min(&image.id);
+  }
+  if (!assigned) {
+    return false;
+  }
+  PointerRNA channel_ptr = RNA_pointer_create_id_subdata(
+      brush.id, RNA_BrushCurvePatchSlotChannel, &slot.channels[channel_index]);
+  PropertyRNA *prop = RNA_struct_find_property(&channel_ptr, "image");
+  RNA_property_update(C, &channel_ptr, prop);
+  ED_undo_memfile_push(C, "Assign Curve Patch Channel Image");
+  return true;
+}
+
+/**
  * Drop target for the Curve Patch STAMPS texture list. A multi-select Asset Browser drag or a
  * multi-file drop appends one slot per image (or takes the dragged texture directly); a drop on a
  * single row replaces that slot's texture.
@@ -1616,7 +1765,7 @@ class CurvePatchTextureListDropTarget : public ui::DropTargetInterface {
    * #WM_DRAG_ASSET_LIST carrying the whole selection, and #drop_target_apply_drop() applies
    * whichever of the two comes first. This target takes the whole selection, so the single-asset
    * drag defers to its list sibling when one is present (same as
-   * #ImageIDBrowserDropTarget::paint_channel_effective_drag).
+   * #paint_channel_effective_drag).
    */
   static const wmDrag &effective_drag(const wmDrag &drag)
   {
@@ -1687,6 +1836,15 @@ class CurvePatchTextureListDropTarget : public ui::DropTargetInterface {
     if (WM_drag_is_ID_type(&drag, ID_IM)) {
       return true;
     }
+    if (WM_drag_is_ID_type(&drag, ID_MA)) {
+      /* Same rule as a texture: a linked brush cannot reference a local material. */
+      const ID *material_id = WM_drag_get_local_ID(const_cast<wmDrag *>(&drag), ID_MA);
+      if (material_id && ID_IS_LINKED(&target_.brush->id) && !ID_IS_LINKED(material_id)) {
+        *r_disabled_hint = TIP_("A linked brush cannot use a local material");
+        return false;
+      }
+      return true;
+    }
     if (WM_drag_is_ID_type(&drag, ID_TE)) {
       /* A pre-existing local texture can never be referenced by a linked brush; report that
        * instead of a silent no-op in #on_drop. */
@@ -1716,7 +1874,14 @@ class CurvePatchTextureListDropTarget : public ui::DropTargetInterface {
     const wmDrag &drag = effective_drag(drag_info.drag_data);
 
     /* The dragged item's name is already drawn as the drag's own label, so it is not repeated. */
+    if (WM_drag_is_ID_type(&drag, ID_MA)) {
+      return target_.replace_slot ? TIP_("Use this material as the slot's source") :
+                                    TIP_("Add a slot using this material");
+    }
     if (target_.replace_slot) {
+      if (target_.replace_slot->kind == BRUSH_CURVE_PATCH_SLOT_PBR) {
+        return TIP_("Assign to the set's next empty channel");
+      }
       return TIP_("Replace this slot's texture");
     }
 
@@ -1735,6 +1900,67 @@ class CurvePatchTextureListDropTarget : public ui::DropTargetInterface {
       return false;
     }
     Main *bmain = CTX_data_main(C);
+
+    /* A dragged material becomes the live source of a MATERIAL slot: the row it landed on is
+     * switched to that kind, or a new slot is added. Assigned through RNA so the setters' user
+     * bookkeeping and the bake start in the update callback apply. */
+    if (WM_drag_is_ID_type(&drag_info.drag_data, ID_MA)) {
+      Material *material = resolve_drag_material_for_slot(C, drag_info.drag_data);
+      if (material == nullptr ||
+          (ID_IS_LINKED(&brush->id) && !ID_IS_LINKED(&material->id)))
+      {
+        return false;
+      }
+      BrushCurvePatchTextureSlot *slot = target_.replace_slot ?
+                                             target_.replace_slot :
+                                             BKE_brush_curve_patch_texture_slot_add(*brush);
+      PointerRNA slot_ptr = RNA_pointer_create_id_subdata(
+          brush->id, RNA_BrushCurvePatchTextureSlot, slot);
+      RNA_enum_set(&slot_ptr, "kind", BRUSH_CURVE_PATCH_SLOT_MATERIAL);
+      PropertyRNA *prop = RNA_struct_find_property(&slot_ptr, "material");
+      RNA_property_pointer_set(&slot_ptr, prop, RNA_id_pointer_create(&material->id), nullptr);
+      RNA_property_update(C, &slot_ptr, prop);
+      ED_undo_memfile_push(C, "Assign Curve Patch Material");
+      return true;
+    }
+
+    /* Several images dropped on the list (anywhere but a PBR row, handled below) are a texture
+     * set: the assign operator's dialog routes them to channels by name and puts them in a new PBR
+     * slot, instead of one stamp slot per file. */
+    if (!(target_.replace_slot && target_.replace_slot->kind == BRUSH_CURVE_PATCH_SLOT_PBR) &&
+        curve_patch_drag_image_count(drag_info.drag_data) > 1 &&
+        !WM_drag_is_ID_type(&drag, ID_TE) && drag_asset_list_count_of(drag, ID_TE) == 0)
+    {
+      return curve_patch_drop_to_assign_operator(
+          C, drag_info, *brush, -1);
+    }
+
+    /* Dropping on a PBR slot's row fills the set rather than replacing its mask texture: the
+     * image lands in the first enabled channel that has no image yet, falling back to Base Color
+     * once every enabled channel is filled (the same "replace" mental model the TEXTURE kind has,
+     * pointed at the set's most prominent channel). A dragged image-wrapping texture is unwrapped
+     * exactly as it is on a single channel row. */
+    if (target_.replace_slot && target_.replace_slot->kind == BRUSH_CURVE_PATCH_SLOT_PBR) {
+      /* Several images at once are a whole set: the assign operator routes them to the slot's
+       * channels by name instead of stacking them onto "the next empty channel". */
+      if (curve_patch_drag_image_count(drag_info.drag_data) > 1) {
+        const int slot_index = BLI_findindex(&brush->curve_patch.texture_slots,
+                                             target_.replace_slot);
+        if (slot_index != -1) {
+          return curve_patch_drop_to_assign_operator(
+              C, drag_info, *brush, slot_index);
+        }
+      }
+      const std::optional<DragResolvedImage> resolved = curve_patch_resolve_channel_drag_image(
+          C, drag);
+      if (!resolved) {
+        return false;
+      }
+      BrushCurvePatchTextureSlot &slot = *target_.replace_slot;
+      const int channel_index = BKE_brush_curve_patch_slot_drop_channel(slot);
+      return curve_patch_assign_channel_image(
+          C, *brush, slot, channel_index, *resolved->image, resolved->has_extra_user);
+    }
 
     /* A dragged #Texture replaces (or fills one new slot with) itself directly. A pre-existing
      * local texture can never be referenced by a linked brush (and moving it into the library
@@ -1818,6 +2044,161 @@ std::unique_ptr<ui::DropTargetInterface> curve_patch_texture_list_drop_target_ge
     return nullptr;
   }
   return std::make_unique<CurvePatchTextureListDropTarget>(target);
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Curve Patch PBR Slot Channel Drop Target
+ * \{ */
+
+/**
+ * What one per-channel image row of a PBR-kind Curve Patch slot offers as a drop target: assign
+ * the dropped image to THAT channel. The Python UI publishes the channel element through the
+ * `curve_patch_slot_channel` layout context pointer (see
+ * `_draw_curve_patch_pbr_slot_channels`), so a drop never has to guess which channel of the set
+ * the user meant.
+ */
+struct CurvePatchSlotChannelTarget {
+  Brush *brush = nullptr;
+  BrushCurvePatchSlotChannel *channel = nullptr;
+  /** #eMaterialPaintChannel of #channel. */
+  int channel_index = -1;
+};
+
+static bool curve_patch_slot_channel_button_target(const ui::Button &but,
+                                                   CurvePatchSlotChannelTarget *r_target)
+{
+  if (const PointerRNA *channel_ptr = ui::button_context_ptr_get(
+          &but, "curve_patch_slot_channel", nullptr))
+  {
+    if (channel_ptr->type && RNA_struct_is_a(channel_ptr->type, RNA_BrushCurvePatchSlotChannel) &&
+        channel_ptr->owner_id && GS(channel_ptr->owner_id->name) == ID_BR)
+    {
+      Brush *brush = id_cast<Brush *>(channel_ptr->owner_id);
+      BrushCurvePatchSlotChannel *channel = static_cast<BrushCurvePatchSlotChannel *>(
+          channel_ptr->data);
+      /* Validate the pointer against the brush's list: a panel drawn before a slot was deleted
+       * must not become a drop target. The lookup also recovers the channel's index, without
+       * which the drop cannot name the channel it assigns to. */
+      int channel_index = -1;
+      if (BKE_brush_curve_patch_slot_from_channel(*brush, *channel, &channel_index) != nullptr) {
+        r_target->brush = brush;
+        r_target->channel = channel;
+        r_target->channel_index = channel_index;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Drop target for one channel row of a PBR slot. Images (an Asset Browser drag, a local ID, image
+ * files) assign directly; a dragged image-wrapping #Tex is unwrapped to its #Image, because a
+ * channel stores an image, not a texture -- the brush mapping stays shared with the stamps.
+ */
+class CurvePatchSlotChannelDropTarget : public ui::DropTargetInterface {
+  CurvePatchSlotChannelTarget target_;
+
+  /** The whole-selection deferral of the Asset Browser (see the list target for the full story).
+   */
+  static const wmDrag &effective_drag(const wmDrag &drag)
+  {
+    return drag_prefer_asset_list_sibling(drag, [](const wmDrag &asset_list_drag) {
+      return drag_asset_list_first_of(asset_list_drag, {ID_IM, ID_TE}) != nullptr;
+    });
+  }
+
+ public:
+  explicit CurvePatchSlotChannelDropTarget(const CurvePatchSlotChannelTarget &target)
+      : target_(target)
+  {
+  }
+
+  bool can_drop(bContext & /*C*/, const wmDrag &drag, const char **r_disabled_hint) const override
+  {
+    if (target_.brush == nullptr || !paint_slot_owner_editable(&target_.brush->id)) {
+      *r_disabled_hint = TIP_("Cannot edit linked brush data");
+      return false;
+    }
+    if (WM_drag_is_ID_type(&drag, ID_IM) || WM_drag_is_ID_type(&drag, ID_TE)) {
+      return true;
+    }
+    if (drag.type == WM_DRAG_ASSET_LIST) {
+      return drag_asset_list_first_of(drag, {ID_IM, ID_TE}) != nullptr;
+    }
+    if (drag.type == WM_DRAG_PATH) {
+      for (const std::string &path : WM_drag_get_paths(&drag)) {
+        if (BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    return false;
+  }
+
+  std::string drop_tooltip(const ui::DragInfo &drag_info) const override
+  {
+    /* The target lookup only succeeds for a channel inside this brush's list, so the index is
+     * always a valid #eMaterialPaintChannel here. */
+    const char *channel_name =
+        BKE_paint_material_channel_info(eMaterialPaintChannel(target_.channel_index)).ui_name;
+    return fmt::format(fmt::runtime(TIP_("Assign to the {} stamp image")), channel_name);
+  }
+
+  bool on_drop(bContext *C, const ui::DragInfo &drag_info) const override
+  {
+    const wmDrag &drag = effective_drag(drag_info.drag_data);
+    Brush *brush = target_.brush;
+    if (brush == nullptr || target_.channel == nullptr || !paint_slot_owner_editable(&brush->id)) {
+      return false;
+    }
+
+    /* Several images at once fill the whole set of the channel's slot, not just this channel. */
+    if (curve_patch_drag_image_count(drag_info.drag_data) > 1) {
+      const int slot_index = BKE_brush_curve_patch_slot_index_from_channel(*brush,
+                                                                           *target_.channel);
+      if (slot_index != -1) {
+        return curve_patch_drop_to_assign_operator(
+            C, drag_info, *brush, slot_index);
+      }
+    }
+
+    /* A dragged texture is unwrapped to its image when it can be: a channel stores an image, and
+     * dropping the Texture a previous drop created should still land in the channel. A procedural
+     * (or image-less) texture refuses -- there is no image to store. */
+    const std::optional<DragResolvedImage> resolved = curve_patch_resolve_channel_drag_image(C,
+                                                                                             drag);
+    if (!resolved) {
+      return false;
+    }
+    int channel_index = -1;
+    BrushCurvePatchTextureSlot *slot = BKE_brush_curve_patch_slot_from_channel(
+        *brush, *target_.channel, &channel_index);
+    if (slot == nullptr) {
+      if (resolved->has_extra_user) {
+        id_us_min(&resolved->image->id);
+      }
+      return false;
+    }
+    return curve_patch_assign_channel_image(
+        C, *brush, *slot, channel_index, *resolved->image, resolved->has_extra_user);
+  }
+};
+
+std::unique_ptr<ui::DropTargetInterface> curve_patch_slot_channel_drop_target_get(
+    bContext * /*C*/, const ARegion *region, const wmEvent *event)
+{
+  CurvePatchSlotChannelTarget target;
+  if (!find_button_at(region,
+                      event,
+                      [&](const ui::Button &but) {
+                        return curve_patch_slot_channel_button_target(but, &target);
+                      }))
+  {
+    return nullptr;
+  }
+  return std::make_unique<CurvePatchSlotChannelDropTarget>(target);
 }
 
 /** \} */

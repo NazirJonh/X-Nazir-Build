@@ -454,6 +454,47 @@ struct BrushMaterialPaint {
 /** Max number of propagation steps for automasking settings. */
 #define AUTOMASKING_BOUNDARY_EDGES_MAX_PROPAGATION_STEPS 20
 
+/** What one Curve Patch texture slot holds (#BrushCurvePatchTextureSlot::kind). */
+enum eBrushCurvePatchSlotKind : int8_t {
+  /** A single texture (#BrushCurvePatchTextureSlot::tex): the pre-PBR behavior. */
+  BRUSH_CURVE_PATCH_SLOT_TEXTURE = 0,
+  /**
+   * A PBR set: the slot declares which material paint channels it covers
+   * (#BrushCurvePatchTextureSlot::channels) and carries one image per channel. A stamp that drew
+   * this slot paints every enabled channel whose image is set, so one slot stands for a whole
+   * Base Color + Normal + Roughness ... bundle the brush stores for it.
+   */
+  BRUSH_CURVE_PATCH_SLOT_PBR = 1,
+  /**
+   * A live reference to a Material (#BrushCurvePatchTextureSlot::material): the images linked to
+   * its Principled BSDF inputs are the per-channel images, resolved on every re-stamp, so edits to
+   * the material reach the stamps without copying anything into the slot.
+   */
+  BRUSH_CURVE_PATCH_SLOT_MATERIAL = 2,
+};
+
+/** One channel of a PBR-kind Curve Patch texture slot (#BrushCurvePatchTextureSlot::channels),
+ * indexed by #eMaterialPaintChannel. Modelled on #BrushMaterialPaintChannel's own DNA shape so
+ * the RNA collection, the UI drop rows and the sampling plumbing all read the same way.
+ *
+ * Must stay trivially copyable: the slot is duplicated by `BLI_duplicatelist()`, which copies the
+ * node's bytes and runs no constructor. */
+struct BrushCurvePatchSlotChannel {
+  /**
+   * Whether the PBR slot DECLARES this channel. Declaring is INTENT, not data: an enabled channel
+   * without an #image is skipped by the stamps (and the UI warns), so a half-filled set never
+   * paints a channel from the brush's own sources by surprise.
+   */
+  char enabled = 0;
+  /** Keeps #image pointer-aligned; makesdna inserts no padding of its own. */
+  char _pad[7] = {};
+  /**
+   * The channel's stamp image. Null until the user drops one. The slot list holds a user on every
+   * non-null image, same as it does on the TEXTURE kind's `tex`.
+   */
+  struct Image *image = nullptr;
+};
+
 /** One entry in a brush's Curve Patch texture list (#BrushCurvePatchSettings::texture_slots), used
  * by the Curve Patch STAMPS mode when its texture source is #BRUSH_CURVE_PATCH_TEX_MULTI.
  *
@@ -463,14 +504,31 @@ struct BrushMaterialPaint {
  * leave that member's bytes aliased between the two brushes. */
 struct BrushCurvePatchTextureSlot {
   struct BrushCurvePatchTextureSlot *next = nullptr, *prev = nullptr;
-  /** Sampled through a copy of #Brush::mtex with only this `tex` swapped in, so every mapping
-   * setting stays shared with the brush. A null `tex` makes the stamp that drew this slot skip
-   * itself entirely -- unlike the brush's own null texture, which sculpts flat. */
+  /** (TEXTURE kind) Sampled through a copy of #Brush::mtex with only this `tex` swapped in, so
+   * every mapping setting stays shared with the brush. A null `tex` makes the stamp that drew this
+   * slot skip itself entirely -- unlike the brush's own null texture, which sculpts flat. A PBR
+   * slot may still carry a `tex`: it then serves as the stamp's coverage mask (a PBR set without
+   * one falls back to its Base Color image's alpha, when Base Color is enabled and set). */
   struct Tex *tex = nullptr;
   /** Relative probability weight in the per-stamp draw. Zero disables the slot without deleting
    * it; a list whose weights all sum to zero falls back to the brush's own texture. */
   float weight = 1.0f;
-  char _pad[4] = {};
+  /** #eBrushCurvePatchSlotKind. */
+  char kind = 0;
+  char _pad[1] = {};
+  /** (MATERIAL kind) Resolution of the cached bake of #material, as for
+   * #BrushMaterialPaint::source_bake_size. Zero (a file written before the field existed) reads as
+   * the default 2048. Also keeps #material pointer-aligned; makesdna inserts no padding. */
+  int16_t bake_size = 2048;
+  /** (MATERIAL kind) The material whose Principled image inputs feed the stamps. The list holds a
+   * user on it, as it does on `tex`. Kept when the kind flips away, so a flip back restores it. */
+  struct Material *material = nullptr;
+  /**
+   * (PBR kind) The slot's channels, indexed by #eMaterialPaintChannel (array size 18 =
+   * #PAINT_MATERIAL_CHANNEL_NUM, spelled as a literal per the DNA convention -- see
+   * #BrushMaterialPaint.channels). Unused for the TEXTURE kind, whose entries stay disabled.
+   */
+  struct BrushCurvePatchSlotChannel channels[/*PAINT_MATERIAL_CHANNEL_NUM*/ 18] = {};
 };
 
 /**

@@ -11,6 +11,7 @@
 #include <cfloat>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -2059,6 +2060,201 @@ static bool material_paint_channels_assign_images_has_new_imports(wmOperator *op
   return has_new_imports;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Assign Images Targets
+ *
+ * What the Assign Images operator writes to. The operator itself only routes files to channels
+ * (name matching, importing, asset marking); where a channel's image ends up is the target's
+ * business, so a new kind of destination is one more subclass picked in
+ * #material_paint_channels_assign_images_target_get, with neither the matching nor the dialog
+ * touched. Targets are created per execution and hold no ownership of what they edit.
+ * \{ */
+
+class ChannelImageAssignTarget {
+ public:
+  virtual ~ChannelImageAssignTarget() = default;
+
+  /** Put \a image on \a channel. False when the destination refuses it (the caller reports and
+   * counts the image as skipped). */
+  virtual bool assign(eMaterialPaintChannel channel, Image &image) = 0;
+
+  /** What a refused assignment names ("this layer channel"). */
+  virtual const char *channel_label() const = 0;
+
+  /** Tag and notify after at least one assignment succeeded. */
+  virtual void changed(bContext &C) = 0;
+};
+
+/** A fill layer's channel map of a layered material. */
+class LayerChannelAssignTarget final : public ChannelImageAssignTarget {
+  Material &material_;
+  MaterialPaintLayer &layer_;
+
+ public:
+  LayerChannelAssignTarget(Material &material, MaterialPaintLayer &layer)
+      : material_(material), layer_(layer)
+  {
+  }
+
+  bool assign(const eMaterialPaintChannel channel, Image &image) override
+  {
+    return material_paint_channels_assign_images_layer_assign(material_, layer_, channel, image);
+  }
+
+  const char *channel_label() const override
+  {
+    return "this layer channel";
+  }
+
+  void changed(bContext & /*C*/) override
+  {
+    DEG_id_tag_update(&material_.id, ID_RECALC_SHADING);
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &material_);
+  }
+};
+
+/** The PBR Paint channels of a brush. */
+class BrushChannelAssignTarget final : public ChannelImageAssignTarget {
+  Brush &brush_;
+
+ public:
+  explicit BrushChannelAssignTarget(Brush &brush) : brush_(brush)
+  {
+  }
+
+  bool assign(const eMaterialPaintChannel channel, Image &image) override
+  {
+    BrushMaterialPaintChannel *channel_data = &brush_.material_paint->channels[channel];
+    PointerRNA channel_ptr = RNA_pointer_create_discrete(
+        &brush_.id, RNA_BrushMaterialPaintChannel, channel_data);
+    RNA_pointer_set(&channel_ptr, "source_image", RNA_id_pointer_create(&image.id));
+    if (RNA_pointer_get(&channel_ptr, "source_image").data != &image.id) {
+      return false;
+    }
+    /* A texture dropped on a channel means that channel is used. Leaving it disabled would make
+     * the assignment invisible: the stroke writes no channel and the brush cursor has nothing to
+     * preview. */
+    RNA_boolean_set(&channel_ptr, "use", true);
+    return true;
+  }
+
+  const char *channel_label() const override
+  {
+    return "this material paint channel";
+  }
+
+  void changed(bContext &C) override
+  {
+    BKE_brush_tag_unsaved_changes(&brush_);
+    WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, &brush_);
+  }
+};
+
+namespace ed::sculpt_paint {
+
+bool curve_patch_slot_channel_assign(Brush &brush,
+                                     BrushCurvePatchTextureSlot &slot,
+                                     const int channel_index,
+                                     Image &image,
+                                     const bool enable)
+{
+  if (channel_index < 0 || channel_index >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+  /* Through the channel's RNA `image`: the setter keeps the list's user bookkeeping and applies
+   * the Non-Color default a scalar channel needs. */
+  PointerRNA channel_ptr = RNA_pointer_create_id_subdata(
+      brush.id, RNA_BrushCurvePatchSlotChannel, &slot.channels[channel_index]);
+  RNA_pointer_set(&channel_ptr, "image", RNA_id_pointer_create(&image.id));
+  if (BKE_brush_curve_patch_slot_image_get(slot, channel_index) != &image) {
+    return false;
+  }
+  if (enable) {
+    BKE_brush_curve_patch_slot_channel_enable(slot, channel_index, true);
+  }
+  return true;
+}
+
+}  // namespace ed::sculpt_paint
+
+/** The channels of one Curve Patch PBR slot of a brush. */
+class CurvePatchSlotAssignTarget final : public ChannelImageAssignTarget {
+  Brush &brush_;
+  BrushCurvePatchTextureSlot &slot_;
+
+ public:
+  CurvePatchSlotAssignTarget(Brush &brush, BrushCurvePatchTextureSlot &slot)
+      : brush_(brush), slot_(slot)
+  {
+  }
+
+  bool assign(const eMaterialPaintChannel channel, Image &image) override
+  {
+    /* The channel is switched on, as for the brush channels, so the assignment is not invisible. */
+    return ed::sculpt_paint::curve_patch_slot_channel_assign(brush_, slot_, channel, image, true);
+  }
+
+  const char *channel_label() const override
+  {
+    return "this Curve Patch slot channel";
+  }
+
+  void changed(bContext &C) override
+  {
+    BKE_brush_tag_unsaved_changes(&brush_);
+    WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, &brush_);
+  }
+};
+
+/**
+ * The target the operator's properties address, or null after reporting why there is none:
+ * a layer (`material_name` + `layer_marker`), a Curve Patch PBR slot (`curve_patch_slot_index`) or
+ * the brush's own channels.
+ */
+static std::unique_ptr<ChannelImageAssignTarget> material_paint_channels_assign_images_target_get(
+    bContext *C, wmOperator *op)
+{
+  if (material_paint_channels_assign_images_targets_layer(op)) {
+    Material *material = nullptr;
+    MaterialPaintLayer *layer = material_paint_channels_assign_images_layer_get(C, op, material);
+    if (layer == nullptr) {
+      BKE_report(op->reports, RPT_ERROR, "The target paint layer no longer exists");
+      return nullptr;
+    }
+    return std::make_unique<LayerChannelAssignTarget>(*material, *layer);
+  }
+
+  Brush *brush = material_paint_channels_assign_images_brush_get(C, op);
+  if (brush != nullptr && RNA_boolean_get(op->ptr, "curve_patch_new_slot")) {
+    /* Created here, on confirm, so cancelling the dialog leaves the list untouched. A new slot is
+     * set up directly: nothing references it yet, so no setter bookkeeping is skipped. */
+    if (!ID_IS_EDITABLE(&brush->id) || ID_IS_OVERRIDE_LIBRARY(&brush->id)) {
+      BKE_report(op->reports, RPT_ERROR, "Cannot edit linked brush data");
+      return nullptr;
+    }
+    BrushCurvePatchTextureSlot *slot = BKE_brush_curve_patch_texture_slot_add(*brush);
+    slot->kind = BRUSH_CURVE_PATCH_SLOT_PBR;
+    return std::make_unique<CurvePatchSlotAssignTarget>(*brush, *slot);
+  }
+  const int slot_index = RNA_int_get(op->ptr, "curve_patch_slot_index");
+  if (brush != nullptr && slot_index >= 0) {
+    BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(
+        BLI_findlink(&brush->curve_patch.texture_slots, slot_index));
+    if (slot == nullptr || slot->kind != BRUSH_CURVE_PATCH_SLOT_PBR) {
+      BKE_report(op->reports, RPT_ERROR, "The target Curve Patch slot is no longer a PBR set");
+      return nullptr;
+    }
+    return std::make_unique<CurvePatchSlotAssignTarget>(*brush, *slot);
+  }
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No material paint brush to assign the images to");
+    return nullptr;
+  }
+  return std::make_unique<BrushChannelAssignTarget>(*brush);
+}
+
+/** \} */
+
 static wmOperatorStatus material_paint_channels_assign_images_exec(bContext *C, wmOperator *op)
 {
   material_paint_channels_assign_images_from_directory(op);
@@ -2067,22 +2263,10 @@ static wmOperatorStatus material_paint_channels_assign_images_exec(bContext *C, 
     return OPERATOR_CANCELLED;
   }
 
-  Material *material = nullptr;
-  MaterialPaintLayer *layer = nullptr;
-  Brush *brush = nullptr;
-  if (material_paint_channels_assign_images_targets_layer(op)) {
-    layer = material_paint_channels_assign_images_layer_get(C, op, material);
-    if (layer == nullptr) {
-      BKE_report(op->reports, RPT_ERROR, "The target paint layer no longer exists");
-      return OPERATOR_CANCELLED;
-    }
-  }
-  else {
-    brush = material_paint_channels_assign_images_brush_get(C, op);
-    if (brush == nullptr || brush->material_paint == nullptr) {
-      BKE_report(op->reports, RPT_ERROR, "No material paint brush to assign the images to");
-      return OPERATOR_CANCELLED;
-    }
+  const std::unique_ptr<ChannelImageAssignTarget> target =
+      material_paint_channels_assign_images_target_get(C, op);
+  if (!target) {
+    return OPERATOR_CANCELLED;
   }
 
   /* The dialog already applied the matching, and the user may have cleared channels to "None"
@@ -2134,36 +2318,15 @@ static wmOperatorStatus material_paint_channels_assign_images_exec(bContext *C, 
       continue;
     }
 
-    if (layer != nullptr) {
-      if (!material_paint_channels_assign_images_layer_assign(*material, *layer, *channel, *image))
-      {
-        BKE_reportf(op->reports,
-                    RPT_WARNING,
-                    "Could not assign \"%s\" to this layer channel",
-                    image->id.name + 2);
-        skipped++;
-        continue;
-      }
-      assigned++;
-      continue;
-    }
-
-    BrushMaterialPaintChannel *channel_data = &brush->material_paint->channels[*channel];
-    PointerRNA channel_ptr = RNA_pointer_create_discrete(
-        &brush->id, RNA_BrushMaterialPaintChannel, channel_data);
-    RNA_pointer_set(&channel_ptr, "source_image", RNA_id_pointer_create(&image->id));
-    if (RNA_pointer_get(&channel_ptr, "source_image").data != &image->id) {
+    if (!target->assign(*channel, *image)) {
       BKE_reportf(op->reports,
                   RPT_WARNING,
-                  "Could not assign \"%s\" to this material paint channel",
-                  image->id.name + 2);
+                  "Could not assign \"%s\" to %s",
+                  image->id.name + 2,
+                  target->channel_label());
       skipped++;
       continue;
     }
-    /* A texture dropped on a channel means that channel is used. Leaving it disabled would make
-     * the assignment invisible: the stroke writes no channel and the brush cursor has nothing to
-     * preview. */
-    RNA_boolean_set(&channel_ptr, "use", true);
     assigned++;
   }
   RNA_END;
@@ -2179,14 +2342,7 @@ static wmOperatorStatus material_paint_channels_assign_images_exec(bContext *C, 
   }
 
   if (assigned > 0) {
-    if (brush != nullptr) {
-      BKE_brush_tag_unsaved_changes(brush);
-      WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
-    }
-    if (layer != nullptr) {
-      DEG_id_tag_update(&material->id, ID_RECALC_SHADING);
-      WM_main_add_notifier(NC_MATERIAL | ND_SHADING, material);
-    }
+    target->changed(*C);
   }
 
   if (skipped > 0) {
@@ -2422,6 +2578,26 @@ void PAINT_OT_material_paint_channels_assign_images(wmOperatorType *ot)
                      "Session UID of the brush to assign to (the active brush when unset)",
                      INT32_MIN,
                      INT32_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_int(ot->srna,
+                     "curve_patch_slot_index",
+                     -1,
+                     -1,
+                     INT32_MAX,
+                     "Curve Patch Slot",
+                     "Index of the brush's Curve Patch PBR slot to assign to (-1 for the brush's "
+                     "material paint channels)",
+                     -1,
+                     INT32_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "curve_patch_new_slot",
+                         false,
+                         "New Curve Patch Slot",
+                         "Add a new PBR slot to the brush's Curve Patch texture list and assign to "
+                         "it");
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 
   prop = RNA_def_boolean(ot->srna,
@@ -3378,6 +3554,77 @@ static void BRUSH_OT_curve_patch_texture_slot_move(wmOperatorType *ot)
   ot->prop = RNA_def_enum(ot->srna, "type", slot_move, 0, "Type", "");
 }
 
+static wmOperatorStatus curve_patch_pbr_slot_from_brush_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint != nullptr ? BKE_paint_brush(paint) : nullptr;
+  /* Same editable rule the drop targets apply: linked data can only be edited where its library
+   * allows it, and an override's assigned pointers are not the override's to rewrite. */
+  if (brush == nullptr || !ID_IS_EDITABLE(&brush->id) || ID_IS_OVERRIDE_LIBRARY(&brush->id)) {
+    BKE_report(op->reports, RPT_ERROR, "Cannot edit linked brush data");
+    return OPERATOR_CANCELLED;
+  }
+  BrushCurvePatchTextureSlot *slot = static_cast<BrushCurvePatchTextureSlot *>(
+      BLI_findlink(&brush->curve_patch.texture_slots, brush->curve_patch.texture_active_index));
+  if (slot == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active Curve Patch texture slot");
+    return OPERATOR_CANCELLED;
+  }
+  if (slot->kind != BRUSH_CURVE_PATCH_SLOT_PBR) {
+    BKE_report(op->reports, RPT_ERROR, "The active Curve Patch slot is not a PBR set");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Seed the PBR set from the brush's own PBR Paint channels: each channel's source image moves
+   * over (the TEXTURE wrapper it rides in stays the brush's), the channel is enabled only when
+   * the brush paints it. Channels without a source are left as-is: images already dropped into
+   * the set are data the user entered, not brush state to overwrite. */
+  if (brush->material_paint == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "The brush has no PBR Paint channels");
+    return OPERATOR_CANCELLED;
+  }
+  const BrushMaterialPaint &brush_paint = *brush->material_paint;
+  bool any = false;
+  for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+    const BrushMaterialPaintChannel &channel = brush_paint.channels[i];
+    if (channel.source_mtex.tex == nullptr || channel.source_mtex.tex->type != TEX_IMAGE ||
+        channel.source_mtex.tex->ima == nullptr)
+    {
+      continue;
+    }
+    any = true;
+    if (BKE_brush_curve_patch_slot_image_get(*slot, i) != nullptr) {
+      /* Already filled by the user: neither the image nor its enabled state is the brush's to
+       * overwrite. */
+      continue;
+    }
+    ed::sculpt_paint::curve_patch_slot_channel_assign(
+        *brush, *slot, i, *channel.source_mtex.tex->ima, channel.use != 0);
+  }
+  if (!any) {
+    BKE_report(
+        op->reports, RPT_WARNING, "The brush's PBR Paint channels have no image sources to copy");
+    return OPERATOR_CANCELLED;
+  }
+
+  BKE_brush_tag_unsaved_changes(brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+static void BRUSH_OT_curve_patch_pbr_slot_from_brush(wmOperatorType *ot)
+{
+  ot->name = "PBR Set from Brush";
+  ot->description =
+      "Fill the active slot's channels from the brush's own PBR Paint channel source images";
+  ot->idname = "BRUSH_OT_curve_patch_pbr_slot_from_brush";
+
+  ot->exec = curve_patch_pbr_slot_from_brush_exec;
+  ot->poll = curve_patch_texture_slot_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
 /** \} */
 
 /**************************** registration **********************************/
@@ -3476,6 +3723,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(BRUSH_OT_curve_patch_texture_slot_add);
   WM_operatortype_append(BRUSH_OT_curve_patch_texture_slot_remove);
   WM_operatortype_append(BRUSH_OT_curve_patch_texture_slot_move);
+  WM_operatortype_append(BRUSH_OT_curve_patch_pbr_slot_from_brush);
   /* Publishes the RNA `point_image` hooks the per-point texture browse flow assigns through. Lives
    * with the paint operators here, not with sculpt's operator registration: the hooks are about the
    * brush's Curve Patch texture list, which this file already owns. */

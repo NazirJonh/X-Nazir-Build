@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <optional>
 
 #include "MEM_guardedalloc.h"
@@ -20,6 +21,7 @@
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_base.hh"
 #include "BLI_math_color.h"
@@ -46,6 +48,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_resolve.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_preview_image.hh"
@@ -299,6 +302,14 @@ static void brush_foreach_id(ID *id, LibraryForeachIDData *data)
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->curve_patch.tex_end, IDWALK_CB_USER);
   for (BrushCurvePatchTextureSlot &slot : brush->curve_patch.texture_slots) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, slot.tex, IDWALK_CB_USER);
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, slot.material, IDWALK_CB_USER);
+    /* The PBR slot's channel images are ID references like its texture: the list holds a user on
+     * every non-null entry, and remapping / library overrides / unused-data purging must see them.
+     * A non-PBR slot keeps its channel images null, so this walks 18 nulls -- cheap enough to not
+     * branch on the kind here. */
+    for (BrushCurvePatchSlotChannel &channel : slot.channels) {
+      BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, channel.image, IDWALK_CB_USER);
+    }
   }
 
   BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, BKE_texture_mtex_foreach_id(data, &brush->mtex));
@@ -593,6 +604,13 @@ static void brush_blend_read_data(BlendDataReader *reader, ID *id)
   /* The `Tex` pointers inside are resolved automatically through `brush_foreach_id()`, so there is
    * nothing for `brush_blend_read_after_liblink()` to do here. */
   BLO_read_struct_list(reader, BrushCurvePatchTextureSlot, &brush->curve_patch.texture_slots);
+  /* Files written before `bake_size` existed read it as zero, which is not an RNA enum value (the
+   * UI would show an empty entry), so normalize it to the DNA default here. */
+  for (BrushCurvePatchTextureSlot &slot : brush->curve_patch.texture_slots) {
+    if (slot.bake_size <= 0) {
+      slot.bake_size = 2048;
+    }
+  }
 }
 
 static void brush_blend_read_after_liblink(BlendLibReader * /*reader*/, ID *id)
@@ -1523,10 +1541,21 @@ bool BKE_brush_curve_patch_texture_slot_remove(Brush &brush, BrushCurvePatchText
 
   /* The list holds a user on its texture, so dropping the slot must drop that user too --
    * `BLI_freelinkN` knows nothing about ID reference counts. Cleared as well as decremented so the
-   * slot never sits in the list holding a pointer it no longer owns a user on. */
+   * slot never sits in the list holding a pointer it no longer owns a user on. The PBR slot's
+   * channel images are users of the same kind; see #brush_foreach_id. */
   if (slot.tex != nullptr) {
     id_us_min(&slot.tex->id);
     slot.tex = nullptr;
+  }
+  if (slot.material != nullptr) {
+    id_us_min(&slot.material->id);
+    slot.material = nullptr;
+  }
+  for (BrushCurvePatchSlotChannel &channel : slot.channels) {
+    if (channel.image != nullptr) {
+      id_us_min(&channel.image->id);
+      channel.image = nullptr;
+    }
   }
   BLI_freelinkN(&brush.curve_patch.texture_slots, &slot);
 
@@ -1545,6 +1574,202 @@ bool BKE_brush_curve_patch_texture_slot_remove(Brush &brush, BrushCurvePatchText
     brush.curve_patch.texture_active_index = new_count - 1;
   }
   return true;
+}
+
+Image *BKE_brush_curve_patch_slot_image_get(const BrushCurvePatchTextureSlot &slot, int channel)
+{
+  /* Range-checked rather than asserted: `channel` comes from a per-channel UI loop and a Python
+   * caller is free to pass a nonsense index into a property setter. The kind is deliberately not
+   * tested here -- the data outlives a kind flip, and consumers that stamp filter by kind. */
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return nullptr;
+  }
+  return slot.channels[channel].image;
+}
+
+void BKE_brush_curve_patch_slot_image_set(BrushCurvePatchTextureSlot &slot,
+                                          int channel,
+                                          Image *image)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return;
+  }
+  Image *existing = slot.channels[channel].image;
+  if (existing == image) {
+    return;
+  }
+  /* Same user bookkeeping `BKE_brush_curve_patch_texture_slot_remove()` does for `tex`: the list
+   * holds a user on every non-null channel image. Cleared as well as decremented so the slot
+   * never keeps a pointer it no longer owns a user on. */
+  if (existing != nullptr) {
+    id_us_min(&existing->id);
+    slot.channels[channel].image = nullptr;
+  }
+  if (image != nullptr) {
+    id_us_plus(&image->id);
+    slot.channels[channel].image = image;
+  }
+}
+
+bool BKE_brush_curve_patch_slot_channel_enabled(const BrushCurvePatchTextureSlot &slot,
+                                                int channel)
+{
+  return channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM &&
+         slot.channels[channel].enabled != 0;
+}
+
+bool BKE_brush_curve_patch_slot_channel_active(const BrushCurvePatchTextureSlot &slot, int channel)
+{
+  return BKE_brush_curve_patch_slot_channel_enabled(slot, channel) &&
+         BKE_brush_curve_patch_slot_image_get(slot, channel) != nullptr;
+}
+
+int BKE_brush_curve_patch_slot_drop_channel(const BrushCurvePatchTextureSlot &slot)
+{
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (BKE_brush_curve_patch_slot_channel_enabled(slot, channel) &&
+        BKE_brush_curve_patch_slot_image_get(slot, channel) == nullptr)
+    {
+      return channel;
+    }
+  }
+  return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+}
+
+void BKE_brush_curve_patch_slot_channel_enable(BrushCurvePatchTextureSlot &slot,
+                                               int channel,
+                                               bool enable)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return;
+  }
+  slot.channels[channel].enabled = enable ? 1 : 0;
+}
+
+int BKE_brush_curve_patch_slot_image_count(const BrushCurvePatchTextureSlot &slot)
+{
+  if (slot.kind != BRUSH_CURVE_PATCH_SLOT_PBR) {
+    return 0;
+  }
+  int count = 0;
+  /* Count the channels the UI actually shows: enabled AND carrying an image. An image left on a
+   * disabled channel is invisible data, not a usable one. */
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (BKE_brush_curve_patch_slot_channel_active(slot, channel)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/* The DNA arrays spell their length as a literal 18 (see #BrushCurvePatchTextureSlot::channels);
+ * this keeps the two in step the moment a channel is added to the paint enum. */
+static_assert(PAINT_MATERIAL_CHANNEL_NUM == 18,
+              "Update the literal channel-array length in DNA_brush_types.h");
+
+/* Shared by both overloads so neither needs a `const_cast`. `std::less` gives a total order on
+ * pointers into different objects, unlike the built-in relational operators. */
+template<typename BrushT, typename SlotT>
+static SlotT *curve_patch_slot_from_channel_impl(BrushT &brush,
+                                                 const BrushCurvePatchSlotChannel &channel,
+                                                 int *r_channel_index)
+{
+  /* A fixed-array collection exposes its elements as raw pointers with no back-pointer to the
+   * owning slot, so the range test is the only way to recover it. */
+  const std::less<const BrushCurvePatchSlotChannel *> less;
+  for (SlotT &slot : brush.curve_patch.texture_slots) {
+    const BrushCurvePatchSlotChannel *first = slot.channels;
+    const BrushCurvePatchSlotChannel *last = slot.channels + PAINT_MATERIAL_CHANNEL_NUM;
+    if (!less(&channel, first) && less(&channel, last)) {
+      if (r_channel_index != nullptr) {
+        *r_channel_index = int(&channel - first);
+      }
+      return &slot;
+    }
+  }
+  return nullptr;
+}
+
+BrushCurvePatchTextureSlot *BKE_brush_curve_patch_slot_from_channel(
+    Brush &brush, const BrushCurvePatchSlotChannel &channel, int *r_channel_index)
+{
+  return curve_patch_slot_from_channel_impl<Brush, BrushCurvePatchTextureSlot>(
+      brush, channel, r_channel_index);
+}
+
+const BrushCurvePatchTextureSlot *BKE_brush_curve_patch_slot_from_channel(
+    const Brush &brush, const BrushCurvePatchSlotChannel &channel, int *r_channel_index)
+{
+  return curve_patch_slot_from_channel_impl<const Brush, const BrushCurvePatchTextureSlot>(
+      brush, channel, r_channel_index);
+}
+
+int BKE_brush_curve_patch_slot_index_from_channel(const Brush &brush,
+                                                  const BrushCurvePatchSlotChannel &channel)
+{
+  const BrushCurvePatchTextureSlot *slot = BKE_brush_curve_patch_slot_from_channel(brush, channel);
+  if (slot == nullptr) {
+    return -1;
+  }
+  return BLI_findindex(&brush.curve_patch.texture_slots, slot);
+}
+
+uint32_t BKE_brush_curve_patch_slot_channel_mask(const Brush &brush)
+{
+  const BrushCurvePatchSettings &settings = brush.curve_patch;
+  if (!bke::brush::supports_curve_patch(brush) ||
+      settings.stamp_mode != BRUSH_CURVE_PATCH_STAMP_STAMPS ||
+      settings.stamp_texture_source != BRUSH_CURVE_PATCH_TEX_MULTI)
+  {
+    return 0;
+  }
+  uint32_t mask = 0;
+  for (const BrushCurvePatchTextureSlot &slot : settings.texture_slots) {
+    if (slot.weight <= 0.0f) {
+      continue;
+    }
+    if (slot.kind == BRUSH_CURVE_PATCH_SLOT_PBR) {
+      for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+        if (BKE_brush_curve_patch_slot_channel_active(slot, channel)) {
+          mask |= 1u << channel;
+        }
+      }
+    }
+    else if (slot.kind == BRUSH_CURVE_PATCH_SLOT_MATERIAL && slot.material != nullptr) {
+      const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(slot.material);
+      for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+        if (resolve.channels[channel] != ChannelResolution::Unavailable) {
+          mask |= 1u << channel;
+        }
+      }
+    }
+  }
+  return mask;
+}
+
+int BKE_brush_curve_patch_slot_bake_size(const BrushCurvePatchTextureSlot &slot)
+{
+  /* Defensive: the reader normalizes zero, but a slot built in memory by other code may not. */
+  return slot.bake_size > 0 ? int(slot.bake_size) : 2048;
+}
+
+StringRefNull BKE_brush_curve_patch_slot_display_name(const BrushCurvePatchTextureSlot &slot)
+{
+  if (slot.kind == BRUSH_CURVE_PATCH_SLOT_PBR) {
+    /* Named after the first stamped image (the same channel order the stamps use), so the list
+     * row reads like the image the user dropped rather than a generic "PBR Set" for every set. */
+    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      if (BKE_brush_curve_patch_slot_channel_active(slot, channel)) {
+        return slot.channels[channel].image->id.name + 2;
+      }
+    }
+    return "PBR Set";
+  }
+  if (slot.kind == BRUSH_CURVE_PATCH_SLOT_MATERIAL) {
+    return slot.material != nullptr ? StringRefNull(slot.material->id.name + 2) :
+                                      StringRefNull("Material");
+  }
+  return slot.tex != nullptr ? StringRefNull(slot.tex->id.name + 2) : StringRefNull();
 }
 
 void BKE_brush_debug_print_state(Brush *br)

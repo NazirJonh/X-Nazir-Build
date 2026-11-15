@@ -80,6 +80,12 @@ std::optional<PaintSlotOwner> paint_slot_material_owner(const PointerRNA &ptr,
     }
     return PaintSlotOwner::Shape;
   }
+  if (RNA_struct_is_a(ptr.type, RNA_BrushCurvePatchTextureSlot)) {
+    if (prop_name != "material") {
+      return std::nullopt;
+    }
+    return PaintSlotOwner::CurvePatchSlot;
+  }
   return std::nullopt;
 }
 

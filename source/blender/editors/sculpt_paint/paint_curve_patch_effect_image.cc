@@ -665,6 +665,127 @@ static float3 curve_patch_channel_flat_color(const paint::image::ImagePaintTarge
   return float3(value);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name PBR slot channel images
+ * \{ */
+
+/**
+ * Direct sampler of the PBR slots' channel images at the stamp's own texture coordinates.
+ *
+ * A stamp that drew a PBR-kind slot paints every channel the slot declares from THAT SLOT's
+ * image, sampled at the stamp's `patch_uv`: the stamp frame IS the mapping, so no brush MTex
+ * placement applies (the #sample_layout_image size/ofs stage the brush sources run through has
+ * no counterpart here). Built once per pass, next to #material::ChannelSourceSampler, whose
+ * per-channel sources it overrides for the slots' own channels; every non-null channel image is
+ * pinned through the stroke's shared image pool up front, so #sample is read-only and safe from
+ * the parallel pixel wave. UDIM tiles beyond 1001 are not resolved (a zeroed #ImageUser) -- the
+ * same limitation the stamp's own single-image frame has.
+ */
+class CurvePatchSlotPbrSampler {
+ public:
+  CurvePatchSlotPbrSampler(const CurvePatchTextureBinding &binding, ImagePool &pool) : pool_(pool)
+  {
+    const int slot_num = int(binding.stamp_slots.size());
+    channels_.reinitialize(slot_num * PAINT_MATERIAL_CHANNEL_NUM);
+    ibufs_.reinitialize(channels_.size());
+    ibufs_.fill(nullptr);
+    for (const int slot : binding.stamp_slots.index_range()) {
+      for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+        const int i = slot * PAINT_MATERIAL_CHANNEL_NUM + channel;
+        channels_[i] = binding.stamp_slots[slot].channels[channel];
+        if (channels_[i].kind == CurvePatchStampChannelKind::Image && channels_[i].image) {
+          /* Acquire may update the #ImageUser; keep a local copy so nothing reaches through the
+           * binding into the brush's DNA. Zeroed: the stamp frame addresses tile 1001 only. */
+          ImageUser iuser = {};
+          ibufs_[i] = BKE_image_pool_acquire_ibuf(
+              const_cast<Image *>(channels_[i].image), &iuser, &pool_);
+        }
+        else if (channels_[i].kind == CurvePatchStampChannelKind::Baked) {
+          /* Owned by the binding's bake, which outlives this sampler; not pooled. */
+          ibufs_[i] = channels_[i].baked;
+        }
+      }
+    }
+  }
+
+  ~CurvePatchSlotPbrSampler()
+  {
+    for (const int i : ibufs_.index_range()) {
+      if (ibufs_[i] != nullptr && channels_[i].kind == CurvePatchStampChannelKind::Image) {
+        BKE_image_pool_release_ibuf(
+            const_cast<Image *>(channels_[i].image), const_cast<ImBuf *>(ibufs_[i]), &pool_);
+      }
+    }
+  }
+
+  /** Whether any slot row carries a samplable channel, so callers can skip the override branch. */
+  bool is_active() const
+  {
+    for (const int i : channels_.index_range()) {
+      if (channels_[i].kind == CurvePatchStampChannelKind::Constant) {
+        return true;
+      }
+      const ImBuf *ibuf = ibufs_[i];
+      if (ibuf != nullptr && (ibuf->float_data() != nullptr || ibuf->byte_data() != nullptr)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The slot \a tex_index's source for \a channel, sampled at the stamp's `patch_uv` (the [-1, 1]
+   * texture domain), scene-linear like every color the write path consumes. A material's unlinked
+   * input is its default value everywhere; a baked or direct image is sampled bilinearly.
+   *
+   * Scalar channels read raw data: a scalar stamp image is Non-Color by the assignment rule the
+   * RNA setter applies, and a float buffer is linear anyway. Color channels decode through the
+   * image's own colorspace per sample -- slower than the brush sources' batched decode, which
+   * this path deliberately stays out of (the batch runs over the BRUSH source's colorspace, and
+   * slot images each carry their own).
+   */
+  std::optional<float4> sample(const int tex_index,
+                               const eMaterialPaintChannel channel,
+                               const float2 patch_uv,
+                               const bool is_color_channel) const
+  {
+    const int index = tex_index * PAINT_MATERIAL_CHANNEL_NUM + int(channel);
+    if (index < 0 || index >= ibufs_.size()) {
+      return std::nullopt;
+    }
+    if (channels_[index].kind == CurvePatchStampChannelKind::Constant) {
+      return channels_[index].constant;
+    }
+    const ImBuf *ibuf = ibufs_[index];
+    if (ibuf == nullptr) {
+      return std::nullopt;
+    }
+    const std::optional<float4> sampled = curve_patch_sample_image_bilinear(*ibuf, patch_uv);
+    if (!sampled) {
+      return std::nullopt;
+    }
+    float4 rgba = *sampled;
+    if (is_color_channel && ibuf->float_data() == nullptr &&
+        ibuf->byte_buffer.colorspace != nullptr)
+    {
+      /* A byte image stores its pixels in the file's colorspace; the write path consumes
+       * scene-linear. Per-sample decode: see the class comment for why this is not batched. */
+      IMB_colormanagement_colorspace_to_scene_linear_v3(rgba, ibuf->byte_buffer.colorspace);
+    }
+    return rgba;
+  }
+
+ private:
+  /** The binding's flattened slot x channel sources. */
+  Array<CurvePatchStampChannel> channels_;
+  /** The buffers behind #channels_, one-to-one: pooled for an Image channel, the bake's own for a
+   * Baked one, null otherwise (or for an image that failed to load). */
+  Array<const ImBuf *> ibufs_;
+  ImagePool &pool_;
+};
+
+/** \} */
+
 /** The #Paint the spawning stroke resolved; #StrokeCache::paint is the same pointer its own init
  * used. Both the canvas key stored at session start and every later comparison of it read the
  * brush and channel mask from here, so the two cannot be computed from different inputs. */
@@ -1078,6 +1199,13 @@ struct AcceptedPixel {
    * when neither constrains the canvas. Scales the final COVERAGE, not #weight: #weight only shapes
    * the cross-pass average, where a uniform factor would cancel out. */
   float selection;
+  /**
+   * #source_color came from the pixel's stamp's own PBR SLOT image, not the brush's channel
+   * source: it is already scene-linear (the slot sampler decodes per image) and carries no
+   * "Correction Image", so the chunk's brush-source batch decode and correction below must leave
+   * it alone.
+   */
+  bool slot_sourced = false;
 };
 
 /** One chunk of a `PackedPixelRow` that PHASE 1 accepted at least one pixel in.
@@ -1159,6 +1287,112 @@ std::optional<float3> normal_footprint_average(
   float packed[3];
   BKE_pbr_normal_pack(math::normalize(sum), false, packed);
   return float3(packed[0], packed[1], packed[2]);
+}
+
+/** The tangent frame a normal map's decal remap is authored in: the patch axes flattened onto the
+ * surface. A frame seen edge-on projects to nothing, so the screen basis stands in -- as it does
+ * for a texel with no patch frame at all. */
+struct CurvePatchDecalBasis {
+  float3 tangent;
+  float3 bitangent;
+};
+
+static CurvePatchDecalBasis curve_patch_decal_basis(const float3 &axis_u,
+                                                    const float3 &axis_v,
+                                                    const float3 &normal,
+                                                    const float3 &screen_tangent,
+                                                    const float3 &screen_bitangent)
+{
+  CurvePatchDecalBasis basis{screen_tangent, screen_bitangent};
+  const float3 flat_u = axis_u - normal * math::dot(axis_u, normal);
+  const float3 flat_v = axis_v - normal * math::dot(axis_v, normal);
+  const float len_u = math::length(flat_u);
+  const float len_v = math::length(flat_v);
+  if (len_u > 1e-6f && len_v > 1e-6f) {
+    basis.tangent = flat_u / len_u;
+    basis.bitangent = flat_v / len_v;
+  }
+  return basis;
+}
+
+/** What one chunk's PBR-slot source lookups share. Everything per-pixel (the sample and its index
+ * in the chunk) is passed to #curve_patch_slot_source_color on its own, so this is built once per
+ * chunk rather than once per pixel in the hot loop. */
+struct CurvePatchSlotChunkContext {
+  const CurvePatchSlotPbrSampler &slot_pbr;
+  const CurvePatchSampler &sampler;
+  eMaterialPaintChannel channel;
+  int row_size;
+  int thread_id;
+  bool is_normal_channel;
+  bool is_color_channel;
+  bool final_quality;
+  float3 t_screen;
+  float3 b_screen;
+  float3 n_m;
+  float3 t_m;
+  float3 b_m;
+};
+
+/**
+ * The pixel's color source when its dominant stamp drew a PBR-kind slot carrying \a channel, or
+ * null when the brush's own channel source should remain the source.
+ *
+ * A slot image is sampled at the stamp's `patch_uv` in its own frame; a Normal slot image gets the
+ * same decal remap the brush-source branch applies, including the committed-build footprint
+ * average. The slot sampler decodes per image and applies no "Correction Image", so the caller
+ * marks such pixels and leaves the brush-source batch decode alone.
+ *
+ * The Normal image is always unpacked as OpenGL convention: a slot carries no DirectX flag of its
+ * own (unlike a brush Normal source), which is a deliberate limitation of the slot format.
+ */
+static std::optional<float3> curve_patch_slot_source_color(const CurvePatchSlotChunkContext &ctx,
+                                                           const CurvePatchSample &sample,
+                                                           const int li)
+{
+  if (sample.tex_index < 0 || !sample.patch_uv_valid) {
+    return std::nullopt;
+  }
+  if (ctx.is_normal_channel) {
+    const CurvePatchDecalBasis decal = curve_patch_decal_basis(
+        sample.patch_axis_u, sample.patch_axis_v, ctx.n_m, ctx.t_screen, ctx.b_screen);
+    const auto slot_normal_at_uv = [&](const float2 &uv) -> float3 {
+      const std::optional<float4> tapped = ctx.slot_pbr.sample(
+          sample.tex_index, ctx.channel, uv, false);
+      if (!tapped) {
+        return float3(0.0f, 0.0f, 1.0f);
+      }
+      /* OpenGL convention, unpacked: see the function comment. */
+      const float3 n_d = float3(tapped->x, tapped->y, tapped->z) * 2.0f - 1.0f;
+      const float3 n_t = material::remap_decal_normal_to_tangent(
+          n_d, decal.tangent, decal.bitangent, ctx.n_m, ctx.t_m, ctx.b_m);
+      float packed[3];
+      BKE_pbr_normal_pack(n_t, false, packed);
+      return float3(packed[0], packed[1], packed[2]);
+    };
+    /* The center tap decides presence: a slot without this channel's image keeps the brush-source
+     * paths instead of writing the fallback direction. */
+    if (!ctx.slot_pbr.sample(sample.tex_index, ctx.channel, sample.patch_uv, false)) {
+      return std::nullopt;
+    }
+    /* Only the committed build pays for the footprint average; the live preview keeps the single
+     * tap -- the same split the brush-source branch makes. */
+    std::optional<float3> averaged;
+    if (ctx.final_quality) {
+      if (const std::optional<float2> footprint = pixel_footprint_uv_step(
+              ctx.sampler, sample, li, ctx.row_size, ctx.thread_id))
+      {
+        averaged = normal_footprint_average(slot_normal_at_uv, sample.patch_uv, *footprint);
+      }
+    }
+    return averaged ? *averaged : slot_normal_at_uv(sample.patch_uv);
+  }
+  if (const std::optional<float4> slot_sample = ctx.slot_pbr.sample(
+          sample.tex_index, ctx.channel, sample.patch_uv, ctx.is_color_channel))
+  {
+    return float3(slot_sample->x, slot_sample->y, slot_sample->z);
+  }
+  return std::nullopt;
 }
 
 void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
@@ -1467,6 +1701,18 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * one of them. */
   ImagePool &tex_pool = ss.tex_pool_ensure();
 
+  /* The PBR slots' own channel images. Empty unless the brush stamps a LIST whose slots carry
+   * PBR sets, so a stamp paints the SET's image instead of the brush's channel source; built
+   * lazily per canvas (it is channel-independent, but its buffers pin through this canvas's pool
+   * resolution above). */
+  std::optional<CurvePatchSlotPbrSampler> slot_pbr;
+  if (!target.texture.stamp_slots.is_empty()) {
+    slot_pbr.emplace(target.texture, tex_pool);
+    if (!slot_pbr->is_active()) {
+      slot_pbr.reset();
+    }
+  }
+
 #if CURVE_PATCH_PROFILING
   const double prof_phase1_t0 = BLI_time_now_seconds(); /* DEBUG-cpatch-image */
 #endif
@@ -1644,13 +1890,17 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
             /* Destination tangent basis for a Normal source, plus the screen basis a texel with
              * no patch frame falls back to. Constant across a UV primitive, and a chunk never
              * spans more than one, so it is built once here -- the same per-row hoist
-             * `do_paint_pixels()` makes for the identical reason. */
+             * `do_paint_pixels()` makes for the identical reason. A PBR slot's own Normal image
+             * needs the same basis (its decal remap is identical), so its mere possibility --
+             * decided per pixel by which slot won -- widens the condition too. */
             float3 n_m(0.0f, 0.0f, 1.0f);
             float3 t_screen(1.0f, 0.0f, 0.0f);
             float3 b_screen(0.0f, 1.0f, 0.0f);
             float3 t_m(1.0f, 0.0f, 0.0f);
             float3 b_m(0.0f, 1.0f, 0.0f);
-            if (target_paints_normal_source) {
+            if (target_paints_normal_source ||
+                (slot_pbr.has_value() && paint_target.is_normal_channel))
+            {
               const int64_t tri_position_start = int64_t(pixel_row.uv_primitive_index) * 3;
               material::build_normal_write_basis(
                   pixel_node.uv_primitives.tangents[pixel_row.uv_primitive_index],
@@ -1665,6 +1915,24 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                   n_m,
                   t_m,
                   b_m);
+            }
+
+            /* Chunk constants of the PBR-slot source lookup, built once instead of per pixel. */
+            std::optional<CurvePatchSlotChunkContext> slot_chunk_ctx;
+            if (slot_pbr.has_value()) {
+              slot_chunk_ctx.emplace(CurvePatchSlotChunkContext{*slot_pbr,
+                                                                sampler,
+                                                                target_channel,
+                                                                int(range.size()),
+                                                                thread_id,
+                                                                paint_target.is_normal_channel,
+                                                                target_paints_color,
+                                                                item.params.final_quality,
+                                                                t_screen,
+                                                                b_screen,
+                                                                n_m,
+                                                                t_m,
+                                                                b_m});
             }
 
             /* NARROW-PHASE reject, in spans of #cull_span_size pixels.
@@ -1761,25 +2029,23 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                    * TURN with the curve instead of staying pinned to the screen while the color
                    * texture under it rotates; without a patch frame it is the screen basis, the
                    * same one the stroke engine uses. */
-                  float3 t_decal = t_screen;
-                  float3 b_decal = b_screen;
-                  if (use_patch_frame) {
-                    const float3 flat_u = sample->patch_axis_u -
-                                          n_m * math::dot(sample->patch_axis_u, n_m);
-                    const float3 flat_v = sample->patch_axis_v -
-                                          n_m * math::dot(sample->patch_axis_v, n_m);
-                    const float len_u = math::length(flat_u);
-                    const float len_v = math::length(flat_v);
-                    /* A frame seen edge-on by the surface projects to nothing; the screen basis
-                     * already loaded above then stands in, as it does for a frameless texel. */
-                    if (len_u > 1e-6f && len_v > 1e-6f) {
-                      t_decal = flat_u / len_u;
-                      b_decal = flat_v / len_v;
-                    }
-                  }
+                  const CurvePatchDecalBasis decal = use_patch_frame ?
+                                                         curve_patch_decal_basis(
+                                                             sample->patch_axis_u,
+                                                             sample->patch_axis_v,
+                                                             n_m,
+                                                             t_screen,
+                                                             b_screen) :
+                                                         CurvePatchDecalBasis{t_screen, b_screen};
                   const auto normal_at_uv = [&](const float2 &uv) {
-                    return channel_sources->tangent_normal_packed_at_uv(
-                        target_channel, uv, thread_id, t_decal, b_decal, n_m, t_m, b_m);
+                    return channel_sources->tangent_normal_packed_at_uv(target_channel,
+                                                                        uv,
+                                                                        thread_id,
+                                                                        decal.tangent,
+                                                                        decal.bitangent,
+                                                                        n_m,
+                                                                        t_m,
+                                                                        b_m);
                   };
                   /* Only the committed build pays for the footprint average; the live preview
                    * keeps the single tap. */
@@ -1799,8 +2065,14 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                     source_color = normal_at_uv(sample->patch_uv);
                   }
                   else {
-                    source_color = channel_sources->tangent_normal_packed(
-                        target_channel, *tex_ctx, thread_id, t_decal, b_decal, n_m, t_m, b_m);
+                    source_color = channel_sources->tangent_normal_packed(target_channel,
+                                                                          *tex_ctx,
+                                                                          thread_id,
+                                                                          decal.tangent,
+                                                                          decal.bitangent,
+                                                                          n_m,
+                                                                          t_m,
+                                                                          b_m);
                   }
                 }
                 else if (target_has_source) {
@@ -1823,6 +2095,21 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                   }
                 }
               }
+              /* The stamp's own PBR set: when the pixel's dominant stamp drew a PBR-kind slot
+               * that carries this channel, the SET's image is the source, ahead of the brush's
+               * own. The slot sampler decodes per image and applies no "Correction Image", so
+               * the entry marks itself and the brush-source batch decode below leaves it alone.
+               * No stamp frame -- a sample that reached neither the ribbon nor the stamp branch
+               * -- has no coordinates to sample the set with, and falls back to the paths above.
+               */
+              std::optional<float3> slot_color;
+              if (slot_chunk_ctx.has_value()) {
+                slot_color = curve_patch_slot_source_color(*slot_chunk_ctx, *sample, li);
+              }
+              const bool slot_sourced = slot_color.has_value();
+              if (slot_sourced) {
+                source_color = *slot_color;
+              }
               accepted.append({li,
                                sample->tex_color,
                                sample->tex_valid,
@@ -1832,13 +2119,18 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                sample->value * item.params.opacity,
                                sample->weight,
                                source_color,
-                               selection_weight});
+                               selection_weight,
+                               slot_sourced});
             }
             if (batch_decode_color && !accepted.is_empty()) {
               /* Gathered into a contiguous span because the decode entry point takes one. Every
                * accepted pixel of this chunk sampled the color source -- the branch that fills
                * `source_color` from it is selected by chunk-constant flags -- so the whole array
-               * decodes, with no per-pixel bookkeeping of which entries are raw. */
+               * decodes, with no per-pixel bookkeeping of which entries are raw. A pixel whose
+               * dominant stamp drew a PBR slot (see #slot_sourced) is the exception: the slot
+               * sampler already decoded through the slot image's own colorspace, and the brush
+               * source's colorspace and "Correction Image" are not its data -- those entries ride
+               * along unchanged so the one batched call keeps a single shape. */
               Vector<float3> raw_colors(accepted.size());
               for (const int ai : accepted.index_range()) {
                 raw_colors[ai] = accepted[ai].source_color;
@@ -1851,7 +2143,8 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                 channel_sources->apply_correction_batch(raw_colors, target_channel);
               }
               for (const int ai : accepted.index_range()) {
-                accepted[ai].source_color = raw_colors[ai];
+                accepted[ai].source_color = accepted[ai].slot_sourced ? accepted[ai].source_color :
+                                                                        raw_colors[ai];
               }
             }
 #if CURVE_PATCH_PROFILING
@@ -2089,7 +2382,7 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
          * Randomize Color applies once to whichever color won, so a source- or texture-driven
          * patch randomizes exactly like a value-driven one; PHASE 1 decoded the sampled texels
          * to scene-linear, the same space the channel-value path jitters in. */
-        const float3 pass_rgb_raw = target_has_source ?
+        const float3 pass_rgb_raw = (target_has_source || pixel.slot_sourced) ?
                                         pixel.source_color :
                                         (target_paints_color ?
                                              curve_patch_paint_color(

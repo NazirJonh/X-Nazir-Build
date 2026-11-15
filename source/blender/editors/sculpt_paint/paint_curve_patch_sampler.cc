@@ -17,6 +17,7 @@
 #include "DNA_texture_types.h"
 
 #include "BKE_brush.hh"
+#include "BKE_image.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -25,8 +26,11 @@
 #include "BLI_bounds_types.hh"
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
+#include "BLI_math_interp.hh"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
+
+#include "IMB_imbuf_types.hh"
 
 #include "paint_curve_patch_session.hh"
 #include "paint_intern.hh"
@@ -56,6 +60,35 @@ float3 curve_patch_decanonicalize_dir(const CurvePatchStrokeContext &ctx, const 
 float curve_patch_cull_tube_radius(const bke::CurvePatchGeometry &geometry, const float max_radius)
 {
   return 2.5f * max_radius + geometry.ribbon_end_margin;
+}
+
+std::optional<float4> curve_patch_sample_image_bilinear(const ImBuf &ibuf, const float2 patch_uv)
+{
+  const int width = ibuf.x;
+  const int height = ibuf.y;
+  if (width <= 0 || height <= 0) {
+    return std::nullopt;
+  }
+  const float px = (patch_uv.x * 0.5f + 0.5f) * float(width);
+  const float py = (patch_uv.y * 0.5f + 0.5f) * float(height);
+  if (const float *float_pixels = ibuf.float_data()) {
+    return math::interpolate_bilinear_fl(float_pixels, width, height, px, py);
+  }
+  if (const uint8_t *byte_pixels = ibuf.byte_data()) {
+    /* #uchar4 names its components x/y/z/w (the vector types carry no r/g/b/a). */
+    const uchar4 col = math::interpolate_bilinear_byte(byte_pixels, width, height, px, py);
+    return float4(float(col.x), float(col.y), float(col.z), float(col.w)) * (1.0f / 255.0f);
+  }
+  return std::nullopt;
+}
+
+/** ALPHA coverage of a tex-less PBR slot's Base Color image at the stamp's raw uv, in [0, 1].
+ * Bilinear, edge-clamped, and the same [-1, 1] to [0, 1] mapping the effects' slot sampler
+ * applies, so the coverage mask and the channel writes describe the same image the same way. */
+static float curve_patch_pbr_mask_alpha_at(const ImBuf &ibuf, const float2 patch_uv)
+{
+  const std::optional<float4> rgba = curve_patch_sample_image_bilinear(ibuf, patch_uv);
+  return rgba ? rgba->w : 1.0f;
 }
 
 #if CURVE_PATCH_PROFILING
@@ -92,6 +125,47 @@ CurvePatchSampler::CurvePatchSampler(const CurvePatchItem &item,
       mtex_size_(brush.mtex.size[0], brush.mtex.size[1]),
       mtex_ofs_(brush.mtex.ofs[0], brush.mtex.ofs[1])
 {
+  /* A PBR slot dropped WITHOUT a mask texture stamps its Base Color image's alpha as the
+   * coverage mask (see the null-texture branch in #sample). Pin those images' buffers once per
+   * sampler instead of per covered element: the pool dedups, and the acquire is thread-safe, so
+   * a per-chunk sampler can do this from the parallel wave. */
+  const int slot_num = int(texture.stamp_slots.size());
+  pbr_masks_.reinitialize(slot_num);
+  for (const int slot : IndexRange(slot_num)) {
+    const CurvePatchStampSlot &stamp_slot = *texture.stamp_slot(slot);
+    if (!stamp_slot.has_channel_sources) {
+      continue;
+    }
+    /* The slot's variant `tex` doubles as the mask when present; only a tex-less slot falls back
+     * to Base Color. */
+    if (slot < texture.stamp_texture_variants.size() &&
+        texture.stamp_texture_variants[slot].tex != nullptr)
+    {
+      continue;
+    }
+    const CurvePatchStampChannel &base_color =
+        stamp_slot.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+    PbrMask &mask = pbr_masks_[slot];
+    switch (base_color.kind) {
+      case CurvePatchStampChannelKind::Image: {
+        ImageUser iuser = {};
+        mask.ibuf = BKE_image_pool_acquire_ibuf(
+            const_cast<Image *>(base_color.image), &iuser, &tex_pool_);
+        mask.valid = mask.ibuf != nullptr;
+        break;
+      }
+      case CurvePatchStampChannelKind::Baked:
+        mask.ibuf = base_color.baked;
+        mask.valid = mask.ibuf != nullptr;
+        break;
+      case CurvePatchStampChannelKind::Constant:
+        mask.constant_alpha = base_color.constant.w;
+        mask.valid = true;
+        break;
+      case CurvePatchStampChannelKind::None:
+        break;
+    }
+  }
 }
 
 std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const int thread_id) const
@@ -447,6 +521,9 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
      * the bottom, where the sample is built. See #CurvePatchSample::patch_axis_u. */
     float3 patch_axis_u(1.0f, 0.0f, 0.0f);
     float3 patch_axis_v(0.0f, 1.0f, 0.0f);
+    /* Slot of the texture that reported the frame above. Raised only by the stamps loop, whose
+     * dominant contributor wins it together with the frame; see #CurvePatchSample::tex_index. */
+    int tex_index = -1;
     if (is_stamps) {
       /* Find the stamps whose square could cover this vertex. The list is sorted by `center_v`,
        * so a lower-bound on `s - max_extent` opens a window that closes as soon as a stamp starts
@@ -566,9 +643,15 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
         /* An empty slot in the LIST is an unconfigured slot, not a request to sculpt flat -- skip
          * the stamp entirely BEFORE it can win the merge below with the default `sample` of 1.0.
          * SINGLE mode deliberately keeps the old behavior, where a brush with no texture sculpts
-         * a smooth, full-amplitude shape. */
+         * a smooth, full-amplitude shape. A PBR-kind slot without a texture is NOT unconfigured:
+         * its Base Color image's alpha IS the coverage mask (pinned per slot in the constructor),
+         * so the stamp proceeds with that instead of being dropped. */
+        const PbrMask *pbr_mask = nullptr;
         if (it->tex_index >= 0 && stamp_mtex.tex == nullptr) {
-          continue;
+          if (it->tex_index >= pbr_masks_.size() || !pbr_masks_[it->tex_index].valid) {
+            continue;
+          }
+          pbr_mask = &pbr_masks_[it->tex_index];
         }
         float sample = 1.0f;
         float sample_rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -579,6 +662,13 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
 #endif
           paint_get_tex_pixel(
               &stamp_mtex, stamp_u, stamp_v, &tex_pool_, thread_id, &sample, sample_rgba);
+        }
+        else if (pbr_mask != nullptr) {
+          /* The mask follows the stamp's own frame -- the raw `stamp_patch_uv` the effects sample
+           * the set's channel images at, NOT the size/ofs-mapped `stamp_u` / `stamp_v` below. */
+          sample_rgba[3] = pbr_mask->ibuf != nullptr ?
+                               curve_patch_pbr_mask_alpha_at(*pbr_mask->ibuf, stamp_patch_uv) :
+                               pbr_mask->constant_alpha;
         }
         /* The brush's own falloff curve fades the stamp toward its rim, so overlapping stamps
          * meet along a smooth seam instead of showing the square's hard edge. */
@@ -618,6 +708,7 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
           patch_uv_valid = true;
           patch_axis_u = stamp_axis_u;
           patch_axis_v = stamp_axis_v;
+          tex_index = it->tex_index;
         }
 
         /* The amplitude is the stamp's own strength: the texture's shape has already been folded
@@ -806,7 +897,8 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
                              * axis above was derived from geometry frozen in the canonical
                              * frame. */
                             curve_patch_decanonicalize_dir(ctx, patch_axis_u),
-                            curve_patch_decanonicalize_dir(ctx, patch_axis_v)};
+                            curve_patch_decanonicalize_dir(ctx, patch_axis_v),
+                            tex_index};
   };
 
   /* Relief at one sample position: the stretches covering it merged by keeping the strongest

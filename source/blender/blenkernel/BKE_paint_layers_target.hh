@@ -385,9 +385,14 @@ Image *BKE_paint_layers_map_coverage_map_ensure(Main &bmain,
 /**
  * Make sure the tiled coverage map \a image has UDIM tile \a tile_number, adding it zero-filled and
  * shaped like the first tile when it is missing.
+ * \param width: when positive, the size the added tile generates at instead of the first tile's
+ * (\a height likewise). A tile that already exists is left as it is.
  * \return false when \a image is not a tiled image or the tile cannot be made.
  */
-bool BKE_paint_layers_map_coverage_tile_ensure(Image &image, int tile_number);
+bool BKE_paint_layers_map_coverage_tile_ensure(Image &image,
+                                               int tile_number,
+                                               int width = 0,
+                                               int height = 0);
 
 /**
  * Collapse the mask stack of \a layer (its base mask and every correction over it) into one map,

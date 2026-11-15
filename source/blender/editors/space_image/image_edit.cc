@@ -745,6 +745,16 @@ void ED_space_image_gpu_combined_stand_in_free()
 
 static const Object *space_image_projection_object_find(Main &bmain, const SpaceImage &sima);
 
+/**
+ * The UDIM tile the editor shows, the one its previews are the composite of: the active tile, the
+ * base square for a number below the UDIM range (a legacy single-image number, or a picker that
+ * has not named a tile yet). The same rule the paint canvas is read by.
+ */
+static int space_image_active_tile_number(const SpaceImage &sima)
+{
+  return (sima.iuser.tile >= PAINT_TILE_NUMBER_BASE) ? sima.iuser.tile : PAINT_TILE_NUMBER_BASE;
+}
+
 bool ED_space_image_update_gpu_combined(Main *bmain,
                                         SpaceImage *sima,
                                         gpu::Texture *texture,
@@ -761,14 +771,27 @@ bool ED_space_image_update_gpu_combined(Main *bmain,
   BKE_paint_material_combined_lighting_rotate_z(lighting, sima->material_paint_light_rot_z);
   /* The object a projected row reads its surface from, as the CPU acquire resolves it. */
   const Object *painted_object = space_image_projection_object_find(*bmain, *sima);
+  /* The preview is the composite of the tile the editor shows, exactly as the CPU channel pass
+   * below builds it: the active UDIM tile, the base one for a non-tiled image. */
+  const int tile_number = space_image_active_tile_number(*sima);
   if (!ed::material_combined::combined_preview_gpu_update(
-          *ma, lighting, sima->material_paint_pass, texture, texel_to_uv, painted_object))
+          *ma,
+          lighting,
+          sima->material_paint_pass,
+          texture,
+          texel_to_uv,
+          PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}))
   {
     return false;
   }
   if (sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED) {
     ed::material_combined::combined_preview_gpu_verify(
-        *bmain, *ma, lighting, texture, texel_to_uv, painted_object);
+        *bmain,
+        *ma,
+        lighting,
+        texture,
+        texel_to_uv,
+        PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number});
   }
   return true;
 }
@@ -852,7 +875,9 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
     if (gradient_drag &&
         !ed::material_combined::gradient_preview_refresh_allow(*ma, preview_now))
     {
-      if (ImBuf *cached = BKE_paint_material_combined_cache_peek(*ma, r_revision)) {
+      /* The tile the editor shows owns the entry, as in the request below. */
+      const int preview_tile = space_image_active_tile_number(*sima);
+      if (ImBuf *cached = BKE_paint_material_combined_cache_peek(*ma, r_revision, preview_tile)) {
         /* A skipped step still draws: the previous octave stays valid until the trailing tick. */
         IMB_refImBuf(cached);
         return cached;
@@ -869,6 +894,9 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
       request.clip = sima->runtime->combined_preview_draw.clip;
       request.max_output = sima->runtime->combined_preview_draw.display_size;
     }
+    /* The preview is the composite of the tile the editor shows, exactly as the channel pass's
+     * own canvas is (#ED_space_image_get_paint_canvas). */
+    request.tile_number = space_image_active_tile_number(*sima);
     /* The per-object surface resolved by #ED_space_image_gradient_preview_sync. Null outside a
      * draw, or while the preview is approximate; the Combined gather then keeps the 3D Gradient
      * rows approximate, exactly as a channel pass does. */
@@ -916,7 +944,9 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
     if (sima->runtime != nullptr) {
       int canvas_width = 0;
       int canvas_height = 0;
-      if (BKE_paint_material_combined_cache_size_get(*ma, canvas_width, canvas_height)) {
+      const int canvas_tile = space_image_active_tile_number(*sima);
+      if (BKE_paint_material_combined_cache_size_get(*ma, canvas_width, canvas_height, canvas_tile))
+      {
         sima->runtime->combined_preview_canvas = int2(canvas_width, canvas_height);
         sima->runtime->combined_preview_canvas_image_uid = sima->image->id.session_uid;
       }
@@ -943,7 +973,7 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
   }
   /* The composite canvas follows the Image Editor's active UDIM tile; a non-tiled image reads the
    * base tile. */
-  const int tile_number = (sima->iuser.tile >= 1001) ? sima->iuser.tile : 1001;
+  const int tile_number = space_image_active_tile_number(*sima);
   Vector<PaintMaterialCompositeImageLayer> layers;
   const std::shared_ptr<const PaintMaterialCompositeSurface> surface =
       sima->runtime != nullptr ? sima->runtime->gradient_surface : nullptr;
@@ -1202,7 +1232,8 @@ void ED_space_image_get_size(SpaceImage *sima, int *r_width, int *r_height)
     /* Nothing remembered -- a space that has not drawn yet, or one whose image just changed. Ask
      * the cache directly, which still beats producing the preview to measure it. */
     if (Material *ma = ED_space_image_composite_material_get(G_MAIN, sima->image)) {
-      if (BKE_paint_material_combined_cache_size_get(*ma, *r_width, *r_height)) {
+      const int canvas_tile = space_image_active_tile_number(*sima);
+      if (BKE_paint_material_combined_cache_size_get(*ma, *r_width, *r_height, canvas_tile)) {
         return;
       }
       /* Before the first evaluation a stand-in canvas image is 64x64 by design: it is a lookup key,

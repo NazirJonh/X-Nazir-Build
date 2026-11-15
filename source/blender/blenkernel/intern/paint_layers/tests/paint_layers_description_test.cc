@@ -4319,7 +4319,7 @@ TEST_F(PaintLayersDescription, map_encoding_survives_a_duplicate)
   ASSERT_TRUE(BKE_paint_layers_channel_set_map_encoding(
       ma, &fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA));
 
-  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(bmain, ma, &fill);
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, ma, &fill);
   ASSERT_NE(copy, nullptr);
   const MaterialPaintLayerChannel *rough = paint_layer_channel_find(
       *copy, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
@@ -4517,7 +4517,7 @@ TEST_F(PaintLayersDescription, map_encoding_round_trips_a_smart_asset)
   PaintLayerImportParams params;
   const MaterialPaintLayer *asset_rows[1] = {asset_row};
   ASSERT_TRUE(BKE_paint_layers_import_rows(
-      bmain, target, *asset, Span<const MaterialPaintLayer *>(asset_rows, 1), params));
+      *bmain, target, *asset, Span<const MaterialPaintLayer *>(asset_rows, 1), params));
   MaterialPaintLayer *imported = static_cast<MaterialPaintLayer *>(target.paint_layers.first);
   ASSERT_NE(imported, nullptr);
   const MaterialPaintLayerChannel *imported_rough = paint_layer_channel_find(

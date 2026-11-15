@@ -4572,7 +4572,13 @@ static void project_paint_prepare_all_faces(ProjPaintState *ps,
           BKE_imageuser_default(&iuser);
           iuser.tile = tile;
           iuser.framenr = tpage->lastframe;
-          if (BKE_image_has_ibuf(tpage, &iuser)) {
+          /* A map the stack owns grows its UDIM tiles under the stroke: a face whose UVs land on
+           * a tile the map does not have yet gets one generated like the base, instead of being
+           * skipped the way a foreign texture's untracked tile is. */
+          if (BKE_image_has_ibuf(tpage, &iuser) ||
+              ((tpage->flag & IMA_PAINT_CANVAS) != 0 &&
+               BKE_paint_layers_map_coverage_tile_ensure(*tpage, tile)))
+          {
             PrepareImageEntry *e = MEM_new<PrepareImageEntry>("PrepareImageEntry");
             e->ima = tpage;
             e->iuser = iuser;

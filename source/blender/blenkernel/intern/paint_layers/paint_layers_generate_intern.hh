@@ -30,6 +30,7 @@
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_map.hh"
+#include "BLI_set.hh"
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
@@ -458,7 +459,7 @@ struct UvReaders {
  * The one rule for "reads the active UV": the predicate behind #BKE_paint_layers_source_reads_uv
  * and the source group's chain insertion both ask it, so what the UI offers is what gets moved.
  */
-UvReaders uv_readers_find(bNodeTree &tree);
+UvReaders uv_readers_find(bNodeTree &tree, const Set<const bNode *> *fed_elsewhere = nullptr);
 
 struct MappingChain {
   bNode *rotate = nullptr;
@@ -872,7 +873,8 @@ bNodeSocket *source_group_side_sign_find(bNodeTree &tree, bNode **r_node);
  */
 bool source_group_mapping_prepare(bNodeTree &tree,
                                   int16_t mirror_axes = 0,
-                                  Span<const MaterialPaintLayer *> effects = {});
+                                  Span<const MaterialPaintLayer *> effects = {},
+                                  const Set<const bNode *> *fed_elsewhere = nullptr);
 
 /** Drop the value inputs again once the row applies no mapping (the root keeps its interface). */
 void source_group_mapping_interface_remove(bNodeTree &tree);

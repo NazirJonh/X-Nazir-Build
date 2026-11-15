@@ -77,14 +77,16 @@ static std::shared_ptr<ImBuf> mask_effect_buffer_new(const int width, const int 
 }
 
 /**
- * The grey canvas the mask effect of \a row lays on: the row's own dimensions, described with the
- * mask stopped before the effect. The stop is what keeps the walk from re-entering the effect's
- * own describe -- a plain dimensions walk of the row reaches the item and would ask for the grey
- * that is being sized, for ever. The canvas follows the row's maps, which no mask item carries.
+ * The grey canvas the mask effect of \a row lays on: the row's own dimensions on \a tile_number,
+ * described with the mask stopped before the effect. The stop is what keeps the walk from
+ * re-entering the effect's own describe -- a plain dimensions walk of the row reaches the item and
+ * would ask for the grey that is being sized, for ever. The canvas follows the row's maps, which
+ * no mask item carries.
  */
 static bool mask_effect_dimensions(const Material &ma,
                                    const MaterialPaintLayer &row,
                                    const MaterialPaintLayer &effect,
+                                   const int tile_number,
                                    int &r_width,
                                    int &r_height)
 {
@@ -96,7 +98,7 @@ static bool mask_effect_dimensions(const Material &ma,
                                    false,
                                    true,
                                    entry,
-                                   PAINT_TILE_NUMBER_BASE,
+                                   tile_number,
                                    &effect.marker,
                                    nullptr,
                                    /*dimensions_only=*/true,
@@ -114,11 +116,13 @@ static bool mask_effect_dimensions(const Material &ma,
  * carries the row's preceding effects in, so one scheme keys both (M6 reads it as is). */
 static EffectCacheKey mask_effect_key_get(const Material &ma,
                                           const MaterialPaintLayer &row,
-                                          const MaterialPaintLayer &effect)
+                                          const MaterialPaintLayer &effect,
+                                          const int tile_number)
 {
   EffectCacheKey key{ma.id.session_uid,
                      effect.marker,
                      PAINT_LAYER_EFFECT_CHANNEL_MASK,
+                     tile_number,
                      paint_layer_effect_hash(effect, PAINT_LAYER_EFFECT_CHANNEL_MASK)};
   key.gpu_extras.chain_hash = paint_layer_mask_prefix_hash(ma, row, effect);
   return key;
@@ -226,17 +230,19 @@ static void mask_effect_transform_apply(ImBuf &buffer, const PaintMaterialCompos
   IMB_freeImBuf(moved);
 }
 
-/** Render the input of \a effect -- the mask built up to it -- and apply its kernel. */
+/** Render the input of \a effect -- the mask built up to it on \a tile_number -- and apply its
+ * kernel. */
 static bool paint_layer_mask_effect_compute(const Material &ma,
                                             const MaterialPaintLayer &row,
                                             const MaterialPaintLayer &effect,
+                                            const int tile_number,
                                             std::shared_ptr<ImBuf> &r_color,
                                             Vector<PaintLayerEffectSource> &r_synced)
 {
   bke::paint_perf::ScopedTimer perf_total("mask_effect.cpu.total");
   int width = 0;
   int height = 0;
-  if (!mask_effect_dimensions(ma, row, effect, width, height)) {
+  if (!mask_effect_dimensions(ma, row, effect, tile_number, width, height)) {
     return false;
   }
   std::shared_ptr<ImBuf> color = mask_effect_buffer_new(width, height);
@@ -247,13 +253,14 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
     bke::paint_perf::ScopedTimer perf_input("mask_effect.cpu.input");
     /* The same grey a slice before this item would show: the base and the items before it, laid by
      * their own opacity, blend and invert, independent of the row's visibility -- the anchor
-     * slice's own policy. The buffer is already canvas grey, so the item samples in with no map. */
+     * slice's own policy. The buffer is already canvas grey, so the item samples in with no map.
+     * The tile is the one the grey is computed for: the stack's tiled maps are acquired on it. */
     PaintLayersMaskSampler sampler(ma, row, &effect.marker, false);
-    sampler.tile_acquire(0, width, height);
+    sampler.tile_acquire(tile_number, width, height);
     float *pixels = color->float_data_for_write();
     for (const int y : IndexRange(height)) {
       for (const int x : IndexRange(width)) {
-        const float grey = sampler.sample(0, x, y);
+        const float grey = sampler.sample(tile_number, x, y);
         const int64_t index = int64_t(y) * width + x;
         pixels[index * 4 + 0] = grey;
         pixels[index * 4 + 1] = grey;
@@ -292,7 +299,8 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(const Material &ma,
                                                           const MaterialPaintLayer &row,
                                                           const MaterialPaintLayer &effect,
                                                           const bool describe_only,
-                                                          Vector<Image *> *r_images)
+                                                          Vector<Image *> *r_images,
+                                                          const int tile_number)
 {
   /* The re-entrancy guard: the describes the grey's own walk needs -- its input's, and the canvas
    * size -- stop before the item, but any other describe of the row reaches the item's branch and
@@ -321,7 +329,7 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(const Material &ma,
 
   int width = 0;
   int height = 0;
-  if (!mask_effect_dimensions(ma, row, effect, width, height)) {
+  if (!mask_effect_dimensions(ma, row, effect, tile_number, width, height)) {
     return {};
   }
   Vector<Image *> images;
@@ -333,7 +341,7 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(const Material &ma,
     return {};
   }
 
-  const EffectCacheKey key = mask_effect_key_get(ma, row, effect);
+  const EffectCacheKey key = mask_effect_key_get(ma, row, effect, tile_number);
   return paint_layer_effect_cache_get_or_compute(
       g_paint_mask_effect_cache,
       g_paint_mask_effect_cache_mutex,
@@ -343,7 +351,7 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(const Material &ma,
       images,
       g_paint_mask_effect_cache_budget,
       [&](std::shared_ptr<ImBuf> &r_color, Vector<PaintLayerEffectSource> &r_synced) {
-        return paint_layer_mask_effect_compute(ma, row, effect, r_color, r_synced);
+        return paint_layer_mask_effect_compute(ma, row, effect, tile_number, r_color, r_synced);
       });
 }
 
@@ -351,10 +359,10 @@ void paint_layer_mask_effect_cache_drop(const Material &ma,
                                         const MaterialPaintLayer &row,
                                         const MaterialPaintLayer &effect)
 {
-  const EffectCacheKey key = mask_effect_key_get(ma, row, effect);
+  const EffectCacheKey key = mask_effect_key_get(ma, row, effect, PAINT_TILE_NUMBER_BASE);
   std::lock_guard<std::mutex> lock(g_paint_mask_effect_cache_mutex);
   const auto no_release = [](MaskEffectCacheEntry &) {};
-  g_paint_mask_effect_cache.drop_rekeyed(key, no_release);
+  g_paint_mask_effect_cache.drop_instance(key, no_release);
 }
 
 /** \} */

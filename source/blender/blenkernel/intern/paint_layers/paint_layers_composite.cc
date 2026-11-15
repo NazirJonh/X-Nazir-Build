@@ -150,6 +150,11 @@ static void composite_projection_describe(const Material &ma,
                                           const Object *painted_object,
                                           PaintMaterialCompositeProjection &out)
 {
+  /* The tile the caller composites, written whether or not the row projects: the evaluator's
+   * fallback reads every map of the row through it, so the bake or export of tile N sees tile N's
+   * pixels of a tiled map instead of the base tile's. A row whose projection applies rasterizes
+   * the same tile, so the field serves both reads. */
+  out.tile_number = tile_number;
   if (!BKE_paint_layers_projection_applies(ma, row)) {
     out.present = false;
     return;
@@ -435,8 +440,8 @@ static bool composite_generator_describe(
     const int channel,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface,
     PaintMaterialCompositeGradient &out,
-    const MaterialPaintLayer *projection_row = nullptr,
-    const int tile_number = 1001,
+    const MaterialPaintLayer *projection_row,
+    const int tile_number,
     const Object *painted_object = nullptr)
 {
   const int kind = int(row.kind_subtype);
@@ -743,14 +748,16 @@ static void composite_mask_item_anchor_point(const MaskItemDescribeContext &cont
     if (!context.describe_only) {
       std::shared_ptr<ImBuf> slice_color;
       std::shared_ptr<ImBuf> slice_coverage;
-      if (!BKE_paint_layers_slice_render(ma,
-                                         mask,
-                                         read_channel,
-                                         &slice_color,
-                                         &slice_coverage,
-                                         context.slice_rect,
-                                         context.dimensions_only,
-                                         context.painted_object))
+      if (!BKE_paint_layers_slice_render(
+              ma,
+              mask,
+              read_channel,
+              &slice_color,
+              &slice_coverage,
+              context.slice_rect,
+              context.dimensions_only,
+              PaintLayerTileContext{.painted_object = context.painted_object,
+                                    .tile_number = context.tile_number}))
       {
         return;
       }
@@ -841,8 +848,12 @@ static void composite_mask_item_filter(const MaskItemDescribeContext &context,
                                  effect.image);
     }
     else {
-      effect.grey_buffer = paint_layer_mask_effect_buffer_get(
-          ma, context.layer, mask, context.describe_only, &effect.grey_input_images);
+      effect.grey_buffer = paint_layer_mask_effect_buffer_get(ma,
+                                                             context.layer,
+                                                             mask,
+                                                             context.describe_only,
+                                                             &effect.grey_input_images,
+                                                             context.tile_number);
       if (!context.describe_only && effect.grey_buffer == nullptr) {
         /* The input could not be rendered: the item is left out, as the generator leaves a
          * filter it cannot express out of the live graph. */
@@ -1076,17 +1087,19 @@ static std::shared_ptr<ImBuf> composite_height_won_get(
     const MaterialPaintLayer &row,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface,
     const bool isolating,
-    PaintLayersHeightWonCache *cache)
+    PaintLayersHeightWonCache *cache,
+    const int tile_number)
 {
   if (cache == nullptr) {
-    return composite_height_won_render(ma, prefix, row, context_surface, isolating, nullptr);
+    return composite_height_won_render(
+        ma, prefix, row, context_surface, isolating, nullptr, tile_number);
   }
-  const std::pair<const MaterialPaintLayer *, bool> key(&row, isolating);
+  const PaintLayersHeightWonKey key{&row, isolating, tile_number};
   if (const std::shared_ptr<ImBuf> *found = cache->masks.lookup_ptr(key)) {
     return *found;
   }
   std::shared_ptr<ImBuf> mask = composite_height_won_render(
-      ma, prefix, row, context_surface, isolating, cache);
+      ma, prefix, row, context_surface, isolating, cache, tile_number);
   cache->masks.add_new(key, mask);
   return mask;
 }
@@ -1097,7 +1110,8 @@ static bool anchor_slice_dimensions(const Material &ma,
                                     const PaintLayerAnchorPointRef &ref,
                                     int &r_width,
                                     int &r_height,
-                                    const Object *painted_object);
+                                    const Object *painted_object,
+                                    int tile_number);
 
 /** The effect cache, defined beside the slice cache it shares the machinery of; the hash is
  * declared with the key in #paint_layers_effect_cache_intern.hh. */
@@ -1105,6 +1119,7 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                                                             const MaterialPaintLayer &row,
                                                             const MaterialPaintLayer &effect,
                                                             const int channel,
+                                                            const int tile_number,
                                                             const bool describe_only,
                                                             Vector<Image *> *r_images);
 
@@ -1118,6 +1133,7 @@ static void composite_effect_append_cpu_computed(const Material &ma,
                                                  const MaterialPaintLayer &effect,
                                                  const int channel,
                                                  const float pass_through_scale,
+                                                 const int tile_number,
                                                  const bool describe_only,
                                                  PaintMaterialCompositeImageLayer &out)
 {
@@ -1137,8 +1153,13 @@ static void composite_effect_append_cpu_computed(const Material &ma,
   /* The GPU path keys its result texture on the effect instance, which a parameter hash cannot do
    * across rows: name the marker the correction was made from. */
   effect_correction.effect_marker = effect.marker;
-  effect_correction.effect_color = paint_layer_effect_buffer_get(
-      ma, *owner_row, effect, channel, describe_only, &effect_correction.effect_images);
+  effect_correction.effect_color = paint_layer_effect_buffer_get(ma,
+                                                                *owner_row,
+                                                                effect,
+                                                                channel,
+                                                                tile_number,
+                                                                describe_only,
+                                                                &effect_correction.effect_images);
   if (!describe_only && effect_correction.effect_color == nullptr) {
     /* The input could not be rendered: the correction is left out, as the generator leaves it
      * out of the live graph. */
@@ -1151,7 +1172,8 @@ static void composite_effect_append_cpu_computed(const Material &ma,
 
 /**
  * Describe an Anchor Point reader correction into \a correction. False when the correction is left
- * out because its slice cannot be rendered.
+ * out because its slice cannot be rendered. The slice is the one of \a tile_number: every map of
+ * the source row is read on that tile.
  */
 static bool composite_effect_anchor_point_describe(
     const Material &ma,
@@ -1161,6 +1183,7 @@ static bool composite_effect_anchor_point_describe(
     const int *slice_rect,
     const bool dimensions_only,
     const bool describe_only,
+    const int tile_number,
     const Object *painted_object,
     PaintMaterialCompositeCorrection &correction)
 {
@@ -1193,7 +1216,10 @@ static bool composite_effect_anchor_point_describe(
                                                        &correction.anchor_point_coverage,
                                                        slice_rect,
                                                        dimensions_only,
-                                                       painted_object))
+                                                       PaintLayerTileContext{.painted_object =
+                                                                                 painted_object,
+                                                                             .tile_number =
+                                                                                 tile_number}))
   {
     return false;
   }
@@ -1296,7 +1322,7 @@ static void composite_effect_append(
 {
   if (paint_layer_effect_is_cpu_computed(effect)) {
     composite_effect_append_cpu_computed(
-        ma, owner_row, effect, channel, pass_through_scale, describe_only, out);
+        ma, owner_row, effect, channel, pass_through_scale, tile_number, describe_only, out);
     return;
   }
   if (paint_layer_effect_filters(ma, effect, channel)) {
@@ -1326,13 +1352,20 @@ static void composite_effect_append(
                                                        slice_rect,
                                                        dimensions_only,
                                                        describe_only,
+                                                       tile_number,
                                                        painted_object,
                                                        correction);
   }
   else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES)) {
     /* A generator correction has no map: its ramp is laid by its own blend and opacity. */
-    described = composite_generator_describe(
-        ma, effect, channel, context_surface, correction.gradient);
+    described = composite_generator_describe(ma,
+                                             effect,
+                                             channel,
+                                             context_surface,
+                                             correction.gradient,
+                                             /*projection_row=*/nullptr,
+                                             tile_number,
+                                             painted_object);
   }
   else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
     described = composite_effect_source_describe(
@@ -1430,7 +1463,8 @@ bool composite_image_layer_build(const Material &ma,
                                        &out.anchor_point_coverage,
                                        slice_rect,
                                        dimensions_only,
-                                       painted_object))
+                                       PaintLayerTileContext{.painted_object = painted_object,
+                                                             .tile_number = tile_number}))
     {
       return false;
     }
@@ -1440,8 +1474,14 @@ bool composite_image_layer_build(const Material &ma,
        * stack's dimensions find the reader without rendering a single nested slice. */
       int slice_width = 0;
       int slice_height = 0;
-      if (anchor_slice_dimensions(
-              ma, layer, channel, reader_ref, slice_width, slice_height, painted_object))
+      if (anchor_slice_dimensions(ma,
+                                  layer,
+                                  channel,
+                                  reader_ref,
+                                  slice_width,
+                                  slice_height,
+                                  painted_object,
+                                  tile_number))
       {
         out.empty_base = true;
         out.empty_base_size = slice_width;
@@ -1674,7 +1714,7 @@ void composite_image_layers_collect(const Material &ma,
         prefix.first = (list.first == &layer) ? nullptr : list.first;
         prefix.last = layer.prev;
         out.height_won = composite_height_won_get(
-            ma, prefix, layer, context_surface, isolating, height_won_cache);
+            ma, prefix, layer, context_surface, isolating, height_won_cache, tile_number);
       }
       r_layers.append(std::move(out));
     }
@@ -2105,6 +2145,8 @@ struct AnchorSliceCacheKey {
   uint32_t material_uid = 0;
   bUUID reader = {};
   int channel = 0;
+  /** The UDIM tile the slice was rendered for; each tile is its own entry. */
+  int tile_number = PAINT_TILE_NUMBER_BASE;
   uint64_t hash = 0;
 };
 
@@ -2226,7 +2268,7 @@ int paint_layer_anchor_point_slice_cache_entry_count()
 static bool anchor_slice_key_equal(const AnchorSliceCacheKey &a, const AnchorSliceCacheKey &b)
 {
   return a.material_uid == b.material_uid && BLI_uuid_equal(a.reader, b.reader) &&
-         a.channel == b.channel && a.hash == b.hash;
+         a.channel == b.channel && a.tile_number == b.tile_number && a.hash == b.hash;
 }
 
 /** An RGBA float buffer of \a width x \a height, owned by the returned shared pointer. */
@@ -2278,6 +2320,21 @@ static void anchor_slice_buffers_clear_if_partial(const int *dst_rect,
   memset(coverage.float_data_for_write(), 0, size);
 }
 
+int BKE_paint_layers_tile_resolve(const int tile_number,
+                                  const PaintMaterialCompositeSurface *surface,
+                                  const Object *painted_object)
+{
+  if (tile_number != PAINT_TILE_NUMBER_AUTO) {
+    return tile_number;
+  }
+  /* The surface knows the UDIM tile of the UVs it was rasterized from; without one the painted
+   * object's own UVs decide, and the base tile stays the answer for everything else. */
+  if (surface != nullptr) {
+    return surface->tile_number;
+  }
+  return BKE_paint_layers_gradient_surface_object_tile(painted_object);
+}
+
 bool BKE_paint_layers_slice_describe(const Material &ma,
                                      const MaterialPaintLayer &reader,
                                      const int channel,
@@ -2285,11 +2342,15 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
                                      const int *slice_rect,
                                      const bool dimensions_only,
                                      const bool allow_empty_mask,
-                                     const Object *painted_object)
+                                     const PaintLayerTileContext &context)
 {
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
+  /* One resolution of the unset tile here, so everything below keys on the concrete number. */
+  const int tile_number = BKE_paint_layers_tile_resolve(
+      context.tile_number, nullptr, context.painted_object);
+  const Object *painted_object = context.painted_object;
   const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
   if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == nullptr ||
       ref.point == nullptr)
@@ -2304,7 +2365,7 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
     composite_mask_items_describe(ma,
                                   *ref.source_row,
                                   r_entry.mask_items,
-                                  1001,
+                                  tile_number,
                                   &ref.point->marker,
                                   slice_rect,
                                   dimensions_only,
@@ -2324,7 +2385,7 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
                                      false,
                                      true,
                                      r_entry,
-                                     1001,
+                                     tile_number,
                                      &ref.point->marker,
                                      slice_rect,
                                      dimensions_only,
@@ -2349,40 +2410,50 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
   return true;
 }
 
-/** The size of the slice of \a reader: the source row's, like a bake of that row. */
+/** The size of the slice of \a reader on \a tile_number: the source row's, like a bake of that
+ * row. */
 static bool anchor_slice_dimensions(const Material &ma,
                                     const MaterialPaintLayer &reader,
                                     const int channel,
                                     const PaintLayerAnchorPointRef &ref,
                                     int &r_width,
                                     int &r_height,
-                                    const Object *painted_object)
+                                    const Object *painted_object,
+                                    const int tile_number)
 {
   r_width = 0;
   r_height = 0;
   if (ref.target == PaintLayerAnchorPointTarget::Mask) {
-    return BKE_paint_layers_row_dimensions(ma,
-                                           *ref.source_row,
-                                           PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                           r_width,
-                                           r_height,
-                                           painted_object) &&
+    return BKE_paint_layers_row_dimensions(
+               ma,
+               *ref.source_row,
+               PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+               r_width,
+               r_height,
+               PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}) &&
            r_width > 0 && r_height > 0;
   }
   /* Described without rendering, so the nested slices this one reads are not rendered (or
    * allocated) just to learn a size. */
   PaintMaterialCompositeImageLayer entry;
   return BKE_paint_layers_slice_describe(
-             ma, reader, channel, entry, nullptr, true, false, painted_object) &&
+             ma,
+             reader,
+             channel,
+             entry,
+             nullptr,
+             true,
+             false,
+             PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}) &&
          BKE_paint_material_composite_stack_dimensions(
              Span<PaintMaterialCompositeImageLayer>(&entry, 1), r_width, r_height) &&
          r_width > 0 && r_height > 0;
 }
 
 /**
- * Render the slice of \a reader into the buffers, which are already of the slice's size: the whole
- * of them when \a rect is null, else the rectangle (x0, y0, x1, y1), leaving the rest as it is.
- * False when the slice cannot be rendered there.
+ * Render the slice of \a reader on \a tile_number into the buffers, which are already of the
+ * slice's size: the whole of them when \a rect is null, else the rectangle (x0, y0, x1, y1),
+ * leaving the rest as it is. False when the slice cannot be rendered there.
  */
 static bool anchor_slice_fill(const Material &ma,
                               const MaterialPaintLayer &reader,
@@ -2391,7 +2462,8 @@ static bool anchor_slice_fill(const Material &ma,
                               const int *rect,
                               ImBuf &color,
                               ImBuf &coverage,
-                              const Object *painted_object)
+                              const Object *painted_object,
+                              const int tile_number)
 {
   const int width = color.x;
   const int height = color.y;
@@ -2404,14 +2476,15 @@ static bool anchor_slice_fill(const Material &ma,
 
   if (ref.target == PaintLayerAnchorPointTarget::Mask) {
     /* The slice reads the stack straight, the base's switch included (see
-     * #BKE_paint_layers_slice_describe). */
+     * #BKE_paint_layers_slice_describe). The tile is the one the slice is rendered for: the
+     * stack's own maps are acquired on it, so a tiled mask item contributes the tile's pixels. */
     PaintLayersMaskSampler sampler(
         ma, *ref.source_row, &ref.point->marker, false, painted_object);
-    sampler.tile_acquire(0, width, height);
+    sampler.tile_acquire(tile_number, width, height);
     for (int y = ry0; y < ry1; y++) {
       for (int x = rx0; x < rx1; x++) {
         const int64_t index = int64_t(y) * width + x;
-        const float gray = sampler.sample(0, x, y);
+        const float gray = sampler.sample(tile_number, x, y);
         color_pixels[index * 4 + 0] = gray;
         color_pixels[index * 4 + 1] = gray;
         color_pixels[index * 4 + 2] = gray;
@@ -2430,7 +2503,14 @@ static bool anchor_slice_fill(const Material &ma,
   /* Nested readers inside the content slice must see the same rectangle: without it every nested
    * slice would render fully even when only a rectangle is wanted. */
   if (!BKE_paint_layers_slice_describe(
-          ma, reader, channel, entry, rect, false, false, painted_object))
+          ma,
+          reader,
+          channel,
+          entry,
+          rect,
+          false,
+          false,
+          PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}))
   {
     return false;
   }
@@ -2479,8 +2559,8 @@ static bool anchor_slice_fill(const Material &ma,
   return true;
 }
 
-/** Render the slice into buffers of its own: all of it for a null \a dst_rect, else that rectangle
- * with the rest zero. */
+/** Render the slice of \a reader on \a tile_number into buffers of its own: all of it for a null
+ * \a dst_rect, else that rectangle with the rest zero. */
 static bool anchor_slice_render_new(const Material &ma,
                                     const MaterialPaintLayer &reader,
                                     const int channel,
@@ -2488,11 +2568,14 @@ static bool anchor_slice_render_new(const Material &ma,
                                     const int *dst_rect,
                                     std::shared_ptr<ImBuf> &r_color,
                                     std::shared_ptr<ImBuf> &r_coverage,
-                                    const Object *painted_object)
+                                    const Object *painted_object,
+                                    const int tile_number)
 {
   int width = 0;
   int height = 0;
-  if (!anchor_slice_dimensions(ma, reader, channel, ref, width, height, painted_object)) {
+  if (!anchor_slice_dimensions(
+          ma, reader, channel, ref, width, height, painted_object, tile_number))
+  {
     return false;
   }
   int rx0, ry0, rx1, ry1;
@@ -2505,7 +2588,9 @@ static bool anchor_slice_render_new(const Material &ma,
     return false;
   }
   anchor_slice_buffers_clear_if_partial(dst_rect, *color, *coverage);
-  if (!anchor_slice_fill(ma, reader, channel, ref, dst_rect, *color, *coverage, painted_object)) {
+  if (!anchor_slice_fill(
+          ma, reader, channel, ref, dst_rect, *color, *coverage, painted_object, tile_number))
+  {
     return false;
   }
   r_color = std::move(color);
@@ -2523,10 +2608,19 @@ static bool anchor_slice_region_is_exact(const Material &ma,
                                          const int channel,
                                          const Span<Image *> images,
                                          const int width,
-                                         const int height)
+                                         const int height,
+                                         const int tile_number)
 {
   PaintMaterialCompositeImageLayer entry;
-  if (!BKE_paint_layers_slice_describe(ma, reader, channel, entry, nullptr, true) ||
+  if (!BKE_paint_layers_slice_describe(
+          ma,
+          reader,
+          channel,
+          entry,
+          nullptr,
+          true,
+          false,
+          PaintLayerTileContext{.tile_number = tile_number}) ||
       !anchor_slice_layer_is_texel_exact(entry))
   {
     return false;
@@ -2664,9 +2758,11 @@ bool BKE_paint_layers_effect_input_describe(const Material &ma,
                                             const bool dimensions_only,
                                             const bool describe_only,
                                             PaintMaterialCompositeImageLayer &r_entry,
-                                            const Object *painted_object)
+                                            const PaintLayerTileContext &context)
 {
   r_entry = PaintMaterialCompositeImageLayer{};
+  const int tile_number = BKE_paint_layers_tile_resolve(
+      context.tile_number, nullptr, context.painted_object);
   if (!composite_image_layer_build(ma,
                                    row,
                                    channel,
@@ -2674,7 +2770,7 @@ bool BKE_paint_layers_effect_input_describe(const Material &ma,
                                    false,
                                    true,
                                    r_entry,
-                                   BKE_paint_layers_gradient_surface_object_tile(painted_object),
+                                   tile_number,
                                    &effect.marker,
                                    nullptr,
                                    dimensions_only,
@@ -2682,7 +2778,7 @@ bool BKE_paint_layers_effect_input_describe(const Material &ma,
                                    nullptr,
                                    nullptr,
                                    PaintLayerBakeScope::WholeRow,
-                                   painted_object))
+                                   context.painted_object))
   {
     return false;
   }
@@ -2727,11 +2823,13 @@ void BKE_paint_layers_effect_input_images(const PaintMaterialCompositeImageLayer
   }
 }
 
-/** Render the input of \a effect and apply its kernel, into a buffer of the input's own size. */
+/** Render the input of \a effect on \a tile_number and apply its kernel, into a buffer of the
+ * input's own size. */
 static bool paint_layer_effect_compute(const Material &ma,
                                        const MaterialPaintLayer &row,
                                        const MaterialPaintLayer &effect,
                                        const int channel,
+                                       const int tile_number,
                                        std::shared_ptr<ImBuf> &r_color,
                                        Vector<AnchorSliceSource> &r_synced)
 {
@@ -2747,7 +2845,14 @@ static bool paint_layer_effect_compute(const Material &ma,
   {
     bke::paint_perf::ScopedTimer perf_input("effect.cpu.input");
     if (!BKE_paint_layers_effect_input_describe(
-            ma, row, effect, channel, /*dimensions_only=*/false, /*describe_only=*/false, entry))
+            ma,
+            row,
+            effect,
+            channel,
+            /*dimensions_only=*/false,
+            /*describe_only=*/false,
+            entry,
+            PaintLayerTileContext{.tile_number = tile_number}))
     {
       return false;
     }
@@ -2840,6 +2945,7 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                                                             const MaterialPaintLayer &row,
                                                             const MaterialPaintLayer &effect,
                                                             const int channel,
+                                                            const int tile_number,
                                                             const bool describe_only,
                                                             Vector<Image *> *r_images)
 {
@@ -2850,7 +2956,14 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
   int width = 0;
   int height = 0;
   if (!BKE_paint_layers_effect_input_describe(
-          ma, row, effect, channel, true, false, dims_entry) ||
+          ma,
+          row,
+          effect,
+          channel,
+          true,
+          false,
+          dims_entry,
+          PaintLayerTileContext{.tile_number = tile_number}) ||
       !BKE_paint_material_composite_stack_dimensions(
           Span<PaintMaterialCompositeImageLayer>(&dims_entry, 1), width, height) ||
       width <= 0 || height <= 0)
@@ -2868,6 +2981,7 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
   const EffectCacheKey key{ma.id.session_uid,
                            effect.marker,
                            channel,
+                           tile_number,
                            paint_layer_effect_hash(effect, channel)};
   return paint_layer_effect_cache_get_or_compute(
       g_paint_effect_cache,
@@ -2878,7 +2992,8 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
       images,
       g_paint_effect_cache_budget,
       [&](std::shared_ptr<ImBuf> &r_color, Vector<PaintLayerEffectSource> &r_synced) {
-        return paint_layer_effect_compute(ma, row, effect, channel, r_color, r_synced);
+        return paint_layer_effect_compute(
+            ma, row, effect, channel, tile_number, r_color, r_synced);
       });
 }
 
@@ -2891,13 +3006,17 @@ bool BKE_paint_layers_slice_render(const Material &ma,
                                    std::shared_ptr<ImBuf> *r_coverage,
                                    const int *dst_rect,
                                    const bool dimensions_only,
-                                   const Object *painted_object)
+                                   const PaintLayerTileContext &context)
 {
   *r_color = {};
   *r_coverage = {};
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
+  /* One resolution of the unset tile here, so everything below keys on the concrete number. */
+  const int tile_number = BKE_paint_layers_tile_resolve(
+      context.tile_number, nullptr, context.painted_object);
+  const Object *painted_object = context.painted_object;
   const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
   if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == nullptr) {
     return false;
@@ -2907,13 +3026,21 @@ bool BKE_paint_layers_slice_render(const Material &ma,
      * needed. */
     int width = 0;
     int height = 0;
-    return anchor_slice_dimensions(ma, reader, channel, ref, width, height, painted_object);
+    return anchor_slice_dimensions(
+        ma, reader, channel, ref, width, height, painted_object, tile_number);
   }
   if (dst_rect != nullptr) {
     /* A partial render is not a complete slice and is never cached: it is only produced for a bake
      * job that writes the requested rectangle into its own full-size map. */
-    if (!anchor_slice_render_new(
-            ma, reader, channel, ref, dst_rect, *r_color, *r_coverage, painted_object)) {
+    if (!anchor_slice_render_new(ma,
+                                 reader,
+                                 channel,
+                                 ref,
+                                 dst_rect,
+                                 *r_color,
+                                 *r_coverage,
+                                 painted_object,
+                                 tile_number)) {
       return false;
     }
     return true;
@@ -2923,8 +3050,9 @@ bool BKE_paint_layers_slice_render(const Material &ma,
   Vector<Image *> images;
   key.material_uid = ma.id.session_uid;
   key.reader = reader.marker;
-  /* A mask slice is the same grey for every channel: one cache entry per reader. */
+  /* A mask slice is the same grey for every channel: one cache entry per reader and tile. */
   key.channel = (ref.target == PaintLayerAnchorPointTarget::Mask) ? -1 : channel;
+  key.tile_number = tile_number;
   key.hash = paint_layer_anchor_point_slice_hash(ma, reader, channel);
   anchor_slice_images_get(ma, reader, images);
   /* Read before anything is rendered: an edit that lands while the slice renders is then seen as
@@ -2968,7 +3096,8 @@ bool BKE_paint_layers_slice_render(const Material &ma,
   bool updated = false;
   if (have_entry && change == ePixelChange::Region && held.color != nullptr &&
       held.coverage != nullptr &&
-      anchor_slice_region_is_exact(ma, reader, channel, images, held.color->x, held.color->y))
+      anchor_slice_region_is_exact(
+          ma, reader, channel, images, held.color->x, held.color->y, tile_number))
   {
     /* Only the edited rectangle is rendered again. The buffers are written in place when the cache
      * is their only owner; a description that still reads them gets them unchanged, and the
@@ -2990,7 +3119,7 @@ bool BKE_paint_layers_slice_render(const Material &ma,
       }
       else {
         updated = anchor_slice_fill(
-            ma, reader, channel, ref, rect, *color, *coverage, painted_object);
+            ma, reader, channel, ref, rect, *color, *coverage, painted_object, tile_number);
       }
     }
     if (!updated) {
@@ -2999,8 +3128,15 @@ bool BKE_paint_layers_slice_render(const Material &ma,
       coverage = {};
     }
   }
-  if (!updated && !anchor_slice_render_new(
-                       ma, reader, channel, ref, nullptr, color, coverage, painted_object))
+  if (!updated && !anchor_slice_render_new(ma,
+                                           reader,
+                                           channel,
+                                           ref,
+                                           nullptr,
+                                           color,
+                                           coverage,
+                                           painted_object,
+                                           tile_number))
   {
     return false;
   }
@@ -3055,22 +3191,23 @@ static bool composite_bake_entry(
     const MaterialPaintLayer &layer,
     const int channel,
     PaintMaterialCompositeImageLayer &r_entry,
-    const std::shared_ptr<const PaintMaterialCompositeSurface> &surface = nullptr,
-    const int *slice_rect = nullptr,
-    const bool dimensions_only = false,
-    const PaintLayerBakeScope scope = PaintLayerBakeScope::WholeRow,
-    const Object *painted_object = nullptr)
+    const std::shared_ptr<const PaintMaterialCompositeSurface> &surface,
+    const int *slice_rect,
+    const bool dimensions_only,
+    const PaintLayerBakeScope scope,
+    const Object *painted_object,
+    const int tile_number)
 {
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
       (BKE_paint_layers_is_folder(layer) && BKE_paint_layers_folder_is_pass_through(layer)))
   {
     return false;
   }
-  /* The surface knows the UDIM tile of the UVs it was rasterized from; without one the painted
-   * object's own UVs decide, and the base tile stays the answer for everything else. */
-  const int tile_number = surface != nullptr ?
-                              surface->tile_number :
-                              BKE_paint_layers_gradient_surface_object_tile(painted_object);
+  /* One resolution of the unset tile: the surface knows the UDIM tile of the UVs it was rasterized
+   * from, then the painted object's own UVs decide, and the base tile stays the answer for
+   * everything else. */
+  const int effective_tile = BKE_paint_layers_tile_resolve(
+      tile_number, surface.get(), painted_object);
   /* The surface is a row input of the description, not a stop point: it rides the context
    * arguments after the size ones. */
   return composite_image_layer_build(ma,
@@ -3080,7 +3217,7 @@ static bool composite_bake_entry(
                                     false,
                                     true,
                                     r_entry,
-                                    tile_number,
+                                    effective_tile,
                                     nullptr,
                                     slice_rect,
                                     dimensions_only,
@@ -3100,8 +3237,10 @@ bool BKE_paint_layers_bake_render_node(
     float *r_coverage_gray,
     const int *dst_rect,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &surface,
-    const Object *painted_object)
+    const PaintLayerTileContext &context)
 {
+  const Object *painted_object = context.painted_object;
+  const int tile_number = context.tile_number;
   if (size <= 0 || r_color_rgba == nullptr || r_coverage_gray == nullptr) {
     return false;
   }
@@ -3123,8 +3262,16 @@ bool BKE_paint_layers_bake_render_node(
    * laid live over the map the result becomes, so a stroke into the mask never asks for this. */
   const PaintLayerBakeScope scope = paint_layer_bake_scope(layer, false);
   PaintMaterialCompositeImageLayer dims_entry;
-  if (!composite_bake_entry(
-          ma, layer, channel, dims_entry, surface, nullptr, true, scope, painted_object))
+  if (!composite_bake_entry(ma,
+                            layer,
+                            channel,
+                            dims_entry,
+                            surface,
+                            nullptr,
+                            true,
+                            scope,
+                            painted_object,
+                            tile_number))
   {
     return false;
   }
@@ -3191,7 +3338,8 @@ bool BKE_paint_layers_bake_render_node(
                             dst_rect != nullptr ? slice_rect : nullptr,
                             false,
                             scope,
-                            painted_object))
+                            painted_object,
+                            tile_number))
   {
     return false;
   }
@@ -3230,7 +3378,7 @@ bool BKE_paint_layers_row_dimensions(const Material &ma,
                                      const int channel,
                                      int &r_width,
                                      int &r_height,
-                                     const Object *painted_object)
+                                     const PaintLayerTileContext &context)
 {
   PaintMaterialCompositeImageLayer entry;
   /* Only the size is wanted: nested readers must not render and cache their slices for it. */
@@ -3242,7 +3390,8 @@ bool BKE_paint_layers_row_dimensions(const Material &ma,
                             nullptr,
                             true,
                             PaintLayerBakeScope::WholeRow,
-                            painted_object))
+                            context.painted_object,
+                            context.tile_number))
   {
     return false;
   }
@@ -3498,12 +3647,14 @@ class GpuCapturePlanner {
                     const int channel_num,
                     Vector<PaintLayersGpuCaptureJob> &r_jobs,
                     const char **r_reason,
-                    const Object *painted_object)
+                    const PaintLayerTileContext &context)
       : ma_(ma),
         channel_num_(channel_num),
         jobs_(r_jobs),
         reason_(r_reason),
-        painted_object_(painted_object)
+        painted_object_(context.painted_object),
+        tile_number_(BKE_paint_layers_tile_resolve(
+            context.tile_number, nullptr, context.painted_object))
   {
   }
 
@@ -3544,7 +3695,14 @@ class GpuCapturePlanner {
       const bool mask_kind = kind != PaintLayersGpuCaptureKind::Content;
       PaintMaterialCompositeImageLayer entry;
       if (!BKE_paint_layers_slice_describe(
-              ma_, *reader, channel, entry, nullptr, true, mask_kind, painted_object_))
+              ma_,
+              *reader,
+              channel,
+              entry,
+              nullptr,
+              true,
+              mask_kind,
+              PaintLayerTileContext{.painted_object = painted_object_, .tile_number = tile_number_}))
       {
         return this->fail("an Anchor Point slice cannot be described");
       }
@@ -3575,6 +3733,8 @@ class GpuCapturePlanner {
   const char **reason_;
   /** Describes a slice's projection against the painted surface; null leaves it without one. */
   const Object *painted_object_;
+  /** The UDIM tile the plan's slices describe and the slots capture for. */
+  int tile_number_ = PAINT_TILE_NUMBER_BASE;
   /** One depth per job, parallel to #jobs_: a job discovered inside another's description is one
    * level deeper. The hard limit bounds both recursion and work on a malicious description. */
   Vector<int> depths_;
@@ -3743,7 +3903,7 @@ bool BKE_paint_layers_gpu_capture_plan(
     const Span<int> channels,
     Vector<PaintLayersGpuCaptureJob> &r_jobs,
     const char **r_reason,
-    const Object *painted_object)
+    const PaintLayerTileContext &context)
 {
   r_jobs.clear();
   if (r_reason != nullptr) {
@@ -3756,7 +3916,7 @@ bool BKE_paint_layers_gpu_capture_plan(
     return false;
   }
 
-  GpuCapturePlanner planner(ma, int(channels.size()), r_jobs, r_reason, painted_object);
+  GpuCapturePlanner planner(ma, int(channels.size()), r_jobs, r_reason, context);
   if (!planner.collect_stacks(stacks, channels) || !planner.describe_jobs()) {
     return false;
   }
@@ -3776,14 +3936,18 @@ bool BKE_paint_layers_gpu_slot_key_equal(const PaintLayersGpuSlotKey &a,
 {
   /* The channel is the #eMaterialPaintChannel value, never the combined-stack index: Alpha and
    * Emission occupy the same position in one order and none in the other. */
-  return a.channel == b.channel && BLI_uuid_equal(a.point, b.point);
+  return a.channel == b.channel && a.tile_number == b.tile_number &&
+         BLI_uuid_equal(a.point, b.point);
 }
 
 int BKE_paint_layers_gpu_slot_find(const Span<PaintLayersGpuSlotKey> slots,
                                    const bUUID &point,
-                                   const int channel)
+                                   const int channel,
+                                   const int tile_number)
 {
-  const PaintLayersGpuSlotKey wanted{point, channel};
+  /* A caller that named no tile means the base one, the tile its slots were captured for. */
+  const PaintLayersGpuSlotKey wanted{
+      point, channel, BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr)};
   for (const int i : slots.index_range()) {
     if (BKE_paint_layers_gpu_slot_key_equal(slots[i], wanted)) {
       return i;

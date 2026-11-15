@@ -19,6 +19,7 @@
 #include <memory>
 #include <utility>
 
+#include "BLI_hash.hh"
 #include "BLI_map.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_set.hh"
@@ -27,6 +28,7 @@
 #include "DNA_color_types.h"
 #include "DNA_colorband_types.h"
 
+#include "BKE_paint_layers_tile.hh"
 #include "BKE_paint_material_composite.hh"
 
 namespace blender {
@@ -48,20 +50,40 @@ struct rcti;
  * mask is channel-independent by construction.
  *
  * An entry is good for the pass that filled it and no longer: the description it was rendered from
- * (opacities, masks, the rows below) can change between passes and nothing here is keyed on it. The
- * key is the row and whether the build was isolating, the two things the mask depends on besides
- * the pass. A caller that describes a single channel has nothing to share and leaves it out.
+ * (opacities, masks, the rows below) can change between passes and nothing here is keyed on it.
+ */
+struct PaintLayersHeightWonKey {
+  const MaterialPaintLayer *row = nullptr;
+  bool isolating = false;
+  int tile_number = PAINT_TILE_NUMBER_BASE;
+
+  uint64_t hash() const
+  {
+    return get_default_hash(this->row, this->isolating, this->tile_number);
+  }
+
+  friend bool operator==(const PaintLayersHeightWonKey &a, const PaintLayersHeightWonKey &b)
+  {
+    return a.row == b.row && a.isolating == b.isolating && a.tile_number == b.tile_number;
+  }
+};
+
+/**
+ * The rendered masks one build pass shares, keyed on #PaintLayersHeightWonKey: the row, whether
+ * the build was isolating and the UDIM tile the maps were read on, the three things the mask
+ * depends on besides the pass. A caller that describes a single channel has nothing to share and
+ * leaves it out.
  */
 struct PaintLayersHeightWonCache {
   /** The rendered mask of a row of an isolating or a top-level build; a null entry is "no mask". */
-  Map<std::pair<const MaterialPaintLayer *, bool>, std::shared_ptr<ImBuf>> masks;
+  Map<PaintLayersHeightWonKey, std::shared_ptr<ImBuf>> masks;
   /**
    * The rows of this pass whose mask could not be rendered for a size mismatch and which have been
    * said out loud already, keyed like #masks. The mask is rendered once per row and pass, but the
    * diagnostic is worth exactly one line per pass: a stack that compares through a resample the
    * graph has no node for is worth knowing about once, not once per channel.
    */
-  Set<std::pair<const MaterialPaintLayer *, bool>> size_mismatch_reported;
+  Set<PaintLayersHeightWonKey> size_mismatch_reported;
 };
 
 /**
@@ -252,6 +274,10 @@ bool BKE_paint_layers_corrections_row_describe(const Material &ma,
  * \param allow_empty_mask: a mask slice with no item is a valid slice (a factor of one), rather
  * than a refused one. The GPU capture plan asks for it so the slot can be cleared to one; a bake
  * still refuses it.
+ * \param context: the object a projected row or mask item reads its surface from, and the UDIM
+ * tile the slice describes: every map of the source row is read on that tile, the way the
+ * composite reads the row on it. An unset tile resolves through the object (see
+ * #BKE_paint_layers_tile_resolve).
  *
  * \return false when the reference does not resolve or the row cannot be described.
  */
@@ -262,7 +288,7 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
                                      const int *slice_rect = nullptr,
                                      bool dimensions_only = false,
                                      bool allow_empty_mask = false,
-                                     const Object *painted_object = nullptr);
+                                     const PaintLayerTileContext &context = {});
 
 /**
  * Describe the **input** of a CPU-computed \a effect: the content \a row holds up to the effect's
@@ -280,8 +306,10 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
  * \param describe_only: keep every reader's descriptor and the maps it subscribes to, but render no
  *        Anchor Point slice and compute no nested effect buffer: the GPU path lays the slices from
  *        its own slots and the nested effects from its own cache. A CPU caller must leave it false.
- * \param painted_object: the object a projected row, correction or mask item of the input reads its
- *        surface from, or null (the GPU path then refuses the projection).
+ * \param context: the object a projected row, correction or mask item of the input reads its
+ *        surface from (null refuses the projection), and the UDIM tile the input describes: every
+ *        map of the row is read on that tile, the way the composite reads the row on it. An unset
+ *        tile resolves through the object.
  * \return false when the row cannot be described.
  */
 bool BKE_paint_layers_effect_input_describe(const Material &ma,
@@ -291,7 +319,7 @@ bool BKE_paint_layers_effect_input_describe(const Material &ma,
                                             bool dimensions_only,
                                             bool describe_only,
                                             PaintMaterialCompositeImageLayer &r_entry,
-                                            const Object *painted_object = nullptr);
+                                            const PaintLayerTileContext &context = {});
 
 /**
  * Every map the described effect \a layer renders from, once each and none of them null. The effect
@@ -325,9 +353,10 @@ void BKE_paint_layers_input_transforms_get(const Material &ma,
                                            const Object *painted_object = nullptr);
 
 /**
- * Render the slice \a reader lays in \a channel at the source row's resolution. The buffers are
- * reference counted and outlive the slice cache; \a dst_rect limits a partial render to that
- * rectangle, leaving the rest zero, and is never cached. Used by the developer GPU verification.
+ * Render the slice \a reader lays in \a channel on the context's tile, at the source row's
+ * resolution for that tile. The buffers are reference counted and outlive the slice cache; \a
+ * dst_rect limits a partial render to that rectangle, leaving the rest zero, and is never cached.
+ * Each tile is its own cache entry. Used by the developer GPU verification.
  */
 bool BKE_paint_layers_slice_render(const Material &ma,
                                    const MaterialPaintLayer &reader,
@@ -336,7 +365,7 @@ bool BKE_paint_layers_slice_render(const Material &ma,
                                    std::shared_ptr<ImBuf> *r_coverage,
                                    const int *dst_rect = nullptr,
                                    bool dimensions_only = false,
-                                   const Object *painted_object = nullptr);
+                                   const PaintLayerTileContext &context = {});
 
 /**
  * Whether the combined preview computes \a effect itself, in an effect pass of its own whose result
@@ -670,7 +699,8 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
                                                                const PaintLayerEffectGpuKeyExtras &key_extras,
                                                                const PaintLayerEffectGpuHooks &hooks,
                                                                rcti *r_dirty_region,
-                                                               void **r_resource);
+                                                               void **r_resource,
+                                                               int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /**
  * Record that the texture of this effect's entry now holds its result over \a images at the versions
@@ -686,7 +716,8 @@ void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
                                                int width,
                                                int height,
                                                Span<Image *> images,
-                                               const PaintLayerEffectGpuKeyExtras &key_extras);
+                                               const PaintLayerEffectGpuKeyExtras &key_extras,
+                                               int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /**
  * Drop every cached effect texture. The cache owns textures of its own, so it has to be emptied while
@@ -753,8 +784,10 @@ struct PaintLayersGpuCaptureJob {
  * \param stacks: one stack per entry of \a channels, same length.
  * \param channels: the channel enum each stack was derived for.
  * \param r_reason: a static string saying why no plan could be built, or null.
- * \param painted_object: the object a projected row in a slice reads its surface from; without it
- *        the slice's projection has no object and the GPU path refuses it.
+ * \param context: the object a projected row in a slice reads its surface from (without it the
+ *        slice's projection has no object and the GPU path refuses it), and the UDIM tile the
+ *        stacks describe and the slots capture for; each tile is its own plan and its own slots.
+ *        An unset tile resolves through the object.
  */
 bool BKE_paint_layers_gpu_capture_plan(
     const Material &ma,
@@ -762,21 +795,27 @@ bool BKE_paint_layers_gpu_capture_plan(
     Span<int> channels,
     Vector<PaintLayersGpuCaptureJob> &r_jobs,
     const char **r_reason = nullptr,
-    const Object *painted_object = nullptr);
+    const PaintLayerTileContext &context = {});
 
-/** The identity of a GPU slice slot: a point read in one channel enum. */
+/** The identity of a GPU slice slot: a point read in one channel enum, on one UDIM tile. */
 struct PaintLayersGpuSlotKey {
   bUUID point = {};
   int channel = 0;
+  /** The tile the slot's slice was captured for; each tile is its own slot. */
+  int tile_number = PAINT_TILE_NUMBER_BASE;
 };
 
 bool BKE_paint_layers_gpu_slot_key_equal(const PaintLayersGpuSlotKey &a,
                                          const PaintLayersGpuSlotKey &b);
 
-/** The index of the slot for \a point in \a channel, or -1. */
+/**
+ * The index of the slot for \a point in \a channel on \a tile_number, or -1. An unset tile reads
+ * as the base one, the tile the slots of a caller that named none were captured for.
+ */
 int BKE_paint_layers_gpu_slot_find(Span<PaintLayersGpuSlotKey> slots,
                                    const bUUID &point,
-                                   int channel);
+                                   int channel,
+                                   int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /* -------------------------------------------------------------------- */
 /** \name GPU Verification

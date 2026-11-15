@@ -82,10 +82,11 @@ bool paint_layer_source_reads_uv_compute(const Material &source)
 }
 
 /**
- * Whether the Image Texture \a source can be shown without the graph around it: the map is a file
- * or a generated image (not a sequence, a movie or a UDIM set, whose frame is the node's
- * business), the projection is flat with nothing linked to its Vector input (so it reads the UV
- * the layers read), and the channel takes the output the node is read at (the Alpha output for a
+ * Whether the Image Texture \a source can be shown without the graph around it: the map is a file,
+ * a generated image or a UDIM set (the composite reads the tile of the call, so a tiled map is
+ * sampled per canvas tile the way a painted one is; not a sequence or a movie, whose frame is the
+ * node's business), the projection is flat with nothing linked to its Vector input (so it reads the
+ * UV the layers read), and the channel takes the output the node is read at (the Alpha output for a
  * coverage, the Color output for a colour).
  */
 static bool live_image_usable(const ChannelSourceImage &source, const bool alpha_output)
@@ -93,7 +94,7 @@ static bool live_image_usable(const ChannelSourceImage &source, const bool alpha
   if (source.image == nullptr || source.node == nullptr || source.alpha_output != alpha_output) {
     return false;
   }
-  if (!ELEM(source.image->source, IMA_SRC_FILE, IMA_SRC_GENERATED)) {
+  if (!ELEM(source.image->source, IMA_SRC_FILE, IMA_SRC_GENERATED, IMA_SRC_TILED)) {
     return false;
   }
   const NodeTexImage *storage = static_cast<const NodeTexImage *>(source.node->storage);

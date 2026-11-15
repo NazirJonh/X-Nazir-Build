@@ -42,6 +42,7 @@
 #include "BLI_vector.hh"
 
 #include "BKE_paint_layers_generator_registry.hh"
+#include "BKE_paint_layers_tile.hh"
 #include "BKE_paint_material_composite_surface.hh"
 
 #include "DNA_scene_types.h"
@@ -200,12 +201,6 @@ struct PaintMaterialCompositeConstant {
   float constant_color[4] = {};
   bool has_constant_color = false;
 };
-
-/**
- * The first UDIM tile number. A non-tiled image reads it as its only tile, so it is the default
- * tile of every composite and bake that names no tile.
- */
-inline constexpr int PAINT_TILE_NUMBER_BASE = 1001;
 
 /**
  * The projection of a row's own map, as the CPU bake reads it.
@@ -1657,6 +1652,10 @@ uint64_t BKE_paint_material_composite_stack_hash(
  *                     a size the canvas no longer divides -- as the canvas itself. A Gradient
  *                     samples its line directly at the octave's own UVs, so a reduced composite is
  *                     the same formula at fewer texels, not a resample of one.
+ * \param tile_number: the UDIM tile the composite is of. The layers describe their maps through it
+ *                     (see the `tile_number` of #BKE_paint_layers_composite_image_layers), so the
+ *                     caller compositing a canvas tile by tile gets an entry -- and a buffer -- per
+ *                     tile instead of one shared buffer that always shows the base tile.
  * \return null when the stack cannot be composited, which is the caller's cue to fall back.
  */
 ImBuf *BKE_paint_material_composite_cache_ensure(
@@ -1668,7 +1667,8 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     PaintMaterialCompositeEvalStats *r_stats = nullptr,
     rcti *r_changed_region = nullptr,
     FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)> full_layers = {},
-    const int2 &output_size = int2(0));
+    const int2 &output_size = int2(0),
+    int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /**
  * Mark the whole composite of \a ma out of date, or of every material when \a ma is null.

@@ -135,6 +135,10 @@ template<typename Entry> struct GpuLruStore {
  * buffer (assumed straight) and straightens a float one (assumed premultiplied) exactly when it
  * stores premultiplied, so dividing by alpha gives the straight colour `composite_decode_tile`
  * decodes. Null when the image has no GPU texture.
+ *
+ * Always the base tile of a tiled image: the texture is cached once per image, so it cannot follow
+ * a tile. #combined_preview_gpu_update refuses a tile other than the base for a tiled stack, so
+ * this never serves another tile's plan.
  */
 static gpu::Texture *gpu_map_texture(Image *image,
                                      const ImageUser *image_user,
@@ -1984,7 +1988,8 @@ bool combined_preview_gpu_effects_run(
     int wanted_channel,
     CombinedPasses &passes,
     Vector<GpuEffectJob> &r_jobs,
-    const Object *painted_object)
+    const Object *painted_object,
+    const int tile_number)
 {
   /* GPU effects: the content each effect reads, then the effect's own passes into the cache. This
    * runs after the Anchor Point captures -- a content render may read their slots -- and before the
@@ -2050,15 +2055,16 @@ bool combined_preview_gpu_effects_run(
   int chain_channel = -1;
   int chain_halo = 0;
   for (GpuEffectJob &job : r_jobs) {
-    if (!BKE_paint_layers_effect_input_describe(
-            ma,
-            *job.row,
-            *job.effect,
-            job.channel,
-            /*dimensions_only=*/false,
-            /*describe_only=*/true,
-            job.input_entry,
-            painted_object))
+    if (!BKE_paint_layers_effect_input_describe(ma,
+                                                *job.row,
+                                                *job.effect,
+                                                job.channel,
+                                                /*dimensions_only=*/false,
+                                                /*describe_only=*/true,
+                                                job.input_entry,
+                                                PaintLayerTileContext{.painted_object =
+                                                                          painted_object,
+                                                                      .tile_number = tile_number}))
     {
       return gpu_refuse("an effect input cannot be described");
     }
@@ -2094,17 +2100,19 @@ bool combined_preview_gpu_effects_run(
       return gpu_refuse("a GPU effect has no pass plan");
     }
     void *resource = nullptr;
-    const PaintLayerEffectGpuState state = BKE_paint_layers_effect_gpu_cache_get(
-        ma,
-        *job.effect,
-        job.channel,
-        width,
-        height,
-        job.images,
-        PaintLayerEffectGpuKeyExtras{job.chain_hash, job.input_scalar_hash},
-        effect_gpu_hooks,
-        &job.region,
-        &resource);
+    const PaintLayerEffectGpuState state = BKE_paint_layers_effect_gpu_cache_get(ma,
+                                                                                *job.effect,
+                                                                                job.channel,
+                                                                                width,
+                                                                                height,
+                                                                                job.images,
+                                                                                PaintLayerEffectGpuKeyExtras{
+                                                                                    job.chain_hash,
+                                                                                    job.input_scalar_hash},
+                                                                                effect_gpu_hooks,
+                                                                                &job.region,
+                                                                                &resource,
+                                                                                tile_number);
     if (state == PaintLayerEffectGpuState::Failed || resource == nullptr) {
       return gpu_refuse("a GPU effect texture could not be allocated");
     }
@@ -2404,7 +2412,8 @@ bool combined_preview_gpu_effects_run(
                                                 job.input_size.y,
                                                 job.images,
                                                 PaintLayerEffectGpuKeyExtras{job.chain_hash,
-                                                                             job.input_scalar_hash});
+                                                                             job.input_scalar_hash},
+                                                tile_number);
       rendered++;
       last_kind = int(job.correction->filter);
       last_radius = job.halo;

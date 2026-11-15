@@ -257,7 +257,10 @@ void bake_write_stored_image(Image &image,
                              const void *stored,
                              const int *rect,
                              int tile_number = 0);
-void bake_image_pixels_changed(Image &image, ImBuf &ibuf);
+void bake_image_pixels_changed(Image &image,
+                               ImBuf &ibuf,
+                               int tile_number,
+                               const int *rect = nullptr);
 void bake_object_identity_record(const Material &ma,
                                  const MaterialPaintLayer &layer,
                                  uint64_t identity);

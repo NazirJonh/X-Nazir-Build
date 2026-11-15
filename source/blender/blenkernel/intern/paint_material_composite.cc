@@ -3395,6 +3395,14 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
       }
     }
     if (size_image == nullptr) {
+      /* A reader that rendered its slice has no map of its own: the slice is its canvas. */
+      if (layer.anchor_point_color != nullptr && layer.anchor_point_color->x > 0 &&
+          layer.anchor_point_color->y > 0)
+      {
+        r_width = layer.anchor_point_color->x;
+        r_height = layer.anchor_point_color->y;
+        return true;
+      }
       if (layer.empty_base && layer.empty_base_size > 0) {
         r_width = r_height = layer.empty_base_size;
         return true;
@@ -3720,15 +3728,23 @@ uint64_t BKE_paint_material_composite_stack_hash(
 struct CompositeCacheKey {
   uint32_t material_session_uid = 0;
   int channel = 0;
+  /**
+   * The tile the composite is of. Every entry today is the base tile, but a caller that composites
+   * a UDIM canvas tile by tile (the bake of the corrections does, an export can) asks per tile:
+   * without the field those calls would collide on one buffer and show tile 1001's pixels
+   * everywhere.
+   */
+  int tile_number = PAINT_TILE_NUMBER_BASE;
 
   uint64_t hash() const
   {
-    return get_default_hash(this->material_session_uid, this->channel);
+    return get_default_hash(this->material_session_uid, this->channel, this->tile_number);
   }
 
   friend bool operator==(const CompositeCacheKey &a, const CompositeCacheKey &b)
   {
-    return a.material_session_uid == b.material_session_uid && a.channel == b.channel;
+    return a.material_session_uid == b.material_session_uid && a.channel == b.channel &&
+           a.tile_number == b.tile_number;
   }
 };
 
@@ -3823,8 +3839,8 @@ static void composite_entry_reset(CompositeCacheEntry &entry)
 
 /**
  * The floor is #COMPOSITE_CACHE_BUDGET_BYTES. Above it, the budget grows to hold one composite per
- * channel at the size being gathered: a larger material's whole set would otherwise evict itself on
- * every redraw, since the gather needs all of its channels resident at once.
+ * channel and tile at the size being gathered: a larger material's whole set would otherwise evict
+ * itself on every redraw, since the gather needs all of its channels resident at once.
  */
 static void composite_cache_enforce_budget(const CompositeCacheKey &keep,
                                            const int width,
@@ -3917,7 +3933,8 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     PaintMaterialCompositeEvalStats *r_stats,
     rcti *r_changed_region,
     FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)> full_layers,
-    const int2 &output_size)
+    const int2 &output_size,
+    const int tile_number)
 {
   bke::paint_perf::ScopedTimer perf_timer("composite_cache_ensure");
   if (r_changed_region != nullptr) {
@@ -3948,6 +3965,8 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
   CompositeCacheKey key;
   key.material_session_uid = ma.id.session_uid;
   key.channel = channel;
+  /* No surface or object rides this call, so an unset tile is the base square. */
+  key.tile_number = BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr);
 
   CompositeCacheEntry &entry = g_cache.entries.lookup_or_add_default(key);
   entry.last_use = ++g_cache.use_counter;
@@ -3995,7 +4014,8 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
       entry.partial_update_users,
       source_images,
       entry_scaled ? FunctionRef<rcti(const rcti &)>(poll_region_to_entry) :
-                     FunctionRef<rcti(const rcti &)>());
+                     FunctionRef<rcti(const rcti &)>(),
+      key.tile_number);
   if (poll.needs_full_update) {
     entry.dirty_full = true;
   }

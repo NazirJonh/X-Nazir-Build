@@ -238,6 +238,9 @@ uint64_t paint_layer_anchor_point_slice_hash(const Material &ma,
  * true with both buffers null when the slice exists. A caller finding the stack dimensions uses
  * this instead of rendering a 1x1 rectangle, whose nested readers would still allocate their whole
  * buffers.
+ * \param context: the object a projected row of the slice reads its surface from, and the UDIM
+ * tile the slice renders: every map of the source row is read on that tile, and the buffers are
+ * that tile's canvas. Each tile is its own cache entry.
  */
 bool BKE_paint_layers_slice_render(const Material &ma,
                                    const MaterialPaintLayer &reader,
@@ -245,7 +248,8 @@ bool BKE_paint_layers_slice_render(const Material &ma,
                                    std::shared_ptr<ImBuf> *r_color,
                                    std::shared_ptr<ImBuf> *r_coverage,
                                    const int *dst_rect,
-                                   bool dimensions_only);
+                                   bool dimensions_only,
+                                   const PaintLayerTileContext &context);
 
 /** Drop every cached slice. Buffers still referenced by a description stay alive. For tests and
  * teardown: a stroke on a source map needs no clear, as the cache key holds the pixel versions of
@@ -1593,20 +1597,23 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &ef
 
 /**
  * The grey the CPU-computed mask effect \a effect lays over its row's mask: the mask built up to
- * the item, its kernel applied, one entry per (material, item, parameters) in the mask effect
- * cache. The buffer is canvas grey at the row's dimensions, scene linear, opaque.
+ * the item, its kernel applied, one entry per (material, item, tile, parameters) in the mask
+ * effect cache. The buffer is canvas grey at the row's dimensions for \a tile_number, scene
+ * linear, opaque.
  *
  * \param describe_only: learn nothing but the maps the input reads (into \a r_images) -- the
  *        combined preview refuses these kinds and falls back to the CPU.
  * \param r_images: the maps the input was rendered from; the caches subscribe to them, so a stroke
  *        on any of them reaches the entry.
+ * \param tile_number: the UDIM tile the grey is computed for; a caller of the base tile names it.
  * \return null when the input could not be rendered or \a describe_only was asked.
  */
 std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(const Material &ma,
                                                           const MaterialPaintLayer &row,
                                                           const MaterialPaintLayer &effect,
                                                           const bool describe_only,
-                                                          blender::Vector<Image *> *r_images);
+                                                          blender::Vector<Image *> *r_images,
+                                                          int tile_number);
 
 /**
  * The UV step of the transform item \a item of a mask (#paint_layer_mask_item_is_transform), in the

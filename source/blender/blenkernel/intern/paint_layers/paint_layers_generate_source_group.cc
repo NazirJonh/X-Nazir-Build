@@ -395,7 +395,20 @@ static bool source_group_level_build(const SourceGroupBuild &build,
     /* Every level: the mapping inputs (the row's own and one set per transform effect), the
      * implicit UV wiring and the chains in front of every UV output. Path copies are fresh, so a
      * mapped build always starts from no inputs. */
-    source_group_mapping_prepare(tree, build.mirror_axes, build.transform_effects);
+    /* The copy leaves the Principled out, so what feeds it is linked to nothing in the copy; those
+     * nodes are named so a texture straight into the BSDF still counts as part of the shader. */
+    Set<const bNode *> fed_by_principled;
+    if (innermost) {
+      for (const bNodeLink &link : orig.links) {
+        if (link.tonode == &build.principled) {
+          if (const bNode *copy = node_map.lookup_default(link.fromnode, nullptr)) {
+            fed_by_principled.add(copy);
+          }
+        }
+      }
+    }
+    source_group_mapping_prepare(
+        tree, build.mirror_axes, build.transform_effects, &fed_by_principled);
   }
   else if (depth == 0) {
     /* The root's interface survives a refill, so inputs left by an earlier mapped build go now. */

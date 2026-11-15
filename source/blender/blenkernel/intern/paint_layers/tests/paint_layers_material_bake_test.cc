@@ -15,12 +15,15 @@
 #include "paint_layers_generate_test_fixture.hh"
 
 #include <array>
+#include <string>
 
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_node_tree_interface.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
+
+#include "BLI_uuid.h"
 
 #include "NOD_socket.hh"
 
@@ -415,6 +418,8 @@ TEST_F(PaintLayersMaterialBakeTest, a_resized_or_repointed_row_does_not_keep_its
   ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
 
   Material *other = BKE_material_add(bmain, "Other");
+  /* An empty source has nothing to render and is never due, so the new source needs a graph. */
+  principled_source_set_up(*other, /*graphs=*/true);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, other));
   EXPECT_FALSE(paint_layer_row_material_map(*ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr))
       << "the maps are the previous source's";
@@ -1110,6 +1115,8 @@ TEST_F(PaintLayersMaterialBakeTest, the_edited_row_waits_for_a_map_only_the_rend
 {
   MaterialPaintLayer *row = add_material_row(*source, MA_PAINT_LAYER_BAKE_AUTO);
   ASSERT_NE(row, nullptr);
+  /* Adding a row does not select it; the editing the test is about happens inside the active one. */
+  BKE_paint_layers_active_set(*ma, row->marker);
   ASSERT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
   EXPECT_FLOAT_EQ(BKE_paint_layers_source_edit_delay(*ma, *source), 0.0f)
       << "the graph is live: an edit has nothing to wait for";
@@ -1534,14 +1541,20 @@ TEST_F(PaintLayersMaterialCorrectionTest, the_generator_gives_the_correction_a_l
 
   bNodeTree *group = layer_tree_find(*bmain, "Base");
   ASSERT_NE(group, nullptr);
-  EXPECT_TRUE(interface_has_socket(*group, "Base Mat Metallic Source", false))
+  /* The effect's marker is part of its input names, so two corrections of one kind never share a
+   * socket. */
+  char marker[40];
+  BLI_uuid_format(marker, effect->marker);
+  const std::string source_name = std::string("Base Mat Metallic Source ") + marker;
+  const std::string opacity_name = std::string("Base Mat Metallic Opacity ") + marker;
+  EXPECT_TRUE(interface_has_socket(*group, source_name.c_str(), false))
       << "a plain value of the source is an input of the row's group";
-  EXPECT_TRUE(interface_has_socket(*group, "Base Mat Metallic Opacity", false));
+  EXPECT_TRUE(interface_has_socket(*group, opacity_name.c_str(), false));
 
   /* Editing the value in the source reaches the input without a rebuild. */
   edit_source(0.8f);
   EXPECT_TRUE(BKE_paint_layers_values_sync(*ma));
-  const bNodeTreeInterfaceSocket *live = interface_input_find(*group, "Base Mat Metallic Source");
+  const bNodeTreeInterfaceSocket *live = interface_input_find(*group, source_name.c_str());
   ASSERT_NE(live, nullptr);
   ASSERT_NE(live->socket_data, nullptr);
   EXPECT_FLOAT_EQ(static_cast<const bNodeSocketValueRGBA *>(live->socket_data)->value[0], 0.8f);

@@ -20,6 +20,8 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_paint_layers_tile.hh"
+
 namespace blender {
 
 /**

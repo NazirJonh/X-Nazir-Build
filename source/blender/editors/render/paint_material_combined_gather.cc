@@ -549,7 +549,7 @@ ImBuf *combined_preview_ensure(Main &bmain,
                              /*describe_only=*/true,
                              surface,
                              &height_won_cache,
-                             PAINT_TILE_NUMBER_BASE,
+                             request.tile_number,
                              painted_object) :
                          BKE_paint_material_composite_stack_from_material(
                              bmain, ma, combined_shading_channels[i], stacks[i]);
@@ -674,15 +674,14 @@ ImBuf *combined_preview_ensure(Main &bmain,
            * texel's object-space point -- while the hash that decided they were current carried
            * the exact one: approximate pixels behind an exact identity, and no edit of the surface
            * would ever invalidate them. */
-          return BKE_paint_layers_composite_image_layers(
-              ma,
-              channel,
-              r_full,
-              /*describe_only=*/false,
-              surface,
-              &height_won_cache,
-              PAINT_TILE_NUMBER_BASE,
-              painted_object);
+          return BKE_paint_layers_composite_image_layers(ma,
+                                                        channel,
+                                                        r_full,
+                                                        /*describe_only=*/false,
+                                                        surface,
+                                                        &height_won_cache,
+                                                        request.tile_number,
+                                                        painted_object);
         };
         /* The octave the gather decided for every channel, or zero for the canvas. Passed as a size
          * rather than as a display cap: the hysteresis is the preview's, not each channel's, or two
@@ -842,7 +841,7 @@ ImBuf *combined_preview_ensure(Main &bmain,
   CombinedEvalStats stats;
   bke::paint_perf::ScopedTimer perf_shade("gather.combined_cache_ensure");
   ImBuf *result = BKE_paint_material_combined_cache_ensure(
-      ma, inputs, lighting, cache_request, r_revision, r_changed_region, &stats);
+      ma, inputs, lighting, cache_request, r_revision, r_changed_region, &stats, request.tile_number);
   perf_shade.note("canvas=%dx%d in=%dx%d out=%dx%d eval=%.3f ms pixels=%lld dep_images=%d",
                   canvas_size.x,
                   canvas_size.y,
@@ -1053,8 +1052,11 @@ bool combined_preview_gpu_update(const Material &ma,
                                  const int pass,
                                  gpu::Texture *output,
                                  const float3x3 &texel_to_uv,
-                                 const Object *painted_object)
+                                 const PaintLayerTileContext &context)
 {
+  const Object *painted_object = context.painted_object;
+  const int tile_number = BKE_paint_layers_tile_resolve(
+      context.tile_number, nullptr, painted_object);
   if (output == nullptr) {
     return gpu_refuse("no display texture");
   }
@@ -1063,6 +1065,17 @@ bool combined_preview_gpu_update(const Material &ma,
   }
   if ((GPU_texture_usage(output) & GPU_TEXTURE_USAGE_SHADER_WRITE) == 0) {
     return gpu_refuse("the display texture has no SHADER_WRITE usage");
+  }
+  if (tile_number != PAINT_TILE_NUMBER_BASE) {
+    /* The GPU texture of a map is one per image (#BKE_image_get_gpu_texture), built from whichever
+     * tile asked first, so a tiled map cannot be read per tile here: the texture would show the
+     * base tile under another tile's plan. Refuse and let the CPU preview, which reads each tile
+     * on its own, serve the tile. A stack of non-tiled maps has no per-tile pixels and is safe. */
+    Vector<int> stack_tiles;
+    BKE_paint_layers_stack_tiles_collect(ma, stack_tiles);
+    if (BKE_paint_layers_stack_is_tiled(stack_tiles)) {
+      return gpu_refuse("a tiled map has one GPU texture, the GPU path lays the base tile only");
+    }
   }
   if (!combined_preview_gpu_pass_supported(pass)) {
     return gpu_refuse("the pass has no channel the GPU path lays");
@@ -1098,7 +1111,7 @@ bool combined_preview_gpu_update(const Material &ma,
                                                            /*describe_only=*/true,
                                                            nullptr,
                                                            nullptr,
-                                                           PAINT_TILE_NUMBER_BASE,
+                                                           tile_number,
                                                            painted_object);
     if (!has_stack[i]) {
       continue;
@@ -1295,7 +1308,12 @@ bool combined_preview_gpu_update(const Material &ma,
       stack_spans.data(), int64_t(stack_spans.size()));
   const Span<int> channel_view(channel_enums.data(), int64_t(channel_enums.size()));
   if (!BKE_paint_layers_gpu_capture_plan(
-          ma, stack_view, channel_view, capture_jobs, &capture_reason, painted_object))
+          ma,
+          stack_view,
+          channel_view,
+          capture_jobs,
+          &capture_reason,
+          PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}))
   {
     return gpu_refuse(capture_reason != nullptr ? capture_reason :
                                                  "the Anchor Point capture plan cannot be built");
@@ -1467,15 +1485,15 @@ bool combined_preview_gpu_update(const Material &ma,
    * frame ends. */
   {
     const Span<bool> has_view(has_stack.data(), int64_t(has_stack.size()));
-    if (!combined_preview_gpu_effects_run(
-            ma,
-            stack_view,
-            channel_view,
-            has_view,
-            wanted_channel,
-            passes,
-            effect_jobs,
-            painted_object))
+    if (!combined_preview_gpu_effects_run(ma,
+                                          stack_view,
+                                          channel_view,
+                                          has_view,
+                                          wanted_channel,
+                                          passes,
+                                          effect_jobs,
+                                          painted_object,
+                                          tile_number))
     {
       return false;
     }
@@ -1678,7 +1696,15 @@ bool combined_preview_gpu_update(const Material &ma,
       }
       std::shared_ptr<ImBuf> color;
       std::shared_ptr<ImBuf> coverage;
-      if (!BKE_paint_layers_slice_render(ma, *reader, channel, &color, &coverage)) {
+      if (!BKE_paint_layers_slice_render(
+              ma,
+              *reader,
+              channel,
+              &color,
+              &coverage,
+              nullptr,
+              false,
+              PaintLayerTileContext{.tile_number = tile_number})) {
         report(point_marker,
                reader_marker,
                channel,
@@ -1843,8 +1869,11 @@ void combined_preview_gpu_verify(Main &bmain,
                                  const CombinedPreviewLighting &lighting,
                                  gpu::Texture *output,
                                  const float3x3 &texel_to_uv,
-                                 const Object *painted_object)
+                                 const PaintLayerTileContext &context)
 {
+  const Object *painted_object = context.painted_object;
+  const int tile_number = BKE_paint_layers_tile_resolve(
+      context.tile_number, nullptr, painted_object);
   /* Decided by the update that just shaded this frame, which also kept the channel accumulators. */
   if (!gpu_verify_due || output == nullptr) {
     return;
@@ -1868,8 +1897,17 @@ void combined_preview_gpu_verify(Main &bmain,
   Vector<float> gpu_pixels(int64_t(size.x) * size.y * 4);
   GPU_texture_read(output, GPU_DATA_FLOAT, 0, gpu_pixels.data());
 
-  const ImBuf *cpu = combined_preview_ensure(
-      bmain, ma, lighting, {}, nullptr, nullptr, nullptr, nullptr, painted_object);
+  CombinedPreviewRequest verify_request;
+  verify_request.tile_number = tile_number;
+  const ImBuf *cpu = combined_preview_ensure(bmain,
+                                             ma,
+                                             lighting,
+                                             verify_request,
+                                             nullptr,
+                                             nullptr,
+                                             nullptr,
+                                             nullptr,
+                                             painted_object);
   if (cpu == nullptr || cpu->float_data() == nullptr || cpu->x <= 0 || cpu->y <= 0) {
     printf("[PBR-PERF] gpu_verify: the CPU preview produced nothing to compare with\n");
     return;
@@ -1974,17 +2012,20 @@ void combined_preview_gpu_verify(Main &bmain,
                                                 /*describe_only=*/false,
                                                 nullptr,
                                                 nullptr,
-                                                PAINT_TILE_NUMBER_BASE,
+                                                tile_number,
                                                 painted_object))
     {
-      const ImBuf *composite = BKE_paint_material_composite_cache_ensure(
-          ma,
-          channel,
-          layers,
-          BKE_paint_material_composite_stack_hash(layers),
-          nullptr,
-          nullptr,
-          nullptr);
+      const ImBuf *composite = BKE_paint_material_composite_cache_ensure(ma,
+                                                                        channel,
+                                                                        layers,
+                                                                        BKE_paint_material_composite_stack_hash(
+                                                                            layers),
+                                                                        nullptr,
+                                                                        nullptr,
+                                                                        nullptr,
+                                                                        nullptr,
+                                                                        int2(0),
+                                                                        tile_number);
       if (composite != nullptr && composite->byte_data() != nullptr && composite->x > 0) {
         const uchar *p = composite->byte_data() +
                          (int64_t(int(worst_uv.y * composite->y)) * composite->x +

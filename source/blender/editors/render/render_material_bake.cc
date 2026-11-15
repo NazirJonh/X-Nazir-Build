@@ -50,6 +50,7 @@
 #include "BKE_global.hh"
 #include "BKE_idtype.hh"
 #include "BKE_image.hh"
+#include "BKE_image_tile_buffer.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
@@ -739,8 +740,14 @@ static bNode *vector_encode_node_add(bNodeTree &tree)
 /** \name Bake Domain
  * \{ */
 
-/** A unit quad whose UV covers [0, 1]^2, framed exactly by the ortho camera below. */
-static Mesh *bake_quad_mesh(Main *bmain)
+/**
+ * A unit quad framed exactly by the ortho camera below. For the base tile (#PAINT_TILE_NUMBER_BASE,
+ * whose origin #BKE_image_get_tile_uv_origin puts at 0, 0) its UV covers [0, 1]^2; for any other
+ * UDIM tile number it covers that tile's own square -- corners on the tile's origin and one past
+ * it -- so a per-tile render samples the material's textures across the tile exactly as the base
+ * render samples the base one.
+ */
+static Mesh *bake_quad_mesh(Main *bmain, const int tile_number)
 {
   /* The geometry arrays and the face offset storage are allocated from the element counts given at
    * creation time; assigning the counts to an already created empty mesh leaves them unallocated. */
@@ -762,10 +769,11 @@ static Mesh *bake_quad_mesh(Main *bmain)
   bke::MutableAttributeAccessor attributes = mesh_src->attributes_for_write();
   bke::SpanAttributeWriter<float2> uv = attributes.lookup_or_add_for_write_only_span<float2>(
       "UVMap", bke::AttrDomain::Corner);
-  uv.span[0] = float2(0.0f, 0.0f);
-  uv.span[1] = float2(1.0f, 0.0f);
-  uv.span[2] = float2(1.0f, 1.0f);
-  uv.span[3] = float2(0.0f, 1.0f);
+  const float2 tile_origin = BKE_image_get_tile_uv_origin(tile_number);
+  uv.span[0] = tile_origin + float2(0.0f, 0.0f);
+  uv.span[1] = tile_origin + float2(1.0f, 0.0f);
+  uv.span[2] = tile_origin + float2(1.0f, 1.0f);
+  uv.span[3] = tile_origin + float2(0.0f, 1.0f);
   uv.finish();
   mesh_src->uv_maps_active_set("UVMap");
   mesh_src->uv_maps_default_set("UVMap");
@@ -849,18 +857,37 @@ bool bake_requests_attach(Main &bmain,
 constexpr float BAKE_PROGRESS_ATTACHED = 0.1f;
 constexpr float BAKE_PROGRESS_RENDERED = 0.95f;
 
-/** Maps the render's own progress into the part of a job's progress bar the render takes up. */
-static void bake_render_progress_cb(void *handle, const float progress)
+/** One render of a per-tile bake: which UDIM tile its quad spans and which slice of the render
+ * phase the progress bar gives it. The default is the single base-square render. */
+struct BakeRenderTile {
+  int number = PAINT_TILE_NUMBER_BASE;
+  int index = 0;
+  int count = 1;
+};
+
+/** Maps the render's own progress into the part of a job's progress bar the render takes up. The
+ * handle carries the slice of the render phase this render covers: one tile of a per-tile bake, or
+ * the whole phase for a single one. */
+struct BakeRenderProgressHandle {
+  wmJobWorkerStatus *worker_status = nullptr;
+  BakeRenderTile tile;
+};
+
+static void bake_render_progress_cb(void *handle_v, const float progress)
 {
-  wmJobWorkerStatus *worker_status = static_cast<wmJobWorkerStatus *>(handle);
+  BakeRenderProgressHandle *handle = static_cast<BakeRenderProgressHandle *>(handle_v);
+  wmJobWorkerStatus *worker_status = handle->worker_status;
+  const float tile_span = 1.0f / float(handle->tile.count);
+  const float tile_start = tile_span * float(handle->tile.index);
   worker_status->progress = BAKE_PROGRESS_ATTACHED +
-                            (BAKE_PROGRESS_RENDERED - BAKE_PROGRESS_ATTACHED) * progress;
+                            (BAKE_PROGRESS_RENDERED - BAKE_PROGRESS_ATTACHED) *
+                                (tile_start + tile_span * progress);
   worker_status->do_update = true;
 }
 
-static bool bake_render_test_break_cb(void *handle)
+static bool bake_render_test_break_cb(void *handle_v)
 {
-  return static_cast<wmJobWorkerStatus *>(handle)->stop;
+  return static_cast<BakeRenderProgressHandle *>(handle_v)->worker_status->stop;
 }
 
 /**
@@ -869,6 +896,10 @@ static bool bake_render_test_break_cb(void *handle)
  * \a bake_material must already be owned by \a bmain and carry the AOV nodes #bake_requests_attach
  * added. Must run on a thread that may take the draw lock, i.e. not the one already inside a draw
  * or paint callback.
+ *
+ * \param tile: the UDIM tile the render covers, whose UV square the quad spans. The base tile
+ *                    renders [0, 1]^2; a caller baking a material row tile by tile hands back one
+ *                    render per tile with everything else unchanged.
  *
  * Every buffer leaves with four float channels whatever its AOV delivered, so a consumer can read
  * them all the same way. On failure nothing is written and \a r_images is left all null.
@@ -881,7 +912,8 @@ static bool bake_requests_render(Main &bmain,
                                  const int resolution,
                                  const Span<BakeSocketRequest> requests,
                                  MutableSpan<ImBuf *> r_images,
-                                 wmJobWorkerStatus *worker_status = nullptr)
+                                 wmJobWorkerStatus *worker_status = nullptr,
+                                 const BakeRenderTile tile = {})
 {
   BLI_assert(r_images.size() == requests.size());
   Scene *scene = BKE_scene_add(&bmain, "PBR Paint Bake Scene");
@@ -903,7 +935,7 @@ static bool bake_requests_render(Main &bmain,
    * is what the shader preview render relies on for its own separate Main as well. */
   scene->r.scemode |= R_BUTS_PREVIEW;
 
-  Mesh *mesh = bake_quad_mesh(&bmain);
+  Mesh *mesh = bake_quad_mesh(&bmain, tile.number);
   Object *object = BKE_object_add_for_data(
       &bmain, scene, view_layer, OB_MESH, "PBR Paint Bake Plane", &mesh->id, true);
   BKE_object_material_slot_add(&bmain, object);
@@ -929,9 +961,12 @@ static bool bake_requests_render(Main &bmain,
   BKE_view_layer_synced_ensure(bmain, scene, view_layer);
 
   Render *render = RE_NewSceneRender(scene);
+  BakeRenderProgressHandle progress_handle;
   if (worker_status != nullptr) {
-    RE_progress_cb(render, worker_status, bake_render_progress_cb);
-    RE_test_break_cb(render, worker_status, bake_render_test_break_cb);
+    progress_handle.worker_status = worker_status;
+    progress_handle.tile = tile;
+    RE_progress_cb(render, &progress_handle, bake_render_progress_cb);
+    RE_test_break_cb(render, &progress_handle, bake_render_test_break_cb);
   }
   /* The engine binds its own GPU context (#DRW_render_context_enable); enabling one here would
    * take the draw lock a second time on this thread. Like the regular render and preview jobs,
@@ -1516,8 +1551,14 @@ struct MaterialBakeImagesJob {
   /** Parallel arrays: the target for #channels[i] is the image with #target_session_uids[i]. */
   Vector<uint32_t> target_session_uids;
   Vector<eMaterialPaintChannel> channels;
-  /** Rendered buffers, one per entry of #channels, filled by the worker. Owned. */
-  Vector<ImBuf *> rendered;
+  /**
+   * The UDIM tiles the bake covers, one render each. A row bake takes the owner stack's tile list
+   * (#BKE_paint_layers_stack_tiles_collect); every other bake covers the base square alone, which
+   * the single base tile number stands for.
+   */
+  Vector<int> tiles;
+  /** Rendered buffers, one per tile of #tiles, holding one per entry of #channels. Owned. */
+  Vector<Vector<ImBuf *>> rendered_tiles;
   int size = 0;
   /** Node-tree hash the targets carry once this bake lands. */
   uint64_t baked_hash = 0;
@@ -1652,14 +1693,17 @@ static BakeTargetKind bake_target_kind(const bool source_cache, const bool place
   return placeholder ? BakeTargetKind::Placeholder : BakeTargetKind::Row;
 }
 
-/** Create one target image and link it back to \a material. Main thread only. */
+/** Create one target image and link it back to \a material. Main thread only. A \a tiled image is
+ * the UDIM one a per-tile bake writes into: it carries the base tile only, and each further tile is
+ * generated at its write's side (see #bake_target_image_write_back). */
 Image *bake_target_image_create(Main &bmain,
                                 Material &material,
                                 const eMaterialPaintChannel channel,
                                 const int size,
                                 const char *layer_id,
                                 const uint64_t current_hash,
-                                const BakeTargetKind kind)
+                                const BakeTargetKind kind,
+                                const bool tiled)
 {
   const bool placeholder = ELEM(
       kind, BakeTargetKind::Placeholder, BakeTargetKind::SourceCachePlaceholder);
@@ -1689,7 +1733,7 @@ Image *bake_target_image_create(Main &bmain,
                                          color,
                                          /*stereo3d=*/false,
                                          /*is_data=*/!is_color,
-                                         /*tiled=*/false);
+                                         tiled);
   if (image == nullptr) {
     return nullptr;
   }
@@ -1726,66 +1770,6 @@ Image *bake_target_image_create(Main &bmain,
   return image;
 }
 
-/** Fill \a image with a single color. Main thread only. */
-static void bake_target_image_fill_constant(Image &image, const float4 &value)
-{
-  void *lock = nullptr;
-  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
-  if (ibuf != nullptr && ibuf->float_data() != nullptr) {
-    float *dst = ibuf->float_data_for_write();
-    const int64_t texel_num = int64_t(ibuf->x) * ibuf->y;
-    for (const int64_t texel : IndexRange(texel_num)) {
-      dst[texel * 4 + 0] = value.x;
-      dst[texel * 4 + 1] = value.y;
-      dst[texel * 4 + 2] = value.z;
-      dst[texel * 4 + 3] = value.w;
-    }
-    /* The target is scene linear (color) or data, and the constant is already in that space, so
-     * there is nothing to convert. */
-    ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
-    BKE_image_mark_dirty(&image, ibuf);
-  }
-  BKE_image_release_ibuf(&image, ibuf, lock);
-  BKE_image_partial_update_mark_full_update(&image);
-  BKE_image_free_gputextures(&image);
-  WM_main_add_notifier(NC_IMAGE | NA_EDITED, &image);
-}
-
-/** Write one rendered buffer into its target image. Main thread only. */
-void bake_target_image_write_back(Image &image, const ImBuf &rendered)
-{
-  void *lock = nullptr;
-  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
-  if (ibuf != nullptr && ibuf->float_data() != nullptr) {
-    /* The render is square and matches the requested size, but the target may have been resized
-     * by the user since it was created. */
-    const ImBuf *source = &rendered;
-    ImBuf *scaled = nullptr;
-    if (rendered.x != ibuf->x || rendered.y != ibuf->y) {
-      /* Box is bilinear when scaling up, which is what a preview smaller than its map needs. */
-      scaled = IMB_scale_into_new(&rendered, ibuf->x, ibuf->y, IMBScaleFilter::Box, false);
-      source = scaled;
-    }
-    if (source != nullptr && source->float_data() != nullptr) {
-      float *dst = ibuf->float_data_for_write();
-      const int64_t texel_num = int64_t(ibuf->x) * ibuf->y;
-      memcpy(dst, source->float_data(), size_t(texel_num) * 4 * sizeof(float));
-      /* The render delivers scene-linear pixels and the target is scene linear (color) or data,
-       * so the pixels go in unchanged. */
-      ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
-      BKE_image_mark_dirty(&image, ibuf);
-    }
-    if (scaled != nullptr) {
-      IMB_freeImBuf(scaled);
-    }
-  }
-  BKE_image_release_ibuf(&image, ibuf, lock);
-  BKE_image_partial_update_mark_full_update(&image);
-  BKE_image_free_gputextures(&image);
-  WM_main_add_notifier(NC_IMAGE | NA_EDITED, &image);
-  WM_main_add_notifier(NC_IMAGE | ND_DISPLAY, &image);
-}
-
 /** True for the 1x1 stand-in created by #bake_target_image_create before the bake has landed. */
 static bool bake_target_image_is_placeholder(const Image &image)
 {
@@ -1793,6 +1777,138 @@ static bool bake_target_image_is_placeholder(const Image &image)
   int image_h = 0;
   BKE_image_get_size(const_cast<Image *>(&image), nullptr, &image_w, &image_h);
   return image_w == 1 && image_h == 1;
+}
+
+/**
+ * Make sure \a image's tile \a tile_number exists and holds a buffer at \a width x \a height: a
+ * tile the image does not have yet is added and generated like the base one, and the 1x1 base of
+ * a placeholder target (\a placeholder_base) is regenerated at the real side the first write asks
+ * for. The gen type, flag and colour always come from the base tile, so the tile a bake lands in
+ * reads back exactly like the map it belongs to. False when the tile could not be made.
+ */
+static bool bake_target_image_tile_ensure(Image &image,
+                                          const int tile_number,
+                                          const int width,
+                                          const int height,
+                                          const bool placeholder_base)
+{
+  if (image.source != IMA_SRC_TILED) {
+    return false;
+  }
+  ImageTile *tile = BKE_image_get_tile(&image, tile_number);
+  if (tile == nullptr) {
+    /* Generated at the render's side, so the first write has a buffer of the right size. */
+    return BKE_paint_layers_map_coverage_tile_ensure(image, tile_number, width, height);
+  }
+  /* The 1x1 base a placeholder target starts with is regenerated at the render's side; a real
+   * tile keeps its own side, and a smaller render is scaled into it by the write below. */
+  if (placeholder_base && tile_number == PAINT_TILE_NUMBER_BASE && (width > 1 || height > 1)) {
+    tile->gen_x = width;
+    tile->gen_y = height;
+    if (!BKE_image_fill_tile(&image, tile)) {
+      BKE_image_remove_tile(&image, tile);
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Fill \a image with a single color. Main thread only. A tiled target gets one tile per entry of
+ * \a tiles, each generated at \a size: the constant is what the channel shows everywhere, so a
+ * tile the bake never renders still reads the value rather than nothing. */
+static void bake_target_image_fill_constant(Image &image,
+                                            const float4 &value,
+                                            const Span<int> tiles,
+                                            const int size)
+{
+  /* A placeholder's 1x1 base is regenerated at \a size by the tile ensure below; a real target
+   * keeps its tiles as they are. */
+  const bool placeholder_base = bake_target_image_is_placeholder(image);
+  for (const int tile_number : tiles) {
+    const bool tiled = image.source == IMA_SRC_TILED;
+    if (tiled && !bake_target_image_tile_ensure(image, tile_number, size, size, placeholder_base))
+    {
+      continue;
+    }
+    ImageUser tile_user;
+    ImageUser *tile_user_ptr = nullptr;
+    if (tiled) {
+      BKE_imageuser_default(&tile_user);
+      tile_user.tile = tile_number;
+      tile_user_ptr = &tile_user;
+    }
+    ImageTileBufferScope buffer(image, tile_user_ptr);
+    if (buffer != nullptr && buffer->float_data() != nullptr) {
+      float *dst = buffer->float_data_for_write();
+      const int64_t texel_num = int64_t(buffer->x) * buffer->y;
+      for (const int64_t texel : IndexRange(texel_num)) {
+        dst[texel * 4 + 0] = value.x;
+        dst[texel * 4 + 1] = value.y;
+        dst[texel * 4 + 2] = value.z;
+        dst[texel * 4 + 3] = value.w;
+      }
+      /* The target is scene linear (color) or data, and the constant is already in that space, so
+       * there is nothing to convert. */
+      buffer->userflags |= IB_DISPLAY_BUFFER_INVALID;
+      BKE_image_mark_dirty(&image, buffer.get());
+    }
+  }
+  BKE_image_partial_update_mark_full_update(&image);
+  BKE_image_free_gputextures(&image);
+  WM_main_add_notifier(NC_IMAGE | NA_EDITED, &image);
+}
+
+/** Write one rendered buffer into its target image: into the tile \a tile_number names for a tiled
+ * image, into the one buffer of a plain one. Main thread only. */
+void bake_target_image_write_back(Image &image, const ImBuf &rendered, const int tile_number)
+{
+  /* The tile the write lands in has to exist at the render's side first: a tile that does not
+   * exist yet is generated here, and so is the placeholder base a fresh target starts with. */
+  const bool tiled = image.source == IMA_SRC_TILED;
+  if (tiled) {
+    if (!bake_target_image_tile_ensure(
+            image, tile_number, rendered.x, rendered.y, bake_target_image_is_placeholder(image)))
+    {
+      return;
+    }
+  }
+  ImageUser tile_user;
+  ImageUser *tile_user_ptr = nullptr;
+  if (tiled) {
+    /* The tile user is a tiled image's business: a plain image has the one buffer, and no tile to
+     * name for it. */
+    BKE_imageuser_default(&tile_user);
+    tile_user.tile = tile_number;
+    tile_user_ptr = &tile_user;
+  }
+  ImageTileBufferScope buffer(image, tile_user_ptr);
+  if (buffer != nullptr && buffer->float_data() != nullptr) {
+    /* The render is square and matches the requested size, but the target may have been resized
+     * by the user since it was created. */
+    const ImBuf *source = &rendered;
+    ImBuf *scaled = nullptr;
+    if (rendered.x != buffer->x || rendered.y != buffer->y) {
+      /* Box is bilinear when scaling up, which is what a preview smaller than its map needs. */
+      scaled = IMB_scale_into_new(&rendered, buffer->x, buffer->y, IMBScaleFilter::Box, false);
+      source = scaled;
+    }
+    if (source != nullptr && source->float_data() != nullptr) {
+      float *dst = buffer->float_data_for_write();
+      const int64_t texel_num = int64_t(buffer->x) * buffer->y;
+      memcpy(dst, source->float_data(), size_t(texel_num) * 4 * sizeof(float));
+      /* The render delivers scene-linear pixels and the target is scene linear (color) or data,
+       * so the pixels go in unchanged. */
+      buffer->userflags |= IB_DISPLAY_BUFFER_INVALID;
+      BKE_image_mark_dirty(&image, buffer.get());
+    }
+    if (scaled != nullptr) {
+      IMB_freeImBuf(scaled);
+    }
+  }
+  BKE_image_partial_update_mark_full_update(&image);
+  BKE_image_free_gputextures(&image);
+  WM_main_add_notifier(NC_IMAGE | NA_EDITED, &image);
+  WM_main_add_notifier(NC_IMAGE | ND_DISPLAY, &image);
 }
 
 /**
@@ -1903,43 +2019,71 @@ static void material_bake_images_startjob(void *customdata, wmJobWorkerStatus *w
     return;
   }
 
-  Vector<ImBuf *> request_images;
+  if (job.tiles.is_empty()) {
+    /* Every job covers at least the base square: a starter that found no stack tiles (a source
+     * cache bake, a plain Bake to Images) renders it plain. */
+    job.tiles.append(PAINT_TILE_NUMBER_BASE);
+  }
+  job.rendered_tiles.reinitialize(job.tiles.size());
+  for (Vector<ImBuf *> &tile_images : job.rendered_tiles) {
+    tile_images.resize(job.channels.size(), nullptr);
+  }
+
+  Vector<Vector<ImBuf *>> request_images_per_tile;
   if (baked) {
-    request_images.resize(requests.size(), nullptr);
+    const int tiles_num = job.tiles.size();
+    request_images_per_tile.resize(tiles_num);
     const bool attached = bake_requests_attach(*bake_main, *bake_material.nodetree, requests);
     if (worker_status != nullptr) {
       worker_status->progress = BAKE_PROGRESS_ATTACHED;
       worker_status->do_update = true;
     }
-    /* Stoppable here, unlike the brush source bake: this job shows a progress bar with a cancel
-     * button, and the status bar's cancel raises the same flag a superseding bake does. */
-    const bool rendered = attached && bake_requests_render(*bake_main,
-                                                           bake_material,
-                                                           job.size,
-                                                           requests,
-                                                           request_images,
-                                                           worker_status);
+    /* A failed attach leaves nothing to render, as it did before the bake went per tile. */
+    baked = attached;
+    /* One render per tile, each over its own UV square: the same scene and the same AOV routing,
+     * so the tiles of a UDIM bake cost one EEVEE pass each. */
+    for (const int tile_index : IndexRange(tiles_num)) {
+      if (!baked || (worker_status != nullptr && worker_status->stop)) {
+        baked = false;
+        break;
+      }
+      request_images_per_tile[tile_index].resize(requests.size(), nullptr);
+      baked = bake_requests_render(*bake_main,
+                                   bake_material,
+                                   job.size,
+                                   requests,
+                                   request_images_per_tile[tile_index],
+                                   worker_status,
+                                   BakeRenderTile{job.tiles[tile_index], tile_index, tiles_num});
+      if (!baked) {
+        break;
+      }
+    }
     if (worker_status != nullptr) {
       worker_status->progress = BAKE_PROGRESS_RENDERED;
       worker_status->do_update = true;
     }
-    baked = rendered;
   }
   if (baked) {
-    for (const int request_index : requests.index_range()) {
-      const int64_t channel_index = job.channels.first_index_of_try(
-          eMaterialPaintChannel(request_channels[request_index]));
-      if (channel_index < 0) {
-        IMB_freeImBuf(request_images[request_index]);
-        continue;
+    for (const int tile_index : request_images_per_tile.index_range()) {
+      for (const int request_index : requests.index_range()) {
+        const int64_t channel_index = job.channels.first_index_of_try(
+            eMaterialPaintChannel(request_channels[request_index]));
+        if (channel_index < 0) {
+          IMB_freeImBuf(request_images_per_tile[tile_index][request_index]);
+          continue;
+        }
+        job.rendered_tiles[tile_index][channel_index] = request_images_per_tile[tile_index]
+                                                           [request_index];
       }
-      job.rendered[channel_index] = request_images[request_index];
     }
   }
   else {
-    for (ImBuf *ibuf : request_images) {
-      if (ibuf != nullptr) {
-        IMB_freeImBuf(ibuf);
+    for (const Vector<ImBuf *> &tile_images : request_images_per_tile) {
+      for (ImBuf *ibuf : tile_images) {
+        if (ibuf != nullptr) {
+          IMB_freeImBuf(ibuf);
+        }
       }
     }
   }
@@ -1966,7 +2110,10 @@ static void material_source_cache_land(MaterialBakeImagesJob &job, Main &bmain)
   }
   Vector<PaintLayersSourceCacheLandedChannel> landed;
   for (const int i : job.channels.index_range()) {
-    ImBuf *rendered = job.rendered[i];
+    /* A source-graph cache bake covers the base square alone, so its buffers sit in the one tile. */
+    ImBuf *rendered = (job.rendered_tiles.is_empty() || job.rendered_tiles[0].is_empty()) ?
+                          nullptr :
+                          job.rendered_tiles[0][i];
     if (rendered == nullptr || rendered->float_data() == nullptr) {
       /* A channel that failed to render (a cancelled job included) lands nothing: its claim part
        * is left to the next bake, its old pixels or the constant are what the CPU serves meanwhile
@@ -2017,6 +2164,32 @@ static void material_source_cache_land(MaterialBakeImagesJob &job, Main &bmain)
  * Publish the rendered buffers into their targets. Runs on the main thread once the worker is
  * done, which is what makes it safe to touch real #Image data-blocks at all.
  */
+/**
+ * Land one rendered tile of a bake into \a target: the whole-buffer adopt of a plain single-tile
+ * target, or the write into \a tile_number's own tile (the base square of a tiled single-tile
+ * bake, the rendered tile of a UDIM one -- the tile generated at the render's side when the target
+ * does not have it yet). The pixels are copied rather than adopted on the write paths, since a
+ * tiled image's buffer is the tile's, not the image's own. \a rendered is taken over only by the
+ * adopt path; the job frees it otherwise.
+ */
+static void bake_target_land_tile(Image &target,
+                                  ImBuf *&rendered,
+                                  const eMaterialPaintChannel channel,
+                                  const int tile_number,
+                                  const bool single_tile,
+                                  const bool replace_size)
+{
+  if (single_tile && target.source != IMA_SRC_TILED) {
+    /* A render at the row's own size replaces the buffer of a map a preview left at another
+     * size; a preview is scaled into whatever the map is. */
+    if (!bake_target_image_adopt(target, rendered, channel, replace_size)) {
+      bake_target_image_write_back(target, *rendered);
+    }
+    return;
+  }
+  bake_target_image_write_back(target, *rendered, tile_number);
+}
+
 static void material_bake_images_endjob(void *customdata)
 {
   MaterialBakeImagesJob &job = *static_cast<MaterialBakeImagesJob *>(customdata);
@@ -2045,8 +2218,12 @@ static void material_bake_images_endjob(void *customdata)
     return;
   }
   bool all_landed = true;
+  /* The base square, whatever the tile list says: a single-tile bake keeps the adopt path, which
+   * hands the render's own buffer to the image instead of copying it. A target that already is a
+   * UDIM image never adopts -- its buffer is the base tile's, not the image's own -- so it takes
+   * the write below, at its base tile, whatever the bake covered. */
+  const bool single_tile = !BKE_paint_layers_stack_is_tiled(job.tiles);
   for (const int i : job.channels.index_range()) {
-    ImBuf *rendered = job.rendered[i];
     const uint32_t session_uid = job.target_session_uids[i];
     Image *target = image_by_session_uid(*bmain, session_uid);
     ImageMaterialSource source;
@@ -2055,18 +2232,37 @@ static void material_bake_images_endjob(void *customdata)
                               source.channel == int(job.channels[i]) &&
                               source.material != nullptr &&
                               source.material->id.session_uid == job.material_session_uid;
-    if (rendered == nullptr || !target_valid) {
-      /* A channel that failed to render (including a cancelled job, whose buffers stay empty) keeps
-       * its old pixels and its old hash, so it stays stale and the next re-bake picks it up
-       * again. The buffer, if any, stays with the job and is freed with it. */
+    if (!target_valid) {
+      /* A target that went away keeps its channel's pixels in the job: they are freed with it, and
+       * the channel's old pixels and old hash stay what the composite serves. */
       all_landed = false;
       continue;
     }
-    /* A render at the row's own size replaces the buffer of a map a preview left at another size;
-     * a preview is scaled into whatever the map is. */
+    /* All of the channel's tiles are checked before the first one lands: a bake that rendered
+     * three of its four tiles must not leave the target half-new -- its old hash would then claim
+     * the mixed state is current -- so a channel with a missing tile lands nothing at all. */
+    bool channel_landed = true;
+    for (const int tile_index : job.tiles.index_range()) {
+      if (job.rendered_tiles[tile_index][i] == nullptr) {
+        channel_landed = false;
+        break;
+      }
+    }
+    if (!channel_landed) {
+      /* A tile that failed to render (including a cancelled job, whose buffers stay empty) keeps
+       * the target's old pixels and its old hash, so it stays stale and the next re-bake picks it
+       * up again. The buffers stay with the job and are freed with it. */
+      all_landed = false;
+      continue;
+    }
     const bool replace_size = job.row.active && job.row.preview_side == 0;
-    if (!bake_target_image_adopt(*target, job.rendered[i], job.channels[i], replace_size)) {
-      bake_target_image_write_back(*target, *rendered);
+    for (const int tile_index : job.tiles.index_range()) {
+      bake_target_land_tile(*target,
+                            job.rendered_tiles[tile_index][i],
+                            job.channels[i],
+                            single_tile ? PAINT_TILE_NUMBER_BASE : job.tiles[tile_index],
+                            single_tile,
+                            replace_size);
     }
     /* #bake_target_image_write_back only notifies NC_IMAGE, which the Image Editor listens for --
      * the 3D viewport's shading redraw does not, so a material that reads the map keeps showing
@@ -2119,9 +2315,11 @@ static void material_bake_images_free(void *customdata)
       }
     }
   }
-  for (ImBuf *ibuf : job->rendered) {
-    if (ibuf != nullptr) {
-      IMB_freeImBuf(ibuf);
+  for (const Vector<ImBuf *> &tile_images : job->rendered_tiles) {
+    for (ImBuf *ibuf : tile_images) {
+      if (ibuf != nullptr) {
+        IMB_freeImBuf(ibuf);
+      }
     }
   }
   for (const uint32_t session_uid : job->target_session_uids) {
@@ -2231,24 +2429,54 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
       params.source_graph ? BKE_paint_layers_source_channel_graph_hash_cached(*params.material) :
                             material_bake_source_node_tree_hash(*params.material);
 
+  /* The tiles the bake covers: a row bake takes its owner stack's tile list, so a UDIM canvas gets
+   * one render and one target tile per tile the stack holds, and every other bake covers the base
+   * square alone. Captured here, on the main thread, so the job renders the set it was started for
+   * even if the stack changes while it runs. */
+  Vector<int> bake_tiles;
+  if (params.row.active) {
+    if (const Material *owner = material_by_session_uid(bmain, params.row.owner_session_uid)) {
+      BKE_paint_layers_stack_tiles_collect(*owner, bake_tiles);
+    }
+  }
+  const bool bake_tiled = BKE_paint_layers_stack_is_tiled(bake_tiles);
+  if (bake_tiles.is_empty()) {
+    bake_tiles.append(PAINT_TILE_NUMBER_BASE);
+  }
+
   Vector<eMaterialPaintChannel> render_channels;
   Vector<uint32_t> render_target_uids;
+  /* A target the bake reuses has to match its tiling: a map baked before the stack went UDIM
+   * cannot take a per-tile write, so a fresh tiled one is minted instead of it, and the row hands
+   * the new map in when the render lands. */
+  const auto tiled_ok = [&](const Image *candidate) {
+    return candidate == nullptr || !bake_tiled || candidate->source == IMA_SRC_TILED;
+  };
   for (const BakeTargetSpec *target : to_create) {
     const eMaterialPaintChannel channel = target->channel;
     const bool constant = !params.source_graph &&
                           resolve.channels[channel] == ChannelResolution::Constant;
-    Image *image = target->existing != nullptr ?
-                       target->existing :
-                   params.reuse_existing ?
-                       bake_target_image_find(bmain, *params.material, channel) :
-                       bake_target_image_create(bmain,
-                                                *params.material,
-                                                channel,
-                                                size,
-                                                result.layer_id,
-                                                current_hash,
-                                                bake_target_kind(params.source_graph,
-                                                                 !constant && !params.blocking));
+    Image *image = tiled_ok(target->existing) ? target->existing : nullptr;
+    if (image == nullptr) {
+      if (params.reuse_existing) {
+        image = bake_target_image_find(bmain, *params.material, channel);
+        if (!tiled_ok(image)) {
+          image = nullptr;
+        }
+      }
+      if (image == nullptr) {
+        image = bake_target_image_create(bmain,
+                                         *params.material,
+                                         channel,
+                                         size,
+                                         result.layer_id,
+                                         current_hash,
+                                         bake_target_kind(params.source_graph,
+                                                          !constant && !params.blocking &&
+                                                              !bake_tiled),
+                                         bake_tiled);
+      }
+    }
     if (image == nullptr) {
       /* Only reachable when re-baking a layer whose target for this channel is gone. */
       continue;
@@ -2261,7 +2489,7 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
 
     if (resolve.channels[channel] == ChannelResolution::Constant) {
       /* Nothing to render: the channel is a plain value on the Principled input. */
-      bake_target_image_fill_constant(*image, resolve.constants[channel]);
+      bake_target_image_fill_constant(*image, resolve.constants[channel], bake_tiles, size);
       ImageMaterialSource link;
       link.material = params.material;
       link.channel = int(channel);
@@ -2307,6 +2535,12 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
       {
         continue;
       }
+      /* A carried target has to match the bake's tiling as well: a single-tile map of a replaced
+       * bake cannot take the per-tile writes of a UDIM one, so its channel is rendered into the
+       * fresh target the loop above made instead. */
+      if (!tiled_ok(&image)) {
+        continue;
+      }
       const eMaterialPaintChannel channel = eMaterialPaintChannel(source.channel);
       if (render_channels.contains(channel) ||
           ELEM(resolve.channels[channel],
@@ -2329,7 +2563,7 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
                      LIB_ID_CREATE_LOCAL | LIB_ID_COPY_LOCALIZE | LIB_ID_COPY_NO_ANIMDATA));
   job->target_session_uids = std::move(render_target_uids);
   job->channels = std::move(render_channels);
-  job->rendered.resize(job->channels.size(), nullptr);
+  job->tiles = bake_tiles;
   job->size = size;
   job->baked_hash = current_hash;
   job->material_session_uid = params.material->id.session_uid;

@@ -93,10 +93,18 @@ struct PollResult {
  *                        coordinates, for a cache whose buffer is not the canvas -- the Combined
  *                        preview is shaded at a fraction of it. Empty for a cache that stores
  *                        texels, which is the identity.
+ * \param tile_filter: when non-zero, the cache entry answers for that UDIM tile. Of a tiled image
+ *                        only the changes of that tile are reported (each entry polls its own
+ *                        subscriptions, so the other tiles are not lost), plus the base tile's
+ *                        when the image lacks that tile and is read through the base. A non-tiled
+ *                        image serves every tile and reports its changes as the base tile, so
+ *                        all of them are reported. Zero keeps the untiled behavior, where a
+ *                        change on any tile but the first asks for the full rebuild.
  */
 PollResult subscriptions_poll(SubscriptionMap &subscriptions,
                               Span<Image *> images,
-                              FunctionRef<rcti(const rcti &)> to_cache_space = {});
+                              FunctionRef<rcti(const rcti &)> to_cache_space = {},
+                              const int tile_filter = 0);
 
 /**
  * The size to store or shade a preview at: the largest power-of-two fraction of \a canvas that still

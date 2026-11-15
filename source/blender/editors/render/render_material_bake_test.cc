@@ -472,9 +472,14 @@ TEST_F(MaterialBakeTest, height_request_follows_include_height)
   ASSERT_EQ(requests.size(), 2);
   ASSERT_EQ(request_channels.size(), 2);
   EXPECT_EQ(request_channels[1], PAINT_MATERIAL_CHANNEL_HEIGHT);
-  /* The Height request reads that Bump's Height input. */
-  EXPECT_EQ(requests[1].source->owner_node().type_legacy, SH_NODE_BUMP);
-  EXPECT_STREQ(requests[1].source->identifier, "Height");
+  /* The Height request reads what feeds that Bump's Height input: the generated graph composes the
+   * relief before the Bump, so the socket is the one the resolver finds behind the input, not the
+   * input itself. */
+  const bNode *bump = BKE_paint_layers_bump_owned_find(*layered);
+  ASSERT_NE(bump, nullptr);
+  const bNodeSocket *bump_height = bke::node_find_socket(*bump, SOCK_IN, "Height"_ustr);
+  ASSERT_NE(bump_height, nullptr);
+  EXPECT_EQ(requests[1].source, BKE_paint_material_source_socket(*bump_height));
   EXPECT_TRUE(requests[1].is_color);
   EXPECT_FALSE(requests[1].encode_vector);
 }

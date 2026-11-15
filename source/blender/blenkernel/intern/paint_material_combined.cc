@@ -582,6 +582,23 @@ struct CombinedCacheEntry {
   int64_t last_use = 0;
 };
 
+/** What one Combined cache entry answers for: a material's preview on one UDIM tile. */
+struct CombinedCacheKey {
+  uint32_t material_session_uid = 0;
+  /** The tile the entry's canvas is; the base tile for a non-tiled stack. */
+  int tile_number = PAINT_TILE_NUMBER_BASE;
+
+  uint64_t hash() const
+  {
+    return get_default_hash(this->material_session_uid, this->tile_number);
+  }
+};
+
+inline bool operator==(const CombinedCacheKey &a, const CombinedCacheKey &b)
+{
+  return a.material_session_uid == b.material_session_uid && a.tile_number == b.tile_number;
+}
+
 /**
  * The one Combined cache of the session.
  *
@@ -589,7 +606,7 @@ struct CombinedCacheEntry {
  * on the main thread and there is no worker writing results back.
  */
 struct CombinedCache {
-  Map<uint32_t, CombinedCacheEntry> entries;
+  Map<CombinedCacheKey, CombinedCacheEntry> entries;
   /** Monotonic, and only ever compared: the source of #CombinedCacheEntry.last_use. */
   int64_t use_counter = 0;
   /** Never reset: a consumer compares revisions over time, across entries that come and go. */
@@ -607,7 +624,7 @@ static int64_t combined_entry_size_in_bytes(const CombinedCacheEntry &entry)
   return int64_t(entry.width) * entry.height * 4 * int64_t(sizeof(float));
 }
 
-static void combined_cache_enforce_budget(const uint32_t keep)
+static void combined_cache_enforce_budget(const CombinedCacheKey &keep)
 {
   bke::paint_material_cache::enforce_budget(
       g_cache.entries, keep, COMBINED_CACHE_BUDGET_BYTES, combined_entry_size_in_bytes);
@@ -624,7 +641,9 @@ static void combined_cache_enforce_budget(const uint32_t keep)
  * Requires #CombinedCacheEntry.canvas_width and #height to be current: a change arrives in the
  * image's texels, which are the canvas's, and the entry's rectangles are in output pixels.
  */
-static void combined_entry_poll_dependencies(CombinedCacheEntry &entry, Span<Image *> images)
+static void combined_entry_poll_dependencies(CombinedCacheEntry &entry,
+                                             Span<Image *> images,
+                                             const int tile_number)
 {
   BLI_assert(entry.canvas_width > 0 && entry.canvas_height > 0);
   /* Rounded outwards, so a dab never loses its edge and leaves a stale fringe. */
@@ -633,8 +652,11 @@ static void combined_entry_poll_dependencies(CombinedCacheEntry &entry, Span<Ima
         region, int2(entry.canvas_width, entry.canvas_height), int2(entry.width, entry.height));
   };
 
+  /* The entry answers for one tile: of a tiled image only that tile's changes are ours, plus the
+   * base tile's while the entry's tile is read through the base. Every entry polls its own
+   * subscriptions, so the other tiles' changes reach the entries they belong to. */
   const bke::paint_material_cache::PollResult poll = bke::paint_material_cache::subscriptions_poll(
-      entry.partial_update_users, images, to_output);
+      entry.partial_update_users, images, to_output, tile_number);
   if (poll.needs_full_update) {
     entry.dirty_full = true;
   }
@@ -661,7 +683,8 @@ ImBuf *BKE_paint_material_combined_cache_ensure(const Material &ma,
                                                 const CombinedCacheRequest &request,
                                                 uint64_t *r_revision,
                                                 rcti *r_changed_region,
-                                                CombinedEvalStats *r_stats)
+                                                CombinedEvalStats *r_stats,
+                                                const int tile_number)
 {
   if (r_stats != nullptr) {
     *r_stats = CombinedEvalStats{};
@@ -676,7 +699,10 @@ ImBuf *BKE_paint_material_combined_cache_ensure(const Material &ma,
   }
   bke::paint_perf::ScopedTimer perf_timer("combined_cache_ensure");
 
-  const uint32_t key = ma.id.session_uid;
+  /* The cache has no surface or object to resolve an unset tile from: the base square is what a
+   * caller that named none means. */
+  const int resolved_tile = BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr);
+  const CombinedCacheKey key{ma.id.session_uid, resolved_tile};
   CombinedCacheEntry &entry = g_cache.entries.lookup_or_add_default(key);
   entry.last_use = ++g_cache.use_counter;
 
@@ -726,7 +752,7 @@ ImBuf *BKE_paint_material_combined_cache_ensure(const Material &ma,
    * output pixels, and those dimensions are only current once the buffer is. A resize keeps its
    * subscriptions -- nothing about the images changed -- and gets its full rebuild from
    * `size_changed` instead. */
-  combined_entry_poll_dependencies(entry, request.dependency_images);
+  combined_entry_poll_dependencies(entry, request.dependency_images, resolved_tile);
 
   const uint64_t lighting_hash = lighting.hash();
   const bool rebuild_all = size_changed || inputs_resized ||
@@ -856,8 +882,10 @@ void BKE_paint_material_combined_cache_invalidate(const Material *ma)
     }
     return;
   }
-  if (CombinedCacheEntry *entry = g_cache.entries.lookup_ptr(ma->id.session_uid)) {
-    entry->dirty_full = true;
+  for (auto item : g_cache.entries.items()) {
+    if (item.key.material_session_uid == ma->id.session_uid) {
+      item.value.dirty_full = true;
+    }
   }
 }
 
@@ -868,8 +896,10 @@ void BKE_paint_material_combined_cache_free_material(const Material &ma)
      * almost none of which was ever previewed. */
     return;
   }
-  /* Removing is the whole drop: the entry owns its buffer outright. */
-  g_cache.entries.remove(ma.id.session_uid);
+  /* Every tile the material's previews made: removing is the whole drop, the entry owns its
+   * buffer outright. */
+  g_cache.entries.remove_if(
+      [&](auto item) { return item.key.material_session_uid == ma.id.session_uid; });
 }
 
 void BKE_paint_material_combined_cache_free_all()
@@ -878,14 +908,19 @@ void BKE_paint_material_combined_cache_free_all()
   g_cache.entries.clear();
 }
 
-bool BKE_paint_material_combined_cache_contains(const Material &ma)
+bool BKE_paint_material_combined_cache_contains(const Material &ma, const int tile_number)
 {
-  return g_cache.entries.contains(ma.id.session_uid);
+  return g_cache.entries.contains(CombinedCacheKey{
+      ma.id.session_uid, BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr)});
 }
 
-ImBuf *BKE_paint_material_combined_cache_peek(const Material &ma, uint64_t *r_revision)
+ImBuf *BKE_paint_material_combined_cache_peek(const Material &ma,
+                                              uint64_t *r_revision,
+                                              const int tile_number)
 {
-  CombinedCacheEntry *entry = g_cache.entries.lookup_ptr(ma.id.session_uid);
+  const CombinedCacheKey key{ma.id.session_uid,
+                             BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr)};
+  CombinedCacheEntry *entry = g_cache.entries.lookup_ptr(key);
   if (entry == nullptr || entry->ibuf == nullptr) {
     return nullptr;
   }
@@ -898,9 +933,13 @@ ImBuf *BKE_paint_material_combined_cache_peek(const Material &ma, uint64_t *r_re
   return entry->ibuf.get();
 }
 
-bool BKE_paint_material_combined_cache_size_get(const Material &ma, int &r_width, int &r_height)
+bool BKE_paint_material_combined_cache_size_get(const Material &ma,
+                                                int &r_width,
+                                                int &r_height,
+                                                const int tile_number)
 {
-  const CombinedCacheEntry *entry = g_cache.entries.lookup_ptr(ma.id.session_uid);
+  const CombinedCacheEntry *entry = g_cache.entries.lookup_ptr(CombinedCacheKey{
+      ma.id.session_uid, BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr)});
   if (entry == nullptr || entry->ibuf == nullptr) {
     return false;
   }
@@ -915,9 +954,11 @@ bool BKE_paint_material_combined_cache_size_get(const Material &ma, int &r_width
 
 bool BKE_paint_material_combined_cache_output_size_get(const Material &ma,
                                                        int &r_width,
-                                                       int &r_height)
+                                                       int &r_height,
+                                                       const int tile_number)
 {
-  const CombinedCacheEntry *entry = g_cache.entries.lookup_ptr(ma.id.session_uid);
+  const CombinedCacheEntry *entry = g_cache.entries.lookup_ptr(CombinedCacheKey{
+      ma.id.session_uid, BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr)});
   if (entry == nullptr || entry->ibuf == nullptr) {
     return false;
   }
@@ -929,9 +970,11 @@ bool BKE_paint_material_combined_cache_output_size_get(const Material &ma,
 
 bool BKE_paint_material_combined_cache_sizes_get(const Material &ma,
                                                 int2 &r_input,
-                                                int2 &r_output)
+                                                int2 &r_output,
+                                                const int tile_number)
 {
-  const CombinedCacheEntry *entry = g_cache.entries.lookup_ptr(ma.id.session_uid);
+  const CombinedCacheEntry *entry = g_cache.entries.lookup_ptr(CombinedCacheKey{
+      ma.id.session_uid, BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr)});
   if (entry == nullptr || entry->ibuf == nullptr) {
     return false;
   }

@@ -12,10 +12,12 @@
  */
 
 #include <algorithm>
+#include <memory>
 
 #include "BKE_paint_layers.hh"
 
 #include "BKE_image.hh"
+#include "BKE_image_tile_buffer.hh"
 #include "BKE_lib_id.hh"
 
 #include "IMB_colormanagement.hh"
@@ -81,10 +83,123 @@ Image *specular_convert_image_make(Main &bmain, ImBuf *buf, const char *name)
   return image;
 }
 
+/**
+ * An empty tiled Image in the data colorspace, its first tile sized like \a first: a tiled map
+ * converts tile by tile, so the grey maps mirror its tiling rather than collapsing it into one
+ * buffer, which would leave every other tile's content out.
+ */
+Image *specular_convert_image_tiled_make(Main &bmain, const ImBuf &first, const char *name)
+{
+  const float blank[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *image = BKE_image_add_generated(&bmain,
+                                         uint(first.x),
+                                         uint(first.y),
+                                         name,
+                                         32,
+                                         false,
+                                         IMA_GENTYPE_BLANK,
+                                         blank,
+                                         false,
+                                         /*is_data=*/true,
+                                         /*tiled=*/true);
+  return image;
+}
+
+/**
+ * Put \a buf's grey into \a image's tile \a tile_number, adding the tile when the image does not
+ * have it yet and generating it blank from \a buf's size first. False when the tile could not be
+ * made or does not match the buffer.
+ */
+bool specular_convert_tile_write(Image &image, const int tile_number, const ImBuf &buf)
+{
+  /* The tile generates like the first one does, but at \a buf's size: a source whose tiles
+   * differ in resolution still reads back faithfully. */
+  if (!BKE_paint_layers_map_coverage_tile_ensure(image, tile_number, buf.x, buf.y)) {
+    return false;
+  }
+  ImageUser tile_user;
+  BKE_imageuser_default(&tile_user);
+  tile_user.tile = tile_number;
+  ImageTileBufferScope dst(image, &tile_user);
+  if (dst == nullptr || dst->x != buf.x || dst->y != buf.y) {
+    return false;
+  }
+  uchar *dst_pixels = dst->byte_data_for_write();
+  if (dst_pixels == nullptr) {
+    return false;
+  }
+  memcpy(dst_pixels, buf.byte_data(), size_t(buf.x) * size_t(buf.y) * 4);
+  /* Painted pixels exist only in this buffer, so it has to count as unsaved work. */
+  dst->userflags |= IB_DISPLAY_BUFFER_INVALID;
+  BKE_image_mark_dirty(&image, dst.get());
+  return true;
+}
+
 /** The channels a float buffer stores per pixel: zero stands for the four-channel default. */
 int specular_source_channels(const ImBuf &source)
 {
   return (source.channels > 0) ? source.channels : 4;
+}
+
+/** Convert one buffer's pixels into the grey the channels read: the specular level from the
+ * colour, and -- when \a rough_buf is given -- the roughness from the alpha. Both outputs are byte
+ * buffers of \a source's size, as every maker of a grey map fills them. */
+void specular_convert_buf_fill(const ImBuf &source,
+                               const PaintSpecularMapKind kind,
+                               ImBuf *level_buf,
+                               ImBuf *rough_buf)
+{
+  const size_t pixel_num = size_t(source.x) * size_t(source.y);
+  uint8_t *level_out = level_buf->byte_data_for_write();
+  uint8_t *rough_out = (rough_buf != nullptr) ? rough_buf->byte_data_for_write() : nullptr;
+  const float *source_float = source.float_data();
+  const uint8_t *source_byte = source.byte_data();
+  const ColorSpace *source_colorspace = source.byte_buffer.colorspace;
+  const int source_channels = (source_float != nullptr) ? specular_source_channels(source) : 4;
+
+  for (size_t i = 0; i < pixel_num; i++) {
+    /* The specular colour as scene linear, the way a colour map's reader decodes it; a level map
+     * is data, so its stored value goes over as it is. */
+    float3 color;
+    float glossiness = 0.0f;
+    if (source_float != nullptr) {
+      const float *px = source_float + i * source_channels;
+      if (source_channels == 1) {
+        color = float3(px[0]);
+      }
+      else {
+        color = float3(px[0], px[1], px[2]);
+      }
+      glossiness = (source_channels >= 4) ? px[3] : 0.0f;
+    }
+    else {
+      const uint8_t *px = source_byte + i * 4;
+      color = float3(specular_stored_level(px[0]),
+                     specular_stored_level(px[1]),
+                     specular_stored_level(px[2]));
+      if (kind != PaintSpecularMapKind::Level && source_colorspace != nullptr) {
+        IMB_colormanagement_colorspace_to_scene_linear_v3(color, source_colorspace);
+      }
+      glossiness = specular_stored_level(px[3]);
+    }
+
+    const float level = (kind == PaintSpecularMapKind::Level) ?
+                            paint_layer_map_luminance(color) :
+                            paint_layer_map_luminance(color) / SPECULAR_LEVEL_F0_FULL;
+    const uint8_t level_byte = specular_level_byte(level);
+    level_out[i * 4 + 0] = level_byte;
+    level_out[i * 4 + 1] = level_byte;
+    level_out[i * 4 + 2] = level_byte;
+    level_out[i * 4 + 3] = 255;
+
+    if (rough_out != nullptr) {
+      const uint8_t rough_byte = specular_level_byte(1.0f - glossiness);
+      rough_out[i * 4 + 0] = rough_byte;
+      rough_out[i * 4 + 1] = rough_byte;
+      rough_out[i * 4 + 2] = rough_byte;
+      rough_out[i * 4 + 3] = 255;
+    }
+  }
 }
 
 /** Whether the source holds a colour to read and, separately, the alpha glossiness needs. */
@@ -146,6 +261,23 @@ bool specular_alpha_varies(const ImBuf &source)
   return false;
 }
 
+/** Whether any buffer the map holds carries an alpha that is not one flat value; a tiled map's
+ * glossiness may sit on any tile, so the walk goes over them all, and an ordinary map is its
+ * one-buffer case. A tile without a buffer is skipped: nothing was stored in it that a reader
+ * could see. */
+bool specular_alpha_varies_map(Image &spec_map)
+{
+  bool varies = false;
+  BKE_image_tile_buffers_foreach(spec_map, [&](const int /*tile_number*/, ImBuf &ibuf) {
+    if (specular_alpha_varies(ibuf)) {
+      varies = true;
+      return false;
+    }
+    return true;
+  });
+  return varies;
+}
+
 /**
  * The no-bake spec-gloss set (#PaintSpecularMapKind::SpecGlossSet): the map keeps its pixels, the
  * Specular record reads it as the F0 colour with the glossiness in its alpha, and -- when \a
@@ -175,7 +307,8 @@ bool specular_spec_gloss_set(Material &ma,
   const SpecularSourceShape shape = specular_source_shape(*source);
   bool alpha_varies = false;
   if (shape.has_alpha && make_roughness) {
-    alpha_varies = specular_alpha_varies(*source);
+    /* A tiled map's glossiness may sit on any tile, so the walk goes over them all. */
+    alpha_varies = specular_alpha_varies_map(spec_map);
   }
   BKE_image_release_ibuf(&spec_map, source, source_lock);
   if (!shape.has_color) {
@@ -231,6 +364,27 @@ bool specular_spec_gloss_set(Material &ma,
     return refuse("The roughness record refused the map");
   }
   return true;
+}
+
+/** An ImBuf owned for a scope: the tile buffers of the conversion walk die with it, so the walk
+ * frees nothing by hand. */
+struct ImBufDeleter {
+  void operator()(ImBuf *buf) const
+  {
+    IMB_freeImBuf(buf);
+  }
+};
+using ImBufHandle = std::unique_ptr<ImBuf, ImBufDeleter>;
+
+/** A half conversion must not read as one: the maps made so far go away again. */
+void specular_convert_discard(Main &bmain, Image *level_image, Image *rough_image)
+{
+  if (level_image != nullptr) {
+    BKE_id_delete(&bmain, &level_image->id);
+  }
+  if (rough_image != nullptr) {
+    BKE_id_delete(&bmain, &rough_image->id);
+  }
 }
 
 }  // namespace
@@ -310,85 +464,86 @@ bool BKE_paint_layers_specular_map_convert(Main &bmain,
     return refuse("The map has no alpha to read the glossiness from");
   }
 
-  ImBuf *level_buf = specular_convert_buf_alloc(*source);
-  ImBuf *rough_buf = want_roughness ? specular_convert_buf_alloc(*source) : nullptr;
-  if (level_buf == nullptr || (want_roughness && rough_buf == nullptr)) {
-    IMB_freeImBuf(level_buf);
-    IMB_freeImBuf(rough_buf);
-    BKE_image_release_ibuf(&spec_map, source, source_lock);
-    return refuse("The converted maps could not be allocated");
+  /* The grey maps mirror the source's tiling: a tiled map converts tile by tile, so every tile's
+   * pixels land in the grey map's own tile, and an ordinary map is the one-tile list of the same
+   * walk, its greys landing in the plain generated images. The per-tile buffers die with their
+   * scope, so neither walk holds a second tile's pixels nor frees anything by hand. */
+  const bool tiled = spec_map.source == IMA_SRC_TILED;
+  Image *level_image = nullptr;
+  Image *rough_image = nullptr;
+  char name[MAX_NAME];
+  if (tiled) {
+    specular_convert_name(spec_map, " Specular", name);
+    level_image = specular_convert_image_tiled_make(bmain, *source, name);
+    if (want_roughness) {
+      specular_convert_name(spec_map, " Roughness", name);
+      rough_image = specular_convert_image_tiled_make(bmain, *source, name);
+    }
+    if (level_image == nullptr || (want_roughness && rough_image == nullptr)) {
+      BKE_image_release_ibuf(&spec_map, source, source_lock);
+      specular_convert_discard(bmain, level_image, rough_image);
+      return refuse("The converted maps could not be created");
+    }
   }
 
-  const size_t pixel_num = size_t(source->x) * size_t(source->y);
-  uint8_t *level_out = level_buf->byte_data_for_write();
-  uint8_t *rough_out = (rough_buf != nullptr) ? rough_buf->byte_data_for_write() : nullptr;
-  const float *source_float = source->float_data();
-  const uint8_t *source_byte = source->byte_data();
-  const ColorSpace *source_colorspace = source->byte_buffer.colorspace;
-  const int source_channels = (source_float != nullptr) ? specular_source_channels(*source) : 4;
-
-  for (size_t i = 0; i < pixel_num; i++) {
-    /* The specular colour as scene linear, the way a colour map's reader decodes it; a level map
-     * is data, so its stored value goes over as it is. */
-    float3 color;
-    float glossiness = 0.0f;
-    if (source_float != nullptr) {
-      const float *px = source_float + i * source_channels;
-      if (source_channels == 1) {
-        color = float3(px[0]);
-      }
-      else {
-        color = float3(px[0], px[1], px[2]);
-      }
-      glossiness = (source_channels >= 4) ? px[3] : 0.0f;
+  /* One walk over the source's tiles: a tiled map over its own, an ordinary map over the single
+   * buffer acquired above. A tile that cannot be read or written would silently drop that tile's
+   * specular, so the conversion is refused whole, the way any other half-done result is. */
+  const char *fail = nullptr;
+  const auto convert_tile = [&](const int tile_number, const ImBuf &tile_buf) {
+    if (tile_buf.x <= 0 || tile_buf.y <= 0) {
+      fail = "A tile of the map cannot be read";
+      return false;
     }
-    else {
-      const uint8_t *px = source_byte + i * 4;
-      color = float3(specular_stored_level(px[0]),
-                     specular_stored_level(px[1]),
-                     specular_stored_level(px[2]));
-      if (kind != PaintSpecularMapKind::Level && source_colorspace != nullptr) {
-        IMB_colormanagement_colorspace_to_scene_linear_v3(color, source_colorspace);
+    ImBufHandle level_buf(specular_convert_buf_alloc(tile_buf));
+    ImBufHandle rough_buf(want_roughness ? specular_convert_buf_alloc(tile_buf) : nullptr);
+    if (level_buf == nullptr || (want_roughness && rough_buf == nullptr)) {
+      fail = "The converted maps could not be allocated";
+      return false;
+    }
+    specular_convert_buf_fill(tile_buf, kind, level_buf.get(), rough_buf.get());
+    if (tiled) {
+      if (!specular_convert_tile_write(*level_image, tile_number, *level_buf) ||
+          (rough_buf != nullptr &&
+           !specular_convert_tile_write(*rough_image, tile_number, *rough_buf)))
+      {
+        fail = "A tile of the converted maps could not be written";
+        return false;
       }
-      glossiness = specular_stored_level(px[3]);
+      return true;
     }
-
-    const float level = (kind == PaintSpecularMapKind::Level) ?
-                            paint_layer_map_luminance(color) :
-                            paint_layer_map_luminance(color) / SPECULAR_LEVEL_F0_FULL;
-    const uint8_t level_byte = specular_level_byte(level);
-    level_out[i * 4 + 0] = level_byte;
-    level_out[i * 4 + 1] = level_byte;
-    level_out[i * 4 + 2] = level_byte;
-    level_out[i * 4 + 3] = 255;
-
-    if (rough_out != nullptr) {
-      const uint8_t rough_byte = specular_level_byte(1.0f - glossiness);
-      rough_out[i * 4 + 0] = rough_byte;
-      rough_out[i * 4 + 1] = rough_byte;
-      rough_out[i * 4 + 2] = rough_byte;
-      rough_out[i * 4 + 3] = 255;
+    /* The one tile of an ordinary map becomes the plain image whole, buffer and all. */
+    specular_convert_name(spec_map, " Specular", name);
+    level_image = specular_convert_image_make(bmain, level_buf.release(), name);
+    if (rough_buf != nullptr) {
+      specular_convert_name(spec_map, " Roughness", name);
+      rough_image = specular_convert_image_make(bmain, rough_buf.release(), name);
     }
+    if (level_image == nullptr || (want_roughness && rough_image == nullptr)) {
+      fail = "The converted maps could not be created";
+      return false;
+    }
+    return true;
+  };
+  if (tiled) {
+    for (const ImageTile &tile : spec_map.tiles) {
+      ImageUser tile_user;
+      BKE_imageuser_default(&tile_user);
+      tile_user.tile = tile.tile_number;
+      ImageTileBufferScope tile_buf(spec_map, &tile_user);
+      if (tile_buf == nullptr || !convert_tile(tile.tile_number, *tile_buf)) {
+        break;
+      }
+    }
+  }
+  else {
+    const ImageTile *only = static_cast<const ImageTile *>(spec_map.tiles.first);
+    convert_tile((only != nullptr) ? only->tile_number : PAINT_TILE_NUMBER_BASE, *source);
   }
   BKE_image_release_ibuf(&spec_map, source, source_lock);
-
-  char name[MAX_NAME];
-  specular_convert_name(spec_map, " Specular", name);
-  Image *level_image = specular_convert_image_make(bmain, level_buf, name);
-  Image *rough_image = nullptr;
-  if (rough_buf != nullptr) {
-    specular_convert_name(spec_map, " Roughness", name);
-    rough_image = specular_convert_image_make(bmain, rough_buf, name);
-  }
-  if (level_image == nullptr || (want_roughness && rough_image == nullptr)) {
-    /* A half conversion must not read as one: what got made goes away again. */
-    if (level_image != nullptr) {
-      BKE_id_delete(&bmain, &level_image->id);
-    }
-    if (rough_image != nullptr) {
-      BKE_id_delete(&bmain, &rough_image->id);
-    }
-    return refuse("The converted maps could not be created");
+  if (fail != nullptr) {
+    specular_convert_discard(bmain, level_image, rough_image);
+    return refuse(fail);
   }
 
   if (BKE_paint_layers_channel_add(ma, &layer, PAINT_MATERIAL_CHANNEL_SPECULAR) == nullptr ||

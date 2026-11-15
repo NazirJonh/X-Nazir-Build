@@ -32,6 +32,8 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 
+#include "BKE_paint_layers_tile.hh"
+
 #include "DNA_scene_types.h"
 /* Complete rather than forward-declared: #CombinedCacheRequest holds #rcti by value. */
 #include "DNA_vec_types.h"
@@ -289,7 +291,8 @@ ImBuf *BKE_paint_material_combined_cache_ensure(const Material &ma,
                                                 const CombinedCacheRequest &request,
                                                 uint64_t *r_revision = nullptr,
                                                 rcti *r_changed_region = nullptr,
-                                                CombinedEvalStats *r_stats = nullptr);
+                                                CombinedEvalStats *r_stats = nullptr,
+                                                int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /**
  * Mark the Combined preview of \a ma out of date, or of every material when \a ma is null.
@@ -311,7 +314,8 @@ void BKE_paint_material_combined_cache_free_material(const Material &ma);
 void BKE_paint_material_combined_cache_free_all();
 
 /** Whether a preview of \a ma is currently cached. Exists for tests. */
-bool BKE_paint_material_combined_cache_contains(const Material &ma);
+bool BKE_paint_material_combined_cache_contains(const Material &ma,
+                                                int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /**
  * The cached preview of \a ma without recomputing anything, or null when nothing is cached.
@@ -324,7 +328,8 @@ bool BKE_paint_material_combined_cache_contains(const Material &ma);
  *                    is current, exactly as for #BKE_paint_material_combined_cache_ensure.
  */
 ImBuf *BKE_paint_material_combined_cache_peek(const Material &ma,
-                                              uint64_t *r_revision = nullptr);
+                                              uint64_t *r_revision = nullptr,
+                                              int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /**
  * The dimensions of the *canvas* a cached preview of \a ma stands for, without producing one.
@@ -340,7 +345,10 @@ ImBuf *BKE_paint_material_combined_cache_peek(const Material &ma,
  *
  * \return false when nothing is cached, leaving \a r_width and \a r_height untouched.
  */
-bool BKE_paint_material_combined_cache_size_get(const Material &ma, int &r_width, int &r_height);
+bool BKE_paint_material_combined_cache_size_get(const Material &ma,
+                                                int &r_width,
+                                                int &r_height,
+                                                int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /**
  * The resolution a cached preview of \a ma is currently shaded at -- a power-of-two fraction of
@@ -355,7 +363,8 @@ bool BKE_paint_material_combined_cache_size_get(const Material &ma, int &r_width
  */
 bool BKE_paint_material_combined_cache_output_size_get(const Material &ma,
                                                        int &r_width,
-                                                       int &r_height);
+                                                       int &r_height,
+                                                       int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /**
  * The resolution the *inputs* of a cached preview of \a ma were gathered at, and the one its output
@@ -373,7 +382,8 @@ bool BKE_paint_material_combined_cache_output_size_get(const Material &ma,
  */
 bool BKE_paint_material_combined_cache_sizes_get(const Material &ma,
                                                 int2 &r_input,
-                                                int2 &r_output);
+                                                int2 &r_output,
+                                                int tile_number = PAINT_TILE_NUMBER_AUTO);
 
 /**
  * The size a preview of \a canvas is stored or shaded at, for the most the caller can display.

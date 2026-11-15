@@ -1409,9 +1409,14 @@ bool node_is_mapping_chain(const bNode &node)
   return prop_string_get(node.prop, MAPPING_CHAIN_PROP) != nullptr;
 }
 
-UvReaders uv_readers_find(bNodeTree &tree)
+UvReaders uv_readers_find(bNodeTree &tree, const Set<const bNode *> *fed_elsewhere)
 {
   UvReaders found;
+  /* The source group's copy leaves the Principled out, so a node feeding it is linked to nothing in
+   * the copy although it is part of the shader: the caller names those nodes. */
+  const auto fed = [&](const bNode &node) {
+    return fed_elsewhere != nullptr && fed_elsewhere->contains(&node);
+  };
   /* Links are read from the list, not the per-socket caches: a tree under construction (a copy
    * the source group is filling) has stale ones, and a source tree asked from the UI is the same
    * list either way. */
@@ -1443,7 +1448,8 @@ UvReaders uv_readers_find(bNodeTree &tree)
       }
       case SH_NODE_TEX_IMAGE:
         /* An orphan texture is not part of the shader; an open Vector samples the active UV. */
-        if ((linked(socket_out(node, "Color")) || linked(socket_out(node, "Alpha"))) &&
+        if ((fed(node) || linked(socket_out(node, "Color")) ||
+             linked(socket_out(node, "Alpha"))) &&
             !linked(socket_in(node, "Vector")))
         {
           found.open_images.append(&node);

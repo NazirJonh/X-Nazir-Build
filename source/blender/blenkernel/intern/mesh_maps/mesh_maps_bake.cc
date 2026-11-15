@@ -30,6 +30,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_image.hh"
+#include "BKE_image_tile_buffer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
@@ -548,18 +549,20 @@ int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
                                         const Object &ob,
                                         const Material &ma,
                                         const int resolution,
+                                        const Span<int> tiles,
                                         Span<uint8_t> own_coverage,
                                         FunctionRef<void(Mesh &mesh,
                                                          MutableSpan<BakePixel> pixels,
                                                          int resolution,
-                                                         StringRef uv_name)> populate_pixels,
+                                                         StringRef uv_name,
+                                                         int tile_number)> populate_pixels,
                                         MutableSpan<uint8_t> r_coverage,
                                         MutableSpan<char> r_overlap_name)
 {
   if (!r_overlap_name.is_empty()) {
     r_overlap_name[0] = '\0';
   }
-  const size_t pixels_num = size_t(r_coverage.size());
+  const size_t pixels_num = tiles.is_empty() ? 0 : size_t(r_coverage.size()) / tiles.size();
   if (pixels_num == 0 || resolution <= 0) {
     return 0;
   }
@@ -603,15 +606,20 @@ int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
     if (uv_name == nullptr) {
       continue;
     }
-    populate_pixels(*mesh, pixels, resolution, StringRef(uv_name));
-    BKE_mesh_maps_bake_restrict_to_material(pixels.data(), pixels_num, *mesh, candidate, ma);
-    BKE_mesh_maps_bake_coverage_from_pixels(pixels.data(), pixels_num, object_coverage);
-    if (!r_overlap_name.is_empty() && r_overlap_name[0] == '\0' &&
-        BKE_mesh_maps_bake_coverage_overlap(own_coverage, object_coverage) > 0)
-    {
-      BLI_strncpy(r_overlap_name.data(), candidate.id.name + 2, r_overlap_name.size());
+    for (const int tile_index : tiles.index_range()) {
+      populate_pixels(*mesh, pixels, resolution, StringRef(uv_name), tiles[tile_index]);
+      BKE_mesh_maps_bake_restrict_to_material(pixels.data(), pixels_num, *mesh, candidate, ma);
+      BKE_mesh_maps_bake_coverage_from_pixels(pixels.data(), pixels_num, object_coverage);
+      const int64_t tile_start = int64_t(tile_index) * int64_t(pixels_num);
+      const Span<uint8_t> own_tile = own_coverage.slice(tile_start, int64_t(pixels_num));
+      MutableSpan<uint8_t> coverage_tile = r_coverage.slice(tile_start, int64_t(pixels_num));
+      if (!r_overlap_name.is_empty() && r_overlap_name[0] == '\0' &&
+          BKE_mesh_maps_bake_coverage_overlap(own_tile, object_coverage) > 0)
+      {
+        BLI_strncpy(r_overlap_name.data(), candidate.id.name + 2, r_overlap_name.size());
+      }
+      BKE_mesh_maps_bake_coverage_union(object_coverage, coverage_tile);
     }
-    BKE_mesh_maps_bake_coverage_union(object_coverage, r_coverage);
     foreign_num++;
   }
   return foreign_num;
@@ -630,7 +638,12 @@ Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain,
     int width = 0;
     int height = 0;
     BKE_image_get_size(slot->image, nullptr, &width, &height);
-    if (width == resolution && height == resolution) {
+    /* The atlas became a tiled image (the bake is one raster per UDIM tile), so a plain atlas from
+     * an older file is replaced like one of another resolution: the fresh one takes the slot, and
+     * the next bake fills its tiles from scratch. */
+    if (width == resolution && height == resolution &&
+        slot->image->source == IMA_SRC_TILED)
+    {
       return slot->image;
     }
   }
@@ -645,7 +658,7 @@ Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain,
                                          black,
                                          /*stereo3d*/ false,
                                          /*is_data*/ true,
-                                         /*tiled*/ false);
+                                         /*tiled*/ true);
   if (image == nullptr) {
     return nullptr;
   }
@@ -654,6 +667,35 @@ Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain,
     return nullptr;
   }
   return image;
+}
+
+Vector<int> BKE_mesh_maps_bake_tiles_with_pixels(const Span<BakePixel> pixels,
+                                                 const int64_t pixels_per_tile,
+                                                 const Span<int> tiles)
+{
+  Vector<int> kept;
+  if (pixels_per_tile <= 0 || tiles.is_empty() ||
+      pixels.size() != pixels_per_tile * int64_t(tiles.size()))
+  {
+    /* A shape this function does not understand keeps every tile: the caller bakes what it
+     * allocated, and the commit still writes per tile. */
+    for (const int tile_index : tiles.index_range()) {
+      kept.append(tile_index);
+    }
+    return kept;
+  }
+  for (const int tile_index : tiles.index_range()) {
+    const Span<BakePixel> tile_pixels = pixels.slice(int64_t(tile_index) * pixels_per_tile,
+                                                     pixels_per_tile);
+    const bool has_pixels = std::any_of(
+        tile_pixels.begin(), tile_pixels.end(), [](const BakePixel &pixel) {
+          return pixel.primitive_id != -1;
+        });
+    if (has_pixels) {
+      kept.append(tile_index);
+    }
+  }
+  return kept;
 }
 
 const char *BKE_mesh_maps_bake_uv_resolve_or_fail(ObjectMeshMapState &state,
@@ -828,13 +870,14 @@ int BKE_mesh_maps_bake_clear_type(Main &bmain, Material &ma, const int8_t type)
     return states_reset;
   }
   Image *image = slot->image;
-  void *lock = nullptr;
-  ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
-  if (ibuf != nullptr) {
-    if (ibuf->float_data() != nullptr) {
-      float *data = ibuf->float_data_for_write();
+  /* Every tile the atlas holds is cleared: the atlas is a tiled image, so a bake that covered a
+   * face on another UDIM tile has its texels there, not only in the base one. A tile without a
+   * buffer holds no texels to clear and is skipped rather than generated for. */
+  BKE_image_tile_buffers_foreach(*image, [&](const int /*tile_number*/, ImBuf &ibuf) {
+    if (ibuf.float_data() != nullptr) {
+      float *data = ibuf.float_data_for_write();
       const int channels = 4;
-      const size_t num = size_t(ibuf->x) * size_t(ibuf->y);
+      const size_t num = size_t(ibuf.x) * size_t(ibuf.y);
       for (size_t i = 0; i < num; i++) {
         float *texel = data + i * size_t(channels);
         texel[0] = 0.0f;
@@ -842,14 +885,14 @@ int BKE_mesh_maps_bake_clear_type(Main &bmain, Material &ma, const int8_t type)
         texel[2] = 0.0f;
         texel[3] = 1.0f;
       }
-      ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
-      BKE_image_mark_dirty(image, ibuf);
+      ibuf.userflags |= IB_DISPLAY_BUFFER_INVALID;
+      BKE_image_mark_dirty(image, &ibuf);
     }
-    BKE_image_release_ibuf(image, ibuf, lock);
-    BKE_image_partial_update_mark_full_update(image);
-    BKE_image_free_gputextures(image);
-    BKE_image_memorypack(image);
-  }
+    return true;
+  });
+  BKE_image_partial_update_mark_full_update(image);
+  BKE_image_free_gputextures(image);
+  BKE_image_memorypack(image);
   return states_reset;
 }
 

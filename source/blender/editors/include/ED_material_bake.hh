@@ -30,6 +30,7 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_paint_layers_tile.hh"
 #include "BKE_paint_material_resolve.hh"
 
 #include "DNA_brush_types.h"
@@ -346,7 +347,9 @@ struct MaterialBakeToImagesResult {
 };
 
 /**
- * Bake \a params.targets of \a params.material into one #Image each, on the unit UV square.
+ * Bake \a params.targets of \a params.material into one #Image each, on the unit UV square -- or,
+ * when \a params.row is a stack row whose material's canvas is UDIM, once per tile of the stack's
+ * tile list, each render covering that tile's UV square and landing in the target's own tile.
  *
  * Preflight, target creation and the link write happen on the calling thread before this returns.
  * The render and the pixel write-back run in a #wmJob unless \a params.blocking. \a wm / \a win may
@@ -381,6 +384,11 @@ enum class BakeTargetKind {
  * <Channel> Source", marked internal like every map the stack owns, and carrying no bake link and no row
  * stamp -- the material's #Material::paint_layers_source_images array is its only owner and the
  * stored hash its only validity claim.
+ *
+ * With \a tiled the image is a UDIM one (#IMA_SRC_TILED): a bake that covers the stack's tiles
+ * writes one tile per render, and each tile the write is first to touch is generated at the
+ * render's size. A tiled target is never a placeholder, since a tile has to exist at its real side
+ * before a per-tile write can land in it.
  */
 Image *bake_target_image_create(Main &bmain,
                                 Material &material,
@@ -388,13 +396,18 @@ Image *bake_target_image_create(Main &bmain,
                                 int size,
                                 const char *layer_id,
                                 uint64_t current_hash,
-                                BakeTargetKind kind = BakeTargetKind::Row);
+                                BakeTargetKind kind = BakeTargetKind::Row,
+                                bool tiled = false);
 
 /**
- * Write a rendered scene-linear buffer into \a image exactly as the completion callback does.
- * Exposed for tests alongside #bake_target_image_create.
+ * Write a rendered scene-linear buffer into \a image exactly as the completion callback does, into
+ * the one buffer of a plain image or into \a tile_number's own tile for a UDIM image -- whose tile
+ * is generated at the render's size when the image does not have it yet. Exposed for tests
+ * alongside #bake_target_image_create.
  */
-void bake_target_image_write_back(Image &image, const ImBuf &rendered);
+void bake_target_image_write_back(Image &image,
+                                  const ImBuf &rendered,
+                                  int tile_number = PAINT_TILE_NUMBER_BASE);
 
 /**
  * Bring a reused map to the colorspace its channel needs, converting the pixels out of a legacy

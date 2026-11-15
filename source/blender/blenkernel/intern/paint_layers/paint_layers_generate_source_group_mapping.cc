@@ -232,11 +232,11 @@ bNodeSocket *source_group_mapping_input_socket(bNodeTree &tree,
  * those open vectors from one Texture Coordinate `UV` output here, so the mapping insertion then
  * finds it. Links are read from the tree, whose per-socket caches this build has not refreshed.
  */
-static void source_group_implicit_uv_wire(bNodeTree &tree)
+static void source_group_implicit_uv_wire(bNodeTree &tree, const Set<const bNode *> *fed_elsewhere)
 {
   bNode *tex_coord = nullptr;
   bNodeSocket *uv_out = nullptr;
-  for (bNode *texture : uv_readers_find(tree).open_images) {
+  for (bNode *texture : uv_readers_find(tree, fed_elsewhere).open_images) {
     bNodeSocket *vector = socket_in(*texture, "Vector");
     if (vector == nullptr) {
       continue;
@@ -565,9 +565,10 @@ bool source_group_mapping_present(const bNodeTree &tree)
  */
 bool source_group_mapping_prepare(bNodeTree &tree,
                                   const int16_t mirror_axes,
-                                  const Span<const MaterialPaintLayer *> effects)
+                                  const Span<const MaterialPaintLayer *> effects,
+                                  const Set<const bNode *> *fed_elsewhere)
 {
-  source_group_implicit_uv_wire(tree);
+  source_group_implicit_uv_wire(tree, fed_elsewhere);
   if (!source_group_mapping_interface_ensure(tree, effects)) {
     return false;
   }

@@ -440,6 +440,13 @@ template<typename Answer, bool ZeroIsAnAnswer = false> class SourceMemoMap final
     Answer answer{};
   };
 
+  /* Registered here, so a forget reaches the memo however it was first used. The first use of
+   * each memo is under #source_hash_memo_mutex(), which guards the registry too. */
+  SourceMemoMap()
+  {
+    source_memo_registry().append(this);
+  }
+
   const Entry *lookup(const uint32_t session_uid, const uint64_t signal) const
   {
     const Entry *entry = map_.lookup_ptr(session_uid);
@@ -576,6 +583,12 @@ static void normal_hash_node(NormalHashWalk &walk, const bNode &node)
    * after a load (see #BKE_paint_layers_source_channel_graph_hash). */
   h = source_hash_id_reference(h, node.id);
   h = source_hash_node_storage(h, node);
+  /* The output defaults carry the value of constant nodes such as Value and RGB; without them a
+   * number dragged on a node feeding the Normal would not move the hash. Only nodes the walk
+   * reaches are hashed, so a constant that feeds another channel still leaves it alone. */
+  for (const bNodeSocket &output : node.outputs) {
+    h = source_hash_socket_value(h, output.type, output.default_value);
+  }
   h = hash_mix(h, node.is_muted() ? 1 : 0);
   /* A coarse test on purpose: it names the node kinds a UV-quad bake cannot reproduce faithfully
    * (Texture Coordinate counts although its UV output is safe), so a caller warns rather than

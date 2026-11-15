@@ -554,6 +554,12 @@ TEST_F(PaintLayersAnchorPointTest, slice_with_object_mask_child_auto_stays_live)
   folder->source = MA_PAINT_LAYER_SOURCE_STACK;
   MaterialPaintLayer *child = BKE_paint_layers_add(*ma, "Child", folder, PaintLayerPlace::Into);
   child->object_mask_flag |= MA_PAINT_LAYER_OBJECT_MASK_ACTIVE;
+  /* An empty row takes part nowhere, so the folder (and the reader of its slice) would not either:
+   * the child is given a value to lay. */
+  const float color[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_value(
+      *ma, child, PAINT_MATERIAL_CHANNEL_BASE_COLOR, color));
   MaterialPaintLayer *point = add_point(*folder);
   MaterialPaintLayer *reader_row = BKE_paint_layers_add(
       *ma, "Reader", nullptr, PaintLayerPlace::Above);

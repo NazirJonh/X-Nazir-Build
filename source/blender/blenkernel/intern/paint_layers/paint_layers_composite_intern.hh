@@ -129,6 +129,7 @@ std::shared_ptr<ImBuf> composite_height_won_render(
     const MaterialPaintLayer &row,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface,
     bool isolating,
-    PaintLayersHeightWonCache *cache);
+    PaintLayersHeightWonCache *cache,
+    int tile_number);
 
 }  // namespace blender

@@ -103,8 +103,8 @@ inline ePixelChange map_sources_changes(const Span<PaintLayerEffectSource> synce
  * \{ */
 
 /**
- * One cached effect: the result, keyed by the material, the effect, the channel and the
- * parameters. Both effect caches key their entries on it.
+ * One cached effect: the result, keyed by the material, the effect, the channel, the UDIM tile and
+ * the parameters. Both effect caches key their entries on it.
  */
 struct EffectCacheKey {
   uint32_t material_uid = 0;
@@ -115,6 +115,11 @@ struct EffectCacheKey {
    */
   bUUID effect_marker = {};
   int channel = 0;
+  /**
+   * The UDIM tile the effect's input was rendered for: one entry per tile, like the slice cache's.
+   * A non-tiled stack keeps every effect at the base tile's entry.
+   */
+  int tile_number = PAINT_TILE_NUMBER_BASE;
   /** The effect kind and its parameters; the input's pixels are the sources' versions below. */
   uint64_t hash = 0;
   /**
@@ -135,7 +140,7 @@ struct EffectCacheKey {
  */
 inline constexpr int PAINT_LAYER_EFFECT_CHANNEL_MASK = -1;
 
-/** Whether \a a and \a b name the same effect instance, whatever its parameters say. */
+/** Whether \a a and \a b name the same effect instance, whatever its parameters or tile say. */
 inline bool paint_layer_effect_key_same_effect(const EffectCacheKey &a, const EffectCacheKey &b)
 {
   return a.material_uid == b.material_uid && BLI_uuid_equal(a.effect_marker, b.effect_marker) &&
@@ -144,8 +149,8 @@ inline bool paint_layer_effect_key_same_effect(const EffectCacheKey &a, const Ef
 
 inline bool paint_layer_effect_key_equal(const EffectCacheKey &a, const EffectCacheKey &b)
 {
-  return paint_layer_effect_key_same_effect(a, b) && a.hash == b.hash &&
-         a.gpu_extras == b.gpu_extras;
+  return paint_layer_effect_key_same_effect(a, b) && a.tile_number == b.tile_number &&
+         a.hash == b.hash && a.gpu_extras == b.gpu_extras;
 }
 
 /**
@@ -196,19 +201,36 @@ template<typename Entry> struct PaintLayerEffectCacheStore {
   }
 
   /**
-   * Drop the entry of the same effect instance with other parameters: the description can only
-   * ever ask for the parameters the effect carries now, so an old result is memory held for
-   * nothing. A frame still laying it keeps its own reference, exactly as it does against the
-   * budget eviction.
+   * Drop the entries of the same effect instance and the same UDIM tile as \a key with other
+   * parameters: the description can only ever ask for the parameters the effect carries now, so an
+   * old result is memory held for nothing. The entries of the effect's other tiles stay, each is
+   * the live answer of its own tile. A frame still laying a dropped result keeps its own
+   * reference, exactly as it does against the budget eviction.
    */
-  template<typename Release> void drop_rekeyed(const EffectCacheKey &key, Release &&release)
+  template<typename Release> void drop_stale(const EffectCacheKey &key, Release &&release)
+  {
+    for (int i = int(entries.size()) - 1; i >= 0; i--) {
+      if (paint_layer_effect_key_same_effect(entries[i].key, key) &&
+          entries[i].key.tile_number == key.tile_number)
+      {
+        release(entries[i]);
+        total_bytes -= entries[i].bytes;
+        entries.remove(i);
+      }
+    }
+  }
+
+  /**
+   * Drop the entries of the effect instance of \a key on every UDIM tile, whatever their
+   * parameters: for the explicit reset of an effect (it was baked, changed or removed).
+   */
+  template<typename Release> void drop_instance(const EffectCacheKey &key, Release &&release)
   {
     for (int i = int(entries.size()) - 1; i >= 0; i--) {
       if (paint_layer_effect_key_same_effect(entries[i].key, key)) {
         release(entries[i]);
         total_bytes -= entries[i].bytes;
         entries.remove(i);
-        break;
       }
     }
   }
@@ -292,12 +314,12 @@ std::shared_ptr<ImBuf> paint_layer_effect_cache_get_or_compute(
   const size_t bytes = size_t(color->x) * size_t(color->y) * sizeof(float[4]);
 
   std::lock_guard<std::mutex> lock(mutex);
-  /* An entry of the same effect with other parameters is stale -- the description can only ever ask
-   * for the parameters the effect carries now -- so it is replaced rather than kept until the LRU
-   * evicts it. A buffer still shared with a live description keeps its pixels through its own
-   * reference. */
+  /* An entry of the same effect and tile with other parameters is stale -- the description can only
+   * ever ask for the parameters the effect carries now -- so it is replaced rather than kept until
+   * the LRU evicts it. The other tiles' entries are live answers and stay. A buffer still shared
+   * with a live description keeps its pixels through its own reference. */
   const auto no_release = [](Entry &) {};
-  store.drop_rekeyed(key, no_release);
+  store.drop_stale(key, no_release);
   if (bytes <= budget) {
     store.enforce_budget(bytes, budget, no_release);
     Entry entry;

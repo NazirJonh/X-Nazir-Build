@@ -617,12 +617,10 @@ bool paint_layer_row_reads_anchor_point(const Material &ma,
   if (!paint_layer_channel_live(paint_layer_channel_find(reader, channel))) {
     return false;
   }
-  /* A tiled mask slice is not supported: the sampler and the bake are single-tile. A content
-   * slice is refused only when a nested mask reader in it has that problem. */
-  if (paint_layer_anchor_point_slice_is_udim(ma, reader)) {
-    return false;
-  }
-  /* Always cannot bake a slice that contains an object mask, and it has no live path to fall back
+  /* A tiled mask slice is supported: the sampler and the cache are tile-parameterized, so the
+   * slice is rendered per UDIM tile and the reader takes part on each. Whether the slice *depends*
+   * on a tiled map is still answered by #paint_layer_anchor_point_slice_is_udim, for diagnostics.
+   * Always cannot bake a slice that contains an object mask, and it has no live path to fall back
    * to: the reader is told to stop taking part (the issue says why). Auto stays live instead. */
   if (ref.target != PaintLayerAnchorPointTarget::None &&
       BKE_paint_layers_bake_mode_get(reader) == MA_PAINT_LAYER_BAKE_ALWAYS &&
@@ -733,8 +731,7 @@ void paint_layer_anchor_point_counts(const Material &ma, int &r_points, int &r_r
         continue;
       }
       if (paint_layer_anchor_point_resolve(ma, *reader).issue ==
-              PaintLayerAnchorPointIssue::None &&
-          !paint_layer_anchor_point_slice_is_udim(ma, *reader))
+          PaintLayerAnchorPointIssue::None)
       {
         return true;
       }
@@ -754,9 +751,7 @@ void paint_layer_anchor_point_counts(const Material &ma, int &r_points, int &r_r
           }
           else if (paint_layer_kind_reads_anchor_point(candidate)) {
             const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, candidate);
-            if (ref.issue == PaintLayerAnchorPointIssue::None &&
-                !paint_layer_anchor_point_slice_is_udim(ma, candidate))
-            {
+            if (ref.issue == PaintLayerAnchorPointIssue::None) {
               r_readers++;
             }
           }

@@ -120,7 +120,7 @@ bool bake_mask_effect_row_write(Main &bmain,
     return false;
   }
   std::shared_ptr<ImBuf> grey = paint_layer_mask_effect_buffer_get(
-      ma, *owner, layer, /*describe_only=*/false, nullptr);
+      ma, *owner, layer, /*describe_only=*/false, nullptr, PAINT_TILE_NUMBER_BASE);
   if (grey == nullptr || grey->float_buffer.data == nullptr) {
     return false;
   }

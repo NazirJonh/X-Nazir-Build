@@ -175,8 +175,10 @@ static void resolve_all_unavailable(MaterialSourceResolve &r_resolve,
  * Resolve \a source as a plain image map, if it is one.
  *
  * Only a #ShaderNodeTexImage counts: anything else is a graph that has to be evaluated. A tiled
- * (UDIM) image is rejected because a stroke samples one buffer, and which tile that would be is
- * not a property of the material.
+ * (UDIM) image is allowed: the composite reads the tile of the call, which names the tile of the
+ * canvas being laid (the acquisition's fallback tile), so which tile a sample reads is decided
+ * there and not by the material. A caller without a tile context sees the buffer the node's
+ * #ImageUser names, and refuses the image itself where it cannot pick a tile.
  *
  * \return false when \a source is not an image map at all, leaving \a r_reason untouched so the
  *         caller can fall back to #ChannelResolution::Baked.
@@ -201,10 +203,6 @@ static bool resolve_image_source(const bNodeSocket &source,
     return true;
   }
   Image *image = id_cast<Image *>(node.id);
-  if (image->source == IMA_SRC_TILED) {
-    r_reason = ChannelUnavailableReason::ImageNotSampleable;
-    return true;
-  }
   r_image.image = image;
   r_image.iuser = &storage->iuser;
   r_image.node = &node;

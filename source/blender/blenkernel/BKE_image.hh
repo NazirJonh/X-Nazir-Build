@@ -499,6 +499,7 @@ ImBuf *BKE_image_acquire_multilayer_view_ibuf(const RenderData &render_data,
 
 void BKE_image_release_ibuf(Image *ima, ImBuf *ibuf, void *lock);
 
+
 /**
  * Return image buffer of preview for given image
  * r_width & r_height are optional and return the _original size_ of the image.

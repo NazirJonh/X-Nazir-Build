@@ -18,6 +18,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
+#include "BKE_image_tile_buffer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_vector.hh"
@@ -85,52 +86,80 @@ void paint_layer_anchor_point_foreign_ref_clear(Material &ma, MaterialPaintLayer
   }
 }
 
+/** Whether \a source_ibuf's pixels went into \a copy's buffer for \a tile_user: the copy's own
+ * buffer is what its settings generate or load, same size and kind as the source's and blank, so
+ * the pixels go into it rather than replacing it, which keeps everything the image system derived
+ * from the settings (tile, colorspace, gen flags). A null \a tile_user reads the single buffer a
+ * non-tiled map carries. */
+static bool paint_layer_image_buffer_copy(Image &copy,
+                                          ImageUser *tile_user,
+                                          const ImBuf &source_ibuf)
+{
+  ImageTileBufferScope copy_ibuf(copy, tile_user);
+  if (copy_ibuf == nullptr) {
+    return false;
+  }
+  bool copied = false;
+  if (copy_ibuf->x == source_ibuf.x && copy_ibuf->y == source_ibuf.y) {
+    const size_t pixel_num = size_t(source_ibuf.x) * size_t(source_ibuf.y);
+    if (source_ibuf.float_data() != nullptr && copy_ibuf->float_data() != nullptr &&
+        source_ibuf.channels == copy_ibuf->channels)
+    {
+      memcpy(copy_ibuf->float_data_for_write(),
+             source_ibuf.float_data(),
+             sizeof(float) * pixel_num * size_t(copy_ibuf->channels));
+      copied = true;
+    }
+    else if (source_ibuf.byte_data() != nullptr && copy_ibuf->byte_data() != nullptr) {
+      memcpy(copy_ibuf->byte_data_for_write(), source_ibuf.byte_data(), pixel_num * 4);
+      copied = true;
+    }
+    if (copied) {
+      /* Painted pixels exist only in this buffer, so it has to count as unsaved work. */
+      copy_ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
+      BKE_image_mark_dirty(&copy, copy_ibuf.get());
+    }
+  }
+  return copied;
+}
+
 /**
  * A copy of the map \a source with its pixels. #BKE_id_copy copies the image's settings but not the
- * buffer behind it, and a painted map is a buffer that exists nowhere else -- unsaved, generated --
+ * buffers behind it, and a painted map is a buffer that exists nowhere else -- unsaved, generated --
  * so the bare copy would come back blank and the layer made from it would show nothing.
+ *
+ * A tiled map carries one buffer per tile, so the pixels go over tile by tile: each copy tile is
+ * regenerated blank from the gen settings #BKE_id_copy brought over and then filled from the
+ * source's buffer for the same tile number.
  */
 Image *paint_layer_image_duplicate(Main &bmain, Image &source)
 {
   Image *copy = id_cast<Image *>(BKE_id_copy(&bmain, &source.id));
+  if (copy == nullptr) {
+    return nullptr;
+  }
+  if (source.source == IMA_SRC_TILED) {
+    for (const ImageTile &tile : source.tiles) {
+      ImageUser tile_user;
+      BKE_imageuser_default(&tile_user);
+      tile_user.tile = tile.tile_number;
+      ImageTileBufferScope source_ibuf(source, &tile_user);
+      if (source_ibuf != nullptr) {
+        paint_layer_image_buffer_copy(*copy, &tile_user, *source_ibuf);
+      }
+    }
+    return copy;
+  }
   /* A generated map is of type #IMA_TYPE_UV_TEST, not #IMA_TYPE_IMAGE, so the source alone decides
    * whether there is a single buffer to carry over. */
-  if (copy == nullptr || !ELEM(source.source, IMA_SRC_FILE, IMA_SRC_GENERATED)) {
+  if (!ELEM(source.source, IMA_SRC_FILE, IMA_SRC_GENERATED)) {
     return copy;
   }
 
-  void *source_lock = nullptr;
-  ImBuf *source_ibuf = BKE_image_acquire_ibuf(&source, nullptr, &source_lock);
+  ImageTileBufferScope source_ibuf(source, nullptr);
   if (source_ibuf != nullptr) {
-    /* The copy's own buffer is what its settings generate or load: same size and kind as the
-     * source's, and blank. The pixels go into that buffer rather than replacing it, which keeps
-     * everything the image system derived from the settings (tile, colorspace, gen flags). */
-    void *copy_lock = nullptr;
-    ImBuf *copy_ibuf = BKE_image_acquire_ibuf(copy, nullptr, &copy_lock);
-    if (copy_ibuf != nullptr && copy_ibuf->x == source_ibuf->x && copy_ibuf->y == source_ibuf->y) {
-      const size_t pixel_num = size_t(source_ibuf->x) * size_t(source_ibuf->y);
-      bool copied = false;
-      if (source_ibuf->float_data() != nullptr && copy_ibuf->float_data() != nullptr &&
-          source_ibuf->channels == copy_ibuf->channels)
-      {
-        memcpy(copy_ibuf->float_data_for_write(),
-               source_ibuf->float_data(),
-               sizeof(float) * pixel_num * size_t(copy_ibuf->channels));
-        copied = true;
-      }
-      else if (source_ibuf->byte_data() != nullptr && copy_ibuf->byte_data() != nullptr) {
-        memcpy(copy_ibuf->byte_data_for_write(), source_ibuf->byte_data(), pixel_num * 4);
-        copied = true;
-      }
-      if (copied) {
-        /* Painted pixels exist only in this buffer, so it has to count as unsaved work. */
-        copy_ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
-        BKE_image_mark_dirty(copy, copy_ibuf);
-      }
-    }
-    BKE_image_release_ibuf(copy, copy_ibuf, copy_lock);
+    paint_layer_image_buffer_copy(*copy, nullptr, *source_ibuf);
   }
-  BKE_image_release_ibuf(&source, source_ibuf, source_lock);
   return copy;
 }
 

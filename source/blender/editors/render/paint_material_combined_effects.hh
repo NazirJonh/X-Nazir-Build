@@ -573,7 +573,8 @@ bool combined_preview_gpu_effects_run(
     int wanted_channel,
     CombinedPasses &passes,
     Vector<GpuEffectJob> &r_jobs,
-    const Object *painted_object = nullptr);
+    const Object *painted_object = nullptr,
+    int tile_number = PAINT_TILE_NUMBER_BASE);
 
 /**
  * Report why the GPU path refused, once per change of reason rather than once per frame, and

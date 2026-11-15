@@ -30,6 +30,7 @@
 #include "BLI_vector.hh"
 
 #include "BKE_paint_layers_target.hh"
+#include "BKE_paint_layers_tile.hh"
 #include "BKE_paint_material_composite_surface.hh"
 
 #include "DNA_listBase.h"
@@ -2884,6 +2885,24 @@ void BKE_paint_layers_maps_collect(const Main &bmain, Vector<Image *> &r_images)
 void BKE_paint_layers_bake_cache_maps_collect(const Main &bmain, Vector<Image *> &r_images);
 
 /**
+ * Append the UDIM tiles \a ma's stack covers to \a r_tiles, sorted, once each: the union of the
+ * tiles its maps hold, with 1001 standing in for a map that is not tiled at all. A consumer that
+ * works the stack tile by tile -- a material row's bake, an export -- walks exactly this list, so
+ * its result matches what the composite reads back per tile.
+ */
+void BKE_paint_layers_stack_tiles_collect(const Material &ma, Vector<int> &r_tiles);
+
+/**
+ * Whether \a tiles (from #BKE_paint_layers_stack_tiles_collect) name more than the base square, so
+ * a map written for them has to be tiled. One place for the test, so the bake job and the material
+ * bake cannot disagree on it.
+ */
+inline bool BKE_paint_layers_stack_is_tiled(const Span<int> tiles)
+{
+  return tiles.size() > 1 || (!tiles.is_empty() && tiles.first() != PAINT_TILE_NUMBER_BASE);
+}
+
+/**
  * Collect the images of \a bmain a file write owns the pixels of into \a r_images, once each: the
  * bake caches #BKE_paint_layers_bake_cache_maps_collect names, plus every map an owned layer slot
  * holds that #BKE_paint_layers_pack_maps can embed -- an editable one, generated or an assigned
@@ -3133,6 +3152,10 @@ int BKE_paint_layers_bake_object_issue_get(const Material &ma, const MaterialPai
  * an Object or Generated Gradient needs it -- the render reads the coordinate of each texel's
  * surface point -- and is refused without one: the texel's own UV is the approximate preview, not
  * a bake.
+ * \param context: the object a projected row of the subtree reads its surface from, and the UDIM
+ * tile the render is of. The row's maps are read at that tile, so a caller that renders the stack
+ * tile by tile gets each tile's own pixels; an unset tile resolves through the surface, then the
+ * object (see #BKE_paint_layers_tile_resolve).
  * \return false when the row has nothing to render in \a channel.
  */
 bool BKE_paint_layers_bake_render_node(
@@ -3144,15 +3167,19 @@ bool BKE_paint_layers_bake_render_node(
     float *r_coverage_gray,
     const int *dst_rect = nullptr,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &surface = nullptr,
-    const Object *painted_object = nullptr);
+    const PaintLayerTileContext &context = {});
 
-/** The pixel dimensions of \a layer's content in \a channel, the size a bake defaults to. */
+/**
+ * The pixel dimensions of \a layer's content in \a channel, the size a bake defaults to. For a
+ * tiled stack this is the canvas of the context's tile: every tile of one image shares the
+ * resolution, and the row's maps are read on that tile.
+ */
 bool BKE_paint_layers_row_dimensions(const Material &ma,
                                      const MaterialPaintLayer &layer,
                                      int channel,
                                      int &r_width,
                                      int &r_height,
-                                     const Object *painted_object = nullptr);
+                                     const PaintLayerTileContext &context = {});
 
 /**
  * Whether \a layer's stored bake can stand in for its live subtree right now: a bake exists, its

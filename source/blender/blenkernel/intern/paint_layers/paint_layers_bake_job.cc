@@ -301,7 +301,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
         object.object_uid = target.object_uid;
         object.mesh_uid = target.mesh_uid;
         object.identity = paint_layers_bake_target_identity(target, size);
-        object.tile_number = 1001 + object_index;
+        object.tile_number = PAINT_TILE_NUMBER_BASE + object_index;
         object.surface = std::move(surface);
         row.objects.append(std::move(object));
       }
@@ -806,10 +806,20 @@ struct PaintLayersRowResultJob {
   bUUID source_marker = {};
   bUUID target_marker = {};
   int size = 0;
+  /**
+   * The UDIM tiles the render covers, the source stack's own list: a canvas tiled beyond its base
+   * gets one render per tile, and the maps the target takes hold each tile's pixels.
+   */
+  Vector<int> tiles;
   struct ChannelResult {
     int channel = 0;
     bool is_color = false;
-    Vector<float> color;
+    /**
+     * The straight RGBA of one tile of #tiles, in the same order; empty where the tile failed.
+     * Held until the commit, so the job's peak is #channels x #tiles x size² x 16 bytes -- a 4K
+     * colour tile is 268 MiB -- which the commit pays down by freeing each tile as it writes it.
+     */
+    Vector<Vector<float>> color;
   };
   Vector<ChannelResult> channels;
 };
@@ -855,20 +865,50 @@ void BKE_paint_layers_row_result_job_compute(PaintLayersRowResultJob &job)
   if (source == nullptr) {
     return;
   }
-  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    const int channel = int(info.channel);
-    Vector<float> color(int64_t(job.size) * job.size * 4);
-    Vector<float> coverage(int64_t(job.size) * job.size);
-    if (!BKE_paint_layers_bake_render_node(
-            ma, *source, channel, job.size, color.data(), coverage.data()))
-    {
-      continue;
+  /* The stack's own tiles, so a canvas tiled beyond its base is rendered tile by tile: each render
+   * reads the row's maps at that tile and describes that tile's UV square. */
+  BKE_paint_layers_stack_tiles_collect(ma, job.tiles);
+  /* The slot of each channel's result in #job.channels, by the channel enum rather than a walk. */
+  std::array<int, PAINT_MATERIAL_CHANNEL_NUM> channel_slots;
+  channel_slots.fill(-1);
+  for (const int tile_index : job.tiles.index_range()) {
+    const int tile_number = job.tiles[tile_index];
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      const int channel = int(info.channel);
+      Vector<float> color(int64_t(job.size) * job.size * 4);
+      Vector<float> coverage(int64_t(job.size) * job.size);
+      if (!BKE_paint_layers_bake_render_node(ma,
+                                            *source,
+                                            channel,
+                                            job.size,
+                                            color.data(),
+                                            coverage.data(),
+                                            nullptr,
+                                            nullptr,
+                                            PaintLayerTileContext{.tile_number = tile_number}))
+      {
+        /* The tile carries nothing: the map is left without it, and the composite reads its
+         * constant there, the way a map the stack never painted reads. */
+        continue;
+      }
+      /* The channel is entered on its first rendered tile only, so a channel no tile rendered is
+       * skipped, as it was before the render went per tile. The slot index spares the walk over
+       * the results the channels before it already appended. */
+      PaintLayersRowResultJob::ChannelResult *result = nullptr;
+      if (channel_slots[channel] >= 0) {
+        result = &job.channels[channel_slots[channel]];
+      }
+      if (result == nullptr) {
+        PaintLayersRowResultJob::ChannelResult fresh;
+        fresh.channel = channel;
+        fresh.is_color = info.is_color;
+        fresh.color.resize(job.tiles.size());
+        job.channels.append(std::move(fresh));
+        channel_slots[channel] = int(job.channels.size()) - 1;
+        result = &job.channels.last();
+      }
+      result->color[tile_index] = std::move(color);
     }
-    PaintLayersRowResultJob::ChannelResult result;
-    result.channel = channel;
-    result.is_color = info.is_color;
-    result.color = std::move(color);
-    job.channels.append(std::move(result));
   }
 }
 
@@ -896,9 +936,20 @@ bool BKE_paint_layers_row_result_job_commit(PaintLayersRowResultJob &job)
   for (PaintLayersRowResultJob::ChannelResult &result : job.channels) {
     const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
         eMaterialPaintChannel(result.channel));
+    const bool rendered = std::any_of(result.color.begin(),
+                                      result.color.end(),
+                                      [](const Vector<float> &tile_color) {
+                                        return !tile_color.is_empty();
+                                      });
+    if (!rendered) {
+      continue;
+    }
     char name[192];
     SNPRINTF(name, "%s %s", target->name[0] != '\0' ? target->name : "Layer", info.ui_name);
     const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    /* A map that is not the base tile alone has to be tiled, or the other tiles have nowhere to go;
+     * the single-tile result stays the plain generated map it always was. */
+    const bool tiled = BKE_paint_layers_stack_is_tiled(job.tiles);
     Image *image = BKE_image_add_generated(&bmain,
                                            job.size,
                                            job.size,
@@ -909,9 +960,19 @@ bool BKE_paint_layers_row_result_job_commit(PaintLayersRowResultJob &job)
                                            black,
                                            false,
                                            /*is_data=*/!info.is_color,
-                                           false);
+                                           tiled);
     if (image == nullptr) {
       continue;
+    }
+    if (tiled) {
+      /* The tiles the render covered are added before the writes, each generated like the base
+       * one at the map's own side, so every tile the stack holds carries the result. */
+      for (const int tile_number : job.tiles) {
+        if (tile_number == PAINT_TILE_NUMBER_BASE) {
+          continue;
+        }
+        BKE_paint_layers_map_coverage_tile_ensure(*image, tile_number, job.size, job.size);
+      }
     }
     image->alpha_mode = IMA_ALPHA_STRAIGHT;
     /* A row result is a bake the stack owns, so the browsers hide it like every other map. */
@@ -919,7 +980,16 @@ bool BKE_paint_layers_row_result_job_commit(PaintLayersRowResultJob &job)
     /* The render is the CPU one the bake planner uses, so the colour's alpha already is the source
      * row's content alpha. Written through unchanged: the target map then means the same thing any
      * other paint-layer map does. */
-    bake_write_image(*image, result.color.data(), info.is_color, nullptr);
+    for (const int tile_index : job.tiles.index_range()) {
+      Vector<float> &tile_color = result.color[tile_index];
+      if (tile_color.is_empty()) {
+        continue;
+      }
+      bake_write_image(*image, tile_color.data(), info.is_color, nullptr, job.tiles[tile_index]);
+      /* Written: the tile's RGBA is hundreds of MiB at 4K, so it goes now rather than at the free,
+       * and the commit's own peak stays one tile per channel. */
+      tile_color.clear_and_shrink();
+    }
     if (BKE_paint_layers_channel_add(*ma, target, eMaterialPaintChannel(result.channel)) ==
             nullptr ||
         !BKE_paint_layers_channel_set_image(

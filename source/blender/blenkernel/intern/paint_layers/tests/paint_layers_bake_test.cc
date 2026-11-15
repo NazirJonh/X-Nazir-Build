@@ -621,7 +621,27 @@ TEST_F(PaintLayersBakeTest, a_noise_row_scalar_bake_is_float)
   EXPECT_NE(tile->gen_flag & IMA_GEN_FLOAT, 0)
       << "the noise's ramp of a factor reads as terraces in 8 bits";
 
-  /* The baked map answers what the live row answers, at the bake's own tolerance. */
+  /* The baked map answers what the live row answers, at the bake's own tolerance. The row stands in
+   * through its bake while it is baked, so its generator is read from the live description (mode
+   * Never) and the baked pixels from the substituted one. */
+  Vector<PaintMaterialCompositeImageLayer> baked_layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, baked_layers));
+  ASSERT_FALSE(baked_layers.is_empty());
+  float bottom[4];
+  BKE_paint_layers_channel_bottom_color(PAINT_MATERIAL_CHANNEL_ROUGHNESS, bottom);
+  rcti area;
+  BLI_rcti_init(&area, 0, size, 0, size);
+  Vector<float> pixels(int64_t(size) * size * 4);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      baked_layers,
+      PaintMaterialCompositeLinearTarget::packed(pixels.as_mutable_span(), area),
+      nullptr,
+      nullptr,
+      bottom));
+  const int64_t centre = (int64_t(size / 2) * size + size / 2) * 4;
+
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_NEVER));
   Vector<PaintMaterialCompositeImageLayer> layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
       *ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, layers));
@@ -630,18 +650,6 @@ TEST_F(PaintLayersBakeTest, a_noise_row_scalar_bake_is_float)
   float live[4];
   ASSERT_TRUE(
       BKE_paint_material_generator_sample(layers[0].gradient, size / 2, size / 2, size, size, live));
-  float bottom[4];
-  BKE_paint_layers_channel_bottom_color(PAINT_MATERIAL_CHANNEL_ROUGHNESS, bottom);
-  rcti area;
-  BLI_rcti_init(&area, 0, size, 0, size);
-  Vector<float> pixels(int64_t(size) * size * 4);
-  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
-      layers,
-      PaintMaterialCompositeLinearTarget::packed(pixels.as_mutable_span(), area),
-      nullptr,
-      nullptr,
-      bottom));
-  const int64_t centre = (int64_t(size / 2) * size + size / 2) * 4;
   EXPECT_NEAR(pixels[centre], live[0], 1e-4f);
 }
 
@@ -2797,6 +2805,9 @@ TEST_F(PaintLayersBakeTest, a_mask_item_contrast_edit_invalidates_the_parent_bak
   MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
       *ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT, "Mask Fill", 0.75f);
   ASSERT_NE(item, nullptr);
+  /* A fresh Always row owns no map until the planner has baked it. */
+  clear_active();
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
 
   /* The contrast is part of the parent's pixels, like the item's opacity is. */
@@ -2806,7 +2817,7 @@ TEST_F(PaintLayersBakeTest, a_mask_item_contrast_edit_invalidates_the_parent_bak
   EXPECT_FLOAT_EQ(BKE_paint_layers_mask_contrast_apply(0.75f, 1.0f), 0.75f);
   EXPECT_FLOAT_EQ(BKE_paint_layers_mask_contrast_apply(0.75f, 3.0f), 1.0f);
   EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
-  changed = false;
+  bool changed = false;
   EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   changed = false;
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));

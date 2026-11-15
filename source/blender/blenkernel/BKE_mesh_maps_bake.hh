@@ -232,7 +232,9 @@ void BKE_mesh_maps_bake_write_with_margin(int8_t type,
  *
  * \param populate_pixels: fills the `resolution x resolution` #BakePixel array of a mesh for the UV
  * layer of the given name (the caller passes #RE_bake_pixels_populate), which keeps blenkernel free
- * of the render module.
+ * of the render module. The pass is one UDIM tile's: \a tile_number shifts the UVs into it.
+ * \param tiles: the UDIM tiles of \a own_coverage and \a r_coverage, in order; each is one
+ * `resolution x resolution` block of them.
  *
  * When \a r_overlap_name is non-empty and some foreign coverage intersects \a own_coverage, it
  * receives the name (without the ID prefix) of the first such object; it is cleared otherwise.
@@ -246,8 +248,13 @@ int BKE_mesh_maps_bake_foreign_coverage(
     const Object &ob,
     const Material &ma,
     int resolution,
+    Span<int> tiles,
     Span<uint8_t> own_coverage,
-    FunctionRef<void(Mesh &mesh, MutableSpan<BakePixel> pixels, int resolution, StringRef uv_name)>
+    FunctionRef<void(Mesh &mesh,
+                     MutableSpan<BakePixel> pixels,
+                     int resolution,
+                     StringRef uv_name,
+                     int tile_number)>
         populate_pixels,
     MutableSpan<uint8_t> r_coverage,
     MutableSpan<char> r_overlap_name);
@@ -258,6 +265,17 @@ int BKE_mesh_maps_bake_foreign_coverage(
  * through #BKE_mesh_maps_slot_image_set. Returns null for an invalid type or resolution.
  */
 Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain, Material &ma, int8_t type, int resolution);
+
+/**
+ * The indices of \a tiles -- one `pixels_per_tile` block of \a pixels each, in order -- that hold
+ * at least one used texel (#BakePixel::primitive_id != -1), the raster's own answer to which tiles
+ * the bake covers. A tile the UV-bounds pre-filter (#BKE_paint_layers_tiles_from_uv_bounds) could
+ * not rule out but the raster left empty is dropped here, so no atlas tile and no render pass is
+ * paid for it. The indices come back in order.
+ */
+Vector<int> BKE_mesh_maps_bake_tiles_with_pixels(Span<BakePixel> pixels,
+                                                 int64_t pixels_per_tile,
+                                                 Span<int> tiles);
 
 /**
  * Resolve the UV layer a bake on \a ob_eval must sample: the mesh's active UV map, through the

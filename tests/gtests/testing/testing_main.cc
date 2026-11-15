@@ -11,6 +11,12 @@
 DEFINE_string(test_assets_dir, "", "tests/files directory containing the test assets.");
 DEFINE_string(test_release_dir, "", "bin/{blender version} directory of the current build.");
 
+namespace blender {
+/* Defined in blenlib (`cpp_types.cc`); declared here because bf_testing_main does not see the
+ * blenlib include path. Without it every CPPType of a test binary is an unregistered zeroed buffer. */
+void register_cpp_types();
+}  // namespace blender
+
 namespace blender::tests {
 
 const std::string &flags_test_asset_dir()
@@ -44,6 +50,7 @@ int main(int argc, char **argv)
   MEM_use_guarded_allocator();
   MEM_init_memleak_detection();
   MEM_enable_fail_on_memleak();
+  blender::register_cpp_types();
   testing::InitGoogleTest(&argc, argv);
   BLENDER_GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging(argv[0]);

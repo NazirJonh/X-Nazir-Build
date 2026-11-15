@@ -118,7 +118,8 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
                                                               const PaintLayerEffectGpuKeyExtras &key_extras,
                                                               const PaintLayerEffectGpuHooks &hooks,
                                                               rcti *r_dirty_region,
-                                                              void **r_resource)
+                                                              void **r_resource,
+                                                              const int tile_number)
 {
   if (r_resource != nullptr) {
     *r_resource = nullptr;
@@ -132,6 +133,7 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
   const EffectCacheKey key{ma.id.session_uid,
                            effect.marker,
                            channel,
+                           BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr),
                            paint_layer_effect_hash(effect, channel),
                            key_extras};
   const size_t bytes = paint_layer_effect_gpu_entry_bytes(width, height);
@@ -196,7 +198,7 @@ PaintLayerEffectGpuState BKE_paint_layers_effect_gpu_cache_get(const Material &m
   if (resource == nullptr) {
     return PaintLayerEffectGpuState::Failed;
   }
-  g_paint_effect_gpu_cache.drop_rekeyed(key, paint_layer_effect_gpu_entry_release);
+  g_paint_effect_gpu_cache.drop_stale(key, paint_layer_effect_gpu_entry_release);
   /* An entry larger than the whole budget is still inserted rather than handed out uncached: the
    * cache must own the texture to release it, and a caller that keeps it past this frame holds a
    * reference of its own, so the budget reads as temporarily exceeded -- the same allowance the CPU
@@ -228,11 +230,13 @@ void BKE_paint_layers_effect_gpu_cache_publish(const Material &ma,
                                                const int width,
                                                const int height,
                                                const Span<Image *> images,
-                                               const PaintLayerEffectGpuKeyExtras &key_extras)
+                                               const PaintLayerEffectGpuKeyExtras &key_extras,
+                                               const int tile_number)
 {
   const EffectCacheKey key{ma.id.session_uid,
                            effect.marker,
                            channel,
+                           BKE_paint_layers_tile_resolve(tile_number, nullptr, nullptr),
                            paint_layer_effect_hash(effect, channel),
                            key_extras};
   std::lock_guard<std::mutex> lock(g_paint_effect_gpu_cache_mutex);

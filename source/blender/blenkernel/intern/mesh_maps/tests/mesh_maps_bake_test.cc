@@ -73,12 +73,17 @@ namespace blender::bke::tests {
 static void populate_geometry_pixels(Mesh &mesh,
                                      MutableSpan<BakePixel> pixels,
                                      const int resolution,
-                                     const StringRef uv_name)
+                                     const StringRef uv_name,
+                                     const int tile_number)
 {
   Image *material_to_image[1] = {nullptr};
   BakeImage bake_image = {};
+  bake_image.tile_number = tile_number;
   bake_image.width = resolution;
   bake_image.height = resolution;
+  const blender::float2 tile_origin = BKE_image_get_tile_uv_origin(tile_number);
+  bake_image.uv_offset[0] = tile_origin.x;
+  bake_image.uv_offset[1] = tile_origin.y;
   BakeTargets targets = {};
   targets.images = &bake_image;
   targets.images_num = 1;
@@ -1016,6 +1021,7 @@ TEST_F(MeshMapBakeTest, foreign_coverage_only_material_and_active_uv)
       *self,
       *ma,
       resolution,
+      Span<int>({1001}),
       own_coverage,
       populate_geometry_pixels,
       foreign_coverage,
@@ -1329,6 +1335,7 @@ TEST_F(MeshMapBakeTest, source_objects_are_not_foreign_or_baked)
       *low,
       *ma,
       resolution,
+      Span<int>({1001}),
       own_coverage,
       populate_geometry_pixels,
       foreign_coverage,

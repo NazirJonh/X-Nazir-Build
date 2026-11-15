@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "BKE_paint_layers_tile.hh"
 #include "BKE_paint_material_combined.hh"
 
 #include "BLI_math_matrix_types.hh"
@@ -56,6 +57,12 @@ struct CombinedPreviewRequest {
    * shaded at canvas resolution only to be thrown away by the downscale. Zero means no cap.
    */
   int2 max_output = int2(0);
+  /**
+   * The UDIM tile the preview stands for: the Image Editor's active tile, so a preview of a tiled
+   * stack is the composite of that tile's pixels rather than of the base one's. The default is the
+   * base tile, which a non-tiled stack reads whatever the field says.
+   */
+  int tile_number = PAINT_TILE_NUMBER_BASE;
 };
 
 /**
@@ -194,8 +201,9 @@ void combined_preview_gpu_caches_free();
  *                its own resolution.
  * \param texel_to_uv: maps an \a output texel (plus the half-texel centre) to the canvas UV in
  *                     [0, 1]; a texel that lands outside the canvas is written transparent.
- * \param painted_object: the object a projected row reads its surface from, or null, in which case
- *                        a projected row refuses the GPU path.
+ * \param context: the object a projected row reads its surface from (null refuses a projected row
+ *                        the GPU path), and the UDIM tile the preview is of -- the Image Editor's
+ *                        active one, the base square when unset.
  * \return false, with \a output untouched or partly written, when the material or one of its rows
  *         is something the GPU path does not lay (an adjustment inside a folder, folders nested
  *         deeper than the accumulators it keeps), when a layer map has no GPU texture, or when
@@ -206,7 +214,7 @@ bool combined_preview_gpu_update(const Material &ma,
                                  int pass,
                                  gpu::Texture *output,
                                  const float3x3 &texel_to_uv,
-                                 const Object *painted_object = nullptr);
+                                 const PaintLayerTileContext &context = {});
 
 /**
  * Whether the GPU path lays \a pass: the Combined preview, or the channel pass of one of
@@ -225,6 +233,6 @@ void combined_preview_gpu_verify(Main &bmain,
                                  const CombinedPreviewLighting &lighting,
                                  gpu::Texture *output,
                                  const float3x3 &texel_to_uv,
-                                 const Object *painted_object = nullptr);
+                                 const PaintLayerTileContext &context = {});
 
 }  // namespace blender::ed::material_combined

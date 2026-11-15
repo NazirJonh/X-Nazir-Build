@@ -525,6 +525,7 @@ set(SRC
   BKE_image_paint_selection.hh
   BKE_image_partial_update.hh
   BKE_image_save.hh
+  BKE_image_tile_buffer.hh
   BKE_image_wrappers.hh
   BKE_instances.hh
   BKE_kelvinlet.h
@@ -608,6 +609,7 @@ set(SRC
   BKE_paint_layers_object_mask.hh
   BKE_paint_layers_source_graph.hh
   BKE_paint_layers_target.hh
+  BKE_paint_layers_tile.hh
   BKE_paint_types.hh
   BKE_paint_material_combined.hh
   BKE_paint_material_composite.hh

@@ -16,6 +16,7 @@
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_source_graph.hh"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -4007,12 +4008,8 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
             add_issue(ref.issue);
             return;
           }
-          /* UDIM is unsupported for any reader whose slice depends on a tiled mask map: Content
-           * targets too, when a nested mask reader in the content slice has one. */
-          if (paint_layer_anchor_point_slice_is_udim(ma, row)) {
-            add_issue(PaintLayerAnchorPointIssue::UdimUnsupported);
-            return;
-          }
+          /* A slice that depends on a tiled mask map is supported: it is rendered per UDIM tile
+           * and baked per tile, like the row bakes are. */
           const int mode = BKE_paint_layers_bake_mode_get(row);
           if (mode == MA_PAINT_LAYER_BAKE_ALWAYS &&
               paint_layer_anchor_point_slice_has_object_mask(ma, row))
@@ -4357,6 +4354,49 @@ static void paint_layers_slot_images_collect(const Main &bmain,
 void BKE_paint_layers_maps_collect(const Main &bmain, Vector<Image *> &r_images)
 {
   paint_layers_slot_images_collect(bmain, PaintLayerDependencyKind::ImageMap, r_images);
+}
+
+void BKE_paint_layers_stack_tiles_collect(const Material &ma, Vector<int> &r_tiles)
+{
+  Set<Image *> seen;
+  const auto add_channels = [&](const MaterialPaintLayer &row) {
+    paint_layer_dependencies(row, [&](const PaintLayerDependency &dep) {
+      if (dep.kind != PaintLayerDependencyKind::ImageMap || *dep.slot == nullptr) {
+        return;
+      }
+      Image *image = id_cast<Image *>(*dep.slot);
+      if (!seen.add(image)) {
+        return;
+      }
+      /* The stack covers the union of its maps' tiles, with the base tile standing in for a map
+       * that is not tiled at all -- the same walk the mask merge and the corrections bake make. */
+      if (image->source == IMA_SRC_TILED) {
+        for (const ImageTile &tile : image->tiles) {
+          if (!r_tiles.contains(tile.tile_number)) {
+            r_tiles.append(tile.tile_number);
+          }
+        }
+      }
+      else if (!r_tiles.contains(PAINT_TILE_NUMBER_BASE)) {
+        r_tiles.append(PAINT_TILE_NUMBER_BASE);
+      }
+    });
+  };
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        add_channels(layer);
+        for (const MaterialPaintLayer &effect : layer.effects) {
+          add_channels(effect);
+        }
+        for (const MaterialPaintLayer &item : layer.mask_stack) {
+          add_channels(item);
+        }
+        return true;
+      });
+  if (r_tiles.is_empty()) {
+    r_tiles.append(PAINT_TILE_NUMBER_BASE);
+  }
+  std::sort(r_tiles.begin(), r_tiles.end());
 }
 
 void BKE_paint_layers_bake_cache_maps_collect(const Main &bmain, Vector<Image *> &r_images)

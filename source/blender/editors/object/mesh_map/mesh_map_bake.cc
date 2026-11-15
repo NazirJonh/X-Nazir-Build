@@ -34,13 +34,17 @@
 #include <cstring>
 
 #include "BLI_array.hh"
+#include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix_types.hh"
+#include "BLI_math_vector.h"
+#include "BLI_math_vector.hh"
 #include "BLI_span.hh"
 #include "BLI_string.h"
 #include "BLI_string_ref.hh"
 #include "BLI_time.h"
+#include "BLI_utildefines.h"
 
 #include "MEM_guardedalloc.h"
 
@@ -56,8 +60,10 @@
 #include "BKE_mesh_maps_bake.hh"
 #include "BKE_mesh_maps_bake_handshake.hh"
 #include "BKE_node_tree_update.hh"
+#include "BKE_image_tile_buffer.hh"
 #include "BKE_object.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_tile.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 
@@ -95,19 +101,25 @@ namespace {
 /**
  * The texel pass of #BKE_mesh_maps_bake_foreign_coverage: pure geometry, so the bake image is null.
  * #RE_bake_pixels_populate always indexes `material_to_image`, even with no materials; a single
- * null entry that matches the null bake image keeps the pass about geometry only.
+ * null entry that matches the null bake image keeps the pass about geometry only. The pass is one
+ * UDIM tile's: \a tile_number is the UDIM tile number it shifts the UVs into.
  */
 void mesh_map_bake_populate_geometry_pixels(Mesh &mesh,
                                             MutableSpan<BakePixel> pixels,
                                             const int resolution,
-                                            const StringRef uv_name)
+                                            const StringRef uv_name,
+                                            const int tile_number)
 {
   Image *material_to_image[1] = {nullptr};
   BakeImage bake_image = {};
   bake_image.image = nullptr;
+  bake_image.tile_number = tile_number;
   bake_image.width = resolution;
   bake_image.height = resolution;
   bake_image.offset = 0;
+  const blender::float2 tile_origin = BKE_image_get_tile_uv_origin(tile_number);
+  bake_image.uv_offset[0] = tile_origin.x;
+  bake_image.uv_offset[1] = tile_origin.y;
   BakeTargets targets = {};
   targets.images = &bake_image;
   targets.images_num = 1;
@@ -132,12 +144,17 @@ struct MeshMapBakeWorld {
   /** The atlas this world bakes into. */
   Image *atlas = nullptr;
 
-  /* One image (the atlas), the rasterized texels and the float result buffer. */
-  BakeImage bake_image = {};
+  /* The atlas is a tiled image, so a bake is one raster per tile the object's UVs cover: one
+   * #BakeImage per tile, each shifted by its tile origin (`uv_offset`), its texels one block of
+   * the shared buffers below (`offset`). The raster prunes the tiles it left empty, so the vector
+   * can shrink after the prepare. */
+  Vector<BakeImage> images;
+  int tiles_num = 0;
   Image **material_to_image = nullptr;
   BakeTargets targets = {};
   BakePixel *pixels = nullptr;
   float *result = nullptr;
+  /** One tile's raster is #pixels_num texels; the buffers cover every tile in #images. */
   size_t pixels_num = 0;
 
   /* The copied low-poly mesh the margin is derived from, and its UV layer. */
@@ -341,6 +358,7 @@ void mesh_map_bake_world_free(MeshMapBakeWorld &world)
   world.temp_view_layer = nullptr;
   world.temp_object = nullptr;
   world.atlas = nullptr;
+  world.images = {};
   MEM_delete(world.pixels);
   world.pixels = nullptr;
   MEM_delete(world.result);
@@ -652,33 +670,140 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   const size_t pixels_num = size_t(job.resolution) * size_t(job.resolution);
   job.world.pixels_num = pixels_num;
   job.world.resolution = job.resolution;
+
+  /* The atlas is a tiled image: the bake is one raster per tile the object's UVs cover. The
+   * candidates come from the faces' UV bounds (half-open at the top, so the standard 0..1 layout
+   * covers the base tile alone), and the raster prunes them once it is populated -- a bound can
+   * name a tile no texel of the material lands in, and the base tile the UVs never touch earns
+   * nothing either. The atlas tiles of the survivors are added after the prune, so nothing is
+   * allocated for a tile the bake never writes; a foreign object's tiles are not this bake's, and
+   * its coverage is weighed per tile in the commit. */
+  Vector<int> tile_numbers;
+  bool uv_outside_udim = false;
+  {
+    const blender::bke::AttributeAccessor attributes = mesh_copy->attributes();
+    const std::string name(job.world.uv_name);
+    const blender::bke::AttributeReader<float2> uv_reader = attributes.lookup<float2>(
+        name, blender::bke::AttrDomain::Corner);
+    if (uv_reader) {
+      const VArraySpan<float2> uv_map(*uv_reader);
+      if (!uv_map.is_empty()) {
+        const OffsetIndices<int> faces = mesh_copy->faces();
+        for (const int face : faces.index_range()) {
+          const IndexRange corners = faces[face];
+          if (corners.is_empty()) {
+            continue;
+          }
+          float2 uv_min = uv_map[corners.first()];
+          float2 uv_max = uv_min;
+          for (const int corner : corners.drop_front(1)) {
+            uv_min = math::min(uv_min, uv_map[corner]);
+            uv_max = math::max(uv_max, uv_map[corner]);
+          }
+          BKE_paint_layers_tiles_from_uv_bounds(uv_min, uv_max, uv_outside_udim, tile_numbers);
+        }
+      }
+    }
+  }
+  if (tile_numbers.is_empty()) {
+    /* No UV layer to read, or none of it names a tile: the base square is the only candidate, as
+     * when the bake was single-tile. */
+    tile_numbers.append(PAINT_TILE_NUMBER_BASE);
+  }
+  std::sort(tile_numbers.begin(), tile_numbers.end());
+  if (uv_outside_udim && job.reports != nullptr) {
+    BKE_reportf(job.reports,
+                RPT_WARNING,
+                "UV map '%s' of '%s' has corners outside the UDIM range (U and V 0 to 10), "
+                "they are not baked",
+                job.world.uv_name,
+                ob->id.name + 2);
+  }
+  size_t pixels_total = pixels_num * size_t(tile_numbers.size());
+  job.world.images.reserve(tile_numbers.size());
+  for (const int i : tile_numbers.index_range()) {
+    BakeImage image = {};
+    image.image = atlas;
+    image.tile_number = tile_numbers[i];
+    image.width = job.resolution;
+    image.height = job.resolution;
+    image.offset = size_t(i) * pixels_num;
+    const float2 tile_origin = BKE_image_get_tile_uv_origin(tile_numbers[i]);
+    image.uv_offset[0] = tile_origin.x;
+    image.uv_offset[1] = tile_origin.y;
+    job.world.images.append(image);
+  }
   job.world.material_to_image = MEM_new_array_uninitialized<Image *>(1, __func__);
   job.world.material_to_image[0] = atlas;
-  job.world.bake_image.image = atlas;
-  job.world.bake_image.tile_number = 0;
-  job.world.bake_image.uv_offset[0] = 0.0f;
-  job.world.bake_image.uv_offset[1] = 0.0f;
-  job.world.bake_image.width = job.resolution;
-  job.world.bake_image.height = job.resolution;
-  job.world.bake_image.offset = 0;
-  job.world.targets.images = &job.world.bake_image;
-  job.world.targets.images_num = 1;
+  job.world.targets.images = job.world.images.data();
+  job.world.targets.images_num = int(job.world.images.size());
   job.world.targets.material_to_image = job.world.material_to_image;
   job.world.targets.materials_num = 1;
-  job.world.targets.pixels_num = int(pixels_num);
+  job.world.targets.pixels_num = int(pixels_total);
   job.world.targets.channels_num = 4;
   job.world.targets.is_noncolor = true;
-  job.world.targets.result = MEM_new_array_zeroed<float>(pixels_num * 4, __func__);
-  job.world.pixels = MEM_new_array_uninitialized<BakePixel>(pixels_num, __func__);
+  job.world.targets.result = MEM_new_array_zeroed<float>(pixels_total * 4, __func__);
+  job.world.pixels = MEM_new_array_uninitialized<BakePixel>(pixels_total, __func__);
   job.world.result = job.world.targets.result;
 
   RE_bake_pixels_populate(
-      mesh_copy, job.world.pixels, pixels_num, &job.world.targets, StringRef(job.world.uv_name));
+      mesh_copy, job.world.pixels, pixels_total, &job.world.targets, StringRef(job.world.uv_name));
   /* Warm the lazy triangulation caches on the main thread: the worker's rasterize there only reads
    * them, and computing them off-thread would race the main thread's own mesh access. */
   (void)mesh_copy->corner_tris();
   (void)mesh_copy->corner_tri_faces();
-  BKE_mesh_maps_bake_restrict_to_material(job.world.pixels, pixels_num, *mesh_copy, *ob, *ma);
+  BKE_mesh_maps_bake_restrict_to_material(job.world.pixels, pixels_total, *mesh_copy, *ob, *ma);
+
+  /* The raster decides which of the candidates the bake covers: a tile no used texel landed in is
+   * dropped here, its block of the shared buffers with it, so the render and the commit walk only
+   * the tiles that hold something. */
+  Vector<int> kept_indices = BKE_mesh_maps_bake_tiles_with_pixels(
+      Span<BakePixel>(job.world.pixels, pixels_total), int64_t(pixels_num), tile_numbers.as_span());
+  if (kept_indices.is_empty()) {
+    /* Nothing was rasterized anywhere (a degenerate UV set): keep the first candidate so the pair
+     * still renders one consistent, empty tile. */
+    kept_indices.append(0);
+  }
+  if (kept_indices.size() < tile_numbers.size()) {
+    Vector<int> kept_tiles;
+    kept_tiles.reserve(kept_indices.size());
+    Vector<BakeImage> kept_images;
+    kept_images.reserve(kept_indices.size());
+    size_t write_block = 0;
+    for (const int kept : kept_indices) {
+      if (size_t(kept) != write_block) {
+        memcpy(job.world.pixels + write_block * pixels_num,
+               job.world.pixels + int64_t(kept) * pixels_num,
+               pixels_num * sizeof(BakePixel));
+      }
+      BakeImage image = job.world.images[kept];
+      image.offset = write_block * pixels_num;
+      kept_images.append(image);
+      kept_tiles.append(tile_numbers[kept]);
+      write_block++;
+    }
+    tile_numbers = std::move(kept_tiles);
+    job.world.images = std::move(kept_images);
+    pixels_total = write_block * pixels_num;
+    job.world.targets.pixels_num = int(pixels_total);
+    job.world.targets.images = job.world.images.data();
+    job.world.targets.images_num = int(job.world.images.size());
+  }
+  for (const int tile_number : tile_numbers) {
+    if (!BKE_paint_layers_map_coverage_tile_ensure(
+            *atlas, tile_number, job.resolution, job.resolution))
+    {
+      BKE_mesh_maps_bake_state_fail(*state);
+      BLI_snprintf(pair.error,
+                   sizeof(pair.error),
+                   "Could not add UDIM tile %d to the mesh map atlas",
+                   tile_number);
+      pair.failed = true;
+      return false;
+    }
+  }
+  job.world.tiles_num = int(job.world.images.size());
+  BLI_assert(job.world.tiles_num >= 1);
 
   job.world.highpoly_num = int(job.world.source_objects.size());
   if (job.world.highpoly_num > 0) {
@@ -703,7 +828,7 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
           source_eval->object_to_world().ptr());
     }
 
-    job.world.pixels_high = MEM_new_array_uninitialized<BakePixel>(pixels_num, __func__);
+    job.world.pixels_high = MEM_new_array_uninitialized<BakePixel>(pixels_total, __func__);
     const bool is_custom_cage = job.world.cage_mesh != nullptr;
     const float(*mat_low)[4] = job.world.low_matrix.ptr();
     const float(*mat_cage)[4] = is_custom_cage ? job.world.cage_matrix.ptr() : mat_low;
@@ -712,7 +837,7 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
                                               job.world.pixels_high,
                                               job.world.highpoly,
                                               job.world.highpoly_num,
-                                              pixels_num,
+                                              pixels_total,
                                               is_custom_cage,
                                               cage_extrusion,
                                               max_ray_distance,
@@ -737,7 +862,7 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
         id_meshes.append(job.world.source_meshes[i]);
       }
       BKE_mesh_maps_bake_fill_id_from_high_poly(job.world.pixels_high,
-                                                pixels_num,
+                                                pixels_total,
                                                 id_objects.data(),
                                                 size_t(job.world.highpoly_num),
                                                 id_meshes.data(),
@@ -750,7 +875,7 @@ bool mesh_map_bake_prepare_pair(MeshMapBakeJob &job, MeshMapBakePairState &pair)
   else if (!is_render) {
     /* No source: the low-poly's own faces decide every covered texel. */
     BKE_mesh_maps_bake_fill_id_pixels(
-        job.world.pixels, pixels_num, *mesh_copy, *ob, pair.type, 4, job.world.result);
+        job.world.pixels, pixels_total, *mesh_copy, *ob, pair.type, 4, job.world.result);
   }
   return true;
 }
@@ -775,25 +900,31 @@ void mesh_map_bake_apply_margin(MeshMapBakeWorld &world, const int margin)
   }
   const size_t pixels_num = world.pixels_num;
   const int resolution = world.resolution;
-  const float uv_offset[2] = {0.0f, 0.0f};
   const StringRef uv_name(world.uv_name);
+  const int tiles_num = world.tiles_num;
 
-  char *mask = MEM_new_array_zeroed<char>(pixels_num, __func__);
-  RE_bake_mask_fill(world.pixels, pixels_num, mask);
-
+  world.margin_mask = MEM_new_array_zeroed<char>(pixels_num * size_t(tiles_num), __func__);
   ImBuf *ibuf = IMB_allocImBuf(resolution, resolution, ImBufFlags::FloatData);
   if (ibuf == nullptr) {
-    MEM_delete(mask);
     return;
   }
-  float *pixels = ibuf->float_data_for_write();
-  memcpy(pixels, world.result, sizeof(float) * pixels_num * 4);
-  RE_bake_margin(ibuf, mask, margin, R_BAKE_ADJACENT_FACES, world.mesh, uv_name, uv_offset);
-  memcpy(world.result, pixels, sizeof(float) * pixels_num * 4);
-  IMB_freeImBuf(ibuf);
-
   ImBuf *indicator = IMB_allocImBuf(resolution, resolution, ImBufFlags::FloatData);
-  if (indicator != nullptr) {
+  for (const int tile : IndexRange(tiles_num)) {
+    const BakeImage &image = world.images[tile];
+    char *mask = world.margin_mask + size_t(tile) * pixels_num;
+    float *result_tile = world.result + size_t(tile) * pixels_num * 4;
+    RE_bake_mask_fill(world.pixels + image.offset, pixels_num, mask);
+
+    if (ibuf->float_data_for_write() != nullptr) {
+      float *pixels = ibuf->float_data_for_write();
+      memcpy(pixels, result_tile, sizeof(float) * pixels_num * 4);
+      RE_bake_margin(
+          ibuf, mask, margin, R_BAKE_ADJACENT_FACES, world.mesh, uv_name, image.uv_offset);
+      memcpy(result_tile, pixels, sizeof(float) * pixels_num * 4);
+    }
+    if (indicator == nullptr || indicator->float_data_for_write() == nullptr) {
+      continue;
+    }
     float *values = indicator->float_data_for_write();
     for (size_t i = 0; i < pixels_num; i++) {
       const float value = mask[i] == FILTER_MASK_USED ? 1.0f : 0.0f;
@@ -809,16 +940,18 @@ void mesh_map_bake_apply_margin(MeshMapBakeWorld &world, const int margin)
                    R_BAKE_ADJACENT_FACES,
                    world.mesh,
                    uv_name,
-                   uv_offset);
+                   image.uv_offset);
     for (size_t i = 0; i < pixels_num; i++) {
       if (mask[i] != FILTER_MASK_USED && values[i * 4] > 0.5f) {
         mask[i] = FILTER_MASK_MARGIN;
       }
     }
     MEM_delete(indicator_mask);
+  }
+  IMB_freeImBuf(ibuf);
+  if (indicator != nullptr) {
     IMB_freeImBuf(indicator);
   }
-  world.margin_mask = mask;
 }
 
 /**
@@ -871,17 +1004,18 @@ void mesh_map_bake_worker_run(MeshMapBakeJob &job, MeshMapBakeWorld &world)
       return;
     }
     if (pass_type == SCE_PASS_NORMAL) {
-      /* Cycles always delivers world-space normals; rotate and compress them for the atlas. */
+      /* Cycles always delivers world-space normals; rotate and compress them for the atlas. The
+       * whole result is walked: every tile's pixels are one block of the same buffers. */
       const eBakeNormalSwizzle swizzle[3] = {R_BAKE_POSX, R_BAKE_POSY, R_BAKE_POSZ};
       eBakeSpace space = R_BAKE_SPACE_WORLD;
       BKE_mesh_maps_bake_normal_space_for_type(world.type, space);
+      const size_t pixels_total = world.pixels_num * size_t(world.tiles_num);
       if (space == R_BAKE_SPACE_OBJECT) {
         RE_bake_normal_world_to_object(
-            world.pixels, world.pixels_num, 4, world.result, world.temp_object, swizzle);
+            world.pixels, pixels_total, 4, world.result, world.temp_object, swizzle);
       }
       else {
-        RE_bake_normal_world_to_world(
-            world.pixels, world.pixels_num, 4, world.result, swizzle);
+        RE_bake_normal_world_to_world(world.pixels, pixels_total, 4, world.result, swizzle);
       }
     }
   }
@@ -951,17 +1085,26 @@ void mesh_map_bake_commit_current(MeshMapBakeJob &job, MeshMapBakePairState &pai
     return;
   }
   /* The atlas is shared: the object's own pixels always land, but its margin must not paint over
-   * an island another object using the material already baked. */
-  Array<uint8_t> own_coverage(world.pixels_num, 0);
-  BKE_mesh_maps_bake_coverage_from_pixels(world.pixels, world.pixels_num, own_coverage);
-  Array<uint8_t> own_margin(world.pixels_num, 0);
+   * an island another object using the material already baked. Everything below is per tile: the
+   * raster covers every tile in the world, and each tile weighs its own islands. */
+  const size_t pixels_num = world.pixels_num;
+  const int tiles_num = world.tiles_num;
+  const size_t pixels_total = pixels_num * size_t(tiles_num);
+  Array<uint8_t> own_coverage(pixels_total, 0);
+  BKE_mesh_maps_bake_coverage_from_pixels(world.pixels, pixels_total, own_coverage);
+  Array<uint8_t> own_margin(pixels_total, 0);
   if (world.margin_mask != nullptr) {
-    for (size_t i = 0; i < world.pixels_num; i++) {
+    for (size_t i = 0; i < pixels_total; i++) {
       own_margin[i] = world.margin_mask[i] == FILTER_MASK_MARGIN ? 1 : 0;
     }
   }
-  Array<uint8_t> foreign_coverage(world.pixels_num, 0);
+  Array<uint8_t> foreign_coverage(pixels_total, 0);
   char overlap_name[MAX_ID_NAME] = "";
+  Vector<int> tile_numbers;
+  tile_numbers.reserve(size_t(tiles_num));
+  for (const int i : IndexRange(tiles_num)) {
+    tile_numbers.append(world.images[i].tile_number);
+  }
   BKE_mesh_maps_bake_foreign_coverage(
       *job.bmain,
       *job.scene,
@@ -969,6 +1112,7 @@ void mesh_map_bake_commit_current(MeshMapBakeJob &job, MeshMapBakePairState &pai
       *ob,
       *ma,
       job.resolution,
+      tile_numbers.as_span(),
       own_coverage,
       mesh_map_bake_populate_geometry_pixels,
       foreign_coverage,
@@ -982,21 +1126,25 @@ void mesh_map_bake_commit_current(MeshMapBakeJob &job, MeshMapBakePairState &pai
                 world.uv_name);
   }
 
-  void *lock = nullptr;
-  ImBuf *ibuf = BKE_image_acquire_ibuf(atlas, nullptr, &lock);
-  if (ibuf != nullptr && ibuf->float_data() != nullptr) {
-    BKE_mesh_maps_bake_write_with_margin(
-        pair.type,
-        own_coverage,
-        own_margin,
-        foreign_coverage,
-        4,
-        world.result,
-        MutableSpan<float>(ibuf->float_data_for_write(), world.pixels_num * 4));
-    ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
-    BKE_image_mark_dirty(atlas, ibuf);
+  for (const int tile : IndexRange(tiles_num)) {
+    ImageUser iuser;
+    BKE_imageuser_default(&iuser);
+    iuser.tile = world.images[tile].tile_number;
+    ImageTileBufferScope buffer(*atlas, &iuser);
+    if (buffer != nullptr && buffer->float_data() != nullptr) {
+      const int64_t tile_start = int64_t(tile) * int64_t(pixels_num);
+      BKE_mesh_maps_bake_write_with_margin(
+          pair.type,
+          own_coverage.as_span().slice(tile_start, int64_t(pixels_num)),
+          own_margin.as_span().slice(tile_start, int64_t(pixels_num)),
+          foreign_coverage.as_span().slice(tile_start, int64_t(pixels_num)),
+          4,
+          world.result + tile_start * 4,
+          MutableSpan<float>(buffer->float_data_for_write(), pixels_num * 4));
+      buffer->userflags |= IB_DISPLAY_BUFFER_INVALID;
+      BKE_image_mark_dirty(atlas, buffer.get());
+    }
   }
-  BKE_image_release_ibuf(atlas, ibuf, lock);
   BKE_image_partial_update_mark_full_update(atlas);
   BKE_image_free_gputextures(atlas);
   BKE_image_memorypack(atlas);

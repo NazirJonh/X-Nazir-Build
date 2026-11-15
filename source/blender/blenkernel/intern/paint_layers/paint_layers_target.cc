@@ -29,6 +29,7 @@
 
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
+#include "BKE_image_tile_buffer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
@@ -86,47 +87,49 @@ static void paint_layers_color_premultiply(float rgba[4])
  * A byte map is written through its byte buffer, straight; a float map (Height) through its float
  * buffer, premultiplied, the association float storage uses. Whichever buffer the image was
  * created with is the one written, so the call never allocates the other and never turns a float
- * map into a byte one for the readers. */
+ * map into a byte one for the readers.
+ *
+ * Every tile a tiled map already holds gets the same colour: the flat value is the map's content
+ * as a whole, so no tile keeps what a stroke painted on. A tile without a buffer is skipped rather
+ * than allocated -- a generated one regenerates from its own gen colour, which is the same flat
+ * value, and an assigned one is fetched from its file when something reads it. */
 static void paint_layers_image_fill(Image &image, const bool is_color, const float rgba[4])
 {
-  void *lock = nullptr;
-  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
-  if (ibuf == nullptr) {
-    return;
-  }
-  float encoded[4];
-  copy_v4_v4(encoded, rgba);
-  if (is_color) {
-    /* The constant is scene linear; the buffer stores the map's colorspace. */
-    paint_layers_image_encode(image, encoded);
-  }
-  if (ibuf->float_data() != nullptr) {
-    float *pixels = ibuf->float_data_for_write();
-    if (pixels != nullptr) {
-      float premultiplied[4];
-      copy_v4_v4(premultiplied, encoded);
-      paint_layers_color_premultiply(premultiplied);
-      for (const int64_t i : IndexRange(int64_t(ibuf->x) * ibuf->y)) {
-        pixels[i * 4 + 0] = premultiplied[0];
-        pixels[i * 4 + 1] = premultiplied[1];
-        pixels[i * 4 + 2] = premultiplied[2];
-        pixels[i * 4 + 3] = premultiplied[3];
+  BKE_image_tile_buffers_foreach(image, [&](const int /*tile_number*/, ImBuf &ibuf) {
+    float encoded[4];
+    copy_v4_v4(encoded, rgba);
+    if (is_color) {
+      /* The constant is scene linear; the buffer stores the map's colorspace. */
+      paint_layers_image_encode(image, encoded);
+    }
+    if (ibuf.float_data() != nullptr) {
+      float *pixels = ibuf.float_data_for_write();
+      if (pixels != nullptr) {
+        float premultiplied[4];
+        copy_v4_v4(premultiplied, encoded);
+        paint_layers_color_premultiply(premultiplied);
+        for (const int64_t i : IndexRange(int64_t(ibuf.x) * ibuf.y)) {
+          pixels[i * 4 + 0] = premultiplied[0];
+          pixels[i * 4 + 1] = premultiplied[1];
+          pixels[i * 4 + 2] = premultiplied[2];
+          pixels[i * 4 + 3] = premultiplied[3];
+        }
       }
     }
-  }
-  else if (uchar *pixels = ibuf->byte_data_for_write()) {
-    const uchar r = uchar(clamp_f(encoded[0], 0.0f, 1.0f) * 255.0f + 0.5f);
-    const uchar g = uchar(clamp_f(encoded[1], 0.0f, 1.0f) * 255.0f + 0.5f);
-    const uchar b = uchar(clamp_f(encoded[2], 0.0f, 1.0f) * 255.0f + 0.5f);
-    const uchar a = uchar(clamp_f(encoded[3], 0.0f, 1.0f) * 255.0f + 0.5f);
-    for (const int64_t i : IndexRange(int64_t(ibuf->x) * ibuf->y)) {
-      pixels[i * 4 + 0] = r;
-      pixels[i * 4 + 1] = g;
-      pixels[i * 4 + 2] = b;
-      pixels[i * 4 + 3] = a;
+    else if (uchar *pixels = ibuf.byte_data_for_write()) {
+      const uchar r = uchar(clamp_f(encoded[0], 0.0f, 1.0f) * 255.0f + 0.5f);
+      const uchar g = uchar(clamp_f(encoded[1], 0.0f, 1.0f) * 255.0f + 0.5f);
+      const uchar b = uchar(clamp_f(encoded[2], 0.0f, 1.0f) * 255.0f + 0.5f);
+      const uchar a = uchar(clamp_f(encoded[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+      for (const int64_t i : IndexRange(int64_t(ibuf.x) * ibuf.y)) {
+        pixels[i * 4 + 0] = r;
+        pixels[i * 4 + 1] = g;
+        pixels[i * 4 + 2] = b;
+        pixels[i * 4 + 3] = a;
+      }
     }
-  }
-  BKE_image_release_ibuf(&image, ibuf, lock);
+    return true;
+  });
 }
 
 /**
@@ -758,7 +761,10 @@ Image *BKE_paint_layers_map_coverage_map_ensure(Main &bmain,
   return paint_layer_channel_find(item, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image;
 }
 
-bool BKE_paint_layers_map_coverage_tile_ensure(Image &image, const int tile_number)
+bool BKE_paint_layers_map_coverage_tile_ensure(Image &image,
+                                               const int tile_number,
+                                               const int width,
+                                               const int height)
 {
   if (image.source != IMA_SRC_TILED) {
     return false;
@@ -776,9 +782,10 @@ bool BKE_paint_layers_map_coverage_tile_ensure(Image &image, const int tile_numb
   if (tile == nullptr) {
     return false;
   }
-  /* The new tile is generated like the first one: same size, depth and zero-filled data colour. */
-  tile->gen_x = base->gen_x;
-  tile->gen_y = base->gen_y;
+  /* The new tile is generated like the first one: same size, depth and zero-filled data colour,
+   * unless the caller names a size (a source whose tiles differ in resolution). */
+  tile->gen_x = width > 0 ? width : base->gen_x;
+  tile->gen_y = height > 0 ? height : base->gen_y;
   tile->gen_type = base->gen_type;
   tile->gen_flag = base->gen_flag;
   tile->gen_depth = base->gen_depth;
@@ -884,8 +891,11 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
   /* A Height map is a continuous field, so its map is a float buffer where every other scalar
    * channel keeps the byte map a factor is stored in. */
   const bool is_float_map = info.map_float;
+  /* Tiled, the way a map-coverage mask is: a stroke that lands on a UV of another UDIM tile gets
+   * its tile there instead of wrapping into the base one. Until a tile is added the map has the
+   * one buffer any plain map carries, so nothing is paid for tiles nobody paints. */
   Image *image = paint_layers_map_create(
-      bmain, name, map_size, info.is_color, fill, /*tiled=*/false, is_float_map);
+      bmain, name, map_size, info.is_color, fill, /*tiled=*/true, is_float_map);
   if (image == nullptr) {
     return nullptr;
   }
@@ -939,11 +949,19 @@ bool BKE_paint_layers_target_content_reset(PaintLayersTarget &target)
   BKE_image_release_ibuf(&image, ibuf, lock);
   paint_layers_image_fill(image, BKE_paint_material_channel_info(channel).is_color, fill);
 
-  ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
-  if (ibuf != nullptr) {
-    BKE_image_mark_dirty(&image, ibuf);
+  /* Every tile the reset wrote has to count as unsaved work; the fill leaves the dirty marks to
+   * the callers, which know the shape of the whole operation. Acquiring without the existing-buffer
+   * skip on purpose: a tile that holds no buffer yet is generated here, so the reset's flat value
+   * (the tile's own gen colour) is what it comes back with. */
+  for (const ImageTile &tile : image.tiles) {
+    ImageUser tile_user;
+    BKE_imageuser_default(&tile_user);
+    tile_user.tile = tile.tile_number;
+    ImageTileBufferScope buffer(image, &tile_user);
+    if (buffer != nullptr) {
+      BKE_image_mark_dirty(&image, buffer.get());
+    }
   }
-  BKE_image_release_ibuf(&image, ibuf, lock);
   BKE_image_partial_update_mark_full_update(&image);
   BKE_image_free_gputextures(&image);
   target.channel_record = record;

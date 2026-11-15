@@ -52,6 +52,14 @@ namespace blender::bke::tests {
 
 class PaintLayersAnchorPointCompositeTest : public PaintLayersTestBase {
  protected:
+  void TearDown() override
+  {
+    /* The composite cache is a static keyed by session UID: its buffers outlive the freed `Main`
+     * and are reported as leaked blocks at exit. */
+    BKE_paint_material_composite_cache_free_all();
+    PaintLayersTestBase::TearDown();
+  }
+
   /** A solid \a size square byte map; \a data makes it a Non-Color map. */
   Image *add_image(const char *name,
                    const int size,
@@ -320,9 +328,10 @@ TEST_F(PaintLayersAnchorPointCompositeTest, corr_reader_never_renders_live)
 
 TEST_F(PaintLayersAnchorPointCompositeTest, mask_reader_always_reads_bake_maps)
 {
-  MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
-  /* A fully hidden source mask: both readers' masks reduce the owner's coverage to zero, so the
-   * result is the channel's bottom colour exactly. */
+  /* A fully hidden source: its mask is zero and its map carries no alpha, so both readers (the
+   * mask slice reads the mask, the content slice reads the map's alpha, never the row mask)
+   * reduce the owner's coverage to zero and the result is the channel's bottom colour. */
+  MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0, 0));
   ASSERT_NE(BKE_paint_layers_mask_add(*ma, source, 0.0f), nullptr);
   MaterialPaintLayer *mask_point = add_point(*source, PaintLayerAnchorPointList::MaskStack);
   MaterialPaintLayer *content_point = add_point(*source);
@@ -398,9 +407,10 @@ TEST_F(PaintLayersAnchorPointCompositeTest, mask_reader_always_reads_bake_maps)
 
 TEST_F(PaintLayersAnchorPointCompositeTest, baked_and_live_reader_layer_match)
 {
+  /* The source sits under the blue row, so only the reader brings red over it. */
+  MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
   MaterialPaintLayer *below = add_layer_with_image("Below", add_image("Below", 4, 0, 0, 255));
   ASSERT_NE(below, nullptr);
-  MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
   MaterialPaintLayer *point = add_point(*source);
   MaterialPaintLayer *reader_row = BKE_paint_layers_add(
       *ma, "Reader", nullptr, PaintLayerPlace::Above);
@@ -673,7 +683,9 @@ TEST_F(PaintLayersAnchorPointCompositeTest, reader_layer_keeps_own_effects)
   MaterialPaintLayer *reader = add_reader(
       *reader_row, PaintLayerAnchorPointList::Row, point->marker);
   ASSERT_NE(reader, nullptr);
-  MaterialPaintLayer *effect = add_correction(*reader_row, "Own Effect");
+  /* A Fill correction: a Paint one with no map lays nothing. It hangs on the reader row itself. */
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, reader, "Own Effect", MA_PAINT_LAYER_SOURCE_CONSTANT);
   ASSERT_NE(effect, nullptr);
   ASSERT_TRUE(BKE_paint_layers_channel_add(
       *ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR) != nullptr);
@@ -710,20 +722,23 @@ TEST_F(PaintLayersAnchorPointCompositeTest, reader_layer_equals_source_without_u
   MaterialPaintLayer *point = add_point(*source);
   ASSERT_NE(point, nullptr);
   ASSERT_TRUE(BKE_paint_layers_anchor_point_source_set(*ma, reader, point->marker));
-  MaterialPaintLayer *above = add_correction(*source, "Above");
+  MaterialPaintLayer *above = BKE_paint_layers_correction_add(
+      *ma, source, "Above", MA_PAINT_LAYER_SOURCE_CONSTANT);
   ASSERT_NE(above, nullptr);
   ASSERT_TRUE(BKE_paint_layers_channel_add(
       *ma, above, PAINT_MATERIAL_CHANNEL_BASE_COLOR) != nullptr);
   const float blue[4] = {0.0f, 0.0f, 1.0f, 1.0f};
   ASSERT_TRUE(BKE_paint_layers_channel_set_value(
       *ma, above, PAINT_MATERIAL_CHANNEL_BASE_COLOR, blue));
-
-  /* The composite shows the correction above the marker, which the slice must not contain. */
+  /* The composite shows the correction above the marker, which the slice must not contain. The
+   * reader lies over the source row and would hide it, so it is switched off for this look. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, reader, false));
   Vector<float> pixels;
   int width = 0, height = 0;
   ASSERT_TRUE(render_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, pixels, width, height));
   const float *pixel = linear_pixel(pixels, width, 1, 1);
   EXPECT_NEAR(pixel[2], 1.0f, 1e-3f) << "the composite shows the blue correction";
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, reader, true));
 
   paint_layer_anchor_point_slice_cache_clear();
   std::shared_ptr<ImBuf> slice_color;
@@ -904,7 +919,8 @@ TEST_F(PaintLayersAnchorPointCompositeTest, udim_nested_mask_reader_in_content_s
   EXPECT_TRUE(paint_layer_anchor_point_slice_is_udim(*ma, *nested));
   EXPECT_TRUE(paint_layer_anchor_point_slice_is_udim(*ma, *reader))
       << "the content slice contains a mask reader whose slice is UDIM";
-  EXPECT_FALSE(paint_layer_row_reads_anchor_point(
+  /* The slice is rendered per UDIM tile now, so the reader takes part. */
+  EXPECT_TRUE(paint_layer_row_reads_anchor_point(
       *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
 }
 
@@ -954,7 +970,8 @@ TEST_F(PaintLayersAnchorPointCompositeTest, udim_nested_mask_reader_in_child_mas
   EXPECT_TRUE(paint_layer_anchor_point_slice_is_udim(*ma, *nested));
   EXPECT_TRUE(paint_layer_anchor_point_slice_is_udim(*ma, *reader))
       << "the folder's content slice contains the child's mask reader";
-  EXPECT_FALSE(paint_layer_row_reads_anchor_point(
+  /* The slice is rendered per UDIM tile now, so the reader takes part. */
+  EXPECT_TRUE(paint_layer_row_reads_anchor_point(
       *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
 }
 
@@ -995,9 +1012,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, udim_issue_for_content_target)
       found = &issue;
     }
   }
-  ASSERT_NE(found, nullptr) << "a Content reader whose slice needs a tiled mask is diagnosed";
-  EXPECT_EQ(found->code, PaintLayersIssueCode::AnchorPointInvalid);
-  EXPECT_STREQ(found->text, "A mask Anchor Point is not supported in a UDIM material");
+  EXPECT_EQ(found, nullptr) << "a tiled mask slice is rendered per UDIM tile, so it is no issue";
 }
 
 TEST_F(PaintLayersAnchorPointCompositeTest, slice_describe_equals_slice_render_input)
@@ -1118,6 +1133,8 @@ TEST_F(PaintLayersAnchorPointCompositeTest, bake_partial_rect_does_not_render_fu
                                                 full_color,
                                                 full_coverage));
 
+  /* The full render above may cache the nested slice; only what the partial one adds is measured. */
+  paint_layer_anchor_point_slice_cache_clear();
   float partial_color[4 * 4 * 4];
   float partial_coverage[4 * 4];
   const int rect[4] = {1, 1, 3, 3};
@@ -1471,7 +1488,11 @@ TEST_F(PaintLayersAnchorPointCompositeTest, resolve_rejects_non_marker_reference
 TEST_F(PaintLayersAnchorPointCompositeTest, nested_reader_object_mask_detected)
 {
   MaterialPaintLayer *inner = add_layer_with_image("Inner", add_image("Inner", 4, 255, 0, 0));
-  inner->object_mask_flag |= MA_PAINT_LAYER_OBJECT_MASK_ACTIVE;
+  /* The source row's own object mask is applied after its slice, so a correction below the marker
+   * is what carries the mask into the nested slice. */
+  MaterialPaintLayer *inner_correction = add_correction(*inner, "Masked");
+  ASSERT_NE(inner_correction, nullptr);
+  inner_correction->object_mask_flag |= MA_PAINT_LAYER_OBJECT_MASK_ACTIVE;
   MaterialPaintLayer *inner_point = add_point(*inner);
   MaterialPaintLayer *middle = add_layer_with_image("Middle", add_image("Middle", 4, 0, 255, 0));
   MaterialPaintLayer *middle_reader = add_reader(
@@ -1490,11 +1511,12 @@ TEST_F(PaintLayersAnchorPointCompositeTest, limit_twelve_points_counts_only_part
 {
   for (int i = 0; i < PAINT_LAYER_ANCHOR_POINT_LIMIT; i++) {
     MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Row", nullptr, PaintLayerPlace::Above);
-    MaterialPaintLayer *reader = add_reader(*row, PaintLayerAnchorPointList::Effects, {});
+    /* The point first: a reader built before its point is a forward reference and takes no part. */
     MaterialPaintLayer *point = add_point(*row);
-    ASSERT_NE(reader, nullptr);
     ASSERT_NE(point, nullptr);
-    ASSERT_TRUE(BKE_paint_layers_anchor_point_source_set(*ma, reader, point->marker));
+    MaterialPaintLayer *reader = add_reader(
+        *row, PaintLayerAnchorPointList::Effects, point->marker);
+    ASSERT_NE(reader, nullptr);
   }
   /* An unused point and a disabled reader take no part. */
   MaterialPaintLayer *spare_row = BKE_paint_layers_add(
@@ -1539,6 +1561,8 @@ TEST_F(PaintLayersAnchorPointCompositeTest, parent_folder_with_read_point_not_su
 {
   MaterialPaintLayer *folder = BKE_paint_layers_add(*ma, "Folder", nullptr, PaintLayerPlace::Above);
   folder->source = MA_PAINT_LAYER_SOURCE_STACK;
+  /* A mask gives the folder a row of its own; a plain folder is inlined and owns no bake. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, folder, 1.0f), nullptr);
   MaterialPaintLayer *child = BKE_paint_layers_add(
       *ma, "Child", folder, PaintLayerPlace::Into);
   ASSERT_NE(child, nullptr);
@@ -1560,6 +1584,8 @@ TEST_F(PaintLayersAnchorPointCompositeTest, parent_folder_with_read_point_not_su
       *ma, "Control Folder", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(control, nullptr);
   control->source = MA_PAINT_LAYER_SOURCE_STACK;
+  /* A mask gives the folder a row of its own; a plain folder is inlined and owns no bake. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, control, 1.0f), nullptr);
   MaterialPaintLayer *control_child = BKE_paint_layers_add(
       *ma, "Control Child", control, PaintLayerPlace::Into);
   ASSERT_NE(control_child, nullptr);
@@ -1899,7 +1925,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, describe_only_reader_has_descriptor_
   MaterialPaintLayer *reader_row = BKE_paint_layers_add(
       *ma, "Reader", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *reader = add_reader(
-      *reader_row, PaintLayerAnchorPointList::Effects, point->marker);
+      *reader_row, PaintLayerAnchorPointList::Row, point->marker);
   ASSERT_NE(reader, nullptr);
 
   paint_layer_anchor_point_slice_cache_clear();
@@ -1952,7 +1978,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, full_description_unchanged_by_descri
   MaterialPaintLayer *reader_row = BKE_paint_layers_add(
       *ma, "Reader", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *reader = add_reader(
-      *reader_row, PaintLayerAnchorPointList::Effects, point->marker);
+      *reader_row, PaintLayerAnchorPointList::Row, point->marker);
   ASSERT_NE(reader, nullptr);
 
   Vector<PaintMaterialCompositeImageLayer> full;

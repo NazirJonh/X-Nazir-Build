@@ -70,14 +70,14 @@ void composite_height_settings_describe(const MaterialPaintLayer &layer,
 static void composite_height_won_report_mismatch(PaintLayersHeightWonCache *cache,
                                                  const MaterialPaintLayer &row,
                                                  const bool isolating,
+                                                 const int tile_number,
                                                  const int prefix_width,
                                                  const int prefix_height,
                                                  const int width,
                                                  const int height)
 {
   if (cache != nullptr &&
-      !cache->size_mismatch_reported.add(std::pair<const MaterialPaintLayer *, bool>(&row,
-                                                                                    isolating)))
+      !cache->size_mismatch_reported.add(PaintLayersHeightWonKey{&row, isolating, tile_number}))
   {
     return;
   }
@@ -96,7 +96,8 @@ std::shared_ptr<ImBuf> composite_height_won_render(
     const MaterialPaintLayer &row,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface,
     const bool isolating,
-    PaintLayersHeightWonCache *cache)
+    PaintLayersHeightWonCache *cache,
+    const int tile_number)
 {
   /* The row's own Height record first: it names the canvas (its map's size) and refuses the mask
    * for a row that lays no Height at all. Described once: its stack names the canvas, and the
@@ -109,7 +110,7 @@ std::shared_ptr<ImBuf> composite_height_won_render(
                                    false,
                                    false,
                                    content,
-                                   PAINT_TILE_NUMBER_BASE,
+                                   tile_number,
                                    nullptr,
                                    nullptr,
                                    false,
@@ -140,7 +141,7 @@ std::shared_ptr<ImBuf> composite_height_won_render(
                                    1.0f,
                                    context_surface,
                                    prefix_layers,
-                                   PAINT_TILE_NUMBER_BASE,
+                                   tile_number,
                                    false,
                                    nullptr,
                                    false,
@@ -157,7 +158,7 @@ std::shared_ptr<ImBuf> composite_height_won_render(
      * own comparison would have given and every other channel of the row pays this walk again. */
     if (!sized || prefix_width != width || prefix_height != height) {
       composite_height_won_report_mismatch(
-          cache, row, isolating, prefix_width, prefix_height, width, height);
+          cache, row, isolating, tile_number, prefix_width, prefix_height, width, height);
       return nullptr;
     }
   }

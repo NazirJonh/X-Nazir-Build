@@ -67,6 +67,7 @@
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
 #include "BLI_math_base.h"
+#include "BLI_rect.h"
 #include "BLI_math_vector.h"
 #include "BLI_set.hh"
 #include "BLI_string.h"
@@ -1515,11 +1516,8 @@ bool paint_layer_anchor_point_reader_baked(const Material &ma, const MaterialPai
   if (ref.issue != PaintLayerAnchorPointIssue::None) {
     return false;
   }
-  /* A UDIM mask slice is unsupported rather than bake-able: the reader does not take part. A
-   * content slice is refused when a nested mask reader in it has a tiled map. */
-  if (paint_layer_anchor_point_slice_is_udim(ma, reader)) {
-    return false;
-  }
+  /* A slice that depends on a tiled mask map is bake-able: the bake renders it per UDIM tile, the
+   * way the row bakes are tiled. */
   const bool has_object_mask = paint_layer_anchor_point_slice_has_object_mask(ma, reader);
   if (mode == MA_PAINT_LAYER_BAKE_ALWAYS) {
     /* Always asks for a cache, but an object mask cannot be represented in one. */
@@ -1666,7 +1664,7 @@ Image *bake_service_image(Main &bmain,
        * resolved instead of throwing the canvas away. */
       bool all_tiles = true;
       for (int index = 0; index < object_num; index++) {
-        if (!BKE_paint_layers_map_coverage_tile_ensure(**slot, 1001 + index)) {
+        if (!BKE_paint_layers_map_coverage_tile_ensure(**slot, PAINT_TILE_NUMBER_BASE + index)) {
           all_tiles = false;
           break;
         }
@@ -1708,16 +1706,7 @@ Image *bake_service_image(Main &bmain,
       /* The first tile is created by the image itself; the rest carry the same canvas and format,
        * because a UDIM image requires every tile to have the same resolution. */
       for (int index = 1; index < object_num; index++) {
-        ImageTile *tile = BKE_image_add_tile(image, 1001 + index, nullptr);
-        if (tile == nullptr) {
-          continue;
-        }
-        tile->gen_x = size;
-        tile->gen_y = size;
-        tile->gen_type = IMA_GENTYPE_BLANK;
-        tile->gen_flag |= eImage_GenFlag(floatbuf ? IMA_GEN_FLOAT : 0);
-        tile->gen_depth = 32;
-        copy_v4_v4(tile->gen_color, black);
+        BKE_paint_layers_map_coverage_tile_ensure(*image, PAINT_TILE_NUMBER_BASE + index);
       }
     }
     /* A bake is the stack's own read of a row, so the browsers hide it like every other map. */
@@ -1731,13 +1720,40 @@ Image *bake_service_image(Main &bmain,
  * Tell the image system that \a ibuf's pixels were rewritten behind its back. Without this a map
  * that already reached the GPU keeps showing its previous bake, since nothing else invalidates the
  * texture.
+ *
+ * The invalidation stays at the tile the write landed in: the region walk marks that tile's rect
+ * and the GPU texture of it is refreshed in place, so a bake that fills its tiles one object at a
+ * time does not drop every other tile's texture along the way. A tile the map does not know (a
+ * write through the base buffer of a non-tiled map that lost its first tile) falls back to the
+ * whole-image invalidation.
  */
-void bake_image_pixels_changed(Image &image, ImBuf &ibuf)
+void bake_image_pixels_changed(Image &image,
+                               ImBuf &ibuf,
+                               const int tile_number,
+                               const int *rect)
 {
   ibuf.userflags |= IB_DISPLAY_BUFFER_INVALID;
   BKE_image_mark_dirty(&image, &ibuf);
-  BKE_image_partial_update_mark_full_update(&image);
-  BKE_image_free_gputextures(&image);
+  ImageTile *tile = BKE_image_get_tile(&image, tile_number);
+  if (tile != nullptr) {
+    /* Only the rows and columns a partial write touched are marked, clamped to the buffer the way
+     * the writers clamp them. */
+    const int x0 = rect != nullptr ? clamp_i(rect[0], 0, ibuf.x) : 0;
+    const int x1 = rect != nullptr ? clamp_i(rect[2], 0, ibuf.x) : ibuf.x;
+    const int y0 = rect != nullptr ? clamp_i(rect[1], 0, ibuf.y) : 0;
+    const int y1 = rect != nullptr ? clamp_i(rect[3], 0, ibuf.y) : ibuf.y;
+    if (x1 <= x0 || y1 <= y0) {
+      return;
+    }
+    rcti region;
+    BLI_rcti_init(&region, x0, x1, y0, y1);
+    BKE_image_partial_update_mark_region(&image, tile, &ibuf, &region);
+    BKE_image_update_gputexture_delayed(&image, tile, &ibuf, x0, y0, x1 - x0, y1 - y0);
+  }
+  else {
+    BKE_image_partial_update_mark_full_update(&image);
+    BKE_image_free_gputextures(&image);
+  }
 }
 
 
@@ -1834,7 +1850,7 @@ void bake_write_image_rows(
       }
     }
   }
-  bake_image_pixels_changed(image, *ibuf);
+  bake_image_pixels_changed(image, *ibuf, tile_number, rect);
   BKE_image_release_ibuf(&image, ibuf, lock);
 }
 
@@ -1909,7 +1925,7 @@ void bake_write_stored_image(Image &image,
       }
     }
   }
-  bake_image_pixels_changed(image, *ibuf);
+  bake_image_pixels_changed(image, *ibuf, tile_number, rect);
   BKE_image_release_ibuf(&image, ibuf, lock);
 }
 
@@ -1945,7 +1961,7 @@ void bake_write_coverage_image(Image &image,
       }
     }
   }
-  bake_image_pixels_changed(image, *ibuf);
+  bake_image_pixels_changed(image, *ibuf, tile_number, rect);
   BKE_image_release_ibuf(&image, ibuf, lock);
 }
 
@@ -3406,7 +3422,7 @@ static bool bake_object_tile_write(
             coverage.data(),
             channel_rect,
             surface,
-            painted_object))
+            PaintLayerTileContext{.painted_object = painted_object}))
     {
       continue;
     }

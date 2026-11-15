@@ -16,6 +16,9 @@
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
 
+#include "BKE_image.hh"
+#include "BKE_paint_material_composite_surface.hh"
+
 namespace blender::bke::paint_material_cache {
 
 using namespace image::partial_update;
@@ -69,7 +72,8 @@ rcti rect_scale(const rcti &rect, const int2 from, const int2 to)
 
 PollResult subscriptions_poll(SubscriptionMap &subscriptions,
                               const Span<Image *> images,
-                              const FunctionRef<rcti(const rcti &)> to_cache_space)
+                              const FunctionRef<rcti(const rcti &)> to_cache_space,
+                              const int tile_filter)
 {
   PollResult result;
   BLI_rcti_init(&result.changed_region, 0, 0, 0, 0);
@@ -106,10 +110,25 @@ PollResult subscriptions_poll(SubscriptionMap &subscriptions,
         while (BKE_image_partial_update_get_next_change(user, &change) ==
                ePartialUpdateIterResult::ChangeAvailable)
         {
-          /* Neither cache is tiled, so a change reported for any tile but the first would land at
-           * the wrong place in a single-canvas buffer. Give up precision rather than put pixels
-           * somewhere they do not belong. */
-          if (change.tile_number != 1001) {
+          if (tile_filter > 0) {
+            /* A non-tiled image is the one tile every entry reads (#composite_image_acquire falls
+             * back to it), and it reports its change as the base tile whatever tile the entry
+             * answers for, so it is never filtered. Only a tiled image has tiles of its own. */
+            if (image->source == IMA_SRC_TILED && change.tile_number != tile_filter) {
+              /* A tiled image lacking the entry's tile is read through the base tile, so the base
+               * tile's change is ours too. Any other tile is somebody else's: each entry polls its
+               * own subscriptions. */
+              const bool read_through_base = change.tile_number == PAINT_TILE_NUMBER_BASE &&
+                                             BKE_image_get_tile(image, tile_filter) == nullptr;
+              if (!read_through_base) {
+                continue;
+              }
+            }
+          }
+          else if (change.tile_number != 1001) {
+            /* No tile is named, so a change reported for any tile but the first would land at
+             * the wrong place in a single-canvas buffer. Give up precision rather than put
+             * pixels somewhere they do not belong. */
             result.needs_full_update = true;
             break;
           }

@@ -8024,6 +8024,153 @@ static int do_but_HSVCUBE(
   return WM_UI_HANDLER_CONTINUE;
 }
 
+/**
+ * Shared by the color wheel pickers: update #HandleButtonData::relative_drag from the mouse,
+ * limited to the wheel radius in the relative (continuous grab / shift) modes.
+ */
+static void color_wheel_drag_position_update(Button *but,
+                                             HandleButtonData *data,
+                                             const float mx,
+                                             const float my,
+                                             const bool shift,
+                                             const bool use_continuous_grab)
+{
+  if (use_continuous_grab || shift) {
+    const float fac = mouse_scale_warp_factor(shift);
+    data->relative_drag.x += (mx - float(data->draglastx)) * fac;
+    data->relative_drag.y += (my - float(data->draglasty)) * fac;
+
+    const float radius = min_ff(BLI_rctf_size_x(&but->rect), BLI_rctf_size_y(&but->rect)) / 2.0f;
+    const float cent[2] = {BLI_rctf_cent_x(&but->rect), BLI_rctf_cent_y(&but->rect)};
+    const float len = len_v2v2(cent, data->relative_drag);
+
+    if (len > radius) {
+      dist_ensure_v2_v2fl(data->relative_drag, cent, radius);
+    }
+  }
+  else {
+    data->relative_drag.x = mx;
+    data->relative_drag.y = my;
+  }
+
+#ifdef USE_CONT_MOUSE_CORRECT
+  if (use_continuous_grab) {
+    /* OK but can go outside bounds */
+    data->ungrab_mval[0] = data->relative_drag.x;
+    data->ungrab_mval[1] = data->relative_drag.y;
+  }
+#endif
+}
+
+/** Shared by the color wheel pickers: write the edited \a hsv back to the button. */
+static void color_wheel_drag_apply(Button *but,
+                                   HandleButtonData *data,
+                                   const ColorPicker *cpicker,
+                                   const float hsv[3],
+                                   const float mx,
+                                   const float my)
+{
+  float rgb[3];
+  color_picker_hsv_to_rgb(hsv, rgb);
+
+  if (cpicker->use_luminosity_lock) {
+    if (!is_zero_v3(rgb)) {
+      normalize_v3_length(rgb, cpicker->luminosity_lock_value);
+    }
+  }
+
+  perceptual_to_scene_linear_space(but, rgb);
+  button_v3_set(but, rgb);
+
+  data->draglastx = mx;
+  data->draglasty = my;
+}
+
+/* Mouse editing for the ring + triangle picker (#USER_CP_RING_TRIANGLE): the hue is picked on
+ * the outer ring, the saturation/value inside the rotating triangle. The edited part is chosen
+ * once when the drag starts, so dragging across the ring boundary doesn't switch what is
+ * edited (the triangle position is clamped to its edges). */
+static bool numedit_but_RING_TRIANGLE(Button *but,
+                                      HandleButtonData *data,
+                                      float mx,
+                                      float my,
+                                      const eSnapType snap,
+                                      const bool shift,
+                                      const bool use_continuous_grab,
+                                      const bool start_drag = false)
+{
+  ColorPicker *cpicker = static_cast<ColorPicker *>(but->custom_data);
+  float *hsv = cpicker->hsv_perceptual;
+
+  rcti rect;
+  BLI_rcti_rctf_copy(&rect, &but->rect);
+
+  const RingTriangleRadii radii = hsvringtriangle_radii_get(&rect);
+
+  if (start_drag) {
+    const float press[2] = {mx, my};
+    const float cent[2] = {BLI_rcti_cent_x_fl(&rect), BLI_rcti_cent_y_fl(&rect)};
+    cpicker->ring_triangle_zone = (len_v2v2(press, cent) >= radii.ring_inner) ?
+                                      RingTriangleDragZone::Ring :
+                                      RingTriangleDragZone::Triangle;
+
+    /* Allow start editing the original color if shift is pressed at start. */
+    if (shift) {
+      float hsvo[3], rgbo[3];
+
+      /* Get original hsv. */
+      copy_v3_v3(hsvo, hsv);
+      copy_v3_v3(rgbo, data->origvec);
+      scene_linear_to_perceptual_space(but, rgbo);
+      color_picker_rgb_to_hsv_compat(rgbo, hsvo);
+
+      /* Get original cursor position of the part that is being edited. */
+      if (cpicker->ring_triangle_zone == RingTriangleDragZone::Ring) {
+        hsvringtriangle_pos_from_hue(
+            &rect, hsvo[0], &data->relative_drag.x, &data->relative_drag.y);
+      }
+      else {
+        hsvringtriangle_pos_from_sv(
+            &rect, hsvo[0], hsvo[1], hsvo[2], &data->relative_drag.x, &data->relative_drag.y);
+      }
+    }
+    else {
+      data->relative_drag.x = mx;
+      data->relative_drag.y = my;
+    }
+  }
+
+  float rgb[3];
+  copy_v3_v3(rgb, data->origvec);
+  scene_linear_to_perceptual_space(but, rgb);
+  color_picker_rgb_to_hsv_compat(rgb, hsv);
+
+  color_wheel_drag_position_update(but, data, mx, my, shift, use_continuous_grab);
+
+  /* Hue is edited on the ring, saturation/value inside the triangle. */
+  if (cpicker->ring_triangle_zone == RingTriangleDragZone::Ring) {
+    hsvringtriangle_hue_from_pos(&rect, data->relative_drag.x, data->relative_drag.y, &hsv[0]);
+
+    if (snap != SNAP_OFF) {
+      color_snap_hue(snap, &hsv[0]);
+    }
+  }
+  else {
+    hsvringtriangle_sv_from_pos(
+        &rect, data->relative_drag.x, data->relative_drag.y, hsv[0], &hsv[1], &hsv[2]);
+  }
+
+  /* exception: when using the picker in 'locked' value state, lock the value of the triangle
+   * to 1 (hue/saturation picking). */
+  if (cpicker->use_color_lock) {
+    hsv[2] = 1.0f;
+  }
+
+  color_wheel_drag_apply(but, data, cpicker, hsv, mx, my);
+
+  return true;
+}
+
 static bool numedit_but_HSVCIRCLE(Button *but,
                                   HandleButtonData *data,
                                   float mx,
@@ -8033,6 +8180,13 @@ static bool numedit_but_HSVCIRCLE(Button *but,
                                   const bool use_continuous_grab,
                                   const bool start_drag = false)
 {
+  /* The ring + triangle picker shares the HSV circle button type and event handling, but maps
+   * positions differently (hue on the ring, saturation/value in the triangle). */
+  if (is_ring_triangle_picker()) {
+    return numedit_but_RING_TRIANGLE(
+        but, data, mx, my, snap, shift, use_continuous_grab, start_drag);
+  }
+
   const bool changed = true;
   ColorPicker *cpicker = static_cast<ColorPicker *>(but->custom_data);
   float *hsv = cpicker->hsv_perceptual;
@@ -8065,31 +8219,8 @@ static bool numedit_but_HSVCIRCLE(Button *but,
   scene_linear_to_perceptual_space(but, rgb);
   color_picker_rgb_to_hsv_compat(rgb, hsv);
 
-  if (use_continuous_grab || shift) {
-    const float fac = mouse_scale_warp_factor(shift);
-    data->relative_drag.x += (mx - float(data->draglastx)) * fac;
-    data->relative_drag.y += (my - float(data->draglasty)) * fac;
+  color_wheel_drag_position_update(but, data, mx, my, shift, use_continuous_grab);
 
-    const float radius = min_ff(BLI_rctf_size_x(&but->rect), BLI_rctf_size_y(&but->rect)) / 2.0f;
-    const float cent[2] = {BLI_rctf_cent_x(&but->rect), BLI_rctf_cent_y(&but->rect)};
-    const float len = len_v2v2(cent, data->relative_drag);
-
-    if (len > radius) {
-      dist_ensure_v2_v2fl(data->relative_drag, cent, radius);
-    }
-  }
-  else {
-    data->relative_drag.x = mx;
-    data->relative_drag.y = my;
-  }
-
-#ifdef USE_CONT_MOUSE_CORRECT
-  if (use_continuous_grab) {
-    /* OK but can go outside bounds */
-    data->ungrab_mval[0] = data->relative_drag.x;
-    data->ungrab_mval[1] = data->relative_drag.y;
-  }
-#endif
   /* exception, when using color wheel in 'locked' value state:
    * allow choosing a hue for black values, by giving a tiny increment */
   if (cpicker->use_color_lock) {
@@ -8116,19 +8247,7 @@ static bool numedit_but_HSVCIRCLE(Button *but,
     color_snap_hue(snap, &hsv[0]);
   }
 
-  color_picker_hsv_to_rgb(hsv, rgb);
-
-  if (cpicker->use_luminosity_lock) {
-    if (!is_zero_v3(rgb)) {
-      normalize_v3_length(rgb, cpicker->luminosity_lock_value);
-    }
-  }
-
-  perceptual_to_scene_linear_space(but, rgb);
-  button_v3_set(but, rgb);
-
-  data->draglastx = mx;
-  data->draglasty = my;
+  color_wheel_drag_apply(but, data, cpicker, hsv, mx, my);
 
   return changed;
 }
@@ -8177,7 +8296,7 @@ static void ndofedit_but_HSVCIRCLE(Button *but,
   /* exception, when using color wheel in 'locked' value state:
    * allow choosing a hue for black values, by giving a tiny increment */
   if (cpicker->use_color_lock) {
-    if (U.color_picker_type == USER_CP_CIRCLE_HSV) { /* lock */
+    if (U.color_picker_type == USER_CP_CIRCLE_HSV || is_ring_triangle_picker()) { /* lock */
       if (hsv[2] == 0.0f) {
         hsv[2] = 0.0001f;
       }

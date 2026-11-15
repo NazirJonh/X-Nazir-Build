@@ -48,7 +48,7 @@ void template_color_picker(Layout *layout,
 
   ColorPicker *cpicker = block_colorpicker_create(block);
   Button *but = nullptr;
-  ButtonHSVCube *hsv_but;
+  ButtonHSVCube *hsv_but = nullptr;
   switch (U.color_picker_type) {
     case USER_CP_SQUARE_SV:
     case USER_CP_SQUARE_HS:
@@ -78,6 +78,7 @@ void template_color_picker(Layout *layout,
           break;
         case USER_CP_CIRCLE_HSV:
         case USER_CP_CIRCLE_HSL:
+        case USER_CP_RING_TRIANGLE:
           break;
       }
       but = hsv_but;
@@ -86,14 +87,19 @@ void template_color_picker(Layout *layout,
       /* user default */
     case USER_CP_CIRCLE_HSV:
     case USER_CP_CIRCLE_HSL:
-    default:
+    case USER_CP_RING_TRIANGLE:
+    default: {
+      /* The ring + triangle picker is drawn larger than the other pickers. */
+      const int wheel_size = (U.color_picker_type == USER_CP_RING_TRIANGLE) ?
+                                 int(WHEEL_SIZE * RING_TRIANGLE_PICKER_SIZE_FAC) :
+                                 WHEEL_SIZE;
       but = uiDefButR_prop(block,
                            ButtonType::HsvCircle,
                            "",
                            0,
                            0,
-                           WHEEL_SIZE,
-                           WHEEL_SIZE,
+                           wheel_size,
+                           wheel_size,
                            ptr,
                            prop,
                            -1,
@@ -101,6 +107,7 @@ void template_color_picker(Layout *layout,
                            0.0,
                            "");
       break;
+    }
   }
 
   but->custom_data = cpicker;
@@ -118,7 +125,8 @@ void template_color_picker(Layout *layout,
     cpicker->luminosity_lock_value = len_v3(color);
   }
 
-  if (value_slider) {
+  /* The ring + triangle picker has no slider: the triangle already edits saturation/value. */
+  if (value_slider && U.color_picker_type != USER_CP_RING_TRIANGLE) {
     switch (U.color_picker_type) {
       case USER_CP_CIRCLE_HSL:
         row.separator();
@@ -188,7 +196,6 @@ void template_color_picker(Layout *layout,
                                                               ""));
         hsv_but->gradient_type = eButGradientType(GRAD_HV + 3);
         break;
-
         /* user default */
       case USER_CP_CIRCLE_HSV:
       default:

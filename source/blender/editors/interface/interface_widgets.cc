@@ -3706,6 +3706,282 @@ static void draw_but_HSVCIRCLE(Button *but, const uiWidgetColors *wcol, const rc
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Ring + Triangle Color Picker (#USER_CP_RING_TRIANGLE)
+ *
+ * A hue ring with a rotating saturation/value triangle inside it. The triangle apex (the pure
+ * hue color) points towards the hue position on the ring, the other vertices are white and
+ * black. Positions use the same angle convention as the HSV circle: the angle of the hue \a h is
+ * `-(2pi*h + pi/2)` in the button rectangle space, so the ring aligns with the HSV circle picker.
+ * \{ */
+
+/* Inner radius of the hue ring, as a fraction of the outer radius. */
+static constexpr float RING_TRIANGLE_RING_FAC = 0.82f;
+/* Circum-radius of the saturation/value triangle, as a fraction of the ring inner radius. */
+static constexpr float RING_TRIANGLE_TRI_FAC = 0.96f;
+
+bool is_ring_triangle_picker()
+{
+  return U.color_picker_type == USER_CP_RING_TRIANGLE;
+}
+
+/** Angle (in the button rectangle space) of the hue position on the ring. */
+static float hsvringtriangle_angle_from_hue(const float hue)
+{
+  return -(2.0f * float(M_PI) * hue + float(M_PI_2));
+}
+
+/** Inverse of #hsvringtriangle_angle_from_hue, wrapped to the [0, 1) range. */
+static float hsvringtriangle_hue_from_angle(const float angle)
+{
+  const float hue = 0.75f - angle / (2.0f * float(M_PI));
+  return hue - floorf(hue);
+}
+
+struct RingTriangleVertices {
+  float2 hue;
+  float2 white;
+  float2 black;
+};
+
+/** Triangle vertices (relative to the widget center) for the given hue. */
+static RingTriangleVertices hsvringtriangle_vertices(const float tri_radius, const float hue)
+{
+  const float hue_ang = hsvringtriangle_angle_from_hue(hue);
+  const float ang_white = hue_ang + (2.0f * float(M_PI) / 3.0f);
+  const float ang_black = hue_ang - (2.0f * float(M_PI) / 3.0f);
+
+  return {float2(cosf(hue_ang), sinf(hue_ang)) * tri_radius,
+          float2(cosf(ang_white), sinf(ang_white)) * tri_radius,
+          float2(cosf(ang_black), sinf(ang_black)) * tri_radius};
+}
+
+RingTriangleRadii hsvringtriangle_radii_get(const rcti *rect)
+{
+  const float outer = float(min_ii(BLI_rcti_size_x(rect), BLI_rcti_size_y(rect))) / 2.0f;
+  const float ring_inner = outer * RING_TRIANGLE_RING_FAC;
+  return {outer, ring_inner, ring_inner * RING_TRIANGLE_TRI_FAC};
+}
+
+void hsvringtriangle_hue_from_pos(const rcti *rect, const float mx, const float my, float *r_hue)
+{
+  const float centx = BLI_rcti_cent_x_fl(rect);
+  const float centy = BLI_rcti_cent_y_fl(rect);
+
+  *r_hue = hsvringtriangle_hue_from_angle(atan2f(my - centy, mx - centx));
+}
+
+void hsvringtriangle_sv_from_pos(const rcti *rect,
+                                 const float mx,
+                                 const float my,
+                                 const float hue,
+                                 float *r_sat,
+                                 float *r_val)
+{
+  const float centx = BLI_rcti_cent_x_fl(rect);
+  const float centy = BLI_rcti_cent_y_fl(rect);
+  const RingTriangleVertices tri = hsvringtriangle_vertices(
+      hsvringtriangle_radii_get(rect).triangle, hue);
+  const float2 m_delta = {mx - centx, my - centy};
+
+  /* Barycentric coordinates of the point relative to the triangle. */
+  const float denom = ((tri.white.y - tri.black.y) * (tri.hue.x - tri.black.x) +
+                       (tri.black.x - tri.white.x) * (tri.hue.y - tri.black.y));
+  const float lambda_hue = ((tri.white.y - tri.black.y) * (m_delta.x - tri.black.x) +
+                            (tri.black.x - tri.white.x) * (m_delta.y - tri.black.y)) /
+                           denom;
+  const float lambda_white = ((tri.black.y - tri.hue.y) * (m_delta.x - tri.black.x) +
+                              (tri.hue.x - tri.black.x) * (m_delta.y - tri.black.y)) /
+                             denom;
+
+  /* Value spans the hue and white vertices, saturation is the share of the hue vertex. Points
+   * outside the triangle clamp onto its edges. The value 0 edge collapses onto the black vertex,
+   * so fall back to saturation 0 when the value is too small to resolve the ratio reliably (the
+   * color is black there regardless of the saturation). */
+  const float val = lambda_hue + lambda_white;
+  const float sat = (val > 1e-5f) ? lambda_hue / val : 0.0f;
+  *r_sat = clamp_f(sat, 0.0f, 1.0f);
+  *r_val = clamp_f(val, 0.0f, 1.0f);
+}
+
+void hsvringtriangle_pos_from_hue(const rcti *rect, const float hue, float *r_xpos, float *r_ypos)
+{
+  const float centx = BLI_rcti_cent_x_fl(rect);
+  const float centy = BLI_rcti_cent_y_fl(rect);
+  const RingTriangleRadii radii = hsvringtriangle_radii_get(rect);
+
+  /* Cursor in the middle of the ring. */
+  const float rad = (radii.outer + radii.ring_inner) * 0.5f;
+  const float ang = hsvringtriangle_angle_from_hue(hue);
+  *r_xpos = centx + cosf(ang) * rad;
+  *r_ypos = centy + sinf(ang) * rad;
+}
+
+void hsvringtriangle_pos_from_sv(const rcti *rect,
+                                 const float hue,
+                                 const float sat,
+                                 const float val,
+                                 float *r_xpos,
+                                 float *r_ypos)
+{
+  const float centx = BLI_rcti_cent_x_fl(rect);
+  const float centy = BLI_rcti_cent_y_fl(rect);
+  const RingTriangleVertices tri = hsvringtriangle_vertices(
+      hsvringtriangle_radii_get(rect).triangle, hue);
+
+  /* Barycentric mapping: value 0 is the black vertex, value 1 spans the white (saturation 0)
+   * and hue (saturation 1) vertices. */
+  const float s = clamp_f(sat, 0.0f, 1.0f);
+  const float v = clamp_f(val, 0.0f, 1.0f);
+  const float2 pos = tri.hue * (s * v) + tri.white * ((1.0f - s) * v) + tri.black * (1.0f - v);
+  *r_xpos = centx + pos.x;
+  *r_ypos = centy + pos.y;
+}
+
+/** Picker-space HSV to RGB in display space, the same conversion the HSV circle uses. */
+static void hsvringtriangle_hsv_to_display_rgb(Button *but,
+                                               const float hsv[3],
+                                               const bool is_color_gamma,
+                                               float r_rgb[3])
+{
+  color_picker_hsv_to_rgb(hsv, r_rgb);
+  perceptual_to_scene_linear_space(but, r_rgb);
+
+  if (!is_color_gamma) {
+    block_cm_to_display_space_v3(but->block, r_rgb);
+  }
+}
+
+static void draw_but_RING_TRIANGLE(Button *but, const uiWidgetColors *wcol, const rcti *rect)
+{
+  const int tot = 64;
+  const float radstep = 2.0f * float(M_PI) / float(tot);
+  const float centx = BLI_rcti_cent_x_fl(rect);
+  const float centy = BLI_rcti_cent_y_fl(rect);
+  const RingTriangleRadii radii = hsvringtriangle_radii_get(rect);
+
+  ColorPicker *cpicker = static_cast<ColorPicker *>(but->custom_data);
+  float rgb[3], hsv[3], rgb_perceptual[3];
+  const bool is_color_gamma = button_is_color_gamma(but);
+
+  /* Initialize for compatibility. */
+  copy_v3_v3(hsv, cpicker->hsv_perceptual);
+
+  /* Compute current hue. */
+  button_v3_get(but, rgb);
+  copy_v3_v3(rgb_perceptual, rgb);
+  scene_linear_to_perceptual_space(but, rgb_perceptual);
+  color_picker_rgb_to_hsv_compat(rgb_perceptual, hsv);
+
+  if (!is_color_gamma) {
+    block_cm_to_display_space_v3(but->block, rgb);
+  }
+
+  CLAMP(hsv[1], 0.0f, 1.0f); /* for display only */
+  CLAMP(hsv[2], 0.0f, 1.0f); /* for display only */
+
+  /* exception: if 'lock' is set, lock the value of the triangle to 1.
+   * Useful for color correction tools where you're only interested in hue. */
+  if (cpicker->use_color_lock) {
+    hsv[2] = 1.0f;
+  }
+
+  const RingTriangleVertices tri = hsvringtriangle_vertices(radii.triangle, hsv[0]);
+
+  GPUVertFormat *format = immVertexFormat();
+  uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  const uint color = GPU_vertformat_attr_add(format, "color", gpu::VertAttrType::SFLOAT_32_32_32);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_SMOOTH_COLOR);
+
+  /* Hue ring, always at full value so it stays readable (the triangle shows the value). */
+  immBegin(GPU_PRIM_TRI_STRIP, (tot + 1) * 2);
+  float ang = 0.0f;
+  for (int a = 0; a <= tot; a++, ang += radstep) {
+    const float hsv_ang[3] = {hsvringtriangle_hue_from_angle(ang), 1.0f, 1.0f};
+    float rgb_ang[3];
+
+    hsvringtriangle_hsv_to_display_rgb(but, hsv_ang, is_color_gamma, rgb_ang);
+
+    immAttr3fv(color, rgb_ang);
+    immVertex2f(pos, centx + cosf(ang) * radii.outer, centy + sinf(ang) * radii.outer);
+    immAttr3fv(color, rgb_ang);
+    immVertex2f(
+        pos, centx + cosf(ang) * radii.ring_inner, centy + sinf(ang) * radii.ring_inner);
+  }
+  immEnd();
+
+  /* Rotating saturation/value triangle: smooth color interpolation between the pure hue,
+   * white and black vertices. */
+  {
+    const float hsv_hue[3] = {hsv[0], 1.0f, 1.0f};
+    const float hsv_white[3] = {0.0f, 0.0f, 1.0f};
+    const float hsv_black[3] = {0.0f, 0.0f, 0.0f};
+    float rgb_hue[3], rgb_white[3], rgb_black[3];
+    hsvringtriangle_hsv_to_display_rgb(but, hsv_hue, is_color_gamma, rgb_hue);
+    hsvringtriangle_hsv_to_display_rgb(but, hsv_white, is_color_gamma, rgb_white);
+    hsvringtriangle_hsv_to_display_rgb(but, hsv_black, is_color_gamma, rgb_black);
+
+    immBegin(GPU_PRIM_TRIS, 3);
+    immAttr3fv(color, rgb_hue);
+    immVertex2f(pos, centx + tri.hue.x, centy + tri.hue.y);
+    immAttr3fv(color, rgb_white);
+    immVertex2f(pos, centx + tri.white.x, centy + tri.white.y);
+    immAttr3fv(color, rgb_black);
+    immVertex2f(pos, centx + tri.black.x, centy + tri.black.y);
+    immEnd();
+  }
+
+  immUnbindProgram();
+
+  /* Outlines of the ring and the triangle, then the hue cursor. */
+  format = immVertexFormat();
+  pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  GPU_line_smooth(true);
+
+  immUniformColor3ubv(wcol->outline);
+  imm_draw_circle_wire_2d(pos, centx, centy, radii.outer, tot);
+  imm_draw_circle_wire_2d(pos, centx, centy, radii.ring_inner, tot);
+
+  /* The filled triangle is not anti-aliased by the rasterizer, a smooth outline hides the
+   * stair-stepping on its edges. */
+  immBegin(GPU_PRIM_LINE_LOOP, 3);
+  immVertex2f(pos, centx + tri.hue.x, centy + tri.hue.y);
+  immVertex2f(pos, centx + tri.white.x, centy + tri.white.y);
+  immVertex2f(pos, centx + tri.black.x, centy + tri.black.y);
+  immEnd();
+
+  /* Hue cursor: a hollow circle slightly wider than the ring, so the hue under it stays visible
+   * (the final color is shown by the color property button). Black outer, white inner outline. */
+  float xpos, ypos;
+  hsvringtriangle_pos_from_hue(rect, hsv[0], &xpos, &ypos);
+  const float hue_cursor_radius = (radii.outer - radii.ring_inner) * 0.5f + 2.0f * U.pixelsize;
+  const float outline_width = max_ff(1.0f, U.pixelsize);
+
+  GPU_line_width(outline_width);
+  immUniformColor4f(0.0f, 0.0f, 0.0f, 0.8f);
+  imm_draw_circle_wire_2d(pos, xpos, ypos, hue_cursor_radius + outline_width, 32);
+  immUniformColor4f(1.0f, 1.0f, 1.0f, 0.9f);
+  imm_draw_circle_wire_2d(pos, xpos, ypos, hue_cursor_radius, 32);
+  GPU_line_width(1.0f);
+
+  immUnbindProgram();
+
+  GPU_blend(GPU_BLEND_NONE);
+  GPU_line_smooth(false);
+
+  /* Saturation/value cursor in the triangle. */
+  const float zoom = 1.0f / but->block->aspect;
+  hsvringtriangle_pos_from_sv(rect, hsv[0], hsv[1], hsv[2], &xpos, &ypos);
+  hsv_cursor(xpos, ypos, zoom, rgb, hsv, but->flag & UI_SELECT);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Draw Custom Buttons
  * \{ */
 
@@ -6290,7 +6566,12 @@ void draw_button(const bContext *C, ARegion *region, uiStyle *style, Button *but
       }
 
       case ButtonType::HsvCircle:
-        draw_but_HSVCIRCLE(but, &tui->wcol_regular, rect);
+        if (is_ring_triangle_picker()) {
+          draw_but_RING_TRIANGLE(but, &tui->wcol_regular, rect);
+        }
+        else {
+          draw_but_HSVCIRCLE(but, &tui->wcol_regular, rect);
+        }
         break;
 
       case ButtonType::ColorBand: {

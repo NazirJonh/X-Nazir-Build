@@ -682,6 +682,13 @@ struct ButtonExtraOpIcon {
   bool disabled;
 };
 
+/** Part of the ring + triangle picker that the current drag edits (fixed when the drag starts). */
+enum class RingTriangleDragZone : char {
+  None = 0,
+  Ring,
+  Triangle,
+};
+
 struct ColorPicker {
   ColorPicker *next, *prev;
 
@@ -719,6 +726,8 @@ struct ColorPicker {
   /** Cubic saturation for the color wheel. */
   bool use_color_cubic;
   bool use_color_lock;
+  /** Only valid during a drag, reset by the ring + triangle handler on drag start. */
+  RingTriangleDragZone ring_triangle_zone;
   bool use_luminosity_lock;
   float luminosity_lock_value;
 
@@ -1521,6 +1530,44 @@ void hsvcircle_pos_from_vals(
     const ColorPicker *cpicker, const rcti *rect, const float *hsv, float *r_xpos, float *r_ypos);
 void hsvcube_pos_from_vals(
     const ButtonHSVCube *hsv_but, const rcti *rect, const float *hsv, float *r_xp, float *r_yp);
+
+/* -------------------------------------------------------------------- */
+/** \name Ring + Triangle Color Picker (#USER_CP_RING_TRIANGLE)
+ *
+ * A hue ring with a rotating saturation/value triangle inside it. The triangle apex (pure hue
+ * color) points towards the hue position on the ring, the other vertices are white and black.
+ *
+ * All positions are in the button rectangle space (the same space #hsvcircle_pos_from_vals
+ * uses), so drawing and event handling stay aligned.
+ * \{ */
+
+/** The picker is drawn larger than the other pickers, the popup and the template follow it. */
+constexpr float RING_TRIANGLE_PICKER_SIZE_FAC = 1.5f;
+
+struct RingTriangleRadii {
+  /** Outer radius of the hue ring. */
+  float outer;
+  /** Inner radius of the hue ring. */
+  float ring_inner;
+  /** Circum-radius of the saturation/value triangle. */
+  float triangle;
+};
+
+/** True when the user preference selects the ring + triangle picker. */
+bool is_ring_triangle_picker();
+RingTriangleRadii hsvringtriangle_radii_get(const rcti *rect);
+/** Hue picked from a position on the ring (same angle convention as the HSV circle). */
+void hsvringtriangle_hue_from_pos(const rcti *rect, float mx, float my, float *r_hue);
+/** Saturation/value picked from a position inside the rotating triangle of \a hue. */
+void hsvringtriangle_sv_from_pos(
+    const rcti *rect, float mx, float my, float hue, float *r_sat, float *r_val);
+/** Position of the hue cursor, in the middle of the ring. */
+void hsvringtriangle_pos_from_hue(const rcti *rect, float hue, float *r_xpos, float *r_ypos);
+/** Position of the saturation/value cursor inside the rotating triangle of \a hue. */
+void hsvringtriangle_pos_from_sv(
+    const rcti *rect, float hue, float sat, float val, float *r_xpos, float *r_ypos);
+
+/** \} */
 
 /**
  * \param float_precision: For number buttons the precision

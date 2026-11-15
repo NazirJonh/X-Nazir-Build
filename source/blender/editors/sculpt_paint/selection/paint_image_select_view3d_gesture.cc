@@ -497,15 +497,10 @@ static PaintSelectionEdgePolicy gesture_edge_policy_from_settings(const bContext
   return image_paint_selection_edge_policy_from_feather(feather_px);
 }
 
-/** Rasterize the quad / polygon / circle the gesture described. */
-static bool gesture_apply(bContext *C, wmOperator *op, SelectGesture3DData &data)
+/** The selection operation of the gesture: the tool's mode, with Shift / Ctrl seen so far. */
+static eSelectOp gesture_select_op(const wmOperator &op, const SelectGesture3DData &data)
 {
-  ARegion *region = CTX_wm_region(C);
-  Object *ob = CTX_data_active_object(C);
-  if (region == nullptr || ob == nullptr) {
-    return false;
-  }
-  eSelectOp sel_op = eSelectOp(RNA_enum_get(op->ptr, "mode"));
+  eSelectOp sel_op = eSelectOp(RNA_enum_get(op.ptr, "mode"));
   /* The keymap only maps Shift / Ctrl held at the press; holding them later (or while moving the
    * shape with Space) must still extend / subtract. An explicit mode of the tool is kept. The
    * modifiers that are part of the keymap binding itself (the temporary lasso always holds Ctrl)
@@ -520,6 +515,18 @@ static bool gesture_apply(bContext *C, wmOperator *op, SelectGesture3DData &data
       sel_op = SEL_OP_SUB;
     }
   }
+  return sel_op;
+}
+
+/** Rasterize the quad / polygon / circle the gesture described. */
+static bool gesture_apply(bContext *C, wmOperator *op, SelectGesture3DData &data)
+{
+  ARegion *region = CTX_wm_region(C);
+  Object *ob = CTX_data_active_object(C);
+  if (region == nullptr || ob == nullptr) {
+    return false;
+  }
+  const eSelectOp sel_op = gesture_select_op(*op, data);
 
   /* The gesture geometry is mapped onto the anchor plane once: the inside test below runs per
    * projected texel and must not redo the screen->plane mapping per pixel. */
@@ -977,7 +984,20 @@ static wmOperatorStatus view3d_select_polyline_invoke(bContext *C,
                                                       wmOperator *op,
                                                       const wmEvent *event)
 {
-  return gesture_invoke_common(C, op, event, GestureKind::Polyline);
+  const wmOperatorStatus status = gesture_invoke_common(C, op, event, GestureKind::Polyline);
+  if (status != OPERATOR_RUNNING_MODAL) {
+    return status;
+  }
+  /* The polyline is click-built and may take many clicks to close, so a replacing selection drops
+   * the previous one at the first click instead of at the (possibly much later) confirm. Extend /
+   * subtract keep it. */
+  const auto *data = static_cast<const SelectGesture3DData *>(op->customdata);
+  if (gesture_select_op(*op, *data) == SEL_OP_SET) {
+    if (Object *ob = CTX_data_active_object(C)) {
+      image_select_view3d_deselect(C, *ob);
+    }
+  }
+  return status;
 }
 
 static wmOperatorStatus view3d_select_polyline_modal(bContext *C,

@@ -5580,6 +5580,11 @@ static void rna_def_userdef_view(BlenderRNA *brna)
        0,
        "Square (HV + S)",
        "A square showing Hue/Value, with Saturation slider"},
+      {USER_CP_RING_TRIANGLE,
+       "RING_TRIANGLE",
+       0,
+       "Ring + Triangle",
+       "A Hue ring with a rotating Saturation/Value triangle inside"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 

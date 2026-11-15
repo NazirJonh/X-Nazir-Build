@@ -597,6 +597,12 @@ static void colorpicker_tooltips(ColorPicker *cpicker,
       axis_y = name_val;
       slider = name_sat;
       break;
+    case USER_CP_RING_TRIANGLE:
+      /* The area covers the hue ring and the saturation/value triangle, there is no slider. */
+      SNPRINTF_UTF8(cpicker->tooltip_area, "%s/%s/%s", name_hue, name_sat, name_val);
+      *r_area_tooltip = cpicker->tooltip_area;
+      *r_slider_tooltip = name_val;
+      return;
     default:
       *r_area_tooltip = name_color;
       *r_slider_tooltip = name_val;
@@ -655,6 +661,40 @@ static void colorpicker_circle(Block *block,
   hsv_but->gradient_type = (U.color_picker_type == USER_CP_CIRCLE_HSL) ? GRAD_L_ALT : GRAD_V_ALT;
   button_func_set(hsv_but, colorpicker_rgba_update_cb, hsv_but, hsv_but);
   hsv_but->custom_data = cpicker;
+}
+
+/* The popup width follows the larger ring + triangle picker. */
+#define PICKER_RING_TRIANGLE_SIZE (PICKER_H * RING_TRIANGLE_PICKER_SIZE_FAC)
+
+static void colorpicker_ring_triangle(Block *block,
+                                      PointerRNA *ptr,
+                                      PropertyRNA *prop,
+                                      ColorPicker *cpicker)
+{
+  const float ring_size = PICKER_RING_TRIANGLE_SIZE;
+  Button *bt;
+  const char *area_tooltip;
+  const char *slider_tooltip;
+
+  colorpicker_tooltips(cpicker, &area_tooltip, &slider_tooltip);
+
+  /* Hue ring with rotating saturation/value triangle. No extra slider is added: the triangle
+   * already covers saturation and value, so the slider tooltip is deliberately unused. */
+  bt = uiDefButR_prop(block,
+                      ButtonType::HsvCircle,
+                      "",
+                      0,
+                      0,
+                      ring_size,
+                      ring_size,
+                      ptr,
+                      prop,
+                      -1,
+                      0.0,
+                      0.0,
+                      area_tooltip);
+  button_func_set(bt, colorpicker_rgba_update_cb, bt, bt);
+  bt->custom_data = cpicker;
 }
 
 static void colorpicker_square(
@@ -799,7 +839,8 @@ static void block_colorpicker(
   PointerRNA *ptr = &from_but->rnapoin;
   PropertyRNA *prop = from_but->rnaprop;
 
-  picker_width = PICKER_TOTAL_W;
+  picker_width = (U.color_picker_type == USER_CP_RING_TRIANGLE) ? PICKER_RING_TRIANGLE_SIZE :
+                                                                  PICKER_TOTAL_W;
 
   RNA_property_float_ui_range(ptr, prop, &softmin, &softmax, &step, &precision);
   RNA_property_float_range(ptr, prop, &hardmin, &hardmax);
@@ -820,6 +861,9 @@ static void block_colorpicker(
       break;
     case USER_CP_SQUARE_HV:
       colorpicker_square(block, ptr, prop, GRAD_HV, cpicker);
+      break;
+    case USER_CP_RING_TRIANGLE:
+      colorpicker_ring_triangle(block, ptr, prop, cpicker);
       break;
 
     /* user default */

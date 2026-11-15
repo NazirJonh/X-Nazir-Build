@@ -388,6 +388,19 @@ bool BKE_paint_layers_effect_is_gpu_computed(const MaterialPaintLayer &effect);
 const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialCompositeImageLayer &layer,
                                                     bool mask_slice = false);
 
+/**
+ * Describe \a layer alone, as a whole row, in \a channel for the GPU: the same entry
+ * #BKE_paint_layers_bake_render_node renders on the CPU, but described only (maps stay images, no
+ * nested slice is rendered). False under the same refusals as that function (a generator the bake
+ * cannot evaluate, an Object or Generated pattern, which need a surface the GPU path has no use
+ * for), and when the row has nothing in \a channel.
+ */
+bool BKE_paint_layers_gpu_row_entry(const Material &ma,
+                                    const MaterialPaintLayer &layer,
+                                    int channel,
+                                    PaintMaterialCompositeImageLayer &r_entry,
+                                    const Object *painted_object = nullptr);
+
 /* -------------------------------------------------------------------- */
 /** \name GPU Effect Pass Plan
  *

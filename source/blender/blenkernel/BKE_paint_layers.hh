@@ -3247,6 +3247,9 @@ int BKE_paint_layers_bake_object_issue_get(const Material &ma, const MaterialPai
  *
  * \param dst_rect: (x0, y0, x1, y1) in result pixels; when given only that rectangle is computed
  * and written, which is how a partial re-bake touches one changed tile.
+ * \param whole_row: render the row as it looks, its mask and its opacity folded in, even when it
+ * carries a CPU-computed effect. For a caller that wants the picture and has no live layer to lay
+ * the mask over it (the row result); never for a map a substitution reads.
  * \param surface: the UV-to-object-space surface of the object the bake is for. A subtree holding
  * an Object or Generated Gradient needs it -- the render reads the coordinate of each texel's
  * surface point -- and is refused without one: the texel's own UV is the approximate preview, not
@@ -3266,7 +3269,8 @@ bool BKE_paint_layers_bake_render_node(
     float *r_coverage_gray,
     const int *dst_rect = nullptr,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &surface = nullptr,
-    const PaintLayerTileContext &context = {});
+    const PaintLayerTileContext &context = {},
+    bool whole_row = false);
 
 /**
  * The pixel dimensions of \a layer's content in \a channel, the size a bake defaults to. For a
@@ -3454,7 +3458,22 @@ struct PaintLayersRowResultJob;
 PaintLayersRowResultJob *BKE_paint_layers_row_result_job_create(
     Main &bmain, Material &ma, const bUUID &source_marker, const bUUID &target_marker, int size);
 
-/** Render \a source_marker's channels from the localized copy. Runs on the worker thread. */
+/**
+ * Hand the job a channel rendered elsewhere (the GPU, on the main thread): \a rgba is the
+ * `size x size` straight colour with the content alpha, exactly what the CPU render of the same
+ * channel gives. The compute step then leaves that channel alone.
+ *
+ * \return false, taking nothing, for a stack tiled beyond its base tile: the GPU render is the base
+ * tile alone, so the CPU renders every tile of such a stack.
+ */
+bool BKE_paint_layers_row_result_job_channel_set(PaintLayersRowResultJob &job,
+                                                 int channel,
+                                                 const float *rgba);
+
+/**
+ * Render \a source_marker's channels from the localized copy, those not handed in with
+ * #BKE_paint_layers_row_result_job_channel_set. Runs on the worker thread.
+ */
 void BKE_paint_layers_row_result_job_compute(PaintLayersRowResultJob &job);
 
 /**

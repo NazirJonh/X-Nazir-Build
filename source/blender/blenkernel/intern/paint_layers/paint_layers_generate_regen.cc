@@ -1513,6 +1513,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     /* A group that was kept unchanged had its value inputs written by an earlier pass; this makes
      * the instances the root just re-created carry the description's current values. */
     BKE_paint_layers_values_sync(ma);
+    /* Likewise for a kept group's ramp: a stop edit is data, not part of the group's topology hash,
+     * so a pass that rebuilt only the shape would leave the old stops in the kept valtorgb node. A
+     * rebuilt node already matches, so this writes only what a kept one missed. */
+    paint_layers_gradient_ramp_sync(ma, bmain);
 
     /* Everything was built and wired: only now do the stored hashes say "this is what exists". */
     factory.topology_hashes_commit();

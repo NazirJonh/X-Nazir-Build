@@ -1459,7 +1459,8 @@ bool composite_image_layer_build(const Material &ma,
       out.mask_iuser = nullptr;
       out.mask_from_alpha = false;
       out.mask_influence = 1.0f;
-      out.color_alpha_coverage = record != nullptr && record->image != nullptr;
+      /* The slice's bake is read back the way a substituted row's is (the shared predicate). */
+      out.color_alpha_coverage = paint_layer_bake_color_alpha_is_coverage(layer, record);
       out.blend = layer_channel_blend(layer, channel);
       composite_height_settings_describe(layer, channel, out);
       out.opacity = ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) *
@@ -1526,10 +1527,8 @@ bool composite_image_layer_build(const Material &ma,
     out.mask_iuser = nullptr;
     out.mask_from_alpha = false;
     out.mask_influence = 1.0f;
-    /* The colour map's alpha is the content alpha the live row had (a folder's subtree, or its
-     * map); a flat constant had none and covers by the shared coverage alone, as it does live. */
-    out.color_alpha_coverage = BKE_paint_layers_is_folder(layer) ||
-                               (record != nullptr && record->image != nullptr);
+    /* The colour map's alpha is the content alpha the live row had (the shared predicate). */
+    out.color_alpha_coverage = paint_layer_bake_color_alpha_is_coverage(layer, record);
     out.blend = layer_channel_blend(layer, channel);
     composite_height_settings_describe(layer, channel, out);
     /* The coverage map holds what the content covers rather than the mask times the opacity; the
@@ -3255,7 +3254,8 @@ bool BKE_paint_layers_bake_render_node(
     float *r_coverage_gray,
     const int *dst_rect,
     const std::shared_ptr<const PaintMaterialCompositeSurface> &surface,
-    const PaintLayerTileContext &context)
+    const PaintLayerTileContext &context,
+    const bool whole_row)
 {
   const Object *painted_object = context.painted_object;
   const int tile_number = context.tile_number;
@@ -3278,7 +3278,11 @@ bool BKE_paint_layers_bake_render_node(
   /* Learn the stack dimensions without rendering or allocating a single nested slice. A row
    * carrying a CPU-computed effect is rendered as its content alone: its mask and its opacity are
    * laid live over the map the result becomes, so a stroke into the mask never asks for this. */
-  const PaintLayerBakeScope scope = paint_layer_bake_scope(layer, false);
+  /* A caller that wants the finished picture asks for the whole row: the live description already
+   * renders a CPU effect through the effect cache (as it does for a child of another row's bake),
+   * so the mask and the opacity come along without a separate pass. */
+  const PaintLayerBakeScope scope = whole_row ? PaintLayerBakeScope::WholeRow :
+                                                paint_layer_bake_scope(layer, false);
   PaintMaterialCompositeImageLayer dims_entry;
   if (!composite_bake_entry(ma,
                             layer,
@@ -3389,6 +3393,44 @@ bool BKE_paint_layers_bake_render_node(
     }
   }
   return true;
+}
+
+bool BKE_paint_layers_gpu_row_entry(const Material &ma,
+                                    const MaterialPaintLayer &layer,
+                                    const int channel,
+                                    PaintMaterialCompositeImageLayer &r_entry,
+                                    const Object *painted_object)
+{
+  /* The CPU render's own refusals, so a row the GPU takes is one the CPU would have rendered. With
+   * no surface, a pattern that reads the object's geometry is the approximate preview, not a bake.
+   */
+  if (!BKE_paint_layers_generator_subtree_is_bakeable(layer) ||
+      (!BKE_paint_layers_generator_subtree_is_shared_bakeable(layer) &&
+       !paint_layer_kind_reads_anchor_point(layer)))
+  {
+    return false;
+  }
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
+      (BKE_paint_layers_is_folder(layer) && BKE_paint_layers_folder_is_pass_through(layer)))
+  {
+    return false;
+  }
+  return composite_image_layer_build(ma,
+                                     layer,
+                                     channel,
+                                     1.0f,
+                                     false,
+                                     true,
+                                     r_entry,
+                                     PAINT_TILE_NUMBER_BASE,
+                                     nullptr,
+                                     nullptr,
+                                     false,
+                                     /*describe_only=*/true,
+                                     nullptr,
+                                     nullptr,
+                                     PaintLayerBakeScope::WholeRow,
+                                     painted_object);
 }
 
 bool BKE_paint_layers_row_dimensions(const Material &ma,

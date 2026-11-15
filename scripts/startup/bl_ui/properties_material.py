@@ -12,6 +12,7 @@ from bpy_extras.node_utils import find_node_input
 from bl_ui.space_properties import PropertiesAnimationMixin
 
 from bl_ui.properties_paint_common import (
+    _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS,
     paint_shape_tool_active,
 )
 
@@ -30,6 +31,7 @@ from bl_ui.properties_material_paint_layers import (
     draw_material_smart_asset_expose,
     draw_material_smart_asset_rows,
     draw_material_update_now,
+    material_layer_visible_channels,
 )
 from bl_operators.material_paint_layers import (
     mesh_map_objects_for_material,
@@ -811,6 +813,13 @@ def draw_material_generator_layer(layout, context, owner, layer, draw_channels=T
         draw_material_layer_channels(layout, context, owner, layer)
 
 
+bpy.types.WindowManager.material_layer_show_channel_overview = bpy.props.BoolProperty(
+    name="Channel Overview",
+    description="Show the opacity and blend of every active channel of the layer",
+    default=False,
+)
+
+
 class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
     """The Layer Material tab for a layered material: the active layer read from the description,
     its opacity and its channels.
@@ -833,11 +842,55 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         layout.prop(row, "locked", text="Lock", icon='LOCKED' if row.locked else 'UNLOCKED')
 
     @staticmethod
-    def _draw_opacity_lock(layout, row):
-        """Opacity with the Lock toggle to its right, as one row."""
+    def _draw_opacity_lock(layout, row, channel_overview=None):
+        """Opacity with the Lock toggle to its right, as one row.
+
+        With #channel_overview (window manager, material, channel ids) a chevron follows the lock
+        and unfolds every active channel's own opacity and blend below the row. The fold lives on
+        the window manager, so it stays open while the active layer changes.
+        """
         line = layout.row(align=True)
         line.prop(row, "opacity", text="Opacity")
         line.prop(row, "locked", text="", icon='LOCKED' if row.locked else 'UNLOCKED')
+        if channel_overview is None:
+            return
+        wm, channel_ids = channel_overview
+        expanded = wm.material_layer_show_channel_overview
+        # Unembossed like the Source Picker chevron, so it reads as a fold arrow, not a button.
+        line.prop(wm, "material_layer_show_channel_overview", text="",
+                  icon='DOWNARROW_HLT' if expanded else 'RIGHTARROW', emboss=False)
+        if not expanded:
+            return
+
+        records = {record.channel: record for record in row.channels}
+        settings = {entry.channel: entry for entry in row.channel_settings}
+        # A folder has no channel records: every channel of the set is laid through its settings.
+        is_folder = row.source == 'STACK'
+        shown = [
+            channel_id for channel_id in channel_ids
+            if settings.get(channel_id) is not None and (
+                is_folder or (records.get(channel_id) is not None and records[channel_id].use))
+        ]
+        # A box rather than a subpanel: this is drawn inside the row's own draw(), and a subpanel
+        # needs a panel class of its own, which could not read the overview's inputs.
+        col = layout.box().column(align=False)
+        col.use_property_split = False
+        drawn_any = bool(shown)
+        for index, channel_id in enumerate(shown):
+            entry = settings[channel_id]
+            if index:
+                col.separator()
+            split = col.split(factor=0.3, align=True)
+            split.label(text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id])
+            sub = split.row(align=True)
+            sub.prop(entry, "opacity", text="")
+            sub.prop(entry, "blend_type", text="")
+            reset = sub.operator("material.paint_layer_channel_settings_reset", text="",
+                                 icon='LOOP_BACK')
+            reset.marker = row.marker
+            reset.channel = channel_id
+        if not drawn_any:
+            col.label(text="No active channels")
 
     def draw(self, context):
         layout = self.layout
@@ -857,9 +910,9 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             if item.gradient_supported:
                 # A Gradient mask item has a line and a ramp instead of a map; its invert and blend
                 # are the mask item's own, as on any other correction.
+                layout.prop(item, "blend_type", text="Blend")
                 self._draw_opacity_lock(layout, item)
                 layout.prop(item, "mask_contrast", text="Contrast", slider=True)
-                layout.prop(item, "blend_type", text="Blend")
                 if len(item.channels):
                     layout.prop(item.channels[0], "invert", text="Invert", toggle=True)
                 layout.separator()
@@ -868,8 +921,8 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             if item.generator_supported:
                 # A pattern mask item lays its ramp's grey over the row's mask: the same panel a
                 # generator layer draws, with the ramp of its own and no channels to choose.
-                self._draw_opacity_lock(layout, item)
                 layout.prop(item, "blend_type", text="Blend")
+                self._draw_opacity_lock(layout, item)
                 if len(item.channels):
                     layout.prop(item.channels[0], "invert", text="Invert", toggle=True)
                 layout.separator()
@@ -905,12 +958,11 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             if item.source == 'ANCHOR_POINT':
                 # A marker publishes a slice and a reader lays one: no map, no channels to choose.
                 if item.is_anchor_point_reader:
-                    self._draw_opacity_lock(layout, item)
                     layout.prop(item, "blend_type", text="Blend")
+                    self._draw_opacity_lock(layout, item)
                 else:
                     self._draw_lock(layout, item)
                 return
-            self._draw_lock(layout, item)
             draw_material_mask_item(layout, context, item)
             return
 
@@ -918,10 +970,13 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             # The marker is a place: it has no opacity, blend or channels of its own.
             return
 
-        self._draw_opacity_lock(layout, layer)
+        overview = None
+        if layer.source != 'MATERIAL':
+            overview = (context.window_manager, material_layer_visible_channels(owner))
         # The row's own blend is the base a channel inherits; a channel's override is edited in the
         # Outliner stack, beside its opacity.
         layout.prop(layer, "blend_type", text="Blend")
+        self._draw_opacity_lock(layout, layer, overview)
         # A Material row owns no channel records: it lays what its source material shows.
         if layer.source == 'MATERIAL':
             layout.separator()
@@ -1235,7 +1290,9 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         row = cls._shown_row(context)
-        return row is not None and (row.mapping_available or row.projection_supported)
+        # The base mask is painted at the raw UV, so there is no mapping or projection to edit.
+        return (row is not None and not row.is_mask_base and
+                (row.mapping_available or row.projection_supported))
 
     def draw_header_preset(self, _context):
         # Drawn while the panel's poll passed, so a row that carries a mapping is shown; the menu's
@@ -1930,6 +1987,8 @@ class LAYER_MT_row_result_source(Menu):
     """The rows whose result can be baked into the active row's channel maps."""
 
     bl_label = "Source Row"
+    # Typing filters the rows by name, so a long stack needs no scrolling through the tree.
+    bl_options = {'SEARCH_ON_KEY_PRESS'}
 
     def draw(self, context):
         layout = self.layout
@@ -2034,6 +2093,9 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
 
     bl_idname = "LAYER_MATERIAL_PT_mesh_maps"
     bl_label = "Mesh Maps"
+    bl_options = {'DEFAULT_CLOSED'}
+    # Sits right above Output Texture, after the settings panels.
+    bl_order = 1
 
     @classmethod
     def poll(cls, context):
@@ -2259,6 +2321,7 @@ class LAYER_MATERIAL_PT_output_texture(LayerMaterialButtonsPanel, Panel):
     bl_idname = "LAYER_MATERIAL_PT_output_texture"
     bl_label = "Output Texture"
     bl_options = {'DEFAULT_CLOSED'}
+    bl_order = 2
 
     @classmethod
     def poll(cls, context):

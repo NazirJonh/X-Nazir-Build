@@ -25,6 +25,7 @@ static constexpr bool RNA_SPACE_DEBUG_ENABLED = false;
 
 #include "BKE_context.hh"
 #include "BKE_geometry_set.hh"
+#include "BKE_icons.hh"
 #include "BKE_movieclip.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
@@ -3479,6 +3480,14 @@ static const EnumPropertyItem *rna_SpaceProperties_context_itemf(bContext * /*C*
     /* Add the object data icon dynamically for the data tab. */
     if (tab == BCONTEXT_DATA) {
       (item + totitem_added - 1)->icon = sbuts->dataicon;
+    }
+
+    /* The Layered Material tab wears a Material Symbols glyph in its own color where the font
+     * provides one; the color belongs to this icon, not to the codepoint. */
+    if (tab == BCONTEXT_LAYER_MATERIAL) {
+      if (const int icon_id = BKE_icon_glyph_colored_ensure(0xE868, 0xC4A0EE)) {
+        (item + totitem_added - 1)->icon = icon_id;
+      }
     }
   }
 

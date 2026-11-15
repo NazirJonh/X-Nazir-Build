@@ -181,6 +181,30 @@ class MATERIAL_OT_paint_layer_channel_toggle(_PaintLayerOperator):
         return {'FINISHED'}
 
 
+class MATERIAL_OT_paint_layer_channel_settings_reset(_PaintLayerOperator):
+    """Reset a layer's opacity and blend in one channel to their defaults."""
+
+    bl_idname = "material.paint_layer_channel_settings_reset"
+    bl_label = "Reset Channel Opacity and Blend"
+    bl_description = "Reset the channel's opacity to 100% and its blend to Inherit"
+
+    channel: bpy.props.EnumProperty(
+        name="Channel",
+        items=lambda self, context: _paint_channel_enum_items(),
+    )
+
+    def execute(self, context):
+        layer = self._layer(context)
+        if layer is None:
+            return {'CANCELLED'}
+        entry = next((item for item in layer.channel_settings if item.channel == self.channel), None)
+        if entry is None:
+            return {'CANCELLED'}
+        entry.opacity = 100.0
+        entry.blend_type = 'INHERIT'
+        return {'FINISHED'}
+
+
 def _leave_mask_target(context, layer):
     """Back to painting the content when the mask being painted is about to go away or off.
 
@@ -1279,6 +1303,7 @@ classes = (
     MATERIAL_OT_paint_layer_channel_add,
     MATERIAL_OT_paint_layer_channel_remove,
     MATERIAL_OT_paint_layer_channel_toggle,
+    MATERIAL_OT_paint_layer_channel_settings_reset,
     MATERIAL_OT_paint_layer_mask_add,
     MATERIAL_OT_paint_layer_mask_remove,
     MATERIAL_OT_paint_layer_mask_toggle,

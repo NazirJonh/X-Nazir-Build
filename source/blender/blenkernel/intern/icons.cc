@@ -57,8 +57,12 @@ static GlobalIconsMap &get_global_icons_map()
   return gIcons;
 }
 
-/** Material Symbols codepoint -> icon id, for #BKE_icon_glyph_ensure. Protected by gIconMutex. */
-using GlyphIconsMap = Map<uint32_t, int>;
+/**
+ * Material Symbols glyph -> icon id, for #BKE_icon_glyph_ensure and
+ * #BKE_icon_glyph_colored_ensure. The key is the codepoint in the low 32 bits and the fixed color
+ * (see #Icon::glyph_color) in the high ones. Protected by gIconMutex.
+ */
+using GlyphIconsMap = Map<uint64_t, int>;
 static GlyphIconsMap &get_glyph_icons_map()
 {
   static GlyphIconsMap gGlyphIcons;
@@ -273,6 +277,7 @@ static Icon *icon_create(int icon_id, int obj_type, void *obj)
   new_icon->obj = obj;
   new_icon->id_type = 0;
   new_icon->glyph = 0;
+  new_icon->glyph_color = 0;
   new_icon->flag = 0;
 
   /* next two lines make sure image gets created */
@@ -417,7 +422,7 @@ int BKE_icon_imbuf_create(ImBuf *ibuf)
   return icon_id;
 }
 
-int BKE_icon_glyph_ensure(const uint32_t codepoint)
+static int icon_glyph_ensure(const uint32_t codepoint, const uint32_t glyph_color)
 {
   BLI_assert(BLI_thread_is_main());
 
@@ -425,10 +430,11 @@ int BKE_icon_glyph_ensure(const uint32_t codepoint)
     return 0;
   }
 
+  const uint64_t key = uint64_t(codepoint) | (uint64_t(glyph_color) << 32);
   int cached_id = 0;
   {
     std::scoped_lock lock(gIconMutex);
-    cached_id = get_glyph_icons_map().lookup_default(codepoint, 0);
+    cached_id = get_glyph_icons_map().lookup_default(key, 0);
   }
   /* The id can outlive its icon when someone deletes the glyph icon explicitly. */
   if (cached_id != 0 && BKE_icon_exists(cached_id)) {
@@ -443,15 +449,27 @@ int BKE_icon_glyph_ensure(const uint32_t codepoint)
 
   Icon *icon = icon_create(icon_id, ICON_DATA_GLYPH, nullptr);
   icon->glyph = codepoint;
+  icon->glyph_color = glyph_color;
   /* Shared and cached: Python must not be able to delete the icon out from under its users. */
   icon->flag = ICON_FLAG_MANAGED;
 
   {
     std::scoped_lock lock(gIconMutex);
-    get_glyph_icons_map().add_overwrite(codepoint, icon_id);
+    get_glyph_icons_map().add_overwrite(key, icon_id);
   }
 
   return icon_id;
+}
+
+int BKE_icon_glyph_ensure(const uint32_t codepoint)
+{
+  return icon_glyph_ensure(codepoint, 0);
+}
+
+int BKE_icon_glyph_colored_ensure(const uint32_t codepoint, const uint32_t rgb)
+{
+  /* Bit 24 marks the color as set, so black (0x000000) is a valid fixed color. */
+  return icon_glyph_ensure(codepoint, (rgb & 0x00FFFFFF) | (1u << 24));
 }
 
 ImBuf *BKE_icon_imbuf_get_buffer(int icon_id)

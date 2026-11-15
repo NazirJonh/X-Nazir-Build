@@ -393,6 +393,88 @@ TEST_F(PaintLayersBakeTest, an_auto_gradient_row_bakes_itself_and_matches_the_li
 }
 
 /**
+ * The regression of a baked Gradient losing its ramp alpha: the bake folds the content alpha out
+ * of the coverage it stores (#bake_common_from_channel), so the substituted row has to cover by
+ * the colour map's alpha again, or the half-transparent end of the ramp shows opaque. A scalar
+ * channel bakes an alpha of one (a value ramp has no transparency), so the multiply it gains is a
+ * no-op and its picture keeps matching the live one.
+ */
+TEST_F(PaintLayersBakeTest, a_baked_gradient_keeps_the_ramp_alpha_the_live_row_covered_by)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  const float start[3] = {0.0f, 0.5f, 0.0f};
+  const float end[3] = {1.0f, 0.5f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_line(*ma, *layer, start, end));
+  /* A half-transparent end stop: the content alpha the live row covers by, which only the colour
+   * map's alpha carries across the bake. */
+  layer->gradient->ramp.data[1].a = 0.5f;
+  /* A scalar channel of the same row: its bake carries an alpha of one, so covering by it again
+   * must not move the picture. */
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  clear_active();
+
+  /* The live stack, before anything is cached. */
+  ImBuf *live_color = IMB_allocImBuf(8, 8, ImBufFlags::ByteData);
+  ASSERT_NE(live_color, nullptr);
+  live_color->channels = 4;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_channel(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, *live_color));
+  ImBuf *live_rough = IMB_allocImBuf(8, 8, ImBufFlags::ByteData);
+  ASSERT_NE(live_rough, nullptr);
+  live_rough->channels = 4;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_channel(*ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, *live_rough));
+
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_TRUE(paint_layer_row_substituted(*ma, *layer));
+  ASSERT_NE(layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  ASSERT_NE(layer->bake->images[PAINT_MATERIAL_CHANNEL_ROUGHNESS], nullptr);
+
+  /* The substituted row covers by the colour map's alpha again, as the live one did -- both in the
+   * colour channel the ramp alpha belongs to and in the scalar one. */
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  EXPECT_TRUE(layers[0].color_alpha_coverage);
+  Vector<PaintMaterialCompositeImageLayer> rough_layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough_layers));
+  ASSERT_EQ(rough_layers.size(), 1);
+  EXPECT_TRUE(rough_layers[0].color_alpha_coverage);
+
+  /* And both pictures are the ones the live stack laid: the alpha folded into the coverage at bake
+   * time comes back out. */
+  const auto expect_matches_live = [&](const int channel, const ImBuf &live) {
+    ImBuf *baked = IMB_allocImBuf(8, 8, ImBufFlags::ByteData);
+    ASSERT_NE(baked, nullptr);
+    baked->channels = 4;
+    ASSERT_TRUE(BKE_paint_layers_composite_channel(*ma, eMaterialPaintChannel(channel), *baked));
+    const uchar *live_pixels = live.byte_data();
+    const uchar *baked_pixels = baked->byte_data();
+    ASSERT_NE(live_pixels, nullptr);
+    ASSERT_NE(baked_pixels, nullptr);
+    for (const int64_t i : IndexRange(8 * 8)) {
+      for (const int k : IndexRange(4)) {
+        EXPECT_NEAR(int(live_pixels[i * 4 + k]), int(baked_pixels[i * 4 + k]), 2)
+            << channel << " texel " << i << " channel " << k;
+      }
+    }
+    IMB_freeImBuf(baked);
+  };
+  expect_matches_live(PAINT_MATERIAL_CHANNEL_BASE_COLOR, *live_color);
+  expect_matches_live(PAINT_MATERIAL_CHANNEL_ROUGHNESS, *live_rough);
+  IMB_freeImBuf(live_color);
+  IMB_freeImBuf(live_rough);
+}
+
+/**
  * What the storage of a generated row's bake costs per channel: the live stack evaluated at the
  * canvas size, the bake made, the substituted stack evaluated again over the same texels.
  *
@@ -1123,6 +1205,30 @@ TEST_F(PaintLayersBakeTest, the_cpu_composite_reads_the_bake_as_one_plain_layer)
   EXPECT_TRUE(baked[0].mask_items.is_empty());
 }
 
+TEST_F(PaintLayersBakeTest, a_baked_gradient_covers_by_the_alpha_of_its_colour_map)
+{
+  /* A generator row has no map to take its bake size from, so the canvas size has to be set. */
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *gradient, MA_PAINT_LAYER_BAKE_ALWAYS));
+  clear_active();
+
+  /* The bake folds the ramp alpha out of the stored coverage, so the reader has to multiply the
+   * colour map's alpha back, or the gradient lays opaque. */
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_TRUE(paint_layer_row_substituted(*ma, *gradient));
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  EXPECT_EQ(layers[0].color_image, gradient->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  EXPECT_TRUE(layers[0].color_alpha_coverage);
+}
+
 TEST_F(PaintLayersBakeTest, the_generator_reads_the_bake_instead_of_the_row)
 {
   Image *source = add_image("Row");
@@ -1362,6 +1468,105 @@ TEST_F(PaintLayersBakeTest, a_row_result_job_gives_the_target_the_sources_channe
   EXPECT_EQ(width, size);
   EXPECT_EQ(height, size);
   EXPECT_EQ(source->channels_num, 1) << "the source is only read";
+}
+
+/**
+ * A channel the GPU rendered is handed to the job and the compute step leaves it alone: the target
+ * map carries the handed-in pixels, not the source row's own render.
+ */
+TEST_F(PaintLayersBakeTest, a_row_result_job_keeps_a_channel_handed_in_by_the_gpu)
+{
+  const int size = 4;
+  MaterialPaintLayer *source = add_paint_layer("Source", add_image("SourceImg"));
+  MaterialPaintLayer *target = BKE_paint_layers_add(
+      *ma, "Target", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(target, nullptr);
+
+  PaintLayersRowResultJob *job = BKE_paint_layers_row_result_job_create(
+      *bmain, *ma, source->marker, target->marker, size);
+  ASSERT_NE(job, nullptr);
+  /* White with a full alpha: the same bytes whatever the colour space writes them in. */
+  const Vector<float> white(int64_t(size) * size * 4, 1.0f);
+  ASSERT_TRUE(BKE_paint_layers_row_result_job_channel_set(
+      *job, PAINT_MATERIAL_CHANNEL_BASE_COLOR, white.data()));
+  BKE_paint_layers_row_result_job_compute(*job);
+  ASSERT_TRUE(BKE_paint_layers_row_result_job_commit(*job));
+  BKE_paint_layers_row_result_job_free(*job);
+
+  const MaterialPaintLayerChannel *color_record = nullptr;
+  for (int i = 0; i < target->channels_num; i++) {
+    if (target->channels[i].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      color_record = &target->channels[i];
+    }
+  }
+  ASSERT_NE(color_record, nullptr);
+  ASSERT_NE(color_record->image, nullptr);
+
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(color_record->image, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  ASSERT_NE(ibuf->byte_data(), nullptr);
+  for (const int64_t i : IndexRange(int64_t(size) * size * 4)) {
+    EXPECT_EQ(int(ibuf->byte_data()[i]), 255) << "byte " << i;
+  }
+  BKE_image_release_ibuf(color_record->image, ibuf, lock);
+}
+
+/**
+ * The whole row: a row carrying a CPU-computed effect renders as its content alone by default (its
+ * mask and opacity are laid live over the map), while the row result asks for the finished picture.
+ * A row with no such effect renders the same either way.
+ */
+TEST_F(PaintLayersBakeTest, whole_row_folds_the_opacity_of_a_cpu_effect_row_into_the_render)
+{
+  const int size = 8;
+  ma->paint_layers_image_size = size;
+  MaterialPaintLayer *plain = add_paint_layer("Plain", add_image("PlainImg"));
+  MaterialPaintLayer *noisy = add_paint_layer("Noisy", add_image("NoisyImg"));
+  ASSERT_NE(BKE_paint_layers_filter_add(*ma, noisy, MA_PAINT_LAYER_FILTER_NOISE), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, plain, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, noisy, 0.5f));
+  clear_active();
+
+  struct Render {
+    Vector<float> color = Vector<float>(8 * 8 * 4);
+    Vector<float> coverage = Vector<float>(8 * 8);
+  };
+  const auto render = [&](const MaterialPaintLayer &row, const bool whole_row) {
+    Render out;
+    EXPECT_TRUE(BKE_paint_layers_bake_render_node(*ma,
+                                                  row,
+                                                  PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                  size,
+                                                  out.color.data(),
+                                                  out.coverage.data(),
+                                                  nullptr,
+                                                  nullptr,
+                                                  {},
+                                                  whole_row));
+    return out;
+  };
+  const auto coverage_sum = [](const Render &r) {
+    double sum = 0.0;
+    for (const float value : r.coverage) {
+      sum += value;
+    }
+    return sum;
+  };
+
+  const Render plain_content = render(*plain, false);
+  const Render plain_whole = render(*plain, true);
+  EXPECT_EQ(plain_content.coverage, plain_whole.coverage)
+      << "a row with no CPU effect is rendered whole either way";
+  EXPECT_EQ(plain_content.color, plain_whole.color);
+
+  const Render noisy_content = render(*noisy, false);
+  const Render noisy_whole = render(*noisy, true);
+  EXPECT_TRUE(noisy_content.coverage != noisy_whole.coverage ||
+              noisy_content.color != noisy_whole.color)
+      << "the whole row differs from the content alone";
+  EXPECT_LE(coverage_sum(noisy_whole), coverage_sum(noisy_content) + 1e-4)
+      << "the opacity is folded in, never added";
 }
 
 TEST_F(PaintLayersBakeTest, a_row_result_job_needs_both_rows_and_a_target_that_still_exists)

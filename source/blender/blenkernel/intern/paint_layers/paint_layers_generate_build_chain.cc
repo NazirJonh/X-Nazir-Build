@@ -2918,9 +2918,10 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
       return {};
     }
     out.coverage = common;
-    const bool live_content = BKE_paint_layers_is_folder(ctx.layer) ||
-                              (paint_layer_channel_find(ctx.layer, ctx.channel) != nullptr &&
-                               paint_layer_channel_find(ctx.layer, ctx.channel)->image != nullptr);
+    /* Multiplying the bake's colour alpha back keeps the baked factor the factor the live row
+     * had; a scalar or own-colour generator baked an alpha of one, so the product is its old
+     * self there. */
+    const bool live_content = paint_layer_bake_color_alpha_is_coverage(ctx.layer, ctx.record);
     if (live_content) {
       const NodeOutput covered = this->multiply_nodes_add(tree, common, {color_map, alpha_out});
       if (covered.socket != nullptr) {

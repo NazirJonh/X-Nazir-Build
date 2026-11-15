@@ -27,6 +27,7 @@ namespace blender {
 struct ImBuf;
 struct Main;
 struct Material;
+struct MaterialPaintLayer;
 struct Object;
 struct PaintMaterialCompositeSurface;
 struct bContext;
@@ -221,6 +222,24 @@ bool combined_preview_gpu_update(const Material &ma,
  * the channels it shades. The Mask pass is not one.
  */
 bool combined_preview_gpu_pass_supported(int pass);
+
+/**
+ * Render the content of the single plain row \a row in \a channel on the GPU into \a r_rgba
+ * (`size x size` RGBA floats): the straight colour with the content alpha in `w`, as
+ * #BKE_paint_layers_bake_render_node gives for a whole row. Synchronous, on the main thread, and
+ * outside a draw: it enables the draw GPU context itself when none is.
+ *
+ * \return false, with \a r_rgba untouched or partly written, for a folder, a row the GPU path does
+ * not lay (#BKE_paint_layers_gpu_unsupported_reason), an Anchor Point reader, a GPU effect, a map
+ * without a GPU texture, a canvas over the memory budget, a material set to the CPU or no GPU
+ * context. The caller then renders the channel on the CPU.
+ */
+bool combined_row_render_gpu(const Material &ma,
+                             const MaterialPaintLayer &row,
+                             int channel,
+                             int size,
+                             float *r_rgba,
+                             const Object *painted_object = nullptr);
 
 /**
  * Compare \a output, just shaded by #combined_preview_gpu_update, with the CPU preview

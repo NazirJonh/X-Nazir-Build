@@ -66,6 +66,8 @@ struct Icon {
   short id_type;
   /** #ICON_DATA_GLYPH: Unicode codepoint of the Material Symbols glyph. */
   uint32_t glyph;
+  /** #ICON_DATA_GLYPH: fixed color as `0x00RRGGBB` with bit 24 set, or 0 for the button's color. */
+  uint32_t glyph_color;
   DrawInfoFreeFP drawinfo_free;
 };
 
@@ -125,6 +127,13 @@ bool BKE_icon_is_imbuf(int icon_id) ATTR_WARN_UNUSED_RESULT;
  * back to a built-in icon then.
  */
 int BKE_icon_glyph_ensure(uint32_t codepoint) ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * Same as #BKE_icon_glyph_ensure, but the glyph is always drawn in the sRGB color \a rgb
+ * (`0xRRGGBB`) instead of the button's. It is an icon of its own, cached per codepoint and color,
+ * so the plain glyph of the same codepoint is not recolored.
+ */
+int BKE_icon_glyph_colored_ensure(uint32_t codepoint, uint32_t rgb) ATTR_WARN_UNUSED_RESULT;
 
 /**
  * Simple wrapper to reference a drawable pixel buffer (non-owning).

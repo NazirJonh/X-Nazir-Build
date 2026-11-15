@@ -282,7 +282,11 @@ def draw_material_mask_item(layout, context, item):
     if not base:
         # The base is the Multiply item of the row's own mask: it has no blend to choose.
         col.prop(item, "blend_type", text="Blend")
-    col.prop(item, "opacity", text="Opacity")
+    # The lock sits right of the opacity, as in the other branches of the Layer panel.
+    opacity_row = col.row(align=True)
+    opacity_row.prop(item, "opacity", text="Opacity")
+    opacity_row.prop(item, "locked", text="", icon='LOCKED' if item.locked else 'UNLOCKED')
+    col.separator()
     col.prop(item, "mask_contrast", text="Contrast", slider=True)
     if base and record is not None:
         # The base mask's slot is a debug view (see below), so its Invert is offered here, where it

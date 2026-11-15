@@ -1773,6 +1773,13 @@ static void icon_glyph_draw(const Icon &icon,
   else {
     theme::get_color_4fv(TH_TEXT, color);
   }
+  /* An icon created with its own color keeps it whatever the button state or theme says; the
+   * alpha still follows the button. */
+  if (icon.glyph_color != 0) {
+    color[0] = float((icon.glyph_color >> 16) & 0xFF) / 255.0f;
+    color[1] = float((icon.glyph_color >> 8) & 0xFF) / 255.0f;
+    color[2] = float(icon.glyph_color & 0xFF) / 255.0f;
+  }
   color[3] *= alpha;
 
   BLF_size(fontid, h * ICON_GLYPH_SIZE);

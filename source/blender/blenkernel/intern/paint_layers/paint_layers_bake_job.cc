@@ -855,6 +855,28 @@ PaintLayersRowResultJob *BKE_paint_layers_row_result_job_create(Main &bmain,
   return job;
 }
 
+bool BKE_paint_layers_row_result_job_channel_set(PaintLayersRowResultJob &job,
+                                                 const int channel,
+                                                 const float *rgba)
+{
+  if (job.material_copy == nullptr) {
+    return false;
+  }
+  /* The GPU render covers the base tile only; a stack tiled beyond it is rendered tile by tile on
+   * the CPU. */
+  Vector<int> tiles;
+  BKE_paint_layers_stack_tiles_collect(*job.material_copy, tiles);
+  if (BKE_paint_layers_stack_is_tiled(tiles)) {
+    return false;
+  }
+  PaintLayersRowResultJob::ChannelResult result;
+  result.channel = channel;
+  result.is_color = BKE_paint_material_channel_info(eMaterialPaintChannel(channel)).is_color;
+  result.color.append(Vector<float>(Span<float>(rgba, int64_t(job.size) * job.size * 4)));
+  job.channels.append(std::move(result));
+  return true;
+}
+
 void BKE_paint_layers_row_result_job_compute(PaintLayersRowResultJob &job)
 {
   if (job.material_copy == nullptr) {
@@ -871,12 +893,24 @@ void BKE_paint_layers_row_result_job_compute(PaintLayersRowResultJob &job)
   /* The slot of each channel's result in #job.channels, by the channel enum rather than a walk. */
   std::array<int, PAINT_MATERIAL_CHANNEL_NUM> channel_slots;
   channel_slots.fill(-1);
+  /* The channels handed in already (the GPU render) keep their result; the tiles skip them. */
+  std::array<bool, PAINT_MATERIAL_CHANNEL_NUM> handed_in;
+  handed_in.fill(false);
+  for (const int slot : job.channels.index_range()) {
+    channel_slots[job.channels[slot].channel] = int(slot);
+    handed_in[job.channels[slot].channel] = true;
+  }
   for (const int tile_index : job.tiles.index_range()) {
     const int tile_number = job.tiles[tile_index];
     for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
       const int channel = int(info.channel);
+      if (handed_in[channel]) {
+        continue;
+      }
       Vector<float> color(int64_t(job.size) * job.size * 4);
       Vector<float> coverage(int64_t(job.size) * job.size);
+      /* The whole row: a source with a CPU effect would otherwise come back without its mask and
+       * opacity, which only a live substitution lays over such a map. */
       if (!BKE_paint_layers_bake_render_node(ma,
                                             *source,
                                             channel,
@@ -885,7 +919,8 @@ void BKE_paint_layers_row_result_job_compute(PaintLayersRowResultJob &job)
                                             coverage.data(),
                                             nullptr,
                                             nullptr,
-                                            PaintLayerTileContext{.tile_number = tile_number}))
+                                            PaintLayerTileContext{.tile_number = tile_number},
+                                            true))
       {
         /* The tile carries nothing: the map is left without it, and the composite reads its
          * constant there, the way a map the stack never painted reads. */

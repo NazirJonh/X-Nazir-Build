@@ -1282,6 +1282,32 @@ bool paint_layer_row_baked_channel(const Material &ma,
                                    Image **r_color);
 
 /**
+ * Whether the bake read back in \a channel keeps, in its colour map's alpha, the content alpha the
+ * live row laid, so whoever reads the bake covers by it again.
+ *
+ * The bake folds the content alpha out of the coverage it stores (#bake_common_from_channel
+ * recovers the common factor as `coverage / content alpha`), so the coverage map no longer carries
+ * it and the reader multiplies the colour map's alpha back: a folder's bake holds its subtree's
+ * composite, a generator lays no map and keeps its emission's alpha (a Gradient's ramp) in the
+ * colour map alone, and a painted row keeps its map's own alpha. A flat constant laid none and
+ * covers by the shared coverage alone, as it does live.
+ *
+ * The alpha-is-data encodings need no term: the encoding is only ever set on a row that owns a
+ * map, whose bake has already folded the data out and stored an alpha of one, so multiplying by it
+ * changes nothing. The generated graph and the CPU composite read the same bake, so both ask this
+ * one predicate rather than spelling the rule out where they read it.
+ *
+ * \a record is the row's record in \a channel, found once by the caller.
+ */
+inline bool paint_layer_bake_color_alpha_is_coverage(const MaterialPaintLayer &layer,
+                                                     const MaterialPaintLayerChannel *record)
+{
+  return BKE_paint_layers_is_folder(layer) ||
+         paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES) ||
+         (record != nullptr && record->image != nullptr);
+}
+
+/**
  * Whether the description no longer matches the shape the generated root was built for: a value
  * edit that picks nodes (a node's stored choice, a seed) has to rebuild, which the value path never
  * asks for on its own because it leaves out #MA_PAINT_LAYERS_REGEN, the only thing that calls the

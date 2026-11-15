@@ -67,6 +67,8 @@
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
+#include "DRW_engine.hh"
+
 #include "ED_material_bake.hh"
 #include "ED_material_combined.hh"
 #include "paint_material_combined_effects.hh"
@@ -1010,6 +1012,28 @@ static struct {
   bool created = false;
 } gpu_shaders;
 
+/**
+ * Create the compute shaders once, successful or not: a shader that fails to compile would
+ * otherwise be compiled and logged again on every call. \return false when any of them is missing.
+ */
+static bool gpu_shaders_ensure()
+{
+  if (!gpu_shaders.created) {
+    gpu_shaders.created = true;
+    gpu_shaders.layer = GPU_shader_create_from_info_name("image_engine_combined_layer");
+    gpu_shaders.mask = GPU_shader_create_from_info_name("image_engine_combined_mask");
+    gpu_shaders.correction = GPU_shader_create_from_info_name("image_engine_combined_correction");
+    gpu_shaders.effect = GPU_shader_create_from_info_name("image_engine_combined_effect");
+    gpu_shaders.folder = GPU_shader_create_from_info_name("image_engine_combined_folder");
+    gpu_shaders.display = GPU_shader_create_from_info_name("image_engine_combined_display");
+    gpu_shaders.shade = GPU_shader_create_from_info_name("image_engine_combined_shade");
+  }
+  return gpu_shaders.layer != nullptr && gpu_shaders.mask != nullptr &&
+         gpu_shaders.correction != nullptr && gpu_shaders.effect != nullptr &&
+         gpu_shaders.folder != nullptr && gpu_shaders.display != nullptr &&
+         gpu_shaders.shade != nullptr;
+}
+
 void combined_preview_gpu_free()
 {
   GPU_SHADER_FREE_SAFE(gpu_shaders.layer);
@@ -1123,17 +1147,8 @@ bool combined_preview_gpu_update(const Material &ma,
     }
   }
 
-  /* Created once, successful or not: a shader that fails to compile would otherwise be compiled
-   * and logged again on every frame. */
-  if (!gpu_shaders.created) {
-    gpu_shaders.created = true;
-    gpu_shaders.layer = GPU_shader_create_from_info_name("image_engine_combined_layer");
-    gpu_shaders.mask = GPU_shader_create_from_info_name("image_engine_combined_mask");
-    gpu_shaders.correction = GPU_shader_create_from_info_name("image_engine_combined_correction");
-    gpu_shaders.effect = GPU_shader_create_from_info_name("image_engine_combined_effect");
-    gpu_shaders.folder = GPU_shader_create_from_info_name("image_engine_combined_folder");
-    gpu_shaders.display = GPU_shader_create_from_info_name("image_engine_combined_display");
-    gpu_shaders.shade = GPU_shader_create_from_info_name("image_engine_combined_shade");
+  if (!gpu_shaders_ensure()) {
+    return gpu_refuse("a compute shader failed to compile");
   }
   gpu::Shader *layer_shader = gpu_shaders.layer;
   gpu::Shader *mask_shader = gpu_shaders.mask;
@@ -1142,12 +1157,6 @@ bool combined_preview_gpu_update(const Material &ma,
   gpu::Shader *folder_shader = gpu_shaders.folder;
   gpu::Shader *display_shader = gpu_shaders.display;
   gpu::Shader *shade_shader = gpu_shaders.shade;
-  if (layer_shader == nullptr || mask_shader == nullptr || correction_shader == nullptr ||
-      effect_shader == nullptr || folder_shader == nullptr || display_shader == nullptr ||
-      shade_shader == nullptr)
-  {
-    return gpu_refuse("a compute shader failed to compile");
-  }
 
   const int2 size(GPU_texture_width(output), GPU_texture_height(output));
   const int2 groups = math::divide_ceil(size, int2(16));
@@ -2061,6 +2070,233 @@ void combined_preview_gpu_verify(Main &bmain,
              gpu_value.w);
     }
   }  fflush(stdout);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Row Render
+ * \{ */
+
+/**
+ * The memory the six canvas-sized half float textures of a row render may take together. Past it
+ * the CPU render takes over, as it does for an Anchor Point slot budget.
+ */
+static constexpr size_t gpu_row_budget_bytes = size_t(1024) * 1024 * 1024;
+
+bool combined_row_render_gpu(const Material &ma,
+                             const MaterialPaintLayer &row,
+                             const int channel,
+                             const int size,
+                             float *r_rgba,
+                             const Object *painted_object)
+{
+  if (r_rgba == nullptr || size <= 0 || !combined_preview_gpu_enabled(&ma) ||
+      !BKE_paint_layers_is_layered(ma))
+  {
+    return false;
+  }
+  if (size_t(6) * size_t(size) * size_t(size) * 8 > gpu_row_budget_bytes) {
+    return gpu_refuse("the row render exceeds the GPU budget");
+  }
+
+  /* Only a plain row: a folder, a live Anchor Point reader and an effect row need passes that the
+   * single capture below does not run. */
+  PaintMaterialCompositeImageLayer entry;
+  if (!BKE_paint_layers_gpu_row_entry(ma, row, channel, entry, painted_object) ||
+      entry.is_folder || !entry.enabled || entry.opacity <= 0.0f)
+  {
+    return false;
+  }
+  if (const char *reason = gpu_layer_unsupported_reason(entry)) {
+    return gpu_refuse(reason);
+  }
+  {
+    const int channel_enum = channel;
+    const Span<const PaintMaterialCompositeImageLayer> stack(&entry, 1);
+    const Span<Span<const PaintMaterialCompositeImageLayer>> stack_view(&stack, 1);
+    Vector<GpuCaptureJob> capture_jobs;
+    const char *capture_reason = nullptr;
+    if (!BKE_paint_layers_gpu_capture_plan(ma,
+                                           stack_view,
+                                           Span<int>(&channel_enum, 1),
+                                           capture_jobs,
+                                           &capture_reason,
+                                           PaintLayerTileContext{.painted_object = painted_object}) ||
+        !capture_jobs.is_empty())
+    {
+      return gpu_refuse(capture_reason != nullptr ? capture_reason :
+                                                   "the row reads an Anchor Point slice");
+    }
+  }
+
+  /* The operator runs on the main thread outside a draw, where no GPU context is current. */
+  const bool context_was_enabled = DRW_gpu_context_is_enabled();
+  if (!context_was_enabled && !DRW_gpu_context_try_enable()) {
+    return gpu_refuse("there is no GPU context");
+  }
+  BLI_SCOPED_DEFER([&]() {
+    if (!context_was_enabled) {
+      DRW_gpu_context_disable();
+    }
+  });
+
+  if (!gpu_shaders_ensure()) {
+    return gpu_refuse("a compute shader failed to compile");
+  }
+
+  const int2 canvas(size);
+  gpu::TexturePool &pool = gpu::TexturePool::get();
+  const eGPUTextureUsage usage = GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE |
+                                 GPU_TEXTURE_USAGE_HOST_READ;
+  const auto acquire = [&](const char *name) {
+    return pool.acquire_texture_2d(canvas, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, usage, name);
+  };
+  gpu::Texture *dummy = pool.acquire_texture_2d(
+      int2(1),
+      1,
+      gpu::TextureFormat::SFLOAT_16_16_16_16,
+      eGPUTextureUsage(GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE),
+      "combined_dummy");
+  gpu::Texture *slot_dummy = pool.acquire_texture_2d(
+      int2(1),
+      1,
+      gpu::TextureFormat::SFLOAT_16_16_16_16,
+      eGPUTextureUsage(GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE),
+      "combined_slot_dummy");
+  gpu::Texture *mask_accum = acquire("combined_mask");
+  gpu::Texture *row_color = acquire("combined_row_color");
+  gpu::Texture *row_factor = acquire("combined_row_factor");
+  /* The capture's target and the destination the layer pass binds without ever blending onto it. */
+  gpu::Texture *capture_color = acquire("combined_row_capture");
+  gpu::Texture *capture_coverage = acquire("combined_row_capture_coverage");
+  gpu::Texture *dest = acquire("combined_accum");
+  Vector<gpu::Texture *> filter_luts;
+  CombinedTarget target;
+  BLI_SCOPED_DEFER([&]() {
+    for (gpu::Texture *texture : {dummy,
+                                  slot_dummy,
+                                  mask_accum,
+                                  row_color,
+                                  row_factor,
+                                  capture_color,
+                                  capture_coverage,
+                                  dest})
+    {
+      if (texture != nullptr) {
+        pool.release_texture(texture);
+      }
+    }
+    for (gpu::Texture *texture : target.folder_premul) {
+      if (texture != nullptr) {
+        pool.release_texture(texture);
+      }
+    }
+    for (gpu::Texture *texture : target.folder_cover) {
+      if (texture != nullptr) {
+        pool.release_texture(texture);
+      }
+    }
+    for (gpu::Texture *texture : filter_luts) {
+      if (texture != nullptr) {
+        pool.release_texture(texture);
+      }
+    }
+  });
+  if (dummy == nullptr || slot_dummy == nullptr || mask_accum == nullptr || row_color == nullptr ||
+      row_factor == nullptr || capture_color == nullptr || capture_coverage == nullptr ||
+      dest == nullptr)
+  {
+    return gpu_refuse("a row render texture could not be allocated");
+  }
+
+  target.row_color = row_color;
+  target.row_factor = row_factor;
+  target.mask_accum = mask_accum;
+  target.dest = dest;
+  target.size = canvas;
+  target.groups = math::divide_ceil(canvas, int2(16));
+  /* The canvas texel centres onto [0, 1) of the canvas, the whole of it and nothing outside. */
+  float3x3 texel_to_uv = float3x3::identity();
+  texel_to_uv[0].x = 1.0f / float(size);
+  texel_to_uv[1].y = 1.0f / float(size);
+  target.texel_to_uv = texel_to_uv;
+  float4x4 texel_to_uv_4x4 = float4x4::identity();
+  texel_to_uv_4x4[0] = float4(texel_to_uv[0].x, texel_to_uv[0].y, 0.0f, 0.0f);
+  texel_to_uv_4x4[1] = float4(texel_to_uv[1].x, texel_to_uv[1].y, 0.0f, 0.0f);
+  texel_to_uv_4x4[3] = float4(texel_to_uv[2].x, texel_to_uv[2].y, 0.0f, 1.0f);
+  target.texel_to_uv_4x4 = texel_to_uv_4x4;
+
+  Vector<GpuSliceSlot> slice_slots;
+  Vector<GpuMaskSlot> mask_slots;
+  Vector<GpuEffectResult> effect_results;
+  CombinedPasses passes(pool,
+                        dummy,
+                        slot_dummy,
+                        gpu_shaders.layer,
+                        gpu_shaders.mask,
+                        gpu_shaders.correction,
+                        gpu_shaders.folder,
+                        gpu_shaders.effect,
+                        filter_luts,
+                        slice_slots,
+                        mask_slots,
+                        effect_results,
+                        usage);
+
+  /* The effects the row carries, computed the way the preview computes them. The cache they go
+   * through is keyed by the material, the effect, the channel and the input's own size and map
+   * versions -- nothing of the display -- so an entry either side stores is valid for the other. */
+  Vector<GpuEffectJob> effect_jobs;
+  BLI_SCOPED_DEFER([&]() {
+    /* The frame's own reference to each cached result: the cache may have dropped its entry since. */
+    for (const GpuEffectJob &job : effect_jobs) {
+      if (job.result != nullptr) {
+        GPU_texture_free(job.result);
+      }
+    }
+  });
+  {
+    const int channel_enum = channel;
+    const bool has_stack = true;
+    const Span<const PaintMaterialCompositeImageLayer> stack(&entry, 1);
+    const Span<Span<const PaintMaterialCompositeImageLayer>> stack_view(&stack, 1);
+    if (!combined_preview_gpu_effects_run(ma,
+                                          stack_view,
+                                          Span<int>(&channel_enum, 1),
+                                          Span<bool>(&has_stack, 1),
+                                          -1,
+                                          passes,
+                                          effect_jobs,
+                                          painted_object))
+    {
+      return false;
+    }
+  }
+
+  /* The capture path stops before the row's own opacity, mask and blend: the straight content
+   * colour with the content alpha in `w`, which is what the CPU render hands the commit. */
+  if (!passes.row_emit(target, entry, channel, -1, capture_color, capture_coverage)) {
+    return false;
+  }
+
+  GPU_finish();
+  float *pixels = static_cast<float *>(GPU_texture_read(capture_color, GPU_DATA_FLOAT, 0));
+  if (pixels == nullptr) {
+    return gpu_refuse("the row render could not be read back");
+  }
+  const int64_t pixels_num = int64_t(size) * size;
+  /* A channel that tracks no content alpha stays opaque, as in the CPU render; its transparency is
+   * the coverage alone. Normal keeps the map's own alpha. */
+  const bool keep_alpha = entry.tracks_content_alpha || channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+  for (int64_t i = 0; i < pixels_num; i++) {
+    r_rgba[i * 4 + 0] = pixels[i * 4 + 0];
+    r_rgba[i * 4 + 1] = pixels[i * 4 + 1];
+    r_rgba[i * 4 + 2] = pixels[i * 4 + 2];
+    r_rgba[i * 4 + 3] = keep_alpha ? pixels[i * 4 + 3] : 1.0f;
+  }
+  MEM_delete(pixels);
+  return true;
 }
 
 /** \} */

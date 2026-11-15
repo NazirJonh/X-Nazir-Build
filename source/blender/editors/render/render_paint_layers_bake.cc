@@ -13,6 +13,7 @@
 #include <algorithm>
 
 #include "ED_material_bake.hh"
+#include "ED_material_combined.hh"
 #include "ED_paint_layers_bake.hh"
 #include "ED_undo.hh"
 
@@ -551,10 +552,33 @@ bool paint_layer_row_result_run(Main &bmain,
     BKE_report(reports, RPT_ERROR, "No row to take the result from");
     return false;
   }
-  /* The threshold the bake planner uses. */
   const MaterialPaintLayer *source = BKE_paint_layers_find(owner, source_marker);
-  const bool heavy = (source != nullptr && BKE_paint_layers_bake_is_heavy(owner, *source)) ||
-                     size >= PAINT_LAYERS_HEAVY_BAKE_SIZE;
+  /* A plain row is rendered on the GPU right here: a worker has no GPU context. Each channel the
+   * GPU refuses is left for the CPU render below, which is also the whole job when it refuses all
+   * of them. */
+  bool cpu_needed = source == nullptr;
+  if (source != nullptr) {
+    Vector<float> gpu_color(int64_t(size) * size * 4);
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      const int channel = int(info.channel);
+      /* The job refuses the channel of a tiled stack: the GPU render is the base tile alone. */
+      if (ed::material_combined::combined_row_render_gpu(
+              owner, *source, channel, size, gpu_color.data(), nullptr) &&
+          BKE_paint_layers_row_result_job_channel_set(*job, channel, gpu_color.data()))
+      {
+        continue;
+      }
+      /* A channel the row has nothing in costs the CPU nothing to skip, so it does not make the
+       * job a heavy one. */
+      int width = 0;
+      int height = 0;
+      cpu_needed |= BKE_paint_layers_row_dimensions(owner, *source, channel, width, height);
+    }
+  }
+  /* The threshold the bake planner uses. */
+  const bool heavy = cpu_needed &&
+                     ((source != nullptr && BKE_paint_layers_bake_is_heavy(owner, *source)) ||
+                      size >= PAINT_LAYERS_HEAVY_BAKE_SIZE);
   if (heavy) {
     wmJob *wm_job = WM_jobs_get(&wm,
                                 win,

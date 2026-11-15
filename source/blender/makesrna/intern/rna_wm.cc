@@ -3058,6 +3058,53 @@ static void rna_def_operator_asset_image_import_element(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_IDPROPERTY | PROP_HIDDEN);
 }
 
+static void rna_def_operator_pbr_material_element(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "OperatorPbrMaterialElement", "PropertyGroup");
+  RNA_def_struct_ui_text(
+      srna, "Operator PBR Material Element", "Per-image entry for the PBR material operator");
+
+  prop = RNA_def_property(srna, "filepath", PROP_STRING, PROP_FILEPATH);
+  RNA_def_property_string_maxlength(prop, FILE_MAX);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(prop,
+                           "File Path",
+                           "Absolute path to an image file (ignored when 'name' is also given)");
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_maxlength(prop, MAX_NAME);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(
+      prop,
+      "Image",
+      "Name of an existing image data-block to use (takes priority over the file path)");
+
+  /* Placeholder items matching the map type item-func's "None" value; the item func overrides
+   * them with the Preferences' map types at operator registration time (see
+   * ASSET_OT_pbr_material_from_images). */
+  static const EnumPropertyItem map_type_items[] = {
+      {0, "NONE", 0, "None", "Leave the map type unassigned"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "map_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, map_type_items);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_enum_default(prop, 0);
+  RNA_def_property_ui_text(prop, "Map Type", "Texture map type");
+
+  prop = RNA_def_property(srna, "map_type_identifier", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_maxlength(prop, 64);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY | PROP_HIDDEN);
+  RNA_def_property_ui_text(prop,
+                           "Map Type Identifier",
+                           "Stable map type identifier (e.g. BASE_COLOR). Addons should set this "
+                           "one; it is used when the Map Type enum is left unassigned, while an "
+                           "assigned Map Type (set through the dialog) takes precedence");
+}
+
 static void rna_def_operator_paint_channel_image_element(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -4643,6 +4690,7 @@ void RNA_def_wm(BlenderRNA *brna)
   rna_def_operator_filelist_element(brna);
   rna_def_operator_object_placement_element(brna);
   rna_def_operator_asset_image_import_element(brna);
+  rna_def_operator_pbr_material_element(brna);
   rna_def_operator_paint_channel_image_element(brna);
   rna_def_macro_operator(brna);
   rna_def_operator_type_macro(brna);

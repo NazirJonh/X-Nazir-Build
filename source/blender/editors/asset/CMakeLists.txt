@@ -8,6 +8,7 @@ set(INC
   ../../gpu
   ../../imbuf
   ../../makesrna
+  ../../nodes
   # dna_type_offsets.h
   ${CMAKE_CURRENT_BINARY_DIR}/../../makesdna/intern
   # RNA_prototypes.hh
@@ -36,6 +37,7 @@ set(SRC
   intern/asset_browser_name_match.cc
   intern/asset_name_matching_sync.cc
   intern/asset_ops.cc
+  intern/asset_pbr_material.cc
   intern/asset_shelf.cc
   intern/asset_shelf_asset_view.cc
   intern/asset_shelf_asset_lists.cc
@@ -64,6 +66,7 @@ set(SRC
   ED_asset_list.hh
   ED_asset_mark_clear.hh
   ED_asset_name_matching.hh
+  ED_asset_pbr_material.hh
   ED_asset_shelf.hh
   ED_asset_temp_id_consumer.hh
   ED_asset_type.hh

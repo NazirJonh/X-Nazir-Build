@@ -26,6 +26,7 @@
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
+#include "BKE_name_matching.hh"
 #include "BKE_preferences.h"
 #include "BKE_preview_image.hh"
 #include "BKE_report.hh"
@@ -33,6 +34,7 @@
 
 #include "BLI_fnmatch.h"
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
 #include "BLI_path_utils.hh"
 #include "BLI_rect.h"
 #include "BLI_set.hh"
@@ -40,6 +42,7 @@
 #include "BLI_uuid.h"
 
 #include "DNA_image_types.h"
+#include "DNA_material_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_userdef_types.h"
 
@@ -48,6 +51,7 @@
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
+#include "ED_asset_pbr_material.hh"
 #include "ED_asset_updates.hh"
 #include "ED_screen.hh"
 #include "asset_shelf.hh"
@@ -366,6 +370,178 @@ static std::string asset_image_import_item_label(const StringRef filepath,
   return filepath_storage;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Shared PBR material operator helpers
+ *
+ * Used by the "Import Images as Assets" dialog (Advanced panel) and the standalone
+ * #ASSET_OT_pbr_material_from_images operator, so the material options exist once.
+ * \{ */
+
+/* Single default for "Create Material" in the image import dialog. */
+static constexpr bool asset_image_import_create_material_default = false;
+
+/** Define the material options (name, tag, normal format, height mode, AO mix). */
+static void asset_pbr_material_props_define(wmOperatorType *ot)
+{
+  PropertyRNA *prop;
+
+  prop = RNA_def_string(ot->srna,
+                        "material_name",
+                        nullptr,
+                        MAX_NAME,
+                        "Material Name",
+                        "Name for the created material; empty uses the texture-set name of the "
+                        "first image");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_string(ot->srna,
+                        "material_tag",
+                        nullptr,
+                        MAX_NAME,
+                        "Material Tag",
+                        "Optional tag added to the created material asset");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_enum(ot->srna,
+                      "normal_format",
+                      pbr_normal_format_items(),
+                      int(PbrNormalFormat::OpenGL),
+                      "Normal Format",
+                      "Encoding convention of the normal map texture");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_enum(ot->srna,
+                      "height_mode",
+                      pbr_height_mode_items(),
+                      int(PbrHeightMode::Bump),
+                      "Height",
+                      "How the height texture is wired into the material");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "ao_mix",
+                         true,
+                         "Mix AO into Base Color",
+                         "Multiply the ambient occlusion texture into the base color");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+}
+
+/**
+ * Texture-set name ("averaged" name as displayed in the Asset Browser) of the first entry of the
+ * "images" collection: the first file path is preferred, entries that only have an image
+ * data-block name are the fallback. Returns an empty string when there is nothing to derive it
+ * from.
+ */
+static std::string asset_pbr_first_texture_set_name(PointerRNA *ptr)
+{
+  char first_name[MAX_NAME] = "";
+  char first_filepath[FILE_MAX] = "";
+  RNA_BEGIN (ptr, itemptr, "images") {
+    /* Only the PBR material elements carry an image data-block name. */
+    if (first_name[0] == '\0' && RNA_struct_find_property(&itemptr, "name") != nullptr) {
+      RNA_string_get(&itemptr, "name", first_name);
+    }
+    if (first_filepath[0] == '\0') {
+      RNA_string_get(&itemptr, "filepath", first_filepath);
+    }
+  }
+  RNA_END;
+
+  const char *source = first_filepath[0] != '\0' ? first_filepath : first_name;
+  if (source[0] == '\0') {
+    return "";
+  }
+  return BKE_name_matching_base_name(U, BLI_path_basename(source));
+}
+
+/** Fill an empty "material_name" with the texture-set name of the first image. */
+static void asset_pbr_material_name_prefill(wmOperator *op)
+{
+  char material_name[MAX_NAME];
+  RNA_string_get(op->ptr, "material_name", material_name);
+  if (material_name[0] != '\0') {
+    return;
+  }
+  const std::string base_name = asset_pbr_first_texture_set_name(op->ptr);
+  if (!base_name.empty()) {
+    RNA_string_set(op->ptr, "material_name", base_name.c_str());
+  }
+}
+
+/** Read the material options of \a op; the maps still have to be filled by the caller. */
+static PbrMaterialBuildParams asset_pbr_material_params_from_op(wmOperator *op)
+{
+  PbrMaterialBuildParams params;
+  char material_name[MAX_NAME];
+  RNA_string_get(op->ptr, "material_name", material_name);
+  params.name = material_name[0] != '\0' ? material_name : std::string("PBR Material");
+  params.normal_format = static_cast<PbrNormalFormat>(RNA_enum_get(op->ptr, "normal_format"));
+  params.height_mode = static_cast<PbrHeightMode>(RNA_enum_get(op->ptr, "height_mode"));
+  params.mix_ao = RNA_boolean_get(op->ptr, "ao_mix");
+  return params;
+}
+
+/**
+ * Report and return true when \a map_type_identifier already has an image in \a maps (first
+ * texture per map type wins).
+ */
+static bool asset_pbr_map_type_taken(wmOperator *op,
+                                     const Map<std::string, Image *> &maps,
+                                     const char *map_type_identifier)
+{
+  if (!maps.contains(map_type_identifier)) {
+    return false;
+  }
+  BKE_reportf(op->reports,
+              RPT_WARNING,
+              "Multiple textures with map type '%s'; only the first is used in the material",
+              map_type_identifier);
+  return true;
+}
+
+/**
+ * Resolve the target catalog from "catalog_path" (preferred) or "catalog_id".
+ * A nil \a r_catalog_id means no catalog. Returns false (after reporting) when the path does not
+ * exist.
+ */
+static bool asset_catalog_from_op(wmOperator *op,
+                                  asset_system::AssetLibrary &library,
+                                  bUUID &r_catalog_id,
+                                  std::string &r_catalog_simple_name)
+{
+  char catalog_path_c[MAX_NAME];
+  RNA_string_get(op->ptr, "catalog_path", catalog_path_c);
+  if (catalog_path_c[0] != '\0') {
+    const asset_system::AssetCatalogPath catalog_path =
+        asset_system::AssetCatalogPath::from_user_input(catalog_path_c);
+    const asset_system::AssetCatalog *catalog = library.catalog_service().find_catalog_by_path(
+        catalog_path);
+    if (catalog == nullptr) {
+      BKE_reportf(op->reports, RPT_ERROR, "Catalog \"%s\" not found", catalog_path_c);
+      return false;
+    }
+    r_catalog_id = catalog->catalog_id;
+    r_catalog_simple_name = catalog->simple_name;
+    return true;
+  }
+
+  /* Fallback for call sites that only set catalog_id. */
+  char catalog_id_str[UUID_STRING_SIZE];
+  RNA_string_get(op->ptr, "catalog_id", catalog_id_str);
+  bUUID parsed_id;
+  if (catalog_id_str[0] != '\0' && BLI_uuid_parse_string(&parsed_id, catalog_id_str)) {
+    r_catalog_id = parsed_id;
+    if (const asset_system::AssetCatalog *catalog = library.catalog_service().find_catalog(
+            parsed_id))
+    {
+      r_catalog_simple_name = catalog->simple_name;
+    }
+  }
+  return true;
+}
+
+/** \} */
+
 static void asset_image_import_invoke_prefill_catalog(wmOperator *op,
                                                       asset_system::AssetLibrary *library)
 {
@@ -425,6 +601,10 @@ static wmOperatorStatus asset_image_import_mark_invoke(bContext *C,
   }
   RNA_END;
 
+  /* Prefill the material name with the texture-set name ("averaged" name) of the first file,
+   * as displayed in the Asset Browser. */
+  asset_pbr_material_name_prefill(op);
+
   asset_image_import_invoke_prefill_catalog(
       op, asset_image_import_current_file_library_get(CTX_data_main(C)));
 
@@ -432,7 +612,7 @@ static wmOperatorStatus asset_image_import_mark_invoke(bContext *C,
       C, op, 720, IFACE_("Import Images as Assets"), IFACE_("Import"));
 }
 
-static void asset_image_import_mark_draw(bContext * /*C*/, wmOperator *op)
+static void asset_image_import_mark_draw(bContext *C, wmOperator *op)
 {
   ui::Layout *layout = op->layout;
   PointerRNA *ptr = op->ptr;
@@ -483,6 +663,27 @@ static void asset_image_import_mark_draw(bContext * /*C*/, wmOperator *op)
     else {
       layout->prop(ptr, "catalog_path", UI_ITEM_NONE, IFACE_("Catalog"), ICON_NONE);
     }
+  }
+
+  layout->separator();
+
+  /* Advanced section — build a Principled BSDF material from the imported textures, marked as
+   * an asset in the same catalog. Collapsed by default, the checkbox in the header allows
+   * enabling it without opening the panel. */
+  ui::PanelLayout panel = layout->panel(C, "ASSET_OT_image_import_advanced", true);
+  panel.header->use_property_split_set(false);
+  panel.header->prop(ptr, "create_material", UI_ITEM_NONE, "", ICON_NONE);
+  panel.header->label(IFACE_("Create Material"), ICON_NONE);
+  if (panel.body) {
+    panel.body->use_property_split_set(true);
+    panel.body->use_property_decorate_set(false);
+    panel.body->active_set(RNA_boolean_get(ptr, "create_material"));
+
+    panel.body->prop(ptr, "material_name", UI_ITEM_NONE, IFACE_("Name"), ICON_NONE);
+    panel.body->prop(ptr, "material_tag", UI_ITEM_NONE, IFACE_("Tag"), ICON_NONE);
+    panel.body->prop(ptr, "normal_format", UI_ITEM_NONE, IFACE_("Normal Format"), ICON_NONE);
+    panel.body->prop(ptr, "height_mode", UI_ITEM_NONE, IFACE_("Height"), ICON_NONE);
+    panel.body->prop(ptr, "ao_mix", UI_ITEM_NONE, IFACE_("Mix AO into Base Color"), ICON_NONE);
   }
 }
 
@@ -554,36 +755,10 @@ static wmOperatorStatus asset_image_import_mark_exec(bContext *C, wmOperator *op
     has_catalog = true;
   }
   else if (!catalog_locked) {
-    char catalog_path_c[MAX_NAME];
-    RNA_string_get(op->ptr, "catalog_path", catalog_path_c);
-    if (catalog_path_c[0] != '\0') {
-      const asset_system::AssetCatalogPath catalog_path =
-          asset_system::AssetCatalogPath::from_user_input(catalog_path_c);
-      if (const asset_system::AssetCatalog *cat =
-              library->catalog_service().find_catalog_by_path(catalog_path))
-      {
-        catalog_id = cat->catalog_id;
-        catalog_simple_name = cat->simple_name;
-        has_catalog = true;
-      }
-      else {
-        BKE_reportf(op->reports, RPT_ERROR, "Catalog \"%s\" not found", catalog_path_c);
-        return OPERATOR_CANCELLED;
-      }
+    if (!asset_catalog_from_op(op, *library, catalog_id, catalog_simple_name)) {
+      return OPERATOR_CANCELLED;
     }
-    else {
-      /* Fallback for call sites that only set catalog_id (e.g. catalog tree is not used here). */
-      char catalog_id_str[UUID_STRING_SIZE];
-      RNA_string_get(op->ptr, "catalog_id", catalog_id_str);
-      if (catalog_id_str[0] != '\0' && BLI_uuid_parse_string(&catalog_id, catalog_id_str)) {
-        has_catalog = true;
-        if (const asset_system::AssetCatalog *cat =
-                library->catalog_service().find_catalog(catalog_id))
-        {
-          catalog_simple_name = cat->simple_name;
-        }
-      }
-    }
+    has_catalog = !BLI_uuid_is_nil(catalog_id);
   }
   else if (has_catalog) {
     /* catalog_locked with valid UUID — look up simple name. */
@@ -626,6 +801,10 @@ static wmOperatorStatus asset_image_import_mark_exec(bContext *C, wmOperator *op
   RNA_END;
 
   /* 7. Per-file import. */
+  /* Textures collected for the optional PBR material: map type identifier -> first image with
+   * that type (later files with the same type are reported and left unconnected). */
+  Map<std::string, Image *> material_maps;
+  const bool create_material = RNA_boolean_get(op->ptr, "create_material");
   int success_count = 0;
   for (const ImportItem &item : items) {
     const bUserNameMatchMapType *map_type_ptr = asset_image_import_map_type_find(
@@ -651,6 +830,16 @@ static wmOperatorStatus asset_image_import_mark_exec(bContext *C, wmOperator *op
       ED_preview_kill_jobs_for_id(CTX_wm_manager(C), &image->id);
       BKE_image_signal(bmain, image, nullptr, IMA_SIGNAL_RELOAD);
       WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, image);
+    }
+
+    /* Textures that go into the material stay plain image data-blocks: the material asset is the
+     * only asset created for them. */
+    if (create_material && map_type_ptr != nullptr) {
+      if (!asset_pbr_map_type_taken(op, material_maps, item.map_type_identifier.c_str())) {
+        material_maps.add(item.map_type_identifier, image);
+      }
+      success_count++;
+      continue;
     }
 
     bool this_success = false;
@@ -685,6 +874,38 @@ static wmOperatorStatus asset_image_import_mark_exec(bContext *C, wmOperator *op
     }
 
     success_count++;
+  }
+
+  /* 7b. Optional: build a Principled BSDF material from the imported textures and mark it as
+   * an asset in the same catalog as the images. */
+  if (create_material && !material_maps.is_empty()) {
+    /* No name typed in the dialog: use the texture-set name of the first file. */
+    asset_pbr_material_name_prefill(op);
+    PbrMaterialBuildParams params = asset_pbr_material_params_from_op(op);
+    params.maps = std::move(material_maps);
+
+    PbrMaterialAssetParams asset_params;
+    asset_params.catalog_id = catalog_id;
+    asset_params.catalog_simple_name = catalog_simple_name;
+    char material_tag[MAX_NAME];
+    RNA_string_get(op->ptr, "material_tag", material_tag);
+    asset_params.tag = material_tag;
+
+    const PbrMaterialResult result = pbr_material_from_images(bmain, params);
+    if (result.material != nullptr) {
+      if (pbr_material_mark_asset(
+              C, *result.material, asset_params, result.wired_map_types.as_span()))
+      {
+        BKE_reportf(
+            op->reports, RPT_INFO, "Material \"%s\" created", result.material->id.name + 2);
+      }
+      else {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Material \"%s\" created, but could not be marked as asset",
+                    result.material->id.name + 2);
+      }
+    }
   }
 
   /* 8. Refresh library notifiers. */
@@ -761,7 +982,211 @@ static void ASSET_OT_image_import_mark(wmOperatorType *ot)
                         "UUID of the catalog to assign the new assets to");
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 
+  /* Material creation (see the "Advanced" sub-panel). */
+  prop = RNA_def_boolean(ot->srna,
+                         "create_material",
+                         asset_image_import_create_material_default,
+                         "Create Material",
+                         "Build a Principled BSDF material from the imported textures and mark "
+                         "it as an asset");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  asset_pbr_material_props_define(ot);
+
   PropertyRNA *map_type_prop = RNA_struct_type_find_property(RNA_OperatorAssetImageImportElement,
+                                                             "map_type");
+  RNA_def_enum_funcs(map_type_prop, rna_asset_image_import_map_type_itemf);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name PBR material from images operator
+ *
+ * Public facing API for addons: builds a Principled BSDF material from already available
+ * images (by data-block name or file path), keyed by map type identifiers. The node graph is
+ * the exact same one the "Import Images as Assets" dialog builds. See
+ * #pbr_material_from_images / #pbr_material_mark_asset.
+ * \{ */
+
+static wmOperatorStatus asset_pbr_material_from_images_invoke(bContext *C,
+                                                              wmOperator *op,
+                                                              const wmEvent * /*event*/)
+{
+  asset_pbr_material_name_prefill(op);
+  return WM_operator_props_dialog_popup(C, op, 420, IFACE_("Create PBR Material"), IFACE_("OK"));
+}
+
+static wmOperatorStatus asset_pbr_material_from_images_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  const UserDef &userdef = U;
+
+  /* Same naming behavior with or without the dialog: empty name uses the texture-set name of
+   * the first image. */
+  asset_pbr_material_name_prefill(op);
+
+  /* 1. Resolve the images by map type (first entry per type wins). */
+  Map<std::string, Image *> maps;
+  RNA_BEGIN (op->ptr, itemptr, "images") {
+    char name[MAX_NAME];
+    char filepath[FILE_MAX];
+    char map_type_identifier[64];
+    RNA_string_get(&itemptr, "name", name);
+    RNA_string_get(&itemptr, "filepath", filepath);
+    RNA_string_get(&itemptr, "map_type_identifier", map_type_identifier);
+    /* The visible enum is authoritative after dialog edits; the string stays the stable
+     * identifier for callers that populate the collection without the enum UI. */
+    if (const char *identifier = asset_image_import_map_type_enum_to_identifier(
+            userdef, RNA_enum_get(&itemptr, "map_type")))
+    {
+      STRNCPY(map_type_identifier, identifier);
+    }
+    if (map_type_identifier[0] == '\0') {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "No map type assigned for \"%s\", skipped",
+                  name[0] != '\0' ? name : BLI_path_basename(filepath));
+      continue;
+    }
+    /* Checked before loading anything, so skipped duplicates cost nothing. */
+    if (asset_pbr_map_type_taken(op, maps, map_type_identifier)) {
+      continue;
+    }
+
+    Image *image = nullptr;
+    if (name[0] != '\0') {
+      image = id_cast<Image *>(BKE_libblock_find_name(bmain, ID_IM, name));
+      if (image == nullptr) {
+        BKE_reportf(op->reports, RPT_WARNING, "Image \"%s\" not found", name);
+      }
+    }
+    if (image == nullptr && filepath[0] != '\0') {
+      image = BKE_image_load_exists(bmain, filepath, nullptr);
+      if (image != nullptr) {
+        /* Drop the user added by the loader: the material's image nodes take their own. An image
+         * that ends up with zero users when the operator is cancelled afterwards is the same
+         * state as any freshly loaded, unused image and is purged like one. */
+        id_us_min(&image->id);
+      }
+      else {
+        BKE_reportf(op->reports, RPT_WARNING, "Could not load image \"%s\"", filepath);
+      }
+    }
+    if (image != nullptr) {
+      maps.add(map_type_identifier, image);
+    }
+  }
+  RNA_END;
+
+  if (maps.is_empty()) {
+    BKE_report(op->reports, RPT_WARNING, "No images to build a material from");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* 2. Resolve the catalog first, so an invalid one does not leave a half-created material. */
+  const bool mark_asset = RNA_boolean_get(op->ptr, "mark_asset");
+  PbrMaterialAssetParams asset_params;
+  if (mark_asset) {
+    asset_params.catalog_id = BLI_uuid_nil();
+    if (asset_system::AssetLibrary *library = asset_image_import_current_file_library_get(bmain)) {
+      if (!asset_catalog_from_op(
+              op, *library, asset_params.catalog_id, asset_params.catalog_simple_name))
+      {
+        return OPERATOR_CANCELLED;
+      }
+    }
+    char material_tag[MAX_NAME];
+    RNA_string_get(op->ptr, "material_tag", material_tag);
+    asset_params.tag = material_tag;
+  }
+
+  /* 3. Build the material. */
+  PbrMaterialBuildParams params = asset_pbr_material_params_from_op(op);
+  params.maps = std::move(maps);
+
+  const PbrMaterialResult result = pbr_material_from_images(bmain, params);
+  if (result.material == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Could not create the material");
+    return OPERATOR_CANCELLED;
+  }
+
+  /* 4. Optionally mark the material as an asset. A failure leaves a regular material behind. */
+  bool marked = false;
+  if (mark_asset) {
+    marked = pbr_material_mark_asset(
+        C, *result.material, asset_params, result.wired_map_types.as_span());
+    if (marked) {
+      refresh_asset_library(C, asset_system::current_file_library_reference());
+      WM_main_add_notifier(NC_ASSET | ND_ASSET_LIST | NA_ADDED, nullptr);
+    }
+    else {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Material \"%s\" could not be marked as asset",
+                  result.material->id.name + 2);
+    }
+  }
+
+  WM_main_add_notifier(NC_ID | NA_ADDED, nullptr);
+  BKE_reportf(op->reports,
+              RPT_INFO,
+              marked || !mark_asset ? "Material \"%s\" created" :
+                                      "Material \"%s\" created (not an asset)",
+              result.material->id.name + 2);
+  return OPERATOR_FINISHED;
+}
+
+static void ASSET_OT_pbr_material_from_images(wmOperatorType *ot)
+{
+  ot->name = "Create PBR Material";
+  ot->description =
+      "Build a Principled BSDF material from a set of PBR images, keyed by map types, and "
+      "optionally mark it as an asset with a catalog, tags and a rendered preview. Intended as "
+      "the Python-facing API for addons implementing their own PBR texture workflows";
+  ot->idname = "ASSET_OT_pbr_material_from_images";
+
+  ot->invoke = asset_pbr_material_from_images_invoke;
+  ot->exec = asset_pbr_material_from_images_exec;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+
+  PropertyRNA *prop;
+
+  /* Per-image list: image data-block name or file path, keyed by map type. */
+  prop = RNA_def_collection_runtime(
+      ot->srna, "images", RNA_OperatorPbrMaterialElement, "Images", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  asset_pbr_material_props_define(ot);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "mark_asset",
+                         true,
+                         "Mark as Asset",
+                         "Mark the created material as an asset and generate a preview");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_string(ot->srna,
+                        "catalog_path",
+                        nullptr,
+                        MAX_NAME,
+                        "Catalog",
+                        "Catalog path in the current file to assign the material asset to");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+  RNA_def_property_string_search_func_runtime(
+      prop, asset_image_import_catalog_search, PROP_STRING_SEARCH_SUGGESTION);
+
+  /* Alternative to catalog_path for callers holding a catalog UUID. */
+  prop = RNA_def_string(ot->srna,
+                        "catalog_id",
+                        nullptr,
+                        UUID_STRING_SIZE,
+                        "Catalog UUID",
+                        "UUID of the catalog to assign the material asset to");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  PropertyRNA *map_type_prop = RNA_struct_type_find_property(RNA_OperatorPbrMaterialElement,
                                                              "map_type");
   RNA_def_enum_funcs(map_type_prop, rna_asset_image_import_map_type_itemf);
 }
@@ -2525,6 +2950,7 @@ void operatortypes_asset()
   WM_operatortype_append(ASSET_OT_asset_download);
 
   WM_operatortype_append(ASSET_OT_image_import_mark);
+  WM_operatortype_append(ASSET_OT_pbr_material_from_images);
 
   WM_operatortype_append(ASSET_OT_browser_name_match_map_type_toggle);
   WM_operatortype_append(ASSET_OT_browser_name_match_clear);

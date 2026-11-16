@@ -858,6 +858,50 @@ enum PaintLayerMaskOutlineParam : int {
   PAINT_LAYER_MASK_OUTLINE_PARAM_NUM = 8,
 };
 
+/** What the Fill Area filter reads its border from, the value of its #PAINT_LAYER_FILL_AREA_SOURCE
+ * parameter. The same source the Bevel and the Drop Shadow read their shapes by. */
+enum PaintLayerFillAreaSource : int {
+  /** The content's own alpha: a stroke's outline is the border the fill closes against. */
+  PAINT_LAYER_FILL_AREA_SOURCE_ALPHA = 0,
+  /** The scene-linear luminance: the dark side of the content is the border. A mask item reads
+   * this one, for the grey the mask lays carries no alpha of its own. */
+  PAINT_LAYER_FILL_AREA_SOURCE_LUMINANCE = 1,
+};
+
+/** What a region open at the map's border does, the value of its
+ * #PAINT_LAYER_FILL_AREA_UV_BORDER parameter. */
+enum PaintLayerFillAreaUvBorder : int {
+  /** A region open at the border fills against it: the border closes what runs off the map. */
+  PAINT_LAYER_FILL_AREA_UV_BORDER_FILL = 0,
+  /** A region open at the border stays open: only what the border closes off is filled. */
+  PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE = 1,
+};
+
+/** What the enclosed region takes, the value of its #PAINT_LAYER_FILL_AREA_COLOR_MODE parameter. */
+enum PaintLayerFillAreaColorMode : int {
+  /** The border's own colours, diffused inward by the iterations. */
+  PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE = 0,
+  /** The solid colour the fill carries, the diffusion left out. */
+  PAINT_LAYER_FILL_AREA_COLOR_MODE_SOLID = 1,
+};
+
+/** The positions of the Fill Area filter's parameters in its schema. */
+enum PaintLayerFillAreaParam : int {
+  PAINT_LAYER_FILL_AREA_SOURCE = 0,
+  /** The value the border of the shape is read at. */
+  PAINT_LAYER_FILL_AREA_THRESHOLD = 1,
+  /** On: the regions themselves are laid as a grey ramp instead of the fill. */
+  PAINT_LAYER_FILL_AREA_DEBUG = 2,
+  PAINT_LAYER_FILL_AREA_UV_BORDER = 3,
+  PAINT_LAYER_FILL_AREA_COLOR_MODE = 4,
+  PAINT_LAYER_FILL_AREA_COLOR = 5,
+  /** Whole texels of the box blur laid over the finished fill; zero leaves it as it is. */
+  PAINT_LAYER_FILL_AREA_BLUR = 6,
+  /** The diffusion passes the fill walks; more reach farther in, at the cost of the passes. */
+  PAINT_LAYER_FILL_AREA_ITERATIONS = 7,
+  PAINT_LAYER_FILL_AREA_PARAM_NUM = 8,
+};
+
 /** The positions of the Sharpen filter's parameters in its schema. */
 enum PaintLayerSharpenParam : int {
   PAINT_LAYER_SHARPEN_RADIUS = 0,

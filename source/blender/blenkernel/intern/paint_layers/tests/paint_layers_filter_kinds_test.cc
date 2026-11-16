@@ -834,6 +834,82 @@ TEST_F(PaintLayersFilterKindsTest, mask_outline_kind_is_a_cpu_computed_effect_wi
   }
 }
 
+TEST_F(PaintLayersFilterKindsTest, fill_area_kind_is_a_cpu_computed_effect_with_a_schema)
+{
+  Material *ma = BKE_material_add(bmain, "RnaFillAreaParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *fill = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_FILL_AREA);
+  ASSERT_NE(fill, nullptr);
+
+  /* A CPU-computed effect like the Bevel: the flood and the diffusion are whole-map passes, so no
+   * GPU pass exists for it. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*fill, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*fill, PAINT_LAYER_KIND_NEEDS_BAKE));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*fill, PAINT_LAYER_KIND_GPU_COMPUTED));
+  /* The result is a layer of its own: a hole between strokes has no coverage to fill into, and a
+   * mask's fill is brought back to one grey. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*fill, PAINT_LAYER_KIND_RESULT_HAS_ALPHA));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*fill, PAINT_LAYER_KIND_MASK_NEEDS_LUMA));
+
+  /* The border defaults to the alpha a stroke closes with, a region open at the map's border
+   * stays open, the fill diffuses the border's own colours over two dozen passes. */
+  EXPECT_EQ(paint_layer_kind_param_int_get(*fill, PAINT_LAYER_FILL_AREA_SOURCE),
+            PAINT_LAYER_FILL_AREA_SOURCE_ALPHA);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*fill, PAINT_LAYER_FILL_AREA_THRESHOLD), 0.5f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*fill, PAINT_LAYER_FILL_AREA_DEBUG), 0.0f);
+  EXPECT_EQ(paint_layer_kind_param_int_get(*fill, PAINT_LAYER_FILL_AREA_UV_BORDER),
+            PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE);
+  EXPECT_EQ(paint_layer_kind_param_int_get(*fill, PAINT_LAYER_FILL_AREA_COLOR_MODE),
+            PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*fill, PAINT_LAYER_FILL_AREA_BLUR), 0.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*fill, PAINT_LAYER_FILL_AREA_ITERATIONS), 24.0f);
+  float color[4];
+  paint_layer_kind_param_color_get(*fill, PAINT_LAYER_FILL_AREA_COLOR, color);
+  EXPECT_FLOAT_EQ(color[0], 1.0f);
+
+  /* The RNA enum names the kind, and the collection lists exactly the schema's eight parameters,
+   * labelled. */
+  PointerRNA fill_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, fill);
+  PropertyRNA *filter_prop = RNA_struct_find_property(&fill_ptr, "filter_type");
+  ASSERT_NE(filter_prop, nullptr);
+  const char *identifier = nullptr;
+  ASSERT_TRUE(RNA_property_enum_identifier(nullptr,
+                                           &fill_ptr,
+                                           filter_prop,
+                                           MA_PAINT_LAYER_FILTER_FILL_AREA,
+                                           &identifier));
+  EXPECT_STREQ(identifier, "FILL_AREA");
+  PropertyRNA *params = RNA_struct_find_property(&fill_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&fill_ptr, params), 8);
+  const char *names[8] = {"source",
+                          "threshold",
+                          "debug",
+                          "uv_border",
+                          "color_mode",
+                          "color",
+                          "blur",
+                          "iterations"};
+  const char *labels[8] = {"Area Detection",
+                           "Area Detection Threshold",
+                           "Debug Area Detection",
+                           "UV Border Behavior",
+                           "Color Mode",
+                           "Fill Color",
+                           "Blur Intensity",
+                           "Diffusion Iterations"};
+  for (const int i : IndexRange(8)) {
+    PointerRNA param_ptr;
+    ASSERT_TRUE(RNA_property_collection_lookup_string(&fill_ptr, params, names[i], &param_ptr))
+        << names[i];
+    PropertyRNA *label = RNA_struct_find_property(&param_ptr, "label");
+    ASSERT_NE(label, nullptr);
+    EXPECT_EQ(RNA_property_string_get(&param_ptr, label), labels[i]);
+  }
+}
+
 TEST_F(PaintLayersFilterKindsTest, deband_kind_is_a_pointwise_filter_with_a_mode_and_two_integers)
 {
   Material *ma = BKE_material_add(bmain, "RnaDebandParamMat");

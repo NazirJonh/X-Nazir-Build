@@ -400,10 +400,16 @@ def _kind_param_is_hidden(by_name, param):
     """Whether a parameter has no effect in the state of its siblings and is left undrawn.
 
     A Mask Outline lays its ring in the Color only when it reads the shape from the Luminance: from the
-    Alpha the ring is white, so the picker would offer a value that changes nothing.
+    Alpha the ring is white, so the picker would offer a value that changes nothing. A Fill Area uses
+    its Fill Color only in the Solid color mode, and its Diffusion Iterations only in the Source one.
     """
     if param.name == "color" and "curve_shape" in by_name and "source" in by_name:
         return by_name["source"].enum_value == 'ALPHA'
+    if "color_mode" in by_name and "iterations" in by_name:
+        if param.name == "color":
+            return by_name["color_mode"].enum_value != 'SOLID'
+        if param.name == "iterations":
+            return by_name["color_mode"].enum_value == 'SOLID'
     return False
 
 

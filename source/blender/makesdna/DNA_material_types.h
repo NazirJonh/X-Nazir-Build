@@ -1153,6 +1153,13 @@ enum eMaterialPaintLayerFilter : int16_t {
    * the color tints the ring); on a mask it is a grey band.
    */
   MA_PAINT_LAYER_FILTER_MASK_OUTLINE = 34,
+  /**
+   * Fill what a continuous border encloses (a Fill Area): the regions the border of the content
+   * — its alpha, or the dark side of its paint — closes off take the colour the border carries,
+   * diffused inward by the iterations, or the solid colour the mode names. A CPU-computed effect
+   * like the #MA_PAINT_LAYER_FILTER_BEVEL: the flood and the diffusion are whole-map passes.
+   */
+  MA_PAINT_LAYER_FILTER_FILL_AREA = 35,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

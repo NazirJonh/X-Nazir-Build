@@ -966,6 +966,293 @@ static void paint_layer_effect_mask_outline_apply(ImBuf &buffer,
 }
 
 /**
+ * The Fill Area over \a buffer in place: the regions the border of the content closes off take
+ * the colour the border carries, diffused inward by the iterations, or the solid colour the mode
+ * names. The border is the alpha (or the luminance, as the Bevel reads) at or past the threshold;
+ * a region is the connected run of texels short of it, the background the one an open border
+ * leaves reachable from the map's edge (or, when the border closes what runs off the map, the
+ * largest one). The kernel reads one ImBuf, one UDIM tile: a region open at the tile's border is
+ * filled against that border, never through into its neighbour.
+ *
+ * \a as_layer picks what the buffer holds afterwards. A content effect leaves a layer of its own
+ * (#PAINT_LAYER_KIND_RESULT_HAS_ALPHA): the enclosed texels carry the fill, premultiplied, with
+ * an alpha of one, everything else is empty -- a hole between strokes has no coverage of its own,
+ * so a colour-only result would stay invisible on it. Without it (a mask item) the border is
+ * always the luminance, the fill is written into the colour and alpha is untouched.
+ */
+static void paint_layer_effect_fill_area_apply(ImBuf &buffer,
+                                               const MaterialPaintLayer &effect,
+                                               const bool as_layer)
+{
+  /* A mask's grey carries no alpha of its own: its border is always the luminance. */
+  const bool by_alpha = as_layer &&
+                        paint_layer_kind_param_int_get(effect, PAINT_LAYER_FILL_AREA_SOURCE) ==
+                            PAINT_LAYER_FILL_AREA_SOURCE_ALPHA;
+  const float threshold = paint_layer_kind_param_get(effect, PAINT_LAYER_FILL_AREA_THRESHOLD);
+  const bool debug = paint_layer_kind_param_bool_get(effect, PAINT_LAYER_FILL_AREA_DEBUG);
+  const int uv_border = paint_layer_kind_param_int_get(effect, PAINT_LAYER_FILL_AREA_UV_BORDER);
+  const int color_mode = paint_layer_kind_param_int_get(effect, PAINT_LAYER_FILL_AREA_COLOR_MODE);
+  const int blur = paint_layer_kind_param_int_get(effect, PAINT_LAYER_FILL_AREA_BLUR);
+  const int iterations = paint_layer_kind_param_int_get(effect, PAINT_LAYER_FILL_AREA_ITERATIONS);
+  float fill_color[4];
+  paint_layer_kind_param_color_get(effect, PAINT_LAYER_FILL_AREA_COLOR, fill_color);
+
+  const int width = buffer.x;
+  const int height = buffer.y;
+  const int64_t count = int64_t(width) * height;
+  float *pixels = buffer.float_data_for_write();
+  const auto layer_clear = [&]() {
+    if (as_layer) {
+      std::fill_n(pixels, count * 4, 0.0f);
+    }
+  };
+  /* The texels of a row range, as the flat indices the per-texel passes walk. */
+  const auto texels_of = [&](const IndexRange rows) {
+    return IndexRange(rows.start() * int64_t(width), rows.size() * int64_t(width));
+  };
+
+  /* The border is read once: the flood and the diffusion both ask it per texel. */
+  Vector<bool> border(count);
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange rows) {
+    for (const int64_t i : texels_of(rows)) {
+      const float *texel = pixels + i * 4;
+      const float shape = by_alpha ? texel[3] :
+                                     clamp_f(IMB_colormanagement_get_luminance(texel), 0.0f, 1.0f);
+      border[i] = shape >= threshold;
+    }
+  });
+
+  /* The region id of every texel short of the border: zero is no region, the rest count the
+   * connected runs the flood walks. The flood is the one serial pass (a region grows from one
+   * texel), iterative on an explicit queue so a 4K map cannot overflow the stack. */
+  Vector<int32_t> region(count, int32_t(0));
+  int32_t regions = 0;
+  {
+    /* Texel indices only, as 32-bit: the image size limit keeps a map's texel count below 2^31.
+     * The queue is freed with the scope, before the diffusion's buffer is allocated. */
+    Vector<int32_t> queue;
+    queue.reserve(count);
+    for (const int64_t start : IndexRange(count)) {
+      if (border[start] || region[start] != 0) {
+        continue;
+      }
+      regions++;
+      region[start] = regions;
+      queue.clear();
+      queue.append(int32_t(start));
+      for (int64_t head = 0; head < queue.size(); head++) {
+        const int32_t i = queue[head];
+        const int x = i % width;
+        const int y = i / width;
+        const int32_t neighbours[4] = {
+            (x > 0) ? i - 1 : -1,
+            (x < width - 1) ? i + 1 : -1,
+            (y > 0) ? i - width : -1,
+            (y < height - 1) ? i + width : -1,
+        };
+        for (const int32_t n : neighbours) {
+          if (n >= 0 && region[n] == 0 && !border[n]) {
+            region[n] = regions;
+            queue.append(n);
+          }
+        }
+      }
+    }
+  }
+  if (regions == 0) {
+    /* The border covers the whole map: nothing is enclosed. */
+    layer_clear();
+    return;
+  }
+
+  /* The regions the fill leaves alone: the ones an open border leaves reachable from the map's
+   * edge, or -- when the border closes what runs off it -- the largest one, the background the
+   * map itself holds. The slot of "no region" counts as one, so a border texel is never enclosed. */
+  Vector<bool> is_background(int64_t(regions) + 1, false);
+  is_background[0] = true;
+  if (uv_border == PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE) {
+    for (const int x : IndexRange(width)) {
+      is_background[region[x]] = true;
+      is_background[region[int64_t(height - 1) * width + x]] = true;
+    }
+    for (const int y : IndexRange(height)) {
+      is_background[region[int64_t(y) * width]] = true;
+      is_background[region[int64_t(y) * width + width - 1]] = true;
+    }
+  }
+  else {
+    /* The largest run wins: a map holds one background, however much the strokes cut into it. */
+    Vector<int64_t> area(int64_t(regions) + 1, 0);
+    for (const int64_t i : IndexRange(count)) {
+      area[region[i]]++;
+    }
+    int32_t largest_region = 1;
+    for (const int32_t r : IndexRange(1, regions)) {
+      if (area[r] > area[largest_region]) {
+        largest_region = r;
+      }
+    }
+    is_background[largest_region] = true;
+  }
+  const auto enclosed = [&](const int64_t i) { return !is_background[region[i]]; };
+
+  /* The result written row-parallel: \a color_of gives an enclosed texel's colour. The layer is
+   * empty everywhere else; a mask item keeps what the texel held. */
+  const auto write_result = [&](const auto &color_of) {
+    threading::parallel_for(IndexRange(height), 64, [&](const IndexRange rows) {
+      for (const int64_t i : texels_of(rows)) {
+        float *texel = pixels + i * 4;
+        if (enclosed(i)) {
+          color_of(i, texel);
+          if (as_layer) {
+            texel[3] = 1.0f;
+          }
+        }
+        else if (as_layer) {
+          texel[0] = texel[1] = texel[2] = texel[3] = 0.0f;
+        }
+      }
+    });
+  };
+
+  /* The debug lays the regions themselves: a grey ramp of their number (the background ones
+   * too, the border at zero), the check that finds the strokes whose border is not closed. */
+  if (debug) {
+    const float scale = 1.0f / float(regions);
+    threading::parallel_for(IndexRange(height), 64, [&](const IndexRange rows) {
+      for (const int64_t i : texels_of(rows)) {
+        float *texel = pixels + i * 4;
+        const float value = float(region[i]) * scale;
+        texel[0] = texel[1] = texel[2] = value;
+        if (as_layer) {
+          /* Opaque everywhere, the border as the ramp's zero: the debug is the whole picture. */
+          texel[3] = 1.0f;
+        }
+      }
+    });
+    return;
+  }
+
+  if (color_mode == PAINT_LAYER_FILL_AREA_COLOR_MODE_SOLID) {
+    /* The solid mode skips the diffusion: the enclosed region takes the colour as it is. */
+    write_result([&](const int64_t /*i*/, float *texel) {
+      texel[0] = fill_color[0];
+      texel[1] = fill_color[1];
+      texel[2] = fill_color[2];
+    });
+  }
+  else if (iterations > 0) {
+    /* The diffusion: the border texels hold their own colour, the enclosed ones walk toward the
+     * average of their neighbours, one pass at a time. A texel's neighbour is a border texel or
+     * one of its own region (regions are the connected runs), so the passes ping-pong between the
+     * buffer's own colour and one extra RGB field -- the only full-size float buffer beyond it. */
+    Vector<float> pong(count * 3, 0.0f);
+    threading::parallel_for(IndexRange(height), 64, [&](const IndexRange rows) {
+      for (const int64_t i : texels_of(rows)) {
+        float *texel = pixels + i * 4;
+        if (border[i]) {
+          if (as_layer && texel[3] >= 0.01f && texel[3] < 1.0f) {
+            /* The input is premultiplied: the fill carries the border's own colour. */
+            const float inverse = 1.0f / texel[3];
+            texel[0] *= inverse;
+            texel[1] *= inverse;
+            texel[2] *= inverse;
+          }
+          pong[i * 3 + 0] = texel[0];
+          pong[i * 3 + 1] = texel[1];
+          pong[i * 3 + 2] = texel[2];
+        }
+        else if (enclosed(i)) {
+          texel[0] = texel[1] = texel[2] = 0.0f;
+        }
+      }
+    });
+    for (const int pass : IndexRange(iterations)) {
+      const bool read_pixels = (pass % 2 == 0);
+      const float *read = read_pixels ? pixels : pong.data();
+      float *write = read_pixels ? pong.data() : pixels;
+      const int64_t read_stride = read_pixels ? 4 : 3;
+      const int64_t write_stride = read_pixels ? 3 : 4;
+      threading::parallel_for(IndexRange(height), 64, [&](const IndexRange rows) {
+        for (const int y : rows) {
+          for (const int x : IndexRange(width)) {
+            const int64_t i = int64_t(y) * width + x;
+            if (!enclosed(i)) {
+              continue;
+            }
+            /* The map's edge is no neighbour: a region left open is no wall there. */
+            const int64_t neighbours[4] = {
+                (x > 0) ? i - 1 : -1,
+                (x < width - 1) ? i + 1 : -1,
+                (y > 0) ? i - width : -1,
+                (y < height - 1) ? i + width : -1,
+            };
+            float sum[3] = {0.0f, 0.0f, 0.0f};
+            int samples = 0;
+            for (const int64_t n : neighbours) {
+              if (n < 0) {
+                continue;
+              }
+              sum[0] += read[n * read_stride + 0];
+              sum[1] += read[n * read_stride + 1];
+              sum[2] += read[n * read_stride + 2];
+              samples++;
+            }
+            if (samples == 0) {
+              continue;
+            }
+            const float inverse = 1.0f / float(samples);
+            write[i * write_stride + 0] = sum[0] * inverse;
+            write[i * write_stride + 1] = sum[1] * inverse;
+            write[i * write_stride + 2] = sum[2] * inverse;
+          }
+        }
+      });
+    }
+    /* The last pass wrote into the buffer when the count is even, into the extra field otherwise. */
+    const bool done_in_pixels = (iterations % 2 == 0);
+    const float *done = done_in_pixels ? pixels : pong.data();
+    const int64_t done_stride = done_in_pixels ? 4 : 3;
+    write_result([&](const int64_t i, float *texel) {
+      texel[0] = done[i * done_stride + 0];
+      texel[1] = done[i * done_stride + 1];
+      texel[2] = done[i * done_stride + 2];
+    });
+  }
+  else {
+    /* No iterations: the fill has nothing to reach in with, the regions stay as they are. */
+    layer_clear();
+    return;
+  }
+
+  if (blur > 0) {
+    if (as_layer) {
+      /* The box blur reads the colour only: the coverage is softened as a grey of its own, so the
+       * fill's edge fades out instead of staying a hard step under a soft colour. */
+      std::shared_ptr<ImBuf> coverage = paint_layer_anchor_slice_buffer_clone(buffer);
+      if (coverage == nullptr) {
+        return;
+      }
+      paint_layer_effect_map_rgb(*coverage, [](const int /*x*/, const int /*y*/, float *texel) {
+        texel[0] = texel[1] = texel[2] = texel[3];
+      });
+      paint_layer_effect_blur_box(*coverage, blur);
+      paint_layer_effect_blur_box(buffer, blur);
+      const float *soft = coverage->float_data();
+      float *out = buffer.float_data_for_write();
+      threading::parallel_for(IndexRange(count), 65536, [&](const IndexRange range) {
+        for (const int64_t i : range) {
+          out[i * 4 + 3] = clamp_f(soft[i * 4], 0.0f, 1.0f);
+        }
+      });
+    }
+    else {
+      paint_layer_effect_blur_box(buffer, blur);
+    }
+  }
+}
+
+/**
  * The Bevel kernel over \a buffer in place: the distance of each texel from the content's border,
  * normalized by the distance parameter and clamped to [0, 1], written to all three colour channels,
  * then softened by a box blur of the smooth radius. The source parameter says what a border is: the
@@ -978,11 +1265,16 @@ static void paint_layer_effect_mask_outline_apply(ImBuf &buffer,
  * angular one is the chessboard walk, which keeps corners square. Both are the shared
  * #paint_layer_effect_chamfer_walk.
  */
-static void paint_layer_effect_bevel_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
+static void paint_layer_effect_bevel_apply(ImBuf &buffer,
+                                              const MaterialPaintLayer &effect,
+                                              const bool for_mask)
 {
   const int distance = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_DISTANCE);
-  const bool luminance = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_SOURCE) ==
-                         PAINT_LAYER_BEVEL_SOURCE_LUMINANCE;
+  /* A mask's grey carries no alpha (it is one everywhere), so its border is always the luminance;
+   * the alpha source would bevel nothing and lay a solid one. */
+  const bool luminance = for_mask || paint_layer_kind_param_int_get(
+                                         effect, PAINT_LAYER_BEVEL_SOURCE) ==
+                                         PAINT_LAYER_BEVEL_SOURCE_LUMINANCE;
   const bool angular = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_CORNER) ==
                        PAINT_LAYER_BEVEL_ANGULAR;
   const int smooth = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_SMOOTH);
@@ -1183,8 +1475,12 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer,
       paint_layer_effect_mask_outline_apply(
           buffer, effect, !for_mask && paint_layer_kind_result_has_alpha(effect));
       break;
+    case MA_PAINT_LAYER_FILTER_FILL_AREA:
+      paint_layer_effect_fill_area_apply(
+          buffer, effect, !for_mask && paint_layer_kind_result_has_alpha(effect));
+      break;
     case MA_PAINT_LAYER_FILTER_BEVEL:
-      paint_layer_effect_bevel_apply(buffer, effect);
+      paint_layer_effect_bevel_apply(buffer, effect, for_mask);
       break;
     case MA_PAINT_LAYER_FILTER_COLOR_MATCH:
       paint_layer_effect_color_match_apply(buffer, effect);

@@ -138,6 +138,32 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
     return image;
   }
 
+  /** An 8x8 byte image of a closed ring: opaque red on the square the texels 1 to 5 trace, and no
+   * alpha on the hole it closes (2 to 4) and on the map around it. */
+  Image *add_ring_image(const char *name)
+  {
+    const int size = 8;
+    const float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    Image *image = BKE_image_add_generated(
+        bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+    image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int y : IndexRange(size)) {
+      for (const int x : IndexRange(size)) {
+        const bool on_ring = x >= 1 && x <= 5 && y >= 1 && y <= 5 &&
+                             (x == 1 || x == 5 || y == 1 || y == 5);
+        uchar *p = pixels + (int64_t(y) * size + x) * 4;
+        p[0] = on_ring ? 255 : 0;
+        p[1] = 0;
+        p[2] = 0;
+        p[3] = on_ring ? 255 : 0;
+      }
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return image;
+  }
   MaterialPaintLayer *add_effect(MaterialPaintLayer &row, const eMaterialPaintLayerFilter filter)
   {
     MaterialPaintLayer *effect = BKE_paint_layers_filter_add(*ma, &row, filter);
@@ -749,6 +775,27 @@ TEST_F(PaintLayersEffectTest, a_drop_shadow_falls_toward_the_angle_off_the_lumin
   EXPECT_NEAR(linear_pixel(pixels, width, 7, 4), 0.0f, 2e-3f);
 }
 
+TEST_F(PaintLayersEffectTest, the_fill_area_debug_lays_the_regions_the_border_leaves)
+{
+  /* Left half white, right half black, all opaque: the luminance source reads the white side as
+   * the border, the black side the one region the fill closes against it. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *fill = add_effect(*row, MA_PAINT_LAYER_FILTER_FILL_AREA);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(
+      *fill, PAINT_LAYER_FILL_AREA_SOURCE, PAINT_LAYER_FILL_AREA_SOURCE_LUMINANCE));
+  ASSERT_TRUE(paint_layer_kind_param_bool_set(*fill, PAINT_LAYER_FILL_AREA_DEBUG, true));
+
+  /* The debug lays the regions themselves, opaque: the border reads zero, the one region reads the
+   * ramp's full one. */
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 0, 4), 0.0f, 2e-3f) << "the border reads zero";
+  EXPECT_NEAR(linear_pixel(pixels, width, 3, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 4), 1.0f, 2e-3f) << "the one region reads one";
+  EXPECT_NEAR(linear_pixel(pixels, width, 7, 4), 1.0f, 2e-3f);
+}
 TEST_F(PaintLayersEffectTest, a_drop_shadow_kernel_lays_a_premultiplied_shadow_layer)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
@@ -2134,6 +2181,211 @@ TEST_F(PaintLayersEffectTest, a_mask_outline_shows_on_the_map_around_an_island)
   EXPECT_NEAR(texel(7, 4, 0), 0.0f, 2e-3f) << "no ring far from the island";
 }
 
+/** A 9x9 float buffer holding a closed ring of premultiplied red around a hole, the ring traced
+ * by the texels two away from the centre: opaque on the ring, nothing on the hole and the map
+ * around it. \a gap opens the ring's west texel. */
+static ImBuf *fill_area_ring_buffer(const bool gap)
+{
+  constexpr int size = 9;
+  ImBuf *input = IMB_allocImBuf(size, size, ImBufFlags::FloatData);
+  float *pixels = input->float_data_for_write();
+  for (const int y : IndexRange(size)) {
+    for (const int x : IndexRange(size)) {
+      float *p = pixels + (int64_t(y) * size + x) * 4;
+      const bool on_ring = std::max(std::abs(x - 4), std::abs(y - 4)) == 2 && !(gap && x == 2 && y == 4);
+      p[0] = on_ring ? 1.0f : 0.0f;
+      p[1] = 0.0f;
+      p[2] = 0.0f;
+      p[3] = on_ring ? 1.0f : 0.0f;
+    }
+  }
+  return input;
+}
+
+TEST_F(PaintLayersEffectTest, a_fill_area_kernel_lays_a_premultiplied_fill_on_an_enclosed_hole)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *fill = add_effect(*row, MA_PAINT_LAYER_FILTER_FILL_AREA);
+
+  for (const PaintLayerFillAreaUvBorder uv_border : {PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE,
+                                                     PAINT_LAYER_FILL_AREA_UV_BORDER_FILL})
+  {
+    SCOPED_TRACE(int(uv_border));
+    ASSERT_TRUE(paint_layer_kind_param_int_set(*fill, PAINT_LAYER_FILL_AREA_UV_BORDER, int(uv_border)));
+    ImBuf *input = fill_area_ring_buffer(false);
+    paint_layer_effect_kernel_apply(*input, *fill);
+    const float *pixels = input->float_data();
+    const auto texel = [&](const int x, const int y) { return pixels + (int64_t(y) * 9 + x) * 4; };
+    /* The hole takes the ring's red and an alpha of one: the fill is a layer of its own, because
+     * the hole had no coverage a colour-only result could have shown on. The 24 passes carry the
+     * red into the 3x3 hole's every texel. */
+    for (const int y : IndexRange(3, 3)) {
+      for (const int x : IndexRange(3, 3)) {
+        EXPECT_NEAR(texel(x, y)[0], 1.0f, 5e-3f) << "red at " << x << "," << y;
+        EXPECT_NEAR(texel(x, y)[1], 0.0f, 1e-6f);
+        EXPECT_NEAR(texel(x, y)[3], 1.0f, 1e-6f) << "alpha at " << x << "," << y;
+      }
+    }
+    /* The ring itself and the map around it are empty in the layer: the row keeps them. */
+    for (const std::pair<int, int> empty : {std::pair<int, int>(2, 2),
+                                            std::pair<int, int>(2, 4),
+                                            std::pair<int, int>(0, 0),
+                                            std::pair<int, int>(8, 8),
+                                            std::pair<int, int>(1, 4)})
+    {
+      for (const int c : IndexRange(4)) {
+        EXPECT_NEAR(texel(empty.first, empty.second)[c], 0.0f, 1e-6f)
+            << "channel " << c << " at " << empty.first << "," << empty.second;
+      }
+    }
+    IMB_freeImBuf(input);
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_fill_area_kernel_leaves_a_hole_the_ring_does_not_close)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *fill = add_effect(*row, MA_PAINT_LAYER_FILTER_FILL_AREA);
+
+  /* A gap joins the hole to the map around it: one region that runs off the map's edge is the
+   * background whichever way the border behaves there, and the layer stays empty. */
+  for (const PaintLayerFillAreaUvBorder uv_border : {PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE,
+                                                     PAINT_LAYER_FILL_AREA_UV_BORDER_FILL})
+  {
+    SCOPED_TRACE(int(uv_border));
+    ASSERT_TRUE(paint_layer_kind_param_int_set(*fill, PAINT_LAYER_FILL_AREA_UV_BORDER, int(uv_border)));
+    ImBuf *input = fill_area_ring_buffer(true);
+    paint_layer_effect_kernel_apply(*input, *fill);
+    for (const int64_t i : IndexRange(int64_t(9) * 9 * 4)) {
+      EXPECT_NEAR(input->float_data()[i], 0.0f, 1e-6f) << "component " << i;
+    }
+    IMB_freeImBuf(input);
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_fill_area_kernel_with_no_border_lays_an_empty_layer)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *fill = add_effect(*row, MA_PAINT_LAYER_FILTER_FILL_AREA);
+
+  /* No texel reaches the threshold: the whole map is one region that touches the edge, so there
+   * is no hole to fill. The buffer is not handed back as the layer. */
+  ImBuf *input = IMB_allocImBuf(9, 9, ImBufFlags::FloatData);
+  float *pixels = input->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(9) * 9)) {
+    pixels[i * 4 + 0] = 0.2f;
+    pixels[i * 4 + 1] = 0.2f;
+    pixels[i * 4 + 2] = 0.2f;
+    pixels[i * 4 + 3] = 0.1f;
+  }
+  paint_layer_effect_kernel_apply(*input, *fill);
+  for (const int64_t i : IndexRange(int64_t(9) * 9 * 4)) {
+    EXPECT_NEAR(input->float_data()[i], 0.0f, 1e-6f) << "component " << i;
+  }
+  IMB_freeImBuf(input);
+
+  /* A border that covers the whole map leaves nothing enclosed either. */
+  input = IMB_allocImBuf(9, 9, ImBufFlags::FloatData);
+  pixels = input->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(9) * 9 * 4)) {
+    pixels[i] = 1.0f;
+  }
+  paint_layer_effect_kernel_apply(*input, *fill);
+  for (const int64_t i : IndexRange(int64_t(9) * 9 * 4)) {
+    EXPECT_NEAR(input->float_data()[i], 0.0f, 1e-6f) << "component " << i;
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_fill_area_solid_mode_fills_the_hole_with_the_colour)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *fill = add_effect(*row, MA_PAINT_LAYER_FILTER_FILL_AREA);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(
+      *fill, PAINT_LAYER_FILL_AREA_COLOR_MODE, PAINT_LAYER_FILL_AREA_COLOR_MODE_SOLID));
+  const float green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(paint_layer_kind_param_color_set(*fill, PAINT_LAYER_FILL_AREA_COLOR, green));
+
+  ImBuf *input = fill_area_ring_buffer(false);
+  paint_layer_effect_kernel_apply(*input, *fill);
+  const float *hole = input->float_data() + (int64_t(4) * 9 + 4) * 4;
+  EXPECT_NEAR(hole[0], 0.0f, 1e-6f);
+  EXPECT_NEAR(hole[1], 1.0f, 1e-6f);
+  EXPECT_NEAR(hole[3], 1.0f, 1e-6f);
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_fill_area_blur_softens_the_edge_of_the_fill_layer)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *fill = add_effect(*row, MA_PAINT_LAYER_FILTER_FILL_AREA);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*fill, PAINT_LAYER_FILL_AREA_BLUR, 1));
+
+  ImBuf *input = fill_area_ring_buffer(false);
+  paint_layer_effect_kernel_apply(*input, *fill);
+  /* The hard fill was one inside the hole and zero on the ring: the blur gives the ring's inner
+   * texel a coverage between them, and the colour stays premultiplied by it (no brighter than
+   * the alpha, red only). */
+  const float *edge = input->float_data() + (int64_t(4) * 9 + 2) * 4;
+  EXPECT_GT(edge[3], 0.05f);
+  EXPECT_LT(edge[3], 0.95f);
+  EXPECT_LE(edge[0], edge[3] + 1e-4f);
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_fill_area_kernel_in_a_mask_fills_the_grey_and_keeps_the_alpha)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *fill = add_effect(*row, MA_PAINT_LAYER_FILTER_FILL_AREA);
+  /* The source parameter is a content one: a mask's grey has no alpha, so the luminance is always
+   * the border, whatever the parameter reads. */
+  ASSERT_EQ(paint_layer_kind_param_int_get(*fill, PAINT_LAYER_FILL_AREA_SOURCE),
+            PAINT_LAYER_FILL_AREA_SOURCE_ALPHA);
+
+  ImBuf *input = fill_area_ring_buffer(false);
+  float *pixels = input->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(9) * 9)) {
+    /* White ring, black elsewhere, alpha one everywhere: the grey a mask item holds. */
+    const float grey = pixels[i * 4 + 0];
+    pixels[i * 4 + 1] = grey;
+    pixels[i * 4 + 2] = grey;
+    pixels[i * 4 + 3] = 1.0f;
+  }
+  paint_layer_effect_kernel_apply(*input, *fill, true);
+  const float *result = input->float_data();
+  const auto texel = [&](const int x, const int y) { return result + (int64_t(y) * 9 + x) * 4; };
+  for (const int y : IndexRange(3, 3)) {
+    for (const int x : IndexRange(3, 3)) {
+      EXPECT_NEAR(texel(x, y)[0], 1.0f, 5e-3f) << "grey at " << x << "," << y;
+      EXPECT_NEAR(texel(x, y)[1], texel(x, y)[0], 1e-6f);
+    }
+  }
+  EXPECT_NEAR(texel(2, 4)[0], 1.0f, 1e-6f) << "the ring keeps its white";
+  EXPECT_NEAR(texel(0, 0)[0], 0.0f, 1e-6f) << "the open map stays black";
+  for (const int64_t i : IndexRange(int64_t(9) * 9)) {
+    EXPECT_NEAR(result[i * 4 + 3], 1.0f, 1e-6f) << "a mask's alpha stays one, texel " << i;
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_fill_area_shows_in_the_hole_of_a_ring_on_the_map)
+{
+  /* The ring is opaque, its hole and the map around it have no alpha: the fill raises the
+   * coverage of the hole, which a colour-only result could not show. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_ring_image("Row"));
+  add_effect(*row, MA_PAINT_LAYER_FILTER_FILL_AREA);
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  const auto texel = [&](const int x, const int y, const int channel) {
+    return pixels[(int64_t(y) * width + x) * 4 + channel];
+  };
+  EXPECT_NEAR(texel(1, 3, 0), 1.0f, 2e-3f) << "the ring keeps its red";
+  EXPECT_GT(texel(3, 3, 0), 0.5f) << "the hole takes the ring's red where the row had no coverage";
+  EXPECT_NEAR(texel(7, 7, 0), 0.0f, 2e-3f) << "the open map around the ring stays empty";
+}
 TEST_F(PaintLayersEffectTest, a_color_match_of_a_solid_row_lands_on_the_target)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
@@ -2605,7 +2857,7 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
    * nothing. */
   Set<int> gpu_computed_filters;
   for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT);
-       filter <= int(MA_PAINT_LAYER_FILTER_MASK_OUTLINE);
+       filter <= int(MA_PAINT_LAYER_FILTER_FILL_AREA);
        filter++)
   {
     const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
@@ -3121,6 +3373,22 @@ TEST_F(PaintLayersEffectTest, a_mask_outline_lays_a_grey_band_from_the_luminance
   EXPECT_NEAR(px[(int64_t(4) * laid->x + laid->x - 1) * 4], 0.0f, 1e-6f);
 }
 
+TEST_F(PaintLayersEffectTest, a_mask_bevel_reads_the_luminance_whatever_the_source_says)
+{
+  /* A mask's grey has no alpha (one everywhere): the alpha source of the schema default would find
+   * no border and lay a solid one, so a mask item always bevels by the luminance. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  MaterialPaintLayer *bevel = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BEVEL);
+  ASSERT_EQ(paint_layer_kind_param_int_get(*bevel, PAINT_LAYER_BEVEL_SOURCE),
+            PAINT_LAYER_BEVEL_SOURCE_ALPHA);
+
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_BEVEL);
+  ASSERT_NE(laid, nullptr);
+  /* The dark end of the ramp is outside the shape, which is no distance from a border. */
+  EXPECT_LT(laid->float_data()[(int64_t(4) * laid->x) * 4], 0.5f);
+}
+
 TEST_F(PaintLayersEffectTest, a_mask_blur_is_the_box_blur_of_the_mask_built_up_to_it)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
@@ -3315,6 +3583,7 @@ TEST_F(PaintLayersEffectTest, every_mask_effect_kind_lays_one_grey)
                                                MA_PAINT_LAYER_FILTER_COLOR_MATCH,
                                                MA_PAINT_LAYER_FILTER_DROP_SHADOW,
                                                MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
+                                               MA_PAINT_LAYER_FILTER_FILL_AREA,
                                                MA_PAINT_LAYER_FILTER_NOISE};
   for (const eMaterialPaintLayerFilter filter : filters) {
     MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));

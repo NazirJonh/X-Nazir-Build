@@ -48,6 +48,8 @@ extern const uint32_t CELL_TOWER;
 extern const uint32_t COLORIZE;
 extern const uint32_t SELECT_ALL;
 extern const uint32_t PATTERN;
+extern const uint32_t FILL_AREA;
+extern const uint32_t MASK_OUTLINE;
 }  // namespace paint_glyph
 
 /** The pair a paint row shows for its kind: the built-in icon and its Material Symbols glyph. */

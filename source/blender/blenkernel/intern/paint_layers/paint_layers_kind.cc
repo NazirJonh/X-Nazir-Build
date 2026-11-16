@@ -375,6 +375,78 @@ static const PaintLayerKindParam mask_outline_params[] = {
 };
 static_assert(std::size(mask_outline_params) == PAINT_LAYER_MASK_OUTLINE_PARAM_NUM);
 
+static const PaintLayerKindEnumItem fill_area_source_items[] = {
+    {PAINT_LAYER_FILL_AREA_SOURCE_ALPHA, "ALPHA", "Alpha"},
+    {PAINT_LAYER_FILL_AREA_SOURCE_LUMINANCE, "LUMINANCE", "Luminance"},
+};
+static_assert(int(std::size(fill_area_source_items)) - 1 ==
+              PAINT_LAYER_FILL_AREA_SOURCE_LUMINANCE);
+
+static const PaintLayerKindEnumItem fill_area_uv_border_items[] = {
+    {PAINT_LAYER_FILL_AREA_UV_BORDER_FILL, "FILL", "Fill"},
+    {PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE, "IGNORE", "Ignore"},
+};
+static_assert(int(std::size(fill_area_uv_border_items)) - 1 ==
+              PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE);
+
+static const PaintLayerKindEnumItem fill_area_color_mode_items[] = {
+    {PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE, "SOURCE", "Source"},
+    {PAINT_LAYER_FILL_AREA_COLOR_MODE_SOLID, "SOLID", "Solid"},
+};
+static_assert(int(std::size(fill_area_color_mode_items)) - 1 ==
+              PAINT_LAYER_FILL_AREA_COLOR_MODE_SOLID);
+
+static const PaintLayerKindParam fill_area_params[] = {
+    /* The border the fill closes against: a stroke's coverage, or the dark side of the content --
+     * a mask item reads the latter, for the grey the mask lays carries no alpha of its own. */
+    {"source",
+     "Area Detection",
+     float(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA),
+     0.0f,
+     float(PAINT_LAYER_FILL_AREA_SOURCE_LUMINANCE),
+     PaintLayerKindParamType::Enum,
+     fill_area_source_items,
+     int(std::size(fill_area_source_items))},
+    /* The value the border is read at: what crosses it is border, what falls short is region. */
+    {"threshold", "Area Detection Threshold", 0.5f, 0.0f, 1.0f},
+    /* The regions themselves, as a grey ramp of their number: the check that finds the strokes
+     * whose border is not closed. */
+    {"debug", "Debug Area Detection", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Bool},
+    /* What a region open at the map's border does: the border closes it, or it stays open. */
+    {"uv_border",
+     "UV Border Behavior",
+     float(PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE),
+     0.0f,
+     float(PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE),
+     PaintLayerKindParamType::Enum,
+     fill_area_uv_border_items,
+     int(std::size(fill_area_uv_border_items))},
+    /* What the enclosed region takes: the border's own colours, or the solid one. */
+    {"color_mode",
+     "Color Mode",
+     float(PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE),
+     0.0f,
+     float(PAINT_LAYER_FILL_AREA_COLOR_MODE_SOLID),
+     PaintLayerKindParamType::Enum,
+     fill_area_color_mode_items,
+     int(std::size(fill_area_color_mode_items))},
+    {"color",
+     "Fill Color",
+     0.0f,
+     0.0f,
+     1.0f,
+     PaintLayerKindParamType::Color,
+     nullptr,
+     0,
+     {1.0f, 1.0f, 1.0f, 1.0f}},
+    /* Whole texels of the box blur laid over the finished fill. */
+    {"blur", "Blur Intensity", 0.0f, 0.0f, 32.0f, PaintLayerKindParamType::Int},
+    /* The diffusion passes: the useful range the filter documents is 8 to 48; more reach farther
+     * into a wide region, at the cost of the passes. */
+    {"iterations", "Diffusion Iterations", 24.0f, 0.0f, 64.0f, PaintLayerKindParamType::Int},
+};
+static_assert(std::size(fill_area_params) == PAINT_LAYER_FILL_AREA_PARAM_NUM);
+
 static const PaintLayerKindEnumItem glow_mode_items[] = {
     {PAINT_LAYER_GLOW_SOFT, "SOFT", "Soft"},
     {PAINT_LAYER_GLOW_PRECISE, "PRECISE", "Precise"},
@@ -1007,6 +1079,20 @@ static const PaintLayerKindInfo kinds[] = {
      int(std::size(mask_outline_params)),
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
+    /* What a continuous border encloses: the flood that finds the regions and the diffusion that
+     * fills them are whole-map passes, so it computes on the CPU like the Bevel does. A content
+     * row's result is a layer of its own (alpha one where a region is filled): a hole between the
+     * strokes has no coverage, so a colour-only fill would stay invisible there. In a mask the fill
+     * is a grey of itself (the kind normalizes) and the border always reads the luminance. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_FILL_AREA,
+     "Fill Area",
+     PaintLayerKindCategory::Operator,
+     effect_or_mask_roles,
+     fill_area_params,
+     int(std::size(fill_area_params)),
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_MASK_NEEDS_LUMA | PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
     /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same
      * open-above-one policy as Exposure and High Pass, unlike Noise and Channel Mixer. */
     {MA_PAINT_LAYER_SOURCE_FILTER,

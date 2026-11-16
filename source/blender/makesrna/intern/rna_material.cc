@@ -5963,6 +5963,12 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "Mask Outline",
      "Lay a band along the border of the grey of what is below: inside it, outside it, or on both "
      "sides, the width the band takes and the shape its falloff walks"},
+    {MA_PAINT_LAYER_FILTER_FILL_AREA,
+     "FILL_AREA",
+     0,
+     "Fill Area",
+     "Fill what a continuous border of what is below encloses: the regions the border closes off "
+     "take the colour the border carries, diffused inward, or the solid colour"},
     {MA_PAINT_LAYER_FILTER_SHARPEN,
      "SHARPEN",
      0,

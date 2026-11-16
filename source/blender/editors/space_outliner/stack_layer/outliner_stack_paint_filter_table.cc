@@ -36,6 +36,9 @@ const uint32_t COLORIZE = 0xE3B8;       /* colorize */
 const uint32_t SELECT_ALL = 0xE162;     /* select_all */
 /* The procedural patterns (Noise, Voronoi, ...), kept apart from the Gradient's own glyph. */
 const uint32_t PATTERN = 0xE3A5;        /* blur_on */
+/* The Fill Area and Mask Outline effects, apart from the Fill layer's own glyph. */
+const uint32_t FILL_AREA = 0xF873;
+const uint32_t MASK_OUTLINE = 0xE1AD;
 }  // namespace paint_glyph
 
 /**
@@ -125,8 +128,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
       /* No glyph of its own yet: the sun icon names the cast the silhouette takes. */
       return {ICON_LIGHT_SUN, 0};
     case MA_PAINT_LAYER_FILTER_MASK_OUTLINE:
-      /* No glyph of its own yet: the stroke outline icon names the band the border takes. */
-      return {ICON_MOD_THICKNESS, 0};
+      return {ICON_MOD_THICKNESS, paint_glyph::MASK_OUTLINE};
+    case MA_PAINT_LAYER_FILTER_FILL_AREA:
+      return {ICON_CURVE_PATH, paint_glyph::FILL_AREA};
     case MA_PAINT_LAYER_FILTER_NORMAL_CONVERT:
       /* No glyph of its own yet: the vertex-normals icon names what the filter converts. */
       return {ICON_NORMALS_VERTEX, 0};
@@ -337,6 +341,11 @@ static const PaintFilterAddKind paint_effect_add_kinds_table[] = {
      "Lay a band along the border of the active layer's grey: inside it, outside it, or on both "
      "sides, the width the band takes and the shape its falloff walks",
      MA_PAINT_LAYER_FILTER_MASK_OUTLINE},
+    {"EFFECT_FILL_AREA",
+     N_("Fill Area"),
+     "Fill what a continuous border of the active layer's content encloses: the regions the "
+     "border closes off take the colour the border carries, diffused inward, or the solid colour",
+     MA_PAINT_LAYER_FILTER_FILL_AREA},
 };
 
 /**

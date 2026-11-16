@@ -1142,6 +1142,158 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       }
       return true;
     }
+    case MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY: {
+      /* `(c - 0.5) * (1 + contrast) + 0.5 + luminosity` per channel, the Math nodes' own
+       * arithmetic with the factors shared by the three channels, so an edit of one parameter is
+       * a value and not a different graph. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_CONTRAST_LUMINOSITY_PARAM_NUM ||
+          (*params)[PAINT_LAYER_CONTRAST_LUMINOSITY_CONTRAST] == nullptr ||
+          (*params)[PAINT_LAYER_CONTRAST_LUMINOSITY_LUMINOSITY] == nullptr)
+      {
+        return false;
+      }
+      const NodeOutput contrast{group.group_input,
+                                group_input_socket(group, *(*params)[PAINT_LAYER_CONTRAST_LUMINOSITY_CONTRAST])};
+      const NodeOutput luminosity{group.group_input,
+                                  group_input_socket(group, *(*params)[PAINT_LAYER_CONTRAST_LUMINOSITY_LUMINOSITY])};
+      if (contrast.socket == nullptr || luminosity.socket == nullptr) {
+        return false;
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      /* The constants ride on the second operand: #math_node_add reads its `a_default` for a null
+       * first operand only and refuses a null second one, so a constant is #math_constant_node_add's
+       * job. */
+      bNode *scale_node = math_constant_node_add(tree, grid_, nodes, NODE_MATH_ADD, contrast, 1.0f);
+      bNode *shift_node = math_constant_node_add(
+          tree, grid_, nodes, NODE_MATH_ADD, luminosity, 0.5f);
+      if (scale_node == nullptr || shift_node == nullptr) {
+        return discard();
+      }
+      const NodeOutput scale{scale_node, socket_out(*scale_node, "Value")};
+      const NodeOutput shift{shift_node, socket_out(*shift_node, "Value")};
+      if (scale.socket == nullptr || shift.socket == nullptr) {
+        return discard();
+      }
+
+      NodeOutput xyz[3];
+      if (!separate_xyz_node_add(tree, grid_, nodes, content, xyz)) {
+        return discard();
+      }
+      NodeOutput graded[3];
+      for (const int i : IndexRange(3)) {
+        bNode *centered_node = math_constant_node_add(
+            tree, grid_, nodes, NODE_MATH_SUBTRACT, xyz[i], 0.5f);
+        if (centered_node == nullptr) {
+          return discard();
+        }
+        const NodeOutput centered{centered_node, socket_out(*centered_node, "Value")};
+        const NodeOutput scaled = math_node_add(
+            tree, grid_, nodes, NODE_MATH_MULTIPLY, centered, scale);
+        if (centered.socket == nullptr || scaled.socket == nullptr) {
+          return discard();
+        }
+        graded[i] = math_node_add(tree, grid_, nodes, NODE_MATH_ADD, scaled, shift);
+        if (graded[i].socket == nullptr) {
+          return discard();
+        }
+      }
+      NodeOutput combined = combine_xyz_node_add(tree, grid_, nodes, graded);
+      if (combined.socket == nullptr) {
+        return discard();
+      }
+
+      if (!filter_result_mix_add(tree, grid_, nodes, content, combined, strength, effect.name)) {
+        return discard();
+      }
+      return true;
+    }
+    case MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST: {
+      /* `(invert(c) + offset) * multiply` per channel, the invert blended by the switch as
+       * `c + (1 - 2 * c) * invert`, the Math nodes' own arithmetic -- the order the filter's own
+       * note pins. An edit of any parameter is a value and not a different graph. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_HEIGHT_ADJUST_PARAM_NUM ||
+          (*params)[PAINT_LAYER_HEIGHT_ADJUST_INVERT] == nullptr ||
+          (*params)[PAINT_LAYER_HEIGHT_ADJUST_OFFSET] == nullptr ||
+          (*params)[PAINT_LAYER_HEIGHT_ADJUST_MULTIPLY] == nullptr)
+      {
+        return false;
+      }
+      const NodeOutput invert{group.group_input,
+                              group_input_socket(group, *(*params)[PAINT_LAYER_HEIGHT_ADJUST_INVERT])};
+      const NodeOutput offset{group.group_input,
+                              group_input_socket(group, *(*params)[PAINT_LAYER_HEIGHT_ADJUST_OFFSET])};
+      const NodeOutput multiply{group.group_input,
+                                group_input_socket(group, *(*params)[PAINT_LAYER_HEIGHT_ADJUST_MULTIPLY])};
+      if (invert.socket == nullptr || offset.socket == nullptr || multiply.socket == nullptr) {
+        return false;
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      NodeOutput xyz[3];
+      if (!separate_xyz_node_add(tree, grid_, nodes, content, xyz)) {
+        return discard();
+      }
+      NodeOutput adjusted[3];
+      for (const int i : IndexRange(3)) {
+        bNode *doubled = math_constant_node_add(
+            tree, grid_, nodes, NODE_MATH_MULTIPLY, xyz[i], 2.0f);
+        if (doubled == nullptr) {
+          return discard();
+        }
+        const NodeOutput twice{doubled, socket_out(*doubled, "Value")};
+        const NodeOutput one_minus = math_node_add(
+            tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, twice, 1.0f);
+        const NodeOutput blended = math_node_add(
+            tree, grid_, nodes, NODE_MATH_MULTIPLY, one_minus, invert);
+        const NodeOutput flipped = math_node_add(tree, grid_, nodes, NODE_MATH_ADD, xyz[i], blended);
+        if (one_minus.socket == nullptr || blended.socket == nullptr || flipped.socket == nullptr) {
+          return discard();
+        }
+        const NodeOutput offset_ride = math_node_add(
+            tree, grid_, nodes, NODE_MATH_ADD, flipped, offset);
+        if (offset_ride.socket == nullptr) {
+          return discard();
+        }
+        /* The multiply is a factor the schema keeps at zero or above: the constant multiply node
+         * takes it by a link, not a literal, so the node is laid by hand. */
+        bNode *scaled = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+        bNodeSocket *value_in = (scaled != nullptr) ? socket_in(*scaled, "Value") : nullptr;
+        bNodeSocket *factor_in = (scaled != nullptr) ? socket_in(*scaled, "Value_001") : nullptr;
+        bNodeSocket *out = (scaled != nullptr) ? socket_out(*scaled, "Value") : nullptr;
+        if (scaled == nullptr || value_in == nullptr || factor_in == nullptr || out == nullptr) {
+          if (scaled != nullptr) {
+            nodes.append(scaled);
+          }
+          return discard();
+        }
+        scaled->custom1 = NODE_MATH_MULTIPLY;
+        grid_.place_extra(*scaled);
+        nodes.append(scaled);
+        bke::node_add_link(tree, *offset_ride.node, *offset_ride.socket, *scaled, *value_in);
+        bke::node_add_link(tree, *multiply.node, *multiply.socket, *scaled, *factor_in);
+        adjusted[i] = {scaled, out};
+      }
+      NodeOutput combined = combine_xyz_node_add(tree, grid_, nodes, adjusted);
+      if (combined.socket == nullptr) {
+        return discard();
+      }
+
+      if (!filter_result_mix_add(tree, grid_, nodes, content, combined, strength, effect.name)) {
+        return discard();
+      }
+      return true;
+    }
     case MA_PAINT_LAYER_FILTER_CURVES: {
       /* `curves(c)` per channel, the row's mapping copied into the node so the generated tree owns
        * no reference. The node's own evaluation — each channel through its curve, no white

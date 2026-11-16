@@ -936,6 +936,26 @@ enum PaintLayerSmoothstepParam : int {
   PAINT_LAYER_SMOOTHSTEP_PARAM_NUM = 2,
 };
 
+/** The positions of the Contrast Luminosity filter's parameters in its schema. */
+enum PaintLayerContrastLuminosityParam : int {
+  /** The contrast the middle scales by: zero is the value as it is, one doubles its distance. */
+  PAINT_LAYER_CONTRAST_LUMINOSITY_CONTRAST = 0,
+  /** The shift every channel takes, a brightness the middle carries. */
+  PAINT_LAYER_CONTRAST_LUMINOSITY_LUMINOSITY = 1,
+  PAINT_LAYER_CONTRAST_LUMINOSITY_PARAM_NUM = 2,
+};
+
+/** The positions of the Height Adjust filter's parameters in its schema. */
+enum PaintLayerHeightAdjustParam : int {
+  /** On: the value flips before the offset reads it. */
+  PAINT_LAYER_HEIGHT_ADJUST_INVERT = 0,
+  /** What the height value rises or falls by, before the multiply reads it. */
+  PAINT_LAYER_HEIGHT_ADJUST_OFFSET = 1,
+  /** What the offset result scales by: a zero annihilates the value at that point. */
+  PAINT_LAYER_HEIGHT_ADJUST_MULTIPLY = 2,
+  PAINT_LAYER_HEIGHT_ADJUST_PARAM_NUM = 3,
+};
+
 /** The positions of the Sharpen filter's parameters in its schema. */
 enum PaintLayerSharpenParam : int {
   PAINT_LAYER_SHARPEN_RADIUS = 0,
@@ -1442,6 +1462,32 @@ inline float paint_layer_smoothstep_apply(const float value, const float minimum
   const float span = maximum - minimum;
   const float t = (std::abs(span) < 1e-6f) ? 0.0f : std::clamp((value - minimum) / span, 0.0f, 1.0f);
   return t * t * (3.0f - 2.0f * t);
+}
+
+/**
+ * One channel of the Contrast Luminosity filter: the value's distance from the middle scaled by
+ * the contrast, then shifted by the luminosity. A negative contrast folds the distance in, a
+ * positive one spreads it; the shift rides after, so a full-black value still moves.
+ */
+inline float paint_layer_contrast_luminosity_apply(const float value,
+                                                   const float contrast,
+                                                   const float luminosity)
+{
+  const float scaled = (value - 0.5f) * (1.0f + contrast) + 0.5f;
+  return scaled + luminosity;
+}
+
+/**
+ * One channel of the Height Adjust filter: the invert, then the offset, then the multiply -- the
+ * order the filter's own note pins, where a zero offset result annihilates the multiply. The
+ * result is left open above one: a height pushed past the top stays there, and the height delta
+ * machinery reads the excess as it reads any HDR value.
+ */
+inline float paint_layer_height_adjust_apply(
+    const float value, const bool invert, const float offset, const float multiply)
+{
+  const float flipped = invert ? 1.0f - value : value;
+  return (flipped + offset) * multiply;
 }
 
 /**

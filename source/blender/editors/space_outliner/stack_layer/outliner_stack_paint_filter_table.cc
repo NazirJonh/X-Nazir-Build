@@ -87,6 +87,13 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_SMOOTHSTEP:
       /* No glyph of its own yet: the curve icon names the Hermite the extraction walks. */
       return {ICON_RNDCURVE, 0};
+    case MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY:
+      /* No glyph of its own yet: the brightness icon names the two sliders the filter carries. */
+      return {ICON_MOD_BRIGHTNESS_CONTRAST, 0};
+    case MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST:
+      /* No glyph of its own yet: the arrow icon names the offset and the multiply the height
+       * takes. */
+      return {ICON_ARROW_LEFTRIGHT, 0};
     case MA_PAINT_LAYER_FILTER_CURVES:
       /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
       return {ICON_RNDCURVE, 0};
@@ -261,6 +268,16 @@ static const PaintFilterAddKind paint_filter_add_kinds_table[] = {
      "Extract a range of the active layer's grey between a minimum and a maximum: the Hermite "
      "interpolation between the edges, the smoother sibling of a threshold",
      MA_PAINT_LAYER_FILTER_SMOOTHSTEP},
+    {"FILTER_CONTRAST_LUMINOSITY",
+     N_("Contrast Luminosity"),
+     "Scale the contrast of the active layer about its middle and shift it: the two sliders a "
+     "brightness and contrast control carries",
+     MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY},
+    {"FILTER_HEIGHT_ADJUST",
+     N_("Height Adjust"),
+     "Invert, offset or multiply the active layer's height: the offset rides before the multiply, "
+     "so a zero offset result annihilates the multiply at that point",
+     MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST},
     {"FILTER_CURVES",
      N_("RGB Curves"),
      "Remap the active layer's channels through their own curves",

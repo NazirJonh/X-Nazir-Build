@@ -470,6 +470,26 @@ static const PaintLayerKindParam smoothstep_params[] = {
 };
 static_assert(std::size(smoothstep_params) == PAINT_LAYER_SMOOTHSTEP_PARAM_NUM);
 
+static const PaintLayerKindParam contrast_luminosity_params[] = {
+    /* The distance from the middle scales: a negative contrast folds it in, a positive one
+     * spreads it. */
+    {"contrast", "Contrast", 0.0f, -1.0f, 1.0f},
+    /* The shift every channel takes, after the contrast has scaled. */
+    {"luminosity", "Luminosity", 0.0f, -1.0f, 1.0f},
+};
+static_assert(std::size(contrast_luminosity_params) == PAINT_LAYER_CONTRAST_LUMINOSITY_PARAM_NUM);
+
+static const PaintLayerKindParam height_adjust_params[] = {
+    /* On: the value flips before the offset reads it. */
+    {"invert", "Invert", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Bool},
+    /* The offset rides before the multiply, the order the filter's own note pins: a zero offset
+     * result annihilates the multiply at that point. */
+    {"offset", "Offset", 0.0f, -1.0f, 1.0f},
+    /* The multiplier: zero leaves the value at zero, two doubles the relief. */
+    {"multiply", "Multiply", 1.0f, 0.0f, 4.0f},
+};
+static_assert(std::size(height_adjust_params) == PAINT_LAYER_HEIGHT_ADJUST_PARAM_NUM);
+
 static const PaintLayerKindEnumItem glow_mode_items[] = {
     {PAINT_LAYER_GLOW_SOFT, "SOFT", "Soft"},
     {PAINT_LAYER_GLOW_PRECISE, "PRECISE", "Precise"},
@@ -1139,6 +1159,27 @@ static const PaintLayerKindInfo kinds[] = {
      filter_roles,
      smoothstep_params,
      int(std::size(smoothstep_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    /* The distance from the middle scales and the result shifts: the two sliders a brightness and
+     * contrast control carries. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY,
+     "Contrast Luminosity",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     contrast_luminosity_params,
+     int(std::size(contrast_luminosity_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    /* The invert, then the offset, then the multiply: the order the filter's own note pins, where
+     * a zero offset result annihilates the multiply at that point. The result stays open above
+     * one, the same policy the Exposure carries. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST,
+     "Height Adjust",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     height_adjust_params,
+     int(std::size(height_adjust_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same
      * open-above-one policy as Exposure and High Pass, unlike Noise and Channel Mixer. */

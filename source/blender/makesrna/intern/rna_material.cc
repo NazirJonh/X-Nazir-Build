@@ -6050,6 +6050,18 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "Smoothstep",
      "Extract a range of the grey of what is below between a minimum and a maximum: the Hermite "
      "interpolation between the edges, the smoother sibling of a threshold"},
+    {MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY,
+     "CONTRAST_LUMINOSITY",
+     0,
+     "Contrast Luminosity",
+     "Scale the contrast of what is below about its middle and shift it: the two sliders a "
+     "brightness and contrast control carries"},
+    {MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST,
+     "HEIGHT_ADJUST",
+     0,
+     "Height Adjust",
+     "Invert, offset or multiply the height of what is below: the offset rides before the "
+     "multiply, so a zero offset result annihilates the multiply at that point"},
     {MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
      "CHANNEL_MIXER",
      0,

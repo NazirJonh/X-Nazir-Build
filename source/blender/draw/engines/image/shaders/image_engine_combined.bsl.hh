@@ -313,6 +313,8 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_HISTOGRAM_SCAN 30
 #define COMBINED_FILTER_HISTOGRAM_SHIFT 31
 #define COMBINED_FILTER_SMOOTHSTEP 37
+#define COMBINED_FILTER_CONTRAST_LUMINOSITY 38
+#define COMBINED_FILTER_HEIGHT_ADJUST 39
 
 float levels_channel(float value, float4 p0, float4 p1)
 {
@@ -587,6 +589,23 @@ float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, float4 p2
                         clamp((rgb.y - p0.x) * inv_span, 0.0f, 1.0f),
                         clamp((rgb.z - p0.x) * inv_span, 0.0f, 1.0f));
       result = t * t * (float3(3.0f) - 2.0f * t);
+      break;
+    }
+    case COMBINED_FILTER_CONTRAST_LUMINOSITY: {
+      /* The CPU's `paint_layer_contrast_luminosity_apply`: the distance from the middle scaled by
+       * the contrast, then shifted by the luminosity. `p0.x` is the contrast, `p0.y` the
+       * luminosity. */
+      result = (rgb - float3(0.5f)) * (1.0f + p0.x) + float3(0.5f + p0.y);
+      break;
+    }
+    case COMBINED_FILTER_HEIGHT_ADJUST: {
+      /* The CPU's `paint_layer_height_adjust_apply`: the invert, then the offset, then the
+       * multiply -- the order the filter's own note pins, where a zero offset result annihilates
+       * the multiply. The result stays open above one. The params ride in the schema order:
+       * `p0.x` is the invert switch, `p0.y` the offset, `p0.z` the multiply. Per component: the
+       * invert flips before the offset reads. */
+      float3 flipped = (p0.x > 0.5f) ? (1.0f - rgb) : rgb;
+      result = (flipped + float3(p0.y)) * p0.z;
       break;
     }
     case COMBINED_FILTER_COLOR_BALANCE: {

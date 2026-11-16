@@ -1174,6 +1174,16 @@ enum eMaterialPaintLayerFilter : int16_t {
    * like #MA_PAINT_LAYER_FILTER_THRESHOLD.
    */
   MA_PAINT_LAYER_FILTER_SMOOTHSTEP = 37,
+  /**
+   * Scale the contrast of the channels below about their middle and shift them (a Contrast
+   * Luminosity): the two sliders a brightness and contrast control carries, per channel.
+   */
+  MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY = 38,
+  /**
+   * Invert, offset or multiply the height below (a Height Adjust): the three sliders the height
+   * offset carries, the offset applied before the multiply, per the filter's own order.
+   */
+  MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST = 39,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

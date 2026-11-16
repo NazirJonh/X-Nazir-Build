@@ -3216,4 +3216,108 @@ TEST_F(PaintLayersSmoothstepTest, a_reversed_range_matches_the_cpu)
   expect_graph_matches_cpu(kColor);
 }
 
+class PaintLayersContrastLuminosityTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_contrast_luminosity(MaterialPaintLayer &row,
+                                              const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+};
+
+TEST_F(PaintLayersContrastLuminosityTest, contrast_luminosity_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_contrast_luminosity(*row, 0.7f);
+  EXPECT_TRUE(paint_layer_kind_param_set(
+      *filter, PAINT_LAYER_CONTRAST_LUMINOSITY_CONTRAST, 0.35f));
+  EXPECT_TRUE(paint_layer_kind_param_set(
+      *filter, PAINT_LAYER_CONTRAST_LUMINOSITY_LUMINOSITY, -0.15f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersContrastLuminosityTest, a_negative_contrast_folds_the_middle)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_contrast_luminosity(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(
+      *filter, PAINT_LAYER_CONTRAST_LUMINOSITY_CONTRAST, -0.5f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersContrastLuminosityTest, extreme_values_match_the_cpu)
+{
+  /* Contrast -1 is a flat middle, a negative luminosity pushes below zero and a large contrast
+   * pushes above one: none of it is clamped on either side. */
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_contrast_luminosity(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_CONTRAST_LUMINOSITY_CONTRAST, -1.0f));
+  EXPECT_TRUE(
+      paint_layer_kind_param_set(*filter, PAINT_LAYER_CONTRAST_LUMINOSITY_LUMINOSITY, -0.8f));
+  expect_graph_matches_cpu(kColor);
+
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_CONTRAST_LUMINOSITY_CONTRAST, 1.0f));
+  EXPECT_TRUE(
+      paint_layer_kind_param_set(*filter, PAINT_LAYER_CONTRAST_LUMINOSITY_LUMINOSITY, 0.6f));
+  expect_graph_matches_cpu(kColor);
+}
+
+class PaintLayersHeightAdjustTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_height_adjust(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+};
+
+TEST_F(PaintLayersHeightAdjustTest, height_adjust_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *adjust = add_height_adjust(*row, 0.7f);
+  EXPECT_TRUE(paint_layer_kind_param_bool_set(*adjust, PAINT_LAYER_HEIGHT_ADJUST_INVERT, true));
+  EXPECT_TRUE(paint_layer_kind_param_set(*adjust, PAINT_LAYER_HEIGHT_ADJUST_OFFSET, 0.1f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*adjust, PAINT_LAYER_HEIGHT_ADJUST_MULTIPLY, 1.5f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersHeightAdjustTest, the_offset_rides_before_the_multiply)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *adjust = add_height_adjust(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*adjust, PAINT_LAYER_HEIGHT_ADJUST_OFFSET, 0.25f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*adjust, PAINT_LAYER_HEIGHT_ADJUST_MULTIPLY, 0.0f));
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, 0.0f, 2e-3f);
+  EXPECT_NEAR(after.g, 0.0f, 2e-3f);
+  EXPECT_NEAR(after.b, 0.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersHeightAdjustTest, extreme_values_match_the_cpu)
+{
+  /* A negative offset pushes below zero and a large multiply above one: none of it is clamped. */
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *adjust = add_height_adjust(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*adjust, PAINT_LAYER_HEIGHT_ADJUST_OFFSET, -1.0f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*adjust, PAINT_LAYER_HEIGHT_ADJUST_MULTIPLY, 4.0f));
+  expect_graph_matches_cpu(kColor);
+
+  EXPECT_TRUE(paint_layer_kind_param_bool_set(*adjust, PAINT_LAYER_HEIGHT_ADJUST_INVERT, true));
+  EXPECT_TRUE(paint_layer_kind_param_set(*adjust, PAINT_LAYER_HEIGHT_ADJUST_OFFSET, 1.0f));
+  expect_graph_matches_cpu(kColor);
+}
 }  // namespace blender::bke::tests

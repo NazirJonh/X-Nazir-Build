@@ -980,6 +980,8 @@ TEST_F(PaintLayersFilterKindsTest, the_second_batch_pointwise_kinds_carry_their_
     int params_num;
   } pointwise[] = {
       {MA_PAINT_LAYER_FILTER_SMOOTHSTEP, "SMOOTHSTEP", 2},
+      {MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY, "CONTRAST_LUMINOSITY", 2},
+      {MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST, "HEIGHT_ADJUST", 3},
   };
   for (const auto &expected : pointwise) {
     Material *ma = BKE_material_add(bmain, "RnaSecondBatchPointwiseMat");

@@ -1476,7 +1476,12 @@ class LAYER_MATERIAL_PT_decal(LayerMaterialButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         ob = context.active_object
-        return ob is not None and ob.mode == 'TEXTURE_PAINT'
+        if ob is None or ob.mode != 'TEXTURE_PAINT':
+            return False
+        # A 2D Curve Patch effect keeps the object in Texture Paint mode, but has no decal rows:
+        # the block buttons would act on a group the effect does not belong to.
+        _owner, layer = cls._active_layer(context)
+        return layer is None or layer.source != 'CURVE_PATCH'
 
     def draw_header(self, context):
         # Show the active decal name next to the panel label so the user knows which group the
@@ -1832,6 +1837,10 @@ class LAYER_MATERIAL_PT_curve_patch(LayerMaterialButtonsPanel, Panel):
         if layer is None or layer.curve_patch is None:
             return
         draw_curve_patch_brush_drop_row(self.layout, layer.curve_patch)
+        # Where the effect's curves live: two buttons, since the choice is a mode of the tool and
+        # not a value to pick from a list.
+        row = self.layout.row(align=True)
+        row.prop(layer.curve_patch, "space", expand=True)
 
 
 class LAYER_MATERIAL_PT_curve_patch_channels(LayerMaterialButtonsPanel, Panel):

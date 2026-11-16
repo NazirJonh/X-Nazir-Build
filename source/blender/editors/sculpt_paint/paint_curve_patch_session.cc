@@ -757,6 +757,24 @@ const char *curve_patch_active_session_message(const bContext &C)
   return nullptr;
 }
 
+const char *curve_patch_space_mismatch_message(const bContext &C)
+{
+  const Object *ob = CTX_data_active_object(&C);
+  if (ob == nullptr || ob->type != OB_MESH) {
+    return nullptr;
+  }
+  Material *ma = BKE_object_material_get(const_cast<Object *>(ob), ob->actcol);
+  const MaterialPaintLayer *row = ma != nullptr ? BKE_paint_layers_active_layer_get(*ma) :
+                                                  nullptr;
+  if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
+      row->curve_patch == nullptr || (row->flag & MA_PAINT_LAYER_ENABLED) == 0 ||
+      curve_patch_layer_row_space(*row) != MA_CURVE_PATCH_SPACE_2D)
+  {
+    return nullptr;
+  }
+  return "The active Curve Patch effect is in 2D Space: edit its curves in the Image Editor";
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -1798,12 +1816,25 @@ Span<float3> ED_curve_patch_session_positions(const ed::sculpt_paint::CurvePatch
   return item != nullptr ? item->control_curve.positions() : Span<float3>();
 }
 
+/** Whether \a session was entered from an effect whose Space is 2D: its curves are canvas UV (or
+ * about to become so), never object-space curves the 3D Viewport may draw. */
+static bool curve_patch_session_row_is_2d(const ed::sculpt_paint::CurvePatchSession &session)
+{
+  if (session.layer_material == nullptr) {
+    return false;
+  }
+  const MaterialPaintLayer *row = BKE_paint_layers_find(*session.layer_material,
+                                                        session.layer_row_marker);
+  return row != nullptr && row->curve_patch != nullptr &&
+         ed::sculpt_paint::curve_patch_layer_row_space(*row) == MA_CURVE_PATCH_SPACE_2D;
+}
+
 void ED_curve_patch_overlay_data_get(const ed::sculpt_paint::CurvePatchSession *session,
                                      CurvePatchOverlayData &r_data)
 {
   r_data.splines.clear();
   r_data.active_index = -1;
-  if (session == nullptr) {
+  if (session == nullptr || curve_patch_session_row_is_2d(*session)) {
     return;
   }
   if (session->has_active_item() && ed::sculpt_paint::curve_patch_layer_solo(*session)) {
@@ -1888,6 +1919,11 @@ void ED_curve_patch_overlay_data_get_stack(const Object *ob, CurvePatchOverlayDa
   /* A switched-off effect is not a paint target and hides nothing: its curves (and the handles
    * over them) stay off, the same rule #BKE_paint_layers_target_is_live gives the stroke. */
   if ((row->flag & MA_PAINT_LAYER_ENABLED) == 0) {
+    return;
+  }
+  /* The curves of a 2D Space effect are canvas UV, not object space: drawn here they would read
+   * as world positions. */
+  if (ed::sculpt_paint::curve_patch_layer_row_space(*row) != MA_CURVE_PATCH_SPACE_3D) {
     return;
   }
   const PaintVector &pv = *row->curve_patch->vectors;

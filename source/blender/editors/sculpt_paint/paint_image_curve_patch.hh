@@ -23,6 +23,7 @@
 #pragma once
 
 #include "BLI_math_vector_types.hh"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "BKE_curve_patch.hh"
@@ -42,7 +43,9 @@ struct ImagePool;
 namespace blender {
 
 struct Brush;
+struct Material;
 struct Paint;
+struct PaintVector;
 struct bContext;
 struct Image;
 struct MTex;
@@ -79,9 +82,9 @@ struct ImageCurvePatchFrozenParams {
 
 /**
  * One in-progress 2D Curve Patch. Holds:
- * - The canonical UV-space #bke::CurvesGeometry the user is editing (z = 0 everywhere; only x/y
- *   carry meaning).
- * - The patch built from that curve (#patch) plus its resolved texture bindings (#texture),
+ * - The canonical UV-space control curves the user edits (z = 0 everywhere; only x/y carry
+ *   meaning), one per patch (#uv_curves).
+ * - The patches built from those curves (#doc) plus their resolved texture bindings (#texture),
  *   rasterized directly by `paint_image_curve_patch_raster.hh` -- no dab-replay involved.
  * - Snapshot of every brush / paint parameter the writer reads directly
  *   (#ImageCurvePatchFrozenParams), so restamp is deterministic across UI mutations.
@@ -91,8 +94,38 @@ struct ImageCurvePatchFrozenParams {
  * - Selection / modal UI state consumed by the Stage 7 modal operator.
  */
 struct ImageCurvePatchSession {
-  /* Canonical UV curve. Z component is always 0; positions and handles carry UV only. */
-  bke::CurvesGeometry curve;
+  /**
+   * The reference tile of one patch: the UDIM tile whose pixel resolution turns that patch's UV
+   * curve into the pixel-space geometry the rasterizer addresses. Per patch, because the curves
+   * of a layer session may start on different tiles.
+   */
+  struct RefTile {
+    int number = 0;
+    float2 uv_origin = float2(0.0f, 0.0f);
+    int2 resolution = int2(0, 0);
+  };
+
+  /**
+   * Canonical UV curves, index-parallel to #doc.patches. Z component is always 0; positions and
+   * handles carry UV only. The anchor path fills exactly one (see
+   * #image_curve_patch_session_begin); a layer path fills one per container curve.
+   */
+  Vector<bke::CurvesGeometry> uv_curves;
+
+  /** The canonical UV curve of the patch the modal editor acts on. Asserts a well-formed
+   * document, like #CurvePatchDocument::active_item. */
+  bke::CurvesGeometry &curve()
+  {
+    BLI_assert(this->doc.has_active_item());
+    BLI_assert(this->uv_curves.index_range().contains(this->doc.active_patch));
+    return this->uv_curves[this->doc.active_patch];
+  }
+  const bke::CurvesGeometry &curve() const
+  {
+    BLI_assert(this->doc.has_active_item());
+    BLI_assert(this->uv_curves.index_range().contains(this->doc.active_patch));
+    return this->uv_curves[this->doc.active_patch];
+  }
 
   /* Frozen brush/paint fields the writer reads directly -- see the struct's own doc comment. */
   ImageCurvePatchFrozenParams params;
@@ -107,17 +140,20 @@ struct ImageCurvePatchSession {
 
   /* Per-patch fields with a home in `bke::CurvePatchParams` (radius, spacing, falloff, stamp
    * layout, ...), frozen at anchor time and overlaid with live brush state on every rebuild via
-   * `curve_patch_params_live_overlay()` -- same split 3D Sculpt Mode uses. */
+   * `curve_patch_params_live_overlay()` -- same split 3D Sculpt Mode uses. The anchor path has
+   * exactly one; a layer path overlays each item's own frozen parameters (the container carries
+   * per-curve values). */
   bke::CurvePatchParams frozen_patch_params;
 
-  /* What the user edits, target-independent: the single built patch (`doc.active_item()`), its
-   * resolved texture variants, and the live-brush watchdog. The item's `control_curve` lives in
-   * PIXELS of the reference tile, not UV -- see #ref_tile_number and the coordinate-space note on
-   * `paint_image_curve_patch_raster.hh`. Rebuilt by `image_curve_patch_geometry_rebuild()` on
-   * every curve edit and every live-parameter change.
+  /* What the user edits, target-independent: every built patch, the resolved texture variants,
+   * and the live-brush watchdog. Each item's `control_curve` lives in PIXELS of ITS reference
+   * tile, not UV -- the canonical UV curve of the same patch is #uv_curves (see the
+   * coordinate-space note on `paint_image_curve_patch_raster.hh`). Rebuilt by
+   * `image_curve_patch_geometry_rebuild()` on every curve edit and every live-parameter change.
    *
-   * Exactly one item, appended by #image_curve_patch_session_begin: the canvas has no multi-patch
-   * path yet, so nothing here may assume more than one. */
+   * The anchor path appends exactly one item; a layer path mirrors the row's container. The set
+   * is FIXED for the session's life: the 2D modal adds and removes POINTS, never patches, so the
+   * vectors parallel to #doc.patches cannot drift. */
   CurvePatchDocument doc;
 
   /* Texture pool for thread-safe sampling. Lazily created -- see #tex_pool_ensure().
@@ -143,17 +179,19 @@ struct ImageCurvePatchSession {
    */
   void tex_pool_invalidate();
 
-  /* UDIM tile number the patch is built in, and that tile's UV origin / pixel resolution at the
-   * time of the last rebuild (spec §4.2, §9). */
-  int ref_tile_number = 0;
-  float2 ref_tile_uv_origin = float2(0.0f, 0.0f);
-  int2 ref_tile_resolution = int2(0, 0);
+  /* Per-patch reference tile: UDIM tile number and that tile's UV origin / pixel resolution at
+   * the time of the last rebuild (spec §4.2, §9). Index-parallel to #doc.patches -- the anchor
+   * path has exactly one entry, a layer path one per patch (curves may sit on different tiles).
+   */
+  Vector<RefTile> ref_tiles;
 
   /* Image-editor zoom at session open, frozen (spec §4.3) -- never recomputed, so zooming while
    * editing does not rescale an already-started patch. */
   float zoom_2d = 1.0f;
   /* Image pixels per brush-Size unit, frozen alongside the radius so the Size slider keeps
-   * scaling a started patch (spec §4.3). */
+   * scaling a started patch (spec §4.3). A layer session leaves it 0: each container curve
+   * carries its own `radius_per_size` in its frozen parameters, which the rebuild refreshes
+   * instead. */
   float radius_per_size = 0.0f;
 
   /* The session's own capture of every image tile it has painted over, owned outright and freed
@@ -163,7 +201,12 @@ struct ImageCurvePatchSession {
   PaintTileMap *tiles = nullptr;
 
   /* The image the session paints on -- recorded at begin time so the modal can notice the editor
-   * being pointed at a different one. Pointer-only: the image is owned by `Main`. */
+   * being pointed at a different one. Pointer-only: the image is owned by `Main`.
+   *
+   * For a layer session this is the row's reference map (the Base Color map, or the first map
+   * the row carries): it is what `resolve_reference_tile()` reads tile resolutions from, NOT a
+   * statement that only this image is written -- in Material-canvas mode every enabled channel
+   * map of the row is. */
   Image *image = nullptr;
 
   /* ----- Modal UI / selection state (read by the modal operator) ----- */
@@ -171,6 +214,27 @@ struct ImageCurvePatchSession {
    * anchor stroke uses it to detect a session nobody took over and roll it back instead of
    * leaking it together with its open image-undo transaction. */
   bool modal_active = false;
+
+  /* ----- Stack-layer session context (see `paint_curve_patch_layer.hh`) ----- */
+  /**
+   * True for a session entered from a #MA_PAINT_LAYER_SOURCE_CURVE_PATCH row
+   * (#image_curve_patch_session_begin_layer) rather than from a Texture Paint anchor stroke.
+   * The commit then writes the curves back into the row's container and requests the bake; a
+   * cancel only restores the pixels. The brush the row's snapshot replaced is restored through
+   * #layer_brush_restore on BOTH exits.
+   */
+  bool is_layer = false;
+  /** The row this session edits, addressed by marker (never by raw pointer: the Outliner can
+   * delete the row mid-session, and a dangling pointer on the commit path would crash). Null /
+   * zero for an anchor session. */
+  Material *layer_material = nullptr;
+  bUUID layer_row_marker = {};
+  /**
+   * The previous-brush restore of a layer session: the single path that puts the user's own
+   * brush back on every exit (commit, cancel, refused invoke). Null for an anchor session.
+   * The type is only completed in the .cc, which owns the destructor call.
+   */
+  std::unique_ptr<class PrevBrushRestore> layer_brush_restore;
 
   ~ImageCurvePatchSession();
 };
@@ -199,6 +263,50 @@ ImageCurvePatchSession *image_curve_patch_session_begin(bContext *C,
                                                         const bke::CurvesGeometry &initial_curve,
                                                         Brush *brush,
                                                         const Paint *paint);
+
+/**
+ * Open a LAYER session around a Stack Layers row's container (#MA_PAINT_LAYER_SOURCE_CURVE_PATCH
+ * row, Space = 2D): adopt every curve item of \a vectors as a patch (no anchor stroke), freeze
+ * each patch's parameters as they are stored in DNA, and target the row's channel maps the way
+ * the 3D layer session does.
+ *
+ * \a ref_image is the row's reference map (the Base Color map, or the first map the row
+ * carries): patch pixel space is built against its tile resolutions, and in Material-canvas mode
+ * every enabled channel map of the row is written, not just this one. The Image Editor may
+ * display a different image while the session runs -- Material-canvas mode tolerates that.
+ *
+ * The caller must have set the Material canvas (`PAINT_CANVAS_SOURCE_MATERIAL`), activated the
+ * row's brush snapshot and ensured the row's channel maps before this, exactly like the 3D layer
+ * entry does. \a ma / \a row_marker record the row for the commit write-back; the row is looked
+ * up again BY MARKER at commit time, so a row deleted mid-session simply writes nothing back.
+ *
+ * Returns nullptr (and reports) when the container holds no usable curve, or when a session is
+ * already active. The caller surfaces the report and rolls back its brush switch.
+ */
+ImageCurvePatchSession *image_curve_patch_session_begin_layer(bContext *C,
+                                                              ReportList *reports,
+                                                              PaintVector &vectors,
+                                                              Brush *brush,
+                                                              const Paint *paint,
+                                                              Image *ref_image,
+                                                              Material &ma,
+                                                              const bUUID &row_marker);
+
+/**
+ * Whether a live 2D session edits the Curve Patch effect row identified by \a row_marker on
+ * \a ma (see #ED_curve_patch_session_edits_row, which also consults the 3D sessions). False
+ * without a live session, or for an anchor session.
+ */
+bool image_curve_patch_session_edits_row(const Material &ma, const bUUID &row_marker);
+
+/**
+ * Whether \a session shows and edits only its active curve. An anchor session is always solo
+ * (it has exactly one patch); a layer session follows its row container's show-all flag
+ * (#PAINT_VECTOR_SHOW_ALL_CURVES), and a row that went away mid-session degrades to solo rather
+ * than to show-all -- the conservative side, since the curves it would reveal are unknown.
+ * Read by the overlay, the pick and the modal's pickable-curve set.
+ */
+bool image_curve_patch_session_solo(const ImageCurvePatchSession &session);
 
 /**
  * Commit: re-stamp at final quality, turn the session's captured tiles into a single undo history

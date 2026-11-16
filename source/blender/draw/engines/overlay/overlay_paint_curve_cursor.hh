@@ -87,6 +87,13 @@ class PaintCurveCursor : Overlay {
    * spline pointers (dangling if the session died between frames). */
   CurvePatchOverlayData patch_overlay_;
 
+  /** Region-pixel-space copies of the live 2D session's curves, owned by this pass because the
+   * session's canonical curves are in image UV: #ED_image_curve_patch_overlay_data_get refills
+   * it and points #patch_overlay_.splines into it for the Image Editor branch. Reused across
+   * syncs like #patch_overlay_ itself, and cleared with it, so a frame that never reaches the
+   * 2D branch cannot leave last-frame pointers into freed session curves. */
+  Vector<bke::CurvesGeometry> image_patch_projected_;
+
   Vector<ed::sculpt_paint::PaintCurveCachedObjectSilhouette> silhouette_cache_;
   uint64_t silhouette_cache_key_ = 0;
 
@@ -191,6 +198,9 @@ class PaintCurveCursor : Overlay {
      * this function, after #ED_curve_patch_overlay_data_get refills the buffer. */
     patch_overlay_.splines.clear();
     patch_overlay_.active_index = -1;
+    /* The 2D branch's projected copies: cleared with the pointers that reference them, so a
+     * frame whose session died cannot leave the buffer holding stale session curves. */
+    image_patch_projected_.clear();
 
     if (!state.is_space_v3d() && !state.is_space_image()) {
       free_handle_gpu();
@@ -242,7 +252,21 @@ class PaintCurveCursor : Overlay {
     Paint *paint = ed::sculpt_paint::ED_paint_curve_resolve_active_paint(
         state.depsgraph, scene, view_layer, state.space_data, state.space_type);
     const Brush *brush = paint ? BKE_paint_brush_for_read(paint) : nullptr;
-    if (!ed::sculpt_paint::ED_paint_curve_overlay_is_relevant(
+    /* A 2D Space Curve Patch effect shows its curves in the Image Editor even with no session and
+     * with a plain texture brush active, so that case passes the brush relevance gate. */
+    Object *active_object_eval = BKE_view_layer_active_object_get(view_layer);
+    const Object *active_object_orig = active_object_eval ? DEG_get_original(active_object_eval) :
+                                                              nullptr;
+    /* Only decides the brush relevance gate below. The overlay syncs on the main thread, as does
+     * every writer of the 2D session, so reading it needs no guard. */
+    const bool image_patch_available = state.is_space_image() &&
+                                       ed::sculpt_paint::ED_image_curve_patch_overlay_data_get(
+                                           state.region,
+                                           image_patch_projected_,
+                                           patch_overlay_,
+                                           active_object_orig);
+    if (!image_patch_available &&
+        !ed::sculpt_paint::ED_paint_curve_overlay_is_relevant(
             brush, state.active_tool_idname, state.is_space_v3d(), state.is_space_image()))
     {
       free_handle_gpu();
@@ -295,15 +319,19 @@ class PaintCurveCursor : Overlay {
     const bool compute_hover = modes.compute_hover;
     const bool show_insert_preview = modes.show_insert_preview;
 
-    /* Live 2D Curve Patch session in the Image Editor. Its canonical curve is stored in image UV,
-     * so it is projected into region pixels first and then drawn through the regular screen-space
+    /* Live 2D Curve Patch session in the Image Editor. Its canonical curves are stored in image
+     * UV, so they are projected into region pixels first (the scratch copies the session getter
+     * fills and #patch_overlay_ then points into) and drawn through the regular screen-space
      * (`use_3d_space == false`) path. This branch takes priority: while a 2D session is alive it
      * is what the user is editing, whatever the brush's own paint curve says. */
     bool image_patch_drawn = false;
     if (state.is_space_image()) {
-      bke::CurvesGeometry image_patch_geometry;
-      if (ed::sculpt_paint::ED_image_curve_patch_overlay_geometry_get(state.region,
-                                                                      image_patch_geometry))
+      /* Refilled on purpose: #sync_stack_silhouettes above overwrites #patch_overlay_ with the 3D
+       * targets, so the 2D curves have to be projected into it again. The earlier result gates the
+       * call: a frame without a 2D patch does not run the second projection. */
+      if (image_patch_available &&
+          ed::sculpt_paint::ED_image_curve_patch_overlay_data_get(
+              state.region, image_patch_projected_, patch_overlay_, active_object_orig))
       {
         /* Radius handles follow the same Sculpt-side preference the 3D editor uses
          * (`paint_curve_show_radius_handles` / `paint_curve_radius_display_mode`), so the two
@@ -312,19 +340,14 @@ class PaintCurveCursor : Overlay {
          * insert preview, matching Ctrl+RMB in the modal. */
         const ed::sculpt_paint::CurvePatchHandleVisibility patch_visibility =
             ed::sculpt_paint::ED_curve_patch_handle_visibility_get(brush);
-        const bool show_radius_handles = patch_visibility.radius_regular ||
-                                         patch_visibility.radius_all_points;
-        ed::sculpt_paint::ED_paint_curve_screen_handles_build_from_geometry(
-            vc,
-            image_patch_geometry,
-            /*use_3d_space=*/false,
-            sculpt,
-            /*show_radius_handles=*/show_radius_handles,
-            mval_region,
-            /*compute_segment_hover=*/state.cursor_mval_valid,
-            /*show_insert_preview=*/state.cursor_mval_valid && state.cursor_ctrl_pressed,
-            handles_,
-            patch_visibility);
+        build_patch_handles(vc,
+                            sculpt,
+                            patch_visibility,
+                            /*use_3d_space=*/false,
+                            mval_region,
+                            /*compute_hover=*/state.cursor_mval_valid,
+                            /*show_insert_preview=*/state.cursor_mval_valid &&
+                                state.cursor_ctrl_pressed);
         image_patch_drawn = true;
       }
     }
@@ -350,44 +373,15 @@ class PaintCurveCursor : Overlay {
        * Draw all patches. Only the active patch shows hover highlights and insert preview.
        * Non-active patches are drawn plain (no hover, no insert preview) so the user can
        * still see and click them. */
-      handles_.points.clear();
-      handles_.radius_handles.clear();
-      handles_.strength_handles.clear();
-      handles_.angle_handles.clear();
-      handles_.segments.clear();
-      handles_.insert_preview = {};
-
       const ed::sculpt_paint::CurvePatchHandleVisibility patch_visibility =
           ed::sculpt_paint::ED_curve_patch_handle_visibility_get(brush);
-      const bool show_radius_handles = patch_visibility.radius_regular ||
-                                       patch_visibility.radius_all_points;
-      for (const int i : patch_overlay_.splines.index_range()) {
-        const bke::CurvesGeometry *control_curve = patch_overlay_.splines[i];
-        if (control_curve == nullptr) {
-          continue;
-        }
-        const bool is_active = (i == patch_overlay_.active_index);
-        ed::sculpt_paint::PaintCurveScreenHandles tmp_handles;
-        ed::sculpt_paint::ED_paint_curve_screen_handles_build_from_geometry(
-            vc,
-            *control_curve,
-            true,
-            sculpt,
-            show_radius_handles,
-            mval_region,
-            is_active ? compute_hover : false,
-            is_active ? show_insert_preview : false,
-            tmp_handles,
-            patch_visibility);
-        handles_.points.extend(tmp_handles.points);
-        handles_.radius_handles.extend(tmp_handles.radius_handles);
-        handles_.strength_handles.extend(tmp_handles.strength_handles);
-        handles_.angle_handles.extend(tmp_handles.angle_handles);
-        handles_.segments.extend(tmp_handles.segments);
-        if (is_active) {
-          handles_.insert_preview = tmp_handles.insert_preview;
-        }
-      }
+      build_patch_handles(vc,
+                          sculpt,
+                          patch_visibility,
+                          /*use_3d_space=*/true,
+                          mval_region,
+                          compute_hover,
+                          show_insert_preview);
 
       /* Deliberately one curve set, not one per stamped object: every target's local curve is the
        * same WORLD curve, so drawing a secondary through its own matrix would paint the identical
@@ -553,6 +547,56 @@ class PaintCurveCursor : Overlay {
     }
     silhouette_batches_.clear();
     silhouette_batches_key_ = 0;
+  }
+
+  /**
+   * Rebuild #handles_ from every curve in #patch_overlay_. Only the active curve shows hover
+   * highlights and the insert preview; the others are drawn plain so the user can still see and
+   * click them.
+   */
+  void build_patch_handles(const ViewContext &vc,
+                           const Sculpt *sculpt,
+                           const ed::sculpt_paint::CurvePatchHandleVisibility &visibility,
+                           const bool use_3d_space,
+                           const float2 mval_region,
+                           const bool compute_hover,
+                           const bool show_insert_preview)
+  {
+    const bool show_radius_handles = visibility.radius_regular || visibility.radius_all_points;
+    handles_.points.clear();
+    handles_.radius_handles.clear();
+    handles_.strength_handles.clear();
+    handles_.angle_handles.clear();
+    handles_.segments.clear();
+    handles_.insert_preview = {};
+
+    for (const int i : patch_overlay_.splines.index_range()) {
+      const bke::CurvesGeometry *control_curve = patch_overlay_.splines[i];
+      if (control_curve == nullptr) {
+        continue;
+      }
+      const bool is_active = (i == patch_overlay_.active_index);
+      ed::sculpt_paint::PaintCurveScreenHandles tmp_handles;
+      ed::sculpt_paint::ED_paint_curve_screen_handles_build_from_geometry(
+          vc,
+          *control_curve,
+          use_3d_space,
+          sculpt,
+          show_radius_handles,
+          mval_region,
+          is_active && compute_hover,
+          is_active && show_insert_preview,
+          tmp_handles,
+          visibility);
+      handles_.points.extend(tmp_handles.points);
+      handles_.radius_handles.extend(tmp_handles.radius_handles);
+      handles_.strength_handles.extend(tmp_handles.strength_handles);
+      handles_.angle_handles.extend(tmp_handles.angle_handles);
+      handles_.segments.extend(tmp_handles.segments);
+      if (is_active) {
+        handles_.insert_preview = tmp_handles.insert_preview;
+      }
+    }
   }
 
   /**

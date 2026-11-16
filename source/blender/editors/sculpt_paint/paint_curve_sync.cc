@@ -1157,6 +1157,7 @@ void paintcurve_stack_foreach_curve_patch_item(const ViewContext &vc,
     const auto visit_effect = [&](MaterialPaintLayer &effect) {
       if (effect.source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH || effect.curve_patch == nullptr ||
           effect.curve_patch->vectors == nullptr ||
+          effect.curve_patch->space != MA_CURVE_PATCH_SPACE_3D ||
           (effect.flag & MA_PAINT_LAYER_ENABLED) == 0)
       {
         return;

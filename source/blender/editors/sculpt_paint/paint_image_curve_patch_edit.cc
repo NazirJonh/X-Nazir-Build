@@ -131,7 +131,7 @@ static float2 mval_uv_get(bContext *C, const int mval[2])
  */
 static void image_curve_patch_status_text_set(bContext *C, const ImageCurvePatchSession &session)
 {
-  const bke::CurvesGeometry &curve = session.curve;
+  const bke::CurvesGeometry &curve = session.curve();
   const bool is_cyclic = curve.curves_num() > 0 && curve.cyclic()[0];
 
   WorkspaceStatus status(C);
@@ -149,15 +149,15 @@ static void image_curve_patch_status_text_set(bContext *C, const ImageCurvePatch
   status.item(IFACE_("Handle Type"), ICON_EVENT_V);
 }
 
-/** Mark the session's only point-level selection, which is what the overlay reads to color the
- * active handle. `sel_bits` uses the packed convention of #paintcurve_geom_set_selection. */
+/** Mark the active point's selection, which is what the overlay reads to color the active handle.
+ * `sel_bits` uses the packed convention of #paintcurve_geom_set_selection. */
 static void session_select_only(ImageCurvePatchSession &session,
                                 const int point_index,
                                 const uint8_t sel_bits)
 {
-  paintcurve_geom_set_all_selection(session.curve, 0);
+  paintcurve_geom_set_all_selection(session.curve(), 0);
   if (point_index >= 0) {
-    paintcurve_geom_set_selection(session.curve, point_index, sel_bits);
+    paintcurve_geom_set_selection(session.curve(), point_index, sel_bits);
   }
   session.doc.active_point = point_index;
 }
@@ -165,9 +165,9 @@ static void session_select_only(ImageCurvePatchSession &session,
 /** Re-derive computed handles and push the result to the canvas. Every mutation ends here. */
 static void session_apply_curve_change(bContext *C, ImageCurvePatchSession &session)
 {
-  session.curve.calculate_bezier_auto_handles();
-  session.curve.calculate_bezier_aligned_handles();
-  session.curve.tag_positions_changed();
+  session.curve().calculate_bezier_auto_handles();
+  session.curve().calculate_bezier_aligned_handles();
+  session.curve().tag_positions_changed();
 
   image_curve_patch_session_restore_and_restamp(C, &session);
   ED_region_tag_redraw(CTX_wm_region(C));
@@ -207,11 +207,39 @@ class ImageCurvePatchHost : public CurvePatchEditorHost {
     return session_.doc;
   }
 
-  /** The canonical UV curve, NOT `doc.active_item().control_curve` -- that one is the pixel-space
-   * copy the rasterizer builds from this one (see #ImageCurvePatchSession::doc). */
+  /** The active patch's canonical UV curve, NOT `doc.active_item().control_curve` -- that one is
+   * the pixel-space copy the rasterizer builds from this one (see #ImageCurvePatchSession::doc). */
   bke::CurvesGeometry &curve() override
   {
-    return session_.curve;
+    return session_.curve();
+  }
+
+  /**
+   * Every curve the session carries, so a click picks the closest point across the lot: the
+   * anchor path has exactly one; a layer session offers its whole container, Solo-aware (the
+   * hidden curves are neither drawn nor pickable, exactly like the 3D session).
+   */
+  void pickable_curves(Vector<bke::CurvesGeometry *> &r_curves) override
+  {
+    r_curves.clear();
+    if (image_curve_patch_session_solo(session_)) {
+      if (session_.doc.has_active_item()) {
+        r_curves.append(&session_.curve());
+      }
+      return;
+    }
+    for (bke::CurvesGeometry &curve : session_.uv_curves) {
+      r_curves.append(&curve);
+    }
+  }
+
+  void pickable_curve_activate(const int index) override
+  {
+    if (!session_.uv_curves.index_range().contains(index) || index == session_.doc.active_patch)
+    {
+      return;
+    }
+    curve_patch_document_active_patch_set(session_.doc, index);
   }
 
   void restamp(bContext &C) override
@@ -631,7 +659,7 @@ static bool image_curve_patch_active_point_poll(bContext *C)
   }
   const ImageCurvePatchSession *session = image_curve_patch_session_active_get();
   return session != nullptr && session->doc.active_point >= 0 &&
-         session->doc.active_point < session->curve.points_num();
+         session->doc.active_point < session->curve().points_num();
 }
 
 static wmOperatorStatus image_curve_patch_handle_type_set_exec(bContext *C, wmOperator *op)
@@ -739,8 +767,8 @@ static void image_curve_patch_context_menu_open(bContext *C, const ImageCurvePat
   layout.op_menu_enum(
       C, "PAINT_OT_image_curve_patch_handle_type_set", "type", IFACE_("Handle Type"), ICON_NONE);
 
-  const bool is_cyclic = paintcurve_geometry_is_valid(session.curve) &&
-                         session.curve.curves_num() > 0 && session.curve.cyclic()[0];
+  const bool is_cyclic = paintcurve_geometry_is_valid(session.curve()) &&
+                         session.curve().curves_num() > 0 && session.curve().cyclic()[0];
   layout.separator();
   layout.op("PAINT_OT_image_curve_patch_toggle_cyclic",
             is_cyclic ? IFACE_("Open Curve") : IFACE_("Close Curve"),
@@ -755,7 +783,7 @@ static void image_curve_patch_context_menu_open(bContext *C, const ImageCurvePat
   if (session.frozen_patch_params.stamp_mode == bke::CurvePatchStampMode::Stamps &&
       session.frozen_patch_params.stamp_layout == bke::CurvePatchStampLayout::Points && brush &&
       brush->curve_patch.stamp_texture_source == BRUSH_CURVE_PATCH_TEX_MULTI &&
-      session.doc.active_point >= 0 && session.doc.active_point < session.curve.points_num())
+      session.doc.active_point >= 0 && session.doc.active_point < session.curve().points_num())
   {
     layout.separator();
     layout.label(IFACE_("Point Texture"), ICON_NONE);

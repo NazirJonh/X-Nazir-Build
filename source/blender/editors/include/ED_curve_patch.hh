@@ -20,12 +20,15 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "DNA_uuid_types.h"
+
 namespace blender {
 
 struct bContext;
 struct Brush;
 struct Main;
 struct Material;
+struct MaterialPaintLayer;
 struct MaterialPaintLayerCurvePatch;
 struct Object;
 struct PointerRNA;
@@ -44,6 +47,30 @@ struct CurvePatchSession;
  * The live session published on `ob`, or null when no Curve Patch edit is running on it.
  */
 const ed::sculpt_paint::CurvePatchSession *ED_curve_patch_session_get(const Object &ob);
+
+/**
+ * Whether a live Curve Patch session edits the Curve Patch effect row identified by
+ * \a row_marker on \a ma: the 3D Sculpt session of any object (the row the session was entered
+ * from), or the Image Editor's 2D session entered from the same row. Row-level editing (the
+ * space, the brush swap) locks while this is true: both sessions hold the row's state open, and
+ * replacing it under a running modal would strand the editor.
+ */
+bool ED_curve_patch_session_edits_row(const Main &bmain,
+                                      const Material &ma,
+                                      const bUUID &row_marker);
+
+/**
+ * Apply a change of the Space of the Curve Patch effect row: a live session of the old space is
+ * committed, the curves are re-expressed in the space the payload now asks for (object space <->
+ * canvas UV, through the owner object's UV map), and the new space's tool is entered when a session
+ * was live (or an Image Editor is open for 2D). Also requests the row's re-bake and tags the
+ * depsgraph and the UI, so callers (the RNA update) only call this.
+ *
+ * Returns false when the curves could not be converted (the active object does not use the
+ * material, has no UV map, or a point lies outside the UV layout); the user is told why, the
+ * stored curves and the row's Space stay as they were.
+ */
+bool ED_curve_patch_layer_space_switch(bContext &C, Material &ma, MaterialPaintLayer &row);
 
 /** Control point count of the session's live control curve. Null session yields 0. */
 int ED_curve_patch_session_point_num(const ed::sculpt_paint::CurvePatchSession *session);
@@ -177,6 +204,24 @@ bool ED_curve_patch_layer_brush_assign(bContext &C,
  * session, leaves them untouched. Returns whether the ring was retargeted.
  */
 bool ED_curve_patch_radial_control_retarget(bContext &C, PointerRNA &r_ptr, PropertyRNA *&r_prop);
+
+/**
+ * Whether the active curve's Width / Opacity can be edited live: a 3D layer session runs on \a ob,
+ * or the Image Editor's 2D layer session runs (it is not published on an object). The retarget
+ * above and the `Object.curve_patch_layer_look` RNA pointer are gated on this.
+ */
+bool ED_curve_patch_layer_look_available(const Object &ob);
+/** The active control point of the live layer session of either space, or -1. */
+int ED_curve_patch_layer_look_active_point(const Object &ob);
+/** Per-point opacity / opacity falloff of the active control point (1.0 without one) and their
+ * writers, for the live layer session of either space. The writers do not re-stamp: the RNA update
+ * does, because it has a context. */
+float ED_curve_patch_layer_look_point_opacity(const Object &ob);
+bool ED_curve_patch_layer_look_point_opacity_set(Object &ob, float opacity);
+float ED_curve_patch_layer_look_point_falloff(const Object &ob);
+bool ED_curve_patch_layer_look_point_falloff_set(Object &ob, float falloff);
+/** Re-stamp the live layer session of either space after a Width / Opacity edit. */
+void ED_curve_patch_layer_look_restamp(bContext &C, Object &ob);
 
 /**
  * The ACTIVE curve's persisted Width, in the layer panel's slider units (1 unit is 5 px of brush

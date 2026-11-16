@@ -526,6 +526,62 @@ static void rna_CurvePatchSession_look_update(bContext *C, PointerRNA *ptr)
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
 }
 
+/* The active curve's Width / Opacity of a live LAYER session in either space. A separate struct
+ * from #CurvePatchSession because the Image Editor's 2D session is not published on the object;
+ * `ptr->data` is the object, and every accessor is keyed by it. */
+
+static PointerRNA rna_Object_curve_patch_layer_look_get(PointerRNA *ptr)
+{
+  const Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
+  if (ob == nullptr || !ED_curve_patch_layer_look_available(*ob)) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(
+      *ptr, RNA_CurvePatchLayerLook, const_cast<Object *>(ob));
+}
+
+static int rna_CurvePatchLayerLook_active_point_get(PointerRNA *ptr)
+{
+  const Object *ob = rna_curve_patch_session_object(ptr);
+  return ob != nullptr ? ED_curve_patch_layer_look_active_point(*ob) : -1;
+}
+
+static float rna_CurvePatchLayerLook_point_opacity_get(PointerRNA *ptr)
+{
+  const Object *ob = rna_curve_patch_session_object(ptr);
+  return ob != nullptr ? ED_curve_patch_layer_look_point_opacity(*ob) : 1.0f;
+}
+
+static void rna_CurvePatchLayerLook_point_opacity_set(PointerRNA *ptr, float value)
+{
+  if (Object *ob = rna_curve_patch_session_object(ptr)) {
+    ED_curve_patch_layer_look_point_opacity_set(*ob, value);
+  }
+}
+
+static float rna_CurvePatchLayerLook_point_falloff_get(PointerRNA *ptr)
+{
+  const Object *ob = rna_curve_patch_session_object(ptr);
+  return ob != nullptr ? ED_curve_patch_layer_look_point_falloff(*ob) : 1.0f;
+}
+
+static void rna_CurvePatchLayerLook_point_falloff_set(PointerRNA *ptr, float value)
+{
+  if (Object *ob = rna_curve_patch_session_object(ptr)) {
+    ED_curve_patch_layer_look_point_falloff_set(*ob, value);
+  }
+}
+
+static void rna_CurvePatchLayerLook_look_update(bContext *C, PointerRNA *ptr)
+{
+  Object *ob = rna_curve_patch_session_object(ptr);
+  if (ob == nullptr) {
+    return;
+  }
+  ED_curve_patch_layer_look_restamp(*C, *ob);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+}
+
 static int rna_CurvePatchSession_stamp_count_get(PointerRNA *ptr)
 {
   return ED_curve_patch_session_stamp_num(rna_curve_patch_session_from_ptr(ptr));
@@ -4750,6 +4806,16 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Curve Patch Session", "Curve Patch edit currently running on this object, or None");
 
+  prop = RNA_def_property(srna, "curve_patch_layer_look", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "CurvePatchLayerLook");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_pointer_funcs(
+      prop, "rna_Object_curve_patch_layer_look_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Curve Patch Layer Look",
+                           "Width and Opacity of the active curve while a Curve Patch effect runs "
+                           "in the 3D Viewport or the Image Editor, or None");
+
   /* Live Sculpt Mode Vector shape session: the session's own settings copy (read-only pointer) and
    * the runtime "Transform" flag. */
   prop = RNA_def_property(srna, "paint_shape_session_settings", PROP_POINTER, PROP_NONE);
@@ -5077,6 +5143,75 @@ static void rna_def_curve_patch_session(BlenderRNA *brna)
                                     nullptr);
   RNA_def_property_ui_text(
       prop, "Positions", "Control point positions of the curve being edited, in object space");
+
+  /* The ACTIVE curve's look of a live layer session in either space. */
+  srna = RNA_def_struct(brna, "CurvePatchLayerLook", nullptr);
+  RNA_def_struct_ui_text(srna,
+                         "Curve Patch Layer Look",
+                         "Width and Opacity of the active curve of a running Curve Patch effect");
+
+  prop = RNA_def_property(srna, "curve_width", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_CurvePatchSession_curve_width_get",
+                               "rna_CurvePatchSession_curve_width_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 100000.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 100.0f, 1.0f, 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Curve Width",
+      "Width of the ACTIVE curve's ribbon: 1 unit is 5 px of brush size, so 100 is a 500 px brush");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_CurvePatchLayerLook_look_update");
+
+  prop = RNA_def_property(srna, "curve_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(prop,
+                               "rna_CurvePatchSession_curve_opacity_get",
+                               "rna_CurvePatchSession_curve_opacity_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
+  RNA_def_property_ui_text(
+      prop, "Curve Opacity", "Opacity multiplier of the ACTIVE curve");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_CurvePatchLayerLook_look_update");
+
+  prop = RNA_def_property(srna, "active_point", PROP_INT, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_int_funcs(prop, "rna_CurvePatchLayerLook_active_point_get", nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Active Point", "Index of the control point last acted on, or -1");
+
+  prop = RNA_def_property(srna, "active_point_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(prop,
+                               "rna_CurvePatchLayerLook_point_opacity_get",
+                               "rna_CurvePatchLayerLook_point_opacity_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
+  RNA_def_property_ui_text(prop,
+                           "Active Point Opacity",
+                           "Opacity multiplier of the active control point, applied on top of the "
+                           "curve's own Opacity");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_CurvePatchLayerLook_look_update");
+
+  prop = RNA_def_property(srna, "active_point_opacity_falloff", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_CurvePatchLayerLook_point_falloff_get",
+                               "rna_CurvePatchLayerLook_point_falloff_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 100.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 10.0f, 0.01f, 2);
+  RNA_def_property_ui_text(prop,
+                           "Opacity Falloff",
+                           "Distance along the curve over which THIS control point's opacity "
+                           "influence fades, as a multiple of the curve's width");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_CurvePatchLayerLook_look_update");
 }
 
 static void rna_def_object_sculpt_history(BlenderRNA *brna)

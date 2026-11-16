@@ -11039,6 +11039,17 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     BKE_report(op->reports, RPT_WARNING, blocked);
     return OPERATOR_CANCELLED;
   }
+  /* A Curve Patch stroke here would anchor a 3D curve on the mesh, but the active effect keeps its
+   * curves in canvas UV: it is edited in the Image Editor only. */
+  if (const Paint *paint = BKE_paint_get_active_from_context(C)) {
+    const Brush *brush = BKE_paint_brush_for_read(paint);
+    if (brush != nullptr && brush->stroke_method == BRUSH_STROKE_CURVE_PATCH) {
+      if (const char *mismatch = curve_patch_space_mismatch_message(*C)) {
+        BKE_report(op->reports, RPT_WARNING, mismatch);
+        return OPERATOR_CANCELLED;
+      }
+    }
+  }
 
   /* The "Line start set" hint from the previous Shift+click outlives its operator: no destructor
    * clears the workspace status when #sculpt_line_start_mark returns. Clear it when the next

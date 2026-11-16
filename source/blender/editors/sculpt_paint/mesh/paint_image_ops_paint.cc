@@ -74,6 +74,7 @@
 #include "../paint_clone.hh"
 #include "../paint_clone_2d.hh"
 #include "../paint_image_curve_patch.hh"
+#include "../paint_curve_patch_layer.hh"
 #include "../paint_image_curve_patch_anchor.hh"
 #include "../paint_image_stroke_hook.hh"
 #include "../paint_intern.hh"
@@ -2000,6 +2001,15 @@ static wmOperatorStatus paint_invoke(bContext *C, wmOperator *op, const wmEvent 
   {
     WM_operator_name_call(
         C, "PAINT_OT_clone_source_set", wm::OpCallContext::InvokeDefault, nullptr, event);
+    return OPERATOR_FINISHED;
+  }
+
+  /* The active Curve Patch effect is in 2D Space and its curves are shown in this editor: the
+   * press is meant for them, so it enters the effect's session instead of anchoring a new curve.
+   */
+  if (brush != nullptr && brush->stroke_method == BRUSH_STROKE_CURVE_PATCH &&
+      CTX_wm_region_view3d(C) == nullptr && curve_patch_layer_enter_active_2d_row(*C))
+  {
     return OPERATOR_FINISHED;
   }
 

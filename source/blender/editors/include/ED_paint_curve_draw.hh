@@ -11,11 +11,14 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_curves.hh"
+
 #include "DNA_space_enums.h"
 
 namespace blender {
 struct ARegion;
 struct Brush;
+struct CurvePatchOverlayData;
 struct Depsgraph;
 struct Object;
 struct Paint;
@@ -382,6 +385,25 @@ void ED_paint_curve_screen_handles_build_from_geometry(
  */
 bool ED_image_curve_patch_overlay_geometry_get(const ARegion *region,
                                                blender::bke::CurvesGeometry &r_geometry);
+
+/**
+ * Every curve the live Image Editor Curve Patch session edits, projected into region pixels:
+ * `r_data.splines` points into `r_projected`, which OWNS the copies (reuse it across redraws --
+ * the session's curves are not in region space, so the projection always materializes new
+ * geometry). `r_data.active_index` names the curve the modal editor acts on; Solo (the default
+ * for a row's container) limits the list to that one, exactly like the 3D session's overlay.
+ * Without a live session, the curves of  ob's active 2D Space Curve Patch effect are shown
+ * instead (a passive preview, nothing to edit). Nothing is filled when neither exists; returns
+ * whether any curve was.
+ *
+ * #ED_image_curve_patch_overlay_geometry_get is the single-active-curve form the modal's own
+ * hit tests use; the overlay draw reads this one.
+ */
+bool ED_image_curve_patch_overlay_data_get(
+    const ARegion *region,
+    blender::Vector<blender::bke::CurvesGeometry> &r_projected,
+    CurvePatchOverlayData &r_data,
+    const Object *ob);
 
 void ED_paint_curve_screen_silhouettes_build(const ViewContext &vc,
                                              float2 mval_region,

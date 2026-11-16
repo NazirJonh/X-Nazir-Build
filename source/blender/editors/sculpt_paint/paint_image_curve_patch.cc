@@ -22,21 +22,31 @@
  * see `.MyTaskAndDoc/Paint-Curve-in-Sculpt-Mode/2026-08-20-image-curve-patch-rasterizer-spec.md`.
  */
 
+#include <algorithm>
+
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
 #include "BKE_image.hh"
+#include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_paint_vector.hh"
 #include "BKE_report.hh"
 #include "BKE_undo_system.hh"
 
+#include "BLI_index_range.hh"
+
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
+#include "DNA_material_types.h"
+#include "DNA_paint_vector_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 
+#include "ED_curve_patch.hh"
 #include "ED_paint.hh"
 #include "ED_paint_curve_draw.hh"
 
@@ -50,6 +60,7 @@
 
 #include "mesh/paint_material_source.hh"
 #include "paint_curve_patch_edit_intern.hh"
+#include "paint_curve_patch_layer.hh"
 #include "paint_image_curve_patch.hh"
 #include "paint_image_curve_patch_raster.hh"
 #include "selection/paint_image_select_intern.hh"
@@ -78,6 +89,27 @@ bool image_curve_patch_session_active()
 ImageCurvePatchSession *image_curve_patch_session_active_get()
 {
   return g_active_session;
+}
+
+/**
+ * Whether the session shows and edits only its active curve. An anchor session is always solo
+ * (it has exactly one patch); a layer session follows its row container's show-all flag
+ * (#PAINT_VECTOR_SHOW_ALL_CURVES), and a row that went away mid-session degrades to solo rather
+ * than to show-all -- the conservative side, since the curves it would reveal are unknown.
+ */
+bool image_curve_patch_session_solo(const ImageCurvePatchSession &session)
+{
+  if (!session.is_layer || !curve_patch_layer_material_alive(session.layer_material) ||
+      BLI_uuid_is_nil(session.layer_row_marker))
+  {
+    return true;
+  }
+  const MaterialPaintLayer *row = BKE_paint_layers_find(*session.layer_material,
+                                                        session.layer_row_marker);
+  if (row == nullptr || row->curve_patch == nullptr || row->curve_patch->vectors == nullptr) {
+    return true;
+  }
+  return (row->curve_patch->vectors->flag & PAINT_VECTOR_SHOW_ALL_CURVES) == 0;
 }
 
 /* \} */
@@ -133,6 +165,48 @@ void ImageCurvePatchSession::tex_pool_invalidate()
   }
 }
 
+/**
+ * Nested Curve Patch sessions are not allowed (one modal edit at a time per editor), so a session
+ * that is still registered when a new one begins is disposed first. Nobody owns it anymore if its
+ * modal is gone, and restoring its tiles puts the canvas back to a state the (dead) modal can no
+ * longer contradict.
+ */
+static void image_curve_patch_session_discard_stale()
+{
+  if (g_active_session == nullptr) {
+    return;
+  }
+  if (g_active_session->tiles != nullptr) {
+    ED_image_paint_tile_map_restore(g_active_session->tiles);
+  }
+  MEM_delete(g_active_session);
+  g_active_session = nullptr;
+  curve_patch_point_texture_pick_reset();
+}
+
+/**
+ * The fields both entries fill the same way: the frozen brush parameters, the color-jitter seed,
+ * the session's own "before" pixels (nothing is pushed onto the undo stack until commit, so no
+ * foreign operator can take a transaction out from under a patch that is still being edited), the
+ * reference image and the view zoom.
+ */
+static void image_curve_patch_session_init_common(
+    bContext *C, ImageCurvePatchSession &session, Brush *brush, const Paint *paint, Image *image)
+{
+  session.params = image_curve_patch_capture_params(brush, paint);
+  /* Randomize Color: one seed per session, frozen like the rest of #params -- see the field's doc
+   * comment on #ImageCurvePatchSession. */
+  if (paint != nullptr && BKE_brush_color_jitter_get_settings(paint, brush)) {
+    session.initial_hsv_jitter = seed_hsv_jitter();
+  }
+  session.tiles = ED_image_paint_tile_map_new();
+  session.image = image;
+
+  float zoomx = 1.0f, zoomy = 1.0f;
+  get_imapaint_zoom(C, &zoomx, &zoomy);
+  session.zoom_2d = std::max(zoomx, zoomy);
+}
+
 ImageCurvePatchSession *image_curve_patch_session_begin(bContext *C,
                                                         ReportList *reports,
                                                         const bke::CurvesGeometry &initial_curve,
@@ -150,17 +224,7 @@ ImageCurvePatchSession *image_curve_patch_session_begin(bContext *C,
                 brush == nullptr ? -1 : int(brush->image_brush_type));
     return nullptr;
   }
-  if (g_active_session != nullptr) {
-    /* Nested Curve Patch sessions are not allowed (only one modal edit at a time per
-     * editor). The pre-existing session has to be disposed first; if its owning operator is
-     * gone, drop it without ceremony. */
-    if (g_active_session->tiles != nullptr) {
-      ED_image_paint_tile_map_restore(g_active_session->tiles);
-    }
-    MEM_delete(g_active_session);
-    g_active_session = nullptr;
-    curve_patch_point_texture_pick_reset();
-  }
+  image_curve_patch_session_discard_stale();
   SpaceImage *sima = CTX_wm_space_image(C);
   if (sima == nullptr || sima->image == nullptr) {
     BKE_report(reports, RPT_ERROR, "Curve Patch requires an Image Editor with an open image");
@@ -202,29 +266,90 @@ ImageCurvePatchSession *image_curve_patch_session_begin(bContext *C,
    * `unique_ptr` to guard here anyway: every failure exit is above this line, so the object cannot
    * leak between its construction and the assignment to `g_active_session` below. */
   ImageCurvePatchSession *session = MEM_new<ImageCurvePatchSession>(__func__);
-  session->curve = initial_curve;
-  /* The canvas has exactly one patch; every consumer reaches it through `doc.active_item()`. */
+  /* The anchor path has exactly one canonical curve and one patch; the vectors stay
+   * index-parallel for the session's whole life (the 2D modal adds and removes POINTS, never
+   * patches). */
+  session->uv_curves.append(initial_curve);
   session->doc.patches.resize(1);
-  session->params = image_curve_patch_capture_params(brush, paint);
-  /* Randomize Color: one seed per session, frozen like the rest of #params -- see the field's doc
-   * comment on #ImageCurvePatchSession. */
-  if (paint != nullptr && BKE_brush_color_jitter_get_settings(paint, brush)) {
-    session->initial_hsv_jitter = seed_hsv_jitter();
-  }
-  /* The session's own "before" pixels. Nothing is pushed onto the undo stack until commit, so no
-   * foreign operator can take a transaction out from under a patch that is still being edited. */
-  session->tiles = ED_image_paint_tile_map_new();
-  session->image = sima->image;
-
-  float zoomx = 1.0f, zoomy = 1.0f;
-  get_imapaint_zoom(C, &zoomx, &zoomy);
-  session->zoom_2d = std::max(zoomx, zoomy);
+  session->ref_tiles.append_as();
+  image_curve_patch_session_init_common(C, *session, brush, paint, sima->image);
   const float pixel_radius = BKE_brush_radius_get(paint, brush);
   session->radius_per_size = (pixel_radius / session->zoom_2d) /
                              float(std::max(1, BKE_brush_size_get(paint, brush)));
 
   g_active_session = session;
   return g_active_session;
+}
+
+ImageCurvePatchSession *image_curve_patch_session_begin_layer(bContext *C,
+                                                              ReportList *reports,
+                                                              PaintVector &vectors,
+                                                              Brush *brush,
+                                                              const Paint *paint,
+                                                              Image *ref_image,
+                                                              Material &ma,
+                                                              const bUUID &row_marker)
+{
+  image_curve_patch_session_discard_stale();
+  if (brush == nullptr || ref_image == nullptr) {
+    BKE_report(reports, RPT_WARNING, "Curve Patch layer needs a brush snapshot and a channel map");
+    return nullptr;
+  }
+  /* Unlike the anchor entry, the brush type is NOT constrained to a Draw image brush: the caller
+   * validated the row's snapshot through `bke::brush::supports_curve_patch`, which is the gate
+   * both spaces share. */
+
+  /* The document is the persisted container: curves come in as UV (Space = 2D is what this entry
+   * serves), parameters decoded per item. Curves too short to build are dropped the same way the
+   * 3D layer entry drops them. */
+  ImageCurvePatchSession *session = MEM_new<ImageCurvePatchSession>(__func__);
+  curve_patch_document_from_vector(vectors, session->doc);
+  session->doc.patches.remove_if(
+      [](const CurvePatchItem &item) { return item.control_curve.points_num() < 2; });
+  if (session->doc.patches.is_empty()) {
+    BKE_report(
+        CTX_wm_reports(C), RPT_WARNING, "Curve Patch layer has no usable control curve yet");
+    MEM_delete(session);
+    return nullptr;
+  }
+  session->doc.active_patch = std::clamp(session->doc.active_patch,
+                                         0,
+                                         std::max<int>(session->doc.patches.size() - 1, 0));
+
+  /* The document items hold the canonical UV curves for now; move them into the session's
+   * canonical vector and leave `control_curve` to the rebuild, which overwrites it with the
+   * pixel-space copy each patch is rasterized from. */
+  const int patches_num = session->doc.patches.size();
+  session->uv_curves.reserve(patches_num);
+  session->ref_tiles.resize(patches_num);
+  for (const int i : IndexRange(patches_num)) {
+    session->uv_curves.append(std::move(session->doc.patches[i].control_curve));
+    session->doc.patches[i].control_curve = bke::CurvesGeometry();
+  }
+
+  image_curve_patch_session_init_common(C, *session, brush, paint, ref_image);
+  session->is_layer = true;
+  session->layer_material = &ma;
+  session->layer_row_marker = row_marker;
+
+  /* Face selection masking: while enabled on any canvas object, the reference map's derived 2D
+   * selection masks are rebuilt from the objects' face selections, so the 2D patch respects the
+   * same faces as the 3D viewport -- the same parity call the anchor path makes for the editor's
+   * own image. Only the reference map is rebuilt (the anchor path masks exactly one image too);
+   * the rasterizer gates every channel through ITS image's own mask state. */
+  image_paint_selection_mask_from_face_selection(C, CTX_data_scene(C), ref_image);
+  /* `radius_per_size` stays 0: each container curve carries its own frozen ratio, which
+   * `image_curve_patch_params_resolve()` reads per item for a layer session. */
+
+  g_active_session = session;
+  return g_active_session;
+}
+
+bool image_curve_patch_session_edits_row(const Material &ma, const bUUID &row_marker)
+{
+  const ImageCurvePatchSession *session = g_active_session;
+  return session != nullptr && session->is_layer && session->layer_material == &ma &&
+         BLI_uuid_equal(session->layer_row_marker, row_marker);
 }
 
 /* Roll the canvas back to the pre-patch state captured in the session's own tile map. The
@@ -253,8 +378,17 @@ void image_curve_patch_session_commit(bContext *C, ImageCurvePatchSession *sessi
     image_curve_patch_raster_draw_final(C, *session);
     ED_image_undo_push_from_tile_map("Curve Patch", PaintMode::Texture2D, session->tiles);
   }
+  if (session->is_layer && C != nullptr) {
+    /* Write the curves back into the row's container, request the bake and push the memfile
+     * step, exactly like the 3D layer session's commit does. The session is still alive here, so
+     * the memfile snapshot captures the pre-restore brush; the destructor below switches the
+     * user's own brush back either way. */
+    curve_patch_layer_commit_session_2d(*C, *session);
+  }
   g_active_session = nullptr;
   curve_patch_point_texture_pick_reset();
+  /* #layer_brush_restore (a layer session) puts the user's previous brush back through its
+   * destructor; an anchor session has none. */
   MEM_delete(session);
 }
 
@@ -265,10 +399,17 @@ void image_curve_patch_session_cancel(bContext * /*C*/, ImageCurvePatchSession *
     return;
   }
   /* Put the pristine pixels back and write no history entry at all: nothing was ever pushed onto
-   * the undo stack for this session, so there is nothing to discard either. */
+   * the undo stack for this session, so there is nothing to discard either. A layer session
+   * writes nothing back either way -- the container keeps the curves it had before the session
+   * (see #curve_patch_layer_cancel_session_2d, which also notifies the stack). */
   curve_patch_restore_to_anchor(*session);
+  if (session->is_layer) {
+    curve_patch_layer_cancel_session_2d(*session);
+  }
   g_active_session = nullptr;
   curve_patch_point_texture_pick_reset();
+  /* #layer_brush_restore (a layer session) puts the user's previous brush back through its
+   * destructor; an anchor session has none. */
   MEM_delete(session);
 }
 
@@ -287,7 +428,10 @@ static CurvePatchLiveInputs image_curve_patch_live_inputs_capture(ImageCurvePatc
                                                                   const Brush &brush,
                                                                   bke::CurvePatchParams &r_params)
 {
-  r_params = image_curve_patch_params_resolve(session, paint, brush);
+  /* The watchdog compares the ACTIVE patch's resolved parameters (the patch the modal acts on):
+   * the live inputs it watches are session-wide, but the parameters a rebuild produces are
+   * per-item, and only the active one is what an edit flow reads back. */
+  r_params = image_curve_patch_params_resolve(session, paint, brush, session.doc.active_item());
   r_params.final_quality = false;
 
   CurvePatchLiveInputs in = curve_patch_live_inputs_capture(paint, brush);
@@ -301,13 +445,23 @@ static CurvePatchLiveInputs image_curve_patch_live_inputs_capture(ImageCurvePatc
 
 bool image_curve_patch_session_sync_live_brush(bContext *C, ImageCurvePatchSession *session)
 {
-  if (session == nullptr) {
+  /* The watchdog reads the ACTIVE patch's parameters: a session whose active patch is gone (its
+   * container emptied or re-ordered under it) has nothing to compare, and reading it would
+   * dereference past the patch vector. */
+  if (session == nullptr || !session->doc.has_active_item()) {
     return false;
   }
   const Paint *paint = BKE_paint_get_active_from_context(C);
   const Brush *brush = paint ? BKE_paint_brush_for_read(paint) : nullptr;
   if (brush == nullptr) {
     return false;
+  }
+
+  /* A panel edit of the row's curves (Width, Opacity, Hide, Mirror, the active item) lands in the
+   * container; the live document follows it, and the restamp below shows it. */
+  if (session->is_layer && curve_patch_layer_follow_2d(*session)) {
+    image_curve_patch_session_restore_and_restamp(C, session);
+    return true;
   }
 
   bke::CurvePatchParams live_params;
@@ -354,6 +508,9 @@ void image_curve_patch_session_restore_and_restamp(bContext *C, ImageCurvePatchS
    * goes through here, so this is the one place the live-brush watchdog's baseline can be kept
    * honest -- seeding it anywhere else would leave the first poll comparing against defaults and
    * re-stamping for no reason. */
+  if (!session->doc.has_active_item()) {
+    return;
+  }
   if (const Paint *paint = BKE_paint_get_active_from_context(C)) {
     if (const Brush *brush = BKE_paint_brush_for_read(paint)) {
       session->doc.last_synced = image_curve_patch_live_inputs_capture(
@@ -385,10 +542,10 @@ bool ED_image_curve_patch_overlay_geometry_get(const ARegion *region,
                                                bke::CurvesGeometry &r_geometry)
 {
   const ImageCurvePatchSession *session = g_active_session;
-  if (session == nullptr || region == nullptr) {
+  if (session == nullptr || region == nullptr || !session->doc.has_active_item()) {
     return false;
   }
-  const bke::CurvesGeometry &src = session->curve;
+  const bke::CurvesGeometry &src = session->curve();
   if (src.points_num() == 0 || src.curves_num() == 0) {
     return false;
   }
@@ -416,6 +573,128 @@ bool ED_image_curve_patch_overlay_geometry_get(const ARegion *region,
   }
   r_geometry.tag_positions_changed();
   return true;
+}
+
+/** Project \a r_geometry (canvas UV) into region pixels, rotation included. */
+static void image_curve_patch_project_to_region(const View2D &v2d, bke::CurvesGeometry &r_geometry)
+{
+  const auto project_coords = [&](MutableSpan<float3> coords) {
+    for (float3 &co : coords) {
+      float region_x, region_y;
+      ui::view2d_view_to_region_fl(&v2d, co.x, co.y, &region_x, &region_y);
+      co = float3(region_x, region_y, 0.0f);
+    }
+  };
+  project_coords(r_geometry.positions_for_write());
+  if (r_geometry.handle_positions_left().has_value()) {
+    project_coords(r_geometry.handle_positions_left_for_write());
+  }
+  if (r_geometry.handle_positions_right().has_value()) {
+    project_coords(r_geometry.handle_positions_right_for_write());
+  }
+  r_geometry.tag_positions_changed();
+}
+
+/**
+ * The passive preview of the active 2D Space Curve Patch effect of \a ob: its stored UV curves,
+ * with no session behind them. The row must hold its curves in UV already (#stored_space), or the
+ * coordinates would be object-space positions read as UV.
+ */
+static bool image_curve_patch_passive_overlay_get(const ARegion *region,
+                                                  const Object *ob,
+                                                  Vector<bke::CurvesGeometry> &r_projected,
+                                                  CurvePatchOverlayData &r_data)
+{
+  if (region == nullptr || ob == nullptr) {
+    return false;
+  }
+  const Material *ma = BKE_object_material_get(const_cast<Object *>(ob), ob->actcol);
+  if (ma == nullptr) {
+    return false;
+  }
+  const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(const_cast<Material &>(*ma));
+  if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
+      row->curve_patch == nullptr || row->curve_patch->vectors == nullptr ||
+      (row->flag & MA_PAINT_LAYER_ENABLED) == 0 ||
+      curve_patch_layer_row_space(*row) != MA_CURVE_PATCH_SPACE_2D ||
+      row->curve_patch->stored_space != MA_CURVE_PATCH_SPACE_2D)
+  {
+    return false;
+  }
+  const PaintVector &pv = *row->curve_patch->vectors;
+  const bool solo = (pv.flag & PAINT_VECTOR_SHOW_ALL_CURVES) == 0;
+  /* `r_data.splines` points into `r_projected`: reserve once so no append reallocates. */
+  r_projected.reserve(pv.items_num);
+  int active_curve = 0;
+  for (const int i : IndexRange(pv.items_num)) {
+    const PaintVectorItem &item = pv.items[i];
+    if (item.type != PAINT_VECTOR_ITEM_CURVE_PATCH || (solo && i != pv.active_item) ||
+        !BKE_paint_vector_item_curve_geometry_is_valid(item))
+    {
+      continue;
+    }
+    const bke::CurvesGeometry &src = item.curve_patch_geometry.wrap();
+    if (src.points_num() == 0 || src.curves_num() == 0) {
+      continue;
+    }
+    if (i == pv.active_item) {
+      active_curve = r_data.splines.size();
+    }
+    r_projected.append(src);
+    image_curve_patch_project_to_region(region->v2d, r_projected.last());
+    r_data.splines.append(&r_projected.last());
+  }
+  if (!r_data.splines.is_empty()) {
+    r_data.active_index = active_curve;
+  }
+  return !r_data.splines.is_empty();
+}
+
+bool ED_image_curve_patch_overlay_data_get(const ARegion *region,
+                                           Vector<bke::CurvesGeometry> &r_projected,
+                                           CurvePatchOverlayData &r_data,
+                                           const Object *ob)
+{
+  r_projected.clear();
+  r_data.splines.clear();
+  r_data.active_index = -1;
+  const ImageCurvePatchSession *session = g_active_session;
+  if (session == nullptr) {
+    return image_curve_patch_passive_overlay_get(region, ob, r_projected, r_data);
+  }
+  if (region == nullptr || !session->doc.has_active_item()) {
+    return false;
+  }
+
+  /* Solo: the curves that are not selected are neither drawn nor pickable -- the same contract
+   * the 3D session's overlay honors. An anchor session is always solo (it has one patch); a
+   * layer session follows its row container's show-all flag. */
+  const int active_patch = session->doc.active_patch;
+  const bool solo = image_curve_patch_session_solo(*session);
+
+  /* Reserve ONCE up front: `r_data.splines` holds pointers INTO `r_projected`, so a mid-loop
+   * reallocation would dangle every pointer appended before it. The loop appends at most
+   * `uv_curves.size()` entries, so one reserve covers them all. */
+  r_projected.reserve(session->uv_curves.size());
+
+  for (const int i : session->uv_curves.index_range()) {
+    const bke::CurvesGeometry &src = session->uv_curves[i];
+    if (src.points_num() == 0 || src.curves_num() == 0) {
+      continue;
+    }
+    if (solo && i != active_patch) {
+      continue;
+    }
+    r_projected.append(src);
+    image_curve_patch_project_to_region(region->v2d, r_projected.last());
+    r_data.splines.append(&r_projected.last());
+  }
+  /* The active index points into the FILLED list: under solo the active curve is the only entry,
+   * so it is 0 there, exactly like the 3D session's solo branch. */
+  if (!r_data.splines.is_empty()) {
+    r_data.active_index = solo ? 0 : active_patch;
+  }
+  return !r_data.splines.is_empty();
 }
 
 /* \} */

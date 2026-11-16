@@ -230,6 +230,13 @@ using StrokeDone = void (*)(PaintStroke *stroke, bool is_cancel);
  */
 const char *curve_patch_active_session_message(const bContext &C);
 
+/**
+ * Refusal text for a 3D Curve Patch stroke while the active object's active Curve Patch effect
+ * lives in 2D Space, or null. The stroke would otherwise anchor a new object-space curve on the
+ * mesh and take the exclusive session away from the effect's UV curves in the Image Editor.
+ */
+const char *curve_patch_space_mismatch_message(const bContext &C);
+
 /* stroke operator */
 
 struct PaintSample {

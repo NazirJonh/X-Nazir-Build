@@ -800,6 +800,31 @@ struct MaterialPaintLayerText {
   char _pad[7] = {};
 };
 
+/** #MaterialPaintLayerCurvePatch::space -- where the effect's control curves live and which
+ * editor edits them. One space per EFFECT (the whole container is interpreted in it), not per
+ * curve: the two sessions are different tools, and a mixed container would have no single
+ * meaning for the bake. */
+enum eMaterialPaintLayerCurvePatchSpace {
+  /**
+   * Object-space 3D curves: the container's curve positions are the owner object's local
+   * coordinates, the tool runs in Sculpt Mode in the 3D Viewport, and the stamp is projected
+   * onto the mesh through the 3D sampler. The historical behavior and the value every file
+   * written before the space existed reads back as.
+   */
+  MA_CURVE_PATCH_SPACE_3D = 0,
+  /**
+   * Image UV curves: the container's curve positions are canvas UV coordinates (x/y carry the
+   * UV, z is 0), the tool runs in Texture Paint mode in the Image Editor, and the stamp is
+   * rasterized directly into the UV space of the row's channel maps -- no mesh projection at
+   * all (see `paint_image_curve_patch_raster.cc`).
+   *
+   * Switching the space carries the stored curves over to the new space through the owner
+   * object's UV map (#MaterialPaintLayerCurvePatch::stored_space tracks which space they are
+   * in), and invalidates the row's bake.
+   */
+  MA_CURVE_PATCH_SPACE_2D = 1,
+};
+
 /**
  * The owned payload of a #MA_PAINT_LAYER_SOURCE_CURVE_PATCH row: the curve container and the
  * brush snapshot the row was created with. 1:1 ownership (see the ownership contract in
@@ -813,8 +838,15 @@ struct MaterialPaintLayerCurvePatch {
   struct PaintVector *vectors = nullptr;
   /** The owned brush snapshot ("`.CP Brush <row>`" naming convention). */
   struct Brush *brush = nullptr;
+  /** #eMaterialPaintLayerCurvePatchSpace. Zero-defaulted, so files written before the field
+   * existed read back as 3D Space -- exactly what their curves were authored in. */
+  int space = MA_CURVE_PATCH_SPACE_3D;
+  /** #eMaterialPaintLayerCurvePatchSpace the stored curve coordinates are actually expressed in.
+   * It trails #space until the space switch has converted the curves, so a repeated set of the
+   * same value never converts twice. */
+  int8_t stored_space = MA_CURVE_PATCH_SPACE_3D;
   /* Pads the struct to a multiple of the pointer size, as every DNA struct must. */
-  char _pad[8] = {};
+  char _pad[3] = {};
 };
 
 /** #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_ANCHOR_POINT row. */

@@ -211,6 +211,10 @@ static void paint_layer_curve_patch_copy(Main *bmain,
   }
   MaterialPaintLayerCurvePatch *payload = MEM_new<MaterialPaintLayerCurvePatch>(__func__);
   dst.curve_patch = payload;
+  /* Evaluated copies included: the overlay and the picking read the Space from the copy, and the
+   * default would show 2D (UV) curves as object-space ones in the 3D Viewport. */
+  payload->space = src.curve_patch->space;
+  payload->stored_space = src.curve_patch->stored_space;
   const bool count_users = (flag & LIB_ID_CREATE_NO_USER_REFCOUNT) == 0 &&
                            (flag & LIB_ID_CREATE_NO_MAIN) == 0;
   if (!count_users || bmain == nullptr) {

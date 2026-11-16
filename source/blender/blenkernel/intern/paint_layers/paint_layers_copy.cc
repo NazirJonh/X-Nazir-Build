@@ -313,6 +313,10 @@ static void paint_layer_curve_patch_duplicate(Main &bmain,
   }
   MaterialPaintLayerCurvePatch *payload = MEM_new<MaterialPaintLayerCurvePatch>(__func__);
   dst.curve_patch = payload;
+  /* The Space decides how the curves are read; a copy that fell back to the default would turn
+   * 2D (UV) curves into object-space ones. */
+  payload->space = src.curve_patch->space;
+  payload->stored_space = src.curve_patch->stored_space;
   if (src.curve_patch->vectors != nullptr) {
     payload->vectors = id_cast<PaintVector *>(
         BKE_id_copy(&bmain, &src.curve_patch->vectors->id));

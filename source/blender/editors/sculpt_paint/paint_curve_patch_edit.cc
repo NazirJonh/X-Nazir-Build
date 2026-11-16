@@ -2570,8 +2570,9 @@ static std::optional<CurvePatchPointTextureTarget> curve_patch_point_texture_tar
       return std::nullopt;
     }
     target.doc = &pick.session_2d->doc;
-    /* The 2D editor acts on the canonical UV curve, not the pixel-space copy on the item. */
-    target.curve = &pick.session_2d->curve;
+    /* The 2D editor acts on the active patch's canonical UV curve, not the pixel-space copy on
+     * the item. */
+    target.curve = &pick.session_2d->curve();
   }
   else {
     return std::nullopt;
@@ -2699,8 +2700,9 @@ void curve_patch_point_texture_remap_live(Brush &brush, const Span<int> old_to_n
     }
   }
   if (ImageCurvePatchSession *session_2d = image_curve_patch_session_active_get()) {
-    /* The 2D editor acts on the canonical UV curve, not the pixel-space copy on the item. */
-    remap_curve(session_2d->curve);
+    /* The 2D editor acts on the active patch's canonical UV curve, not the pixel-space copy on
+     * the item. */
+    remap_curve(session_2d->curve());
   }
 
   if (any) {
@@ -2774,8 +2776,9 @@ static std::optional<CurvePatchPointTarget> curve_patch_point_target_from_contex
   if (image_editor && session_2d != nullptr) {
     target.session_2d = session_2d;
     target.doc = &session_2d->doc;
-    /* The 2D editor acts on the canonical UV curve, not the pixel-space copy on the item. */
-    target.curve = &session_2d->curve;
+    /* The 2D editor acts on the active patch's canonical UV curve, not the pixel-space copy on
+     * the item. */
+    target.curve = &session_2d->curve();
     target.point = session_2d->doc.active_point;
   }
   else if (session_3d != nullptr && session_3d->doc.has_active_item()) {
@@ -2788,7 +2791,7 @@ static std::optional<CurvePatchPointTarget> curve_patch_point_target_from_contex
   else if (session_2d != nullptr) {
     target.session_2d = session_2d;
     target.doc = &session_2d->doc;
-    target.curve = &session_2d->curve;
+    target.curve = &session_2d->curve();
     target.point = session_2d->doc.active_point;
   }
   else {

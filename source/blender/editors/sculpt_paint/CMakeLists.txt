@@ -54,6 +54,7 @@ set(SRC
   paint_curve_patch_params.cc
   paint_curve_patch_sampler.cc
   paint_curve_patch_session.cc
+  paint_curve_patch_space_convert.cc
   paint_curve_patch_targets.cc
   paint_curve_topology.cc
   paint_curve_draw.cc

@@ -29,6 +29,7 @@ struct Paint;
 
 namespace ed::sculpt_paint {
 
+struct CurvePatchItem;
 struct ImageCurvePatchSession;
 
 /* -------------------------------------------------------------------- */
@@ -36,16 +37,17 @@ struct ImageCurvePatchSession;
  * \{ */
 
 /**
- * Rebuild `session.doc.active_item().geometry` (and its `control_curve` / `params`) from the
- * session's
- * canonical UV curve. Call after every edit to the curve and on every live-parameter change
- * (spec §6.4).
+ * Rebuild every patch's geometry (and its `control_curve` / `params`) from the session's
+ * canonical UV curves (`session.uv_curves`, index-parallel to `doc.patches`). Call after every
+ * edit to a curve and on every live-parameter change (spec §6.4). The anchor path carries exactly
+ * one patch; a layer path rebuilds every curve of the row's container.
  */
 void image_curve_patch_geometry_rebuild(bContext *C, ImageCurvePatchSession &session);
 
 /**
- * Resolve the patch parameters for the current brush state: refresh the session-frozen radius
- * from the live Size slider, then overlay every brush-driven field on top of the frozen ones.
+ * Resolve \a item's patch parameters for the current brush state: refresh the frozen radius from
+ * the live Size slider (session-level ratio for the anchor path, the curve's own `radius_per_size`
+ * for a layer session), then overlay every brush-driven field on top of the frozen ones.
  *
  * Shared by #image_curve_patch_geometry_rebuild() and the live-brush watchdog in
  * `paint_image_curve_patch.hh`, which compares the result against the last stamped one. The two
@@ -54,13 +56,13 @@ void image_curve_patch_geometry_rebuild(bContext *C, ImageCurvePatchSession &ses
  */
 bke::CurvePatchParams image_curve_patch_params_resolve(ImageCurvePatchSession &session,
                                                        const Paint &paint,
-                                                       const Brush &brush);
+                                                       const Brush &brush,
+                                                       CurvePatchItem &item);
 
 /**
- * Rasterize `session.doc.active_item().geometry` into the canvas. Assumes the caller already
- * restored tiles
- * to the anchor state (spec §7.3) -- this function reads FROM the tiles' original pixels, it does
- * not restore them itself.
+ * Rasterize every patch's geometry into the canvas, in document order (a later patch composites
+ * over an earlier one). Assumes the caller already restored tiles to the anchor state (spec §7.3)
+ * -- this function reads FROM the tiles' original pixels, it does not restore them itself.
  */
 void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session);
 

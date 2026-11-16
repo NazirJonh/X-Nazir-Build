@@ -22,6 +22,8 @@
 
 #include "BLI_math_vector_types.hh"
 
+#include "DNA_material_types.h"
+
 #include "BKE_paint_layers_edit.hh"
 
 namespace blender {
@@ -45,6 +47,7 @@ namespace blender::ed::sculpt_paint {
 
 struct CurvePatchDocument;
 struct CurvePatchSession;
+struct ImageCurvePatchSession;
 
 /**
  * RAII: the single path that restores the previous brush on every exit (Apply / Discard / Failed /
@@ -86,8 +89,33 @@ class PrevBrushRestore {
  * mesh. Sculpt Mode is entered by the call itself when the object is not in it yet. False (with
  * nothing left behind) when any step refused: the brush restore is rolled back, no session is
  * published.
+ *
+ * A row whose Space is 2D routes to #curve_patch_layer_activate_2d instead.
  */
 bool curve_patch_layer_activate(bContext &C, Material &ma, MaterialPaintLayer &row);
+
+/**
+ * The 2D Space entry: open the row's Curve Patch tool in the Image Editor instead of the 3D
+ * Viewport. The container's curves are canvas UV coordinates; the session is the Image Editor's
+ * #ImageCurvePatchSession, the stamp rasterizes directly into the UV space of the row's channel
+ * maps, and the commit writes the curves back into the row's container
+ * (#curve_patch_layer_commit_session_2d).
+ *
+ * Texture Paint mode is entered (both the editor's and the object's) by the call itself; an
+ * Image Editor on the screen is REQUIRED -- without one the entry refuses with a report, exactly
+ * like the 3D entry refuses without a 3D Viewport. False (with nothing left behind) when any
+ * step refused.
+ */
+bool curve_patch_layer_activate_2d(bContext &C, Material &ma, MaterialPaintLayer &row);
+
+/**
+ * A press of the Curve Patch brush in the Image Editor while the active object's active Curve Patch
+ * effect is in 2D Space: enter that effect's 2D session instead of letting the press start a new
+ * anchor curve. The effect's curves are on screen (the passive UV preview), so the press is meant
+ * for them. Returns true when the press was consumed (the entry was attempted); false when there is
+ * no such effect, or a session of it is already live.
+ */
+bool curve_patch_layer_enter_active_2d_row(bContext &C);
 
 /**
  * Enter the tool for the active Curve Patch effect of \a C's active object, if there is one and the
@@ -111,6 +139,51 @@ bool curve_patch_layer_enter_if_sculpting(bContext &C, Material &ma, MaterialPai
  * session, before the session is freed.
  */
 void curve_patch_layer_commit_document(bContext &C, CurvePatchSession &session);
+
+/**
+ * The 2D Space counterpart of #curve_patch_layer_commit_document: write the canonical UV curves
+ * of the Image Editor session back into the row's PaintVector, tag it changed, request the bake,
+ * push the "Curve Patch Layer Edit" memfile step and notify the stack. No-op when the row the
+ * session was entered from no longer exists. Called by #image_curve_patch_session_commit for a
+ * session with `is_layer` set, before the session is freed (the session's own brush restore runs
+ * through its destructor right after).
+ */
+void curve_patch_layer_commit_session_2d(bContext &C, ImageCurvePatchSession &session);
+
+/**
+ * The cancel counterpart: no pixels, no container write-back and no undo step -- only the
+ * stack-visible parts of the session's exit (the notifier the UI needs to unlock the row's
+ * editing). No-op when the row is gone. Called by #image_curve_patch_session_cancel for a
+ * session with `is_layer` set.
+ */
+void curve_patch_layer_cancel_session_2d(ImageCurvePatchSession &session);
+
+/**
+ * The 2D counterpart of #curve_patch_layer_active_item_follow: fold the container's per-curve
+ * edits (name, Width, Opacity, Hide, Mirror) and its active item into the live 2D document, so the
+ * Curve Patch panel works while the Image Editor session runs. Returns whether anything changed
+ * (the caller re-stamps).
+ */
+bool curve_patch_layer_follow_2d(ImageCurvePatchSession &session);
+
+/**
+ * Whether  ma is still a material of the file. A session addresses its material by raw pointer,
+ * and an undo step or a library reload can free the material under a running modal: every access
+ * through #CurvePatchSession::layer_material or #ImageCurvePatchSession::layer_material checks this
+ * first, so a stale pointer is never dereferenced.
+ */
+bool curve_patch_layer_material_alive(const Material *ma);
+
+/**
+ * The Space a Curve Patch effect row works in. A row without a payload reads as 3D, the value every
+ * file written before the Space existed reads back as. The one place that decides it, so no caller
+ * compares the raw DNA field.
+ */
+inline eMaterialPaintLayerCurvePatchSpace curve_patch_layer_row_space(const MaterialPaintLayer &row)
+{
+  return row.curve_patch != nullptr ? eMaterialPaintLayerCurvePatchSpace(row.curve_patch->space) :
+                                      MA_CURVE_PATCH_SPACE_3D;
+}
 
 /**
  * Write the live document into the row's container, tag the PaintVector changed and mark the row's
@@ -166,9 +239,6 @@ bool curve_patch_layer_solo(const CurvePatchSession &session);
  */
 bool curve_patch_layer_session_blocks_row(const CurvePatchSession &session,
                                           const MaterialPaintLayer &row);
-/** The same question asked of \a ob's live session: false when it has none, or when the session was
- * not entered from a Stack Layers effect (an anchor session never blocks a row switch). */
-bool curve_patch_layer_session_blocks_row(const Object &ob, const MaterialPaintLayer &row);
 
 /**
  * Commit the live session of \a ob, if any, into its effect and end it: the silent counterpart of

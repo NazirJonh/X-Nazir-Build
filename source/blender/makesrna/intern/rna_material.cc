@@ -416,7 +416,6 @@ static const EnumPropertyItem rna_enum_material_paint_layer_kind_param_type_item
 #  include "DNA_node_types.h"
 #  include "DNA_object_types.h"
 
-#  include "ED_image.hh"
 #  include "DNA_screen_types.h"
 #  include "DNA_space_types.h"
 
@@ -993,6 +992,35 @@ static int rna_MaterialPaintLayerCurvePatch_brush_source_name_length(PointerRNA 
   const MaterialPaintLayerCurvePatch *payload = static_cast<const MaterialPaintLayerCurvePatch *>(
       ptr->data);
   return payload ? int(strlen(BKE_paint_layers_curve_patch_brush_source_name(*payload))) : 0;
+}
+
+static void rna_MaterialPaintLayerCurvePatch_space_update(bContext *C, PointerRNA *ptr)
+{
+  MaterialPaintLayerCurvePatch *payload = static_cast<MaterialPaintLayerCurvePatch *>(ptr->data);
+  Material *ma = (ptr->owner_id != nullptr && GS(ptr->owner_id->name) == ID_MA) ?
+                     id_cast<Material *>(ptr->owner_id) :
+                     nullptr;
+  if (payload == nullptr || ma == nullptr) {
+    return;
+  }
+  MaterialPaintLayer *owner = BKE_paint_layers_curve_patch_row_find(*ma, *payload);
+  if (owner == nullptr) {
+    return;
+  }
+  if (C != nullptr) {
+    /* The editors layer owns the semantics: it ends a live session of the old space, carries the
+     * curves over, requests the re-bake and tags the depsgraph. */
+    ED_curve_patch_layer_space_switch(*C, *ma, *owner);
+    return;
+  }
+  /* A script without a context cannot convert the curves: the stored space stays as it was (the
+   * tool refuses a mismatching row until it is converted), and only the redraw is requested. */
+  BKE_paint_layers_bake_request(*owner);
+  DEG_id_tag_update(&ma->id, ID_RECALC_SYNC_TO_EVAL | ID_RECALC_SHADING);
+  if (payload->vectors != nullptr) {
+    DEG_id_tag_update(&payload->vectors->id, ID_RECALC_SYNC_TO_EVAL);
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
 }
 
 /** The Text Decal row \a payload belongs to, or null when it is detached. */
@@ -6427,6 +6455,23 @@ static const EnumPropertyItem rna_enum_material_paint_layer_bake_size_preset_ite
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Values match #eMaterialPaintLayerCurvePatchSpace. */
+static const EnumPropertyItem rna_enum_material_paint_layer_curve_patch_space_items[] = {
+    {MA_CURVE_PATCH_SPACE_3D,
+     "3D_SPACE",
+     0,
+     "3D Space",
+     "Curves on the object's surface: edit them in the 3D Viewport (Sculpt Mode), stamps project "
+     "onto the mesh"},
+    {MA_CURVE_PATCH_SPACE_2D,
+     "2D_SPACE",
+     0,
+     "2D Space (UV)",
+     "Curves in canvas UV: edit them in the Image Editor (Texture Paint mode), stamps rasterize "
+     "straight into the UV space of the row's channel maps"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static void rna_def_material_paint_layer_curve_patch(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -6438,6 +6483,24 @@ static void rna_def_material_paint_layer_curve_patch(BlenderRNA *brna)
                          "Paint Layer Curve Patch",
                          "The owned payload of a Curve Patch layer: its curve container and brush "
                          "snapshot");
+
+  /* Where the effect's curves live: object space (3D Viewport tool) or canvas UV (Image Editor
+   * tool). One space per effect, not per curve. */
+  prop = RNA_def_property(srna, "space", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "space");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_curve_patch_space_items);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  /* The update ends a live session and enters the new space's tool, which needs the context. */
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_ui_text(
+      prop,
+      "Space",
+      "Where the effect's curves live and which editor edits them: 3D Space edits on the mesh "
+      "in the 3D Viewport, 2D Space (UV) edits in the Image Editor and stamps straight into the "
+      "row's maps; switching carries the curves over to the new space through the UV map");
+  RNA_def_property_update(prop,
+                          NC_MATERIAL | ND_SHADING_DRAW,
+                          "rna_MaterialPaintLayerCurvePatch_space_update");
 
   /* The container is a real ID (bpy.data.paint_vectors); the row owns it one to one. */
   prop = RNA_def_property(srna, "vectors", PROP_POINTER, PROP_NONE);

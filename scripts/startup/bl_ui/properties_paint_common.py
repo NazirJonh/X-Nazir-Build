@@ -5438,10 +5438,8 @@ class PAINTVECTOR_UL_curve_patches(bpy.types.UIList):
         if item.type == 'CURVE_PATCH':
             row = layout.row(align=True)
             row.prop(item, "curve_name", text="", emboss=False, icon='CURVE_BEZCURVE')
-            # The look of a curve is edited with its session: outside it nothing would be redrawn.
-            if context.object is not None and context.object.curve_patch_session is not None:
-                row.prop(item, "hide", text="", emboss=False,
-                         icon='HIDE_ON' if item.hide else 'HIDE_OFF')
+            row.prop(item, "hide", text="", emboss=False,
+                     icon='HIDE_ON' if item.hide else 'HIDE_OFF')
         else:
             layout.label(text="Shape", icon='MESH_PLANE')
 
@@ -5525,13 +5523,13 @@ class CURVE_PATCH_LAYER_PT_opacity_options(bpy.types.Panel):
     @classmethod
     def poll(cls, context):
         ob = context.object if context.object is not None else context.active_object
-        return ob is not None and ob.curve_patch_session is not None
+        return ob is not None and ob.curve_patch_layer_look is not None
 
     def draw(self, context):
         layout = self.layout
         ob = context.object if context.object is not None else context.active_object
-        session = ob.curve_patch_session
-        if session.active_point < 0:
+        session = ob.curve_patch_layer_look
+        if session is None or session.active_point < 0:
             layout.label(text="Select a control point", icon='INFO')
             return
         layout.prop(session, "active_point_opacity_falloff", text="Opacity Falloff", slider=True)
@@ -5584,20 +5582,24 @@ class CURVE_PATCH_LAYER_PT_curves(Panel):
 
         if pv.elements and 0 <= pv.active_item < len(pv.elements):
             active = pv.elements[pv.active_item]
-            session = (context.object.curve_patch_session
-                       if context.object is not None else None)
-            # Opacity and width are applied by the session, so they are offered only while it runs.
-            if active.type == 'CURVE_PATCH' and session is not None:
+            # The look is the container item's: it edits (and bakes) without any editor open, and a
+            # running 3D or 2D session follows it. Only the per-point values belong to a session.
+            look = (context.object.curve_patch_layer_look
+                    if context.object is not None else None)
+            if active.type == 'CURVE_PATCH':
                 col = layout.column(align=True)
                 col.prop(active, "opacity", slider=True)
                 col.prop(active, "width", slider=True)
                 col.separator()
                 # The per-point value is the curve-wide Opacity's multiplier for one control point;
-                # it is only meaningful while the modal has an active point to apply it to. The
-                # falloff lives in the popover so it does not sit after Point Opacity in the panel.
+                # it needs an active control point, which exists only while a session (either
+                # space) edits the curve. The falloff lives in the popover.
                 point_row = col.row(align=True)
-                point_row.active = session.active_point >= 0
-                point_row.prop(session, "active_point_opacity", text="Point Opacity", slider=True)
+                point_row.active = look is not None and look.active_point >= 0
+                if look is not None:
+                    point_row.prop(look, "active_point_opacity", text="Point Opacity", slider=True)
+                else:
+                    point_row.label(text="Point Opacity (edit the curve to set)")
                 point_row.popover(
                     panel="CURVE_PATCH_LAYER_PT_opacity_options",
                     text="",

@@ -684,6 +684,34 @@ class GraphInterpreter {
         }
         return {vector.r, vector.g, vector.b, 1.0f};
       }
+      case SH_NODE_MAP_RANGE: {
+        /* The float form, linear or smoothstep, with the clamp. Equal edges read as zero, the
+         * node's own rule, which the generated graphs floor their spans against. */
+        const auto input = [&](const char *identifier) {
+          return eval_socket(*bke::node_find_socket(
+                                 mutable_node, SOCK_IN, UString::from_ptr_noinline(identifier)))
+              .r;
+        };
+        const NodeMapRange *storage = static_cast<const NodeMapRange *>(node.storage);
+        const float value = input("Value");
+        const float from_min = input("From Min");
+        const float from_max = input("From Max");
+        const float to_min = input("To Min");
+        const float to_max = input("To Max");
+        float t = 0.0f;
+        if (from_max != from_min) {
+          t = (value - from_min) / (from_max - from_min);
+          if (storage != nullptr && storage->clamp != 0) {
+            t = std::clamp(t, 0.0f, 1.0f);
+          }
+          if (storage != nullptr && storage->interpolation_type == NODE_MAP_RANGE_SMOOTHSTEP) {
+            const float c = std::clamp(t, 0.0f, 1.0f);
+            t = c * c * (3.0f - 2.0f * c);
+          }
+        }
+        const float result = to_min + t * (to_max - to_min);
+        return {result, result, result, 1.0f};
+      }
       case SH_NODE_HUE_SAT: {
         /* The node's own function, written out here so the CPU filter is not its own witness. */
         const RGBA color = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Color"_ustr));

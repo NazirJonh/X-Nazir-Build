@@ -701,6 +701,73 @@ TEST_F(PaintLayersFilterKindsTest, blur_directional_kind_is_a_neighborhood_filte
   }
 }
 
+TEST_F(PaintLayersFilterKindsTest, drop_shadow_kind_is_a_cpu_computed_effect_with_a_schema)
+{
+  Material *ma = BKE_material_add(bmain, "RnaDropShadowParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *shadow = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_DROP_SHADOW);
+  ASSERT_NE(shadow, nullptr);
+
+  /* A CPU-computed effect like the Bevel: the silhouette is spread, blurred and offset, a
+   * sequence of passes no single shader kernel lays, so no GPU pass exists for it. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*shadow, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*shadow, PAINT_LAYER_KIND_NEEDS_BAKE));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*shadow, PAINT_LAYER_KIND_GPU_COMPUTED));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*shadow, PAINT_LAYER_KIND_MASK_NEEDS_LUMA));
+  /* Its result is a layer with an alpha of its own, so the shadow shows on the empty map; no other
+   * kind opts in, and every one of them keeps its colour-only result. */
+  EXPECT_TRUE(paint_layer_kind_result_has_alpha(*shadow));
+  MaterialPaintLayer *bevel = BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_BEVEL);
+  ASSERT_NE(bevel, nullptr);
+  EXPECT_FALSE(paint_layer_kind_result_has_alpha(*bevel));
+
+  /* The source defaults to the alpha a stroke casts off, the cast to the map's lower left, the
+   * blur and the offset to a visible shadow, the tint to black. */
+  EXPECT_EQ(paint_layer_kind_param_int_get(*shadow, PAINT_LAYER_DROP_SHADOW_SOURCE),
+            PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*shadow, PAINT_LAYER_DROP_SHADOW_ANGLE), 135.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*shadow, PAINT_LAYER_DROP_SHADOW_DISTANCE), 4.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*shadow, PAINT_LAYER_DROP_SHADOW_SIZE), 8.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*shadow, PAINT_LAYER_DROP_SHADOW_SPREAD), 0.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*shadow, PAINT_LAYER_DROP_SHADOW_OPACITY), 1.0f);
+  float color[4];
+  paint_layer_kind_param_color_get(*shadow, PAINT_LAYER_DROP_SHADOW_COLOR, color);
+  EXPECT_FLOAT_EQ(color[0], 0.0f);
+  EXPECT_FLOAT_EQ(color[3], 1.0f);
+
+  /* The RNA enum names the kind, and the collection lists exactly the schema's seven parameters,
+   * labelled. */
+  PointerRNA shadow_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, shadow);
+  PropertyRNA *filter_prop = RNA_struct_find_property(&shadow_ptr, "filter_type");
+  ASSERT_NE(filter_prop, nullptr);
+  const char *identifier = nullptr;
+  ASSERT_TRUE(RNA_property_enum_identifier(nullptr,
+                                           &shadow_ptr,
+                                           filter_prop,
+                                           MA_PAINT_LAYER_FILTER_DROP_SHADOW,
+                                           &identifier));
+  EXPECT_STREQ(identifier, "DROP_SHADOW");
+  PropertyRNA *params = RNA_struct_find_property(&shadow_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&shadow_ptr, params), 7);
+  const char *names[7] = {"source",
+                          "angle",
+                          "distance",
+                          "size",
+                          "spread",
+                          "opacity",
+                          "color"};
+  for (const int i : IndexRange(7)) {
+    PointerRNA param_ptr;
+    ASSERT_TRUE(RNA_property_collection_lookup_string(&shadow_ptr, params, names[i], &param_ptr))
+        << names[i];
+    PropertyRNA *label = RNA_struct_find_property(&param_ptr, "label");
+    ASSERT_NE(label, nullptr);
+  }
+}
+
 TEST_F(PaintLayersFilterKindsTest, deband_kind_is_a_pointwise_filter_with_a_mode_and_two_integers)
 {
   Material *ma = BKE_material_add(bmain, "RnaDebandParamMat");

@@ -254,7 +254,10 @@ bool bake_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &effect
     /* The nearest sample of the result, each axis independently, written straight into the map's own
      * buffer (see #bake_mask_effect_row_write). The effect cache's buffer is premultiplied by the
      * input's content alpha, the composite straightens it before it mixes, and the map holds the
-     * straight colour the same way: the alpha is not part of the result. */
+     * straight colour the same way: the alpha is not part of the result -- except for a kind whose
+     * result is a layer (#PAINT_LAYER_KIND_RESULT_HAS_ALPHA), whose alpha is what it covers by and
+     * is kept in the map. */
+    const bool keeps_alpha = paint_layer_kind_result_has_alpha(effect);
     const float *src = result->float_buffer.data;
     bake_write_image_rows(
         *image, info.is_color, nullptr, 0,
@@ -268,7 +271,7 @@ bool bake_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &effect
             r_row[x * 4 + 0] = texel[0] * inv;
             r_row[x * 4 + 1] = texel[1] * inv;
             r_row[x * 4 + 2] = texel[2] * inv;
-            r_row[x * 4 + 3] = 1.0f;
+            r_row[x * 4 + 3] = keeps_alpha ? texel[3] : 1.0f;
           }
         });
     written_channels.append(channel);

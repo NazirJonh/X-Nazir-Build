@@ -1744,17 +1744,75 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
       result_nodes.append(result_map);
       const MapRead result_read = this->map_read_apply(
           tree, effect, *result_map, result_nodes, channel);
-      if (result_read.color.socket == nullptr ||
-          !filter_result_mix_add(tree,
+      if (result_read.color.socket == nullptr) {
+        this->nodes_discard(tree, result_nodes);
+        return false;
+      }
+      NodeOutput strength = {group.group_input, result_opacity};
+      NodeOutput coverage_joined;
+      NodeOutput alpha_joined;
+      if (paint_layer_kind_result_has_alpha(effect)) {
+        /* The result is a layer with an alpha of its own (a Drop Shadow): a Normal correction with
+         * a map alpha, the CPU composite's formula for it. With `f = opacity * alpha(map)`:
+         *   a'  = a + f * (1 - a)
+         *   S'  = lerp(S, colour, f / a')
+         * where the colour is the layer's own (a Normal blend over it is the colour itself), so the
+         * layer shows where the row covers nothing and the coverage and content alpha follow. */
+        if (result_read.alpha.socket == nullptr) {
+          this->nodes_discard(tree, result_nodes);
+          return false;
+        }
+        const NodeOutput factor = math_node_add(tree,
+                                                grid_,
+                                                result_nodes,
+                                                NODE_MATH_MULTIPLY,
+                                                {group.group_input, result_opacity},
+                                                result_read.alpha);
+        strength = factor;
+        if (coverage.socket != nullptr) {
+          const NodeOutput one_minus = math_node_add(
+              tree, grid_, result_nodes, NODE_MATH_SUBTRACT, {}, coverage, 1.0f);
+          const NodeOutput scaled = math_node_add(
+              tree, grid_, result_nodes, NODE_MATH_MULTIPLY, factor, one_minus);
+          coverage_joined = math_node_add(
+              tree, grid_, result_nodes, NODE_MATH_ADD, coverage, scaled);
+          strength = math_node_add(
+              tree, grid_, result_nodes, NODE_MATH_DIVIDE, factor, coverage_joined);
+        }
+        if (content_alpha != nullptr && content_alpha->socket != nullptr) {
+          const NodeOutput alpha_one_minus = math_node_add(
+              tree, grid_, result_nodes, NODE_MATH_SUBTRACT, {}, *content_alpha, 1.0f);
+          const NodeOutput alpha_scaled = math_node_add(
+              tree, grid_, result_nodes, NODE_MATH_MULTIPLY, factor, alpha_one_minus);
+          alpha_joined = math_node_add(
+              tree, grid_, result_nodes, NODE_MATH_ADD, *content_alpha, alpha_scaled);
+        }
+        if (factor.node == nullptr || strength.node == nullptr ||
+            (coverage.socket != nullptr && coverage_joined.node == nullptr) ||
+            (content_alpha != nullptr && content_alpha->socket != nullptr &&
+             alpha_joined.node == nullptr))
+        {
+          this->nodes_discard(tree, result_nodes);
+          return false;
+        }
+      }
+      if (!filter_result_mix_add(tree,
                                  grid_,
                                  result_nodes,
                                  content,
                                  result_read.color,
-                                 {group.group_input, result_opacity},
+                                 strength,
                                  effect.name))
       {
         this->nodes_discard(tree, result_nodes);
         return false;
+      }
+      /* Only a complete layer moves the coverage and the content alpha. */
+      if (coverage_joined.node != nullptr) {
+        coverage = coverage_joined;
+      }
+      if (alpha_joined.node != nullptr) {
+        *content_alpha = alpha_joined;
       }
       return true;
     }

@@ -987,25 +987,31 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
         ramped[i] = {range, result};
       }
 
-      NodeOutput combined = combine_xyz_node_add(tree, grid_, nodes, ramped);
-      if (combined.socket == nullptr) {
-        return discard();
-      }
       /* The inverted position flips the two states: `1 - out`, blended by the switch as
-       * `combined + (1 - 2 * combined) * invert`, the Math nodes' own arithmetic; the schema's
-       * zero keeps the blend at `combined` until the switch is up. */
-      bNode *twice_node = math_constant_node_add(
-          tree, grid_, nodes, NODE_MATH_MULTIPLY, combined, 2.0f);
-      if (twice_node == nullptr) {
-        return discard();
+       * `out + (1 - 2 * out) * invert` per channel, the Math nodes' own arithmetic; the schema's
+       * zero keeps the blend at `out` until the switch is up. The Math nodes are scalar, so each
+       * channel is flipped before the combine: a vector fed to one would read as its average. */
+      NodeOutput scanned[3];
+      for (const int i : IndexRange(3)) {
+        bNode *twice_node = math_constant_node_add(
+            tree, grid_, nodes, NODE_MATH_MULTIPLY, ramped[i], 2.0f);
+        if (twice_node == nullptr) {
+          return discard();
+        }
+        const NodeOutput twice{twice_node, socket_out(*twice_node, "Value")};
+        const NodeOutput one_minus = math_node_add(
+            tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, twice, 1.0f);
+        const NodeOutput scaled = math_node_add(
+            tree, grid_, nodes, NODE_MATH_MULTIPLY, one_minus, invert);
+        scanned[i] = math_node_add(tree, grid_, nodes, NODE_MATH_ADD, ramped[i], scaled);
+        if (one_minus.socket == nullptr || scaled.socket == nullptr ||
+            scanned[i].socket == nullptr)
+        {
+          return discard();
+        }
       }
-      const NodeOutput twice{twice_node, socket_out(*twice_node, "Value")};
-      const NodeOutput one_minus = math_node_add(
-          tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, twice, 1.0f);
-      const NodeOutput scaled = math_node_add(tree, grid_, nodes, NODE_MATH_MULTIPLY,
-                                              one_minus, invert);
-      const NodeOutput scan = math_node_add(tree, grid_, nodes, NODE_MATH_ADD, combined, scaled);
-      if (one_minus.socket == nullptr || scaled.socket == nullptr || scan.socket == nullptr) {
+      const NodeOutput scan = combine_xyz_node_add(tree, grid_, nodes, scanned);
+      if (scan.socket == nullptr) {
         return discard();
       }
 
@@ -1583,7 +1589,14 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
             NODE_MATH_SQRT, constant_op(NODE_MATH_MAXIMUM, rest, 0.0f), 0.0f);
         const NodeOutput encoded = constant_op(
             NODE_MATH_ADD, constant_op(NODE_MATH_MULTIPLY, root, 0.5f), 0.5f);
-        const NodeOutput out_xyz[3] = {xyz[0], xyz[1], encoded};
+        /* The red and green stay as they were encoded: the decoded pair above is only the input of
+         * the root. */
+        NodeOutput kept[3];
+        if (encoded.socket != nullptr && !separate_xyz_node_add(tree, grid_, nodes, content, kept))
+        {
+          return discard();
+        }
+        const NodeOutput out_xyz[3] = {kept[0], kept[1], encoded};
         converted = (encoded.socket != nullptr) ?
                         combine_xyz_node_add(tree, grid_, nodes, out_xyz) :
                         NodeOutput{};

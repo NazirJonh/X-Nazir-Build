@@ -281,6 +281,48 @@ static const PaintLayerKindParam blur_directional_params[] = {
 };
 static_assert(std::size(blur_directional_params) == PAINT_LAYER_BLUR_DIRECTIONAL_PARAM_NUM);
 
+static const PaintLayerKindEnumItem drop_shadow_source_items[] = {
+    {PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA, "ALPHA", "Alpha"},
+    {PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE, "LUMINANCE", "Luminance"},
+};
+static_assert(int(std::size(drop_shadow_source_items)) - 1 ==
+              PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE);
+
+static const PaintLayerKindParam drop_shadow_params[] = {
+    /* The shape that casts: a paint stroke's coverage, or the bright side of the content. A mask
+     * item ignores this and always reads the luminance, for the grey the mask lays carries no alpha
+     * of its own. A channel that keeps no content alpha has none to cast from either, so an alpha
+     * source lays no shadow there. */
+    {"source",
+     "Source",
+     float(PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA),
+     0.0f,
+     float(PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE),
+     PaintLayerKindParamType::Enum,
+     drop_shadow_source_items,
+     int(std::size(drop_shadow_source_items))},
+    /* Degrees, counter-clockwise off the map's +X: the direction the shadow is cast toward. */
+    {"angle", "Angle", 135.0f, 0.0f, 360.0f},
+    /* Whole texels the silhouette is offset by, along the angle. */
+    {"distance", "Distance", 4.0f, 0.0f, 64.0f, PaintLayerKindParamType::Int},
+    /* Whole texels the box blur of the shadow edge reaches; zero leaves a hard edge. */
+    {"size", "Size", 8.0f, 0.0f, 64.0f, PaintLayerKindParamType::Int},
+    /* Whole texels the silhouette grows (a positive spread) or shrinks (a negative one) before
+     * the blur, the erosion the spread of a cast shadow makes of the shape's edge. */
+    {"spread", "Spread", 0.0f, -64.0f, 64.0f, PaintLayerKindParamType::Int},
+    {"opacity", "Opacity", 1.0f, 0.0f, 1.0f},
+    {"color",
+     "Color",
+     0.0f,
+     0.0f,
+     1.0f,
+     PaintLayerKindParamType::Color,
+     nullptr,
+     0,
+     {0.0f, 0.0f, 0.0f, 1.0f}},
+};
+static_assert(std::size(drop_shadow_params) == PAINT_LAYER_DROP_SHADOW_PARAM_NUM);
+
 static const PaintLayerKindEnumItem glow_mode_items[] = {
     {PAINT_LAYER_GLOW_SOFT, "SOFT", "Soft"},
     {PAINT_LAYER_GLOW_PRECISE, "PRECISE", "Precise"},
@@ -884,6 +926,20 @@ static const PaintLayerKindInfo kinds[] = {
      int(std::size(blur_directional_params)),
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED)},
+    /* A shadow cast off the row's own shape: the silhouette is spread, blurred and offset before
+     * it is tinted, a sequence of passes no single shader kernel lays, so it computes on the CPU
+     * like the Bevel does. Its result is a layer with an alpha of its own, so the shadow shows on the
+     * empty map around a stroke. In a mask the tint is a grey of itself (the mask kind normalizes),
+     * and the shape always reads the luminance, for the grey carries no alpha. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_DROP_SHADOW,
+     "Drop Shadow",
+     PaintLayerKindCategory::Operator,
+     effect_or_mask_roles,
+     drop_shadow_params,
+     int(std::size(drop_shadow_params)),
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_MASK_NEEDS_LUMA | PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
     /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same
      * open-above-one policy as Exposure and High Pass, unlike Noise and Channel Mixer. */
     {MA_PAINT_LAYER_SOURCE_FILTER,

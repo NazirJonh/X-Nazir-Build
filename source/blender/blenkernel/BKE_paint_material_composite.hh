@@ -746,6 +746,12 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
    */
   Image *effect_image = nullptr;
   /**
+   * The result in #effect_color or #effect_image is a layer with an alpha of its own (a Drop
+   * Shadow), not a colour only: it is laid as a correction with a map alpha, `f = opacity x alpha`,
+   * which raises the row's coverage and content alpha where the row had none.
+   */
+  bool effect_result_has_alpha = false;
+  /**
    * The marker of the effect row this correction was made from, for a caller that has to name it --
    * the GPU result cache keys its texture on the effect instance, and a parameter hash cannot tell
    * two effects with the same parameters on two rows apart. Nil for every other correction.
@@ -808,6 +814,8 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   ImBuf *effect_color = nullptr;
   /** Colorspace name of #effect_color's own buffer when it is an effect's map, or null. */
   const char *effect_colorspace_name = nullptr;
+  /** See #PaintMaterialCompositeCorrection::effect_result_has_alpha. */
+  bool effect_result_has_alpha = false;
   ImBuf *ibuf = nullptr;
   /** Colorspace name of #ibuf's own buffer, or null for scene linear. */
   const char *colorspace_name = nullptr;

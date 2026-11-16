@@ -207,7 +207,7 @@ static void paint_layer_effect_blur_directional(ImBuf &buffer,
       float *dst = pixels + int64_t(y) * width * 4;
       for (const int x : IndexRange(width)) {
         float sum[3] = {0.0f, 0.0f, 0.0f};
-        for (const int k : IndexRange(-reach, reach + 1)) {
+        for (const int k : IndexRange(-reach, 2 * reach + 1)) {
           /* One texel along the line per step, clamped to the canvas the window is. */
           const int sx = std::clamp(x + int(std::floor(direction.x * float(k) + 0.5f)), 0, width - 1);
           const int sy = std::clamp(y + int(std::floor(direction.y * float(k) + 0.5f)), 0, height - 1);
@@ -679,6 +679,112 @@ static void paint_layer_effect_glow_apply(ImBuf &buffer, const MaterialPaintLaye
 }
 
 /**
+ * The Drop Shadow over \a buffer in place: the silhouette its source names, spread (a negative
+ * spread erodes it), blurred by the size and offset by the distance along the angle, tinted by
+ * the colour and laid over the content by the opacity. An alpha source lays the shadow where the
+ * content is not -- the shadow a stroke casts on the empty map around it -- and a luminance
+ * source lays it wherever the offset silhouette covers, the way a mask's grey is darkened by the
+ * shape the mask itself casts.
+ *
+ * \a as_layer picks what the buffer holds afterwards. A content effect leaves the shadow as a layer
+ * of its own (#PAINT_LAYER_KIND_RESULT_HAS_ALPHA): the colour of the shadow, premultiplied like
+ * the effect cache's other buffers, and the alpha it covers by, `shadow x opacity x under` with the
+ * "under the content" folded into it, so the composite lays it over a row that has no content
+ * there. Without it (a mask item) the shadow is mixed into the grey and alpha is untouched; a
+ * mask's buffer has no alpha to cast from, so the shape is always the luminance there.
+ */
+static void paint_layer_effect_drop_shadow_apply(ImBuf &buffer,
+                                                 const MaterialPaintLayer &effect,
+                                                 const bool as_layer)
+{
+  const int source = as_layer ?
+                         paint_layer_kind_param_int_get(effect, PAINT_LAYER_DROP_SHADOW_SOURCE) :
+                         int(PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE);
+  const float angle_deg = paint_layer_kind_param_get(effect, PAINT_LAYER_DROP_SHADOW_ANGLE);
+  const int distance = paint_layer_kind_param_int_get(effect, PAINT_LAYER_DROP_SHADOW_DISTANCE);
+  const int size = paint_layer_kind_param_int_get(effect, PAINT_LAYER_DROP_SHADOW_SIZE);
+  const int spread = paint_layer_kind_param_int_get(effect, PAINT_LAYER_DROP_SHADOW_SPREAD);
+  const float opacity = paint_layer_kind_param_get(effect, PAINT_LAYER_DROP_SHADOW_OPACITY);
+  float color[4];
+  paint_layer_kind_param_color_get(effect, PAINT_LAYER_DROP_SHADOW_COLOR, color);
+  /* A layer that casts nothing is empty, not the content it was handed: the buffer would otherwise
+   * be read as a shadow of the row's own colour. */
+  const auto layer_clear = [&]() {
+    if (as_layer) {
+      std::fill_n(buffer.float_data_for_write(), int64_t(buffer.x) * buffer.y * 4, 0.0f);
+    }
+  };
+  if (opacity <= 0.0f) {
+    layer_clear();
+    return;
+  }
+
+  std::shared_ptr<ImBuf> silhouette = paint_layer_anchor_slice_buffer_clone(buffer);
+  if (silhouette == nullptr) {
+    layer_clear();
+    return;
+  }
+  paint_layer_effect_map_rgb(*silhouette, [&](const int /*x*/, const int /*y*/, float *texel) {
+    const float shape = (source == PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE) ?
+                            clamp_f(IMB_colormanagement_get_luminance(texel), 0.0f, 1.0f) :
+                            texel[3];
+    texel[0] = shape;
+    texel[1] = shape;
+    texel[2] = shape;
+  });
+
+  /* The spread grows (a positive one dilates) or shrinks (a negative one erodes) the silhouette
+   * before the blur softens its edge; zero of either leaves it as it is. */
+  if (spread > 0) {
+    paint_layer_effect_erode_dilate(*silhouette, false, spread);
+  }
+  else if (spread < 0) {
+    paint_layer_effect_erode_dilate(*silhouette, true, -spread);
+  }
+  if (size > 0) {
+    paint_layer_effect_blur_box(*silhouette, size);
+  }
+
+  /* The shadow is cast toward the angle: every texel reads the silhouette the offset lands on, so
+   * the shadow sits displaced along the direction the angle names. */
+  const float angle_rad = angle_deg * float(M_PI) / 180.0f;
+  const float2 direction = {std::cos(angle_rad), std::sin(angle_rad)};
+  /* Rounded half up, the project rule, not the half away from zero of `std::round`. */
+  const int offset_x = int(std::floor(direction.x * float(distance) + 0.5f));
+  const int offset_y = int(std::floor(direction.y * float(distance) + 0.5f));
+  const int width = buffer.x;
+  const int height = buffer.y;
+  const float *shadow_data = silhouette->float_buffer.data;
+  paint_layer_effect_map_rgb(buffer, [&](const int x, const int y, float *texel) {
+    const int sx = x - offset_x;
+    const int sy = y - offset_y;
+    /* A texel the offset reads from past the map's edge has no silhouette to cast: clamping would
+     * smear the edge row of the shape across the whole shadow band. */
+    const bool inside = sx >= 0 && sx < width && sy >= 0 && sy < height;
+    const float shadow = inside ? shadow_data[(int64_t(sy) * width + sx) * 4] : 0.0f;
+    /* An alpha source keeps the shadow where the content is not: the stroke casts on the empty
+     * map around it, and the stroke itself keeps its colour. A luminance source darkens wherever
+     * the offset silhouette covers, the way a mask's grey is laid over the mask. */
+    const float under = (source == PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA) ?
+                            1.0f - clamp_f(texel[3], 0.0f, 1.0f) :
+                            1.0f;
+    const float weight = shadow * opacity * under;
+    if (as_layer) {
+      /* The alpha is the weight and the colour is the shadow's own, premultiplied by it. */
+      const float alpha = clamp_f(weight, 0.0f, 1.0f);
+      texel[0] = color[0] * alpha;
+      texel[1] = color[1] * alpha;
+      texel[2] = color[2] * alpha;
+      texel[3] = alpha;
+      return;
+    }
+    for (const int c : IndexRange(3)) {
+      texel[c] += (color[c] - texel[c]) * weight;
+    }
+  });
+}
+
+/**
  * The Bevel kernel over \a buffer in place: the distance of each texel from the content's border,
  * normalized by the distance parameter and clamped to [0, 1], written to all three colour channels,
  * then softened by a box blur of the smooth radius. The source parameter says what a border is: the
@@ -848,7 +954,9 @@ static void paint_layer_effect_color_match_apply(ImBuf &buffer, const MaterialPa
   });
 }
 
-void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
+void paint_layer_effect_kernel_apply(ImBuf &buffer,
+                                     const MaterialPaintLayer &effect,
+                                     const bool for_mask)
 {
   /* Timed apart from the input it is handed: this is the half an effect pass computes instead, so
    * the line stopping to print in `BLENDER_PBR_PERF` is what a covered kind bought. The region is
@@ -928,6 +1036,10 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &ef
       break;
     case MA_PAINT_LAYER_FILTER_GLOW:
       paint_layer_effect_glow_apply(buffer, effect);
+      break;
+    case MA_PAINT_LAYER_FILTER_DROP_SHADOW:
+      paint_layer_effect_drop_shadow_apply(
+          buffer, effect, !for_mask && paint_layer_kind_result_has_alpha(effect));
       break;
     case MA_PAINT_LAYER_FILTER_BEVEL:
       paint_layer_effect_bevel_apply(buffer, effect);

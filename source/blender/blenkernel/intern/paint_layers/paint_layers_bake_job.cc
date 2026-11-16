@@ -449,7 +449,9 @@ static bool bake_effect_channel_compute(const Material &ma,
   }
   /* The nearest sample of the result, each axis independently. The effect cache's buffer is
    * premultiplied by the input's content alpha and the map holds the straight colour, so the alpha
-   * is not part of the result (see #bake_effect_row_write). */
+   * is not part of the result, unless the kind's result is a layer that covers by it (see
+   * #bake_effect_row_write). */
+  const bool keeps_alpha = paint_layer_kind_result_has_alpha(effect);
   for (int y = 0; y < size; y++) {
     const int src_y = min_ii(int(int64_t(y) * height / size), height - 1);
     const float *src_row = src + int64_t(src_y) * width * 4;
@@ -457,7 +459,8 @@ static bool bake_effect_channel_compute(const Material &ma,
       const int src_x = min_ii(int(int64_t(x) * width / size), width - 1);
       const float *texel = src_row + int64_t(src_x) * 4;
       const float inv = texel[3] > 0.0f ? 1.0f / texel[3] : 1.0f;
-      const float straight[4] = {texel[0] * inv, texel[1] * inv, texel[2] * inv, 1.0f};
+      const float straight[4] = {
+          texel[0] * inv, texel[1] * inv, texel[2] * inv, keeps_alpha ? texel[3] : 1.0f};
       const int64_t i = int64_t(y) * size + x;
       if (r_result.stored_float) {
         bake_pixel_store_float(straight, &r_result.color[i * 4]);

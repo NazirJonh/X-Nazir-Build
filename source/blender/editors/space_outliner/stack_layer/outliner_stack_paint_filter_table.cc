@@ -121,6 +121,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
       return {ICON_MOD_BEVEL, 0};
     case MA_PAINT_LAYER_FILTER_COLOR_MATCH:
       return {ICON_NODE_COMPOSITING, 0};
+    case MA_PAINT_LAYER_FILTER_DROP_SHADOW:
+      /* No glyph of its own yet: the sun icon names the cast the silhouette takes. */
+      return {ICON_LIGHT_SUN, 0};
     case MA_PAINT_LAYER_FILTER_NORMAL_CONVERT:
       /* No glyph of its own yet: the vertex-normals icon names what the filter converts. */
       return {ICON_NORMALS_VERTEX, 0};
@@ -321,6 +324,11 @@ static const PaintFilterAddKind paint_effect_add_kinds_table[] = {
      N_("Color Match"),
      "Grade the active layer's colours from a source colour to a target one",
      MA_PAINT_LAYER_FILTER_COLOR_MATCH},
+    {"EFFECT_DROP_SHADOW",
+     N_("Drop Shadow"),
+     "Cast a shadow off the active layer's shape: the silhouette spread, blurred and offset by "
+     "the angle and the distance, tinted by the colour",
+     MA_PAINT_LAYER_FILTER_DROP_SHADOW},
 };
 
 /**

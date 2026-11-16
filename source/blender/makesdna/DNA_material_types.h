@@ -1138,6 +1138,13 @@ enum eMaterialPaintLayerFilter : int16_t {
    * though its kernel is a line rather than a square.
    */
   MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL = 32,
+  /**
+   * Cast a shadow off the row's own shape (a Drop Shadow): the silhouette its alpha — or its
+   * luminance, as the Bevel reads — spread, blurred and offset by the angle and the distance,
+   * tinted by the colour and laid where the content is not. A CPU-computed effect like the
+   * #MA_PAINT_LAYER_FILTER_BEVEL: it reads a neighbourhood and composites a sequence of passes.
+   */
+  MA_PAINT_LAYER_FILTER_DROP_SHADOW = 33,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

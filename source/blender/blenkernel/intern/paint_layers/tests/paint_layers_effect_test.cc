@@ -716,6 +716,150 @@ TEST_F(PaintLayersEffectTest, a_blur_directional_sweeps_the_angles_at_the_map_ed
   }
 }
 
+TEST_F(PaintLayersEffectTest, a_drop_shadow_falls_toward_the_angle_off_the_luminance)
+{
+  /* Left half white, right half black, all opaque: the luminance source reads the white side as
+   * the shape that casts, and the offset silhouette darkens the white it lands on even there,
+   * which the alpha source would never do. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *shadow = add_effect(*row, MA_PAINT_LAYER_FILTER_DROP_SHADOW);
+  /* The shape from the luminance, the cast toward the +X the zero angle names, two texels of it,
+   * no blur and no spread, the shadow read at full strength in the black it defaults to. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*shadow,
+                                             PAINT_LAYER_DROP_SHADOW_SOURCE,
+                                             PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE));
+  ASSERT_TRUE(paint_layer_kind_param_set(*shadow, PAINT_LAYER_DROP_SHADOW_ANGLE, 0.0f));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*shadow, PAINT_LAYER_DROP_SHADOW_DISTANCE, 2));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*shadow, PAINT_LAYER_DROP_SHADOW_SIZE, 0));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  /* The two columns before the silhouette has reached keep the white; the two the offset lands
+   * the silhouette on turn to the shadow, opaque content and all; the black side reads nothing to
+   * cast and stays black. */
+  EXPECT_NEAR(linear_pixel(pixels, width, 0, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 1, 4), 1.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 2, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 3, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 4, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 5, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 6, 4), 0.0f, 2e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 7, 4), 0.0f, 2e-3f);
+}
+
+TEST_F(PaintLayersEffectTest, a_drop_shadow_kernel_lays_a_premultiplied_shadow_layer)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *shadow = add_effect(*row, MA_PAINT_LAYER_FILTER_DROP_SHADOW);
+  ASSERT_TRUE(paint_layer_kind_param_set(*shadow, PAINT_LAYER_DROP_SHADOW_ANGLE, 0.0f));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*shadow, PAINT_LAYER_DROP_SHADOW_DISTANCE, 2));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*shadow, PAINT_LAYER_DROP_SHADOW_SIZE, 0));
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(paint_layer_kind_param_color_set(*shadow, PAINT_LAYER_DROP_SHADOW_COLOR, red));
+  ASSERT_TRUE(paint_layer_kind_param_set(*shadow, PAINT_LAYER_DROP_SHADOW_OPACITY, 0.5f));
+
+  /* A white square stroke on the left half, nothing on the right: straight colour, content alpha. */
+  constexpr int size = 8;
+  ImBuf *input = IMB_allocImBuf(size, size, ImBufFlags::FloatData);
+  ASSERT_NE(input, nullptr);
+  float *pixels = input->float_data_for_write();
+  for (const int y : IndexRange(size)) {
+    for (const int x : IndexRange(size)) {
+      float *p = pixels + (int64_t(y) * size + x) * 4;
+      const float covered = x < size / 2 ? 1.0f : 0.0f;
+      p[0] = covered;
+      p[1] = covered;
+      p[2] = covered;
+      p[3] = covered;
+    }
+  }
+  paint_layer_effect_kernel_apply(*input, *shadow);
+
+  /* The shadow falls two texels to the right of the stroke: where the content is, the layer has no
+   * alpha ("under the content" is part of the weight); on the empty map next to it the alpha is the
+   * opacity and the colour is the shadow's own, premultiplied; past the offset silhouette nothing. */
+  for (const int y : IndexRange(size)) {
+    for (const int x : IndexRange(size)) {
+      const float *p = pixels + (int64_t(y) * size + x) * 4;
+      const bool shadowed = x == 4 || x == 5;
+      EXPECT_NEAR(p[3], shadowed ? 0.5f : 0.0f, 1e-6f) << "alpha at " << x << "," << y;
+      EXPECT_NEAR(p[0], shadowed ? 0.5f : 0.0f, 1e-6f) << "premultiplied red at " << x << "," << y;
+      EXPECT_NEAR(p[1], 0.0f, 1e-6f) << "green at " << x << "," << y;
+      EXPECT_NEAR(p[2], 0.0f, 1e-6f) << "blue at " << x << "," << y;
+    }
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_drop_shadow_shows_on_the_map_around_a_stroke)
+{
+  /* The left half is an opaque white stroke, the right half has no alpha: the shadow is cast onto
+   * texels the row covers nothing at, which a colour-only result could never show. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0, false, 0));
+  MaterialPaintLayer *shadow = add_effect(*row, MA_PAINT_LAYER_FILTER_DROP_SHADOW);
+  ASSERT_TRUE(paint_layer_kind_param_set(*shadow, PAINT_LAYER_DROP_SHADOW_ANGLE, 0.0f));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*shadow, PAINT_LAYER_DROP_SHADOW_DISTANCE, 2));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*shadow, PAINT_LAYER_DROP_SHADOW_SIZE, 0));
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(paint_layer_kind_param_color_set(*shadow, PAINT_LAYER_DROP_SHADOW_COLOR, red));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  const auto texel = [&](const int x, const int y, const int channel) {
+    return pixels[(int64_t(y) * width + x) * 4 + channel];
+  };
+  /* The stroke keeps its white, the two texels the offset lands on turn the shadow's red where the
+   * row had no coverage, and past them the map is as empty as it was. */
+  EXPECT_NEAR(texel(1, 4, 0), 1.0f, 2e-3f);
+  EXPECT_NEAR(texel(1, 4, 1), 1.0f, 2e-3f);
+  for (const int x : {4, 5}) {
+    EXPECT_NEAR(texel(x, 4, 0), 1.0f, 2e-3f) << "red at " << x;
+    EXPECT_NEAR(texel(x, 4, 1), 0.0f, 2e-3f) << "green at " << x;
+    EXPECT_NEAR(texel(x, 4, 2), 0.0f, 2e-3f) << "blue at " << x;
+  }
+  EXPECT_FALSE(texel(7, 4, 0) > 0.99f && texel(7, 4, 1) < 0.01f)
+      << "no shadow past the offset silhouette";
+}
+
+TEST_F(PaintLayersEffectTest, a_reduced_bake_keeps_the_effects_input_at_the_stack_resolution)
+{
+  /* The drag-reduced bake composites on a smaller grid, but a CPU-computed effect's input is always
+   * described at the stack's own resolution: its texel parameters (a Drop Shadow's offset, a Blur's
+   * radius) keep their meaning, and the reduced frame is a resample of the full result. */
+  ma->paint_layers_image_size = 4;
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *shadow = add_effect(*row, MA_PAINT_LAYER_FILTER_DROP_SHADOW);
+  ASSERT_NE(shadow, nullptr);
+  BKE_paint_layers_bake_drag_set(*bmain, ma->id.session_uid, true);
+
+  PaintMaterialCompositeImageLayer entry;
+  ASSERT_TRUE(BKE_paint_layers_effect_input_describe(
+      *ma, *row, *shadow, kColor, true, false, entry));
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(
+      Span<PaintMaterialCompositeImageLayer>(&entry, 1), width, height));
+  EXPECT_EQ(width, 8) << "the effect input keeps the stack's texels while the bake is reduced";
+  EXPECT_EQ(height, 8);
+
+  /* The bake itself is the reduced square the drag asked for. */
+  Vector<float> color(4 * 4 * 4);
+  Vector<float> coverage(4 * 4);
+  ASSERT_TRUE(BKE_paint_layers_bake_render_node(*ma,
+                                                *row,
+                                                kColor,
+                                                4,
+                                                color.data(),
+                                                coverage.data(),
+                                                nullptr,
+                                                nullptr));
+  BKE_paint_layers_bake_drag_set(*bmain, ma->id.session_uid, false);
+}
+
 TEST_F(PaintLayersEffectTest, an_erode_and_a_dilate_leave_a_solid_alone)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
@@ -885,6 +1029,7 @@ TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_for_each_added_cpu
       {MA_PAINT_LAYER_FILTER_GLOW, "a Glow correction is read"},
       {MA_PAINT_LAYER_FILTER_BEVEL, "a Bevel correction is read"},
       {MA_PAINT_LAYER_FILTER_COLOR_MATCH, "a Color Match correction is read"},
+      {MA_PAINT_LAYER_FILTER_DROP_SHADOW, "a Drop Shadow correction is read"},
   };
   for (const auto &[filter, reason] : reasons) {
     MaterialPaintLayer *effect = add_effect(*row, filter);
@@ -1551,7 +1696,9 @@ TEST_F(PaintLayersEffectTest, every_pointwise_kind_has_a_shader_branch_or_refuse
                            MA_PAINT_LAYER_FILTER_CURVES,
                            MA_PAINT_LAYER_FILTER_COLOR_BALANCE,
                            MA_PAINT_LAYER_FILTER_EXPOSURE,
-                           MA_PAINT_LAYER_FILTER_CHANNEL_MIXER};
+                           MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
+                           MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN,
+                           MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT};
   constexpr uint8_t both_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
                                  paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER);
   MaterialPaintLayer *previous = nullptr;
@@ -2288,7 +2435,7 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
    * nothing. */
   Set<int> gpu_computed_filters;
   for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT);
-       filter <= int(MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL);
+       filter <= int(MA_PAINT_LAYER_FILTER_DROP_SHADOW);
        filter++)
   {
     const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
@@ -2758,6 +2905,27 @@ bool mask_grey_differs(const ImBuf &a, const ImBuf &b, const float tolerance)
 
 }  // namespace
 
+TEST_F(PaintLayersEffectTest, a_mask_drop_shadow_reads_the_luminance_whatever_the_source_says)
+{
+  /* A mask's grey has no alpha: the alpha source of the schema default would cast nothing from it,
+   * so a mask item always reads the luminance and the shadow darkens the ramp. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  MaterialPaintLayer *shadow = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_DROP_SHADOW);
+  ASSERT_EQ(paint_layer_kind_param_int_get(*shadow, PAINT_LAYER_DROP_SHADOW_SOURCE),
+            PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA);
+
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_DROP_SHADOW);
+  ASSERT_NE(laid, nullptr);
+  std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *shadow);
+  ASSERT_NE(input, nullptr);
+  EXPECT_TRUE(mask_grey_differs(*laid, *input, 1e-6f));
+  for (const int64_t i : IndexRange(int64_t(laid->x) * laid->y)) {
+    EXPECT_NEAR(laid->float_data()[i * 4 + 3], 1.0f, 1e-6f)
+        << "a mask's alpha stays one, texel " << i;
+  }
+}
+
 TEST_F(PaintLayersEffectTest, a_mask_blur_is_the_box_blur_of_the_mask_built_up_to_it)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
@@ -2950,6 +3118,7 @@ TEST_F(PaintLayersEffectTest, every_mask_effect_kind_lays_one_grey)
                                                MA_PAINT_LAYER_FILTER_GLOW,
                                                MA_PAINT_LAYER_FILTER_BEVEL,
                                                MA_PAINT_LAYER_FILTER_COLOR_MATCH,
+                                               MA_PAINT_LAYER_FILTER_DROP_SHADOW,
                                                MA_PAINT_LAYER_FILTER_NOISE};
   for (const eMaterialPaintLayerFilter filter : filters) {
     MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));

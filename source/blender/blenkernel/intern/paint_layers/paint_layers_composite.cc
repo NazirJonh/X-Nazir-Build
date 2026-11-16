@@ -1154,6 +1154,7 @@ static void composite_effect_append_cpu_computed(const Material &ma,
   /* The GPU path keys its result texture on the effect instance, which a parameter hash cannot do
    * across rows: name the marker the correction was made from. */
   effect_correction.effect_marker = effect.marker;
+  effect_correction.effect_result_has_alpha = paint_layer_kind_result_has_alpha(effect);
   /* An effect that owns its result reads the map of its bake while that stands: switching it off and
    * on moves no pixel, and a stroke elsewhere costs it no recompute. */
   effect_correction.effect_color = paint_layer_effect_buffer_get(
@@ -2899,8 +2900,9 @@ static bool paint_layer_effect_compute(const Material &ma,
     }
     perf_input.note("kind=%d size=%dx%d region=full", int(effect.kind_subtype), width, height);
   }
-  /* The kernel reads the buffer the block above filled and leaves the alpha alone; the scope ends
-   * before it, so the two halves of the recompute are not timed together. */
+  /* The kernel reads the buffer the block above filled and leaves the alpha alone -- unless the kind
+   * lays a layer of its own (#PAINT_LAYER_KIND_RESULT_HAS_ALPHA); the scope ends before it, so the
+   * two halves of the recompute are not timed together. */
   paint_layer_effect_kernel_apply(*color, effect);
   /* The versions are taken after the render: an edit that landed while it ran is read next time. */
   Vector<Image *> images;

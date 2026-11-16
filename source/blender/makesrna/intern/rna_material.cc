@@ -5951,6 +5951,12 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "Blur Directional",
      "Streak the colours of what is below along a fixed angle: a line average the radius reaches "
      "along, mixed over the colour by its intensity"},
+    {MA_PAINT_LAYER_FILTER_DROP_SHADOW,
+     "DROP_SHADOW",
+     0,
+     "Drop Shadow",
+     "Cast a shadow off the shape of what is below: the silhouette spread, blurred and offset by "
+     "the angle and the distance, tinted by the colour"},
     {MA_PAINT_LAYER_FILTER_SHARPEN,
      "SHARPEN",
      0,

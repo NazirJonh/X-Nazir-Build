@@ -1464,6 +1464,22 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       for (int64_t i = 0; i < count; i++) {
         float *s = r_color + i * 4;
         const float *filtered = correction_storage.data() + i * 4;
+        if (correction.effect_result_has_alpha) {
+          /* A result that is a layer (a Drop Shadow) is a Normal correction with a map alpha, the
+           * formula below: it takes over where the row covers nothing, and raises the coverage and
+           * the content alpha by `f` so the Image channel shows it there. */
+          const float f = clamp_f(weight * filtered[3], 0.0f, 1.0f);
+          const float a = clamp_f(r_factor[i], 0.0f, 1.0f);
+          const float a_new = a + f * (1.0f - a);
+          const float lay_weight = (a_new > 0.0f) ? f / a_new : 0.0f;
+          for (const int k : IndexRange(3)) {
+            s[k] += (filtered[k] - s[k]) * lay_weight;
+          }
+          const float alpha = clamp_f(s[3], 0.0f, 1.0f);
+          s[3] = layer.tracks_content_alpha ? alpha + f * (1.0f - alpha) : a_new;
+          r_factor[i] = a_new;
+          continue;
+        }
         for (const int k : IndexRange(3)) {
           s[k] += (filtered[k] - s[k]) * weight;
         }
@@ -2993,8 +3009,11 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       buffer.filter = correction.filter;
       buffer.filter_ramp = correction.filter_ramp;
       buffer.filter_curves = correction.filter_curves;
-      /* A CPU-computed effect's result is owned by the description; the evaluation borrows it. */
-      buffer.effect_color = correction.effect_color.get();
+      /* A CPU-computed effect's result is owned by the description; the evaluation borrows it. It is
+       * always at the stack's resolution, so a reduced grid reads an owned resample of it. */
+      buffer.effect_color = composite_buffer_to_eval_grid(
+          correction.effect_color.get(), ref_width, ref_height, r_locks);
+      buffer.effect_result_has_alpha = correction.effect_result_has_alpha;
       if (correction.effect_image != nullptr) {
         /* An effect that owns its result keeps it in a map of its own: read at the composite's grid
          * like any other map, then mixed in exactly as the effect cache's buffer is. A map that

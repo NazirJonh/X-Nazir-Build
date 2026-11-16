@@ -277,7 +277,7 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
   }
   else {
     /* The kernel reads the buffer the block above filled and leaves the alpha alone. */
-    paint_layer_effect_kernel_apply(*color, effect);
+    paint_layer_effect_kernel_apply(*color, effect, /*for_mask=*/true);
     mask_effect_grey_normalize(*color, effect);
   }
   /* The versions are taken after the render: an edit that landed while it ran is read next time. */

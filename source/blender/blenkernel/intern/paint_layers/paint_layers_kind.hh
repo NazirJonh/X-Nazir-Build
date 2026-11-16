@@ -302,6 +302,15 @@ enum PaintLayerKindFlag : uint16_t {
    * and Mask mode alike with #PaintLayersTargetStatus::RowTakesNoStrokes.
    */
   PAINT_LAYER_KIND_NO_STROKES = 1 << 14,
+  /**
+   * A #PAINT_LAYER_KIND_NEEDS_BAKE effect whose result is a layer with an alpha of its own (a Drop
+   * Shadow: straight colour, premultiplied in the effect cache's buffer, and the alpha it covers
+   * by) instead of a colour only. Laid over a row it is a correction with a map alpha: `f = opacity
+   * x alpha(map)` raises the row's coverage and content alpha, so it shows where the row has none.
+   * Every kind without the flag keeps a colour-only result and an alpha of one. A mask item takes
+   * no part in it: a mask effect's buffer has no alpha to cast from or to lay.
+   */
+  PAINT_LAYER_KIND_RESULT_HAS_ALPHA = 1 << 15,
 };
 
 struct PaintLayerKindInfo {
@@ -789,6 +798,32 @@ enum PaintLayerBlurDirectionalParam : int {
   /** How much of the average the result takes: zero is the colour as it is, one is all average. */
   PAINT_LAYER_BLUR_DIRECTIONAL_MIX = 2,
   PAINT_LAYER_BLUR_DIRECTIONAL_PARAM_NUM = 3,
+};
+
+/** What the Drop Shadow filter reads its silhouette from, the value of its
+ * #PAINT_LAYER_DROP_SHADOW_SOURCE parameter. The same source the Bevel reads its borders by. */
+enum PaintLayerDropShadowSource : int {
+  /** The content's own alpha: a paint stroke casts a shadow off what it covers. */
+  PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA = 0,
+  /** The scene-linear luminance: the dark side of the content is the shape that casts. A mask
+   * item reads this one, for the grey the mask lays carries no alpha of its own. */
+  PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE = 1,
+};
+
+/** The positions of the Drop Shadow filter's parameters in its schema. */
+enum PaintLayerDropShadowParam : int {
+  PAINT_LAYER_DROP_SHADOW_SOURCE = 0,
+  /** The angle the shadow is cast toward, in degrees, counter-clockwise off the +X of the map. */
+  PAINT_LAYER_DROP_SHADOW_ANGLE = 1,
+  /** Whole texels the shadow silhouette is offset by. */
+  PAINT_LAYER_DROP_SHADOW_DISTANCE = 2,
+  /** Whole texels the box blur of the shadow edge reaches. */
+  PAINT_LAYER_DROP_SHADOW_SIZE = 3,
+  /** Whole texels the silhouette grows (positive) or shrinks (negative) before the blur. */
+  PAINT_LAYER_DROP_SHADOW_SPREAD = 4,
+  PAINT_LAYER_DROP_SHADOW_OPACITY = 5,
+  PAINT_LAYER_DROP_SHADOW_COLOR = 6,
+  PAINT_LAYER_DROP_SHADOW_PARAM_NUM = 7,
 };
 
 /** The positions of the Sharpen filter's parameters in its schema. */
@@ -1529,6 +1564,12 @@ inline bool paint_layer_kind_is_map_coverage(const MaterialPaintLayer &row)
 inline bool paint_layer_kind_transforms_input(const MaterialPaintLayer &row)
 {
   return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_TRANSFORMS_INPUT);
+}
+
+/** Whether \a row's kind computes a result with an alpha of its own (a Drop Shadow). */
+inline bool paint_layer_kind_result_has_alpha(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_RESULT_HAS_ALPHA);
 }
 
 /** Whether \a row is the inert Anchor Point marker. */

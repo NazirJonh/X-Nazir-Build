@@ -1683,8 +1683,15 @@ std::shared_ptr<ImBuf> paint_layer_anchor_slice_buffer_clone(const ImBuf &source
  * a Color Match) bring their result back through it, so the item lays one grey. */
 void paint_layer_effect_to_luminance(ImBuf &buffer);
 
-/** The kernel of \a effect over \a buffer in place, at full strength, RGB only. */
-void paint_layer_effect_kernel_apply(ImBuf &buffer, const MaterialPaintLayer &effect);
+/**
+ * The kernel of \a effect over \a buffer in place, at full strength, RGB only -- except for a kind
+ * with #PAINT_LAYER_KIND_RESULT_HAS_ALPHA, whose result is a layer: premultiplied colour and the
+ * alpha it covers by. \a for_mask is a mask item's grey, which has no alpha and takes the
+ * colour-only result of every kind.
+ */
+void paint_layer_effect_kernel_apply(ImBuf &buffer,
+                                     const MaterialPaintLayer &effect,
+                                     bool for_mask = false);
 
 /**
  * Compute the result of \a effect, which owns it (#paint_layer_effect_owns_result), on \a row's

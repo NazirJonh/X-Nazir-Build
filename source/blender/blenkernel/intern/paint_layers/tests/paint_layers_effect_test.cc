@@ -973,6 +973,104 @@ TEST_F(PaintLayersEffectTest, a_height_to_normal_in_world_units_reads_the_texel_
   IMB_freeImBuf(input);
 }
 
+TEST_F(PaintLayersEffectTest, a_pixelate_of_a_whole_map_averages_it_into_one_block)
+{
+  /* Half white, half black: one pixel across the map takes the block average, and the half-and-
+   * half average is the half. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *pixelate = add_effect(*row, MA_PAINT_LAYER_FILTER_PIXELATE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*pixelate, PAINT_LAYER_PIXELATE_AMOUNT, 1));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (const int y : IndexRange(height)) {
+    for (const int x : IndexRange(width)) {
+      EXPECT_NEAR(linear_pixel(pixels, width, x, y), 0.5f, 2e-3f)
+          << "the one block reads the map's own average, texel " << x << ", " << y;
+    }
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_pixelate_kernel_cuts_a_ramp_into_blocks_and_keeps_alpha)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_PIXELATE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect, PAINT_LAYER_PIXELATE_AMOUNT, 2));
+
+  /* 8 x 8 texels, two blocks a side: blocks of four. Red is the column, so each block of four
+   * columns averages to its middle, and the alpha stays a half. */
+  ImBuf *input = IMB_allocImBuf(8, 8, ImBufFlags::FloatData);
+  ASSERT_NE(input, nullptr);
+  float *data = input->float_data_for_write();
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      float *p = data + (int64_t(y) * 8 + x) * 4;
+      p[0] = float(x);
+      p[1] = 0.0f;
+      p[2] = 0.0f;
+      p[3] = 0.5f;
+    }
+  }
+  paint_layer_effect_kernel_apply(*input, *effect);
+  const float *out = input->float_data();
+  for (const int x : IndexRange(8)) {
+    const float *p = out + (int64_t(3) * 8 + x) * 4;
+    EXPECT_NEAR(p[0], x < 4 ? 1.5f : 5.5f, 1e-5f) << x;
+    EXPECT_FLOAT_EQ(p[3], 0.5f);
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_pixelate_kernel_does_not_leak_a_transparent_texels_black_into_an_island)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_PIXELATE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect, PAINT_LAYER_PIXELATE_AMOUNT, 1));
+
+  /* One opaque white texel among transparent black ones: the block is white, not a grey. */
+  ImBuf *input = IMB_allocImBuf(4, 4, ImBufFlags::FloatData);
+  ASSERT_NE(input, nullptr);
+  float *data = input->float_data_for_write();
+  for (const int i : IndexRange(16)) {
+    float *p = data + int64_t(i) * 4;
+    const float island = (i == 5) ? 1.0f : 0.0f;
+    p[0] = island;
+    p[1] = island;
+    p[2] = island;
+    p[3] = island;
+  }
+  paint_layer_effect_kernel_apply(*input, *effect);
+  const float *p = input->float_data() + 5 * 4;
+  EXPECT_NEAR(p[0], 1.0f, 1e-5f);
+  EXPECT_NEAR(p[1], 1.0f, 1e-5f);
+  EXPECT_FLOAT_EQ(p[3], 1.0f);
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_pixelate_of_one_texel_blocks_is_the_identity)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_PIXELATE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect, PAINT_LAYER_PIXELATE_AMOUNT, 256));
+
+  ImBuf *input = IMB_allocImBuf(8, 8, ImBufFlags::FloatData);
+  ASSERT_NE(input, nullptr);
+  float *data = input->float_data_for_write();
+  for (const int i : IndexRange(64)) {
+    float *p = data + int64_t(i) * 4;
+    p[0] = float(i) / 64.0f;
+    p[1] = 0.25f;
+    p[2] = 0.75f;
+    p[3] = 1.0f;
+  }
+  paint_layer_effect_kernel_apply(*input, *effect);
+  for (const int i : IndexRange(64)) {
+    EXPECT_FLOAT_EQ(input->float_data()[int64_t(i) * 4], float(i) / 64.0f);
+  }
+  IMB_freeImBuf(input);
+}
 TEST_F(PaintLayersEffectTest, height_to_normal_reads_the_height_of_its_own_tile)
 {
   /* One tiled Height map: the base tile is flat white and tile 1002 carries a vertical step. The
@@ -1346,6 +1444,7 @@ TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_for_each_added_cpu
       {MA_PAINT_LAYER_FILTER_COLOR_MATCH, "a Color Match correction is read"},
       {MA_PAINT_LAYER_FILTER_DROP_SHADOW, "a Drop Shadow correction is read"},
       {MA_PAINT_LAYER_FILTER_MASK_OUTLINE, "a Mask Outline correction is read"},
+      {MA_PAINT_LAYER_FILTER_PIXELATE, "a Pixelate correction is read"},
   };
   for (const auto &[filter, reason] : reasons) {
     MaterialPaintLayer *effect = add_effect(*row, filter);
@@ -2017,7 +2116,8 @@ TEST_F(PaintLayersEffectTest, every_pointwise_kind_has_a_shader_branch_or_refuse
                            MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT,
                            MA_PAINT_LAYER_FILTER_SMOOTHSTEP,
                            MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY,
-                           MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST};
+                           MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST,
+                           MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE};
   constexpr uint8_t both_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
                                  paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER);
   MaterialPaintLayer *previous = nullptr;
@@ -3128,7 +3228,7 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
    * nothing. */
   Set<int> gpu_computed_filters;
   for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT);
-       filter <= int(MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST);
+       filter <= int(MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE);
        filter++)
   {
     const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
@@ -3855,6 +3955,7 @@ TEST_F(PaintLayersEffectTest, every_mask_effect_kind_lays_one_grey)
                                                MA_PAINT_LAYER_FILTER_DROP_SHADOW,
                                                MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
                                                MA_PAINT_LAYER_FILTER_FILL_AREA,
+                                               MA_PAINT_LAYER_FILTER_PIXELATE,
                                                MA_PAINT_LAYER_FILTER_NOISE};
   for (const eMaterialPaintLayerFilter filter : filters) {
     MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));

@@ -94,6 +94,13 @@ static PaintKindLook paint_filter_look(const int16_t filter)
       /* No glyph of its own yet: the arrow icon names the offset and the multiply the height
        * takes. */
       return {ICON_ARROW_LEFTRIGHT, 0};
+    case MA_PAINT_LAYER_FILTER_PIXELATE:
+      /* No glyph of its own yet: the grid icon names the blocks the map is cut into. */
+      return {ICON_GRID, 0};
+    case MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE:
+      /* No glyph of its own yet: the color icon names the hue, the saturation and the lightness
+       * the filter moves. */
+      return {ICON_COLOR, 0};
     case MA_PAINT_LAYER_FILTER_CURVES:
       /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
       return {ICON_RNDCURVE, 0};
@@ -278,6 +285,11 @@ static const PaintFilterAddKind paint_filter_add_kinds_table[] = {
      "Invert, offset or multiply the active layer's height: the offset rides before the multiply, "
      "so a zero offset result annihilates the multiply at that point",
      MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST},
+    {"FILTER_HSL_PERSPECTIVE",
+     N_("HSL Perspective"),
+     "Adjust the active layer's hue, saturation and lightness: the Regular mode shifts the value "
+     "channel, the Perceptive one lifts the colour toward white or black",
+     MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE},
     {"FILTER_CURVES",
      N_("RGB Curves"),
      "Remap the active layer's channels through their own curves",
@@ -379,6 +391,11 @@ static const PaintFilterAddKind paint_effect_add_kinds_table[] = {
      "Convert the Height the active layer lays into a tangent-space normal: the Sobel gradients "
      "of the height, scaled by the intensity or the world units, encoded into the Normal channel",
      MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL},
+    {"EFFECT_PIXELATE",
+     N_("Pixelate"),
+     "Quantize the active layer's content into blocks of one colour: the map cut into a grid of "
+     "the pixel amount's size, every block taking the average of what it covers",
+     MA_PAINT_LAYER_FILTER_PIXELATE},
 };
 
 /**

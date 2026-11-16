@@ -191,10 +191,12 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_TRUE(kinds[19].is_effect);
   EXPECT_EQ(kinds[20].identifier, "FILTER_HEIGHT_ADJUST");
   EXPECT_TRUE(kinds[20].is_effect);
-  EXPECT_EQ(kinds[21].identifier, "FILTER_CURVES");
+  EXPECT_EQ(kinds[21].identifier, "FILTER_HSL_PERSPECTIVE");
   EXPECT_TRUE(kinds[21].is_effect);
-  EXPECT_EQ(kinds[22].identifier, "FILTER_COLOR_BALANCE");
+  EXPECT_EQ(kinds[22].identifier, "FILTER_CURVES");
   EXPECT_TRUE(kinds[22].is_effect);
+  EXPECT_EQ(kinds[23].identifier, "FILTER_COLOR_BALANCE");
+  EXPECT_TRUE(kinds[23].is_effect);
   /* Every kind past the head is found by identifier; `at` also fails the test if it is missing. */
   const auto at = [&](const char *identifier) {
     const int index = kind_index(kinds, identifier);
@@ -208,6 +210,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
                              "FILTER_SMOOTHSTEP",
                              "FILTER_CONTRAST_LUMINOSITY",
                              "FILTER_HEIGHT_ADJUST",
+                             "FILTER_HSL_PERSPECTIVE",
                              "FILTER_DEBAND",
                              "FILTER_NORMAL_CONVERT",
                              "FILTER_CHANNEL_MIXER"})
@@ -226,7 +229,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
                              "EFFECT_NOISE",
                              "EFFECT_GLOW",
                              "EFFECT_BEVEL",
-                             "EFFECT_COLOR_MATCH"})
+                             "EFFECT_COLOR_MATCH",
+                             "EFFECT_PIXELATE"})
   {
     EXPECT_TRUE(kinds[at(effect)].is_effect) << effect;
   }
@@ -247,6 +251,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
                                  "ADJUSTMENT_SMOOTHSTEP",
                                  "ADJUSTMENT_CONTRAST_LUMINOSITY",
                                  "ADJUSTMENT_HEIGHT_ADJUST",
+                                 "ADJUSTMENT_HSL_PERSPECTIVE",
                                  "ADJUSTMENT_CURVES",
                                  "ADJUSTMENT_COLOR_BALANCE",
                                  "ADJUSTMENT_EXPOSURE",
@@ -272,6 +277,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
                            "MASK_FILTER_SMOOTHSTEP",
                            "MASK_FILTER_CONTRAST_LUMINOSITY",
                            "MASK_FILTER_HEIGHT_ADJUST",
+                           "MASK_FILTER_HSL_PERSPECTIVE",
                            "MASK_FILTER_CURVES",
                            "MASK_FILTER_COLOR_BALANCE",
                            "MASK_FILTER_EXPOSURE",
@@ -394,10 +400,12 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
                                  "FILTER_SMOOTHSTEP",
                                  "FILTER_CONTRAST_LUMINOSITY",
                                  "FILTER_HEIGHT_ADJUST",
+                                 "FILTER_HSL_PERSPECTIVE",
                                  "EFFECT_DROP_SHADOW",
                                  "EFFECT_MASK_OUTLINE",
                                  "EFFECT_FILL_AREA",
-                                 "EFFECT_HEIGHT_TO_NORMAL"})
+                                 "EFFECT_HEIGHT_TO_NORMAL",
+                                 "EFFECT_PIXELATE"})
   {
     EXPECT_TRUE(is_filter2(content, identifier)) << identifier;
     EXPECT_FALSE(is_new(content, identifier)) << identifier;
@@ -406,7 +414,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
                                  "MASK_FILTER_HISTOGRAM_SHIFT",
                                  "MASK_FILTER_SMOOTHSTEP",
                                  "MASK_FILTER_CONTRAST_LUMINOSITY",
-                                 "MASK_FILTER_HEIGHT_ADJUST"})
+                                 "MASK_FILTER_HEIGHT_ADJUST",
+                                 "MASK_FILTER_HSL_PERSPECTIVE"})
   {
     EXPECT_TRUE(is_filter2(mask, identifier)) << identifier;
     EXPECT_FALSE(is_new(mask, identifier)) << identifier;

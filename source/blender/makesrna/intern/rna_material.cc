@@ -6062,6 +6062,18 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "Height Adjust",
      "Invert, offset or multiply the height of what is below: the offset rides before the "
      "multiply, so a zero offset result annihilates the multiply at that point"},
+    {MA_PAINT_LAYER_FILTER_PIXELATE,
+     "PIXELATE",
+     0,
+     "Pixelate",
+     "Quantize what is below into blocks of one colour: the map cut into a grid of the pixel "
+     "amount's size, every block taking the average of what it covers"},
+    {MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE,
+     "HSL_PERSPECTIVE",
+     0,
+     "HSL Perspective",
+     "Adjust the hue, saturation and lightness of what is below: the Regular mode shifts the "
+     "value channel, the Perceptive one lifts the colour toward white or black"},
     {MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
      "CHANNEL_MIXER",
      0,

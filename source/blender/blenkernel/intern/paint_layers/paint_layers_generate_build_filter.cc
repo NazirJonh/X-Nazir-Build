@@ -1294,6 +1294,148 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       }
       return true;
     }
+    case MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE: {
+      /* The hue and the saturation ride a Hue/Saturation node, the same math the CPU's hsv stage
+       * runs; the mode decides what the lightness moves -- the node's own Value in the Regular
+       * mode, the per-channel lift toward white or black in the Perceptive one. The mode is a
+       * shape the tree is built with, so an edit of it is a rebuild, and an edit of any other
+       * parameter is a value. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_HSL_PERSPECTIVE_PARAM_NUM ||
+          (*params)[PAINT_LAYER_HSL_PERSPECTIVE_MODE] == nullptr ||
+          (*params)[PAINT_LAYER_HSL_PERSPECTIVE_HUE] == nullptr ||
+          (*params)[PAINT_LAYER_HSL_PERSPECTIVE_SATURATION] == nullptr ||
+          (*params)[PAINT_LAYER_HSL_PERSPECTIVE_LIGHTNESS] == nullptr)
+      {
+        return false;
+      }
+      const bool perceptive = paint_layer_kind_param_int_get(
+                                  effect, PAINT_LAYER_HSL_PERSPECTIVE_MODE) ==
+                              PAINT_LAYER_HSL_PERSPECTIVE_PERCEPTIVE;
+      const NodeOutput hue{group.group_input,
+                           group_input_socket(group, *(*params)[PAINT_LAYER_HSL_PERSPECTIVE_HUE])};
+      const NodeOutput saturation{group.group_input,
+                                  group_input_socket(group,
+                                                     *(*params)[PAINT_LAYER_HSL_PERSPECTIVE_SATURATION])};
+      const NodeOutput lightness{group.group_input,
+                                 group_input_socket(group,
+                                                    *(*params)[PAINT_LAYER_HSL_PERSPECTIVE_LIGHTNESS])};
+      if (hue.socket == nullptr || saturation.socket == nullptr || lightness.socket == nullptr) {
+        return false;
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      /* The node's own bipolar sockets: the hue at its half-neutral, the saturation and the value
+       * at the factor of one plus the double. */
+      bNode *doubled_sat = math_constant_node_add(
+          tree, grid_, nodes, NODE_MATH_MULTIPLY, saturation, 2.0f);
+      if (doubled_sat == nullptr) {
+        return discard();
+      }
+      const NodeOutput sat_twice{doubled_sat, socket_out(*doubled_sat, "Value")};
+      bNode *sat_plus = math_constant_node_add(tree, grid_, nodes, NODE_MATH_ADD, sat_twice, 1.0f);
+      bNode *hue_plus = math_constant_node_add(tree, grid_, nodes, NODE_MATH_ADD, hue, 0.5f);
+      if (sat_plus == nullptr || hue_plus == nullptr) {
+        return discard();
+      }
+      const NodeOutput sat_factor{sat_plus, socket_out(*sat_plus, "Value")};
+      const NodeOutput hue_shift{hue_plus, socket_out(*hue_plus, "Value")};
+
+      bNode *hsv = bke::node_add_static_node(nullptr, tree, SH_NODE_HUE_SAT);
+      bNodeSocket *color_in = (hsv != nullptr) ? socket_in(*hsv, "Color") : nullptr;
+      bNodeSocket *color_out = (hsv != nullptr) ? socket_out(*hsv, "Color") : nullptr;
+      bNodeSocket *hue_socket = (hsv != nullptr) ? socket_in(*hsv, "Hue") : nullptr;
+      bNodeSocket *sat_socket = (hsv != nullptr) ? socket_in(*hsv, "Saturation") : nullptr;
+      bNodeSocket *value_socket = (hsv != nullptr) ? socket_in(*hsv, "Value") : nullptr;
+      if (hsv == nullptr || color_in == nullptr || color_out == nullptr || hue_socket == nullptr ||
+          sat_socket == nullptr || value_socket == nullptr)
+      {
+        if (hsv != nullptr) {
+          nodes.append(hsv);
+        }
+        return discard();
+      }
+      grid_.place_extra(*hsv);
+      nodes.append(hsv);
+      bke::node_add_link(tree, *hue_shift.node, *hue_shift.socket, *hsv, *hue_socket);
+      bke::node_add_link(tree, *sat_factor.node, *sat_factor.socket, *hsv, *sat_socket);
+      if (!perceptive) {
+        bNode *doubled_lgt = math_constant_node_add(
+            tree, grid_, nodes, NODE_MATH_MULTIPLY, lightness, 2.0f);
+        if (doubled_lgt == nullptr) {
+          return discard();
+        }
+        const NodeOutput lgt_twice{doubled_lgt, socket_out(*doubled_lgt, "Value")};
+        bNode *value_plus = math_constant_node_add(
+            tree, grid_, nodes, NODE_MATH_ADD, lgt_twice, 1.0f);
+        if (value_plus == nullptr) {
+          return discard();
+        }
+        const NodeOutput value_factor{value_plus, socket_out(*value_plus, "Value")};
+        bke::node_add_link(
+            tree, *value_factor.node, *value_factor.socket, *hsv, *value_socket);
+      }
+      else {
+        /* The value stays as it is: the lightness rides after, the per-channel lift the CPU's
+         * `paint_layer_hsl_perspective_apply` runs -- toward white by the headroom, toward black
+         * by the colour itself. */
+        static_cast<bNodeSocketValueFloat *>(value_socket->default_value)->value = 1.0f;
+      }
+      bke::node_add_link(tree, *content.node, *content.socket, *hsv, *color_in);
+
+      NodeOutput stage{hsv, color_out};
+      if (perceptive) {
+        NodeOutput xyz[3];
+        if (!separate_xyz_node_add(tree, grid_, nodes, stage, xyz)) {
+          return discard();
+        }
+        bNode *doubled = math_constant_node_add(
+            tree, grid_, nodes, NODE_MATH_MULTIPLY, lightness, 2.0f);
+        if (doubled == nullptr) {
+          return discard();
+        }
+        const NodeOutput delta{doubled, socket_out(*doubled, "Value")};
+        bNode *up_node = math_constant_node_add(tree, grid_, nodes, NODE_MATH_MAXIMUM, delta, 0.0f);
+        bNode *down_node = math_constant_node_add(
+            tree, grid_, nodes, NODE_MATH_MINIMUM, delta, 0.0f);
+        if (up_node == nullptr || down_node == nullptr) {
+          return discard();
+        }
+        const NodeOutput up{up_node, socket_out(*up_node, "Value")};
+        const NodeOutput down{down_node, socket_out(*down_node, "Value")};
+        NodeOutput lifted[3];
+        for (const int i : IndexRange(3)) {
+          const NodeOutput headroom = math_node_add(
+              tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, xyz[i], 1.0f);
+          const NodeOutput rise = math_node_add(tree, grid_, nodes, NODE_MATH_MULTIPLY, up, headroom);
+          const NodeOutput fall = math_node_add(tree, grid_, nodes, NODE_MATH_MULTIPLY, down, xyz[i]);
+          const NodeOutput raised = math_node_add(tree, grid_, nodes, NODE_MATH_ADD, xyz[i], rise);
+          if (headroom.socket == nullptr || rise.socket == nullptr || fall.socket == nullptr ||
+              raised.socket == nullptr)
+          {
+            return discard();
+          }
+          lifted[i] = math_node_add(tree, grid_, nodes, NODE_MATH_ADD, raised, fall);
+          if (lifted[i].socket == nullptr) {
+            return discard();
+          }
+        }
+        NodeOutput combined = combine_xyz_node_add(tree, grid_, nodes, lifted);
+        if (combined.socket == nullptr) {
+          return discard();
+        }
+        stage = combined;
+      }
+
+      if (!filter_result_mix_add(tree, grid_, nodes, content, stage, strength, effect.name)) {
+        return discard();
+      }
+      return true;
+    }
     case MA_PAINT_LAYER_FILTER_CURVES: {
       /* `curves(c)` per channel, the row's mapping copied into the node so the generated tree owns
        * no reference. The node's own evaluation — each channel through its curve, no white

@@ -1238,6 +1238,9 @@ static float composite_filter_color(const int16_t filter,
             params[PAINT_LAYER_HEIGHT_ADJUST_MULTIPLY]);
       }
       break;
+    case MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE:
+      paint_layer_hsl_perspective_apply(rgb, params);
+      break;
     case MA_PAINT_LAYER_FILTER_COLOR_BALANCE:
       /* `pow(max(rgb * A + B, 0), E)` per channel, the folded triples the CPU description, the
        * graph and the GPU share (#paint_layer_color_balance_fold). No payload pointer: the folded

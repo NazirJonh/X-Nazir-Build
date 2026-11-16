@@ -3320,4 +3320,93 @@ TEST_F(PaintLayersHeightAdjustTest, extreme_values_match_the_cpu)
   EXPECT_TRUE(paint_layer_kind_param_set(*adjust, PAINT_LAYER_HEIGHT_ADJUST_OFFSET, 1.0f));
   expect_graph_matches_cpu(kColor);
 }
+class PaintLayersHslPerspectiveTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_hsl_perspective(MaterialPaintLayer &row,
+                                          const int mode,
+                                          const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    EXPECT_TRUE(paint_layer_kind_param_int_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_MODE, mode));
+    return filter;
+  }
+};
+
+TEST_F(PaintLayersHslPerspectiveTest, regular_mode_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_hsl_perspective(
+      *row, PAINT_LAYER_HSL_PERSPECTIVE_REGULAR, 0.7f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_HUE, 0.1f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_SATURATION, 0.2f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_LIGHTNESS, -0.1f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersHslPerspectiveTest, perceptive_mode_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_hsl_perspective(
+      *row, PAINT_LAYER_HSL_PERSPECTIVE_PERCEPTIVE, 0.7f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_HUE, 0.15f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_SATURATION, -0.2f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_LIGHTNESS, 0.2f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersHslPerspectiveTest, the_regular_filter_changes_the_pixel)
+{
+  /* A graph that discards the filter would still equal an unfiltered row, so the result must also
+   * differ from the plain row to prove the filter is live. */
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_hsl_perspective(*row, PAINT_LAYER_HSL_PERSPECTIVE_REGULAR);
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_LIGHTNESS, 0.5f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_GT(cpu_pixel(kColor).b, 220.0f / 255.0f + 0.05f);
+}
+
+TEST_F(PaintLayersHslPerspectiveTest, the_perceptive_filter_changes_the_pixel)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_hsl_perspective(*row, PAINT_LAYER_HSL_PERSPECTIVE_PERCEPTIVE);
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_LIGHTNESS, 0.5f));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_GT(cpu_pixel(kColor).r, 30.0f / 255.0f + 0.05f);
+}
+TEST_F(PaintLayersHslPerspectiveTest, a_grey_stays_grey_under_hue_and_saturation)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 128, 128, 128, 255));
+  MaterialPaintLayer *filter = add_hsl_perspective(*row, PAINT_LAYER_HSL_PERSPECTIVE_REGULAR);
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_HUE, 0.4f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_SATURATION, 0.5f));
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA after = cpu_pixel(kColor);
+  EXPECT_NEAR(after.r, after.g, 2e-3f);
+  EXPECT_NEAR(after.g, after.b, 2e-3f);
+}
+
+TEST_F(PaintLayersHslPerspectiveTest, extreme_values_match_the_cpu)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *filter = add_hsl_perspective(*row, PAINT_LAYER_HSL_PERSPECTIVE_PERCEPTIVE);
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_HUE, -0.5f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_SATURATION, -0.5f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_LIGHTNESS, -0.5f));
+  expect_graph_matches_cpu(kColor);
+
+  EXPECT_TRUE(paint_layer_kind_param_int_set(
+      *filter, PAINT_LAYER_HSL_PERSPECTIVE_MODE, PAINT_LAYER_HSL_PERSPECTIVE_REGULAR));
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_HUE, 0.5f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_SATURATION, 0.5f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*filter, PAINT_LAYER_HSL_PERSPECTIVE_LIGHTNESS, 0.5f));
+  expect_graph_matches_cpu(kColor);
+}
 }  // namespace blender::bke::tests

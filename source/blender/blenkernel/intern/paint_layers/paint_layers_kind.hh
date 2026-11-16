@@ -956,6 +956,36 @@ enum PaintLayerHeightAdjustParam : int {
   PAINT_LAYER_HEIGHT_ADJUST_PARAM_NUM = 3,
 };
 
+/** The positions of the Pixelate filter's parameters in its schema. */
+enum PaintLayerPixelateParam : int {
+  /** The pixel count the map cuts into per side: more pixels, smaller blocks. */
+  PAINT_LAYER_PIXELATE_AMOUNT = 0,
+  PAINT_LAYER_PIXELATE_PARAM_NUM = 1,
+};
+
+/** What the HSL Perspective adjusts by, the value of its #PAINT_LAYER_HSL_PERSPECTIVE_MODE
+ * parameter. */
+enum PaintLayerHslPerspectiveMode : int {
+  /** The internal value channel shifts: the max channel of the colour moves, what the colour is
+   * stored as. */
+  PAINT_LAYER_HSL_PERSPECTIVE_REGULAR = 0,
+  /** The colour lifts toward white or black, so what it looks like moves: the perceptual shift
+   * the headroom of the colour eases. */
+  PAINT_LAYER_HSL_PERSPECTIVE_PERCEPTIVE = 1,
+};
+
+/** The positions of the HSL Perspective filter's parameters in its schema. */
+enum PaintLayerHslPerspectiveParam : int {
+  PAINT_LAYER_HSL_PERSPECTIVE_MODE = 0,
+  /** Bipolar around a half: below it the hue shifts one way, above it the other. */
+  PAINT_LAYER_HSL_PERSPECTIVE_HUE = 1,
+  /** Bipolar around a half: below it the saturation falls, above it the saturation rises. */
+  PAINT_LAYER_HSL_PERSPECTIVE_SATURATION = 2,
+  /** Bipolar around a half: below it the lightness falls, above it the lightness rises. */
+  PAINT_LAYER_HSL_PERSPECTIVE_LIGHTNESS = 3,
+  PAINT_LAYER_HSL_PERSPECTIVE_PARAM_NUM = 4,
+};
+
 /** The positions of the Sharpen filter's parameters in its schema. */
 enum PaintLayerSharpenParam : int {
   PAINT_LAYER_SHARPEN_RADIUS = 0,
@@ -1132,6 +1162,14 @@ void paint_layer_hsv_stage_apply(float rgb[3], float hue_turns, float saturation
  * below zero), so the CPU composite and the generated node agree.
  */
 void paint_layer_hsl_apply(float rgb[3], const float params[PAINT_LAYER_HSL_PARAM_NUM]);
+
+/**
+ * The HSL Perspective applied to one texel \a rgb in place: the hue and saturation shift the way
+ * the Hue/Saturation node's own math does, the lightness moves the value channel in the Regular
+ * mode and lifts the colour toward white or black in the Perceptive one.
+ */
+void paint_layer_hsl_perspective_apply(float rgb[3],
+                                       const float params[PAINT_LAYER_HSL_PERSPECTIVE_PARAM_NUM]);
 
 /**
  * One uniform in [0, 1) of a texel hash family: \a salt separates the passes and the channels, the

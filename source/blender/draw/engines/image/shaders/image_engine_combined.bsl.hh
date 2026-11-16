@@ -315,6 +315,7 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_SMOOTHSTEP 37
 #define COMBINED_FILTER_CONTRAST_LUMINOSITY 38
 #define COMBINED_FILTER_HEIGHT_ADJUST 39
+#define COMBINED_FILTER_HSL_PERSPECTIVE 41
 
 float levels_channel(float value, float4 p0, float4 p1)
 {
@@ -608,7 +609,29 @@ float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, float4 p2
       result = (flipped + float3(p0.y)) * p0.z;
       break;
     }
-    case COMBINED_FILTER_COLOR_BALANCE: {
+    case COMBINED_FILTER_HSL_PERSPECTIVE: {
+      /* The CPU's `paint_layer_hsl_perspective_apply`: the hue and the saturation shift the way the
+       * hsv stage does (the hue's turns, the saturation's factor of one plus the double), and the
+       * lightness scales the value channel in the Regular mode or lifts toward white or black in
+       * the Perceptive one. The params ride in the schema order: `p0.x` is the mode, `p0.y` the hue
+       * in turns, `p0.z` the raw saturation slider, `p0.w` the raw lightness slider. */
+      float lightness = p0.w * 2.0f;
+      bool perceptive = p0.x > 0.5f;
+      float3 hsv = rgb_to_hsv3(rgb);
+      float turned = hsv.x + p0.y;
+      hsv.x = turned - floor(turned);
+      hsv.y = clamp(hsv.y * (1.0f + p0.z * 2.0f), 0.0f, 1.0f);
+      if (!perceptive) {
+        hsv.z = hsv.z * (1.0f + lightness);
+      }
+      float3 shifted = max(hsv_to_rgb3(hsv), float3(0.0f));
+      if (perceptive) {
+        shifted = shifted + max(lightness, 0.0f) * (float3(1.0f) - shifted) +
+                  min(lightness, 0.0f) * shifted;
+      }
+      result = shifted;
+      break;
+    }    case COMBINED_FILTER_COLOR_BALANCE: {
       /* `pow(max(rgb * A + B, 0), E)` per channel, the folded triples the CPU composite reads:
        * `p0.xyz` is A, `p1.xyz` is B and `p2.xyz` is E (each in the `.xyz` of its own float4, not
        * laid end to end). Per component: the vectorized pow is not an overload every backend has.

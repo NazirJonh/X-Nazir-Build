@@ -1338,6 +1338,77 @@ static void paint_layer_effect_height_to_normal_apply(ImBuf &buffer,
   });
 }
 /**
+ * The Pixelate over \a buffer in place: the map cut into a grid of \a Pixels Amount blocks per
+ * side, every block taking one colour -- the whole block read from a private clone, so the average
+ * is the one the block had, not the one its neighbour left. The colour is weighted by the alpha, so
+ * the black a transparent texel keeps at an island's edge never leaks into an opaque one; a block
+ * with no coverage keeps the plain average. Alpha is untouched (a mask grey has alpha one, so it
+ * averages plainly). A block is at least one texel, and the last one of a side may be shorter.
+ */
+static void paint_layer_effect_pixelate_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
+{
+  const int amount = paint_layer_kind_param_int_get(effect, PAINT_LAYER_PIXELATE_AMOUNT);
+  const int pixels = std::max(amount, 1);
+  const int width = buffer.x;
+  const int height = buffer.y;
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+  const int block_w = std::max(width / pixels, 1);
+  const int block_h = std::max(height / pixels, 1);
+  if (block_w <= 1 && block_h <= 1) {
+    return;
+  }
+
+  std::shared_ptr<ImBuf> source = paint_layer_anchor_slice_buffer_clone(buffer);
+  if (source == nullptr) {
+    return;
+  }
+  const float *src = source->float_buffer.data;
+  float *dst_pixels = buffer.float_data_for_write();
+  /* Each block is summed once and its colour written to all of its texels: summing the block again
+   * for every texel would cost the block's area per texel, hours on a 4K map with big blocks. The
+   * blocks are independent (they read the clone and write their own texels), so one block is one
+   * unit of work. */
+  const int blocks_x = (width + block_w - 1) / block_w;
+  const int blocks_y = (height + block_h - 1) / block_h;
+  threading::parallel_for(IndexRange(int64_t(blocks_x) * blocks_y), 4, [&](const IndexRange range) {
+    for (const int64_t block : range) {
+      const int bx = int(block % blocks_x) * block_w;
+      const int by = int(block / blocks_x) * block_h;
+      const int bx_end = std::min(bx + block_w, width);
+      const int by_end = std::min(by + block_h, height);
+      float weighted[3] = {0.0f, 0.0f, 0.0f};
+      float plain[3] = {0.0f, 0.0f, 0.0f};
+      float alpha_sum = 0.0f;
+      for (const int sy : IndexRange(by, by_end - by)) {
+        const float *row = src + int64_t(sy) * width * 4;
+        for (const int sx : IndexRange(bx, bx_end - bx)) {
+          const float *p = row + int64_t(sx) * 4;
+          for (const int c : IndexRange(3)) {
+            weighted[c] += p[c] * p[3];
+            plain[c] += p[c];
+          }
+          alpha_sum += p[3];
+        }
+      }
+      const float count = float((bx_end - bx) * (by_end - by));
+      float color[3];
+      for (const int c : IndexRange(3)) {
+        color[c] = (alpha_sum > 1e-6f) ? weighted[c] / alpha_sum : plain[c] / count;
+      }
+      for (const int sy : IndexRange(by, by_end - by)) {
+        float *dst = dst_pixels + (int64_t(sy) * width + bx) * 4;
+        for (const int sx : IndexRange(bx_end - bx)) {
+          dst[int64_t(sx) * 4 + 0] = color[0];
+          dst[int64_t(sx) * 4 + 1] = color[1];
+          dst[int64_t(sx) * 4 + 2] = color[2];
+        }
+      }
+    }
+  });
+}
+/**
  * The Bevel kernel over \a buffer in place: the distance of each texel from the content's border,
  * normalized by the distance parameter and clamped to [0, 1], written to all three colour channels,
  * then softened by a box blur of the smooth radius. The source parameter says what a border is: the
@@ -1566,6 +1637,9 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer,
       break;
     case MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL:
       paint_layer_effect_height_to_normal_apply(buffer, effect);
+      break;
+    case MA_PAINT_LAYER_FILTER_PIXELATE:
+      paint_layer_effect_pixelate_apply(buffer, effect);
       break;
     case MA_PAINT_LAYER_FILTER_BEVEL:
       paint_layer_effect_bevel_apply(buffer, effect, for_mask);

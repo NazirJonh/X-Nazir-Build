@@ -982,6 +982,7 @@ TEST_F(PaintLayersFilterKindsTest, the_second_batch_pointwise_kinds_carry_their_
       {MA_PAINT_LAYER_FILTER_SMOOTHSTEP, "SMOOTHSTEP", 2},
       {MA_PAINT_LAYER_FILTER_CONTRAST_LUMINOSITY, "CONTRAST_LUMINOSITY", 2},
       {MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST, "HEIGHT_ADJUST", 3},
+      {MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE, "HSL_PERSPECTIVE", 4},
   };
   for (const auto &expected : pointwise) {
     Material *ma = BKE_material_add(bmain, "RnaSecondBatchPointwiseMat");
@@ -995,6 +996,49 @@ TEST_F(PaintLayersFilterKindsTest, the_second_batch_pointwise_kinds_carry_their_
     EXPECT_FALSE(paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_NEEDS_BAKE))
         << expected.identifier;
     EXPECT_FALSE(paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_NO_GPU_BRANCH))
+        << expected.identifier;
+    EXPECT_EQ(paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, expected.filter)->params_num,
+              expected.params_num)
+        << expected.identifier;
+
+    PointerRNA effect_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, effect);
+    PropertyRNA *filter_prop = RNA_struct_find_property(&effect_ptr, "filter_type");
+    ASSERT_NE(filter_prop, nullptr);
+    const char *identifier = nullptr;
+    ASSERT_TRUE(RNA_property_enum_identifier(nullptr,
+                                             &effect_ptr,
+                                             filter_prop,
+                                             expected.filter,
+                                             &identifier));
+    EXPECT_STREQ(identifier, expected.identifier);
+  }
+}
+
+TEST_F(PaintLayersFilterKindsTest, the_second_batch_cpu_computed_kinds_carry_their_flags)
+{
+  /* The three CPU-computed kinds of the second batch: the Bevel's own flags, with the FXAA the
+   * one GPU pass among them. */
+  const struct {
+    eMaterialPaintLayerFilter filter;
+    const char *identifier;
+    int params_num;
+    bool gpu_computed;
+  } computed[] = {
+      {MA_PAINT_LAYER_FILTER_PIXELATE, "PIXELATE", 1, false},
+  };
+  for (const auto &expected : computed) {
+    Material *ma = BKE_material_add(bmain, "RnaSecondBatchComputedMat");
+    MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+    ASSERT_NE(row, nullptr);
+    MaterialPaintLayer *effect = BKE_paint_layers_filter_add(*ma, row, expected.filter);
+    ASSERT_NE(effect, nullptr) << expected.identifier;
+
+    EXPECT_TRUE(paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_ACTS_ON_BELOW))
+        << expected.identifier;
+    EXPECT_TRUE(paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_NEEDS_BAKE))
+        << expected.identifier;
+    EXPECT_EQ(paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_GPU_COMPUTED),
+              expected.gpu_computed)
         << expected.identifier;
     EXPECT_EQ(paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, expected.filter)->params_num,
               expected.params_num)

@@ -1184,6 +1184,18 @@ enum eMaterialPaintLayerFilter : int16_t {
    * offset carries, the offset applied before the multiply, per the filter's own order.
    */
   MA_PAINT_LAYER_FILTER_HEIGHT_ADJUST = 39,
+  /**
+   * Quantize the content below into blocks of one colour (a Pixelate): the map cut into a grid of
+   * the pixel amount's size, every block taking the average of what it covers. A neighborhood
+   * filter like the Blur, though its kernel reads each block once.
+   */
+  MA_PAINT_LAYER_FILTER_PIXELATE = 40,
+  /**
+   * Adjust the hue, saturation and lightness below in the mode the filter names (an HSL
+   * Perspective): the Regular mode shifts the internal value channel, the Perceptive one lifts
+   * the colour toward white or black so what it looks like moves, not what it is stored as.
+   */
+  MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE = 41,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

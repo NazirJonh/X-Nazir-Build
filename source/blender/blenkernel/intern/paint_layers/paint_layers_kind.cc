@@ -462,6 +462,13 @@ static const PaintLayerKindParam height_to_normal_params[] = {
 };
 static_assert(std::size(height_to_normal_params) == PAINT_LAYER_HEIGHT_TO_NORMAL_PARAM_NUM);
 
+static const PaintLayerKindEnumItem hsl_perspective_mode_items[] = {
+    {PAINT_LAYER_HSL_PERSPECTIVE_REGULAR, "REGULAR", "Regular"},
+    {PAINT_LAYER_HSL_PERSPECTIVE_PERCEPTIVE, "PERCEPTIVE", "Perceptive"},
+};
+static_assert(int(std::size(hsl_perspective_mode_items)) - 1 ==
+              PAINT_LAYER_HSL_PERSPECTIVE_PERCEPTIVE);
+
 static const PaintLayerKindParam smoothstep_params[] = {
     /* The low edge of the extracted range: what falls short of it reads zero. */
     {"minimum", "Minimum", 0.0f, 0.0f, 1.0f},
@@ -489,6 +496,33 @@ static const PaintLayerKindParam height_adjust_params[] = {
     {"multiply", "Multiply", 1.0f, 0.0f, 4.0f},
 };
 static_assert(std::size(height_adjust_params) == PAINT_LAYER_HEIGHT_ADJUST_PARAM_NUM);
+
+static const PaintLayerKindParam pixelate_params[] = {
+    /* The pixel count the map cuts into per side: more pixels, smaller blocks, finer detail. */
+    {"amount", "Pixels Amount", 64.0f, 1.0f, 256.0f, PaintLayerKindParamType::Int},
+};
+static_assert(std::size(pixelate_params) == PAINT_LAYER_PIXELATE_PARAM_NUM);
+
+static const PaintLayerKindParam hsl_perspective_params[] = {
+    {"mode",
+     "Mode",
+     float(PAINT_LAYER_HSL_PERSPECTIVE_REGULAR),
+     0.0f,
+     float(PAINT_LAYER_HSL_PERSPECTIVE_PERCEPTIVE),
+     PaintLayerKindParamType::Enum,
+     hsl_perspective_mode_items,
+     int(std::size(hsl_perspective_mode_items))},
+    /* Bipolar around zero: the full sweep shifts the hue half a turn each way, the same ±180
+     * degrees the slider reads. */
+    {"hue", "Hue", 0.0f, -0.5f, 0.5f},
+    /* Bipolar around zero: the factor the saturation carries is one plus the double, so the full
+     * sweep drains it or doubles it. */
+    {"saturation", "Saturation", 0.0f, -0.5f, 0.5f},
+    /* Bipolar around zero: the Regular mode scales the value channel by the same factor, the
+     * Perceptive one lifts toward white or black. */
+    {"lightness", "Lightness", 0.0f, -0.5f, 0.5f},
+};
+static_assert(std::size(hsl_perspective_params) == PAINT_LAYER_HSL_PERSPECTIVE_PARAM_NUM);
 
 static const PaintLayerKindEnumItem glow_mode_items[] = {
     {PAINT_LAYER_GLOW_SOFT, "SOFT", "Soft"},
@@ -738,6 +772,30 @@ void paint_layer_hsl_apply(float rgb[3], const float params[PAINT_LAYER_HSL_PARA
       rgb[i] = std::max(rgb[i] + (rgb[i] - gray) * boost, 0.0f);
     }
   }
+}
+
+void paint_layer_hsl_perspective_apply(float rgb[3],
+                                       const float params[PAINT_LAYER_HSL_PERSPECTIVE_PARAM_NUM])
+{
+  const float hue = params[PAINT_LAYER_HSL_PERSPECTIVE_HUE];
+  /* The bipolar sliders read as factors: zero is no change, the full sweep doubles or drains. */
+  const float saturation = 1.0f + params[PAINT_LAYER_HSL_PERSPECTIVE_SATURATION] * 2.0f;
+  const float lightness = params[PAINT_LAYER_HSL_PERSPECTIVE_LIGHTNESS] * 2.0f;
+  if (int(params[PAINT_LAYER_HSL_PERSPECTIVE_MODE] + 0.5f) ==
+      PAINT_LAYER_HSL_PERSPECTIVE_PERCEPTIVE)
+  {
+    /* The Perceptive shift: the hue and the saturation move the same way the Regular's do, but the
+     * lightness lifts the colour toward white or scales it toward black -- what the colour looks
+     * like moves, where the Regular's value multiply moves what the max channel is stored as. The
+     * lift eases by the headroom the channel has, so a lit channel lifts least. */
+    paint_layer_hsv_stage_apply(rgb, hue, saturation, 1.0f);
+    for (int i = 0; i < 3; i++) {
+      rgb[i] += std::max(lightness, 0.0f) * (1.0f - rgb[i]) +
+                std::min(lightness, 0.0f) * rgb[i];
+    }
+    return;
+  }
+  paint_layer_hsv_stage_apply(rgb, hue, saturation, 1.0f + lightness);
 }
 
 float paint_layer_texel_hash_uniform(const int x,
@@ -1180,6 +1238,26 @@ static const PaintLayerKindInfo kinds[] = {
      filter_roles,
      height_adjust_params,
      int(std::size(height_adjust_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    /* The map cut into blocks of one colour: the kernel reads each block once, so the live graph
+     * cannot express it and the row is baked for it. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_PIXELATE,
+     "Pixelate",
+     PaintLayerKindCategory::Operator,
+     effect_or_mask_roles,
+     pixelate_params,
+     int(std::size(pixelate_params)),
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+    /* The hue and saturation shift the way the Hue/Saturation node does; the mode says what the
+     * lightness moves, the Regular's value channel or the Perceptive lift toward white. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE,
+     "HSL Perspective",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     hsl_perspective_params,
+     int(std::size(hsl_perspective_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same
      * open-above-one policy as Exposure and High Pass, unlike Noise and Channel Mixer. */

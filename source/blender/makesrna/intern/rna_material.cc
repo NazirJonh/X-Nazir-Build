@@ -6074,6 +6074,18 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "HSL Perspective",
      "Adjust the hue, saturation and lightness of what is below: the Regular mode shifts the "
      "value channel, the Perceptive one lifts the colour toward white or black"},
+    {MA_PAINT_LAYER_FILTER_FXAA,
+     "FXAA",
+     0,
+     "FXAA",
+     "Smooth the jagged edges of what is below with a single-pass FXAA: the luminance-driven "
+     "edge blend walking the jag along its own direction"},
+    {MA_PAINT_LAYER_FILTER_BLUR_SLOPE,
+     "BLUR_SLOPE",
+     0,
+     "Blur Slope",
+     "Smear what is below along the slope of a source: the samples walk the gradient of the "
+     "noise, the blending mode saying what the walk accumulates"},
     {MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
      "CHANNEL_MIXER",
      0,

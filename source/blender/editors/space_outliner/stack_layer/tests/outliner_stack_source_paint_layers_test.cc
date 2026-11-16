@@ -230,7 +230,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
                              "EFFECT_GLOW",
                              "EFFECT_BEVEL",
                              "EFFECT_COLOR_MATCH",
-                             "EFFECT_PIXELATE"})
+                             "EFFECT_PIXELATE",
+                             "EFFECT_FXAA",
+                             "EFFECT_BLUR_SLOPE"})
   {
     EXPECT_TRUE(kinds[at(effect)].is_effect) << effect;
   }
@@ -405,7 +407,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
                                  "EFFECT_MASK_OUTLINE",
                                  "EFFECT_FILL_AREA",
                                  "EFFECT_HEIGHT_TO_NORMAL",
-                                 "EFFECT_PIXELATE"})
+                                 "EFFECT_PIXELATE",
+                                 "EFFECT_BLUR_SLOPE"})
   {
     EXPECT_TRUE(is_filter2(content, identifier)) << identifier;
     EXPECT_FALSE(is_new(content, identifier)) << identifier;

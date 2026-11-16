@@ -442,6 +442,9 @@ enum class ePaintLayerEffectPass : uint8_t {
   /** The line average at an angle of a Blur Directional: taps clamped to the canvas edge, the
    * mix read off the effect's parameters. */
   BlurDirectional,
+  /** The single-pass luminance-driven edge blend of an FXAA: the nine lumas name the edge, the
+   * gradient names the direction, and the pair of samples along it blend. */
+  Fxaa,
 };
 
 /** Which buffer a pass's `input_tx` reads. The gather binds the texture the role names. */

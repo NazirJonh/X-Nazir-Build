@@ -417,6 +417,11 @@ def _kind_param_is_hidden(by_name, param):
             return by_name["world_units"].bool_value
         if param.name in {"surface_size", "height_depth"}:
             return not by_name["world_units"].bool_value
+    if "source_mode" in by_name and "source_tilling" in by_name:
+        if param.name == "source_blur":
+            return by_name["source_mode"].enum_value != 'PREVIOUS_INPUT'
+        if param.name in {"seed", "source_tilling"}:
+            return by_name["source_mode"].enum_value != 'DEFAULT_NOISE'
     return False
 
 

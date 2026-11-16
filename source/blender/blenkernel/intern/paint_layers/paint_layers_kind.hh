@@ -986,6 +986,42 @@ enum PaintLayerHslPerspectiveParam : int {
   PAINT_LAYER_HSL_PERSPECTIVE_PARAM_NUM = 4,
 };
 
+/** Where the Blur Slope reads its driver from, the value of its source-mode parameter. */
+enum PaintLayerSlopeSource : int {
+  /** The filter's own seeded noise, tiled by the source tilling. */
+  PAINT_LAYER_SLOPE_SOURCE_NOISE = 0,
+  /** The content the filter reads, the same map the kernel is laid over. */
+  PAINT_LAYER_SLOPE_SOURCE_PREVIOUS_INPUT = 1,
+};
+
+/** What the Blur Slope's walk accumulates, the value of its #PAINT_LAYER_BLUR_SLOPE_BLENDING
+ * parameter. */
+enum PaintLayerBlurSlopeBlending : int {
+  /** The samples average: the anisotropic blur the walk is. */
+  PAINT_LAYER_BLUR_SLOPE_BLENDING_BLUR = 0,
+  /** The samples take the minimum: the walk eats the edges away. */
+  PAINT_LAYER_BLUR_SLOPE_BLENDING_MIN = 1,
+  /** The samples take the maximum: the walk smears the white out. */
+  PAINT_LAYER_BLUR_SLOPE_BLENDING_MAX = 2,
+};
+
+/** The positions of the Blur Slope filter's parameters in its schema. */
+enum PaintLayerBlurSlopeParam : int {
+  PAINT_LAYER_BLUR_SLOPE_SEED = 0,
+  /** Texels the walk spans at most, along the slope. */
+  PAINT_LAYER_BLUR_SLOPE_INTENSITY = 1,
+  /** The samples the walk takes: the quality, at the cost of the speed. */
+  PAINT_LAYER_BLUR_SLOPE_QUALITY = 2,
+  PAINT_LAYER_BLUR_SLOPE_BLENDING = 3,
+  PAINT_LAYER_BLUR_SLOPE_SOURCE_MODE = 4,
+  PAINT_LAYER_BLUR_SLOPE_SOURCE_BLUR = 5,
+  /** The midpoint the source shifts by, toward black or white. */
+  PAINT_LAYER_BLUR_SLOPE_SOURCE_POSITION = 6,
+  PAINT_LAYER_BLUR_SLOPE_SOURCE_CONTRAST = 7,
+  PAINT_LAYER_BLUR_SLOPE_SOURCE_TILLING = 8,
+  PAINT_LAYER_BLUR_SLOPE_PARAM_NUM = 9,
+};
+
 /** The positions of the Sharpen filter's parameters in its schema. */
 enum PaintLayerSharpenParam : int {
   PAINT_LAYER_SHARPEN_RADIUS = 0,

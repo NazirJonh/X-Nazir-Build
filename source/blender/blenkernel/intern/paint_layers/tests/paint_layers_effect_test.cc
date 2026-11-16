@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <utility>
 
@@ -1071,6 +1072,510 @@ TEST_F(PaintLayersEffectTest, a_pixelate_of_one_texel_blocks_is_the_identity)
   }
   IMB_freeImBuf(input);
 }
+
+/** An RGBA float buffer of \a width x \a height, every texel filled by \a fill(x, y, texel). */
+template<typename FillFn> static ImBuf *effect_test_buffer(const int width, const int height, FillFn fill)
+{
+  ImBuf *buffer = IMB_allocImBuf(width, height, ImBufFlags::FloatData);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  float *data = buffer->float_data_for_write();
+  for (const int y : IndexRange(height)) {
+    for (const int x : IndexRange(width)) {
+      fill(x, y, data + (int64_t(y) * width + x) * 4);
+    }
+  }
+  return buffer;
+}
+
+TEST_F(PaintLayersEffectTest, a_pixelate_on_a_non_square_map_cuts_each_axis_by_its_own_block)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_PIXELATE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect, PAINT_LAYER_PIXELATE_AMOUNT, 4));
+
+  /* 16 x 8 with four blocks a side: block_w = 16 / 4 = 4 and block_h = 8 / 4 = 2. Red is
+   * `x + 100 * y`, so a block at (bx, by) averages to `(bx + 1.5) + 100 * (by + 0.5)`: the mean of
+   * four consecutive columns is the first plus 1.5, the mean of two rows the first plus 0.5. */
+  ImBuf *input = effect_test_buffer(16, 8, [](const int x, const int y, float *p) {
+    p[0] = float(x) + 100.0f * float(y);
+    p[1] = 0.0f;
+    p[2] = 0.0f;
+    p[3] = 1.0f;
+  });
+  ASSERT_NE(input, nullptr);
+  paint_layer_effect_kernel_apply(*input, *effect);
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(16)) {
+      const float expected = float(x / 4 * 4) + 1.5f + 100.0f * (float(y / 2 * 2) + 0.5f);
+      EXPECT_NEAR(input->float_data()[(int64_t(y) * 16 + x) * 4], expected, 1e-3f)
+          << "texel " << x << ", " << y;
+    }
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_pixelate_last_block_may_be_shorter)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_PIXELATE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect, PAINT_LAYER_PIXELATE_AMOUNT, 3));
+
+  /* 10 texels with three blocks a side: block = 10 / 3 = 3, so the blocks are ceil(10 / 3) = 4
+   * wide (3, 3, 3 and a last one of a single texel). The block means of 0..9 are 1, 4, 7 and 9;
+   * red is `x + 100 * y`, so a texel reads `mean(x block) + 100 * mean(y block)`. */
+  ImBuf *input = effect_test_buffer(10, 10, [](const int x, const int y, float *p) {
+    p[0] = float(x) + 100.0f * float(y);
+    p[1] = 0.0f;
+    p[2] = 0.0f;
+    p[3] = 1.0f;
+  });
+  ASSERT_NE(input, nullptr);
+  paint_layer_effect_kernel_apply(*input, *effect);
+  const float means[4] = {1.0f, 4.0f, 7.0f, 9.0f};
+  for (const int y : IndexRange(10)) {
+    for (const int x : IndexRange(10)) {
+      const float expected = means[x / 3] + 100.0f * means[y / 3];
+      EXPECT_NEAR(input->float_data()[(int64_t(y) * 10 + x) * 4], expected, 1e-3f)
+          << "texel " << x << ", " << y;
+    }
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_pixelate_with_big_blocks_finishes_quickly)
+{
+  /* The guard for the per-texel block sum that hung a 4K map: the cost is the map, not the map
+   * times the block. Red is 0.25 left of the middle column and 0.75 right of it, plus 0.5 on the
+   * odd rows (all multiples of 0.25, so the float sums are exact). One block: the map's mean is
+   * 0.5 + 0.25 = 0.75. Two blocks a side (512 texels): 0.25 + 0.25 = 0.5 left, 0.75 + 0.25 = 1
+   * right. */
+  const auto make_input = []() {
+    return effect_test_buffer(1024, 1024, [](const int x, const int y, float *p) {
+      p[0] = (x < 512 ? 0.25f : 0.75f) + ((y % 2) ? 0.5f : 0.0f);
+      p[1] = 0.0f;
+      p[2] = 0.0f;
+      p[3] = 1.0f;
+    });
+  };
+  const auto elapsed_seconds = [](const std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  };
+
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_PIXELATE);
+
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect, PAINT_LAYER_PIXELATE_AMOUNT, 1));
+  ImBuf *one_block = make_input();
+  ASSERT_NE(one_block, nullptr);
+  std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+  paint_layer_effect_kernel_apply(*one_block, *effect);
+  EXPECT_LT(elapsed_seconds(start), 5.0) << "one block over a 1024 map must not cost the area per texel";
+  for (const int64_t i : {int64_t(0), int64_t(512) * 1024 + 700, int64_t(1024) * 1024 - 1}) {
+    EXPECT_NEAR(one_block->float_data()[i * 4], 0.75f, 1e-4f) << i;
+  }
+  IMB_freeImBuf(one_block);
+
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect, PAINT_LAYER_PIXELATE_AMOUNT, 2));
+  ImBuf *two_blocks = make_input();
+  ASSERT_NE(two_blocks, nullptr);
+  start = std::chrono::steady_clock::now();
+  paint_layer_effect_kernel_apply(*two_blocks, *effect);
+  EXPECT_LT(elapsed_seconds(start), 5.0) << "two blocks a side must not cost the area per texel";
+  EXPECT_NEAR(two_blocks->float_data()[(int64_t(100) * 1024 + 100) * 4], 0.5f, 1e-4f);
+  EXPECT_NEAR(two_blocks->float_data()[(int64_t(900) * 1024 + 900) * 4], 1.0f, 1e-4f);
+  IMB_freeImBuf(two_blocks);
+}
+
+TEST_F(PaintLayersEffectTest, an_fxaa_keeps_a_straight_edge)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+
+  /* The vertical edge is one the blend walks along: the two texels the direction takes read the
+   * same column, so the jagless edge is its own result. */
+  add_effect(*row, MA_PAINT_LAYER_FILTER_FXAA);
+  Vector<float> pixels;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  ASSERT_EQ(pixels.size(), before.size());
+  for (int64_t i = 0; i < pixels.size(); i++) {
+    EXPECT_NEAR(pixels[i], before[i], 2e-3f) << "an FXAA of a straight edge is the edge, texel "
+                                             << i;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_flat_fxaa_input_is_unchanged)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_FXAA);
+
+  /* A flat grey has a luma range of zero, under the edge threshold: every ring reads as it is. */
+  ImBuf *input = effect_test_buffer(8, 8, [](const int /*x*/, const int /*y*/, float *p) {
+    p[0] = 0.5f;
+    p[1] = 0.5f;
+    p[2] = 0.5f;
+    p[3] = 0.7f;
+  });
+  ASSERT_NE(input, nullptr);
+  paint_layer_effect_kernel_apply(*input, *effect);
+  for (const int i : IndexRange(64)) {
+    const float *p = input->float_data() + int64_t(i) * 4;
+    EXPECT_FLOAT_EQ(p[0], 0.5f) << i;
+    EXPECT_FLOAT_EQ(p[1], 0.5f) << i;
+    EXPECT_FLOAT_EQ(p[2], 0.5f) << i;
+    EXPECT_FLOAT_EQ(p[3], 0.7f) << i;
+  }
+  IMB_freeImBuf(input);
+}
+
+/** A one-texel stair: the rows above four step at column 3, the rows from four on at column 5. */
+static float fxaa_stair_value(const int x, const int y, const float low, const float high)
+{
+  return x >= (y < 4 ? 3 : 5) ? high : low;
+}
+
+TEST_F(PaintLayersEffectTest, an_fxaa_smooths_a_stair_step_edge)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_FXAA);
+
+  ImBuf *input = effect_test_buffer(8, 8, [](const int x, const int y, float *p) {
+    p[0] = p[1] = p[2] = fxaa_stair_value(x, y, 0.0f, 1.0f);
+    p[3] = 1.0f;
+  });
+  ASSERT_NE(input, nullptr);
+  paint_layer_effect_kernel_apply(*input, *effect);
+
+  /* The corner texel (3, 3) is white with the ring nw 0, n 1, ne 1, w 0, e 1, sw 0, s 0, se 0.
+   * The gradient direction is (-2, -2), a step of (-1, -1): the two ring texels it walks to,
+   * (2, 2) and (4, 4), are black, and the blend is (1 * 2 + 0 + 0) / (2 + 1 + 1) = 0.5. The
+   * mirror corner (4, 4) is black with a white (3, 3) and (5, 5): (0 * 2 + 1 + 1) / 4 = 0.5. */
+  const auto value_at = [&](const int x, const int y) {
+    return input->float_data()[(int64_t(y) * 8 + x) * 4];
+  };
+  EXPECT_NEAR(value_at(3, 3), 0.5f, 1e-4f);
+  EXPECT_NEAR(value_at(4, 4), 0.5f, 1e-4f);
+
+  /* A texel whose whole 3 x 3 ring is one colour has no edge: it is left as it is. */
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      const float centre = fxaa_stair_value(x, y, 0.0f, 1.0f);
+      bool flat_ring = true;
+      for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+          const int nx = std::clamp(x + dx, 0, 7);
+          const int ny = std::clamp(y + dy, 0, 7);
+          flat_ring = flat_ring && fxaa_stair_value(nx, ny, 0.0f, 1.0f) == centre;
+        }
+      }
+      if (flat_ring) {
+        EXPECT_FLOAT_EQ(value_at(x, y), centre) << "texel " << x << ", " << y;
+      }
+      EXPECT_GE(value_at(x, y), -1e-5f);
+      EXPECT_LE(value_at(x, y), 1.0f + 1e-5f);
+    }
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, an_fxaa_leaves_alpha_untouched)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_FXAA);
+
+  /* A busy pattern, so a good many rings are edges: the alpha is only ever a weight. */
+  ImBuf *input = effect_test_buffer(8, 8, [](const int x, const int y, float *p) {
+    p[0] = float((x * 7 + y * 13) % 5) / 4.0f;
+    p[1] = float((x * 3 + y * 11) % 5) / 4.0f;
+    p[2] = float((x * 5 + y * 2) % 5) / 4.0f;
+    p[3] = 0.25f + 0.25f * float((x * 3 + y * 5) % 4);
+  });
+  ASSERT_NE(input, nullptr);
+  paint_layer_effect_kernel_apply(*input, *effect);
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      EXPECT_EQ(input->float_data()[(int64_t(y) * 8 + x) * 4 + 3],
+                0.25f + 0.25f * float((x * 3 + y * 5) % 4))
+          << "texel " << x << ", " << y;
+    }
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, an_fxaa_does_not_leak_a_transparent_texels_black_into_an_island)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_FXAA);
+
+  /* An opaque white island on alpha 0 and black. A transparent centre is skipped; an opaque one
+   * blends with its ring texels weighted by alpha, and the transparent ones weigh nothing, so
+   * every sum is a sum of whites over a sum of weights: exactly white. */
+  const auto in_island = [](const int x, const int y) {
+    return x >= 2 && x <= 5 && y >= 2 && y <= 5;
+  };
+  ImBuf *input = effect_test_buffer(8, 8, [&](const int x, const int y, float *p) {
+    const float island = in_island(x, y) ? 1.0f : 0.0f;
+    p[0] = p[1] = p[2] = p[3] = island;
+  });
+  ASSERT_NE(input, nullptr);
+  paint_layer_effect_kernel_apply(*input, *effect);
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      const float *p = input->float_data() + (int64_t(y) * 8 + x) * 4;
+      const float expected = in_island(x, y) ? 1.0f : 0.0f;
+      EXPECT_NEAR(p[0], expected, 1e-5f) << "texel " << x << ", " << y;
+      EXPECT_NEAR(p[1], expected, 1e-5f) << "texel " << x << ", " << y;
+      EXPECT_NEAR(p[2], expected, 1e-5f) << "texel " << x << ", " << y;
+      EXPECT_FLOAT_EQ(p[3], expected);
+    }
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, an_fxaa_below_the_contrast_threshold_changes_nothing)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_FXAA);
+
+  /* The stair of the test above, with a luma step of 0.05 -- under the kernel's edge threshold of
+   * 0.0618: no ring is an edge, so no texel moves. */
+  ImBuf *input = effect_test_buffer(8, 8, [](const int x, const int y, float *p) {
+    p[0] = p[1] = p[2] = fxaa_stair_value(x, y, 0.4f, 0.45f);
+    p[3] = 1.0f;
+  });
+  ASSERT_NE(input, nullptr);
+  paint_layer_effect_kernel_apply(*input, *effect);
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      const float *p = input->float_data() + (int64_t(y) * 8 + x) * 4;
+      EXPECT_FLOAT_EQ(p[0], fxaa_stair_value(x, y, 0.4f, 0.45f)) << "texel " << x << ", " << y;
+    }
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_blur_slope_of_a_solid_row_is_the_solid)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
+  Vector<float> before;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(before, width, height));
+
+  /* A solid map has no edge to smear: the walk along the slope gathers the same colour. */
+  add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR_SLOPE);
+  Vector<float> pixels;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  ASSERT_EQ(pixels.size(), before.size());
+  for (int64_t i = 0; i < pixels.size(); i++) {
+    EXPECT_NEAR(pixels[i], before[i], 2e-3f) << "a solid row is its own slope blur, texel "
+                                             << i;
+  }
+}
+
+/** The luminance profile along the columns of the Blur Slope tests: a ramp with a bright stripe. */
+static float blur_slope_profile(const int x)
+{
+  static const float profile[8] = {0.0f, 0.1f, 0.2f, 0.3f, 1.0f, 0.5f, 0.6f, 0.7f};
+  return profile[x];
+}
+
+/** The Blur Slope on its own input: the luminance of the content it is laid over drives the walk. */
+static void blur_slope_on_previous_input(MaterialPaintLayer &effect,
+                                         const int quality,
+                                         const float intensity,
+                                         const int blending)
+{
+  EXPECT_TRUE(paint_layer_kind_param_int_set(
+      effect, PAINT_LAYER_BLUR_SLOPE_SOURCE_MODE, PAINT_LAYER_SLOPE_SOURCE_PREVIOUS_INPUT));
+  EXPECT_TRUE(paint_layer_kind_param_int_set(effect, PAINT_LAYER_BLUR_SLOPE_QUALITY, quality));
+  EXPECT_TRUE(paint_layer_kind_param_set(effect, PAINT_LAYER_BLUR_SLOPE_INTENSITY, intensity));
+  EXPECT_TRUE(paint_layer_kind_param_int_set(effect, PAINT_LAYER_BLUR_SLOPE_BLENDING, blending));
+}
+
+/** An 8 x 8 grey buffer whose columns follow #blur_slope_profile, every row the same. */
+static ImBuf *blur_slope_profile_buffer()
+{
+  return effect_test_buffer(8, 8, [](const int x, const int /*y*/, float *p) {
+    p[0] = p[1] = p[2] = blur_slope_profile(x);
+    p[3] = 1.0f;
+  });
+}
+
+TEST_F(PaintLayersEffectTest, a_blur_slope_with_one_sample_or_zero_intensity_is_the_identity)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR_SLOPE);
+
+  /* One sample reads the centre, and an intensity of zero has no span to walk: both return before
+   * anything is read, however steep the ramp is. */
+  const struct {
+    int quality;
+    float intensity;
+  } cases[] = {{1, 8.0f}, {8, 0.0f}};
+  for (const auto &c : cases) {
+    blur_slope_on_previous_input(*effect, c.quality, c.intensity, PAINT_LAYER_BLUR_SLOPE_BLENDING_BLUR);
+    ImBuf *input = blur_slope_profile_buffer();
+    ASSERT_NE(input, nullptr);
+    paint_layer_effect_kernel_apply(*input, *effect);
+    for (const int y : IndexRange(8)) {
+      for (const int x : IndexRange(8)) {
+        EXPECT_FLOAT_EQ(input->float_data()[(int64_t(y) * 8 + x) * 4], blur_slope_profile(x))
+            << "quality " << c.quality << ", texel " << x << ", " << y;
+      }
+    }
+    IMB_freeImBuf(input);
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_blur_slope_in_previous_input_mode_blurs_along_the_ramp)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR_SLOPE);
+  blur_slope_on_previous_input(*effect, 3, 2.0f, PAINT_LAYER_BLUR_SLOPE_BLENDING_BLUR);
+
+  /* The columns follow {0, .1, .2, .3, 1, .5, .6, .7}, constant down the rows: the luminance
+   * gradient is (gx, 0) with gx != 0 everywhere, so the walk runs along x. Three samples over two
+   * texels are t = -1, 0, 1, the taps x - 1, x, x + 1 (clamped), whichever way gx points. The
+   * blend of the opaque taps is their mean:
+   *   x = 0: (0 + 0 + .1) / 3 = .0333   x = 4: (.3 + 1 + .5) / 3 = .6
+   *   x = 1: .1   x = 2: .2   x = 3: .5  x = 5: .7  x = 6: .6  x = 7: (.6 + .7 + .7) / 3 = .6667.
+   * The stripe at 4 spreads to both sides, and no row mixes with another. */
+  const float expected[8] = {0.1f / 3.0f, 0.1f, 0.2f, 0.5f, 0.6f, 0.7f, 0.6f, 2.0f / 3.0f};
+  ImBuf *input = blur_slope_profile_buffer();
+  ASSERT_NE(input, nullptr);
+  paint_layer_effect_kernel_apply(*input, *effect);
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      EXPECT_NEAR(input->float_data()[(int64_t(y) * 8 + x) * 4], expected[x], 1e-5f)
+          << "texel " << x << ", " << y;
+    }
+  }
+  EXPECT_GT(input->float_data()[(int64_t(2) * 8 + 3) * 4], blur_slope_profile(3) + 0.1f);
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_blur_slope_max_mode_spreads_the_bright_and_min_mode_the_dark)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR_SLOPE);
+
+  /* The same walk as the Blur test (taps x - 1, x, x + 1), the extreme of the taps instead of
+   * their mean: Max is >= the texel itself everywhere and Min <= it. Max at 3 is max(.2, .3, 1)
+   * = 1 (the stripe spreads), at 2 it is .3; Min at 3 is .2 and at 4 min(.3, 1, .5) = .3. */
+  blur_slope_on_previous_input(*effect, 3, 2.0f, PAINT_LAYER_BLUR_SLOPE_BLENDING_MAX);
+  ImBuf *maximum = blur_slope_profile_buffer();
+  ASSERT_NE(maximum, nullptr);
+  paint_layer_effect_kernel_apply(*maximum, *effect);
+  blur_slope_on_previous_input(*effect, 3, 2.0f, PAINT_LAYER_BLUR_SLOPE_BLENDING_MIN);
+  ImBuf *minimum = blur_slope_profile_buffer();
+  ASSERT_NE(minimum, nullptr);
+  paint_layer_effect_kernel_apply(*minimum, *effect);
+  for (const int x : IndexRange(8)) {
+    const float value = maximum->float_data()[(int64_t(5) * 8 + x) * 4];
+    const float lowest = minimum->float_data()[(int64_t(5) * 8 + x) * 4];
+    EXPECT_GE(value, blur_slope_profile(x) - 1e-6f) << x;
+    EXPECT_LE(lowest, blur_slope_profile(x) + 1e-6f) << x;
+  }
+  EXPECT_NEAR(maximum->float_data()[(int64_t(5) * 8 + 3) * 4], 1.0f, 1e-6f);
+  EXPECT_NEAR(maximum->float_data()[(int64_t(5) * 8 + 2) * 4], 0.3f, 1e-6f);
+  EXPECT_NEAR(minimum->float_data()[(int64_t(5) * 8 + 3) * 4], 0.2f, 1e-6f);
+  EXPECT_NEAR(minimum->float_data()[(int64_t(5) * 8 + 4) * 4], 0.3f, 1e-6f);
+  IMB_freeImBuf(maximum);
+  IMB_freeImBuf(minimum);
+
+  /* A tap from an alpha-zero texel is skipped: with the stripe texel (4) transparent, Max at 3
+   * is max(.2, .3) = .3 and at 5 it is max(.5, .6) = .6 (the taps x = 4 are dropped). */
+  blur_slope_on_previous_input(*effect, 3, 2.0f, PAINT_LAYER_BLUR_SLOPE_BLENDING_MAX);
+  ImBuf *holed = effect_test_buffer(8, 8, [](const int x, const int /*y*/, float *p) {
+    p[0] = p[1] = p[2] = blur_slope_profile(x);
+    p[3] = (x == 4) ? 0.0f : 1.0f;
+  });
+  ASSERT_NE(holed, nullptr);
+  paint_layer_effect_kernel_apply(*holed, *effect);
+  EXPECT_NEAR(holed->float_data()[(int64_t(5) * 8 + 3) * 4], 0.3f, 1e-6f);
+  EXPECT_NEAR(holed->float_data()[(int64_t(5) * 8 + 5) * 4], 0.6f, 1e-6f);
+  IMB_freeImBuf(holed);
+}
+
+TEST_F(PaintLayersEffectTest, a_blur_slope_does_not_leak_a_transparent_texels_black_into_an_island)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR_SLOPE);
+  blur_slope_on_previous_input(*effect, 5, 4.0f, PAINT_LAYER_BLUR_SLOPE_BLENDING_BLUR);
+
+  /* An opaque white island on alpha 0 and black. The taps are weighted by alpha, so the
+   * transparent ones weigh nothing: a texel's blend is a sum of whites over a sum of weights, and
+   * every texel is white or untouched black -- never a grey. An opaque texel always has its own
+   * tap (t = 0 is the centre sample of an odd quality), so it is white. */
+  const auto in_island = [](const int x, const int y) {
+    return x >= 3 && x <= 6 && y >= 3 && y <= 6;
+  };
+  ImBuf *input = effect_test_buffer(10, 10, [&](const int x, const int y, float *p) {
+    const float island = in_island(x, y) ? 1.0f : 0.0f;
+    p[0] = p[1] = p[2] = p[3] = island;
+  });
+  ASSERT_NE(input, nullptr);
+  paint_layer_effect_kernel_apply(*input, *effect);
+  for (const int y : IndexRange(10)) {
+    for (const int x : IndexRange(10)) {
+      const float *p = input->float_data() + (int64_t(y) * 10 + x) * 4;
+      if (in_island(x, y)) {
+        EXPECT_NEAR(p[0], 1.0f, 1e-5f) << "texel " << x << ", " << y;
+      }
+      else {
+        EXPECT_TRUE(std::abs(p[0]) < 1e-5f || std::abs(p[0] - 1.0f) < 1e-5f)
+            << "a grey of " << p[0] << " leaked at texel " << x << ", " << y;
+      }
+      EXPECT_FLOAT_EQ(p[3], in_island(x, y) ? 1.0f : 0.0f);
+    }
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_blur_slope_is_deterministic_and_keeps_alpha)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR_SLOPE);
+
+  /* The noise source (the default) over a busy 32 x 32 pattern with alphas from zero to one. The
+   * rows run in parallel but each texel is written from the private clone alone, so two runs over
+   * the same input are bit-identical; the alpha is only a weight, so it never changes. */
+  const auto make_input = []() {
+    return effect_test_buffer(32, 32, [](const int x, const int y, float *p) {
+      p[0] = float((x * 7 + y * 13) % 11) / 10.0f;
+      p[1] = float((x * 3 + y * 5) % 7) / 6.0f;
+      p[2] = float((x * 5 + y * 3) % 13) / 12.0f;
+      p[3] = 0.25f * float((x + 2 * y) % 5);
+    });
+  };
+  ImBuf *original = make_input();
+  ImBuf *first = make_input();
+  ImBuf *second = make_input();
+  ASSERT_NE(original, nullptr);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  paint_layer_effect_kernel_apply(*first, *effect);
+  paint_layer_effect_kernel_apply(*second, *effect);
+
+  bool changed = false;
+  for (const int64_t i : IndexRange(32 * 32 * 4)) {
+    EXPECT_EQ(first->float_data()[i], second->float_data()[i]) << "float " << i;
+    changed = changed || first->float_data()[i] != original->float_data()[i];
+    if (i % 4 == 3) {
+      EXPECT_EQ(first->float_data()[i], original->float_data()[i]) << "alpha " << i / 4;
+    }
+  }
+  EXPECT_TRUE(changed) << "the default walk over the noise smears something";
+  IMB_freeImBuf(original);
+  IMB_freeImBuf(first);
+  IMB_freeImBuf(second);
+}
+
 TEST_F(PaintLayersEffectTest, height_to_normal_reads_the_height_of_its_own_tile)
 {
   /* One tiled Height map: the base tile is flat white and tile 1002 carries a vertical step. The
@@ -1445,6 +1950,7 @@ TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_for_each_added_cpu
       {MA_PAINT_LAYER_FILTER_DROP_SHADOW, "a Drop Shadow correction is read"},
       {MA_PAINT_LAYER_FILTER_MASK_OUTLINE, "a Mask Outline correction is read"},
       {MA_PAINT_LAYER_FILTER_PIXELATE, "a Pixelate correction is read"},
+      {MA_PAINT_LAYER_FILTER_BLUR_SLOPE, "a Blur Slope correction is read"},
   };
   for (const auto &[filter, reason] : reasons) {
     MaterialPaintLayer *effect = add_effect(*row, filter);
@@ -3094,6 +3600,7 @@ TEST_F(PaintLayersEffectTest, the_halo_matches_each_kernels_total_coverage)
             6);
   EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_EDGE_DETECT, nullptr, 100, 100), 1);
   EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_EMBOSS, nullptr, 100, 100), 1);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_FXAA, nullptr, 100, 100), 1);
   /* The directional line reaches its radius along the line, whichever way the angle points. */
   EXPECT_EQ(BKE_paint_layers_effect_halo(
                 MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL, blur_directional(30.0f, 7, 1.0f).data(), 100, 100),
@@ -3208,6 +3715,12 @@ TEST_F(PaintLayersEffectTest, the_pass_plan_matches_each_kernels_shape)
   EXPECT_EQ(passes[0].reach, 1);
   EXPECT_EQ(passes[0].axis_mask, PAINT_LAYER_EFFECT_AXIS_XY);
 
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_FXAA, nullptr, 100, 100, passes);
+  ASSERT_EQ(passes.size(), 1);
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::Fxaa);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
+  EXPECT_EQ(passes[0].reach, 1);
+  EXPECT_EQ(passes[0].axis_mask, PAINT_LAYER_EFFECT_AXIS_XY);
   /* A pointwise effect is one pass that reads no neighbour and no second buffer. */
   BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_NOISE, nullptr, 100, 100, passes);
   ASSERT_EQ(passes.size(), 1);
@@ -3228,7 +3741,7 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
    * nothing. */
   Set<int> gpu_computed_filters;
   for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT);
-       filter <= int(MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE);
+       filter <= int(MA_PAINT_LAYER_FILTER_BLUR_SLOPE);
        filter++)
   {
     const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
@@ -3262,6 +3775,7 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
   EXPECT_FALSE(gpu_computed_filters.is_empty());
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BLUR)));
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_FXAA)));
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_SHARPEN)));
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_HIGH_PASS)));
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_EDGE_DETECT)));
@@ -3956,6 +4470,8 @@ TEST_F(PaintLayersEffectTest, every_mask_effect_kind_lays_one_grey)
                                                MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
                                                MA_PAINT_LAYER_FILTER_FILL_AREA,
                                                MA_PAINT_LAYER_FILTER_PIXELATE,
+                                               MA_PAINT_LAYER_FILTER_FXAA,
+                                               MA_PAINT_LAYER_FILTER_BLUR_SLOPE,
                                                MA_PAINT_LAYER_FILTER_NOISE};
   for (const eMaterialPaintLayerFilter filter : filters) {
     MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));

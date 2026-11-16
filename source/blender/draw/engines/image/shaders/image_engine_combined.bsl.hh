@@ -2316,6 +2316,7 @@ void noise_apply(float3 &rgb, int2 texel, float4 params, float3 luma_coefficient
 #define COMBINED_PASS_UNSHARP_TAIL 8
 #define COMBINED_PASS_HIGH_PASS_TAIL 9
 #define COMBINED_PASS_BLUR_DIRECTIONAL 10
+#define COMBINED_PASS_FXAA 11
 
 /**
  * The scalar `linearrgb_to_srgb` / `srgb_to_linearrgb` of `BLI_math_color`, ported verbatim (both
@@ -2417,6 +2418,58 @@ float3 emboss(const float3 t00,
 }
 
 /**
+ * The single-pass FXAA: the nine lumas name an edge, the gradient of the luminance across the
+ * ring names the direction it runs at, and the two ring texels that direction walks to blend with
+ * the centre -- the jag smoothed along its own direction, not across it. The CPU's
+ * `paint_layer_effect_fxaa_apply`, the same threshold, the same texel pair and the same alpha
+ * weights (the colour under a transparent island never bleeds into its border); the working
+ * space's luminance weights ride in `luma_coefficients`, the same ones the CPU's
+ * `IMB_colormanagement` grey reads. The caller carries the alpha through.
+ */
+float3 fxaa(sampler2D tx, const int2 texel, const int2 size, const float3 luma_coefficients)
+{
+  const float4 center = texelFetch(tx, texel, 0);
+  if (center.w <= 0.0f) {
+    return center.xyz;
+  }
+  const float luma_nw = dot(fetch_clamped(tx, texel + int2(-1, -1), size), luma_coefficients);
+  const float luma_n = dot(fetch_clamped(tx, texel + int2(0, -1), size), luma_coefficients);
+  const float luma_ne = dot(fetch_clamped(tx, texel + int2(1, -1), size), luma_coefficients);
+  const float luma_w = dot(fetch_clamped(tx, texel + int2(-1, 0), size), luma_coefficients);
+  const float luma_m = dot(center.xyz, luma_coefficients);
+  const float luma_e = dot(fetch_clamped(tx, texel + int2(1, 0), size), luma_coefficients);
+  const float luma_sw = dot(fetch_clamped(tx, texel + int2(-1, 1), size), luma_coefficients);
+  const float luma_s = dot(fetch_clamped(tx, texel + int2(0, 1), size), luma_coefficients);
+  const float luma_se = dot(fetch_clamped(tx, texel + int2(1, 1), size), luma_coefficients);
+  const float highest = max(max(max(max(luma_nw, luma_n), max(luma_ne, luma_w)),
+                                max(max(luma_m, luma_e), max(max(luma_sw, luma_s), luma_se))),
+                            luma_m);
+  const float lowest = min(min(min(min(luma_nw, luma_n), min(luma_ne, luma_w)),
+                               min(min(luma_m, luma_e), min(min(luma_sw, luma_s), luma_se))),
+                           luma_m);
+  if (highest - lowest < 0.0618f) {
+    return center.xyz;
+  }
+  const float dir_x = -((luma_nw + luma_n + luma_ne) - (luma_sw + luma_s + luma_se));
+  const float dir_y = ((luma_nw + luma_w + luma_sw) - (luma_ne + luma_e + luma_se));
+  const float len = sqrt(dir_x * dir_x + dir_y * dir_y);
+  if (len < 1e-6f) {
+    return center.xyz;
+  }
+  /* The ring texel the unit direction points at, rounded half up, as the CPU rounds it. */
+  const int2 step_at = int2(int(floor(dir_x / len + 0.5f)), int(floor(dir_y / len + 0.5f)));
+  const int2 along_at = texel + step_at;
+  const int2 against_at = texel - step_at;
+  const int2 along_clamped = int2(clamp(along_at.x, 0, size.x - 1), clamp(along_at.y, 0, size.y - 1));
+  const int2 against_clamped = int2(clamp(against_at.x, 0, size.x - 1),
+                                    clamp(against_at.y, 0, size.y - 1));
+  const float4 along = texelFetch(tx, along_clamped, 0);
+  const float4 against = texelFetch(tx, against_clamped, 0);
+  const float weight_center = 2.0f * center.w;
+  const float weight_sum = weight_center + along.w + against.w;
+  return (center.xyz * weight_center + along.xyz * along.w + against.xyz * against.w) / weight_sum;
+}
+/**
  * The line average of a Blur Directional: `\a r` texel steps each way along the direction the
  * angle names, every tap clamped to the canvas the CPU's line kernel clamps it, the average mixed
  * over the source by the intensity. The angle rides in `filter_params_0.x` (degrees,
@@ -2517,6 +2570,9 @@ void effect_comp([[resource_table]] EffectResources &srt,
                              srt.filter_params_0.x,
                              srt.filter_params_0.z,
                              srt.texture_size);
+      break;
+    case COMBINED_PASS_FXAA:
+      rgb = fxaa(srt.input_tx, texel, srt.texture_size, srt.luma_coefficients.xyz);
       break;
     case COMBINED_PASS_EXTREMUM_H:
       rgb = extremum_axis(srt.input_tx, texel, 0, srt.radius, srt.maximum != 0, srt.texture_size);

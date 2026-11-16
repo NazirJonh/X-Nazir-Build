@@ -280,6 +280,18 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
       pass.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
       break;
     }
+    case MA_PAINT_LAYER_FILTER_FXAA: {
+      /* The same 3x3 window as the Edge Detect, one texel of reach, and the shader case reads no
+       * radius: the kind alone tells the kernel what to tap (the luminance edge blend here, of
+       * which a flat ring is its own result). */
+      add(ePaintLayerEffectPass::Fxaa, 0);
+      PaintLayerEffectPass &pass = r_passes.last();
+      pass.source = ePaintLayerEffectPassSource::Input;
+      pass.aux = ePaintLayerEffectPassAux::None;
+      pass.reach = 1;
+      pass.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+      break;
+    }
     default:
       /* Not a #PAINT_LAYER_KIND_GPU_COMPUTED kind: an empty plan. The caller refuses it first. */
       break;

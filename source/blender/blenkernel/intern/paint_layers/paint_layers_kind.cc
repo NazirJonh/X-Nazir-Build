@@ -469,6 +469,20 @@ static const PaintLayerKindEnumItem hsl_perspective_mode_items[] = {
 static_assert(int(std::size(hsl_perspective_mode_items)) - 1 ==
               PAINT_LAYER_HSL_PERSPECTIVE_PERCEPTIVE);
 
+static const PaintLayerKindEnumItem slope_source_items[] = {
+    {PAINT_LAYER_SLOPE_SOURCE_NOISE, "DEFAULT_NOISE", "Default Noise"},
+    {PAINT_LAYER_SLOPE_SOURCE_PREVIOUS_INPUT, "PREVIOUS_INPUT", "Previous Input"},
+};
+static_assert(int(std::size(slope_source_items)) - 1 == PAINT_LAYER_SLOPE_SOURCE_PREVIOUS_INPUT);
+
+static const PaintLayerKindEnumItem blur_slope_blending_items[] = {
+    {PAINT_LAYER_BLUR_SLOPE_BLENDING_BLUR, "BLUR", "Blur"},
+    {PAINT_LAYER_BLUR_SLOPE_BLENDING_MIN, "MIN", "Min"},
+    {PAINT_LAYER_BLUR_SLOPE_BLENDING_MAX, "MAX", "Max"},
+};
+static_assert(int(std::size(blur_slope_blending_items)) - 1 ==
+              PAINT_LAYER_BLUR_SLOPE_BLENDING_MAX);
+
 static const PaintLayerKindParam smoothstep_params[] = {
     /* The low edge of the extracted range: what falls short of it reads zero. */
     {"minimum", "Minimum", 0.0f, 0.0f, 1.0f},
@@ -523,6 +537,39 @@ static const PaintLayerKindParam hsl_perspective_params[] = {
     {"lightness", "Lightness", 0.0f, -0.5f, 0.5f},
 };
 static_assert(std::size(hsl_perspective_params) == PAINT_LAYER_HSL_PERSPECTIVE_PARAM_NUM);
+
+static const PaintLayerKindParam blur_slope_params[] = {
+    {"seed", "Seed", 0.0f, 0.0f, 10000.0f, PaintLayerKindParamType::Int},
+    /* Texels the walk spans at most, along the slope. */
+    {"intensity", "Intensity", 15.0f, 0.0f, 16.0f},
+    /* The samples the walk takes: the quality, at the cost of the speed. */
+    {"quality", "Quality", 8.0f, 0.0f, 32.0f, PaintLayerKindParamType::Int},
+    {"blending",
+     "Blending Mode",
+     float(PAINT_LAYER_BLUR_SLOPE_BLENDING_BLUR),
+     0.0f,
+     float(PAINT_LAYER_BLUR_SLOPE_BLENDING_MAX),
+     PaintLayerKindParamType::Enum,
+     blur_slope_blending_items,
+     int(std::size(blur_slope_blending_items))},
+    {"source_mode",
+     "Source Type",
+     float(PAINT_LAYER_SLOPE_SOURCE_NOISE),
+     0.0f,
+     float(PAINT_LAYER_SLOPE_SOURCE_PREVIOUS_INPUT),
+     PaintLayerKindParamType::Enum,
+     slope_source_items,
+     int(std::size(slope_source_items))},
+    /* Whole texels the source is blurred by before it drives the slope. */
+    {"source_blur", "Blur", 0.0f, 0.0f, 32.0f, PaintLayerKindParamType::Int},
+    /* The midpoint the source shifts by, like a brightness. */
+    {"source_position", "Position", 0.0f, -1.0f, 1.0f},
+    /* The contrast the source carries: one is the source as it is. */
+    {"source_contrast", "Contrast", 1.0f, 0.0f, 2.0f},
+    /* The tiles the noise covers the map with. */
+    {"source_tilling", "Source Tilling", 1.0f, 0.25f, 16.0f},
+};
+static_assert(std::size(blur_slope_params) == PAINT_LAYER_BLUR_SLOPE_PARAM_NUM);
 
 static const PaintLayerKindEnumItem glow_mode_items[] = {
     {PAINT_LAYER_GLOW_SOFT, "SOFT", "Soft"},
@@ -1259,6 +1306,28 @@ static const PaintLayerKindInfo kinds[] = {
      hsl_perspective_params,
      int(std::size(hsl_perspective_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    /* The luminance-driven edge blend: one pass of one 3x3 kernel, so the combined preview
+     * computes it on the GPU like the Edge Detect does. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_FXAA,
+     "FXAA",
+     PaintLayerKindCategory::Operator,
+     effect_or_mask_roles,
+     nullptr,
+     0,
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED)},
+    /* The walk along the slope of a source: the samples the quality names take the direction the
+     * gradient names, the blending mode saying what they accumulate. A CPU-computed effect the
+     * effect cache computes, the row baked for the graph. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_BLUR_SLOPE,
+     "Blur Slope",
+     PaintLayerKindCategory::Operator,
+     effect_or_mask_roles,
+     blur_slope_params,
+     int(std::size(blur_slope_params)),
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
     /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same
      * open-above-one policy as Exposure and High Pass, unlike Noise and Channel Mixer. */
     {MA_PAINT_LAYER_SOURCE_FILTER,

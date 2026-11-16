@@ -66,6 +66,12 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_COLOR_RAMP:
       /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
       return {ICON_COLOR, 0};
+    case MA_PAINT_LAYER_FILTER_FXAA:
+      /* No glyph of its own yet: the smooth icon names the jag the blend walks away. */
+      return {ICON_MOD_SMOOTH, 0};
+    case MA_PAINT_LAYER_FILTER_BLUR_SLOPE:
+      /* No glyph of its own yet: the fluid icon names the smear the slope drives. */
+      return {ICON_MATFLUID, 0};
     case MA_PAINT_LAYER_FILTER_POSTERIZE:
       /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
       return {ICON_MOD_SMOOTH, 0};
@@ -396,6 +402,16 @@ static const PaintFilterAddKind paint_effect_add_kinds_table[] = {
      "Quantize the active layer's content into blocks of one colour: the map cut into a grid of "
      "the pixel amount's size, every block taking the average of what it covers",
      MA_PAINT_LAYER_FILTER_PIXELATE},
+    {"EFFECT_FXAA",
+     N_("FXAA"),
+     "Smooth the jagged edges of the active layer with a single-pass FXAA: the luminance-driven "
+     "edge blend walking the jag along its own direction",
+     MA_PAINT_LAYER_FILTER_FXAA},
+    {"EFFECT_BLUR_SLOPE",
+     N_("Blur Slope"),
+     "Smear the active layer's content along the slope of a source: the samples walk the gradient "
+     "of the noise, the blending mode saying what the walk accumulates",
+     MA_PAINT_LAYER_FILTER_BLUR_SLOPE},
 };
 
 /**

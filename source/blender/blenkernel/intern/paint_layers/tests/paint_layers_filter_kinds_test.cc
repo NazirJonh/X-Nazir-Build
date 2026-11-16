@@ -1025,6 +1025,8 @@ TEST_F(PaintLayersFilterKindsTest, the_second_batch_cpu_computed_kinds_carry_the
     bool gpu_computed;
   } computed[] = {
       {MA_PAINT_LAYER_FILTER_PIXELATE, "PIXELATE", 1, false},
+      {MA_PAINT_LAYER_FILTER_FXAA, "FXAA", 0, true},
+      {MA_PAINT_LAYER_FILTER_BLUR_SLOPE, "BLUR_SLOPE", 9, false},
   };
   for (const auto &expected : computed) {
     Material *ma = BKE_material_add(bmain, "RnaSecondBatchComputedMat");

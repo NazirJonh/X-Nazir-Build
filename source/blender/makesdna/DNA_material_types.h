@@ -1196,6 +1196,19 @@ enum eMaterialPaintLayerFilter : int16_t {
    * the colour toward white or black so what it looks like moves, not what it is stored as.
    */
   MA_PAINT_LAYER_FILTER_HSL_PERSPECTIVE = 41,
+  /**
+   * Smooth the jagged edges below with a single-pass FXAA (an FXAA anti-aliasing): the
+   * luminance-driven edge blend the algorithm is, the jag of a hard outline walked along its own
+   * direction. A neighborhood filter like the Edge Detect.
+   */
+  MA_PAINT_LAYER_FILTER_FXAA = 42,
+  /**
+   * Smear the content below along the slope of a source (a Blur Slope): the samples the quality
+   * names walk the gradient of the noise, the blending mode saying what the walk accumulates.
+   * A neighborhood filter like the Blur, driven by a slope. The Warp is left out for now: its
+   * resample waits for the input-socket mechanism the custom-noise slot needs.
+   */
+  MA_PAINT_LAYER_FILTER_BLUR_SLOPE = 43,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

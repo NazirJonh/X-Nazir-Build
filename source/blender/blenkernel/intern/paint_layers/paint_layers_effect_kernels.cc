@@ -1408,6 +1408,273 @@ static void paint_layer_effect_pixelate_apply(ImBuf &buffer, const MaterialPaint
     }
   });
 }
+
+/**
+ * The FXAA over \a buffer in place: the single-pass luminance-driven edge blend. The nine lumas
+ * name an edge, the gradient of the luminance across the ring names the direction the edge runs
+ * at, and the two ring texels that direction walks to blend with the centre -- the jag smoothed
+ * along its own direction, not across it. A ring under the contrast threshold reads as it is.
+ * The colour is weighted by each texel's alpha, so the black colour under a transparent island
+ * never bleeds into its border as a dark fringe. Alpha is untouched.
+ */
+static void paint_layer_effect_fxaa_apply(ImBuf &buffer, const MaterialPaintLayer & /*effect*/)
+{
+  std::shared_ptr<ImBuf> source = paint_layer_anchor_slice_buffer_clone(buffer);
+  if (source == nullptr) {
+    return;
+  }
+  const int width = buffer.x;
+  const int height = buffer.y;
+  const float *src = source->float_buffer.data;
+  float *pixels = buffer.float_data_for_write();
+  /* The edge threshold the console variant reads: under it the ring is no edge, whatever the
+   * direction its gradient names. */
+  constexpr float EDGE_THRESHOLD = 0.0618f;
+  const auto texel_at = [&](const int x, const int y) {
+    return src + (int64_t(std::clamp(y, 0, height - 1)) * width + std::clamp(x, 0, width - 1)) * 4;
+  };
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    for (const int y : range) {
+      for (const int x : IndexRange(width)) {
+        const float *center = texel_at(x, y);
+        if (center[3] <= 0.0f) {
+          continue;
+        }
+        const float luma_nw = IMB_colormanagement_get_luminance(texel_at(x - 1, y - 1));
+        const float luma_n = IMB_colormanagement_get_luminance(texel_at(x, y - 1));
+        const float luma_ne = IMB_colormanagement_get_luminance(texel_at(x + 1, y - 1));
+        const float luma_w = IMB_colormanagement_get_luminance(texel_at(x - 1, y));
+        const float luma_m = IMB_colormanagement_get_luminance(center);
+        const float luma_e = IMB_colormanagement_get_luminance(texel_at(x + 1, y));
+        const float luma_sw = IMB_colormanagement_get_luminance(texel_at(x - 1, y + 1));
+        const float luma_s = IMB_colormanagement_get_luminance(texel_at(x, y + 1));
+        const float luma_se = IMB_colormanagement_get_luminance(texel_at(x + 1, y + 1));
+        const float highest = std::max(
+            std::max(std::max(luma_nw, luma_n), std::max(luma_ne, luma_w)),
+            std::max(std::max(luma_m, luma_e), std::max(std::max(luma_sw, luma_s), luma_se)));
+        const float lowest = std::min(
+            std::min(std::min(luma_nw, luma_n), std::min(luma_ne, luma_w)),
+            std::min(std::min(luma_m, luma_e), std::min(std::min(luma_sw, luma_s), luma_se)));
+        if (highest - lowest < EDGE_THRESHOLD) {
+          continue;
+        }
+        /* The luminance gradient across the ring, turned a quarter to run along the edge. */
+        const float dir_x = -((luma_nw + luma_n + luma_ne) - (luma_sw + luma_s + luma_se));
+        const float dir_y = ((luma_nw + luma_w + luma_sw) - (luma_ne + luma_e + luma_se));
+        const float len = std::sqrt(dir_x * dir_x + dir_y * dir_y);
+        if (len < 1e-6f) {
+          continue;
+        }
+        /* The ring texel the unit direction points at, rounded half up, the project rule. */
+        const int step_x = int(std::floor(dir_x / len + 0.5f));
+        const int step_y = int(std::floor(dir_y / len + 0.5f));
+        const float *along = texel_at(x + step_x, y + step_y);
+        const float *against = texel_at(x - step_x, y - step_y);
+        const float weight_center = 2.0f * center[3];
+        const float weight_along = along[3];
+        const float weight_against = against[3];
+        const float weight_sum = weight_center + weight_along + weight_against;
+        float *dst = pixels + (int64_t(y) * width + x) * 4;
+        for (const int c : IndexRange(3)) {
+          dst[c] = (center[c] * weight_center + along[c] * weight_along +
+                    against[c] * weight_against) /
+                   weight_sum;
+        }
+      }
+    }
+  });
+}
+/**
+ * The smooth value noise the Blur Slope reads its driver from: the texel hash's lattice,
+ * interpolated bilinearly about the smoothstep, so what it slopes is a slope a gradient can read.
+ * The seed rides the hash, so a different seed is a different pattern of the same kind.
+ */
+static float paint_layer_effect_value_noise(const float x, const float y, const int seed)
+{
+  const int ix = int(std::floor(x));
+  const int iy = int(std::floor(y));
+  const float fx = x - float(ix);
+  const float fy = y - float(iy);
+  const float sx = fx * fx * (3.0f - 2.0f * fx);
+  const float sy = fy * fy * (3.0f - 2.0f * fy);
+  const float a = paint_layer_texel_hash_uniform(ix, iy, seed, 48739u);
+  const float b = paint_layer_texel_hash_uniform(ix + 1, iy, seed, 48739u);
+  const float c = paint_layer_texel_hash_uniform(ix, iy + 1, seed, 48739u);
+  const float d = paint_layer_texel_hash_uniform(ix + 1, iy + 1, seed, 48739u);
+  return (a * (1.0f - sx) + b * sx) * (1.0f - sy) + (c * (1.0f - sx) + d * sx) * sy;
+}
+
+/**
+ * The driver the Blur Slope reads: the source mode's noise or the input's own luminance, blurred
+ * and re-graded -- one float per texel, smooth enough that its gradient is the slope the walk
+ * follows. The position shifts the midpoint, the contrast scales it about the half; the blur rides
+ * only on the input, whose own detail is what a blur has anything to soften. There is no separate
+ * input: the "previous input" is the content the row is laid over, its luminance gradient.
+ */
+static bool paint_layer_effect_slope_source_build(const ImBuf &buffer,
+                                                  const int source_mode,
+                                                  const int seed,
+                                                  const int source_blur,
+                                                  const float source_position,
+                                                  const float source_contrast,
+                                                  const float source_tilling,
+                                                  Vector<float> &r_source)
+{
+  const int width = buffer.x;
+  const int height = buffer.y;
+  r_source.reinitialize(int64_t(width) * height);
+  if (source_mode == PAINT_LAYER_SLOPE_SOURCE_PREVIOUS_INPUT) {
+    std::shared_ptr<ImBuf> clone = paint_layer_anchor_slice_buffer_clone(buffer);
+    if (clone == nullptr) {
+      return false;
+    }
+    if (source_blur > 0) {
+      paint_layer_effect_blur_box(*clone, source_blur);
+    }
+    const float *data = clone->float_buffer.data;
+    threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+      for (const int y : range) {
+        for (const int x : IndexRange(width)) {
+          const int64_t i = int64_t(y) * width + x;
+          const float value = IMB_colormanagement_get_luminance(data + i * 4) + source_position;
+          r_source[i] = (value - 0.5f) * source_contrast + 0.5f;
+        }
+      }
+    });
+    return true;
+  }
+  /* The noise: the tiles the tilling names across the map, eight lattice cells to a tile, so the
+   * pattern the seed names has a slope worth following at any size. */
+  const float tiles = std::max(source_tilling, 0.25f);
+  threading::parallel_for(IndexRange(height), 16, [&](const IndexRange range) {
+    for (const int y : range) {
+      for (const int x : IndexRange(width)) {
+        const float nx = (float(x) / float(width) * tiles + float(seed % 7) * 0.113f) * 8.0f;
+        const float ny = (float(y) / float(height) * tiles + float(seed % 13) * 0.179f) * 8.0f;
+        const float value = paint_layer_effect_value_noise(nx, ny, seed) + source_position;
+        r_source[int64_t(y) * width + x] = (value - 0.5f) * source_contrast + 0.5f;
+      }
+    }
+  });
+  return true;
+}
+
+/**
+ * The Blur Slope over \a buffer in place: the samples the quality names walk the gradient's
+ * direction of the driver, spanning the intensity (in texels of the map), and the blending mode
+ * says what the walk accumulates -- the average, the minimum that eats the edges away, or the
+ * maximum that smears the white out. A texel whose slope is flat reads as it is. The taps read a
+ * private clone, nearest and clamped, and are weighted by their alpha so the black colour under a
+ * transparent island never darkens a border; alpha is untouched. The cost is the quality's taps
+ * per texel (at most 32), one gradient read per texel; the rows run in parallel, each texel
+ * written from the clone alone, so the result does not depend on the thread order.
+ */
+static void paint_layer_effect_blur_slope_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
+{
+  const int seed = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BLUR_SLOPE_SEED);
+  const float intensity = paint_layer_kind_param_get(effect, PAINT_LAYER_BLUR_SLOPE_INTENSITY);
+  const int quality = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BLUR_SLOPE_QUALITY);
+  const int blending = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BLUR_SLOPE_BLENDING);
+  const int source_mode = paint_layer_kind_param_int_get(effect,
+                                                         PAINT_LAYER_BLUR_SLOPE_SOURCE_MODE);
+  const int source_blur = paint_layer_kind_param_int_get(effect,
+                                                         PAINT_LAYER_BLUR_SLOPE_SOURCE_BLUR);
+  const float source_position = paint_layer_kind_param_get(
+      effect, PAINT_LAYER_BLUR_SLOPE_SOURCE_POSITION);
+  const float source_contrast = paint_layer_kind_param_get(
+      effect, PAINT_LAYER_BLUR_SLOPE_SOURCE_CONTRAST);
+  const float source_tilling = paint_layer_kind_param_get(effect,
+                                                          PAINT_LAYER_BLUR_SLOPE_SOURCE_TILLING);
+  const int samples = std::clamp(quality, 1, 32);
+  if (intensity <= 0.0f || samples <= 1) {
+    /* One sample reads the centre: the walk has no span to cover. */
+    return;
+  }
+
+  Vector<float> source;
+  if (!paint_layer_effect_slope_source_build(buffer,
+                                             source_mode,
+                                             seed,
+                                             source_blur,
+                                             source_position,
+                                             source_contrast,
+                                             source_tilling,
+                                             source))
+  {
+    return;
+  }
+  std::shared_ptr<ImBuf> clone = paint_layer_anchor_slice_buffer_clone(buffer);
+  if (clone == nullptr) {
+    return;
+  }
+  const int width = buffer.x;
+  const int height = buffer.y;
+  const float *src = clone->float_buffer.data;
+  const bool take_min = (blending == PAINT_LAYER_BLUR_SLOPE_BLENDING_MIN);
+  const bool take_max = (blending == PAINT_LAYER_BLUR_SLOPE_BLENDING_MAX);
+  float *pixels = buffer.float_data_for_write();
+  threading::parallel_for(IndexRange(height), 32, [&](const IndexRange range) {
+    for (const int y : range) {
+      const int yu = std::max(y - 1, 0);
+      const int yd = std::min(y + 1, height - 1);
+      for (const int x : IndexRange(width)) {
+        const int xl = std::max(x - 1, 0);
+        const int xr = std::min(x + 1, width - 1);
+        const float gx = (source[int64_t(y) * width + xr] - source[int64_t(y) * width + xl]) * 0.5f;
+        const float gy = (source[int64_t(yd) * width + x] - source[int64_t(yu) * width + x]) * 0.5f;
+        const float slope = std::sqrt(gx * gx + gy * gy);
+        if (slope < 1e-4f) {
+          continue;
+        }
+        /* The walk: the slope's direction, the intensity's span, the samples from one end of it
+         * to the other. */
+        const float dir_x = gx / slope;
+        const float dir_y = gy / slope;
+        float result[3] = {0.0f, 0.0f, 0.0f};
+        float weight_sum = 0.0f;
+        bool any = false;
+        for (const int k : IndexRange(samples)) {
+          const float t = (float(k) / float(samples - 1) - 0.5f) * intensity;
+          const int sx = std::clamp(int(std::floor(float(x) + dir_x * t + 0.5f)), 0, width - 1);
+          const int sy = std::clamp(int(std::floor(float(y) + dir_y * t + 0.5f)), 0, height - 1);
+          const float *texel = src + (int64_t(sy) * width + sx) * 4;
+          const float alpha = texel[3];
+          if (alpha <= 0.0f) {
+            continue;
+          }
+          if (take_min || take_max) {
+            for (const int c : IndexRange(3)) {
+              result[c] = !any ? texel[c] :
+                          take_min ? std::min(result[c], texel[c]) :
+                                     std::max(result[c], texel[c]);
+            }
+            any = true;
+          }
+          else {
+            result[0] += texel[0] * alpha;
+            result[1] += texel[1] * alpha;
+            result[2] += texel[2] * alpha;
+            weight_sum += alpha;
+          }
+        }
+        float *dst = pixels + (int64_t(y) * width + x) * 4;
+        if (take_min || take_max) {
+          if (any) {
+            dst[0] = result[0];
+            dst[1] = result[1];
+            dst[2] = result[2];
+          }
+        }
+        else if (weight_sum > 0.0f) {
+          const float inv = 1.0f / weight_sum;
+          dst[0] = result[0] * inv;
+          dst[1] = result[1] * inv;
+          dst[2] = result[2] * inv;
+        }
+      }
+    }
+  });
+}
 /**
  * The Bevel kernel over \a buffer in place: the distance of each texel from the content's border,
  * normalized by the distance parameter and clamped to [0, 1], written to all three colour channels,
@@ -1640,6 +1907,12 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer,
       break;
     case MA_PAINT_LAYER_FILTER_PIXELATE:
       paint_layer_effect_pixelate_apply(buffer, effect);
+      break;
+    case MA_PAINT_LAYER_FILTER_FXAA:
+      paint_layer_effect_fxaa_apply(buffer, effect);
+      break;
+    case MA_PAINT_LAYER_FILTER_BLUR_SLOPE:
+      paint_layer_effect_blur_slope_apply(buffer, effect);
       break;
     case MA_PAINT_LAYER_FILTER_BEVEL:
       paint_layer_effect_bevel_apply(buffer, effect, for_mask);

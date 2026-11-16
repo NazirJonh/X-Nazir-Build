@@ -785,43 +785,19 @@ static void paint_layer_effect_drop_shadow_apply(ImBuf &buffer,
 }
 
 /**
- * The Bevel kernel over \a buffer in place: the distance of each texel from the content's border,
- * normalized by the distance parameter and clamped to [0, 1], written to all three colour channels,
- * then softened by a box blur of the smooth radius. The source parameter says what a border is: the
- * content's alpha below one half, or its luminance below one half -- the same scene-linear
- * luminance the Glow and the Noise read, so an opaque row bevels by the dark side of its paint. A
- * row with no border is one everywhere. Alpha is untouched.
+ * A two-pass chamfer walk over \a dist, seeded with the zeroes the caller laid (every other texel
+ * holds a huge value): every texel walks to its nearest seed, \a side per orthogonal step and
+ * \a diagonal per diagonal one (3 and 4 approximate the Euclidean distance, hence the 1/3 the
+ * caller normalizes by; 1 and 1 is the chessboard walk). A texel's neighbour past the buffer's edge
+ * is read as the texel itself, so the edge is no border of its own. A texel no seed reaches (the
+ * buffer holds none) keeps its huge value, which reads as infinitely far.
  *
- * The distance is a two-pass chamfer transform. The round corner type walks sides at 3 and
- * diagonals at 4 (an approximation of the Euclidean distance, hence the 1/3 normalization); the
- * angular one is the chessboard walk, which keeps corners square. An interior texel reads its
- * neighbours through the row pointers alone; only the edge rows and columns pay for the clamped
- * read, which was the pass's whole cost on a 4K map.
+ * An interior texel reads its neighbours through the row pointers alone; only the edge rows and
+ * columns pay for the clamped read, which was the pass's whole cost on a 4K map.
  */
-static void paint_layer_effect_bevel_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
+static void paint_layer_effect_chamfer_walk(
+    Vector<float> &dist, const int width, const int height, const float side, const float diagonal)
 {
-  const int distance = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_DISTANCE);
-  const bool luminance = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_SOURCE) ==
-                         PAINT_LAYER_BEVEL_SOURCE_LUMINANCE;
-  const bool angular = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_CORNER) ==
-                       PAINT_LAYER_BEVEL_ANGULAR;
-  const int smooth = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_SMOOTH);
-  const float side = angular ? 1.0f : 3.0f;
-  const float diagonal = angular ? 1.0f : 4.0f;
-  const float normalize = angular ? 1.0f : 1.0f / 3.0f;
-  constexpr float UNSEEN = 1e12f;
-
-  const int width = buffer.x;
-  const int height = buffer.y;
-  const int64_t count = int64_t(width) * height;
-  const float *source = buffer.float_data();
-  Vector<float> dist(count);
-  for (const int64_t i : IndexRange(count)) {
-    const float *texel = source + i * 4;
-    const float interior = luminance ? IMB_colormanagement_get_luminance(texel) : texel[3];
-    dist[i] = (interior >= 0.5f) ? UNSEEN : 0.0f;
-  }
-  /* The buffer's edge is not a border: a neighbour past it is read as the edge texel itself. */
   const auto at = [&](const int x, const int y) {
     return dist[int64_t(std::clamp(y, 0, height - 1)) * width + std::clamp(x, 0, width - 1)];
   };
@@ -865,6 +841,168 @@ static void paint_layer_effect_bevel_apply(ImBuf &buffer, const MaterialPaintLay
       }
     }
   }
+}
+
+/**
+ * The Mask Outline over \a buffer in place: a band along the border the threshold crosses in the
+ * grey, lying outside it, inside it, or on both sides, falling from one at the border to zero a
+ * width away, bent by the curve shape from a line to the smoothstep, and softened by the blur.
+ *
+ * \a as_layer picks what the buffer holds afterwards. A content effect reads its shape from the
+ * alpha the source names (or the luminance) and leaves the band as a layer of its own
+ * (#PAINT_LAYER_KIND_RESULT_HAS_ALPHA): the colour premultiplied by the band, and the band as the
+ * alpha, so the ring shows on the empty map around the islands and the islands themselves are
+ * untouched. Without it (a mask item) the shape is the luminance of the mask's grey, the band is
+ * written as a grey into the colour and alpha is untouched. The kernel reads one ImBuf, one UDIM
+ * tile: a shape that runs off the tile's border is outlined against that border, not followed
+ * into its neighbour.
+ */
+static void paint_layer_effect_mask_outline_apply(ImBuf &buffer,
+                                                  const MaterialPaintLayer &effect,
+                                                  const bool as_layer)
+{
+  const bool alpha_source = as_layer &&
+                            paint_layer_kind_param_int_get(
+                                effect, PAINT_LAYER_MASK_OUTLINE_SOURCE) ==
+                                PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA;
+  float color[4];
+  paint_layer_kind_param_color_get(effect, PAINT_LAYER_MASK_OUTLINE_COLOR, color);
+  if (alpha_source) {
+    /* The panel hides the colour while the shape is read from the alpha, so a value left from an
+     * earlier luminance source must not tint the ring. */
+    std::fill(std::begin(color), std::end(color), 1.0f);
+  }
+  const int position = paint_layer_kind_param_int_get(effect, PAINT_LAYER_MASK_OUTLINE_POSITION);
+  const bool start_black = paint_layer_kind_param_bool_get(effect,
+                                                           PAINT_LAYER_MASK_OUTLINE_START_BLACK);
+  const float threshold = paint_layer_kind_param_get(effect, PAINT_LAYER_MASK_OUTLINE_THRESHOLD);
+  const int width_param = paint_layer_kind_param_int_get(effect, PAINT_LAYER_MASK_OUTLINE_WIDTH);
+  const int blur = paint_layer_kind_param_int_get(effect, PAINT_LAYER_MASK_OUTLINE_BLUR);
+  const float shape = paint_layer_kind_param_get(effect, PAINT_LAYER_MASK_OUTLINE_SHAPE);
+
+  const int width = buffer.x;
+  const int height = buffer.y;
+  const int64_t count = int64_t(width) * height;
+  const float *source = buffer.float_data();
+
+  /* The inside the threshold holds: what crosses it (or, from black, what falls short of it). */
+  const auto is_inside = [&](const float *texel) {
+    const float grey = alpha_source ?
+                           clamp_f(texel[3], 0.0f, 1.0f) :
+                           clamp_f(IMB_colormanagement_get_luminance(texel), 0.0f, 1.0f);
+    return start_black ? (grey <= threshold) : (grey >= threshold);
+  };
+  /* The inside is read once: the walks, the merge and the final write all ask it per texel. */
+  Vector<bool> inside(count);
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    const int64_t first = range.start() * int64_t(width);
+    for (const int64_t i : IndexRange(first, range.size() * int64_t(width))) {
+      inside[i] = is_inside(source + i * 4);
+    }
+  });
+
+  constexpr float UNSEEN = 1e12f;
+  const auto seeded = [&](const bool seed_on_inside) {
+    Vector<float> dist(count);
+    threading::parallel_for(IndexRange(count), 65536, [&](const IndexRange range) {
+      for (const int64_t i : range) {
+        dist[i] = (inside[i] == seed_on_inside) ? 0.0f : UNSEEN;
+      }
+    });
+    paint_layer_effect_chamfer_walk(dist, width, height, 3.0f, 4.0f);
+    return dist;
+  };
+
+  /* A band lies on one side of the border and is empty on the other: outside lays the ring around
+   * the shape (the shape itself stays black), inside the ring within it, double both. Each side
+   * measures from the texels of the other, so only the walks the position needs run; a buffer with
+   * no border on that side leaves the walk unseen, which reads as infinitely far (no band), not as
+   * the border itself. */
+  const auto position_kind = PaintLayerMaskOutlinePosition(position);
+  Vector<float> dist = seeded(position_kind != PAINT_LAYER_MASK_OUTLINE_INSIDE);
+  if (position_kind == PAINT_LAYER_MASK_OUTLINE_DOUBLE) {
+    /* The outward walk holds the outside texels' distance; the inward one, laid first, holds the
+     * inside ones'. The one pass merges them, and the second field is freed with the scope. */
+    const Vector<float> inward = seeded(false);
+    threading::parallel_for(IndexRange(count), 65536, [&](const IndexRange range) {
+      for (const int64_t i : range) {
+        if (inside[i]) {
+          dist[i] = inward[i];
+        }
+      }
+    });
+  }
+
+  const float reach = float(std::max(width_param, 1));
+  const float normalize = 1.0f / 3.0f;
+  paint_layer_effect_map_rgb(buffer, [&](const int x, const int y, float *texel) {
+    const int64_t i = int64_t(y) * width + x;
+    /* The side the position leaves empty is no band at all. */
+    const bool on_band_side = (position_kind == PAINT_LAYER_MASK_OUTLINE_DOUBLE) ||
+                              (inside[i] == (position_kind == PAINT_LAYER_MASK_OUTLINE_INSIDE));
+    float band = on_band_side ? clamp_f(1.0f - dist[i] * normalize / reach, 0.0f, 1.0f) : 0.0f;
+    /* The falloff's bend: the line the distance lays, walked toward the smoothstep's own curve by
+     * the shape. */
+    const float smooth = band * band * (3.0f - 2.0f * band);
+    band += (smooth - band) * clamp_f(shape, 0.0f, 1.0f);
+    texel[0] = band;
+    texel[1] = band;
+    texel[2] = band;
+  });
+  if (blur > 0) {
+    paint_layer_effect_blur_box(buffer, blur);
+  }
+  if (as_layer) {
+    /* The band is built (and blurred) as a grey first, so the layer's colour and alpha follow the
+     * softened band. */
+    paint_layer_effect_map_rgb(buffer, [&](const int /*x*/, const int /*y*/, float *texel) {
+      const float alpha = clamp_f(texel[0], 0.0f, 1.0f);
+      texel[0] = color[0] * alpha;
+      texel[1] = color[1] * alpha;
+      texel[2] = color[2] * alpha;
+      texel[3] = alpha;
+    });
+  }
+}
+
+/**
+ * The Bevel kernel over \a buffer in place: the distance of each texel from the content's border,
+ * normalized by the distance parameter and clamped to [0, 1], written to all three colour channels,
+ * then softened by a box blur of the smooth radius. The source parameter says what a border is: the
+ * content's alpha below one half, or its luminance below one half -- the same scene-linear
+ * luminance the Glow and the Noise read, so an opaque row bevels by the dark side of its paint. A
+ * row with no border is one everywhere. Alpha is untouched.
+ *
+ * The distance is a two-pass chamfer transform. The round corner type walks sides at 3 and
+ * diagonals at 4 (an approximation of the Euclidean distance, hence the 1/3 normalization); the
+ * angular one is the chessboard walk, which keeps corners square. Both are the shared
+ * #paint_layer_effect_chamfer_walk.
+ */
+static void paint_layer_effect_bevel_apply(ImBuf &buffer, const MaterialPaintLayer &effect)
+{
+  const int distance = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_DISTANCE);
+  const bool luminance = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_SOURCE) ==
+                         PAINT_LAYER_BEVEL_SOURCE_LUMINANCE;
+  const bool angular = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_CORNER) ==
+                       PAINT_LAYER_BEVEL_ANGULAR;
+  const int smooth = paint_layer_kind_param_int_get(effect, PAINT_LAYER_BEVEL_SMOOTH);
+  const float side = angular ? 1.0f : 3.0f;
+  const float diagonal = angular ? 1.0f : 4.0f;
+  const float normalize = angular ? 1.0f : 1.0f / 3.0f;
+  constexpr float UNSEEN = 1e12f;
+
+  const int width = buffer.x;
+  const int height = buffer.y;
+  const int64_t count = int64_t(width) * height;
+  const float *source = buffer.float_data();
+  Vector<float> dist(count);
+  for (const int64_t i : IndexRange(count)) {
+    const float *texel = source + i * 4;
+    const float interior = luminance ? IMB_colormanagement_get_luminance(texel) : texel[3];
+    dist[i] = (interior >= 0.5f) ? UNSEEN : 0.0f;
+  }
+  /* The buffer's edge is not a border: the walk reads a neighbour past it as the edge texel. */
+  paint_layer_effect_chamfer_walk(dist, width, height, side, diagonal);
 
   const float reach = float(std::max(distance, 1));
   paint_layer_effect_map_rgb(buffer, [&](const int x, const int y, float *texel) {
@@ -1039,6 +1177,10 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer,
       break;
     case MA_PAINT_LAYER_FILTER_DROP_SHADOW:
       paint_layer_effect_drop_shadow_apply(
+          buffer, effect, !for_mask && paint_layer_kind_result_has_alpha(effect));
+      break;
+    case MA_PAINT_LAYER_FILTER_MASK_OUTLINE:
+      paint_layer_effect_mask_outline_apply(
           buffer, effect, !for_mask && paint_layer_kind_result_has_alpha(effect));
       break;
     case MA_PAINT_LAYER_FILTER_BEVEL:

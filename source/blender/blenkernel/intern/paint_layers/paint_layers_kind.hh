@@ -826,6 +826,38 @@ enum PaintLayerDropShadowParam : int {
   PAINT_LAYER_DROP_SHADOW_PARAM_NUM = 7,
 };
 
+/** Where the Mask Outline's band sits about the border, the value of its
+ * #PAINT_LAYER_MASK_OUTLINE_POSITION parameter. */
+enum PaintLayerMaskOutlinePosition : int {
+  /** The band lies outside the border: the shape itself stays clear of it. */
+  PAINT_LAYER_MASK_OUTLINE_OUTSIDE = 0,
+  /** The band lies inside the border: what the shape covers keeps only the rim. */
+  PAINT_LAYER_MASK_OUTLINE_INSIDE = 1,
+  /** The band lies on both sides of the border, the nearer rim winning where they cross. */
+  PAINT_LAYER_MASK_OUTLINE_DOUBLE = 2,
+};
+
+/** The positions of the Mask Outline filter's parameters in its schema. */
+enum PaintLayerMaskOutlineParam : int {
+  PAINT_LAYER_MASK_OUTLINE_POSITION = 0,
+  /** On: what the threshold's dark side of the shape holds is the inside. */
+  PAINT_LAYER_MASK_OUTLINE_START_BLACK = 1,
+  /** The grey the border of the shape is read at. */
+  PAINT_LAYER_MASK_OUTLINE_THRESHOLD = 2,
+  /** Whole texels the band takes to fall from the border to zero. */
+  PAINT_LAYER_MASK_OUTLINE_WIDTH = 3,
+  /** Whole texels of the box blur laid over the finished band; zero leaves it as it is. */
+  PAINT_LAYER_MASK_OUTLINE_BLUR = 4,
+  /** How far the falloff bends from a line to the smoothstep, one being the smoothstep. */
+  PAINT_LAYER_MASK_OUTLINE_SHAPE = 5,
+  /** What a content row's shape is read from, a #PaintLayerDropShadowSource. A mask item always
+   * reads the luminance. */
+  PAINT_LAYER_MASK_OUTLINE_SOURCE = 6,
+  /** The colour of the ring a content row lays; a mask's band is a grey of itself. */
+  PAINT_LAYER_MASK_OUTLINE_COLOR = 7,
+  PAINT_LAYER_MASK_OUTLINE_PARAM_NUM = 8,
+};
+
 /** The positions of the Sharpen filter's parameters in its schema. */
 enum PaintLayerSharpenParam : int {
   PAINT_LAYER_SHARPEN_RADIUS = 0,

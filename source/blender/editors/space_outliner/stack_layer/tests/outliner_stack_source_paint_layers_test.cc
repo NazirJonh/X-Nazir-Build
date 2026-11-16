@@ -376,7 +376,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
    * alike, and none of them is also in the "Filter" one. */
   for (const char *identifier : {"FILTER_HISTOGRAM_SCAN",
                                  "FILTER_HISTOGRAM_SHIFT",
-                                 "EFFECT_DROP_SHADOW"})
+                                 "EFFECT_DROP_SHADOW",
+                                 "EFFECT_MASK_OUTLINE"})
   {
     EXPECT_TRUE(is_filter2(content, identifier)) << identifier;
     EXPECT_FALSE(is_new(content, identifier)) << identifier;

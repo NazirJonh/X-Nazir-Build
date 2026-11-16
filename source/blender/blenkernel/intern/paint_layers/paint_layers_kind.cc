@@ -323,6 +323,58 @@ static const PaintLayerKindParam drop_shadow_params[] = {
 };
 static_assert(std::size(drop_shadow_params) == PAINT_LAYER_DROP_SHADOW_PARAM_NUM);
 
+static const PaintLayerKindEnumItem mask_outline_position_items[] = {
+    {PAINT_LAYER_MASK_OUTLINE_OUTSIDE, "OUTSIDE", "Outside"},
+    {PAINT_LAYER_MASK_OUTLINE_INSIDE, "INSIDE", "Inside"},
+    {PAINT_LAYER_MASK_OUTLINE_DOUBLE, "DOUBLE", "Double"},
+};
+static_assert(int(std::size(mask_outline_position_items)) - 1 ==
+              PAINT_LAYER_MASK_OUTLINE_DOUBLE);
+
+static const PaintLayerKindParam mask_outline_params[] = {
+    {"position",
+     "Mask Position",
+     float(PAINT_LAYER_MASK_OUTLINE_OUTSIDE),
+     0.0f,
+     float(PAINT_LAYER_MASK_OUTLINE_DOUBLE),
+     PaintLayerKindParamType::Enum,
+     mask_outline_position_items,
+     int(std::size(mask_outline_position_items))},
+    /* On: the dark side of the threshold is the inside, the way an inverted mask item reads. */
+    {"start_from_black", "Start From Black", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Bool},
+    /* The grey the border of the shape is read at: what crosses it is in, what falls short is
+     * out. */
+    {"threshold", "Threshold", 0.5f, 0.0f, 1.0f},
+    /* Whole texels the band takes to fall from the border to zero. */
+    {"width", "Width", 4.0f, 1.0f, 64.0f, PaintLayerKindParamType::Int},
+    /* Whole texels of the box blur laid over the finished band. */
+    {"blur", "Blur", 0.0f, 0.0f, 32.0f, PaintLayerKindParamType::Int},
+    /* The falloff's bend from a line to the smoothstep: zero is the line, one the smoothstep's
+     * own curve. */
+    {"curve_shape", "Curve Shape", 0.5f, 0.0f, 1.0f},
+    /* The shape a content row's ring is laid around: its alpha (a stroke's coverage) or the
+     * luminance. A mask item ignores this and always reads the luminance of its grey. */
+    {"source",
+     "Source",
+     float(PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA),
+     0.0f,
+     float(PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE),
+     PaintLayerKindParamType::Enum,
+     drop_shadow_source_items,
+     int(std::size(drop_shadow_source_items))},
+    /* The colour of the ring on a content row; a mask lays a grey band instead. */
+    {"color",
+     "Color",
+     0.0f,
+     0.0f,
+     1.0f,
+     PaintLayerKindParamType::Color,
+     nullptr,
+     0,
+     {1.0f, 1.0f, 1.0f, 1.0f}},
+};
+static_assert(std::size(mask_outline_params) == PAINT_LAYER_MASK_OUTLINE_PARAM_NUM);
+
 static const PaintLayerKindEnumItem glow_mode_items[] = {
     {PAINT_LAYER_GLOW_SOFT, "SOFT", "Soft"},
     {PAINT_LAYER_GLOW_PRECISE, "PRECISE", "Precise"},
@@ -940,6 +992,21 @@ static const PaintLayerKindInfo kinds[] = {
      int(std::size(drop_shadow_params)),
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_MASK_NEEDS_LUMA | PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
+    /* A band along the border of the shape: a distance field from the border, banded by the width
+     * and softened by the blur -- the Bevel's transform, taken as the edge band rather than the
+     * ramp. A content row's result is a ring layer of its own (alpha = band, colour = Color) read
+     * from the alpha or the luminance the source names, so it shows on the empty map around the
+     * islands. A mask's grey has no alpha, so the shape is the luminance the threshold crosses and
+     * the band is a grey. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
+     "Mask Outline",
+     PaintLayerKindCategory::Operator,
+     effect_or_mask_roles,
+     mask_outline_params,
+     int(std::size(mask_outline_params)),
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
     /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same
      * open-above-one policy as Exposure and High Pass, unlike Noise and Channel Mixer. */
     {MA_PAINT_LAYER_SOURCE_FILTER,

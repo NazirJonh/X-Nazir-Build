@@ -124,6 +124,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_DROP_SHADOW:
       /* No glyph of its own yet: the sun icon names the cast the silhouette takes. */
       return {ICON_LIGHT_SUN, 0};
+    case MA_PAINT_LAYER_FILTER_MASK_OUTLINE:
+      /* No glyph of its own yet: the stroke outline icon names the band the border takes. */
+      return {ICON_MOD_THICKNESS, 0};
     case MA_PAINT_LAYER_FILTER_NORMAL_CONVERT:
       /* No glyph of its own yet: the vertex-normals icon names what the filter converts. */
       return {ICON_NORMALS_VERTEX, 0};
@@ -329,6 +332,11 @@ static const PaintFilterAddKind paint_effect_add_kinds_table[] = {
      "Cast a shadow off the active layer's shape: the silhouette spread, blurred and offset by "
      "the angle and the distance, tinted by the colour",
      MA_PAINT_LAYER_FILTER_DROP_SHADOW},
+    {"EFFECT_MASK_OUTLINE",
+     N_("Mask Outline"),
+     "Lay a band along the border of the active layer's grey: inside it, outside it, or on both "
+     "sides, the width the band takes and the shape its falloff walks",
+     MA_PAINT_LAYER_FILTER_MASK_OUTLINE},
 };
 
 /**

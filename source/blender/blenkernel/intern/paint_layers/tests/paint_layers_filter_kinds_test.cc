@@ -768,6 +768,72 @@ TEST_F(PaintLayersFilterKindsTest, drop_shadow_kind_is_a_cpu_computed_effect_wit
   }
 }
 
+TEST_F(PaintLayersFilterKindsTest, mask_outline_kind_is_a_cpu_computed_effect_with_a_schema)
+{
+  Material *ma = BKE_material_add(bmain, "RnaMaskOutlineParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *outline = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_MASK_OUTLINE);
+  ASSERT_NE(outline, nullptr);
+
+  /* A CPU-computed effect like the Bevel: the band is a distance field the live graph cannot
+   * express, so no GPU pass exists for it. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*outline, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*outline, PAINT_LAYER_KIND_NEEDS_BAKE));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*outline, PAINT_LAYER_KIND_GPU_COMPUTED));
+  /* A content row's result is a ring layer with an alpha of its own, like the Drop Shadow's. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*outline, PAINT_LAYER_KIND_RESULT_HAS_ALPHA));
+
+  /* The band defaults to the outside of the border, a width of four and no blur, the falloff
+   * halfway between the line and the smoothstep. */
+  EXPECT_EQ(paint_layer_kind_param_int_get(*outline, PAINT_LAYER_MASK_OUTLINE_POSITION),
+            PAINT_LAYER_MASK_OUTLINE_OUTSIDE);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*outline, PAINT_LAYER_MASK_OUTLINE_START_BLACK), 0.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*outline, PAINT_LAYER_MASK_OUTLINE_THRESHOLD), 0.5f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*outline, PAINT_LAYER_MASK_OUTLINE_WIDTH), 4.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*outline, PAINT_LAYER_MASK_OUTLINE_BLUR), 0.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*outline, PAINT_LAYER_MASK_OUTLINE_SHAPE), 0.5f);
+  /* The shape is read from the alpha, and the ring is white. */
+  EXPECT_EQ(paint_layer_kind_param_int_get(*outline, PAINT_LAYER_MASK_OUTLINE_SOURCE),
+            PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA);
+  float color[4];
+  paint_layer_kind_param_color_get(*outline, PAINT_LAYER_MASK_OUTLINE_COLOR, color);
+  for (const int c : IndexRange(4)) {
+    EXPECT_FLOAT_EQ(color[c], 1.0f) << c;
+  }
+
+  /* The RNA enum names the kind, and the collection lists exactly the schema's eight parameters. */
+  PointerRNA outline_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, outline);
+  PropertyRNA *filter_prop = RNA_struct_find_property(&outline_ptr, "filter_type");
+  ASSERT_NE(filter_prop, nullptr);
+  const char *identifier = nullptr;
+  ASSERT_TRUE(RNA_property_enum_identifier(nullptr,
+                                           &outline_ptr,
+                                           filter_prop,
+                                           MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
+                                           &identifier));
+  EXPECT_STREQ(identifier, "MASK_OUTLINE");
+  PropertyRNA *params = RNA_struct_find_property(&outline_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&outline_ptr, params), 8);
+  const char *names[8] = {"position",
+                          "start_from_black",
+                          "threshold",
+                          "width",
+                          "blur",
+                          "curve_shape",
+                          "source",
+                          "color"};
+  for (const int i : IndexRange(8)) {
+    PointerRNA param_ptr;
+    ASSERT_TRUE(RNA_property_collection_lookup_string(&outline_ptr, params, names[i], &param_ptr))
+        << names[i];
+    PropertyRNA *label = RNA_struct_find_property(&param_ptr, "label");
+    ASSERT_NE(label, nullptr);
+  }
+}
+
 TEST_F(PaintLayersFilterKindsTest, deband_kind_is_a_pointwise_filter_with_a_mode_and_two_integers)
 {
   Material *ma = BKE_material_add(bmain, "RnaDebandParamMat");

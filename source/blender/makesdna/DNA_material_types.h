@@ -1145,6 +1145,14 @@ enum eMaterialPaintLayerFilter : int16_t {
    * #MA_PAINT_LAYER_FILTER_BEVEL: it reads a neighbourhood and composites a sequence of passes.
    */
   MA_PAINT_LAYER_FILTER_DROP_SHADOW = 33,
+  /**
+   * Lay a band along the border of the shape below (a Mask Outline): inside it, outside it, or on
+   * both sides, the width the band takes and the shape its falloff walks. A neighborhood filter
+   * like the #MA_PAINT_LAYER_FILTER_BEVEL, of which it is the edge band rather than the ramp. On
+   * a content row the result is a ring layer of its own (the alpha or luminance names the shape,
+   * the color tints the ring); on a mask it is a grey band.
+   */
+  MA_PAINT_LAYER_FILTER_MASK_OUTLINE = 34,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

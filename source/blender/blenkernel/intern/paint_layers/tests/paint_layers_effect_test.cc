@@ -1030,6 +1030,7 @@ TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_for_each_added_cpu
       {MA_PAINT_LAYER_FILTER_BEVEL, "a Bevel correction is read"},
       {MA_PAINT_LAYER_FILTER_COLOR_MATCH, "a Color Match correction is read"},
       {MA_PAINT_LAYER_FILTER_DROP_SHADOW, "a Drop Shadow correction is read"},
+      {MA_PAINT_LAYER_FILTER_MASK_OUTLINE, "a Mask Outline correction is read"},
   };
   for (const auto &[filter, reason] : reasons) {
     MaterialPaintLayer *effect = add_effect(*row, filter);
@@ -1964,6 +1965,175 @@ TEST_F(PaintLayersEffectTest, a_bevel_of_a_luminance_source_ramps_from_the_dark)
   }
 }
 
+TEST_F(PaintLayersEffectTest, a_mask_outline_lays_its_band_on_the_side_the_position_names)
+{
+  /* The shade image's white left half is the shape (read by its luminance, the row being opaque):
+   * the border runs along column 4, and the falloff is linear, two texels wide. The ring is a mid
+   * grey laid over the row, so each case shows which side it lies on: the white content darkens
+   * under it, the black one lightens. */
+  struct Case {
+    PaintLayerMaskOutlinePosition position;
+    float expected[8];
+  };
+  /* A texel next to the border is one chamfer step (3 / 3 = 1 texel) away: half the band of two. */
+  const Case cases[] = {
+      {PAINT_LAYER_MASK_OUTLINE_OUTSIDE, {1, 1, 1, 1, 0.25f, 0, 0, 0}},
+      {PAINT_LAYER_MASK_OUTLINE_INSIDE, {1, 1, 1, 0.75f, 0, 0, 0, 0}},
+      {PAINT_LAYER_MASK_OUTLINE_DOUBLE, {1, 1, 1, 0.75f, 0.25f, 0, 0, 0}},
+  };
+  for (const Case &test : cases) {
+    SCOPED_TRACE(int(test.position));
+    clear_active();
+    MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+    MaterialPaintLayer *outline = add_effect(*row, MA_PAINT_LAYER_FILTER_MASK_OUTLINE);
+    ASSERT_TRUE(paint_layer_kind_param_int_set(
+        *outline, PAINT_LAYER_MASK_OUTLINE_POSITION, int(test.position)));
+    ASSERT_TRUE(paint_layer_kind_param_int_set(*outline, PAINT_LAYER_MASK_OUTLINE_WIDTH, 2));
+    ASSERT_TRUE(paint_layer_kind_param_set(*outline, PAINT_LAYER_MASK_OUTLINE_SHAPE, 0.0f));
+    ASSERT_TRUE(paint_layer_kind_param_int_set(
+        *outline, PAINT_LAYER_MASK_OUTLINE_SOURCE, PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE));
+    const float grey[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+    ASSERT_TRUE(paint_layer_kind_param_color_set(*outline, PAINT_LAYER_MASK_OUTLINE_COLOR, grey));
+
+    Vector<float> pixels;
+    int width = 0;
+    int height = 0;
+    ASSERT_TRUE(render_channel(pixels, width, height));
+    for (const int y : IndexRange(height)) {
+      for (const int x : IndexRange(8)) {
+        EXPECT_NEAR(linear_pixel(pixels, width, x, y), test.expected[x], 2e-3f) << x << "," << y;
+      }
+    }
+    BKE_paint_layers_effect_cache_free_all();
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_mask_outline_of_a_buffer_with_no_border_lays_no_band)
+{
+  /* All inside or all outside: one side has no border at all, so its distance is unseen, which
+   * reads as infinitely far and not as the border itself. */
+  for (const int grey : {0, 255}) {
+    for (const PaintLayerMaskOutlinePosition position : {PAINT_LAYER_MASK_OUTLINE_OUTSIDE,
+                                                         PAINT_LAYER_MASK_OUTLINE_INSIDE,
+                                                         PAINT_LAYER_MASK_OUTLINE_DOUBLE})
+    {
+      SCOPED_TRACE(grey * 10 + int(position));
+      clear_active();
+      MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", grey, grey));
+      MaterialPaintLayer *outline = add_effect(*row, MA_PAINT_LAYER_FILTER_MASK_OUTLINE);
+      ASSERT_TRUE(paint_layer_kind_param_int_set(
+          *outline, PAINT_LAYER_MASK_OUTLINE_POSITION, int(position)));
+      ASSERT_TRUE(paint_layer_kind_param_int_set(
+          *outline, PAINT_LAYER_MASK_OUTLINE_SOURCE, PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE));
+
+      Vector<float> pixels;
+      int width = 0;
+      int height = 0;
+      ASSERT_TRUE(render_channel(pixels, width, height));
+      /* No band: the ring layer is empty, so the row shows as it is. */
+      const float content = grey ? 1.0f : 0.0f;
+      for (const int y : IndexRange(height)) {
+        for (const int x : IndexRange(width)) {
+          EXPECT_NEAR(linear_pixel(pixels, width, x, y), content, 2e-3f)
+              << x << "," << y;
+        }
+      }
+      BKE_paint_layers_effect_cache_free_all();
+    }
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_mask_outline_kernel_lays_a_premultiplied_ring_around_an_alpha_island)
+{
+  /* Content mode reads the alpha: a white island on the left half of a transparent map. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *outline = add_effect(*row, MA_PAINT_LAYER_FILTER_MASK_OUTLINE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*outline, PAINT_LAYER_MASK_OUTLINE_WIDTH, 2));
+  ASSERT_TRUE(paint_layer_kind_param_set(*outline, PAINT_LAYER_MASK_OUTLINE_SHAPE, 0.0f));
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(paint_layer_kind_param_color_set(*outline, PAINT_LAYER_MASK_OUTLINE_COLOR, red));
+
+  struct Case {
+    PaintLayerMaskOutlinePosition position;
+    PaintLayerDropShadowSource source;
+    /* The band alpha of columns 0..7. */
+    float expected[8];
+  };
+  const Case cases[] = {
+      {PAINT_LAYER_MASK_OUTLINE_OUTSIDE, PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA, {0, 0, 0, 0, 0.5f, 0, 0, 0}},
+      {PAINT_LAYER_MASK_OUTLINE_INSIDE, PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA, {0, 0, 0, 0.5f, 0, 0, 0, 0}},
+      {PAINT_LAYER_MASK_OUTLINE_DOUBLE, PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA, {0, 0, 0, 0.5f, 0.5f, 0, 0, 0}},
+      /* The luminance of the same island is the same shape. */
+      {PAINT_LAYER_MASK_OUTLINE_OUTSIDE, PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE, {0, 0, 0, 0, 0.5f, 0, 0, 0}},
+  };
+  for (const Case &test : cases) {
+    SCOPED_TRACE(int(test.position) * 10 + int(test.source));
+    ASSERT_TRUE(paint_layer_kind_param_int_set(
+        *outline, PAINT_LAYER_MASK_OUTLINE_POSITION, int(test.position)));
+    ASSERT_TRUE(paint_layer_kind_param_int_set(
+        *outline, PAINT_LAYER_MASK_OUTLINE_SOURCE, int(test.source)));
+
+    constexpr int size = 8;
+    ImBuf *input = IMB_allocImBuf(size, size, ImBufFlags::FloatData);
+    ASSERT_NE(input, nullptr);
+    float *pixels = input->float_data_for_write();
+    for (const int y : IndexRange(size)) {
+      for (const int x : IndexRange(size)) {
+        float *p = pixels + (int64_t(y) * size + x) * 4;
+        const float covered = x < size / 2 ? 1.0f : 0.0f;
+        p[0] = covered;
+        p[1] = covered;
+        p[2] = covered;
+        p[3] = covered;
+      }
+    }
+    paint_layer_effect_kernel_apply(*input, *outline);
+
+    /* The layer is empty on the island and far from it; the ring is premultiplied by the band,
+     * with the band as its alpha. The Color tints it only from a luminance source: an alpha source
+     * lays a white ring, the Color being hidden there. */
+    const bool white = test.source == PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA;
+    for (const int y : IndexRange(size)) {
+      for (const int x : IndexRange(size)) {
+        const float *p = pixels + (int64_t(y) * size + x) * 4;
+        EXPECT_NEAR(p[3], test.expected[x], 1e-6f) << "alpha at " << x << "," << y;
+        EXPECT_NEAR(p[0], test.expected[x], 1e-6f) << "premultiplied red at " << x << "," << y;
+        EXPECT_NEAR(p[1], white ? test.expected[x] : 0.0f, 1e-6f) << "green at " << x << "," << y;
+        EXPECT_NEAR(p[2], white ? test.expected[x] : 0.0f, 1e-6f) << "blue at " << x << "," << y;
+      }
+    }
+    IMB_freeImBuf(input);
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_mask_outline_shows_on_the_map_around_an_island)
+{
+  /* The left half is an opaque white island, the right half has no alpha: the ring is laid onto
+   * texels the row covers nothing at, which a colour-only band could never show. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0, false, 0));
+  MaterialPaintLayer *outline = add_effect(*row, MA_PAINT_LAYER_FILTER_MASK_OUTLINE);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*outline, PAINT_LAYER_MASK_OUTLINE_WIDTH, 2));
+  ASSERT_TRUE(paint_layer_kind_param_set(*outline, PAINT_LAYER_MASK_OUTLINE_SHAPE, 0.0f));
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(paint_layer_kind_param_color_set(*outline, PAINT_LAYER_MASK_OUTLINE_COLOR, red));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  const auto texel = [&](const int x, const int y, const int channel) {
+    return pixels[(int64_t(y) * width + x) * 4 + channel];
+  };
+  /* The island keeps its white, the texel next to it takes the ring's white where the row covered
+   * nothing, and the map past the band is as empty as it was. */
+  EXPECT_NEAR(texel(1, 4, 0), 1.0f, 2e-3f);
+  EXPECT_NEAR(texel(1, 4, 1), 1.0f, 2e-3f);
+  EXPECT_GT(texel(4, 4, 0), 0.05f) << "the ring raises the coverage where the row had none";
+  EXPECT_GT(texel(4, 4, 1), 0.05f) << "an alpha source lays a white ring, not the hidden Color";
+  EXPECT_GT(texel(4, 4, 2), 0.05f);
+  EXPECT_NEAR(texel(7, 4, 0), 0.0f, 2e-3f) << "no ring far from the island";
+}
+
 TEST_F(PaintLayersEffectTest, a_color_match_of_a_solid_row_lands_on_the_target)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
@@ -2435,7 +2605,7 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
    * nothing. */
   Set<int> gpu_computed_filters;
   for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT);
-       filter <= int(MA_PAINT_LAYER_FILTER_DROP_SHADOW);
+       filter <= int(MA_PAINT_LAYER_FILTER_MASK_OUTLINE);
        filter++)
   {
     const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
@@ -2926,6 +3096,31 @@ TEST_F(PaintLayersEffectTest, a_mask_drop_shadow_reads_the_luminance_whatever_th
   }
 }
 
+TEST_F(PaintLayersEffectTest, a_mask_outline_lays_a_grey_band_from_the_luminance)
+{
+  /* A mask's grey has no alpha and no colour: the band is a grey of itself and the item's alpha
+   * stays one, whatever the content-only source and colour parameters say. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  MaterialPaintLayer *outline = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_MASK_OUTLINE);
+  ASSERT_EQ(paint_layer_kind_param_int_get(*outline, PAINT_LAYER_MASK_OUTLINE_SOURCE),
+            PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA);
+
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_MASK_OUTLINE);
+  ASSERT_NE(laid, nullptr);
+  std::shared_ptr<ImBuf> input = mask_effect_input_grey(*ma, *row, *outline);
+  ASSERT_NE(input, nullptr);
+  EXPECT_TRUE(mask_grey_differs(*laid, *input, 1e-6f));
+  const float *px = laid->float_data();
+  for (const int64_t i : IndexRange(int64_t(laid->x) * laid->y)) {
+    EXPECT_NEAR(px[i * 4 + 0], px[i * 4 + 1], 1e-6f) << "texel " << i;
+    EXPECT_NEAR(px[i * 4 + 1], px[i * 4 + 2], 1e-6f) << "texel " << i;
+    EXPECT_NEAR(px[i * 4 + 3], 1.0f, 1e-6f) << "a mask's alpha stays one, texel " << i;
+  }
+  /* The white end of the ramp is the inside, which an outside band leaves empty. */
+  EXPECT_NEAR(px[(int64_t(4) * laid->x + laid->x - 1) * 4], 0.0f, 1e-6f);
+}
+
 TEST_F(PaintLayersEffectTest, a_mask_blur_is_the_box_blur_of_the_mask_built_up_to_it)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
@@ -3119,6 +3314,7 @@ TEST_F(PaintLayersEffectTest, every_mask_effect_kind_lays_one_grey)
                                                MA_PAINT_LAYER_FILTER_BEVEL,
                                                MA_PAINT_LAYER_FILTER_COLOR_MATCH,
                                                MA_PAINT_LAYER_FILTER_DROP_SHADOW,
+                                               MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
                                                MA_PAINT_LAYER_FILTER_NOISE};
   for (const eMaterialPaintLayerFilter filter : filters) {
     MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));

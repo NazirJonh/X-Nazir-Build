@@ -396,6 +396,17 @@ def _draw_mask_output(layout, record, item):
     panel.operator("paint.mask_item_bake", text="Bake to Image", icon='IMAGE_DATA')
 
 
+def _kind_param_is_hidden(by_name, param):
+    """Whether a parameter has no effect in the state of its siblings and is left undrawn.
+
+    A Mask Outline lays its ring in the Color only when it reads the shape from the Luminance: from the
+    Alpha the ring is white, so the picker would offer a value that changes nothing.
+    """
+    if param.name == "color" and "curve_shape" in by_name and "source" in by_name:
+        return by_name["source"].enum_value == 'ALPHA'
+    return False
+
+
 def draw_material_kind_params(layout, params):
     """The parameters of a row's kind, each drawn as its type asks.
 
@@ -403,7 +414,10 @@ def draw_material_kind_params(layout, params):
     picker, a boolean as a checkbox; the value is whichever property of the parameter carries its
     type.
     """
+    by_name = {param.name: param for param in params}
     for param in params:
+        if _kind_param_is_hidden(by_name, param):
+            continue
         _draw_kind_param(layout, param)
 
 

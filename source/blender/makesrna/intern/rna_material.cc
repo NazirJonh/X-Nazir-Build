@@ -5957,6 +5957,12 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "Drop Shadow",
      "Cast a shadow off the shape of what is below: the silhouette spread, blurred and offset by "
      "the angle and the distance, tinted by the colour"},
+    {MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
+     "MASK_OUTLINE",
+     0,
+     "Mask Outline",
+     "Lay a band along the border of the grey of what is below: inside it, outside it, or on both "
+     "sides, the width the band takes and the shape its falloff walks"},
     {MA_PAINT_LAYER_FILTER_SHARPEN,
      "SHARPEN",
      0,

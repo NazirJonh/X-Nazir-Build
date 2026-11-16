@@ -185,10 +185,12 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_TRUE(kinds[16].is_effect);
   EXPECT_EQ(kinds[17].identifier, "FILTER_HISTOGRAM_SHIFT");
   EXPECT_TRUE(kinds[17].is_effect);
-  EXPECT_EQ(kinds[18].identifier, "FILTER_CURVES");
+  EXPECT_EQ(kinds[18].identifier, "FILTER_SMOOTHSTEP");
   EXPECT_TRUE(kinds[18].is_effect);
-  EXPECT_EQ(kinds[19].identifier, "FILTER_COLOR_BALANCE");
+  EXPECT_EQ(kinds[19].identifier, "FILTER_CURVES");
   EXPECT_TRUE(kinds[19].is_effect);
+  EXPECT_EQ(kinds[20].identifier, "FILTER_COLOR_BALANCE");
+  EXPECT_TRUE(kinds[20].is_effect);
   /* Every kind past the head is found by identifier; `at` also fails the test if it is missing. */
   const auto at = [&](const char *identifier) {
     const int index = kind_index(kinds, identifier);
@@ -199,6 +201,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   for (const char *filter : {"FILTER_EXPOSURE",
                              "FILTER_HISTOGRAM_SCAN",
                              "FILTER_HISTOGRAM_SHIFT",
+                             "FILTER_SMOOTHSTEP",
                              "FILTER_DEBAND",
                              "FILTER_NORMAL_CONVERT",
                              "FILTER_CHANNEL_MIXER"})
@@ -235,6 +238,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
                                  "ADJUSTMENT_CLAMP",
                                  "ADJUSTMENT_HISTOGRAM_SCAN",
                                  "ADJUSTMENT_HISTOGRAM_SHIFT",
+                                 "ADJUSTMENT_SMOOTHSTEP",
                                  "ADJUSTMENT_CURVES",
                                  "ADJUSTMENT_COLOR_BALANCE",
                                  "ADJUSTMENT_EXPOSURE",
@@ -257,6 +261,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
                            "MASK_FILTER_CLAMP",
                            "MASK_FILTER_HISTOGRAM_SCAN",
                            "MASK_FILTER_HISTOGRAM_SHIFT",
+                           "MASK_FILTER_SMOOTHSTEP",
                            "MASK_FILTER_CURVES",
                            "MASK_FILTER_COLOR_BALANCE",
                            "MASK_FILTER_EXPOSURE",
@@ -376,6 +381,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
    * alike, and none of them is also in the "Filter" one. */
   for (const char *identifier : {"FILTER_HISTOGRAM_SCAN",
                                  "FILTER_HISTOGRAM_SHIFT",
+                                 "FILTER_SMOOTHSTEP",
                                  "EFFECT_DROP_SHADOW",
                                  "EFFECT_MASK_OUTLINE",
                                  "EFFECT_FILL_AREA",
@@ -384,7 +390,10 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
     EXPECT_TRUE(is_filter2(content, identifier)) << identifier;
     EXPECT_FALSE(is_new(content, identifier)) << identifier;
   }
-  for (const char *identifier : {"MASK_FILTER_HISTOGRAM_SCAN", "MASK_FILTER_HISTOGRAM_SHIFT"}) {
+  for (const char *identifier : {"MASK_FILTER_HISTOGRAM_SCAN",
+                                 "MASK_FILTER_HISTOGRAM_SHIFT",
+                                 "MASK_FILTER_SMOOTHSTEP"})
+  {
     EXPECT_TRUE(is_filter2(mask, identifier)) << identifier;
     EXPECT_FALSE(is_new(mask, identifier)) << identifier;
   }

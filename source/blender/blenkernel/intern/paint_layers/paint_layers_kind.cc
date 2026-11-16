@@ -462,6 +462,14 @@ static const PaintLayerKindParam height_to_normal_params[] = {
 };
 static_assert(std::size(height_to_normal_params) == PAINT_LAYER_HEIGHT_TO_NORMAL_PARAM_NUM);
 
+static const PaintLayerKindParam smoothstep_params[] = {
+    /* The low edge of the extracted range: what falls short of it reads zero. */
+    {"minimum", "Minimum", 0.0f, 0.0f, 1.0f},
+    /* The high edge: what passes it reads one. */
+    {"maximum", "Maximum", 1.0f, 0.0f, 1.0f},
+};
+static_assert(std::size(smoothstep_params) == PAINT_LAYER_SMOOTHSTEP_PARAM_NUM);
+
 static const PaintLayerKindEnumItem glow_mode_items[] = {
     {PAINT_LAYER_GLOW_SOFT, "SOFT", "Soft"},
     {PAINT_LAYER_GLOW_PRECISE, "PRECISE", "Precise"},
@@ -1122,6 +1130,16 @@ static const PaintLayerKindInfo kinds[] = {
      int(std::size(height_to_normal_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_NORMAL_SAFE | PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT)},
+    /* The Hermite interpolation between the edges: the Map Range node's own Smoothstep, the
+     * smoother extraction the Histogram Scan's threshold opens into. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_SMOOTHSTEP,
+     "Smoothstep",
+     PaintLayerKindCategory::Operator,
+     filter_roles,
+     smoothstep_params,
+     int(std::size(smoothstep_params)),
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same
      * open-above-one policy as Exposure and High Pass, unlike Noise and Channel Mixer. */
     {MA_PAINT_LAYER_SOURCE_FILTER,

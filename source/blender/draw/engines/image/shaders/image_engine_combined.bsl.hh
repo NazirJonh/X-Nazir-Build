@@ -312,6 +312,7 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_CHANNEL_MIXER 27
 #define COMBINED_FILTER_HISTOGRAM_SCAN 30
 #define COMBINED_FILTER_HISTOGRAM_SHIFT 31
+#define COMBINED_FILTER_SMOOTHSTEP 37
 
 float levels_channel(float value, float4 p0, float4 p1)
 {
@@ -574,6 +575,18 @@ float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, float4 p2
        * through zero when it passes one -- the Math node's Wrap, cyclic, so a full turn is the
        * value again. `p0.x` is the position. */
       result = fract(rgb + float3(p0.x));
+      break;
+    }
+    case COMBINED_FILTER_SMOOTHSTEP: {
+      /* The CPU's paint_layer_smoothstep_apply: the Hermite interpolation between the range's
+       * edges, written out per component. An empty range reads as zero (the graph's Map Range
+       * gives zero for equal edges too). p0.x is the minimum, p0.y the maximum. */
+      float span = p0.y - p0.x;
+      float inv_span = (abs(span) < 1e-6f) ? 0.0f : 1.0f / span;
+      float3 t = float3(clamp((rgb.x - p0.x) * inv_span, 0.0f, 1.0f),
+                        clamp((rgb.y - p0.x) * inv_span, 0.0f, 1.0f),
+                        clamp((rgb.z - p0.x) * inv_span, 0.0f, 1.0f));
+      result = t * t * (float3(3.0f) - 2.0f * t);
       break;
     }
     case COMBINED_FILTER_COLOR_BALANCE: {

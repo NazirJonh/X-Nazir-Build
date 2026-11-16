@@ -927,6 +927,15 @@ enum PaintLayerHeightToNormalParam : int {
   PAINT_LAYER_HEIGHT_TO_NORMAL_PARAM_NUM = 5,
 };
 
+/** The positions of the Smoothstep filter's parameters in its schema. */
+enum PaintLayerSmoothstepParam : int {
+  /** The low edge of the extracted range. */
+  PAINT_LAYER_SMOOTHSTEP_MINIMUM = 0,
+  /** The high edge of the extracted range. */
+  PAINT_LAYER_SMOOTHSTEP_MAXIMUM = 1,
+  PAINT_LAYER_SMOOTHSTEP_PARAM_NUM = 2,
+};
+
 /** The positions of the Sharpen filter's parameters in its schema. */
 enum PaintLayerSharpenParam : int {
   PAINT_LAYER_SHARPEN_RADIUS = 0,
@@ -1421,6 +1430,18 @@ inline float paint_layer_histogram_shift_apply(const float value, const float po
 {
   const float shifted = value + position;
   return shifted - std::floor(shifted);
+}
+
+/**
+ * One channel of the Smoothstep filter: the Hermite interpolation between the range's edges, the
+ * Map Range node's own Smoothstep. An empty range reads as the low edge's state: the extraction
+ * of nothing leaves nothing.
+ */
+inline float paint_layer_smoothstep_apply(const float value, const float minimum, const float maximum)
+{
+  const float span = maximum - minimum;
+  const float t = (std::abs(span) < 1e-6f) ? 0.0f : std::clamp((value - minimum) / span, 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
 }
 
 /**

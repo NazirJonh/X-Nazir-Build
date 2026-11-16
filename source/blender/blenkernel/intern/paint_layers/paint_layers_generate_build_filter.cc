@@ -1081,6 +1081,67 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       }
       return true;
     }
+    case MA_PAINT_LAYER_FILTER_SMOOTHSTEP: {
+      /* `smoothstep(min, max, c)` per channel, one Map Range node per channel with the Smoothstep
+       * interpolation and its clamp on -- the node's own evaluation is the CPU's
+       * `paint_layer_smoothstep_apply`, the edges the schema's inputs. */
+      Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&effect);
+      if (params == nullptr || params->size() != PAINT_LAYER_SMOOTHSTEP_PARAM_NUM ||
+          (*params)[PAINT_LAYER_SMOOTHSTEP_MINIMUM] == nullptr ||
+          (*params)[PAINT_LAYER_SMOOTHSTEP_MAXIMUM] == nullptr)
+      {
+        return false;
+      }
+      bNodeSocket *min_socket = group_input_socket(group, *(*params)[PAINT_LAYER_SMOOTHSTEP_MINIMUM]);
+      bNodeSocket *max_socket = group_input_socket(group, *(*params)[PAINT_LAYER_SMOOTHSTEP_MAXIMUM]);
+      if (min_socket == nullptr || max_socket == nullptr) {
+        return false;
+      }
+      Vector<bNode *> nodes;
+      const auto discard = [&]() {
+        nodes_discard(tree, nodes);
+        return false;
+      };
+
+      NodeOutput xyz[3];
+      if (!separate_xyz_node_add(tree, grid_, nodes, content, xyz)) {
+        return discard();
+      }
+      NodeOutput stepped[3];
+      for (const int i : IndexRange(3)) {
+        bNode *range = bke::node_add_static_node(nullptr, tree, SH_NODE_MAP_RANGE);
+        bNodeSocket *value = (range != nullptr) ? socket_in(*range, "Value") : nullptr;
+        bNodeSocket *from_min = (range != nullptr) ? socket_in(*range, "From Min") : nullptr;
+        bNodeSocket *from_max = (range != nullptr) ? socket_in(*range, "From Max") : nullptr;
+        bNodeSocket *result = (range != nullptr) ? socket_out(*range, "Result") : nullptr;
+        if (value == nullptr || from_min == nullptr || from_max == nullptr || result == nullptr) {
+          if (range != nullptr) {
+            nodes.append(range);
+          }
+          return discard();
+        }
+        if (NodeMapRange *storage = static_cast<NodeMapRange *>(range->storage)) {
+          storage->data_type = CD_PROP_FLOAT;
+          storage->interpolation_type = NODE_MAP_RANGE_SMOOTHSTEP;
+          storage->clamp = 1;
+        }
+        grid_.place_extra(*range);
+        nodes.append(range);
+        bke::node_add_link(tree, *xyz[i].node, *xyz[i].socket, *range, *value);
+        bke::node_add_link(tree, *group.group_input, *min_socket, *range, *from_min);
+        bke::node_add_link(tree, *group.group_input, *max_socket, *range, *from_max);
+        stepped[i] = {range, result};
+      }
+      NodeOutput combined = combine_xyz_node_add(tree, grid_, nodes, stepped);
+      if (combined.socket == nullptr) {
+        return discard();
+      }
+
+      if (!filter_result_mix_add(tree, grid_, nodes, content, combined, strength, effect.name)) {
+        return discard();
+      }
+      return true;
+    }
     case MA_PAINT_LAYER_FILTER_CURVES: {
       /* `curves(c)` per channel, the row's mapping copied into the node so the generated tree owns
        * no reference. The node's own evaluation — each channel through its curve, no white

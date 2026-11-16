@@ -6044,6 +6044,12 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "Height To Normal",
      "Convert the Height the row lays into a tangent-space normal: the Sobel gradients of the "
      "height, scaled by the intensity or the world units, encoded into the Normal channel"},
+    {MA_PAINT_LAYER_FILTER_SMOOTHSTEP,
+     "SMOOTHSTEP",
+     0,
+     "Smoothstep",
+     "Extract a range of the grey of what is below between a minimum and a maximum: the Hermite "
+     "interpolation between the edges, the smoother sibling of a threshold"},
     {MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
      "CHANNEL_MIXER",
      0,

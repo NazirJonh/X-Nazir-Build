@@ -2014,7 +2014,8 @@ TEST_F(PaintLayersEffectTest, every_pointwise_kind_has_a_shader_branch_or_refuse
                            MA_PAINT_LAYER_FILTER_EXPOSURE,
                            MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
                            MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN,
-                           MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT};
+                           MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT,
+                           MA_PAINT_LAYER_FILTER_SMOOTHSTEP};
   constexpr uint8_t both_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
                                  paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER);
   MaterialPaintLayer *previous = nullptr;
@@ -3125,7 +3126,7 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
    * nothing. */
   Set<int> gpu_computed_filters;
   for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT);
-       filter <= int(MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL);
+       filter <= int(MA_PAINT_LAYER_FILTER_SMOOTHSTEP);
        filter++)
   {
     const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);

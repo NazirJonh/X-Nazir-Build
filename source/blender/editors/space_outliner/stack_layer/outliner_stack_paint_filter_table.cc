@@ -84,6 +84,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT:
       /* No glyph of its own yet: the histogram icon names the range the filter rolls. */
       return {ICON_SEQ_HISTOGRAM, 0};
+    case MA_PAINT_LAYER_FILTER_SMOOTHSTEP:
+      /* No glyph of its own yet: the curve icon names the Hermite the extraction walks. */
+      return {ICON_RNDCURVE, 0};
     case MA_PAINT_LAYER_FILTER_CURVES:
       /* No glyph of its own yet: the icon alone keeps it apart from Invert's arrow. */
       return {ICON_RNDCURVE, 0};
@@ -253,6 +256,11 @@ static const PaintFilterAddKind paint_filter_add_kinds_table[] = {
      "Roll the tonal range of the active layer's channels by one amount, wrapping back through "
      "zero",
      MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT},
+    {"FILTER_SMOOTHSTEP",
+     N_("Smoothstep"),
+     "Extract a range of the active layer's grey between a minimum and a maximum: the Hermite "
+     "interpolation between the edges, the smoother sibling of a threshold",
+     MA_PAINT_LAYER_FILTER_SMOOTHSTEP},
     {"FILTER_CURVES",
      N_("RGB Curves"),
      "Remap the active layer's channels through their own curves",

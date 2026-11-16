@@ -3173,4 +3173,47 @@ TEST_F(PaintLayersHistogramShiftTest, a_negative_shift_wraps_the_same_way_as_the
   expect_graph_matches_cpu(kColor);
 }
 
+class PaintLayersSmoothstepTest : public PaintLayersFilterTest {
+ public:
+  MaterialPaintLayer *add_smoothstep(MaterialPaintLayer &row, const float opacity = 1.0f)
+  {
+    MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+        *ma, &row, MA_PAINT_LAYER_FILTER_SMOOTHSTEP);
+    EXPECT_NE(filter, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
+    return filter;
+  }
+};
+
+TEST_F(PaintLayersSmoothstepTest, smoothstep_over_a_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *smoothstep = add_smoothstep(*row, 0.7f);
+  EXPECT_TRUE(paint_layer_kind_param_set(*smoothstep, PAINT_LAYER_SMOOTHSTEP_MINIMUM, 0.2f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*smoothstep, PAINT_LAYER_SMOOTHSTEP_MAXIMUM, 0.8f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersSmoothstepTest, an_empty_range_matches_the_cpu)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *smoothstep = add_smoothstep(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*smoothstep, PAINT_LAYER_SMOOTHSTEP_MINIMUM, 0.5f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*smoothstep, PAINT_LAYER_SMOOTHSTEP_MAXIMUM, 0.5f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersSmoothstepTest, a_reversed_range_matches_the_cpu)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *smoothstep = add_smoothstep(*row);
+  EXPECT_TRUE(paint_layer_kind_param_set(*smoothstep, PAINT_LAYER_SMOOTHSTEP_MINIMUM, 0.8f));
+  EXPECT_TRUE(paint_layer_kind_param_set(*smoothstep, PAINT_LAYER_SMOOTHSTEP_MAXIMUM, 0.2f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
 }  // namespace blender::bke::tests

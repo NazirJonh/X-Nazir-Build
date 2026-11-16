@@ -1214,6 +1214,13 @@ static float composite_filter_color(const int16_t filter,
             rgb[k], params[PAINT_LAYER_HISTOGRAM_SHIFT_POSITION]);
       }
       break;
+    case MA_PAINT_LAYER_FILTER_SMOOTHSTEP:
+      for (const int k : IndexRange(3)) {
+        rgb[k] = paint_layer_smoothstep_apply(rgb[k],
+                                              params[PAINT_LAYER_SMOOTHSTEP_MINIMUM],
+                                              params[PAINT_LAYER_SMOOTHSTEP_MAXIMUM]);
+      }
+      break;
     case MA_PAINT_LAYER_FILTER_COLOR_BALANCE:
       /* `pow(max(rgb * A + B, 0), E)` per channel, the folded triples the CPU description, the
        * graph and the GPU share (#paint_layer_color_balance_fold). No payload pointer: the folded

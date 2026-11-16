@@ -1168,6 +1168,12 @@ enum eMaterialPaintLayerFilter : int16_t {
    * #MA_PAINT_LAYER_FILTER_NORMAL_CONVERT (#PAINT_LAYER_KIND_NORMAL_SAFE).
    */
   MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL = 36,
+  /**
+   * Extract a range of the grey below between a minimum and a maximum (a Smoothstep): the Hermite
+   * interpolation between the two edges, the smoother sibling of the Histogram Scan. Per channel,
+   * like #MA_PAINT_LAYER_FILTER_THRESHOLD.
+   */
+  MA_PAINT_LAYER_FILTER_SMOOTHSTEP = 37,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

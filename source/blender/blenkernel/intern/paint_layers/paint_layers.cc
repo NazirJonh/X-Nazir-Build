@@ -36,6 +36,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_blend.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_vector.hh"
 #include "BKE_report.hh"
@@ -3729,64 +3730,8 @@ bool BKE_paint_layers_rename(Material &ma, MaterialPaintLayer *layer, const char
 
 int BKE_paint_layers_blend_to_ramp(const eMaterialPaintLayerBlend blend)
 {
-  switch (blend) {
-    case MA_PAINT_LAYER_BLEND_MIX:
-      return MA_RAMP_BLEND;
-    case MA_PAINT_LAYER_BLEND_MULTIPLY:
-      return MA_RAMP_MULT;
-    case MA_PAINT_LAYER_BLEND_OVERLAY:
-      return MA_RAMP_OVERLAY;
-    case MA_PAINT_LAYER_BLEND_ADD:
-      return MA_RAMP_ADD;
-    case MA_PAINT_LAYER_BLEND_DARKEN:
-      return MA_RAMP_DARK;
-    case MA_PAINT_LAYER_BLEND_BURN:
-      return MA_RAMP_BURN;
-    case MA_PAINT_LAYER_BLEND_LIGHTEN:
-      return MA_RAMP_LIGHT;
-    case MA_PAINT_LAYER_BLEND_SCREEN:
-      return MA_RAMP_SCREEN;
-    case MA_PAINT_LAYER_BLEND_DODGE:
-      return MA_RAMP_DODGE;
-    case MA_PAINT_LAYER_BLEND_SUBTRACT:
-      return MA_RAMP_SUB;
-    case MA_PAINT_LAYER_BLEND_DIVIDE:
-      return MA_RAMP_DIV;
-    case MA_PAINT_LAYER_BLEND_DIFFERENCE:
-      return MA_RAMP_DIFF;
-    case MA_PAINT_LAYER_BLEND_EXCLUSION:
-      return MA_RAMP_EXCLUSION;
-    case MA_PAINT_LAYER_BLEND_SOFT_LIGHT:
-      return MA_RAMP_SOFT;
-    case MA_PAINT_LAYER_BLEND_LINEAR_LIGHT:
-      return MA_RAMP_LINEAR;
-    case MA_PAINT_LAYER_BLEND_HUE:
-      return MA_RAMP_HUE;
-    case MA_PAINT_LAYER_BLEND_SATURATION:
-      return MA_RAMP_SAT;
-    case MA_PAINT_LAYER_BLEND_COLOR:
-      return MA_RAMP_COLOR;
-    case MA_PAINT_LAYER_BLEND_VALUE:
-      return MA_RAMP_VAL;
-    case MA_PAINT_LAYER_BLEND_NORMAL_COMBINE:
-      return MA_RAMP_BLEND;
-    case MA_PAINT_LAYER_BLEND_NORMAL_REPLACE:
-      /* The Normal channel builds a plain Mix for Replace; the code is never read there. */
-      return MA_RAMP_BLEND;
-    case MA_PAINT_LAYER_BLEND_HARD_LIGHT:
-      return MA_PAINT_BLEND_HARD_LIGHT;
-    case MA_PAINT_LAYER_BLEND_VIVID_LIGHT:
-      return MA_PAINT_BLEND_VIVID_LIGHT;
-    case MA_PAINT_LAYER_BLEND_PIN_LIGHT:
-      return MA_PAINT_BLEND_PIN_LIGHT;
-    case MA_PAINT_LAYER_BLEND_LINEAR_BURN:
-      return MA_PAINT_BLEND_LINEAR_BURN;
-    case MA_PAINT_LAYER_BLEND_LIGHTER_COLOR:
-      return MA_PAINT_BLEND_LIGHTER_COLOR;
-    case MA_PAINT_LAYER_BLEND_DARKER_COLOR:
-      return MA_PAINT_BLEND_DARKER_COLOR;
-  }
-  return MA_RAMP_BLEND;
+  /* The Normal channel builds a plain Mix for the combine, so it answers the Mix code here. */
+  return BKE_paint_blend_to_ramp(int(blend), MA_RAMP_BLEND);
 }
 
 /** Whether \a blend names one of the modes a Mix node cannot express (see #eMaterialPaintBlend). */

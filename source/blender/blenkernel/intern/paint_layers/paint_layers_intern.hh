@@ -1201,7 +1201,7 @@ inline bool paint_layer_mask_item_alpha_background(const MaterialPaintLayer &ite
  * node expresses, and a #MA_PAINT_BLEND_* code for the six it does not.
  *
  * The one table the generator, the ".PBR Blend" group's `Mode` input and the CPU's
- * #BKE_paint_material_blend_apply all read, so a blend cannot mean two different things.
+ * #BKE_paint_blend_apply all read, so a blend cannot mean two different things.
  * #MA_PAINT_LAYER_BLEND_NORMAL_COMBINE is not a Mix mode and has no ramp code; it answers
  * #MA_RAMP_BLEND, and the Normal channel never reaches this with it.
  *

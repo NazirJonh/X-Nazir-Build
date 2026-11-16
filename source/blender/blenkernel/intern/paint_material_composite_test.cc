@@ -322,7 +322,7 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_extended_blend_modes_match_their_d
 TEST_F(PaintMaterialCompositeEvalTest, linear_extended_blend_boundary_vectors)
 {
   /* The layer sitting exactly on the 0.5 split of Vivid and Pin Light, swept over below and
-   * factor: the composite must land on #BKE_paint_material_blend_apply -- the CPU statement the
+   * factor: the composite must land on #BKE_paint_blend_apply -- the CPU statement the
    * GPU clusters are held to -- to float precision, and Vivid and Pin must be continuous at the
    * split (both halves agree there, so a per-channel branch crossing it shows no seam). Float
    * buffers carry the exact halves that the byte images of the graph-parity tests cannot. */
@@ -349,7 +349,7 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_extended_blend_boundary_vectors)
                                      mode == CompositeBlend::DarkerColor;
       if (mode != CompositeBlend::LinearBurn && (!colour_comparison || below == 0.5f)) {
         float continuous[4] = {below, below, below, 1.0f};
-        BKE_paint_material_blend_apply(int(mode), continuous, 1.0f, half);
+        BKE_paint_blend_apply(int(mode), continuous, 1.0f, half);
         EXPECT_NEAR(continuous[0], below, 1e-6f) << "mode " << int(mode);
         EXPECT_NEAR(continuous[1], below, 1e-6f) << "mode " << int(mode);
         EXPECT_NEAR(continuous[2], below, 1e-6f) << "mode " << int(mode);
@@ -369,7 +369,7 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_extended_blend_boundary_vectors)
         stack.layers.append(top);
 
         float expected[4] = {below, below, below, 1.0f};
-        BKE_paint_material_blend_apply(int(mode), expected, factor, half);
+        BKE_paint_blend_apply(int(mode), expected, factor, half);
         const std::array<float, 4> result = linear_pixel(stack, 0, 0);
         EXPECT_NEAR(result[0], expected[0], 1e-6f) << "mode " << int(mode) << " below " << below
                                                    << " factor " << factor;

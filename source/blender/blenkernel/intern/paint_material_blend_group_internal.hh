@@ -91,7 +91,7 @@ bool blend_group_socket_vector_default_set(bNode &node,
  *
  * Every one of them is the same shape: a cluster computing the mode at full strength, then a Mix
  * of what is below with that answer by the group's own Factor. That is also how the CPU reads them
- * (`BKE_paint_material_blend_apply` mixes the formula's result in), so the two agree texel for
+ * (`BKE_paint_blend_apply` mixes the formula's result in), so the two agree texel for
  * texel -- and the alpha model stays the chain's, since none of these modes is a Mix
  * (#ROLE_BLEND_IS_MIX reads false). An empty result means the cluster could not be built; the
  * caller drops the whole group, so no orphan of a half-built cluster is left behind.

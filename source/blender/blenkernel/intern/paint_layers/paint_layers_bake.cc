@@ -1120,6 +1120,39 @@ static uint64_t bake_hash_idprops(uint64_t h, const IDProperty *group)
   return h;
 }
 
+/**
+ * Whether the UV mapping of \a layer is folded into its bake instead of keeping the row live: a
+ * plain UV remap (no Mirror, no projection) of a row that carries an enabled CPU-computed effect
+ * (Noise, Blur). Such a row has no live form, so it shows only once baked and substituted, and the
+ * CPU composite the bake renders from applies the mapping itself; the substituted group has no
+ * mapping inputs, so it is not applied twice. An identity transform with a clipping wrap folds as
+ * well, as it only cuts what a bake never holds.
+ */
+static bool bake_own_mapping_folds(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if (!BKE_paint_layers_mapping_remaps(ma, layer) ||
+      BKE_paint_layers_mapping_mirror_get(layer) != 0 ||
+      BKE_paint_layers_projection_applies(ma, layer))
+  {
+    return false;
+  }
+  if (BKE_paint_layers_mapping_is_identity(layer)) {
+    return true;
+  }
+  /* Rows that read a source or an Anchor Point cache their effects apart and are kept live. */
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) ||
+      paint_layer_kind_reads_anchor_point(layer))
+  {
+    return false;
+  }
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 && paint_layer_effect_is_cpu_computed(effect)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static uint64_t bake_hash_layer(uint64_t h,
                                 const Material &ma,
                                 const MaterialPaintLayer &layer,
@@ -1206,6 +1239,16 @@ static uint64_t bake_hash_layer(uint64_t h,
    * on. */
   if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     h = bake_hash_mix(h, BKE_paint_layers_mapping_remaps(ma, layer) ? 1 : 0);
+    /* A mapping folded into the bake is part of what the cache holds, so its values are hashed:
+     * moving the gizmo must invalidate the bake. */
+    if (bake_own_mapping_folds(ma, layer)) {
+      h = bake_hash_float(h, layer.mapping.offset[0]);
+      h = bake_hash_float(h, layer.mapping.offset[1]);
+      h = bake_hash_float(h, layer.mapping.scale[0]);
+      h = bake_hash_float(h, layer.mapping.scale[1]);
+      h = bake_hash_float(h, layer.mapping.rotation);
+      h = bake_hash_mix(h, uint16_t(BKE_paint_layers_mapping_wrap_get(layer)));
+    }
   }
   /* An effect in its Decal frame is rendered into the cache, unlike a UV mapping that keeps the row
    * live, so every number of its step and of its frame is part of what the cache holds. The frame
@@ -1468,7 +1511,10 @@ static bool bake_mapping_blocks(const Material &ma,
                                 const MaterialPaintLayer &layer,
                                 const PaintLayerBakeScope scope)
 {
-  if (BKE_paint_layers_mapping_remaps(ma, layer) ||
+  /* A plain UV mapping of a CPU-computed row (Noise, Blur) is folded into its bake rather than
+   * keeping it live: such a row shows only when baked and substituted
+   * (#bake_own_mapping_folds). */
+  if ((BKE_paint_layers_mapping_remaps(ma, layer) && !bake_own_mapping_folds(ma, layer)) ||
       BKE_paint_layers_projection_applies(ma, layer))
   {
     return true;

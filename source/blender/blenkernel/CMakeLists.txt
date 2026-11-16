@@ -264,8 +264,10 @@ set(SRC
   intern/outliner_treehash.cc
   intern/packedFile.cc
   intern/paint.cc
+  intern/paint_blend.cc
   intern/paint_brush_group_override.cc
   intern/paint_canvas.cc
+  intern/paint_layer_formula.cc
   intern/paint_layers/paint_layers.cc
   intern/paint_layers/paint_layers_anchor_point.cc
   intern/paint_layers/paint_layers_asset.cc
@@ -596,6 +598,7 @@ set(SRC
   BKE_outliner_treehash.hh
   BKE_packedFile.hh
   BKE_paint.hh
+  BKE_paint_blend.hh
   BKE_paint_bvh.hh
   BKE_paint_bvh_pixels.hh
   BKE_paint_layers.hh
@@ -688,6 +691,7 @@ set(SRC
   intern/multires_reshape.hh
   intern/multires_unsubdivide.hh
   intern/ocean_intern.h
+  intern/paint_layer_formula.hh
   intern/paint_material_cache_common.hh
   intern/pbvh_intern.hh
   intern/pbvh_pixels_copy.hh

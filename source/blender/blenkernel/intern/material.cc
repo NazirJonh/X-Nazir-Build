@@ -2936,7 +2936,7 @@ void ramp_blend(int type, float r_col[4], const float fac, const float col[4])
       }
       break;
     /* The blend codes past #MA_RAMP_EXCLUSION are the paint stack's own (see
-     * #eMaterialPaintBlend): they are applied through #BKE_paint_material_blend_apply, not here,
+     * #eMaterialPaintBlend): they are applied through #BKE_paint_blend_apply, not here,
      * so this switch stays the Mix node's own arithmetic. */
   }
 }

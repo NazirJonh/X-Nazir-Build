@@ -901,103 +901,11 @@ static void composite_decode_tile(const ImBuf *ibuf,
 }
 
 /* -------------------------------------------------------------------- */
-/** \name Paint blend codes
- *
- * The CPU arithmetic of the stack's own blend codes: every `MA_RAMP_*` mode a Mix node expresses
- * goes through #ramp_blend, the six #eMaterialPaintBlend modes past its range are computed here.
- * The ".PBR Blend" group builds each of them from nodes the Mix node already has (see
- * #BKE_paint_material_blend_group_ensure); the formulas below are what those node clusters reduce
- * to, and the parity tests in `paint_layers_graph_eval_test.cc` hold the two together.
- * \{ */
+/* The CPU arithmetic of the paint blend codes moved to its own translation unit
+ * (`paint_blend.cc`, the shared #BKE_paint_blend_apply both paint stacks run). */
 
 /**
- * The whole-colour result of a mode a Mix node has no blend type for.
- *
- * Each returns the unweighted blend of \a below and \a above, the Photoshop definition with no
- * factor in it: the caller mixes the answer back over \a below by its own factor, which is how the
- * ".PBR Blend" group builds the same mode -- a cluster for the formula, then one Mix by the factor.
- * The two engines must agree channel for channel, and neither of them clamps: the byte encode is
- * where a result finally comes back inside 0..1.
- */
-static float paint_blend_extended_channel(const int type, const float below, const float above)
-{
-  switch (type) {
-    case MA_PAINT_BLEND_HARD_LIGHT:
-      /* Overlay with the two colours exchanged: the layer decides which half of the curve. */
-      return (above < 0.5f) ? (2.0f * below * above) :
-                              (1.0f - 2.0f * (1.0f - below) * (1.0f - above));
-    case MA_PAINT_BLEND_LINEAR_BURN:
-      return below + above - 1.0f;
-    case MA_PAINT_BLEND_VIVID_LIGHT:
-      /* One of the two ramps the Mix node already computes, against the layer pushed to twice its
-       * value or to twice its value less one -- and it is the node's own form of each that both
-       * engines have to agree on, not the textbook one: #blend_color_burn_channel and
-       * #blend_color_dodge_channel are the factor-one cases of #ramp_blend's Burn and Dodge. */
-      return (above < 0.5f) ? blend_color_burn_channel(below, 2.0f * above) :
-                              blend_color_dodge_channel(below, 2.0f * (1.0f - above));
-    case MA_PAINT_BLEND_PIN_LIGHT:
-      return (above < 0.5f) ? min_ff(below, 2.0f * above) : max_ff(below, 2.0f * above - 1.0f);
-    default:
-      return below;
-  }
-}
-
-/** The RGB-sum decision of Lighter/Darker Color: does \a above win over \a below? */
-static bool paint_blend_color_sum_wins(const int type, const float below[3], const float above[3])
-{
-  const float sum_below = below[0] + below[1] + below[2];
-  const float sum_above = above[0] + above[1] + above[2];
-  return (type == MA_PAINT_BLEND_LIGHTER_COLOR) ? (sum_above > sum_below) : (sum_above < sum_below);
-}
-
-void BKE_paint_material_blend_apply(int code,
-                                    float r_col[4],
-                                    float fac,
-                                    const float col[4])
-{
-  if (code <= MA_RAMP_EXCLUSION) {
-    /* A Mix node mode: the node's own arithmetic is the one statement of it. */
-    ramp_blend(code, r_col, fac, col);
-    return;
-  }
-  switch (code) {
-    case MA_PAINT_BLEND_HARD_LIGHT:
-    case MA_PAINT_BLEND_VIVID_LIGHT:
-    case MA_PAINT_BLEND_PIN_LIGHT:
-    case MA_PAINT_BLEND_LINEAR_BURN: {
-      const float full[3] = {
-          paint_blend_extended_channel(code, r_col[0], col[0]),
-          paint_blend_extended_channel(code, r_col[1], col[1]),
-          paint_blend_extended_channel(code, r_col[2], col[2]),
-      };
-      for (const int i : IndexRange(3)) {
-        r_col[i] = (1.0f - fac) * r_col[i] + fac * full[i];
-      }
-      break;
-    }
-    case MA_PAINT_BLEND_LIGHTER_COLOR:
-    case MA_PAINT_BLEND_DARKER_COLOR: {
-      /* One whole colour wins, so the decision is made once and the factor mixes the winner in. */
-      const bool above_wins = paint_blend_color_sum_wins(code, r_col, col);
-      const float full[3] = {above_wins ? col[0] : r_col[0],
-                             above_wins ? col[1] : r_col[1],
-                             above_wins ? col[2] : r_col[2]};
-      for (const int i : IndexRange(3)) {
-        r_col[i] = (1.0f - fac) * r_col[i] + fac * full[i];
-      }
-      break;
-    }
-    default:
-      /* An unknown code blends nothing: the caller clamps its modes at the description, so this
-       * only ever reads a corrupt value, and leaving the colour alone is the safe answer. */
-      break;
-  }
-}
-
-/** \} */
-
-/**
- * Blend one scene-linear pixel: the paint stack's own blend codes (#BKE_paint_material_blend_apply
+ * Blend one scene-linear pixel: the paint stack's own blend codes (#BKE_paint_blend_apply
  * covers the Mix node's modes and the six past them), and the whiteout for
  * #CompositeBlend::NormalCombine, which no Mix node expresses.
  *
@@ -1022,7 +930,7 @@ static void blend_row_linear(float dst[4],
   /* Every other mode is a paint blend code, and CompositeBlend holds the very code the description
    * stores, so this is the one CPU statement of it -- the Mix node's own arithmetic for the modes
    * the node has, the formulas above for the six it does not. */
-  BKE_paint_material_blend_apply(int(blend), dst, fac, top);
+  BKE_paint_blend_apply(int(blend), dst, fac, top);
 }
 
 /**
@@ -1121,6 +1029,20 @@ static void composite_row_blend(float dst[4],
   blend_row_linear(dst, top, blend, factor);
 }
 
+/* The shared dispatcher (#paint_layer_filter_apply) reads the material's own filter codes. */
+static_assert(int(MA_PAINT_LAYER_FILTER_INVERT) == int(PAINT_LAYER_FILTER_CODE_INVERT));
+static_assert(int(MA_PAINT_LAYER_FILTER_LEVELS) == int(PAINT_LAYER_FILTER_CODE_LEVELS));
+static_assert(int(MA_PAINT_LAYER_FILTER_HSL) == int(PAINT_LAYER_FILTER_CODE_HSL));
+static_assert(int(MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST) ==
+              int(PAINT_LAYER_FILTER_CODE_BRIGHTNESS_CONTRAST));
+static_assert(int(MA_PAINT_LAYER_FILTER_POSTERIZE) == int(PAINT_LAYER_FILTER_CODE_POSTERIZE));
+static_assert(int(MA_PAINT_LAYER_FILTER_MATH) == int(PAINT_LAYER_FILTER_CODE_MATH));
+static_assert(int(MA_PAINT_LAYER_FILTER_THRESHOLD) == int(PAINT_LAYER_FILTER_CODE_THRESHOLD));
+static_assert(int(MA_PAINT_LAYER_FILTER_CLAMP) == int(PAINT_LAYER_FILTER_CODE_CLAMP));
+static_assert(int(MA_PAINT_LAYER_FILTER_EXPOSURE) == int(PAINT_LAYER_FILTER_CODE_EXPOSURE));
+static_assert(int(MA_PAINT_LAYER_FILTER_CHANNEL_MIXER) ==
+              int(PAINT_LAYER_FILTER_CODE_CHANNEL_MIXER));
+
 /**
  * Render one layer onto tile-sized buffers: its straight colour in \a r_color and the coverage it
  * blends by in \a r_factor, before the layer's own opacity.
@@ -1146,58 +1068,11 @@ static float composite_filter_color(const int16_t filter,
                                     float rgb[3])
 {
   switch (filter) {
-    case MA_PAINT_LAYER_FILTER_INVERT:
-      paint_layer_invert_apply(rgb, params);
-      break;
-    case MA_PAINT_LAYER_FILTER_HSL:
-      paint_layer_hsl_apply(rgb, params);
-      break;
-    case MA_PAINT_LAYER_FILTER_LEVELS:
-      for (const int k : IndexRange(3)) {
-        rgb[k] = paint_layer_levels_apply(rgb[k], params);
-      }
-      break;
-    case MA_PAINT_LAYER_FILTER_BRIGHTNESS_CONTRAST:
-      paint_layer_brightness_contrast_apply(rgb, params);
-      break;
-    case MA_PAINT_LAYER_FILTER_POSTERIZE:
-      for (const int k : IndexRange(3)) {
-        rgb[k] = paint_layer_posterize_apply(rgb[k], params[PAINT_LAYER_POSTERIZE_STEPS]);
-      }
-      break;
-    case MA_PAINT_LAYER_FILTER_EXPOSURE:
-      paint_layer_exposure_apply(rgb, params);
-      break;
     case MA_PAINT_LAYER_FILTER_DEBAND:
       paint_layer_deband_apply(rgb, params, texel_xy);
       break;
     case MA_PAINT_LAYER_FILTER_NORMAL_CONVERT:
       paint_layer_normal_convert_apply(rgb, params);
-      break;
-    case MA_PAINT_LAYER_FILTER_CHANNEL_MIXER:
-      /* The folded matrix (#paint_layer_channel_mixer_fold, monochrome included), clamped into
-       * [0, 1] like the addon's result. No payload pointer: the 12 numbers are the whole input. */
-      paint_layer_channel_mixer_apply(params, rgb);
-      break;
-    case MA_PAINT_LAYER_FILTER_MATH:
-      for (const int k : IndexRange(3)) {
-        rgb[k] = paint_layer_math_apply(rgb[k],
-                                        int(params[PAINT_LAYER_MATH_OPERATION] + 0.5f),
-                                        params[PAINT_LAYER_MATH_OPERAND_R + k],
-                                        params[PAINT_LAYER_MATH_CLAMP] > 0.5f);
-      }
-      break;
-    case MA_PAINT_LAYER_FILTER_THRESHOLD:
-      for (const int k : IndexRange(3)) {
-        rgb[k] = paint_layer_threshold_apply(rgb[k], params[PAINT_LAYER_THRESHOLD_THRESHOLD]);
-      }
-      break;
-    case MA_PAINT_LAYER_FILTER_CLAMP:
-      for (const int k : IndexRange(3)) {
-        rgb[k] = paint_layer_clamp_apply(rgb[k],
-                                         params[PAINT_LAYER_CLAMP_MIN],
-                                         params[PAINT_LAYER_CLAMP_MAX]);
-      }
       break;
     case MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN:
       for (const int k : IndexRange(3)) {
@@ -1264,6 +1139,9 @@ static float composite_filter_color(const int16_t filter,
       }
       break;
     default:
+      /* The pointwise filters both stacks share (their codes are pinned equal to the shared
+       * ones); a code only the material has was handled above. */
+      paint_layer_filter_apply(int(filter), params, rgb);
       break;
   }
   return 1.0f;
@@ -1311,12 +1189,14 @@ float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskB
     if (item.filter != 0) {
       /* A filter works on the factor so far as a grey, `M = lerp(M, f(M), opacity)`; its function is
        * the one a correction applies to a colour. */
-      float grey[3] = {mask_factor, mask_factor, mask_factor};
-      /* The strength multiplier is ignored: a grey coefficient has no stop alpha to apply. */
-      composite_filter_color(
-          item.filter, item.filter_params, item.filter_ramp, item.filter_curves, mask_texel_xy,
-          grey);
-      mask_factor += (grey[0] - mask_factor) * opacity;
+      mask_factor = paint_layer_mask_filter_apply(mask_factor, opacity, [&](float grey[3]) {
+        composite_filter_color(item.filter,
+                               item.filter_params,
+                               item.filter_ramp,
+                               item.filter_curves,
+                               mask_texel_xy,
+                               grey);
+      });
       /* The filter's result is the coverage the item leaves; the contrast reshapes it like any
        * item's, exactly as the graph wraps the filter's output in the same chain. */
       mask_factor = BKE_paint_layers_mask_contrast_apply(mask_factor, item.contrast);

@@ -19,7 +19,6 @@
 
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
-#include "BLI_math_color.h"
 #include "BLI_math_constants.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_task.hh"
@@ -251,7 +250,7 @@ static void paint_layer_effect_unsharp_apply(ImBuf &buffer, const int radius, Op
       for (const int x : IndexRange(width)) {
         for (const int c : IndexRange(3)) {
           const int64_t i = int64_t(x) * 4 + c;
-          dst[i] = std::max(op(dst[i], src[i]), 0.0f);
+          dst[i] = paint_layer_unsharp_channel_apply(op, dst[i], src[i]);
         }
       }
     }
@@ -282,7 +281,7 @@ template<typename Op> static void paint_layer_effect_map_rgb(ImBuf &buffer, Op o
 void paint_layer_effect_to_luminance(ImBuf &buffer)
 {
   paint_layer_effect_map_rgb(buffer, [](const int /*x*/, const int /*y*/, float *texel) {
-    const float luminance = IMB_colormanagement_get_luminance(texel);
+    const float luminance = paint_layer_luminance_get(texel);
     texel[0] = luminance;
     texel[1] = luminance;
     texel[2] = luminance;
@@ -571,12 +570,6 @@ static void paint_layer_effect_noise_apply(ImBuf &buffer, const MaterialPaintLay
   const bool monochrome = paint_layer_kind_param_bool_get(effect, PAINT_LAYER_NOISE_MONOCHROME);
   const int seed = paint_layer_kind_param_int_get(effect, PAINT_LAYER_NOISE_SEED);
 
-  const auto offset = [&](const int channel, const int x, const int y) {
-    return (type == PAINT_LAYER_NOISE_UNIFORM) ?
-               (paint_layer_noise_uniform(x, y, seed, channel, 1) * 2.0f - 1.0f) * intensity :
-               paint_layer_noise_gaussian(x, y, seed, channel, intensity);
-  };
-
   const int width = buffer.x;
   const int height = buffer.y;
   float *pixels = buffer.float_data_for_write();
@@ -584,35 +577,7 @@ static void paint_layer_effect_noise_apply(ImBuf &buffer, const MaterialPaintLay
     for (const int y : range) {
       for (const int x : IndexRange(width)) {
         float *p = pixels + (int64_t(y) * width + x) * 4;
-        if (type == PAINT_LAYER_NOISE_SALT_PEPPER) {
-          /* A salted channel reads black, a peppered one white, and the rest stay as they are: the
-           * amount is the intensity, half to each side. */
-          const float reach = intensity * 0.5f;
-          for (const int k : IndexRange(3)) {
-            const float u = paint_layer_noise_uniform(x, y, seed, k, 1);
-            p[k] = (u < reach) ? 0.0f : ((u > 1.0f - reach) ? 1.0f : p[k]);
-          }
-          continue;
-        }
-        if (!monochrome) {
-          for (const int k : IndexRange(3)) {
-            const float n = offset(k, x, y);
-            p[k] = (type == PAINT_LAYER_NOISE_SPECKLE) ? clamp_f(p[k] * (1.0f + n), 0.0f, 1.0f) :
-                                                         clamp_f(p[k] + n, 0.0f, 1.0f);
-          }
-          continue;
-        }
-        /* One noise per texel, laid through the luminance: the colour follows it, so the grain is
-         * the same grey the eye reads. */
-        const float lum = IMB_colormanagement_get_luminance(p);
-        const float n = offset(0, x, y);
-        const float moved = (type == PAINT_LAYER_NOISE_SPECKLE) ?
-                                clamp_f(lum * (1.0f + n), 0.0f, 1.0f) :
-                                clamp_f(lum + n, 0.0f, 1.0f);
-        const float delta = moved - lum;
-        p[0] += delta;
-        p[1] += delta;
-        p[2] += delta;
+        paint_layer_noise_texel_apply(type, intensity, monochrome, seed, x, y, p);
       }
     }
   });
@@ -621,7 +586,7 @@ static void paint_layer_effect_noise_apply(ImBuf &buffer, const MaterialPaintLay
 /** Three box passes, a gaussian approximation; the radius reads as the per-pass half reach. */
 static void paint_layer_effect_blur_soft(ImBuf &buffer, const int radius)
 {
-  const int pass = std::max(radius / 2, 1);
+  const int pass = paint_layer_gaussian_pass_radius(radius);
   paint_layer_effect_blur_box(buffer, pass);
   paint_layer_effect_blur_box(buffer, pass);
   paint_layer_effect_blur_box(buffer, pass);
@@ -1846,7 +1811,7 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer,
       const float amount = paint_layer_kind_param_get(effect, PAINT_LAYER_SHARPEN_AMOUNT);
       paint_layer_effect_unsharp_apply(
           buffer, radius, [amount](const float orig, const float blurred) {
-            return orig + (orig - blurred) * amount;
+            return paint_layer_sharpen_apply(orig, blurred, amount);
           });
       break;
     }
@@ -1866,8 +1831,7 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer,
       }
       paint_layer_effect_unsharp_apply(
           buffer, radius, [contrast](const float orig, const float blurred) {
-            const float detail = linearrgb_to_srgb(orig) - linearrgb_to_srgb(blurred);
-            return srgb_to_linearrgb(0.5f + detail * contrast);
+            return paint_layer_high_pass_apply(orig, blurred, contrast);
           });
       break;
     }

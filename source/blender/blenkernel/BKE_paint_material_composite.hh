@@ -41,6 +41,7 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_paint_blend.hh"
 #include "BKE_paint_layers_generator_registry.hh"
 #include "BKE_paint_layers_tile.hh"
 #include "BKE_paint_material_composite_surface.hh"
@@ -69,26 +70,7 @@ struct ImageUser;
 struct Material;
 struct rcti;
 
-/**
- * Blend codes past the Mix node's own range: the stack modes a single `ShaderNodeMix` cannot
- * express. They continue the #eMaterial_RampBlend numbering, because the two share one code space
- * -- the paint composite's #CompositeBlend, the ".PBR Blend" group's `Mode` input and the CPU's
- * #BKE_paint_material_blend_apply all read these numbers -- but they are not Mix blend types: no
- * Mix node may hold one, which is why the modes of this range are built out of the group's own
- * nodes. 19 is the normal combine, which has a group of its own and never reaches the blend chain.
- *
- * Runtime-only, which is why this is a BKE header and not the DNA one: no struct field stores
- * these codes, and the file format names the same modes through #eMaterialPaintLayerBlend, whose
- * own numbering runs past them by one (#MA_PAINT_LAYER_BLEND_NORMAL_REPLACE at 20).
- */
-enum eMaterialPaintBlend : int {
-  MA_PAINT_BLEND_HARD_LIGHT = 20,
-  MA_PAINT_BLEND_VIVID_LIGHT = 21,
-  MA_PAINT_BLEND_PIN_LIGHT = 22,
-  MA_PAINT_BLEND_LINEAR_BURN = 23,
-  MA_PAINT_BLEND_LIGHTER_COLOR = 24,
-  MA_PAINT_BLEND_DARKER_COLOR = 25,
-};
+/* #eMaterialPaintBlend, the codes past the Mix node's range, lives in BKE_paint_blend.hh. */
 
 /**
  * How a layer combines with what is below it: every mode a Mix node offers.
@@ -137,7 +119,7 @@ enum class CompositeBlend : int8_t {
    *
    * The GPU builds each of them out of nodes the group already uses -- Overlay with its two colours
    * exchanged is Hard Light, and the rest are Compare/Switch choices between branches that exist --
-   * while the CPU writes the arithmetic directly (see #BKE_paint_material_blend_apply). The two
+   * while the CPU writes the arithmetic directly (see #BKE_paint_blend_apply). The two
    * must agree texel for texel, which is what the parity tests in `paint_layers_graph_eval_test.cc`
    * hold them to.
    */
@@ -153,20 +135,6 @@ static_assert(int(CompositeBlend::Mix) == MA_RAMP_BLEND);
 static_assert(int(CompositeBlend::Exclusion) == MA_RAMP_EXCLUSION);
 static_assert(int(CompositeBlend::HardLight) == MA_PAINT_BLEND_HARD_LIGHT);
 static_assert(int(CompositeBlend::DarkerColor) == MA_PAINT_BLEND_DARKER_COLOR);
-
-/**
- * Blend \a col over \a r_col by \a fac, for one paint blend code: the CPU statement of what the
- * ".PBR Blend" group's node clusters compute on the GPU.
- *
- * A #MA_RAMP_* code is the Mix node's own `ramp_blend`; an #eMaterialPaintBlend code is the
- * extended arithmetic its range needs. The factor is clamped to 0..1 by the caller's conventions
- * (the row blend clamps it; nothing else clamps, so a float buffer keeps a mode's overshoot).
- * Unknown codes leave \a r_col alone.
- */
-void BKE_paint_material_blend_apply(int code,
-                                    float r_col[4],
-                                    float fac,
-                                    const float col[4]);
 
 /**
  * The maximum number of scalar parameters any filter's fold can produce.

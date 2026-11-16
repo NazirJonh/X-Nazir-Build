@@ -31,6 +31,9 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generator_registry.hh"
 
+/* Re-exports the shared filter formulas and parameter layouts, so callers keep one include. */
+#include "../paint_layer_formula.hh"
+
 namespace blender {
 
 struct BlendDataReader;
@@ -349,99 +352,13 @@ struct PaintLayerKindInfo {
   const char *no_stroke_reason = nullptr;
 };
 
-/** The positions of the Levels filter's parameters in its schema. */
-enum PaintLayerLevelsParam : int {
-  PAINT_LAYER_LEVELS_IN_BLACK = 0,
-  PAINT_LAYER_LEVELS_IN_WHITE = 1,
-  PAINT_LAYER_LEVELS_GAMMA = 2,
-  PAINT_LAYER_LEVELS_OUT_BLACK = 3,
-  PAINT_LAYER_LEVELS_OUT_WHITE = 4,
-  PAINT_LAYER_LEVELS_PARAM_NUM = 5,
-};
-
-/** The positions of the HSL filter's parameters in its schema. */
-enum PaintLayerHslParam : int {
-  PAINT_LAYER_HSL_HUE = 0,
-  PAINT_LAYER_HSL_SATURATION = 1,
-  PAINT_LAYER_HSL_VALUE = 2,
-  /** The lift the muted colours get, in the addon's -100..100 scaled to -1..1: zero is no-op. */
-  PAINT_LAYER_HSL_VIBRANCE = 3,
-  PAINT_LAYER_HSL_PARAM_NUM = 4,
-};
-
-/** The positions of the Brightness/Contrast filter's parameters in its schema. */
-enum PaintLayerBrightnessContrastParam : int {
-  PAINT_LAYER_BRIGHTNESS_CONTRAST_BRIGHTNESS = 0,
-  PAINT_LAYER_BRIGHTNESS_CONTRAST_CONTRAST = 1,
-  PAINT_LAYER_BRIGHTNESS_CONTRAST_PARAM_NUM = 2,
-};
+/* The shared filter parameter layouts live in `paint_layer_formula.hh`. */
 
 /** The positions of the Color Ramp filter's parameters in its schema; the ramp payload is last. */
 enum PaintLayerColorRampParam : int {
   /** 0 ignores the alpha of the ramp stop, 1 multiplies the filter's strength by it. */
   PAINT_LAYER_COLOR_RAMP_AFFECT_ALPHA = 0,
   PAINT_LAYER_COLOR_RAMP_PARAM_NUM = 2,
-};
-
-/** The positions of the Posterize filter's parameters in its schema. */
-enum PaintLayerPosterizeParam : int {
-  PAINT_LAYER_POSTERIZE_STEPS = 0,
-  PAINT_LAYER_POSTERIZE_PARAM_NUM = 1,
-};
-
-/** The operation of the Math filter, the value of its #PAINT_LAYER_MATH_OPERATION parameter. */
-enum PaintLayerMathOperation : int {
-  PAINT_LAYER_MATH_OP_ADD = 0,
-  PAINT_LAYER_MATH_OP_SUBTRACT = 1,
-  PAINT_LAYER_MATH_OP_MULTIPLY = 2,
-  PAINT_LAYER_MATH_OP_DIVIDE = 3,
-  PAINT_LAYER_MATH_OP_MINIMUM = 4,
-  PAINT_LAYER_MATH_OP_MAXIMUM = 5,
-  PAINT_LAYER_MATH_OP_POWER = 6,
-  PAINT_LAYER_MATH_OP_LOGARITHM = 7,
-};
-
-/** The positions of the Math filter's parameters in its schema. */
-enum PaintLayerMathParam : int {
-  PAINT_LAYER_MATH_OPERATION = 0,
-  /** The node's own Use Clamp: the result folds into [0, 1]. */
-  PAINT_LAYER_MATH_CLAMP = 1,
-  /** One operand per colour channel: the value the channel is combined with. */
-  PAINT_LAYER_MATH_OPERAND_R = 2,
-  PAINT_LAYER_MATH_OPERAND_G = 3,
-  PAINT_LAYER_MATH_OPERAND_B = 4,
-  PAINT_LAYER_MATH_PARAM_NUM = 5,
-};
-
-/** The positions of the Threshold filter's parameters in its schema. */
-enum PaintLayerThresholdParam : int {
-  PAINT_LAYER_THRESHOLD_THRESHOLD = 0,
-  PAINT_LAYER_THRESHOLD_PARAM_NUM = 1,
-};
-
-/** The positions of the Histogram Scan filter's parameters in its schema. */
-enum PaintLayerHistogramScanParam : int {
-  /** The crossover point of the remap, the brightness the ramp is centered on. */
-  PAINT_LAYER_HISTOGRAM_SCAN_POSITION = 0,
-  /** The half-width of the soft transition around the position; zero reads as a hard edge. */
-  PAINT_LAYER_HISTOGRAM_SCAN_CONTRAST = 1,
-  /** On: the two states flip, `1 - out`, the way an inverted mask item does. */
-  PAINT_LAYER_HISTOGRAM_SCAN_INVERT = 2,
-  PAINT_LAYER_HISTOGRAM_SCAN_PARAM_NUM = 3,
-};
-
-/** The positions of the Histogram Shift filter's parameters in its schema. */
-enum PaintLayerHistogramShiftParam : int {
-  /** The fraction of the tonal range the value rolls by; one is the value again. */
-  PAINT_LAYER_HISTOGRAM_SHIFT_POSITION = 0,
-  PAINT_LAYER_HISTOGRAM_SHIFT_PARAM_NUM = 1,
-};
-
-/** The positions of the Clamp filter's parameters in its schema. */
-enum PaintLayerClampParam : int {
-  PAINT_LAYER_CLAMP_MIN = 0,
-  PAINT_LAYER_CLAMP_MAX = 1,
-  PAINT_LAYER_CLAMP_PARAM_NUM = 2,
 };
 
 /**
@@ -471,15 +388,6 @@ inline constexpr PaintLayerColorBalanceTriple
         {"Balance A", PAINT_LAYER_COLOR_BALANCE_A},
         {"Balance B", PAINT_LAYER_COLOR_BALANCE_B},
         {"Balance E", PAINT_LAYER_COLOR_BALANCE_E},
-};
-
-/** The positions of the Channel Mixer filter's parameters in its schema. */
-enum PaintLayerChannelMixerParam : int {
-  /** The payload: #MaterialPaintLayerChannelMixer, behind the row's own pointer. */
-  PAINT_LAYER_CHANNEL_MIXER_MIXER = 0,
-  /** On: a grey from the red row and the constants' mean. */
-  PAINT_LAYER_CHANNEL_MIXER_MONOCHROME = 1,
-  PAINT_LAYER_CHANNEL_MIXER_PARAM_NUM = 2,
 };
 
 /**
@@ -747,35 +655,6 @@ bool paint_layer_generator_has_own_color(const MaterialPaintLayer &row);
 
 /** \} */
 
-/**
- * The layout of the Channel Mixer's folded 12 floats, shared by the CPU composite, the generated
- * graph and the GPU push constants: the three rows in the `.xyz` of the three float4s (positions
- * 0, 4, 8) and the three constants in their `.w` (3, 7, 11), the output channel k reading row k.
- */
-enum PaintLayerChannelMixerFolded : int {
-  PAINT_LAYER_CHANNEL_MIXER_ROW_R = 0,
-  PAINT_LAYER_CHANNEL_MIXER_ROW_G = 4,
-  PAINT_LAYER_CHANNEL_MIXER_ROW_B = 8,
-  /** The position of the first constant: the `.w` of the red row's float4. */
-  PAINT_LAYER_CHANNEL_MIXER_CONSTANTS = 3,
-  /** The length the folded array needs; the constant of row k sits at `3 + 4 * k`. */
-  PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM = 12,
-};
-
-/** One vector a Channel Mixer input carries: a row, or the three constants. */
-struct PaintLayerChannelMixerVector {
-  const char *suffix;
-  int position;
-};
-inline constexpr int PAINT_LAYER_CHANNEL_MIXER_VECTOR_NUM = 4;
-inline constexpr PaintLayerChannelMixerVector
-    PAINT_LAYER_CHANNEL_MIXER_VECTORS[PAINT_LAYER_CHANNEL_MIXER_VECTOR_NUM] = {
-        {"Mixer R", PAINT_LAYER_CHANNEL_MIXER_ROW_R},
-        {"Mixer G", PAINT_LAYER_CHANNEL_MIXER_ROW_G},
-        {"Mixer B", PAINT_LAYER_CHANNEL_MIXER_ROW_B},
-        {"Mixer Constants", PAINT_LAYER_CHANNEL_MIXER_CONSTANTS},
-};
-
 /** The positions of a map-coverage operator's parameters in its schema. */
 enum PaintLayerCoverageParam : int {
   /** How far a sample may differ from a stored colour and still match (max-channel). */
@@ -783,30 +662,6 @@ enum PaintLayerCoverageParam : int {
   /** The width of the falloff past the tolerance; zero reads as a hard edge. */
   PAINT_LAYER_COVERAGE_SOFTNESS = 1,
   PAINT_LAYER_COVERAGE_PARAM_NUM = 2,
-};
-
-/** The shape of the Blur filter's kernel, the value of its #PAINT_LAYER_BLUR_SHAPE parameter. */
-enum PaintLayerBlurShape : int {
-  PAINT_LAYER_BLUR_BOX = 0,
-  PAINT_LAYER_BLUR_GAUSSIAN = 1,
-};
-
-/** The positions of the Blur filter's parameters in its schema. */
-enum PaintLayerBlurParam : int {
-  PAINT_LAYER_BLUR_SHAPE = 0,
-  PAINT_LAYER_BLUR_RADIUS = 1,
-  PAINT_LAYER_BLUR_PARAM_NUM = 2,
-};
-
-/** The positions of the Blur Directional filter's parameters in its schema. */
-enum PaintLayerBlurDirectionalParam : int {
-  /** The angle the line of samples runs at, in degrees, counter-clockwise off the +X of the map. */
-  PAINT_LAYER_BLUR_DIRECTIONAL_ANGLE = 0,
-  /** Whole texels: the line's half reach. */
-  PAINT_LAYER_BLUR_DIRECTIONAL_RADIUS = 1,
-  /** How much of the average the result takes: zero is the colour as it is, one is all average. */
-  PAINT_LAYER_BLUR_DIRECTIONAL_MIX = 2,
-  PAINT_LAYER_BLUR_DIRECTIONAL_PARAM_NUM = 3,
 };
 
 /** What the Drop Shadow filter reads its silhouette from, the value of its
@@ -963,29 +818,6 @@ enum PaintLayerPixelateParam : int {
   PAINT_LAYER_PIXELATE_PARAM_NUM = 1,
 };
 
-/** What the HSL Perspective adjusts by, the value of its #PAINT_LAYER_HSL_PERSPECTIVE_MODE
- * parameter. */
-enum PaintLayerHslPerspectiveMode : int {
-  /** The internal value channel shifts: the max channel of the colour moves, what the colour is
-   * stored as. */
-  PAINT_LAYER_HSL_PERSPECTIVE_REGULAR = 0,
-  /** The colour lifts toward white or black, so what it looks like moves: the perceptual shift
-   * the headroom of the colour eases. */
-  PAINT_LAYER_HSL_PERSPECTIVE_PERCEPTIVE = 1,
-};
-
-/** The positions of the HSL Perspective filter's parameters in its schema. */
-enum PaintLayerHslPerspectiveParam : int {
-  PAINT_LAYER_HSL_PERSPECTIVE_MODE = 0,
-  /** Bipolar around a half: below it the hue shifts one way, above it the other. */
-  PAINT_LAYER_HSL_PERSPECTIVE_HUE = 1,
-  /** Bipolar around a half: below it the saturation falls, above it the saturation rises. */
-  PAINT_LAYER_HSL_PERSPECTIVE_SATURATION = 2,
-  /** Bipolar around a half: below it the lightness falls, above it the lightness rises. */
-  PAINT_LAYER_HSL_PERSPECTIVE_LIGHTNESS = 3,
-  PAINT_LAYER_HSL_PERSPECTIVE_PARAM_NUM = 4,
-};
-
 /** Where the Blur Slope reads its driver from, the value of its source-mode parameter. */
 enum PaintLayerSlopeSource : int {
   /** The filter's own seeded noise, tiled by the source tilling. */
@@ -1022,43 +854,38 @@ enum PaintLayerBlurSlopeParam : int {
   PAINT_LAYER_BLUR_SLOPE_PARAM_NUM = 9,
 };
 
-/** The positions of the Sharpen filter's parameters in its schema. */
-enum PaintLayerSharpenParam : int {
-  PAINT_LAYER_SHARPEN_RADIUS = 0,
-  PAINT_LAYER_SHARPEN_AMOUNT = 1,
-  PAINT_LAYER_SHARPEN_PARAM_NUM = 2,
-};
+/**
+ * The Color Ramp filter applied to \a rgb in place: the colour's luminance indexes \a band, and the
+ * ramp's colour replaces the colour. Returns the multiplier of the filter's strength: 1, or the
+ * alpha of the ramp colour found when \a use_alpha is set.
+ */
+float paint_layer_color_ramp_apply(const ColorBand &band, bool use_alpha, float rgb[3]);
 
-/** The value of the High Pass filter's #PAINT_LAYER_HIGH_PASS_OUTPUT. */
-enum PaintLayerHighPassOutput : int {
-  /** The detail of each colour channel. */
-  PAINT_LAYER_HIGH_PASS_OUTPUT_COLOR = 0,
-  /** The detail of the luminance, the same grey in all three channels. */
-  PAINT_LAYER_HIGH_PASS_OUTPUT_GRAYSCALE = 1,
-};
+/**
+ * The RGB Curves filter applied to \a rgb in place, at full strength: the RGB Curves shader node's
+ * own function, each channel through its curve with no white balancing (the node's GPU and
+ * multi-function evaluations ignore the levels). The mapping's tables must be built
+ * (#BKE_curvemapping_init) when this runs. Alpha is untouched.
+ */
+void paint_layer_curves_apply(const CurveMapping &curve_mapping, float rgb[3]);
 
-/** The positions of the High Pass filter's parameters in its schema. */
-enum PaintLayerHighPassParam : int {
-  PAINT_LAYER_HIGH_PASS_RADIUS = 0,
-  PAINT_LAYER_HIGH_PASS_CONTRAST = 1,
-  PAINT_LAYER_HIGH_PASS_OUTPUT = 2,
-  PAINT_LAYER_HIGH_PASS_PARAM_NUM = 3,
-};
+/**
+ * The shader's own lookup in the table #paint_layer_curves_lut_build (BKE_paint_layers_composite.hh)
+ * made, as a CPU reference.
+ */
+void paint_layer_curves_lut_eval(Span<float4> texels, int width, float rgb[3]);
 
-/** The direction of the Erode/Dilate kernel, the value of its #PAINT_LAYER_ERODE_DILATE_MODE. */
-enum PaintLayerErodeDilateMode : int {
-  /** The minimum of the neighbourhood: the bright regions shrink. */
-  PAINT_LAYER_ERODE_DILATE_ERODE = 0,
-  /** The maximum of the neighbourhood: the bright regions grow. */
-  PAINT_LAYER_ERODE_DILATE_DILATE = 1,
-};
-
-/** The positions of the Erode/Dilate filter's parameters in its schema. */
-enum PaintLayerErodeDilateParam : int {
-  PAINT_LAYER_ERODE_DILATE_MODE = 0,
-  PAINT_LAYER_ERODE_DILATE_RADIUS = 1,
-  PAINT_LAYER_ERODE_DILATE_PARAM_NUM = 2,
-};
+/**
+ * The shader's own lookup in the table #paint_layer_color_ramp_lut_build made, as a CPU reference.
+ * \a constant selects the nearest texel, which is what a CONSTANT band lays; otherwise the two
+ * neighbours are linearly interpolated. Returns the filter's strength multiplier: the stop's alpha
+ * when \a use_alpha is set, one otherwise.
+ */
+float paint_layer_color_ramp_lut_eval(Span<float4> texels,
+                                      int width,
+                                      bool constant,
+                                      bool use_alpha,
+                                      float rgb[3]);
 
 /** The kernel of the Glow filter, the value of its #PAINT_LAYER_GLOW_MODE parameter. */
 enum PaintLayerGlowMode : int {
@@ -1144,28 +971,6 @@ void paint_layer_color_match_apply(const float source_color[3],
                                    int y,
                                    float rgb[3]);
 
-/** The positions of the Exposure filter's parameters in its schema. */
-enum PaintLayerExposureParam : int {
-  /** The power of two the colour is scaled by: one stop per unit. */
-  PAINT_LAYER_EXPOSURE_EXPOSURE = 0,
-  /** What the scaled colour rises or falls by, in scene linear. */
-  PAINT_LAYER_EXPOSURE_OFFSET = 1,
-  /** The power every positive value is raised to, read as one over it. */
-  PAINT_LAYER_EXPOSURE_GAMMA = 2,
-  PAINT_LAYER_EXPOSURE_PARAM_NUM = 3,
-};
-
-/** The positions of the Invert filter's parameters in its schema. */
-enum PaintLayerInvertParam : int {
-  /** How far the red channel turns to its complement: one is the whole way, zero none of it. */
-  PAINT_LAYER_INVERT_AMOUNT_R = 0,
-  /** The same for green. */
-  PAINT_LAYER_INVERT_AMOUNT_G = 1,
-  /** The same for blue. */
-  PAINT_LAYER_INVERT_AMOUNT_B = 2,
-  PAINT_LAYER_INVERT_PARAM_NUM = 3,
-};
-
 /** The two modes of the Deband filter. */
 enum PaintLayerDebandMode : int {
   /** A triangular noise under the quantization step, breaking the bands up. */
@@ -1185,38 +990,8 @@ enum PaintLayerDebandParam : int {
 };
 
 /**
- * The Hue/Saturation/Value stage itself: hue shifted by \a hue_turns turns, saturation clamped to
- * one, value scaled, result not below zero. The one formula every CPU consumer runs - the stack's
- * HSL filter passes its own parameters (and then applies its vibrance); the brush's "Correction
- * Image" passes the constants its prepare step resolved, so the two cannot drift apart.
- */
-void paint_layer_hsv_stage_apply(float rgb[3], float hue_turns, float saturation, float value);
-
-/**
- * The HSL filter applied to \a rgb in place, at full strength: the Hue/Saturation/Value node's
- * function (hue shifted by `hue - 0.5` turns, saturation clamped to one, value scaled, result not
- * below zero), so the CPU composite and the generated node agree.
- */
-void paint_layer_hsl_apply(float rgb[3], const float params[PAINT_LAYER_HSL_PARAM_NUM]);
-
-/**
- * The HSL Perspective applied to one texel \a rgb in place: the hue and saturation shift the way
- * the Hue/Saturation node's own math does, the lightness moves the value channel in the Regular
- * mode and lifts the colour toward white or black in the Perceptive one.
- */
-void paint_layer_hsl_perspective_apply(float rgb[3],
-                                       const float params[PAINT_LAYER_HSL_PERSPECTIVE_PARAM_NUM]);
-
-/**
- * One uniform in [0, 1) of a texel hash family: \a salt separates the passes and the channels, the
- * seed moves the pattern, and the texel's coordinates are where the noise lives. The one generator
- * the Deband and Noise filters both read.
- */
-float paint_layer_texel_hash_uniform(int x, int y, int seed, uint32_t salt);
-
-/**
- * One uniform of the Deband filter's triangular pair, from #paint_layer_texel_hash_uniform: the
- * salt keeps the two passes and the three channels apart.
+ * One uniform of the Deband filter's triangular pair, from the shared
+ * #paint_layer_texel_hash_uniform: the salt keeps the two passes and the three channels apart.
  */
 float paint_layer_deband_noise(int x, int y, int seed, int channel, int pass);
 
@@ -1229,44 +1004,6 @@ float paint_layer_deband_noise(int x, int y, int seed, int channel, int pass);
 void paint_layer_deband_apply(float rgb[3],
                               const float params[PAINT_LAYER_DEBAND_PARAM_NUM],
                               const int texel_xy[2]);
-
-/** The Noise filter's families. */
-enum PaintLayerNoiseType : int {
-  /** A sum of three uniforms, scaled so the spread reads as the intensity. */
-  PAINT_LAYER_NOISE_GAUSSIAN = 0,
-  /** One uniform, signed and scaled. */
-  PAINT_LAYER_NOISE_UNIFORM = 1,
-  /** The gaussian noise as a factor of the colour itself. */
-  PAINT_LAYER_NOISE_SPECKLE = 2,
-  /** The channels the uniform puts under the intensity's half read as black, the ones over the
-   * other end as white, and the rest stay as they are. */
-  PAINT_LAYER_NOISE_SALT_PEPPER = 3,
-};
-
-/** The positions of the Noise filter's parameters in its schema. */
-enum PaintLayerNoiseParam : int {
-  PAINT_LAYER_NOISE_TYPE = 0,
-  /** The spread of the noise, in colour: the sigma of the gaussian family, the reach of the rest. */
-  PAINT_LAYER_NOISE_INTENSITY = 1,
-  /** On: the noise moves the scene-linear luminance and the colour follows it. */
-  PAINT_LAYER_NOISE_MONOCHROME = 2,
-  PAINT_LAYER_NOISE_SEED = 3,
-  PAINT_LAYER_NOISE_PARAM_NUM = 4,
-};
-
-/**
- * One uniform in [0, 1) of the Noise filter, from the same hash family the Deband pair reads: the
- * salt keeps the three passes and the channels apart, the seed moves the pattern, and the texel is
- * where the noise lives.
- */
-float paint_layer_noise_uniform(int x, int y, int seed, int channel, int pass);
-
-/**
- * The gaussian noise of one texel channel: three uniforms of #paint_layer_noise_uniform summed,
- * centred and scaled, so the spread of the answer reads as \a intensity. The one function the
- * effect kernel and the tests both call, so they cannot disagree.
- */
-float paint_layer_noise_gaussian(int x, int y, int seed, int channel, float intensity);
 
 /** The Normal Convert filter's modes, over the encoded [0, 1] channels. */
 enum PaintLayerNormalConvertMode : int {
@@ -1300,278 +1037,6 @@ enum PaintLayerNormalConvertParam : int {
  */
 void paint_layer_normal_convert_apply(float rgb[3],
                                       const float params[PAINT_LAYER_NORMAL_CONVERT_PARAM_NUM]);
-
-/**
- * The Levels stage itself, on the t in [0, 1] the caller has already scaled out of its raw input:
- * the one formula every CPU consumer runs. The stack's Levels filter scales from its parameter
- * array per texel; the brush's "Correction Image" calls it with the constants its prepare step
- * resolved, so the two cannot drift apart on the math they paint.
- */
-inline float paint_layer_levels_stage_apply(const float t,
-                                            const float inv_gamma,
-                                            const float out_black,
-                                            const float out_white)
-{
-  float result = (t < 0.0f) ? 0.0f : ((t > 1.0f) ? 1.0f : t);
-  /* The Gamma node leaves a non-positive value as it is. */
-  if (result > 0.0f) {
-    result = powf(result, inv_gamma);
-  }
-  return result * (out_white - out_black) + out_black;
-}
-
-/** The Levels of a filter value: the same function for every consumer that applies it on the CPU. */
-inline float paint_layer_levels_apply(const float value, const float params[PAINT_LAYER_LEVELS_PARAM_NUM])
-{
-  /* A zero span or gamma reads as zero, which is what the Math Divide node gives the graph. */
-  const float span = params[PAINT_LAYER_LEVELS_IN_WHITE] - params[PAINT_LAYER_LEVELS_IN_BLACK];
-  const float k = (span != 0.0f) ? 1.0f / span : 0.0f;
-  const float m = -(params[PAINT_LAYER_LEVELS_IN_BLACK] * k);
-  const float inv_gamma = (params[PAINT_LAYER_LEVELS_GAMMA] != 0.0f) ?
-                              1.0f / params[PAINT_LAYER_LEVELS_GAMMA] :
-                              0.0f;
-  return paint_layer_levels_stage_apply(
-      value * k + m, inv_gamma, params[PAINT_LAYER_LEVELS_OUT_BLACK], params[PAINT_LAYER_LEVELS_OUT_WHITE]);
-}
-
-/**
- * The Invert stage's per-channel target: `|c - 1|`, the complement on [0, 1], the same distance
- * past it - what the Difference mix against white and the CPU composite both read. Shared by the
- * stack's Invert filter (which moves each channel part of the way, by its own amount) and the
- * brush correction's full invert.
- */
-inline float paint_layer_invert_target(const float c)
-{
-  return std::fabs(c - 1.0f);
-}
-
-/**
- * The Invert filter applied to \a rgb in place, each channel by its own strength: the channel moves
- * from its colour to #paint_layer_invert_target of itself. The default of every amount is one, so a
- * row without stored parameters inverts the whole way as the unparameterised filter always did.
- * Alpha is not part of \a rgb and so stays untouched.
- */
-inline void paint_layer_invert_apply(float rgb[3],
-                                     const float params[PAINT_LAYER_INVERT_PARAM_NUM])
-{
-  for (int k = 0; k < 3; k++) {
-    rgb[k] += (paint_layer_invert_target(rgb[k]) - rgb[k]) * params[k];
-  }
-}
-
-/**
- * The Exposure filter applied to \a rgb in place: the colour scaled by `2^exposure`, shifted by the
- * offset, then raised to one over the gamma. The power is the Gamma node's own function -- a
- * non-positive value is left as it is -- so a default gamma leaves a colour above one above one:
- * the filter brightens an HDR map instead of clipping what it already holds. Alpha is not part of
- * \a rgb and so stays untouched.
- */
-inline void paint_layer_exposure_apply(
-    float rgb[3], const float params[PAINT_LAYER_EXPOSURE_PARAM_NUM])
-{
-  const float scale = powf(2.0f, params[PAINT_LAYER_EXPOSURE_EXPOSURE]);
-  const float exponent = 1.0f / params[PAINT_LAYER_EXPOSURE_GAMMA];
-  for (int i = 0; i < 3; i++) {
-    const float scaled = rgb[i] * scale + params[PAINT_LAYER_EXPOSURE_OFFSET];
-    rgb[i] = (scaled > 0.0f) ? powf(scaled, exponent) : scaled;
-  }
-}
-
-/**
- * The Brightness/Contrast filter applied to \a rgb in place, at full strength: the
- * Brightness/Contrast shader node's function, `out = max(a * in + b, 0)` with `a = 1 + contrast`
- * and `b = brightness - contrast * 0.5`, so the CPU composite and the generated node agree. Alpha is
- * not part of \a rgb and so stays untouched.
- */
-inline void paint_layer_brightness_contrast_apply(
-    float rgb[3], const float params[PAINT_LAYER_BRIGHTNESS_CONTRAST_PARAM_NUM])
-{
-  const float contrast = params[PAINT_LAYER_BRIGHTNESS_CONTRAST_CONTRAST];
-  const float a = 1.0f + contrast;
-  const float b = params[PAINT_LAYER_BRIGHTNESS_CONTRAST_BRIGHTNESS] - contrast * 0.5f;
-  for (int i = 0; i < 3; i++) {
-    rgb[i] = std::max(a * rgb[i] + b, 0.0f);
-  }
-}
-
-/**
- * The Color Ramp filter applied to \a rgb in place: the colour's luminance indexes \a band, and the
- * ramp's colour replaces the colour. Returns the multiplier of the filter's strength: 1, or the
- * alpha of the ramp colour found when \a use_alpha is set.
- */
-float paint_layer_color_ramp_apply(const ColorBand &band, bool use_alpha, float rgb[3]);
-
-/**
- * The RGB Curves filter applied to \a rgb in place, at full strength: the RGB Curves shader node's
- * own function, each channel through its curve with no white balancing (the node's GPU and
- * multi-function evaluations ignore the levels). The mapping's tables must be built
- * (#BKE_curvemapping_init) when this runs. Alpha is untouched.
- */
-void paint_layer_curves_apply(const CurveMapping &curve_mapping, float rgb[3]);
-
-/**
- * The shader's own lookup in the table #paint_layer_curves_lut_build (BKE_paint_layers_composite.hh)
- * made, as a CPU reference.
- */
-void paint_layer_curves_lut_eval(Span<float4> texels, int width, float rgb[3]);
-
-/**
- * The shader's own lookup in the table #paint_layer_color_ramp_lut_build made, as a CPU reference.
- * \a constant selects the nearest texel, which is what a CONSTANT band lays; otherwise the two
- * neighbours are linearly interpolated. Returns the filter's strength multiplier: the stop's alpha
- * when \a use_alpha is set, one otherwise.
- */
-float paint_layer_color_ramp_lut_eval(Span<float4> texels,
-                                      int width,
-                                      bool constant,
-                                      bool use_alpha,
-                                      float rgb[3]);
-
-/**
- * The Posterize filter applied to one channel: the value quantized to \a steps evenly spaced levels
- * over [0, 1], `floor(clamp(value, 0, 1) * (steps - 1) + 0.5) / (steps - 1)`, so both endpoints are
- * preserved and a value at a level's midpoint rounds to the nearer one. A step count below two
- * reads as two, the smallest count that shows a step.
- */
-inline float paint_layer_posterize_apply(const float value, const float steps)
-{
-  const float k = std::max(steps - 1.0f, 1.0f);
-  const float clamped = std::clamp(value, 0.0f, 1.0f);
-  return std::floor(clamped * k + 0.5f) / k;
-}
-
-/**
- * One channel of the Math filter: \a value combined with the constant \a operand by \a operation
- * (a #PaintLayerMathOperation). POWER and LOGARITHM read the Math node's safe rules through
- * #safe_powf and #safe_logf, so a negative base under a fractional exponent and a non-positive
- * logarithm base or argument stay defined; a division by zero reads zero. With \a clamp the result
- * folds into [0, 1], the node's own Use Clamp, so the CPU composite and the generated node agree.
- */
-inline float paint_layer_math_apply(const float value,
-                                    const int operation,
-                                    const float operand,
-                                    const bool clamp)
-{
-  float result = value;
-  switch (operation) {
-    case PAINT_LAYER_MATH_OP_ADD:
-      result = value + operand;
-      break;
-    case PAINT_LAYER_MATH_OP_SUBTRACT:
-      result = value - operand;
-      break;
-    case PAINT_LAYER_MATH_OP_MULTIPLY:
-      result = value * operand;
-      break;
-    case PAINT_LAYER_MATH_OP_DIVIDE:
-      result = (operand != 0.0f) ? value / operand : 0.0f;
-      break;
-    case PAINT_LAYER_MATH_OP_MINIMUM:
-      result = std::min(value, operand);
-      break;
-    case PAINT_LAYER_MATH_OP_MAXIMUM:
-      result = std::max(value, operand);
-      break;
-    case PAINT_LAYER_MATH_OP_POWER:
-      result = safe_powf(value, operand);
-      break;
-    case PAINT_LAYER_MATH_OP_LOGARITHM:
-      result = safe_logf(value, operand);
-      break;
-    default:
-      break;
-  }
-  return clamp ? std::clamp(result, 0.0f, 1.0f) : result;
-}
-
-/**
- * One channel of the Threshold filter: the two states of the Math node's Greater Than, `1.0` when
- * the value is strictly above \a threshold and `0.0` otherwise, so the CPU composite and the
- * generated node agree on the comparison's edge.
- */
-inline float paint_layer_threshold_apply(const float value, const float threshold)
-{
-  return (value > threshold) ? 1.0f : 0.0f;
-}
-
-/**
- * One channel of the Histogram Scan filter: the smoothstep the Math node's own Smooth Step
- * evaluates, centered on \a position and opened by \a contrast into a ramp of the same width each
- * side, so `contrast = 0` reads as the Threshold the position alone makes. An inverted position
- * flips the two states, `1 - out`, the way an inverted mask item does.
- */
-inline float paint_layer_histogram_scan_apply(const float value,
-                                              const float position,
-                                              const float contrast,
-                                              const bool invert_position)
-{
-  /* The transition spans the same width each side of the position, so a full contrast is the
-   * ramp the value walks from zero at the position's low edge to one at its high one. */
-  const float edge = contrast * 0.5f;
-  const float lo = position - edge;
-  const float span = std::max(edge * 2.0f, 1e-6f);
-  const float t = std::clamp((value - lo) / span, 0.0f, 1.0f);
-  const float result = t * t * (3.0f - 2.0f * t);
-  return invert_position ? 1.0f - result : result;
-}
-
-/**
- * One channel of the Histogram Shift filter: the value plus the position, wrapped back through
- * zero when it passes one, the Math node's own Wrap. The shift is cyclic: a position of one is
- * the value again.
- */
-inline float paint_layer_histogram_shift_apply(const float value, const float position)
-{
-  const float shifted = value + position;
-  return shifted - std::floor(shifted);
-}
-
-/**
- * One channel of the Smoothstep filter: the Hermite interpolation between the range's edges, the
- * Map Range node's own Smoothstep. An empty range reads as the low edge's state: the extraction
- * of nothing leaves nothing.
- */
-inline float paint_layer_smoothstep_apply(const float value, const float minimum, const float maximum)
-{
-  const float span = maximum - minimum;
-  const float t = (std::abs(span) < 1e-6f) ? 0.0f : std::clamp((value - minimum) / span, 0.0f, 1.0f);
-  return t * t * (3.0f - 2.0f * t);
-}
-
-/**
- * One channel of the Contrast Luminosity filter: the value's distance from the middle scaled by
- * the contrast, then shifted by the luminosity. A negative contrast folds the distance in, a
- * positive one spreads it; the shift rides after, so a full-black value still moves.
- */
-inline float paint_layer_contrast_luminosity_apply(const float value,
-                                                   const float contrast,
-                                                   const float luminosity)
-{
-  const float scaled = (value - 0.5f) * (1.0f + contrast) + 0.5f;
-  return scaled + luminosity;
-}
-
-/**
- * One channel of the Height Adjust filter: the invert, then the offset, then the multiply -- the
- * order the filter's own note pins, where a zero offset result annihilates the multiply. The
- * result is left open above one: a height pushed past the top stays there, and the height delta
- * machinery reads the excess as it reads any HDR value.
- */
-inline float paint_layer_height_adjust_apply(
-    const float value, const bool invert, const float offset, const float multiply)
-{
-  const float flipped = invert ? 1.0f - value : value;
-  return (flipped + offset) * multiply;
-}
-
-/**
- * One channel of the Clamp filter: `min(max(value, min), max)`, the Math node's own Clamp and the
- * order that keeps a well-defined result when \a min is above \a max.
- */
-inline float paint_layer_clamp_apply(const float value, const float min, const float max)
-{
-  return std::min(std::max(value, min), max);
-}
 
 /**
  * The value of the parameter \a index of \a row's kind: the stored one, or the schema's default.
@@ -1733,32 +1198,7 @@ bool paint_layer_kind_has_channel_mixer_param(const MaterialPaintLayer &row);
 const struct MaterialPaintLayerChannelMixer *BKE_paint_layers_channel_mixer_get(
     const MaterialPaintLayer &row);
 
-/**
- * Fold \a mixer into the 12 numbers the CPU composite, the generated graph and the GPU read, laid
- * at #PaintLayerChannelMixerFolded's positions: `out_k = dot(row_k, c) + constant_k`. With
- * \a monochrome all three rows are the red row and all three constants their mean, so the three
- * outputs are one grey -- the addon's monochrome, `gray = red_row . c + mean(constants)`. The one
- * place that knows the formulas; its callers never re-derive them.
- */
-void paint_layer_channel_mixer_fold(const MaterialPaintLayerChannelMixer &mixer,
-                                    bool monochrome,
-                                    float r_params[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM]);
-
-/**
- * The three numbers of the \a index-th vector of #PAINT_LAYER_CHANNEL_MIXER_VECTORS out of the
- * folded layout: a row's three neighbours, or the three constants, which sit in the `.w` of the
- * three rows four floats apart. The one place the layout's stride is written for its readers.
- */
-void paint_layer_channel_mixer_vector_get(
-    const float folded[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM], int index, float r_vec[3]);
-
-/**
- * The folded matrix applied to \a rgb in place and clamped to [0, 1], as the addon's result is
- * (`np.clip(result, 0, 1)`, in both of its branches). The C++ reference the parity tests compare
- * against.
- */
-void paint_layer_channel_mixer_apply(const float params[PAINT_LAYER_CHANNEL_MIXER_FOLDED_NUM],
-                                     float rgb[3]);
+/* The Channel Mixer's fold, vector read-out and apply live in `paint_layer_formula.hh`. */
 
 /** A hash of every stored value of the matrix, for the bake cache. */
 uint64_t paint_layer_channel_mixer_hash(const MaterialPaintLayerChannelMixer &mixer);

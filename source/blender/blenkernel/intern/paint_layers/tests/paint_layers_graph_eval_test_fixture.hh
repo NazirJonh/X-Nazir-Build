@@ -417,7 +417,7 @@ class GraphInterpreter {
             *bke::node_find_socket(mutable_node, SOCK_IN, "Color2"_ustr));
         float result[4] = {color1.r, color1.g, color1.b, color1.a};
         const float top_rgba[4] = {color2.r, color2.g, color2.b, color2.a};
-        BKE_paint_material_blend_apply(node.custom1, result, clamp_f(fac, 0.0f, 1.0f), top_rgba);
+        BKE_paint_blend_apply(node.custom1, result, clamp_f(fac, 0.0f, 1.0f), top_rgba);
         return {result[0], result[1], result[2], result[3]};
       }
       case SH_NODE_MIX: {
@@ -468,7 +468,7 @@ class GraphInterpreter {
         float result[4] = {bottom.r, bottom.g, bottom.b, bottom.a};
         const float top_rgba[4] = {top.r, top.g, top.b, top.a};
         /* The node clamps its factor and leaves the result alone, like the CPU. */
-        BKE_paint_material_blend_apply(
+        BKE_paint_blend_apply(
             storage.blend_type, result, clamp_f(fac, 0.0f, 1.0f), top_rgba);
         return {result[0], result[1], result[2], result[3]};
       }

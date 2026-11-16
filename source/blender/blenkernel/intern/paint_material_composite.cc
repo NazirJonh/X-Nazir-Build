@@ -3488,7 +3488,7 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
         r_height = layer.anchor_point_color->y;
         return true;
       }
-      if (layer.empty_base && layer.empty_base_size > 0) {
+      if (layer.empty_base_size > 0) {
         r_width = r_height = layer.empty_base_size;
         return true;
       }

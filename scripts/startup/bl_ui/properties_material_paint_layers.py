@@ -401,7 +401,9 @@ def _kind_param_is_hidden(by_name, param):
 
     A Mask Outline lays its ring in the Color only when it reads the shape from the Luminance: from the
     Alpha the ring is white, so the picker would offer a value that changes nothing. A Fill Area uses
-    its Fill Color only in the Solid color mode, and its Diffusion Iterations only in the Source one.
+    its Fill Color only in the Solid color mode, and its Diffusion Iterations only in the Source one. A
+    Height To Normal reads its Normal Intensity only off the world units, and its Surface Size and Height
+    Depth only on them.
     """
     if param.name == "color" and "curve_shape" in by_name and "source" in by_name:
         return by_name["source"].enum_value == 'ALPHA'
@@ -410,6 +412,11 @@ def _kind_param_is_hidden(by_name, param):
             return by_name["color_mode"].enum_value != 'SOLID'
         if param.name == "iterations":
             return by_name["color_mode"].enum_value == 'SOLID'
+    if "world_units" in by_name and "surface_size" in by_name:
+        if param.name == "strength":
+            return by_name["world_units"].bool_value
+        if param.name in {"surface_size", "height_depth"}:
+            return not by_name["world_units"].bool_value
     return False
 
 
@@ -775,8 +782,12 @@ def draw_material_layer_channels(layout, context, material, layer):
     switches_only = is_filter or layer.source == 'ANCHOR_POINT'
     is_generator = layer.source == 'GENERATOR'
     if is_filter:
-        # A tangent normal is not a colour a filter may change.
-        channel_ids = [channel_id for channel_id in channel_ids if channel_id != 'NORMAL']
+        if layer.reads_height:
+            # It reads the Height and lays a normal: Normal is the only channel it works in.
+            channel_ids = [channel_id for channel_id in channel_ids if channel_id == 'NORMAL']
+        elif not layer.normal_channel_supported:
+            # A tangent normal is not a colour a filter may change.
+            channel_ids = [channel_id for channel_id in channel_ids if channel_id != 'NORMAL']
     if is_generator:
         # A tangent normal is not a ramp a generator can produce either.
         channel_ids = [channel_id for channel_id in channel_ids if channel_id != 'NORMAL']

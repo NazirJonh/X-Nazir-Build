@@ -217,8 +217,20 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
   /** The composite of Base Color as straight scene-linear RGBA at the stack's dimensions. */
   bool render_channel(Vector<float> &r_pixels, int &r_width, int &r_height)
   {
+    return render_channel_on_tile(kColor, PAINT_TILE_NUMBER_BASE, r_pixels, r_width, r_height);
+  }
+
+  /** The composite of \a channel on UDIM \a tile_number as straight scene-linear RGBA. */
+  bool render_channel_on_tile(const eMaterialPaintChannel channel,
+                              const int tile_number,
+                              Vector<float> &r_pixels,
+                              int &r_width,
+                              int &r_height)
+  {
     Vector<PaintMaterialCompositeImageLayer> layers;
-    if (!BKE_paint_layers_composite_image_layers(*ma, kColor, layers)) {
+    if (!BKE_paint_layers_composite_image_layers(
+            *ma, channel, layers, false, nullptr, nullptr, tile_number))
+    {
       return false;
     }
     if (!BKE_paint_material_composite_stack_dimensions(layers, r_width, r_height) ||
@@ -228,7 +240,7 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
     }
     r_pixels.resize(int64_t(r_width) * r_height * 4);
     float bottom[4];
-    BKE_paint_layers_channel_bottom_color(kColor, bottom);
+    BKE_paint_layers_channel_bottom_color(channel, bottom);
     return BKE_paint_material_composite_eval_images_linear(
         layers,
         PaintMaterialCompositeLinearTarget::frame(r_pixels, r_width),
@@ -870,6 +882,262 @@ TEST_F(PaintLayersEffectTest, a_drop_shadow_shows_on_the_map_around_a_stroke)
   }
   EXPECT_FALSE(texel(7, 4, 0) > 0.99f && texel(7, 4, 1) < 0.01f)
       << "no shadow past the offset silhouette";
+}
+
+/** An 8x8 float buffer whose red (the Height the kernel reads) rises by \a step per texel along x,
+ * or along y (the rows, which run toward +V) when \a along_y. */
+static ImBuf *height_ramp_buffer(const float step, const bool along_y, const float alpha = 1.0f)
+{
+  constexpr int size = 8;
+  ImBuf *input = IMB_allocImBuf(size, size, ImBufFlags::FloatData);
+  float *pixels = input->float_data_for_write();
+  for (const int y : IndexRange(size)) {
+    for (const int x : IndexRange(size)) {
+      float *p = pixels + (int64_t(y) * size + x) * 4;
+      p[0] = step * float(along_y ? y : x);
+      p[1] = p[0];
+      p[2] = p[0];
+      p[3] = alpha;
+    }
+  }
+  return input;
+}
+
+TEST_F(PaintLayersEffectTest, a_height_to_normal_kernel_lays_the_neutral_normal_on_a_flat_height)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL);
+
+  ImBuf *input = height_ramp_buffer(0.0f, false, 0.75f);
+  paint_layer_effect_kernel_apply(*input, *effect);
+  const float *pixels = input->float_data();
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    EXPECT_NEAR(pixels[i * 4 + 0], 0.5f, 1e-5f);
+    EXPECT_NEAR(pixels[i * 4 + 1], 0.5f, 1e-5f);
+    EXPECT_NEAR(pixels[i * 4 + 2], 1.0f, 1e-5f) << "the up vector is encoded one";
+    EXPECT_FLOAT_EQ(pixels[i * 4 + 3], 0.75f) << "the alpha is untouched";
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_height_to_normal_kernel_leans_the_normal_against_the_slope)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL);
+
+  /* A ramp rising along +U: the normal leans toward -U (red under the half), green stays at the
+   * half, and the vector is unit length. The ramp is read in the middle, away from the clamped
+   * edges. */
+  ImBuf *along_u = height_ramp_buffer(0.1f, false);
+  paint_layer_effect_kernel_apply(*along_u, *effect);
+  const float *p = along_u->float_data() + (int64_t(4) * 8 + 4) * 4;
+  EXPECT_LT(p[0], 0.5f - 1e-2f);
+  EXPECT_NEAR(p[1], 0.5f, 1e-5f);
+  const float nx = p[0] * 2.0f - 1.0f;
+  const float ny = p[1] * 2.0f - 1.0f;
+  const float nz = p[2] * 2.0f - 1.0f;
+  EXPECT_NEAR(nx * nx + ny * ny + nz * nz, 1.0f, 1e-4f);
+  IMB_freeImBuf(along_u);
+
+  /* A ramp rising along +V (the rows): the OpenGL green leans toward -V, the DirectX one flips. */
+  ImBuf *along_v = height_ramp_buffer(0.1f, true);
+  paint_layer_effect_kernel_apply(*along_v, *effect);
+  const float *opengl = along_v->float_data() + (int64_t(4) * 8 + 4) * 4;
+  EXPECT_LT(opengl[1], 0.5f - 1e-2f);
+  EXPECT_NEAR(opengl[0], 0.5f, 1e-5f);
+  const float opengl_green = opengl[1];
+  IMB_freeImBuf(along_v);
+
+  ASSERT_TRUE(paint_layer_kind_param_bool_set(*effect, PAINT_LAYER_HEIGHT_TO_NORMAL_FLIP_GREEN, true));
+  ImBuf *flipped = height_ramp_buffer(0.1f, true);
+  paint_layer_effect_kernel_apply(*flipped, *effect);
+  const float *directx = flipped->float_data() + (int64_t(4) * 8 + 4) * 4;
+  EXPECT_NEAR(directx[1], 1.0f - opengl_green, 1e-5f);
+  IMB_freeImBuf(flipped);
+}
+
+TEST_F(PaintLayersEffectTest, a_height_to_normal_in_world_units_reads_the_texel_size)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL);
+  ASSERT_TRUE(paint_layer_kind_param_bool_set(*effect, PAINT_LAYER_HEIGHT_TO_NORMAL_WORLD_UNITS, true));
+  /* 8 texels across 8 cm: one centimetre a texel; a height step of 0.1 over a 5 cm depth rises
+   * half a centimetre a texel, so the slope is 0.5 and the normal's x is -0.5 / sqrt(1.25). */
+  ASSERT_TRUE(paint_layer_kind_param_set(*effect, PAINT_LAYER_HEIGHT_TO_NORMAL_SURFACE_SIZE, 8.0f));
+  ASSERT_TRUE(paint_layer_kind_param_set(*effect, PAINT_LAYER_HEIGHT_TO_NORMAL_HEIGHT_DEPTH, 5.0f));
+
+  ImBuf *input = height_ramp_buffer(0.1f, false);
+  paint_layer_effect_kernel_apply(*input, *effect);
+  const float *p = input->float_data() + (int64_t(4) * 8 + 4) * 4;
+  EXPECT_NEAR(p[0] * 2.0f - 1.0f, -0.5f / std::sqrt(1.25f), 1e-4f);
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, height_to_normal_reads_the_height_of_its_own_tile)
+{
+  /* One tiled Height map: the base tile is flat white and tile 1002 carries a vertical step. The
+   * Normal composite of each tile must read that tile's Height -- the effect's input describe is
+   * handed the tile the composite is for -- so the step can only show on 1002. */
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *height_map = BKE_image_add_generated(
+      bmain, 8, 8, "Height", 32, false, IMA_GENTYPE_BLANK, black, false, true, true);
+  ASSERT_NE(height_map, nullptr);
+  /* A tile added by number carries the generator defaults (a 1024 grid, never filled): size it like
+   * the base tile and fill it, or it has no buffer to paint. */
+  const auto add_filled_tile = [&](Image *image) {
+    ImageTile *tile = BKE_image_add_tile(image, 1002, nullptr);
+    ASSERT_NE(tile, nullptr);
+    tile->gen_x = 8;
+    tile->gen_y = 8;
+    tile->gen_type = IMA_GENTYPE_BLANK;
+    tile->gen_depth = 32;
+    copy_v4_v4(tile->gen_color, black);
+    ASSERT_TRUE(BKE_image_fill_tile(image, tile));
+  };
+  add_filled_tile(height_map);
+  const auto paint_height_tile = [&](const int tile_number, const bool step) {
+    ImageUser iuser;
+    BKE_imageuser_default(&iuser);
+    iuser.tile = tile_number;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(height_map, &iuser, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int y : IndexRange(8)) {
+      for (const int x : IndexRange(8)) {
+        const uchar value = (step && x >= 4) ? 0 : 255;
+        uchar *p = pixels + (int64_t(y) * 8 + x) * 4;
+        p[0] = value;
+        p[1] = value;
+        p[2] = value;
+        p[3] = 255;
+      }
+    }
+    BKE_image_release_ibuf(height_map, ibuf, lock);
+  };
+  paint_height_tile(1001, false);
+  paint_height_tile(1002, true);
+  BKE_image_partial_update_mark_full_update(height_map);
+
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_HEIGHT, true));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_NORMAL, true));
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
+  add_channel(*row, PAINT_MATERIAL_CHANNEL_HEIGHT, height_map);
+  /* The Normal map is tiled too, so both tiles resolve: its own grey is irrelevant, the effect
+   * replaces it with the height's normal. */
+  Image *normal_map = BKE_image_add_generated(
+      bmain, 8, 8, "Normal", 32, false, IMA_GENTYPE_BLANK, black, false, true, true);
+  ASSERT_NE(normal_map, nullptr);
+  add_filled_tile(normal_map);
+  for (const int tile_number : {1001, 1002}) {
+    ImageUser iuser;
+    BKE_imageuser_default(&iuser);
+    iuser.tile = tile_number;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(normal_map, &iuser, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+      pixels[i * 4 + 0] = 128;
+      pixels[i * 4 + 1] = 128;
+      pixels[i * 4 + 2] = 255;
+      pixels[i * 4 + 3] = 255;
+    }
+    BKE_image_release_ibuf(normal_map, ibuf, lock);
+  }
+  add_channel(*row, PAINT_MATERIAL_CHANNEL_NORMAL, normal_map);
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, effect, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  /* The effect lays a normal, so it filters the Normal alone, whatever other record it carries. */
+  EXPECT_TRUE(paint_layer_effect_filters(*ma, *effect, PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_FALSE(paint_layer_effect_filters(*ma, *effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+
+  Vector<float> flat;
+  Vector<float> stepped;
+  int flat_width = 0;
+  int flat_height = 0;
+  int stepped_width = 0;
+  int stepped_height = 0;
+  ASSERT_TRUE(render_channel_on_tile(
+      PAINT_MATERIAL_CHANNEL_NORMAL, 1001, flat, flat_width, flat_height));
+  ASSERT_TRUE(render_channel_on_tile(
+      PAINT_MATERIAL_CHANNEL_NORMAL, 1002, stepped, stepped_width, stepped_height));
+  const auto at = [](const Vector<float> &pixels, const int width, const int x, const int y) {
+    return &pixels[(int64_t(y) * width + x) * 4];
+  };
+  /* The flat tile is the neutral normal: encoded x and y at the half, z at one. */
+  EXPECT_NEAR(at(flat, flat_width, 3, 4)[0], 0.5f, 2e-3f);
+  EXPECT_NEAR(at(flat, flat_width, 4, 4)[0], 0.5f, 2e-3f);
+  /* The step on 1002 leans the normal about the edge, which only its own Height can produce. */
+  EXPECT_GT(std::abs(at(stepped, stepped_width, 3, 4)[0] - 0.5f), 1e-2f);
+
+  /* A stroke on the step tile is a new pixel version of the map the input read: the effect cache
+   * must recompute it into the neutral normal. */
+  paint_height_tile(1002, false);
+  BKE_image_partial_update_mark_full_update(height_map);
+  ASSERT_TRUE(render_channel_on_tile(
+      PAINT_MATERIAL_CHANNEL_NORMAL, 1002, stepped, stepped_width, stepped_height));
+  EXPECT_NEAR(at(stepped, stepped_width, 3, 4)[0], 0.5f, 2e-3f);
+}
+
+TEST_F(PaintLayersEffectTest, height_to_normal_lays_a_normal_on_a_row_that_has_only_a_height)
+{
+  /* A row with a map in Height alone and no Normal of its own: the effect is the only thing that
+   * can put a normal in that channel, so the row must take part there and the effect must read the
+   * Height it lays. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_HEIGHT, true));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_NORMAL, true));
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *height_map = BKE_image_add_generated(
+      bmain, 8, 8, "Height", 32, false, IMA_GENTYPE_BLANK, black, false, true, false);
+  ASSERT_NE(height_map, nullptr);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(height_map, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *texels = ibuf->byte_data_for_write();
+    for (const int y : IndexRange(8)) {
+      for (const int x : IndexRange(8)) {
+        uchar *p = texels + (int64_t(y) * 8 + x) * 4;
+        p[0] = p[1] = p[2] = (x >= 4) ? 0 : 255;
+        p[3] = 255;
+      }
+    }
+    BKE_image_release_ibuf(height_map, ibuf, lock);
+  }
+  BKE_image_partial_update_mark_full_update(height_map);
+  MaterialPaintLayer *row = add_paint_layer("Row", height_map, PAINT_MATERIAL_CHANNEL_HEIGHT);
+  ASSERT_NE(row, nullptr);
+  EXPECT_FALSE(paint_layer_channel_contributes(
+      *ma, *row, paint_layer_channel_find(*row, PAINT_MATERIAL_CHANNEL_NORMAL)))
+      << "the row has no normal of its own";
+  EXPECT_FALSE(paint_layer_row_participates(*ma, *row, PAINT_MATERIAL_CHANNEL_NORMAL));
+
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_NE(paint_layer_channel_find(*effect, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
+  EXPECT_TRUE(paint_layer_effect_filters(*ma, *effect, PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_TRUE(paint_layer_effects_derive(*ma, *row, PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_TRUE(paint_layer_row_participates(*ma, *row, PAINT_MATERIAL_CHANNEL_NORMAL))
+      << "the effect brings the row into the Normal channel";
+  EXPECT_FALSE(paint_layer_effects_derive(*ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+
+  PaintMaterialCompositeImageLayer entry;
+  EXPECT_TRUE(BKE_paint_layers_effect_input_describe(
+      *ma, *row, *effect, PAINT_MATERIAL_CHANNEL_NORMAL, true, false, entry));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel_on_tile(
+      PAINT_MATERIAL_CHANNEL_NORMAL, PAINT_TILE_NUMBER_BASE, pixels, width, height));
+  /* The Height steps from white to black at x = 4: the normal leans about the edge, nowhere else. */
+  const float *edge = &pixels[(int64_t(4) * width + 3) * 4];
+  const float *flat = &pixels[(int64_t(4) * width + 1) * 4];
+  EXPECT_GT(std::abs(edge[0] - 0.5f), 1e-2f);
+  EXPECT_NEAR(flat[0], 0.5f, 2e-3f);
+  EXPECT_NEAR(flat[2], 1.0f, 2e-3f);
 }
 
 TEST_F(PaintLayersEffectTest, a_reduced_bake_keeps_the_effects_input_at_the_stack_resolution)
@@ -2857,7 +3125,7 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
    * nothing. */
   Set<int> gpu_computed_filters;
   for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT);
-       filter <= int(MA_PAINT_LAYER_FILTER_FILL_AREA);
+       filter <= int(MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL);
        filter++)
   {
     const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);

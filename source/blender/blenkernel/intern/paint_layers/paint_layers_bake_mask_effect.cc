@@ -203,7 +203,9 @@ int bake_effect_size_for(const Material &ma, const MaterialPaintLayer &effect)
     int width = 0;
     int height = 0;
     if (paint_layer_effect_filters(ma, effect, channel) &&
-        BKE_paint_layers_row_dimensions(ma, *row, channel, width, height) && width > 0 &&
+        BKE_paint_layers_row_dimensions(
+            ma, *row, paint_layer_effect_input_channel(effect, channel), width, height) &&
+        width > 0 &&
         height > 0)
     {
       /* The side is the content's width, as a mask effect's grey and a row's bake take it (see

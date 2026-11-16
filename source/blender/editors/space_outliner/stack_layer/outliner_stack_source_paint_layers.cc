@@ -1321,7 +1321,9 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                         MA_PAINT_LAYER_SOURCE_FILTER, PaintLookRole::Content, filter.filter)),
           PaintLayerAddKind::Filter,
           filter.filter,
-          PaintLayerAddKind::MaskFilter);
+          paint_filter_is_content_only(filter.filter) ?
+              std::nullopt :
+              std::optional<PaintLayerAddKind>(PaintLayerAddKind::MaskFilter));
     }
     /* Then the same filters as rows of the stack: an adjustment changes the whole stack below it
      * instead of one layer's color. */
@@ -1350,6 +1352,9 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
     /* The mask form of each CPU-computed effect: the effect works on the grey the mask has built up
      * to it. Folded into the content line by the Effects menu, like the pointwise filters above. */
     for (const PaintFilterAddKind &filter : paint_effect_add_kinds()) {
+      if (paint_filter_is_content_only(filter.filter)) {
+        continue;
+      }
       add(with_look(effect({std::string("MASK_") + filter.identifier,
                             std::string("Mask ") + filter.name,
                             "Apply the effect to the grey the active layer's mask has built up"}),

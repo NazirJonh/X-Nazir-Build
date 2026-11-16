@@ -27,6 +27,7 @@
 
 #include "DNA_material_types.h"
 
+#include "BKE_paint.hh"
 #include "BKE_paint_perf_debug.hh"
 
 #include "IMB_colormanagement.hh"
@@ -1253,6 +1254,90 @@ static void paint_layer_effect_fill_area_apply(ImBuf &buffer,
 }
 
 /**
+ * The Height To Normal kernel over \a buffer in place. The buffer holds the row's Height (the input
+ * describe lays the Height content for this kind), read from the red; it is replaced by the
+ * tangent-space normal of that height, encoded `0.5 + 0.5 n` in the OpenGL convention the Normal
+ * Map node reads (green up along +V, which is the row direction of an image), or with the green
+ * flipped for the DirectX one. A flat height is the neutral normal (0.5, 0.5, 1). Alpha is
+ * untouched.
+ *
+ * The gradients are the Sobel pair of the Edge Detect (a full-range step reads as one), edges
+ * clamped to the canvas. The intensity multiplies them; with the world units the multiplier is
+ * instead the physical slope: the height delta's centimetres against the texel's own, so the same
+ * surface laid at another resolution keeps its normal.
+ */
+static void paint_layer_effect_height_to_normal_apply(ImBuf &buffer,
+                                                      const MaterialPaintLayer &effect)
+{
+  const float strength = paint_layer_kind_param_get(effect, PAINT_LAYER_HEIGHT_TO_NORMAL_STRENGTH);
+  const bool world_units = paint_layer_kind_param_bool_get(
+      effect, PAINT_LAYER_HEIGHT_TO_NORMAL_WORLD_UNITS);
+  const float surface_size = paint_layer_kind_param_get(effect,
+                                                        PAINT_LAYER_HEIGHT_TO_NORMAL_SURFACE_SIZE);
+  const float height_depth = paint_layer_kind_param_get(effect,
+                                                        PAINT_LAYER_HEIGHT_TO_NORMAL_HEIGHT_DEPTH);
+  const bool flip_green = paint_layer_kind_param_bool_get(effect,
+                                                          PAINT_LAYER_HEIGHT_TO_NORMAL_FLIP_GREEN);
+
+  const int width = buffer.x;
+  const int height = buffer.y;
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+  std::shared_ptr<ImBuf> source = paint_layer_anchor_slice_buffer_clone(buffer);
+  if (source == nullptr) {
+    return;
+  }
+  const float *src = source->float_buffer.data;
+  float *pixels = buffer.float_data_for_write();
+  /* The kernel sums its side to four, so the gradient is twice the true slope per texel: the
+   * half turns the world units' slope into that scale. Without a surface or a depth the world
+   * units name no slope, and the normal stays flat. */
+  float scale = strength;
+  if (world_units) {
+    const float texel_cm = surface_size / float(std::max(width, height));
+    scale = (texel_cm > 0.0f) ? 0.5f * height_depth / texel_cm : 0.0f;
+  }
+  const float green_sign = flip_green ? 1.0f : -1.0f;
+  /* Where the Height row has no coverage the map holds no relief, which reads as the neutral
+   * height: its straight colour there is not a height, so the alpha weighs it in. Without it a
+   * stroke's edge would read as a cliff. */
+  const auto height_at = [src](const int64_t texel) {
+    const float *p = src + texel * 4;
+    return PAINT_HEIGHT_NEUTRAL + (p[0] - PAINT_HEIGHT_NEUTRAL) * p[3];
+  };
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    for (const int y : range) {
+      const int64_t row_lo = int64_t(std::max(y - 1, 0)) * width;
+      const int64_t row_mid = int64_t(y) * width;
+      const int64_t row_hi = int64_t(std::min(y + 1, height - 1)) * width;
+      for (const int x : IndexRange(width)) {
+        const int col_lf = std::max(x - 1, 0);
+        const int col_rt = std::min(x + 1, width - 1);
+        const float h00 = height_at(row_lo + col_lf);
+        const float h01 = height_at(row_lo + x);
+        const float h02 = height_at(row_lo + col_rt);
+        const float h10 = height_at(row_mid + col_lf);
+        const float h12 = height_at(row_mid + col_rt);
+        const float h20 = height_at(row_hi + col_lf);
+        const float h21 = height_at(row_hi + x);
+        const float h22 = height_at(row_hi + col_rt);
+        /* Row y + 1 is the higher V, so the slopes are the height rising along +U and +V. */
+        const float dh_du = ((h02 + 2.0f * h12 + h22) - (h00 + 2.0f * h10 + h20)) * 0.25f;
+        const float dh_dv = ((h20 + 2.0f * h21 + h22) - (h00 + 2.0f * h01 + h02)) * 0.25f;
+        /* The normal leans against the slope; the DirectX encoding flips the green. */
+        const float nx = -dh_du * scale;
+        const float ny = green_sign * dh_dv * scale;
+        const float inv_len = 1.0f / std::sqrt(nx * nx + ny * ny + 1.0f);
+        float *dst = pixels + (row_mid + x) * 4;
+        dst[0] = nx * inv_len * 0.5f + 0.5f;
+        dst[1] = ny * inv_len * 0.5f + 0.5f;
+        dst[2] = inv_len * 0.5f + 0.5f;
+      }
+    }
+  });
+}
+/**
  * The Bevel kernel over \a buffer in place: the distance of each texel from the content's border,
  * normalized by the distance parameter and clamped to [0, 1], written to all three colour channels,
  * then softened by a box blur of the smooth radius. The source parameter says what a border is: the
@@ -1478,6 +1563,9 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer,
     case MA_PAINT_LAYER_FILTER_FILL_AREA:
       paint_layer_effect_fill_area_apply(
           buffer, effect, !for_mask && paint_layer_kind_result_has_alpha(effect));
+      break;
+    case MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL:
+      paint_layer_effect_height_to_normal_apply(buffer, effect);
       break;
     case MA_PAINT_LAYER_FILTER_BEVEL:
       paint_layer_effect_bevel_apply(buffer, effect, for_mask);

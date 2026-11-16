@@ -134,6 +134,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_NORMAL_CONVERT:
       /* No glyph of its own yet: the vertex-normals icon names what the filter converts. */
       return {ICON_NORMALS_VERTEX, 0};
+    case MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL:
+      /* No glyph of its own yet: the vertex-normals icon names what the height becomes. */
+      return {ICON_NORMALS_VERTEX, 0};
     case MA_PAINT_LAYER_FILTER_CHANNEL_MIXER:
       /* No glyph of its own yet: the RGB icon names the channels the filter mixes. */
       return {ICON_IMAGE_RGB, 0};
@@ -346,6 +349,11 @@ static const PaintFilterAddKind paint_effect_add_kinds_table[] = {
      "Fill what a continuous border of the active layer's content encloses: the regions the "
      "border closes off take the colour the border carries, diffused inward, or the solid colour",
      MA_PAINT_LAYER_FILTER_FILL_AREA},
+    {"EFFECT_HEIGHT_TO_NORMAL",
+     N_("Height To Normal"),
+     "Convert the Height the active layer lays into a tangent-space normal: the Sobel gradients "
+     "of the height, scaled by the intensity or the world units, encoded into the Normal channel",
+     MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL},
 };
 
 /**
@@ -409,6 +417,11 @@ bool paint_filter_is_transform(const int16_t filter)
   return ELEM(eMaterialPaintLayerFilter(filter),
               MA_PAINT_LAYER_FILTER_TRANSFORM,
               MA_PAINT_LAYER_FILTER_MIRROR);
+}
+
+bool paint_filter_is_content_only(const int16_t filter)
+{
+  return filter == MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL;
 }
 
 Span<const PaintFilterAddKind> paint_filter_add_kinds()

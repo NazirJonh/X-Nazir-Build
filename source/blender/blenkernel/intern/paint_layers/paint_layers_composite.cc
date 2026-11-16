@@ -638,6 +638,42 @@ static bool composite_row_source_describe(const Material &ma,
     }
     return true;
   }
+  if (!paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel)) &&
+      paint_layer_effects_derive(ma, layer, channel))
+  {
+    /* No normal of its own: the row takes part for a Height To Normal, which replaces this flat
+     * tangent-space "up" with the normal of the Height. The row covers whole, as a Fill does. */
+    const float flat_normal[4] = {0.5f, 0.5f, 1.0f, 1.0f};
+    copy_v4_v4(out.constant_color, flat_normal);
+    out.has_constant_color = true;
+    /* The row has no map to size the stack by: the Height the effect reads is its canvas. */
+    for (const MaterialPaintLayer &effect : layer.effects) {
+      if (!paint_layer_effect_reads_height(effect) ||
+          !paint_layer_effect_filters(ma, effect, channel))
+      {
+        continue;
+      }
+      PaintMaterialCompositeImageLayer input;
+      int input_width = 0;
+      int input_height = 0;
+      if (BKE_paint_layers_effect_input_describe(
+              ma,
+              layer,
+              effect,
+              channel,
+              /*dimensions_only=*/true,
+              /*describe_only=*/false,
+              input,
+              PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}) &&
+          BKE_paint_material_composite_stack_dimensions(
+              Span<PaintMaterialCompositeImageLayer>(&input, 1), input_width, input_height))
+      {
+        out.empty_base_size = input_width;
+        break;
+      }
+    }
+    return true;
+  }
   if (paint_layer_row_empty_base(ma, layer, channel)) {
     /* Only its corrections lay here: its own constant covers nothing, so the row starts from zero
      * coverage and the corrections bring it in. */
@@ -2785,12 +2821,16 @@ bool BKE_paint_layers_effect_input_describe(const Material &ma,
                                             PaintMaterialCompositeImageLayer &r_entry,
                                             const PaintLayerTileContext &context)
 {
+  /* A Height To Normal effect reads the Height the row lays, whichever channel it hangs on: its
+   * input is the Height content, and the normal its kernel computes lays into the channel the
+   * effect itself works on. The other kinds read their own channel. */
+  const int input_channel = paint_layer_effect_input_channel(effect, channel);
   r_entry = PaintMaterialCompositeImageLayer{};
   const int tile_number = BKE_paint_layers_tile_resolve(
       context.tile_number, nullptr, context.painted_object);
   if (!composite_image_layer_build(ma,
                                    row,
-                                   channel,
+                                   input_channel,
                                    1.0f,
                                    false,
                                    true,

@@ -910,6 +910,66 @@ TEST_F(PaintLayersFilterKindsTest, fill_area_kind_is_a_cpu_computed_effect_with_
   }
 }
 
+TEST_F(PaintLayersFilterKindsTest, height_to_normal_kind_is_a_cross_channel_effect_with_a_schema)
+{
+  Material *ma = BKE_material_add(bmain, "RnaHeightToNormalParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *to_normal = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL);
+  ASSERT_NE(to_normal, nullptr);
+
+  /* A CPU-computed cross-channel effect: it reads the Height the row lays and lays into its own
+   * channel, which is the Normal's -- the one filter a Normal may carry besides the Normal
+   * Convert. No GPU pass exists for it, and a mask item has no channel to lay a normal into. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_NEEDS_BAKE));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_GPU_COMPUTED));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_NORMAL_SAFE));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT));
+  /* The gradients default to the intensity's own scale; the flip to the OpenGL encoding. */
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*to_normal, PAINT_LAYER_HEIGHT_TO_NORMAL_STRENGTH),
+                  1.0f);
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*to_normal, PAINT_LAYER_HEIGHT_TO_NORMAL_WORLD_UNITS), 0.0f);
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*to_normal, PAINT_LAYER_HEIGHT_TO_NORMAL_SURFACE_SIZE), 100.0f);
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*to_normal, PAINT_LAYER_HEIGHT_TO_NORMAL_HEIGHT_DEPTH), 5.0f);
+  EXPECT_FLOAT_EQ(
+      paint_layer_kind_param_get(*to_normal, PAINT_LAYER_HEIGHT_TO_NORMAL_FLIP_GREEN), 0.0f);
+
+  /* The RNA enum names the kind, and the collection lists exactly the schema's five parameters,
+   * labelled. */
+  PointerRNA normal_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, to_normal);
+  PropertyRNA *filter_prop = RNA_struct_find_property(&normal_ptr, "filter_type");
+  ASSERT_NE(filter_prop, nullptr);
+  const char *identifier = nullptr;
+  ASSERT_TRUE(RNA_property_enum_identifier(nullptr,
+                                           &normal_ptr,
+                                           filter_prop,
+                                           MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL,
+                                           &identifier));
+  EXPECT_STREQ(identifier, "HEIGHT_TO_NORMAL");
+  PropertyRNA *params = RNA_struct_find_property(&normal_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&normal_ptr, params), 5);
+  const char *names[5] = {"strength", "world_units", "surface_size", "height_depth", "flip_green"};
+  const char *labels[5] = {"Normal Intensity",
+                           "Use World Units",
+                           "Surface Size (cm)",
+                           "Height Depth (cm)",
+                           "Flip Green"};
+  for (const int i : IndexRange(5)) {
+    PointerRNA param_ptr;
+    ASSERT_TRUE(RNA_property_collection_lookup_string(&normal_ptr, params, names[i], &param_ptr))
+        << names[i];
+    PropertyRNA *label = RNA_struct_find_property(&param_ptr, "label");
+    ASSERT_NE(label, nullptr);
+    EXPECT_EQ(RNA_property_string_get(&param_ptr, label), labels[i]);
+  }
+}
+
 TEST_F(PaintLayersFilterKindsTest, deband_kind_is_a_pointwise_filter_with_a_mode_and_two_integers)
 {
   Material *ma = BKE_material_add(bmain, "RnaDebandParamMat");
@@ -956,8 +1016,8 @@ TEST_F(PaintLayersFilterKindsTest, normal_convert_kind_alone_carries_the_normal_
   ASSERT_NE(convert, nullptr);
   ASSERT_NE(invert, nullptr);
 
-  /* The flag sits past the eighth bit: the flags are 16 bits wide, and it is the Normal Convert's
-   * alone, so every other filter keeps the Normal channel closed. */
+  /* The flag sits past the eighth bit, and the Normal Convert and the Height To Normal alone carry it,
+   * so every other filter keeps the Normal channel closed. */
   EXPECT_TRUE(paint_layer_kind_has_flag(*convert, PAINT_LAYER_KIND_NORMAL_SAFE));
   EXPECT_TRUE(paint_layer_kind_has_flag(*convert, PAINT_LAYER_KIND_ACTS_ON_BELOW));
   EXPECT_FALSE(paint_layer_kind_has_flag(*convert, PAINT_LAYER_KIND_NEEDS_BAKE));

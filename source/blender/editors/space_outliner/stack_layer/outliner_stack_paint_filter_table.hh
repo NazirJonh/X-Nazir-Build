@@ -127,4 +127,10 @@ bool paint_filter_is_filter2(int16_t filter);
 /** The transform effects the Add Effect menu lists under "Transform" instead of the other lists. */
 bool paint_filter_is_transform(int16_t filter);
 
+/**
+ * Whether the effect has no mask form: it lays into a channel of its own (a Height To Normal lays
+ * the Normal), which a mask has no counterpart of. The Add Effect menu offers it for content only.
+ */
+bool paint_filter_is_content_only(int16_t filter);
+
 }  // namespace blender::ed::outliner

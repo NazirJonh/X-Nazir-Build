@@ -1434,7 +1434,12 @@ MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
    * material's set (Base Color unless the user removed it), and the others are switched on like a
    * layer's. */
   const int owner_channel = paint_layer_filter_owner_channel(ma, *owner);
-  if (owner_channel >= 0) {
+  if (paint_layer_effect_reads_height(*effect)) {
+    /* It lays a normal from the row's Height whatever channel the owner is narrowed to: Normal is
+     * the only channel it works in, so it is the one record it starts with. */
+    BKE_paint_layers_channel_add(ma, effect, PAINT_MATERIAL_CHANNEL_NORMAL);
+  }
+  else if (owner_channel >= 0) {
     BKE_paint_layers_channel_add(ma, effect, eMaterialPaintChannel(owner_channel));
   }
   else {

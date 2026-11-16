@@ -86,6 +86,15 @@ void BKE_paint_layers_tag_edited(Material &ma);
 bool BKE_paint_layers_ramp_supported(const MaterialPaintLayer &row);
 
 /**
+ * Whether \a row's kind may work in the Normal channel (a filter that reads the encoding as numbers
+ * or lays a normal from the Height), so the channel row offers its Normal switch.
+ */
+bool BKE_paint_layers_normal_channel_supported(const MaterialPaintLayer &row);
+
+/** Whether \a row's kind reads the Height and works in the Normal channel alone. */
+bool BKE_paint_layers_reads_height(const MaterialPaintLayer &row);
+
+/**
  * The row's ramp payload, allocated with the default black-to-white band when it has none. Only a
  * kind with a Ramp parameter gets one; returns null for every other kind.
  */

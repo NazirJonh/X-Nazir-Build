@@ -744,8 +744,10 @@ inline bool paint_layer_effect_is_filter(const MaterialPaintLayer &effect)
  * The channels a filter works in are the live records of its row, the same switches a layer has:
  * the record carries no map, only the choice. A tangent normal is not a colour a per-channel
  * function may touch, so Normal is left alone whatever the record says -- except by a filter that
- * reads the encoding as numbers (#PAINT_LAYER_KIND_NORMAL_SAFE, a Normal Convert). The one rule for
- * the generator, the CPU adapter and the topology hash.
+ * reads the encoding as numbers (#PAINT_LAYER_KIND_NORMAL_SAFE, a Normal Convert). A filter that
+ * reads the Height (#PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT, a Height To Normal) lays a normal, so it
+ * filters the Normal alone: on any other channel it would write a normal into a colour. The one
+ * rule for the generator, the CPU adapter and the topology hash.
  */
 inline bool paint_layer_effect_filters(const Material &ma,
                                        const MaterialPaintLayer &effect,
@@ -754,7 +756,18 @@ inline bool paint_layer_effect_filters(const Material &ma,
   return paint_layer_effect_is_filter(effect) && !paint_layer_channel_filtered(ma, channel) &&
          (channel != PAINT_MATERIAL_CHANNEL_NORMAL ||
           paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_NORMAL_SAFE)) &&
+         (channel == PAINT_MATERIAL_CHANNEL_NORMAL || !paint_layer_effect_reads_height(effect)) &&
          paint_layer_channel_live(paint_layer_channel_find(effect, channel));
+}
+
+/**
+ * The channel whose content \a effect reads as its input when it works in \a channel: its own, or
+ * the Height for a kind that reads it (#PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT). The one answer for
+ * the input describe and the bake's canvas size, so neither can read a channel the other does not.
+ */
+inline int paint_layer_effect_input_channel(const MaterialPaintLayer &effect, const int channel)
+{
+  return paint_layer_effect_reads_height(effect) ? int(PAINT_MATERIAL_CHANNEL_HEIGHT) : channel;
 }
 
 /**
@@ -982,6 +995,31 @@ inline bool paint_layer_effects_lay(const Material &ma,
 }
 
 /**
+ * Whether a Height To Normal of \a layer lays a normal in \a channel out of the Height the row lays:
+ * the one cross-channel effect, so the row has to take part in the Normal channel without a Normal
+ * record of its own (a Fill with a Height texture only). The effect works in Normal alone and needs a
+ * Height the row contributes, or it would read nothing. The row keeps its own opacity, mask and
+ * blend there; its coverage is whole, as a Fill's is.
+ */
+inline bool paint_layer_effects_derive(const Material &ma,
+                                       const MaterialPaintLayer &layer,
+                                       const int channel)
+{
+  if (channel != PAINT_MATERIAL_CHANNEL_NORMAL ||
+      !paint_layer_channel_contributes(
+          ma, layer, paint_layer_channel_find(layer, PAINT_MATERIAL_CHANNEL_HEIGHT)))
+  {
+    return false;
+  }
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (paint_layer_effect_reads_height(effect) && paint_layer_effect_filters(ma, effect, channel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Whether a leaf row takes part in \a channel: through its own record, or only through the
  * corrections laid over it (an unpainted Paint row kept alive for them, #paint_layer_row_empty_base).
  * The generator's participation test and the CPU adapter both call this one predicate.
@@ -992,6 +1030,7 @@ inline bool paint_layer_row_participates(const Material &ma,
 {
   return paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel)) ||
          paint_layer_effects_lay(ma, layer, channel) ||
+         paint_layer_effects_derive(ma, layer, channel) ||
          paint_layer_adjustment_acts(ma, layer, channel) ||
          paint_layer_row_reads_source(ma, layer, channel) ||
          paint_layer_row_reads_anchor_point(ma, layer, channel);

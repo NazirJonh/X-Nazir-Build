@@ -194,7 +194,7 @@ struct PaintLayerKindParam {
 };
 
 /** What a kind is, as far as the rules shared by the generator and the CPU stack care. */
-enum PaintLayerKindFlag : uint16_t {
+enum PaintLayerKindFlag : uint32_t {
   /**
    * The kind lays the value it stores while it has no map (a Fill): a live record alone makes it
    * take part, as a correction it lays its flat colour, as a mask item its flat grey.
@@ -251,8 +251,9 @@ enum PaintLayerKindFlag : uint16_t {
   PAINT_LAYER_KIND_NEEDS_BAKE = 1 << 7,
   /**
    * A filter that reads the encoding of a Normal channel as numbers, not as a direction (a Normal
-   * Convert): the one filter such a channel may carry, where every other filter would corrupt the
-   * vector. Past the eighth bit, which is why the flags are 16 bits wide.
+   * Convert), or lays a normal of its own (a Height To Normal): the only filters such a channel may
+   * carry, where every other filter would corrupt the vector. Past the eighth bit, which is why the
+   * flags are wider than a byte.
    */
   PAINT_LAYER_KIND_NORMAL_SAFE = 1 << 8,
   /**
@@ -311,6 +312,14 @@ enum PaintLayerKindFlag : uint16_t {
    * no part in it: a mask effect's buffer has no alpha to cast from or to lay.
    */
   PAINT_LAYER_KIND_RESULT_HAS_ALPHA = 1 << 15,
+  /**
+   * A cross-channel effect (a Height To Normal): it reads the Height the row lays, not the channel
+   * it hangs on. The effect input describe answers the Height content for it, so the kernel's
+   * input is the row's height, and the result lays into the channel the effect works on -- the
+   * Normal, the only one such an effect filters (#paint_layer_effect_filters). Past the sixteenth
+   * bit, which is why the flags are 32 bits wide.
+   */
+  PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT = 1 << 16,
 };
 
 struct PaintLayerKindInfo {
@@ -325,7 +334,7 @@ struct PaintLayerKindInfo {
   const PaintLayerKindParam *params = nullptr;
   int params_num = 0;
   /** #PaintLayerKindFlag bits. */
-  uint16_t flags = 0;
+  uint32_t flags = 0;
   /**
    * Whether the kind's map may be a stroke target. A #PAINT_LAYER_KIND_MAP_COVERAGE kind whose map
    * is reference-only (Color ID: an external ID Map) reports false, so the target resolve and the UI
@@ -900,6 +909,22 @@ enum PaintLayerFillAreaParam : int {
   /** The diffusion passes the fill walks; more reach farther in, at the cost of the passes. */
   PAINT_LAYER_FILL_AREA_ITERATIONS = 7,
   PAINT_LAYER_FILL_AREA_PARAM_NUM = 8,
+};
+
+/** The positions of the Height To Normal filter's parameters in its schema. */
+enum PaintLayerHeightToNormalParam : int {
+  /** The gradients' multiplier, when the scale is not the world units' one. */
+  PAINT_LAYER_HEIGHT_TO_NORMAL_STRENGTH = 0,
+  /** On: the gradients scale by the physical size the surface and the depth name, so the normal
+   * stops reading the resolution the map was laid at. */
+  PAINT_LAYER_HEIGHT_TO_NORMAL_WORLD_UNITS = 1,
+  /** The width of the surface the map covers, in centimetres, when the world units read. */
+  PAINT_LAYER_HEIGHT_TO_NORMAL_SURFACE_SIZE = 2,
+  /** The height range the map's delta covers, in centimetres, when the world units read. */
+  PAINT_LAYER_HEIGHT_TO_NORMAL_HEIGHT_DEPTH = 3,
+  /** On: the green flips, the DirectX encoding, for a normal the project reads the other way. */
+  PAINT_LAYER_HEIGHT_TO_NORMAL_FLIP_GREEN = 4,
+  PAINT_LAYER_HEIGHT_TO_NORMAL_PARAM_NUM = 5,
 };
 
 /** The positions of the Sharpen filter's parameters in its schema. */
@@ -1640,6 +1665,12 @@ inline bool paint_layer_kind_is_map_coverage(const MaterialPaintLayer &row)
 inline bool paint_layer_kind_transforms_input(const MaterialPaintLayer &row)
 {
   return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_TRANSFORMS_INPUT);
+}
+
+/** Whether \a row reads the Height the stack lays, not the channel it hangs on. */
+inline bool paint_layer_effect_reads_height(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT);
 }
 
 /** Whether \a row's kind computes a result with an alpha of its own (a Drop Shadow). */

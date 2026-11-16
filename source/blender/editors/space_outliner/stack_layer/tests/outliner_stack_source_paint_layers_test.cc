@@ -378,7 +378,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
                                  "FILTER_HISTOGRAM_SHIFT",
                                  "EFFECT_DROP_SHADOW",
                                  "EFFECT_MASK_OUTLINE",
-                                 "EFFECT_FILL_AREA"})
+                                 "EFFECT_FILL_AREA",
+                                 "EFFECT_HEIGHT_TO_NORMAL"})
   {
     EXPECT_TRUE(is_filter2(content, identifier)) << identifier;
     EXPECT_FALSE(is_new(content, identifier)) << identifier;

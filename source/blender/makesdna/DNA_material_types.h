@@ -1160,6 +1160,14 @@ enum eMaterialPaintLayerFilter : int16_t {
    * like the #MA_PAINT_LAYER_FILTER_BEVEL: the flood and the diffusion are whole-map passes.
    */
   MA_PAINT_LAYER_FILTER_FILL_AREA = 35,
+  /**
+   * Convert the Height the row lays into a tangent-space normal (a Height To Normal): the Sobel
+   * gradients of the height, scaled by the intensity (or by the physical scale the world units
+   * name) and encoded as the normal the channel the effect hangs on lays. A cross-channel effect:
+   * it reads the row's Height and lays into its own channel, the one Normal filter besides the
+   * #MA_PAINT_LAYER_FILTER_NORMAL_CONVERT (#PAINT_LAYER_KIND_NORMAL_SAFE).
+   */
+  MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL = 36,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

@@ -3463,7 +3463,7 @@ static const IDPropertyUIDataInt *rna_kind_param_ui_data_int(const IDProperty *p
  */
 static const char *rna_kind_param_label_text(const IDProperty *prop)
 {
-  if (prop->ui_data != nullptr && ELEM(prop->type, IDP_FLOAT, IDP_INT, IDP_BOOLEAN)) {
+  if (prop->ui_data != nullptr && ELEM(prop->type, IDP_FLOAT, IDP_INT, IDP_BOOLEAN, IDP_ARRAY)) {
     const IDPropertyUIData *base = static_cast<const IDPropertyUIData *>(prop->ui_data);
     if (base->description != nullptr) {
       return base->description;
@@ -4150,6 +4150,18 @@ static bool rna_MaterialPaintLayer_ramp_supported_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
   return layer != nullptr && BKE_paint_layers_ramp_supported(*layer);
+}
+
+static bool rna_MaterialPaintLayer_normal_channel_supported_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer != nullptr && BKE_paint_layers_normal_channel_supported(*layer);
+}
+
+static bool rna_MaterialPaintLayer_reads_height_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer != nullptr && BKE_paint_layers_reads_height(*layer);
 }
 
 static PointerRNA rna_MaterialPaintLayer_kind_ramp_get(PointerRNA *ptr)
@@ -6026,6 +6038,12 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "Normal Convert",
      "Convert the encoding of a normal map: flip its green, rebuild or clear its blue, or move its "
      "channels between linear and sRGB"},
+    {MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL,
+     "HEIGHT_TO_NORMAL",
+     0,
+     "Height To Normal",
+     "Convert the Height the row lays into a tangent-space normal: the Sobel gradients of the "
+     "height, scaled by the intensity or the world units, encoded into the Normal channel"},
     {MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
      "CHANNEL_MIXER",
      0,
@@ -7313,6 +7331,19 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_ramp_supported_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Has Ramp", "Whether the row's kind reads a Color Band");
+
+  prop = RNA_def_property(srna, "normal_channel_supported", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_MaterialPaintLayer_normal_channel_supported_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Normal Channel Supported", "Whether the row's kind may work in the Normal channel");
+
+  prop = RNA_def_property(srna, "reads_height", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_reads_height_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Reads Height", "Whether the row's kind reads the Height and lays the Normal alone");
 
   prop = RNA_def_property(srna, "kind_ramp", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "ColorRamp");

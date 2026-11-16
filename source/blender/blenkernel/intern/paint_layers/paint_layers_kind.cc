@@ -447,6 +447,21 @@ static const PaintLayerKindParam fill_area_params[] = {
 };
 static_assert(std::size(fill_area_params) == PAINT_LAYER_FILL_AREA_PARAM_NUM);
 
+static const PaintLayerKindParam height_to_normal_params[] = {
+    /* The gradients' multiplier: one reads as the Sobel's own scale, two doubles the slope. */
+    {"strength", "Normal Intensity", 1.0f, 0.0f, 16.0f},
+    /* The gradients scale by the physical size instead of the map's texels: the same surface laid
+     * at twice the resolution keeps the same normal. */
+    {"world_units", "Use World Units", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Bool},
+    /* Centimetres the map's width (or height, whichever is laid wider) covers. */
+    {"surface_size", "Surface Size (cm)", 100.0f, 0.0f, 1000.0f},
+    /* Centimetres the height delta covers, from the lowest texel to the highest. */
+    {"height_depth", "Height Depth (cm)", 5.0f, 0.0f, 100.0f},
+    /* The green flips, the DirectX encoding: the project's own setting is the OpenGL one. */
+    {"flip_green", "Flip Green", 0.0f, 0.0f, 1.0f, PaintLayerKindParamType::Bool},
+};
+static_assert(std::size(height_to_normal_params) == PAINT_LAYER_HEIGHT_TO_NORMAL_PARAM_NUM);
+
 static const PaintLayerKindEnumItem glow_mode_items[] = {
     {PAINT_LAYER_GLOW_SOFT, "SOFT", "Soft"},
     {PAINT_LAYER_GLOW_PRECISE, "PRECISE", "Precise"},
@@ -1037,7 +1052,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      blur_params,
      int(std::size(blur_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* A line average at an angle: one pass of one kernel, not separable like the box blur's pair,
      * which reaches both ways at once along the line it samples. */
@@ -1048,7 +1063,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      blur_directional_params,
      int(std::size(blur_directional_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* A shadow cast off the row's own shape: the silhouette is spread, blurred and offset before
      * it is tinted, a sequence of passes no single shader kernel lays, so it computes on the CPU
@@ -1062,7 +1077,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      drop_shadow_params,
      int(std::size(drop_shadow_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_MASK_NEEDS_LUMA | PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
     /* A band along the border of the shape: a distance field from the border, banded by the width
      * and softened by the blur -- the Bevel's transform, taken as the edge band rather than the
@@ -1077,7 +1092,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      mask_outline_params,
      int(std::size(mask_outline_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
     /* What a continuous border encloses: the flood that finds the regions and the diffusion that
      * fills them are whole-map passes, so it computes on the CPU like the Bevel does. A content
@@ -1091,8 +1106,22 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      fill_area_params,
      int(std::size(fill_area_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_MASK_NEEDS_LUMA | PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
+    /* The Height laid as a normal: the Sobel gradients of the row's Height, encoded as the
+     * tangent-space normal. The one cross-channel effect: it reads the Height
+     * (#PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT) and lays into the Normal channel, the only one it
+     * filters, which is why it is also #PAINT_LAYER_KIND_NORMAL_SAFE. A content correction only: a
+     * mask item has no channel of its own to lay a normal into. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL,
+     "Height To Normal",
+     PaintLayerKindCategory::Operator,
+     effect_only_roles,
+     height_to_normal_params,
+     int(std::size(height_to_normal_params)),
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_NORMAL_SAFE | PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT)},
     /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same
      * open-above-one policy as Exposure and High Pass, unlike Noise and Channel Mixer. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -1102,7 +1131,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      sharpen_params,
      int(std::size(sharpen_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* The detail is a difference against a blurred copy, so an HDR value above one stays above it;
      * only the negative side is clamped. The same open-above-one policy as Exposure and Sharpen. */
@@ -1113,7 +1142,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      high_pass_params,
      int(std::size(high_pass_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* The Sobel gradient magnitude: a full-range step reads as one, a flat area as zero. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -1123,7 +1152,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      nullptr,
      0,
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* A diagonal 3x3 lighting kernel: a flat colour is its own result, an edge takes the light. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -1133,7 +1162,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      nullptr,
      0,
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* The extreme of a square window per channel: min and max are separable, so the kernel is one
      * pass per axis like the box blur's. */
@@ -1144,7 +1173,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      erode_dilate_params,
      int(std::size(erode_dilate_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* A glow screens its colour under the content, so it stays bounded where the colour is. Its
      * source is choked to [0, 1] by the same bound: an HDR texel above one does not brighten the
@@ -1158,7 +1187,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      glow_params,
      int(std::size(glow_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
     /* A bevel replaces the colour with a distance ramp from the content's borders: its alpha, or
      * its luminance when the source says so -- an opaque row bevels by the dark side of its paint. */
@@ -1169,7 +1198,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      bevel_params,
      int(std::size(bevel_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
     /* The source average is a statistic of the whole map, which the live graph cannot express. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_COLOR_MATCH,
@@ -1178,7 +1207,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      color_match_params,
      int(std::size(color_match_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
     /* The gamma leaves a non-positive value alone and has no upper bound, so an HDR value above
      * one passes through: only the negative side is clamped. The same policy as Sharpen and High
@@ -1200,7 +1229,7 @@ static const PaintLayerKindInfo kinds[] = {
      filter_roles,
      deband_params,
      int(std::size(deband_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NO_GPU_BRANCH)},
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NO_GPU_BRANCH)},
     /* A grain is part of the texture: the shader graph's White Noise and the CPU hash are two
      * different sequences, so the noise is an effect the cache computes once and the bake carries,
      * and no live graph, adjustment or mask form exists for it. The kernel clips its result to
@@ -1214,7 +1243,7 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      noise_params,
      int(std::size(noise_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
     /* A Normal Convert reads the encoding as numbers, not as a direction: the one filter a Normal
      * channel carries, by its own flag. The combined preview has no branch for it. */
@@ -1225,7 +1254,7 @@ static const PaintLayerKindInfo kinds[] = {
      filter_roles,
      normal_convert_params,
      int(std::size(normal_convert_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NORMAL_SAFE |
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NORMAL_SAFE |
               PAINT_LAYER_KIND_NO_GPU_BRANCH)},
     /* A Channel Mixer reads the colour as numbers in a matrix; its payload is the matrix, its
      * monochrome a plain Bool. The combined preview shader has a branch for it, like Color
@@ -1566,15 +1595,22 @@ static IDProperty *kind_param_ensure_color(MaterialPaintLayer &row,
 {
   IDProperty *group = kind_param_group_ensure(row);
   IDProperty *existing = IDP_GetPropertyFromGroup(group, param.name);
-  if (existing != nullptr && existing->type == IDP_ARRAY &&
-      existing->subtype == IDP_FLOAT && existing->len == 4)
+  IDProperty *prop = existing;
+  if (existing == nullptr || existing->type != IDP_ARRAY || existing->subtype != IDP_FLOAT ||
+      existing->len != 4)
   {
-    return existing;
+    float default_color[4];
+    copy_v4_v4(default_color, param.default_color);
+    prop = bke::idprop::create(param.name, Span<float>(default_color, 4)).release();
+    IDP_ReplaceInGroup(group, prop);
   }
-  float default_color[4];
-  copy_v4_v4(default_color, param.default_color);
-  IDProperty *prop = bke::idprop::create(param.name, Span<float>(default_color, 4)).release();
-  IDP_ReplaceInGroup(group, prop);
+  /* The label travels with the property, as a scalar's does: without it the parameter is drawn
+   * under its identifier ("color") instead of its name ("Fill Color"). */
+  if (prop->ui_data == nullptr) {
+    IDPropertyUIDataFloat *ui_data = reinterpret_cast<IDPropertyUIDataFloat *>(
+        IDP_ui_data_ensure(prop));
+    ui_data->base.description = BLI_strdup(param.label);
+  }
   return prop;
 }
 
@@ -1684,6 +1720,16 @@ bool paint_layer_kind_param_color_set(MaterialPaintLayer &row,
 bool BKE_paint_layers_ramp_supported(const MaterialPaintLayer &row)
 {
   return paint_layer_kind_has_ramp_param(row);
+}
+
+bool BKE_paint_layers_normal_channel_supported(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_NORMAL_SAFE);
+}
+
+bool BKE_paint_layers_reads_height(const MaterialPaintLayer &row)
+{
+  return paint_layer_effect_reads_height(row);
 }
 
 /** Whether \a data is \a band itself or one of its stops. */

@@ -132,7 +132,7 @@ bool BKE_paint_layers_composite_image_layers(
     std::shared_ptr<const PaintMaterialCompositeSurface> surface = nullptr,
     PaintLayersHeightWonCache *height_won_cache = nullptr,
     int tile_number = PAINT_TILE_NUMBER_BASE,
-    const Object *painted_object = nullptr);
+    PaintLayerSurfaceRef painted_object = nullptr);
 
 /**
  * Drop every cached Anchor Point slice. The cache owns float canvases of its own (about 0.5 GiB per
@@ -185,7 +185,7 @@ bool BKE_paint_layers_composite_channel(const Material &ma,
                                         ImBuf &r_dst,
                                         const rcti *region = nullptr,
                                         int tile_number = PAINT_TILE_NUMBER_BASE,
-                                        const Object *painted_object = nullptr);
+                                        PaintLayerSurfaceRef painted_object = nullptr);
 
 /**
  * Composite \a channel of \a ma into \a dst, for a caller that holds an #Image rather than a bare
@@ -209,7 +209,7 @@ bool BKE_paint_layers_composite_image(const Material &ma,
                                       const rcti *region = nullptr,
                                       ReportList *reports = nullptr,
                                       int tile_number = PAINT_TILE_NUMBER_BASE,
-                                      const Object *painted_object = nullptr);
+                                      PaintLayerSurfaceRef painted_object = nullptr);
 
 /**
  * The row's mask items as the evaluator reads them, bottom to top: the same description
@@ -228,7 +228,7 @@ bool BKE_paint_layers_mask_items(const Material &ma,
                                  Vector<PaintMaterialCompositeMaskItem> &r_items,
                                  const bUUID *stop_before = nullptr,
                                  int tile_number = PAINT_TILE_NUMBER_BASE,
-                                 const Object *painted_object = nullptr);
+                                 PaintLayerSurfaceRef painted_object = nullptr);
 
 /**
  * Whether the correction \a effect lays in \a channel with the plain blend: Mix, or the combine
@@ -260,7 +260,7 @@ bool BKE_paint_layers_corrections_row_describe(const Material &ma,
                                                PaintMaterialCompositeImageLayer &r_row,
                                                const std::shared_ptr<const PaintMaterialCompositeSurface>
                                                    &context_surface = nullptr,
-                                               const Object *painted_object = nullptr);
+                                               PaintLayerSurfaceRef painted_object = nullptr);
 
 /**
  * Describe the slice \a reader lays in \a channel, without rendering it: the same entry
@@ -350,7 +350,7 @@ void BKE_paint_layers_input_transforms_get(const Material &ma,
                                            int channel,
                                            Vector<PaintMaterialCompositeMapping> &r_steps,
                                            int tile_number = PAINT_TILE_NUMBER_BASE,
-                                           const Object *painted_object = nullptr);
+                                           PaintLayerSurfaceRef painted_object = nullptr);
 
 /**
  * Render the slice \a reader lays in \a channel on the context's tile, at the source row's
@@ -399,7 +399,7 @@ bool BKE_paint_layers_gpu_row_entry(const Material &ma,
                                     const MaterialPaintLayer &layer,
                                     int channel,
                                     PaintMaterialCompositeImageLayer &r_entry,
-                                    const Object *painted_object = nullptr);
+                                    PaintLayerSurfaceRef painted_object = nullptr);
 
 /* -------------------------------------------------------------------- */
 /** \name GPU Effect Pass Plan
@@ -601,7 +601,7 @@ uint64_t BKE_paint_layers_effect_chain_hash(
  * A fingerprint of the described effect input's non-map scalar content -- the row's flat colour, its
  * adjustment filter and parameters, the filters, colours and opacities of the corrections below
  * the effect, and every gradient generator's payload and Anchor Point reader's slice hash in the
- * same description: a map version does not carry those, and a change to one alone would otherwise
+ * same description, and the input's transform steps (Mirror, Transform Mapping): a map version does not carry those, and a change to one alone would otherwise
  * serve a result computed from the old pixels. Together with the map versions it names everything a
  * re-render would read; it keys the GPU entry beyond the CPU hash. Pure: it reads the
  * description only, so it is testable without a GPU.
@@ -923,7 +923,7 @@ class PaintLayersMaskSampler {
                          const MaterialPaintLayer &layer,
                          const bUUID *stop_before = nullptr,
                          const bool hidden_with_base = true,
-                         const Object *painted_object = nullptr);
+                         PaintLayerSurfaceRef painted_object = nullptr);
   ~PaintLayersMaskSampler();
 
   PaintLayersMaskSampler(const PaintLayersMaskSampler &) = delete;

@@ -54,7 +54,7 @@ bool composite_image_layer_build(const Material &ma,
                                      &context_surface = nullptr,
                                  PaintLayersHeightWonCache *height_won_cache = nullptr,
                                  PaintLayerBakeScope scope = PaintLayerBakeScope::WholeRow,
-                                 const Object *painted_object = nullptr);
+                                 PaintLayerSurfaceRef painted_object = nullptr);
 
 /**
  * Append the rows of \a list that take part in \a channel to \a r_layers, bottom to top. A folder is
@@ -74,7 +74,7 @@ void composite_image_layers_collect(const Material &ma,
                                     const bool dimensions_only = false,
                                     const bool describe_only = false,
                                     PaintLayersHeightWonCache *height_won_cache = nullptr,
-                                    const Object *painted_object = nullptr);
+                                    PaintLayerSurfaceRef painted_object = nullptr);
 
 /**
  * Whether nothing in \a layer moves a texel of a map: no mapping on the row, its corrections or

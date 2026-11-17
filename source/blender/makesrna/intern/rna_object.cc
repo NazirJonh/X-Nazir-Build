@@ -22,7 +22,9 @@
 
 #include "BKE_mesh_maps_bake.hh"
 #include "BKE_object_types.hh"
+#include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_sculpt_history.hh"
 
@@ -1364,6 +1366,12 @@ static void rna_Object_active_material_index_update(bContext *C, PointerRNA *ptr
   }
   Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
   ed::sculpt_paint::hide::layered_material_isolate_follow_active_slot(*C, *ob);
+  /* After a stroke only the active material re-bakes its surface rows; the one that just became
+   * active may have waited, and nothing else would make the depsgraph update that sweeps it. */
+  const Material *ma = BKE_object_material_get(ob, ob->actcol);
+  if (ma != nullptr && BKE_paint_layers_is_layered(*ma)) {
+    DEG_id_tag_update(&ob->id, ID_RECALC_SHADING);
+  }
 }
 
 static void rna_Object_active_material_index_range(

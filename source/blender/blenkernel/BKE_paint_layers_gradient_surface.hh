@@ -37,6 +37,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_paint_material_composite_surface.hh"
 
@@ -98,6 +99,20 @@ BKE_paint_layers_gradient_surface_build(const Object &object,
  * the base tile 1001, which is what a bake used before tiles were told apart.
  */
 int BKE_paint_layers_gradient_surface_uv_tile(const Mesh &mesh, const char *uv_map_name);
+
+/**
+ * Every UDIM tile \a uv_map_name of \a mesh has a triangle in, ascending, for a bake that renders
+ * one surface per tile. Unlike #BKE_paint_layers_gradient_surface_uv_tile a triangle owns every tile
+ * its UV bounds reach (half-open, so an island that fills its tile owns that tile alone), because
+ * the surface of a tile rasterizes whatever overlaps it.
+ *
+ * \param r_outside_udim: set when a triangle reaches outside the 10 x 10 tiles UDIM can name, or a
+ *                        UV is not finite; the caller refuses the bake instead of baking a part.
+ * \return the tile numbers, or the base tile alone for a missing map or a mesh without triangles.
+ */
+Vector<int> BKE_paint_layers_gradient_surface_uv_tiles(const Mesh &mesh,
+                                                       const char *uv_map_name,
+                                                       bool &r_outside_udim);
 
 /**
  * The same answer for \a object's render UV map, from the mesh a bake surface is built from (the

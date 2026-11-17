@@ -35,6 +35,7 @@
 #include "DNA_view3d_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_global.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
@@ -111,6 +112,10 @@ static void place_notify(Material *ma)
    * 4K canvas: the previews shade at an octave until the gesture ends (see #place_free). Re-armed
    * on every step, as the mark expires by itself. */
   ed::material_combined::gradient_interactive_begin(*ma);
+  /* The per-object bake of a projected CPU-effect row runs reduced until #place_free ends it. */
+  if (G_MAIN != nullptr) {
+    BKE_paint_layers_bake_drag_set(*G_MAIN, ma->id.session_uid, true);
+  }
   DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, ma);
 }

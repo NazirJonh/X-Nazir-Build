@@ -90,6 +90,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_uuid_types.h"
 
+#include "../paint_material_composite_projection_internal.hh"
 #include "paint_layers_bake_intern.hh"
 #include "paint_layers_hash_intern.hh"
 #include "paint_layers_intern.hh"
@@ -216,15 +217,18 @@ static MaterialPaintLayerBakeTile *bake_tile_find(MaterialPaintLayerBake &bake,
 
 MaterialPaintLayerBakeTile *bake_tile_ensure(MaterialPaintLayerBake &bake,
                                              const uint32_t object_uid,
-                                             const int index)
+                                             const int tile_x,
+                                             const int tile_y)
 {
   if (MaterialPaintLayerBakeTile *tile = bake_tile_find(bake, object_uid)) {
     return tile;
   }
   MaterialPaintLayerBakeTile *tile = MEM_new<MaterialPaintLayerBakeTile>(__func__);
   tile->object_uid = object_uid;
-  tile->tile[0] = index % 10;
-  tile->tile[1] = index / 10;
+  /* The block origin. A one-tile block at index `i` is `(i % 10, i / 10)`, the placement a record
+   * had before blocks, so a saved record reads the same. */
+  tile->tile[0] = tile_x;
+  tile->tile[1] = tile_y;
   BLI_addtail(&bake.tiles, tile);
   return tile;
 }
@@ -285,46 +289,85 @@ std::string paint_layers_bake_tile_attribute_path(const Material &ma)
   return std::string("paint_layer_bake_tile_") + key.data();
 }
 
-/** Write \a index into \a object's tile property so the shader can offset into its tile. */
-static void bake_tile_object_index_set(const Object &object, const char *path, const int index)
+/**
+ * The suffix of the property that carries the row shift of an object's tile block, next to the
+ * column shift the plain path carries. A second scalar rather than a vector or a re-typed property:
+ * a file saved before blocks holds the column shift as an integer under the plain path, and a shader
+ * that reads the row shift finds nothing (zero) there, which is exactly the placement that file's
+ * bake was written with.
+ */
+constexpr char BAKE_TILE_ROW_SUFFIX[] = "_v";
+
+std::string paint_layers_bake_tile_row_attribute_path(const Material &ma)
+{
+  return paint_layers_bake_tile_attribute_path(ma) + BAKE_TILE_ROW_SUFFIX;
+}
+
+/** Set the integer property \a path of \a object_mut to \a value; true when it changed. */
+static bool bake_tile_property_int_set(Object &object_mut, const char *path, const int value)
+{
+  IDProperty *properties = IDP_EnsureProperties(&object_mut.id);
+  IDProperty *property = IDP_GetPropertyFromGroup(properties, path);
+  if (property == nullptr) {
+    IDP_AddToGroup(properties, IDP_NewInt(value, path));
+    return true;
+  }
+  if (property->type != IDP_INT || IDP_int_get(property) == value) {
+    return false;
+  }
+  IDP_int_set(property, value);
+  return true;
+}
+
+/**
+ * Write the shift of \a object's tile block into its two tile properties so the shader can move the
+ * UV into the block: \a shift_x columns and \a shift_y rows.
+ */
+static void bake_tile_object_shift_set(const Object &object,
+                                       const char *path,
+                                       const char *row_path,
+                                       const int shift_x,
+                                       const int shift_y)
 {
   const Object *original = DEG_get_original(&object);
   Object *object_mut = const_cast<Object *>(original != nullptr ? original : &object);
-  IDProperty *properties = IDP_EnsureProperties(&object_mut->id);
-  IDProperty *property = IDP_GetPropertyFromGroup(properties, path);
-  if (property == nullptr) {
-    IDP_AddToGroup(properties, IDP_NewInt(index, path));
+  const bool changed_x = bake_tile_property_int_set(*object_mut, path, shift_x);
+  const bool changed_y = bake_tile_property_int_set(*object_mut, row_path, shift_y);
+  if (changed_x || changed_y) {
+    /* The shader reads the properties through Attribute nodes: let the depsgraph copy them. */
+    DEG_id_tag_update(&object_mut->id, ID_RECALC_SHADING);
   }
-  else if (property->type == IDP_INT) {
-    if (IDP_int_get(property) == index) {
-      return;
-    }
-    IDP_int_set(property, index);
-  }
-  else {
-    return;
-  }
-  /* The shader reads the property through an Attribute node: let the depsgraph copy it. */
-  DEG_id_tag_update(&object_mut->id, ID_RECALC_SHADING);
 }
 
-/** Remove the tile index \a path left on \a object; no bake of the material reads it any more. */
+/** Remove the single tile property \a name \a object carries; true when there was one. */
+static bool bake_tile_property_remove(Object &object_mut, const char *name)
+{
+  IDProperty *properties = IDP_GetProperties(&object_mut.id);
+  if (properties == nullptr) {
+    return false;
+  }
+  IDProperty *property = IDP_GetPropertyFromGroup(properties, name);
+  if (property == nullptr) {
+    return false;
+  }
+  IDP_FreeFromGroup(properties, property);
+  return true;
+}
+
+/**
+ * Remove the tile shift \a path (and its row companion) left on \a object; no bake of the material
+ * reads it any more.
+ */
 static void bake_tile_object_index_remove(const Object &object,
                                           const char *path,
                                           const bool tag_update)
 {
   const Object *original = DEG_get_original(&object);
   Object *object_mut = const_cast<Object *>(original != nullptr ? original : &object);
-  IDProperty *properties = IDP_GetProperties(&object_mut->id);
-  if (properties == nullptr) {
-    return;
-  }
-  IDProperty *property = IDP_GetPropertyFromGroup(properties, path);
-  if (property == nullptr) {
-    return;
-  }
-  IDP_FreeFromGroup(properties, property);
-  if (tag_update) {
+  const std::string row_path = std::string(path) + BAKE_TILE_ROW_SUFFIX;
+  const bool removed_x = bake_tile_property_remove(*object_mut, path);
+  const bool removed_y = bake_tile_property_remove(*object_mut, row_path.c_str());
+  if (tag_update && (removed_x || removed_y)) {
     /* The shader no longer reads the property: let the depsgraph drop its copy too. */
     DEG_id_tag_update(&object_mut->id, ID_RECALC_SHADING);
   }
@@ -336,7 +379,7 @@ constexpr char BAKE_TILE_PROPERTY_PREFIX[] = "paint_layer_bake_tile_";
 /**
  * Parse a tile-index property name into the 64-bit key \a paint_layers_bake_tile_attribute_path()
  * encodes after its prefix. Returns false for any other property, so the lazy prune never touches
- * an unrelated Custom Property.
+ * an unrelated Custom Property. The row companion (#BAKE_TILE_ROW_SUFFIX) names the same key.
  */
 static bool bake_tile_property_hash(const char *name, uint64_t &r_hash)
 {
@@ -345,7 +388,11 @@ static bool bake_tile_property_hash(const char *name, uint64_t &r_hash)
     return false;
   }
   const char *hex = name + prefix_len;
-  if (strlen(hex) != 16) {
+  const size_t hex_len = strlen(hex);
+  if (hex_len != 16 &&
+      !(hex_len == 16 + sizeof(BAKE_TILE_ROW_SUFFIX) - 1 &&
+        strcmp(hex + 16, BAKE_TILE_ROW_SUFFIX) == 0))
+  {
     return false;
   }
   uint64_t value = 0;
@@ -367,14 +414,63 @@ static bool bake_tile_property_hash(const char *name, uint64_t &r_hash)
   return true;
 }
 
-/** Give every target object its tile index, in the order the bake writes the tiles. */
+/**
+ * Give every target object the shift of its tile block, in the order the bake writes the tiles.
+ * The single-tile scheme has the origin `(index, 0)` and no UV minimum, so its column shift is the
+ * index the property held before blocks and the row shift is zero.
+ */
 void bake_tile_object_indices_set(const Material &ma,
                                   const PaintLayersBakeTargets &targets)
 {
   const std::string path = paint_layers_bake_tile_attribute_path(ma);
-  for (int index = 0; index < targets.objects.size(); index++) {
-    bake_tile_object_index_set(*targets.objects[index].object, path.c_str(), index);
+  const std::string row_path = paint_layers_bake_tile_row_attribute_path(ma);
+  for (const PaintLayersBakeTarget &target : targets.objects) {
+    bake_tile_object_shift_set(*target.object,
+                               path.c_str(),
+                               row_path.c_str(),
+                               target.block_origin[0] - target.uv_tile_min[0],
+                               target.block_origin[1] - target.uv_tile_min[1]);
   }
+}
+
+Vector<PaintLayersBakeTilePair> bake_target_tile_pairs(const PaintLayersBakeTarget &target,
+                                                       const int object_index)
+{
+  Vector<PaintLayersBakeTilePair> pairs;
+  if (target.uv_tiles.is_empty()) {
+    /* The single-tile scheme: the object's UVs are rendered where they sit and written to the tile
+     * of the object's index. */
+    pairs.append({BKE_paint_layers_gradient_surface_uv_tile(*target.mesh, target.uv_map_name),
+                  PAINT_TILE_NUMBER_BASE + object_index});
+    return pairs;
+  }
+  for (const int uv_tile : target.uv_tiles) {
+    const int column = (uv_tile - PAINT_TILE_NUMBER_BASE) % 10 - target.uv_tile_min[0];
+    const int row = (uv_tile - PAINT_TILE_NUMBER_BASE) / 10 - target.uv_tile_min[1];
+    pairs.append({uv_tile,
+                  PAINT_TILE_NUMBER_BASE + (target.block_origin[0] + column) +
+                      10 * (target.block_origin[1] + row)});
+  }
+  return pairs;
+}
+
+Vector<int> bake_targets_image_tiles(const Span<PaintLayersBakeTarget> objects)
+{
+  Vector<int> tiles;
+  for (const int index : objects.index_range()) {
+    const PaintLayersBakeTarget &target = objects[index];
+    if (target.uv_tiles.is_empty()) {
+      tiles.append(PAINT_TILE_NUMBER_BASE + index);
+      continue;
+    }
+    for (const int row : IndexRange(target.block_size[1])) {
+      for (const int column : IndexRange(target.block_size[0])) {
+        tiles.append(PAINT_TILE_NUMBER_BASE + (target.block_origin[0] + column) +
+                     10 * (target.block_origin[1] + row));
+      }
+    }
+  }
+  return tiles;
 }
 
 /** Whether any row of \a ma still carries per-object tile records. */
@@ -1120,31 +1216,16 @@ static uint64_t bake_hash_idprops(uint64_t h, const IDProperty *group)
   return h;
 }
 
-/**
- * Whether the UV mapping of \a layer is folded into its bake instead of keeping the row live: a
- * plain UV remap (no Mirror, no projection) of a row that carries an enabled CPU-computed effect
- * (Noise, Blur). Such a row has no live form, so it shows only once baked and substituted, and the
- * CPU composite the bake renders from applies the mapping itself; the substituted group has no
- * mapping inputs, so it is not applied twice. An identity transform with a clipping wrap folds as
- * well, as it only cuts what a bake never holds.
- */
-static bool bake_own_mapping_folds(const Material &ma, const MaterialPaintLayer &layer)
+/** Whether \a layer keeps its effects apart (a Material row, an Anchor Point reader). */
+static bool bake_row_keeps_effects_apart(const MaterialPaintLayer &layer)
 {
-  if (!BKE_paint_layers_mapping_remaps(ma, layer) ||
-      BKE_paint_layers_mapping_mirror_get(layer) != 0 ||
-      BKE_paint_layers_projection_applies(ma, layer))
-  {
-    return false;
-  }
-  if (BKE_paint_layers_mapping_is_identity(layer)) {
-    return true;
-  }
-  /* Rows that read a source or an Anchor Point cache their effects apart and are kept live. */
-  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) ||
-      paint_layer_kind_reads_anchor_point(layer))
-  {
-    return false;
-  }
+  return paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) ||
+         paint_layer_kind_reads_anchor_point(layer);
+}
+
+/** Whether \a layer carries an enabled CPU-computed effect (Noise, Blur). */
+static bool bake_row_has_cpu_effect(const MaterialPaintLayer &layer)
+{
   for (const MaterialPaintLayer &effect : layer.effects) {
     if ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 && paint_layer_effect_is_cpu_computed(effect)) {
       return true;
@@ -1153,11 +1234,105 @@ static bool bake_own_mapping_folds(const Material &ma, const MaterialPaintLayer 
   return false;
 }
 
+/**
+ * Whether the mapping of \a layer is folded into its bake instead of keeping the row live: a UV
+ * remap (Mirror included) of a row that carries an enabled CPU-computed effect (Noise, Blur), or the
+ * projection of such a row (#paint_layer_row_folds_into_bake). Such a row has no live form, so it
+ * shows only once baked and substituted, and the CPU composite the bake renders from applies the
+ * mapping itself; the substituted group has no mapping inputs, so it is not applied twice. An
+ * identity transform with a clipping wrap folds as well, as it only cuts what a bake never holds.
+ *
+ * \a cpu_in_subtree is #paint_layer_subtree_has_cpu_effect of the row the bake is made for: a
+ * projection nested under such a row (a child, a Text Decal, a mask item inside the picture) is
+ * folded with it, so the effect runs over what the surface projects.
+ */
+static bool bake_own_mapping_folds(const Material &ma,
+                                   const MaterialPaintLayer &layer,
+                                   const bool cpu_in_subtree)
+{
+  if (BKE_paint_layers_projection_applies(ma, layer)) {
+    /* A Mirror on a projected row is a step of the projected read (the CPU resample and the
+     * graph), so it never keeps the row live; #bake_hash_projection_fold hashes its axes and
+     * center. A nested row folds along with the bake it is rendered in. */
+    return paint_layer_node_folds_into_bake(ma, layer, cpu_in_subtree);
+  }
+  if (!BKE_paint_layers_mapping_remaps(ma, layer)) {
+    return false;
+  }
+  /* A Mirror is folded only where the effects are cached with the row; a source or an Anchor Point
+   * reader keeps it live as it always did. */
+  if (BKE_paint_layers_mapping_mirror_get(layer) != 0 &&
+      (bake_row_keeps_effects_apart(layer) || !bake_row_has_cpu_effect(layer)))
+  {
+    return false;
+  }
+  if (BKE_paint_layers_mapping_is_identity(layer)) {
+    return true;
+  }
+  /* Rows that read a source or an Anchor Point cache their effects apart and are kept live. */
+  if (bake_row_keeps_effects_apart(layer)) {
+    return false;
+  }
+  return bake_row_has_cpu_effect(layer);
+}
+
+/**
+ * Whether the transform effects (Mirror, Transform Mapping) of \a layer are rendered into its bake:
+ * the CPU composite resamples through them before the CPU effect runs, and the substituted group
+ * builds no transform chains, so they must not keep the row live.
+ */
+static bool bake_effect_transforms_fold(const MaterialPaintLayer &layer)
+{
+  return !bake_row_keeps_effects_apart(layer) && bake_row_has_cpu_effect(layer);
+}
+
+/**
+ * The numbers of a projected row that its bake holds: the frame and the mapping the projection is
+ * read through. The mesh and the material slots behind the frame belong to the tile identity.
+ */
+static uint64_t bake_hash_projection_fold(uint64_t h, const MaterialPaintLayer &layer)
+{
+  const MaterialPaintLayerProjection &frame = *layer.projection;
+  for (const float value : frame.center) {
+    h = bake_hash_float(h, value);
+  }
+  for (const float value : frame.size) {
+    h = bake_hash_float(h, value);
+  }
+  for (const float value : frame.normal) {
+    h = bake_hash_float(h, value);
+  }
+  h = bake_hash_float(h, frame.roll);
+  h = bake_hash_mix(h, uint8_t(frame.axis));
+  h = bake_hash_mix(h, uint16_t(frame.flag));
+  h = bake_hash_mix(h, uint16_t(layer.mapping.space));
+  h = bake_hash_mix(h, uint16_t(layer.mapping.flag));
+  h = bake_hash_mix(h, uint16_t(layer.mapping.wrap));
+  h = bake_hash_mix(h, uint8_t(BKE_paint_layers_mapping_mirror_get(layer)));
+  for (const float value : layer.mapping.offset) {
+    h = bake_hash_float(h, value);
+  }
+  for (const float value : layer.mapping.scale) {
+    h = bake_hash_float(h, value);
+  }
+  h = bake_hash_float(h, layer.mapping.rotation);
+  h = bake_hash_float(h, layer.mapping.mirror_center[0]);
+  h = bake_hash_float(h, layer.mapping.mirror_center[1]);
+  return h;
+}
+
 static uint64_t bake_hash_layer(uint64_t h,
                                 const Material &ma,
                                 const MaterialPaintLayer &layer,
-                                const bool is_child)
+                                const bool is_child,
+                                const bool parent_cpu_in_subtree = false)
 {
+  /* Whether a CPU effect runs over this bake's picture: asked once at the row the bake is made for
+   * and handed down, so a projection nested at any depth is hashed (it is part of what the cache
+   * holds) exactly when #bake_mapping_blocks lets it through. False for every stack that has no such
+   * effect, which keeps the hash of every older bake as it was. */
+  const bool cpu_in_subtree = is_child ? parent_cpu_in_subtree :
+                                         paint_layer_subtree_has_cpu_effect(layer);
   /* A content bake's mask, its opacities and its blend are live over the substituted map, so none
    * of them may move the hash of what was rendered; a child of another row's cache keeps its mask
    * inside, being part of the picture that cache holds (#paint_layer_bake_scope). */
@@ -1241,13 +1416,28 @@ static uint64_t bake_hash_layer(uint64_t h,
     h = bake_hash_mix(h, BKE_paint_layers_mapping_remaps(ma, layer) ? 1 : 0);
     /* A mapping folded into the bake is part of what the cache holds, so its values are hashed:
      * moving the gizmo must invalidate the bake. */
-    if (bake_own_mapping_folds(ma, layer)) {
+    if (bake_own_mapping_folds(ma, layer, cpu_in_subtree)) {
       h = bake_hash_float(h, layer.mapping.offset[0]);
       h = bake_hash_float(h, layer.mapping.offset[1]);
       h = bake_hash_float(h, layer.mapping.scale[0]);
       h = bake_hash_float(h, layer.mapping.scale[1]);
       h = bake_hash_float(h, layer.mapping.rotation);
       h = bake_hash_mix(h, uint16_t(BKE_paint_layers_mapping_wrap_get(layer)));
+      /* Only a mirrored row adds to the hash, so a bake saved before keeps its value. */
+      if (const int mirror = BKE_paint_layers_mapping_mirror_get(layer)) {
+        h = bake_hash_mix(h, uint8_t(mirror));
+        h = bake_hash_float(h, layer.mapping.mirror_center[0]);
+        h = bake_hash_float(h, layer.mapping.mirror_center[1]);
+      }
+    }
+    /* A projected row with a CPU effect holds the frame and the mapping in its cache. Reached only
+     * while #PAINT_LAYERS_BAKE_PROJECTED_EFFECT is on, so the hash of every other row is as it was.
+     * NOTE: the surface identity of the tile (mesh content, UV name, and the material slot
+     * signature of #composite_projection_surface_identity) joins the tile identity in
+     * #paint_layers_bake_row_identity, not this hash. Every node of the subtree that projects is
+     * hashed (a child's, a nested correction's, a mask item's), not only the row's own. */
+    if (paint_layer_node_folds_into_bake(ma, layer, cpu_in_subtree)) {
+      h = bake_hash_projection_fold(h, layer);
     }
   }
   /* An effect in its Decal frame is rendered into the cache, unlike a UV mapping that keeps the row
@@ -1394,18 +1584,37 @@ static uint64_t bake_hash_layer(uint64_t h,
    * payloads directly, so a matrix or balance is part of what the baked map was made from. */
   h = bake_hash_mix(h, paint_layer_payload_hash(layer));
   /* Effects first, then mask items, then children, each in its own storage order. */
+  const bool transforms_fold = bake_effect_transforms_fold(layer);
   for (const MaterialPaintLayer &effect : layer.effects) {
-    h = bake_hash_layer(h, ma, effect, true);
+    h = bake_hash_layer(h, ma, effect, true, cpu_in_subtree);
+    /* A transform effect folded into this row's bake moves its pixels (Decal-frame ones are hashed
+     * above). Only one that remaps adds to the hash, as the others never blocked a bake. */
+    if (transforms_fold && paint_layer_kind_transforms_input(effect) &&
+        effect.mapping.space != MA_PAINT_LAYER_MAPPING_SPACE_DECAL &&
+        BKE_paint_layers_mapping_remaps(ma, effect))
+    {
+      h = bake_hash_mix(h, uint16_t(effect.mapping.space));
+      h = bake_hash_mix(h, uint16_t(effect.mapping.flag));
+      h = bake_hash_mix(h, uint16_t(BKE_paint_layers_mapping_wrap_get(effect)));
+      h = bake_hash_mix(h, uint8_t(BKE_paint_layers_mapping_mirror_get(effect)));
+      h = bake_hash_float(h, effect.mapping.offset[0]);
+      h = bake_hash_float(h, effect.mapping.offset[1]);
+      h = bake_hash_float(h, effect.mapping.scale[0]);
+      h = bake_hash_float(h, effect.mapping.scale[1]);
+      h = bake_hash_float(h, effect.mapping.rotation);
+      h = bake_hash_float(h, effect.mapping.mirror_center[0]);
+      h = bake_hash_float(h, effect.mapping.mirror_center[1]);
+    }
   }
   /* The mask of a content bake is laid live over the map and reaches none of its pixels: a stroke
    * into it must leave the cache current. */
   if (scope != PaintLayerBakeScope::ContentOnly) {
     for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
-      h = bake_hash_layer(h, ma, mask_item, true);
+      h = bake_hash_layer(h, ma, mask_item, true, cpu_in_subtree);
     }
   }
   for (const MaterialPaintLayer &child : layer.children) {
-    h = bake_hash_layer(h, ma, child, true);
+    h = bake_hash_layer(h, ma, child, true, cpu_in_subtree);
   }
   /* The row's own visibility is a live factor and must not move its own bake. A parent's bake
    * renders its children, so a child's visibility does change the parent's result. */
@@ -1509,36 +1718,48 @@ void BKE_paint_layers_bake_finalize(Material &ma, MaterialPaintLayer &layer)
  */
 static bool bake_mapping_blocks(const Material &ma,
                                 const MaterialPaintLayer &layer,
-                                const PaintLayerBakeScope scope)
+                                const PaintLayerBakeScope scope,
+                                const bool cpu_in_subtree)
 {
   /* A plain UV mapping of a CPU-computed row (Noise, Blur) is folded into its bake rather than
    * keeping it live: such a row shows only when baked and substituted
-   * (#bake_own_mapping_folds). */
-  if ((BKE_paint_layers_mapping_remaps(ma, layer) && !bake_own_mapping_folds(ma, layer)) ||
-      BKE_paint_layers_projection_applies(ma, layer))
+   * (#bake_own_mapping_folds). A projection folds when the row it is rendered in has a CPU effect
+   * in its subtree (#paint_layer_node_folds_into_bake): the effect then runs over what the surface
+   * projects. Without one the stack keeps its live graph, so the Auto bake never starts for a
+   * projected stack that had no effect to bake. */
+  if ((BKE_paint_layers_mapping_remaps(ma, layer) &&
+       !bake_own_mapping_folds(ma, layer, cpu_in_subtree)) ||
+      (BKE_paint_layers_projection_applies(ma, layer) &&
+       !paint_layer_node_folds_into_bake(ma, layer, cpu_in_subtree)))
   {
     return true;
   }
+  const bool transforms_fold = bake_effect_transforms_fold(layer);
   for (const MaterialPaintLayer &effect : layer.effects) {
+    /* A Mirror or Transform Mapping effect of a row that bakes a CPU effect is rendered into the
+     * bake, like the row's own mapping. */
+    if (transforms_fold && paint_layer_kind_transforms_input(effect)) {
+      continue;
+    }
     /* An effect in its Decal frame is what the bake renders (CPU effect-space resampling over the
      * object's surface), so it must not keep the row live; the graph leaves it out of the row anyway
      * (#BKE_paint_layers_active_uv_transform_effects), so the baked map is not transformed twice. */
     if (BKE_paint_layers_effect_decal_applies(ma, layer, effect)) {
       continue;
     }
-    if (bake_mapping_blocks(ma, effect, PaintLayerBakeScope::Child)) {
+    if (bake_mapping_blocks(ma, effect, PaintLayerBakeScope::Child, cpu_in_subtree)) {
       return true;
     }
   }
   if (scope != PaintLayerBakeScope::ContentOnly) {
     for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
-      if (bake_mapping_blocks(ma, mask_item, PaintLayerBakeScope::Child)) {
+      if (bake_mapping_blocks(ma, mask_item, PaintLayerBakeScope::Child, cpu_in_subtree)) {
         return true;
       }
     }
   }
   for (const MaterialPaintLayer &child : layer.children) {
-    if (bake_mapping_blocks(ma, child, PaintLayerBakeScope::Child)) {
+    if (bake_mapping_blocks(ma, child, PaintLayerBakeScope::Child, cpu_in_subtree)) {
       return true;
     }
   }
@@ -1558,13 +1779,44 @@ static bool bake_object_mask_blocks(const MaterialPaintLayer &layer)
   return false;
 }
 
+/**
+ * Whether \a layer is a mask item whose CPU effect lays a grey computed from a projected item of
+ * the same mask stack before it. That grey is one map for every object of the material and is
+ * computed without a surface, so a projected item in it would read as nothing: the bake would
+ * hold a wrong map. The item stays live, its grey computed per describe with the painted object
+ * (#paint_layer_mask_effect_buffer_get) instead.
+ */
+static bool bake_mask_effect_prefix_projects(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if (!paint_layer_mask_item_bakes_effect(layer)) {
+    return false;
+  }
+  const MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, layer);
+  if (owner == nullptr) {
+    return false;
+  }
+  for (const MaterialPaintLayer &item : owner->mask_stack) {
+    if (&item == &layer) {
+      break;
+    }
+    if (BKE_paint_layers_projection_applies(ma, item)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool BKE_paint_layers_bake_blocked(const Material &ma, const MaterialPaintLayer &layer)
 {
   /* A row holding a read Anchor Point (or a folder above one) is never substituted: the cache
    * would swallow the point. A reader whose slice contains an object mask stays live when its mode
    * allows it; the effective-mode helper decides which. */
-  return bake_mapping_blocks(ma, layer, paint_layer_bake_scope(layer, false)) ||
-         bake_object_mask_blocks(layer) || paint_layer_anchor_point_blocks_bake(ma, layer);
+  return bake_mapping_blocks(ma,
+                             layer,
+                             paint_layer_bake_scope(layer, false),
+                             paint_layer_subtree_has_cpu_effect(layer)) ||
+         bake_mask_effect_prefix_projects(ma, layer) || bake_object_mask_blocks(layer) ||
+         paint_layer_anchor_point_blocks_bake(ma, layer);
 }
 
 /** \} */
@@ -1719,9 +1971,17 @@ Image *bake_service_image(Main &bmain,
                           const int size,
                           const bool is_color,
                           const bool floatbuf,
-                          const int object_num)
+                          const int object_num,
+                          const Span<int> tile_numbers)
 {
   const bool tiled = object_num > 0;
+  /* The tiles a tiled map has to hold: the blocks' tiles, or one per object in the single-tile
+   * scheme. The first one is created by the image itself and is always 1001 (the first block sits
+   * at the origin of the map). */
+  const auto tile_number_at = [&](const int index) {
+    return tile_numbers.is_empty() ? PAINT_TILE_NUMBER_BASE + index : tile_numbers[index];
+  };
+  const int tile_num = tile_numbers.is_empty() ? object_num : int(tile_numbers.size());
   Image **slot = bake_service_slot(layer, channel);
   if (*slot != nullptr) {
     int width = 0;
@@ -1732,11 +1992,11 @@ Image *bake_service_image(Main &bmain,
       if (!tiled) {
         return *slot;
       }
-      /* A precreated per-object map has tile 1001 only: grow it to the number of objects the bake
+      /* A precreated per-object map has tile 1001 only: grow it to the number of tiles the bake
        * resolved instead of throwing the canvas away. */
       bool all_tiles = true;
-      for (int index = 0; index < object_num; index++) {
-        if (!BKE_paint_layers_map_coverage_tile_ensure(**slot, PAINT_TILE_NUMBER_BASE + index)) {
+      for (int index = 0; index < tile_num; index++) {
+        if (!BKE_paint_layers_map_coverage_tile_ensure(**slot, tile_number_at(index))) {
           all_tiles = false;
           break;
         }
@@ -1777,8 +2037,10 @@ Image *bake_service_image(Main &bmain,
     if (tiled) {
       /* The first tile is created by the image itself; the rest carry the same canvas and format,
        * because a UDIM image requires every tile to have the same resolution. */
-      for (int index = 1; index < object_num; index++) {
-        BKE_paint_layers_map_coverage_tile_ensure(*image, PAINT_TILE_NUMBER_BASE + index);
+      for (int index = 0; index < tile_num; index++) {
+        if (tile_number_at(index) != PAINT_TILE_NUMBER_BASE) {
+          BKE_paint_layers_map_coverage_tile_ensure(*image, tile_number_at(index));
+        }
       }
     }
     /* A bake is the stack's own read of a row, so the browsers hide it like every other map. */
@@ -2300,8 +2562,13 @@ static int64_t bake_object_budget_bytes(const Material &ma,
         {
           return true;
         }
-        const int row_objects = std::max(1, row.bake->object_count);
-        bytes += int64_t(row_objects) * bake_object_cache_bytes(ma, row, row.bake->size);
+        /* A row baked with tile blocks holds a tile per block tile, not per object: the coverage map
+         * is tiled exactly like the colour maps, so it tells how many. */
+        int row_tiles = std::max(1, row.bake->object_count);
+        if (row.bake->coverage != nullptr && row.bake->coverage->source == IMA_SRC_TILED) {
+          row_tiles = std::max(row_tiles, BLI_listbase_count(&row.bake->coverage->tiles));
+        }
+        bytes += int64_t(row_tiles) * bake_object_cache_bytes(ma, row, row.bake->size);
         return true;
       });
   return bytes;
@@ -2311,6 +2578,153 @@ uint64_t paint_layers_bake_target_identity(const PaintLayersBakeTarget &target, 
 {
   return BKE_paint_layers_gradient_surface_identity(
       *target.object, *target.mesh, target.uv_map_name, size);
+}
+
+/**
+ * Whether \a node or anything a bake of it renders (its corrections, its mask items, its children)
+ * applies a projection: the Material-aware half of #paint_layer_subtree_holds_frame, over the same
+ * nodes, so the two cannot disagree about what a bake reads from the surface.
+ */
+static bool bake_subtree_projects(const Material &ma,
+                                  const MaterialPaintLayer &node,
+                                  const bool is_child)
+{
+  if (paint_layer_node_holds_frame(node) && BKE_paint_layers_projection_applies(ma, node)) {
+    return true;
+  }
+  for (const MaterialPaintLayer &effect : node.effects) {
+    if (bake_subtree_projects(ma, effect, true)) {
+      return true;
+    }
+  }
+  if (paint_layer_bake_scope(node, is_child) != PaintLayerBakeScope::ContentOnly) {
+    for (const MaterialPaintLayer &item : node.mask_stack) {
+      if (bake_subtree_projects(ma, item, true)) {
+        return true;
+      }
+    }
+  }
+  for (const MaterialPaintLayer &child : node.children) {
+    if (bake_subtree_projects(ma, child, true)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Whether \a layer or a row below it folds a projection into its bake. */
+bool bake_subtree_folds_projection(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if (paint_layer_row_folds_into_bake(ma, layer)) {
+    return true;
+  }
+  /* A CPU effect anywhere in the subtree makes every projection under it part of the bake: the
+   * effect runs over what the surface projects, whatever node holds the frame. */
+  if (paint_layer_subtree_has_cpu_effect(layer) && bake_subtree_projects(ma, layer, false)) {
+    return true;
+  }
+  for (const MaterialPaintLayer &child : layer.children) {
+    if (bake_subtree_folds_projection(ma, child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The controller Empties of every projecting node a bake of \a node renders, over the same nodes as
+ * #bake_subtree_projects. They are what the bake's identity has to follow: a controller of a child
+ * or of a mask item inside the picture moves the pixels of the whole row.
+ */
+static void bake_subtree_controllers_collect(const Material &ma,
+                                             const MaterialPaintLayer &node,
+                                             const bool is_child,
+                                             Vector<const Object *> &r_controllers)
+{
+  if (node.projection_object != nullptr && paint_layer_node_holds_frame(node) &&
+      BKE_paint_layers_projection_applies(ma, node) &&
+      !r_controllers.contains(node.projection_object))
+  {
+    r_controllers.append(node.projection_object);
+  }
+  for (const MaterialPaintLayer &effect : node.effects) {
+    bake_subtree_controllers_collect(ma, effect, true, r_controllers);
+  }
+  if (paint_layer_bake_scope(node, is_child) != PaintLayerBakeScope::ContentOnly) {
+    for (const MaterialPaintLayer &item : node.mask_stack) {
+      bake_subtree_controllers_collect(ma, item, true, r_controllers);
+    }
+  }
+  for (const MaterialPaintLayer &child : node.children) {
+    bake_subtree_controllers_collect(ma, child, true, r_controllers);
+  }
+}
+
+void bake_projection_controllers_collect(const Material &ma,
+                                          Vector<const Object *> &r_controllers)
+{
+  const auto add = [&](const MaterialPaintLayer &row) {
+    if (row.projection_object != nullptr && !r_controllers.contains(row.projection_object)) {
+      r_controllers.append(row.projection_object);
+    }
+  };
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        add(layer);
+        for (const MaterialPaintLayer &effect : layer.effects) {
+          add(effect);
+        }
+        for (const MaterialPaintLayer &item : layer.mask_stack) {
+          add(item);
+        }
+        return true;
+      });
+}
+
+uint64_t paint_layers_bake_row_identity(const Material &ma,
+                                        const MaterialPaintLayer &layer,
+                                        const PaintLayersBakeTarget &target,
+                                        const int size)
+{
+  uint64_t identity = paint_layers_bake_target_identity(target, size);
+  /* A block of several tiles moves what the maps hold (which UV tiles, and where they lie), which
+   * the geometry hash does not see when only the material's rows changed. A one-tile block adds
+   * nothing: the tile hash is saved in the file, and those bakes keep the value they always had. */
+  if (target.block_size[0] * target.block_size[1] > 1) {
+    identity = get_default_hash(identity,
+                                target.uv_tile_min[0],
+                                target.uv_tile_min[1],
+                                target.block_size[0],
+                                target.block_size[1]);
+  }
+  /* The tile hash is saved in the file, so a row that folds no projection keeps the value it always
+   * had: adding the slot signature to every tile would re-bake every saved bake once. */
+  if (!bake_subtree_folds_projection(ma, layer)) {
+    return identity;
+  }
+  /* A projected read covers the faces of the slots holding the material, which no mesh hash sees. */
+  identity = get_default_hash(identity, composite_projection_surface_identity(target.object, &ma));
+  /* The frame of a row with a controller Empty moves with the Empty (and with the painted object
+   * seen from it), which the frame's own numbers do not say. Every projecting node of the subtree
+   * adds its controller, so a nested row's Empty invalidates the bake like the row's own does. Only
+   * a subtree with a controller adds anything, so the identity of the others stays as it was. */
+  Vector<const Object *> controllers;
+  bake_subtree_controllers_collect(ma, layer, false, controllers);
+  if (!controllers.is_empty()) {
+    const auto mix_matrix = [&](const float4x4 &matrix) {
+      for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+          identity = bake_hash_float(identity, matrix[i][j]);
+        }
+      }
+    };
+    mix_matrix(target.object->object_to_world());
+    for (const Object *controller : controllers) {
+      identity = get_default_hash(identity, controller->id.session_uid);
+      mix_matrix(controller->object_to_world());
+    }
+  }
+  return identity;
 }
 
 /**
@@ -2352,9 +2766,126 @@ static void bake_tile_properties_prune(const Object &object, const Set<uint64_t>
     IDProperty *next = property->next;
     uint64_t key;
     if (bake_tile_property_hash(property->name, key) && !keys.contains(key)) {
-      bake_tile_object_index_remove(*object_mut, property->name, true);
+      /* One property per step: the walk holds the next one, which may be this one's row companion,
+       * so removing the pair at once would free it. */
+      if (bake_tile_property_remove(*object_mut, property->name)) {
+        DEG_id_tag_update(&object_mut->id, ID_RECALC_SHADING);
+      }
     }
     property = next;
+  }
+}
+
+/** The columns of the UDIM grid, and the tiles it holds in all: the limits of one bake's blocks. */
+constexpr int BAKE_TILE_BLOCK_COLUMNS = 10;
+constexpr int BAKE_TILE_BLOCK_TILES_MAX = 100;
+
+/** Whether any row of \a ma folds a projection into its bake. */
+static bool bake_any_row_folds_projection(const Material &ma)
+{
+  bool folds = false;
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+        folds = bake_subtree_folds_projection(ma, row);
+        return !folds;
+      });
+  return folds;
+}
+
+/**
+ * Place the objects of \a r_view in the UDIM maps their bakes share.
+ *
+ * Every object first gets the single-tile scheme: tile `1001 + index`, which is all a bake had
+ * before blocks and stays what a one-tile object gets below, so the maps and records of a saved
+ * bake read the same. A material holding a row that folds a projection then gives each object a
+ * block instead: the bounding box of the UDIM tiles its UVs have geometry in, blocks laid left to
+ * right in rows of ten tiles. The shift into a block is one constant per object (the shader adds it
+ * to the UV), so a block is a rigid copy of that box, tiles without geometry included.
+ *
+ * The scheme is the material's, not a row's: the shift lives on the object and every row of the
+ * material reads it. A bake that cannot be placed (a box wider than the ten columns, more than 100
+ * tiles in all, a UV outside the UDIM grid) sets #PaintLayersBakeView::tiles_limited; the rows that
+ * fold a projection then stay live and the others keep the single-tile scheme.
+ */
+static void bake_view_tile_blocks_assign(const Material &ma, PaintLayersBakeView &r_view)
+{
+  r_view.tiles_limited = false;
+  for (const int index : r_view.objects.index_range()) {
+    PaintLayersBakeTarget &target = r_view.objects[index];
+    target.uv_tiles.clear();
+    target.uv_tile_min[0] = target.uv_tile_min[1] = 0;
+    target.block_size[0] = target.block_size[1] = 1;
+    target.block_origin[0] = index % BAKE_TILE_BLOCK_COLUMNS;
+    target.block_origin[1] = index / BAKE_TILE_BLOCK_COLUMNS;
+  }
+  if (r_view.objects.is_empty() || !bake_any_row_folds_projection(ma)) {
+    return;
+  }
+
+  struct Block {
+    Vector<int> uv_tiles;
+    int uv_min[2];
+    int size[2];
+    int origin[2];
+  };
+  Vector<Block> blocks;
+  for (const PaintLayersBakeTarget &target : r_view.objects) {
+    bool outside_udim = false;
+    Block block;
+    block.uv_tiles = BKE_paint_layers_gradient_surface_uv_tiles(
+        *target.mesh, target.uv_map_name, outside_udim);
+    if (outside_udim) {
+      r_view.tiles_limited = true;
+      return;
+    }
+    int uv_max[2] = {0, 0};
+    block.uv_min[0] = block.uv_min[1] = BAKE_TILE_BLOCK_COLUMNS;
+    for (const int tile : block.uv_tiles) {
+      const int column = (tile - PAINT_TILE_NUMBER_BASE) % BAKE_TILE_BLOCK_COLUMNS;
+      const int row = (tile - PAINT_TILE_NUMBER_BASE) / BAKE_TILE_BLOCK_COLUMNS;
+      block.uv_min[0] = std::min(block.uv_min[0], column);
+      block.uv_min[1] = std::min(block.uv_min[1], row);
+      uv_max[0] = std::max(uv_max[0], column);
+      uv_max[1] = std::max(uv_max[1], row);
+    }
+    block.size[0] = uv_max[0] - block.uv_min[0] + 1;
+    block.size[1] = uv_max[1] - block.uv_min[1] + 1;
+    blocks.append(std::move(block));
+  }
+
+  /* Shelf packing: a block that does not fit the rest of the row starts the next one. One-tile
+   * blocks in a row come out as `(index % 10, index / 10)`, the single-tile scheme. */
+  int column = 0;
+  int row = 0;
+  int row_height = 0;
+  int tiles_total = 0;
+  for (Block &block : blocks) {
+    if (column + block.size[0] > BAKE_TILE_BLOCK_COLUMNS) {
+      row += row_height;
+      column = 0;
+      row_height = 0;
+    }
+    block.origin[0] = column;
+    block.origin[1] = row;
+    column += block.size[0];
+    row_height = std::max(row_height, block.size[1]);
+    tiles_total += block.size[0] * block.size[1];
+    if (block.size[0] > BAKE_TILE_BLOCK_COLUMNS || tiles_total > BAKE_TILE_BLOCK_TILES_MAX ||
+        row + block.size[1] > BAKE_TILE_BLOCK_COLUMNS)
+    {
+      r_view.tiles_limited = true;
+      return;
+    }
+  }
+  for (const int index : r_view.objects.index_range()) {
+    PaintLayersBakeTarget &target = r_view.objects[index];
+    Block &block = blocks[index];
+    target.uv_tiles = std::move(block.uv_tiles);
+    for (const int axis : IndexRange(2)) {
+      target.uv_tile_min[axis] = block.uv_min[axis];
+      target.block_size[axis] = block.size[axis];
+      target.block_origin[axis] = block.origin[axis];
+    }
   }
 }
 
@@ -2367,6 +2898,7 @@ void paint_layers_bake_view_resolve(const Material &ma,
   r_view.objects.clear();
   r_view.meshes.clear();
   r_view.issue = PAINT_LAYERS_BAKE_OBJECTS_OK;
+  r_view.tiles_limited = false;
   if (scene == nullptr || view_layer == nullptr) {
     r_view.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT;
     return;
@@ -2441,7 +2973,9 @@ void paint_layers_bake_view_resolve(const Material &ma,
   }
   if (r_view.objects.is_empty()) {
     r_view.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_OBJECT;
+    return;
   }
+  bake_view_tile_blocks_assign(ma, r_view);
 }
 
 /**
@@ -2515,14 +3049,34 @@ void paint_layers_bake_targets_resolve(const Material &ma,
     r_targets.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_OBJECT;
     return;
   }
+  const bool folds_projection = bake_subtree_folds_projection(ma, layer);
+  if (view.tiles_limited && folds_projection) {
+    /* The UVs have no placement in the UDIM maps (see #bake_view_tile_blocks_assign): the row has
+     * nothing to be baked into and stays live, without its effect. */
+    r_targets.issue = PAINT_LAYERS_BAKE_OBJECTS_TILES;
+    return;
+  }
   r_targets.objects = view.objects;
 
   /* The budget is one per material, not one per row: every Object/Generated row of the material
-   * holds one cache set per object, and the sum is what the file's caches can grow to. Existing
-   * rows are counted at the size and object count they were baked at, the row being resolved at
-   * the size and object count it is about to use. */
-  if (bake_object_budget_bytes(ma, layer, size, int64_t(view.objects.size())) >
-      PAINT_LAYERS_BAKE_OBJECTS_BUDGET)
+   * holds one cache set per object tile, and the sum is what the file's caches can grow to.
+   * Existing rows are counted at the size and tile count they were baked at, the row being
+   * resolved at the size and tile count it is about to use. */
+  int64_t tiles_num = 0;
+  for (const PaintLayersBakeTarget &target : view.objects) {
+    tiles_num += target.uv_tiles.is_empty() ? 1 : target.block_size[0] * target.block_size[1];
+  }
+  int64_t pairs_num = 0;
+  for (const int index : view.objects.index_range()) {
+    pairs_num += std::max<int64_t>(1, view.objects[index].uv_tiles.size());
+  }
+  /* A background job holds the surface of every render until the worker has used it, which the
+   * cache budget does not count. A bake of one tile per object is the case that always had this
+   * cost and is left alone; only the extra renders of tile blocks are held to the limit. */
+  const int64_t surface_bytes = pairs_num * int64_t(size) * size * 13;
+  if (bake_object_budget_bytes(ma, layer, size, tiles_num) > PAINT_LAYERS_BAKE_OBJECTS_BUDGET ||
+      (folds_projection && pairs_num > int64_t(view.objects.size()) &&
+       surface_bytes > PAINT_LAYERS_BAKE_OBJECTS_BUDGET))
   {
     r_targets.objects.clear();
     r_targets.issue = PAINT_LAYERS_BAKE_OBJECTS_OVER_BUDGET;
@@ -2630,6 +3184,12 @@ static bool bake_generator_auto_allowed(const Material &ma, const MaterialPaintL
 /** Whether anything in \a layer's subtree is a transform effect acting in its Decal frame. */
 static bool bake_subtree_has_decal_effect(const MaterialPaintLayer &layer)
 {
+  /* A projected row with a CPU effect is baked synchronously per object, like a Decal effect
+   * (never true while #PAINT_LAYERS_BAKE_PROJECTED_EFFECT is off); so is one whose CPU effect runs
+   * over a projection nested in its subtree. */
+  if (paint_layer_subtree_may_fold_into_bake(layer)) {
+    return true;
+  }
   for (const MaterialPaintLayer &effect : layer.effects) {
     if (paint_layer_effect_acts_in_decal_frame(effect)) {
       return true;
@@ -2643,12 +3203,78 @@ static bool bake_subtree_has_decal_effect(const MaterialPaintLayer &layer)
   return false;
 }
 
+/** Whether anything in \a layer's subtree acts in a Decal frame, which needs the Decal map. */
+static bool bake_subtree_has_decal_frame_effect(const MaterialPaintLayer &layer)
+{
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (paint_layer_effect_acts_in_decal_frame(effect)) {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &child : layer.children) {
+    if (bake_subtree_has_decal_frame_effect(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a bake of \a node renders a frame in the Decal space (a Text Decal in a row's corrections,
+ * a decal-mapped child or mask item). That frame reads through the Decal map, which is built from
+ * the evaluated mesh and so can only be had on the main thread.
+ */
+static bool bake_subtree_projects_in_decal_space(const MaterialPaintLayer &node,
+                                                 const bool is_child)
+{
+  if (paint_layer_node_holds_frame(node) &&
+      node.mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL)
+  {
+    return true;
+  }
+  for (const MaterialPaintLayer &effect : node.effects) {
+    if (bake_subtree_projects_in_decal_space(effect, true)) {
+      return true;
+    }
+  }
+  if (paint_layer_bake_scope(node, is_child) != PaintLayerBakeScope::ContentOnly) {
+    for (const MaterialPaintLayer &item : node.mask_stack) {
+      if (bake_subtree_projects_in_decal_space(item, true)) {
+        return true;
+      }
+    }
+  }
+  for (const MaterialPaintLayer &child : node.children) {
+    if (bake_subtree_projects_in_decal_space(child, true)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer &layer)
 {
-  if (bake_subtree_has_decal_effect(layer)) {
+  if (bake_subtree_has_decal_frame_effect(layer)) {
     /* The Decal map and its inverse are cached per object and built from the evaluated mesh, which
      * only the main thread may read: the worker job gets the rasterized surface and nothing else.
      * Such a row is baked by the planner, synchronously, one object at a time. */
+    return false;
+  }
+  if (bake_subtree_has_decal_effect(layer) && bake_subtree_projects_in_decal_space(layer, false)) {
+    /* The same holds for a frame in the Decal space under a row that folds projections: the snapshot
+     * a worker projects through carries no Decal map. The planner bakes it on the main thread. */
+    return false;
+  }
+  if (bake_subtree_folds_projection(ma, layer)) {
+    /* A projected row with a CPU effect reads the object's mesh, which the job takes as a snapshot
+     * on the main thread (#PaintMaterialProjectionSnapshot), so a 4K Noise or Blur no longer
+     * freezes the UI. The planner keeps the synchronous path for what a job cannot serve (a handle
+     * drag at its coarse size, a session without windows). */
+    return true;
+  }
+  if (bake_subtree_has_decal_effect(layer)) {
+    /* A row that may fold a projection but does not (its frame does not apply) keeps the
+     * synchronous path it always had. */
     return false;
   }
   if (paint_layer_mask_item_bakes_effect(layer)) {
@@ -3103,7 +3729,8 @@ void bake_object_identities_notice(Material &ma, const PaintLayersBakeView &view
             stale = true;
             break;
           }
-          const uint64_t identity = paint_layers_bake_target_identity(target, layer.bake->size);
+          const uint64_t identity = paint_layers_bake_row_identity(
+              ma, layer, target, layer.bake->size);
           if (tile->hash[0] != uint32_t(identity & 0xFFFFFFFFu) ||
               tile->hash[1] != uint32_t(identity >> 32))
           {
@@ -3191,6 +3818,13 @@ bool bake_row_is_due(const Material &ma,
      * The deferred and hidden checks stand too: a stroke defers the grey the same way it defers a
      * row's content effect (#BKE_paint_layers_bake_row_is_deferred). */
     if (BKE_paint_layers_bake_mode_get(layer) == MA_PAINT_LAYER_BAKE_NEVER) {
+      r_release = bake_row_has_maps(layer) ? BakeRowRelease::ReleaseMaps : BakeRowRelease::Keep;
+      return false;
+    }
+    /* The bake computes the grey without a surface, so a projected item before this one would read
+     * as nothing; the item stays live (#bake_mask_effect_prefix_projects) and a map an earlier
+     * state baked is released. */
+    if (bake_mask_effect_prefix_projects(ma, layer)) {
       r_release = bake_row_has_maps(layer) ? BakeRowRelease::ReleaseMaps : BakeRowRelease::Keep;
       return false;
     }
@@ -3409,7 +4043,8 @@ bool paint_layers_bake_pending_after_switch(const Material &ma,
                PAINT_LAYERS_BAKE_OBJECTS_ANIMATED,
                PAINT_LAYERS_BAKE_OBJECTS_TOO_MANY,
                PAINT_LAYERS_BAKE_OBJECTS_TOO_LARGE,
-               PAINT_LAYERS_BAKE_OBJECTS_OVER_BUDGET))
+               PAINT_LAYERS_BAKE_OBJECTS_OVER_BUDGET,
+               PAINT_LAYERS_BAKE_OBJECTS_TILES))
       {
         /* The switch changes no object: the reason would be the same after the update. */
         continue;
@@ -3475,7 +4110,10 @@ void bake_gradient_row_report(const MaterialPaintLayer &layer,
 /* The islands are grown outward so the map's bilinear filtering finds an edge rather than empty
  * texels, and the orco grid is kept only when a Generated generator reads it. */
 std::shared_ptr<const PaintMaterialCompositeSurface> bake_surface_build(
-    const MaterialPaintLayer &layer, const PaintLayersBakeTarget &target, const int size)
+    const MaterialPaintLayer &layer,
+    const PaintLayersBakeTarget &target,
+    const int size,
+    const int uv_tile)
 {
   const int padding = BKE_paint_composite_island_padding(size);
   return BKE_paint_layers_gradient_surface_build(*target.object,
@@ -3487,9 +4125,12 @@ std::shared_ptr<const PaintMaterialCompositeSurface> bake_surface_build(
                                                     layer),
                                                 /* The tile of the object's UVs, not the tile the
                                                  * result is written to: the surface and the source
-                                                 * maps read through it follow the UVs. */
-                                                BKE_paint_layers_gradient_surface_uv_tile(
-                                                    *target.mesh, target.uv_map_name));
+                                                 * maps read through it follow the UVs. A caller
+                                                 * that names none gets the single-tile answer. */
+                                                uv_tile != 0 ?
+                                                    uv_tile :
+                                                    BKE_paint_layers_gradient_surface_uv_tile(
+                                                        *target.mesh, target.uv_map_name));
 }
 
 /** Whether any row of \a ma reads object geometry, so a view has to be resolved for the plan. */
@@ -3517,7 +4158,9 @@ static bool bake_object_tile_write(
     const std::shared_ptr<const PaintMaterialCompositeSurface> &surface,
     const int size,
     const int object_num,
+    const Span<int> tile_numbers,
     const int tile_number,
+    const int uv_tile,
     const int *rect,
     const bool reuse_cache,
     Vector<int> &r_written_channels,
@@ -3542,7 +4185,9 @@ static bool bake_object_tile_write(
             coverage.data(),
             channel_rect,
             surface,
-            PaintLayerTileContext{.painted_object = painted_object}))
+            /* The UV tile is named, not left to the surface: the effect cache keys the result on
+             * it and a projection rasterizes into it, so each tile of a block is its own render. */
+            PaintLayerTileContext{.painted_object = painted_object, .tile_number = uv_tile}))
     {
       continue;
     }
@@ -3552,7 +4197,8 @@ static bool bake_object_tile_write(
                                             size,
                                             info.is_color,
                                             bake_channel_needs_float(layer, info),
-                                            object_num);
+                                            object_num,
+                                            tile_numbers);
     if (color_image == nullptr) {
       continue;
     }
@@ -3579,7 +4225,7 @@ static bool bake_object_tile_write(
   /* One shared coverage write for all channels; a partial re-bake touches only its rectangle, so
    * the stored common outside it survives. */
   if (Image *coverage_image = bake_service_image(
-          bmain, layer, -1, size, false, false, object_num))
+          bmain, layer, -1, size, false, false, object_num, tile_numbers))
   {
     bake_write_coverage_image(*coverage_image,
                               common.data(),
@@ -3593,7 +4239,8 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
                                     Material &ma,
                                     bool *r_changed,
                                     const Scene *scene,
-                                    const ViewLayer *view_layer)
+                                    const ViewLayer *view_layer,
+                                    const bool notice_surface_edits)
 {
   bool changed = false;
   PaintLayersBakeView view;
@@ -3614,7 +4261,9 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
        * reused; only an unresolvable view walks the depsgraph again. */
       bake_tile_object_indices_clear(ma, scene, view_layer, &view);
     }
-    bake_object_identities_notice(ma, view);
+    if (notice_surface_edits) {
+      bake_object_identities_notice(ma, view);
+    }
     Vector<MaterialPaintLayer *> rows;
     BKE_paint_layers_foreach(ma,
                              [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
@@ -3670,7 +4319,12 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
       /* A background session has no window to own a worker job, so nothing would ever bake the
        * effect: it computes here, as it did before it left the main thread. */
       const bool owned_effect_inline = G.background && paint_layer_is_owned_effect(ma, layer);
-      if (heavy && !owned_effect_inline) {
+      /* A projected row with a CPU effect is a job's too, except where a job cannot serve it: a
+       * handle drag re-renders it at every step at the coarse drag size, and a session without a
+       * window has no job to own it. */
+      const bool projection_inline = heavy && (G.background || bake_drag_active(ma)) &&
+                                     bake_subtree_folds_projection(ma, layer);
+      if (heavy && !owned_effect_inline && !projection_inline) {
         continue;
       }
       if (paint_layer_is_owned_effect(ma, layer)) {
@@ -3712,12 +4366,20 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
         continue;
       }
       const int object_num = int(targets.objects.size());
+      /* The tiles of the objects' blocks, and the renders each object owes (one per UV tile with
+       * geometry; one tile per object in the single-tile scheme). */
+      const Vector<int> image_tiles = bake_targets_image_tiles(targets.objects);
+      Vector<Vector<PaintLayersBakeTilePair>> object_pairs;
+      for (const int object_index : targets.objects.index_range()) {
+        object_pairs.append(bake_target_tile_pairs(targets.objects[object_index], object_index));
+      }
       /* Build the first surface before the bake record exists: a row whose object cannot supply one
        * must not be left with an empty, permanently invalid cache. The remaining surfaces are built
        * one at a time in the loop below, after the previous one was written and released. */
       std::shared_ptr<const PaintMaterialCompositeSurface> first_surface;
       if (needs_surface) {
-        first_surface = bake_surface_build(layer, targets.objects[0], size);
+        first_surface = bake_surface_build(
+            layer, targets.objects[0], size, object_pairs[0][0].uv_tile);
         if (first_surface == nullptr) {
           continue;
         }
@@ -3748,6 +4410,11 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
       /* A Decal step moves texels across the surface (a fold, a rotation): a changed rectangle of the
        * source lands anywhere in the result, so the whole cache is rendered again. */
       if (bake_subtree_has_decal_effect(layer)) {
+        has_region = false;
+      }
+      /* The same holds for a projection folded into the bake: a texel edited in a source map lands
+       * wherever the frame sends it, in any tile of any object's block. */
+      if (bake_subtree_folds_projection(ma, layer)) {
         has_region = false;
       }
       const bool reuse_cache = bake->coverage != nullptr;
@@ -3785,46 +4452,62 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
       /* The surface is built for one object and dropped before the next: decision 4 of the spec,
        * the transient canvas never holds every object at once. */
       for (int object_index = 0; object_index < std::max(1, object_num); object_index++) {
-        std::shared_ptr<const PaintMaterialCompositeSurface> surface;
-        int tile_number = 0;
-        if (object_num > 0) {
-          surface = (object_index == 0 && first_surface != nullptr) ?
-                        first_surface :
-                        bake_surface_build(layer, targets.objects[object_index], size);
-          if (surface == nullptr) {
-            all_objects = false;
-            continue;
+        /* A row reading no geometry is one render without a surface; an object is one render per
+         * UV tile of its block, each into its own tile of the maps. */
+        const int pairs_num = object_num > 0 ? int(object_pairs[object_index].size()) : 1;
+        bool object_ok = true;
+        for (int pair_index = 0; pair_index < pairs_num; pair_index++) {
+          std::shared_ptr<const PaintMaterialCompositeSurface> surface;
+          int tile_number = 0;
+          int uv_tile = 0;
+          if (object_num > 0) {
+            const PaintLayersBakeTilePair pair = object_pairs[object_index][pair_index];
+            surface = (object_index == 0 && pair_index == 0 && first_surface != nullptr) ?
+                          first_surface :
+                          bake_surface_build(
+                              layer, targets.objects[object_index], size, pair.uv_tile);
+            if (surface == nullptr) {
+              object_ok = false;
+              break;
+            }
+            tile_number = pair.image_tile;
+            uv_tile = pair.uv_tile;
           }
-          tile_number = 1001 + object_index;
+          Vector<int> tile_channels;
+          if (!bake_object_tile_write(bmain,
+                                      ma,
+                                      layer,
+                                      surface,
+                                      size,
+                                      object_num,
+                                      image_tiles,
+                                      tile_number,
+                                      uv_tile,
+                                      rect_ptr,
+                                      reuse_cache,
+                                      tile_channels,
+                                      object_num > 0 ? targets.objects[object_index].object :
+                                                       nullptr))
+          {
+            object_ok = false;
+            break;
+          }
+          any_channel = true;
+          for (const int channel : tile_channels) {
+            if (!written_channels.contains(channel)) {
+              written_channels.append(channel);
+            }
+          }
         }
-        Vector<int> tile_channels;
-        if (!bake_object_tile_write(bmain,
-                                    ma,
-                                    layer,
-                                    surface,
-                                    size,
-                                    object_num,
-                                    tile_number,
-                                    rect_ptr,
-                                    reuse_cache,
-                                    tile_channels,
-                                    object_num > 0 ? targets.objects[object_index].object :
-                                                     nullptr))
-        {
+        if (!object_ok) {
           all_objects = false;
           continue;
-        }
-        any_channel = true;
-        for (const int channel : tile_channels) {
-          if (!written_channels.contains(channel)) {
-            written_channels.append(channel);
-          }
         }
         if (object_num > 0) {
           const PaintLayersBakeTarget &target = targets.objects[object_index];
           MaterialPaintLayerBakeTile *tile = bake_tile_ensure(
-              *bake, target.object_uid, object_index);
-          const uint64_t identity = paint_layers_bake_target_identity(target, size);
+              *bake, target.object_uid, target.block_origin[0], target.block_origin[1]);
+          const uint64_t identity = paint_layers_bake_row_identity(ma, layer, target, size);
           tile->hash[0] = uint32_t(identity & 0xFFFFFFFFu);
           tile->hash[1] = uint32_t(identity >> 32);
         }
@@ -3839,7 +4522,7 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
       BKE_paint_layers_bake_finalize(ma, layer);
       if (object_num > 0) {
         bake_object_identity_record(
-            ma, layer, paint_layers_bake_target_identity(targets.objects[0], size));
+            ma, layer, paint_layers_bake_row_identity(ma, layer, targets.objects[0], size));
       }
       if (size == full_size) {
         bake_drag_reduced_forget(ma, layer);

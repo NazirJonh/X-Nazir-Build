@@ -6519,6 +6519,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_bake_object_issue_it
      0,
      "Animated",
      "The object's deformation changes over time"},
+    {PAINT_LAYERS_BAKE_OBJECTS_TILES,
+     "TILES",
+     0,
+     "Too Many Tiles",
+     "The UDIM tiles of the UVs do not fit the bake's tile blocks"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

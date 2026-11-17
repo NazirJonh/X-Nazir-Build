@@ -884,6 +884,48 @@ inline bool paint_layer_effect_acts_in_decal_frame(const MaterialPaintLayer &eff
 }
 
 /**
+ * Switch for baking a projected row that carries a CPU-computed effect per object (the effect runs
+ * over the projected content, so the map depends on the object's surface), the way a Decal effect
+ * is baked. The bake block on such rows is lifted in #bake_own_mapping_folds and
+ * #bake_mapping_blocks; a projected row without a CPU-computed effect stays live and blocked.
+ * A CPU-computed effect anywhere in a row's subtree lifts the block of the projections nested
+ * under it too (#paint_layer_subtree_may_fold_into_bake).
+ */
+inline constexpr bool PAINT_LAYERS_BAKE_PROJECTED_EFFECT = true;
+
+/**
+ * Material-free half of #paint_layer_row_folds_into_bake: \a row holds a frame, an enabled
+ * CPU-computed effect, and is no row that keeps its effects apart (a Material row or an Anchor
+ * Point reader, see #paint_layer_effect_owns_result). It can err only toward "projected", so the caller
+ * asks for a surface at worst for nothing, never the other way round.
+ */
+inline bool paint_layer_row_may_fold_into_bake(const MaterialPaintLayer &row)
+{
+  if (!PAINT_LAYERS_BAKE_PROJECTED_EFFECT || row.role != MA_PAINT_LAYER_ROLE_LAYER ||
+      row.projection == nullptr || paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) ||
+      paint_layer_kind_reads_anchor_point(row))
+  {
+    return false;
+  }
+  for (const MaterialPaintLayer &effect : row.effects) {
+    if ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 && paint_layer_effect_is_cpu_computed(effect)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether the projection of \a row is folded into its bake: a projected row with a CPU-computed
+ * effect, whose map is rendered per object. The one question for the bake hash, the surface need,
+ * the heavy test and the planner, so they cannot disagree.
+ */
+inline bool paint_layer_row_folds_into_bake(const Material &ma, const MaterialPaintLayer &row)
+{
+  return paint_layer_row_may_fold_into_bake(row) && BKE_paint_layers_projection_applies(ma, row);
+}
+
+/**
  * Whether \a row carries a CPU-computed effect anywhere in its content corrections. The mask and
  * the children come with the row's bake either way (such a kind only ever corrects a row's colour,
  * so it cannot be a mask item), and it is the row itself that has to be baked for the live graph to
@@ -933,6 +975,113 @@ inline PaintLayerBakeScope paint_layer_bake_scope(const MaterialPaintLayer &row,
   }
   return paint_layer_row_bakes_content(row) ? PaintLayerBakeScope::ContentOnly :
                                               PaintLayerBakeScope::WholeRow;
+}
+
+/**
+ * Whether \a row or a row under it (its children) carries an enabled CPU-computed effect: the one
+ * reason a bake folds the projections of nested rows (see #paint_layer_subtree_may_fold_into_bake).
+ * A projected stack with no such effect keeps its live graph, so the Auto bake does not start for
+ * stacks that never had one. A row that keeps its effects apart (a Material row, an Anchor Point
+ * reader) bakes them on their own, outside this subtree's picture.
+ */
+inline bool paint_layer_subtree_has_cpu_effect(const MaterialPaintLayer &row)
+{
+  if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) ||
+      paint_layer_kind_reads_anchor_point(row))
+  {
+    return false;
+  }
+  for (const MaterialPaintLayer &effect : row.effects) {
+    if ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 && paint_layer_effect_is_cpu_computed(effect)) {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &child : row.children) {
+    if (paint_layer_subtree_has_cpu_effect(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Material-free half of "the frame of \a node is read in a bake": \a node holds a frame in a space
+ * other than UV. It can err only toward "projected" (the payload may not support it), which asks for
+ * a surface at worst for nothing. A transform effect's Decal frame is its own business
+ * (#paint_layer_effect_acts_in_decal_frame).
+ */
+inline bool paint_layer_node_holds_frame(const MaterialPaintLayer &node)
+{
+  return node.projection != nullptr && node.mapping.space != MA_PAINT_LAYER_MAPPING_SPACE_UV &&
+         !paint_layer_kind_transforms_input(node) &&
+         !paint_layer_kind_has_flag(node, PAINT_LAYER_KIND_READS_SOURCE) &&
+         !paint_layer_kind_reads_anchor_point(node);
+}
+
+/**
+ * Whether \a node or anything a bake of it renders holds a frame: its corrections, its mask items
+ * and its children. The own mask of a content bake (#PaintLayerBakeScope::ContentOnly) is laid live
+ * over the map, so a frame there needs no surface, exactly as it does not block the bake
+ * (#BKE_paint_layers_bake_blocked); a nested row's mask is inside the picture and counts.
+ */
+inline bool paint_layer_subtree_holds_frame(const MaterialPaintLayer &node, const bool is_child)
+{
+  if (paint_layer_node_holds_frame(node)) {
+    return true;
+  }
+  for (const MaterialPaintLayer &effect : node.effects) {
+    if (paint_layer_subtree_holds_frame(effect, true)) {
+      return true;
+    }
+  }
+  if (paint_layer_bake_scope(node, is_child) != PaintLayerBakeScope::ContentOnly) {
+    for (const MaterialPaintLayer &item : node.mask_stack) {
+      if (paint_layer_subtree_holds_frame(item, true)) {
+        return true;
+      }
+    }
+  }
+  for (const MaterialPaintLayer &child : node.children) {
+    if (paint_layer_subtree_holds_frame(child, true)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Material-free: the bake of \a row folds projections into its maps, so it is rendered per object.
+ * That is the row of #paint_layer_row_may_fold_into_bake, or one whose subtree has a CPU-computed
+ * effect and a frame anywhere in what the bake renders (a child, a nested correction, a mask item
+ * of a child, a Text Decal): the effect then runs over what the object's surface projects, however
+ * deep the frame sits. Like its single-row half it can err only toward "projected".
+ */
+inline bool paint_layer_subtree_may_fold_into_bake(const MaterialPaintLayer &row)
+{
+  if (!PAINT_LAYERS_BAKE_PROJECTED_EFFECT) {
+    return false;
+  }
+  if (paint_layer_row_may_fold_into_bake(row)) {
+    return true;
+  }
+  return paint_layer_subtree_has_cpu_effect(row) && paint_layer_subtree_holds_frame(row, false);
+}
+
+/**
+ * Whether the projection of \a node is folded into the bake of the row it is rendered in.
+ * \a cpu_in_subtree is #paint_layer_subtree_has_cpu_effect of that bake's own row: a nested node
+ * has no CPU effect of its own to ask. The one question for the bake hash, the block, the surface
+ * need and the identity, so they cannot disagree.
+ */
+inline bool paint_layer_node_folds_into_bake(const Material &ma,
+                                             const MaterialPaintLayer &node,
+                                             const bool cpu_in_subtree)
+{
+  if (paint_layer_row_folds_into_bake(ma, node)) {
+    return true;
+  }
+  return PAINT_LAYERS_BAKE_PROJECTED_EFFECT && cpu_in_subtree &&
+         paint_layer_node_holds_frame(node) && BKE_paint_layers_projection_applies(ma, node);
 }
 
 /**
@@ -1471,6 +1620,22 @@ struct PaintLayersBakeTarget {
   uint32_t mesh_uid = 0;
   /** The UV map the shader reads, borrowed from #mesh. */
   const char *uv_map_name = nullptr;
+  /**
+   * The tile block of the object in the bake's UDIM maps, set by #paint_layers_bake_view_resolve.
+   * #uv_tiles is empty for the single-tile scheme every bake had before blocks (one tile per
+   * object, 1001 + index, the one UV tile #BKE_paint_layers_gradient_surface_uv_tile names); the
+   * rest is then the plain index placement.
+   *
+   * Otherwise #uv_tiles lists the UDIM tiles of the UVs that hold geometry, #uv_tile_min is the
+   * (column, row) of the lowest of them and #block_size the bounding box of them in tiles. The
+   * block is a rigid translation of that box: UV tile (c, r) lands in image tile
+   * `block_origin + (c, r) - uv_tile_min`, which is what lets the shader move the whole UV by one
+   * constant per object.
+   */
+  Vector<int> uv_tiles;
+  int uv_tile_min[2] = {0, 0};
+  int block_size[2] = {1, 1};
+  int block_origin[2] = {0, 0};
 };
 
 /**
@@ -1488,6 +1653,12 @@ struct PaintLayersBakeView {
   Vector<const Object *> meshes;
   /** #ePaintLayersBakeObjectIssue: why the list is short, or that it is usable. */
   int issue = PAINT_LAYERS_BAKE_OBJECTS_OK;
+  /**
+   * The material holds a row that folds a projection and the objects' UV tiles could not be given
+   * blocks (see #PAINT_LAYERS_BAKE_OBJECTS_TILES): such a row stays live, every other row keeps the
+   * single-tile scheme.
+   */
+  bool tiles_limited = false;
 };
 
 struct PaintLayersBakeTargets {
@@ -1525,11 +1696,28 @@ void paint_layers_bake_targets_resolve(const Material &ma,
 uint64_t paint_layers_bake_target_identity(const PaintLayersBakeTarget &target, int size);
 
 /**
+ * The identity of \a target stored in the tile of \a layer's bake: the surface identity above, and
+ * for a row that folds a projection (see #paint_layer_row_folds_into_bake) the material slot
+ * signature too. Every other row gets exactly the surface identity, as the tile hash is saved.
+ */
+uint64_t paint_layers_bake_row_identity(const Material &ma,
+                                        const MaterialPaintLayer &layer,
+                                        const PaintLayersBakeTarget &target,
+                                        int size);
+
+/**
  * The object property path the generated graph reads with an Attribute node
  * (`SHD_ATTRIBUTE_OBJECT`) to learn which UDIM tile of the row's bake belongs to the object being
  * shaded.
  */
 std::string paint_layers_bake_tile_attribute_path(const Material &ma);
+
+/**
+ * The companion property of #paint_layers_bake_tile_attribute_path that holds the row shift of the
+ * object's tile block, read by a second Attribute node. An object with no such property shifts by
+ * zero rows, which is every object of a bake written before tile blocks.
+ */
+std::string paint_layers_bake_tile_row_attribute_path(const Material &ma);
 
 /** Drop \a bake's per-object tile records, e.g. when its maps were cleared or copied. */
 void paint_layers_bake_tiles_clear(MaterialPaintLayerBake &bake);
@@ -1790,14 +1978,30 @@ uint64_t paint_layer_owned_effect_input_hash(const Material &ma,
  * \param r_images: the maps the input was rendered from; the caches subscribe to them, so a stroke
  *        on any of them reaches the entry.
  * \param tile_number: the UDIM tile the grey is computed for; a caller of the base tile names it.
+ * \param painted_object: the surface a projected item before \a effect is read through. Without
+ *        one such an item reads as nothing, which is all a caller with no surface (a shared bake)
+ *        can have; the entry is then keyed apart from the one computed over a surface.
  * \return null when the input could not be rendered or \a describe_only was asked.
  */
-std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(const Material &ma,
-                                                          const MaterialPaintLayer &row,
-                                                          const MaterialPaintLayer &effect,
-                                                          const bool describe_only,
-                                                          blender::Vector<Image *> *r_images,
-                                                          int tile_number);
+std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    const MaterialPaintLayer &effect,
+    const bool describe_only,
+    blender::Vector<Image *> *r_images,
+    int tile_number,
+    PaintLayerSurfaceRef painted_object = nullptr);
+
+/**
+ * Fingerprint of the projected items of \a row's mask before \a stop, as \a painted_object sees
+ * them (frame, mapping, controller matrices, the surface). Zero when none of them projects, so a
+ * mask with no projected item keys as it always did.
+ */
+uint64_t paint_layer_mask_prefix_projection_hash(const Material &ma,
+                                                 const MaterialPaintLayer &row,
+                                                 const MaterialPaintLayer &stop,
+                                                 int tile_number,
+                                                 PaintLayerSurfaceRef painted_object);
 
 /**
  * The UV step of the transform item \a item of a mask (#paint_layer_mask_item_is_transform), in the

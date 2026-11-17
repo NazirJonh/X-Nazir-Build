@@ -3271,6 +3271,12 @@ enum ePaintLayersBakeObjectIssue {
   PAINT_LAYERS_BAKE_OBJECTS_OVER_BUDGET,
   /** An object's geometry changes over time: a time-dependent modifier, shape keys, or drivers. */
   PAINT_LAYERS_BAKE_OBJECTS_ANIMATED,
+  /**
+   * A row that folds a projection could not be given a block of UDIM tiles per object: the UVs of
+   * an object span more than 10 tile columns, the objects together need more than 100 tiles, or a
+   * UV lies outside the UDIM grid.
+   */
+  PAINT_LAYERS_BAKE_OBJECTS_TILES,
 };
 
 /**
@@ -3392,13 +3398,15 @@ bool BKE_paint_layers_folder_auto_bake_allowed(const Material &ma, const Materia
  * object, size or memory limits, or deforms over time. Without them such a row is left live, and a
  * cache it carries is kept rather than dropped on the strength of a context the plan does not have.
  *
+ * \param notice_surface_edits: see #BKE_paint_layers_bake_job_create.
  * \return true when some row was baked or released, so the caller knows the tree needs a rebuild.
  */
 bool BKE_paint_layers_bake_plan_run(Main &bmain,
                                     Material &ma,
                                     bool *r_changed = nullptr,
                                     const Scene *scene = nullptr,
-                                    const ViewLayer *view_layer = nullptr);
+                                    const ViewLayer *view_layer = nullptr,
+                                    bool notice_surface_edits = true);
 
 /**
  * Whether any heavy, not-yet-valid baked row of \a ma waits for a worker.
@@ -3434,11 +3442,15 @@ struct PaintLayersBakeJob;
  * \param scene, view_layer: the scene and view layer whose objects an Object or Generated row is
  * baked for. The surfaces are rasterized from their evaluated geometry here, on the main thread,
  * and the worker only reads them; without a context such a row is not queued.
+ * \param notice_surface_edits: false skips comparing the rows' stored surface identities with the
+ * current objects, so an edited mesh does not mark them stale on this call. The comparison is
+ * against what was baked, not an edge event: a later call with true still finds the difference.
  */
 PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
                                                      Material &ma,
                                                      const Scene *scene = nullptr,
-                                                     const ViewLayer *view_layer = nullptr);
+                                                     const ViewLayer *view_layer = nullptr,
+                                                     bool notice_surface_edits = true);
 
 /**
  * The worker half: reads only the localized copy and shared images. \a report_progress gets 0..1;

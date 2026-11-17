@@ -20,7 +20,9 @@
 #include "BKE_attribute.hh"
 #include "BKE_customdata.hh"
 #include "BKE_material.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_mesh.hh"
+#include "BKE_mesh_types.hh"
 #include "BKE_object.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_gradient.hh"
@@ -41,6 +43,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_span.hh"
 #include "BLI_task.hh"
+#include "BLI_threads.h"
 #include "BLI_vector.hh"
 #include "BLI_virtual_array.hh"
 
@@ -298,9 +301,9 @@ const Mesh *composite_projection_mesh(const Object *object)
  * many. Compared by original ID: an evaluated object's slots point at evaluated copies of its
  * materials, while the row's material is the original.
  */
-static int composite_projection_slots_match(const Object &object,
-                                            const Material *material,
-                                            MutableSpan<bool> r_matches)
+int composite_projection_slots_match(const Object &object,
+                                     const Material *material,
+                                     MutableSpan<bool> r_matches)
 {
   const Material *material_orig = (material != nullptr) ? DEG_get_original(material) : nullptr;
   int matched = 0;
@@ -315,6 +318,95 @@ static int composite_projection_slots_match(const Object &object,
     }
   }
   return matched;
+}
+
+uint64_t composite_projection_surface_identity(const Object *object, const Material *material)
+{
+  const Mesh *mesh = composite_projection_mesh(object);
+  if (mesh == nullptr) {
+    return 0;
+  }
+  uint64_t hash = composite_mesh_content_hash(*mesh);
+  Array<bool> slot_matches(object->totcol, false);
+  composite_projection_slots_match(*object, material, slot_matches);
+  for (const bool match : slot_matches) {
+    hash = get_default_hash(hash, match);
+  }
+  return hash;
+}
+
+PaintMaterialProjectionSnapshot *BKE_paint_material_projection_snapshot_create(
+    const Object &object,
+    const Material &material,
+    const Span<const Object *> controllers,
+    const Span<int> uv_tiles)
+{
+  BLI_assert(BLI_thread_is_main());
+  const Mesh *mesh_src = composite_projection_mesh(&object);
+  if (mesh_src == nullptr || object.totcol <= 0 || mesh_src->runtime == nullptr ||
+      mesh_src->runtime->wrapper_type != ME_WRAPPER_TYPE_MDATA)
+  {
+    return nullptr;
+  }
+  const StringRefNull uv_name = BKE_paint_layers_gradient_uv_map_name(*mesh_src);
+  if (uv_name.is_empty() ||
+      !mesh_src->attributes().lookup<float2>(uv_name.c_str(), bke::AttrDomain::Corner))
+  {
+    return nullptr;
+  }
+  auto snapshot = std::make_unique<PaintMaterialProjectionSnapshot>();
+  snapshot->slot_matches = Array<bool>(object.totcol, false);
+  if (composite_projection_slots_match(object, &material, snapshot->slot_matches) == 0) {
+    return nullptr;
+  }
+  /* A shallow copy: the arrays stay shared with the evaluated mesh, which a later depsgraph update
+   * replaces instead of editing, and a sculpt edit of the original copies on write. */
+  Mesh *mesh = BKE_mesh_copy_for_eval(*mesh_src);
+  if (mesh == nullptr) {
+    return nullptr;
+  }
+  /* The lazy caches are filled here, once, so no worker (or parallel task) is the first to write
+   * them. */
+  if (mesh->corner_tris().is_empty()) {
+    BKE_id_free(nullptr, &mesh->id);
+    return nullptr;
+  }
+  mesh->corner_normals();
+  snapshot->mesh = mesh;
+  snapshot->object = &object;
+  snapshot->object_uid = object.id.session_uid;
+  snapshot->totcol = object.totcol;
+  snapshot->object_to_world = object.object_to_world();
+  snapshot->uv_map_name = uv_name;
+  snapshot->uv_tile = BKE_paint_layers_gradient_surface_object_tile(&object);
+  snapshot->uv_tiles = Vector<int>(uv_tiles);
+  snapshot->content_hash = composite_mesh_content_hash(*mesh_src);
+  snapshot->surface_identity = composite_projection_surface_identity(&object, &material);
+  for (const Object *controller : controllers) {
+    if (controller == nullptr || snapshot->controller_find(controller) != nullptr) {
+      continue;
+    }
+    snapshot->controllers.append({});
+    PaintMaterialProjectionSnapshot::Controller &entry = snapshot->controllers.last();
+    entry.object = controller;
+    entry.uid = controller->id.session_uid;
+    entry.object_to_world = controller->object_to_world();
+    entry.world_to_object = controller->world_to_object();
+  }
+  return snapshot.release();
+}
+
+void BKE_paint_material_projection_snapshot_free(PaintMaterialProjectionSnapshot *snapshot)
+{
+  if (snapshot == nullptr) {
+    return;
+  }
+  BLI_assert(BLI_thread_is_main());
+  if (snapshot->mesh != nullptr) {
+    Mesh *mesh = const_cast<Mesh *>(snapshot->mesh);
+    BKE_id_free(nullptr, &mesh->id);
+  }
+  delete snapshot;
 }
 
 /** The bands a projected bake is rasterized in, one task each. Each band owns whole canvas rows, so
@@ -412,7 +504,8 @@ static CompositeProjectionKind composite_projection_kind_make(
 /** The mesh, UV, material and frame state both projected rasterizers share. */
 struct CompositeProjectionBakeContext {
   const PaintMaterialCompositeProjection &projection;
-  const Object *object = nullptr;
+  /** The material slot count of the painted object, read from the snapshot when there is one. */
+  int totcol = 0;
   CompositeProjectionKind kind;
   VArraySpan<float2> uvs;
   Span<float3> positions;
@@ -452,7 +545,10 @@ static bool composite_projection_context_init(CompositeProjectionBakeContext &ct
 {
   const PaintMaterialCompositeProjection &projection = ctx.projection;
   const Object *object = projection.object;
-  const Mesh *mesh_ptr = composite_projection_mesh(object);
+  /* A background bake reads the snapshot: the evaluated object and mesh belong to the main thread,
+   * and nothing below dereferences them when one is set. */
+  const PaintMaterialProjectionSnapshot *snapshot = projection.snapshot;
+  const Mesh *mesh_ptr = (snapshot != nullptr) ? snapshot->mesh : composite_projection_mesh(object);
   if (mesh_ptr == nullptr) {
     return false;
   }
@@ -467,7 +563,7 @@ static bool composite_projection_context_init(CompositeProjectionBakeContext &ct
   if (!uv_attr) {
     return false;
   }
-  ctx.object = object;
+  ctx.totcol = (snapshot != nullptr) ? snapshot->totcol : object->totcol;
   ctx.uvs = VArraySpan<float2>(*uv_attr);
   ctx.positions = mesh.vert_positions();
   if (need_normals) {
@@ -475,12 +571,19 @@ static bool composite_projection_context_init(CompositeProjectionBakeContext &ct
   }
   ctx.corner_verts = mesh.corner_verts();
   ctx.tris = mesh.corner_tris();
-  if (ctx.tris.is_empty() || object->totcol <= 0) {
+  if (ctx.tris.is_empty() || ctx.totcol <= 0) {
     return false;
   }
-  ctx.slot_matches = Array<bool>(object->totcol, false);
-  if (composite_projection_slots_match(*object, projection.material, ctx.slot_matches) == 0) {
-    return false;
+  if (snapshot != nullptr) {
+    /* Resolved for the baked material on the main thread: the row's material here may be a
+     * localized copy, which no slot holds. */
+    ctx.slot_matches = snapshot->slot_matches;
+  }
+  else {
+    ctx.slot_matches = Array<bool>(ctx.totcol, false);
+    if (composite_projection_slots_match(*object, projection.material, ctx.slot_matches) == 0) {
+      return false;
+    }
   }
   ctx.material_indices = *attributes.lookup_or_default<int>(
       "material_index", bke::AttrDomain::Face, 0);
@@ -491,8 +594,22 @@ static bool composite_projection_context_init(CompositeProjectionBakeContext &ct
    * space first, exactly as a Texture Coordinate node naming that object does in the shader. */
   ctx.has_controller = projection.controller != nullptr && projection.controller != object;
   if (ctx.has_controller) {
-    ctx.object_to_world = object->object_to_world();
-    ctx.world_to_controller = projection.controller->world_to_object();
+    if (snapshot != nullptr) {
+      const PaintMaterialProjectionSnapshot::Controller *controller = snapshot->controller_find(
+          projection.controller);
+      if (controller == nullptr) {
+        /* The snapshot was taken without this frame's controller: refuse rather than read the
+         * live object from a worker. */
+        BLI_assert_unreachable();
+        return false;
+      }
+      ctx.object_to_world = snapshot->object_to_world;
+      ctx.world_to_controller = controller->world_to_object;
+    }
+    else {
+      ctx.object_to_world = object->object_to_world();
+      ctx.world_to_controller = projection.controller->world_to_object();
+    }
     if (need_normals) {
       ctx.normal_object_to_world = math::transpose(math::invert(float3x3(ctx.object_to_world)));
       ctx.normal_world_to_controller = math::transpose(
@@ -571,7 +688,7 @@ static void composite_projection_raster(const CompositeProjectionBakeContext &ct
       for (const int tri_index : IndexRange(ctx.tris.size())) {
         const int face = ctx.tri_faces[tri_index];
         const int material_index = ctx.material_indices[face];
-        if (material_index < 0 || material_index >= ctx.object->totcol ||
+        if (material_index < 0 || material_index >= ctx.totcol ||
             !ctx.slot_matches[material_index])
         {
           continue;
@@ -828,14 +945,26 @@ ImBuf *composite_resample_projected(const ImBuf *src,
       return nullptr;
     }
   }
-  /* The transform effects' steps only; the row's own mapping stays the UV adjust of
-   * #composite_projection_uv_wrap, which runs after them. */
+  /* The transform effects' steps, then the row's Mirror fold below; the rest of the row's own
+   * mapping stays the UV adjust of #composite_projection_uv_wrap, which runs after them. */
   CompositeMappingChain steps_chain;
   for (const PaintMaterialCompositeMapping &step : input_steps) {
     if (steps_chain.steps_num == CompositeMappingChain::MAX_STEPS) {
       break;
     }
     steps_chain.steps[steps_chain.steps_num++] = CompositeMappingTransform(step);
+  }
+  if (mapping.mirror_axes != 0 && steps_chain.steps_num < CompositeMappingChain::MAX_STEPS) {
+    /* The row's own Mirror is one more step on the map coordinate, after the effects' steps and
+     * before the row's UV adjust: the order the UV path folds in (effects, then the row's fold,
+     * rotate, scale, offset). Going through the chain gives it the Cube cell-local fold and the
+     * Normal's covariant flip the effects' Mirror already has. The step carries the fold only (the
+     * rest of the mapping stays #composite_projection_uv_wrap's, so nothing applies twice) and
+     * repeats, like an effect's Mirror. */
+    PaintMaterialCompositeMapping fold;
+    fold.mirror_axes = mapping.mirror_axes;
+    copy_v2_v2(fold.mirror_center, mapping.mirror_center);
+    steps_chain.steps[steps_chain.steps_num++] = CompositeMappingTransform(fold);
   }
   const bool use_steps = !steps_chain.is_identity();
   CompositeProjectionSampler sampler(src);

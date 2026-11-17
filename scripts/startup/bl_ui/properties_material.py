@@ -2007,6 +2007,7 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
                 'TOO_LARGE': "Lower the bake size to 4096 or less",
                 'OVER_BUDGET': "The 2 GiB bake budget is exceeded",
                 'ANIMATED': "The object deforms over time (modifier, shape keys or drivers)",
+                'TILES': "The UV tiles are too wide or too many for a projected bake",
             }
             layout.label(text=reasons.get(issue, "The object bake cannot run"), icon='ERROR')
 

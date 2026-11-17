@@ -21,6 +21,7 @@ struct ImBuf;
 
 namespace blender {
 
+struct Material;
 struct Mesh;
 struct Object;
 struct PaintMaterialCompositeMapping;
@@ -311,6 +312,23 @@ const Mesh *composite_projection_mesh(const Object *object);
  * costs a few thousand reads.
  */
 uint64_t composite_mesh_content_hash(const Mesh &mesh);
+
+/**
+ * Mark the slots of \a object that hold \a material (every slot when it is null) and return how
+ * many. Compared by original ID.
+ */
+int composite_projection_slots_match(const Object &object,
+                                     const Material *material,
+                                     MutableSpan<bool> r_matches);
+
+/**
+ * The identity of the (object, material) surface a projected read bakes: the mesh content plus
+ * which slots hold \a material. A slot moved to or from the material changes which faces the
+ * projection covers without touching the mesh, so the mesh hash alone would serve a stale bake.
+ * Kept out of #composite_mesh_content_hash, which is cached per mesh and slot independent.
+ * Returns 0 when \a object has no mesh.
+ */
+uint64_t composite_projection_surface_identity(const Object *object, const Material *material);
 
 /** A premultiplied scene-linear transparent buffer of \a width by \a height, or null. */
 ImBuf *composite_alloc_transparent(int width, int height);

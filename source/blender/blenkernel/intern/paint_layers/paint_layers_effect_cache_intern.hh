@@ -123,11 +123,11 @@ struct EffectCacheKey {
   /** The effect kind and its parameters; the input's pixels are the sources' versions below. */
   uint64_t hash = 0;
   /**
-   * The key halves beyond the effect's own parameters. The row effect cache (CPU and GPU alike)
-   * leaves both at zero: what its input is made of rides the maps' versions, so zeros cannot split
-   * a key. The GPU cache folds in the chain hash (the effects that precede this one in the row,
-   * whose results feed this effect's input) and the input scalar hash (the input's non-map scalar
-   * content -- a flat colour, an adjustment, a filter's parameters -- that no map version carries).
+   * The key halves beyond the effect's own parameters. The GPU cache folds in the chain hash (the
+   * effects that precede this one in the row, whose results feed this effect's input) and the input
+   * scalar hash (the input's non-map scalar content -- a projection frame, a mapping, a flat
+   * colour, an adjustment, transform steps -- that no map version carries). The CPU row effect
+   * cache leaves both at zero.
    * The mask effect cache (CPU) uses the chain half for what its input is made of: the mask built
    * up to the item, which no map version carries either.
    */

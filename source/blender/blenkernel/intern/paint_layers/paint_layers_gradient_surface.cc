@@ -7,6 +7,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cfloat>
 #include <cmath>
@@ -790,6 +791,55 @@ int BKE_paint_layers_gradient_surface_uv_tile(const Mesh &mesh, const char *uv_m
     found_tile = tile;
   }
   return found_tile != 0 ? found_tile : surface_udim_first;
+}
+
+Vector<int> BKE_paint_layers_gradient_surface_uv_tiles(const Mesh &mesh,
+                                                       const char *uv_map_name,
+                                                       bool &r_outside_udim)
+{
+  r_outside_udim = false;
+  Vector<int> tiles;
+  if (uv_map_name == nullptr || uv_map_name[0] == '\0') {
+    tiles.append(surface_udim_first);
+    return tiles;
+  }
+  const auto uv_attr = mesh.attributes().lookup<float2>(uv_map_name, bke::AttrDomain::Corner);
+  if (!uv_attr) {
+    tiles.append(surface_udim_first);
+    return tiles;
+  }
+  const VArraySpan<float2> uvs(*uv_attr);
+  /* One flag per tile of the 10 x 10 grid: a mesh walk costs one lookup per triangle, not a search
+   * of a list. */
+  std::array<bool, surface_udim_row_len * surface_udim_row_len> used = {};
+  for (const int3 &tri : mesh.corner_tris()) {
+    if (tri.x < 0 || tri.y < 0 || tri.z < 0 || tri.x >= uvs.size() || tri.y >= uvs.size() ||
+        tri.z >= uvs.size())
+    {
+      continue;
+    }
+    const float2 uv_min = math::min(math::min(uvs[tri.x], uvs[tri.y]), uvs[tri.z]);
+    const float2 uv_max = math::max(math::max(uvs[tri.x], uvs[tri.y]), uvs[tri.z]);
+    bool outside = false;
+    Vector<int> tri_tiles;
+    BKE_paint_layers_tiles_from_uv_bounds(uv_min, uv_max, outside, tri_tiles);
+    if (outside) {
+      r_outside_udim = true;
+      return tiles;
+    }
+    for (const int tile_number : tri_tiles) {
+      used[tile_number - surface_udim_first] = true;
+    }
+  }
+  for (const int index : IndexRange(int(used.size()))) {
+    if (used[index]) {
+      tiles.append(surface_udim_first + index);
+    }
+  }
+  if (tiles.is_empty()) {
+    tiles.append(surface_udim_first);
+  }
+  return tiles;
 }
 
 int BKE_paint_layers_gradient_surface_object_tile(const Object *object)

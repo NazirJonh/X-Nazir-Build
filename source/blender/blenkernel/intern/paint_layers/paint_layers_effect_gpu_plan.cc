@@ -551,6 +551,11 @@ uint64_t BKE_paint_layers_effect_input_scalar_hash(
    * pixels the effect reads, so it keys the result like the flat colour does. */
   hash = composite_mapping_hash(effect_hash_u64(hash, input_entry.mapping.enabled ? 1u : 0u),
                                 input_entry.mapping);
+  /* The transform steps (Mirror, Transform Mapping effects) move the pixels the effect reads like
+   * the frame does, and the stack hash folds them the same way, so the CPU and GPU keys agree. */
+  for (const PaintMaterialCompositeMapping &step : input_entry.input_transforms) {
+    hash = composite_mapping_hash(effect_hash_u64(hash, 1u), step);
+  }
   hash = effect_hash_u64(hash, uint32_t(input_entry.adjustment_filter));
   if (input_entry.adjustment_filter != 0) {
     for (const float param : input_entry.adjustment_params) {

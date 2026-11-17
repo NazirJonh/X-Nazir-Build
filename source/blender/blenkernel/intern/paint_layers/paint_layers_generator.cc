@@ -269,6 +269,13 @@ bool BKE_paint_layers_generator_subtree_is_shared_bakeable(const MaterialPaintLa
   if (paint_layer_effect_acts_in_decal_frame(layer)) {
     return false;
   }
+  /* A projected row with a CPU effect is baked per object too: the effect runs over what the
+   * object's surface projects. So is a row whose CPU effect (its own or a child's) runs over a
+   * projection that sits deeper in its subtree: the whole subtree is one picture of the surface.
+   * Always false while #PAINT_LAYERS_BAKE_PROJECTED_EFFECT is off. */
+  if (paint_layer_subtree_may_fold_into_bake(layer)) {
+    return false;
+  }
   for (const MaterialPaintLayer &child : layer.children) {
     if (!BKE_paint_layers_generator_subtree_is_shared_bakeable(child)) {
       return false;

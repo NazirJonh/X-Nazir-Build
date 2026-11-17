@@ -150,6 +150,8 @@ bool projection_gizmo_place(const bContext *C, wmGizmoGroup *gzgroup)
   if (const Material *material = ggd->target.material()) {
     if (ggd->drag_gz != nullptr) {
       ed::material_combined::gradient_interactive_begin(*material);
+      /* Re-armed with the preview mark: both expire together if the drag's end never arrives. */
+      BKE_paint_layers_bake_drag_set(*CTX_data_main(C), material->id.session_uid, true);
       ggd->drag_material_uid = material->id.session_uid;
     }
     else if (ggd->drag_material_uid != 0) {
@@ -216,6 +218,9 @@ void projection_gizmo_invoke_prepare(const bContext *C,
      * canvas one. #projection_gizmo_place keeps the mark alive and ends it. */
     if (const Material *material = ggd->target.material()) {
       ed::material_combined::gradient_interactive_begin(*material);
+      /* A projected row with a CPU effect is baked per object: the planner bakes it reduced while
+       * the drag lasts and once at full size after it (#gradient_interactive_end ends the mark). */
+      BKE_paint_layers_bake_drag_set(*CTX_data_main(C), material->id.session_uid, true);
       ggd->drag_material_uid = material->id.session_uid;
     }
     projection_gizmo_volume_invoke_prepare(C, *ggd, gz, event);

@@ -234,7 +234,11 @@ void paint_layers_bake_free(void *customdata)
  * Start the heavy bake of \a ma when a row of it needs one and none runs already.
  * \return true when a job was started.
  */
-bool paint_layers_bake_job_start(wmWindowManager &wm, wmWindow *win, Main &bmain, Material &ma)
+bool paint_layers_bake_job_start(wmWindowManager &wm,
+                                 wmWindow *win,
+                                 Main &bmain,
+                                 Material &ma,
+                                 const bool notice_surface_edits = true)
 {
   /* A job needs a window to own its progress and timer; background mode has none, and nothing there
    * would redraw the result anyway. */
@@ -260,7 +264,8 @@ bool paint_layers_bake_job_start(wmWindowManager &wm, wmWindow *win, Main &bmain
    * edited surface, or releases a cache whose object can no longer supply one, on the depsgraph
    * update that produced the new geometry. A material with nothing queued returns null and costs
    * one walk over its rows, no surface. */
-  PaintLayersBakeJob *bake = BKE_paint_layers_bake_job_create(bmain, ma, scene, view_layer);
+  PaintLayersBakeJob *bake = BKE_paint_layers_bake_job_create(
+      bmain, ma, scene, view_layer, notice_surface_edits);
   if (bake == nullptr) {
     /* Nothing could actually be queued (no size, no localized copy): leave it to the next poll
      * rather than marking the material active. */
@@ -962,7 +967,20 @@ void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bma
     /* The rows that read another material are rendered from that material, a job of their own per
      * row and independent of the heavy planner's one job per layered material. */
     material_bake_layered_rows_ensure(bmain, ma);
-    paint_layers_bake_job_start(wm, win, bmain, ma);
+    /* An edited surface (a stroke, a mesh edit) re-bakes only the material that is being looked
+     * at: the same object's other slots carry the same rows and would re-bake on every stroke.
+     * They are not lost, since the identity is compared with what was baked, not with an event:
+     * the sweep that runs once the material is active (see
+     * #rna_Object_active_material_index_update) notices the difference and bakes it then. Value
+     * edits and a load stay stale by hash, which this does not touch. */
+    bool surface_wanted = false;
+    for (const wmWindow &window : wm.windows) {
+      if (paint_layers_source_cache_wanted(window, ma)) {
+        surface_wanted = true;
+        break;
+      }
+    }
+    paint_layers_bake_job_start(wm, win, bmain, ma, surface_wanted);
     /* The source-graph cache rides the same sweep, under its own policy: a material that is being
      * looked at re-bakes a stale cache here; the others keep the mark until asked. The due
      * decision keeps a graph the bake already failed to land from being retried every sweep. */

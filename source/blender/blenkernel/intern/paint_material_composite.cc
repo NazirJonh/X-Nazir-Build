@@ -3506,6 +3506,41 @@ uint64_t composite_projection_hash(uint64_t hash, const PaintMaterialCompositePr
   };
   /* A frame in object space does not move when the object does; a controller Empty's transform
    * does move the projection, so both transforms enter the key then. */
+  if (const PaintMaterialProjectionSnapshot *snapshot = projection.snapshot) {
+    /* A background bake: the same values the lines below read from the objects, taken from the
+     * snapshot, so the key is the one the main thread computes and no object is dereferenced. */
+    const auto hash_matrix = [&](const float4x4 &matrix) {
+      for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+          hash = get_default_hash(hash, matrix[i][j]);
+        }
+      }
+    };
+    hash = get_default_hash(hash, snapshot->object_uid);
+    if (projection.controller != nullptr) {
+      hash_matrix(snapshot->object_to_world);
+    }
+    const PaintMaterialProjectionSnapshot::Controller *controller = snapshot->controller_find(
+        projection.controller);
+    if (projection.controller == nullptr) {
+      hash = get_default_hash(hash, 0);
+    }
+    else if (controller != nullptr) {
+      hash = get_default_hash(hash, controller->uid);
+      hash_matrix(controller->object_to_world);
+    }
+    else {
+      BLI_assert_unreachable();
+      hash = get_default_hash(hash, 0);
+    }
+    for (const char c : snapshot->uv_map_name) {
+      hash = get_default_hash(hash, int(c));
+    }
+    const Mesh &mesh = *snapshot->mesh;
+    hash = get_default_hash(hash, mesh.verts_num, mesh.faces_num, mesh.corners_num);
+    hash = get_default_hash(hash, snapshot->surface_identity);
+    return hash;
+  }
   hash_object(projection.object, projection.controller != nullptr);
   hash_object(projection.controller, true);
   if (const Mesh *bake_mesh = composite_projection_mesh(projection.object)) {
@@ -3518,9 +3553,11 @@ uint64_t composite_projection_hash(uint64_t hash, const PaintMaterialCompositePr
       hash = get_default_hash(hash, int(*c));
     }
     hash = get_default_hash(hash, mesh.verts_num, mesh.faces_num, mesh.corners_num);
-    /* A sculpt stroke moves positions without a topology change; the cached content hash moves
-     * with them, so the effect and stack caches are not served stale. */
-    hash = get_default_hash(hash, composite_mesh_content_hash(mesh));
+    /* The identity holds the mesh content hash, which a sculpt stroke moves without a topology
+     * change, so the effect and stack caches are not served stale. A slot moved to or from the
+     * row's material changes the covered faces, not the mesh, and moves it as well. */
+    hash = get_default_hash(
+        hash, composite_projection_surface_identity(projection.object, projection.material));
   }
   return hash;
 }

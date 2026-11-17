@@ -27,6 +27,7 @@
 #include "BLI_uuid.h"
 
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_tile.hh"
 
 #include "BKE_image_partial_update.hh"
 
@@ -52,6 +53,9 @@ struct MaterialPaintChannelInfo;
  * \param floatbuf: keep the values as float. A map of the wrong format cannot be reused: the pixel
  *                  writers index one buffer or the other, and a byte map read as float (or back)
  *                  would be a different picture.
+ * \param object_num: the objects the map serves; non-zero makes it a UDIM map.
+ * \param tile_numbers: the UDIM tiles a tiled map has to hold. Empty means the single-tile scheme,
+ *                      1001 + index for each object (see #PaintLayersBakeTarget::uv_tiles).
  */
 Image *bake_service_image(Main &bmain,
                           MaterialPaintLayer &layer,
@@ -59,7 +63,31 @@ Image *bake_service_image(Main &bmain,
                           int size,
                           bool is_color,
                           bool floatbuf,
-                          int object_num);
+                          int object_num,
+                          Span<int> tile_numbers = {});
+
+/** One render of an object's tile block: a UV tile and the image tile it is written to. */
+struct PaintLayersBakeTilePair {
+  /** The UDIM tile of the object's UVs the surface rasterizes. */
+  int uv_tile = PAINT_TILE_NUMBER_BASE;
+  /** The tile of the bake's maps the result lands in, and the composite's tile for the render. */
+  int image_tile = PAINT_TILE_NUMBER_BASE;
+};
+
+/**
+ * The renders \a target's block takes, one per UV tile with geometry. The single-tile scheme gives
+ * the one pair it always had: \a object_index names the image tile, the UV tile is where the
+ * object's UVs sit.
+ */
+Vector<PaintLayersBakeTilePair> bake_target_tile_pairs(const PaintLayersBakeTarget &target,
+                                                       int object_index);
+
+/**
+ * Every image tile the blocks of \a objects cover, the whole rectangle of each block: a tile of the
+ * rectangle no triangle reaches is still created, so a sample there reads an empty texel instead of
+ * a missing tile.
+ */
+Vector<int> bake_targets_image_tiles(Span<PaintLayersBakeTarget> objects);
 
 /** The map \a channel's bake stores as float rather than bytes; see #bake_service_image. */
 bool bake_channel_needs_float(const MaterialPaintLayer &layer,
@@ -267,9 +295,11 @@ std::mutex &bake_runtime_mutex();
 /** \name Planner helpers shared with the worker job and the pixel writers
  * \{ */
 
+/** The record of \a object_uid, placed at the block origin (\a tile_x, \a tile_y) of its tiles. */
 MaterialPaintLayerBakeTile *bake_tile_ensure(MaterialPaintLayerBake &bake,
                                              uint32_t object_uid,
-                                             int index);
+                                             int tile_x,
+                                             int tile_y);
 void bake_tile_object_indices_set(const Material &ma, const PaintLayersBakeTargets &targets);
 void bake_tile_object_indices_clear(const Material &ma,
                                     const Scene *scene,
@@ -314,11 +344,30 @@ void bake_gradient_row_report(const MaterialPaintLayer &layer,
 bool bake_any_row_needs_surface(const Material &ma);
 
 /**
+ * Whether \a layer or a row below it folds a projection into its bake
+ * (#paint_layer_row_folds_into_bake), or a projection nested under a row whose subtree has a
+ * CPU-computed effect (#paint_layer_node_folds_into_bake). Such a row reads the surface of the
+ * object it is baked for, which a worker job takes as a snapshot
+ * (#PaintMaterialProjectionSnapshot).
+ */
+bool bake_subtree_folds_projection(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Collect the controller objects of every projected row of \a ma (the layers, their effects and
+ * mask items): the Empties whose matrices a snapshot has to carry. Main thread.
+ */
+void bake_projection_controllers_collect(const Material &ma,
+                                          Vector<const Object *> &r_controllers);
+
+/**
  * The surface an Object or Generated bake of \a layer renders through, or null when its subtree
  * reads no object geometry at all.
  */
 std::shared_ptr<const PaintMaterialCompositeSurface> bake_surface_build(
-    const MaterialPaintLayer &layer, const PaintLayersBakeTarget &target, int size);
+    const MaterialPaintLayer &layer,
+    const PaintLayersBakeTarget &target,
+    int size,
+    int uv_tile = 0);
 
 /* The bake-drag state lives in `paint_layers_bake_drag.cc`; the planner and the bake read it. */
 

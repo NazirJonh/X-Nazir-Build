@@ -569,6 +569,12 @@ bool combined_projection_gpu_make(const PaintMaterialCompositeProjection &projec
                                   const PaintMaterialCompositeMapping &mapping,
                                   GpuProjection &r_projection)
 {
+  /* The row's Mirror folds the map coordinate inside the projection (the CPU resample and the
+   * generated graph do), and the projected GPU read clears the plain mapping's fold flags: it has
+   * no such step yet, so the CPU path reads the row rather than the GPU showing it unmirrored. */
+  if (mapping.mirror_axes != 0) {
+    return gpu_refuse("a projected row with a Mirror has no GPU step yet");
+  }
   const Object *object = projection.object;
   const Material *material = projection.material;
   if (object == nullptr || material == nullptr) {

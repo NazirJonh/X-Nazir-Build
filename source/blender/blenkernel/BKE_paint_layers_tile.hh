@@ -24,6 +24,37 @@ namespace blender {
 
 struct Object;
 struct PaintMaterialCompositeSurface;
+struct PaintMaterialProjectionSnapshot;
+
+/**
+ * The surface a projected row reads: the painted object, and optionally a snapshot of what the
+ * projection needs from it. A non-owning 16-byte handle passed by value. It converts to and from
+ * `const Object *`, so a caller that only has the object, or a callee that only reads it, is
+ * unchanged.
+ *
+ * A background bake cannot touch the evaluated object or mesh, so its job takes #snapshot on the
+ * main thread (see #PaintMaterialProjectionSnapshot) and owns it for the job's lifetime. With a
+ * snapshot, #object is only an identity to compare and is never dereferenced by the projection;
+ * it stays set so the "no object, no projection" checks keep their answer. A plain handle (no
+ * snapshot) is main-thread only. The snapshot rides this handle instead of thread-local state
+ * because the composite fans out into #threading::parallel_for tasks that do not run on the
+ * worker thread.
+ */
+struct PaintLayerSurfaceRef {
+  const Object *object = nullptr;
+  const PaintMaterialProjectionSnapshot *snapshot = nullptr;
+
+  PaintLayerSurfaceRef() = default;
+  PaintLayerSurfaceRef(const Object *object_,
+                       const PaintMaterialProjectionSnapshot *snapshot_ = nullptr)
+      : object(object_), snapshot(snapshot_)
+  {
+  }
+  operator const Object *() const
+  {
+    return object;
+  }
+};
 
 /**
  * The tile a composite, slice or bake call reads its maps on: an explicit \a tile_number (any
@@ -34,7 +65,7 @@ struct PaintMaterialCompositeSurface;
  */
 int BKE_paint_layers_tile_resolve(int tile_number,
                                   const PaintMaterialCompositeSurface *surface,
-                                  const Object *painted_object);
+                                  PaintLayerSurfaceRef painted_object);
 
 /**
  * A tile the caller leaves to the call to resolve: from the surface it was given (the UVs the
@@ -60,7 +91,7 @@ struct PaintLayerTileContext {
    * The object a projected row, correction or mask item of the call reads its surface from, or
    * null (the projection is then refused where one is needed).
    */
-  const Object *painted_object = nullptr;
+  PaintLayerSurfaceRef painted_object;
   /**
    * The UDIM tile the maps are read on; #PAINT_TILE_NUMBER_AUTO resolves from the context.
    */

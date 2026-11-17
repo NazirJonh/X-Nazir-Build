@@ -31,12 +31,14 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "BLI_array.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_index_range.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -64,6 +66,7 @@ struct ImBuf;
 struct Image;
 struct Main;
 struct Object;
+struct Mesh;
 struct bNode;
 struct bNodeTree;
 struct ImageUser;
@@ -171,6 +174,83 @@ struct PaintMaterialCompositeConstant {
 };
 
 /**
+ * What a projected read takes from the painted object, copied on the main thread so a background
+ * bake never touches the evaluated object or mesh (see #PaintLayerSurfaceRef). Everything is
+ * resolved for one object and one material: the slots that hold it, the matrices and the identity
+ * hash the main-thread path would read from the object, so a hash taken from the snapshot equals
+ * the one taken from the object. The snapshot is immutable once built, which is what lets the
+ * composite's parallel tasks read it without a lock.
+ *
+ * Created by #BKE_paint_material_projection_snapshot_create, owned by whoever runs the bake, and
+ * released on the main thread by #BKE_paint_material_projection_snapshot_free.
+ */
+struct PaintMaterialProjectionSnapshot {
+  /** A controller Empty a row's frame may live in. */
+  struct Controller {
+    /** Compared, never dereferenced. */
+    const Object *object = nullptr;
+    uint32_t uid = 0;
+    float4x4 object_to_world = float4x4::identity();
+    float4x4 world_to_object = float4x4::identity();
+  };
+
+  /** The object the snapshot was taken of. Compared, never dereferenced. */
+  const Object *object = nullptr;
+  uint32_t object_uid = 0;
+  /**
+   * A shallow copy of the evaluated mesh (its arrays are shared, so a later edit of the original
+   * copies on write and leaves this one alone), with the triangles and corner normals already
+   * computed so no worker fills a lazy cache.
+   */
+  const Mesh *mesh = nullptr;
+  /** The slot count of the object, and which of its slots hold the material. */
+  int totcol = 0;
+  Array<bool> slot_matches;
+  float4x4 object_to_world = float4x4::identity();
+  Vector<Controller> controllers;
+  /** The render UV map the surface reads, and the mesh content hash the identity is built on. */
+  std::string uv_map_name;
+  /** The UDIM tile of the object's UVs (#BKE_paint_layers_gradient_surface_object_tile). */
+  int uv_tile = 0;
+  /**
+   * The UDIM tiles of the UVs a bake of this object renders one by one, empty for the single-tile
+   * scheme. A bake names the tile of every render itself; the list only lets a reader of the
+   * snapshot tell which tiles are part of the bake instead of asking the mesh, which a worker may
+   * not read.
+   */
+  Vector<int> uv_tiles;
+  uint64_t content_hash = 0;
+  /** #composite_projection_surface_identity of the object and the material. */
+  uint64_t surface_identity = 0;
+
+  /** The snapshot of \a controller, or null when the snapshot was taken without it. */
+  const Controller *controller_find(const Object *controller) const
+  {
+    for (const Controller &candidate : this->controllers) {
+      if (candidate.object == controller) {
+        return &candidate;
+      }
+    }
+    return nullptr;
+  }
+};
+
+/**
+ * Snapshot \a object (an evaluated object) for the rows of \a material, with the matrices of
+ * \a controllers. Main thread only. Null when the object has no mesh the projection could read
+ * (no UV, no triangles, an edit-mesh wrapper), in which case the caller bakes on the main thread.
+ * \a uv_tiles are the tiles of the object's tile block (#PaintMaterialProjectionSnapshot::uv_tiles).
+ */
+PaintMaterialProjectionSnapshot *BKE_paint_material_projection_snapshot_create(
+    const Object &object,
+    const Material &material,
+    Span<const Object *> controllers,
+    Span<int> uv_tiles = {});
+
+/** Release \a snapshot and its mesh. Main thread only; null is a no-op. */
+void BKE_paint_material_projection_snapshot_free(PaintMaterialProjectionSnapshot *snapshot);
+
+/**
  * The projection of a row's own map, as the CPU bake reads it.
  *
  * #object is the painted object whose UV space the bake writes and whose panel provides the
@@ -233,6 +313,11 @@ struct PaintMaterialCompositeProjection {
   bool source_tiled = false;
   /** The painted object whose UV space the bake writes. */
   const Object *object = nullptr;
+  /**
+   * What a background bake reads of #object and #controller instead of dereferencing them. When
+   * set, the bake never touches either object; #object stays as the identity to compare.
+   */
+  const PaintMaterialProjectionSnapshot *snapshot = nullptr;
   /** The object whose space the frame lives in, or null for the painted object's space. */
   const Object *controller = nullptr;
   /** The material whose slots restrict the baked triangles. */

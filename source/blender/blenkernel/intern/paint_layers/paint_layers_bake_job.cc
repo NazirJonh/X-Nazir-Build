@@ -47,6 +47,7 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_composite_surface.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -118,6 +119,14 @@ static Map<uint32_t, Vector<BakeShapeHold>> &bake_shape_holds()
  * back on the main thread, so the window keeps redrawing while it bakes.
  * \{ */
 
+/** Releases a snapshot's mesh; the job is destroyed on the main thread, which that needs. */
+struct BakeSnapshotDeleter {
+  void operator()(PaintMaterialProjectionSnapshot *snapshot) const
+  {
+    BKE_paint_material_projection_snapshot_free(snapshot);
+  }
+};
+
 struct PaintLayersBakeJob {
   Main *bmain = nullptr;
   Material *material = nullptr;
@@ -151,13 +160,28 @@ struct PaintLayersBakeJob {
     uint32_t object_uid = 0;
     uint32_t mesh_uid = 0;
     uint64_t identity = 0;
-    /** UDIM tile number, 0 for a non-tiled map. */
+    /** UDIM tile number the result is written to, 0 for a non-tiled map. */
     int tile_number = 0;
+    /**
+     * The UDIM tile of the object's UVs this render covers; 0 leaves the tile to the surface. An
+     * object whose UVs span several tiles has one entry per tile, all with the same
+     * #object_index.
+     */
+    int uv_tile = 0;
+    /** The index of the object in the row's targets, shared by the entries of its tiles. */
+    int object_index = 0;
     /**
      * The surface of this object, rasterized on the main thread at creation and read-only on the
      * worker; null for a row reading no object geometry.
      */
     std::shared_ptr<const PaintMaterialCompositeSurface> surface;
+    /**
+     * What the worker reads of the object's mesh, matrices and slots when the row folds a
+     * projection; owned by #PaintLayersBakeJob::snapshots, null for any other row.
+     */
+    const PaintMaterialProjectionSnapshot *snapshot = nullptr;
+    /** The evaluated object #snapshot was taken of: compared by the worker, never dereferenced. */
+    const Object *object = nullptr;
     Vector<ChannelResult> channels;
     /**
      * The row's common factor (`mask x opacity`), folded from every channel's render as it lands on
@@ -176,10 +200,23 @@ struct PaintLayersBakeJob {
      * anew.
      */
     uint32_t hash[2] = {};
-    /** One entry per object tile; a shared (UV) row has one entry with a null surface. */
+    /**
+     * One entry per render of an object's tile block (one per UV tile with geometry); a shared (UV)
+     * row has one entry with a null surface.
+     */
     Vector<ObjectResult> objects;
+    /** How many objects #objects covers, the tiles of one object counted once. */
+    int object_num = 0;
+    /** Every image tile the objects' blocks cover; empty selects one tile per object. */
+    Vector<int> image_tiles;
   };
   Vector<RowResult> rows;
+  /**
+   * The snapshots the rows' objects were taken as, one per object. They are kept here and not in
+   * #rows so the worker's cancel path, which drops the rows on its own thread, never releases a
+   * mesh: #BKE_paint_layers_bake_job_free does, on the main thread.
+   */
+  Vector<std::unique_ptr<PaintMaterialProjectionSnapshot, BakeSnapshotDeleter>> snapshots;
   /**
    * The result of a CPU-computed effect that owns it (#paint_layer_effect_owns_result), computed on
    * the worker from #material_copy. The channels to compute are decided on the main thread at
@@ -226,7 +263,8 @@ static void bake_common_from_channel(Span<float> color,
 PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
                                                      Material &ma,
                                                      const Scene *scene,
-                                                     const ViewLayer *view_layer)
+                                                     const ViewLayer *view_layer,
+                                                     const bool notice_surface_edits)
 {
   if (!BKE_paint_layers_is_layered(ma)) {
     return nullptr;
@@ -241,7 +279,9 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
   else if (bake_any_row_needs_surface(ma)) {
     paint_layers_bake_view_resolve(ma, &bmain, scene, view_layer, view);
   }
-  bake_object_identities_notice(ma, view);
+  if (notice_surface_edits) {
+    bake_object_identities_notice(ma, view);
+  }
   Vector<MaterialPaintLayer *> rows;
   BKE_paint_layers_foreach(ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
     rows.append(&layer);
@@ -259,6 +299,10 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
   });
 
   bool surface_sync_due = false;
+  /* The snapshots of the objects projected rows are baked for, taken at most once each. */
+  Map<const Object *, const PaintMaterialProjectionSnapshot *> snapshot_by_object;
+  Vector<const Object *> controllers;
+  bool controllers_ready = false;
   PaintLayersBakeJob *job = MEM_new<PaintLayersBakeJob>(__func__);
   job->bmain = &bmain;
   job->material = &ma;
@@ -280,6 +324,13 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
        * the synchronous planner's, which needs this view: the regeneration's own plan has no scene,
        * so without the run below nothing would ever bake it. */
       surface_sync_due = surface_sync_due || paint_layers_bake_subtree_needs_surface(layer);
+      continue;
+    }
+    const bool folds_projection = bake_subtree_folds_projection(ma, layer);
+    if (folds_projection && (G.background || bake_drag_active(ma))) {
+      /* A handle drag re-renders the row at every step at the coarse drag size, which the
+       * synchronous planner owns; the full bake follows the drag as a job. */
+      surface_sync_due = true;
       continue;
     }
     const int size = bake_size_for(ma, layer);
@@ -306,21 +357,59 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
     row.size = size;
     bool surfaces_ok = true;
     if (needs_surface) {
-      for (int object_index = 0; object_index < targets.objects.size(); object_index++) {
+      row.object_num = int(targets.objects.size());
+      row.image_tiles = bake_targets_image_tiles(targets.objects);
+      for (int object_index = 0; object_index < targets.objects.size() && surfaces_ok;
+           object_index++)
+      {
         const PaintLayersBakeTarget &target = targets.objects[object_index];
-        std::shared_ptr<const PaintMaterialCompositeSurface> surface = bake_surface_build(
-            layer, target, size);
-        if (surface == nullptr) {
-          surfaces_ok = false;
-          break;
+        const PaintMaterialProjectionSnapshot *snapshot = nullptr;
+        if (folds_projection) {
+          /* The worker projects through the object's mesh and matrices, which only this thread may
+           * read: it gets a copy of them, one per object however many rows fold and however many
+           * UV tiles the object renders. */
+          snapshot = snapshot_by_object.lookup_default(target.object, nullptr);
+          if (snapshot == nullptr) {
+            if (!controllers_ready) {
+              bake_projection_controllers_collect(ma, controllers);
+              controllers_ready = true;
+            }
+            PaintMaterialProjectionSnapshot *created = BKE_paint_material_projection_snapshot_create(
+                *target.object, ma, controllers, target.uv_tiles);
+            if (created == nullptr) {
+              /* No mesh, UV, triangle or slot the projection could read: the synchronous bake
+               * would produce nothing either, so the row waits for a usable surface. */
+              surfaces_ok = false;
+              break;
+            }
+            job->snapshots.append(
+                std::unique_ptr<PaintMaterialProjectionSnapshot, BakeSnapshotDeleter>(created));
+            snapshot = created;
+            snapshot_by_object.add(target.object, snapshot);
+          }
         }
-        PaintLayersBakeJob::ObjectResult object;
-        object.object_uid = target.object_uid;
-        object.mesh_uid = target.mesh_uid;
-        object.identity = paint_layers_bake_target_identity(target, size);
-        object.tile_number = PAINT_TILE_NUMBER_BASE + object_index;
-        object.surface = std::move(surface);
-        row.objects.append(std::move(object));
+        /* One render per UV tile with geometry, each with the surface of its own tile. */
+        for (const PaintLayersBakeTilePair &pair : bake_target_tile_pairs(target, object_index)) {
+          std::shared_ptr<const PaintMaterialCompositeSurface> surface = bake_surface_build(
+              layer, target, size, pair.uv_tile);
+          if (surface == nullptr) {
+            surfaces_ok = false;
+            break;
+          }
+          PaintLayersBakeJob::ObjectResult object;
+          if (folds_projection) {
+            object.snapshot = snapshot;
+            object.object = target.object;
+          }
+          object.object_uid = target.object_uid;
+          object.mesh_uid = target.mesh_uid;
+          object.identity = paint_layers_bake_row_identity(ma, layer, target, size);
+          object.tile_number = pair.image_tile;
+          object.uv_tile = pair.uv_tile;
+          object.object_index = object_index;
+          object.surface = std::move(surface);
+          row.objects.append(std::move(object));
+        }
       }
     }
     else {
@@ -389,7 +478,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
   if (surface_sync_due && scene != nullptr && view_layer != nullptr) {
     /* On the main thread, which is where the evaluated mesh behind the Decal map may be read. It
      * tags the regeneration itself when a row landed. */
-    BKE_paint_layers_bake_plan_run(bmain, ma, nullptr, scene, view_layer);
+    BKE_paint_layers_bake_plan_run(bmain, ma, nullptr, scene, view_layer, notice_surface_edits);
   }
   if (job->rows.is_empty() && job->effects.is_empty()) {
     MEM_delete(job);
@@ -524,7 +613,18 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
         Vector<float> color(int64_t(row.size) * row.size * 4);
         Vector<float> coverage(int64_t(row.size) * row.size);
         const bool rendered = BKE_paint_layers_bake_render_node(
-            ma, *layer, channel, row.size, color.data(), coverage.data(), nullptr, object.surface);
+            ma,
+            *layer,
+            channel,
+            row.size,
+            color.data(),
+            coverage.data(),
+            nullptr,
+            object.surface,
+            /* The snapshot, not the object, is what a projected row reads on this thread. */
+            PaintLayerTileContext{
+                .painted_object = PaintLayerSurfaceRef{object.object, object.snapshot},
+                .tile_number = object.uv_tile});
         done_pairs++;
         report();
         if (!rendered) {
@@ -569,6 +669,9 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
           gradient_channels.append(channel);
         }
       }
+      /* The render of this tile is done: a block of many tiles holds one surface per tile, which at
+       * 4K is the largest thing the job keeps, and nothing reads the surface after its tile. */
+      object.surface.reset();
     }
     if (gradient_row) {
       const double delta_mib = double(int64_t(MEM_get_memory_in_use()) -
@@ -702,23 +805,42 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
        * stored hash would label as current. Dropping them leaves the row due for a new render. */
       continue;
     }
-    const bool tiled_row = !row.objects.is_empty() && row.objects[0].surface != nullptr;
+    /* Not read off the surfaces: the worker releases each one as soon as its tile is rendered. */
+    const bool tiled_row = row.object_num > 0;
+    if (tiled_row && row.objects[0].snapshot != nullptr &&
+        BKE_paint_layers_bake_stroke_active_get())
+    {
+      /* A stroke moves the mesh the snapshot was taken of (a sculpt stroke at every dab), and the
+       * identity below can lag a cached content hash: nothing from a job that overlaps a stroke is
+       * written. The row stays invalid, so the job the stroke's end starts renders it anew. */
+      continue;
+    }
     PaintLayersBakeTargets targets;
     if (tiled_row) {
       /* The objects or their geometry may have moved while the worker ran: the pixels then describe
        * surfaces the view layer no longer has, so they are dropped and the row re-bakes. */
       paint_layers_bake_targets_resolve(*ma, *layer, view, row.size, targets);
       if (targets.issue != PAINT_LAYERS_BAKE_OBJECTS_OK ||
-          targets.objects.size() != row.objects.size())
+          int(targets.objects.size()) != row.object_num)
       {
         continue;
       }
       bool matches = true;
-      for (int index = 0; index < row.objects.size(); index++) {
-        const PaintLayersBakeJob::ObjectResult &object = row.objects[index];
-        const PaintLayersBakeTarget &target = targets.objects[index];
+      for (const PaintLayersBakeJob::ObjectResult &object : row.objects) {
+        const PaintLayersBakeTarget &target = targets.objects[object.object_index];
+        /* The tiles are compared along with the identity: the same objects with their UVs moved to
+         * other tiles (or another block layout) would land the pixels in the wrong tiles. The
+         * identity folds the block of a multi-tile object; the tile list covers the single-tile
+         * scheme, where it is the tile of the UVs. */
+        const Vector<PaintLayersBakeTilePair> pairs = bake_target_tile_pairs(
+            target, object.object_index);
+        const bool tile_found = std::any_of(
+            pairs.begin(), pairs.end(), [&](const PaintLayersBakeTilePair &pair) {
+              return pair.uv_tile == object.uv_tile && pair.image_tile == object.tile_number;
+            });
         if (target.object_uid != object.object_uid || target.mesh_uid != object.mesh_uid ||
-            paint_layers_bake_target_identity(target, row.size) != object.identity)
+            !tile_found ||
+            paint_layers_bake_row_identity(*ma, *layer, target, row.size) != object.identity)
         {
           matches = false;
           break;
@@ -731,7 +853,14 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
       bake_tile_object_indices_clear(*ma, scene, job.view_layer, &view);
       bake_tile_object_indices_set(*ma, targets);
     }
-    const int object_num = tiled_row ? int(row.objects.size()) : 0;
+    const int object_num = tiled_row ? row.object_num : 0;
+    const Span<int> image_tiles = row.image_tiles;
+    /* The renders each object wrote; an object is recorded once all of its tiles landed. */
+    Array<int> object_pairs_written(std::max(object_num, 1), 0);
+    Array<int> object_pairs_total(std::max(object_num, 1), 0);
+    for (const PaintLayersBakeJob::ObjectResult &object : row.objects) {
+      object_pairs_total[tiled_row ? object.object_index : 0]++;
+    }
     /* Whether the row was laid live when the bake landed. That is the only case where the newly
      * valid bake changes the generated shape; a partial re-bake of a row that already read its
      * bake does not. */
@@ -751,7 +880,8 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
                                                row.size,
                                                channel.is_color,
                                                bake_channel_needs_float(*layer, info),
-                                               object_num);
+                                               object_num,
+                                               image_tiles);
         if (color_image == nullptr) {
           continue;
         }
@@ -781,29 +911,48 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
         /* The common factor was folded on the worker as each channel rendered; the per-channel
          * coverages it came from are gone, which is the point. */
         if (Image *coverage_image = bake_service_image(
-                bmain, *layer, -1, row.size, false, false, object_num))
+                bmain, *layer, -1, row.size, false, false, object_num, image_tiles))
         {
           bake_write_coverage_image(
               *coverage_image, object.common.data(), nullptr, object.tile_number);
         }
         object.common = Vector<float>();
       }
-      if (tiled_row) {
-        MaterialPaintLayerBakeTile *tile = bake_tile_ensure(
-            *layer->bake, object.object_uid, object_index);
-        tile->hash[0] = uint32_t(object.identity & 0xFFFFFFFFu);
-        tile->hash[1] = uint32_t(object.identity >> 32);
-      }
+      object_pairs_written[tiled_row ? object.object_index : 0]++;
     }
     if (!row_written || !all_objects) {
       continue;
     }
     if (tiled_row) {
-      layer->bake->object_count = int(row.objects.size());
+      for (const int object_index : targets.objects.index_range()) {
+        if (object_pairs_written[object_index] != object_pairs_total[object_index]) {
+          continue;
+        }
+        const PaintLayersBakeTarget &target = targets.objects[object_index];
+        const PaintLayersBakeJob::ObjectResult *first = nullptr;
+        for (const PaintLayersBakeJob::ObjectResult &object : row.objects) {
+          if (object.object_index == object_index) {
+            first = &object;
+            break;
+          }
+        }
+        if (first == nullptr) {
+          continue;
+        }
+        MaterialPaintLayerBakeTile *tile = bake_tile_ensure(
+            *layer->bake, target.object_uid, target.block_origin[0], target.block_origin[1]);
+        tile->hash[0] = uint32_t(first->identity & 0xFFFFFFFFu);
+        tile->hash[1] = uint32_t(first->identity >> 32);
+      }
+      layer->bake->object_count = row.object_num;
     }
     bake_stale_channel_maps_release(bmain, *layer, written_channels);
     layer->bake->hash[0] = row.hash[0];
     layer->bake->hash[1] = row.hash[1];
+    /* The job renders at the full size and is never queued during a drag, so a reduced bake the drag
+     * left behind is now replaced; without this the row would owe its full bake forever
+     * (#bake_drag_reduced_owes) and be queued again after every commit. */
+    bake_drag_reduced_forget(*ma, *layer);
     if (tiled_row) {
       /* The maps are the surfaces': the next plan compares those identities to notice an edit of
        * the geometry or of the UV layer. */
@@ -1017,6 +1166,9 @@ void BKE_paint_layers_bake_job_free(PaintLayersBakeJob &job)
     BKE_id_free(nullptr, &job.material_copy->id);
     job.material_copy = nullptr;
   }
+  /* The snapshots' meshes go on this (the main) thread, after the worker has finished. */
+  job.rows.clear();
+  job.snapshots.clear();
   MEM_delete(&job);
 }
 

@@ -499,32 +499,18 @@ static bke::LruByteCache<PaintMaterialDecalMapKey, PaintMaterialDecalMap> g_deca
 static bke::LruByteCache<DecalAdjacencyKey, DecalAdjacencyValue> g_decal_adjacency_cache(
     std::numeric_limits<size_t>::max(), 4);
 
-/** The slots of \a object that hold \a material (every slot when null), by original ID. */
-static int decal_slots_match(const Object &object,
-                             const Material *material,
-                             MutableSpan<bool> r_matches)
-{
-  const Material *material_orig = (material != nullptr) ? DEG_get_original(material) : nullptr;
-  int matched = 0;
-  for (int slot = 0; slot < object.totcol; slot++) {
-    const Material *slot_material = BKE_object_material_get(const_cast<Object *>(&object),
-                                                            short(slot + 1));
-    if (material_orig == nullptr ||
-        (slot_material != nullptr && DEG_get_original(slot_material) == material_orig))
-    {
-      r_matches[slot] = true;
-      matched++;
-    }
-  }
-  return matched;
-}
-
 std::shared_ptr<const PaintMaterialDecalMap> BKE_paint_material_decal_map_get(
     const PaintMaterialCompositeProjection &projection,
     const int width,
     const int height,
     const float radius_scale)
 {
+  /* The map is built from the evaluated mesh, which only the main thread may read: a bake that
+   * runs from a snapshot never owns a Decal row (see #BKE_paint_layers_bake_is_heavy). */
+  BLI_assert(projection.snapshot == nullptr);
+  if (projection.snapshot != nullptr) {
+    return nullptr;
+  }
   const Object *object = projection.object;
   const Mesh *mesh_ptr = composite_projection_mesh(object);
   if (mesh_ptr == nullptr || width <= 0 || height <= 0 || object->totcol <= 0) {
@@ -542,7 +528,7 @@ std::shared_ptr<const PaintMaterialDecalMap> BKE_paint_material_decal_map_get(
   }
   const VArraySpan<float2> uvs(*uv_attr);
   Array<bool> slot_matches(object->totcol, false);
-  if (decal_slots_match(*object, projection.material, slot_matches) == 0) {
+  if (composite_projection_slots_match(*object, projection.material, slot_matches) == 0) {
     return nullptr;
   }
   const VArraySpan<int> material_indices = *attributes.lookup_or_default<int>(
@@ -590,11 +576,7 @@ std::shared_ptr<const PaintMaterialDecalMap> BKE_paint_material_decal_map_get(
   key.verts_num = mesh.verts_num;
   key.faces_num = mesh.faces_num;
   key.corners_num = mesh.corners_num;
-  uint64_t mesh_hash = composite_mesh_content_hash(mesh);
-  for (const bool match : slot_matches) {
-    mesh_hash = get_default_hash(mesh_hash, match);
-  }
-  key.mesh_hash = mesh_hash;
+  key.mesh_hash = composite_projection_surface_identity(object, projection.material);
   uint64_t frame_hash = get_default_hash(params.center.x, params.center.y, params.center.z);
   for (const int i : IndexRange(3)) {
     frame_hash = get_default_hash(
@@ -1135,7 +1117,7 @@ bool BKE_paint_material_decal_frame_from_uv(const Object *object,
   }
   const VArraySpan<float2> uvs(*uv_attr);
   Array<bool> slot_matches(object->totcol, false);
-  if (decal_slots_match(*object, material, slot_matches) == 0) {
+  if (composite_projection_slots_match(*object, material, slot_matches) == 0) {
     return false;
   }
 

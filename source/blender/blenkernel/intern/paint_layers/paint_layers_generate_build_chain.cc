@@ -101,18 +101,24 @@ NodeOutput PaintLayersTreeBuilder::bake_tile_uv_add(bNodeTree &tree, Vector<bNod
     return NodeOutput{};
   };
 
+  /* The UV moves into the object's tile block by one constant per axis, which the object carries as
+   * two properties: the columns and the rows of the shift. The row property is absent on an object
+   * whose bake predates tile blocks, and an absent object attribute reads zero, so such a bake keeps
+   * the column-only placement it was written with. */
   bNode *attribute = bke::node_add_static_node(nullptr, tree, SH_NODE_ATTRIBUTE);
+  bNode *attribute_row = bke::node_add_static_node(nullptr, tree, SH_NODE_ATTRIBUTE);
   bNode *coord = this->uv_coordinate_ensure(tree);
   bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
   bNode *add = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  bNode *add_row = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
   bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineXYZ"_ustr);
-  for (bNode *node : {attribute, separate, add, combine}) {
+  for (bNode *node : {attribute, attribute_row, separate, add, add_row, combine}) {
     if (node != nullptr) {
       created.append(node);
     }
   }
-  if (attribute == nullptr || coord == nullptr || separate == nullptr || add == nullptr ||
-      combine == nullptr)
+  if (attribute == nullptr || attribute_row == nullptr || coord == nullptr ||
+      separate == nullptr || add == nullptr || add_row == nullptr || combine == nullptr)
   {
     return discard();
   }
@@ -120,9 +126,15 @@ NodeOutput PaintLayersTreeBuilder::bake_tile_uv_add(bNodeTree &tree, Vector<bNod
   NodeShaderAttribute *attribute_data = static_cast<NodeShaderAttribute *>(attribute->storage);
   attribute_data->type = SHD_ATTRIBUTE_OBJECT;
   STRNCPY(attribute_data->name, paint_layers_bake_tile_attribute_path(ma_).c_str());
+  NodeShaderAttribute *attribute_row_data = static_cast<NodeShaderAttribute *>(
+      attribute_row->storage);
+  attribute_row_data->type = SHD_ATTRIBUTE_OBJECT;
+  STRNCPY(attribute_row_data->name, paint_layers_bake_tile_row_attribute_path(ma_).c_str());
   add->custom1 = NODE_MATH_ADD;
+  add_row->custom1 = NODE_MATH_ADD;
 
   bNodeSocket *attr_out = socket_out(*attribute, "Fac");
+  bNodeSocket *attr_row_out = socket_out(*attribute_row, "Fac");
   bNodeSocket *coord_uv = socket_out(*coord, "UV");
   bNodeSocket *sep_vector = socket_in(*separate, "Vector");
   bNodeSocket *sep_x = socket_out(*separate, "X");
@@ -131,13 +143,17 @@ NodeOutput PaintLayersTreeBuilder::bake_tile_uv_add(bNodeTree &tree, Vector<bNod
   bNodeSocket *add_a = socket_in(*add, "Value");
   bNodeSocket *add_b = socket_in(*add, "Value_001");
   bNodeSocket *add_out = socket_out(*add, "Value");
+  bNodeSocket *add_row_a = socket_in(*add_row, "Value");
+  bNodeSocket *add_row_b = socket_in(*add_row, "Value_001");
+  bNodeSocket *add_row_out = socket_out(*add_row, "Value");
   bNodeSocket *com_x = socket_in(*combine, "X");
   bNodeSocket *com_y = socket_in(*combine, "Y");
   bNodeSocket *com_z = socket_in(*combine, "Z");
   bNodeSocket *com_out = socket_out(*combine, "Vector");
-  if (attr_out == nullptr || coord_uv == nullptr || sep_vector == nullptr ||
-      sep_x == nullptr || sep_y == nullptr || sep_z == nullptr || add_a == nullptr ||
-      add_b == nullptr || add_out == nullptr || com_x == nullptr || com_y == nullptr ||
+  if (attr_out == nullptr || attr_row_out == nullptr || coord_uv == nullptr ||
+      sep_vector == nullptr || sep_x == nullptr || sep_y == nullptr || sep_z == nullptr ||
+      add_a == nullptr || add_b == nullptr || add_out == nullptr || add_row_a == nullptr ||
+      add_row_b == nullptr || add_row_out == nullptr || com_x == nullptr || com_y == nullptr ||
       com_z == nullptr || com_out == nullptr)
   {
     return discard();
@@ -146,8 +162,10 @@ NodeOutput PaintLayersTreeBuilder::bake_tile_uv_add(bNodeTree &tree, Vector<bNod
   bke::node_add_link(tree, *coord, *coord_uv, *separate, *sep_vector);
   bke::node_add_link(tree, *separate, *sep_x, *add, *add_a);
   bke::node_add_link(tree, *attribute, *attr_out, *add, *add_b);
+  bke::node_add_link(tree, *separate, *sep_y, *add_row, *add_row_a);
+  bke::node_add_link(tree, *attribute_row, *attr_row_out, *add_row, *add_row_b);
   bke::node_add_link(tree, *add, *add_out, *combine, *com_x);
-  bke::node_add_link(tree, *separate, *sep_y, *combine, *com_y);
+  bke::node_add_link(tree, *add_row, *add_row_out, *combine, *com_y);
   bke::node_add_link(tree, *separate, *sep_z, *combine, *com_z);
 
   for (bNode *node : created) {

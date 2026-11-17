@@ -77,6 +77,14 @@ struct PlaceProjectionState {
   bool dragging_size = false;
   bool dragging_roll = false;
   float pixel_size = 0.01f;
+  /**
+   * The row projects a Box: the gesture moves the frame's center only. A box has no single
+   * projection direction to turn to the surface, and the frame's size and orientation are the
+   * volume the user sized and turned, so the placement keeps both.
+   */
+  bool place_center_only = false;
+  /** The row projects a Decal: a click that misses the mesh must not place the frame. */
+  bool is_decal = false;
 };
 
 /** \} */
@@ -122,6 +130,11 @@ static void place_notify(Material *ma)
 
 static void place_update_status(bContext *C, const PlaceProjectionState &data)
 {
+  if (data.place_center_only) {
+    /* The Box placement has no size drag and no roll: the frame keeps its scale and rotation. */
+    ED_workspace_status_text(C, "LMB: place | Esc/RMB: cancel");
+    return;
+  }
   const float roll_deg = data.roll * (180.0f / float(M_PI));
   const std::string text = fmt::format(
       "LMB: place / drag: size | R: roll | Ctrl: step | Esc/RMB: cancel | "
@@ -234,18 +247,29 @@ static wmOperatorStatus place_invoke(bContext *C, wmOperator *op, const wmEvent 
   data->roll = data->original.roll;
   data->pixel_size = 0.01f;
 
-  /* Default size from object bbox. */
-  Object *ob = data->target.object();
-  if (ob != nullptr) {
-    Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
-    Object *ob_eval = DEG_get_evaluated(depsgraph, ob);
-    if (ob_eval != nullptr) {
-      const auto bounds = BKE_object_boundbox_get(ob_eval);
-      if (bounds.has_value()) {
-        const float3 extent = bounds->max - bounds->min;
-        const float max_ext = std::max({extent.x, extent.y, extent.z});
-        const float default_sz = max_ext * 0.25f;
-        copy_v3_fl(data->size, default_sz);
+  /* The mapping space is resolved once: the gesture cannot change it while it runs. */
+  if (const Material *ma = data->target.material()) {
+    const MaterialPaintLayer *layer = BKE_paint_layers_find(*ma, data->target.marker());
+    if (layer != nullptr) {
+      data->is_decal = layer->mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL;
+      data->place_center_only = layer->mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_BOX;
+    }
+  }
+
+  /* Default size from object bbox; a Box placement keeps the frame's own size. */
+  if (!data->place_center_only) {
+    Object *ob = data->target.object();
+    if (ob != nullptr) {
+      Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+      Object *ob_eval = DEG_get_evaluated(depsgraph, ob);
+      if (ob_eval != nullptr) {
+        const auto bounds = BKE_object_boundbox_get(ob_eval);
+        if (bounds.has_value()) {
+          const float3 extent = bounds->max - bounds->min;
+          const float max_ext = std::max({extent.x, extent.y, extent.z});
+          const float default_sz = max_ext * 0.25f;
+          copy_v3_fl(data->size, default_sz);
+        }
       }
     }
   }
@@ -285,36 +309,38 @@ static wmOperatorStatus place_modal(bContext *C, wmOperator *op, const wmEvent *
     Object *space_ob = data->target.space_object();
     float world_loc[3], world_no[3];
     bool got_hit = false;
-    const MaterialPaintLayer *place_layer = (data->target.material() != nullptr) ?
-                                                BKE_paint_layers_find(*data->target.material(),
-                                                                      data->target.marker()) :
-                                                nullptr;
-    const bool is_decal = place_layer != nullptr &&
-                          place_layer->mapping.space == MA_PAINT_LAYER_MAPPING_SPACE_DECAL;
+    const bool is_decal = data->is_decal;
     if (ob != nullptr &&
         projection_frame_raycast(*C, region, v3d, *ob, mval, world_loc, world_no))
     {
       got_hit = true;
     }
-    else if (!is_decal && place_plane_fallback(C, region, v3d, rv3d, mval, world_loc, world_no)) {
+    else if (!is_decal && !data->place_center_only &&
+             place_plane_fallback(C, region, v3d, rv3d, mval, world_loc, world_no))
+    {
       got_hit = true;
     }
-    if (is_decal && !got_hit) {
-      /* The Decal map unfolds the surface around the center, so a miss must not leave it in the air. */
+    if ((is_decal || data->place_center_only) && !got_hit) {
+      /* The Decal map unfolds the surface around the center, so a miss must not leave it in the
+       * air; a Box placement moves the center only, so a miss leaves the frame where it was. */
       return OPERATOR_RUNNING_MODAL;
     }
     if (got_hit) {
       projection_frame_point_from_world(
           *C, space_ob, world_loc, world_no, data->hit_center, world_no);
-      BKE_paint_layers_projection_orientation_from_surface(
-          world_no, data->hit_normal, &data->roll);
-      data->roll_at_r_press = data->roll;
+      /* The Box frame keeps the scale and rotation the user set: a box has no single projection
+       * direction to turn to the hit, so only its center follows the surface. */
+      if (!data->place_center_only) {
+        BKE_paint_layers_projection_orientation_from_surface(
+            world_no, data->hit_normal, &data->roll);
+        data->roll_at_r_press = data->roll;
+      }
     }
     data->placed = true;
-    data->dragging_size = true;
+    data->dragging_size = !data->place_center_only;
     copy_v2_v2_int(data->click_mval, event->xy);
     /* Compute pixel size at the hit point for drag scaling. */
-    {
+    if (!data->place_center_only) {
       Object *px_ob = (space_ob != nullptr) ? space_ob : ob;
       const float4x4 &o2w = px_ob->object_to_world();
       const float3 world_center = math::transform_point(o2w, float3(data->hit_center));
@@ -325,23 +351,28 @@ static wmOperatorStatus place_modal(bContext *C, wmOperator *op, const wmEvent *
     return OPERATOR_RUNNING_MODAL;
   }
 
-  /* LMB release: finish. */
-  if (event->type == LEFTMOUSE && event->val == KM_RELEASE && data->dragging_size) {
+  /* LMB release: finish. A Box placement has no size drag, so its release ends the gesture
+   * whether or not the click found the surface. */
+  if (event->type == LEFTMOUSE && event->val == KM_RELEASE &&
+      (data->dragging_size || data->place_center_only))
+  {
     data->dragging_size = false;
+    const bool placed = data->placed;
     ED_workspace_status_text(C, nullptr);
     place_free(op);
-    return OPERATOR_FINISHED;
+    /* A missed Box click wrote nothing, so it must not push an undo step. */
+    return placed ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
   }
 
-  /* R key: enter/exit roll mode. */
-  if (event->type == EVT_RKEY && event->val == KM_PRESS) {
+  /* R key: enter/exit roll mode; the Box placement has no roll, its rotation stays. */
+  if (event->type == EVT_RKEY && event->val == KM_PRESS && !data->place_center_only) {
     data->dragging_roll = true;
     data->dragging_size = false;
     data->roll_at_r_press = data->roll;
     copy_v2_v2_int(data->click_mval, event->xy);
     return OPERATOR_RUNNING_MODAL;
   }
-  if (event->type == EVT_RKEY && event->val == KM_RELEASE) {
+  if (event->type == EVT_RKEY && event->val == KM_RELEASE && !data->place_center_only) {
     data->dragging_roll = false;
     if (data->placed) {
       ED_workspace_status_text(C, nullptr);

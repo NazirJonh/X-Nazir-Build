@@ -1033,6 +1033,37 @@ void ED_buttons_set_context(const bContext *C,
   }
 }
 
+void ED_buttons_layer_material_auto_show(const bContext *C)
+{
+  /* The option is a script-registered WindowManager property (the User Settings subpanel of the
+   * Layer Material Settings owns its UI), so it is read through RNA. Unregistered means the
+   * property is not there yet, which is the enabled default. */
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (wm != nullptr) {
+    PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
+    PropertyRNA *prop = RNA_struct_find_property(&wm_ptr, "paint_layers_auto_activate_tab");
+    if (prop != nullptr && !RNA_property_boolean_get(&wm_ptr, prop)) {
+      return;
+    }
+  }
+
+  bScreen *screen = CTX_wm_screen(C);
+  if (screen == nullptr) {
+    return;
+  }
+  for (ScrArea &area : screen->areabase) {
+    if (area.spacetype != SPACE_PROPERTIES) {
+      continue;
+    }
+    SpaceProperties *sbuts = static_cast<SpaceProperties *>(area.spacedata.first);
+    if (sbuts->mainb != BCONTEXT_LAYER_MATERIAL) {
+      sbuts->mainb = BCONTEXT_LAYER_MATERIAL;
+      sbuts->mainbuser = sbuts->mainb;
+      ED_area_tag_redraw(&area);
+    }
+  }
+}
+
 /************************* Context Callback ************************/
 
 const char *buttons_context_dir[] = {

@@ -59,6 +59,14 @@ void ED_buttons_set_context(const bContext *C,
  */
 void ED_buttons_texture_show(bContext *C, PointerRNA *ptr, PropertyRNA *prop);
 
+/**
+ * Bring every Properties Editor of \a C's screen to the Layer Material tab when it is not on it
+ * already. This is what adding a row to the paint-layer stack does when the User Settings option
+ * (`paint_layers_auto_activate_tab`) is on: a layer the user just asked for is the one they mean to
+ * edit next, and its settings are that tab's. Nothing is switched when the option is off.
+ */
+void ED_buttons_layer_material_auto_show(const bContext *C);
+
 /** Placeholder panel marking the drop position in the modifier stack. */
 #define MODIFIER_DROP_GHOST_PANEL_IDNAME "MOD_PT_drop_ghost"
 

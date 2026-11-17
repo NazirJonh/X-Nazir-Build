@@ -847,8 +847,9 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         """Opacity with the Lock toggle to its right, as one row.
 
         With #channel_overview (window manager, material, channel ids) a chevron follows the lock
-        and unfolds every active channel's own opacity and blend below the row. The fold lives on
-        the window manager, so it stays open while the active layer changes.
+        and unfolds every active channel's own opacity and blend below the row -- on a folder and
+        a Material row, which carry no channel records, every channel of the set. The fold lives
+        on the window manager, so it stays open while the active layer changes.
         """
         line = layout.row(align=True)
         line.prop(row, "opacity", text="Opacity")
@@ -866,11 +867,15 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         records = {record.channel: record for record in row.channels}
         settings = {entry.channel: entry for entry in row.channel_settings}
         # A folder has no channel records: every channel of the set is laid through its settings.
-        is_folder = row.source == 'STACK'
+        # A Material row (a layer or a correction) owns none either: what it lays in every channel
+        # is what its source material shows, and its per-channel opacity and blend are the
+        # settings', which the composite reads as it does a row with records.
+        laid_everywhere = row.source in {'STACK', 'MATERIAL'}
         shown = [
             channel_id for channel_id in channel_ids
             if settings.get(channel_id) is not None and (
-                is_folder or (records.get(channel_id) is not None and records[channel_id].use))
+                laid_everywhere or
+                (records.get(channel_id) is not None and records[channel_id].use))
         ]
         # A box rather than a subpanel: this is drawn inside the row's own draw(), and a subpanel
         # needs a panel class of its own, which could not read the overview's inputs.
@@ -971,9 +976,10 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             # The marker is a place: it has no opacity, blend or channels of its own.
             return
 
-        overview = None
-        if layer.source != 'MATERIAL':
-            overview = (context.window_manager, material_layer_visible_channels(owner))
+        # Every row carries the per-channel settings, and the composite reads them whatever its
+        # source, so a Material row and a Material Correction get the overview like the rows with
+        # channel records do -- the overview treats them like a folder, over the set's channels.
+        overview = (context.window_manager, material_layer_visible_channels(owner))
         # The row's own blend is the base a channel inherits; a channel's override is edited in the
         # Outliner stack, beside its opacity.
         layout.prop(layer, "blend_type", text="Blend")
@@ -2339,6 +2345,37 @@ class LAYER_MATERIAL_PT_advanced(LayerMaterialButtonsPanel, Panel):
         layout.prop(owner, "paint_layers_gradient_bake")
 
 
+# How the tab behaves for the user, rather than what the stack contains: these are not a property
+# of any material, so they live on the WindowManager. The layer-add side reads the switch through
+# RNA (ED_buttons_layer_material_auto_show), so the name here is the one the C++ looks up.
+bpy.types.WindowManager.paint_layers_auto_activate_tab = bpy.props.BoolProperty(
+    name="Auto Activate Layer Material Tab",
+    description=(
+        "Bring the Properties editor's Layer Material tab up when a stack element is added (Fill "
+        "Layer, Paint Layer, an effect and the rest), so the new row can be edited right away; "
+        "editors already on the tab stay where they are"),
+    default=True,
+)
+
+
+class LAYER_MATERIAL_PT_user_settings(LayerMaterialButtonsPanel, Panel):
+    """Conveniences of the tab itself, rather than settings of the material's stack."""
+
+    bl_idname = "LAYER_MATERIAL_PT_user_settings"
+    bl_label = "User Settings"
+    bl_parent_id = "LAYER_MATERIAL_PT_channels"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return cls._owner_material(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(context.window_manager, "paint_layers_auto_activate_tab")
+
+
 class LAYER_MATERIAL_PT_active_channel(LayerMaterialButtonsPanel, Panel):
     """The owner material's global paint channel set: which channels the stack works with.
 
@@ -2545,6 +2582,7 @@ classes = (
     LAYER_MATERIAL_PT_row_result,
     LAYER_MATERIAL_PT_channels,
     LAYER_MATERIAL_PT_advanced,
+    LAYER_MATERIAL_PT_user_settings,
     LAYER_MATERIAL_PT_active_channel,
     LAYER_MATERIAL_PT_output_texture,
     LAYER_MATERIAL_PT_object_mask,

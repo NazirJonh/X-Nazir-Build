@@ -40,6 +40,7 @@
 
 #include "BLT_translation.hh"
 
+#include "ED_buttons.hh"
 #include "ED_object.hh"
 #include "ED_outliner_stack.hh"
 #include "ED_screen.hh"
@@ -618,6 +619,11 @@ int outliner_stack_row_add(bContext *C,
    * showing, so a row just added brings its section up: a mask correction added while the channels
    * were on show would otherwise be there and not be seen. */
   stack_row_reveal_attached(space_outliner, new_ordinal);
+  /* A paint stack's row is edited in the Layer Material tab, so a fresh row brings the tab up when
+   * the User Settings option asks for it; the other stacks have no tab of their own to bring up. */
+  if (space_outliner.stack_source == SO_STACK_SRC_PAINT_MATERIAL) {
+    ED_buttons_layer_material_auto_show(C);
+  }
   return new_ordinal;
 }
 

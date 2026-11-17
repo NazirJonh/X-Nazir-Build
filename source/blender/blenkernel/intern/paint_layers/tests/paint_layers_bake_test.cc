@@ -3030,4 +3030,150 @@ TEST_F(PaintLayersBakeTest, a_mask_item_contrast_edit_invalidates_the_parent_bak
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
 }
 
+/* -------------------------------------------------------------------- */
+/** \name A mask effect that reads the surface
+ *
+ * A mask effect whose grey is computed from a projected item before it is baked per object, like a
+ * row (#paint_layers_bake_node_reads_surface); any other mask effect stays the one shared map.
+ * \{ */
+
+namespace {
+
+/** A Fill mask item with a map, appended to \a row's mask stack; projected when \a space says so. */
+MaterialPaintLayer *bake_test_add_mask_fill(Main &bmain,
+                                            Material &ma,
+                                            MaterialPaintLayer &row,
+                                            const int16_t space)
+{
+  MaterialPaintLayer *fill = BKE_paint_layers_mask_item_add(
+      ma, &row, MA_PAINT_LAYER_SOURCE_CONSTANT, "Mask Fill", 1.0f);
+  EXPECT_NE(fill, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+      ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, bake_test_add_ramp_image(bmain, "Fill Map")));
+  if (space != MA_PAINT_LAYER_MAPPING_SPACE_UV) {
+    EXPECT_TRUE(BKE_paint_layers_projection_set_space(ma, fill, space));
+  }
+  return fill;
+}
+
+}  // namespace
+
+TEST_F(PaintLayersBakeTest, a_mask_effect_reads_the_surface_only_after_a_projected_item)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *early = bake_test_add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  MaterialPaintLayer *fill = bake_test_add_mask_fill(
+      *bmain, *ma, *row, MA_PAINT_LAYER_MAPPING_SPACE_UV);
+  MaterialPaintLayer *late = bake_test_add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(early, nullptr);
+  ASSERT_NE(late, nullptr);
+  ASSERT_NE(fill, nullptr);
+
+  EXPECT_FALSE(paint_layers_bake_node_reads_surface(*ma, *early));
+  EXPECT_FALSE(paint_layers_bake_node_reads_surface(*ma, *late)) << "a Fill in UV reads no surface";
+
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(*ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_BOX));
+  EXPECT_FALSE(paint_layers_bake_node_reads_surface(*ma, *early))
+      << "an item after the effect is no part of its input";
+  EXPECT_TRUE(paint_layers_bake_node_reads_surface(*ma, *late));
+
+  /* A stack row keeps the answer it always had, whatever its mask holds. */
+  EXPECT_EQ(paint_layers_bake_node_reads_surface(*ma, *row),
+            paint_layers_bake_subtree_needs_surface(*row));
+
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(*ma, fill, MA_PAINT_LAYER_MAPPING_SPACE_UV));
+  EXPECT_FALSE(paint_layers_bake_node_reads_surface(*ma, *late))
+      << "the projection stopped applying";
+}
+
+TEST_F(PaintLayersBakeTest, a_mask_effect_without_a_projected_item_keeps_its_shared_map_and_hash)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *bake_test_add_ramp_image(*bmain, "Mask")),
+            nullptr);
+  MaterialPaintLayer *blur = bake_test_add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(blur, nullptr);
+  clear_active();
+
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_NE(blur->bake, nullptr);
+  Image *grey = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(grey, nullptr);
+  EXPECT_NE(grey->source, IMA_SRC_TILED) << "one map for every object";
+  EXPECT_TRUE(BLI_listbase_is_empty(&blur->bake->tiles));
+  EXPECT_EQ(blur->bake->object_count, 0);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+
+  /* A projected item after the effect is no part of what it reads: the bake stays current. */
+  uint32_t before[2];
+  BKE_paint_layers_bake_hash(*ma, *blur, before);
+  MaterialPaintLayer *fill = bake_test_add_mask_fill(
+      *bmain, *ma, *row, MA_PAINT_LAYER_MAPPING_SPACE_BOX);
+  ASSERT_NE(fill, nullptr);
+  uint32_t after[2];
+  BKE_paint_layers_bake_hash(*ma, *blur, after);
+  EXPECT_EQ(before[0], after[0]);
+  EXPECT_EQ(before[1], after[1]);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+}
+
+TEST_F(PaintLayersBakeTest, a_mask_effect_over_a_projected_item_waits_for_objects)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  ASSERT_NE(bake_test_add_mask_fill(*bmain, *ma, *row, MA_PAINT_LAYER_MAPPING_SPACE_BOX), nullptr);
+  MaterialPaintLayer *blur = bake_test_add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(blur, nullptr);
+  clear_active();
+
+  /* No scene: there is no surface to read the projection over, so nothing is baked, and what a
+   * shared bake would have held is not written. */
+  BKE_paint_layers_bake_plan_run(*bmain, *ma);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  EXPECT_TRUE(blur->bake == nullptr || blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] == nullptr);
+}
+
+TEST_F(PaintLayersBakeTest, a_mask_effect_over_a_projected_item_bakes_one_tile_per_object)
+{
+  Scene *scene = BKE_scene_add(bmain, "BakeScene");
+  Object *first = add_uv_quad_object(*scene, "First");
+  update_scene(*scene);
+  ViewLayer *view_layer = static_cast<ViewLayer *>(scene->view_layers.first);
+
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  ASSERT_NE(bake_test_add_mask_fill(*bmain, *ma, *row, MA_PAINT_LAYER_MAPPING_SPACE_BOX), nullptr);
+  MaterialPaintLayer *blur = bake_test_add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_BLUR);
+  ASSERT_NE(blur, nullptr);
+  clear_active();
+
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, nullptr, scene, view_layer));
+  ASSERT_NE(blur->bake, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+  EXPECT_EQ(blur->bake->object_count, 1);
+  ASSERT_EQ(BLI_listbase_count(&blur->bake->tiles), 1);
+  Image *grey = blur->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(grey, nullptr);
+  EXPECT_EQ(grey->source, IMA_SRC_TILED);
+  EXPECT_NE(BKE_image_get_tile(grey, 1001), nullptr);
+
+  /* The tile carries the surface identity: an edited mesh is another tile hash after the re-bake. */
+  const MaterialPaintLayerBakeTile *tile = static_cast<const MaterialPaintLayerBakeTile *>(
+      blur->bake->tiles.first);
+  const uint32_t hash_before[2] = {tile->hash[0], tile->hash[1]};
+  Mesh *mesh = id_cast<Mesh *>(first->data);
+  mesh->vert_positions_for_write()[0].x += 0.5f;
+  mesh->tag_positions_changed();
+  DEG_id_tag_update(&mesh->id, ID_RECALC_GEOMETRY);
+  update_scene(*scene);
+  BKE_paint_layers_bake_plan_run(*bmain, *ma, nullptr, scene, view_layer);
+  tile = static_cast<const MaterialPaintLayerBakeTile *>(blur->bake->tiles.first);
+  ASSERT_NE(tile, nullptr);
+  EXPECT_TRUE(tile->hash[0] != hash_before[0] || tile->hash[1] != hash_before[1]);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *blur));
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

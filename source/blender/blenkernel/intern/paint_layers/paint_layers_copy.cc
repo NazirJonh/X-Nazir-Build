@@ -201,7 +201,9 @@ static void paint_layer_channels_duplicate(Main &bmain,
    * every other import keeps classifying by the image alone, as it did before. A painting row's
    * external file map stays under the policy, so Share still shares it. */
   const bool assigned_texture = options.copy_assigned_maps && !paint_layer_row_paints_maps(src);
-  const bool share_assigned = options.share_assigned_maps && !paint_layer_row_paints_maps(src);
+  /* The base mask is a Fill item whose map is made by strokes, so it is painted data too. */
+  const bool share_assigned = options.share_assigned_maps && !paint_layer_row_paints_maps(src) &&
+                              (src.flag & MA_PAINT_LAYER_MASK_BASE) == 0;
   for (const int i : IndexRange(src.channels_num)) {
     Image *image = dst.channels[i].image;
     if (image != nullptr && (share_assigned || options.share_row_maps)) {

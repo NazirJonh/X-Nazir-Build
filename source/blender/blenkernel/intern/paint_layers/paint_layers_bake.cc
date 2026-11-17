@@ -483,6 +483,13 @@ static bool bake_material_has_tiles(const Material &ma)
           has_tiles = true;
           return false;
         }
+        /* A mask effect item whose grey reads the surface keeps tiles of its own. */
+        for (const MaterialPaintLayer &item : row.mask_stack) {
+          if (item.bake != nullptr && !BLI_listbase_is_empty(&item.bake->tiles)) {
+            has_tiles = true;
+            return false;
+          }
+        }
         return true;
       });
   return has_tiles;
@@ -1652,6 +1659,8 @@ void BKE_paint_layers_bake_hash(const Material &ma,
   r_hash[1] = uint32_t(hash >> 32);
 }
 
+static bool bake_node_is_shared(const Material &ma, const MaterialPaintLayer &layer);
+
 bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer &layer)
 {
   if (layer.bake == nullptr) {
@@ -1676,9 +1685,7 @@ bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer
   {
     return false;
   }
-  if (!BKE_paint_layers_generator_subtree_is_shared_bakeable(layer) &&
-      !bake_tiles_ready(ma, layer))
-  {
+  if (!bake_node_is_shared(ma, layer) && !bake_tiles_ready(ma, layer)) {
     return false;
   }
   /* The structural hash cannot see pixel edits; the runtime subscription, drained by
@@ -1779,33 +1786,6 @@ static bool bake_object_mask_blocks(const MaterialPaintLayer &layer)
   return false;
 }
 
-/**
- * Whether \a layer is a mask item whose CPU effect lays a grey computed from a projected item of
- * the same mask stack before it. That grey is one map for every object of the material and is
- * computed without a surface, so a projected item in it would read as nothing: the bake would
- * hold a wrong map. The item stays live, its grey computed per describe with the painted object
- * (#paint_layer_mask_effect_buffer_get) instead.
- */
-static bool bake_mask_effect_prefix_projects(const Material &ma, const MaterialPaintLayer &layer)
-{
-  if (!paint_layer_mask_item_bakes_effect(layer)) {
-    return false;
-  }
-  const MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, layer);
-  if (owner == nullptr) {
-    return false;
-  }
-  for (const MaterialPaintLayer &item : owner->mask_stack) {
-    if (&item == &layer) {
-      break;
-    }
-    if (BKE_paint_layers_projection_applies(ma, item)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 bool BKE_paint_layers_bake_blocked(const Material &ma, const MaterialPaintLayer &layer)
 {
   /* A row holding a read Anchor Point (or a folder above one) is never substituted: the cache
@@ -1815,8 +1795,7 @@ bool BKE_paint_layers_bake_blocked(const Material &ma, const MaterialPaintLayer 
                              layer,
                              paint_layer_bake_scope(layer, false),
                              paint_layer_subtree_has_cpu_effect(layer)) ||
-         bake_mask_effect_prefix_projects(ma, layer) || bake_object_mask_blocks(layer) ||
-         paint_layer_anchor_point_blocks_bake(ma, layer);
+         bake_object_mask_blocks(layer) || paint_layer_anchor_point_blocks_bake(ma, layer);
 }
 
 /** \} */
@@ -2416,6 +2395,46 @@ bool paint_layers_bake_subtree_needs_surface(const MaterialPaintLayer &layer)
   return !BKE_paint_layers_generator_subtree_is_shared_bakeable(layer);
 }
 
+bool paint_layers_bake_node_reads_surface(const Material &ma, const MaterialPaintLayer &node)
+{
+  if (paint_layer_mask_item_bakes_effect(node)) {
+    /* The grey is computed from the mask built up to the item. A projected item before it reads
+     * the object's surface, which one map for every object cannot carry. An item after the
+     * effect is not part of its input, so it does not count. */
+    const MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, node);
+    if (owner == nullptr) {
+      return false;
+    }
+    for (const MaterialPaintLayer &item : owner->mask_stack) {
+      if (&item == &node) {
+        break;
+      }
+      if (BKE_paint_layers_projection_applies(ma, item)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (paint_layer_is_owned_effect(ma, node)) {
+    const MaterialPaintLayer *row = BKE_paint_layers_correction_owner(ma, node);
+    return row != nullptr && BKE_paint_layers_projection_applies(ma, *row);
+  }
+  return paint_layers_bake_subtree_needs_surface(node);
+}
+
+/**
+ * Whether the bake of \a layer is one map for every object. Same as
+ * #BKE_paint_layers_generator_subtree_is_shared_bakeable, which sees only the node's own subtree
+ * and so cannot know a mask effect item reads the surface through the items before it.
+ */
+static bool bake_node_is_shared(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if (paint_layer_mask_item_bakes_effect(layer) && paint_layers_bake_node_reads_surface(ma, layer)) {
+    return false;
+  }
+  return BKE_paint_layers_generator_subtree_is_shared_bakeable(layer);
+}
+
 /**
  * Whether \a object has \a ma in one of its slots, linked to the object or to its data. The
  * evaluated getter is used because \a object comes from the depsgraph: its mesh may be an edit-mode
@@ -2500,6 +2519,15 @@ static int64_t bake_object_cache_bytes(const Material &ma,
   }
   const int64_t texels = int64_t(size) * size;
   int64_t bytes = 0;
+  if (paint_layer_mask_item_bakes_effect(layer)) {
+    /* A mask effect's grey is one Base Color map and no coverage (#bake_mask_effect_row_write). */
+    for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+      if (info.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+        return texels * (bake_channel_needs_float(layer, info) ? 16 : 4);
+      }
+    }
+    return 0;
+  }
   if (layer.channels != nullptr && layer.channels_num > 0) {
     /* Only the channels the row lays get a map (the same set the precreation walks); counting the
      * material's whole channel set would charge a Base Color Gradient for Height and Metallic maps
@@ -2699,7 +2727,9 @@ uint64_t paint_layers_bake_row_identity(const Material &ma,
   }
   /* The tile hash is saved in the file, so a row that folds no projection keeps the value it always
    * had: adding the slot signature to every tile would re-bake every saved bake once. */
-  if (!bake_subtree_folds_projection(ma, layer)) {
+  const bool mask_effect_reads_surface = paint_layer_mask_item_bakes_effect(layer) &&
+                                         paint_layers_bake_node_reads_surface(ma, layer);
+  if (!mask_effect_reads_surface && !bake_subtree_folds_projection(ma, layer)) {
     return identity;
   }
   /* A projected read covers the faces of the slots holding the material, which no mesh hash sees. */
@@ -2709,7 +2739,20 @@ uint64_t paint_layers_bake_row_identity(const Material &ma,
    * adds its controller, so a nested row's Empty invalidates the bake like the row's own does. Only
    * a subtree with a controller adds anything, so the identity of the others stays as it was. */
   Vector<const Object *> controllers;
-  bake_subtree_controllers_collect(ma, layer, false, controllers);
+  if (mask_effect_reads_surface) {
+    /* The grey reads the items before the effect, not the effect's own subtree. */
+    if (const MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, layer)) {
+      for (const MaterialPaintLayer &item : owner->mask_stack) {
+        if (&item == &layer) {
+          break;
+        }
+        bake_subtree_controllers_collect(ma, item, true, controllers);
+      }
+    }
+  }
+  else {
+    bake_subtree_controllers_collect(ma, layer, false, controllers);
+  }
   if (!controllers.is_empty()) {
     const auto mix_matrix = [&](const float4x4 &matrix) {
       for (int i = 0; i < 4; i++) {
@@ -2780,13 +2823,21 @@ static void bake_tile_properties_prune(const Object &object, const Set<uint64_t>
 constexpr int BAKE_TILE_BLOCK_COLUMNS = 10;
 constexpr int BAKE_TILE_BLOCK_TILES_MAX = 100;
 
-/** Whether any row of \a ma folds a projection into its bake. */
+/**
+ * Whether any row of \a ma folds a projection into its bake, or a mask effect item bakes a grey
+ * read through the surface: both read the object's UVs by tile, so both want the blocks.
+ */
 static bool bake_any_row_folds_projection(const Material &ma)
 {
   bool folds = false;
   BKE_paint_layers_foreach(
       ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
         folds = bake_subtree_folds_projection(ma, row);
+        for (const MaterialPaintLayer &item : row.mask_stack) {
+          folds = folds ||
+                  (paint_layer_mask_item_bakes_effect(item) &&
+                   paint_layers_bake_node_reads_surface(ma, item));
+        }
         return !folds;
       });
   return folds;
@@ -3027,7 +3078,7 @@ void paint_layers_bake_targets_resolve(const Material &ma,
 {
   r_targets.objects.clear();
   r_targets.issue = PAINT_LAYERS_BAKE_OBJECTS_OK;
-  if (!paint_layers_bake_subtree_needs_surface(layer)) {
+  if (!paint_layers_bake_node_reads_surface(ma, layer)) {
     /* A UV-only subtree is one map for every object: it needs no surface and no object. */
     return;
   }
@@ -3049,7 +3100,9 @@ void paint_layers_bake_targets_resolve(const Material &ma,
     r_targets.issue = PAINT_LAYERS_BAKE_OBJECTS_NO_OBJECT;
     return;
   }
-  const bool folds_projection = bake_subtree_folds_projection(ma, layer);
+  /* A mask effect reading the surface places its tiles like a projected row's. */
+  const bool folds_projection = bake_subtree_folds_projection(ma, layer) ||
+                                paint_layer_mask_item_bakes_effect(layer);
   if (view.tiles_limited && folds_projection) {
     /* The UVs have no placement in the UDIM maps (see #bake_view_tile_blocks_assign): the row has
      * nothing to be baked into and stays live, without its effect. */
@@ -3075,8 +3128,8 @@ void paint_layers_bake_targets_resolve(const Material &ma,
    * cost and is left alone; only the extra renders of tile blocks are held to the limit. */
   const int64_t surface_bytes = pairs_num * int64_t(size) * size * 13;
   if (bake_object_budget_bytes(ma, layer, size, tiles_num) > PAINT_LAYERS_BAKE_OBJECTS_BUDGET ||
-      (folds_projection && pairs_num > int64_t(view.objects.size()) &&
-       surface_bytes > PAINT_LAYERS_BAKE_OBJECTS_BUDGET))
+      (folds_projection && !paint_layer_mask_item_bakes_effect(layer) &&
+       pairs_num > int64_t(view.objects.size()) && surface_bytes > PAINT_LAYERS_BAKE_OBJECTS_BUDGET))
   {
     r_targets.objects.clear();
     r_targets.issue = PAINT_LAYERS_BAKE_OBJECTS_OVER_BUDGET;
@@ -3280,7 +3333,11 @@ bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer
   if (paint_layer_mask_item_bakes_effect(layer)) {
     /* The worker job renders a row's subtree from a localized copy; a mask effect's grey is the
      * mask effect cache's compute, which only the main thread reaches. Calling it heavy would leave
-     * it to a job that never picks it up, so after its first bake an edit would not bake it again. */
+     * it to a job that never picks it up, so after its first bake an edit would not bake it again.
+     * A grey that reads the surface (#paint_layers_bake_node_reads_surface) stays the planner's
+     * too: it reads the evaluated object through the projection, which only the main thread may,
+     * and the job has no result type for a mask's grey. #BKE_paint_layers_bake_job_create asks the
+     * planner for it, as for a Decal effect. */
     return false;
   }
   if (paint_layer_is_owned_effect(ma, layer)) {
@@ -3671,7 +3728,7 @@ int bake_row_object_issue(const Material &ma,
                           const MaterialPaintLayer &layer,
                           const PaintLayersBakeView &view)
 {
-  if (!paint_layers_bake_subtree_needs_surface(layer)) {
+  if (!paint_layers_bake_node_reads_surface(ma, layer)) {
     /* A row that stopped reading geometry has no Object/Generated reason to show any more. */
     bake_object_issue_record(ma, layer, PAINT_LAYERS_BAKE_OBJECTS_OK);
     return PAINT_LAYERS_BAKE_OBJECTS_OK;
@@ -3702,10 +3759,10 @@ void bake_object_identities_notice(Material &ma, const PaintLayersBakeView &view
     return;
   }
   bool changed = false;
-  BKE_paint_layers_foreach(
-      ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
+  /* A row, or a mask effect item whose grey is baked per object like one. */
+  const auto notice_node = [&](MaterialPaintLayer &layer) -> bool {
         if (layer.bake == nullptr || layer.bake->mode == MA_PAINT_LAYER_BAKE_NEVER ||
-            !paint_layers_bake_subtree_needs_surface(layer))
+            !paint_layers_bake_node_reads_surface(ma, layer))
         {
           return true;
         }
@@ -3746,6 +3803,16 @@ void bake_object_identities_notice(Material &ma, const PaintLayersBakeView &view
           changed = true;
         }
         return true;
+      };
+  BKE_paint_layers_foreach(
+      ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
+        notice_node(layer);
+        for (MaterialPaintLayer &item : layer.mask_stack) {
+          if (paint_layer_mask_item_bakes_effect(item)) {
+            notice_node(item);
+          }
+        }
+        return true;
       });
   if (changed) {
     ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_CANCELLED;
@@ -3769,8 +3836,11 @@ bool bake_row_is_candidate(const Material &ma,
   }
   if (paint_layer_mask_item_bakes_effect(layer)) {
     /* A CPU-computed mask effect owns the grey it lays: the cache is what the live graph reads,
-     * like a reader's, so the mode is its only gate (the due check asks the rest). */
-    return BKE_paint_layers_bake_mode_get(layer) != MA_PAINT_LAYER_BAKE_NEVER;
+     * like a reader's, so the mode is its only gate (the due check asks the rest). One that reads
+     * the surface needs the object itself, like a row does. */
+    return BKE_paint_layers_bake_mode_get(layer) != MA_PAINT_LAYER_BAKE_NEVER &&
+           (object_issue == PAINT_LAYERS_BAKE_OBJECTS_OK ||
+            !paint_layers_bake_node_reads_surface(ma, layer));
   }
   if (paint_layer_is_owned_effect(ma, layer)) {
     /* An effect that owns its result is baked like a mask effect: the cache is what the live graph
@@ -3821,12 +3891,18 @@ bool bake_row_is_due(const Material &ma,
       r_release = bake_row_has_maps(layer) ? BakeRowRelease::ReleaseMaps : BakeRowRelease::Keep;
       return false;
     }
-    /* The bake computes the grey without a surface, so a projected item before this one would read
-     * as nothing; the item stays live (#bake_mask_effect_prefix_projects) and a map an earlier
-     * state baked is released. */
-    if (bake_mask_effect_prefix_projects(ma, layer)) {
-      r_release = bake_row_has_maps(layer) ? BakeRowRelease::ReleaseMaps : BakeRowRelease::Keep;
-      return false;
+    /* A grey that reads the surface (a projected item before this one) is baked per object, so it
+     * has the same gate as a row that does: objects that can supply a surface. A reason a real
+     * view layer found drops the maps, as it does for a row; without a view nothing is dropped. */
+    if (paint_layers_bake_node_reads_surface(ma, layer)) {
+      const int object_issue = bake_row_object_issue(ma, layer, view);
+      if (object_issue != PAINT_LAYERS_BAKE_OBJECTS_OK) {
+        r_release = (object_issue != PAINT_LAYERS_BAKE_OBJECTS_NO_CONTEXT &&
+                     bake_row_has_maps(layer)) ?
+                        BakeRowRelease::ReleaseMaps :
+                        BakeRowRelease::Keep;
+        return false;
+      }
     }
     if (layer.bake != nullptr && BKE_paint_layers_bake_is_valid(ma, layer)) {
       return false;
@@ -4140,6 +4216,12 @@ bool bake_any_row_needs_surface(const Material &ma)
   BKE_paint_layers_foreach(
       ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
         needs = paint_layers_bake_subtree_needs_surface(layer);
+        /* A mask effect item reading the surface wants the objects too. */
+        for (const MaterialPaintLayer &item : layer.mask_stack) {
+          needs = needs ||
+                  (paint_layer_mask_item_bakes_effect(item) &&
+                   paint_layers_bake_node_reads_surface(ma, item));
+        }
         return !needs;
       });
   return needs;
@@ -4342,18 +4424,39 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain,
         continue;
       }
       const int full_size = size;
-      if (size > BAKE_DRAG_SIZE_MAX && bake_subtree_has_decal_effect(layer) &&
-          bake_drag_active(ma))
+      const bool mask_effect = paint_layer_mask_item_bakes_effect(layer);
+      /* A grey that reads the surface follows a dragged projection frame like a projected row. */
+      if (size > BAKE_DRAG_SIZE_MAX && bake_drag_active(ma) &&
+          (bake_subtree_has_decal_effect(layer) ||
+           (mask_effect && paint_layers_bake_node_reads_surface(ma, layer))))
       {
         /* A handle drag re-renders this row at every step: the maps are re-created at the drag
          * size, and the full bake is owed once the drag ends (#BKE_paint_layers_bake_drag_set). */
         size = BAKE_DRAG_SIZE_MAX;
         bake_drag_reduced_remember(ma, layer, full_size);
       }
-      if (paint_layer_mask_item_bakes_effect(layer)) {
+      if (mask_effect) {
         /* The item's grey is one map of its own, written whole: a stroke into the mask defers it
-         * (#BKE_paint_layers_bake_row_is_deferred), so no region path is wanted here. */
-        if (bake_mask_effect_row_write(bmain, ma, layer, size)) {
+         * (#BKE_paint_layers_bake_row_is_deferred), so no region path is wanted here. A grey that
+         * reads the surface is written per object and UV tile, into the tiles the objects' blocks
+         * name, like a row's per-object bake. */
+        PaintLayersBakeTargets targets;
+        if (paint_layers_bake_node_reads_surface(ma, layer)) {
+          paint_layers_bake_targets_resolve(ma, layer, view, size, targets);
+          if (targets.issue != PAINT_LAYERS_BAKE_OBJECTS_OK || targets.objects.is_empty()) {
+            /* The objects or their surface moved between the plan and this render. */
+            continue;
+          }
+          /* The shader reads the tile index from each object; write it before any map is sampled. */
+          MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
+          paint_layers_bake_tiles_clear(*bake);
+          bake_tile_object_indices_clear(ma, scene, view_layer, &view);
+          bake_tile_object_indices_set(ma, targets);
+        }
+        if (bake_mask_effect_row_write(bmain, ma, layer, size, targets.objects)) {
+          if (size == full_size) {
+            bake_drag_reduced_forget(ma, layer);
+          }
           changed = true;
         }
         continue;

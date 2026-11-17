@@ -429,7 +429,8 @@ bool BKE_paint_layers_map_coverage_tile_ensure(Image &image,
 Image *BKE_paint_layers_mask_stack_merge(Main &bmain,
                                          Material &ma,
                                          MaterialPaintLayer &layer,
-                                         ReportList *reports);
+                                         ReportList *reports,
+                                         const Object *painted_object = nullptr);
 
 /**
  * What baking \a selected asks of the user: 0 when it cannot be baked as selected (not corrections

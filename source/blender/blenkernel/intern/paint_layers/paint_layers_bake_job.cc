@@ -291,7 +291,12 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
       }
     }
     for (MaterialPaintLayer &item : layer.mask_stack) {
-      if (paint_layer_kind_reads_anchor_point(item)) {
+      /* A mask effect whose grey reads the surface is a row of this pass too, though never heavy:
+       * it is the synchronous planner's, which needs the view this pass has (see below). */
+      if (paint_layer_kind_reads_anchor_point(item) ||
+          (paint_layer_mask_item_bakes_effect(item) &&
+           paint_layers_bake_node_reads_surface(ma, item)))
+      {
         rows.append(&item);
       }
     }
@@ -323,7 +328,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
       /* A due row that is light but reads the surface (a transform effect in its Decal frame) is
        * the synchronous planner's, which needs this view: the regeneration's own plan has no scene,
        * so without the run below nothing would ever bake it. */
-      surface_sync_due = surface_sync_due || paint_layers_bake_subtree_needs_surface(layer);
+      surface_sync_due = surface_sync_due || paint_layers_bake_node_reads_surface(ma, layer);
       continue;
     }
     const bool folds_projection = bake_subtree_folds_projection(ma, layer);
@@ -341,7 +346,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain,
     /* An Object or Generated row is rendered through the surface of each object it serves, and the
      * surfaces are rasterized here: the worker reads the grids and never touches the depsgraph. */
     PaintLayersBakeTargets targets;
-    const bool needs_surface = paint_layers_bake_subtree_needs_surface(layer);
+    const bool needs_surface = paint_layers_bake_node_reads_surface(ma, layer);
     if (needs_surface) {
       paint_layers_bake_targets_resolve(ma, layer, view, size, targets);
       if (targets.issue != PAINT_LAYERS_BAKE_OBJECTS_OK || targets.objects.is_empty()) {

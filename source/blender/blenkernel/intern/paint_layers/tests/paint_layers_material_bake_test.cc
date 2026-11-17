@@ -1858,6 +1858,19 @@ TEST_F(PaintLayersOwnedEffectTest, only_an_effect_on_a_row_without_a_bake_of_its
   EXPECT_FALSE(paint_layer_is_owned_effect(*ma, *painted_blur));
 }
 
+TEST_F(PaintLayersOwnedEffectTest, an_owned_effect_reads_no_surface_while_its_row_cannot_project)
+{
+  MaterialPaintLayer *blur = nullptr;
+  MaterialPaintLayer *row = add_row_with_blur(&blur);
+  ASSERT_NE(blur, nullptr);
+  ASSERT_TRUE(paint_layer_is_owned_effect(*ma, *blur));
+  /* The effect owns its result only on a row that is not projected, so its input reads no surface;
+   * the predicate asks the row's projection, which is what makes it true if that rule is lifted. */
+  EXPECT_FALSE(paint_layers_bake_node_reads_surface(*ma, *blur));
+  EXPECT_EQ(paint_layers_bake_node_reads_surface(*ma, *blur),
+            BKE_paint_layers_projection_applies(*ma, *row));
+}
+
 TEST_F(PaintLayersOwnedEffectTest, the_hash_follows_the_parameters_and_not_the_visibility)
 {
   MaterialPaintLayer *blur = nullptr;

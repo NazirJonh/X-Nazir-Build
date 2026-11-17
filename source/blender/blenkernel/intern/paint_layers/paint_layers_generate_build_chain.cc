@@ -822,6 +822,20 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
         discard();
         return {};
       }
+      if (item_effect_bake != nullptr && item_effect_bake->source == IMA_SRC_TILED &&
+          !item_read.mapped)
+      {
+        /* A grey baked per object is one tiled image, read like a row's per-object bake: the
+         * object's Attribute index moves the UV into its own tile. An item whose own mapping moved
+         * the read point keeps that mapping's vector. */
+        const NodeOutput tile_uv = this->bake_tile_uv_add(tree, nodes);
+        bNodeSocket *map_vector = socket_in(*item_map, "Vector");
+        if (tile_uv.node == nullptr || tile_uv.socket == nullptr || map_vector == nullptr) {
+          discard();
+          return {};
+        }
+        bke::node_add_link(tree, *tile_uv.node, *tile_uv.socket, *item_map, *map_vector);
+      }
       item_grey = this->rgb_mean_nodes_add(tree, item_read.color, nodes);
       if (item_grey.node == nullptr) {
         discard();

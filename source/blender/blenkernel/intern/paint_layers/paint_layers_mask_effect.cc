@@ -372,10 +372,11 @@ std::shared_ptr<ImBuf> paint_layer_mask_effect_buffer_get(
 
 void paint_layer_mask_effect_cache_drop(const Material &ma,
                                         const MaterialPaintLayer &row,
-                                        const MaterialPaintLayer &effect)
+                                        const MaterialPaintLayer &effect,
+                                        const int tile_number,
+                                        const PaintLayerSurfaceRef painted_object)
 {
-  const EffectCacheKey key = mask_effect_key_get(
-      ma, row, effect, PAINT_TILE_NUMBER_BASE, nullptr);
+  const EffectCacheKey key = mask_effect_key_get(ma, row, effect, tile_number, painted_object);
   std::lock_guard<std::mutex> lock(g_paint_mask_effect_cache_mutex);
   const auto no_release = [](MaskEffectCacheEntry &) {};
   g_paint_mask_effect_cache.drop_instance(key, no_release);

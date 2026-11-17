@@ -2028,6 +2028,46 @@ TEST_F(PaintLayersGenerateTest, planar_projection_feeds_the_map_through_its_fram
   EXPECT_TRUE(interface_has_socket(*group, "Fill Projection Aspect", false));
 }
 
+TEST_F(PaintLayersGenerateTest, mask_item_projection_is_topology_and_its_frame_is_values)
+{
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, fill, 0.5f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, fill, MA_PAINT_LAYER_SOURCE_CONSTANT, "Proj", 1.0f);
+  ASSERT_NE(item, nullptr);
+  /* The user's flow: a Fill mask correction takes the map the user assigns, then projects. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("MaskFill")));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t plain = paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms);
+
+  /* Switching the correction's projection is topology: the hash must move, or the regen keeps the
+   * group built without the projection nodes and the correction's map reads the raw UV however the
+   * frame sits. */
+  ASSERT_TRUE(BKE_paint_layers_projection_set_space(
+      *ma, item, MA_PAINT_LAYER_MAPPING_SPACE_PLANAR));
+  const uint64_t projected = paint_layers::paint_layers_layer_topology_hash(
+      *ma, *fill, wired, forms);
+  EXPECT_NE(projected, plain);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Proj Projection Center", false));
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Proj Projection Size", false));
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Proj Projection Rotation", false));
+
+  /* The frame values are inputs: moving the frame moves no hash and leaves the nodes. */
+  const float center[3] = {0.25f, 0.5f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_projection_set_center(*ma, item, center));
+  EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms), projected);
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0)
+      << "a value edit syncs the inputs and leaves the nodes";
+}
+
 TEST_F(PaintLayersGenerateTest, box_projection_samples_three_faces_and_blends_them)
 {
   MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");

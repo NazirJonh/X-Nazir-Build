@@ -19,6 +19,7 @@
 #include <memory>
 
 #include "BLI_index_range.hh"
+#include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_vector.hh"
 
@@ -117,57 +118,23 @@ int bake_mask_effect_size_for(const Material &ma, const MaterialPaintLayer &row)
 }
 
 /**
- * Render the CPU-computed mask effect's grey of \a layer (a mask item) into its own bake: the grey
- * the mask effect cache holds, resampled from the row's canvas to the \a size-square map, written
- * whole. The item's bake holds the grey in its Base Color map and no coverage -- the grey is read
- * like a painted mask item's map, and the validity is the hash's and the subscription's, which a
- * coverage map plays no part in. True when the map was written.
+ * Write \a grey into \a tile_number of \a image: the nearest sample of the grey, each axis
+ * independently, straight into the map's own buffer. The row scratch in #bake_write_image_rows is
+ * all the extra memory, so the peak holds the grey and the map, never a third copy of the picture
+ * between them. The stretch is the one a row's bake lays its source canvas by (see
+ * #bake_mask_effect_size_for for the side).
  */
-bool bake_mask_effect_row_write(Main &bmain,
-                                Material &ma,
-                                MaterialPaintLayer &layer,
-                                const int size)
+static void bake_mask_effect_grey_write(Image &image,
+                                        const bool is_color,
+                                        const ImBuf &grey,
+                                        const int size,
+                                        const int tile_number)
 {
-  const MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, layer);
-  if (owner == nullptr) {
-    return false;
-  }
-  std::shared_ptr<ImBuf> grey = paint_layer_mask_effect_buffer_get(
-      ma, *owner, layer, /*describe_only=*/false, nullptr, PAINT_TILE_NUMBER_BASE);
-  if (grey == nullptr || grey->float_buffer.data == nullptr) {
-    return false;
-  }
-  const int width = grey->x;
-  const int height = grey->y;
-  const MaterialPaintChannelInfo *base_info = nullptr;
-  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    if (info.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
-      base_info = &info;
-      break;
-    }
-  }
-  if (base_info == nullptr) {
-    return false;
-  }
-  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
-  bake->size = size;
-  Image *image = bake_service_image(bmain,
-                                    layer,
-                                    PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                    size,
-                                    base_info->is_color,
-                                    bake_channel_needs_float(layer, *base_info),
-                                    0);
-  if (image == nullptr) {
-    return false;
-  }
-  /* The nearest sample of the grey, each axis independently, written straight into the map's own
-   * buffer: the row scratch in #bake_write_image_rows is all the extra memory, so the peak holds
-   * the grey and the map, never a third copy of the picture between them. The stretch is the one a
-   * row's bake lays its source canvas by (see #bake_mask_effect_size_for for the side). */
-  const float *src = grey->float_buffer.data;
+  const int width = grey.x;
+  const int height = grey.y;
+  const float *src = grey.float_buffer.data;
   bake_write_image_rows(
-      *image, base_info->is_color, nullptr, 0,
+      image, is_color, nullptr, tile_number,
       [&](const int y, const int map_width, float *r_row) {
         const int src_y = min_ii(int(int64_t(y) * height / size), height - 1);
         const float *src_row = src + int64_t(src_y) * width * 4;
@@ -180,12 +147,111 @@ bool bake_mask_effect_row_write(Main &bmain,
           r_row[x * 4 + 3] = 1.0f;
         }
       });
+}
+
+/**
+ * Render the CPU-computed mask effect's grey of \a layer (a mask item) into its own bake: the grey
+ * the mask effect cache holds, resampled from the row's canvas to the \a size-square map, written
+ * whole. The item's bake holds the grey in its Base Color map and no coverage -- the grey is read
+ * like a painted mask item's map, and the validity is the hash's and the subscription's, which a
+ * coverage map plays no part in. True when the map was written.
+ *
+ * With \a objects (a grey that reads the surface, #paint_layers_bake_node_reads_surface) the grey is
+ * one render per object and UV tile of its block, each into its own tile of one tiled map, and the
+ * bake keeps the tile records and identities a row's per-object bake does. Without them it is the one
+ * shared map it always was.
+ */
+bool bake_mask_effect_row_write(Main &bmain,
+                                Material &ma,
+                                MaterialPaintLayer &layer,
+                                const int size,
+                                const Span<PaintLayersBakeTarget> objects)
+{
+  const MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, layer);
+  if (owner == nullptr) {
+    return false;
+  }
+  const MaterialPaintChannelInfo *base_info = nullptr;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      base_info = &info;
+      break;
+    }
+  }
+  if (base_info == nullptr) {
+    return false;
+  }
+  const bool floatbuf = bake_channel_needs_float(layer, *base_info);
+
+  if (objects.is_empty()) {
+    std::shared_ptr<ImBuf> grey = paint_layer_mask_effect_buffer_get(
+        ma, *owner, layer, /*describe_only=*/false, nullptr, PAINT_TILE_NUMBER_BASE);
+    if (grey == nullptr || grey->float_buffer.data == nullptr) {
+      return false;
+    }
+    MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
+    bake->size = size;
+    if (!BLI_listbase_is_empty(&bake->tiles) || bake->object_count != 0) {
+      /* The grey stopped reading the surface: the per-object records describe a map that goes. */
+      paint_layers_bake_tiles_clear(*bake);
+      paint_layers_bake_tile_indices_clear_all(ma);
+    }
+    Image *image = bake_service_image(
+        bmain, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, size, base_info->is_color, floatbuf, 0);
+    if (image == nullptr) {
+      return false;
+    }
+    bake_mask_effect_grey_write(*image, base_info->is_color, *grey, size, 0);
+    bake_stale_channel_maps_release(
+        bmain, layer, Vector<int>({PAINT_MATERIAL_CHANNEL_BASE_COLOR}));
+    BKE_paint_layers_bake_finalize(ma, layer);
+    /* The bake holds the grey now: the cache entry is a copy kept for nothing while the bake
+     * stands, and the composite and the graph read the bake. The cache computes the grey back when
+     * the bake goes stale -- an edit or a stroke -- exactly as it did before the first bake. */
+    paint_layer_mask_effect_cache_drop(ma, *owner, layer);
+    return true;
+  }
+
+  MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
+  bake->size = size;
+  paint_layers_bake_tiles_clear(*bake);
+  const Vector<int> image_tiles = bake_targets_image_tiles(objects);
+  for (const int object_index : objects.index_range()) {
+    const PaintLayersBakeTarget &target = objects[object_index];
+    for (const PaintLayersBakeTilePair &pair : bake_target_tile_pairs(target, object_index)) {
+      /* The UV tile is named, as for a row: the cache keys the grey on it and a projected item
+       * rasterizes into it. The object is the surface the projection is read through. */
+      const PaintLayerSurfaceRef painted_object(target.object);
+      std::shared_ptr<ImBuf> grey = paint_layer_mask_effect_buffer_get(
+          ma, *owner, layer, /*describe_only=*/false, nullptr, pair.uv_tile, painted_object);
+      if (grey == nullptr || grey->float_buffer.data == nullptr) {
+        return false;
+      }
+      Image *image = bake_service_image(bmain,
+                                        layer,
+                                        PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                        size,
+                                        base_info->is_color,
+                                        floatbuf,
+                                        int(objects.size()),
+                                        image_tiles);
+      if (image == nullptr) {
+        return false;
+      }
+      bake_mask_effect_grey_write(*image, base_info->is_color, *grey, size, pair.image_tile);
+      grey.reset();
+      paint_layer_mask_effect_cache_drop(ma, *owner, layer, pair.uv_tile, painted_object);
+    }
+    MaterialPaintLayerBakeTile *tile = bake_tile_ensure(
+        *bake, target.object_uid, target.block_origin[0], target.block_origin[1]);
+    const uint64_t identity = paint_layers_bake_row_identity(ma, layer, target, size);
+    tile->hash[0] = uint32_t(identity & 0xFFFFFFFFu);
+    tile->hash[1] = uint32_t(identity >> 32);
+  }
+  bake->object_count = int(objects.size());
   bake_stale_channel_maps_release(bmain, layer, Vector<int>({PAINT_MATERIAL_CHANNEL_BASE_COLOR}));
   BKE_paint_layers_bake_finalize(ma, layer);
-  /* The bake holds the grey now: the cache entry is a copy kept for nothing while the bake stands,
-   * and the composite and the graph read the bake. The cache computes the grey back when the bake
-   * goes stale -- an edit or a stroke -- exactly as it did before the first bake. */
-  paint_layer_mask_effect_cache_drop(ma, *owner, layer);
+  bake_object_identity_record(ma, layer, paint_layers_bake_row_identity(ma, layer, objects[0], size));
   return true;
 }
 

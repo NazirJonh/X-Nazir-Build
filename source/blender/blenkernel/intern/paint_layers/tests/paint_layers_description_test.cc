@@ -1739,7 +1739,12 @@ TEST_F(PaintLayersDescription, mask_is_deep_copied_with_material_and_duplicate)
   MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 0.3f);
   ASSERT_NE(item, nullptr);
-  Image *map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "MaskCopyMap"));
+  /* A generated image, as a stroke makes for the mask: a bare file-source image is a texture the
+   * row only reads, which a duplicate rightly shares. */
+  const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  Image *map = BKE_image_add_generated(
+      bmain, 4, 4, "MaskCopyMap", 32, false, IMA_GENTYPE_BLANK, white, false, true, false);
+  ASSERT_NE(map, nullptr);
   ASSERT_TRUE(
       BKE_paint_layers_channel_set_image(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
 
@@ -4427,6 +4432,8 @@ TEST_F(PaintLayersDescription, spec_gloss_set_reads_the_map_twice_and_bakes_noth
     }
     BKE_image_release_ibuf(&spec_map, ibuf, lock);
   }
+  /* A fresh image already holds one user of its own; the records add theirs on top. */
+  const int users_before = spec_map.id.us;
   MaterialPaintLayer &fill = map_encoding_fill_row(
       ma, spec_map, PAINT_MATERIAL_CHANNEL_SPECULAR);
   const int images_before = int(BLI_listbase_count(&bmain->images));
@@ -4454,7 +4461,8 @@ TEST_F(PaintLayersDescription, spec_gloss_set_reads_the_map_twice_and_bakes_noth
   EXPECT_EQ(spec->map_encoding, int8_t(MA_PAINT_LAYER_MAP_ENCODING_F0_GLOSSINESS_ALPHA));
   EXPECT_EQ(rough->image, &spec_map);
   EXPECT_EQ(rough->map_encoding, int8_t(MA_PAINT_LAYER_MAP_ENCODING_GLOSSINESS_ALPHA));
-  EXPECT_EQ(spec_map.id.us, 2);
+  /* One user per record: the specular one and the roughness one. */
+  EXPECT_EQ(spec_map.id.us, users_before + 2);
 
   /* A constant alpha carries no glossiness: the roughness half refuses the whole set. */
   Image &flat_map = *BKE_image_add_generated(bmain,

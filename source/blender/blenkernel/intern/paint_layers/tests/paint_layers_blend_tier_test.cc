@@ -357,6 +357,10 @@ TEST_F(PaintLayersBlendTierTest, demoted_row_rebuilds_as_a_static_mix)
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   ASSERT_EQ(root_blend_dynamic_get(*ma), 1);
 
+  /* A pending rebuild defers the demotion, so the flags the setters and the regeneration left
+   * behind are cleared first, as in the timer test. */
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC |
+                             MA_PAINT_LAYERS_BAKE_STALE | MA_PAINT_LAYERS_BAKE_SCHEDULED);
   ASSERT_TRUE(BKE_paint_layers_blend_tier_demote_due(*bmain, BLI_time_now_seconds() + 3.0));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 

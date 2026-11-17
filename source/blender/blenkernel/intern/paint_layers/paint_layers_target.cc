@@ -1147,7 +1147,8 @@ void BKE_paint_layers_orphan_maps_purge(Main &bmain)
 Image *BKE_paint_layers_mask_stack_merge(Main &bmain,
                                          Material &ma,
                                          MaterialPaintLayer &layer,
-                                         ReportList *reports)
+                                         ReportList *reports,
+                                         const Object *painted_object)
 {
   MaterialPaintLayer *base = BKE_paint_layers_mask_base(layer);
   if (base == nullptr) {
@@ -1272,7 +1273,9 @@ Image *BKE_paint_layers_mask_stack_merge(Main &bmain,
     }
   }
 
-  PaintLayersMaskSampler sampler(ma, layer);
+  /* A projected item reads the painted object's UV space; without the object it would fold in as
+   * transparent. */
+  PaintLayersMaskSampler sampler(ma, layer, nullptr, true, painted_object);
   if (sampler.is_empty()) {
     return nullptr;
   }

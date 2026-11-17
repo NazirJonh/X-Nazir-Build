@@ -195,6 +195,34 @@ static void mapping_topology_hash_mix(uint64_t &hash,
 }
 
 /**
+ * Mix what a projection builds into \a hash: the space, the axis and the atlas layout pick the UV
+ * math and the node count of the projected read, and the controller's name names the Texture
+ * Coordinate. The frame values, blend and clip are value inputs the sync writes in place, so a
+ * slider move or a gizmo drag never rebuilds.
+ *
+ * Every row kind that can carry a projection goes through here -- a row, a content correction and
+ * a mask item alike -- so a new projection option cannot be hashed in some places and forgotten in
+ * others: a projection a hash does not see keeps the group built without its nodes, and the row
+ * then reads its map at the raw UV however the frame is placed.
+ */
+static void projection_topology_hash_mix(uint64_t &hash,
+                                         const Material &ma,
+                                         const MaterialPaintLayer &row)
+{
+  if (!BKE_paint_layers_projection_applies(ma, row)) {
+    return;
+  }
+  hash = topology_hash_mix(hash, PAINT_LAYER_PROJECTION_HASH_VERSION);
+  hash = topology_hash_mix(hash, 0x700 + uint64_t(uint16_t(row.mapping.space)));
+  hash = topology_hash_mix(hash, uint64_t(uint8_t(BKE_paint_layers_projection_axis_get(row))));
+  hash = topology_hash_mix(
+      hash, uint64_t(uint8_t(BKE_paint_layers_projection_cube_layout_get(row))));
+  if (row.projection_object != nullptr) {
+    topology_hash_string(hash, row.projection_object->id.name);
+  }
+}
+
+/**
  * Which point a reader names, and whether the reference resolves: the tap sockets are only built
  * for a valid reference. \a tag tells the places a reader can sit in apart.
  *
@@ -384,6 +412,7 @@ static void topology_mask_hash_mix(uint64_t &hash,
     /* The inversion is a node of its own. */
     hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(*mask) ? 1 : 0);
     mapping_topology_hash_mix(hash, ma, *mask);
+    projection_topology_hash_mix(hash, ma, *mask);
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (record != nullptr && record->image != nullptr) {
@@ -434,10 +463,17 @@ static void topology_mask_hash_mix(uint64_t &hash,
     if (paint_layer_mask_item_bakes_effect(item)) {
       /* The item builds as a map read only once its bake stands: the presence of the grey is
        * topology, the map's pixels are not (those follow the bake's own freshness). */
+      const Image *effect_bake = paint_layer_mask_effect_bake_map(ma, item);
+      /* A grey baked per object is a tiled map read through the object's tile shift: other nodes
+       * than a shared map's, so the shape of the bake is topology too. Zero extra for a shared map,
+       * which keeps its hash. */
       hash = topology_hash_mix(hash,
-                               paint_layer_mask_effect_bake_map(ma, item) != nullptr ? 1 : 0);
+                               effect_bake == nullptr ? 0 :
+                               effect_bake->source == IMA_SRC_TILED ? 3 :
+                                                                      1);
     }
     mapping_topology_hash_mix(hash, ma, item);
+    projection_topology_hash_mix(hash, ma, item);
     gradient_payload_hash_mix(hash, item);
     generator_topology_hash_mix(hash, item);
     filter_payload_hash_mix(hash, item);
@@ -494,19 +530,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   /* An applied mapping is a Mapping node and its inputs; its values are inputs, so only whether it
    * applies is structure. The same answer builds the interface, so the two cannot disagree. */
   mapping_topology_hash_mix(hash, ma, layer);
-  if (BKE_paint_layers_projection_applies(ma, layer)) {
-    /* The space picks the UV math and the number of samples; the axis and the atlas layout change
-     * the nodes. The frame values, blend and clip are value inputs, so a slider move or a gizmo
-     * drag never rebuilds. The controller's name is structure: the Texture Coordinate names it. */
-    hash = topology_hash_mix(hash, PAINT_LAYER_PROJECTION_HASH_VERSION);
-    hash = topology_hash_mix(hash, 0x700 + uint64_t(uint16_t(layer.mapping.space)));
-    hash = topology_hash_mix(hash, uint64_t(uint8_t(BKE_paint_layers_projection_axis_get(layer))));
-    hash = topology_hash_mix(
-        hash, uint64_t(uint8_t(BKE_paint_layers_projection_cube_layout_get(layer))));
-    if (layer.projection_object != nullptr) {
-      topology_hash_string(hash, layer.projection_object->id.name);
-    }
-  }
+  projection_topology_hash_mix(hash, ma, layer);
   /* A row inside an isolating folder is built in the isolated form, with sockets of its own. */
   hash = topology_hash_mix(hash, forms.lookup_default(&layer, {}).in_isolating_folder ? 1 : 0);
   /* A Pass Through folder builds no group, an isolating one does: the mode is structure, although
@@ -626,6 +650,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     /* Which filter it is decides its nodes; its parameters are inputs. */
     hash = topology_hash_mix(hash, uint64_t(uint16_t(effect.kind_subtype)));
     mapping_topology_hash_mix(hash, ma, effect);
+    projection_topology_hash_mix(hash, ma, effect);
     gradient_payload_hash_mix(hash, effect);
     generator_topology_hash_mix(hash, effect);
     filter_payload_hash_mix(hash, effect);

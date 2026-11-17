@@ -3086,8 +3086,9 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
                      tile_number,
                      paint_layer_effect_hash(effect, channel)};
   /* The input's scalar content (frame, mapping, flat colour, effects below) rides no map version,
-   * so the key carries it; the very helper the GPU key uses, transform steps included. With an object the description carries the projection, whose hash holds the
-   * surface identity (mesh, slots), so two objects sharing the material keep separate entries.
+   * so the key carries it; the very helper the GPU key uses, transform steps included. With an
+   * object the description carries the projection, whose hash holds the surface identity (mesh,
+   * slots), so two objects sharing the material keep separate entries.
    * A memory-only key: nothing here reaches the file. */
   key.gpu_extras.input_scalar_hash = BKE_paint_layers_effect_input_scalar_hash(dims_entry);
   return paint_layer_effect_cache_get_or_compute(

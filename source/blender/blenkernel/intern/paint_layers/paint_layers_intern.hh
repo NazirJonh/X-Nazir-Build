@@ -1604,6 +1604,21 @@ bool BKE_paint_layers_bake_changed_region(const Material &ma,
 bool paint_layers_bake_subtree_needs_surface(const MaterialPaintLayer &layer);
 
 /**
+ * Whether the bake of \a node reads the surface of the object it is made for, so it is made per
+ * object (a tile of the maps for each object and UDIM tile) instead of as one map for every object.
+ * The one question for every kind of bake node, so the planner, the due and candidate checks, the
+ * validity test, the identity and the graph cannot disagree about it:
+ * - a stack row: #paint_layers_bake_subtree_needs_surface, as it always was;
+ * - a mask effect item (#paint_layer_mask_item_bakes_effect): a projected item stands before it in
+ *   its mask, so the grey it blurs is the surface's, not the canvas's;
+ * - an effect that owns its result (#paint_layer_is_owned_effect): the row it filters is projected.
+ *   Such an effect owns nothing today (#paint_layer_effect_owns_result leaves projected rows out), so
+ *   this is false until that restriction is lifted; the question is asked here already so the lift
+ *   needs no second predicate.
+ */
+bool paint_layers_bake_node_reads_surface(const Material &ma, const MaterialPaintLayer &node);
+
+/**
  * One object an Object or Generated bake renders for, resolved from the evaluated depsgraph of the
  * scene and view layer the bake was started for.
  *
@@ -1697,7 +1712,8 @@ uint64_t paint_layers_bake_target_identity(const PaintLayersBakeTarget &target, 
 
 /**
  * The identity of \a target stored in the tile of \a layer's bake: the surface identity above, and
- * for a row that folds a projection (see #paint_layer_row_folds_into_bake) the material slot
+ * for a row that folds a projection (see #paint_layer_row_folds_into_bake), or a mask effect item
+ * whose grey reads the surface (#paint_layers_bake_node_reads_surface), the material slot
  * signature too. Every other row gets exactly the surface identity, as the tile hash is saved.
  */
 uint64_t paint_layers_bake_row_identity(const Material &ma,
@@ -2015,10 +2031,16 @@ bool paint_layer_mask_transform_step_get(const MaterialPaintLayer &item,
  * Drop the cache's entry of the mask effect \a effect: its bake holds the grey now, and the entry
  * is a copy kept for nothing while the bake stands. The cache computes the grey back when the bake
  * goes stale -- an edit or a stroke -- exactly as it did before the first bake.
+ *
+ * \param tile_number: the tile and \param painted_object the surface the entry was computed for
+ *        (see #paint_layer_mask_effect_buffer_get): the key has to be the one the compute used, or
+ *        the drop finds nothing. The defaults are the shared grey's, computed with no surface.
  */
 void paint_layer_mask_effect_cache_drop(const Material &ma,
                                         const MaterialPaintLayer &row,
-                                        const MaterialPaintLayer &effect);
+                                        const MaterialPaintLayer &effect,
+                                        int tile_number = PAINT_TILE_NUMBER_BASE,
+                                        PaintLayerSurfaceRef painted_object = nullptr);
 
 /** \} */
 

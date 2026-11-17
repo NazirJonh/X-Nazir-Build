@@ -1607,7 +1607,8 @@ static wmOperatorStatus mask_merge_exec(bContext *C, wmOperator *op)
   if (!mask_merge_target_get(C, &ma, &layer)) {
     return OPERATOR_CANCELLED;
   }
-  Image *merged = BKE_paint_layers_mask_stack_merge(*CTX_data_main(C), *ma, *layer, op->reports);
+  Image *merged = BKE_paint_layers_mask_stack_merge(
+      *CTX_data_main(C), *ma, *layer, op->reports, CTX_data_active_object(C));
   if (merged == nullptr) {
     return OPERATOR_CANCELLED;
   }

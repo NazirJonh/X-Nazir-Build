@@ -539,6 +539,10 @@ TEST_F(PaintLayersGraphEvalTest, generator_as_correction_and_mask_item)
   /* The correction leaves, so the mask item below covers the white row itself. */
   ASSERT_TRUE(BKE_paint_layers_correction_remove(*ma, correction));
 
+  /* A mask item lays over the base mask, which the row has to own first (opaque, so the item
+   * alone decides the coverage). */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, painted, 1.0f), nullptr);
+
   /* The mask item: the same generator as the row's mask coverage. */
   MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
       *ma, painted, MA_PAINT_LAYER_SOURCE_GENERATOR, "Noise Mask");

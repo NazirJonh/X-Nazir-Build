@@ -159,8 +159,17 @@ void bake_write_image_rows(
  * Render the CPU-computed mask effect's grey of \a layer (a mask item) into its own bake: the grey
  * the mask effect cache holds, resampled from the row's canvas to the \a size-square map, written
  * whole. True when the map was written.
+ *
+ * \param objects: the objects of a grey that reads the surface
+ *                 (#paint_layers_bake_node_reads_surface); the grey is then rendered per object and
+ *                 UV tile into one tiled map, as a row's per-object bake is. Empty writes the one
+ *                 map shared by every object.
  */
-bool bake_mask_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &layer, int size);
+bool bake_mask_effect_row_write(Main &bmain,
+                                Material &ma,
+                                MaterialPaintLayer &layer,
+                                int size,
+                                Span<PaintLayersBakeTarget> objects = {});
 
 /**
  * The side the result of \a effect (which owns it, #paint_layer_effect_owns_result) lays on: its

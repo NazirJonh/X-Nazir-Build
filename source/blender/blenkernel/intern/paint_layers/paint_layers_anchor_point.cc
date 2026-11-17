@@ -468,6 +468,48 @@ static uint64_t anchor_point_hash_row(uint64_t h,
                                              int(row.mapping.wrap),
                                              row.mapping.mirror_center[0],
                                              row.mapping.mirror_center[1]));
+  /* A projection moves every texel a projected read lays, so its space and its whole frame are
+   * part of what a slice or an effect bake shows: without them a moved frame would keep serving
+   * slices and bake maps rendered at the old one. The payload's normal and roll are hashed, the
+   * pair the frame's euler derives from. */
+  if (row.projection != nullptr && row.mapping.space != MA_PAINT_LAYER_MAPPING_SPACE_UV) {
+    const MaterialPaintLayerProjection &projection = *row.projection;
+    h = anchor_point_hash_mix(
+        h,
+        get_default_hash(int(row.mapping.space),
+                         int(projection.axis),
+                         int(projection.flag),
+                         int(projection.cube_layout),
+                         uint32_t(row.projection_object != nullptr ?
+                                      row.projection_object->id.session_uid :
+                                      0)));
+    h = anchor_point_hash_mix(
+        h,
+        get_default_hash(projection.center[0],
+                         projection.center[1],
+                         projection.center[2],
+                         projection.normal[0],
+                         projection.normal[1],
+                         projection.normal[2]));
+    h = anchor_point_hash_mix(h,
+                              get_default_hash(projection.size[0],
+                                               projection.size[1],
+                                               projection.size[2],
+                                               projection.roll,
+                                               projection.blend,
+                                               projection.angle));
+    /* A frame in the painted object's space does not move when the object does; a controller
+     * Empty's transform does move the projection, so its matrix enters the key, the same rule the
+     * composite's projection hash follows. */
+    if (row.projection_object != nullptr) {
+      const float(*matrix)[4] = row.projection_object->object_to_world().ptr();
+      for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+          h = anchor_point_hash_mix(h, get_default_hash(matrix[i][j]));
+        }
+      }
+    }
+  }
   /* What a filter or a map-coverage operator is set to, and what a Material row reads: values the
    * description of the slice carries, though they hold no pixels. */
   if (const PaintLayerKindInfo *kind = paint_layer_kind_of(row)) {

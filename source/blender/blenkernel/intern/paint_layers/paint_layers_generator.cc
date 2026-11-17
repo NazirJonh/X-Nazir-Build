@@ -314,12 +314,14 @@ bool BKE_paint_layers_generator_subtree_holds_laid_generator(const MaterialPaint
 
 bool BKE_paint_layers_generator_subtree_holds_generated(const MaterialPaintLayer &layer)
 {
-  bool holds = false;
-  generator_laid_row_foreach(layer, [&](const MaterialPaintLayer &row) {
-    holds = holds || (BKE_paint_layers_generator_supported(row) &&
-                      BKE_paint_layers_generator_space_of(row) ==
-                          MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED);
-  });
+  const auto reads_generated = [](const MaterialPaintLayer &row) {
+    return BKE_paint_layers_generator_supported(row) &&
+           BKE_paint_layers_generator_space_of(row) == MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED;
+  };
+  /* The row itself counts too: a generator row baked on its own reads the orco grid. */
+  bool holds = reads_generated(layer);
+  generator_laid_row_foreach(
+      layer, [&](const MaterialPaintLayer &row) { holds = holds || reads_generated(row); });
   /* A folder lays its children, and each of them its own corrections and mask items: a Generated
    * pattern anywhere below is one the folder's bake would fold in. */
   if (holds || !BKE_paint_layers_is_folder(layer)) {

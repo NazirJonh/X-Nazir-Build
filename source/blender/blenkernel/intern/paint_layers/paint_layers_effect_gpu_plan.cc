@@ -552,7 +552,8 @@ uint64_t BKE_paint_layers_effect_input_scalar_hash(
   hash = composite_mapping_hash(effect_hash_u64(hash, input_entry.mapping.enabled ? 1u : 0u),
                                 input_entry.mapping);
   /* The transform steps (Mirror, Transform Mapping effects) move the pixels the effect reads like
-   * the frame does, and the stack hash folds them the same way, so the CPU and GPU keys agree. */
+   * the frame does, and the stack hash folds them the same way, so a step that moves the CPU key
+   * moves this key too. The two keys are built by different hash functions and never compared. */
   for (const PaintMaterialCompositeMapping &step : input_entry.input_transforms) {
     hash = composite_mapping_hash(effect_hash_u64(hash, 1u), step);
   }

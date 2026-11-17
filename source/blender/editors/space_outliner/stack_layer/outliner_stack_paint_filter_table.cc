@@ -39,6 +39,8 @@ const uint32_t PATTERN = 0xE3A5;        /* blur_on */
 /* The Fill Area and Mask Outline effects, apart from the Fill layer's own glyph. */
 const uint32_t FILL_AREA = 0xF873;
 const uint32_t MASK_OUTLINE = 0xE1AD;
+/* The Channel Split effect: the fork one source map takes into the row's channels. */
+const uint32_t CHANNEL_SPLIT = 0xF184;
 }  // namespace paint_glyph
 
 /**
@@ -154,6 +156,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
       return {ICON_MOD_THICKNESS, paint_glyph::MASK_OUTLINE};
     case MA_PAINT_LAYER_FILTER_FILL_AREA:
       return {ICON_CURVE_PATH, paint_glyph::FILL_AREA};
+    case MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT:
+      /* The RGB icon names the channels the image carries; the glyph the fork the split takes. */
+      return {ICON_IMAGE_RGB, paint_glyph::CHANNEL_SPLIT};
     case MA_PAINT_LAYER_FILTER_NORMAL_CONVERT:
       /* No glyph of its own yet: the vertex-normals icon names what the filter converts. */
       return {ICON_NORMALS_VERTEX, 0};
@@ -412,6 +417,12 @@ static const PaintFilterAddKind paint_effect_add_kinds_table[] = {
      "Smear the active layer's content along the slope of a source: the samples walk the gradient "
      "of the noise, the blending mode saying what the walk accumulates",
      MA_PAINT_LAYER_FILTER_BLUR_SLOPE},
+    {"EFFECT_CHANNEL_SPLIT",
+     N_("Channel Split"),
+     "Extract one channel of the image assigned to the effect's slot and lay it as a grey in the "
+     "channels the effect works in: an ORM map feeds Roughness from its green, AO from its red "
+     "and Metallic from its blue, one effect each",
+     MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT},
 };
 
 /**

@@ -31,6 +31,7 @@
 
 #include "BLI_set.hh"
 
+#include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 
 #include "DNA_windowmanager_types.h"
@@ -213,6 +214,33 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
             << "texel " << i << " component " << k;
       }
     }
+  }
+
+  /** An opaque 8x8 byte image whose channels are distinct: red 25, green 128, blue 204, and an
+   * alpha of 255 on the left half and 64 on the right one -- one split can tell the four apart.
+   * The kernel reads the slot as data, so the bytes answer as they were written whatever the
+   * image's colorspace. */
+  Image *add_channel_image(const char *name)
+  {
+    const int size = 8;
+    const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    Image *image = BKE_image_add_generated(
+        bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+    image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int y : IndexRange(size)) {
+      for (const int x : IndexRange(size)) {
+        uchar *p = pixels + (int64_t(y) * size + x) * 4;
+        p[0] = 25;
+        p[1] = 128;
+        p[2] = 204;
+        p[3] = x >= size / 2 ? 64 : 255;
+      }
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return image;
   }
 
   /** The composite of Base Color as straight scene-linear RGBA at the stack's dimensions. */
@@ -835,7 +863,7 @@ TEST_F(PaintLayersEffectTest, a_drop_shadow_kernel_lays_a_premultiplied_shadow_l
       p[3] = covered;
     }
   }
-  paint_layer_effect_kernel_apply(*input, *shadow);
+  paint_layer_effect_kernel_apply(*input, *shadow, false, PAINT_TILE_NUMBER_BASE);
 
   /* The shadow falls two texels to the right of the stroke: where the content is, the layer has no
    * alpha ("under the content" is part of the weight); on the empty map next to it the alpha is the
@@ -910,7 +938,7 @@ TEST_F(PaintLayersEffectTest, a_height_to_normal_kernel_lays_the_neutral_normal_
   MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL);
 
   ImBuf *input = height_ramp_buffer(0.0f, false, 0.75f);
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   const float *pixels = input->float_data();
   for (const int64_t i : IndexRange(int64_t(8) * 8)) {
     EXPECT_NEAR(pixels[i * 4 + 0], 0.5f, 1e-5f);
@@ -930,7 +958,7 @@ TEST_F(PaintLayersEffectTest, a_height_to_normal_kernel_leans_the_normal_against
    * half, and the vector is unit length. The ramp is read in the middle, away from the clamped
    * edges. */
   ImBuf *along_u = height_ramp_buffer(0.1f, false);
-  paint_layer_effect_kernel_apply(*along_u, *effect);
+  paint_layer_effect_kernel_apply(*along_u, *effect, false, PAINT_TILE_NUMBER_BASE);
   const float *p = along_u->float_data() + (int64_t(4) * 8 + 4) * 4;
   EXPECT_LT(p[0], 0.5f - 1e-2f);
   EXPECT_NEAR(p[1], 0.5f, 1e-5f);
@@ -942,7 +970,7 @@ TEST_F(PaintLayersEffectTest, a_height_to_normal_kernel_leans_the_normal_against
 
   /* A ramp rising along +V (the rows): the OpenGL green leans toward -V, the DirectX one flips. */
   ImBuf *along_v = height_ramp_buffer(0.1f, true);
-  paint_layer_effect_kernel_apply(*along_v, *effect);
+  paint_layer_effect_kernel_apply(*along_v, *effect, false, PAINT_TILE_NUMBER_BASE);
   const float *opengl = along_v->float_data() + (int64_t(4) * 8 + 4) * 4;
   EXPECT_LT(opengl[1], 0.5f - 1e-2f);
   EXPECT_NEAR(opengl[0], 0.5f, 1e-5f);
@@ -951,7 +979,7 @@ TEST_F(PaintLayersEffectTest, a_height_to_normal_kernel_leans_the_normal_against
 
   ASSERT_TRUE(paint_layer_kind_param_bool_set(*effect, PAINT_LAYER_HEIGHT_TO_NORMAL_FLIP_GREEN, true));
   ImBuf *flipped = height_ramp_buffer(0.1f, true);
-  paint_layer_effect_kernel_apply(*flipped, *effect);
+  paint_layer_effect_kernel_apply(*flipped, *effect, false, PAINT_TILE_NUMBER_BASE);
   const float *directx = flipped->float_data() + (int64_t(4) * 8 + 4) * 4;
   EXPECT_NEAR(directx[1], 1.0f - opengl_green, 1e-5f);
   IMB_freeImBuf(flipped);
@@ -968,7 +996,7 @@ TEST_F(PaintLayersEffectTest, a_height_to_normal_in_world_units_reads_the_texel_
   ASSERT_TRUE(paint_layer_kind_param_set(*effect, PAINT_LAYER_HEIGHT_TO_NORMAL_HEIGHT_DEPTH, 5.0f));
 
   ImBuf *input = height_ramp_buffer(0.1f, false);
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   const float *p = input->float_data() + (int64_t(4) * 8 + 4) * 4;
   EXPECT_NEAR(p[0] * 2.0f - 1.0f, -0.5f / std::sqrt(1.25f), 1e-4f);
   IMB_freeImBuf(input);
@@ -1014,7 +1042,7 @@ TEST_F(PaintLayersEffectTest, a_pixelate_kernel_cuts_a_ramp_into_blocks_and_keep
       p[3] = 0.5f;
     }
   }
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   const float *out = input->float_data();
   for (const int x : IndexRange(8)) {
     const float *p = out + (int64_t(3) * 8 + x) * 4;
@@ -1042,7 +1070,7 @@ TEST_F(PaintLayersEffectTest, a_pixelate_kernel_does_not_leak_a_transparent_texe
     p[2] = island;
     p[3] = island;
   }
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   const float *p = input->float_data() + 5 * 4;
   EXPECT_NEAR(p[0], 1.0f, 1e-5f);
   EXPECT_NEAR(p[1], 1.0f, 1e-5f);
@@ -1066,7 +1094,7 @@ TEST_F(PaintLayersEffectTest, a_pixelate_of_one_texel_blocks_is_the_identity)
     p[2] = 0.75f;
     p[3] = 1.0f;
   }
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   for (const int i : IndexRange(64)) {
     EXPECT_FLOAT_EQ(input->float_data()[int64_t(i) * 4], float(i) / 64.0f);
   }
@@ -1105,7 +1133,7 @@ TEST_F(PaintLayersEffectTest, a_pixelate_on_a_non_square_map_cuts_each_axis_by_i
     p[3] = 1.0f;
   });
   ASSERT_NE(input, nullptr);
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   for (const int y : IndexRange(8)) {
     for (const int x : IndexRange(16)) {
       const float expected = float(x / 4 * 4) + 1.5f + 100.0f * (float(y / 2 * 2) + 0.5f);
@@ -1132,7 +1160,7 @@ TEST_F(PaintLayersEffectTest, a_pixelate_last_block_may_be_shorter)
     p[3] = 1.0f;
   });
   ASSERT_NE(input, nullptr);
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   const float means[4] = {1.0f, 4.0f, 7.0f, 9.0f};
   for (const int y : IndexRange(10)) {
     for (const int x : IndexRange(10)) {
@@ -1170,7 +1198,7 @@ TEST_F(PaintLayersEffectTest, a_pixelate_with_big_blocks_finishes_quickly)
   ImBuf *one_block = make_input();
   ASSERT_NE(one_block, nullptr);
   std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-  paint_layer_effect_kernel_apply(*one_block, *effect);
+  paint_layer_effect_kernel_apply(*one_block, *effect, false, PAINT_TILE_NUMBER_BASE);
   EXPECT_LT(elapsed_seconds(start), 5.0) << "one block over a 1024 map must not cost the area per texel";
   for (const int64_t i : {int64_t(0), int64_t(512) * 1024 + 700, int64_t(1024) * 1024 - 1}) {
     EXPECT_NEAR(one_block->float_data()[i * 4], 0.75f, 1e-4f) << i;
@@ -1181,7 +1209,7 @@ TEST_F(PaintLayersEffectTest, a_pixelate_with_big_blocks_finishes_quickly)
   ImBuf *two_blocks = make_input();
   ASSERT_NE(two_blocks, nullptr);
   start = std::chrono::steady_clock::now();
-  paint_layer_effect_kernel_apply(*two_blocks, *effect);
+  paint_layer_effect_kernel_apply(*two_blocks, *effect, false, PAINT_TILE_NUMBER_BASE);
   EXPECT_LT(elapsed_seconds(start), 5.0) << "two blocks a side must not cost the area per texel";
   EXPECT_NEAR(two_blocks->float_data()[(int64_t(100) * 1024 + 100) * 4], 0.5f, 1e-4f);
   EXPECT_NEAR(two_blocks->float_data()[(int64_t(900) * 1024 + 900) * 4], 1.0f, 1e-4f);
@@ -1221,7 +1249,7 @@ TEST_F(PaintLayersEffectTest, a_flat_fxaa_input_is_unchanged)
     p[3] = 0.7f;
   });
   ASSERT_NE(input, nullptr);
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   for (const int i : IndexRange(64)) {
     const float *p = input->float_data() + int64_t(i) * 4;
     EXPECT_FLOAT_EQ(p[0], 0.5f) << i;
@@ -1248,7 +1276,7 @@ TEST_F(PaintLayersEffectTest, an_fxaa_smooths_a_stair_step_edge)
     p[3] = 1.0f;
   });
   ASSERT_NE(input, nullptr);
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
 
   /* The corner texel (3, 3) is white with the ring nw 0, n 1, ne 1, w 0, e 1, sw 0, s 0, se 0.
    * The gradient direction is (-2, -2), a step of (-1, -1): the two ring texels it walks to,
@@ -1295,7 +1323,7 @@ TEST_F(PaintLayersEffectTest, an_fxaa_leaves_alpha_untouched)
     p[3] = 0.25f + 0.25f * float((x * 3 + y * 5) % 4);
   });
   ASSERT_NE(input, nullptr);
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   for (const int y : IndexRange(8)) {
     for (const int x : IndexRange(8)) {
       EXPECT_EQ(input->float_data()[(int64_t(y) * 8 + x) * 4 + 3],
@@ -1322,7 +1350,7 @@ TEST_F(PaintLayersEffectTest, an_fxaa_does_not_leak_a_transparent_texels_black_i
     p[0] = p[1] = p[2] = p[3] = island;
   });
   ASSERT_NE(input, nullptr);
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   for (const int y : IndexRange(8)) {
     for (const int x : IndexRange(8)) {
       const float *p = input->float_data() + (int64_t(y) * 8 + x) * 4;
@@ -1348,7 +1376,7 @@ TEST_F(PaintLayersEffectTest, an_fxaa_below_the_contrast_threshold_changes_nothi
     p[3] = 1.0f;
   });
   ASSERT_NE(input, nullptr);
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   for (const int y : IndexRange(8)) {
     for (const int x : IndexRange(8)) {
       const float *p = input->float_data() + (int64_t(y) * 8 + x) * 4;
@@ -1421,7 +1449,7 @@ TEST_F(PaintLayersEffectTest, a_blur_slope_with_one_sample_or_zero_intensity_is_
     blur_slope_on_previous_input(*effect, c.quality, c.intensity, PAINT_LAYER_BLUR_SLOPE_BLENDING_BLUR);
     ImBuf *input = blur_slope_profile_buffer();
     ASSERT_NE(input, nullptr);
-    paint_layer_effect_kernel_apply(*input, *effect);
+    paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
     for (const int y : IndexRange(8)) {
       for (const int x : IndexRange(8)) {
         EXPECT_FLOAT_EQ(input->float_data()[(int64_t(y) * 8 + x) * 4], blur_slope_profile(x))
@@ -1448,7 +1476,7 @@ TEST_F(PaintLayersEffectTest, a_blur_slope_in_previous_input_mode_blurs_along_th
   const float expected[8] = {0.1f / 3.0f, 0.1f, 0.2f, 0.5f, 0.6f, 0.7f, 0.6f, 2.0f / 3.0f};
   ImBuf *input = blur_slope_profile_buffer();
   ASSERT_NE(input, nullptr);
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   for (const int y : IndexRange(8)) {
     for (const int x : IndexRange(8)) {
       EXPECT_NEAR(input->float_data()[(int64_t(y) * 8 + x) * 4], expected[x], 1e-5f)
@@ -1470,11 +1498,11 @@ TEST_F(PaintLayersEffectTest, a_blur_slope_max_mode_spreads_the_bright_and_min_m
   blur_slope_on_previous_input(*effect, 3, 2.0f, PAINT_LAYER_BLUR_SLOPE_BLENDING_MAX);
   ImBuf *maximum = blur_slope_profile_buffer();
   ASSERT_NE(maximum, nullptr);
-  paint_layer_effect_kernel_apply(*maximum, *effect);
+  paint_layer_effect_kernel_apply(*maximum, *effect, false, PAINT_TILE_NUMBER_BASE);
   blur_slope_on_previous_input(*effect, 3, 2.0f, PAINT_LAYER_BLUR_SLOPE_BLENDING_MIN);
   ImBuf *minimum = blur_slope_profile_buffer();
   ASSERT_NE(minimum, nullptr);
-  paint_layer_effect_kernel_apply(*minimum, *effect);
+  paint_layer_effect_kernel_apply(*minimum, *effect, false, PAINT_TILE_NUMBER_BASE);
   for (const int x : IndexRange(8)) {
     const float value = maximum->float_data()[(int64_t(5) * 8 + x) * 4];
     const float lowest = minimum->float_data()[(int64_t(5) * 8 + x) * 4];
@@ -1496,7 +1524,7 @@ TEST_F(PaintLayersEffectTest, a_blur_slope_max_mode_spreads_the_bright_and_min_m
     p[3] = (x == 4) ? 0.0f : 1.0f;
   });
   ASSERT_NE(holed, nullptr);
-  paint_layer_effect_kernel_apply(*holed, *effect);
+  paint_layer_effect_kernel_apply(*holed, *effect, false, PAINT_TILE_NUMBER_BASE);
   EXPECT_NEAR(holed->float_data()[(int64_t(5) * 8 + 3) * 4], 0.3f, 1e-6f);
   EXPECT_NEAR(holed->float_data()[(int64_t(5) * 8 + 5) * 4], 0.6f, 1e-6f);
   IMB_freeImBuf(holed);
@@ -1520,7 +1548,7 @@ TEST_F(PaintLayersEffectTest, a_blur_slope_does_not_leak_a_transparent_texels_bl
     p[0] = p[1] = p[2] = p[3] = island;
   });
   ASSERT_NE(input, nullptr);
-  paint_layer_effect_kernel_apply(*input, *effect);
+  paint_layer_effect_kernel_apply(*input, *effect, false, PAINT_TILE_NUMBER_BASE);
   for (const int y : IndexRange(10)) {
     for (const int x : IndexRange(10)) {
       const float *p = input->float_data() + (int64_t(y) * 10 + x) * 4;
@@ -1559,8 +1587,8 @@ TEST_F(PaintLayersEffectTest, a_blur_slope_is_deterministic_and_keeps_alpha)
   ASSERT_NE(original, nullptr);
   ASSERT_NE(first, nullptr);
   ASSERT_NE(second, nullptr);
-  paint_layer_effect_kernel_apply(*first, *effect);
-  paint_layer_effect_kernel_apply(*second, *effect);
+  paint_layer_effect_kernel_apply(*first, *effect, false, PAINT_TILE_NUMBER_BASE);
+  paint_layer_effect_kernel_apply(*second, *effect, false, PAINT_TILE_NUMBER_BASE);
 
   bool changed = false;
   for (const int64_t i : IndexRange(32 * 32 * 4)) {
@@ -1951,6 +1979,7 @@ TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_for_each_added_cpu
       {MA_PAINT_LAYER_FILTER_MASK_OUTLINE, "a Mask Outline correction is read"},
       {MA_PAINT_LAYER_FILTER_PIXELATE, "a Pixelate correction is read"},
       {MA_PAINT_LAYER_FILTER_BLUR_SLOPE, "a Blur Slope correction is read"},
+      {MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT, "a Channel Split correction is read"},
   };
   for (const auto &[filter, reason] : reasons) {
     MaterialPaintLayer *effect = add_effect(*row, filter);
@@ -3011,7 +3040,7 @@ TEST_F(PaintLayersEffectTest, a_mask_outline_kernel_lays_a_premultiplied_ring_ar
         p[3] = covered;
       }
     }
-    paint_layer_effect_kernel_apply(*input, *outline);
+    paint_layer_effect_kernel_apply(*input, *outline, false, PAINT_TILE_NUMBER_BASE);
 
     /* The layer is empty on the island and far from it; the ring is premultiplied by the band,
      * with the band as its alpha. The Color tints it only from a luminance source: an alpha source
@@ -3090,7 +3119,7 @@ TEST_F(PaintLayersEffectTest, a_fill_area_kernel_lays_a_premultiplied_fill_on_an
     SCOPED_TRACE(int(uv_border));
     ASSERT_TRUE(paint_layer_kind_param_int_set(*fill, PAINT_LAYER_FILL_AREA_UV_BORDER, int(uv_border)));
     ImBuf *input = fill_area_ring_buffer(false);
-    paint_layer_effect_kernel_apply(*input, *fill);
+    paint_layer_effect_kernel_apply(*input, *fill, false, PAINT_TILE_NUMBER_BASE);
     const float *pixels = input->float_data();
     const auto texel = [&](const int x, const int y) { return pixels + (int64_t(y) * 9 + x) * 4; };
     /* The hole takes the ring's red and an alpha of one: the fill is a layer of its own, because
@@ -3132,7 +3161,7 @@ TEST_F(PaintLayersEffectTest, a_fill_area_kernel_leaves_a_hole_the_ring_does_not
     SCOPED_TRACE(int(uv_border));
     ASSERT_TRUE(paint_layer_kind_param_int_set(*fill, PAINT_LAYER_FILL_AREA_UV_BORDER, int(uv_border)));
     ImBuf *input = fill_area_ring_buffer(true);
-    paint_layer_effect_kernel_apply(*input, *fill);
+    paint_layer_effect_kernel_apply(*input, *fill, false, PAINT_TILE_NUMBER_BASE);
     for (const int64_t i : IndexRange(int64_t(9) * 9 * 4)) {
       EXPECT_NEAR(input->float_data()[i], 0.0f, 1e-6f) << "component " << i;
     }
@@ -3155,7 +3184,7 @@ TEST_F(PaintLayersEffectTest, a_fill_area_kernel_with_no_border_lays_an_empty_la
     pixels[i * 4 + 2] = 0.2f;
     pixels[i * 4 + 3] = 0.1f;
   }
-  paint_layer_effect_kernel_apply(*input, *fill);
+  paint_layer_effect_kernel_apply(*input, *fill, false, PAINT_TILE_NUMBER_BASE);
   for (const int64_t i : IndexRange(int64_t(9) * 9 * 4)) {
     EXPECT_NEAR(input->float_data()[i], 0.0f, 1e-6f) << "component " << i;
   }
@@ -3167,7 +3196,7 @@ TEST_F(PaintLayersEffectTest, a_fill_area_kernel_with_no_border_lays_an_empty_la
   for (const int64_t i : IndexRange(int64_t(9) * 9 * 4)) {
     pixels[i] = 1.0f;
   }
-  paint_layer_effect_kernel_apply(*input, *fill);
+  paint_layer_effect_kernel_apply(*input, *fill, false, PAINT_TILE_NUMBER_BASE);
   for (const int64_t i : IndexRange(int64_t(9) * 9 * 4)) {
     EXPECT_NEAR(input->float_data()[i], 0.0f, 1e-6f) << "component " << i;
   }
@@ -3184,7 +3213,7 @@ TEST_F(PaintLayersEffectTest, a_fill_area_solid_mode_fills_the_hole_with_the_col
   ASSERT_TRUE(paint_layer_kind_param_color_set(*fill, PAINT_LAYER_FILL_AREA_COLOR, green));
 
   ImBuf *input = fill_area_ring_buffer(false);
-  paint_layer_effect_kernel_apply(*input, *fill);
+  paint_layer_effect_kernel_apply(*input, *fill, false, PAINT_TILE_NUMBER_BASE);
   const float *hole = input->float_data() + (int64_t(4) * 9 + 4) * 4;
   EXPECT_NEAR(hole[0], 0.0f, 1e-6f);
   EXPECT_NEAR(hole[1], 1.0f, 1e-6f);
@@ -3199,7 +3228,7 @@ TEST_F(PaintLayersEffectTest, a_fill_area_blur_softens_the_edge_of_the_fill_laye
   ASSERT_TRUE(paint_layer_kind_param_int_set(*fill, PAINT_LAYER_FILL_AREA_BLUR, 1));
 
   ImBuf *input = fill_area_ring_buffer(false);
-  paint_layer_effect_kernel_apply(*input, *fill);
+  paint_layer_effect_kernel_apply(*input, *fill, false, PAINT_TILE_NUMBER_BASE);
   /* The hard fill was one inside the hole and zero on the ring: the blur gives the ring's inner
    * texel a coverage between them, and the colour stays premultiplied by it (no brighter than
    * the alpha, red only). */
@@ -3228,7 +3257,7 @@ TEST_F(PaintLayersEffectTest, a_fill_area_kernel_in_a_mask_fills_the_grey_and_ke
     pixels[i * 4 + 2] = grey;
     pixels[i * 4 + 3] = 1.0f;
   }
-  paint_layer_effect_kernel_apply(*input, *fill, true);
+  paint_layer_effect_kernel_apply(*input, *fill, true, PAINT_TILE_NUMBER_BASE);
   const float *result = input->float_data();
   const auto texel = [&](const int x, const int y) { return result + (int64_t(y) * 9 + x) * 4; };
   for (const int y : IndexRange(3, 3)) {
@@ -3263,6 +3292,321 @@ TEST_F(PaintLayersEffectTest, a_fill_area_shows_in_the_hole_of_a_ring_on_the_map
   EXPECT_GT(texel(3, 3, 0), 0.5f) << "the hole takes the ring's red where the row had no coverage";
   EXPECT_NEAR(texel(7, 7, 0), 0.0f, 2e-3f) << "the open map around the ring stays empty";
 }
+TEST_F(PaintLayersEffectTest, a_channel_split_kernel_lays_the_slot_channel_as_a_grey)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *split = add_effect(*row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+  Image *orm = add_channel_image("Split");
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, orm));
+  /* The registry's slot flag hands the image to the kernel. */
+  EXPECT_EQ(paint_layer_effect_slot_image(*split), orm);
+
+  ImBuf *input = IMB_allocImBuf(8, 8, ImBufFlags::FloatData);
+  float *pixels = input->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    pixels[i * 4 + 0] = 0.9f;
+    pixels[i * 4 + 1] = 0.1f;
+    pixels[i * 4 + 2] = 0.2f;
+    pixels[i * 4 + 3] = 0.5f;
+  }
+  paint_layer_effect_kernel_apply(*input, *split, false, PAINT_TILE_NUMBER_BASE);
+  const float *result = input->float_data();
+  const auto texel = [&](const int x, const int y) { return result + (int64_t(y) * 8 + x) * 4; };
+  /* The red channel of the map, every texel the one value, the input's alpha left alone: the
+   * coverage the channel carries stays whatever the slot's own alpha does. */
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      EXPECT_NEAR(texel(x, y)[0], 25.0f / 255.0f, 5e-3f) << "red at " << x << "," << y;
+      EXPECT_NEAR(texel(x, y)[1], texel(x, y)[0], 1e-6f) << "grey at " << x << "," << y;
+      EXPECT_NEAR(texel(x, y)[3], 0.5f, 1e-6f) << "alpha at " << x << "," << y;
+    }
+  }
+  IMB_freeImBuf(input);
+
+  /* The green answers the same way, one parameter apart. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*split,
+                                             PAINT_LAYER_CHANNEL_SPLIT_CHANNEL,
+                                             PAINT_LAYER_CHANNEL_SPLIT_GREEN));
+  input = IMB_allocImBuf(8, 8, ImBufFlags::FloatData);
+  pixels = input->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    pixels[i * 4 + 3] = 1.0f;
+  }
+  paint_layer_effect_kernel_apply(*input, *split, false, PAINT_TILE_NUMBER_BASE);
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    EXPECT_NEAR(input->float_data()[i * 4], 128.0f / 255.0f, 5e-3f) << "texel " << i;
+  }
+  IMB_freeImBuf(input);
+
+  /* The blue is the third channel of the packing, the one Metallic reads. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*split,
+                                             PAINT_LAYER_CHANNEL_SPLIT_CHANNEL,
+                                             PAINT_LAYER_CHANNEL_SPLIT_BLUE));
+  input = IMB_allocImBuf(8, 8, ImBufFlags::FloatData);
+  pixels = input->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    pixels[i * 4 + 3] = 1.0f;
+  }
+  paint_layer_effect_kernel_apply(*input, *split, false, PAINT_TILE_NUMBER_BASE);
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    EXPECT_NEAR(input->float_data()[i * 4], 204.0f / 255.0f, 5e-3f) << "texel " << i;
+  }
+  IMB_freeImBuf(input);
+
+  /* The alpha of the map is a channel the split reads too: the right half was written 64, the
+   * left one stays opaque. */
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*split,
+                                             PAINT_LAYER_CHANNEL_SPLIT_CHANNEL,
+                                             PAINT_LAYER_CHANNEL_SPLIT_ALPHA));
+  input = IMB_allocImBuf(8, 8, ImBufFlags::FloatData);
+  pixels = input->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    pixels[i * 4 + 3] = 1.0f;
+  }
+  paint_layer_effect_kernel_apply(*input, *split, false, PAINT_TILE_NUMBER_BASE);
+  result = input->float_data();
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      const float expected = x >= 4 ? 64.0f / 255.0f : 1.0f;
+      EXPECT_NEAR(texel(x, y)[0], expected, 5e-3f) << "alpha at " << x << "," << y;
+      EXPECT_NEAR(texel(x, y)[1], texel(x, y)[0], 1e-6f) << "grey at " << x << "," << y;
+    }
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_channel_split_with_an_empty_slot_is_the_identity)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *split = add_effect(*row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+  EXPECT_EQ(paint_layer_effect_slot_image(*split), nullptr);
+
+  ImBuf *input = IMB_allocImBuf(8, 8, ImBufFlags::FloatData);
+  float *pixels = input->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(8) * 8 * 4)) {
+    pixels[i] = float(i % 4) * 0.25f;
+  }
+  paint_layer_effect_kernel_apply(*input, *split, false, PAINT_TILE_NUMBER_BASE);
+  for (const int64_t i : IndexRange(int64_t(8) * 8 * 4)) {
+    EXPECT_NEAR(input->float_data()[i], float(i % 4) * 0.25f, 1e-6f) << "component " << i;
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, a_channel_split_lays_the_slot_channel_in_the_channels_the_row_carries)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *split = add_effect(*row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+  /* The filter takes the first channel of the set, and a split with no slot lays nothing of its
+   * own: the row shows as it was. */
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 2, 2), 1.0f, 5e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 6, 5), 0.0f, 5e-3f);
+
+  /* The map assigned, its red extracted: the row's Base Color is the map's red everywhere the row
+   * covers, and a second render reads the new slot -- the hash the cache keys on moved with it. */
+  Image *orm = add_channel_image("Split");
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, orm));
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (const int y : IndexRange(height)) {
+    for (const int x : IndexRange(width)) {
+      EXPECT_NEAR(linear_pixel(pixels, width, x, y), 25.0f / 255.0f, 5e-3f)
+          << "the red of the map at " << x << "," << y;
+    }
+  }
+
+  /* Detaching the slot brings the row's own content back: the entry the empty slot keys on is
+   * another one the cache answers. */
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, nullptr));
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 2, 2), 1.0f, 5e-3f);
+  EXPECT_NEAR(linear_pixel(pixels, width, 6, 5), 0.0f, 5e-3f);
+}
+
+TEST_F(PaintLayersEffectTest, a_channel_split_reads_the_udim_tile_it_is_computed_for)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *split = add_effect(*row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *slot = BKE_image_add_generated(
+      bmain, 8, 8, "TiledSlot", 32, false, IMA_GENTYPE_BLANK, black, false, true, true);
+  ASSERT_NE(slot, nullptr);
+  ImageTile *second_tile = BKE_image_add_tile(slot, 1002, nullptr);
+  ASSERT_NE(second_tile, nullptr);
+  /* A tile added by number carries the generator defaults, never filled: size it like the base
+   * tile, or its acquire has no 8x8 buffer to read. */
+  second_tile->gen_x = 8;
+  second_tile->gen_y = 8;
+  second_tile->gen_type = IMA_GENTYPE_BLANK;
+  second_tile->gen_depth = 32;
+  copy_v4_v4(second_tile->gen_color, black);
+  ASSERT_TRUE(BKE_image_fill_tile(slot, second_tile));
+  const auto paint_tile = [&](const int tile_number, const uchar value) {
+    ImageUser iuser;
+    BKE_imageuser_default(&iuser);
+    iuser.tile = tile_number;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(slot, &iuser, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int64_t i : IndexRange(int64_t(ibuf->x) * ibuf->y)) {
+      pixels[i * 4 + 0] = value;
+      pixels[i * 4 + 1] = value;
+      pixels[i * 4 + 2] = value;
+      pixels[i * 4 + 3] = 255;
+    }
+    BKE_image_release_ibuf(slot, ibuf, lock);
+  };
+  paint_tile(1001, 25);
+  paint_tile(1002, 200);
+  BKE_image_partial_update_mark_full_update(slot);
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, slot));
+
+  ImBuf *input = IMB_allocImBuf(8, 8, ImBufFlags::FloatData);
+  float *pixels = input->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    pixels[i * 4 + 3] = 1.0f;
+  }
+  /* The kernel follows the tile it is handed, not the base one: the second tile's 200 comes out,
+   * not the first tile's 25. */
+  paint_layer_effect_kernel_apply(*input, *split, false, 1002);
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    EXPECT_NEAR(input->float_data()[i * 4], 200.0f / 255.0f, 5e-3f) << "texel " << i;
+  }
+  IMB_freeImBuf(input);
+}
+
+TEST_F(PaintLayersEffectTest, assigning_a_slot_leaves_the_images_colorspace_alone)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *split = add_effect(*row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+  Image *slot = add_channel_image("Split");
+  const char *srgb = IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DEFAULT_BYTE);
+  ASSERT_NE(srgb, nullptr);
+  STRNCPY(slot->colorspace_settings.name, srgb);
+
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, slot));
+  /* The slot may be shared with users that read it as colour: the setter does not retag it, the
+   * kernel decodes it as data instead. */
+  EXPECT_STREQ(slot->colorspace_settings.name, srgb);
+
+  /* The data decode is what reaches the kernel: an sRGB read would gamma-decode 25 far below the
+   * stored byte. */
+  ImBuf *input = IMB_allocImBuf(8, 8, ImBufFlags::FloatData);
+  float *pixels = input->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    pixels[i * 4 + 3] = 1.0f;
+  }
+  paint_layer_effect_kernel_apply(*input, *split, false, PAINT_TILE_NUMBER_BASE);
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    EXPECT_NEAR(input->float_data()[i * 4], 25.0f / 255.0f, 5e-3f) << "texel " << i;
+  }
+  IMB_freeImBuf(input);
+
+  /* Assigning the same image again is idempotent in ownership and leaves the space alone. */
+  const int users = slot->id.us;
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, slot));
+  EXPECT_EQ(slot->id.us, users);
+  EXPECT_STREQ(slot->colorspace_settings.name, srgb);
+
+  /* Detaching releases the user and empties the slot. */
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, nullptr));
+  EXPECT_EQ(paint_layer_effect_slot_image(*split), nullptr);
+}
+
+TEST_F(PaintLayersEffectTest, effect_image_set_refuses_a_foreign_row_and_a_kind_without_a_slot)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  Image *image = add_channel_image("Split");
+  EXPECT_FALSE(BKE_paint_layers_effect_image_set(*ma, blur, image));
+  EXPECT_EQ(blur->effect_image, nullptr);
+
+  /* A slot-reading row of another material is not part of this material's stack either. */
+  Material *other = BKE_material_add(bmain, "OtherSplitMat");
+  MaterialPaintLayer *other_row = BKE_paint_layers_add(
+      *other, "Other", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *other_split = BKE_paint_layers_filter_add(
+      *other, other_row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+  ASSERT_NE(other_split, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_effect_image_set(*ma, other_split, image));
+  EXPECT_EQ(other_split->effect_image, nullptr);
+}
+
+TEST_F(PaintLayersEffectTest, a_filter_row_cannot_switch_source_away_from_its_slot)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *split = add_effect(*row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+  Image *slot = add_channel_image("Split");
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, slot));
+  const int users = slot->id.us;
+
+  /* A filter effect is not one of the row sources a switch rewrites; the kind cannot change, so the
+   * slot has no path that would leave it held by a row that no longer reads it. */
+  EXPECT_FALSE(BKE_paint_layers_set_source(*ma, split, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_EQ(paint_layer_effect_slot_image(*split), slot);
+  EXPECT_EQ(slot->id.us, users);
+}
+
+TEST_F(PaintLayersEffectTest, a_channel_split_copy_takes_and_releases_the_slot_user)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *split = add_effect(*row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+  Image *slot = add_channel_image("Split");
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, slot));
+  const int users = slot->id.us;
+
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *ma, split);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(paint_layer_effect_slot_image(*copy), slot);
+  EXPECT_EQ(slot->id.us, users + 1);
+
+  ASSERT_TRUE(BKE_paint_layers_correction_remove(*ma, copy));
+  EXPECT_EQ(slot->id.us, users);
+}
+
+TEST_F(PaintLayersEffectTest, editing_the_slot_pixels_invalidates_the_effect_cache_and_bake)
+{
+  Image *slot = add_channel_image("Split");
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *split = add_effect(*row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, slot));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 2, 2), 25.0f / 255.0f, 5e-3f);
+
+  clear_active();
+  bool changed = false;
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(row->bake, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+
+  /* A pixel edit of the slot is the subscription the common append takes: the cache entry and the
+   * bake it feeds both go stale. */
+  void *lock = nullptr;
+  ImBuf *slot_buffer = BKE_image_acquire_ibuf(slot, nullptr, &lock);
+  ASSERT_NE(slot_buffer, nullptr);
+  uchar *slot_pixels = slot_buffer->byte_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(slot_buffer->x) * slot_buffer->y)) {
+    slot_pixels[i * 4 + 0] = 200;
+  }
+  BKE_image_release_ibuf(slot, slot_buffer, lock);
+  BKE_image_partial_update_mark_full_update(slot);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row))
+      << "stale: the slot edit reaches the bake through its subscription";
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  EXPECT_NEAR(linear_pixel(pixels, width, 2, 2), 200.0f / 255.0f, 5e-3f);
+}
+
 TEST_F(PaintLayersEffectTest, a_color_match_of_a_solid_row_lands_on_the_target)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 128, 128));
@@ -3741,7 +4085,7 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
    * nothing. */
   Set<int> gpu_computed_filters;
   for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT);
-       filter <= int(MA_PAINT_LAYER_FILTER_BLUR_SLOPE);
+       filter <= int(MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
        filter++)
   {
     const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
@@ -4258,6 +4602,27 @@ TEST_F(PaintLayersEffectTest, a_mask_outline_lays_a_grey_band_from_the_luminance
   EXPECT_NEAR(px[(int64_t(4) * laid->x + laid->x - 1) * 4], 0.0f, 1e-6f);
 }
 
+TEST_F(PaintLayersEffectTest, a_mask_channel_split_lays_the_slot_channel_as_the_coverage)
+{
+  /* The channel the slot's map carries is the coverage the item lays: one grey the whole mask
+   * holds, the mask's own alpha one -- the extracted channel is a value already, so no luminance
+   * pass is asked of it. */
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 40, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add_image(*ma, *row, *add_ramp_image("Mask")), nullptr);
+  MaterialPaintLayer *split = add_mask_effect(*ma, *row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+  Image *orm = add_channel_image("Mask Split");
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, orm));
+
+  std::shared_ptr<ImBuf> laid = mask_effect_grey(*ma, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+  ASSERT_NE(laid, nullptr);
+  const float *px = laid->float_data();
+  for (const int64_t i : IndexRange(int64_t(laid->x) * laid->y)) {
+    EXPECT_NEAR(px[i * 4 + 0], 25.0f / 255.0f, 5e-3f) << "the red of the map, texel " << i;
+    EXPECT_NEAR(px[i * 4 + 1], px[i * 4 + 0], 1e-6f) << "texel " << i;
+    EXPECT_NEAR(px[i * 4 + 3], 1.0f, 1e-6f) << "a mask's alpha stays one, texel " << i;
+  }
+}
+
 TEST_F(PaintLayersEffectTest, a_mask_bevel_reads_the_luminance_whatever_the_source_says)
 {
   /* A mask's grey has no alpha (one everywhere): the alpha source of the schema default would find
@@ -4327,7 +4692,7 @@ TEST_F(PaintLayersEffectTest, a_monochrome_mask_noise_lays_the_kernel_over_the_g
    * grey and applies the same grain. */
   std::shared_ptr<ImBuf> expected = paint_layer_anchor_slice_buffer_clone(*input);
   ASSERT_NE(expected, nullptr);
-  paint_layer_effect_kernel_apply(*expected, *noise);
+  paint_layer_effect_kernel_apply(*expected, *noise, false, PAINT_TILE_NUMBER_BASE);
 
   const float *laid_px = laid->float_data();
   const float *expected_px = expected->float_data();
@@ -4362,7 +4727,7 @@ TEST_F(PaintLayersEffectTest, a_mask_effect_reads_the_grey_the_effects_before_it
    * kernel over a copy of it is the whole difference. */
   std::shared_ptr<ImBuf> expected = paint_layer_anchor_slice_buffer_clone(*laid_blur);
   ASSERT_NE(expected, nullptr);
-  paint_layer_effect_kernel_apply(*expected, *noise);
+  paint_layer_effect_kernel_apply(*expected, *noise, false, PAINT_TILE_NUMBER_BASE);
   const float *laid_px = laid_noise->float_data();
   const float *expected_px = expected->float_data();
   for (const int i : IndexRange(64)) {

@@ -4285,6 +4285,12 @@ static bool rna_MaterialPaintLayer_color_match_supported_get(PointerRNA *ptr)
   return layer != nullptr && BKE_paint_layers_color_match_supported(*layer);
 }
 
+static bool rna_MaterialPaintLayer_reads_image_slot_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer != nullptr && BKE_paint_layers_reads_image_slot(*layer);
+}
+
 /**
  * The matrix is a value of the generated graph (four group inputs), not a node's storage: the edit
  * marks the material value-edited (#BKE_paint_layers_channel_mixer_edited finds the owning row), so
@@ -4837,6 +4843,26 @@ static void rna_MaterialPaintLayerChannel_image_set(PointerRNA *ptr,
     if (!rna_paint_layer_map_color_encoding_user_find(*ma, *image)) {
       BKE_paint_layers_channel_map_use_data(*bmain, *image, channel);
     }
+  }
+}
+
+static void rna_MaterialPaintLayer_effect_image_set(PointerRNA *ptr,
+                                                    PointerRNA value,
+                                                    ReportList *reports)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma == nullptr || layer == nullptr) {
+    return;
+  }
+  /* The BKE call keeps the users and tags the material, and refuses a row outside the stack or a
+   * kind that reads no slot. A refusal is reported: otherwise a Python assignment would silently
+   * leave the old image in place. */
+  if (!BKE_paint_layers_effect_image_set(*ma, layer, static_cast<Image *>(value.data))) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "Cannot assign the image: the paint layer is not part of this material, or its "
+               "kind reads no image slot");
   }
 }
 
@@ -5981,6 +6007,12 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "Fill Area",
      "Fill what a continuous border of what is below encloses: the regions the border closes off "
      "take the colour the border carries, diffused inward, or the solid colour"},
+    {MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT,
+     "CHANNEL_SPLIT",
+     0,
+     "Channel Split",
+     "Extract one channel of the assigned image and lay it as a grey in the channels the effect "
+     "works in, or as the coverage of the mask it is an item of"},
     {MA_PAINT_LAYER_FILTER_SHARPEN,
      "SHARPEN",
      0,
@@ -7185,6 +7217,18 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Fill Color", "Constant color of a Fill layer or Fill correction");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
+  prop = RNA_def_property(srna, "effect_image", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "effect_image");
+  RNA_def_property_struct_type(prop, "Image");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, "rna_MaterialPaintLayer_effect_image_set", nullptr, nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_ui_text(prop,
+                           "Image",
+                           "The image the row's kind reads from its own slot, or none while no "
+                           "image is assigned");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
   prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(
       prop, "rna_MaterialPaintLayer_enabled_get", "rna_MaterialPaintLayer_enabled_set");
@@ -7443,6 +7487,13 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_color_match_supported_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Color Match Supported", "Whether the kind is a Color Match grade");
+
+  prop = RNA_def_property(srna, "reads_image_slot", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_reads_image_slot_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Reads Image Slot",
+                           "Whether the kind reads the row's own image slot (effect_image)");
 
   prop = RNA_def_property(srna, "kind_channel_mixer", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "MaterialPaintLayerChannelMixer");

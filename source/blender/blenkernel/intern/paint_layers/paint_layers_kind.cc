@@ -446,6 +446,29 @@ static const PaintLayerKindParam fill_area_params[] = {
 };
 static_assert(std::size(fill_area_params) == PAINT_LAYER_FILL_AREA_PARAM_NUM);
 
+static const PaintLayerKindEnumItem channel_split_channel_items[] = {
+    {PAINT_LAYER_CHANNEL_SPLIT_RED, "RED", "Red"},
+    {PAINT_LAYER_CHANNEL_SPLIT_GREEN, "GREEN", "Green"},
+    {PAINT_LAYER_CHANNEL_SPLIT_BLUE, "BLUE", "Blue"},
+    {PAINT_LAYER_CHANNEL_SPLIT_ALPHA, "ALPHA", "Alpha"},
+};
+static_assert(int(std::size(channel_split_channel_items)) - 1 ==
+              PAINT_LAYER_CHANNEL_SPLIT_ALPHA);
+
+static const PaintLayerKindParam channel_split_params[] = {
+    /* The channel of the slot's image the split extracts: an ORM map's red is the occlusion, its
+     * green the roughness and its blue the metallic, so one effect per target reads one channel. */
+    {"channel",
+     "Source Channel",
+     float(PAINT_LAYER_CHANNEL_SPLIT_RED),
+     0.0f,
+     float(PAINT_LAYER_CHANNEL_SPLIT_ALPHA),
+     PaintLayerKindParamType::Enum,
+     channel_split_channel_items,
+     int(std::size(channel_split_channel_items))},
+};
+static_assert(std::size(channel_split_params) == PAINT_LAYER_CHANNEL_SPLIT_PARAM_NUM);
+
 static const PaintLayerKindParam height_to_normal_params[] = {
     /* The gradients' multiplier: one reads as the Sobel's own scale, two doubles the slope. */
     {"strength", "Normal Intensity", 1.0f, 0.0f, 16.0f},
@@ -1149,6 +1172,25 @@ static const PaintLayerKindInfo kinds[] = {
      int(std::size(fill_area_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_MASK_NEEDS_LUMA | PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
+    /* One channel of an assigned image (an ORM map, say) laid as a grey in the channels the row
+     * works in: the resample of the slot is a whole-map pass the effect cache computes, so it
+     * needs the bake like the Bevel does. The row's own slot is the one map it reads: the
+     * dependency walk, the cache key and the drop slot all read the registry's slot flag. In a
+     * mask the extracted channel is the coverage the grey carries; the result is a grey either
+     * way, so no luminance pass is asked of the mask form. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT,
+     "Channel Split",
+     PaintLayerKindCategory::Operator,
+     effect_or_mask_roles,
+     channel_split_params,
+     int(std::size(channel_split_params)),
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_RESULT_HAS_ALPHA),
+     /* #PaintLayerKindInfo::map_paintable, no_stroke_reason, reads_image_slot. */
+     false,
+     nullptr,
+     true},
     /* The Height laid as a normal: the Sobel gradients of the row's Height, encoded as the
      * tangent-space normal. The one cross-channel effect: it reads the Height
      * (#PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT) and lays into the Normal channel, the only one it
@@ -2392,6 +2434,12 @@ bool BKE_paint_layers_color_match_supported(const MaterialPaintLayer &row)
 {
   return row.source == MA_PAINT_LAYER_SOURCE_FILTER &&
          row.kind_subtype == MA_PAINT_LAYER_FILTER_COLOR_MATCH;
+}
+
+bool BKE_paint_layers_reads_image_slot(const MaterialPaintLayer &row)
+{
+  const PaintLayerKindInfo *kind = paint_layer_kind_of(row);
+  return kind != nullptr && kind->reads_image_slot;
 }
 
 MaterialPaintLayerChannelMixer *BKE_paint_layers_channel_mixer_ensure(MaterialPaintLayer &row)

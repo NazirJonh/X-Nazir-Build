@@ -2501,11 +2501,12 @@ static ImBuf *composite_mask_resample_nearest(const ImBuf *src,
   return dst;
 }
 
-ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
-                                           const int tile_number,
-                                           const PaintMaterialCompositeMapping *mapping,
-                                           const int ref_width,
-                                           const int ref_height)
+static ImBuf *mask_map_acquire(Image *image,
+                               const int tile_number,
+                               const PaintMaterialCompositeMapping *mapping,
+                               const int ref_width,
+                               const int ref_height,
+                               const char *colorspace_name)
 {
   if (image == nullptr) {
     return nullptr;
@@ -2560,7 +2561,10 @@ ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
       rcti whole;
       BLI_rcti_init(&whole, 0, read->x, 0, read->y);
       composite_decode_tile(
-          read, composite_buffer_colorspace_name(read), whole, out->float_data_for_write());
+          read,
+          colorspace_name != nullptr ? colorspace_name : composite_buffer_colorspace_name(read),
+          whole,
+          out->float_data_for_write());
     }
     else if (out != nullptr) {
       IMB_freeImBuf(out);
@@ -2573,6 +2577,25 @@ ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
   }
   BKE_image_release_ibuf(image, src, lock);
   return out;
+}
+
+ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
+                                           const int tile_number,
+                                           const PaintMaterialCompositeMapping *mapping,
+                                           const int ref_width,
+                                           const int ref_height)
+{
+  return mask_map_acquire(image, tile_number, mapping, ref_width, ref_height, nullptr);
+}
+
+ImBuf *BKE_paint_material_mask_map_acquire_data(Image *image,
+                                                const int tile_number,
+                                                const PaintMaterialCompositeMapping *mapping,
+                                                const int ref_width,
+                                                const int ref_height)
+{
+  const char *data_name = IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA);
+  return mask_map_acquire(image, tile_number, mapping, ref_width, ref_height, data_name);
 }
 
 /**

@@ -847,6 +847,9 @@ static void paint_layer_release_users(MaterialPaintLayer &layer)
   if (layer.projection_object != nullptr) {
     id_us_min(&layer.projection_object->id);
   }
+  if (layer.effect_image != nullptr) {
+    id_us_min(&layer.effect_image->id);
+  }
   for (const int i : IndexRange(layer.channels_num)) {
     if (layer.channels[i].image != nullptr) {
       id_us_min(&layer.channels[i].image->id);
@@ -2464,6 +2467,23 @@ bool BKE_paint_layers_channel_set_value(Material &ma,
   return true;
 }
 
+/**
+ * Retag \a image as Non-Color data and drop its decoded buffers, so a map that carries values
+ * (not colour) is not gamma-decoded on its way into the stack. A no-op when it already is data.
+ */
+static void paint_layer_image_read_as_data(Image &image)
+{
+  const char *data_name = IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA);
+  if (data_name == nullptr || data_name[0] == '\0' ||
+      STREQ(image.colorspace_settings.name, data_name))
+  {
+    return;
+  }
+  STRNCPY(image.colorspace_settings.name, data_name);
+  BKE_image_free_buffers(&image);
+  DEG_id_tag_update(&image.id, ID_RECALC_SOURCE);
+}
+
 bool BKE_paint_layers_channel_set_image(Material &ma,
                                         MaterialPaintLayer *layer,
                                         const eMaterialPaintChannel channel,
@@ -2492,15 +2512,35 @@ bool BKE_paint_layers_channel_set_image(Material &ma,
       }
     }
     if (!BKE_paint_material_channel_info(channel).is_color && !read_as_color) {
-      const char *data_name = IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA);
-      if (data_name != nullptr && data_name[0] != '\0' &&
-          !STREQ(image->colorspace_settings.name, data_name))
-      {
-        STRNCPY(image->colorspace_settings.name, data_name);
-        BKE_image_free_buffers(image);
-        DEG_id_tag_update(&image->id, ID_RECALC_SOURCE);
-      }
+      paint_layer_image_read_as_data(*image);
     }
+  }
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_effect_image_set(Material &ma,
+                                       MaterialPaintLayer *layer,
+                                       Image *image)
+{
+  /* The same ownership check a channel record's assignment starts with: a foreign row and a row
+   * outside the stack are refused alike, so a stale RNA pointer cannot write past the material. */
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  const PaintLayerKindInfo *kind = paint_layer_kind_of(*layer);
+  if (kind == nullptr || !kind->reads_image_slot) {
+    /* A kind that reads no slot holds no image: the assignment would be one nothing reads. */
+    return false;
+  }
+  if (layer->effect_image != nullptr) {
+    id_us_min(&layer->effect_image->id);
+  }
+  layer->effect_image = image;
+  if (image != nullptr) {
+    /* The image is not retagged as data: it may be shared with users that read it as colour, so the
+     * kernel decodes the slot as data on the fly (#BKE_paint_material_mask_map_acquire_data). */
+    id_us_plus(&image->id);
   }
   BKE_paint_layers_tag_edited(ma);
   return true;

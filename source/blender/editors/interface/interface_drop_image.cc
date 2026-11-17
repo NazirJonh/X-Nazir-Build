@@ -1225,13 +1225,26 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
     return drag_asset_list_first_of(drag, {ID_IM});
   }
 
+  /** True when the target property is a stack row's own image slot
+   * (#MaterialPaintLayer.effect_image), the only #MaterialPaintLayer pointer an image takes: a
+   * future pointer property on the row must not inherit the paint-channel drop. */
+  bool targets_effect_image_slot() const
+  {
+    return target_ptr_.type && target_prop_ &&
+           RNA_struct_is_a(target_ptr_.type, RNA_MaterialPaintLayer) &&
+           STREQ(RNA_property_identifier(target_prop_), "effect_image");
+  }
+
   /** True when the target property is a PBR paint channel's source image
-   * (#BrushMaterialPaintChannel.source_image), which can take a whole matching batch of images. */
+   * (#BrushMaterialPaintChannel.source_image), which can take a whole matching batch of images, or
+   * a stack row's own image slot (#MaterialPaintLayer.effect_image), which takes one image the
+   * same way its channel records do. */
   bool targets_paint_channel() const
   {
     return !wrap_in_texture_ && target_ptr_.type &&
            (RNA_struct_is_a(target_ptr_.type, RNA_BrushMaterialPaintChannel) ||
             RNA_struct_is_a(target_ptr_.type, RNA_MaterialPaintLayerChannel) ||
+            targets_effect_image_slot() ||
             RNA_struct_is_a(target_ptr_.type, RNA_BrushCurvePatchSlotChannel));
   }
 
@@ -1273,6 +1286,11 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
    */
   bool multi_file_dialog_applies() const
   {
+    if (targets_effect_image_slot()) {
+      /* A stack row's own slot names no channel set: the direct single-image path, the way a
+       * record of a mask item or a correction is taken. */
+      return false;
+    }
     if (!target_ptr_.type || !RNA_struct_is_a(target_ptr_.type, RNA_MaterialPaintLayerChannel)) {
       /* A brush channel (or no paint channel at all): the dialog's own path. */
       return true;

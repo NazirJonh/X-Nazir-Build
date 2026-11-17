@@ -408,7 +408,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_
                                  "EFFECT_FILL_AREA",
                                  "EFFECT_HEIGHT_TO_NORMAL",
                                  "EFFECT_PIXELATE",
-                                 "EFFECT_BLUR_SLOPE"})
+                                 "EFFECT_BLUR_SLOPE",
+                                 "EFFECT_CHANNEL_SPLIT"})
   {
     EXPECT_TRUE(is_filter2(content, identifier)) << identifier;
     EXPECT_FALSE(is_new(content, identifier)) << identifier;

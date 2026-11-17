@@ -52,13 +52,18 @@ void BKE_paint_layers_mask_effect_input_images(const Material &ma,
   Vector<bUUID> visited;
   /* The grey the effect reads is the base mask and the items before it, laid live: the maps each
    * of them renders from are the input's maps, a nested reader among them bringing its own slice's.
-   * The effect item itself reads nothing, so the walk stops before it. */
-  for (const MaterialPaintLayer &item : row.mask_stack) {
-    if (&item == &effect) {
-      break;
-    }
-    bake_collect_row_maps(ma, item, r_images, visited);
-  }
+   * The effect item itself reads nothing, so the walk stops before it. A kind that reads its own
+   * slot (a Channel Split) samples that image beside the grey's input; the common append takes it
+   * so this reader cannot forget it. */
+  paint_layer_effect_input_images_append(
+      effect, r_images, [&](Vector<Image *> &r_input_images) {
+        for (const MaterialPaintLayer &item : row.mask_stack) {
+          if (&item == &effect) {
+            break;
+          }
+          bake_collect_row_maps(ma, item, r_input_images, visited);
+        }
+      });
 }
 
 /* Whether a mask effect item waits for the running stroke to end before its re-bake: the same

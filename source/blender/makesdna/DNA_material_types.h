@@ -1209,6 +1209,15 @@ enum eMaterialPaintLayerFilter : int16_t {
    * resample waits for the input-socket mechanism the custom-noise slot needs.
    */
   MA_PAINT_LAYER_FILTER_BLUR_SLOPE = 43,
+  /**
+   * Extract one channel of an assigned image (a Channel Split) and lay it as a grey in every
+   * channel the effect works in: an ORM map dropped on the slot feeds Roughness from its green, AO
+   * from its red and Metallic from its blue, one effect each. A CPU-computed effect like the
+   * #MA_PAINT_LAYER_FILTER_BEVEL: the resample of a map of its own is the effect cache's to
+   * compute. On a content row the channels the row carries are the targets; as a mask item the
+   * extracted channel is the coverage.
+   */
+  MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT = 44,
 };
 
 /** #MaterialPaintLayerColorBalance::method */
@@ -1973,6 +1982,13 @@ struct MaterialPaintLayer {
    * through the row's dependencies. Appended last so the offsets of the older fields do not move.
    */
   MaterialPaintLayerText *text_decal = nullptr;
+  /**
+   * The image the row's kind reads from its own slot (a Channel Split's source map), or null while
+   * nothing is assigned. A user of the image, reported through the row's dependencies; only a kind
+   * whose registry entry reads a slot ever looks at it. Appended last so the offsets of the older
+   * fields do not move.
+   */
+  struct Image *effect_image = nullptr;
 };
 
 /**

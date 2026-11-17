@@ -111,9 +111,14 @@ static bool mask_effect_dimensions(const Material &ma,
   {
     return false;
   }
-  return BKE_paint_material_composite_stack_dimensions(
-             Span<PaintMaterialCompositeImageLayer>(&entry, 1), r_width, r_height) &&
-         r_width > 0 && r_height > 0;
+  /* A mask with no map of its own and a kind that reads a slot takes the slot's size. */
+  bool from_slot = false;
+  return paint_layer_effect_dimensions_resolve(Span<PaintMaterialCompositeImageLayer>(&entry, 1),
+                                               effect,
+                                               tile_number,
+                                               r_width,
+                                               r_height,
+                                               from_slot);
 }
 
 /** The key of \a effect's entry: the effect's own hash and the mask channel marker folded into it,
@@ -289,7 +294,7 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
   }
   else {
     /* The kernel reads the buffer the block above filled and leaves the alpha alone. */
-    paint_layer_effect_kernel_apply(*color, effect, /*for_mask=*/true);
+    paint_layer_effect_kernel_apply(*color, effect, /*for_mask=*/true, tile_number);
     mask_effect_grey_normalize(*color, effect);
   }
   /* The versions are taken after the render: an edit that landed while it ran is read next time. */

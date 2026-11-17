@@ -542,6 +542,29 @@ static bool composite_generator_describe(
 }
 
 /**
+ * The size of \a effect's slot image (#paint_layer_effect_slot_image) on \a tile_number, the one
+ * place both a row's description and an effect's buffer ask it.
+ * \return false when the effect has no slot image or it has no readable size.
+ */
+static bool paint_layer_effect_slot_size(const MaterialPaintLayer &effect,
+                                         const int tile_number,
+                                         int &r_width,
+                                         int &r_height)
+{
+  Image *slot = paint_layer_effect_slot_image(effect);
+  if (slot == nullptr) {
+    return false;
+  }
+  ImageUser iuser;
+  BKE_imageuser_default(&iuser);
+  iuser.tile = tile_number;
+  r_width = 0;
+  r_height = 0;
+  BKE_image_get_size(slot, &iuser, &r_width, &r_height);
+  return r_width > 0 && r_height > 0;
+}
+
+/**
  * Describe the source of the row \a layer (not a folder) in \a channel to the evaluator: the
  * counterpart of the generator's #PaintLayersTreeBuilder::row_source_emit, which builds the same
  * thing as nodes. False when the row takes no part, which the generator leaves out as well.
@@ -685,6 +708,18 @@ static bool composite_row_source_describe(const Material &ma,
      * coverage and the corrections bring it in. */
     out.has_constant_color = true;
     out.empty_base = true;
+    /* The row has no map to size the stack by: a correction that reads a slot image is the canvas,
+     * at the image's own size. */
+    for (const MaterialPaintLayer &effect : layer.effects) {
+      int slot_width = 0;
+      int slot_height = 0;
+      if (paint_layer_effect_filters(ma, effect, channel) &&
+          paint_layer_effect_slot_size(effect, tile_number, slot_width, slot_height))
+      {
+        out.empty_base_size = slot_width;
+        break;
+      }
+    }
     return true;
   }
   if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
@@ -2349,6 +2384,23 @@ static bool anchor_slice_key_equal(const AnchorSliceCacheKey &a, const AnchorSli
          a.channel == b.channel && a.tile_number == b.tile_number && a.hash == b.hash;
 }
 
+bool paint_layer_effect_dimensions_resolve(Span<PaintMaterialCompositeImageLayer> input,
+                                           const MaterialPaintLayer &effect,
+                                           const int tile_number,
+                                           int &r_width,
+                                           int &r_height,
+                                           bool &r_from_slot)
+{
+  r_from_slot = false;
+  if (BKE_paint_material_composite_stack_dimensions(input, r_width, r_height) && r_width > 0 &&
+      r_height > 0)
+  {
+    return true;
+  }
+  r_from_slot = paint_layer_effect_slot_size(effect, tile_number, r_width, r_height);
+  return r_from_slot;
+}
+
 /** An RGBA float buffer of \a width x \a height, owned by the returned shared pointer. */
 static std::shared_ptr<ImBuf> anchor_slice_buffer_new(const int width, const int height)
 {
@@ -2820,6 +2872,10 @@ uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int cha
       }
     }
   }
+  /* The kind's own slot (a Channel Split's image) is the one map the kernel samples itself, so its
+   * identity joins the hash: assigning another image makes a key the old entry never answers. The
+   * pixels are the subscriptions' business, the way the input's maps' are. */
+  paint_layer_effect_hash_mix_slot(hash, effect);
   return hash;
 }
 
@@ -2944,9 +3000,13 @@ static bool paint_layer_effect_compute(const Material &ma,
     {
       return false;
     }
-    if (!BKE_paint_material_composite_stack_dimensions(
-            Span<PaintMaterialCompositeImageLayer>(&entry, 1), width, height) ||
-        width <= 0 || height <= 0)
+    bool from_slot = false;
+    if (!paint_layer_effect_dimensions_resolve(Span<PaintMaterialCompositeImageLayer>(&entry, 1),
+                                               effect,
+                                               tile_number,
+                                               width,
+                                               height,
+                                               from_slot))
     {
       return false;
     }
@@ -2954,21 +3014,30 @@ static bool paint_layer_effect_compute(const Material &ma,
     if (color == nullptr) {
       return false;
     }
-    Vector<float> coverage(int64_t(width) * height);
-    if (!BKE_paint_material_composite_eval_row_content(
-            entry, color->float_data_for_write(), coverage.data(), nullptr, channel))
-    {
-      return false;
+    /* A row with no map has no content to render: the slot's own size gave the canvas, and the
+     * kernel lays its result over the empty buffer. */
+    if (!from_slot) {
+      Vector<float> coverage(int64_t(width) * height);
+      if (!BKE_paint_material_composite_eval_row_content(
+              entry, color->float_data_for_write(), coverage.data(), nullptr, channel))
+      {
+        return false;
+      }
     }
     perf_input.note("kind=%d size=%dx%d region=full", int(effect.kind_subtype), width, height);
   }
   /* The kernel reads the buffer the block above filled and leaves the alpha alone -- unless the kind
    * lays a layer of its own (#PAINT_LAYER_KIND_RESULT_HAS_ALPHA); the scope ends before it, so the
    * two halves of the recompute are not timed together. */
-  paint_layer_effect_kernel_apply(*color, effect);
-  /* The versions are taken after the render: an edit that landed while it ran is read next time. */
+  paint_layer_effect_kernel_apply(*color, effect, /*for_mask=*/false, tile_number);
+  /* The versions are taken after the render: an edit that landed while it ran is read next time.
+   * The kind's own slot joins the input's maps: the kernel samples it directly, so an edit of its
+   * pixels must reach the entry the same way an edit of the input's maps does. */
   Vector<Image *> images;
-  BKE_paint_layers_effect_input_images(entry, images);
+  paint_layer_effect_input_images_append(
+      effect, images, [&](Vector<Image *> &r_input_images) {
+        BKE_paint_layers_effect_input_images(entry, r_input_images);
+      });
   r_synced = map_sources_snapshot(images);
   r_color = std::move(color);
   perf_total.note("kind=%d size=%dx%d region=full", int(effect.kind_subtype), width, height);
@@ -3046,6 +3115,7 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
   Vector<Image *> images;
   int width = 0;
   int height = 0;
+  bool dims_from_slot = false;
   if (!BKE_paint_layers_effect_input_describe(
           ma,
           row,
@@ -3055,13 +3125,20 @@ static std::shared_ptr<ImBuf> paint_layer_effect_buffer_get(const Material &ma,
           false,
           dims_entry,
           PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}) ||
-      !BKE_paint_material_composite_stack_dimensions(
-          Span<PaintMaterialCompositeImageLayer>(&dims_entry, 1), width, height) ||
-      width <= 0 || height <= 0)
+      !paint_layer_effect_dimensions_resolve(
+          Span<PaintMaterialCompositeImageLayer>(&dims_entry, 1),
+          effect,
+          tile_number,
+          width,
+          height,
+          dims_from_slot))
   {
     return {};
   }
-  BKE_paint_layers_effect_input_images(dims_entry, images);
+  paint_layer_effect_input_images_append(
+      effect, images, [&](Vector<Image *> &r_input_images) {
+        BKE_paint_layers_effect_input_images(dims_entry, r_input_images);
+      });
   if (r_images != nullptr) {
     *r_images = images;
   }
@@ -3138,31 +3215,31 @@ void paint_layer_owned_effect_input_images(const Material &ma,
                                            const MaterialPaintLayer &effect,
                                            Vector<Image *> &r_images)
 {
-  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-    if (!paint_layer_effect_filters(ma, effect, channel)) {
-      continue;
-    }
-    PaintMaterialCompositeImageLayer entry;
-    if (!BKE_paint_layers_effect_input_describe(
-            ma,
-            row,
-            effect,
-            channel,
-            /*dimensions_only=*/true,
-            /*describe_only=*/false,
-            entry,
-            PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}))
-    {
-      continue;
-    }
-    Vector<Image *> images;
-    BKE_paint_layers_effect_input_images(entry, images);
-    for (Image *image : images) {
-      if (!r_images.contains(image)) {
-        r_images.append(image);
-      }
-    }
-  }
+  /* The kind's own slot is beside the input's maps: the bake reads the kernel's sampling of it, so
+   * an edit of its pixels must reach the bake the way an edit of the input's maps does. The common
+   * append takes it once for every channel below. */
+  paint_layer_effect_input_images_append(
+      effect, r_images, [&](Vector<Image *> &r_input_images) {
+        for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+          if (!paint_layer_effect_filters(ma, effect, channel)) {
+            continue;
+          }
+          PaintMaterialCompositeImageLayer entry;
+          if (!BKE_paint_layers_effect_input_describe(
+                  ma,
+                  row,
+                  effect,
+                  channel,
+                  /*dimensions_only=*/true,
+                  /*describe_only=*/false,
+                  entry,
+                  PaintLayerTileContext{.tile_number = PAINT_TILE_NUMBER_BASE}))
+          {
+            continue;
+          }
+          BKE_paint_layers_effect_input_images(entry, r_input_images);
+        }
+      });
 }
 
 uint64_t paint_layer_owned_effect_input_hash(const Material &ma,
@@ -3200,6 +3277,9 @@ uint64_t paint_layer_owned_effect_input_hash(const Material &ma,
     }
     mix(BKE_paint_material_composite_stack_hash(Span<PaintMaterialCompositeImageLayer>(&entry, 1)));
   }
+  /* The kind's own slot moves the bake the way the description does: another image in it is
+   * another result the bake must hold. The pixels stay the subscriptions' business. */
+  paint_layer_effect_hash_mix_slot(hash, effect);
   return hash;
 }
 

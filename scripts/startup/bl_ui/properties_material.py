@@ -31,6 +31,7 @@ from bl_ui.properties_material_paint_layers import (
     draw_material_mask_item,
     draw_material_smart_asset_expose,
     draw_material_smart_asset_rows,
+    draw_material_effect_image_slot,
     draw_material_update_now,
     material_layer_visible_channels,
 )
@@ -943,6 +944,10 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 layout.separator()
                 if item.is_map_coverage:
                     draw_material_mask_coverage_item(layout, context, item)
+                elif item.reads_image_slot:
+                    # The slot first and the kind's parameters below: the grey a mask takes is what
+                    # the kind reads from the image, not a colour of the mask's own.
+                    draw_material_effect_image_slot(layout, item)
                 elif item.color_match_supported:
                     draw_material_color_match(layout, item.kind_params)
                 else:
@@ -1016,7 +1021,11 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 # A transform effect keeps its mapping as its parameter set: the Mapping panel and
                 # the gizmo edit it, and there is nothing else on the row to draw.
                 return
-            if layer.color_match_supported:
+            if layer.reads_image_slot:
+                # The slot comes first, where the eye lands: the kind reads the image it is given,
+                # and the parameters below are the targets it feeds.
+                draw_material_effect_image_slot(layout, layer)
+            elif layer.color_match_supported:
                 draw_material_color_match(layout, layer.kind_params)
             else:
                 draw_material_kind_params(layout, layer.kind_params)

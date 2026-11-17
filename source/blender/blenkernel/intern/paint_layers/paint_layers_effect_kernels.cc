@@ -20,6 +20,7 @@
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_constants.h"
+#include "BLI_math_interp.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_task.hh"
 #include "BLI_vector.hh"
@@ -27,6 +28,7 @@
 #include "DNA_material_types.h"
 
 #include "BKE_paint.hh"
+#include "BKE_paint_material_composite.hh"
 #include "BKE_paint_perf_debug.hh"
 
 #include "IMB_colormanagement.hh"
@@ -1772,9 +1774,71 @@ static void paint_layer_effect_color_match_apply(ImBuf &buffer, const MaterialPa
   });
 }
 
+/**
+ * The Channel Split: one channel of the row's slot image (an ORM map, say) laid as a grey in the
+ * RGB of every texel. A content effect lays a layer of its own (#PAINT_LAYER_KIND_RESULT_HAS_ALPHA):
+ * the map covers fully, so the grey shows on a row that has no paint yet; a mask item keeps the
+ * input alpha, its grey carries none of its own. The image is sampled at the texel's own UV, so
+ * it stretches over the map whatever its resolution, the way a mask item's map is read. An empty
+ * slot, or one with no readable pixels, leaves the buffer as it is: the effect is the identity
+ * while no image is assigned. The value is written as it is, the way the pointwise filters write
+ * the channels they correct, and the kind table needs no luminance pass back from a mask form:
+ * the extraction is one value already.
+ */
+static void paint_layer_effect_channel_split_apply(ImBuf &buffer,
+                                                   const MaterialPaintLayer &effect,
+                                                   const int tile_number,
+                                                   const bool lays_layer)
+{
+  Image *slot = paint_layer_effect_slot_image(effect);
+  if (slot == nullptr) {
+    return;
+  }
+  /* The same tile the buffer stands for: an UDIM slot is sampled on the tile the map was computed
+   * on, and a plain image answers whatever tile is asked. The acquire decodes into a float RGBA
+   * buffer of the image's own size, so the resample below is the only scale the split applies. It
+   * reads the slot as data, without retagging the image or its other users as Non-Color. */
+  bke::paint_perf::ScopedTimer perf("effect.cpu.channel_split");
+  perf.note("kind=%d size=%dx%d", int(effect.kind_subtype), buffer.x, buffer.y);
+  ImBuf *map = BKE_paint_material_mask_map_acquire_data(slot, tile_number, nullptr, 0, 0);
+  if (map == nullptr || map->float_data() == nullptr || map->x <= 0 || map->y <= 0) {
+    if (map != nullptr) {
+      IMB_freeImBuf(map);
+    }
+    return;
+  }
+  const int component = std::clamp(
+      paint_layer_kind_param_int_get(effect, PAINT_LAYER_CHANNEL_SPLIT_CHANNEL),
+      int(PAINT_LAYER_CHANNEL_SPLIT_RED),
+      int(PAINT_LAYER_CHANNEL_SPLIT_ALPHA));
+  const float *data = map->float_data();
+  const int width = buffer.x;
+  const int height = buffer.y;
+  float *pixels = buffer.float_data_for_write();
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    for (const int y : range) {
+      const float sv = ((float(y) + 0.5f) / float(height)) * float(map->y) - 0.5f;
+      float *dst = pixels + int64_t(y) * width * 4;
+      for (const int x : IndexRange(width)) {
+        const float su = ((float(x) + 0.5f) / float(width)) * float(map->x) - 0.5f;
+        const float4 sample = math::interpolate_bilinear_fl(data, map->x, map->y, su, sv);
+        const float value = sample[component];
+        dst[int64_t(x) * 4 + 0] = value;
+        dst[int64_t(x) * 4 + 1] = value;
+        dst[int64_t(x) * 4 + 2] = value;
+        if (lays_layer) {
+          dst[int64_t(x) * 4 + 3] = 1.0f;
+        }
+      }
+    }
+  });
+  IMB_freeImBuf(map);
+}
+
 void paint_layer_effect_kernel_apply(ImBuf &buffer,
                                      const MaterialPaintLayer &effect,
-                                     const bool for_mask)
+                                     const bool for_mask,
+                                     const int tile_number)
 {
   /* Timed apart from the input it is handed: this is the half an effect pass computes instead, so
    * the line stopping to print in `BLENDER_PBR_PERF` is what a covered kind bought. The region is
@@ -1865,6 +1929,10 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer,
     case MA_PAINT_LAYER_FILTER_FILL_AREA:
       paint_layer_effect_fill_area_apply(
           buffer, effect, !for_mask && paint_layer_kind_result_has_alpha(effect));
+      break;
+    case MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT:
+      paint_layer_effect_channel_split_apply(
+          buffer, effect, tile_number, !for_mask && paint_layer_kind_result_has_alpha(effect));
       break;
     case MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL:
       paint_layer_effect_height_to_normal_apply(buffer, effect);

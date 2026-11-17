@@ -1059,6 +1059,59 @@ TEST_F(PaintLayersFilterKindsTest, the_second_batch_cpu_computed_kinds_carry_the
   }
 }
 
+TEST_F(PaintLayersFilterKindsTest, channel_split_kind_is_a_cpu_computed_effect_with_a_schema)
+{
+  Material *ma = BKE_material_add(bmain, "RnaChannelSplitParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *split = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+  ASSERT_NE(split, nullptr);
+
+  /* A CPU-computed effect like the Bevel: the resample of the slot's map is a whole-map pass the
+   * effect cache computes, so no GPU pass exists for it. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_NEEDS_BAKE));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_GPU_COMPUTED));
+  /* The result is a grey of the slot's channel, not a layer with an alpha of its own: the input's
+   * coverage stays, and a mask's grey carries none of its own either. */
+  EXPECT_FALSE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_RESULT_HAS_ALPHA));
+  /* The slot is the one map the kernel reads: the registry says so, and the slot answers null
+   * while nothing is assigned. */
+  const PaintLayerKindInfo *kind = paint_layer_kind_of(*split);
+  ASSERT_NE(kind, nullptr);
+  EXPECT_TRUE(kind->reads_image_slot);
+  EXPECT_EQ(paint_layer_effect_slot_image(*split), nullptr);
+  EXPECT_EQ(paint_layer_kind_param_int_get(*split, PAINT_LAYER_CHANNEL_SPLIT_CHANNEL),
+            PAINT_LAYER_CHANNEL_SPLIT_RED);
+
+  /* The RNA enum names the kind, and the collection lists exactly the schema's one parameter,
+   * labelled. */
+  PointerRNA split_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, split);
+  PropertyRNA *filter_prop = RNA_struct_find_property(&split_ptr, "filter_type");
+  ASSERT_NE(filter_prop, nullptr);
+  const char *identifier = nullptr;
+  ASSERT_TRUE(RNA_property_enum_identifier(nullptr,
+                                           &split_ptr,
+                                           filter_prop,
+                                           MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT,
+                                           &identifier));
+  EXPECT_STREQ(identifier, "CHANNEL_SPLIT");
+  PropertyRNA *params = RNA_struct_find_property(&split_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&split_ptr, params), 1);
+  /* The read-only slot flag is what the UI and the drop target branch on, instead of the kind's
+   * enum identifier. */
+  PropertyRNA *reads_slot = RNA_struct_find_property(&split_ptr, "reads_image_slot");
+  ASSERT_NE(reads_slot, nullptr);
+  EXPECT_TRUE(RNA_property_boolean_get(&split_ptr, reads_slot));
+  PointerRNA param_ptr;
+  ASSERT_TRUE(RNA_property_collection_lookup_string(&split_ptr, params, "channel", &param_ptr));
+  PropertyRNA *label = RNA_struct_find_property(&param_ptr, "label");
+  ASSERT_NE(label, nullptr);
+  EXPECT_EQ(RNA_property_string_get(&param_ptr, label), "Source Channel");
+}
+
 TEST_F(PaintLayersFilterKindsTest, deband_kind_is_a_pointwise_filter_with_a_mode_and_two_integers)
 {
   Material *ma = BKE_material_add(bmain, "RnaDebandParamMat");

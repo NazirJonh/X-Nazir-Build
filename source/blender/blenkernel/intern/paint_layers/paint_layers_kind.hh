@@ -350,6 +350,13 @@ struct PaintLayerKindInfo {
    * of adding an `if (source == ...)` at every refusal site.
    */
   const char *no_stroke_reason = nullptr;
+  /**
+   * The kind reads the image assigned to the row's #MaterialPaintLayer::effect_image (a Channel
+   * Split's source map). The slot is the row's one image: the dependency walk reports it, the effect
+   * cache keys on it and the UI offers the drop, all asking this one field, so a kind that reads
+   * nothing answers null whatever a stale pointer holds.
+   */
+  bool reads_image_slot = false;
 };
 
 /* The shared filter parameter layouts live in `paint_layer_formula.hh`. */
@@ -764,6 +771,22 @@ enum PaintLayerFillAreaParam : int {
   /** The diffusion passes the fill walks; more reach farther in, at the cost of the passes. */
   PAINT_LAYER_FILL_AREA_ITERATIONS = 7,
   PAINT_LAYER_FILL_AREA_PARAM_NUM = 8,
+};
+
+/** The channel of the slot image a Channel Split extracts, the value of its
+ * #PAINT_LAYER_CHANNEL_SPLIT_CHANNEL parameter. */
+enum PaintLayerChannelSplitChannel : int {
+  PAINT_LAYER_CHANNEL_SPLIT_RED = 0,
+  PAINT_LAYER_CHANNEL_SPLIT_GREEN = 1,
+  PAINT_LAYER_CHANNEL_SPLIT_BLUE = 2,
+  PAINT_LAYER_CHANNEL_SPLIT_ALPHA = 3,
+};
+
+/** The positions of the Channel Split filter's parameters in its schema. */
+enum PaintLayerChannelSplitParam : int {
+  /** The channel of the slot's image the split lays as a grey. */
+  PAINT_LAYER_CHANNEL_SPLIT_CHANNEL = 0,
+  PAINT_LAYER_CHANNEL_SPLIT_PARAM_NUM = 1,
 };
 
 /** The positions of the Height To Normal filter's parameters in its schema. */
@@ -1377,6 +1400,18 @@ inline void paint_layer_dependencies(MaterialPaintLayer &row,
       return;
     }
     return;
+  }
+  /* A kind that reads the row's own slot (a Channel Split) reports it the way a map-coverage
+   * operator reports its map: the slot is the one map the kernel samples, so the pixels move the
+   * caches that read it and the row keeps the image alive. */
+  if (const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+      info != nullptr && info->reads_image_slot)
+  {
+    PaintLayerDependency dep{reinterpret_cast<ID **>(&row.effect_image),
+                             PaintLayerDependencyKind::ImageMap,
+                             PAINT_LAYER_DEP_PIXELS | PAINT_LAYER_DEP_OWNERSHIP,
+                             -1};
+    fn(dep);
   }
   for (int i = 0; i < row.channels_num; i++) {
     MaterialPaintLayerChannel &record = row.channels[i];

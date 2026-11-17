@@ -344,6 +344,19 @@ static void paint_layer_text_decal_duplicate(MaterialPaintLayer &dst, const Mate
 }
 
 /**
+ * The copy of a row shares the image of its kind's slot (a Channel Split's source map): it is a
+ * texture the kind reads, never painted data, so the copy takes a user of its own on it.
+ */
+static void paint_layer_effect_image_duplicate(MaterialPaintLayer &dst,
+                                               const MaterialPaintLayer &src)
+{
+  dst.effect_image = src.effect_image;
+  if (dst.effect_image != nullptr) {
+    id_us_plus(&dst.effect_image->id);
+  }
+}
+
+/**
  * Deep-copy \a src's projection payload onto \a dst and take the user of its controller. The frame
  * is plain sub-data; the object reference is an ID user like the row's maps.
  */
@@ -423,6 +436,7 @@ MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
    * to the object. */
   paint_layer_text_decal_duplicate(*item_copy, item);
   paint_layer_channels_duplicate(bmain, *item_copy, item, options);
+  paint_layer_effect_image_duplicate(*item_copy, item);
   paint_layer_id_colors_duplicate(*item_copy, item);
   paint_layer_properties_duplicate(*item_copy, item);
   paint_layer_projection_duplicate(*item_copy, item);
@@ -482,6 +496,7 @@ void paint_layer_branch_duplicate(Main &bmain,
   paint_layer_curve_patch_duplicate(bmain, dst, src);
   paint_layer_text_decal_duplicate(dst, src);
   paint_layer_channels_duplicate(bmain, dst, src, options);
+  paint_layer_effect_image_duplicate(dst, src);
   paint_layer_id_colors_duplicate(dst, src);
   paint_layer_properties_duplicate(dst, src);
   BKE_paint_layers_gradient_copy(dst, src);

@@ -1218,6 +1218,18 @@ ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
                                            int ref_height);
 
 /**
+ * The same acquisition as #BKE_paint_material_mask_map_acquire, but decoded as data: the buffer's
+ * colorspace is ignored and the texels are read as stored, without changing \a image's own
+ * colorspace. A kind that reads channel values (a Channel Split's ORM map) uses this, so assigning
+ * an sRGB-tagged image does not retag an image other users may read as colour.
+ */
+ImBuf *BKE_paint_material_mask_map_acquire_data(Image *image,
+                                                int tile_number,
+                                                const PaintMaterialCompositeMapping *mapping,
+                                                int ref_width,
+                                                int ref_height);
+
+/**
  * Resample \a src onto a \a width x \a height grid through the UV \a steps (the transform effects'
  * vocabulary of #PaintMaterialCompositeMapping, a Decal step ignored), the transform a map read
  * goes through, as a float RGBA buffer the caller owns and frees with #IMB_freeImBuf. Null when the

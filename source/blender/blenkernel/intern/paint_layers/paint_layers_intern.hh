@@ -18,6 +18,7 @@
 #include <string>
 #include <utility>
 
+#include "BLI_function_ref.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
 #include "BLI_span.hh"
@@ -34,6 +35,7 @@
 
 #include "IMB_colormanagement.hh"
 
+#include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 
@@ -1139,6 +1141,15 @@ inline bool paint_layer_effects_lay(const Material &ma,
     if (paint_layer_effect_lays(ma, effect, channel)) {
       return true;
     }
+    /* A filter lays no coverage, except a kind that reads a slot image and lays a layer of its own
+     * (a Channel Split): its map comes from the image, so it keeps an unpainted row alive. */
+    const PaintLayerKindInfo *kind = paint_layer_kind_of(effect);
+    if (kind != nullptr && kind->reads_image_slot &&
+        (kind->flags & PAINT_LAYER_KIND_RESULT_HAS_ALPHA) != 0 && effect.effect_image != nullptr &&
+        paint_layer_effect_filters(ma, effect, channel))
+    {
+      return true;
+    }
   }
   return false;
 }
@@ -1930,11 +1941,85 @@ void paint_layer_effect_to_luminance(ImBuf &buffer);
  * The kernel of \a effect over \a buffer in place, at full strength, RGB only -- except for a kind
  * with #PAINT_LAYER_KIND_RESULT_HAS_ALPHA, whose result is a layer: premultiplied colour and the
  * alpha it covers by. \a for_mask is a mask item's grey, which has no alpha and takes the
- * colour-only result of every kind.
+ * colour-only result of every kind. \a tile_number is the tile the buffer stands for: a kernel
+ * that samples an image of its own (a Channel Split's slot) reads the same UDIM tile the buffer
+ * was computed on. Callers name both explicitly: a tile defaulted to the base one would silently
+ * read the wrong UDIM tile.
  */
 void paint_layer_effect_kernel_apply(ImBuf &buffer,
                                      const MaterialPaintLayer &effect,
-                                     bool for_mask = false);
+                                     bool for_mask,
+                                     int tile_number);
+
+/**
+ * The image the \a effect's kind reads from the row's own slot (#MaterialPaintLayer::effect_image),
+ * or null: the kind table decides, so a kind that reads no slot answers null whatever a stale
+ * pointer holds, and a kind that does answer the slot while no image is assigned.
+ */
+inline Image *paint_layer_effect_slot_image(const MaterialPaintLayer &effect)
+{
+  const PaintLayerKindInfo *kind = paint_layer_kind_of(effect);
+  return (kind != nullptr && kind->reads_image_slot) ? effect.effect_image : nullptr;
+}
+
+/**
+ * Add the \a effect's slot image (#paint_layer_effect_slot_image) to \a r_images when it has one
+ * that is not listed yet: the one place every pixel subscription list takes the slot, so a new
+ * reader of it cannot forget the de-duplication.
+ */
+inline void paint_layer_effect_slot_image_append(const MaterialPaintLayer &effect,
+                                                 blender::Vector<Image *> &r_images)
+{
+  Image *slot = paint_layer_effect_slot_image(effect);
+  if (slot != nullptr && !r_images.contains(slot)) {
+    r_images.append(slot);
+  }
+}
+
+/**
+ * Append to \a r_images every map whose pixel edits make \a effect's result stale: whatever
+ * \a collect_input appends for the effect's input, plus the kind's own slot image. The one place
+ * the slot's subscription is taken, so a new reader of an effect input cannot forget it.
+ */
+inline void paint_layer_effect_input_images_append(
+    const MaterialPaintLayer &effect,
+    blender::Vector<Image *> &r_images,
+    const blender::FunctionRef<void(blender::Vector<Image *> &)> collect_input)
+{
+  collect_input(r_images);
+  paint_layer_effect_slot_image_append(effect, r_images);
+}
+
+/**
+ * Fold the identity of \a effect's slot image (#paint_layer_effect_slot_image) into \a hash, when
+ * it has one. The one place the slot's identity enters a hash, so every reader of an effect input
+ * keys on it; the pixels stay the subscriptions' business.
+ */
+inline void paint_layer_effect_hash_mix_slot(uint64_t &hash, const MaterialPaintLayer &effect)
+{
+  const Image *slot = paint_layer_effect_slot_image(effect);
+  if (slot == nullptr) {
+    return;
+  }
+  hash ^= uint64_t(slot->id.session_uid);
+  hash *= 1099511628211ull;
+}
+
+/**
+ * The size an effect's buffer is computed at: the input stack's own canvas while its maps exist,
+ * else the size of \a effect's slot image on \a tile_number. A kind that reads a slot lays its
+ * result from that image alone, so a row with no map yet (nothing painted) must not leave it empty.
+ * \a r_from_slot is true when the slot gave the size, which tells the caller the input has no
+ * content to render.
+ * \return false when neither the stack nor the slot has a size.
+ */
+bool paint_layer_effect_dimensions_resolve(
+    blender::Span<PaintMaterialCompositeImageLayer> input,
+    const MaterialPaintLayer &effect,
+    int tile_number,
+    int &r_width,
+    int &r_height,
+    bool &r_from_slot);
 
 /**
  * Compute the result of \a effect, which owns it (#paint_layer_effect_owns_result), on \a row's

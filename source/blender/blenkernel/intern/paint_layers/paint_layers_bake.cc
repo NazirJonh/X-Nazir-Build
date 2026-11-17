@@ -782,6 +782,9 @@ void bake_collect_row_maps(const Material &ma,
   for (int i = 0; i < row.channels_num; i++) {
     add(row.channels[i].image);
   }
+  /* A kind that reads its own slot (a Channel Split) samples that image: a pixel edit of it moves
+   * the bake of every row that carries the kind, as an edit of a channel map does. */
+  add(paint_layer_effect_slot_image(row));
   if (row.bake != nullptr) {
     for (Image *image : row.bake->images) {
       add(image);
@@ -1578,6 +1581,9 @@ static uint64_t bake_hash_layer(uint64_t h,
      * in, beside the effect's own parameters hashed below. The pixels are the subscription's. */
     h = bake_hash_mix(h, paint_layer_owned_effect_input_hash(ma, *owned_row, layer));
   }
+  /* The image of a kind's own slot (a Channel Split) is what its result is made of: another image
+   * is another bake. The pixels are the subscription's. */
+  paint_layer_effect_hash_mix_slot(h, layer);
   /* A kind's parameters (a filter's, a coverage operator's) change the pixels. A ramp filter keeps
    * its stops outside the properties, in its own payload; a curves filter its Bézier points. */
   h = bake_hash_idprops(h, layer.system_properties);

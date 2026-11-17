@@ -748,6 +748,28 @@ def draw_material_mask_coverage_item(layout, _context, item):
     _draw_mask_output(layout, record, item)
 
 
+def draw_material_effect_image_slot(layout, item):
+    """The image slot of an effect whose kind reads one, and the kind's parameters.
+
+    The slot is the row's own image -- the same drop the Fill correction's map takes. A kind that
+    reads it decides what the image means; an empty slot leaves its effect the identity, so the
+    slot is drawn first, where the eye lands. The label comes from the property itself, so it stays
+    the row's own wording for any future slot-reading kind.
+    """
+    layout.separator()
+    row = layout.row(align=True)
+    row.template_ID_browser(
+        item,
+        "effect_image",
+        open="image.open",
+        text="Drop image",
+        image_filter='PAINT_SOURCE',
+        use_unlink=True,
+        use_users=False,
+    )
+    draw_material_kind_params(layout, item.kind_params)
+
+
 def draw_material_layer_height(layout, material, layer):
     """Draw a layer's Height record controls, on the channel they belong to.
 

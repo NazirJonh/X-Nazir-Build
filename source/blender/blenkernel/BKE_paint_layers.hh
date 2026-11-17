@@ -173,6 +173,12 @@ bool BKE_paint_layers_channel_mixer_supported(const MaterialPaintLayer &row);
 bool BKE_paint_layers_color_match_supported(const MaterialPaintLayer &row);
 
 /**
+ * Whether \a row's kind reads the row's own image slot (#MaterialPaintLayer::effect_image): the
+ * registry's slot flag, as the kernel, the dependency walk and the UI read it.
+ */
+bool BKE_paint_layers_reads_image_slot(const MaterialPaintLayer &row);
+
+/**
  * The row's channel-mixer payload, allocated with the neutral matrix (identity, zero constants) when
  * it has none. Only a kind with a Channel Mixer parameter gets one; returns null for every other
  * kind.
@@ -1256,6 +1262,17 @@ bool BKE_paint_layers_channel_set_image(Material &ma,
                                         MaterialPaintLayer *layer,
                                         eMaterialPaintChannel channel,
                                         Image *image);
+
+/**
+ * Point \a layer's own image slot (#MaterialPaintLayer::effect_image) at \a image, or detach it
+ * with a null one. Only a kind whose registry entry reads a slot (a Channel Split) holds one, so
+ * the assignment is refused for every other row. User counts are maintained here: the row is one
+ * of the users that keeps the image alive, and a map dropped on the slot is read as data by the
+ * kernel without changing the image's own colorspace.
+ *
+ * \return false when \a layer is not part of \a ma or its kind reads no slot.
+ */
+bool BKE_paint_layers_effect_image_set(Material &ma, MaterialPaintLayer *layer, Image *image);
 
 /** What a specular map carries: what the specular converter reads out of it. */
 enum class PaintSpecularMapKind : int8_t {

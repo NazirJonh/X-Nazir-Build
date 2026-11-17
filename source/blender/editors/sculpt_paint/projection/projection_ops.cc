@@ -416,7 +416,27 @@ static constexpr const char *PROJECTION_FRAME_TOOL_ID = "builtin.projection_fram
 bool ED_paint_projection_frame_tool_is_active(const bContext *C)
 {
   const bToolRef *tref = WM_toolsystem_ref_from_context(C);
-  return tref != nullptr && tref->idname != nullptr && STREQ(tref->idname, PROJECTION_FRAME_TOOL_ID);
+  if (tref != nullptr && tref->idname != nullptr) {
+    return STREQ(tref->idname, PROJECTION_FRAME_TOOL_ID);
+  }
+  /* The Outliner and the Properties editor have no tool of their own: the context holds no tool
+   * there, so the 3D View's is looked up, as the layer mask edit does. */
+  return ED_paint_view3d_tool_id_get(const_cast<bContext *>(C)) == PROJECTION_FRAME_TOOL_ID;
+}
+
+bool ED_paint_projection_frame_tool_leave_for_brush(bContext *C)
+{
+  if (!ED_paint_projection_frame_tool_is_active(C)) {
+    return false;
+  }
+  /* The remembered tool is dropped: the brush is the user's pick now, and a later row change must
+   * not restore the tool held before the frame one. */
+  Object *object = CTX_data_active_object(C);
+  if (object != nullptr && object->runtime->sculpt_session != nullptr) {
+    object->runtime->sculpt_session->layers.projection_saved_tool_id.clear();
+  }
+  ED_paint_view3d_tool_id_set(C, "builtin.brush");
+  return true;
 }
 
 bool ED_paint_projection_frame_tool_activate_if_needed(bContext *C,

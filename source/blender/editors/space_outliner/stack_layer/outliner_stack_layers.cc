@@ -47,6 +47,7 @@
 
 #include "ED_object.hh"
 #include "ED_outliner_stack.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_undo.hh"
 
@@ -341,6 +342,9 @@ wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op)
     /* A mask the user just asked for is the one they mean to work on: the layer it belongs to
      * becomes the selected and active row, even when the Add was aimed at another one. */
     outliner_stack_row_activate(C, *space_outliner, ordinal);
+    /* The row activation makes the Projection Frame tool follow a projected layer again, which
+     * would undo the brush the mask add switched to. */
+    sculpt_paint::paint_stack_mask_brush_tool_activate(*C);
     /* The row now has a mask section; show it, as a click on the mask thumbnail would. The
      * mutation rebuilt the rows, so the row is looked up again. */
     const StringRefNull aux_section = stack_aux_section_id(*space_outliner);

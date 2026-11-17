@@ -2357,7 +2357,7 @@ class PaintLayersStackSource final : public StackSource,
   }
 
   bool preview_activate(bContext &C,
-                        ID & /*owner*/,
+                        ID &owner,
                         const StackRow &row,
                         const StringRef section_id) const override
   {
@@ -2370,10 +2370,23 @@ class PaintLayersStackSource final : public StackSource,
     }
     /* A click on a slot switches what the brush paints: the mask, or the content. */
     if (section_id == "MASK") {
-      return sculpt_paint::paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+      const bool changed = sculpt_paint::paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+      /* The row click made the Projection Frame tool follow a projected layer: the mask is painted
+       * with a brush. */
+      sculpt_paint::paint_stack_mask_brush_tool_activate(C);
+      return changed;
     }
     if (section_id == "CHANNELS") {
-      return sculpt_paint::paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
+      const bool changed = sculpt_paint::paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
+      if (changed) {
+        /* Leaving Mask put the content brush's tool in the hand. A projected layer (Fill) is placed
+         * with the gizmo of the Projection Frame tool, so that tool takes the hand back; a Paint
+         * layer keeps the brush. */
+        Material &material = layers_owner(owner);
+        sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(
+            &C, material, BKE_paint_layers_active_layer_get(material));
+      }
+      return changed;
     }
     return false;
   }
@@ -3130,12 +3143,7 @@ class PaintLayersStackSource final : public StackSource,
       return false;
     }
     /* A mask the user just added is the one they mean to work on. */
-    sculpt_paint::paint_stack_active_row_set(C, material, layer->marker);
-    /* The layer that now owns the mask is the row the stack shows: follow it with the Projection
-     * Frame tool, like a stack row click does. */
-    sculpt_paint::projection::ED_paint_projection_frame_tool_activate_if_needed(
-        &C, material, layer);
-    sculpt_paint::paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+    sculpt_paint::paint_stack_mask_edit_enter(C, material, layer->marker);
     /* The mask's map is made together with the mask: a first stroke into a mapless mask would
      * create it and regenerate the graph before it can write (see #row_add). The map is filled
      * with the constant, so the coverage reads the same before and after. */

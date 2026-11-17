@@ -91,6 +91,31 @@ bool paint_stack_target_mode_set(bContext &C, const ePaintLayerTargetMode mode)
   return true;
 }
 
+void paint_stack_mask_edit_enter(bContext &C, Material &material, const bUUID &mask_marker)
+{
+  paint_stack_active_row_set(C, material, mask_marker);
+  paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+  paint_stack_mask_brush_tool_activate(C);
+}
+
+void paint_stack_mask_brush_tool_activate(bContext &C)
+{
+  /* A mask is added to be painted: the Projection Frame tool that a Projection Box placement left
+   * in the hand cannot do that. Any other tool stays, the user picked it. */
+  if (!projection::ED_paint_projection_frame_tool_is_active(&C)) {
+    return;
+  }
+  Paint *paint = BKE_paint_get_active_from_context(&C);
+  Brush *mask_brush = (paint != nullptr) ? paint->brush : nullptr;
+  /* The brush bindings alone would leave the toolbar on the frame tool, as that tool accepts any
+   * brush type: the toolbar is switched explicitly. */
+  projection::ED_paint_projection_frame_tool_leave_for_brush(&C);
+  if (mask_brush != nullptr) {
+    /* Switching the tool may restore that tool's last brush, so the Mask brush is put back. */
+    WM_toolsystem_activate_brush_and_tool(&C, paint, mask_brush);
+  }
+}
+
 void paint_layers_mask_base_map_prepare(bContext &C, Material &material, MaterialPaintLayer &row)
 {
   const Scene *scene = CTX_data_scene(&C);
@@ -122,11 +147,7 @@ MaterialPaintLayer *paint_layers_mask_add_image(bContext &C,
   }
   /* The correction the pick just made is what the user works on: it holds the texture, so it is
    * the active mask item and the one Mask mode paints. */
-  paint_stack_active_row_set(C, material, mask->marker);
-  /* The layer that now owns the mask is the row the stack shows: follow it with the Projection
-   * Frame tool, like a stack row click does. */
-  projection::ED_paint_projection_frame_tool_activate_if_needed(&C, material, &layer);
-  paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+  paint_stack_mask_edit_enter(C, material, mask->marker);
   /* The base mask's map is made together with the mask, so a stroke on that base later does not
    * lose its first dab. The refresh also covers the mode having already been Mask, where the mode
    * set refreshed nothing. */

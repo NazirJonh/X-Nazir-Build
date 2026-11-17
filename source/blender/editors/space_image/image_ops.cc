@@ -23,6 +23,7 @@
 
 #include "BLI_fileops.h"
 #include "BLI_listbase.h"
+#include "BLI_math_constants.h"
 #include "BLI_math_rotation.h"
 #include "BLI_path_utils.hh"
 #include "BLI_set.hh"
@@ -895,16 +896,23 @@ static void image_combined_light_angle_set(bContext *C, const float angle)
   CTX_wm_space_image(C)->material_paint_light_rot_z = angle;
 }
 
-/* A dial about the press point, matching #IMAGE_OT_view_rotate_interactive: this editor already
- * drags one angle that way, and two gestures for two angles in the same editor would be a
- * needless difference. The cursor's bearing becomes the light's, which is as direct as the
- * mapping gets. */
+/**
+ * The turn of the light, in radians, for a cursor travel of the whole region width: half a turn,
+ * so one sweep across the canvas turns the light by 180 degrees, reachable from any start point.
+ * It follows horizontal travel from the press point rather than a bearing around it, so the
+ * result does not depend on where in the canvas the drag started.
+ */
+constexpr float COMBINED_LIGHT_ROTATE_SPAN = float(M_PI);
+
+/* Horizontal travel like the 3D Viewport's #PAINT_OT_scene_light_rotate, which this gesture is
+ * the counterpart of: two feels for one gesture in two editors would be a needless difference. */
 static const ed::DialDragParams combined_light_drag_params = {
     image_combined_light_angle_get,
     image_combined_light_angle_set,
     N_("Light Rotation"),
-    1.0f,
+    COMBINED_LIGHT_ROTATE_SPAN,
     NC_SPACE | ND_SPACE_IMAGE,
+    true,
 };
 
 static wmOperatorStatus image_combined_light_rotate_invoke(bContext *C,

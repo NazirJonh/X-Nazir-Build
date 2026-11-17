@@ -656,6 +656,14 @@ namespace ed::sculpt_paint::projection {
 bool ED_paint_projection_frame_tool_is_active(const bContext *C);
 
 /**
+ * Switch the 3D View's toolbar from the Projection Frame tool to the generic Brush tool, and forget
+ * the tool remembered before the frame one. The caller binds the brush afterwards.
+ *
+ * \return True when the Projection Frame tool was active and has been left.
+ */
+bool ED_paint_projection_frame_tool_leave_for_brush(bContext *C);
+
+/**
  * Follow the shown row with the Projection Frame tool, like #paint_stack_gradient_tool_activate
  * follows Gradient rows. Call this on the events that change which row is shown -- a stack row was
  * picked, or a row's projection space changed. A row whose projection fills the frame's extents
@@ -922,6 +930,19 @@ void paint_stack_texpaint_slots_refresh(bContext &C);
 
 /** Set the target a layered material's stroke paints (content or mask); true when it changed. */
 bool paint_stack_target_mode_set(bContext &C, ePaintLayerTargetMode mode);
+
+/**
+ * Start working on a mask just added for a layer: make \a mask_marker the active row and Mask the
+ * paint target. When the Projection Frame tool of a Projection Box placement is still active, the
+ * Mask brush's own tool takes over so the mask can be painted right away; any other tool stays.
+ */
+void paint_stack_mask_edit_enter(bContext &C, Material &material, const bUUID &mask_marker);
+
+/**
+ * The tool half of #paint_stack_mask_edit_enter, for a caller that re-activates the layer's row
+ * afterwards: that activation makes the Projection Frame tool follow the row again.
+ */
+void paint_stack_mask_brush_tool_activate(bContext &C);
 
 /**
  * Make \a marker the active row of \a material. The single entry point for an editor that moves

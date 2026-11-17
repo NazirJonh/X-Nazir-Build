@@ -18,6 +18,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
 #include "BLI_implicit_sharing.hh"
+#include "BLI_string.h"
 #include "BLI_task.hh"
 #include "BLI_threads.h"
 #include "BLI_utildefines.h"
@@ -30,7 +31,11 @@
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
 #include "BKE_image_partial_update.hh"
+#include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_paint_layers.hh"
+
+#include "DEG_depsgraph.hh"
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
@@ -1882,6 +1887,161 @@ bool BKE_image_paint_selection_write_region(Image *image,
 
   BKE_image_release_ibuf(image, ibuf, lock);
   return true;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Memfile Undo Carry-Over
+ *
+ * The selection masks are runtime-only (never serialized), so a memfile undo decode that frees or
+ * re-reads an image, or frees a material (which releases its owner), silently drops them. The
+ * image undo steps restore the mask state of their own operation, but nothing restores a mask a
+ * memfile decode merely passes over: one Ctrl+Z over a brush stroke would also erase the selection
+ * that stroke was clipped by. The masks are therefore parked across the decode and put back
+ * afterwards; the undo steps keep full authority over the mask contents.
+ * \{ */
+
+namespace {
+
+struct ParkedSelection {
+  /** Session UID of the owning material, or 0 for an image-local selection. */
+  uint32_t owner_uid = 0;
+  /** Name of the image holding a local selection; unused for an owner. */
+  char image_name[MAX_ID_NAME] = "";
+  Map<int, ImBuf *> masks;
+  PaintSelectionEdgePolicy edge_policy;
+};
+
+}  // namespace
+
+static Vector<ParkedSelection> &paint_selection_parked()
+{
+  static Vector<ParkedSelection> parked;
+  return parked;
+}
+
+/** Move the masks of \a state out into \a parked, leaving the state empty. */
+static void paint_selection_park_masks(bke::PaintSelectionState &state, ParkedSelection &parked)
+{
+  parked.masks = std::move(state.paint_selection_masks);
+  state.paint_selection_masks.clear();
+  parked.edge_policy = state.paint_selection_edge_policy;
+  for (ImBuf *blend : state.paint_selection_blend_masks.values()) {
+    IMB_freeImBuf(blend);
+  }
+  state.paint_selection_blend_masks.clear();
+  state.paint_selection_bounds_cache.clear();
+  state.paint_selection_revision++;
+}
+
+static void paint_selection_parked_free(ParkedSelection &parked)
+{
+  for (ImBuf *mask : parked.masks.values()) {
+    IMB_freeImBuf(mask);
+  }
+  parked.masks.clear();
+}
+
+/** Move the parked masks back into \a state, which the caller made sure holds no mask. */
+static void paint_selection_unpark_masks(ParkedSelection &parked, bke::PaintSelectionState &state)
+{
+  state.paint_selection_masks = std::move(parked.masks);
+  parked.masks.clear();
+  state.paint_selection_edge_policy = parked.edge_policy;
+  state.paint_selection_revision++;
+}
+
+void BKE_image_paint_selection_undo_prepare(Main &bmain)
+{
+  Vector<ParkedSelection> &parked_list = paint_selection_parked();
+  /* A decode that never reached its restore hook would leave masks behind. */
+  for (ParkedSelection &stale : parked_list) {
+    paint_selection_parked_free(stale);
+  }
+  parked_list.clear();
+
+  {
+    std::scoped_lock lock(paint_selection_owners_mutex);
+    for (const auto item : paint_selection_owners.items()) {
+      bke::PaintSelectionShared &owner = *item.value;
+      if (owner.paint_selection_masks.is_empty()) {
+        continue;
+      }
+      ParkedSelection parked;
+      parked.owner_uid = item.key;
+      paint_selection_park_masks(owner, parked);
+      parked_list.append(std::move(parked));
+    }
+  }
+
+  for (Image &image : bmain.images) {
+    /* A linked image is never painted, and an image bound to an owner keeps its selection there. */
+    if (image.runtime == nullptr || ID_IS_LINKED(&image) ||
+        image.runtime->paint_selection_shared != nullptr)
+    {
+      continue;
+    }
+    bke::PaintSelectionState &state = image.runtime->paint_selection;
+    if (state.paint_selection_masks.is_empty()) {
+      continue;
+    }
+    ParkedSelection parked;
+    STRNCPY(parked.image_name, image.id.name);
+    paint_selection_park_masks(state, parked);
+    parked_list.append(std::move(parked));
+  }
+}
+
+void BKE_image_paint_selection_undo_restore(Main &bmain)
+{
+  Vector<ParkedSelection> &parked_list = paint_selection_parked();
+  for (ParkedSelection &parked : parked_list) {
+    if (parked.owner_uid != 0) {
+      /* The material is the owner's only reason to exist: one the target state lacks takes the
+       * selection with it, as a freed material always did. */
+      if (BKE_libblock_find_session_uid(&bmain, ID_MA, parked.owner_uid) == nullptr) {
+        paint_selection_parked_free(parked);
+        continue;
+      }
+      std::scoped_lock lock(paint_selection_owners_mutex);
+      bke::PaintSelectionShared **owner_ptr = paint_selection_owners.lookup_ptr(parked.owner_uid);
+      bke::PaintSelectionShared *owner;
+      if (owner_ptr == nullptr) {
+        /* Released together with a material the decode freed; the re-read one keeps the session
+         * UID, so the images that bind to it later find the selection again. */
+        owner = MEM_new<bke::PaintSelectionShared>(__func__);
+        owner->uid = parked.owner_uid;
+        owner->users = 1; /* The table's user. */
+        paint_selection_owners.add_new(parked.owner_uid, owner);
+      }
+      else {
+        owner = *owner_ptr;
+      }
+      if (!owner->paint_selection_masks.is_empty()) {
+        paint_selection_parked_free(parked);
+        continue;
+      }
+      paint_selection_unpark_masks(parked, *owner);
+      for (Image *bound : owner->bound_images) {
+        DEG_id_tag_update(&bound->id, 0);
+      }
+      continue;
+    }
+
+    Image *image = reinterpret_cast<Image *>(
+        BKE_libblock_find_name(&bmain, ID_IM, parked.image_name + 2, nullptr));
+    if (image == nullptr || image->runtime == nullptr ||
+        image->runtime->paint_selection_shared != nullptr ||
+        !image->runtime->paint_selection.paint_selection_masks.is_empty())
+    {
+      paint_selection_parked_free(parked);
+      continue;
+    }
+    paint_selection_unpark_masks(parked, image->runtime->paint_selection);
+    DEG_id_tag_update(&image->id, 0);
+  }
+  parked_list.clear();
 }
 
 /** \} */

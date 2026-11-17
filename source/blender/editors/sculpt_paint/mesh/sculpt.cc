@@ -3008,16 +3008,33 @@ static bool sculpt_point_inside_texture_rectangle_clip(const StrokeCache &cache,
 }
 
 /**
- * Chebyshev distance in the brush-local XY plane, scaled back to object-space units so it can be
+ * Chebyshev distance in the brush-local frame, scaled back to object-space units so it can be
  * compared against #StrokeCache.radius like any other brush distance.
+ *
+ * The depth (local Z, along the rectangle's plane normal) is part of the metric. Without it the
+ * stamp would be a rectangle extruded through the whole mesh, erasing or painting faces
+ * perpendicular to the brush across their entire depth -- a reach none of the 3D falloff shapes
+ * allows. With it the stamp is a cube of the brush radius extent; on the surface plane itself
+ * (z ~ 0) the rectangle shape is unchanged.
  */
 static float sculpt_texture_rectangle_distance(const StrokeCache &cache,
                                                const float3 &object_space_point)
 {
   const float3 symm_point = sculpt_point_to_first_symm_pass(cache, object_space_point);
   const float3 local_pos = sculpt_point_to_brush_local(cache, symm_point);
-  const float distance = std::max(std::abs(local_pos.x), std::abs(local_pos.y));
+  const float distance = std::max(
+      {std::abs(local_pos.x), std::abs(local_pos.y), std::abs(local_pos.z)});
   return distance * cache.radius;
+}
+
+/**
+ * Squared PBVH search radius that covers the rectangle stamp: the circumscribed sphere of the
+ * cube from #sculpt_texture_rectangle_distance, whose corner lies at `sqrt(3) * radius`. Keep in
+ * sync with that metric so node search never culls geometry the stamp can still reach.
+ */
+static float sculpt_texture_rectangle_search_radius_sq(const float radius)
+{
+  return math::square(radius) * 3.0f;
 }
 
 /**
@@ -3844,10 +3861,10 @@ static IndexMask pbvh_gather_generic(Object &ob,
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
 
   const float3 center = ss.cache->location_symm;
-  float radius_sq = math::square(ss.cache->radius * radius_scale);
-  if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) {
-    radius_sq *= 2.0f;
-  }
+  const float search_radius = ss.cache->radius * radius_scale;
+  const float radius_sq = (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) ?
+                              sculpt_texture_rectangle_search_radius_sq(search_radius) :
+                              math::square(search_radius);
   const bool ignore_ineffective = brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK;
   switch (brush.falloff_shape) {
     case PAINT_FALLOFF_SHAPE_SPHERE: {
@@ -4927,10 +4944,9 @@ brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,
      * of under-covering the compressed axis that a flat skip of the padding would introduce. */
     const float3 &position_scale = ss.cache->position_scale;
     const float3 scaled_location = ss.cache->location_symm * position_scale;
-    float radius_sq = math::square(ss.cache->radius);
-    if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) {
-      radius_sq *= 2.0f;
-    }
+    const float radius_sq = (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE) ?
+                                sculpt_texture_rectangle_search_radius_sq(ss.cache->radius) :
+                                math::square(ss.cache->radius);
     result = {bke::pbvh::search_nodes(
                   pbvh,
                   memory,

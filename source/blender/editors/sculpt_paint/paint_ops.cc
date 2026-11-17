@@ -57,6 +57,7 @@
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
 #include "BKE_layer.hh"
@@ -3675,6 +3676,13 @@ void ED_operatortypes_paint()
   undo_hooks.pre_decode = BKE_paint_layers_undo_prepare;
   undo_hooks.post_decode = BKE_paint_layers_undo_validate;
   ED_undosys_memfile_decode_hooks_add(undo_hooks);
+
+  /* The paint selection masks are runtime-only: a memfile decode that passes over their image
+   * (e.g. the first Ctrl+Z over a stroke) must not take the selection with it. */
+  UndoMemfileDecodeHooks selection_hooks;
+  selection_hooks.pre_decode = BKE_image_paint_selection_undo_prepare;
+  selection_hooks.post_decode = BKE_image_paint_selection_undo_restore;
+  ED_undosys_memfile_decode_hooks_add(selection_hooks);
 
   /* palette */
   using namespace blender::ed::sculpt_paint;

@@ -29,6 +29,7 @@ namespace blender {
 struct ImBuf;
 struct Image;
 struct ImageUser;
+struct Main;
 
 /** Edge policy with binary (non-feathered) edges. */
 inline PaintSelectionEdgePolicy BKE_image_paint_selection_edge_policy_hard()
@@ -473,6 +474,16 @@ void BKE_image_paint_selection_state_discard(Image *image);
 
 /** True when \a image routes its user selection to a shared material-canvas owner. */
 bool BKE_image_paint_selection_is_shared(const Image *image);
+
+/**
+ * Memfile undo carry-over. The selection masks are runtime-only, so a memfile decode that re-reads
+ * an image or frees a material drops them without any undo step knowing. Call
+ * #BKE_image_paint_selection_undo_prepare before the decode (it parks every mask) and
+ * #BKE_image_paint_selection_undo_restore right after it (it puts each back where its image or
+ * material still exists). The image undo steps stay responsible for the mask contents themselves.
+ */
+void BKE_image_paint_selection_undo_prepare(Main &bmain);
+void BKE_image_paint_selection_undo_restore(Main &bmain);
 
 /** \} */
 

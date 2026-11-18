@@ -93,6 +93,7 @@
 
 #include "../paint_material_composite_projection_internal.hh"
 #include "paint_layers_bake_intern.hh"
+#include "paint_layers_curve_patch_object_intern.hh"
 #include "paint_layers_hash_intern.hh"
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
@@ -164,6 +165,7 @@ void BKE_paint_layers_bake_runtime_free(Material &ma)
     }
   }
   text_decal_runtime_free(ma);
+  curve_patch_object_runtime_free(ma);
 }
 
 void BKE_paint_layers_bake_runtime_owner_transfer(Material &dst, Material &src)
@@ -176,6 +178,7 @@ void BKE_paint_layers_bake_runtime_owner_transfer(Material &dst, Material &src)
     }
   }
   text_decal_runtime_owner_transfer(dst, src);
+  curve_patch_object_runtime_owner_transfer(dst, src);
 }
 
 /** \} */

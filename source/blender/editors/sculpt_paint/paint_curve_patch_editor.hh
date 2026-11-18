@@ -237,6 +237,18 @@ class CurvePatchCurveEditor {
   /** Drop the drag state, for a target that mutated the curve behind the core's back. */
   void drag_end();
 
+  ~CurvePatchCurveEditor();
+
+  /**
+   * The source-object re-stamp gate: held while a drag rewrites the curve objects, so the rows
+   * that only read them back wait for the release. Idempotent in both directions -- a second
+   * acquire does not deepen it, a release without one is a no-op -- and the destructor releases,
+   * so every way out of a session (commit, cancel, mode switch, object deletion) leaves it clear
+   * without each of them remembering to.
+   */
+  void drag_gate_acquire();
+  void drag_gate_release();
+
   /**
    * Abandon the mouse drag in flight and put the control curve back as it was when the drag began.
    *
@@ -315,6 +327,8 @@ class CurvePatchCurveEditor {
   std::optional<bke::CurvesGeometry> drag_backup_;
   /** Which Bezier tangent handle #dragging_handle_ is moving. */
   bool handle_is_left_ = false;
+  /** Whether this editor currently holds the source-object re-stamp gate. */
+  bool drag_gate_held_ = false;
 
   /** Endpoints and Bezier parameter of the segment #dragging_segment_ is reshaping. */
   int segment_index_a_ = -1;

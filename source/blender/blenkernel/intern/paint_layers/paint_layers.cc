@@ -12,6 +12,7 @@
 
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_curve_patch_object.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
@@ -1329,6 +1330,196 @@ bool BKE_paint_layers_curve_patch_brush_set(Material &ma,
   BKE_paint_layers_bake_request(row);
   BKE_paint_layers_tag_edited(ma);
   return true;
+}
+
+bool BKE_paint_layers_curve_patch_reads_object(const MaterialPaintLayerCurvePatch *payload)
+{
+  if (payload == nullptr || payload->vectors == nullptr ||
+      payload->space != MA_CURVE_PATCH_SPACE_3D)
+  {
+    return false;
+  }
+  const PaintVector &pv = *payload->vectors;
+  for (const int item_i : IndexRange(pv.items_num)) {
+    const PaintVectorItem &item = pv.items[item_i];
+    if (item.type == PAINT_VECTOR_ITEM_CURVE_PATCH && item.curve_object != nullptr) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool BKE_paint_layers_curve_patch_reads_object(const MaterialPaintLayer &row)
+{
+  return row.source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH &&
+         BKE_paint_layers_curve_patch_reads_object(row.curve_patch);
+}
+
+bool BKE_paint_layers_curve_patch_object_usable(const Object *object)
+{
+  if (object == nullptr) {
+    return true;
+  }
+  if (object->type != OB_CURVES || object->data == nullptr) {
+    return false;
+  }
+  ID *data = static_cast<ID *>(object->data);
+  return GS(data->name) == ID_CV && ID_IS_EDITABLE(&object->id) && ID_IS_EDITABLE(data);
+}
+
+bool BKE_paint_layers_curve_patch_item_object_in_use(const PaintVector &pv,
+                                                     const int skip_item,
+                                                     const Object *object,
+                                                     const int spline)
+{
+  if (object == nullptr) {
+    return false;
+  }
+  for (const int item_i : IndexRange(pv.items_num)) {
+    const PaintVectorItem &other = pv.items[item_i];
+    if (item_i != skip_item && other.type == PAINT_VECTOR_ITEM_CURVE_PATCH &&
+        other.curve_object == object && other.curve_object_spline == std::max(spline, 0))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+CurvePatchVectorOwner BKE_paint_layers_curve_patch_row_find_by_vector(Main &bmain,
+                                                                      const PaintVector &pv)
+{
+  for (Material &ma : bmain.materials) {
+    if (!BKE_paint_layers_is_layered(ma)) {
+      continue;
+    }
+    CurvePatchVectorOwner owner;
+    const auto visit = [&](MaterialPaintLayer &row) {
+      if (owner.row == nullptr && row.source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH &&
+          row.curve_patch != nullptr && row.curve_patch->vectors == &pv)
+      {
+        owner.material = &ma;
+        owner.row = &row;
+      }
+    };
+    BKE_paint_layers_foreach(ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) {
+      for (MaterialPaintLayer &effect : layer.effects) {
+        visit(effect);
+      }
+      for (MaterialPaintLayer &mask_item : layer.mask_stack) {
+        visit(mask_item);
+      }
+      return owner.row == nullptr;
+    });
+    if (owner.row != nullptr) {
+      return owner;
+    }
+  }
+  return {};
+}
+
+/** Shared body of the public validate and set calls: the owner lookup is the setter's cost, so it
+ * is returned to the caller instead of walking the materials a second time. */
+static CurvePatchObjectSetResult curve_patch_item_object_validate(
+    Main &bmain,
+    PaintVector &pv,
+    const int item_index,
+    Object *new_object,
+    const int spline,
+    CurvePatchVectorOwner *r_owner)
+{
+  if (item_index < 0 || item_index >= pv.items_num ||
+      pv.items[item_index].type != PAINT_VECTOR_ITEM_CURVE_PATCH)
+  {
+    return CurvePatchObjectSetResult::NotCurvePatch;
+  }
+  if (!ID_IS_EDITABLE(&pv.id)) {
+    return CurvePatchObjectSetResult::NotEditable;
+  }
+  if (!BKE_paint_layers_curve_patch_object_usable(new_object)) {
+    return CurvePatchObjectSetResult::NotUsable;
+  }
+  const int new_spline = std::max(spline, 0);
+  const CurvePatchVectorOwner owner = BKE_paint_layers_curve_patch_row_find_by_vector(bmain, pv);
+  if (r_owner != nullptr) {
+    *r_owner = owner;
+  }
+  if (new_object != nullptr) {
+    /* The object mode reads object-space 3D positions only: a row in 2D Space (UV) has no
+     * coordinates a curves object could carry. An orphaned container has no row to ask, so it
+     * cannot accept an object either. */
+    if (owner.row == nullptr) {
+      return CurvePatchObjectSetResult::NoOwner;
+    }
+    if (owner.row->curve_patch->space != MA_CURVE_PATCH_SPACE_3D) {
+      return CurvePatchObjectSetResult::WrongSpace;
+    }
+  }
+  if (BKE_paint_layers_curve_patch_item_object_in_use(pv, item_index, new_object, new_spline)) {
+    return CurvePatchObjectSetResult::InUse;
+  }
+  const PaintVectorItem &item = pv.items[item_index];
+  if (item.curve_object == new_object && item.curve_object_spline == new_spline) {
+    return CurvePatchObjectSetResult::NoChange;
+  }
+  return CurvePatchObjectSetResult::Ok;
+}
+
+const char *BKE_paint_layers_curve_patch_object_set_result_message(
+    const CurvePatchObjectSetResult result)
+{
+  switch (result) {
+    case CurvePatchObjectSetResult::Ok:
+    case CurvePatchObjectSetResult::NoChange:
+    case CurvePatchObjectSetResult::NotCurvePatch:
+      return nullptr;
+    case CurvePatchObjectSetResult::InUse:
+      return "The same curve cannot be used more than once in one Curve Patch effect";
+    case CurvePatchObjectSetResult::WrongSpace:
+      return "Curve objects can only be used by Curve Patch effects in 3D Space";
+    case CurvePatchObjectSetResult::NotUsable:
+      return "The object must be an editable Curves object";
+    case CurvePatchObjectSetResult::NoOwner:
+      return "The curve is not attached to a Curve Patch effect";
+    case CurvePatchObjectSetResult::NotEditable:
+      return "The Paint Vector is not editable";
+  }
+  return nullptr;
+}
+
+CurvePatchObjectSetResult BKE_paint_layers_curve_patch_item_object_validate(
+    Main &bmain, PaintVector &pv, const int item_index, Object *new_object, const int spline)
+{
+  return curve_patch_item_object_validate(bmain, pv, item_index, new_object, spline, nullptr);
+}
+
+CurvePatchObjectSetResult BKE_paint_layers_curve_patch_item_object_set(
+    Main &bmain, PaintVector &pv, const int item_index, Object *new_object, const int spline)
+{
+  CurvePatchVectorOwner owner;
+  const CurvePatchObjectSetResult result = curve_patch_item_object_validate(
+      bmain, pv, item_index, new_object, spline, &owner);
+  if (result != CurvePatchObjectSetResult::Ok) {
+    return result;
+  }
+
+  PaintVectorItem &item = pv.items[item_index];
+  item.curve_object = new_object;
+  item.curve_object_spline = std::max(spline, 0);
+  BKE_paint_vector_tag_changed(pv);
+  /* The object is a new ID reference of the material: the depsgraph has to rebuild its relations
+   * before the object's curves can reach the material's update (see the relation builder). */
+  DEG_relations_tag_update(&bmain);
+  if (owner.material != nullptr) {
+    /* Re-pointing a curve invalidates the write-back echo the old object left behind. */
+    BKE_paint_layers_curve_patch_object_expected_hash_clear(*owner.material, *owner.row);
+    /* The curve's content changed: the row is rebuilt, and the next refresh re-reads the curves. */
+    BKE_paint_layers_bake_request(*owner.row);
+    BKE_paint_layers_tag_edited(*owner.material);
+    /* A material that cached "no object-sourced row" has to re-ask before the next refresh. */
+    BKE_paint_layers_curve_patch_object_invalidate(*owner.material);
+  }
+  return CurvePatchObjectSetResult::Ok;
 }
 
 MaterialPaintLayer *BKE_paint_layers_curve_patch_effect_add(Material &ma,

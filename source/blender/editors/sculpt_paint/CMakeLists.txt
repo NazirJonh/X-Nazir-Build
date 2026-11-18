@@ -50,6 +50,9 @@ set(SRC
   paint_curve_patch_effect_mask.cc
   paint_curve_patch_effect_relief.cc
   paint_curve_patch_layer.cc
+  paint_curve_patch_layer_object_restamp.cc
+  paint_curve_patch_layer_object_source.cc
+  paint_curve_patch_layer_object_writeback.cc
   paint_curve_patch_live.cc
   paint_curve_patch_params.cc
   paint_curve_patch_sampler.cc

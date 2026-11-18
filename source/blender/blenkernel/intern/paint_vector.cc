@@ -475,6 +475,8 @@ static void paint_vector_foreach_id(ID *id, LibraryForeachIDData *data)
   PaintVector *pv = id_cast<PaintVector *>(id);
   for (int i = 0; i < pv->items_num; i++) {
     PaintShapeSettings &style = pv->items[i].style;
+    /* A Curve Patch curve's external source: read by the effect, never owned by the document. */
+    BKE_LIB_FOREACHID_PROCESS_ID(data, pv->items[i].curve_object, IDWALK_CB_NOP);
     /* The curve source and texture assignments are snapshot references used only to redraw the
      * item; they are not owned by the vector document, so keep them non-counting references. */
     BKE_LIB_FOREACHID_PROCESS_ID(data, style.curve_source_collection, IDWALK_CB_NOP);

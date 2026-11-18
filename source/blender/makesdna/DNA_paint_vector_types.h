@@ -282,6 +282,19 @@ struct PaintVectorItem {
    * still starts on a multiple of 8. */
   /** Surface anchoring of the curve's control points. */
   PaintVectorSurfaceBinding surface_binding = {};
+  /**
+   * Curve Patch item: the Curves object whose spline #curve_object_spline replaces this item's own
+   * control curve. Null (the default, and every file written before the field existed) keeps the
+   * item's own geometry. The object is the single source of truth while it is set; the item's own
+   * geometry is then only a fallback. Referenced without a user (like the style's curve source
+   * object): a deleted object is cleared by the ID remap.
+   */
+  struct Object *curve_object = nullptr;
+  /** Index of the spline of #curve_object this item reads; a missing spline gives the item's own
+   * geometry back as the fallback. */
+  int curve_object_spline = 0;
+  /* Pads the struct to a multiple of the pointer size, as every DNA struct must. */
+  char _pad_curve_object[4] = {};
 };
 
 /**

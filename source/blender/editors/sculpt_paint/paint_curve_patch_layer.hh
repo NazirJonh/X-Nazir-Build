@@ -20,16 +20,20 @@
 #include <cstdint>
 #include <memory>
 
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_vector.hh"
 
 #include "DNA_material_types.h"
 
+#include "BKE_curves.hh"
 #include "BKE_paint_layers_edit.hh"
 
 namespace blender {
 
 struct bContext;
 struct Brush;
+struct Depsgraph;
 enum ePaintLayerTargetMode : int8_t;
 struct Material;
 struct MaterialPaintLayer;
@@ -38,8 +42,15 @@ struct Main;
 struct Object;
 struct Paint;
 struct PaintVector;
+struct PaintVectorItem;
 struct Scene;
+struct ViewContext;
 struct wmOperatorType;
+struct wmWindowManager;
+
+namespace bke {
+class CurvesGeometry;
+}
 
 }  // namespace blender
 
@@ -48,6 +59,57 @@ namespace blender::ed::sculpt_paint {
 struct CurvePatchDocument;
 struct CurvePatchSession;
 struct ImageCurvePatchSession;
+
+/** Fill the window, area, region and RegionView3D fields of \a r_vc from the first 3D Viewport of
+ * \a wm, when there is one. Needs no `bContext`, so a caller with no view of its own (the headless
+ * passive stamp) borrows the source view direction this way. False when \a wm has no usable one. */
+bool curve_patch_view3d_find(wmWindowManager *wm, ViewContext &r_vc);
+
+/**
+ * The evaluated copy of \a curve_object the object source mode reads, or the original when the
+ * graph has none (the object not yet evaluated, or no graph at all): modifiers and animation
+ * reach the effect only through the evaluated copy, so every reader of the source -- the session's
+ * publish and both overlays -- resolves it here instead of repeating the `DEG_get_evaluated` +
+ * type check inline. BKE cannot call this (the layering forbids BKE -> editors); its refresh
+ * resolves the same way inline (see `paint_layers_curve_patch_object.cc`).
+ */
+const Object *curve_patch_object_evaluated(const Depsgraph *depsgraph, const Object &curve_object);
+
+/**
+ * The ONE conversion the external-curve mode has: spline \a spline_i of \a curve_object's
+ * CurvesGeometry (pass the copy #curve_patch_object_evaluated resolved), copied with its whole
+ * attribute set, mapped into \a painted_object's local space, with the bezier handles recomputed
+ * the way a publish requires and the radius convention filled. The session's document and both
+ * overlays build the curve from this, so what an overlay draws is what the stamp stamps.
+ *
+ * \return false when the spline does not exist or is empty (\a r_spline is untouched).
+ */
+bool curve_patch_spline_from_object(const Object &curve_object,
+                                    const Object &painted_object,
+                                    int spline_i,
+                                    bke::CurvesGeometry &r_spline);
+
+/**
+ * The control curve \a item reads from its external object (the evaluated copy through
+ * \a depsgraph, mapped into \a painted_object's space), or false when the item names no object or
+ * the spline cannot be read -- the item then reads its own geometry.
+ */
+bool curve_patch_item_object_curve(const PaintVectorItem &item,
+                                   const Object &painted_object,
+                                   const Depsgraph *depsgraph,
+                                   bke::CurvesGeometry &r_curve);
+
+/**
+ * The transform that carries a point of \a curve_object's local space into \a painted_object's --
+ * the space the object mode's published curves live in (#curve_patch_spline_from_object).
+ */
+float4x4 curve_patch_curve_to_painted_space(const Object &curve_object,
+                                            const Object &painted_object);
+
+/** The inverse of #curve_patch_curve_to_painted_space: the write-back's mapping back into the
+ * curve object. Kept next to it so the two-way mapping lives in one module. */
+float4x4 curve_patch_painted_to_curve_space(const Object &curve_object,
+                                            const Object &painted_object);
 
 /**
  * RAII: the single path that restores the previous brush on every exit (Apply / Discard / Failed /
@@ -167,7 +229,7 @@ void curve_patch_layer_cancel_session_2d(ImageCurvePatchSession &session);
 bool curve_patch_layer_follow_2d(ImageCurvePatchSession &session);
 
 /**
- * Whether  ma is still a material of the file. A session addresses its material by raw pointer,
+ * Whether \a ma is still a material of the file. A session addresses its material by raw pointer,
  * and an undo step or a library reload can free the material under a running modal: every access
  * through #CurvePatchSession::layer_material or #ImageCurvePatchSession::layer_material checks this
  * first, so a stale pointer is never dereferenced.
@@ -192,6 +254,12 @@ inline eMaterialPaintLayerCurvePatchSpace curve_patch_layer_row_space(const Mate
  * for a session that was not entered from a row.
  */
 void curve_patch_layer_store_document(CurvePatchSession &session);
+/**
+ * Write the live document's curves that name an external Curves object into those objects, so the
+ * object follows every edit of the session as it happens (not only the commit). A session that is
+ * not a Stack Layers effect, or one re-publishing from the objects, writes nothing.
+ */
+void curve_patch_layer_sync_objects(CurvePatchSession &session);
 
 /**
  * The save half of the same write: carry the live document into the row's container for a file
@@ -287,6 +355,16 @@ void paint_stack_gradient_tool_activate(bContext &C, const MaterialPaintLayer *l
  * clamped to the curve items.
  */
 void curve_patch_document_from_vector(const PaintVector &pv, CurvePatchDocument &r_doc);
+/**
+ * Replace the control curve of every patch of \a r_doc whose container item names an external
+ * Curves object by that object's spline (see #curve_patch_item_object_curve): the document the
+ * session shows and stamps then carries the object's shape, while the frozen parameters stay the
+ * item's. Patches are matched to items through #CurvePatchItem::source_curve_index.
+ */
+void curve_patch_document_apply_objects(const PaintVector &pv,
+                                        const Object &painted_object,
+                                        const Depsgraph *depsgraph,
+                                        CurvePatchDocument &r_doc);
 /** Write the document's patches back into the Curve Patch items of \a r_pv. Patches whose
  * #CurvePatchItem::source_curve_index is -1 (created inside the session) are appended; existing
  * Shape items and their order are never disturbed. */

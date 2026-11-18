@@ -16,6 +16,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_span.hh"
 #include "BLI_utildefines.h"
@@ -39,6 +40,7 @@
 #include "DNA_movieclip_types.h"
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
+#include "DNA_paint_vector_types.h"
 #include "DNA_particle_types.h"
 #include "DNA_rigidbody_types.h"
 #include "DNA_scene_types.h"
@@ -79,6 +81,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_curve_patch_object.hh"
 #include "BKE_particle.h"
 #include "BKE_pointcache.h"
 #include "BKE_rigidbody.h"
@@ -2197,13 +2200,36 @@ void DepsgraphNodeBuilder::build_material(Material *material)
         build_object(-1, row.text_decal->text_object, DEG_ID_LINKED_INDIRECTLY, true);
       }
     };
+    /* A Curve Patch row reads the control curve of each curve that names an external Curves object
+     * from it (an effect of a row, or an item of its mask). The object is normally not assigned
+     * to the material, so it would have no node in the graph at all and an edit to its curves
+     * would never reach the material's update: build it here, indirectly, the way a Text Decal's
+     * object is built; the relation builder ties its geometry, transform and data parameters to
+     * this material's update. When the object is also in the view layer, `build_object` merges
+     * the two builds (linked state raised to direct, base index kept). */
+    const auto build_curve_patch_object = [&](const MaterialPaintLayer &row) {
+      if (!BKE_paint_layers_curve_patch_reads_object(row)) {
+        return;
+      }
+      const PaintVector &pv = *row.curve_patch->vectors;
+      for (const int item_i : IndexRange(pv.items_num)) {
+        if (pv.items[item_i].type == PAINT_VECTOR_ITEM_CURVE_PATCH &&
+            pv.items[item_i].curve_object != nullptr)
+        {
+          build_object(-1, pv.items[item_i].curve_object, DEG_ID_LINKED_INDIRECTLY, true);
+        }
+      }
+    };
     BKE_paint_layers_foreach(
         *material, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) {
+          build_curve_patch_object(layer);
           for (const MaterialPaintLayer &effect : layer.effects) {
             build_text_object(effect);
+            build_curve_patch_object(effect);
           }
           for (const MaterialPaintLayer &item : layer.mask_stack) {
             build_text_object(item);
+            build_curve_patch_object(item);
           }
           return true;
         });

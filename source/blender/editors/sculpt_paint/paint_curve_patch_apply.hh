@@ -89,6 +89,53 @@ void curve_patch_apply_cache_init(StrokeCache &cache,
                                   const CurvePatchApplyInput &input);
 
 /**
+ * The outcome of a one-shot apply, as the passive re-stamp (the object-source refresh) needs to
+ * see it: the difference between "not now" and "not ever" decides whether the row stays pending
+ * (retried on the next refresh or session end) or stops asking.
+ */
+enum class CurvePatchApplyStatus {
+  /** The patch was built, stamped and committed. */
+  Done,
+  /**
+   * The object's sculpt slots are occupied by a live session or stroke that will end on its own
+   * (only reachable for a non-passive caller: the passive Image path swaps the slots in and out
+   * for the duration of its synchronous stamp instead).
+   */
+  Blocked,
+  /** Refused for good as things stand: no usable brush, no geometry, unsupported topology. */
+  Unsupported,
+};
+
+/**
+ * #curve_patch_apply with the outcome as a status. The two exist side by side because the public
+ * entry is the script/operator API (a bool and a report answer "why did this fail"), while the
+ * passive re-stamp drives a retry off the temporary/permanent distinction.
+ *
+ * For a caller with `record_undo == false` and the Image effect -- the passive re-stamp's shape,
+ * and nothing else -- this function goes beyond what the interactive paths require:
+ * - An object without a Sculpt session gets one for the duration of the call (the precedent is
+ *   vertex paint's `init_session()`), so a stamp host outside Sculpt Mode works; the session and
+ *   its PBVH are freed again when the call returns.
+ * - An object whose sculpt slots are occupied by another session's patch gets them swapped out
+ *   for the duration of the synchronous stamp and restored afterwards: the stamp runs against
+ *   its own freshly built `StrokeCache` and its own published `CurvePatchSession`, the live
+ *   session's cache object and session pointer are untouched, and the swap window holds no
+ *   redraws, no events and no undo pushes (`record_undo == false`), so nothing of the live
+ *   session reads the stand-in state.
+ */
+CurvePatchApplyStatus curve_patch_apply_with_status(const Scene &scene,
+                                                    const Depsgraph &depsgraph,
+                                                    Object &ob,
+                                                    Sculpt &sd,
+                                                    PaintModeSettings &paint_mode_settings,
+                                                    Span<bke::CurvesGeometry> control_curves,
+                                                    Span<bke::CurvePatchParams> params,
+                                                    CurvePatchEffectType effect_type,
+                                                    const CurvePatchApplyInput &input,
+                                                    ReportList *reports,
+                                                    bool record_undo = true);
+
+/**
  * Apply a Curve Patch to an object, without a modal editor and without a stroke.
  *
  * Does NOT open an undo transaction of its own: the caller's operator is responsible for that
@@ -110,6 +157,13 @@ void curve_patch_apply_cache_init(StrokeCache &cache,
  * Returns false, with the reason in `reports` when that is non-null, whenever the object cannot
  * take a patch: no sculpt session, no Paint BVH, Dynamic Topology, a stroke already in flight, a
  * degenerate curve, or a brush the chosen effect cannot be built for.
+ *
+ * \param record_undo: the Image effect records its per-tile "before" pixels into the global image
+ * undo step it opens for the session (`session_undo_begin()`). A one-shot apply that is an undo
+ * step of its own (the operator, a script) keeps that. A rebuild the caller rolls back with its
+ * OWN undo step (the object-source refresh's passive re-stamp, which follows the memfile step the
+ * commit pushed) passes false: with the step never opened, no tiles are pushed and the
+ * destructor closes nothing, so the refresh leaves no trace in the undo history.
  */
 bool curve_patch_apply(const Scene &scene,
                        const Depsgraph &depsgraph,
@@ -120,7 +174,8 @@ bool curve_patch_apply(const Scene &scene,
                        Span<bke::CurvePatchParams> params,
                        CurvePatchEffectType effect_type,
                        const CurvePatchApplyInput &input,
-                       ReportList *reports);
+                       ReportList *reports,
+                       bool record_undo = true);
 
 /** Defined in `paint_curve_patch_apply.cc`. The thin operator wrapper around #curve_patch_apply:
  * resolves the control curve from a `PaintCurve`, freezes the brush's parameters and fills

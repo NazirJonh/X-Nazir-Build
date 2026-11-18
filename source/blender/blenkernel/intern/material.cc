@@ -75,6 +75,7 @@
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_curve_patch_object.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
@@ -795,6 +796,9 @@ static void material_undo_preserve(BlendLibReader * /*reader*/, ID *id_new, ID *
    * raster still matches the text the re-read payload now names. Forget it and let the next
    * refresh render the map the file came back with. */
   BKE_paint_layers_text_decal_invalidate(*id_cast<Material *>(id_new));
+  /* An object-sourced Curve Patch row can come back with a different curve object under the same
+   * uid: the cached absence answer has to be re-asked (the per-row hashes observe fresh). */
+  BKE_paint_layers_curve_patch_object_invalidate(*id_cast<Material *>(id_new));
 }
 
 IDTypeInfo IDType_ID_MA = {

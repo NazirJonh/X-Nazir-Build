@@ -20,13 +20,19 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_curves.hh"
+
 #include "DNA_uuid_types.h"
 
 namespace blender {
 
+enum class CurvePatchObjectSetResult;
+
 struct bContext;
 struct Brush;
+struct Depsgraph;
 struct Main;
+struct PaintVector;
 struct Material;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerCurvePatch;
@@ -42,6 +48,47 @@ class CurvesGeometry;
 namespace ed::sculpt_paint {
 struct CurvePatchSession;
 }
+
+/**
+ * The outcome of #ED_curve_patch_layer_row_restamp, the single executor a change of an external
+ * curve object goes through. The distinction drives the retry: #Blocked asks the refresh to try
+ * again at the next safe point, #Unsupported asks it to stop until the row's curves really
+ * change.
+ */
+enum class CurvePatchLayerRestampStatus {
+  /** The row's maps are re-stamped (or its live session re-published and re-stamped them). */
+  Done,
+  /**
+   * Temporarily impossible: the stamp host is occupied by a live session or stroke that can end
+   * (a drag in flight, no viewport for the live re-stamp). The row stays pending and is retried
+   * on a later refresh or at the end of the session that holds the host.
+   */
+  Blocked,
+  /**
+   * Refused for the row's current state and not worth retrying: no mesh user with a UV map, no
+   * usable brush snapshot, no visible curve, no depsgraph. A real change of the curves makes the
+   * refresh try again through its own CHANGED verdict.
+   */
+  Unsupported,
+};
+
+/**
+ * The ONE executor of "this row's maps follow its external curve objects": a live session of the
+ * row re-reads the curves and re-stamps through itself; without one, the row's maps are
+ * re-stamped through the headless one-shot apply on a qualifying material user. Both branches
+ * answer with a status instead of silently returning, so the caller (the refresh hook) can keep
+ * a blocked row pending and drop an unsupported one.
+ *
+ * The passive branch stamps even without a Sculpt session on the host and while another
+ * session's patch is live on it (see #curve_patch_apply_with_status for what that takes).
+ *
+ * \param depsgraph: resolves the evaluated curve objects the rebuild reads (may be null).
+ */
+CurvePatchLayerRestampStatus ED_curve_patch_layer_row_restamp(Main &bmain,
+                                                              Material &ma,
+                                                              MaterialPaintLayer &row,
+                                                              const Depsgraph *depsgraph,
+                                                              bool force = false);
 
 /**
  * The live session published on `ob`, or null when no Curve Patch edit is running on it.
@@ -71,6 +118,47 @@ bool ED_curve_patch_session_edits_row(const Main &bmain,
  * stored curves and the row's Space stay as they were.
  */
 bool ED_curve_patch_layer_space_switch(bContext &C, Material &ma, MaterialPaintLayer &row);
+
+/**
+ * Point the curve \a item_index of \a pv at \a object's spline \a spline as its external control
+ * curve, or at no object: validate first (a refusal changes nothing and comes back as its
+ * #CurvePatchObjectSetResult), preserve the old curve's shape when clearing, write the reference,
+ * and let a live session of the owning row adopt the picked curve.
+ *
+ * This is the one place the assignment order lives: RNA's `curve_object` and
+ * `curve_object_spline` setters only resolve \a pv and the index and translate the result into a
+ * report, so any other UI or a Python operator gets the same behaviour.
+ */
+CurvePatchObjectSetResult ED_curve_patch_item_object_assign(Main &bmain,
+                                                            PaintVector &pv,
+                                                            int item_index,
+                                                            Object *object,
+                                                            int spline);
+
+/**
+ * A curve of \a pv was pointed at another external Curves object (or spline): a live session of
+ * the row that owns \a pv ADOPTS the object's curve right away -- the effect adapts to the curve
+ * the user picked, never the other way round. Without this the session would still hold the
+ * curve's previous shape and its next edit would overwrite the picked object with it.
+ */
+void ED_curve_patch_layer_item_object_assigned(Main &bmain, PaintVector &pv);
+
+/**
+ * Call BEFORE a curve of \a pv is released from its external Curves object: the curve keeps the
+ * shape it has at that moment, so unbinding never snaps it back to a stale one. The object's
+ * spline (the live session's shape when one is running) is stored into the curve's own geometry.
+ * Does nothing when the curve names no object or the shape cannot be resolved (the curve then
+ * keeps the geometry it already had).
+ */
+void ED_curve_patch_layer_item_object_detach(Main &bmain, PaintVector &pv, int item_index);
+
+/**
+ * Register the editors hook the BKE source refresh calls
+ * (#BKE_paint_layers_curve_patch_object_changed_cb_set): the hook is editor code (a live
+ * session's rebuild and re-stamp), so BKE must not link it -- the editors register it once at
+ * their startup (#ED_spacetypes_init), before any session can publish.
+ */
+void ED_curve_patch_layer_object_source_hook_register();
 
 /** Control point count of the session's live control curve. Null session yields 0. */
 int ED_curve_patch_session_point_num(const ed::sculpt_paint::CurvePatchSession *session);
@@ -112,9 +200,14 @@ Span<float3> ED_curve_patch_session_positions(const ed::sculpt_paint::CurvePatch
  *
  * Reuse the same instance across redraws: #ED_curve_patch_overlay_data_get clears and refills
  * `splines`, so the vector's capacity is kept.
+ *
+ * A Curve Patch row of the object source mode owns no DNA curves: the fill functions then carry
+ * per-spline copies of the object's CurvesGeometry in #owned_splines and point `splines` into it.
  */
 struct CurvePatchOverlayData {
   Vector<const bke::CurvesGeometry *> splines;
+  /** Owned per-spline copies for an object-sourced row; empty otherwise. */
+  Vector<bke::CurvesGeometry> owned_splines;
   int active_index = -1;
 };
 
@@ -148,10 +241,16 @@ Object *ED_curve_patch_session_owner(const ed::sculpt_paint::CurvePatchSession *
  * row, or the container holds no curve items -- the overlay then draws nothing, the same way a
  * null session reads.
  *
+ * An object-sourced row draws the curve object's splines through the evaluated copy \a depsgraph
+ * resolves (the same conversion the session publishes with, so the overlay draws what the stamp
+ * stamps); pass the caller's ViewContext's graph, null when none.
+ *
  * A live session has priority: the overlay caller resolves the session first and only falls back
  * to this when none runs, so the interactive curves are never drawn twice.
  */
-void ED_curve_patch_overlay_data_get_stack(const Object *ob, CurvePatchOverlayData &r_data);
+void ED_curve_patch_overlay_data_get_stack(const Object *ob,
+                                           const Depsgraph *depsgraph,
+                                           CurvePatchOverlayData &r_data);
 
 /* Mutable point access for the Transform system (`transform_convert_curve_patch.cc`). Every
  * function tolerates "no session"/"no valid active point" by returning false or doing nothing. */

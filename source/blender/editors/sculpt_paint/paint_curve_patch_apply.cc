@@ -16,12 +16,15 @@
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "BKE_brush.hh"
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
+#include "BKE_global.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
@@ -31,6 +34,7 @@
 #include "BKE_report.hh"
 
 #include "BLI_index_range.hh"
+#include "BLI_listbase.h"
 #include "BLI_math_vector.hh"
 #include "BLI_rand.hh"
 #include "BLI_span.hh"
@@ -45,6 +49,7 @@
 #include "RNA_define.hh"
 
 #include "ED_paint.hh"
+#include "ED_view3d.hh"
 #include "ED_undo.hh"
 
 #include "WM_api.hh"
@@ -83,6 +88,59 @@ void curve_patch_prepare_brush_for_headless(Paint &paint, Brush &brush)
 static void curve_patch_apply_release(SculptSession &ss)
 {
   curve_patch_stroke_cache_free(&ss, ss.cache);
+}
+
+/* The public apply entry takes the graph by const reference (a headless caller has no mutable one
+ * to hand over), while the sculpt entry points it reaches -- `BKE_sculpt_update_object_for_edit()`
+ * and `BKE_sculpt_mask_layers_ensure()` -- evaluate and tag it and therefore need it mutably. The
+ * single cast lives here, so the reason is stated once instead of at every call. */
+static Depsgraph &curve_patch_apply_depsgraph_mutable(const Depsgraph &depsgraph)
+{
+  return const_cast<Depsgraph &>(depsgraph);
+}
+
+/* The refusals that depend on nothing but the call's own arguments: the control curves it was
+ * handed, the undo stack it may need and the brush the stamp reads. Split out of the apply so the
+ * reason for each is read in one place; the messages are the user-visible ones, unchanged. */
+static std::optional<CurvePatchApplyStatus> curve_patch_apply_preconditions(
+    const Span<bke::CurvesGeometry> control_curves,
+    const Brush *brush,
+    const bool record_undo,
+    ReportList *reports)
+{
+  if (control_curves.is_empty()) {
+    BKE_report(reports, RPT_ERROR, "Curve Patch: no control curve to stamp");
+    return CurvePatchApplyStatus::Unsupported;
+  }
+  /* Every curve is checked, not just the first: a caller that assembled the list itself must not
+   * be able to smuggle a degenerate one past the build and into an empty patch. */
+  for (const bke::CurvesGeometry &curve : control_curves) {
+    if (curve.points_num() < 2) {
+      BKE_report(reports, RPT_ERROR, "Curve Patch: the control curve needs at least two points");
+      return CurvePatchApplyStatus::Unsupported;
+    }
+  }
+  /* `--background` leaves `wmWindowManager::undo_stack` null (`wm_files.cc`, guarded by
+   * `!G.background`), and every undo push this call reaches -- the relief's position step, the
+   * color attribute step, the image canvas step -- dereferences it without a check. Refusing here
+   * turns what was an access violation deep inside `undosys_stack_validate()` into a message a
+   * script can act on: `bpy.ops.ed.undo_push()` creates the stack on demand (`ed_undo.cc`, issue
+   * #60934). The interactive paths need no such gate -- a GUI session always has a stack. A
+   * `record_undo = false` apply touches no undo step at all (the image effect never opens one and
+   * pushes no tiles), so it needs no stack either. */
+  if (record_undo && ED_undo_stack_get() == nullptr) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "Curve Patch: no undo stack (background mode); call bpy.ops.ed.undo_push() first");
+    return CurvePatchApplyStatus::Unsupported;
+  }
+  /* The brush the symmetry machinery reads (`do_symmetrical_brush_actions()` resolves it from
+   * `sd.paint` itself), which is why it is not a parameter of this function. */
+  if (brush == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Curve Patch: no active brush");
+    return CurvePatchApplyStatus::Unsupported;
+  }
+  return std::nullopt;
 }
 
 /* Stand in for the `StrokeCache` an interactive patch inherits from its anchor stroke. Only the
@@ -137,71 +195,141 @@ void curve_patch_apply_cache_init(StrokeCache &cache,
   }
 }
 
-bool curve_patch_apply(const Scene &scene,
-                       const Depsgraph &depsgraph,
-                       Object &ob,
-                       Sculpt &sd,
-                       PaintModeSettings &paint_mode_settings,
-                       const Span<bke::CurvesGeometry> control_curves,
-                       const Span<bke::CurvePatchParams> params,
-                       const CurvePatchEffectType effect_type,
-                       const CurvePatchApplyInput &input,
-                       ReportList *reports)
+CurvePatchApplyStatus curve_patch_apply_with_status(
+    const Scene &scene,
+    const Depsgraph &depsgraph,
+    Object &ob,
+    Sculpt &sd,
+    PaintModeSettings &paint_mode_settings,
+    const Span<bke::CurvesGeometry> control_curves,
+    const Span<bke::CurvePatchParams> params,
+    const CurvePatchEffectType effect_type,
+    const CurvePatchApplyInput &input,
+    ReportList *reports,
+    const bool record_undo)
 {
   BLI_assert(control_curves.size() == params.size());
+  /* The passive re-stamp's exact shape, and nothing else: it never opens an undo step and only
+   * ever stamps the material canvas. That is what makes the two extensions below -- a temporary
+   * Sculpt session on an object outside Sculpt Mode, and a swap of a live session's slots --
+   * safe for the sessions they borrow state from: the swap window holds no redraws, no events
+   * and no undo pushes, so nothing of the borrowed session reads the stand-in state. */
+  const bool passive_image = !record_undo && effect_type == CurvePatchEffectType::Image;
+
+  /* A temporary Sculpt session for a stamp host the passive path reaches outside Sculpt Mode:
+   * the stamp reads its surface through the Paint BVH, which only a session carries (the
+   * precedent is vertex paint's `init_session()`, which builds one the same way). The guard
+   * frees it on every return, so a host in Object Mode keeps no sculpt state afterwards. */
+  struct TempSculptSessionGuard {
+    Object &ob;
+    bool owns = false;
+    ~TempSculptSessionGuard()
+    {
+      if (this->owns) {
+        BKE_sculptsession_free(&this->ob);
+        this->ob.runtime->sculpt_session = nullptr;
+      }
+    }
+  } temp_ss_guard{ob};
+
   SculptSession *ss = ob.runtime->sculpt_session;
   if (ss == nullptr) {
-    BKE_report(reports, RPT_ERROR, "Curve Patch: the object is not in Sculpt Mode");
-    return false;
+    if (!passive_image || ob.type != OB_MESH || ob.data == nullptr) {
+      BKE_report(reports, RPT_ERROR, "Curve Patch: the object is not in Sculpt Mode");
+      return CurvePatchApplyStatus::Unsupported;
+    }
+    ob.runtime->sculpt_session = MEM_new<SculptSession>(__func__);
+    ss = ob.runtime->sculpt_session;
+    ss->mode_type = OB_MODE_SCULPT;
+    temp_ss_guard.owns = true;
+    /* Builds the Paint BVH and the deform coordinates the stamp reads. The canvas key is
+     * recomputed with it for the Image effect, whose pixel build keys into it. */
+    BKE_sculpt_update_object_for_edit(
+        &curve_patch_apply_depsgraph_mutable(depsgraph),
+        &ob,
+        effect_type == CurvePatchEffectType::Image);
   }
-  /* Both are taken over below, and both belong to something still running -- a live stroke or an
-   * interactive patch. */
-  if (ss->cache != nullptr || ss->curve_patch_session != nullptr) {
+  /* Both slots are taken over below, and when occupied they belong to something still running --
+   * a live stroke or an interactive patch. The passive Image path is the exception: it swaps the
+   * occupant out for the duration of its own synchronous stamp and puts it back before
+   * returning. The occupant's cache OBJECT and session are never touched, only the two
+   * `SculptSession` pointers that publish them -- every reader of `ss->cache` on the stamp path
+   * (the symmetry machinery, the node mask, the effects) then finds the stand-in this call
+   * built, and the live session finds its own again afterwards. */
+  struct SculptSlotSwapGuard {
+    SculptSession &ss;
+    StrokeCache *cache = nullptr;
+    CurvePatchSession *session = nullptr;
+    void (*free_session)(Object &) = nullptr;
+    const bool active;
+
+    /* `active` false leaves the slots alone: there was nothing to take over. */
+    SculptSlotSwapGuard(SculptSession &ss, const bool active) : ss(ss), active(active)
+    {
+      if (!this->active) {
+        return;
+      }
+      this->cache = this->ss.cache;
+      this->session = this->ss.curve_patch_session;
+      this->free_session = this->ss.free_curve_patch_session;
+      /* Nulled here rather than left pointing at the live session: the publication below
+       * overwrites them anyway, and between this point and it the truthful state is "no session
+       * published" (nothing in between reads the slots). */
+      this->ss.curve_patch_session = nullptr;
+      this->ss.free_curve_patch_session = nullptr;
+    }
+    ~SculptSlotSwapGuard()
+    {
+      if (this->active) {
+        this->ss.cache = this->cache;
+        this->ss.curve_patch_session = this->session;
+        this->ss.free_curve_patch_session = this->free_session;
+      }
+    }
+  };
+  const bool slots_busy = (ss->cache != nullptr || ss->curve_patch_session != nullptr);
+  if (slots_busy && !passive_image) {
     BKE_report(
         reports, RPT_ERROR, "Curve Patch: a stroke or another patch is already in progress");
-    return false;
+    return CurvePatchApplyStatus::Blocked;
   }
+  /* Constructed after the last check that can refuse the call without slot ownership, so every
+   * later return -- including one added by a future edit -- puts the slots back. Declared after
+   * #temp_ss_guard, so it is destroyed first: the borrowed slots return before a temporary sculpt
+   * session of our own is freed. */
+  SculptSlotSwapGuard slot_guard{*ss, slots_busy};
+
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
   if (pbvh == nullptr) {
-    BKE_report(reports, RPT_ERROR, "Curve Patch: the object has no sculpt geometry");
-    return false;
+    /* A session that owns no PBVH yet: building it is what entering Sculpt Mode does, and
+     * `sculpt_update_object()` reads and writes neither of the two slots above. Skipped when the
+     * slots are swapped out -- the session that holds them runs on its own PBVH, and a position
+     * update under it is the mid-stroke hazard `sculpt_update_object()` itself documents. */
+    if (passive_image && !slots_busy) {
+      BKE_sculpt_update_object_for_edit(
+          &curve_patch_apply_depsgraph_mutable(depsgraph),
+          &ob,
+          effect_type == CurvePatchEffectType::Image);
+      pbvh = bke::object::pbvh_get(ob);
+    }
+    if (pbvh == nullptr) {
+      BKE_report(reports, RPT_ERROR, "Curve Patch: the object has no sculpt geometry");
+      return CurvePatchApplyStatus::Unsupported;
+    }
   }
   /* Dynamic Topology has no stable per-element index for the effect's snapshot to key into; the
    * interactive entry points refuse it the same way. */
   if (pbvh->type() == bke::pbvh::Type::BMesh) {
     BKE_report(reports, RPT_WARNING, "Curve Patch does not support Dynamic Topology");
-    return false;
-  }
-  if (control_curves.is_empty()) {
-    BKE_report(reports, RPT_ERROR, "Curve Patch: no control curve to stamp");
-    return false;
-  }
-  /* Every curve is checked, not just the first: a caller that assembled the list itself must not
-   * be able to smuggle a degenerate one past the build and into an empty patch. */
-  for (const bke::CurvesGeometry &curve : control_curves) {
-    if (curve.points_num() < 2) {
-      BKE_report(reports, RPT_ERROR, "Curve Patch: the control curve needs at least two points");
-      return false;
-    }
-  }
-  /* `--background` leaves `wmWindowManager::undo_stack` null (`wm_files.cc`, guarded by
-   * `!G.background`), and every undo push this call reaches -- the relief's position step, the
-   * color attribute step, the image canvas step -- dereferences it without a check. Refusing here
-   * turns what was an access violation deep inside `undosys_stack_validate()` into a message a
-   * script can act on: `bpy.ops.ed.undo_push()` creates the stack on demand (`ed_undo.cc`, issue
-   * #60934). The interactive paths need no such gate -- a GUI session always has a stack. */
-  if (ED_undo_stack_get() == nullptr) {
-    BKE_report(reports,
-               RPT_ERROR,
-               "Curve Patch: no undo stack (background mode); call bpy.ops.ed.undo_push() first");
-    return false;
+    return CurvePatchApplyStatus::Unsupported;
   }
   /* The brush the symmetry machinery reads (`do_symmetrical_brush_actions()` resolves it from
    * `sd.paint` itself), which is why it is not a parameter of this function. */
   Brush *brush = BKE_paint_brush(&sd.paint);
-  if (brush == nullptr) {
-    BKE_report(reports, RPT_ERROR, "Curve Patch: no active brush");
-    return false;
+  if (const std::optional<CurvePatchApplyStatus> refused = curve_patch_apply_preconditions(
+          control_curves, brush, record_undo, reports))
+  {
+    return *refused;
   }
 
   curve_patch_prepare_brush_for_headless(sd.paint, *brush);
@@ -217,8 +345,7 @@ bool curve_patch_apply(const Scene &scene,
    * `bmain` comes off the depsgraph: taking it as a parameter would change a public signature for
    * one branch. */
   if (effect_type == CurvePatchEffectType::Mask) {
-    Depsgraph &depsgraph_mutable = const_cast<Depsgraph &>(depsgraph);
-    BKE_sculpt_mask_layers_ensure(&depsgraph_mutable,
+    BKE_sculpt_mask_layers_ensure(&curve_patch_apply_depsgraph_mutable(depsgraph),
                                   DEG_get_bmain(&depsgraph),
                                   &ob,
                                   BKE_sculpt_multires_active(&scene, &ob));
@@ -226,7 +353,7 @@ bool curve_patch_apply(const Scene &scene,
      * (`sculpt_filter_mask.cc`, `sculpt_ops.cc`): creating the Multires layer tags
      * `ID_RECALC_GEOMETRY` and re-evaluates the scene, which leaves the sculpt session pointing at
      * a stale `SubdivCCG` and Paint BVH until this runs. */
-    BKE_sculpt_update_object_for_edit(&depsgraph_mutable, &ob, false);
+    BKE_sculpt_update_object_for_edit(&curve_patch_apply_depsgraph_mutable(depsgraph), &ob, false);
   }
 
   ss->cache = MEM_new<StrokeCache>(__func__);
@@ -253,17 +380,35 @@ bool curve_patch_apply(const Scene &scene,
     BKE_report(reports, RPT_ERROR, "Curve Patch: this object cannot carry the requested effect");
     MEM_delete(session);
     curve_patch_apply_release(*ss);
-    return false;
+    return CurvePatchApplyStatus::Unsupported;
   }
   /* Left default-constructed, so `region` stays null and the re-stamp skips the interactive
    * viewport flush -- see `session_apply()`. The cache still points at it for parity with the
    * interactive path, where `StrokeCache::vc` must outlive the spawning stroke. */
   ss->cache->vc = &session->view_context;
+  /* The passive Image stamp reaches `calc_local_from_screen()` through the channel source's Area
+   * Plane mapping, which dereferences `obact`, `rv3d` and `region`: the default-constructed context
+   * has none of them. A copy (so the session's own context keeps `region` null and the stamp still
+   * skips the viewport flush) borrows the first 3D viewport, which only supplies the view
+   * direction the source projects along. */
+  ViewContext passive_vc = session->view_context;
+  if (passive_image) {
+    passive_vc.obact = &ob;
+    wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN != nullptr ? G_MAIN->wm.first :
+                                                                           nullptr);
+    curve_patch_view3d_find(wm, passive_vc);
+    ss->cache->vc = &passive_vc;
+  }
 
   /* The interactive paths call this after aborting the spawning stroke's undo transaction. Nothing
    * opened a transaction here, so the hook runs before the only re-stamp instead -- which is what
-   * puts the pre-patch canvas tiles into the image effect's undo step at all. */
-  session->effect().session_undo_begin();
+   * puts the pre-patch canvas tiles into the image effect's undo step at all. A record_undo=false
+   * apply skips the open: the tile pushes are gated on the step being open
+   * (`ImageColorEffect::apply_pass()`), so the rebuild lands no undo data and the destructor
+   * closes nothing. */
+  if (record_undo) {
+    session->effect().session_undo_begin();
+  }
 
   curve_patch_restore_and_restamp(
       scene, depsgraph, sd, paint_mode_settings, *session, reports);
@@ -282,6 +427,7 @@ bool curve_patch_apply(const Scene &scene,
   MEM_delete(session);
   ss->curve_patch_session = nullptr;
   ss->free_curve_patch_session = nullptr;
+  /* #slot_guard puts a borrowed pair back as this function returns. */
 
   if (applied && effect_type != CurvePatchEffectType::Image) {
     /* No viewport flush was issued (a caller with no window manager has nothing to repaint), so
@@ -290,7 +436,32 @@ bool curve_patch_apply(const Scene &scene,
     curve_patch_tag_target_mesh_dirty(ob);
   }
 
-  return applied;
+  return applied ? CurvePatchApplyStatus::Done : CurvePatchApplyStatus::Unsupported;
+}
+
+bool curve_patch_apply(const Scene &scene,
+                       const Depsgraph &depsgraph,
+                       Object &ob,
+                       Sculpt &sd,
+                       PaintModeSettings &paint_mode_settings,
+                       const Span<bke::CurvesGeometry> control_curves,
+                       const Span<bke::CurvePatchParams> params,
+                       const CurvePatchEffectType effect_type,
+                       const CurvePatchApplyInput &input,
+                       ReportList *reports,
+                       const bool record_undo)
+{
+  return curve_patch_apply_with_status(scene,
+                                       depsgraph,
+                                       ob,
+                                       sd,
+                                       paint_mode_settings,
+                                       control_curves,
+                                       params,
+                                       effect_type,
+                                       input,
+                                       reports,
+                                       record_undo) == CurvePatchApplyStatus::Done;
 }
 
 /** \} */

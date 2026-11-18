@@ -30,6 +30,7 @@
 #include "ED_asset.hh"
 #include "ED_clip.hh"
 #include "ED_curve.hh"
+#include "ED_curve_patch.hh"
 #include "ED_curves.hh"
 #include "ED_curves_sculpt.hh"
 #include "ED_fileselect.hh"
@@ -74,6 +75,10 @@ void ED_spacetypes_init()
   BKE_paint_layers_regenerate_pre_hook_set([](Main &bmain) {
     ED_preview_kill_jobs_sharing_trees(static_cast<wmWindowManager *>(bmain.wm.first));
   });
+
+  /* The Curve Patch object-source refresh reaches editor code (a live session's rebuild): the
+   * hook is editor-owned and registered here, the way the regenerate pre-hook above is. */
+  ED_curve_patch_layer_object_source_hook_register();
 
   /* Create space types. */
   ED_spacetype_outliner();

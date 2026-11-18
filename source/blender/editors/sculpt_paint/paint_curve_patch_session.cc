@@ -22,6 +22,8 @@
 
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
+#include "BKE_curves.hh"
+#include "BKE_global.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
@@ -30,6 +32,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_curve_patch_object.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_paint_vector.hh"
 #include "BKE_report.hh"
@@ -82,7 +85,6 @@
  * `DEBUG-cpatch-image` sub-phase breakdown. */
 
 namespace blender::ed::sculpt_paint {
-
 
 /* Per-target staleness guard, hoisted here from the effects' own copies: something retopologized
  * THIS target's object while the patch was live -- see `CurvePatchApplyState::element_num`. Bail
@@ -732,6 +734,8 @@ void curve_patch_restore_and_restamp(bContext &C, CurvePatchSession &session)
                                   tool_settings->paint_mode,
                                   session,
                                   CTX_wm_reports(&C));
+  /* The external curve objects follow every edit as it happens. */
+  curve_patch_layer_sync_objects(session);
 }
 
 /** \} */
@@ -933,6 +937,13 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
   }
   CTX_data_ensure_evaluated_depsgraph(&C);
 
+  /* The session's sculpt slots (its cache and the published session) are released above, so the
+   * re-stamps this session's occupancy blocked can go through now: the tag schedules the refresh
+   * that runs them. A no-op when nothing went pending meanwhile. */
+  if (Main *notify_bmain = CTX_data_main(&C)) {
+    BKE_paint_layers_curve_patch_object_restamp_pending_session_end_notify(*notify_bmain);
+  }
+
   return committed;
 }
 
@@ -983,6 +994,15 @@ void curve_patch_discard_on_session_end(Object &ob)
    * #curve_patch_begin_editing), so it dies with the session here too -- along with every other
    * target's cache. */
   curve_patch_session_free(ob);
+
+  /* Same reason as the commit path: the occupied slots are free from this point on, so a
+   * re-stamp the session's occupancy had blocked gets its next update through. Runs on G_MAIN,
+   * which is the main the drag release tags as well -- this path has no bContext (an object
+   * teardown, a mode exit without one), and a material's pending rows are global state keyed by
+   * session uid. */
+  if (G_MAIN != nullptr) {
+    BKE_paint_layers_curve_patch_object_restamp_pending_session_end_notify(*G_MAIN);
+  }
 }
 
 bool curve_patch_session_has_commit_content(CurvePatchSession &session)
@@ -1505,12 +1525,13 @@ bool curve_patch_start_from_anchor(const Depsgraph &depsgraph,
                                    tool_settings->paint_mode);
 }
 
-CurvePatchSession *curve_patch_start_from_layer(bContext &C,
-                                                Object &ob,
-                                                Sculpt &sd,
-                                                PaintVector &vectors,
-                                                const ViewContext &vc,
-                                                const FunctionRef<void(Span<int>)> prepare_canvas)
+CurvePatchSession *curve_patch_start_from_layer(
+    bContext &C,
+    Object &ob,
+    Sculpt &sd,
+    const FunctionRef<void(CurvePatchDocument &)> publish_document,
+    const ViewContext &vc,
+    const FunctionRef<void(Span<int>)> prepare_canvas)
 {
   if (ob.runtime->sculpt_session == nullptr) {
     BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Curve Patch: the object has no Sculpt session");
@@ -1543,12 +1564,17 @@ CurvePatchSession *curve_patch_start_from_layer(bContext &C,
   curve_patch_prepare_brush_for_headless(sd.paint, *brush);
 
   CurvePatchSession *session = MEM_new<CurvePatchSession>(__func__);
-  /* The document is the persisted one: the frozen parameters come from the DNA, not from the
-   * brush. Curves too short to build are dropped the same way the anchor adoption skips them. */
-  curve_patch_document_from_vector(vectors, session->doc);
-  session->doc.patches.remove_if(
-      [](const CurvePatchItem &item) { return item.control_curve.points_num() < 2; });
-  if (session->doc.patches.is_empty()) {
+  /* The document is the one \a publish_document fills: the owned container's items for the vector
+   * source (frozen parameters straight from DNA), the curve object's evaluated splines for the
+   * object source. A publish drops the curves it cannot use; what remains must stamp. */
+  publish_document(session->doc);
+  if (session->doc.patches.is_empty() ||
+      std::none_of(session->doc.patches.begin(),
+                   session->doc.patches.end(),
+                   [](const CurvePatchItem &item) {
+                     return !item.params.hidden && item.control_curve.points_num() >= 2;
+                   }))
+  {
     BKE_report(
         CTX_wm_reports(&C), RPT_WARNING, "Curve Patch layer has no usable control curve yet");
     MEM_delete(session);
@@ -1833,6 +1859,7 @@ void ED_curve_patch_overlay_data_get(const ed::sculpt_paint::CurvePatchSession *
                                      CurvePatchOverlayData &r_data)
 {
   r_data.splines.clear();
+  r_data.owned_splines.clear();
   r_data.active_index = -1;
   if (session == nullptr || curve_patch_session_row_is_2d(*session)) {
     return;
@@ -1865,6 +1892,7 @@ Object *ED_curve_patch_session_owner(const ed::sculpt_paint::CurvePatchSession *
 void ED_curve_patch_overlay_data_get_target(const Object *ob, CurvePatchOverlayData &r_data)
 {
   r_data.splines.clear();
+  r_data.owned_splines.clear();
   r_data.active_index = -1;
   if (ob == nullptr || ob->runtime == nullptr || ob->runtime->sculpt_session == nullptr ||
       ob->runtime->sculpt_session->curve_patch_session == nullptr)
@@ -1895,9 +1923,12 @@ void ED_curve_patch_overlay_data_get_target(const Object *ob, CurvePatchOverlayD
   r_data.active_index = session.doc.active_patch;
 }
 
-void ED_curve_patch_overlay_data_get_stack(const Object *ob, CurvePatchOverlayData &r_data)
+void ED_curve_patch_overlay_data_get_stack(const Object *ob,
+                                           const Depsgraph *depsgraph,
+                                           CurvePatchOverlayData &r_data)
 {
   r_data.splines.clear();
+  r_data.owned_splines.clear();
   r_data.active_index = -1;
   /* The curves are a tool of Sculpt Mode; the overlay has no business drawing them elsewhere. */
   if (ob == nullptr || (ob->mode & OB_MODE_SCULPT) == 0) {
@@ -1912,7 +1943,7 @@ void ED_curve_patch_overlay_data_get_stack(const Object *ob, CurvePatchOverlayDa
   const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(
       const_cast<Material &>(*ma));
   if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
-      row->curve_patch == nullptr || row->curve_patch->vectors == nullptr)
+      row->curve_patch == nullptr)
   {
     return;
   }
@@ -1926,15 +1957,36 @@ void ED_curve_patch_overlay_data_get_stack(const Object *ob, CurvePatchOverlayDa
   if (ed::sculpt_paint::curve_patch_layer_row_space(*row) != MA_CURVE_PATCH_SPACE_3D) {
     return;
   }
+  if (row->curve_patch->vectors == nullptr) {
+    return;
+  }
   const PaintVector &pv = *row->curve_patch->vectors;
   const bool solo = (pv.flag & PAINT_VECTOR_SHOW_ALL_CURVES) == 0;
   r_data.splines.reserve(pv.items_num);
+  r_data.owned_splines.reserve(pv.items_num);
   int curve_index = 0;
   int active_curve = 0;
   for (const int i : IndexRange(pv.items_num)) {
     const PaintVectorItem &item = pv.items[i];
     if (item.type != PAINT_VECTOR_ITEM_CURVE_PATCH || (solo && i != pv.active_item)) {
       continue;
+    }
+    /* A curve that names an external Curves object draws that object's spline through the ONE
+     * conversion the mode has (the evaluated copy, mapped into the painted object's space), so the
+     * overlay shows what the stamp reads. A live session draws its own document instead, through
+     * #ED_curve_patch_overlay_data_get. The copies live in \a r_data, which the overlay reuses
+     * across redraws; the reserve keeps the pointers into it stable. */
+    if (item.curve_object != nullptr) {
+      bke::CurvesGeometry object_curve;
+      if (ed::sculpt_paint::curve_patch_item_object_curve(item, *ob, depsgraph, object_curve)) {
+        r_data.owned_splines.append(std::move(object_curve));
+        r_data.splines.append(&r_data.owned_splines.last());
+        if (i == pv.active_item) {
+          active_curve = curve_index;
+        }
+        curve_index++;
+        continue;
+      }
     }
     r_data.splines.append(&item.curve_patch_geometry.wrap());
     if (i == pv.active_item) {

@@ -11,6 +11,7 @@
  */
 
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_curve_patch_object.hh"
 #include "BKE_paint_layers_asset.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_import.hh"
@@ -580,6 +581,9 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
   /* The copy may have brought a Text Decal into a material that had none: the cached absence has
    * to be re-asked before the next refresh. */
   BKE_paint_layers_text_decal_invalidate(ma);
+  /* A copied row can bring an object-sourced Curve Patch into a material that had none: the
+   * cached absence has to be re-asked before the next refresh. */
+  BKE_paint_layers_curve_patch_object_invalidate(ma);
   BKE_paint_layers_tag_edited(ma);
   return copy;
 }
@@ -790,6 +794,7 @@ bool BKE_paint_layers_import_rows(Main &bmain,
 
     dst.paint_layers_flag |= MA_PAINT_LAYERED;
     BKE_paint_layers_text_decal_invalidate(dst);
+    BKE_paint_layers_curve_patch_object_invalidate(dst);
     BKE_paint_layers_tag_edited(dst);
     if (r_result != nullptr) {
       *r_result = {};
@@ -880,6 +885,7 @@ bool BKE_paint_layers_import_rows(Main &bmain,
 
   dst.paint_layers_flag |= MA_PAINT_LAYERED;
   BKE_paint_layers_text_decal_invalidate(dst);
+  BKE_paint_layers_curve_patch_object_invalidate(dst);
   BKE_paint_layers_tag_edited(dst);
   if (r_result != nullptr) {
     *r_result = {};

@@ -486,6 +486,9 @@ struct CurvePatchSession {
    * runs, and a dangling pointer on the commit path would crash. */
   Material *layer_material = nullptr;
   bUUID layer_row_marker = {};
+  /** Set while the source refresh re-publishes the document from the external curve objects: the
+   * restamp that follows must not write the freshly read curves straight back into them. */
+  bool layer_object_sync_suspended = false;
 
   /** Whether this session is a Stack Layers effect (#layer_material set). Such a session has no
    * Enter/Esc of its own -- it lives and dies with the row's selection, its curves belong to the
@@ -831,9 +834,15 @@ bool curve_patch_start_from_anchor(const Depsgraph &depsgraph,
 
 /**
  * Publish a Curve Patch session from a persisted Stack Layers row: adopt the curve items of the
- * row's #PaintVector as the patches (no `Brush::paint_curve` adoption, no anchor stroke), freeze
- * each patch's parameters as they are stored in DNA, and stamp the initial state the way the
- * headless apply path does (a stand-in `StrokeCache` built with #curve_patch_apply_cache_init).
+ * row's container as the patches (no `Brush::paint_curve` adoption, no anchor stroke), freeze
+ * each patch's parameters, and stamp the initial state the way the headless apply path does (a
+ * stand-in `StrokeCache` built with #curve_patch_apply_cache_init).
+ *
+ * \a publish_document fills the session's document with the curves the row reads: the owned
+ * #PaintVector's items, each curve that names an external Curves object reading that object's
+ * spline (`curve_patch_document_from_vector` + `curve_patch_document_apply_objects`). A publish
+ * may drop curves it cannot use; a document that
+ * ends up without one stampable curve refuses the entry.
  *
  * The effect is always #CurvePatchEffectType::Image: a Stack Layers row's content is its material
  * channel maps, whatever canvas the scene happens to show. The caller must create the row's channel
@@ -850,12 +859,13 @@ bool curve_patch_start_from_anchor(const Depsgraph &depsgraph,
  * with the material channels this session is going to write, so a caller can reset exactly the
  * maps the patches are about to re-render. A session that refuses to start never reaches it.
  */
-CurvePatchSession *curve_patch_start_from_layer(bContext &C,
-                                                Object &ob,
-                                                Sculpt &sd,
-                                                PaintVector &vectors,
-                                                const ViewContext &vc,
-                                                FunctionRef<void(Span<int>)> prepare_canvas);
+CurvePatchSession *curve_patch_start_from_layer(
+    bContext &C,
+    Object &ob,
+    Sculpt &sd,
+    FunctionRef<void(CurvePatchDocument &)> publish_document,
+    const ViewContext &vc,
+    FunctionRef<void(Span<int>)> prepare_canvas);
 
 /**
  * Publish a Curve Patch session from a finished #BRUSH_STROKE_ROLL stroke. Builds the control

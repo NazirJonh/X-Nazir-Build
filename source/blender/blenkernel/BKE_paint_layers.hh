@@ -56,6 +56,7 @@ struct MaterialPaintLayerIdColor;
 struct MaterialPaintLayerProjection;
 struct MaterialSourceResolve;
 struct Object;
+struct PaintVector;
 struct Scene;
 struct ViewLayer;
 struct Brush;

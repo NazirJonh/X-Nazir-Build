@@ -49,6 +49,7 @@
 
 #include "mesh/sculpt_intern.hh"
 #include "paint_curve_intern.hh"
+#include "paint_curve_patch_layer.hh"
 #include "paint_curve_patch_session.hh"
 #include "paint_intern.hh"
 
@@ -1180,6 +1181,17 @@ void paintcurve_stack_foreach_curve_patch_item(const ViewContext &vc,
               break;
             }
           }
+        }
+        /* A curve that names an external Curves object draws that object's spline, through the
+         * ONE conversion the mode has (the evaluated copy mapped into the painted object's local
+         * space, exactly what a session publishes), so the overlay shows what the stamp stamps. A
+         * live session of the row already draws its own document, which carries the same curve. */
+        bke::CurvesGeometry object_curve;
+        if (geom == &pv.items[i].curve_patch_geometry.wrap() &&
+            ed::sculpt_paint::curve_patch_item_object_curve(
+                pv.items[i], *ob, vc.depsgraph, object_curve))
+        {
+          geom = &object_curve;
         }
         fn(*ob, *ma, effect, i, *geom, ob_vc);
       }

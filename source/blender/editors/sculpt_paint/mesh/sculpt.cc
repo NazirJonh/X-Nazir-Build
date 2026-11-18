@@ -4150,6 +4150,18 @@ static void calc_local_from_screen(const ViewContext &vc,
                                    const float screen_dir[2],
                                    float r_local_dir[3])
 {
+  if (vc.obact == nullptr || vc.rv3d == nullptr || vc.region == nullptr) {
+    /* WARNING: only for the Curve Patch passive re-stamp, whose headless one-shot apply can run
+     * with no view and passes an already-local direction in `screen_dir`; copying it keeps the
+     * Area Plane frame instead of dereferencing a view that does not exist. The interactive
+     * sculpt paths always carry all three fields -- a stroke that ever reached here with an
+     * incomplete ViewContext would silently get a wrong direction instead of a crash, so this
+     * branch must not grow any other caller. */
+    r_local_dir[0] = screen_dir[0];
+    r_local_dir[1] = screen_dir[1];
+    r_local_dir[2] = 0.0f;
+    return;
+  }
   Object &ob = *vc.obact;
   float loc[3];
 

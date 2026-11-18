@@ -11,10 +11,13 @@
  */
 
 #include <algorithm>
+#include <climits>
 #include <cstdlib>
 
 #include "DNA_paint_vector_types.h"
 #include "DNA_scene_enums.h"
+
+#include "BKE_paint_layers_curve_patch_object.hh"
 
 #include "RNA_define.hh"
 
@@ -24,7 +27,18 @@
 
 #ifdef RNA_RUNTIME
 
+#  include "BKE_global.hh"
+#  include "BKE_paint_layers.hh"
 #  include "BKE_paint_vector.hh"
+#  include "BKE_report.hh"
+
+#  include "ED_curve_patch.hh"
+
+#  include "WM_api.hh"
+
+#  include "DNA_object_types.h"
+
+#  include "RNA_access.hh"
 
 namespace blender {
 
@@ -56,6 +70,86 @@ static void rna_PaintVectorItem_curve_look_update(Main * /*bmain*/,
   if (PaintVector *pv = id_cast<PaintVector *>(ptr->owner_id)) {
     BKE_paint_vector_tag_changed(*pv);
   }
+}
+
+/** The external Curves object of a Curve Patch curve, as an ID pointer. */
+static PointerRNA rna_PaintVectorItem_curve_object_get(PointerRNA *ptr)
+{
+  const PaintVectorItem *item = static_cast<const PaintVectorItem *>(ptr->data);
+  if (item->curve_object == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_id_pointer_create(&item->curve_object->id);
+}
+
+/** Only a Curves object carries splines the curve can read. The poll admits no null (the property
+ * is cleared through the setter), so the "usable" test itself is the one BKE defines. */
+static bool rna_PaintVectorItem_curve_object_poll(PointerRNA * /*ptr*/, const PointerRNA value)
+{
+  const Object *object = static_cast<const Object *>(value.data);
+  return object != nullptr && BKE_paint_layers_curve_patch_object_usable(object);
+}
+
+/** The curve's position in its container, or -1 for a detached pointer. */
+static int rna_PaintVectorItem_index(PointerRNA *ptr)
+{
+  const PaintVector *pv = id_cast<const PaintVector *>(ptr->owner_id);
+  const PaintVectorItem *item = static_cast<const PaintVectorItem *>(ptr->data);
+  if (pv == nullptr || pv->items == nullptr || item < pv->items || item >= pv->items + pv->items_num)
+  {
+    return -1;
+  }
+  return int(item - pv->items);
+}
+
+/** Report a refused object assignment. The eyedropper and the buttons pass no report list, so
+ * the message goes to the window manager then. */
+static void rna_PaintVectorItem_curve_object_report(ReportList *reports, const char *message)
+{
+  if (reports != nullptr) {
+    BKE_report(reports, RPT_ERROR, message);
+  }
+  else {
+    WM_global_report(RPT_ERROR, message);
+  }
+}
+
+/** The one assignment path of both property setters. The assignment order itself lives in the
+ * editor function, so a Python operator or another UI gets the same behaviour; this wrapper only
+ * resolves the container and translates the result into a report. */
+static void rna_PaintVectorItem_curve_object_apply(PointerRNA *ptr,
+                                                   Object *object,
+                                                   const int spline,
+                                                   ReportList *reports)
+{
+  PaintVector *pv = id_cast<PaintVector *>(ptr->owner_id);
+  const int index = rna_PaintVectorItem_index(ptr);
+  /* `G_MAIN` is acceptable here and nowhere else in this file: a property setter is not handed a
+   * `Main`, and the owner ID it resolves from a PointerRNA always lives in the global main. */
+  Main *bmain = G_MAIN;
+  if (pv == nullptr || index < 0 || bmain == nullptr) {
+    return;
+  }
+  const CurvePatchObjectSetResult result = ED_curve_patch_item_object_assign(
+      *bmain, *pv, index, object, spline);
+  if (const char *message = BKE_paint_layers_curve_patch_object_set_result_message(result)) {
+    rna_PaintVectorItem_curve_object_report(reports, message);
+  }
+}
+
+static void rna_PaintVectorItem_curve_object_set(PointerRNA *ptr,
+                                                 PointerRNA value,
+                                                 ReportList *reports)
+{
+  const PaintVectorItem *item = static_cast<const PaintVectorItem *>(ptr->data);
+  rna_PaintVectorItem_curve_object_apply(
+      ptr, static_cast<Object *>(value.data), item->curve_object_spline, reports);
+}
+
+static void rna_PaintVectorItem_curve_object_spline_set(PointerRNA *ptr, int value)
+{
+  const PaintVectorItem *item = static_cast<const PaintVectorItem *>(ptr->data);
+  rna_PaintVectorItem_curve_object_apply(ptr, item->curve_object, value, nullptr);
 }
 
 /* The Width slider is a friendly scale over the stored world-space `radius`; the conversion (and
@@ -113,6 +207,31 @@ static void rna_def_paint_vector_item(BlenderRNA *brna)
   RNA_def_property_string_sdna(prop, nullptr, "curve_name");
   RNA_def_property_ui_text(
       prop, "Curve Name", "List name of a Curve Patch curve, shown in the Active Tool panel");
+
+  /* A curve can take its control curve from an external Curves object: the object is the single
+   * source of truth for that curve while it is set. */
+  prop = RNA_def_property(srna, "curve_object", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_PaintVectorItem_curve_object_get",
+                                 "rna_PaintVectorItem_curve_object_set",
+                                 nullptr,
+                                 "rna_PaintVectorItem_curve_object_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_editable_func(prop, "rna_PaintVectorItem_curve_look_editable");
+  RNA_def_property_ui_text(prop,
+                           "Curve Object",
+                           "A Curves object whose spline replaces this curve's own control curve; "
+                           "shape edits made in the tool are written back into the object");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_PaintVectorItem_curve_look_update");
+
+  prop = RNA_def_property(srna, "curve_object_spline", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "curve_object_spline");
+  RNA_def_property_int_funcs(prop, nullptr, "rna_PaintVectorItem_curve_object_spline_set", nullptr);
+  RNA_def_property_range(prop, 0, INT_MAX);
+  RNA_def_property_ui_text(prop, "Spline", "Index of the spline of the Curve Object this curve reads");
+  RNA_def_property_editable_func(prop, "rna_PaintVectorItem_curve_look_editable");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_PaintVectorItem_curve_look_update");
 
   prop = RNA_def_property(srna, "hide", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "curve_patch_params.hidden", 1);

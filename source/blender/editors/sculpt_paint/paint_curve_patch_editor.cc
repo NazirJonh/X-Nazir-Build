@@ -23,6 +23,8 @@
 #include "BKE_attribute.hh"
 #include "BKE_context.hh"
 #include "BKE_curves.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_curve_patch_object.hh"
 
 #include "BLT_translation.hh"
 
@@ -84,6 +86,31 @@ static bool curve_patch_radius_editable(const bke::CurvePatchParams &params)
          params.stamp_layout != bke::CurvePatchStampLayout::Fill;
 }
 
+CurvePatchCurveEditor::~CurvePatchCurveEditor()
+{
+  /* Every operator that owns an editor drops it on its way out -- commit, cancel or a lost
+   * context -- which is the one release that cannot be skipped. */
+  this->drag_gate_release();
+}
+
+void CurvePatchCurveEditor::drag_gate_acquire()
+{
+  if (drag_gate_held_) {
+    return;
+  }
+  drag_gate_held_ = true;
+  BKE_paint_layers_curve_patch_object_drag_in_flight_set(true);
+}
+
+void CurvePatchCurveEditor::drag_gate_release()
+{
+  if (!drag_gate_held_) {
+    return;
+  }
+  drag_gate_held_ = false;
+  BKE_paint_layers_curve_patch_object_drag_in_flight_set(false);
+}
+
 bool CurvePatchCurveEditor::radius_drag_begin(bContext &C,
                                               CurvePatchEditorHost &host,
                                               CurvePatchScreenAdapter &adapter)
@@ -110,6 +137,9 @@ bool CurvePatchCurveEditor::radius_drag_begin(bContext &C,
       curve, screen_points.data(), active_point, &radius_handle_);
   dragging_radius_ = true;
   drag_backup_ = host.curve();
+  /* A drag of a live session rewrites its curve objects per step: hold the rows that only read
+   * them back until the release (#drag_end). */
+  this->drag_gate_acquire();
   return true;
 }
 
@@ -122,6 +152,9 @@ void CurvePatchCurveEditor::drag_end()
   dragging_angle_ = false;
   dragging_segment_ = false;
   drag_backup_.reset();
+  /* The drag's writes to the curve objects are over: the refresh may wake the rows that read
+   * them again, and the shape the last step landed is what they rebuild from. */
+  this->drag_gate_release();
 }
 
 bool CurvePatchCurveEditor::drag_cancel(bContext &C, CurvePatchEditorHost &host)
@@ -943,6 +976,9 @@ CurvePatchCurveEditor::Status CurvePatchCurveEditor::handle_event(bContext &C,
          * always has one in flight. The keyboard radius drag is the one other entry and takes its
          * own copy in #radius_drag_begin. */
         drag_backup_ = host.curve();
+        /* A drag of a live session rewrites its curve objects per step: hold the rows that only
+         * read them back until the release (#drag_end). */
+        this->drag_gate_acquire();
         host.redraw(C);
       }
       else if (event.val == KM_RELEASE) {

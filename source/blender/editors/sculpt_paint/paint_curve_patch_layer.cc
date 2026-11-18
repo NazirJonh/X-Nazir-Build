@@ -9,6 +9,7 @@
  */
 
 #include "paint_curve_patch_layer.hh"
+#include "paint_curve_patch_layer_object_source_intern.hh"
 
 #include <algorithm>
 #include <memory>
@@ -19,10 +20,12 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_function_ref.hh"
+#include "BLI_index_mask.hh"
 #include "BLI_index_range.hh"
 #include "BLI_hash.h"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_geom.h"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_span.hh"
@@ -44,6 +47,7 @@
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 #include "DNA_view3d_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
@@ -61,6 +65,7 @@
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_curve_patch_object.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_target.hh"
@@ -70,6 +75,7 @@
 #include "BKE_screen.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_query.hh"
 
 #include "ED_curve_patch.hh"
 #include "ED_image.hh"
@@ -92,6 +98,7 @@
 
 #include "mesh/sculpt_intern.hh"
 #include "paint_curve_geometry.hh"
+#include "paint_curve_patch_apply.hh"
 #include "paint_curve_patch_document.hh"
 #include "paint_curve_patch_edit_intern.hh"
 #include "paint_curve_screen.hh"
@@ -100,7 +107,6 @@
 #include "paint_curve_patch_space_convert.hh"
 
 namespace blender::ed::sculpt_paint {
-
 
 /* -------------------------------------------------------------------- */
 /** \name Brush restore
@@ -148,10 +154,11 @@ void PrevBrushRestore::release()
 /** \name PaintVector <-> CurvePatchDocument converter
  * \{ */
 
-void curve_patch_document_from_vector(const PaintVector &pv, CurvePatchDocument &r_doc)
+/** Field-wise reset to an empty document, shared by both publishers: the document holds an
+ * `Array<MTex>` texture binding, which is neither copy- nor move-assignable (DNA types delete
+ * both). */
+static void curve_patch_document_reset(CurvePatchDocument &r_doc)
 {
-  /* Field-wise reset rather than assignment: the document holds an `Array<MTex>` texture binding,
-   * which is neither copy- nor move-assignable (DNA types delete both). */
   r_doc.patches.clear();
   r_doc.active_patch = 0;
   r_doc.active_point = -1;
@@ -163,6 +170,11 @@ void curve_patch_document_from_vector(const PaintVector &pv, CurvePatchDocument 
   r_doc.undo_steps.clear();
   r_doc.undo_step_current = -1;
   r_doc.undo_anchor_trimmed = false;
+}
+
+void curve_patch_document_from_vector(const PaintVector &pv, CurvePatchDocument &r_doc)
+{
+  curve_patch_document_reset(r_doc);
 
   int patch_index = 0;
   int active_patch = 0;
@@ -198,7 +210,12 @@ void curve_patch_document_from_vector(const PaintVector &pv, CurvePatchDocument 
   r_doc.active_point = -1;
 }
 
+/* The brush radius helpers the document converters use; defined in the Add path section below. */
 static void curve_patch_layer_radius_attribute_ensure(bke::CurvesGeometry &geom);
+static void curve_patch_layer_brush_radius(const Brush *brush,
+                                           float &r_radius,
+                                           float &r_radius_per_size);
+static uint32_t curve_patch_layer_brush_stamp_seed(const Brush &brush);
 
 /** The write-back both spaces share: the document's patches go into the container's items, and
  * the active patch maps back to its item. Only the geometry differs (3D stores the control curve,
@@ -271,8 +288,45 @@ void curve_patch_document_to_vector(const CurvePatchDocument &doc, PaintVector &
   curve_patch_document_write_items(
       doc,
       r_pv,
-      [&](const int patch_i) { return &doc.patches[patch_i].control_curve; },
+      [&](const int patch_i) -> const bke::CurvesGeometry * {
+        /* A curve that names an external object keeps its own geometry as the fallback: the
+         * object is the source of truth, and its shape is written there (see
+         * #curve_patch_document_to_objects), not into the item. */
+        const int item_i = doc.patches[patch_i].source_curve_index;
+        if (item_i >= 0 && item_i < r_pv.items_num &&
+            r_pv.items[item_i].type == PAINT_VECTOR_ITEM_CURVE_PATCH &&
+            r_pv.items[item_i].curve_object != nullptr)
+        {
+          return nullptr;
+        }
+        return &doc.patches[patch_i].control_curve;
+      },
       false);
+}
+
+/** Write a committed document back into the row's container, and the curves that name an external
+ * object into their objects. A \a for_save write carries the container's curves but touches no
+ * staleness mark and no object (a save writes the objects' own data already, and a file write
+ * changes nothing). */
+static void curve_patch_write_back_document(CurvePatchSession &session,
+                                            MaterialPaintLayer &row,
+                                            const bool for_save)
+{
+  if (row.curve_patch->vectors == nullptr) {
+    return;
+  }
+  /* A look edit in the list is only picked up by the modal's poll; the last one may not have
+   * been. */
+  curve_patch_layer_active_item_follow(session);
+  PaintVector &pv = *row.curve_patch->vectors;
+  curve_patch_document_to_vector(session.doc, pv);
+  if (for_save) {
+    return;
+  }
+  curve_patch_document_to_objects(session, row);
+  /* The container changed: the row's content follows it. The save half tags nothing (a file write
+   * changes nothing, and a loaded file re-bakes anyway). */
+  BKE_paint_vector_tag_changed(pv);
 }
 
 /** \} */
@@ -576,14 +630,32 @@ bool ED_paint_layers_curve_patch_row_maps_ensure(bContext &C,
   return any_ready;
 }
 
-/** Whether the object the session will run on has an active UV map: the renderer projects the
- * object-space curves through it, so without one the tool has no canvas to write. */
-static bool curve_patch_layer_object_has_uv(const Object &ob)
+bool curve_patch_view3d_find(wmWindowManager *wm, ViewContext &r_vc)
 {
-  const Mesh *mesh = BKE_object_get_original_mesh(&ob);
-  /* UV maps are attributes of the mesh, not CustomData layers, so the legacy layer lookup always
-   * came back empty. */
-  return mesh != nullptr && !mesh->uv_map_names().is_empty();
+  if (wm == nullptr) {
+    return false;
+  }
+  for (wmWindow &win : wm->windows) {
+    const bScreen *screen = WM_window_get_active_screen(&win);
+    if (screen == nullptr) {
+      continue;
+    }
+    for (ScrArea &area : screen->areabase) {
+      if (area.spacetype != SPACE_VIEW3D) {
+        continue;
+      }
+      ARegion *region = BKE_area_find_region_type(&area, RGN_TYPE_WINDOW);
+      if (region == nullptr || region->regiondata == nullptr) {
+        continue;
+      }
+      r_vc.win = &win;
+      r_vc.region = region;
+      r_vc.rv3d = static_cast<RegionView3D *>(region->regiondata);
+      r_vc.v3d = static_cast<View3D *>(area.spacedata.first);
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1304,7 +1376,6 @@ bool curve_patch_layer_activate(bContext &C, Material &ma, MaterialPaintLayer &r
     BKE_paint_layers_active_set(ma, row.marker);
   }
 
-  PaintVector &pv = *row.curve_patch->vectors;
   curve_patch_layer_entry_curves_prepare(row, [&](PaintVector &seed_pv) {
     curve_patch_layer_seeds_place(C, *ob, *view_context, sd->paint, *brush, seed_pv);
   });
@@ -1331,8 +1402,11 @@ bool curve_patch_layer_activate(bContext &C, Material &ma, MaterialPaintLayer &r
       maps_reset |= BKE_paint_layers_target_content_reset(target);
     }
   };
+  const auto publish_document = [&](CurvePatchDocument &doc) {
+    curve_patch_publish_document(*row.curve_patch, *ob, view_context->depsgraph, doc);
+  };
   CurvePatchSession *session = curve_patch_start_from_layer(
-      C, *ob, *sd, pv, *view_context, reset_maps);
+      C, *ob, *sd, publish_document, *view_context, reset_maps);
   if (session == nullptr) {
     /* Nothing was published; the destructor restores the previous brush. A session that failed
      * after the maps were reset leaves them empty, so the row must not look up to date. */
@@ -1490,50 +1564,68 @@ bool curve_patch_layer_enter_if_sculpting(bContext &C, Material &ma, MaterialPai
   return curve_patch_layer_activate(C, ma, row);
 }
 
-/** The write half the two document stores share: resolve the row the session was entered from,
- * follow the container's active item, and write the live document into the row's PaintVector.
- * Returns the row, or null when there is nothing to write (no row, or its PaintVector is gone). */
-static MaterialPaintLayer *curve_patch_layer_document_to_row(CurvePatchSession &session)
+/** The write half the two document stores share: resolve the row the session was entered from and
+ * write the live document into the row's container and, for the curves that name an external
+ * object, into the objects. Returns the row, or null when there is nothing to write (no row, or
+ * its sources are gone). */
+static MaterialPaintLayer *curve_patch_layer_document_to_row(CurvePatchSession &session,
+                                                             const bool for_save)
 {
   MaterialPaintLayer *row = curve_patch_layer_session_row(session);
-  if (row == nullptr || row->curve_patch->vectors == nullptr) {
+  if (row == nullptr || row->curve_patch == nullptr) {
     return nullptr;
   }
-  /* A look edit in the list is only picked up by the modal's poll; the last one may not have been. */
-  curve_patch_layer_active_item_follow(session);
-  PaintVector &pv = *row->curve_patch->vectors;
-  curve_patch_document_to_vector(session.doc, pv);
+  curve_patch_write_back_document(session, *row, for_save);
   return row;
 }
 
 void curve_patch_layer_store_document(CurvePatchSession &session)
 {
-  MaterialPaintLayer *row = curve_patch_layer_document_to_row(session);
+  MaterialPaintLayer *row = curve_patch_layer_document_to_row(session, false);
   if (row == nullptr) {
     return;
   }
-  PaintVector &pv = *row->curve_patch->vectors;
-  BKE_paint_vector_tag_changed(pv);
-  /* The row's content is its own channel maps: the changed document invalidates the bake, which
-   * re-renders the maps in the background the next time the plan runs. */
+  /* The container tag lives in the vectors source's write-back; the object mode's curves were
+   * written into the object, whose data edit tags itself. Either way the bake follows the row's
+   * curves through the request below. */
   BKE_paint_layers_bake_request(*row);
+}
+
+void curve_patch_layer_sync_objects(CurvePatchSession &session)
+{
+  if (!session.is_layer_effect() || session.layer_object_sync_suspended) {
+    return;
+  }
+  MaterialPaintLayer *row = curve_patch_layer_session_row(session);
+  if (row == nullptr) {
+    return;
+  }
+  curve_patch_document_to_objects(session, *row);
 }
 
 void curve_patch_layer_store_document_for_save(CurvePatchSession &session)
 {
-  /* The file write only carries the curves into the container: the live maps are not stale, and a
-   * loaded file re-bakes anyway -- the blend read clears the row's bake hash, so the first bake
-   * plan renders the row again. Tagging the PaintVector changed here would therefore mark a
-   * staleness nobody acts on, so neither the revision nor the bake is touched. */
-  curve_patch_layer_document_to_row(session);
+  /* The file write only carries the curves into the container (the object source writes nothing:
+   * the object's own data is saved with the file). The live maps are not stale, and a loaded file
+   * re-bakes anyway -- the blend read clears the row's bake hash, so the first bake plan renders
+   * the row again. Tagging the PaintVector changed here would therefore mark a staleness nobody
+   * acts on, so neither the revision nor the bake is touched. */
+  curve_patch_layer_document_to_row(session, true);
 }
 
 void curve_patch_layer_commit_document(bContext &C, CurvePatchSession &session)
 {
-  if (curve_patch_layer_session_row(session) == nullptr) {
+  MaterialPaintLayer *row = curve_patch_layer_session_row(session);
+  if (row == nullptr) {
     return;
   }
   curve_patch_layer_store_document(session);
+  /* A write into a curve object's own data is a geometry edit the object's editors follow too
+   * (the same notification the paint curve's sync to its source object sends); the memfile undo
+   * step below records the object's data with it. */
+  if (row->curve_patch != nullptr && BKE_paint_layers_curve_patch_reads_object(*row)) {
+    WM_event_add_notifier(&C, NC_GEOM | ND_DATA, nullptr);
+  }
   ED_undo_memfile_push(&C, "Curve Patch Layer Edit");
   WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, session.layer_material);
 }
@@ -1573,6 +1665,22 @@ static bool curve_patch_layer_space_convert(bContext &C, Material &ma, MaterialP
   MaterialPaintLayerCurvePatch &payload = *row.curve_patch;
   if (payload.stored_space == payload.space) {
     return true;
+  }
+  /* A curve that names an external object has no UV coordinates to carry over: its curve is the
+   * object's 3D positions, and 2D (UV) coordinates cannot round-trip through a curves object. The
+   * space switch is refused for as long as a curve of the row names an object. */
+  if (payload.vectors != nullptr) {
+    const PaintVector &object_pv = *payload.vectors;
+    for (const int item_i : IndexRange(object_pv.items_num)) {
+      if (object_pv.items[item_i].type == PAINT_VECTOR_ITEM_CURVE_PATCH &&
+          object_pv.items[item_i].curve_object != nullptr)
+      {
+        BKE_report(CTX_wm_reports(&C),
+                   RPT_WARNING,
+                   "A Curve Patch with curves that read a Curve Object works in 3D Space only");
+        return false;
+      }
+    }
   }
   const bool to_2d = payload.space == MA_CURVE_PATCH_SPACE_2D;
 
@@ -1883,6 +1991,17 @@ void curve_patch_layer_mirror_vector(CurvePatchSession &session)
   for (const int patch_i : session.doc.patches.index_range()) {
     const int curve_id = session.doc.patches[patch_i].curve_id;
     if (curve_id <= 0) {
+      /* A curve without an id yet (a file from before the id existed) is still the item it was
+       * published from: matching it by that item keeps the fields the document does not carry --
+       * above all its external curve object -- instead of deleting the item and adding a bare one
+       * in its place. */
+      const int published_item = session.doc.patches[patch_i].source_curve_index;
+      if (published_item >= 0 && published_item < pv.items_num && !claimed[published_item] &&
+          pv.items[published_item].type == PAINT_VECTOR_ITEM_CURVE_PATCH)
+      {
+        item_of_patch[patch_i] = published_item;
+        claimed[published_item] = true;
+      }
       continue;
     }
     for (const int i : IndexRange(pv.items_num)) {
@@ -1909,10 +2028,10 @@ void curve_patch_layer_mirror_vector(CurvePatchSession &session)
   }
   for (const int patch_i : session.doc.patches.index_range()) {
     CurvePatchItem &patch = session.doc.patches[patch_i];
+    if (patch.curve_id <= 0) {
+      patch.curve_id = curve_patch_layer_next_curve_id(pv);
+    }
     if (item_of_patch[patch_i] < 0) {
-      if (patch.curve_id <= 0) {
-        patch.curve_id = curve_patch_layer_next_curve_id(pv);
-      }
       BKE_paint_vector_item_add(pv);
       item_of_patch[patch_i] = pv.items_num - 1;
       pv.items[item_of_patch[patch_i]].type = PAINT_VECTOR_ITEM_CURVE_PATCH;

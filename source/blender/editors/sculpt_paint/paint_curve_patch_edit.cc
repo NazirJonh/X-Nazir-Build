@@ -66,6 +66,7 @@
 #include "BKE_main.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_texture.h"
@@ -1852,6 +1853,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
 static bool curve_patch_edit_session_finish(bContext *C, const bool is_cancel, Object *target)
 {
   ED_workspace_status_text(C, nullptr);
+  /* A drag still in flight releases the source re-stamp gate when the operator drops its editor
+   * (#CurvePatchCurveEditor::~CurvePatchCurveEditor), a few lines after this returns. */
 
   Object &ob = *(target ? target : CTX_data_active_object(C));
   SculptSession &ss = *ob.runtime->sculpt_session;

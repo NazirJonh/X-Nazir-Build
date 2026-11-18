@@ -321,6 +321,7 @@ set(SRC
   intern/paint_layers/paint_layers_source_cache.cc
   intern/paint_layers/paint_layers_source_graph.cc
   intern/paint_layers/paint_layers_projection.cc
+  intern/paint_layers/paint_layers_curve_patch_object.cc
   intern/paint_layers/paint_layers_source_hash.cc
   intern/paint_layers/paint_layers_target.cc
   intern/paint_layers/paint_layers_text_decal.cc
@@ -608,6 +609,7 @@ set(SRC
   BKE_paint_layers.hh
   BKE_paint_layers_asset.hh
   BKE_paint_layers_composite.hh
+  BKE_paint_layers_curve_patch_object.hh
   BKE_paint_layers_edit.hh
   BKE_paint_layers_generate.hh
   BKE_paint_layers_generator.hh

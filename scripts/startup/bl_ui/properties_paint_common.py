@@ -5591,6 +5591,12 @@ class CURVE_PATCH_LAYER_PT_curves(Panel):
                 col.prop(active, "opacity", slider=True)
                 col.prop(active, "width", slider=True)
                 col.separator()
+                # An external Curves object can replace this curve's own control curve: the object
+                # is the curve's source of truth while set, and shape edits are written back into it.
+                col.prop(active, "curve_object", text="Curve Object")
+                if active.curve_object is not None:
+                    col.prop(active, "curve_object_spline", text="Spline")
+                col.separator()
                 # The per-point value is the curve-wide Opacity's multiplier for one control point;
                 # it needs an active control point, which exists only while a session (either
                 # space) edits the curve. The falloff lives in the popover.

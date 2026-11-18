@@ -86,6 +86,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_curve_patch_object.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_pointcache.h"
@@ -257,7 +258,6 @@ const PaintShapeSettings &BKE_paint_shape_settings_get(const ToolSettings &tool_
 {
   return tool_settings.imapaint.shape;
 }
-
 
 static void scene_init_data(ID *id)
 {
@@ -3240,6 +3240,10 @@ static void scene_graph_update_tagged(Depsgraph *depsgraph, Main *bmain, bool on
      * produced it. The refresh tags the material when it writes a map, which the second pass below
      * picks up when the build needs the new pixels. */
     BKE_paint_layers_text_decal_refresh_tagged(*bmain, *depsgraph);
+    /* A Curve Patch row of the object source mode reads the evaluated Curves object the same way:
+     * the refresh compares the row's curve hash against the last-read one and reaches a live
+     * session through the editors hook. */
+    BKE_paint_layers_curve_patch_object_refresh_tagged(*bmain, *depsgraph);
     /* Update sound system. */
     BKE_scene_update_sound(depsgraph, bmain);
     /* Notify python about depsgraph update. */
@@ -3335,8 +3339,10 @@ void BKE_scene_graph_update_for_newframe_ex(Depsgraph *depsgraph, const bool cle
     else {
       DEG_evaluate_on_refresh(depsgraph, DEG_EVALUATE_SYNC_WRITEBACK_YES);
     }
-    /* Text Decals read the evaluated Text objects; see the tagged update above. */
+    /* Text Decals read the evaluated Text objects; see the tagged update above. The Curve Patch
+     * object source follows the same pattern, see the tagged update above. */
     BKE_paint_layers_text_decal_refresh_tagged(*bmain, *depsgraph);
+    BKE_paint_layers_curve_patch_object_refresh_tagged(*bmain, *depsgraph);
     /* Update sound system animation. */
     BKE_scene_update_sound(depsgraph, bmain);
 

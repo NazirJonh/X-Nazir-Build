@@ -663,7 +663,7 @@ class PaintCurveCursor : Overlay {
        * (if the object's active material has one) is what the overlay shows. Paint display group
        * only: in the Sculpt group the effect's curves are neither this tool's subject nor
        * pickable, so drawing them there would invite interaction the tool cannot deliver. */
-      ED_curve_patch_overlay_data_get_stack(vc.obact, patch_overlay_);
+      ED_curve_patch_overlay_data_get_stack(vc.obact, vc.depsgraph, patch_overlay_);
     }
     return effects_silhouettes;
   }

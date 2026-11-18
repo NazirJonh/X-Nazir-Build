@@ -275,7 +275,8 @@ void ED_curve_patch_session_undo_push(Object &ob);
  * Replace the brush snapshot of a Curve Patch effect with a duplicate of \a source. The single
  * entry for every UI path (a brush dropped on the slot, the slot's ID browser, the assign
  * operator); the context-free RNA `brush` setter is only for scripts. It validates \a source
- * (#BKE_paint_layers_curve_patch_brush_usable) and wraps the replacement with what it needs:
+ * (#BKE_paint_layers_curve_patch_brush_is_assignable) and wraps the replacement with what it
+ * needs:
  * - live layer sessions commit first, since the snapshot is the active brush while one runs and
  *   cannot be freed under it;
  * - every curve of the effect takes the new brush's parameters (stamp mode, layout, spacing,

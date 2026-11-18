@@ -1326,7 +1326,13 @@ struct UserDef {
    * #category_tabs_clipboard_use_default_dir is false.
    */
   char category_tabs_clipboard_dir[/*FILE_MAXDIR*/ 768] = "";
-  char _pad20[7] = {};
+  /**
+   * True: switching the active paint layer commits a Curve Patch started on an ordinary layer
+   * instead of asking the user to commit it first. Zero (off) in preferences saved before the
+   * field existed, which is the default.
+   */
+  char paint_layers_commit_patch_on_switch = false;
+  char _pad20[6] = {};
   /**
    * Setting for UI line width.
    *

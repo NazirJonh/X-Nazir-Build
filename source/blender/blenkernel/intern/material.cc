@@ -240,8 +240,10 @@ static void paint_layer_curve_patch_copy(Main *bmain,
       id_us_min(&payload->brush->id);
       /* The brush copy carries the stock fake user; the payload owns its snapshot one to one, so
        * the copy's row is its only user (see
-       * #BKE_paint_layers_curve_patch_brush_snapshot_create). */
+       * #BKE_paint_layers_curve_patch_brush_set). */
       id_fake_user_clear(&payload->brush->id);
+      /* Two materials must not edit one Tex through their two snapshots. */
+      BKE_brush_textures_unshare(*bmain, *payload->brush);
     }
   }
 }

@@ -2284,8 +2284,8 @@ class CurvePatchLayerBrushDropTarget : public ui::DropTargetInterface {
      * refusal at once; an external asset is only known by its name until it is imported, and its
      * type is checked by the assign entry on drop. */
     if (ID *id = WM_drag_get_local_ID(&drag, ID_BR)) {
-      if (!BKE_paint_layers_curve_patch_brush_usable(*id_cast<Brush *>(id))) {
-        *r_disabled_hint = TIP_("That brush cannot stamp a Curve Patch");
+      if (!BKE_paint_layers_curve_patch_brush_is_assignable(*id_cast<Brush *>(id))) {
+        *r_disabled_hint = BKE_paint_layers_curve_patch_brush_refusal_message();
         return false;
       }
       return true;
@@ -2293,10 +2293,10 @@ class CurvePatchLayerBrushDropTarget : public ui::DropTargetInterface {
     if (drag.type == WM_DRAG_ASSET_LIST) {
       const wmDragAssetListItem *item = drag_asset_list_first_of(drag, {ID_BR});
       if (item != nullptr && !item->is_external && item->asset_data.local_id != nullptr &&
-          !BKE_paint_layers_curve_patch_brush_usable(
+          !BKE_paint_layers_curve_patch_brush_is_assignable(
               *id_cast<Brush *>(item->asset_data.local_id)))
       {
-        *r_disabled_hint = TIP_("That brush cannot stamp a Curve Patch");
+        *r_disabled_hint = BKE_paint_layers_curve_patch_brush_refusal_message();
         return false;
       }
       return item != nullptr;

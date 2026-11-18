@@ -206,15 +206,20 @@ struct PaintLayerAddParams {
    */
   Main *bmain = nullptr;
   /**
-   * The brush a #PaintLayerAddKind::CurvePatch row snapshots (a full duplicate is made). Null
-   * falls back to a fresh default brush, so the row always carries a tool state of its own.
-   */
-  Brush *curve_patch_brush = nullptr;
-  /**
    * The Text object a #PaintLayerAddKind::TextDecalEffect bakes its raster from. The object is
    * referenced, never copied: its text and formatting are the single source of truth.
    */
   Object *text_object = nullptr;
+  /**
+   * The brush a #PaintLayerAddKind::CurvePatchEffect takes its snapshot from, or null for a
+   * brush-less effect. The Add policy validates it with
+   * #BKE_paint_layers_curve_patch_brush_is_assignable and silently leaves the row brush-less when
+   * it is not a Paint Brush that can stamp a patch (a geometry brush such as Draw or Clay, a Mask
+   * brush, another row's snapshot), so a caller may pass the active brush without deciding itself.
+   * An assignable brush makes the typical Add open its tool at once, as it did before the effect
+   * could be added brush-less.
+   */
+  const Brush *curve_patch_brush = nullptr;
   /**
    * Where an #PaintLayerAddKind::AnchorPoint marker lands: the anchor row's effects or its mask.
    * The three reader kinds take their list from the kind itself. \a insert_after names the item

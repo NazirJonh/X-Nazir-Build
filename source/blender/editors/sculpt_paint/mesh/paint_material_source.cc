@@ -58,6 +58,8 @@
 #include "ED_material_bake.hh"
 #include "ED_view3d.hh"
 
+#include "../paint_curve_patch_layer.hh"
+
 #include "../paint_intern.hh"
 #include "paint_dab_timing.hh"
 #include "paint_material_blend.hh"
@@ -506,9 +508,11 @@ bool paint_layers_status_report(Material &ma,
   return true;
 }
 
-bool paint_layers_stroke_gate_report(Object &ob,
+bool paint_layers_stroke_gate_report(bContext &C,
+                                     Object &ob,
                                      const PaintModeSettings &settings,
-                                     ReportList *reports)
+                                     ReportList *reports,
+                                     const Brush *brush)
 {
   if (settings.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL) {
     return false;
@@ -542,7 +546,43 @@ bool paint_layers_stroke_gate_report(Object &ob,
       return true;
     }
   }
-  return paint_layers_status_report(*ma, status, reports);
+  if (paint_layers_status_report(*ma, status, reports)) {
+    return true;
+  }
+  /* A Curve Patch effect is stamped only through its own snapshot, entered from the row. Another
+   * brush either writes ordinary dabs into the effect's maps (the next bake overwrites them) or,
+   * with the Curve Patch stroke method, starts a free-standing patch session whose curve is not
+   * stored in the effect. The resolve decides between taking the brush in hand (#Adopt), entering
+   * the row's tool (#Redirect) and refusing, and carries the answer out. */
+  return paint_layers_curve_patch_stroke_gate_report(C, ob, settings, reports, brush);
+}
+
+bool paint_layers_curve_patch_stroke_gate_report(bContext &C,
+                                                 Object &ob,
+                                                 const PaintModeSettings &settings,
+                                                 ReportList *reports,
+                                                 const Brush *brush)
+{
+  if (settings.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL) {
+    return false;
+  }
+  Material *ma = BKE_paint_layers_active_material_get(&ob);
+  if (ma == nullptr) {
+    return false;
+  }
+  PaintLayersTarget target;
+  const PaintLayersTargetStatus status = BKE_paint_layers_target_resolve(
+      *ma,
+      int(PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+      BKE_paint_layers_target_mode(&settings),
+      target);
+  if (status != PaintLayersTargetStatus::Ok || target.mode != PaintLayersTargetMode::Content ||
+      target.layer == nullptr)
+  {
+    return false;
+  }
+  return curve_patch_layer_stroke_target_resolve(C, *ma, *target.layer, brush, reports) !=
+         CurvePatchStrokeTarget::Allow;
 }
 
 Image *mask_target_image_ensure(Main *bmain, Object &ob, const PaintModeSettings &settings)

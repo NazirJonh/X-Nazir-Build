@@ -246,6 +246,9 @@ void outliner_stack_row_added_sync(bContext &C, ID &owner, const bUUID &row_id)
         }
         /* A correction is listed under its row's content section: bring that section up, or the
          * row just made is in the data and unseen. */
+        if (!outliner_stack_row_switch_allowed(&C, space_outliner, ordinal)) {
+          continue;
+        }
         stack_row_reveal_attached(space_outliner, ordinal);
         stack_row_ui_state_edit_select(ctx, space_outliner, owner, ordinal);
         /* The same follow-up the Add wrapper gives a row it made: the target mode, the mask and the
@@ -629,6 +632,38 @@ bool outliner_stack_row_activate(bContext *C, SpaceOutliner &space_outliner, con
   }
   return stack_source_for_space(space_outliner)
       ->row_activate(*C, space_outliner.runtime->stack_focus, *owner, ordinal, *row);
+}
+
+bool outliner_stack_row_switch_allowed(bContext *C,
+                                       SpaceOutliner &space_outliner,
+                                       const int ordinal)
+{
+  if (ordinal < 0) {
+    return true;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, space_outliner);
+  if (owner == nullptr) {
+    return true;
+  }
+  outliner_stack_rows_ensure(ctx, space_outliner, *owner);
+  const StackRow *row = outliner_stack_row_find(space_outliner, ordinal);
+  if (row == nullptr) {
+    return true;
+  }
+  return stack_source_for_space(space_outliner)
+      ->row_switch_allowed(*C, space_outliner.runtime->stack_focus, *owner, row);
+}
+
+bool outliner_stack_new_row_switch_allowed(bContext *C, SpaceOutliner &space_outliner)
+{
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, space_outliner);
+  if (owner == nullptr) {
+    return true;
+  }
+  return stack_source_for_space(space_outliner)
+      ->row_switch_allowed(*C, space_outliner.runtime->stack_focus, *owner, nullptr);
 }
 
 bool outliner_stack_row_preview_activate(bContext *C,

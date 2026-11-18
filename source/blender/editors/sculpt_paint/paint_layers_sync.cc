@@ -48,12 +48,19 @@ void paint_stack_texpaint_slots_refresh(bContext &C)
   }
 }
 
-void paint_stack_active_row_set(bContext &C, Material &material, const bUUID &marker)
+bool paint_stack_active_row_set(bContext &C, Material &material, const bUUID &marker)
 {
+  /* The same pre-switch check every Outliner path runs: a live Curve Patch session writes into the
+   * row it started on, so it refuses the switch and reports why instead of letting this mutation
+   * move the row under it. */
+  if (!curve_patch_layer_row_switch_prepare(C)) {
+    return false;
+  }
   /* Commit before the switch: leaving for Mask would otherwise remember the effect's snapshot
    * brush as the content brush to give back. The session of the row becoming active stays. */
   curve_patch_layer_commit_live_sessions(C, &marker);
   BKE_paint_layers_active_set(material, marker);
+  return true;
 }
 
 bool paint_stack_target_mode_set(bContext &C, const ePaintLayerTargetMode mode)
@@ -93,7 +100,11 @@ bool paint_stack_target_mode_set(bContext &C, const ePaintLayerTargetMode mode)
 
 void paint_stack_mask_edit_enter(bContext &C, Material &material, const bUUID &mask_marker)
 {
-  paint_stack_active_row_set(C, material, mask_marker);
+  if (!paint_stack_active_row_set(C, material, mask_marker)) {
+    /* A live session refused the switch: the mask mode must not be entered on the row it still
+     * writes into. */
+    return;
+  }
   paint_stack_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
   paint_stack_mask_brush_tool_activate(C);
 }

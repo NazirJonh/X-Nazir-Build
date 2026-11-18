@@ -861,6 +861,25 @@ static AssetWeakReference *asset_reference_create_from_brush(Brush *brush)
 }
 
 /**
+ * Whether \a brush must stay out of the material brush preset system: it is a Curve Patch effect's
+ * private snapshot. Its channels are the effect's private state, kept in the snapshot itself, and
+ * a preset keyed by its name would outlive it while the snapshot name uniqueness hands that name
+ * to a later snapshot -- which would then come back with a deleted effect's textures. The one
+ * place the exclusion rule lives; the name-only variant below serves the purge, which has no
+ * #Brush.
+ */
+static bool paint_material_brush_preset_is_excluded(const Brush &brush)
+{
+  return BKE_paint_layers_is_curve_patch_snapshot(brush);
+}
+
+/** The same exclusion for the local-only \a local_name a preset is keyed by. */
+static bool paint_material_brush_preset_name_is_excluded(const char *local_name)
+{
+  return BKE_paint_layers_is_curve_patch_snapshot_name(local_name);
+}
+
+/**
  * Reapplies this session's sticky "Use Texture Overlay" state (set by toggling the option on
  * whichever brush was active before, see #rna_Brush_texture_overlay_session_update) to the brush
  * that just became active, so the user doesn't have to re-enable it by hand on every brush.
@@ -942,6 +961,12 @@ void BKE_paint_material_brush_preset_apply(Scene &scene, Brush &brush)
   /* Do not create a default preset or allocate #Brush.material_paint here. That is the PBR Paint
    * opt-in (#PAINT_OT_material_paint_brush_ensure). Switching brushes must not expand the PBR UI
    * for a brush the user has never set up. */
+  /* A Curve Patch snapshot is the effect's own brush: its channels are its private state, kept in
+   * the snapshot itself, which outlives every switch. The preset system skips snapshots entirely,
+   * in both directions (see #paint_material_brush_preset_is_excluded). */
+  if (paint_material_brush_preset_is_excluded(brush)) {
+    return;
+  }
   PaintMaterialBrushPreset *preset = BKE_paint_material_brush_preset_find(scene, brush);
   if (preset == nullptr) {
     return;
@@ -953,6 +978,10 @@ void BKE_paint_material_brush_preset_apply(Scene &scene, Brush &brush)
 void BKE_paint_material_brush_preset_snapshot(Scene &scene, const Brush &brush)
 {
   if (brush.material_paint == nullptr) {
+    return;
+  }
+  /* The other half of the snapshot skip (see #paint_material_brush_preset_is_excluded). */
+  if (paint_material_brush_preset_is_excluded(brush)) {
     return;
   }
   PaintMaterialBrushPreset *preset = BKE_paint_material_brush_preset_ensure(scene, brush);
@@ -998,7 +1027,11 @@ static void paint_material_brush_presets_purge_unused(Main *bmain, Scene &scene)
     const bool is_orphaned_local = preset.local_name != nullptr &&
                                    BKE_libblock_find_name(
                                        bmain, ID_BR, preset.local_name, nullptr) == nullptr;
-    if (is_malformed || is_orphaned_local) {
+    /* A preset keyed by a Curve Patch snapshot's name is stale by construction: the preset system
+     * skips snapshots (see #paint_material_brush_preset_is_excluded), so whatever this carries was
+     * written by an older build, for a snapshot whose textures it must not resurrect. */
+    const bool is_snapshot_keyed = paint_material_brush_preset_name_is_excluded(preset.local_name);
+    if (is_malformed || is_orphaned_local || is_snapshot_keyed) {
       BLI_remlink(&presets, &preset);
       BKE_paint_material_brush_preset_free(&preset, true);
     }

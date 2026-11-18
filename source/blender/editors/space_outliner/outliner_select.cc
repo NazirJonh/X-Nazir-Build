@@ -156,6 +156,13 @@ static std::optional<wmOperatorStatus> stack_preview_slot_run_operator(
   }
 
   if (activate_row) {
+    /* A source may refuse the switch before anything moves (a live Curve Patch session writes into
+     * the active row): returning cancelled keeps the tree-store highlight where it was, so the
+     * selection and the data never disagree. Any other activation failure is left to the source's
+     * own report, as before. */
+    if (!outliner_stack_row_switch_allowed(C, space_outliner, row_ordinal)) {
+      return OPERATOR_CANCELLED;
+    }
     outliner_stack_row_activate(C, space_outliner, row_ordinal);
   }
   if (!preview_section.empty()) {
@@ -2058,8 +2065,11 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
           outliner_stack_row_is_curve_patch(*C, *space_outliner, activate_tselem->nr))
       {
         /* Double-click on a Curve Patch effect row is the explicit entrance into its curve tool. The
-         * operator's poll reads the active row, so activate the clicked row first; the live-session
-         * guard of `outliner_stack_row_activate` then decides whether the switch may happen. */
+         * operator's poll reads the active row, so activate the clicked row first; a live-session
+         * refusal stops here, before the highlight moves. */
+        if (!outliner_stack_row_switch_allowed(C, *space_outliner, activate_tselem->nr)) {
+          return OPERATOR_CANCELLED;
+        }
         if (outliner_stack_row_activate(C, *space_outliner, activate_tselem->nr)) {
           PointerRNA props = WM_operator_properties_create(
               "OUTLINER_OT_stack_layer_curve_patch_edit");
@@ -2129,6 +2139,15 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
     }
 
     if (use_range) {
+      /* The range write below changes the tree-store highlight before the data is activated; a
+       * switch the source refuses must stop the click here, or the highlight would run ahead of
+       * the active row. */
+      if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+          activate_tselem->type == TSE_STACK_LAYER && activate_tselem->id != nullptr &&
+          !outliner_stack_row_switch_allowed(C, *space_outliner, activate_tselem->nr))
+      {
+        return OPERATOR_CANCELLED;
+      }
       do_outliner_range_select(
           C, space_outliner, activate_te, extend, (recurse && is_over_icon), parent_collection);
 

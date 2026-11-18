@@ -27,6 +27,7 @@
 #include "BLI_math_base.h"
 #include "BLI_set.hh"
 #include "BLI_span.hh"
+#include "BLI_string.h"
 #include "BLI_vector.hh"
 
 #include "BKE_paint_layers_target.hh"
@@ -874,15 +875,41 @@ MaterialPaintLayer *BKE_paint_layers_correction_add_material(Material &ma,
 /** The hidden name prefix that marks a brush as a Curve Patch effect's private snapshot. */
 inline constexpr const char *BKE_PAINT_LAYERS_CP_BRUSH_PREFIX = ".CP ";
 
+/**
+ * Whether the local brush name (without the ID-code prefix) marks a Curve Patch snapshot. The one
+ * implementation by name, so the brush check and the preset exclusion key on the same prefix.
+ */
+inline bool BKE_paint_layers_is_curve_patch_snapshot_name(const char *local_name)
+{
+  return local_name != nullptr && STRPREFIX(local_name, BKE_PAINT_LAYERS_CP_BRUSH_PREFIX);
+}
+
 /** Whether \a brush is a Curve Patch effect's private snapshot (never a source for another). */
 bool BKE_paint_layers_is_curve_patch_snapshot(const Brush &brush);
 
 /**
- * Whether \a brush can be the source of a Curve Patch effect's snapshot: its type can stamp a
- * patch and it is not itself a snapshot. The single rule behind the RNA poll, the drop target and
- * the Python filters.
+ * Whether \a brush can technically stamp a Curve Patch: its type can and it is not itself a
+ * snapshot. The technical half of the assign rule
+ * #BKE_paint_layers_curve_patch_brush_is_assignable enforces; what the user may pick or have taken
+ * for them is only the assignable brush.
  */
-bool BKE_paint_layers_curve_patch_brush_usable(const Brush &brush);
+bool BKE_paint_layers_curve_patch_brush_can_stamp(const Brush &brush);
+
+/**
+ * The one user-facing message for why a brush cannot be assigned to a Curve Patch effect: every
+ * refusing path (the RNA setters, the drop target, the assign operator) reports this same text, so
+ * the rule reads the same wherever it bites. Already wrapped for translation.
+ */
+const char *BKE_paint_layers_curve_patch_brush_refusal_message();
+
+/**
+ * Whether \a brush may be given to a Curve Patch effect by the UI, an Add or the stroke gate: a
+ * source that can stamp a patch and is a Paint Brush (#SCULPT_BRUSH_TYPE_PAINT). The effect is a
+ * Paint Brush effect; a geometry brush (Draw, Clay, ...) can stamp a patch but is neither offered
+ * nor taken silently. The single rule behind the RNA poll, the drop target, the assign operator,
+ * the Add and the stroke gate -- and the one #BKE_paint_layers_curve_patch_brush_set enforces.
+ */
+bool BKE_paint_layers_curve_patch_brush_is_assignable(const Brush &brush);
 
 /**
  * The name of the brush \a brush (a snapshot) was duplicated from; empty when unknown (a fresh
@@ -902,17 +929,14 @@ MaterialPaintLayer *BKE_paint_layers_curve_patch_row_find(
     Material &ma, const MaterialPaintLayerCurvePatch &payload);
 
 /**
- * Create the owned payload of a Curve Patch row or effect: an empty PaintVector and a private
- * brush snapshot. The snapshot is a full duplicate of \a source_brush when that brush's type can
- * stamp a patch, and a fresh sculpt brush otherwise (null included), named
- * `".CP Brush <row_name>"`, set to the Curve Patch stroke method and given the material-paint
- * record the image effect reads its channel values from.
+ * Create the owned payload of a Curve Patch row or effect: an empty PaintVector. No brush snapshot
+ * is made here: a Curve Patch is a Paint Brush effect, and no brush is handed out at the Add --
+ * a Paint Brush is assigned afterwards, through #BKE_paint_layers_curve_patch_brush_set.
  *
- * \return the payload, or null when the database cannot create the brush (the container is freed
- * again). The caller links it into its row and seeds the first curve.
+ * \return the payload, or null when the database cannot create the container (freed again). The
+ * caller links it into its row and seeds the first curve.
  */
-MaterialPaintLayerCurvePatch *BKE_paint_layers_curve_patch_payload_create(
-    Main &bmain, const char *row_name, const Brush *source_brush);
+MaterialPaintLayerCurvePatch *BKE_paint_layers_curve_patch_payload_create(Main &bmain);
 
 /**
  * Replace \a row's private brush snapshot with a fresh duplicate of \a source. The old snapshot
@@ -920,7 +944,8 @@ MaterialPaintLayerCurvePatch *BKE_paint_layers_curve_patch_payload_create(
  * they are (the frozen per-curve parameters belong to the curves, not to the brush). The bake is
  * invalidated because the brush is part of its input.
  *
- * \return false when \a row is not a Curve Patch row or the duplicate could not be made.
+ * \return false when \a row is not a Curve Patch row, \a source is not an assignable brush (see
+ * #BKE_paint_layers_curve_patch_brush_is_assignable), or the duplicate could not be made.
  */
 bool BKE_paint_layers_curve_patch_brush_set(Material &ma,
                                             Main &bmain,
@@ -929,23 +954,22 @@ bool BKE_paint_layers_curve_patch_brush_set(Material &ma,
 
 /**
  * Add a Curve Patch content effect to \a owner: its channels are laid by the 3D control curves of
- * the effect's own PaintVector, stamped through a private brush snapshot (a full duplicate of \a
- * snapshot_source when its type can stamp a patch, a fresh sculpt brush otherwise), over the row's
- * colour, below the row's own blend. The payload is created with the effect; the seeded control
- * curve is the caller's business, through the editors wrapper
- * (#ED_paint_layers_curve_patch_row_seed_curve).
+ * the effect's own PaintVector, stamped through the effect's private brush snapshot, over the
+ * row's colour, below the row's own blend. The payload is created with the effect, brush-less: a
+ * brush whose type cannot stamp a patch (a Mask Smooth brush, another row's snapshot) is not a
+ * source, so one is assigned explicitly through #BKE_paint_layers_curve_patch_brush_set. The
+ * editor-facing Add policy (#BKE_paint_layers_add_with_policy) does that itself for a usable brush
+ * it is handed (see #PaintLayerAddParams::curve_patch_brush). The seeded control curve is the
+ * caller's business, through the editors wrapper (#ED_paint_layers_curve_patch_row_seed_curve).
  *
- * \param bmain: the database the payload's two IDs are created in.
- * \param snapshot_source: the brush duplicated as the effect's tool state, or null for a fresh
- * default one.
+ * \param bmain: the database the payload's container is created in.
  * \return the new effect, or null when \a owner is not a row of \a ma's stack or \a bmain is
  * null. A folder takes one, like any correction.
  */
 MaterialPaintLayer *BKE_paint_layers_curve_patch_effect_add(Material &ma,
                                                             MaterialPaintLayer *owner,
                                                             const char *name,
-                                                            Main &bmain,
-                                                            const Brush *snapshot_source);
+                                                            Main &bmain);
 
 /**
  * Add a Text Decal content effect to \a owner: its channels are painted with the rasterized styled

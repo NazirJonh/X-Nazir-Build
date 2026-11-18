@@ -16,6 +16,7 @@
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_import.hh"
 
+#include "BKE_brush.hh"
 #include "BKE_colortools.hh"
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
@@ -330,6 +331,8 @@ static void paint_layer_curve_patch_duplicate(Main &bmain,
      * owns its snapshot one to one (see #paint_layer_curve_patch_brush_snapshot_create). */
     if (payload->brush != nullptr) {
       id_fake_user_clear(&payload->brush->id);
+      /* Two effects must not edit one Tex through their two snapshots. */
+      BKE_brush_textures_unshare(bmain, *payload->brush);
     }
   }
 }

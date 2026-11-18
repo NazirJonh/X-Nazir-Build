@@ -835,16 +835,18 @@ enum eMaterialPaintLayerCurvePatchSpace {
 
 /**
  * The owned payload of a #MA_PAINT_LAYER_SOURCE_CURVE_PATCH row: the curve container and the
- * brush snapshot the row was created with. 1:1 ownership (see the ownership contract in
- * `paint_layer_dependencies`): on row free the two IDs are released only while the row is their
- * last user, otherwise they are left to whoever else uses them and the pointers are cleared.
+ * brush snapshot assigned to the row (null until a Paint Brush is assigned; the row is added
+ * brush-less). 1:1 ownership (see the ownership contract in `paint_layer_dependencies`): on row
+ * free the two IDs are released only while the row is their last user, otherwise they are left to
+ * whoever else uses them and the pointers are cleared.
  */
 struct MaterialPaintLayerCurvePatch {
   DNA_DEFINE_CXX_METHODS(MaterialPaintLayerCurvePatch)
 
   /** The owned container of the effect's control curves (#PaintVector). */
   struct PaintVector *vectors = nullptr;
-  /** The owned brush snapshot ("`.CP Brush <row>`" naming convention). */
+  /** The owned brush snapshot ("`.CP <source brush>`" naming convention); null until a Paint
+   * Brush is assigned, since the effect is added brush-less. */
   struct Brush *brush = nullptr;
   /** #eMaterialPaintLayerCurvePatchSpace. Zero-defaulted, so files written before the field
    * existed read back as 3D Space -- exactly what their curves were authored in. */

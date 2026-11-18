@@ -1261,6 +1261,12 @@ static wmOperatorStatus stack_layer_paste_exec(bContext *C, wmOperator *op)
     BKE_report(op->reports, RPT_ERROR, "No active paint layer");
     return OPERATOR_CANCELLED;
   }
+  /* A paste makes a new row the active one: a live Curve Patch session refuses that switch before
+   * anything is created, so the tool and the target mode below never describe a row the paste did
+   * not activate. */
+  if (!ed::sculpt_paint::curve_patch_layer_row_switch_prepare(*C)) {
+    return OPERATOR_CANCELLED;
+  }
   MaterialPaintLayer *source = (ma->id.session_uid == stack_layer_clipboard.material_uid) ?
                                    BKE_paint_layers_find(*ma, stack_layer_clipboard.marker) :
                                    nullptr;

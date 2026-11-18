@@ -1748,6 +1748,26 @@ class StackSource {
   /** Make the row the thing the rest of Blender acts on. */
   virtual bool row_activate(
       bContext &C, const StackFocus &focus, ID &owner, int ordinal, const StackRow &row) const = 0;
+
+  /**
+   * Whether the active row may change right now, checked BEFORE the Outliner moves its own
+   * selection or mutates a row into a new active one. A source whose live tool writes into the
+   * active row refuses while that tool runs and reports why; the tree-store highlight then never
+   * runs ahead of the data. \a row is the row about to become active, or null when the caller is
+   * about to activate a row that does not exist yet (an Add, a duplicate, a paste).
+   *
+   * The name asks a question, but this is not promised to be a pure check: a source may COMMIT a
+   * session to let the switch through (the paint-layers source does, when the user preference
+   * asks for it).
+   */
+  virtual bool row_switch_allowed(bContext & /*C*/,
+                                  const StackFocus & /*focus*/,
+                                  ID & /*owner*/,
+                                  const StackRow * /*row*/) const
+  {
+    return true;
+  }
+
   virtual bool row_is_active(const StackReadContext &ctx,
                              const StackFocus &focus,
                              const ID &owner,

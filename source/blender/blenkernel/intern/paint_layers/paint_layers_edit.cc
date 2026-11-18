@@ -291,8 +291,18 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     }
     /* Numbered among the effects of this one row only, like the corrections are. */
     const std::string name = numbered_effect_name(owner->effects, "Curve Patch", params.name);
-    return BKE_paint_layers_curve_patch_effect_add(
-        ma, owner, name.c_str(), *params.bmain, params.curve_patch_brush);
+    MaterialPaintLayer *effect = BKE_paint_layers_curve_patch_effect_add(
+        ma, owner, name.c_str(), *params.bmain);
+    /* The Add takes the brush it was handed when it is an assignable one; an unassignable one (a
+     * Sculpt brush that is not a Paint Brush, another row's snapshot) leaves the effect
+     * brush-less, exactly as an Add that names none. */
+    if (effect != nullptr && params.curve_patch_brush != nullptr &&
+        BKE_paint_layers_curve_patch_brush_is_assignable(*params.curve_patch_brush))
+    {
+      BKE_paint_layers_curve_patch_brush_set(
+          ma, *params.bmain, *effect, *params.curve_patch_brush);
+    }
+    return effect;
   }
   if (params.kind == PaintLayerAddKind::TextDecalEffect) {
     /* An Add aimed at an effect means another one on the row it hangs on. */

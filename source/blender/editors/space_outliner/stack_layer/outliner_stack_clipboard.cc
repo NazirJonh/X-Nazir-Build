@@ -115,6 +115,9 @@ wmOperatorStatus stack_row_paste_exec(bContext *C, wmOperator *op)
   }
 
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (!outliner_stack_new_row_switch_allowed(C, *space_outliner)) {
+    return OPERATOR_CANCELLED;
+  }
   const StackReadContext ctx = outliner_stack_read_context(*C);
   const int active_ordinal = outliner_stack_active_ordinal_get(ctx, *space_outliner);
   if (active_ordinal < 0) {

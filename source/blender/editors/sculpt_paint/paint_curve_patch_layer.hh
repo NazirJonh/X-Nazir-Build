@@ -43,6 +43,7 @@ struct Object;
 struct Paint;
 struct PaintVector;
 struct PaintVectorItem;
+struct ReportList;
 struct Scene;
 struct ViewContext;
 struct wmOperatorType;
@@ -309,6 +310,66 @@ bool curve_patch_layer_session_blocks_row(const CurvePatchSession &session,
                                           const MaterialPaintLayer &row);
 
 /**
+ * Whether a free-standing Curve Patch session (3D or 2D: a patch started on an ordinary layer, not
+ * owned by a Curve Patch effect row) is alive in \a bmain, so the active row must not change: the
+ * session has no row to keep its curves in and writes into the layer that was active when it
+ * started. A session of an effect row never blocks: its state lives in the row's container, and a
+ * switch commits it. The one pure predicate every switch path and the Outliner's pre-selection
+ * check share; which row is about to become active makes no difference, so it takes none. The
+ * checking-and-acting counterpart is #curve_patch_layer_row_switch_prepare.
+ */
+bool curve_patch_layer_row_switch_blocked(Main &bmain);
+
+/**
+ * Get the context ready for the active row to change, and answer whether it may. When the pure
+ * #curve_patch_layer_row_switch_blocked finds a free-standing Curve Patch session, the option
+ * `paint_layers_commit_patch_on_switch` commits it and the switch is allowed; otherwise the
+ * refusal is reported (an INFO telling the user to commit first) and the switch is not allowed.
+ * The name says so on purpose: this is not a check, it may commit a session.
+ */
+bool curve_patch_layer_row_switch_prepare(bContext &C);
+
+/** What a brush stroke on the active Curve Patch effect row must do. The pure half of
+ * #curve_patch_layer_stroke_target_resolve, so a test can drive the table without a context. */
+enum class CurvePatchStrokeTarget : int8_t {
+  /** The row's own snapshot brush is the stroke's brush: the row's tool handles it. */
+  Allow,
+  /** The row has no usable snapshot yet and the stroke's brush can seed one. */
+  Adopt,
+  /** The row's tool has to take the brush: the stroke is cancelled and the tool entered. */
+  Redirect,
+  /** The stroke's brush cannot paint the row at all. */
+  Refuse,
+};
+
+/**
+ * Decide what a stroke with \a brush on the Curve Patch effect \a row does. #Adopt is answered
+ * only when \a brush is a Paint Brush (#BKE_paint_layers_curve_patch_brush_is_assignable) and the
+ * row has no snapshot; #Refuse distinguishes "the effect has no brush", "the brush cannot stamp a
+ * patch", and a row snapshot that is not the brush in hand (#Redirect, the tool has to take over).
+ *
+ * The decision is pure: it reads the row's payload, the brush, and whether the row's session is
+ * live. Carrying it out is #curve_patch_layer_stroke_target_resolve.
+ */
+CurvePatchStrokeTarget curve_patch_layer_stroke_target(const MaterialPaintLayer &row,
+                                                       const Brush *brush,
+                                                       bool row_session_live);
+
+/**
+ * #curve_patch_layer_stroke_target, carried out: #Adopt seeds the row's snapshot from \a brush and
+ * #Adopt/#Redirect enter the row's tool, reporting what they did; #Refuse reports its reason. This
+ * is the side-effectful half -- the decision itself is the pure #curve_patch_layer_stroke_target.
+ *
+ * Returns the final target: #Allow when the stroke should paint normally, every other answer
+ * cancels it. #Adopt can turn into #Refuse when the row could not take the brush in hand.
+ */
+CurvePatchStrokeTarget curve_patch_layer_stroke_target_resolve(bContext &C,
+                                                               Material &material,
+                                                               MaterialPaintLayer &row,
+                                                               const Brush *brush,
+                                                               ReportList *reports);
+
+/**
  * Commit the live session of \a ob, if any, into its effect and end it: the silent counterpart of
  * the confirm dialog, for a switch the user can undo (another row of the stack becoming active).
  */
@@ -318,17 +379,20 @@ void curve_patch_layer_commit_live_session(bContext &C, Object &ob);
  * Commit EVERY live layer session of the file, whatever object runs it, except (when \a
  * target_marker is given) the session of the row that is being (re)activated. A session that
  * stayed behind would keep its effect's brush in the hand after the user's brush was restored,
- * and its stroke polls would keep blocking the paint -- so every switch of the active row, every
- * Add and every step into mask work commits the strays first.
+ * and its stroke polls would keep blocking the paint -- so the paths where the active row changes
+ * without a user switch that could be refused (a row removal, a mode exit, a target-mode change)
+ * commit the strays first. A user switch to another row is refused instead, see
+ * #curve_patch_layer_row_switch_blocked.
  */
 void curve_patch_layer_commit_live_sessions(bContext &C, const bUUID *target_marker = nullptr);
 
 /**
  * The data-level activation of a stack row, shared by the Outliner's row click and the viewport
- * pick: a live Curve Patch session the switch would leave half-edited commits first, the row
- * becomes the active one, a Curve Patch effect enters its tool, the target mode follows the row's
- * masks, and the texture-paint slots resolve through the new active row. The material must be
- * editable. Returns false (with nothing changed) when it is not.
+ * pick: a live Curve Patch session of ANOTHER row refuses the switch (nothing changes, the reason
+ * is reported), the row becomes the active one, a Curve Patch effect enters its tool, the target
+ * mode follows the row's masks, and the texture-paint slots resolve through the new active row.
+ * The material must be editable. Returns false (with nothing changed) when it is not, or when a
+ * live session refused the switch.
  *
  * \param curve_item_index: when non-negative and still valid, the Curve Patch effect's container
  * makes that item active before the session opens, so the clicked curve is the one it starts on.

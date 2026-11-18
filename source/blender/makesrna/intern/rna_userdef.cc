@@ -5791,6 +5791,16 @@ static void rna_def_userdef_view(BlenderRNA *brna)
       "resource directory (next to the extensions folder)");
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 
+  prop = RNA_def_property(srna, "paint_layers_commit_patch_on_switch", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "paint_layers_commit_patch_on_switch", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Commit Curve Patch on Layer Switch",
+      "Switching to another layer commits a Curve Patch started on an ordinary layer instead of "
+      "asking to commit it first. A Curve Patch effect keeps its state in its own row, so "
+      "switching away from it never needs this");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
   prop = RNA_def_property(srna, "category_tabs_clipboard_directory", PROP_STRING, PROP_DIRPATH);
   RNA_def_property_string_sdna(prop, nullptr, "category_tabs_clipboard_dir");
   RNA_def_property_string_maxlength(prop, FILE_MAXDIR);

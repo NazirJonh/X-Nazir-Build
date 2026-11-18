@@ -19,6 +19,9 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLT_translation.hh"
+
+#include "BLI_assert.h"
 #include "BLI_function_ref.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_index_range.hh"
@@ -46,6 +49,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_view3d_types.h"
 #include "DNA_windowmanager_types.h"
 
@@ -1120,7 +1124,7 @@ bool curve_patch_layer_activate_2d(bContext &C, Material &ma, MaterialPaintLayer
   /* One gate per session: a locked or hidden row takes no session, and the user hears why before
    * anything is switched (the same gate the interactive 2D entry runs on every stroke). */
   if (scene->toolsettings != nullptr &&
-      material::paint_layers_stroke_gate_report(*ob, scene->toolsettings->paint_mode, reports))
+      material::paint_layers_stroke_gate_report(C, *ob, scene->toolsettings->paint_mode, reports))
   {
     return false;
   }
@@ -2101,20 +2105,72 @@ void curve_patch_layer_commit_live_session(bContext &C, Object &ob)
       C, session != nullptr && session->owner != nullptr ? *session->owner : ob);
 }
 
+/** A live Curve Patch session as #for_each_live_curve_patch_session reports it: a 3D session an
+ * object runs, or the Image Editor's 2D one. Exactly one of #session and #session_2d is set. */
+struct LiveCurvePatchSession {
+  /** The object the 3D session runs on, null for the 2D session. Non-const because a commit acts
+   * through the object; the session itself is only read, through the const session getter. */
+  Object *ob = nullptr;
+  /** The 3D session, null when this describes the 2D session. */
+  const CurvePatchSession *session = nullptr;
+  /** The Image Editor's 2D session, null when this describes a 3D session. */
+  ImageCurvePatchSession *session_2d = nullptr;
+
+  /** The material of the effect row the session edits, or null when it is free-standing: it has no
+   * row to keep its curves in and writes into the layer that was active when it started. */
+  Material *row_material() const
+  {
+    if (session != nullptr) {
+      return session->layer_material;
+    }
+    /* Unlike the 3D session, which marks a free-standing patch by a null material, the 2D session
+     * says so through its `is_layer` flag. */
+    return session_2d->is_layer ? session_2d->layer_material : nullptr;
+  }
+
+  /** The marker of the effect row the session edits. Only meaningful when #row_material is set. */
+  const bUUID &row_marker() const
+  {
+    return session != nullptr ? session->layer_row_marker : session_2d->layer_row_marker;
+  }
+};
+
+/** Call \a callback for every live Curve Patch session of \a bmain: the 3D ones its objects run,
+ * then the Image Editor's 2D one. \a callback returns false to stop the walk. The one walk the
+ * row-switch, stroke-gate and commit paths share, so the free-standing and row-bound rules live in
+ * #LiveCurvePatchSession instead of a copy per caller. Committing inside the callback is safe: a
+ * commit never adds or removes objects, so the object walk stays valid (it does evaluate the
+ * depsgraph, so a committing callback must not carry state from one session to the next). */
+static void for_each_live_curve_patch_session(Main &bmain,
+                                              FunctionRef<bool(LiveCurvePatchSession)> callback)
+{
+  for (Object &ob : bmain.objects) {
+    const CurvePatchSession *session = ED_curve_patch_session_get(ob);
+    if (session != nullptr && !callback(LiveCurvePatchSession{&ob, session, nullptr})) {
+      return;
+    }
+  }
+  ImageCurvePatchSession *session_2d = image_curve_patch_session_active_get();
+  if (session_2d != nullptr) {
+    callback(LiveCurvePatchSession{nullptr, nullptr, session_2d});
+  }
+}
+
 /** Whether some object runs a live layer session for the row \a row_marker of \a material. */
-static bool curve_patch_layer_row_is_live(const Main &bmain,
+static bool curve_patch_layer_row_is_live(Main &bmain,
                                           const Material &material,
                                           const bUUID &row_marker)
 {
-  for (const Object &ob : bmain.objects) {
-    const CurvePatchSession *session = ED_curve_patch_session_get(ob);
-    if (session != nullptr && session->layer_material == &material &&
-        BLI_uuid_equal(session->layer_row_marker, row_marker))
-    {
-      return true;
-    }
-  }
-  return false;
+  bool live = false;
+  for_each_live_curve_patch_session(bmain, [&](const LiveCurvePatchSession view) {
+    /* Only the sessions published on objects carry the row's snapshot in the hand, which is what
+     * the caller guards; the Image Editor's 2D session is checked by
+     * #curve_patch_layer_row_session_live where the row being live matters. */
+    live = view.session != nullptr && view.row_material() == &material &&
+           BLI_uuid_equal(view.row_marker(), row_marker);
+    return !live;
+  });
+  return live;
 }
 
 void curve_patch_layer_commit_live_sessions(bContext &C, const bUUID *target_marker)
@@ -2125,30 +2181,35 @@ void curve_patch_layer_commit_live_sessions(bContext &C, const bUUID *target_mar
   }
   /* Sessions are published on objects, and a secondary target's owner can hold one while another
    * object is active -- so the search cannot be narrowed by the scene or the active object: every
-   * live layer session the switch would strand (its brush still in the hand, its stroke polls
-   * blocking the paint) commits. The session of the row being (re)activated stays, unless \a
-   * target_marker is null: a switch into mask work ends it even when it is its own row. */
-  for (Object &ob : bmain->objects) {
-    const CurvePatchSession *session = ED_curve_patch_session_get(ob);
-    if (session == nullptr || session->layer_material == nullptr) {
-      continue;
+   * live session the switch would strand (its brush still in the hand, its stroke polls blocking
+   * the paint) commits. The session of the row being (re)activated stays, unless \a target_marker
+   * is null: a switch into mask work ends it even when it is its own row. */
+  for_each_live_curve_patch_session(*bmain, [&](const LiveCurvePatchSession view) {
+    if (view.session != nullptr) {
+      if (view.session->layer_material == nullptr) {
+        /* A free-standing patch has no row to stay with: it writes the surface it started on, and a
+         * switch of the stack below it (or the removal of the row it was started from) must not
+         * leave its overlay and its stroke polls behind. Commit it, as its own Enter/Esc would. */
+        curve_patch_commit_on_session_end(C, *view.ob);
+        return true;
+      }
+      if (target_marker != nullptr && BLI_uuid_equal(view.session->layer_row_marker, *target_marker))
+      {
+        return true;
+      }
+      curve_patch_layer_commit_live_session(C, *view.ob);
+      return true;
     }
-    if (target_marker != nullptr &&
-        BLI_uuid_equal(session->layer_row_marker, *target_marker))
+    /* The Image Editor's 2D session is not published on an object, so its commit goes through the
+     * session itself. Its row-bound session stays when it is the target row; a free-standing 2D
+     * patch has no row and commits on every switch, like the 3D one. */
+    if (!(view.session_2d->is_layer && target_marker != nullptr &&
+          BLI_uuid_equal(view.session_2d->layer_row_marker, *target_marker)))
     {
-      continue;
+      image_curve_patch_session_commit(&C, view.session_2d);
     }
-    curve_patch_layer_commit_live_session(C, ob);
-  }
-  /* The Image Editor's 2D session is not published on an object, so the loop above cannot see it,
-   * and #curve_patch_layer_commit_live_session is a no-op for it: its commit goes through the
-   * session itself. */
-  ImageCurvePatchSession *session_2d = image_curve_patch_session_active_get();
-  if (session_2d != nullptr && session_2d->is_layer &&
-      (target_marker == nullptr || !BLI_uuid_equal(session_2d->layer_row_marker, *target_marker)))
-  {
-    image_curve_patch_session_commit(&C, session_2d);
-  }
+    return true;
+  });
 }
 
 /** \} */
@@ -2260,6 +2321,196 @@ void paint_stack_gradient_tool_activate(bContext &C, const MaterialPaintLayer *l
   saved_tool_id.clear();
 }
 
+/** Whether a free-standing Curve Patch session (3D or 2D) is alive, so the active row must not
+ * change: it has no effect row to keep its curves in, so it writes into the layer that was active
+ * when it started and that layer must not change under it. A session owned by an effect row never
+ * blocks: the row's container holds its state, so a switch just commits it. */
+bool curve_patch_layer_row_switch_blocked(Main &bmain)
+{
+  bool blocked = false;
+  for_each_live_curve_patch_session(bmain, [&](const LiveCurvePatchSession view) {
+    if (view.row_material() == nullptr) {
+      blocked = true;
+      return false;
+    }
+    return true;
+  });
+  return blocked;
+}
+
+bool curve_patch_layer_row_switch_prepare(bContext &C)
+{
+  Main *bmain = CTX_data_main(&C);
+  if (bmain == nullptr || !curve_patch_layer_row_switch_blocked(*bmain)) {
+    return true;
+  }
+  /* The preference (`Preferences > Editing > Miscellaneous`, `view.paint_layers_commit_patch_on_
+   * switch`): switch layers by committing a free-standing patch instead of refusing. */
+  if (U.paint_layers_commit_patch_on_switch) {
+    /* The user asked for the switch to apply the patch: commit it here, so every caller that only
+     * asks "may the row change" finds nothing left to refuse it. */
+    curve_patch_layer_commit_live_sessions(C);
+    return true;
+  }
+  BKE_report(CTX_wm_reports(&C),
+             RPT_INFO,
+             TIP_("Commit the Curve Patch (Enter or Esc) before switching layers"));
+  return false;
+}
+
+CurvePatchStrokeTarget curve_patch_layer_stroke_target(const MaterialPaintLayer &row,
+                                                       const Brush *brush,
+                                                       const bool row_session_live)
+{
+  if (row.source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH || row.curve_patch == nullptr) {
+    return CurvePatchStrokeTarget::Allow;
+  }
+  const Brush *snapshot = row.curve_patch->brush;
+  if (brush == nullptr) {
+    /* Not a brush stroke: an entry or a shape. It has its own checks (see the session entry). */
+    return CurvePatchStrokeTarget::Allow;
+  }
+  if (snapshot == brush) {
+    /* The row's own snapshot is what the stroke paints with: while the row's session runs, its
+     * modal owns the stroke. Without one the tool is entered instead, so a stray press can never
+     * start a free-standing patch whose curve is not stored in the effect. */
+    return row_session_live ? CurvePatchStrokeTarget::Allow : CurvePatchStrokeTarget::Redirect;
+  }
+  /* A geometry brush (Draw, Clay, ...) with an ordinary stroke method neither writes the effect's
+   * maps nor starts a patch: it sculpts, and an active effect row must not take that away. Only a
+   * brush that paints (it would write dabs into the maps) or runs the Curve Patch stroke method
+   * (it would start a patch outside the effect) is the effect's business. */
+  const bool writes_maps = ELEM(brush->sculpt_brush_type,
+                                SCULPT_BRUSH_TYPE_PAINT,
+                                SCULPT_BRUSH_TYPE_ERASE,
+                                SCULPT_BRUSH_TYPE_SMEAR,
+                                SCULPT_BRUSH_TYPE_BLUR);
+  if (!writes_maps && brush->stroke_method != BRUSH_STROKE_CURVE_PATCH) {
+    return CurvePatchStrokeTarget::Allow;
+  }
+  /* Only a Paint Brush is taken or entered for the effect without being named: a geometry brush
+   * that runs the Curve Patch stroke method is refused instead of becoming the effect's snapshot,
+   * which is what the effect was changed to stop doing. */
+  if (snapshot == nullptr) {
+    return BKE_paint_layers_curve_patch_brush_is_assignable(*brush) ?
+               CurvePatchStrokeTarget::Adopt :
+               CurvePatchStrokeTarget::Refuse;
+  }
+  /* The effect has a snapshot, but another brush is in hand. A Paint Brush means the user meant
+   * this effect: entering its tool puts the snapshot back. Anything else (Mask Smooth, Erase,
+   * another row's snapshot, a geometry brush with the Curve Patch stroke method) is refused. */
+  return BKE_paint_layers_curve_patch_brush_is_assignable(*brush) ?
+             CurvePatchStrokeTarget::Redirect :
+             CurvePatchStrokeTarget::Refuse;
+}
+
+/** Whether some live session (3D on any object, or the Image Editor's) edits \a row. */
+static bool curve_patch_layer_row_session_live(Main &bmain,
+                                               const Material &material,
+                                               const MaterialPaintLayer &row)
+{
+  /* The row is addressed by its marker, and the material by its pointer: a session of another
+   * material can carry the same marker in a copied file only, so both are checked. */
+  bool live = false;
+  for_each_live_curve_patch_session(bmain, [&](const LiveCurvePatchSession view) {
+    live = view.row_material() == &material && BLI_uuid_equal(view.row_marker(), row.marker);
+    return !live;
+  });
+  return live;
+}
+
+/** Carry out the pure decision's actions: #Adopt takes \a brush in hand as the row's snapshot,
+ * #Adopt and #Redirect enter the row's tool. The messages depend on what the actions did, so they
+ * are reported here; the refusal's reason is reported by
+ * #curve_patch_layer_stroke_target_report. */
+static CurvePatchStrokeTarget curve_patch_layer_stroke_target_apply(bContext &C,
+                                                                    Material &material,
+                                                                    MaterialPaintLayer &row,
+                                                                    const Brush *brush,
+                                                                    ReportList *reports)
+{
+  Main *bmain = CTX_data_main(&C);
+  const bool session_live = bmain != nullptr &&
+                            curve_patch_layer_row_session_live(*bmain, material, row);
+  const CurvePatchStrokeTarget target = curve_patch_layer_stroke_target(row, brush, session_live);
+
+  switch (target) {
+    case CurvePatchStrokeTarget::Allow:
+    case CurvePatchStrokeTarget::Refuse:
+      return target;
+    case CurvePatchStrokeTarget::Adopt:
+      /* When the row cannot take the brush, the refusal's reason below covers it: the row's own
+       * snapshot is still null, so the answer reads as the plain "no brush" case. */
+      if (bmain == nullptr || !BKE_paint_layers_curve_patch_brush_set(material, *bmain, row, *brush))
+      {
+        return CurvePatchStrokeTarget::Refuse;
+      }
+      /* The row now has its snapshot: enter the tool so the press that would have painted edits
+       * the effect's curves instead. The stroke itself is cancelled. */
+      if (curve_patch_layer_activate(C, material, row)) {
+        BKE_report(
+            reports, RPT_INFO, TIP_("The Curve Patch took the brush in hand: draw on its curves"));
+      }
+      else {
+        BKE_report(reports,
+                   RPT_WARNING,
+                   TIP_("The Curve Patch brush was taken, but its tool could not be opened"));
+      }
+      return target;
+    case CurvePatchStrokeTarget::Redirect:
+      if (curve_patch_layer_activate(C, material, row)) {
+        BKE_report(reports,
+                   RPT_INFO,
+                   TIP_("This Curve Patch effect is drawn with its own brush: its curve tool is "
+                        "opened"));
+      }
+      else {
+        BKE_report(reports,
+                   RPT_WARNING,
+                   TIP_("This Curve Patch effect is drawn with its own brush, and its tool could "
+                        "not be opened"));
+      }
+      return target;
+  }
+  BLI_assert_unreachable();
+  return CurvePatchStrokeTarget::Refuse;
+}
+
+/** Report why a stroke may not paint \a row: the #Refuse answer's reason. The other answers report
+ * what they did, see #curve_patch_layer_stroke_target_apply. */
+static void curve_patch_layer_stroke_target_report(const MaterialPaintLayer &row,
+                                                   const CurvePatchStrokeTarget target,
+                                                   ReportList *reports)
+{
+  if (target != CurvePatchStrokeTarget::Refuse) {
+    return;
+  }
+  if (row.curve_patch != nullptr && row.curve_patch->brush == nullptr) {
+    BKE_report(reports,
+               RPT_WARNING,
+               TIP_("This Curve Patch effect has no brush: assign a Paint Brush in the Curve "
+                    "Patch panel, then click the effect row"));
+  }
+  else {
+    BKE_report(reports,
+               RPT_WARNING,
+               TIP_("This brush cannot draw a Curve Patch: click the effect row to enter its "
+                    "tool"));
+  }
+}
+
+CurvePatchStrokeTarget curve_patch_layer_stroke_target_resolve(bContext &C,
+                                                               Material &material,
+                                                               MaterialPaintLayer &row,
+                                                               const Brush *brush,
+                                                               ReportList *reports)
+{
+  const CurvePatchStrokeTarget target = curve_patch_layer_stroke_target_apply(
+      C, material, row, brush, reports);
+  curve_patch_layer_stroke_target_report(row, target, reports);
+  return target;
+}
+
 bool paint_stack_row_activate(bContext &C,
                               Material &material,
                               const bUUID &row_marker,
@@ -2272,11 +2523,16 @@ bool paint_stack_row_activate(bContext &C,
   if (BKE_paint_layers_find(material, row_marker) == nullptr) {
     return false;
   }
-  /* A live Curve Patch session owns the tool while it runs. Switching the active row away from
-   * its effect is a deliberate step the user can undo, so the session just commits its curves
-   * into the effect and the switch goes on, with no question and no warning. Every live layer
-   * session commits, whatever object runs it: a session on a secondary target's owner would
-   * otherwise keep that effect's brush in the hand after the switch restored the user's own. */
+  /* A live session keeps the active row until it is confirmed or cancelled: a switch would leave
+   * the curves going to a layer the user no longer sees as the one being edited. */
+  if (!curve_patch_layer_row_switch_prepare(C)) {
+    return false;
+  }
+  /* A live Curve Patch session owns the tool while it runs. A free-standing one was refused above
+   * (or committed, when the User Settings option asks for it). A session of an effect row keeps its
+   * state in the row, so switching away from it just commits it here: every live layer session
+   * but the target row's own commits, whatever object runs it, or it would keep that effect's brush
+   * in the hand after the switch restored the user's own. */
   curve_patch_layer_commit_live_sessions(C, &row_marker);
   BKE_paint_layers_active_set(material, row_marker);
   if (curve_item_index >= 0) {
@@ -2872,8 +3128,8 @@ bool ED_curve_patch_layer_brush_assign(bContext &C,
   if (bmain == nullptr) {
     return false;
   }
-  if (!BKE_paint_layers_curve_patch_brush_usable(source)) {
-    BKE_report(reports, RPT_WARNING, "That brush cannot stamp a Curve Patch");
+  if (!BKE_paint_layers_curve_patch_brush_is_assignable(source)) {
+    BKE_report(reports, RPT_WARNING, BKE_paint_layers_curve_patch_brush_refusal_message());
     return false;
   }
   MaterialPaintLayer *row = BKE_paint_layers_curve_patch_row_find(material, payload);

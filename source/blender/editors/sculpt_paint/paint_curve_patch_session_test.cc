@@ -8,8 +8,14 @@
 #include "testing/testing.h"
 
 #include "BKE_gtest_base.hh"
+#include "BKE_brush.hh"
+#include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_object_types.hh"
+#include "BKE_paint_layers.hh"
 
+#include "DNA_brush_types.h"
+#include "DNA_material_types.h"
 #include "DNA_object_types.h"
 
 #include "ED_curve_patch.hh"
@@ -53,7 +59,9 @@ TEST_F(paint_curve_patch_session, curve_transform_moves_positions_and_handles)
 {
   bke::CurvesGeometry curve = test_control_curve();
   ASSERT_TRUE(curve.attributes().contains("handle_left"));
-  const Span<float3> before = curve.positions();
+  /* Copy rather than keep a span: the transform writes the position attribute, which may
+   * reallocate it, leaving a span taken before the call dangling. */
+  const Vector<float3> before(curve.positions().begin(), curve.positions().end());
   const float3 pivot_before = before[0];
   const float3 handle_before = curve.handle_positions_left().value()[0];
 
@@ -472,6 +480,106 @@ TEST_F(paint_curve_patch_session, overlay_data_has_no_active_on_half_built_sessi
 
   EXPECT_TRUE(data.splines.is_empty());
   EXPECT_EQ(data.active_index, -1);
+}
+
+TEST_F(paint_curve_patch_session, curve_patch_stroke_target_table)
+{
+  Main *bmain = BKE_main_new();
+  Brush *paint = BKE_brush_add(bmain, "CPStrokePaint", OB_MODE_SCULPT);
+  paint->sculpt_brush_type = SCULPT_BRUSH_TYPE_PAINT;
+  Brush *draw = BKE_brush_add(bmain, "CPStrokeDraw", OB_MODE_SCULPT);
+  draw->sculpt_brush_type = SCULPT_BRUSH_TYPE_DRAW;
+  Brush *draw_cp = BKE_brush_add(bmain, "CPStrokeDrawCP", OB_MODE_SCULPT);
+  draw_cp->sculpt_brush_type = SCULPT_BRUSH_TYPE_DRAW;
+  draw_cp->stroke_method = BRUSH_STROKE_CURVE_PATCH;
+  Brush *mask = BKE_brush_add(bmain, "CPStrokeMask", OB_MODE_SCULPT);
+  mask->sculpt_brush_type = SCULPT_BRUSH_TYPE_MASK;
+  mask->mask_tool = BRUSH_MASK_SMOOTH;
+  Brush *mask_draw = BKE_brush_add(bmain, "CPStrokeMaskDraw", OB_MODE_SCULPT);
+  mask_draw->sculpt_brush_type = SCULPT_BRUSH_TYPE_MASK;
+  mask_draw->mask_tool = BRUSH_MASK_DRAW;
+  Brush *erase = BKE_brush_add(bmain, "CPStrokeErase", OB_MODE_SCULPT);
+  erase->sculpt_brush_type = SCULPT_BRUSH_TYPE_ERASE;
+  Brush *smear = BKE_brush_add(bmain, "CPStrokeSmear", OB_MODE_SCULPT);
+  smear->sculpt_brush_type = SCULPT_BRUSH_TYPE_SMEAR;
+  Brush *blur = BKE_brush_add(bmain, "CPStrokeBlur", OB_MODE_SCULPT);
+  blur->sculpt_brush_type = SCULPT_BRUSH_TYPE_BLUR;
+  /* Another effect's snapshot: a Paint Brush carrying the private ".CP " prefix. */
+  Brush *foreign = BKE_brush_add(bmain, "CPStrokeForeign", OB_MODE_SCULPT);
+  foreign->sculpt_brush_type = SCULPT_BRUSH_TYPE_PAINT;
+  foreign->stroke_method = BRUSH_STROKE_CURVE_PATCH;
+  BKE_libblock_rename(*bmain, foreign->id, ".CP ForeignSnapshot");
+  Brush *snapshot = BKE_brush_add(bmain, "CPStrokeSnapshot", OB_MODE_SCULPT);
+  ASSERT_TRUE(BKE_paint_layers_curve_patch_brush_is_assignable(*paint));
+  ASSERT_FALSE(BKE_paint_layers_curve_patch_brush_is_assignable(*draw));
+  ASSERT_FALSE(BKE_paint_layers_curve_patch_brush_can_stamp(*mask));
+  /* The two-level rule: a Mask Draw brush can stamp a patch but is not a Paint Brush, so it is
+   * never offered nor taken; the map writers (Erase, Smear, Blur) cannot stamp a patch at all; and
+   * a snapshot is private to its row. */
+  ASSERT_TRUE(BKE_paint_layers_curve_patch_brush_can_stamp(*mask_draw));
+  ASSERT_FALSE(BKE_paint_layers_curve_patch_brush_is_assignable(*mask_draw));
+  ASSERT_FALSE(BKE_paint_layers_curve_patch_brush_can_stamp(*erase));
+  ASSERT_FALSE(BKE_paint_layers_curve_patch_brush_can_stamp(*smear));
+  ASSERT_FALSE(BKE_paint_layers_curve_patch_brush_can_stamp(*blur));
+  ASSERT_FALSE(BKE_paint_layers_curve_patch_brush_is_assignable(*foreign));
+
+  MaterialPaintLayer row;
+  MaterialPaintLayerCurvePatch payload;
+  row.source = MA_PAINT_LAYER_SOURCE_CURVE_PATCH;
+  row.curve_patch = &payload;
+
+  /* Anything that is not a Curve Patch effect is painted as usual. */
+  MaterialPaintLayer plain;
+  EXPECT_EQ(curve_patch_layer_stroke_target(plain, paint, false), CurvePatchStrokeTarget::Allow);
+  EXPECT_EQ(curve_patch_layer_stroke_target(plain, nullptr, false), CurvePatchStrokeTarget::Allow);
+
+  /* No snapshot: a usable Paint Brush seeds one; a mask brush (Draw or Smooth) writes no maps but
+   * edits the mask itself, so it is allowed like any other non-map brush. */
+  payload.brush = nullptr;
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, paint, false), CurvePatchStrokeTarget::Adopt);
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, mask, false), CurvePatchStrokeTarget::Allow);
+
+  /* The row's snapshot in hand: the live session owns the stroke; without one the tool is entered
+   * so a stray press cannot start a patch the row does not keep. */
+  payload.brush = snapshot;
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, snapshot, true), CurvePatchStrokeTarget::Allow);
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, snapshot, false),
+            CurvePatchStrokeTarget::Redirect);
+
+  /* Another brush: a usable Paint Brush enters the effect's tool, an unusable one is refused. A
+   * mask brush is never taken as the effect's brush but still sculpts the mask. */
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, paint, false), CurvePatchStrokeTarget::Redirect);
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, mask, false), CurvePatchStrokeTarget::Allow);
+
+  /* A geometry brush keeps sculpting on an active effect row, and is never adopted as its brush;
+   * with the Curve Patch stroke method it would start a free patch, so it is refused. */
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, draw, false), CurvePatchStrokeTarget::Allow);
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, draw_cp, false), CurvePatchStrokeTarget::Refuse);
+  payload.brush = nullptr;
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, draw, false), CurvePatchStrokeTarget::Allow);
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, draw_cp, false), CurvePatchStrokeTarget::Refuse);
+
+  /* Without a snapshot: the map writers are not Paint Brushes, so none of them seeds one; a Mask
+   * Draw brush sculpts the mask instead of writing the maps (allowed), unless it carries the Curve
+   * Patch stroke method (it would start a patch outside the effect); and a snapshot is never
+   * adopted from another row. */
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, erase, false), CurvePatchStrokeTarget::Refuse);
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, smear, false), CurvePatchStrokeTarget::Refuse);
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, blur, false), CurvePatchStrokeTarget::Refuse);
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, foreign, false), CurvePatchStrokeTarget::Refuse);
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, mask_draw, false), CurvePatchStrokeTarget::Allow);
+  mask_draw->stroke_method = BRUSH_STROKE_CURVE_PATCH;
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, mask_draw, false), CurvePatchStrokeTarget::Refuse);
+
+  /* With the row's snapshot in hand, the same edge brushes are refused instead of taken: entering
+   * the tool is reserved for a Paint Brush in hand. */
+  payload.brush = snapshot;
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, erase, false), CurvePatchStrokeTarget::Refuse);
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, smear, false), CurvePatchStrokeTarget::Refuse);
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, blur, false), CurvePatchStrokeTarget::Refuse);
+  EXPECT_EQ(curve_patch_layer_stroke_target(row, foreign, false), CurvePatchStrokeTarget::Refuse);
+
+  BKE_main_free(bmain);
 }
 
 }  // namespace blender::ed::sculpt_paint::tests

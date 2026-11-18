@@ -678,7 +678,7 @@ static bool texture_fill_click(bContext *C, wmOperator *op, const float mouse[2]
   Scene *scene = CTX_data_scene(C);
   if (ob != nullptr && scene != nullptr && scene->toolsettings != nullptr &&
       ed::sculpt_paint::material::paint_layers_stroke_gate_report(
-          *ob, scene->toolsettings->paint_mode, op->reports))
+          *C, *ob, scene->toolsettings->paint_mode, op->reports, brush))
   {
     return false;
   }
@@ -763,7 +763,7 @@ static bool texture_fill_line(bContext *C,
   Scene *scene = CTX_data_scene(C);
   if (ob != nullptr && scene != nullptr && scene->toolsettings != nullptr &&
       ed::sculpt_paint::material::paint_layers_stroke_gate_report(
-          *ob, scene->toolsettings->paint_mode, op->reports))
+          *C, *ob, scene->toolsettings->paint_mode, op->reports, brush))
   {
     return false;
   }
@@ -1539,13 +1539,13 @@ static void gradient_draw_line(bContext * /*C*/,
  * object has; the Image Editor writes the channels its brush enables on the active material, like
  * the Sculpt Mode canvas does.
  */
-static void texture_paint_prepare_layered_maps(bContext *C,
+static bool texture_paint_prepare_layered_maps(bContext *C,
                                                PaintOperation & /*pop*/,
                                                Object *ob,
                                                const bool is_projection)
 {
   if (ob == nullptr) {
-    return;
+    return true;
   }
 
   Vector<Material *> materials;
@@ -1561,7 +1561,7 @@ static void texture_paint_prepare_layered_maps(bContext *C,
     materials.append(ma);
   }
   if (materials.is_empty()) {
-    return;
+    return true;
   }
 
   Main *bmain = CTX_data_main(C);
@@ -1570,13 +1570,14 @@ static void texture_paint_prepare_layered_maps(bContext *C,
 
   /* Projection paint writes every layered material of the object: a locked or hidden active row
    * proves the stroke has nothing to write before any map is grown. The 2D path checks the same
-   * gate itself, so this one is limited to projection to report once per stroke. */
-  if (is_projection &&
-      ed::sculpt_paint::material::paint_layers_stroke_gate_report(*ob,
-                                                                  paint_mode,
-                                                                  CTX_wm_reports(C)))
+   * gate itself, so this one is limited to projection to report once per stroke. A Curve Patch
+   * answer also cancels the stroke here: this function is the last point before the projection
+   * session starts, and no later gate would stop it. */
+  const Brush *stroke_brush = BKE_paint_brush_for_read(&scene->toolsettings->imapaint.paint);
+  if (is_projection && ed::sculpt_paint::material::paint_layers_stroke_gate_report(
+                           *C, *ob, paint_mode, CTX_wm_reports(C), stroke_brush))
   {
-    return;
+    return false;
   }
 
   int created = 0;
@@ -1637,6 +1638,7 @@ static void texture_paint_prepare_layered_maps(bContext *C,
    * already exists creates nothing here, so they are rebuilt for every stroke -- otherwise the
    * stroke lands in whatever the previous target was. */
   BKE_texpaint_slots_refresh_object(scene, ob);
+  return true;
 }
 
 static std::unique_ptr<PaintOperation> texture_paint_init(bContext *C,
@@ -1693,7 +1695,9 @@ static std::unique_ptr<PaintOperation> texture_paint_init(bContext *C,
     }
   }
 
-  texture_paint_prepare_layered_maps(C, *pop, ob, CTX_wm_region_view3d(C) != nullptr);
+  if (!texture_paint_prepare_layered_maps(C, *pop, ob, CTX_wm_region_view3d(C) != nullptr)) {
+    return nullptr;
+  }
 
   pop->stroke_handle = pop->mode->paint_new_stroke(C, op, ob, mouse, mode, brush_switch_mode);
   if (!pop->stroke_handle) {

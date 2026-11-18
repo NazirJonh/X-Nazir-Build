@@ -2689,8 +2689,12 @@ static void rna_BrushMaterialPaintChannel_source_image_set(PointerRNA *ptr,
       /* The Tex's own refcount (below) is independent from the Image user-count this property
        * reports; drop the image reference explicitly, matching the id_us_plus() done wherever
        * this property assigns one, or RNA's user-count consistency check asserts. Clear the
-       * field too so freeing the now-orphaned Tex later does not decrement it a second time. */
-      if (mtex.tex->type == TEX_IMAGE && mtex.tex->ima != nullptr) {
+       * field too so freeing the now-orphaned Tex later does not decrement it a second time.
+       * A Tex shared with another brush (a copied brush or a Curve Patch snapshot shares it) keeps
+       * its image: it belongs to the remaining owners, only this brush lets go of it. */
+      if (ID_REAL_USERS(&mtex.tex->id) <= 1 && mtex.tex->type == TEX_IMAGE &&
+          mtex.tex->ima != nullptr)
+      {
         id_us_min(&mtex.tex->ima->id);
         mtex.tex->ima = nullptr;
       }
@@ -2704,8 +2708,13 @@ static void rna_BrushMaterialPaintChannel_source_image_set(PointerRNA *ptr,
   const std::optional<eMaterialPaintChannel> channel_id = rna_BrushMaterialPaintChannel_channel_get(
       ptr);
 
+  /* A Tex shared with another owner must never be mutated here: the other owner (another brush,
+   * another channel, a copied brush or a Curve Patch snapshot) still reads it. Only a Tex this
+   * slot is the sole real user of is safe to edit in place. */
+  const bool tex_is_shared = mtex.tex != nullptr && ID_REAL_USERS(&mtex.tex->id) > 1;
+
   /* Each channel owns its own Tex so the same image can carry different mapping per channel. */
-  if (mtex.tex != nullptr && mtex.tex->type == TEX_IMAGE) {
+  if (!tex_is_shared && mtex.tex != nullptr && mtex.tex->type == TEX_IMAGE) {
     if (mtex.tex->ima != image) {
       id_us_min(reinterpret_cast<ID *>(mtex.tex->ima));
       mtex.tex->ima = image;
@@ -2719,7 +2728,15 @@ static void rna_BrushMaterialPaintChannel_source_image_set(PointerRNA *ptr,
   }
 
   /* Either there is no Tex yet, or it is procedural and belongs to the user; replace the slot
-   * rather than mutating a texture that may be shared elsewhere. */
+   * rather than mutating a texture that may be shared elsewhere. The shared case still exists
+   * besides the Curve Patch snapshots (which unshare on creation): an ordinary duplicated brush
+   * shares its channels' Tex with the original, and its owner edits through this setter.
+   *
+   * The old Tex's mapping still describes this slot, not the other owners: kept aside when the Tex
+   * is shared and restored on the new Tex below, instead of resetting what the user configured
+   * before sharing. */
+  const MTex old_mtex = dna::shallow_copy(mtex);
+
   Main *bmain = G_MAIN;
   Tex *tex = BKE_texture_add(bmain, image->id.name + 2);
   tex->type = TEX_IMAGE;
@@ -2731,6 +2748,10 @@ static void rna_BrushMaterialPaintChannel_source_image_set(PointerRNA *ptr,
   }
   mtex.tex = tex;
   rna_BrushMaterialPaintChannel_source_mtex_reset_mapping(mtex);
+  if (tex_is_shared) {
+    mtex = dna::shallow_copy(old_mtex);
+    mtex.tex = tex;
+  }
   rna_BrushMaterialPaintChannel_source_image_apply_non_color_default(bmain, channel_id, image);
   /* BKE_texture_add returns the texture with one user already; the MTex slot is that user. */
   BKE_brush_tag_unsaved_changes(brush);

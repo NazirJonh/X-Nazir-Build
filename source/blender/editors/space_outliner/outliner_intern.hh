@@ -1082,6 +1082,18 @@ bool outliner_stack_focus_set(bContext *C,
                               int sub_index,
                               bool enter_edit_mode);
 bool outliner_stack_row_activate(bContext *C, SpaceOutliner &space_outliner, int ordinal);
+/**
+ * Whether \a ordinal may become the active row now: the source's own pre-switch check, so a live
+ * tool that writes into the active row refuses before the Outliner moves its selection. The reason
+ * is reported. Not promised to be a pure check: a source may commit a session to let the switch
+ * through (the paint-layers source does, when the user preference asks for it).
+ */
+bool outliner_stack_row_switch_allowed(bContext *C, SpaceOutliner &space_outliner, int ordinal);
+/**
+ * The same check for an operation about to make a row that does not exist yet the active one (an
+ * Add, a duplicate, a paste).
+ */
+bool outliner_stack_new_row_switch_allowed(bContext *C, SpaceOutliner &space_outliner);
 bool outliner_stack_row_preview_activate(bContext *C,
                                          SpaceOutliner &space_outliner,
                                          int ordinal,

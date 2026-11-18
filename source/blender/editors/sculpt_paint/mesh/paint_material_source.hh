@@ -30,6 +30,7 @@
 
 namespace blender {
 struct ARegion;
+struct bContext;
 struct Image;
 struct Main;
 struct Material;
@@ -310,15 +311,42 @@ bool paint_layers_status_report(Material &ma,
                                 ReportList *reports);
 
 /**
- * The one gate a stroke start answers to: the paint target is locked or hidden. The decision comes
- * from #BKE_paint_layers_target_resolve alone, so the gate and the stroke cannot disagree, and the
- * message appears once per stroke and not per dab.
+ * The Curve Patch half of #paint_layers_stroke_gate_report: decide what a stroke with \a brush
+ * does on the active row when that row is a Curve Patch effect. Used by itself for callers whose
+ * brush does not paint into the layer maps (a geometry brush: the lock/hidden half of the gate
+ * would report a row the stroke would never write), but whose press must still not start a
+ * free-standing patch outside the effect.
  *
+ * Like the full gate, this is not report-only: an #Adopt or #Redirect answer enters the effect's
+ * tool and reports what it did. A null \a brush (a session entry, a shape -- not a brush stroke)
+ * is never refused here: the entry and the shapes carry their own checks.
+ */
+bool paint_layers_curve_patch_stroke_gate_report(bContext &C,
+                                                 Object &ob,
+                                                 const PaintModeSettings &settings,
+                                                 ReportList *reports,
+                                                 const Brush *brush);
+
+/**
+ * The one gate a stroke start answers to: the paint target is locked or hidden, or it is a Curve
+ * Patch effect whose own brush is not the one in hand. The decision comes from
+ * #BKE_paint_layers_target_resolve alone, so the gate and the stroke cannot disagree, and the
+ * message appears once per stroke and not per dab. A Curve Patch refusal may enter the effect's
+ * tool (see #curve_patch_layer_stroke_target_resolve), which is why the gate needs the context.
+ *
+ * \param brush: the brush the stroke paints with, or null for a caller that is not a brush stroke
+ * (a session entry, a shape). A null \a brush is never refused by the Curve Patch half (the entry
+ * and the shapes carry their own checks), while the lock/hidden half still applies. A Curve Patch
+ * effect is stamped only through its own snapshot: any other brush would write ordinary dabs into
+ * the effect's channel maps, which the next bake overwrites, or start a free-standing patch whose
+ * curve is not stored in the effect.
  * \return true when a refusal was reported and the caller should not start the stroke.
  */
-bool paint_layers_stroke_gate_report(Object &ob,
+bool paint_layers_stroke_gate_report(bContext &C,
+                                     Object &ob,
                                      const PaintModeSettings &settings,
-                                     ReportList *reports);
+                                     ReportList *reports,
+                                     const Brush *brush = nullptr);
 
 /**
  * Map creation is deliberately not part of any stroke's undo step, so nothing else marks the file

@@ -950,8 +950,11 @@ void paint_stack_mask_brush_tool_activate(bContext &C);
  * switch hands the user's own brush back instead of leaving the effect's snapshot in the hand.
  * Call it before a target-mode switch that follows, since that is what swaps the brush. Code
  * without a context (RNA, BKE) keeps using #BKE_paint_layers_active_set.
+ *
+ * \return false when a live Curve Patch session refused the switch (the reason is reported); the
+ * active row is then unchanged and the caller must not go on as if it moved.
  */
-void paint_stack_active_row_set(bContext &C, Material &material, const bUUID &marker);
+bool paint_stack_active_row_set(bContext &C, Material &material, const bUUID &marker);
 
 /** The map of \a row's base mask, created when it has none, with the slots refreshed to hold it.
  * Nothing to create means nothing to refresh, so a call on a mask that already has its map is a

@@ -52,9 +52,11 @@
 #include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
-#include "decal_target.hh"
+#include "../paint_curve_patch_layer.hh"
 #include "../projection/projection_target.hh"
 #include "../selection/paint_image_select_view3d.hh"
+
+#include "decal_target.hh"
 
 namespace blender::ed::sculpt_paint::decal {
 
@@ -210,6 +212,11 @@ static wmOperatorStatus decal_add_rows(bContext *C,
                                        const bool place_from_view,
                                        const float mval[2])
 {
+  /* The Add makes the new decal row active: a live Curve Patch session refuses that switch before
+   * any row is created, so the stack never grows under a session that writes elsewhere. */
+  if (!curve_patch_layer_row_switch_prepare(*C)) {
+    return OPERATOR_CANCELLED;
+  }
   const eMaterialPaintChannel channel = (channel_value < 0) ?
                                             decal_channel_from_image_name(image) :
                                             eMaterialPaintChannel(channel_value);
@@ -478,6 +485,11 @@ static wmOperatorStatus decal_mask_add_exec(bContext *C, wmOperator *op)
   Vector<MaterialPaintLayer *> rows;
   if (!decal_target_find(*C, &ma, &ob, name, &rows) || rows.is_empty()) {
     BKE_report(op->reports, RPT_ERROR, "No decal to mask");
+    return OPERATOR_CANCELLED;
+  }
+  /* The decal becomes the active row below; a live Curve Patch session refuses that switch before
+   * any mask is created. */
+  if (!curve_patch_layer_row_switch_prepare(*C)) {
     return OPERATOR_CANCELLED;
   }
   for (MaterialPaintLayer *row : rows) {

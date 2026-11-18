@@ -594,6 +594,11 @@ int outliner_stack_row_add(bContext *C,
                            const int ordinal,
                            const StackAddArgs &args)
 {
+  /* The Add activates the row it makes: a live tool that writes into the active row refuses the
+   * switch before anything is created, so a blocked Add leaves no row behind. */
+  if (!outliner_stack_new_row_switch_allowed(C, space_outliner)) {
+    return -1;
+  }
   /* Inserting a row renumbers everything above it. */
   int new_ordinal = -1;
   const bool ok = stack_mutate(

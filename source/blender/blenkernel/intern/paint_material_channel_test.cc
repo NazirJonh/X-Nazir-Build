@@ -34,6 +34,9 @@
 #include "BKE_scene.hh"
 #include "BKE_texture.h"
 
+#include "RNA_access.hh"
+#include "RNA_prototypes.hh"
+
 #include "BLI_fileops.h"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
@@ -2155,6 +2158,115 @@ TEST_F(PaintMaterialChannelTest, source_mtex_defaults)
     EXPECT_FLOAT_EQ(mtex.size[1], 1.0f);
     EXPECT_FLOAT_EQ(mtex.size[2], 1.0f);
   }
+}
+
+TEST_F(PaintMaterialChannelTest, source_image_set_does_not_mutate_shared_tex)
+{
+  Brush *brush = BKE_brush_add(bmain, "SharedSourceBrush", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+  Brush *other = BKE_brush_add(bmain, "SharedSourceOther", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(other);
+
+  Image *image_a = add_image("SharedSourceA");
+  Image *image_b = add_image("SharedSourceB");
+  Tex *tex = BKE_texture_add(bmain, "SharedSourceTex");
+  tex->type = TEX_IMAGE;
+  tex->ima = image_a;
+  id_us_plus(&image_a->id);
+
+  BrushMaterialPaintChannel &channel =
+      brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  channel.source_mtex.tex = tex;
+  id_us_plus(&tex->id);
+  channel.source_mtex.size[0] = 2.0f;
+  channel.source_mtex.ofs[0] = 0.25f;
+  channel.source_mtex.rot = 0.5f;
+  channel.source_mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
+  channel.source_mtex.random_angle = 0.75f;
+
+  /* A second owner makes the Tex shared: assigning an image must duplicate it instead of editing
+   * the texture the other brush still reads. */
+  other->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].source_mtex.tex = tex;
+  id_us_plus(&tex->id);
+  ASSERT_GT(ID_REAL_USERS(&tex->id), 1);
+
+  PointerRNA channel_ptr = RNA_pointer_create_discrete(
+      &brush->id, RNA_BrushMaterialPaintChannel, &channel);
+  RNA_pointer_set(&channel_ptr, "source_image", RNA_id_pointer_create(&image_b->id));
+
+  EXPECT_EQ(tex->ima, image_a) << "the shared Tex must keep its image";
+  ASSERT_NE(channel.source_mtex.tex, tex);
+  EXPECT_EQ(channel.source_mtex.tex->ima, image_b);
+  EXPECT_EQ(other->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].source_mtex.tex,
+            tex);
+
+  /* The replacement inherits the slot's mapping instead of resetting it. */
+  EXPECT_FLOAT_EQ(channel.source_mtex.size[0], 2.0f);
+  EXPECT_FLOAT_EQ(channel.source_mtex.ofs[0], 0.25f);
+  EXPECT_FLOAT_EQ(channel.source_mtex.rot, 0.5f);
+  EXPECT_EQ(channel.source_mtex.brush_map_mode, MTEX_MAP_MODE_AREA);
+  EXPECT_FLOAT_EQ(channel.source_mtex.random_angle, 0.75f);
+}
+
+TEST_F(PaintMaterialChannelTest, source_image_clear_keeps_shared_tex_image)
+{
+  Brush *brush = BKE_brush_add(bmain, "ClearSharedBrush", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+  Brush *other = BKE_brush_add(bmain, "ClearSharedOther", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(other);
+
+  Image *image_a = add_image("ClearSharedA");
+  Tex *tex = BKE_texture_add(bmain, "ClearSharedTex");
+  tex->type = TEX_IMAGE;
+  tex->ima = image_a;
+  id_us_plus(&image_a->id);
+
+  BrushMaterialPaintChannel &channel =
+      brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  channel.source_mtex.tex = tex;
+  id_us_plus(&tex->id);
+  other->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].source_mtex.tex = tex;
+  id_us_plus(&tex->id);
+  ASSERT_GT(ID_REAL_USERS(&tex->id), 1);
+
+  PointerRNA channel_ptr = RNA_pointer_create_discrete(
+      &brush->id, RNA_BrushMaterialPaintChannel, &channel);
+  RNA_pointer_set(&channel_ptr, "source_image", PointerRNA_NULL);
+
+  /* Only this brush lets go: the other owner (a copied brush or a Curve Patch snapshot) still
+   * reads the Tex, so its image must survive the clear. */
+  EXPECT_EQ(channel.source_mtex.tex, nullptr);
+  EXPECT_EQ(tex->ima, image_a) << "the shared Tex must keep its image";
+  EXPECT_EQ(other->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].source_mtex.tex,
+            tex);
+}
+
+TEST_F(PaintMaterialChannelTest, source_image_clear_releases_unshared_tex_image)
+{
+  Brush *brush = BKE_brush_add(bmain, "ClearSoleBrush", OB_MODE_SCULPT);
+  BKE_brush_material_paint_ensure(brush);
+
+  Image *image_a = add_image("ClearSoleA");
+  Tex *tex = BKE_texture_add(bmain, "ClearSoleTex");
+  tex->type = TEX_IMAGE;
+  tex->ima = image_a;
+  id_us_plus(&image_a->id);
+  const int image_users_before = image_a->id.us;
+
+  /* The Tex's creation user is the channel's own reference: it is the sole real user. */
+  BrushMaterialPaintChannel &channel =
+      brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  channel.source_mtex.tex = tex;
+  ASSERT_EQ(ID_REAL_USERS(&tex->id), 1);
+
+  PointerRNA channel_ptr = RNA_pointer_create_discrete(
+      &brush->id, RNA_BrushMaterialPaintChannel, &channel);
+  RNA_pointer_set(&channel_ptr, "source_image", PointerRNA_NULL);
+
+  EXPECT_EQ(channel.source_mtex.tex, nullptr);
+  /* The orphaned Tex is not freed by the user-count drop alone, so its release is observable. */
+  EXPECT_EQ(tex->ima, nullptr);
+  EXPECT_EQ(image_a->id.us, image_users_before - 1);
 }
 
 TEST_F(PaintMaterialChannelTest, normal_from_sample_flat)

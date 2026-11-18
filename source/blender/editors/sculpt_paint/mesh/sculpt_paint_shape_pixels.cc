@@ -14,6 +14,7 @@
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_paint.hh"
 
 #include "BLT_translation.hh"
 
@@ -725,7 +726,12 @@ void SculptImageBackend::target_images(Vector<const Image *> &r_images) const
 bool SculptImageBackend::begin(bContext &C, ReportList *reports)
 {
   if (ctx_.ob != nullptr && ctx_.toolsettings != nullptr &&
-      material::paint_layers_stroke_gate_report(*ctx_.ob, ctx_.toolsettings->paint_mode, reports))
+      material::paint_layers_stroke_gate_report(
+          C,
+          *ctx_.ob,
+          ctx_.toolsettings->paint_mode,
+          reports,
+          ctx_.paint != nullptr ? BKE_paint_brush_for_read(ctx_.paint) : nullptr))
   {
     return false;
   }

@@ -432,8 +432,11 @@ wmOperatorStatus stack_row_mask_image_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
   /* The assignment lands on the material's active row, so the row this call is about is made the
-   * active one first: a pick then masks the row the Black and White entries would have. */
-  outliner_stack_row_activate(C, *space_outliner, ordinal);
+   * active one first: a pick then masks the row the Black and White entries would have. A refused
+   * switch (a live Curve Patch session) stops here, before the browser can assign to another row. */
+  if (!outliner_stack_row_activate(C, *space_outliner, ordinal)) {
+    return OPERATOR_CANCELLED;
+  }
   ui::id_browser_popover_invoke(C, RNA_id_pointer_create(owner), browse_prop, false);
   /* Nothing was decided here, so there is nothing for #OPTYPE_UNDO to record: the undo step is the
    * pick's, pushed by the RNA update (or this operator's exec, when a script names the image). The
@@ -731,6 +734,9 @@ bool outliner_stack_row_color_tag_set(bContext *C,
 wmOperatorStatus stack_rows_group_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (!outliner_stack_new_row_switch_allowed(C, *space_outliner)) {
+    return OPERATOR_CANCELLED;
+  }
   const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
   if (ordinal < 0) {
     return OPERATOR_CANCELLED;
@@ -779,6 +785,9 @@ wmOperatorStatus stack_rows_group_exec(bContext *C, wmOperator *op)
 wmOperatorStatus stack_group_add_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (!outliner_stack_new_row_switch_allowed(C, *space_outliner)) {
+    return OPERATOR_CANCELLED;
+  }
   /* -1 means the top of the stack, which is where a folder goes when nothing is pointed at. */
   const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
   /* An empty folder is inserted into the stack, so every row above it has a new ordinal. */
@@ -831,6 +840,9 @@ wmOperatorStatus stack_row_ungroup_exec(bContext *C, wmOperator *op)
 wmOperatorStatus stack_row_merge_down_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (!outliner_stack_new_row_switch_allowed(C, *space_outliner)) {
+    return OPERATOR_CANCELLED;
+  }
   const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
   if (ordinal < 0) {
     return OPERATOR_CANCELLED;
@@ -943,6 +955,9 @@ wmOperatorStatus stack_correction_texture_invoke(bContext *C,
 wmOperatorStatus stack_corrections_bake_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (!outliner_stack_new_row_switch_allowed(C, *space_outliner)) {
+    return OPERATOR_CANCELLED;
+  }
   Vector<int> ordinals;
   stack_corrections_bake_rows(*C, *space_outliner, ordinals);
   if (ordinals.is_empty()) {
@@ -984,6 +999,9 @@ wmOperatorStatus stack_corrections_bake_exec(bContext *C, wmOperator *op)
 wmOperatorStatus stack_row_duplicate_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (!outliner_stack_new_row_switch_allowed(C, *space_outliner)) {
+    return OPERATOR_CANCELLED;
+  }
   const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
   if (ordinal < 0) {
     return OPERATOR_CANCELLED;

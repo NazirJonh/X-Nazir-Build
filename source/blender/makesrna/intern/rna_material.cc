@@ -882,7 +882,7 @@ static bool rna_MaterialPaintLayerCurvePatch_brush_poll(PointerRNA * /*ptr*/,
                                                         const PointerRNA value)
 {
   const Brush *brush = static_cast<const Brush *>(value.data);
-  return brush != nullptr && BKE_paint_layers_curve_patch_brush_usable(*brush);
+  return brush != nullptr && BKE_paint_layers_curve_patch_brush_is_assignable(*brush);
 }
 
 /** Assigning a brush gives the effect a fresh private duplicate of it (the effect never shares a
@@ -905,7 +905,7 @@ static void rna_MaterialPaintLayerCurvePatch_brush_set(PointerRNA *ptr,
     return;
   }
   if (!rna_MaterialPaintLayerCurvePatch_brush_poll(ptr, value)) {
-    BKE_report(reports, RPT_WARNING, "That brush cannot stamp a Curve Patch");
+    BKE_report(reports, RPT_WARNING, BKE_paint_layers_curve_patch_brush_refusal_message());
     return;
   }
   /* The previous snapshot is freed by the replacement: refuse while a session holds it as the
@@ -914,13 +914,15 @@ static void rna_MaterialPaintLayerCurvePatch_brush_set(PointerRNA *ptr,
     if (scene.toolsettings != nullptr && scene.toolsettings->sculpt != nullptr &&
         scene.toolsettings->sculpt->paint.brush == payload->brush)
     {
-      BKE_report(reports, RPT_WARNING, "Finish the Curve Patch session before changing its brush");
+      BKE_report(reports,
+                 RPT_WARNING,
+                 TIP_("Finish the Curve Patch session before changing its brush"));
       return;
     }
   }
   MaterialPaintLayer *owner = BKE_paint_layers_curve_patch_row_find(*ma, *payload);
   if (owner == nullptr || !BKE_paint_layers_curve_patch_brush_set(*ma, *bmain, *owner, *source)) {
-    BKE_report(reports, RPT_ERROR, "Could not assign that brush to the Curve Patch");
+    BKE_report(reports, RPT_ERROR, TIP_("Could not assign that brush to the Curve Patch"));
     return;
   }
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, nullptr);
@@ -963,7 +965,7 @@ static void rna_MaterialPaintLayerCurvePatch_source_brush_set(PointerRNA *ptr,
                                                               ReportList *reports)
 {
   if (!rna_MaterialPaintLayerCurvePatch_brush_poll(ptr, value)) {
-    BKE_report(reports, RPT_WARNING, "That brush cannot stamp a Curve Patch");
+    BKE_report(reports, RPT_WARNING, BKE_paint_layers_curve_patch_brush_refusal_message());
     return;
   }
   rna_curve_patch_pending_pick.payload = static_cast<const MaterialPaintLayerCurvePatch *>(

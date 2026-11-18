@@ -35,6 +35,8 @@
 #include "BKE_report.hh"
 
 #include "ED_paint.hh"
+
+#include "../paint_curve_patch_layer.hh"
 #include "ED_undo.hh"
 
 #include "IMB_imbuf.hh"
@@ -119,6 +121,12 @@ bool image_select_paste_clipboard(bContext *C,
   const bool layered = ma != nullptr && paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL &&
                        BKE_paint_layers_target_mode(&paint_mode) == PaintLayersTargetMode::Content;
   const bool as_layer = layered && image_select_paste_new_layer_enabled(C);
+  /* Pasting as a layer makes a new row the active one. A live Curve Patch session refuses that
+   * switch before any row is created, so the tool and the target mode below cannot describe a row
+   * the paste did not activate. */
+  if (as_layer && !curve_patch_layer_row_switch_prepare(*C)) {
+    return false;
+  }
 
   /* The channel of each clipboard group comes from the map it was copied from, looked up in the
    * material's description. The maps of the *active* layer are not the key: the copy usually comes

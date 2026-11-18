@@ -252,7 +252,7 @@ ImageCurvePatchSession *image_curve_patch_session_begin(bContext *C,
     Object *ob = CTX_data_active_object(C);
     if (ob != nullptr && scene->toolsettings != nullptr &&
         ed::sculpt_paint::material::paint_layers_stroke_gate_report(
-            *ob, scene->toolsettings->paint_mode, reports))
+            *C, *ob, scene->toolsettings->paint_mode, reports))
     {
       return nullptr;
     }

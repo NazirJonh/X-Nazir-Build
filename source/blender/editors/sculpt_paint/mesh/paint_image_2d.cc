@@ -5088,7 +5088,9 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
 
     /* One gate per stroke: a locked or hidden row takes no target and must not create maps
      * first. */
-    if (ed::sculpt_paint::material::paint_layers_stroke_gate_report(*ob, paint_mode, op->reports)) {
+    if (ed::sculpt_paint::material::paint_layers_stroke_gate_report(
+            *C, *ob, paint_mode, op->reports, brush))
+    {
       return nullptr;
     }
 

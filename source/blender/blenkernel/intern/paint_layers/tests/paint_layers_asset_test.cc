@@ -8,6 +8,7 @@
 #include <string>
 
 #include "BKE_asset.hh"
+#include "BKE_brush.hh"
 #include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_idprop.hh"
@@ -29,6 +30,7 @@
 #include "BLI_string.h"
 #include "BLI_uuid.h"
 
+#include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
@@ -1463,8 +1465,7 @@ TEST_F(PaintLayersAssetTest, smart_asset_create_refuses_curve_patch_without_leak
 {
   Material *src = BKE_material_add(bmain, "Src");
   MaterialPaintLayer *row = add_layer(*src, "Curve", add_image("CurveMap"));
-  ASSERT_NE(BKE_paint_layers_curve_patch_effect_add(*src, row, "Patch", *bmain, nullptr),
-            nullptr);
+  ASSERT_NE(BKE_paint_layers_curve_patch_effect_add(*src, row, "Patch", *bmain), nullptr);
   const MaterialPaintLayer *source_rows[1] = {row};
   const int materials_before = BLI_listbase_count(&bmain->materials);
 
@@ -1484,8 +1485,7 @@ TEST_F(PaintLayersAssetTest, smart_asset_create_refuses_curve_patch_inside_a_fol
   MaterialPaintLayer *folder = BKE_paint_layers_group(
       *src, Span<MaterialPaintLayer *>(&member, 1));
   ASSERT_NE(folder, nullptr);
-  ASSERT_NE(BKE_paint_layers_curve_patch_effect_add(*src, folder, "Patch", *bmain, nullptr),
-            nullptr);
+  ASSERT_NE(BKE_paint_layers_curve_patch_effect_add(*src, folder, "Patch", *bmain), nullptr);
   const MaterialPaintLayer *source_rows[1] = {folder};
   const int materials_before = BLI_listbase_count(&bmain->materials);
 
@@ -1503,8 +1503,7 @@ TEST_F(PaintLayersAssetTest, smart_mask_ignores_curve_patch_in_the_row_content)
   Material *src = BKE_material_add(bmain, "Src");
   MaterialPaintLayer *row = add_layer(*src, "Masked", add_image("MaskedMap"));
   ASSERT_NE(BKE_paint_layers_mask_add(*src, row, 0.5f), nullptr);
-  ASSERT_NE(BKE_paint_layers_curve_patch_effect_add(*src, row, "Patch", *bmain, nullptr),
-            nullptr);
+  ASSERT_NE(BKE_paint_layers_curve_patch_effect_add(*src, row, "Patch", *bmain), nullptr);
   const MaterialPaintLayer *source_rows[1] = {row};
 
   Material *asset = BKE_paint_layers_asset_create(*bmain,
@@ -1520,8 +1519,7 @@ TEST_F(PaintLayersAssetTest, smart_asset_insert_skips_curve_patch_effects)
 {
   Material *asset = BKE_material_add(bmain, "LegacyAsset");
   MaterialPaintLayer *row = add_layer(*asset, "Row", add_image("RowMap"));
-  ASSERT_NE(BKE_paint_layers_curve_patch_effect_add(*asset, row, "Patch", *bmain, nullptr),
-            nullptr);
+  ASSERT_NE(BKE_paint_layers_curve_patch_effect_add(*asset, row, "Patch", *bmain), nullptr);
   ASSERT_NE(BKE_paint_layers_correction_add(
                 *asset, row, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT),
             nullptr);
@@ -1699,8 +1697,13 @@ TEST_F(PaintLayersAssetTest, ordinary_duplicate_still_copies_the_curve_patch_pay
   Material *src = BKE_material_add(bmain, "Src");
   MaterialPaintLayer *row = add_layer(*src, "Curve", add_image("CurveMap"));
   MaterialPaintLayer *effect = BKE_paint_layers_curve_patch_effect_add(
-      *src, row, "Patch", *bmain, nullptr);
+      *src, row, "Patch", *bmain);
   ASSERT_NE(effect, nullptr);
+  /* The effect is added brush-less; the assign gives it the snapshot the duplicate must copy. */
+  Brush *brush = BKE_brush_add(bmain, "CPBrush", OB_MODE_SCULPT);
+  brush->sculpt_brush_type = SCULPT_BRUSH_TYPE_PAINT;
+  ASSERT_TRUE(BKE_paint_layers_curve_patch_brush_set(*src, *bmain, *effect, *brush));
+  ASSERT_NE(effect->curve_patch->brush, nullptr);
 
   MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *src, row);
   ASSERT_NE(copy, nullptr);

@@ -1002,11 +1002,12 @@ void curve_patch_edit_status_set(bContext *C, const CurvePatchSession &patch)
   WorkspaceStatus status(C);
   const wmOperatorType *ot = WM_operatortype_find("SCULPT_OT_curve_patch_edit", true);
   if (ot && ot->modalkeymap) {
-    /* A Stack Layers effect has neither: Enter and Esc are inert for it. */
-    if (!patch.is_layer_effect()) {
-      status.opmodal(IFACE_("Commit"), ot, CURVE_PATCH_MODAL_CONFIRM);
-      status.opmodal(IFACE_("Cancel"), ot, CURVE_PATCH_MODAL_CANCEL);
-    }
+    /* A Stack Layers effect has no Cancel: both keys end the session and keep its curves, so Esc
+     * reads as Finish rather than as a discard. */
+    status.opmodal(IFACE_("Commit"), ot, CURVE_PATCH_MODAL_CONFIRM);
+    status.opmodal(patch.is_layer_effect() ? IFACE_("Finish") : IFACE_("Cancel"),
+                   ot,
+                   CURVE_PATCH_MODAL_CANCEL);
     status.opmodal(IFACE_("Undo"), ot, CURVE_PATCH_MODAL_UNDO);
     status.opmodal(patch.active_item().params.swap_axis ? IFACE_("Swap Texture Axis (now U)") :
                                                           IFACE_("Swap Texture Axis (now V)"),
@@ -1575,13 +1576,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   if (event->type == EVT_MODAL_MAP) {
     switch (event->val) {
       case CURVE_PATCH_MODAL_CONFIRM:
-        /* An effect of the Stack Layers lives as long as its row is selected in the Outliner, so
-         * Enter has nothing to commit: the session ends with the selection, not with a key. The
-         * event is consumed (it is already #EVT_MODAL_MAP, so passing it on would not re-deliver
-         * the raw key anyway). */
-        if (patch.is_layer_effect()) {
-          return OPERATOR_RUNNING_MODAL;
-        }
+        /* An effect of the Stack Layers commits into its container, like a switch of the active
+         * row does: switching rows is refused while the session runs, so Enter is how it ends. */
         return curve_patch_edit_finish(C, op, false) ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
       case CURVE_PATCH_MODAL_CANCEL:
         /* Esc during a point, handle, radius, strength, angle or segment drag abandons that drag
@@ -1595,10 +1591,8 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
           curve_patch_edit_snap_ctx_free(data);
           return OPERATOR_RUNNING_MODAL;
         }
-        /* Same reason as Confirm: Esc must not hide the curves of a selected layer row. */
-        if (patch.is_layer_effect()) {
-          return OPERATOR_RUNNING_MODAL;
-        }
+        /* A layer effect has no Cancel (see #curve_patch_edit_session_finish): Esc ends the
+         * session and keeps the curves, which the container already holds. */
         curve_patch_edit_finish(C, op, true);
         return OPERATOR_CANCELLED;
       case CURVE_PATCH_MODAL_UNDO:

@@ -2303,7 +2303,9 @@ class PaintLayersStackSource final : public StackSource,
       if (MaterialPaintLayer *effect = BKE_paint_layers_find(material, row.stable_id);
           effect != nullptr && effect->source == MA_PAINT_LAYER_SOURCE_TEXT)
       {
-        outliner_stack_row_activate(&C, *space_outliner, ordinal);
+        if (!outliner_stack_row_activate(&C, *space_outliner, ordinal)) {
+          return false;
+        }
         wmOperatorType *ot = WM_operatortype_find("PAINT_OT_text_decal_edit_text", false);
         if (ot == nullptr) {
           return false;
@@ -2325,7 +2327,9 @@ class PaintLayersStackSource final : public StackSource,
        * operator does. */
       const Material &material = layers_owner(owner);
       const bool active_changed = !BLI_uuid_equal(material.active_layer_marker, row.stable_id);
-      outliner_stack_row_activate(&C, *space_outliner, ordinal);
+      if (!outliner_stack_row_activate(&C, *space_outliner, ordinal)) {
+        return false;
+      }
       paint_mode.layer_object_mask_edit = 1;
       /* Scan the UVs once now, so the Properties redraws only read the tile cache. */
       BKE_paint_layer_object_mask_tiles_prefetch(*CTX_data_main(&C));
@@ -2354,6 +2358,17 @@ class PaintLayersStackSource final : public StackSource,
       return false;
     }
     return sculpt_paint::paint_stack_row_activate(C, material, row.stable_id);
+  }
+
+  bool row_switch_allowed(bContext &C,
+                          const StackFocus & /*focus*/,
+                          ID & /*owner*/,
+                          const StackRow * /*row*/) const override
+  {
+    /* A live free-standing Curve Patch session refuses the switch to ANY row (it writes into the
+     * layer that was active when it started, whichever row is about to take over); when the user
+     * preference asks for it, the prepare commits it instead. */
+    return sculpt_paint::curve_patch_layer_row_switch_prepare(C);
   }
 
   bool preview_activate(bContext &C,
@@ -2512,6 +2527,11 @@ class PaintLayersStackSource final : public StackSource,
       return false;
     }
     Material &material = layers_owner(*owner);
+    /* Dropping the target is a switch to "no row": a live Curve Patch session writes into a row
+     * that would no longer be selected, so it refuses this before the marker is cleared. */
+    if (!sculpt_paint::curve_patch_layer_row_switch_prepare(C)) {
+      return false;
+    }
     if (!paint_layers_edit_target_clear(material)) {
       return false;
     }
@@ -2724,14 +2744,18 @@ class PaintLayersStackSource final : public StackSource,
     }
     params.kind = add_kind;
     if (params.kind == PaintLayerAddKind::CurvePatchEffect) {
-      /* The payload is created with the effect: a database for its two IDs, and the active brush as
-       * the snapshot source (a fresh default stands in when none is active). */
+      /* The payload is created with the effect: a database for its PaintVector. The Add also takes
+       * the active brush when it is a usable source, so the typical Add opens the tool at once;
+       * an unusable one (a Sculpt brush that cannot stamp a patch) leaves the row brush-less and
+       * the Curve Patch panel asks for a Paint Brush. The policy validates the candidate. */
       params.bmain = CTX_data_main(&C);
-      const Scene *scene = CTX_data_scene(&C);
-      if (scene != nullptr && scene->toolsettings != nullptr &&
-          scene->toolsettings->sculpt != nullptr)
-      {
-        params.curve_patch_brush = BKE_paint_brush(&scene->toolsettings->sculpt->paint);
+      if (const Paint *paint = BKE_paint_get_active_from_context(&C)) {
+        const Brush *active_brush = BKE_paint_brush_for_read(paint);
+        if (active_brush != nullptr &&
+            BKE_paint_layers_curve_patch_brush_is_assignable(*active_brush))
+        {
+          params.curve_patch_brush = active_brush;
+        }
       }
     }
     if (is_anchor_point || is_anchor_point_reader) {
@@ -2959,12 +2983,12 @@ class PaintLayersStackSource final : public StackSource,
       BKE_paint_layers_active_set(material, created->marker);
     }
     if (params.kind == PaintLayerAddKind::CurvePatchEffect && created->curve_patch != nullptr) {
-      /* The effect starts with one seeded control curve laid out from its snapshot brush, so the
-       * passive overlay and the tool entry have something to show and edit. The channel maps are
-       * made when the tool is entered. */
+      /* The effect starts with one seeded control curve, so the passive overlay has something to
+       * show and edit. The channel maps are made when the tool is entered. A usable brush from the
+       * Add already gave the payload its snapshot, so the row click right away enters the tool; a
+       * brush-less effect (no usable brush was in hand) shows the row in the Curve Patch panel and
+       * asks there for the Paint Brush. */
       blender::ed::sculpt_paint::ED_paint_layers_curve_patch_row_seed_curve(*created->curve_patch);
-      /* A fresh effect is the one being worked on: in Sculpt Mode its tool opens right away. */
-      blender::ed::sculpt_paint::curve_patch_layer_enter_if_sculpting(C, material, *created);
     }
     /* The row the stack shows changed: the Projection Frame tool follows it first, so a row that
      * is both a volume projection and a Gradient ends up with the Gradient tool, like the stack
@@ -3024,6 +3048,10 @@ class PaintLayersStackSource final : public StackSource,
     if (layer == nullptr) {
       return false;
     }
+    /* Removing a row can remove the row the live session writes into (its own row, or a parent a
+     * correction hangs on), which is a switch this path cannot refuse. Commit first, so the curves
+     * are in the container before it goes and the overlay cannot outlive the row. */
+    sculpt_paint::curve_patch_layer_commit_live_sessions(C);
     /* A correction is not a row of the stack: it leaves through its own call. */
     if (BKE_paint_layers_correction_owner(material, *layer) != nullptr) {
       if (!BKE_paint_layers_correction_remove(material, layer)) {

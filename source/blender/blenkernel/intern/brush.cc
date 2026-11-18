@@ -21,6 +21,7 @@
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 
+#include "BLI_function_ref.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_base.hh"
@@ -333,6 +334,60 @@ static void brush_foreach_id(ID *id, LibraryForeachIDData *data)
         data, brush->material_paint->source_layer_owner, IDWALK_CB_USER);
   }
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Brush textures unsharing
+ * \{ */
+
+/** Call \a callback for every `Tex` slot pointer the brush holds: the brush, mask and face-set
+ * textures, the Curve Patch zone and stamp-list textures, and the PBR channel sources (plus the
+ * shared mapping slot, whose `Tex` stays null but is walked the way its readers do). Keep this in
+ * sync with #brush_foreach_id above, which walks the same slots for user counts, remapping and
+ * library overrides: a new `Tex` field on the brush has to be added to both, or the new slot
+ * either loses its user count (#brush_foreach_id) or keeps sharing a `Tex` after a copy
+ * (#BKE_brush_textures_unshare). */
+static void brush_tex_slots_foreach(Brush &brush, FunctionRef<void(Tex *&tex)> callback)
+{
+  callback(brush.mtex.tex);
+  callback(brush.mask_mtex.tex);
+  callback(brush.face_set_color_mtex.tex);
+  callback(brush.curve_patch.tex_start);
+  callback(brush.curve_patch.tex_middle);
+  callback(brush.curve_patch.tex_end);
+  for (BrushCurvePatchTextureSlot &slot : brush.curve_patch.texture_slots) {
+    callback(slot.tex);
+  }
+  if (brush.material_paint != nullptr) {
+    for (BrushMaterialPaintChannel &channel : brush.material_paint->channels) {
+      callback(channel.source_mtex.tex);
+    }
+    callback(brush.material_paint->shared_source_mapping.tex);
+  }
+}
+
+/** Replace \a tex by a private copy when another owner uses it too. #BKE_id_copy leaves the copy
+ * one user, which is the slot's; the slot's user on the shared original is dropped. #ID_REAL_USERS
+ * folds the fake user out of #ID::us (#id_fake_user_set counts the fake user in), so a fake-user
+ * texture reads exactly as shared as it is. */
+static void brush_tex_unshare(Main &bmain, Tex *&tex)
+{
+  if (tex == nullptr || ID_REAL_USERS(&tex->id) <= 1) {
+    return;
+  }
+  Tex *copy = id_cast<Tex *>(BKE_id_copy(&bmain, &tex->id));
+  if (copy == nullptr) {
+    return;
+  }
+  id_us_min(&tex->id);
+  tex = copy;
+}
+
+void BKE_brush_textures_unshare(Main &bmain, Brush &brush)
+{
+  brush_tex_slots_foreach(brush, [&](Tex *&tex) { brush_tex_unshare(bmain, tex); });
+}
+
+/** \} */
 
 static void brush_foreach_working_space_color(ID *id, const IDTypeForeachColorFunctionCallback &fn)
 {

@@ -718,6 +718,7 @@ class USERPREF_PT_edit_misc(EditingPanel, CenterAlignMixIn, Panel):
 
         col = layout.column()
         col.prop(edit, "sculpt_paint_overlay_color", text="Sculpt Overlay Color")
+        col.prop(prefs.view, "paint_layers_commit_patch_on_switch")
 
 
 class USERPREF_PT_edit_sculpt_history(EditingPanel, CenterAlignMixIn, Panel):

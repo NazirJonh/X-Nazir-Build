@@ -83,6 +83,16 @@ Brush *BKE_brush_duplicate(Main *bmain,
                            Brush *brush,
                            eDupli_ID_Flags dupflag,
                            /*eLibIDDuplicateFlags*/ uint duplicate_options);
+
+/**
+ * Give \a brush (a freshly copied Curve Patch snapshot, or another private duplicate) its own copy
+ * of every Tex data-block it still shares with the brush it was copied from: the brush and mask
+ * textures, the face-set texture, the Curve Patch zone and stamp-list textures, and the PBR
+ * channel sources. A brush copy only adds a user to each Tex, so without this an edit of one Tex
+ * (a new image, a cleared slot) would change the source brush and every other duplicate too. A Tex
+ * the brush alone uses is left as it is; the Images stay shared.
+ */
+void BKE_brush_textures_unshare(Main &bmain, Brush &brush);
 /**
  * Add grease pencil settings.
  */

@@ -8418,11 +8418,18 @@ static bool paint_layers_stroke_ready(bContext *C, wmOperator *op)
   }
   const Paint *paint = BKE_paint_get_active_from_context(C);
   const Brush *brush = paint != nullptr ? BKE_paint_brush_for_read(paint) : nullptr;
-  if (brush == nullptr || !brush_type_is_paint(brush->sculpt_brush_type)) {
+  if (brush == nullptr) {
     return true;
   }
+  /* A geometry brush never writes the layer maps, so the lock/hidden half of the gate must not
+   * stop it. Its press still lands on the active row, though: on a Curve Patch effect it must
+   * enter the effect's tool rather than start a free-standing patch outside it. */
+  if (!brush_type_is_paint(brush->sculpt_brush_type)) {
+    return !ed::sculpt_paint::material::paint_layers_curve_patch_stroke_gate_report(
+        *C, *ob, scene->toolsettings->paint_mode, op->reports, brush);
+  }
   return !ed::sculpt_paint::material::paint_layers_stroke_gate_report(
-      *ob, scene->toolsettings->paint_mode, op->reports);
+      *C, *ob, scene->toolsettings->paint_mode, op->reports, brush);
 }
 
 static void brush_stroke_init(bContext *C, const wmOperator *op)

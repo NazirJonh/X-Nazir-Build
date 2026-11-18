@@ -658,6 +658,27 @@ class AddPresetEEVEERaytracing(AddPresetBase, Operator):
     preset_subdir = "eevee/raytracing"
 
 
+class AddPresetPaintLayersUserSettings(AddPresetBase, Operator):
+    """Add or remove a Layer Material User Settings preset"""
+    bl_idname = "material.paint_layers_user_settings_preset_add"
+    bl_label = "Add User Settings Preset"
+    preset_menu = "LAYER_MATERIAL_PT_user_settings_presets"
+
+    preset_defines = [
+        "prefs = bpy.context.preferences.edit",
+    ]
+
+    @property
+    def preset_values(self):
+        # The options a preset saves live beside the panels that draw them; imported lazily, so
+        # this module keeps no startup dependency on bl_ui.
+        from bl_ui.properties_material_paint_layers import PAINT_LAYERS_USER_SETTINGS_PRESET_VALUES
+
+        return PAINT_LAYERS_USER_SETTINGS_PRESET_VALUES
+
+    preset_subdir = "paint_layers/user_settings"
+
+
 class AddPresetColorManagementWhiteBalance(AddPresetBase, Operator):
     """Add or remove a white balance preset"""
     bl_idname = "render.color_management_white_balance_preset_add"
@@ -1093,6 +1114,7 @@ classes = (
     AddPresetGpencilBrush,
     AddPresetGpencilMaterial,
     AddPresetEEVEERaytracing,
+    AddPresetPaintLayersUserSettings,
     AddPresetColorManagementWhiteBalance,
     ExecutePreset,
     WM_MT_operator_presets,

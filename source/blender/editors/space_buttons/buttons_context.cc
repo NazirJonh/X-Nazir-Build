@@ -27,6 +27,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_space_enums.h"
 #include "DNA_sequence_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_world_types.h"
 
@@ -39,6 +40,8 @@
 #include "BKE_modifier.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_particle.h"
 #include "BKE_screen.hh"
@@ -1035,16 +1038,11 @@ void ED_buttons_set_context(const bContext *C,
 
 void ED_buttons_layer_material_auto_show(const bContext *C)
 {
-  /* The option is a script-registered WindowManager property (the User Settings subpanel of the
-   * Layer Material Settings owns its UI), so it is read through RNA. Unregistered means the
-   * property is not there yet, which is the enabled default. */
-  wmWindowManager *wm = CTX_wm_manager(C);
-  if (wm != nullptr) {
-    PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
-    PropertyRNA *prop = RNA_struct_find_property(&wm_ptr, "paint_layers_auto_activate_tab");
-    if (prop != nullptr && !RNA_property_boolean_get(&wm_ptr, prop)) {
-      return;
-    }
+  /* The option is a Preferences property (the User Settings panel of the Layer Material Settings
+   * owns its UI), so the switch is read straight from #U. Stored negated, so preferences written
+   * before the field existed read as enabled, which is the default. */
+  if (U.paint_layers_auto_activate_tab_off) {
+    return;
   }
 
   bScreen *screen = CTX_wm_screen(C);
@@ -1061,6 +1059,31 @@ void ED_buttons_layer_material_auto_show(const bContext *C)
       sbuts->mainbuser = sbuts->mainb;
       ED_area_tag_redraw(&area);
     }
+  }
+}
+
+void ED_buttons_paint_layers_add_params_from_user_settings(const bContext * /*C*/,
+                                                           PaintLayerAddParams &params)
+{
+  /* A layer added through a UI path starts lean; the user switches the other slots on. An Add
+   * that named its own channels (an empty Fill's popup) keeps them: the Default Channels options
+   * shape only what the Add did not specify. The options are Preferences properties (the User
+   * Settings panel of the Layer Material Settings owns their UI), read straight from #U. A mask
+   * of zero names no channel; the starter-set fallback for that case lives in the Add. */
+  params.starter_channels_only = true;
+  if (params.channels != 0) {
+    return;
+  }
+  switch (params.kind) {
+    case PaintLayerAddKind::Paint:
+      params.starter_channels = U.paint_layers_paint_default_channels;
+      break;
+    case PaintLayerAddKind::Fill:
+      params.starter_channels = U.paint_layers_fill_default_channels;
+      break;
+    default:
+      /* Only Paint and Fill rows start lean, so no other kind has an option. */
+      break;
   }
 }
 

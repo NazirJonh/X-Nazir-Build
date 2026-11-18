@@ -18,6 +18,7 @@ from bl_ui.properties_paint_common import (
 )
 
 from bl_ui.properties_material_paint_layers import (
+    LAYER_MATERIAL_PT_user_settings_presets,
     draw_material_channel_mixer,
     draw_material_channel_set,
     draw_material_color_balance,
@@ -2363,17 +2364,9 @@ class LAYER_MATERIAL_PT_advanced(LayerMaterialButtonsPanel, Panel):
         layout.prop(owner, "paint_layers_gradient_bake")
 
 
-# How the tab behaves for the user, rather than what the stack contains: these are not a property
-# of any material, so they live on the WindowManager. The layer-add side reads the switch through
-# RNA (ED_buttons_layer_material_auto_show), so the name here is the one the C++ looks up.
-bpy.types.WindowManager.paint_layers_auto_activate_tab = bpy.props.BoolProperty(
-    name="Auto Activate Layer Material Tab",
-    description=(
-        "Bring the Properties editor's Layer Material tab up when a stack element is added (Fill "
-        "Layer, Paint Layer, an effect and the rest), so the new row can be edited right away; "
-        "editors already on the tab stay where they are"),
-    default=True,
-)
+# The User Settings panel draws the tab's own conveniences. The options are Preferences
+# properties, and the panels and the preset-value list they share live in
+# properties_material_paint_layers.py, so this file does not grow with them.
 
 
 class LAYER_MATERIAL_PT_user_settings(LayerMaterialButtonsPanel, Panel):
@@ -2388,10 +2381,27 @@ class LAYER_MATERIAL_PT_user_settings(LayerMaterialButtonsPanel, Panel):
     def poll(cls, context):
         return cls._owner_material(context) is not None
 
+    def draw_header_preset(self, _context):
+        LAYER_MATERIAL_PT_user_settings_presets.draw_panel_header(self.layout)
+
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
-        layout.prop(context.window_manager, "paint_layers_auto_activate_tab")
+        layout.prop(context.preferences.edit, "paint_layers_auto_activate_tab")
+        layout.popover(
+            panel="LAYER_MATERIAL_PT_user_settings_paint_channels_menu",
+            text="Paint Layer Channels",
+            icon='DOWNARROW_HLT',
+        )
+        layout.popover(
+            panel="LAYER_MATERIAL_PT_user_settings_fill_channels_menu",
+            text="Fill Layer Channels",
+            icon='DOWNARROW_HLT',
+        )
+        # The commit switch is a User Preference (it changes a behaviour of the tab, not of any
+        # material) and stays in Preferences > Editing > Miscellaneous. It is shown here as well
+        # because it is looked for in this panel; one RNA property may appear in both places.
+        layout.prop(context.preferences.view, "paint_layers_commit_patch_on_switch")
 
 
 class LAYER_MATERIAL_PT_active_channel(LayerMaterialButtonsPanel, Panel):

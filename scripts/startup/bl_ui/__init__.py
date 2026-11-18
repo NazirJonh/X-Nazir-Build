@@ -38,6 +38,8 @@ _modules = [
     "properties_data_speaker",
     "properties_data_volume",
     "properties_mask_common",
+    # Supplies panels and draw code to properties_material, so it loads (and registers) first.
+    "properties_material_paint_layers",
     "properties_material",
     "properties_material_gpencil",
     "properties_object",

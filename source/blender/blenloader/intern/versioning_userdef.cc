@@ -35,6 +35,7 @@
 #include "BKE_keyconfig.h"
 #include "BKE_main.hh"
 #include "BKE_name_matching.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_preferences.h"
 
 #include "BLO_readfile.hh"
@@ -1994,6 +1995,18 @@ void blo_do_versions_userdef(UserDef *userdef)
   }
   else {
     CLAMP(userdef->asset_shelf_recent_images_max, 1, 200);
+  }
+
+  /* Ensure the Layer Material User Settings' Default Channels options (Paint and Fill) name at
+   * least one channel. The RNA set callbacks refuse an empty set, so 0 is only ever read from
+   * preferences written before the fields existed. Give them the build's starter set, the same
+   * fallback the Add applies when it is handed an empty set. Applied unconditionally since 0 is
+   * never a stored value. */
+  if (userdef->paint_layers_paint_default_channels == 0) {
+    userdef->paint_layers_paint_default_channels = BKE_paint_layers_starter_channel_set();
+  }
+  if (userdef->paint_layers_fill_default_channels == 0) {
+    userdef->paint_layers_fill_default_channels = BKE_paint_layers_starter_channel_set();
   }
 
   /* TEMPORARY: Sculpt/Paint brush-set filtering. Preferences written before the fields existed

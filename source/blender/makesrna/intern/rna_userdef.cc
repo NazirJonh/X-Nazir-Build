@@ -416,6 +416,38 @@ static void rna_userdef_sculpt_history_limit_update(Main *bmain, Scene *scene, P
   rna_userdef_update(bmain, scene, ptr);
 }
 
+static int rna_UserDef_paint_layers_paint_default_channels_get(PointerRNA *ptr)
+{
+  const UserDef *userdef = static_cast<const UserDef *>(ptr->data);
+  return int(userdef->paint_layers_paint_default_channels);
+}
+
+static void rna_UserDef_paint_layers_paint_default_channels_set(PointerRNA *ptr, int value)
+{
+  /* Ignore empty sets: the option keeps at least one channel, the same rule the material's own
+   * channel set follows. A zero never reaches the field, so a zero read back only means the
+   * preferences were written before the field existed. */
+  if (value == 0) {
+    return;
+  }
+  static_cast<UserDef *>(ptr->data)->paint_layers_paint_default_channels = uint32_t(value);
+}
+
+static int rna_UserDef_paint_layers_fill_default_channels_get(PointerRNA *ptr)
+{
+  const UserDef *userdef = static_cast<const UserDef *>(ptr->data);
+  return int(userdef->paint_layers_fill_default_channels);
+}
+
+static void rna_UserDef_paint_layers_fill_default_channels_set(PointerRNA *ptr, int value)
+{
+  /* Ignore empty sets, as the Paint option does. */
+  if (value == 0) {
+    return;
+  }
+  static_cast<UserDef *>(ptr->data)->paint_layers_fill_default_channels = uint32_t(value);
+}
+
 /* Asset Browser -> Automatic Updates: the periodic timer follows the preferences directly, no
  * file-space listener or draw call has to bootstrap it anymore. */
 static void rna_userdef_asset_updates_update(Main *bmain, Scene *scene, PointerRNA *ptr)
@@ -5797,8 +5829,8 @@ static void rna_def_userdef_view(BlenderRNA *brna)
       prop,
       "Commit Curve Patch on Layer Switch",
       "Switching to another layer commits a Curve Patch started on an ordinary layer instead of "
-      "asking to commit it first. A Curve Patch effect keeps its state in its own row, so "
-      "switching away from it never needs this");
+      "blocking the switch until the patch is committed with Enter or canceled with Esc. A Curve "
+      "Patch effect keeps its state in its own row, so switching away from it never needs this");
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 
   prop = RNA_def_property(srna, "category_tabs_clipboard_directory", PROP_STRING, PROP_DIRPATH);
@@ -6625,6 +6657,51 @@ static void rna_def_userdef_edit(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(
       prop, "Save Sculpt History", "Keep sculpt histories in saved .blend files");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  /* Layer Material tab conveniences. The tab's User Settings panel draws them, and the layer-add
+   * side reads them straight from #U (see #ED_buttons_layer_material_auto_show and
+   * #ED_buttons_paint_layers_add_params_from_user_settings), so nothing looks the names up. */
+  prop = RNA_def_property(srna, "paint_layers_auto_activate_tab", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "paint_layers_auto_activate_tab_off", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Auto Activate Layer Material Tab",
+      "Bring the Properties editor's Layer Material tab up when a stack element is added (Fill "
+      "Layer, Paint Layer, an effect and the rest), so the new row can be edited right away; "
+      "editors already on the tab stay where they are");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "paint_layers_paint_default_channels", PROP_ENUM, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_ENUM_FLAG);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_flag_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_UserDef_paint_layers_paint_default_channels_get",
+                              "rna_UserDef_paint_layers_paint_default_channels_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Paint Layer Default Channels",
+      "The channels a new Paint Layer takes part in right away: every channel named here that "
+      "the owner material's set also names gets a record on the row. The set keeps at least one "
+      "channel; a channel the material's set leaves out is never created, however the option "
+      "checks it");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "paint_layers_fill_default_channels", PROP_ENUM, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_ENUM_FLAG);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_flag_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_UserDef_paint_layers_fill_default_channels_get",
+                              "rna_UserDef_paint_layers_fill_default_channels_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Fill Layer Default Channels",
+      "The channels a new Fill Layer takes part in right away: every channel named here that the "
+      "owner material's set also names gets a record on the row. The set keeps at least one "
+      "channel; a channel the material's set leaves out is never created, however the option "
+      "checks it");
   RNA_def_property_update(prop, 0, "rna_userdef_update");
 
   /* VSE */

@@ -1181,6 +1181,14 @@ struct SculptCursorButton {
 #define SCULPT_CURSOR_CUSTOM_BUTTONS_MAX 12
 
 /**
+ * Factory default of #UserDef.paint_layers_paint_default_channels: the build's starter channel set
+ * (#BKE_paint_layers_starter_channel_set: Base Color, Metallic, Roughness, Normal). A literal,
+ * because the channel enum lives in #DNA_scene_types.h, which this header cannot reach; the
+ * match is asserted in paint_layers.cc.
+ */
+#define USERDEF_PAINT_LAYERS_DEFAULT_CHANNELS 23
+
+/**
  * Main user preferences data, typically accessed from #U.
  * See: #BKE_blendfile_userdef_from_defaults & #BKE_blendfile_userdef_read.
  *
@@ -1590,6 +1598,35 @@ struct UserDef {
   struct ColorBand coba_weight;
 
   float sculpt_paint_overlay_col[3] = {0, 0, 0};
+
+  /* Layer Material tab conveniences: how the tab itself behaves for the user, rather than what a
+   * material's stack contains. The tab's User Settings panel draws them, and the layer-add side
+   * reads them straight from #U, so no property name is looked up through RNA at runtime. */
+
+  /**
+   * Whether adding a stack element brings the Properties editor to its Layer Material tab.
+   * Stored negated, so preferences written before the field existed read as enabled, which is the
+   * default.
+   */
+  char paint_layers_auto_activate_tab_off = 0;
+  /**
+   * Padding so the Default Channels mask below keeps its 4-byte alignment, as #makesdna requires
+   * (the switch above is a single byte).
+   */
+  char _pad_auto_activate_tab[3] = {};
+  /**
+   * The channels a lean Paint row starts with, as a bitmask over #eMaterialPaintChannel.
+   * The option keeps at least one channel (the RNA set callback refuses an empty set), and the
+   * factory default is #USERDEF_PAINT_LAYERS_DEFAULT_CHANNELS. A zero read back only means the
+   * preferences were written before the field existed, and the userpref versioning gives them
+   * the starter set, the same fallback the Add applies for an empty set.
+   */
+  uint32_t paint_layers_paint_default_channels = USERDEF_PAINT_LAYERS_DEFAULT_CHANNELS;
+  /** The same option for a lean Fill row, kept apart so the two kinds can start differently. */
+  uint32_t paint_layers_fill_default_channels = USERDEF_PAINT_LAYERS_DEFAULT_CHANNELS;
+  /** Keeps the fields below 8-byte aligned, as #makesdna requires of the whole struct. */
+  char _pad_paint_layers_defaults[4] = {};
+
   /** Default color for newly created Grease Pencil layers. */
   float gpencil_new_layer_col[4] = {0.38, 0.61, 0.78, 0.9};
 

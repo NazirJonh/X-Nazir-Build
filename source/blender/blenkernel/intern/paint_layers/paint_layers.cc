@@ -71,6 +71,7 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_uuid_types.h"
 
 namespace blender {
@@ -831,6 +832,16 @@ uint32_t BKE_paint_layers_starter_channel_set()
          (uint32_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
          (uint32_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL);
 }
+
+/* The factory default of both #UserDef Default Channels options (Paint and Fill) repeats the
+ * starter set as a literal (#DNA_userdef_types.h cannot reach the channel enum); keep the two from
+ * drifting. */
+static_assert(USERDEF_PAINT_LAYERS_DEFAULT_CHANNELS ==
+                  ((uint32_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
+                   (uint32_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
+                   (uint32_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
+                   (uint32_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL)),
+              "USERDEF_PAINT_LAYERS_DEFAULT_CHANNELS must match the starter channel set");
 
 uint32_t BKE_paint_layers_new_material_channel_set()
 {

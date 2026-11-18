@@ -6,11 +6,14 @@
 channels of one stack layer.
 
 Split out of `properties_material.py` so the panels stay thin and the channel vocabulary lives in
-one place. The panels that call these functions are drawn from `properties_material.py` (they need
-the Layer Material tab context), so this module only supplies functions.
+one place. Most panels still draw from `properties_material.py` (they need the Layer Material tab
+context); this module also registers the User Settings panels, whose options are Preferences
+properties and so belong to no material's tab context.
 """
 
 from collections import namedtuple
+
+from bpy.types import Panel
 
 from bl_ui.properties_paint_common import (
     _LAYER_VALUE_PANEL_BY_CHANNEL,
@@ -21,6 +24,8 @@ from bl_ui.properties_paint_common import (
     MaterialPaintChannelView,
     _draw_channel_panel,
 )
+
+from bl_ui.utils import PresetPanel
 
 # Channel count at which a row is considered heavy: five records weigh 34 generated nodes, six
 # weigh 40, over the AUTO-bake threshold of 36. A row this wide bakes instead of evaluating live.
@@ -972,3 +977,73 @@ def draw_material_layer_channels(layout, context, material, layer):
                 _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id]),
             source_enabled=True,
         )
+
+
+# The User Settings panels: the conveniences of the Layer Material tab itself, rather than settings
+# of any material's stack. The options they draw are Preferences properties
+# (paint_layers_auto_activate_tab, paint_layers_paint_default_channels,
+# paint_layers_fill_default_channels), and the layer-add side reads
+# them directly in C++ (ED_buttons_layer_material_auto_show,
+# ED_buttons_paint_layers_add_params_from_user_settings), so no property name is looked up by
+# string. The Default Channels menu offers the same channels by the same names the New Layered
+# Material dialog and the Active Channels subpanel offer: it reads the shared C++ enum items
+# (`rna_enum_material_paint_channel_flag_items`), not a snapshot taken at import time.
+
+
+# The User Settings options a preset saves, in panel order. Kept beside the panels so a new option
+# added to the User Settings panel extends this list and the panel together;
+# AddPresetPaintLayersUserSettings imports it lazily, so no cycle appears at startup.
+PAINT_LAYERS_USER_SETTINGS_PRESET_VALUES = (
+    "prefs.paint_layers_auto_activate_tab",
+    "prefs.paint_layers_paint_default_channels",
+    "prefs.paint_layers_fill_default_channels",
+)
+
+
+class LAYER_MATERIAL_PT_user_settings_presets(PresetPanel, Panel):
+    """Presets of the User Settings."""
+
+    bl_label = "User Settings Presets"
+    preset_subdir = "paint_layers/user_settings"
+    preset_operator = "script.execute_preset"
+    preset_add_operator = "material.paint_layers_user_settings_preset_add"
+
+
+class _LayerMaterialDefaultChannelsMenu:
+    """The checkbox list over every channel in display order, for one Default Channels option."""
+
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+    # The Preferences property this menu toggles.
+    prefs_property = ""
+
+    def draw(self, context):
+        layout = self.layout
+        col = layout.column(align=True)
+        prefs = context.preferences.edit
+        for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
+            col.prop_enum(prefs, self.prefs_property, channel_id)
+
+
+class LAYER_MATERIAL_PT_user_settings_paint_channels_menu(_LayerMaterialDefaultChannelsMenu, Panel):
+    """The channels a new Paint row takes part in right away."""
+
+    bl_idname = "LAYER_MATERIAL_PT_user_settings_paint_channels_menu"
+    bl_label = "Paint Layer Default Channels"
+    prefs_property = "paint_layers_paint_default_channels"
+
+
+class LAYER_MATERIAL_PT_user_settings_fill_channels_menu(_LayerMaterialDefaultChannelsMenu, Panel):
+    """The channels a new Fill row takes part in right away."""
+
+    bl_idname = "LAYER_MATERIAL_PT_user_settings_fill_channels_menu"
+    bl_label = "Fill Layer Default Channels"
+    prefs_property = "paint_layers_fill_default_channels"
+
+
+classes = (
+    LAYER_MATERIAL_PT_user_settings_presets,
+    LAYER_MATERIAL_PT_user_settings_paint_channels_menu,
+    LAYER_MATERIAL_PT_user_settings_fill_channels_menu,
+)

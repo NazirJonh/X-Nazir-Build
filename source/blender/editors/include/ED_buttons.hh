@@ -20,6 +20,7 @@ struct ARegion;
 struct ScrArea;
 struct SpaceProperties;
 struct bContext;
+struct PaintLayerAddParams;
 struct PointerRNA;
 struct PropertyRNA;
 
@@ -62,10 +63,23 @@ void ED_buttons_texture_show(bContext *C, PointerRNA *ptr, PropertyRNA *prop);
 /**
  * Bring every Properties Editor of \a C's screen to the Layer Material tab when it is not on it
  * already. This is what adding a row to the paint-layer stack does when the User Settings option
- * (`paint_layers_auto_activate_tab`) is on: a layer the user just asked for is the one they mean to
- * edit next, and its settings are that tab's. Nothing is switched when the option is off.
+ * (`paint_layers_auto_activate_tab`, a Preferences property) is on: a layer the user just asked
+ * for is the one they mean to edit next, and its settings are that tab's. Nothing is switched
+ * when the option is off.
  */
 void ED_buttons_layer_material_auto_show(const bContext *C);
+
+/**
+ * Fill \a params with the User Settings that shape a layer Add: the row starts lean
+ * (#PaintLayerAddParams::starter_channels_only), with the Preferences' Default Channels of its
+ * kind (`paint_layers_paint_default_channels` for a Paint row, `paint_layers_fill_default_channels`
+ * for a Fill row, both read straight from #U) for the channels its Add did not name itself (an
+ * empty Fill's popup names its own). \a params.kind must already be set. The starter-set fallback
+ * for an option that names no channel lives in the Add (#BKE_paint_layers_add_with_policy). The
+ * one place UI Add paths take the options from, so a new path does not copy them.
+ */
+void ED_buttons_paint_layers_add_params_from_user_settings(const bContext *C,
+                                                           PaintLayerAddParams &params);
 
 /** Placeholder panel marking the drop position in the modifier stack. */
 #define MODIFIER_DROP_GHOST_PANEL_IDNAME "MOD_PT_drop_ghost"

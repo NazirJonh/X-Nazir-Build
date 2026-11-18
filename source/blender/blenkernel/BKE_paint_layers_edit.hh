@@ -180,12 +180,23 @@ struct PaintLayerAddParams {
    */
   uint32_t channels = 0;
   /**
-   * A Paint or Fill row starts with the channels of #BKE_paint_layers_starter_channel_set only
-   * (those that are also in the material's set), instead of every channel of the set. The others
-   * have no record, so the row's slot for them is off until the user adds it. Ignored by an
-   * \a empty Fill, which takes \a channels, and by other kinds.
+   * A Paint or Fill row starts lean: only the channels of #starter_channels, or of
+   * #BKE_paint_layers_starter_channel_set when #starter_channels is zero (those that are also in
+   * the material's set), instead of every channel of the set. The others have no record, so the
+   * row's slot for them is off until the user adds it. Ignored by an \a empty Fill, which takes
+   * \a channels, and by other kinds. UI Add paths set it through
+   * #ED_buttons_paint_layers_add_params_from_user_settings; an Add that does not reach for the
+   * user settings leaves it off.
    */
   bool starter_channels_only = false;
+  /**
+   * The channels a lean Paint or Fill row starts with, as a bitmask over #eMaterialPaintChannel:
+   * the User Settings' Default Channels, which the Add read for the user. Zero keeps the build's
+   * starter set (#BKE_paint_layers_starter_channel_set) -- the one place that fallback lives, so
+   * a reader of the User Settings option may answer zero. Only channels in the material's set
+   * are taken; an \a empty Fill takes \a channels instead, and other kinds are unaffected.
+   */
+  uint32_t starter_channels = 0;
   /** The filter of a #PaintLayerAddKind::Filter Add, an #eMaterialPaintLayerFilter. */
   int16_t filter = 0;
   /**

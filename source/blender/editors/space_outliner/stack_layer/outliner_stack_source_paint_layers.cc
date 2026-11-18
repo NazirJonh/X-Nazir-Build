@@ -83,6 +83,7 @@
 
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_import.hh"
+#include "ED_buttons.hh"
 #include "ED_curve_patch.hh"
 #include "ED_material_bake.hh"
 #include "ED_outliner_stack.hh"
@@ -2882,8 +2883,9 @@ class PaintLayersStackSource final : public StackSource,
     params.fill_folder = args.fill_folder;
     params.empty = args.empty;
     params.channels = args.channel_mask;
-    /* A layer added from the Stack starts lean; the user switches the other slots on. */
-    params.starter_channels_only = true;
+    /* A layer added from the Stack starts lean and takes the User Settings' Default Channels; an
+     * empty Fill keeps the channels its own Add popup asked for instead. */
+    ED_buttons_paint_layers_add_params_from_user_settings(&C, params);
     if (ELEM(params.kind,
              PaintLayerAddKind::Fill,
              PaintLayerAddKind::CorrectionFill,

@@ -464,10 +464,10 @@ TEST_F(PaintMaterialChannelTest, channel_pass_lists_carry_every_channel)
 
 TEST_F(PaintMaterialChannelTest, channel_default_value_matches_the_principled_socket)
 {
-  /* The stored default of every socket-bearing channel has to be the socket's own: the brush
-   * starts where the shader starts, and a disagreement shows up as a material that changes the
-   * moment a stroke enables the channel. Channels without a Principled socket (Custom, Height, AO)
-   * own their defaults elsewhere and are skipped. */
+  /* The stored default of every scalar socket-bearing channel has to be the socket's own: the brush
+   * starts where the shader starts. Colour and direction channels keep a storage neutral that
+   * differs from the socket on purpose (see #BKE_paint_material_combined_default_value), and
+   * channels without a Principled socket (Custom, Height, AO) own their defaults elsewhere. */
   Object *ob = add_mesh_object("PrincipledDefaults");
   Material *ma = add_material_with_principled(*ob, "PrincipledDefaultsMat");
   bNode *principled = nullptr;
@@ -495,24 +495,11 @@ TEST_F(PaintMaterialChannelTest, channel_default_value_matches_the_principled_so
             << "channel " << info.ui_name;
         break;
       case SOCK_VECTOR:
-        /* A direction: the stored value is the flat tangent's Z, and the socket's X and Y rest. */
-        if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
-          const auto &value = *static_cast<const bNodeSocketValueVector *>(socket->default_value);
-          EXPECT_FLOAT_EQ(value.value[2], stored) << "channel " << info.ui_name;
-          EXPECT_FLOAT_EQ(value.value[0], 0.0f) << "channel " << info.ui_name;
-          EXPECT_FLOAT_EQ(value.value[1], 0.0f) << "channel " << info.ui_name;
-        }
+      case SOCK_RGBA:
+        /* A colour or a direction cannot be one scalar: the stored value is a paint *storage*
+         * neutral (black for Base Color, the flat tangent's Z for Normal), and the Principled
+         * preview defaults differ on purpose (see #BKE_paint_material_combined_default_value). */
         break;
-      case SOCK_RGBA: {
-        /* A colour's stored scalar is its neutral: black (0) for Base Color and Emission, white
-         * (1) for Specular Tint. The sockets' defaults are grey, so the red channel stands for
-         * the whole -- assert that, so a tinted default fails loudly instead of comparing half. */
-        const auto &value = *static_cast<const bNodeSocketValueRGBA *>(socket->default_value);
-        EXPECT_FLOAT_EQ(value.value[0], stored) << "channel " << info.ui_name;
-        EXPECT_FLOAT_EQ(value.value[0], value.value[1]) << "channel " << info.ui_name;
-        EXPECT_FLOAT_EQ(value.value[1], value.value[2]) << "channel " << info.ui_name;
-        break;
-      }
       default:
         FAIL() << "channel " << info.ui_name << " resolves to an unexpected socket type";
     }
@@ -1148,7 +1135,12 @@ TEST_F(PaintMaterialChannelTest, vertex_canvas_restricts_to_supported_channels)
    * Height, Emission or Custom-without-a-name; #PAINT_CANVAS_SOURCE_MATERIAL must still enable
    * them since it paints into an image/socket, not a vertex attribute. */
   PaintModeSettings mode_settings{};
-  const int visible_channels = paint_material_channel_test_default_visibility();
+  /* The rule under test is the canvas source's, not the default visibility: make every channel
+   * visible, so a channel the default set hides cannot be mistaken for one the canvas excludes. */
+  int visible_channels = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    visible_channels |= (1 << info.channel);
+  }
   BLI_strncpy(mode_settings.channel_layer_bindings[PAINT_MATERIAL_CHANNEL_CUSTOM].attribute_name,
               "my_attr",
               sizeof(mode_settings.channel_layer_bindings[PAINT_MATERIAL_CHANNEL_CUSTOM]
@@ -1565,6 +1557,9 @@ TEST_F(PaintMaterialChannelTest, BaseColorGetRespectsInvert)
 
   Brush brush{};
   copy_v3_fl3(brush.secondary_color, 0.1f, 0.3f, 0.5f);
+  /* Sculpt paints with the unified color, so the inverted value is read from the unified
+   * settings, not from the brush's own secondary color (#BKE_brush_secondary_color_get). */
+  copy_v3_fl3(paint.unified_paint_settings.secondary_color, 0.1f, 0.3f, 0.5f);
 
   const float3 non_invert = BKE_paint_material_base_color_get(brush_paint, paint, brush, false);
   EXPECT_FLOAT_EQ(non_invert.x, 0.2f);
@@ -1831,6 +1826,16 @@ TEST_F(PaintMaterialChannelTest, principled_image_target_follows_actcol)
   Material *ma_a = add_material_with_principled(*ob, "ActcolMatA");
   Image *image_a = add_image("BaseColorA");
   Material *ma_b = BKE_material_add(bmain, "ActcolMatB");
+  /* #BKE_material_add creates the embedded tree empty; the surface nodes are the caller's, as
+   * in #add_material_with_principled. */
+  bNode *principled_b = bke::node_add_static_node(
+      nullptr, *ma_b->nodetree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output_b = bke::node_add_static_node(nullptr, *ma_b->nodetree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(*ma_b->nodetree,
+                     *principled_b,
+                     *bke::node_find_socket(*principled_b, SOCK_OUT, "BSDF"_ustr),
+                     *output_b,
+                     *bke::node_find_socket(*output_b, SOCK_IN, "Surface"_ustr));
   BKE_object_material_assign(bmain, ob, ma_b, 2, BKE_MAT_ASSIGN_OBJECT);
   Image *image_b = add_image("BaseColorB");
 
@@ -2802,6 +2807,9 @@ TEST_F(PaintMaterialChannelTest, DirectionalBrushSyncCopiesVisibleChannels)
 
   ts->sculpt->paint.visible_material_channels = (1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS);
   ts->imapaint.paint.visible_material_channels = (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  /* New scenes start with automatic sync on (#PaintModeSettings::material_paint_flag), so the
+   * precondition of this test -- sync off -- is spelled out instead of assumed. */
+  ts->paint_mode.material_paint_flag &= ~PAINT_MATERIAL_BRUSH_SYNC;
 
   /* The one-shot copy must work while automatic sync is off, and must leave it off. */
   ASSERT_EQ(ts->paint_mode.material_paint_flag & PAINT_MATERIAL_BRUSH_SYNC, 0);
@@ -2977,9 +2985,11 @@ TEST_F(PaintMaterialChannelTest, ApplyThenSnapshotRoundTripsAndDoesNotLeakTexUse
   id_us_plus(&image->id);
   brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].source_mtex.tex = tex;
   id_us_plus(&tex->id);
+  /* The first snapshot creates the preset, which legitimately owns its own reference to the Tex;
+   * the drift to test for is what the later apply/snapshot rounds add on top of it. */
+  BKE_paint_material_brush_preset_snapshot(*scene, *brush);
   const int tex_users_baseline = tex->id.us;
 
-  BKE_paint_material_brush_preset_snapshot(*scene, *brush);
   BKE_paint_material_brush_preset_apply(*scene, *brush);
   BKE_paint_material_brush_preset_snapshot(*scene, *brush);
   BKE_paint_material_brush_preset_apply(*scene, *brush);

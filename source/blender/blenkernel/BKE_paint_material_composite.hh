@@ -141,7 +141,9 @@ static_assert(int(CompositeBlend::DarkerColor) == MA_PAINT_BLEND_DARKER_COLOR);
 
 /**
  * The maximum number of scalar parameters any filter's fold can produce.
- * Wide enough for a Color Balance's folded triples.
+ * Wide enough for a Color Balance's folded triples, and for a kind whose schema carries a colour:
+ * a colour lays its three channels across the three slots at its place in the schema order, which
+ * keeps every kind within this many floats.
  */
 inline constexpr int PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM = 12;
 
@@ -1043,6 +1045,14 @@ struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
   /** Whether the atlas stores one scalar in R (AO, Curvature, Edge) rather than an RGB map. */
   bool is_mesh_map_scalar = false;
   Image *color_image = nullptr;
+  /**
+   * The slot map an effect's kernel samples itself (a Channel Split's image), or null: the
+   * description names it beside the effect's own input maps, so the GPU pass binds it for the
+   * slot-fetch pass and keys the cached result on its identity, which no map version of the input
+   * carries. Filled by #BKE_paint_layers_effect_input_describe, read by the gather and the GPU
+   * key's scalar fingerprint.
+   */
+  Image *slot_image = nullptr;
   /**
    * The image node's own #ImageUser, or null. Owned by the material: copy it before acquiring a
    * buffer, since acquisition writes to it.

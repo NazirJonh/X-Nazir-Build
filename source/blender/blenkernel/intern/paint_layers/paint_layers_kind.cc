@@ -1157,10 +1157,11 @@ static const PaintLayerKindInfo kinds[] = {
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* A shadow cast off the row's own shape: the silhouette is spread, blurred and offset before
-     * it is tinted, a sequence of passes no single shader kernel lays, so it computes on the CPU
-     * like the Bevel does. Its result is a layer with an alpha of its own, so the shadow shows on the
+     * it is tinted. Its result is a layer with an alpha of its own, so the shadow shows on the
      * empty map around a stroke. In a mask the tint is a grey of itself (the mask kind normalizes),
-     * and the shape always reads the luminance, for the grey carries no alpha. */
+     * and the shape always reads the luminance, for the grey carries no alpha. The plan mirrors
+     * the kernel -- the silhouette spread by the extremum pair, blurred, offset and tinted by the
+     * tail -- so the combined preview computes it on the GPU like the Bevel does. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_DROP_SHADOW,
      "Drop Shadow",
@@ -1169,13 +1170,15 @@ static const PaintLayerKindInfo kinds[] = {
      drop_shadow_params,
      int(std::size(drop_shadow_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_MASK_NEEDS_LUMA | PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA |
+              PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
     /* A band along the border of the shape: a distance field from the border, banded by the width
      * and softened by the blur -- the Bevel's transform, taken as the edge band rather than the
      * ramp. A content row's result is a ring layer of its own (alpha = band, colour = Color) read
      * from the alpha or the luminance the source names, so it shows on the empty map around the
      * islands. A mask's grey has no alpha, so the shape is the luminance the threshold crosses and
-     * the band is a grey. */
+     * the band is a grey. The plan floods the seed field and reads the band off it, so the
+     * combined preview computes it on the GPU like the Bevel does. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
      "Mask Outline",
@@ -1184,12 +1187,17 @@ static const PaintLayerKindInfo kinds[] = {
      mask_outline_params,
      int(std::size(mask_outline_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
-    /* What a continuous border encloses: the flood that finds the regions and the diffusion that
-     * fills them are whole-map passes, so it computes on the CPU like the Bevel does. A content
-     * row's result is a layer of its own (alpha one where a region is filled): a hole between the
-     * strokes has no coverage, so a colour-only fill would stay invisible there. In a mask the fill
-     * is a grey of itself (the kind normalizes) and the border always reads the luminance. */
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
+    /* What a continuous border encloses: the plan floods the label field (the border and the map's
+     * edge the background, the flooding steps over it), diffuses the border's colours inward and
+     * writes the fill out with the coverage the flooding named, so the combined preview computes it
+     * on the GPU like the Bevel does. The parameterizations the flood cannot express stay with the
+     * CPU, the plan builder refusing them with an empty plan: the debug's ramp of region numbers,
+     * the largest-region classification (a reduction over the regions the flood does not walk), and
+     * the source mode without an iteration to diffuse with. A content row's result is a layer of
+     * its own (alpha one where a region is filled): a hole between the strokes has no coverage, so
+     * a colour-only fill would stay invisible there. In a mask the fill is a grey of itself (the
+     * kind normalizes) and the border always reads the luminance. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_FILL_AREA,
      "Fill Area",
@@ -1198,13 +1206,16 @@ static const PaintLayerKindInfo kinds[] = {
      fill_area_params,
      int(std::size(fill_area_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_MASK_NEEDS_LUMA | PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA |
+              PAINT_LAYER_KIND_RESULT_HAS_ALPHA)},
     /* One channel of an assigned image (an ORM map, say) laid as a grey in the channels the row
      * works in: the resample of the slot is a whole-map pass the effect cache computes, so it
      * needs the bake like the Bevel does. The row's own slot is the one map it reads: the
-     * dependency walk, the cache key and the drop slot all read the registry's slot flag. In a
-     * mask the extracted channel is the coverage the grey carries; the result is a grey either
-     * way, so no luminance pass is asked of the mask form. */
+     * dependency walk, the cache key and the drop slot all read the registry's slot flag. One pass
+     * fetches the channel out of the slot map, so the combined preview computes it on the GPU like
+     * the Noise does, the slot bound beside the effect's own ping-pong pair. In a mask the
+     * extracted channel is the coverage the grey carries; the result is a grey either way, so no
+     * luminance pass is asked of the mask form. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT,
      "Channel Split",
@@ -1213,7 +1224,7 @@ static const PaintLayerKindInfo kinds[] = {
      channel_split_params,
      int(std::size(channel_split_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_RESULT_HAS_ALPHA),
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_RESULT_HAS_ALPHA),
      /* #PaintLayerKindInfo::map_paintable, no_stroke_reason, reads_image_slot. */
      false,
      nullptr,
@@ -1249,8 +1260,9 @@ static const PaintLayerKindInfo kinds[] = {
      * tangent-space normal. The one cross-channel effect that lays the channel it reads: it reads
      * the Height (READS_CHANNEL) and lays into the Normal channel, the only one it filters, which
      * is why it is also #PAINT_LAYER_KIND_NORMAL_SAFE. Its output is not colour-only, so its input
-     * stays the row's Height content rather than a switch of its own. A content correction only: a
-     * mask item has no channel of its own to lay a normal into. */
+     * stays the row's Height content rather than a switch of its own. One 3x3 pass over the
+     * height, so the combined preview computes it on the GPU like the Edge Detect does. A content
+     * correction only: a mask item has no channel of its own to lay a normal into. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL,
      "Height To Normal",
@@ -1259,7 +1271,7 @@ static const PaintLayerKindInfo kinds[] = {
      height_to_normal_params,
      int(std::size(height_to_normal_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_NORMAL_SAFE),
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_NORMAL_SAFE),
      /* #PaintLayerKindInfo::map_paintable, no_stroke_reason, reads_image_slot. */
      false,
      nullptr,
@@ -1299,7 +1311,8 @@ static const PaintLayerKindInfo kinds[] = {
      int(std::size(height_adjust_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* The map cut into blocks of one colour: the kernel reads each block once, so the live graph
-     * cannot express it and the row is baked for it. */
+     * cannot express it and the row is baked for it. One pass averages the block each texel
+     * belongs to, so the combined preview computes it on the GPU like the Noise does. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_PIXELATE,
      "Pixelate",
@@ -1307,7 +1320,8 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      pixelate_params,
      int(std::size(pixelate_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* The hue and saturation shift the way the Hue/Saturation node does; the mode says what the
      * lightness moves, the Regular's value channel or the Perceptive lift toward white. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -1330,8 +1344,9 @@ static const PaintLayerKindInfo kinds[] = {
      uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* The walk along the slope of a source: the samples the quality names take the direction the
-     * gradient names, the blending mode saying what they accumulate. A CPU-computed effect the
-     * effect cache computes, the row baked for the graph. */
+     * gradient names, the blending mode saying what they accumulate. The plan lays the driver's
+     * blur, the driver itself and the walk over the original, so the combined preview computes it
+     * on the GPU like the Bevel does. The row is baked for the graph either way. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_BLUR_SLOPE,
      "Blur Slope",
@@ -1339,7 +1354,8 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      blur_slope_params,
      int(std::size(blur_slope_params)),
-     uint16_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED)},
     /* Unsharp masking keeps an HDR value above one: only the negative side is clamped. The same
      * open-above-one policy as Exposure and High Pass, unlike Noise and Channel Mixer. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
@@ -1397,7 +1413,9 @@ static const PaintLayerKindInfo kinds[] = {
      * source is choked to [0, 1] by the same bound: an HDR texel above one does not brighten the
      * glow, unlike the open-topped Sharpen and High Pass. The same clamp zeros the mask at a
      * spread of one, so the slider stops at 0.99: the maximum keeps the narrow, sharp remnant over
-     * the brightest texels instead of choking the glow away. */
+     * the brightest texels instead of choking the glow away. The plan mirrors the kernel -- the
+     * luminance choked, blurred and screened under the colour -- so the combined preview computes
+     * it on the GPU like the High Pass does. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_GLOW,
      "Glow",
@@ -1406,9 +1424,11 @@ static const PaintLayerKindInfo kinds[] = {
      glow_params,
      int(std::size(glow_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
     /* A bevel replaces the colour with a distance ramp from the content's borders: its alpha, or
-     * its luminance when the source says so -- an opaque row bevels by the dark side of its paint. */
+     * its luminance when the source says so -- an opaque row bevels by the dark side of its paint.
+     * The plan floods the distance field (the JFA passes) and reads the ramp off it, so the
+     * combined preview computes it on the GPU like the High Pass does. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_BEVEL,
      "Bevel",
@@ -1416,8 +1436,15 @@ static const PaintLayerKindInfo kinds[] = {
      effect_or_mask_roles,
      bevel_params,
      int(std::size(bevel_params)),
-     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE)},
-    /* The source average is a statistic of the whole map, which the live graph cannot express. */
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_GPU_COMPUTED)},
+    /* The grade moves every texel by the distance between the target colour and the source one --
+     * the input's own average, which the live graph cannot express and the plan reduces down a
+     * pyramid to the 1x1 apex the grade reads, so the combined preview computes it on the GPU like
+     * the Bevel does. The parameterization the pyramid cannot serve stays with the CPU, the plan
+     * builder refusing it with an empty plan: a picked source (the colour the contract lays in the
+     * grade's params2, the one slot whose reading the plan cannot verify against the CPU kernel)
+     * keeps the pick exact on the CPU. The variation rides the grade's params beside the target. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_COLOR_MATCH,
      "Color Match",
@@ -1426,7 +1453,7 @@ static const PaintLayerKindInfo kinds[] = {
      color_match_params,
      int(std::size(color_match_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
+              PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
     /* The gamma leaves a non-positive value alone and has no upper bound, so an HDR value above
      * one passes through: only the negative side is clamped. The same policy as Sharpen and High
      * Pass. */
@@ -1438,8 +1465,10 @@ static const PaintLayerKindInfo kinds[] = {
      exposure_params,
      int(std::size(exposure_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
-    /* A pointwise per-texel dither: it reads a texel's coordinates for its noise, so the combined
-     * preview falls back to the CPU (which walks the texels) rather than a shader branch. */
+    /* A pointwise per-texel dither: it reads a texel's coordinates for its noise. The combined
+     * preview's apply_filter branch receives those coordinates now, so its Deband branch computes
+     * the same noise the CPU (which walks the texels) does, and the filter no longer falls back to
+     * it. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_DEBAND,
      "Deband / Dither",
@@ -1447,7 +1476,7 @@ static const PaintLayerKindInfo kinds[] = {
      filter_roles,
      deband_params,
      int(std::size(deband_params)),
-     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NO_GPU_BRANCH)},
+     PAINT_LAYER_KIND_ACTS_ON_BELOW},
     /* A grain is part of the texture: the shader graph's White Noise and the CPU hash are two
      * different sequences, so the noise is an effect the cache computes once and the bake carries,
      * and no live graph, adjustment or mask form exists for it. The kernel clips its result to
@@ -1464,7 +1493,8 @@ static const PaintLayerKindInfo kinds[] = {
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
               PAINT_LAYER_KIND_GPU_COMPUTED | PAINT_LAYER_KIND_MASK_NEEDS_LUMA)},
     /* A Normal Convert reads the encoding as numbers, not as a direction: the one filter a Normal
-     * channel carries, by its own flag. The combined preview has no branch for it. */
+     * channel carries, by its own flag. The combined preview's apply_filter branch flips the green
+     * and rebuilds the Z the same numbers the CPU does, so the filter no longer falls back to it. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_NORMAL_CONVERT,
      "Normal Convert",
@@ -1472,8 +1502,7 @@ static const PaintLayerKindInfo kinds[] = {
      filter_roles,
      normal_convert_params,
      int(std::size(normal_convert_params)),
-     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NORMAL_SAFE |
-              PAINT_LAYER_KIND_NO_GPU_BRANCH)},
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NORMAL_SAFE)},
     /* A Channel Mixer reads the colour as numbers in a matrix; its payload is the matrix, its
      * monochrome a plain Bool. The combined preview shader has a branch for it, like Color
      * Balance. Its apply clips the result to [0, 1] exactly as the addon's `np.clip` does, so an

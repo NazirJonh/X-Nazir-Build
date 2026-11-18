@@ -940,9 +940,11 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
     }
   }
   paint_layer_dependencies(layer, [&](const PaintLayerDependency &dep) {
-    /* A channel outside the material's set is not rendered, so its map is not a dependency. */
+    /* A channel outside the material's set is not rendered, so its map is not a dependency. A slot
+     * with no channel (a Channel Split's, reported as -1) is outside that set by construction, and
+     * would otherwise be dropped: a pixel edit of it must still reach the bake. */
     if (dep.kind != PaintLayerDependencyKind::ImageMap || *dep.slot == nullptr ||
-        paint_layer_channel_filtered(ma, dep.channel))
+        (dep.channel >= 0 && paint_layer_channel_filtered(ma, dep.channel)))
     {
       return;
     }

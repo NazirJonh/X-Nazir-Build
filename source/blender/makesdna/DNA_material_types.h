@@ -1164,8 +1164,9 @@ enum eMaterialPaintLayerFilter : int16_t {
   /**
    * Fill what a continuous border encloses (a Fill Area): the regions the border of the content
    * — its alpha, or the dark side of its paint — closes off take the colour the border carries,
-   * diffused inward by the iterations, or the solid colour the mode names. A CPU-computed effect
-   * like the #MA_PAINT_LAYER_FILTER_BEVEL: the flood and the diffusion are whole-map passes.
+   * diffused inward by the iterations, or the solid colour the mode names. A whole-map effect
+   * like the #MA_PAINT_LAYER_FILTER_BEVEL: the flood and the diffusion are whole-map passes, and
+   * the largest-region classification and the debug ramp stay on the CPU.
    */
   MA_PAINT_LAYER_FILTER_FILL_AREA = 35,
   /**

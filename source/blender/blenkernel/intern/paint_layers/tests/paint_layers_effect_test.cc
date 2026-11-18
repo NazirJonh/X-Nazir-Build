@@ -2250,21 +2250,17 @@ TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_for_each_added_cpu
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
 
-  /* The three kinds that stay on the CPU still refuse the combined preview by their own reason, and
-   * a describe-only pass computes none of them. The separable and 3x3 kinds (Blur, Sharpen, High
-   * Pass, Edge Detect, Emboss, Erode / Dilate) now carry #PAINT_LAYER_KIND_GPU_COMPUTED, so they no
-   * longer appear here -- they are covered by the GPU-shade test below. */
-  const std::pair<eMaterialPaintLayerFilter, const char *> reasons[] = {
-      {MA_PAINT_LAYER_FILTER_GLOW, "a Glow correction is read"},
-      {MA_PAINT_LAYER_FILTER_BEVEL, "a Bevel correction is read"},
-      {MA_PAINT_LAYER_FILTER_COLOR_MATCH, "a Color Match correction is read"},
-      {MA_PAINT_LAYER_FILTER_DROP_SHADOW, "a Drop Shadow correction is read"},
-      {MA_PAINT_LAYER_FILTER_MASK_OUTLINE, "a Mask Outline correction is read"},
-      {MA_PAINT_LAYER_FILTER_PIXELATE, "a Pixelate correction is read"},
-      {MA_PAINT_LAYER_FILTER_BLUR_SLOPE, "a Blur Slope correction is read"},
-      {MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT, "a Channel Split correction is read"},
-  };
-  for (const auto &[filter, reason] : reasons) {
+  /* The table this test once walked -- the Color Match and the Fill Area, the last two kinds that
+   * refused the combined preview by their kind -- is empty now: both carry
+   * #PAINT_LAYER_KIND_GPU_COMPUTED, and no effect kind names a reason any more. The refusals that
+   * remain are parameter ones -- a picked Color Match source, the Fill Area's largest-region
+   * classification, its debug ramp and its iteration-less source mode -- which the plan builder
+   * answers with an empty plan (the plan test reads them) and the gather falls back on through its
+   * own no-pass-plan check. The walk below reads the two kinds that left the table, the description
+   * naming no reason for their defaults, which are the parameterizations the plans build. */
+  for (const eMaterialPaintLayerFilter filter :
+       {MA_PAINT_LAYER_FILTER_COLOR_MATCH, MA_PAINT_LAYER_FILTER_FILL_AREA})
+  {
     MaterialPaintLayer *effect = add_effect(*row, filter);
     ASSERT_NE(effect, nullptr);
 
@@ -2272,11 +2268,11 @@ TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_for_each_added_cpu
     ASSERT_TRUE(
         BKE_paint_layers_composite_image_layers(*ma, kColor, layers, /*describe_only=*/true));
     ASSERT_FALSE(layers.is_empty());
-    EXPECT_STREQ(BKE_paint_layers_gpu_unsupported_reason(layers[0], false), reason);
+    EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layers[0], false), nullptr);
     EXPECT_EQ(paint_layer_effect_cache_entry_count(), 0)
         << "a describe-only pass computes nothing";
 
-    /* The effect leaves with its reason read, so the next kind is described alone too. */
+    /* The kind leaves with its reason (not) read, so the next one is described alone too. */
     EXPECT_TRUE(BKE_paint_layers_correction_remove(*ma, effect));
   }
 }
@@ -2286,8 +2282,9 @@ TEST_F(PaintLayersEffectTest, the_phase_two_kinds_are_gpu_computed_and_refuse_no
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
 
   /* Every kind this series moved onto the GPU: the description names no reason to fall back, and the
-   * flag the refusal and the gather's queue both read is set. A describe-only pass still computes
-   * nothing. */
+   * flag the refusal and the gather's queue both read is set. The defaults are the parameterizations
+   * the plans build -- the reduce branch and the edge-based flood -- the ones they refuse being the
+   * plan test's. A describe-only pass still computes nothing. */
   const eMaterialPaintLayerFilter gpu_kinds[] = {
       MA_PAINT_LAYER_FILTER_BLUR,
       MA_PAINT_LAYER_FILTER_SHARPEN,
@@ -2295,6 +2292,16 @@ TEST_F(PaintLayersEffectTest, the_phase_two_kinds_are_gpu_computed_and_refuse_no
       MA_PAINT_LAYER_FILTER_EDGE_DETECT,
       MA_PAINT_LAYER_FILTER_EMBOSS,
       MA_PAINT_LAYER_FILTER_ERODE_DILATE,
+      MA_PAINT_LAYER_FILTER_GLOW,
+      MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL,
+      MA_PAINT_LAYER_FILTER_PIXELATE,
+      MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT,
+      MA_PAINT_LAYER_FILTER_BEVEL,
+      MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
+      MA_PAINT_LAYER_FILTER_DROP_SHADOW,
+      MA_PAINT_LAYER_FILTER_BLUR_SLOPE,
+      MA_PAINT_LAYER_FILTER_COLOR_MATCH,
+      MA_PAINT_LAYER_FILTER_FILL_AREA,
   };
   for (const eMaterialPaintLayerFilter filter : gpu_kinds) {
     MaterialPaintLayer *effect = add_effect(*row, filter);
@@ -2899,17 +2906,17 @@ TEST_F(PaintLayersEffectTest, a_noise_is_described_without_a_buffer_and_the_gpu_
 /** \name GPU Guard
  * \{ */
 
-TEST_F(PaintLayersEffectTest, the_combined_preview_falls_back_before_reading_a_deband)
+TEST_F(PaintLayersEffectTest, the_combined_preview_shades_a_deband_without_computing_it)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
   ASSERT_NE(BKE_paint_layers_filter_add(*ma, row, MA_PAINT_LAYER_FILTER_DEBAND), nullptr);
 
-  /* The shader cannot repeat the hash of the texel: the described stack names a reason, without
-   * the noise having been computed for it. */
+  /* The shader repeats the hash of the texel (the filter branch receives the coordinates), so the
+   * described stack names no reason, and the noise is not computed for the description. */
   Vector<PaintMaterialCompositeImageLayer> layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, kColor, layers, /*describe_only=*/true));
   ASSERT_FALSE(layers.is_empty());
-  EXPECT_NE(BKE_paint_layers_gpu_unsupported_reason(layers[0], false), nullptr);
+  EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layers[0], false), nullptr);
   EXPECT_EQ(paint_layer_effect_cache_entry_count(), 0) << "a describe-only pass computes nothing";
 }
 
@@ -2929,6 +2936,8 @@ TEST_F(PaintLayersEffectTest, every_pointwise_kind_has_a_shader_branch_or_refuse
                            MA_PAINT_LAYER_FILTER_CURVES,
                            MA_PAINT_LAYER_FILTER_COLOR_BALANCE,
                            MA_PAINT_LAYER_FILTER_EXPOSURE,
+                           MA_PAINT_LAYER_FILTER_DEBAND,
+                           MA_PAINT_LAYER_FILTER_NORMAL_CONVERT,
                            MA_PAINT_LAYER_FILTER_CHANNEL_MIXER,
                            MA_PAINT_LAYER_FILTER_HISTOGRAM_SCAN,
                            MA_PAINT_LAYER_FILTER_HISTOGRAM_SHIFT,
@@ -4215,6 +4224,102 @@ TEST_F(PaintLayersEffectTest, the_halo_matches_each_kernels_total_coverage)
   const auto blur_directional = [](const float angle, const int radius, const float mix) {
     return std::array<float, 3>{angle, float(radius), mix};
   };
+  const auto glow = [](const int mode, const int width, const float spread, const float opacity) {
+    return std::array<float, 7>{float(mode), float(width), spread, opacity, 1.0f, 1.0f, 1.0f};
+  };
+  const auto pixelate = [](const int amount) {
+    return std::array<float, 1>{float(amount)};
+  };
+  const auto height_to_normal = [](const float strength,
+                                   const int world_units,
+                                   const float surface_size,
+                                   const float height_depth,
+                                   const int flip_green) {
+    return std::array<float, 5>{
+        strength, float(world_units), surface_size, height_depth, float(flip_green)};
+  };
+  const auto channel_split = [](const int channel) {
+    return std::array<float, 1>{float(channel)};
+  };
+  const auto bevel = [](const int source, const int distance, const int corner, const int smooth) {
+    return std::array<float, 4>{float(source), float(distance), float(corner), float(smooth)};
+  };
+  const auto mask_outline = [](const int position,
+                               const int start_black,
+                               const float threshold,
+                               const int width,
+                               const int blur,
+                               const float shape,
+                               const int source) {
+    return std::array<float, 10>{float(position),
+                                 float(start_black),
+                                 threshold,
+                                 float(width),
+                                 float(blur),
+                                 shape,
+                                 float(source),
+                                 1.0f,
+                                 1.0f,
+                                 1.0f};
+  };
+  const auto drop_shadow = [](const int source,
+                              const float angle,
+                              const int distance,
+                              const int size,
+                              const int spread,
+                              const float opacity) {
+    return std::array<float, 9>{
+        float(source), angle, float(distance), float(size), float(spread), opacity, 1.0f, 0.0f, 0.0f};
+  };
+  const auto blur_slope = [](const int seed,
+                             const float intensity,
+                             const int quality,
+                             const int blending,
+                             const int source_mode,
+                             const int source_blur) {
+    return std::array<float, 9>{float(seed),
+                                intensity,
+                                float(quality),
+                                float(blending),
+                                float(source_mode),
+                                float(source_blur),
+                                0.0f,
+                                1.0f,
+                                1.0f};
+  };
+  /* The Color Match's schema packs the two colours across three slots each: the picked flag, the
+   * source colour, the target colour, then the variation switch and its three amounts. */
+  const auto color_match = [](const int picked, const int variation) {
+    return std::array<float, 11>{float(picked),
+                                 0.5f,
+                                 0.5f,
+                                 0.5f,
+                                 0.25f,
+                                 0.5f,
+                                 0.75f,
+                                 float(variation),
+                                 0.1f,
+                                 0.2f,
+                                 0.3f};
+  };
+  const auto fill_area = [](const int source,
+                            const float threshold,
+                            const int debug,
+                            const int uv_border,
+                            const int color_mode,
+                            const int blur,
+                            const int iterations) {
+    return std::array<float, 10>{float(source),
+                                 threshold,
+                                 float(debug),
+                                 float(uv_border),
+                                 float(color_mode),
+                                 1.0f,
+                                 0.5f,
+                                 0.25f,
+                                 float(blur),
+                                 float(iterations)};
+  };
 
   /* A box blur reaches its radius; a soft blur three passes of `max(radius / 2, 1)`. */
   EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_BLUR, blur(PAINT_LAYER_BLUR_BOX, 5).data(), 100, 100), 5);
@@ -4244,6 +4349,156 @@ TEST_F(PaintLayersEffectTest, the_halo_matches_each_kernels_total_coverage)
   EXPECT_EQ(BKE_paint_layers_effect_halo(
                 MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL, blur_directional(30.0f, 7, 1.0f).data(), 100, 100),
             7);
+  /* A glow's halo is its blur's: the luminance and the choke are pointwise, and the tail computes
+   * its own texel, so the pairs the mode spends are the whole reach. */
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_GLOW,
+                                         glow(PAINT_LAYER_GLOW_PRECISE, 5, 0.0f, 1.0f).data(),
+                                         100,
+                                         100),
+            5);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(
+                MA_PAINT_LAYER_FILTER_GLOW, glow(PAINT_LAYER_GLOW_SOFT, 8, 0.0f, 1.0f).data(), 100, 100),
+            12) << "three pairs of max(8 / 2, 1), the gaussian approximation's";
+  /* A Height To Normal is the one 3x3: a texel of reach on both axes. */
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL,
+                                         height_to_normal(2.0f, 0, 100.0f, 5.0f, 0).data(),
+                                         100,
+                                         100),
+            1);
+  /* A pixelate and a slot fetch read their own texel and nothing else. */
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_PIXELATE, pixelate(16).data(), 100, 100), 0);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT,
+                                         channel_split(PAINT_LAYER_CHANNEL_SPLIT_BLUE).data(),
+                                         100,
+                                         100),
+            0);
+  /* The distance transforms are whole-canvas: JFA is not local, so every pass of the flood
+   * reaches the whole canvas, the seed pass and the field's read included -- eight passes of the
+   * hundred-texel canvas here, the smooth blur's pair on top when it runs. */
+  EXPECT_EQ(BKE_paint_layers_effect_halo(
+                MA_PAINT_LAYER_FILTER_BEVEL, bevel(PAINT_LAYER_BEVEL_SOURCE_ALPHA, 2, 0, 0).data(), 100, 100),
+            800);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_BEVEL,
+                                         bevel(PAINT_LAYER_BEVEL_SOURCE_LUMINANCE, 2, 0, 4).data(),
+                                         100,
+                                         100),
+            804);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
+                                         mask_outline(PAINT_LAYER_MASK_OUTLINE_OUTSIDE,
+                                                      0,
+                                                      0.5f,
+                                                      4,
+                                                      0,
+                                                      0.5f,
+                                                      PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA)
+                                             .data(),
+                                         100,
+                                         100),
+            800);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_MASK_OUTLINE,
+                                         mask_outline(PAINT_LAYER_MASK_OUTLINE_OUTSIDE,
+                                                      0,
+                                                      0.5f,
+                                                      4,
+                                                      3,
+                                                      0.5f,
+                                                      PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA)
+                                             .data(),
+                                         100,
+                                         100),
+            803);
+  /* A Drop Shadow is its blur and its spread, plus the offset the cast moves the tail by: the
+   * angle of zero casts along +X, so the offset is the whole distance on X and none on Y, the
+   * reach the larger of the two. */
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_DROP_SHADOW,
+                                         drop_shadow(PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA,
+                                                     0.0f,
+                                                     2,
+                                                     8,
+                                                     0,
+                                                     1.0f)
+                                             .data(),
+                                         100,
+                                         100),
+            10);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_DROP_SHADOW,
+                                         drop_shadow(PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA,
+                                                     0.0f,
+                                                     2,
+                                                     0,
+                                                     -3,
+                                                     1.0f)
+                                             .data(),
+                                         100,
+                                         100),
+            5) << "an eroding spread spends its pair like a dilating one, the reach its absolute";
+  /* A Blur Slope's reach is the gradient's one texel of the driver; the taps read the original
+   * canvas, which is not a pass output and grows nothing. The driver's blur joins it when the
+   * source mode is the previous input and the blur is on. */
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_BLUR_SLOPE,
+                                         blur_slope(5, 15.0f, 8, PAINT_LAYER_BLUR_SLOPE_BLENDING_BLUR, PAINT_LAYER_SLOPE_SOURCE_NOISE, 0)
+                                             .data(),
+                                         100,
+                                         100),
+            1);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_BLUR_SLOPE,
+                                         blur_slope(5,
+                                                    15.0f,
+                                                    8,
+                                                    PAINT_LAYER_BLUR_SLOPE_BLENDING_BLUR,
+                                                    PAINT_LAYER_SLOPE_SOURCE_PREVIOUS_INPUT,
+                                                    5)
+                                             .data(),
+                                         100,
+                                         100),
+            6);
+  /* The reductions and the flood are whole-canvas: the average of any block and the label of any
+   * region are fed by the whole map, so every pass of the chains reaches the whole canvas -- the
+   * hundred-texel canvas gives the reduce chain six passes of a hundred (the first level, the five
+   * steps down to the 1x1 apex) and the flood thirty-three (the seeding and sixteen sweep pairs), the
+   * diffusion's one-texel reaches and the tail's none riding on top. */
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_COLOR_MATCH,
+                                         color_match(0, 0).data(),
+                                         100,
+                                         100),
+            600);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_FILL_AREA,
+                                         fill_area(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA,
+                                                   0.5f,
+                                                   0,
+                                                   PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE,
+                                                   PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE,
+                                                   0,
+                                                   24)
+                                             .data(),
+                                         100,
+                                         100),
+            3324);
+  /* The solid mode skips the diffusion, and the blur's pair rides on top of either chain. */
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_FILL_AREA,
+                                         fill_area(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA,
+                                                   0.5f,
+                                                   0,
+                                                   PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE,
+                                                   PAINT_LAYER_FILL_AREA_COLOR_MODE_SOLID,
+                                                   0,
+                                                   24)
+                                             .data(),
+                                         100,
+                                         100),
+            3300);
+  EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_FILL_AREA,
+                                         fill_area(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA,
+                                                   0.5f,
+                                                   0,
+                                                   PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE,
+                                                   PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE,
+                                                   3,
+                                                   24)
+                                             .data(),
+                                         100,
+                                         100),
+            3327);
   /* A pointwise kind has no neighbourhood to reach. */
   EXPECT_EQ(BKE_paint_layers_effect_halo(MA_PAINT_LAYER_FILTER_NOISE, nullptr, 100, 100), 0);
 }
@@ -4431,6 +4686,492 @@ TEST_F(PaintLayersEffectTest, the_pass_plan_matches_each_kernels_shape)
   EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
   EXPECT_EQ(passes[0].reach, 1);
   EXPECT_EQ(passes[0].axis_mask, PAINT_LAYER_EFFECT_AXIS_XY);
+
+  /* A glow is the luminance choked, blurred and screened under the colour: the two pointwise
+   * passes first, the blur pairs the mode names, and the tail reads the original against the
+   * blurred band. The parameters are packed in the schema order, a colour laying its three
+   * channels across three slots. */
+  const std::array<float, 7> glow_soft{
+      float(PAINT_LAYER_GLOW_SOFT), 8.0f, 0.2f, 1.0f, 1.0f, 0.5f, 0.25f};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_GLOW, glow_soft.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 9) << "luminance, choke, three blur pairs and the screen tail";
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::Luminance);
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[0].reach, 0);
+  EXPECT_EQ(passes[1].kind, ePaintLayerEffectPass::Choke);
+  EXPECT_EQ(passes[1].source, ePaintLayerEffectPassSource::Previous);
+  EXPECT_NEAR(passes[1].aux0, 0.2f, 1e-6f) << "the spread clamps the luminance to the glow band";
+  EXPECT_EQ(passes[1].reach, 0);
+  for (int i = 2; i < 8; i++) {
+    EXPECT_EQ(passes[i].radius, 4) << "a soft glow spends the width over three pairs, max(8 / 2, 1)";
+    EXPECT_EQ(passes[i].reach, 4);
+  }
+  EXPECT_EQ(passes[2].source, ePaintLayerEffectPassSource::Previous)
+      << "the blur reads the choked band, not the raw input";
+  EXPECT_EQ(passes[2].axis_mask, PAINT_LAYER_EFFECT_AXIS_X);
+  EXPECT_EQ(passes[3].axis_mask, PAINT_LAYER_EFFECT_AXIS_Y);
+  EXPECT_EQ(passes[8].kind, ePaintLayerEffectPass::ScreenTail);
+  EXPECT_EQ(passes[8].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[8].aux, ePaintLayerEffectPassAux::Previous);
+  EXPECT_NEAR(passes[8].aux0, 1.0f, 1e-6f) << "the opacity rides in aux0";
+  EXPECT_NEAR(passes[8].params.x, 1.0f, 1e-6f);
+  EXPECT_NEAR(passes[8].params.y, 0.5f, 1e-6f);
+  EXPECT_NEAR(passes[8].params.z, 0.25f, 1e-6f) << "the tint rides in params, the packing's three slots";
+  EXPECT_EQ(passes[8].reach, 0);
+
+  /* A precise glow spends one box pass of the whole width, the tail after it. */
+  const std::array<float, 7> glow_precise{
+      float(PAINT_LAYER_GLOW_PRECISE), 5.0f, 0.0f, 0.5f, 1.0f, 1.0f, 1.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_GLOW, glow_precise.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 5);
+  EXPECT_EQ(passes[2].kind, ePaintLayerEffectPass::BlurH);
+  EXPECT_EQ(passes[2].radius, 5);
+  EXPECT_EQ(passes[3].kind, ePaintLayerEffectPass::BlurV);
+  EXPECT_EQ(passes[3].radius, 5);
+  EXPECT_EQ(passes[4].kind, ePaintLayerEffectPass::ScreenTail);
+  EXPECT_NEAR(passes[4].aux0, 0.5f, 1e-6f);
+
+  /* A pixelate is one pass: the amount rides in aux0, and the kernel cuts the canvas into that
+   * many blocks per side like the CPU does, the last one of a side shorter. */
+  const std::array<float, 1> pixelate{16.0f};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_PIXELATE, pixelate.data(), 64, 64, passes);
+  ASSERT_EQ(passes.size(), 1);
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::BlockAverage);
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
+  EXPECT_EQ(passes[0].reach, 0);
+  EXPECT_NEAR(passes[0].aux0, 16.0f, 1e-6f) << "the amount is the block count per side";
+
+  /* A Height To Normal is one 3x3 pass: the slope scale in aux0 -- the strength, or the physical
+   * slope the world units name -- and the green convention beside it in params. */
+  const std::array<float, 5> h2n_local{2.0f, 0.0f, 100.0f, 5.0f, 0.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL, h2n_local.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 1);
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::HeightToNormal3x3);
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
+  EXPECT_EQ(passes[0].reach, 1);
+  EXPECT_EQ(passes[0].axis_mask, PAINT_LAYER_EFFECT_AXIS_XY);
+  EXPECT_NEAR(passes[0].aux0, 2.0f, 1e-6f) << "the strength is the scale without the world units";
+  EXPECT_NEAR(passes[0].params.x, 1.0f, 1e-6f)
+      << "the OpenGL encoding leans the green against the slope";
+
+  /* The world units turn the scale into the physical slope: the height depth against the texel the
+   * wider side covers, the half turning the Sobel's doubled gradient into it. */
+  const std::array<float, 5> h2n_world{1.0f, 1.0f, 100.0f, 5.0f, 1.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL, h2n_world.data(), 200, 100, passes);
+  ASSERT_EQ(passes.size(), 1);
+  EXPECT_NEAR(passes[0].aux0, 5.0f, 1e-6f)
+      << "texel_cm is 100 / max(200, 100) = 0.5, so the slope is 0.5 * 5 / 0.5";
+  EXPECT_NEAR(passes[0].params.x, -1.0f, 1e-6f) << "the DirectX encoding flips the green";
+
+  /* A Channel Split is one pass that reads the slot map the aux names: the channel index rides in
+   * aux0, clamped the way the kernel clamps it. */
+  const std::array<float, 1> split{float(PAINT_LAYER_CHANNEL_SPLIT_BLUE)};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT, split.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 1);
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::SlotFetch);
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::Slot);
+  EXPECT_EQ(passes[0].reach, 0);
+  EXPECT_NEAR(passes[0].aux0, float(PAINT_LAYER_CHANNEL_SPLIT_BLUE), 1e-6f);
+
+  /* A Bevel floods the distance field and reads the ramp off it: the seed pass, the halving steps
+   * of the standard JFA (half the canvas down to one) and the field's read, each of them reaching
+   * the whole canvas -- JFA is not local, so the halo and the regions of these kinds land on the
+   * whole canvas. The seed pass names the scalar (the alpha here) and the half the CPU seeds by;
+   * the ramp's divisor is the distance parameter, and the mode names the ramp. */
+  const std::array<float, 4> bevel_alpha{float(PAINT_LAYER_BEVEL_SOURCE_ALPHA), 2.0f, 0.0f, 0.0f};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_BEVEL, bevel_alpha.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 8) << "the seed pass, six flooding steps and the field's read";
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::JfaInit);
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
+  EXPECT_EQ(passes[0].radius, 0);
+  EXPECT_EQ(passes[0].reach, 100);
+  EXPECT_EQ(passes[0].axis_mask, PAINT_LAYER_EFFECT_AXIS_XY);
+  EXPECT_NEAR(passes[0].params.x, 0.0f, 1e-6f) << "the alpha source rides in params";
+  EXPECT_NEAR(passes[0].params.y, 0.5f, 1e-6f) << "the threshold the CPU seeds by";
+  int step_index = 1;
+  for (int step = 50; step >= 1; step /= 2) {
+    EXPECT_EQ(passes[step_index].kind, ePaintLayerEffectPass::JfaStep);
+    EXPECT_EQ(passes[step_index].radius, step) << "the standard JFA's halving radius";
+    EXPECT_EQ(passes[step_index].source, ePaintLayerEffectPassSource::Previous);
+    EXPECT_EQ(passes[step_index].reach, 100);
+    step_index++;
+  }
+  EXPECT_EQ(passes[7].kind, ePaintLayerEffectPass::DistEval);
+  EXPECT_EQ(passes[7].source, ePaintLayerEffectPassSource::Previous);
+  EXPECT_EQ(passes[7].reach, 100);
+  EXPECT_NEAR(passes[7].params.x, 2.0f, 1e-6f) << "the ramp's divisor is the distance parameter";
+  EXPECT_NEAR(passes[7].params.z, 0.0f, 1e-6f) << "the ramp mode writes a grey, the alpha carried";
+
+  /* The luminance source names the other scalar; the smooth blur lays its pair over the ramp. */
+  const std::array<float, 4> bevel_luma{float(PAINT_LAYER_BEVEL_SOURCE_LUMINANCE), 2.0f, 0.0f, 3.0f};
+  BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_BEVEL, bevel_luma.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 10);
+  EXPECT_NEAR(passes[0].params.x, 1.0f, 1e-6f);
+  EXPECT_EQ(passes[8].kind, ePaintLayerEffectPass::BlurH);
+  EXPECT_EQ(passes[8].radius, 3);
+  EXPECT_EQ(passes[9].kind, ePaintLayerEffectPass::BlurV);
+  EXPECT_EQ(passes[9].radius, 3);
+
+  /* A Mask Outline is the same field with the band's read instead of the ramp: the band's divisor
+   * is the width, the bend and the band mode ride beside it, and the tint tail premultiplies the
+   * blurred band with the band as its own alpha -- white here, the colour the alpha source forces
+   * the CPU's own tail to. */
+  const std::array<float, 10> outline{
+      float(PAINT_LAYER_MASK_OUTLINE_OUTSIDE), 0.0f, 0.5f, 4.0f, 0.0f, 0.5f,
+      float(PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA), 1.0f, 1.0f, 1.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_MASK_OUTLINE, outline.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 9) << "the seed pass, six flooding steps, the band's read and the tail";
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::JfaInit);
+  EXPECT_NEAR(passes[0].params.x, float(PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA), 1e-6f);
+  EXPECT_NEAR(passes[0].params.y, 0.5f, 1e-6f) << "the threshold rides in params";
+  EXPECT_EQ(passes[7].kind, ePaintLayerEffectPass::DistEval);
+  EXPECT_NEAR(passes[7].params.x, 4.0f, 1e-6f) << "the band's divisor is the width parameter";
+  EXPECT_NEAR(passes[7].params.y, 0.5f, 1e-6f) << "the falloff's bend rides in params";
+  EXPECT_NEAR(passes[7].params.z, 1.0f, 1e-6f) << "the band mode writes its own alpha";
+  EXPECT_EQ(passes[8].kind, ePaintLayerEffectPass::BandTintTail);
+  EXPECT_EQ(passes[8].source, ePaintLayerEffectPassSource::Previous);
+  EXPECT_EQ(passes[8].aux, ePaintLayerEffectPassAux::None);
+  EXPECT_EQ(passes[8].reach, 0);
+  EXPECT_TRUE(passes[8].alpha_from_kernel) << "the ring layer's alpha is the band";
+  EXPECT_NEAR(passes[8].params2.x, 1.0f, 1e-6f) << "the tint is the white the alpha source forces";
+  EXPECT_NEAR(passes[8].params2.w, 0.0f, 1e-6f);
+
+  /* A luminance source keeps the schema's colour, and the blur lays its pair before the tail. */
+  const std::array<float, 10> outline_luma{
+      float(PAINT_LAYER_MASK_OUTLINE_OUTSIDE), 0.0f, 0.5f, 4.0f, 2.0f, 0.5f,
+      float(PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE), 1.0f, 0.5f, 0.25f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_MASK_OUTLINE, outline_luma.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 11);
+  EXPECT_EQ(passes[8].kind, ePaintLayerEffectPass::BlurH);
+  EXPECT_EQ(passes[8].radius, 2);
+  EXPECT_EQ(passes[9].kind, ePaintLayerEffectPass::BlurV);
+  EXPECT_EQ(passes[9].radius, 2);
+  EXPECT_EQ(passes[10].kind, ePaintLayerEffectPass::BandTintTail);
+  EXPECT_NEAR(passes[10].params2.x, 1.0f, 1e-6f) << "the schema's tint rides in params2";
+  EXPECT_NEAR(passes[10].params2.y, 0.5f, 1e-6f);
+  EXPECT_NEAR(passes[10].params2.z, 0.25f, 1e-6f);
+
+  /* A Drop Shadow is the silhouette, its spread's extremum pair, its blur, and the tail that
+   * reads the blurred silhouette at the offset the angle casts. The angle of zero casts along
+   * +X, so the tail's reach is the whole offset on X and none on Y, the larger of the two. */
+  const std::array<float, 9> shadow_alpha{
+      float(PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA), 0.0f, 2.0f, 8.0f, 0.0f, 0.5f, 1.0f, 0.0f, 0.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_DROP_SHADOW, shadow_alpha.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 4) << "the silhouette, the blur pair and the tail";
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::Silhouette);
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[0].reach, 0);
+  EXPECT_NEAR(passes[0].params.x, float(PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA), 1e-6f)
+      << "the scalar the silhouette greys rides in params";
+  EXPECT_EQ(passes[1].kind, ePaintLayerEffectPass::BlurH);
+  EXPECT_EQ(passes[1].radius, 8);
+  EXPECT_EQ(passes[2].kind, ePaintLayerEffectPass::BlurV);
+  EXPECT_EQ(passes[2].radius, 8);
+  EXPECT_EQ(passes[3].kind, ePaintLayerEffectPass::OffsetTintTail);
+  EXPECT_EQ(passes[3].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[3].aux, ePaintLayerEffectPassAux::Previous);
+  EXPECT_EQ(passes[3].reach, 2) << "the tail reads the silhouette the cast's offset lands on";
+  EXPECT_NEAR(passes[3].params.x, 1.0f, 1e-5f) << "the cast's direction, the angle's cosine";
+  EXPECT_NEAR(passes[3].params.y, 0.0f, 1e-5f);
+  EXPECT_NEAR(passes[3].params.z, 2.0f, 1e-6f) << "the offset distance rides in params";
+  EXPECT_NEAR(passes[3].params.w, 0.5f, 1e-6f) << "the opacity rides in params";
+  EXPECT_NEAR(passes[3].params2.x, 1.0f, 1e-6f) << "the tint rides in params2";
+  EXPECT_NEAR(passes[3].params2.w, 1.0f, 1e-6f) << "the alpha source keeps the shadow off the content";
+  EXPECT_TRUE(passes[3].alpha_from_kernel) << "the shadow layer's alpha is the weight";
+
+  /* A negative spread erodes (the extremum pair's minimum), a positive one dilates; a zero one
+   * spends no pair at all. */
+  const std::array<float, 9> shadow_spread{
+      float(PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA), 0.0f, 2.0f, 0.0f, -3.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_DROP_SHADOW, shadow_spread.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 4) << "the silhouette, the spread's pair and the tail";
+  EXPECT_EQ(passes[1].kind, ePaintLayerEffectPass::ExtremumH);
+  EXPECT_FALSE(passes[1].maximum) << "a negative spread erodes";
+  EXPECT_EQ(passes[1].radius, 3);
+  EXPECT_EQ(passes[2].kind, ePaintLayerEffectPass::ExtremumV);
+  EXPECT_FALSE(passes[2].maximum);
+  EXPECT_EQ(passes[3].kind, ePaintLayerEffectPass::OffsetTintTail);
+  EXPECT_EQ(passes[3].aux, ePaintLayerEffectPassAux::Previous)
+      << "the tail reads the spread silhouette, the blur being zero";
+
+  /* The luminance source lays the shadow wherever the silhouette covers (the under flag zero),
+   * and the angle of a quarter turn casts along +Y. */
+  const std::array<float, 9> shadow_luma{
+      float(PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE), 90.0f, 2.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_DROP_SHADOW, shadow_luma.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 2) << "no spread and no blur, the silhouette straight into the tail";
+  EXPECT_NEAR(passes[1].params.x, 0.0f, 1e-5f) << "the quarter turn casts along +Y";
+  EXPECT_NEAR(passes[1].params.y, 1.0f, 1e-5f);
+  EXPECT_EQ(passes[1].reach, 2);
+  EXPECT_NEAR(passes[1].params2.w, 0.0f, 1e-6f) << "the luminance source lays it under everything";
+
+  /* A Blur Slope builds the driver and walks it: no blur pair on the noise mode, the mode riding
+   * in aux0 the CPU's own enum values, the re-grade and the noise's seed and tiles in params. The
+   * walk's radius is the tap count, the blend mode and the span ride in params, and the taps
+   * read the original canvas through the aux. */
+  const std::array<float, 9> slope_noise{5.0f, 15.0f, 8.0f, 0.0f, float(PAINT_LAYER_SLOPE_SOURCE_NOISE), 0.0f, 0.25f, 1.5f, 2.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_BLUR_SLOPE, slope_noise.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 2) << "the driver and the walk";
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::SlopeDriver);
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
+  EXPECT_EQ(passes[0].reach, 0);
+  EXPECT_NEAR(passes[0].aux0, float(PAINT_LAYER_SLOPE_SOURCE_NOISE), 1e-6f)
+      << "the mode rides in aux0, the CPU's own enum";
+  EXPECT_NEAR(passes[0].params.x, 0.25f, 1e-6f) << "the midpoint the source shifts by";
+  EXPECT_NEAR(passes[0].params.y, 1.5f, 1e-6f) << "the contrast";
+  EXPECT_NEAR(passes[0].params.z, 5.0f, 1e-6f) << "the noise's seed";
+  EXPECT_NEAR(passes[0].params.w, 2.0f, 1e-6f) << "the tiles the noise covers the map with";
+  EXPECT_EQ(passes[1].kind, ePaintLayerEffectPass::SlopeWalk);
+  EXPECT_EQ(passes[1].source, ePaintLayerEffectPassSource::Previous);
+  EXPECT_EQ(passes[1].aux, ePaintLayerEffectPassAux::Original) << "the taps read the original canvas";
+  EXPECT_EQ(passes[1].radius, 8) << "the walk's radius is the tap count the quality names";
+  EXPECT_EQ(passes[1].reach, 1) << "the gradient the walk follows reads one texel past";
+  EXPECT_NEAR(passes[1].params.x, 0.0f, 1e-6f) << "the blend mode rides in params";
+  EXPECT_NEAR(passes[1].params.y, 15.0f, 1e-6f) << "the span rides in params";
+
+  /* The previous-input mode blurs the input before the driver reads it, the blur riding only
+   * there -- the noise has no detail of its own to soften. */
+  const std::array<float, 9> slope_input{5.0f,
+                                         15.0f,
+                                         8.0f,
+                                         float(PAINT_LAYER_BLUR_SLOPE_BLENDING_MAX),
+                                         float(PAINT_LAYER_SLOPE_SOURCE_PREVIOUS_INPUT),
+                                         4.0f,
+                                         0.0f,
+                                         1.0f,
+                                         1.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_BLUR_SLOPE, slope_input.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 4);
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::BlurH);
+  EXPECT_EQ(passes[0].radius, 4);
+  EXPECT_EQ(passes[1].kind, ePaintLayerEffectPass::BlurV);
+  EXPECT_EQ(passes[1].radius, 4);
+  EXPECT_EQ(passes[2].kind, ePaintLayerEffectPass::SlopeDriver);
+  EXPECT_EQ(passes[2].source, ePaintLayerEffectPassSource::Previous)
+      << "the driver reads the blurred input";
+  EXPECT_NEAR(passes[2].aux0, float(PAINT_LAYER_SLOPE_SOURCE_PREVIOUS_INPUT), 1e-6f);
+  EXPECT_EQ(passes[3].kind, ePaintLayerEffectPass::SlopeWalk);
+  EXPECT_NEAR(passes[3].params.x, float(PAINT_LAYER_BLUR_SLOPE_BLENDING_MAX), 1e-6f);
+
+  /* A Color Match reduces the input's average down a pyramid and grades the original against it:
+   * the first level halves the canvas, every step halves one more -- its radius naming the level it
+   * makes -- down to the 1x1 apex, and the grade reads the original with the apex through its aux.
+   * The parameters are packed in the schema order, a colour laying its three channels across three
+   * slots: the target colour and the variation switch land on the grade's params, the picked
+   * colour's slot in params2 staying empty on the reduce branch. */
+  const std::array<float, 11> match_reduce{0.0f,
+                                           0.5f,
+                                           0.5f,
+                                           0.5f,
+                                           0.25f,
+                                           0.5f,
+                                           0.75f,
+                                           0.0f,
+                                           0.1f,
+                                           0.2f,
+                                           0.3f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_COLOR_MATCH, match_reduce.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 7) << "the first level, the five steps down to 1x1 and the grade";
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::ReduceStart);
+  EXPECT_EQ(passes[0].radius, 1);
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
+  EXPECT_EQ(passes[0].reach, 100) << "a reduction is fed by the whole map, the JFA's own policy";
+  EXPECT_EQ(passes[0].axis_mask, PAINT_LAYER_EFFECT_AXIS_XY);
+  int reduce_index = 1;
+  for (int level = 2; level <= 6; level++) {
+    EXPECT_EQ(passes[reduce_index].kind, ePaintLayerEffectPass::ReduceStep);
+    EXPECT_EQ(passes[reduce_index].radius, level) << "the step names the level it makes";
+    EXPECT_EQ(passes[reduce_index].source, ePaintLayerEffectPassSource::Previous);
+    EXPECT_EQ(passes[reduce_index].reach, 100);
+    EXPECT_EQ(passes[reduce_index].axis_mask, PAINT_LAYER_EFFECT_AXIS_XY);
+    reduce_index++;
+  }
+  EXPECT_EQ(passes[6].kind, ePaintLayerEffectPass::MatchGrade);
+  EXPECT_EQ(passes[6].source, ePaintLayerEffectPassSource::Input) << "the grade moves the original";
+  EXPECT_EQ(passes[6].aux, ePaintLayerEffectPassAux::Field) << "the apex the reduce left";
+  EXPECT_EQ(passes[6].reach, 0);
+  EXPECT_EQ(passes[6].axis_mask, PAINT_LAYER_EFFECT_AXIS_NONE);
+  EXPECT_NEAR(passes[6].params.x, 0.25f, 1e-6f) << "the target colour rides in params";
+  EXPECT_NEAR(passes[6].params.y, 0.5f, 1e-6f);
+  EXPECT_NEAR(passes[6].params.z, 0.75f, 1e-6f);
+  EXPECT_NEAR(passes[6].params.w, 0.0f, 1e-6f) << "the variation switch rides beside it";
+  EXPECT_NEAR(passes[6].params2.x, 0.1f, 1e-6f) << "the variation's amounts ride in params2";
+  EXPECT_NEAR(passes[6].params2.y, 0.2f, 1e-6f);
+  EXPECT_NEAR(passes[6].params2.z, 0.3f, 1e-6f);
+  EXPECT_NEAR(passes[6].params2.w, 0.0f, 1e-6f);
+
+  /* A 2048 canvas spends one more level: eleven halvings land on the apex, ten of them steps. */
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_COLOR_MATCH, match_reduce.data(), 2048, 2048, passes);
+  ASSERT_EQ(passes.size(), 12) << "the first level, the ten steps and the grade";
+  EXPECT_EQ(passes[10].radius, 11) << "the last step makes the 1x1 apex";
+  EXPECT_EQ(passes[11].kind, ePaintLayerEffectPass::MatchGrade);
+  /* A 4096 canvas: twelve halvings, eleven steps. */
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_COLOR_MATCH, match_reduce.data(), 4096, 4096, passes);
+  ASSERT_EQ(passes.size(), 13);
+  EXPECT_EQ(passes[11].radius, 12);
+
+  /* A picked source is the CPU's: the plan refuses it with an empty plan, the way an unflagged kind
+   * is refused, and the CPU lays the picked match exactly as it always has. */
+  const std::array<float, 11> match_picked{1.0f,
+                                           0.5f,
+                                           0.5f,
+                                           0.5f,
+                                           0.25f,
+                                           0.5f,
+                                           0.75f,
+                                           0.0f,
+                                           0.1f,
+                                           0.2f,
+                                           0.3f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_COLOR_MATCH, match_picked.data(), 100, 100, passes);
+  EXPECT_TRUE(passes.is_empty()) << "the picked match stays with the CPU";
+
+  /* A Fill Area floods the label field and diffuses the border's colours inward: the seeding reads
+   * the scalar and the threshold the border crosses from params, the flooding steps halve from half
+   * the canvas down to one, each diffusion step is one of the CPU's iterations -- the first reading
+   * the original for the border colours, the rest the pass before them, the label field riding the
+   * aux -- and the tail writes the fill out with the coverage, its own alpha computed. */
+  const std::array<float, 10> fill_default{float(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA),
+                                           0.5f,
+                                           0.0f,
+                                           float(PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE),
+                                           float(PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE),
+                                           1.0f,
+                                           0.5f,
+                                           0.25f,
+                                           0.0f,
+                                           24.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_FILL_AREA, fill_default.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 58)
+      << "the seeding, sixteen sweep pairs, the diffusion's 24 passes and the tail";
+  EXPECT_EQ(passes[0].kind, ePaintLayerEffectPass::FloodInit);
+  EXPECT_EQ(passes[0].source, ePaintLayerEffectPassSource::Input);
+  EXPECT_EQ(passes[0].aux, ePaintLayerEffectPassAux::None);
+  EXPECT_EQ(passes[0].reach, 100);
+  EXPECT_EQ(passes[0].axis_mask, PAINT_LAYER_EFFECT_AXIS_XY);
+  EXPECT_NEAR(passes[0].params.x, float(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA), 1e-6f)
+      << "the scalar the border is read at rides in params";
+  EXPECT_NEAR(passes[0].params.y, 0.5f, 1e-6f) << "the threshold the border crosses";
+  /* The flooding is the raster sweep pair, sixteen times over: the mode rides in params (one the
+   * rows, two the columns), the radius left empty. */
+  for (int flood_index = 1; flood_index <= 32; flood_index++) {
+    EXPECT_EQ(passes[flood_index].kind, ePaintLayerEffectPass::FloodStep);
+    EXPECT_NEAR(passes[flood_index].params.x, (flood_index % 2 == 1) ? 1.0f : 2.0f, 1e-6f)
+        << "the sweeps alternate rows and columns";
+    EXPECT_EQ(passes[flood_index].radius, 0);
+    EXPECT_EQ(passes[flood_index].source, ePaintLayerEffectPassSource::Previous);
+    EXPECT_EQ(passes[flood_index].reach, 100);
+  }
+  EXPECT_EQ(passes[33].kind, ePaintLayerEffectPass::DiffuseStep);
+  EXPECT_EQ(passes[33].radius, 1) << "the diffusion's radius names its iteration";
+  EXPECT_EQ(passes[33].source, ePaintLayerEffectPassSource::Input)
+      << "the border colours the CPU seeds the walk with come from the original";
+  EXPECT_EQ(passes[33].aux, ePaintLayerEffectPassAux::Field) << "the flooding's labels";
+  EXPECT_EQ(passes[33].reach, 1) << "a diffusion step reads its four neighbours";
+  EXPECT_EQ(passes[34].source, ePaintLayerEffectPassSource::Previous) << "the CPU's ping-pong";
+  EXPECT_EQ(passes[34].aux, ePaintLayerEffectPassAux::Field);
+  EXPECT_EQ(passes[56].radius, 24) << "the last iteration is the last diffusion pass";
+  EXPECT_EQ(passes[57].kind, ePaintLayerEffectPass::FillTail);
+  EXPECT_EQ(passes[57].source, ePaintLayerEffectPassSource::Previous);
+  EXPECT_EQ(passes[57].aux, ePaintLayerEffectPassAux::Field);
+  EXPECT_EQ(passes[57].reach, 0);
+  EXPECT_EQ(passes[57].axis_mask, PAINT_LAYER_EFFECT_AXIS_NONE);
+  EXPECT_TRUE(passes[57].alpha_from_kernel) << "the fill layer's coverage is the flooding's";
+  EXPECT_NEAR(passes[57].params.x, float(PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE), 1e-6f)
+      << "the mode rides in params";
+  EXPECT_EQ(passes[57].radius, 0) << "the blur (none here) rides in the tail's radius";
+  EXPECT_NEAR(passes[57].params2.x, 1.0f, 1e-6f) << "the schema's fill colour rides in params2";
+  EXPECT_NEAR(passes[57].params2.y, 0.5f, 1e-6f);
+  EXPECT_NEAR(passes[57].params2.z, 0.25f, 1e-6f);
+
+  /* The solid mode skips the diffusion: the flood's classification straight into the blur's pair
+   * and the tail, the schema's colour written as it is. */
+  const std::array<float, 10> fill_solid{float(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA),
+                                         0.5f,
+                                         0.0f,
+                                         float(PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE),
+                                         float(PAINT_LAYER_FILL_AREA_COLOR_MODE_SOLID),
+                                         1.0f,
+                                         0.5f,
+                                         0.25f,
+                                         2.0f,
+                                         0.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_FILL_AREA, fill_solid.data(), 100, 100, passes);
+  ASSERT_EQ(passes.size(), 36) << "the seeding, sixteen sweep pairs, the tail and the blur's pair";
+  EXPECT_EQ(passes[33].kind, ePaintLayerEffectPass::FillTail)
+      << "the tail runs ahead of the blur, the CPU's own order";
+  EXPECT_NEAR(passes[33].params.x, float(PAINT_LAYER_FILL_AREA_COLOR_MODE_SOLID), 1e-6f);
+  EXPECT_EQ(passes[33].radius, 2) << "the blur the coverage softens by";
+  EXPECT_EQ(passes[34].kind, ePaintLayerEffectPass::BlurH);
+  EXPECT_EQ(passes[34].radius, 2);
+  EXPECT_EQ(passes[35].kind, ePaintLayerEffectPass::BlurV);
+
+  /* The parameterizations the flood cannot express are the CPU's, each an empty plan: the debug's
+   * ramp of region numbers, the largest-region classification (the regions' areas are a reduction
+   * the flood does not walk) and the source mode with no iteration to reach in with. */
+  const std::array<float, 10> fill_debug{float(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA),
+                                         0.5f,
+                                         1.0f,
+                                         float(PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE),
+                                         float(PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE),
+                                         1.0f,
+                                         0.5f,
+                                         0.25f,
+                                         0.0f,
+                                         24.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_FILL_AREA, fill_debug.data(), 100, 100, passes);
+  EXPECT_TRUE(passes.is_empty()) << "the debug's region ramp stays with the CPU";
+  const std::array<float, 10> fill_largest{float(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA),
+                                           0.5f,
+                                           0.0f,
+                                           float(PAINT_LAYER_FILL_AREA_UV_BORDER_FILL),
+                                           float(PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE),
+                                           1.0f,
+                                           0.5f,
+                                           0.25f,
+                                           0.0f,
+                                           24.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_FILL_AREA, fill_largest.data(), 100, 100, passes);
+  EXPECT_TRUE(passes.is_empty()) << "the largest-region classification stays with the CPU";
+  const std::array<float, 10> fill_no_iter{float(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA),
+                                           0.5f,
+                                           0.0f,
+                                           float(PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE),
+                                           float(PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE),
+                                           1.0f,
+                                           0.5f,
+                                           0.25f,
+                                           0.0f,
+                                           0.0f};
+  BKE_paint_layers_effect_pass_plan(
+      MA_PAINT_LAYER_FILTER_FILL_AREA, fill_no_iter.data(), 100, 100, passes);
+  EXPECT_TRUE(passes.is_empty()) << "the source mode with no iteration stays with the CPU";
+
   /* A pointwise effect is one pass that reads no neighbour and no second buffer. */
   BKE_paint_layers_effect_pass_plan(MA_PAINT_LAYER_FILTER_NOISE, nullptr, 100, 100, passes);
   ASSERT_EQ(passes.size(), 1);
@@ -4462,10 +5203,18 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
       continue;
     }
     gpu_computed_filters.add(filter);
-    /* The schema defaults are the parameters the gather would pack, in the same order. */
+    /* The schema defaults are the parameters the gather would pack, in the same order: a colour
+     * lays its three channels across three slots, the packing the plan reads the Glow tint by. */
     float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
+    int pos = 0;
     for (int i = 0; i < kind->params_num; i++) {
-      params[i] = kind->params[i].default_value;
+      if (kind->params[i].type == PaintLayerKindParamType::Color) {
+        for (int c = 0; c < 3; c++) {
+          params[pos++] = kind->params[i].default_color[c];
+        }
+        continue;
+      }
+      params[pos++] = kind->params[i].default_value;
     }
     Vector<PaintLayerEffectPass> passes;
     BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter(filter), params, 64, 64, passes);
@@ -4479,9 +5228,14 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
       EXPECT_GE(pass.reach, 0);
     }
   }
-  /* The six neighbourhood kinds are all flagged GPU-computed: the walk must have found every one of
+  /* The neighbourhood kinds are all flagged GPU-computed: the walk must have found every one of
    * them, or the flag and the plan builder have drifted apart. The Noise is flagged too, its
-   * pointwise kernel being the one pass the plan names. */
+   * pointwise kernel being the one pass the plan names, and the glow, the height-to-normal, the
+   * pixelate, the slot fetch and the six pass-chain kinds (the Bevel and the Mask Outline's
+   * distance transform, the Drop Shadow's silhouette chain, the Blur Slope's walk, the Color
+   * Match's reduction and the Fill Area's flood) complete the set. The walk's defaults are the
+   * reduce branch and the edge-based flood's, the parameterizations the plans refuse being the
+   * plan test's to read. */
   EXPECT_FALSE(gpu_computed_filters.is_empty());
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BLUR)));
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BLUR_DIRECTIONAL)));
@@ -4492,6 +5246,16 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_EMBOSS)));
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_ERODE_DILATE)));
   EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_NOISE)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_GLOW)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_PIXELATE)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BEVEL)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_MASK_OUTLINE)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_DROP_SHADOW)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_BLUR_SLOPE)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_COLOR_MATCH)));
+  EXPECT_TRUE(gpu_computed_filters.contains(int(MA_PAINT_LAYER_FILTER_FILL_AREA)));
 }
 
 TEST_F(PaintLayersEffectTest, the_region_grows_by_the_halo_and_clamps_to_the_canvas)
@@ -4534,6 +5298,100 @@ TEST_F(PaintLayersEffectTest,
   };
   const auto erode = [](const int mode, const int radius) {
     return std::array<float, 2>{float(mode), float(radius)};
+  };
+  const auto glow = [](const int mode, const int width, const float spread, const float opacity) {
+    return std::array<float, 7>{float(mode), float(width), spread, opacity, 1.0f, 1.0f, 1.0f};
+  };
+  const auto pixelate = [](const int amount) {
+    return std::array<float, 1>{float(amount)};
+  };
+  const auto height_to_normal = [](const float strength,
+                                   const int world_units,
+                                   const float surface_size,
+                                   const float height_depth,
+                                   const int flip_green) {
+    return std::array<float, 5>{
+        strength, float(world_units), surface_size, height_depth, float(flip_green)};
+  };
+  const auto channel_split = [](const int channel) {
+    return std::array<float, 1>{float(channel)};
+  };
+  const auto bevel = [](const int source, const int distance, const int corner, const int smooth) {
+    return std::array<float, 4>{float(source), float(distance), float(corner), float(smooth)};
+  };
+  const auto mask_outline = [](const int position,
+                               const int start_black,
+                               const float threshold,
+                               const int width,
+                               const int blur,
+                               const float shape,
+                               const int source) {
+    return std::array<float, 10>{float(position),
+                                 float(start_black),
+                                 threshold,
+                                 float(width),
+                                 float(blur),
+                                 shape,
+                                 float(source),
+                                 1.0f,
+                                 1.0f,
+                                 1.0f};
+  };
+  const auto drop_shadow = [](const int source,
+                              const float angle,
+                              const int distance,
+                              const int size,
+                              const int spread,
+                              const float opacity) {
+    return std::array<float, 9>{
+        float(source), angle, float(distance), float(size), float(spread), opacity, 1.0f, 0.0f, 0.0f};
+  };
+  const auto blur_slope = [](const int seed,
+                             const float intensity,
+                             const int quality,
+                             const int blending,
+                             const int source_mode,
+                             const int source_blur) {
+    return std::array<float, 9>{float(seed),
+                                intensity,
+                                float(quality),
+                                float(blending),
+                                float(source_mode),
+                                float(source_blur),
+                                0.0f,
+                                1.0f,
+                                1.0f};
+  };
+  const auto color_match = [](const int picked, const int variation) {
+    return std::array<float, 11>{float(picked),
+                                 0.5f,
+                                 0.5f,
+                                 0.5f,
+                                 0.25f,
+                                 0.5f,
+                                 0.75f,
+                                 float(variation),
+                                 0.1f,
+                                 0.2f,
+                                 0.3f};
+  };
+  const auto fill_area = [](const int source,
+                            const float threshold,
+                            const int debug,
+                            const int uv_border,
+                            const int color_mode,
+                            const int blur,
+                            const int iterations) {
+    return std::array<float, 10>{float(source),
+                                 threshold,
+                                 float(debug),
+                                 float(uv_border),
+                                 float(color_mode),
+                                 1.0f,
+                                 0.5f,
+                                 0.25f,
+                                 float(blur),
+                                 float(iterations)};
   };
 
   /* Builds the plan, takes one rectangle per pass and checks the two invariants every plan has: the
@@ -4607,6 +5465,61 @@ TEST_F(PaintLayersEffectTest,
                  rects);
   plan_and_check(MA_PAINT_LAYER_FILTER_EDGE_DETECT, nullptr, dirty, 100, 100, passes, rects);
   plan_and_check(MA_PAINT_LAYER_FILTER_EMBOSS, nullptr, dirty, 100, 100, passes, rects);
+  /* The glow in both modes, the 3x3, and the two reach-nothing kinds: the invariants above hold for
+   * them the same, the glow's tail reading the input the plan's own halo covers. */
+  const std::array<float, 7> glow_soft = glow(PAINT_LAYER_GLOW_SOFT, 8, 0.0f, 1.0f);
+  plan_and_check(MA_PAINT_LAYER_FILTER_GLOW, glow_soft.data(), dirty, 100, 100, passes, rects);
+  const std::array<float, 7> glow_precise = glow(PAINT_LAYER_GLOW_PRECISE, 5, 0.0f, 1.0f);
+  plan_and_check(MA_PAINT_LAYER_FILTER_GLOW, glow_precise.data(), dirty, 100, 100, passes, rects);
+  const std::array<float, 5> h2n_params = height_to_normal(2.0f, 1, 100.0f, 5.0f, 1);
+  plan_and_check(
+      MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL, h2n_params.data(), dirty, 100, 100, passes, rects);
+  const std::array<float, 1> pixelate_params = pixelate(16);
+  plan_and_check(MA_PAINT_LAYER_FILTER_PIXELATE, pixelate_params.data(), dirty, 100, 100, passes, rects);
+  const std::array<float, 1> split_params = channel_split(PAINT_LAYER_CHANNEL_SPLIT_ALPHA);
+  plan_and_check(
+      MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT, split_params.data(), dirty, 100, 100, passes, rects);
+  /* The distance transforms flood the whole canvas, so every pass of theirs writes the whole
+   * rectangle and the invariants hold on the clamped canvas; the Drop Shadow and the Blur Slope
+   * hold them the ordinary way, the tail's offset and the walk's gradient being the reach. */
+  const std::array<float, 4> bevel_params = bevel(PAINT_LAYER_BEVEL_SOURCE_ALPHA, 2, 0, 3);
+  plan_and_check(MA_PAINT_LAYER_FILTER_BEVEL, bevel_params.data(), dirty, 100, 100, passes, rects);
+  const std::array<float, 10> outline_params = mask_outline(
+      PAINT_LAYER_MASK_OUTLINE_OUTSIDE, 0, 0.5f, 4, 2, 0.5f, PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA);
+  plan_and_check(
+      MA_PAINT_LAYER_FILTER_MASK_OUTLINE, outline_params.data(), dirty, 100, 100, passes, rects);
+  const std::array<float, 9> shadow_params = drop_shadow(
+      PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA, 135.0f, 4, 8, 3, 1.0f);
+  plan_and_check(
+      MA_PAINT_LAYER_FILTER_DROP_SHADOW, shadow_params.data(), dirty, 100, 100, passes, rects);
+  const std::array<float, 9> slope_params = blur_slope(
+      5, 15.0f, 8, PAINT_LAYER_BLUR_SLOPE_BLENDING_BLUR, PAINT_LAYER_SLOPE_SOURCE_PREVIOUS_INPUT, 4);
+  plan_and_check(
+      MA_PAINT_LAYER_FILTER_BLUR_SLOPE, slope_params.data(), dirty, 100, 100, passes, rects);
+  /* The reduce chain and the flood are whole-canvas, so every pass of theirs writes the whole
+   * rectangle and the invariants hold on the clamped canvas, the diffusion's one-texel reaches and
+   * the blur's pair riding between them. */
+  const std::array<float, 11> match_params = color_match(0, 0);
+  plan_and_check(
+      MA_PAINT_LAYER_FILTER_COLOR_MATCH, match_params.data(), dirty, 100, 100, passes, rects);
+  const std::array<float, 10> fill_params = fill_area(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA,
+                                                      0.5f,
+                                                      0,
+                                                      PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE,
+                                                      PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE,
+                                                      2,
+                                                      4);
+  plan_and_check(
+      MA_PAINT_LAYER_FILTER_FILL_AREA, fill_params.data(), dirty, 100, 100, passes, rects);
+  const std::array<float, 10> fill_solid_params = fill_area(PAINT_LAYER_FILL_AREA_SOURCE_ALPHA,
+                                                            0.5f,
+                                                            0,
+                                                            PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE,
+                                                            PAINT_LAYER_FILL_AREA_COLOR_MODE_SOLID,
+                                                            0,
+                                                            24);
+  plan_and_check(
+      MA_PAINT_LAYER_FILTER_FILL_AREA, fill_solid_params.data(), dirty, 100, 100, passes, rects);
 
   /* Per axis, in numbers: an H pass does not grow the height because the V passes after it already
    * do, and the other way around -- the widths and the heights move independently. The gaussian is
@@ -4740,6 +5653,59 @@ TEST_F(PaintLayersEffectTest, the_input_scalar_hash_sees_a_flat_colour_edit)
   entry.constant_color[0] = 0.6f;
   EXPECT_NE(BKE_paint_layers_effect_input_scalar_hash(entry), base)
       << "a flat row colour is part of the effect's input";
+}
+
+TEST_F(PaintLayersEffectTest, the_input_scalar_hash_sees_the_slot_image)
+{
+  /* A Channel Split's slot map is sampled by the kernel itself, outside the input's maps: its
+   * identity keys the GPU entry the way a flat colour does, since no map version of the input
+   * carries its pixels. */
+  PaintMaterialCompositeImageLayer entry;
+  Image *first = add_shade_image("SlotFirst", 255, 0);
+  Image *second = add_shade_image("SlotSecond", 0, 255);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+
+  entry.slot_image = first;
+  const uint64_t keyed = BKE_paint_layers_effect_input_scalar_hash(entry);
+  entry.slot_image = second;
+  EXPECT_NE(BKE_paint_layers_effect_input_scalar_hash(entry), keyed)
+      << "another slot image is another input, not the old one with new data";
+  entry.slot_image = first;
+  EXPECT_EQ(BKE_paint_layers_effect_input_scalar_hash(entry), keyed);
+  entry.slot_image = nullptr;
+  EXPECT_NE(BKE_paint_layers_effect_input_scalar_hash(entry), keyed)
+      << "no slot is another input, not the live one with new data";
+}
+
+TEST_F(PaintLayersEffectTest, the_input_description_names_the_channel_splits_slot)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_shade_image("Row", 255, 0));
+  MaterialPaintLayer *split = add_effect(*row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+  Image *slot = add_channel_image("Split");
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, slot));
+
+  PaintMaterialCompositeImageLayer entry;
+  ASSERT_TRUE(BKE_paint_layers_effect_input_describe(*ma, *row, *split, kColor, true, false, entry));
+  EXPECT_EQ(entry.slot_image, slot)
+      << "the slot is the one map the kernel samples itself, named for the GPU pass to bind";
+  /* The slot's identity keys the GPU entry: assigning another image re-keys it, which the
+   * description alone decides. */
+  const uint64_t keyed = BKE_paint_layers_effect_input_scalar_hash(entry);
+  Image *other = add_channel_image("SplitOther");
+  ASSERT_TRUE(BKE_paint_layers_effect_image_set(*ma, split, other));
+  PaintMaterialCompositeImageLayer rekeyed;
+  ASSERT_TRUE(
+      BKE_paint_layers_effect_input_describe(*ma, *row, *split, kColor, true, false, rekeyed));
+  EXPECT_EQ(rekeyed.slot_image, other);
+  EXPECT_NE(BKE_paint_layers_effect_input_scalar_hash(rekeyed), keyed);
+
+  /* A blur reads no slot: the description names none, whatever a stale pointer on another row
+   * holds. */
+  MaterialPaintLayer *blur = add_effect(*row, MA_PAINT_LAYER_FILTER_BLUR);
+  PaintMaterialCompositeImageLayer no_slot;
+  ASSERT_TRUE(BKE_paint_layers_effect_input_describe(*ma, *row, *blur, kColor, true, false, no_slot));
+  EXPECT_EQ(no_slot.slot_image, nullptr);
 }
 
 TEST_F(PaintLayersEffectTest, the_input_scalar_hash_sees_the_gradient_and_the_reader)

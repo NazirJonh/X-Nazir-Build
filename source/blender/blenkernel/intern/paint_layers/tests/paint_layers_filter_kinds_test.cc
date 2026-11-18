@@ -702,7 +702,7 @@ TEST_F(PaintLayersFilterKindsTest, blur_directional_kind_is_a_neighborhood_filte
   }
 }
 
-TEST_F(PaintLayersFilterKindsTest, drop_shadow_kind_is_a_cpu_computed_effect_with_a_schema)
+TEST_F(PaintLayersFilterKindsTest, drop_shadow_kind_is_a_gpu_computed_effect_with_a_schema)
 {
   Material *ma = BKE_material_add(bmain, "RnaDropShadowParamMat");
   MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
@@ -711,11 +711,11 @@ TEST_F(PaintLayersFilterKindsTest, drop_shadow_kind_is_a_cpu_computed_effect_wit
       *ma, row, MA_PAINT_LAYER_FILTER_DROP_SHADOW);
   ASSERT_NE(shadow, nullptr);
 
-  /* A CPU-computed effect like the Bevel: the silhouette is spread, blurred and offset, a
-   * sequence of passes no single shader kernel lays, so no GPU pass exists for it. */
+  /* The silhouette is spread, blurred and offset before it is tinted: the plan lays that sequence
+   * of passes, so the combined preview computes the kind on the GPU like the Bevel does. */
   EXPECT_TRUE(paint_layer_kind_has_flag(*shadow, PAINT_LAYER_KIND_ACTS_ON_BELOW));
   EXPECT_TRUE(paint_layer_kind_has_flag(*shadow, PAINT_LAYER_KIND_NEEDS_BAKE));
-  EXPECT_FALSE(paint_layer_kind_has_flag(*shadow, PAINT_LAYER_KIND_GPU_COMPUTED));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*shadow, PAINT_LAYER_KIND_GPU_COMPUTED));
   EXPECT_TRUE(paint_layer_kind_has_flag(*shadow, PAINT_LAYER_KIND_MASK_NEEDS_LUMA));
   /* Its result is a layer with an alpha of its own, so the shadow shows on the empty map; no other
    * kind opts in, and every one of them keeps its colour-only result. */
@@ -769,7 +769,7 @@ TEST_F(PaintLayersFilterKindsTest, drop_shadow_kind_is_a_cpu_computed_effect_wit
   }
 }
 
-TEST_F(PaintLayersFilterKindsTest, mask_outline_kind_is_a_cpu_computed_effect_with_a_schema)
+TEST_F(PaintLayersFilterKindsTest, mask_outline_kind_is_a_gpu_computed_effect_with_a_schema)
 {
   Material *ma = BKE_material_add(bmain, "RnaMaskOutlineParamMat");
   MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
@@ -778,11 +778,12 @@ TEST_F(PaintLayersFilterKindsTest, mask_outline_kind_is_a_cpu_computed_effect_wi
       *ma, row, MA_PAINT_LAYER_FILTER_MASK_OUTLINE);
   ASSERT_NE(outline, nullptr);
 
-  /* A CPU-computed effect like the Bevel: the band is a distance field the live graph cannot
-   * express, so no GPU pass exists for it. */
+  /* The band is a distance field the live graph cannot express, and the plan floods it (the seed
+   * pass and the JFA steps) and reads the band off it, so the combined preview computes the kind
+   * on the GPU like the Bevel does. */
   EXPECT_TRUE(paint_layer_kind_has_flag(*outline, PAINT_LAYER_KIND_ACTS_ON_BELOW));
   EXPECT_TRUE(paint_layer_kind_has_flag(*outline, PAINT_LAYER_KIND_NEEDS_BAKE));
-  EXPECT_FALSE(paint_layer_kind_has_flag(*outline, PAINT_LAYER_KIND_GPU_COMPUTED));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*outline, PAINT_LAYER_KIND_GPU_COMPUTED));
   /* A content row's result is a ring layer with an alpha of its own, like the Drop Shadow's. */
   EXPECT_TRUE(paint_layer_kind_has_flag(*outline, PAINT_LAYER_KIND_RESULT_HAS_ALPHA));
 
@@ -835,7 +836,7 @@ TEST_F(PaintLayersFilterKindsTest, mask_outline_kind_is_a_cpu_computed_effect_wi
   }
 }
 
-TEST_F(PaintLayersFilterKindsTest, fill_area_kind_is_a_cpu_computed_effect_with_a_schema)
+TEST_F(PaintLayersFilterKindsTest, fill_area_kind_is_a_gpu_computed_effect_with_a_schema)
 {
   Material *ma = BKE_material_add(bmain, "RnaFillAreaParamMat");
   MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
@@ -844,11 +845,14 @@ TEST_F(PaintLayersFilterKindsTest, fill_area_kind_is_a_cpu_computed_effect_with_
       *ma, row, MA_PAINT_LAYER_FILTER_FILL_AREA);
   ASSERT_NE(fill, nullptr);
 
-  /* A CPU-computed effect like the Bevel: the flood and the diffusion are whole-map passes, so no
-   * GPU pass exists for it. */
+  /* The plan floods the label field, diffuses the border's colours inward and writes the fill out
+   * with the coverage, so the combined preview computes the kind on the GPU like the Bevel does.
+   * The parameterizations the flood cannot express -- the debug's ramp of region numbers, the
+   * largest-region classification, the source mode without an iteration -- stay with the CPU: the
+   * plan builder refuses each with an empty plan, the gather falling back on it. */
   EXPECT_TRUE(paint_layer_kind_has_flag(*fill, PAINT_LAYER_KIND_ACTS_ON_BELOW));
   EXPECT_TRUE(paint_layer_kind_has_flag(*fill, PAINT_LAYER_KIND_NEEDS_BAKE));
-  EXPECT_FALSE(paint_layer_kind_has_flag(*fill, PAINT_LAYER_KIND_GPU_COMPUTED));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*fill, PAINT_LAYER_KIND_GPU_COMPUTED));
   /* The result is a layer of its own: a hole between strokes has no coverage to fill into, and a
    * mask's fill is brought back to one grey. */
   EXPECT_TRUE(paint_layer_kind_has_flag(*fill, PAINT_LAYER_KIND_RESULT_HAS_ALPHA));
@@ -911,6 +915,76 @@ TEST_F(PaintLayersFilterKindsTest, fill_area_kind_is_a_cpu_computed_effect_with_
   }
 }
 
+TEST_F(PaintLayersFilterKindsTest, color_match_kind_is_a_gpu_computed_effect_with_a_schema)
+{
+  Material *ma = BKE_material_add(bmain, "RnaColorMatchParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *match = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_COLOR_MATCH);
+  ASSERT_NE(match, nullptr);
+
+  /* The plan reduces the input's average down a pyramid and grades the original against the 1x1
+   * apex, so the combined preview computes the kind on the GPU like the Bevel does. The one
+   * parameterization the pyramid cannot serve -- a picked source, the colour the contract lays in
+   * the grade's params2 -- stays with the CPU, the plan builder refusing it with an empty plan. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*match, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*match, PAINT_LAYER_KIND_NEEDS_BAKE));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*match, PAINT_LAYER_KIND_GPU_COMPUTED));
+  /* A mask's grey carries no colour of its own to grade: the kind reads the luminance there. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*match, PAINT_LAYER_KIND_MASK_NEEDS_LUMA));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*match, PAINT_LAYER_KIND_RESULT_HAS_ALPHA));
+
+  /* The defaults grade the input's own average toward the schema's target, the variation off: the
+   * parameterization the plan builds, the picked flag and the switch sitting at zero. */
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*match, PAINT_LAYER_COLOR_MATCH_SOURCE_PICKED), 0.0f);
+  float source[4];
+  paint_layer_kind_param_color_get(*match, PAINT_LAYER_COLOR_MATCH_SOURCE_COLOR, source);
+  EXPECT_FLOAT_EQ(source[0], 0.5f);
+  float target[4];
+  paint_layer_kind_param_color_get(*match, PAINT_LAYER_COLOR_MATCH_TARGET_COLOR, target);
+  EXPECT_FLOAT_EQ(target[0], 0.5f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*match, PAINT_LAYER_COLOR_MATCH_VARIATION), 0.0f);
+
+  /* The RNA enum names the kind, and the collection lists exactly the schema's seven parameters,
+   * labelled. */
+  PointerRNA match_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, match);
+  PropertyRNA *filter_prop = RNA_struct_find_property(&match_ptr, "filter_type");
+  ASSERT_NE(filter_prop, nullptr);
+  const char *identifier = nullptr;
+  ASSERT_TRUE(RNA_property_enum_identifier(nullptr,
+                                           &match_ptr,
+                                           filter_prop,
+                                           MA_PAINT_LAYER_FILTER_COLOR_MATCH,
+                                           &identifier));
+  EXPECT_STREQ(identifier, "COLOR_MATCH");
+  PropertyRNA *params = RNA_struct_find_property(&match_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&match_ptr, params), 7);
+  const char *names[7] = {"source_picked",
+                          "source_color",
+                          "target_color",
+                          "variation",
+                          "variation_hue",
+                          "variation_chroma",
+                          "variation_luma"};
+  const char *labels[7] = {"Picked Source",
+                           "Source",
+                           "Target",
+                           "Color Variation",
+                           "Hue",
+                           "Chroma",
+                           "Luma"};
+  for (const int i : IndexRange(7)) {
+    PointerRNA param_ptr;
+    ASSERT_TRUE(RNA_property_collection_lookup_string(&match_ptr, params, names[i], &param_ptr))
+        << names[i];
+    PropertyRNA *label = RNA_struct_find_property(&param_ptr, "label");
+    ASSERT_NE(label, nullptr);
+    EXPECT_EQ(RNA_property_string_get(&param_ptr, label), labels[i]);
+  }
+}
+
 TEST_F(PaintLayersFilterKindsTest, height_to_normal_kind_is_a_cross_channel_effect_with_a_schema)
 {
   Material *ma = BKE_material_add(bmain, "RnaHeightToNormalParamMat");
@@ -920,12 +994,13 @@ TEST_F(PaintLayersFilterKindsTest, height_to_normal_kind_is_a_cross_channel_effe
       *ma, row, MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL);
   ASSERT_NE(to_normal, nullptr);
 
-  /* A CPU-computed cross-channel effect: it reads the Height the row lays and lays into its own
-   * channel, which is the Normal's -- the one filter a Normal may carry besides the Normal
-   * Convert. No GPU pass exists for it, and a mask item has no channel to lay a normal into. */
+  /* A cross-channel effect: it reads the Height the row lays and lays into its own channel, which
+   * is the Normal's -- the one filter a Normal may carry besides the Normal Convert. The one 3x3
+   * pass the plan names computes it on the GPU like the Edge Detect does, and a mask item has no
+   * channel to lay a normal into. */
   EXPECT_TRUE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_ACTS_ON_BELOW));
   EXPECT_TRUE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_NEEDS_BAKE));
-  EXPECT_FALSE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_GPU_COMPUTED));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_GPU_COMPUTED));
   EXPECT_TRUE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_NORMAL_SAFE));
   EXPECT_TRUE(paint_layer_effect_reads_height(*to_normal));
   EXPECT_EQ(paint_layer_effect_input_channel(*to_normal, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
@@ -1019,17 +1094,18 @@ TEST_F(PaintLayersFilterKindsTest, the_second_batch_pointwise_kinds_carry_their_
 
 TEST_F(PaintLayersFilterKindsTest, the_second_batch_cpu_computed_kinds_carry_their_flags)
 {
-  /* The three CPU-computed kinds of the second batch: the Bevel's own flags, with the FXAA the
-   * one GPU pass among them. */
+  /* The three effect kinds of the second batch, all computed by the effect pass now: the FXAA's
+   * one kernel, the Pixelate's block average and the Blur Slope's driver and walk, each with the
+   * Bevel's own flags beside the GPU one. */
   const struct {
     eMaterialPaintLayerFilter filter;
     const char *identifier;
     int params_num;
     bool gpu_computed;
   } computed[] = {
-      {MA_PAINT_LAYER_FILTER_PIXELATE, "PIXELATE", 1, false},
+      {MA_PAINT_LAYER_FILTER_PIXELATE, "PIXELATE", 1, true},
       {MA_PAINT_LAYER_FILTER_FXAA, "FXAA", 0, true},
-      {MA_PAINT_LAYER_FILTER_BLUR_SLOPE, "BLUR_SLOPE", 9, false},
+      {MA_PAINT_LAYER_FILTER_BLUR_SLOPE, "BLUR_SLOPE", 9, true},
   };
   for (const auto &expected : computed) {
     Material *ma = BKE_material_add(bmain, "RnaSecondBatchComputedMat");
@@ -1062,7 +1138,7 @@ TEST_F(PaintLayersFilterKindsTest, the_second_batch_cpu_computed_kinds_carry_the
   }
 }
 
-TEST_F(PaintLayersFilterKindsTest, channel_split_kind_is_a_cpu_computed_effect_with_a_schema)
+TEST_F(PaintLayersFilterKindsTest, channel_split_kind_is_a_gpu_computed_effect_with_a_schema)
 {
   Material *ma = BKE_material_add(bmain, "RnaChannelSplitParamMat");
   MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
@@ -1071,11 +1147,12 @@ TEST_F(PaintLayersFilterKindsTest, channel_split_kind_is_a_cpu_computed_effect_w
       *ma, row, MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
   ASSERT_NE(split, nullptr);
 
-  /* A CPU-computed effect like the Bevel: the resample of the slot's map is a whole-map pass the
-   * effect cache computes, so no GPU pass exists for it. */
+  /* The resample of the slot's map is a whole-map pass the effect cache computes, and the slot
+   * fetch is the one pass the plan names, so the combined preview computes the kind on the GPU
+   * like the Noise does, the slot bound beside the effect's own ping-pong pair. */
   EXPECT_TRUE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_ACTS_ON_BELOW));
   EXPECT_TRUE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_NEEDS_BAKE));
-  EXPECT_FALSE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_GPU_COMPUTED));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_GPU_COMPUTED));
   /* The result is a layer of its own: the slot's map covers fully, so the grey shows on a row that
    * has no paint yet. A mask item keeps the input's alpha, as its grey carries none of its own. */
   EXPECT_TRUE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_RESULT_HAS_ALPHA));
@@ -1126,7 +1203,9 @@ TEST_F(PaintLayersFilterKindsTest, deband_kind_is_a_pointwise_filter_with_a_mode
 
   EXPECT_TRUE(paint_layer_kind_has_flag(*deband, PAINT_LAYER_KIND_ACTS_ON_BELOW));
   EXPECT_FALSE(paint_layer_kind_has_flag(*deband, PAINT_LAYER_KIND_NEEDS_BAKE));
-  EXPECT_TRUE(paint_layer_kind_has_flag(*deband, PAINT_LAYER_KIND_NO_GPU_BRANCH));
+  /* The apply_filter branch of the combined preview receives the texel coordinates now, so the
+   * dither is laid by the shader and the kind no longer refuses the GPU path. */
+  EXPECT_FALSE(paint_layer_kind_has_flag(*deband, PAINT_LAYER_KIND_NO_GPU_BRANCH));
   EXPECT_EQ(paint_layer_kind_param_type(*deband, PAINT_LAYER_DEBAND_MODE),
             PaintLayerKindParamType::Enum);
   EXPECT_EQ(paint_layer_kind_param_type(*deband, PAINT_LAYER_DEBAND_BITS),
@@ -1166,7 +1245,9 @@ TEST_F(PaintLayersFilterKindsTest, normal_convert_kind_alone_carries_the_normal_
   EXPECT_TRUE(paint_layer_kind_has_flag(*convert, PAINT_LAYER_KIND_NORMAL_SAFE));
   EXPECT_TRUE(paint_layer_kind_has_flag(*convert, PAINT_LAYER_KIND_ACTS_ON_BELOW));
   EXPECT_FALSE(paint_layer_kind_has_flag(*convert, PAINT_LAYER_KIND_NEEDS_BAKE));
-  EXPECT_TRUE(paint_layer_kind_has_flag(*convert, PAINT_LAYER_KIND_NO_GPU_BRANCH));
+  /* The combined preview's apply_filter branch flips the green and rebuilds the Z now, so the kind
+   * no longer refuses the GPU path. */
+  EXPECT_FALSE(paint_layer_kind_has_flag(*convert, PAINT_LAYER_KIND_NO_GPU_BRANCH));
   EXPECT_FALSE(paint_layer_kind_has_flag(*invert, PAINT_LAYER_KIND_NORMAL_SAFE));
   EXPECT_EQ(paint_layer_kind_param_type(*convert, PAINT_LAYER_NORMAL_CONVERT_MODE),
             PaintLayerKindParamType::Enum);

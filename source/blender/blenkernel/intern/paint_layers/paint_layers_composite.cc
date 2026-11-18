@@ -398,7 +398,13 @@ bool paint_layer_mask_transform_step_get(const MaterialPaintLayer &item,
   return true;
 }
 
-/** The parameters of \a row's kind in the schema order the evaluator reads them in. */
+/**
+ * The parameters of \a row's kind in the schema order the evaluator reads them in. A colour is not
+ * a scalar: its three channels lay across the three slots at its place in the schema order, the
+ * alpha left to the typed accessor (no kernel reads it from this fold). That is the packing the GPU
+ * effect pass plan reads the Glow's tint by, and the one consumer of a colour in the array; every
+ * reader of the other kinds' numbers reads them by schema index, which the colour does not move.
+ */
 template<size_t N> static void composite_filter_params(const MaterialPaintLayer &row, float (&r_params)[N])
 {
   if (paint_layer_kind_has_color_balance_param(row)) {
@@ -424,8 +430,24 @@ template<size_t N> static void composite_filter_params(const MaterialPaintLayer 
     return;
   }
   if (const PaintLayerKindInfo *kind = paint_layer_kind_of(row)) {
-    for (const int i : IndexRange(std::min(kind->params_num, int(N)))) {
-      r_params[i] = paint_layer_kind_param_get(row, i);
+    int pos = 0;
+    for (const int i : IndexRange(kind->params_num)) {
+      if (kind->params[i].type == PaintLayerKindParamType::Color) {
+        /* Three consecutive floats, the schema order kept: the plan reads the Glow's tint here. */
+        float color[4];
+        paint_layer_kind_param_color_get(row, i, color);
+        for (const int c : IndexRange(3)) {
+          if (pos + c < int(N)) {
+            r_params[pos + c] = color[c];
+          }
+        }
+        pos += 3;
+        continue;
+      }
+      if (pos < int(N)) {
+        r_params[pos] = paint_layer_kind_param_get(row, i);
+      }
+      pos++;
     }
   }
 }
@@ -2910,8 +2932,9 @@ uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int cha
     mix_float(effect.mapping.mirror_center[0]);
     mix_float(effect.mapping.mirror_center[1]);
   }
-  /* A Color parameter reads as zero in the scalar fold above, so its channels join the hash here;
-   * otherwise a Glow's or a Color Match's colour edit would keep the cached result. */
+  /* A colour's three channels join the scalar fold through the packing now; its alpha is what no
+   * kernel reads from the packed array, so it joins the hash here -- a Glow's or a Color Match's
+   * colour edit still retires the cached result either way. */
   if (const PaintLayerKindInfo *kind = paint_layer_kind_of(effect)) {
     for (const int i : IndexRange(kind->params_num)) {
       if (kind->params[i].type == PaintLayerKindParamType::Color) {
@@ -2984,6 +3007,11 @@ bool BKE_paint_layers_effect_input_describe(const Material &ma,
   r_entry.mask_influence = 0.0f;
   r_entry.opacity = 1.0f;
   r_entry.enabled = true;
+  /* A Channel Split's slot is the one map its kernel samples itself, outside the effect's own
+   * ping-pong buffers: the gather binds it for the slot-fetch pass and keys the GPU entry on its
+   * identity, which no map version of the input carries. The kind table decides, so an effect whose
+   * kind reads no slot names none, whatever a stale pointer on the row holds. */
+  r_entry.slot_image = paint_layer_effect_slot_image(effect);
   return true;
 }
 
@@ -2997,6 +3025,9 @@ void BKE_paint_layers_effect_input_images(const PaintMaterialCompositeImageLayer
   };
   add(layer.color_image);
   add(layer.mask_image);
+  /* The slot map a Channel Split samples itself is part of what the result reads, so a stroke on
+   * it makes the entry stale the way a stroke on the input's own maps does. */
+  add(layer.slot_image);
   for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
     add(correction.image);
     add(correction.coverage_image);

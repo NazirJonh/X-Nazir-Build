@@ -17,13 +17,16 @@
  */
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 #include "BLI_assert.h"
 #include "BLI_hash.hh"
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
+#include "BLI_math_constants.h"
 #include "BLI_rect.h"
 #include "BLI_span.hh"
 #include "BLI_uuid.h"
@@ -100,7 +103,9 @@ bool anchor_slice_layer_is_texel_exact(const PaintMaterialCompositeImageLayer &l
 /** The schema integer parameter at the given index, read back from the float the gather packed. */
 static int effect_pass_param_int(const float *params, const int index)
 {
-  return int(params[index] + 0.5f);
+  /* Rounded to nearest, not `int(x + 0.5f)`: that truncates toward zero, so a negative spread of
+   * -3 would read as -2 and the GPU would erode one texel less than the CPU. */
+  return int(std::lround(params[index]));
 }
 
 /** A neighbourhood radius, clamped the way `paint_layer_effect_blur_box` clamps it. */
@@ -108,6 +113,17 @@ static int effect_pass_clamp_radius(const int radius, const int width, const int
 {
   return std::clamp(radius, 1, std::max(width, height));
 }
+
+/* The two schemas that carry a colour ahead of scalars: the packing lays a colour's three channels
+ * across three slots at its place in the schema order, so the scalars after it sit at packed
+ * positions the kind's own enum (which numbers the schema's parameters, one each) does not name.
+ * Every scalar before the colour keeps the enum's own index, which is why the plans below read the
+ * leading ones through it and these constants only past it. */
+constexpr int COLOR_MATCH_PACKED_TARGET = 4;
+constexpr int COLOR_MATCH_PACKED_VARIATION = 7;
+constexpr int FILL_AREA_PACKED_COLOR = 5;
+constexpr int FILL_AREA_PACKED_BLUR = 8;
+constexpr int FILL_AREA_PACKED_ITERATIONS = 9;
 
 void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
                                        const float *params,
@@ -158,6 +174,39 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
     v.aux = ePaintLayerEffectPassAux::None;
     v.reach = v.radius;
     v.axis_mask = PAINT_LAYER_EFFECT_AXIS_Y;
+  };
+  /* The seed field and the flooding steps the distance transforms (a Bevel, a Mask Outline) share:
+   * texels whose scalar sits on the seed side of \a threshold stamp their own coordinates, the
+   * rest a far point, then the Jump Flooding steps halve the radius from half the canvas down to
+   * one, the standard walk that lets every texel hear of a seed anywhere on it. \a seeds_over: the
+   * seeds sit at or over the threshold rather than below it -- the Bevel seeds the scalars short
+   * of the half, the Mask Outline seeds whichever side its position and Start From Black make the
+   * inside. JFA is not a local kernel -- the nearest seed of a texel may sit across the canvas --
+   * so every pass of the transform reaches the whole canvas on both axes: the halo and the
+   * per-pass regions of these kinds land on the whole canvas, which the clip trims there anyway,
+   * and their region incrementality is off. */
+  const auto add_jfa_field = [&](const float source_scalar,
+                                 const float threshold,
+                                 const bool seeds_over) {
+    const int whole = std::max(width, height);
+    add(ePaintLayerEffectPass::JfaInit, 0);
+    PaintLayerEffectPass &init = r_passes.last();
+    init.source = ePaintLayerEffectPassSource::Input;
+    init.aux = ePaintLayerEffectPassAux::None;
+    init.reach = whole;
+    init.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+    init.params.x = source_scalar;
+    init.params.y = threshold;
+    init.params.z = seeds_over ? 1.0f : 0.0f;
+    init.params.w = 0.0f;
+    for (int step = whole / 2; step >= 1; step /= 2) {
+      add(ePaintLayerEffectPass::JfaStep, step);
+      PaintLayerEffectPass &jfa = r_passes.last();
+      jfa.source = ePaintLayerEffectPassSource::Previous;
+      jfa.aux = ePaintLayerEffectPassAux::None;
+      jfa.reach = whole;
+      jfa.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+    }
   };
   switch (filter) {
     case MA_PAINT_LAYER_FILTER_NOISE: {
@@ -292,8 +341,557 @@ void BKE_paint_layers_effect_pass_plan(eMaterialPaintLayerFilter filter,
       pass.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
       break;
     }
+    case MA_PAINT_LAYER_FILTER_GLOW: {
+      /* The CPU kernel (`paint_layer_effect_glow_apply`) builds the glow in a private copy of the
+       * buffer: the scene-linear luminance choked by the spread, blurred by the width, screened
+       * under the colour at the opacity. The plan lays the same chain over the ping-pong pair, the
+       * tail reading the original from the input canvas and the blurred band from the pass before
+       * it, so no private copy is kept. */
+      const int mode = effect_pass_param_int(params, PAINT_LAYER_GLOW_MODE);
+      const int blur_width = effect_pass_param_int(params, PAINT_LAYER_GLOW_WIDTH);
+      /* The luminance and the choke are pointwise: the choke clamps the luminance to the glow band,
+       * `m = clamp((luma - spread) / max(1 - spread, 1e-6), 0, 1)`, the spread riding in #aux0, and
+       * its result is the buffer the blur reads. */
+      add(ePaintLayerEffectPass::Luminance, 0);
+      PaintLayerEffectPass &pass = r_passes.last();
+      pass.source = ePaintLayerEffectPassSource::Input;
+      pass.aux = ePaintLayerEffectPassAux::None;
+      pass.reach = 0;
+      /* The mask is meaningless without a reach. */
+      pass.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
+      add(ePaintLayerEffectPass::Choke, 0);
+      PaintLayerEffectPass &choke = r_passes.last();
+      choke.source = ePaintLayerEffectPassSource::Previous;
+      choke.aux = ePaintLayerEffectPassAux::None;
+      choke.reach = 0;
+      /* The mask is meaningless without a reach. */
+      choke.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
+      choke.aux0 = params[PAINT_LAYER_GLOW_SPREAD];
+      /* One box pass is precise; three soften into a gaussian falloff -- the same radii the CPU's
+       * `paint_layer_effect_blur_soft` spends. */
+      const bool precise = mode == PAINT_LAYER_GLOW_PRECISE;
+      const int pairs = precise ? 1 : 3;
+      for (int i = 0; i < pairs; i++) {
+        add_axis_pair(ePaintLayerEffectPass::BlurH,
+                      ePaintLayerEffectPass::BlurV,
+                      effect_pass_clamp_radius(precise ? blur_width : std::max(blur_width / 2, 1),
+                                               width,
+                                               height));
+      }
+      /* The tail screens the blurred band under the colour at the opacity, per channel
+       * `out += tint * (glow * opacity) * (1 - out)`: a black texel lands on the tint, a lit one
+       * keeps its light. The opacity rides in #aux0, the tint in #params (the packing lays a
+       * colour's three channels at its place in the schema order), and it computes its own texel
+       * only, so it reaches nothing. */
+      add(ePaintLayerEffectPass::ScreenTail, 0);
+      PaintLayerEffectPass &tail = r_passes.last();
+      tail.source = ePaintLayerEffectPassSource::Input;
+      tail.aux = ePaintLayerEffectPassAux::Previous;
+      tail.reach = 0;
+      /* The mask is meaningless without a reach. */
+      tail.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
+      tail.aux0 = params[PAINT_LAYER_GLOW_OPACITY];
+      tail.params.x = params[PAINT_LAYER_GLOW_COLOR + 0];
+      tail.params.y = params[PAINT_LAYER_GLOW_COLOR + 1];
+      tail.params.z = params[PAINT_LAYER_GLOW_COLOR + 2];
+      tail.params.w = 0.0f;
+      break;
+    }
+    case MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL: {
+      /* The CPU kernel (`paint_layer_effect_height_to_normal_apply`) is the Sobel gradients of the
+       * height's red channel, alpha-weighted to the neutral where the row has no coverage, encoded
+       * as the tangent-space normal. One 3x3 pass: it reads one texel past on both axes like the
+       * Edge Detect, and the height is a function of the texel, so no pre-pass and no second
+       * buffer. */
+      const float strength = params[PAINT_LAYER_HEIGHT_TO_NORMAL_STRENGTH];
+      float scale = strength;
+      if (effect_pass_param_int(params, PAINT_LAYER_HEIGHT_TO_NORMAL_WORLD_UNITS) != 0) {
+        /* The multiplier is the physical slope instead: the height delta's centimetres against the
+         * texel's own, the texel the wider side of the canvas covers, and the half that turns the
+         * Sobel's doubled gradient into that slope. Without a surface the world units name no
+         * slope, and the normal stays flat. The canvas size is all this reads, which the plan was
+         * given, so the plan can hand the kernel the final number. */
+        const float texel_cm = params[PAINT_LAYER_HEIGHT_TO_NORMAL_SURFACE_SIZE] /
+                               float(std::max(width, height));
+        scale = (texel_cm > 0.0f) ?
+                    0.5f * params[PAINT_LAYER_HEIGHT_TO_NORMAL_HEIGHT_DEPTH] / texel_cm :
+                    0.0f;
+      }
+      /* The normal leans against the slope; the DirectX encoding flips the green. #params names the
+       * convention -- +1 the OpenGL encoding, -1 the DirectX one -- which the kernel negates into
+       * the CPU's own green sign (a flipped green reads `ny = +dh_dv`, an unflipped one `-dh_dv`). */
+      const float green_convention = effect_pass_param_int(params,
+                                                           PAINT_LAYER_HEIGHT_TO_NORMAL_FLIP_GREEN) != 0 ?
+                                         -1.0f :
+                                         1.0f;
+      add(ePaintLayerEffectPass::HeightToNormal3x3, 0);
+      PaintLayerEffectPass &pass = r_passes.last();
+      pass.source = ePaintLayerEffectPassSource::Input;
+      pass.aux = ePaintLayerEffectPassAux::None;
+      pass.reach = 1;
+      pass.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+      pass.aux0 = scale;
+      pass.params.x = green_convention;
+      pass.params.y = 0.0f;
+      pass.params.z = 0.0f;
+      pass.params.w = 0.0f;
+      break;
+    }
+    case MA_PAINT_LAYER_FILTER_PIXELATE: {
+      /* The CPU kernel (`paint_layer_effect_pixelate_apply`) cuts the map into \a amount blocks per
+       * side, a block at least one texel and the last one of a side shorter. One pass: each texel
+       * averages the alpha-weighted colour of the block it belongs to out of the original, so it
+       * reads its own block and nothing else -- no neighbourhood, no halo. The amount rides in
+       * #aux0, the block count per side, and the kernel cuts the canvas into that many blocks per
+       * axis like the CPU does, the last one of a side shorter at the edge. */
+      const int pixels = std::max(effect_pass_param_int(params, PAINT_LAYER_PIXELATE_AMOUNT), 1);
+      add(ePaintLayerEffectPass::BlockAverage, 0);
+      PaintLayerEffectPass &pass = r_passes.last();
+      pass.source = ePaintLayerEffectPassSource::Input;
+      pass.aux = ePaintLayerEffectPassAux::None;
+      pass.reach = 0;
+      /* The mask is meaningless without a reach. */
+      pass.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
+      pass.aux0 = float(pixels);
+      break;
+    }
+    case MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT: {
+      /* The CPU kernel (`paint_layer_effect_channel_split_apply`) samples the row's slot map at the
+       * texel's own UV, bilinearly, and lays one channel of it as a grey. One pass: the slot map is
+       * bound outside the ping-pong pair -- the aux names it, the gather refuses the effect when the
+       * description names no slot image -- and the channel index rides in #aux0. A flat colour
+       * reads its own texel only, so it reaches nothing. */
+      const int channel = std::clamp(
+          effect_pass_param_int(params, PAINT_LAYER_CHANNEL_SPLIT_CHANNEL),
+          int(PAINT_LAYER_CHANNEL_SPLIT_RED),
+          int(PAINT_LAYER_CHANNEL_SPLIT_ALPHA));
+      add(ePaintLayerEffectPass::SlotFetch, 0);
+      PaintLayerEffectPass &pass = r_passes.last();
+      pass.source = ePaintLayerEffectPassSource::Input;
+      pass.aux = ePaintLayerEffectPassAux::Slot;
+      pass.reach = 0;
+      /* The mask is meaningless without a reach. */
+      pass.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
+      pass.aux0 = float(channel);
+      break;
+    }
+    case MA_PAINT_LAYER_FILTER_BEVEL: {
+      /* The CPU kernel (`paint_layer_effect_bevel_apply`) seeds every texel whose scalar -- the
+       * alpha, or the luminance the source names -- sits below one half and walks the distance to
+       * the nearest seed out of them, writing the ramp `clamp(dist / reach, 0, 1)` as a grey into
+       * all three channels, the reach the distance parameter, softened by the smooth blur. The
+       * plan floods the same field with the JFA passes and reads the ramp off it: the Euclid
+       * distance the flood builds is the CPU's own round-corner metric (its 3-4 chamfer walk
+       * normalized by a third), so the GPU bevels round whatever the corner type says -- the
+       * chessboard walk the Angular corner names is no pass of this plan. A row with no seed is
+       * one everywhere on both, the far point of the seed field clamping the ramp to one. */
+      const int source = effect_pass_param_int(params, PAINT_LAYER_BEVEL_SOURCE);
+      const int distance = effect_pass_param_int(params, PAINT_LAYER_BEVEL_DISTANCE);
+      const int smooth = effect_pass_param_int(params, PAINT_LAYER_BEVEL_SMOOTH);
+      const int whole = std::max(width, height);
+      add_jfa_field(float(source), 0.5f, false);
+      /* The ramp reads the field the flooding built: the divisor is the distance parameter, at
+       * least one the way the CPU's own is. #params.y is the Outline band's bend, which the ramp
+       * mode does not read, and #params.z names the ramp mode. */
+      add(ePaintLayerEffectPass::DistEval, 0);
+      PaintLayerEffectPass &ramp = r_passes.last();
+      ramp.source = ePaintLayerEffectPassSource::Previous;
+      ramp.aux = ePaintLayerEffectPassAux::None;
+      ramp.reach = whole;
+      ramp.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+      ramp.params.x = float(std::max(distance, 1));
+      ramp.params.y = 0.0f;
+      ramp.params.z = 0.0f;
+      ramp.params.w = 0.0f;
+      /* The smooth blur the CPU lays over the finished ramp, one pair like a box blur's. */
+      if (smooth > 0) {
+        add_axis_pair(ePaintLayerEffectPass::BlurH,
+                      ePaintLayerEffectPass::BlurV,
+                      effect_pass_clamp_radius(smooth, width, height));
+      }
+      break;
+    }
+    case MA_PAINT_LAYER_FILTER_MASK_OUTLINE: {
+      /* The CPU kernel (`paint_layer_effect_mask_outline_apply`) seeds one side of the border the
+       * threshold crosses in the grey, walks the distance field out of the seeds, and lays the
+       * band `1 - clamp(dist / reach, 0, 1)`, bent toward the smoothstep by the curve shape, on
+       * the side opposite the seeds -- softened by the blur, then tinted premultiplied with the
+       * band as its own alpha. The plan lays the same chain; the seed pass's own rule seeds the
+       * scalar below the threshold, which is the CPU's seed side when Start From Black is on (an
+       * exact `grey == threshold` texel apart) or the position is Inside, and the mirrored one
+       * when the CPU seeds what crosses the threshold -- the one polarity the seed pass names is
+       * the contract here, and no parameter of this plan moves it. The Double position runs the
+       * same single chain, the CPU's single-position walk: its second field seeds the other side
+       * of the border, which the same seed pass cannot name, so the GPU band lies on one side
+       * only. A shape with no texel on the seed side floods nothing, and the band reads as
+       * infinitely far -- no band, the CPU's own unseen walk. */
+      const int source = effect_pass_param_int(params, PAINT_LAYER_MASK_OUTLINE_SOURCE);
+      const float threshold = params[PAINT_LAYER_MASK_OUTLINE_THRESHOLD];
+      const int band_width = effect_pass_param_int(params, PAINT_LAYER_MASK_OUTLINE_WIDTH);
+      const int blur = effect_pass_param_int(params, PAINT_LAYER_MASK_OUTLINE_BLUR);
+      const float shape = params[PAINT_LAYER_MASK_OUTLINE_SHAPE];
+      const bool alpha_source = source == PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA;
+      const int whole = std::max(width, height);
+      /* The seeds are the CPU's inside side, which the position and the Start From Black lay out:
+       * inside is the greys at or under the threshold from black, at or over it otherwise, and the
+       * Inside position seeds the outside instead -- so the seed side crosses the threshold from
+       * above exactly when an Inside position starts from black or an Outside / Double one does
+       * not. The Double position still runs the single chain below, its band on one side only. */
+      const int position = effect_pass_param_int(params, PAINT_LAYER_MASK_OUTLINE_POSITION);
+      const bool start_black = params[PAINT_LAYER_MASK_OUTLINE_START_BLACK] != 0.0f;
+      const bool seeds_over = (position == PAINT_LAYER_MASK_OUTLINE_INSIDE) ? start_black :
+                                                                            !start_black;
+      add_jfa_field(float(source), threshold, seeds_over);
+      /* The band's divisor is the width parameter, at least one like the CPU's own; the bend and
+       * the band mode ride beside it. */
+      add(ePaintLayerEffectPass::DistEval, 0);
+      PaintLayerEffectPass &band = r_passes.last();
+      band.source = ePaintLayerEffectPassSource::Previous;
+      band.aux = ePaintLayerEffectPassAux::None;
+      band.reach = whole;
+      band.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+      band.params.x = float(std::max(band_width, 1));
+      band.params.y = shape;
+      band.params.z = 1.0f;
+      band.params.w = 0.0f;
+      /* The blur the CPU lays over the finished band. */
+      if (blur > 0) {
+        add_axis_pair(ePaintLayerEffectPass::BlurH,
+                      ePaintLayerEffectPass::BlurV,
+                      effect_pass_clamp_radius(blur, width, height));
+      }
+      /* The tint tail turns the blurred band into the premultiplied ring: the colour at the band,
+       * the band as its own alpha. The colour is white when the shape reads the alpha -- the CPU
+       * forces its own white there, the panel hiding the colour and a value left from an earlier
+       * luminance source not tinting the ring. */
+      add(ePaintLayerEffectPass::BandTintTail, 0);
+      PaintLayerEffectPass &tail = r_passes.last();
+      tail.source = ePaintLayerEffectPassSource::Previous;
+      tail.aux = ePaintLayerEffectPassAux::None;
+      tail.reach = 0;
+      /* The mask is meaningless without a reach. */
+      tail.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
+      tail.params2.x = alpha_source ? 1.0f : params[PAINT_LAYER_MASK_OUTLINE_COLOR + 0];
+      tail.params2.y = alpha_source ? 1.0f : params[PAINT_LAYER_MASK_OUTLINE_COLOR + 1];
+      tail.params2.z = alpha_source ? 1.0f : params[PAINT_LAYER_MASK_OUTLINE_COLOR + 2];
+      tail.params2.w = 0.0f;
+      tail.alpha_from_kernel = true;
+      break;
+    }
+    case MA_PAINT_LAYER_FILTER_DROP_SHADOW: {
+      /* The CPU kernel (`paint_layer_effect_drop_shadow_apply`) clones the buffer into the grey
+       * silhouette the source names, grows (a positive spread) or shrinks (a negative one) it by
+       * the extremum pair, blurs it by the size, then reads the clone back at the offset the
+       * angle casts -- past the map's edge there is no silhouette to cast -- and lays the colour
+       * premultiplied by `shadow * opacity * under`, the alpha source keeping the shadow off the
+       * content (`1 - alpha`), the luminance one laying it wherever the silhouette covers. The
+       * plan lays the same chain over the ping-pong pair, the tail reading the original for the
+       * under factor and the blurred silhouette through its aux, its own alpha written. */
+      const int source = effect_pass_param_int(params, PAINT_LAYER_DROP_SHADOW_SOURCE);
+      const float angle_rad = params[PAINT_LAYER_DROP_SHADOW_ANGLE] * float(M_PI) / 180.0f;
+      const int distance = effect_pass_param_int(params, PAINT_LAYER_DROP_SHADOW_DISTANCE);
+      const int size = effect_pass_param_int(params, PAINT_LAYER_DROP_SHADOW_SIZE);
+      const int spread = effect_pass_param_int(params, PAINT_LAYER_DROP_SHADOW_SPREAD);
+      const float opacity = params[PAINT_LAYER_DROP_SHADOW_OPACITY];
+      add(ePaintLayerEffectPass::Silhouette, 0);
+      PaintLayerEffectPass &shape = r_passes.last();
+      shape.source = ePaintLayerEffectPassSource::Input;
+      shape.aux = ePaintLayerEffectPassAux::None;
+      shape.reach = 0;
+      /* The mask is meaningless without a reach. */
+      shape.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
+      shape.params.x = float(source);
+      shape.params.y = 0.0f;
+      shape.params.z = 0.0f;
+      shape.params.w = 0.0f;
+      /* The spread's extremum pair, dilating when the spread grows the silhouette and eroding
+       * when it shrinks it, the radius its absolute value; zero of either leaves it as it is. */
+      if (spread != 0) {
+        add_axis_pair(ePaintLayerEffectPass::ExtremumH,
+                      ePaintLayerEffectPass::ExtremumV,
+                      effect_pass_clamp_radius(std::abs(spread), width, height),
+                      spread > 0);
+      }
+      if (size > 0) {
+        add_axis_pair(ePaintLayerEffectPass::BlurH,
+                      ePaintLayerEffectPass::BlurV,
+                      effect_pass_clamp_radius(size, width, height));
+      }
+      add(ePaintLayerEffectPass::OffsetTintTail, 0);
+      PaintLayerEffectPass &tail = r_passes.last();
+      tail.source = ePaintLayerEffectPassSource::Input;
+      tail.aux = ePaintLayerEffectPassAux::Previous;
+      /* The tail reads the blurred silhouette the offset lands on, so its output depends on the
+       * plan's input that far back: the reach the cast moves, the larger of the two axes'
+       * offsets, rounded half up like the CPU's own. The other axis pads a little wide, which
+       * the clip trims. */
+      const int offset_x = int(std::floor(std::cos(angle_rad) * float(distance) + 0.5f));
+      const int offset_y = int(std::floor(std::sin(angle_rad) * float(distance) + 0.5f));
+      tail.reach = std::max(std::abs(offset_x), std::abs(offset_y));
+      tail.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+      /* The cast's direction and the opacity ride in #params, the tint and the under flag in
+       * #params2: one when the alpha source keeps the shadow off the content, zero when the
+       * luminance one lays it wherever the silhouette covers. */
+      tail.params.x = std::cos(angle_rad);
+      tail.params.y = std::sin(angle_rad);
+      tail.params.z = float(distance);
+      tail.params.w = opacity;
+      tail.params2.x = params[PAINT_LAYER_DROP_SHADOW_COLOR + 0];
+      tail.params2.y = params[PAINT_LAYER_DROP_SHADOW_COLOR + 1];
+      tail.params2.z = params[PAINT_LAYER_DROP_SHADOW_COLOR + 2];
+      tail.params2.w = (source == PAINT_LAYER_DROP_SHADOW_SOURCE_ALPHA) ? 1.0f : 0.0f;
+      tail.alpha_from_kernel = true;
+      break;
+    }
+    case MA_PAINT_LAYER_FILTER_BLUR_SLOPE: {
+      /* The CPU kernel (`paint_layer_effect_blur_slope_apply`) builds the driver -- the input's
+       * luminance, blurred first when the source mode is the previous input and the blur is on,
+       * or the seeded value noise the tilling tiles -- re-graded by the position and the
+       * contrast, then walks the gradient's direction over the original: the taps the quality
+       * names, spanning the intensity, blended by the mode. The GPU splits it the same way, the
+       * walk reading the original through its aux -- the taps are not a pass output, so they grow
+       * no region; the gradient the walk follows reads one texel past of the driver on both
+       * axes, which is the reach. A flat slope reads as it is on both, the taps of a walk whose
+       * driver is flat being the texel's own. */
+      const int source_mode = effect_pass_param_int(params, PAINT_LAYER_BLUR_SLOPE_SOURCE_MODE);
+      const int source_blur = effect_pass_param_int(params, PAINT_LAYER_BLUR_SLOPE_SOURCE_BLUR);
+      const float position = params[PAINT_LAYER_BLUR_SLOPE_SOURCE_POSITION];
+      const float contrast = params[PAINT_LAYER_BLUR_SLOPE_SOURCE_CONTRAST];
+      const float seed = params[PAINT_LAYER_BLUR_SLOPE_SEED];
+      const float tilling = params[PAINT_LAYER_BLUR_SLOPE_SOURCE_TILLING];
+      const int quality = effect_pass_param_int(params, PAINT_LAYER_BLUR_SLOPE_QUALITY);
+      const int blending = effect_pass_param_int(params, PAINT_LAYER_BLUR_SLOPE_BLENDING);
+      const float intensity = params[PAINT_LAYER_BLUR_SLOPE_INTENSITY];
+      /* The blur rides only on the input mode: the noise has no detail of its own to soften, the
+       * CPU blurring inside the previous-input branch alone. */
+      const bool driver_blurred = source_mode == PAINT_LAYER_SLOPE_SOURCE_PREVIOUS_INPUT &&
+                                  source_blur > 0;
+      if (driver_blurred) {
+        add_axis_pair(ePaintLayerEffectPass::BlurH,
+                      ePaintLayerEffectPass::BlurV,
+                      effect_pass_clamp_radius(source_blur, width, height));
+      }
+      add(ePaintLayerEffectPass::SlopeDriver, 0);
+      PaintLayerEffectPass &driver = r_passes.last();
+      /* The driver reads the blurred input when the blur pair ran and the input itself when it
+       * did not. */
+      driver.source = driver_blurred ? ePaintLayerEffectPassSource::Previous :
+                                       ePaintLayerEffectPassSource::Input;
+      driver.aux = ePaintLayerEffectPassAux::None;
+      driver.reach = 0;
+      /* The mask is meaningless without a reach. */
+      driver.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
+      /* The mode is the CPU's own enum, the noise zero and the previous input one. */
+      driver.aux0 = float(source_mode);
+      /* The re-grade and the noise's seed and tiles ride in #params, in the contract's order. */
+      driver.params.x = position;
+      driver.params.y = contrast;
+      driver.params.z = seed;
+      driver.params.w = tilling;
+      add(ePaintLayerEffectPass::SlopeWalk, std::clamp(quality, 1, 32));
+      PaintLayerEffectPass &walk = r_passes.last();
+      walk.source = ePaintLayerEffectPassSource::Previous;
+      walk.aux = ePaintLayerEffectPassAux::Original;
+      walk.reach = 1;
+      walk.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+      /* The walk's radius is the tap count the quality names, clamped like the CPU's own; the
+       * blend mode and the span ride in #params. */
+      walk.params.x = float(blending);
+      walk.params.y = intensity;
+      walk.params.z = 0.0f;
+      walk.params.w = 0.0f;
+      break;
+    }
+    case MA_PAINT_LAYER_FILTER_COLOR_MATCH: {
+      /* The CPU kernel (`paint_layer_effect_color_match_apply`) moves every texel by the HSL
+       * distance between the target colour and the source one -- the input's own alpha-weighted
+       * average, or the colour a pick laid over the schema -- with the optional per-texel jitter on
+       * top. The average is a statistic of the whole map, so the plan reduces it first: a pyramid of
+       * alpha-weighted colour sums, the first level halving the canvas and every step after it
+       * halving one more, down to the 1x1 apex the grade reads through its aux. A reduction is no
+       * local kernel either -- the sum of any block is fed by the whole map -- so every pass of the
+       * chain reaches the whole canvas on both axes and the region incrementality is off, the JFA's
+       * own policy: the halo and the per-pass regions of these kinds land on the whole canvas, which
+       * the clip trims there anyway. */
+      /* The schema packs the two colours across three slots each, so the scalars after them sit at
+       * the packed positions the constants above name: the picked flag leads, then the source and
+       * the target colours, then the variation switch with its three amounts riding beside it in
+       * the effect's own parameters (in the schema order the correction pass is given them). */
+      const bool picked = params[PAINT_LAYER_COLOR_MATCH_SOURCE_PICKED] != 0.0f;
+      if (picked) {
+        /* The picked branch is the CPU's: the frozen contract lays the picked colour in the grade's
+         * #params2, whose consumer names that slot the match's second colour while the CPU plays it
+         * as the source the match moves *from* -- the one reading this file cannot check against the
+         * CPU kernel alone. An empty plan refuses the GPU path the same way an unflagged kind is,
+         * and the CPU lays the picked match exactly as it always has. */
+        break;
+      }
+      const int whole = std::max(width, height);
+      /* The first level is the canvas halved; a step's radius names the level it makes, and the
+       * chain runs while that level still holds a texel -- the last one is the 1x1 apex. */
+      add(ePaintLayerEffectPass::ReduceStart, 1);
+      PaintLayerEffectPass &start = r_passes.last();
+      start.source = ePaintLayerEffectPassSource::Input;
+      start.aux = ePaintLayerEffectPassAux::None;
+      start.reach = whole;
+      start.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+      for (int level = 2; (whole >> level) >= 1; level++) {
+        add(ePaintLayerEffectPass::ReduceStep, level);
+        PaintLayerEffectPass &step = r_passes.last();
+        step.source = ePaintLayerEffectPassSource::Previous;
+        step.aux = ePaintLayerEffectPassAux::None;
+        step.reach = whole;
+        step.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+      }
+      /* The grade reads the original for the colours it moves and the pyramid's apex for the
+       * average it moves them by -- the whole-map field the reduce passes left, outside the
+       * ping-pong pair, the same role the flood field plays for the Fill Area's passes. The target
+       * colour and the variation switch ride in #params, in the schema order; #params2 stays empty,
+       * the picked colour's slot the reduce branch does not name. */
+      add(ePaintLayerEffectPass::MatchGrade, 0);
+      PaintLayerEffectPass &grade = r_passes.last();
+      grade.source = ePaintLayerEffectPassSource::Input;
+      grade.aux = ePaintLayerEffectPassAux::Field;
+      grade.reach = 0;
+      /* The mask is meaningless without a reach. */
+      grade.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
+      grade.params.x = params[COLOR_MATCH_PACKED_TARGET + 0];
+      grade.params.y = params[COLOR_MATCH_PACKED_TARGET + 1];
+      grade.params.z = params[COLOR_MATCH_PACKED_TARGET + 2];
+      grade.params.w = params[COLOR_MATCH_PACKED_VARIATION];
+      /* The variation's three amounts ride in #params2 -- the shader reads them there, the packed
+       * first float4 the correction pass pushes carrying the picked flag and the source colour
+       * instead. */
+      grade.params2.x = params[COLOR_MATCH_PACKED_VARIATION + 1];
+      grade.params2.y = params[COLOR_MATCH_PACKED_VARIATION + 2];
+      grade.params2.z = params[COLOR_MATCH_PACKED_VARIATION + 3];
+      grade.params2.w = 0.0f;
+      break;
+    }
+    case MA_PAINT_LAYER_FILTER_FILL_AREA: {
+      /* The CPU kernel (`paint_layer_effect_fill_area_apply`) classifies the regions a continuous
+       * border closes off -- the border the scalar's threshold crosses, the background the one an
+       * open border leaves reachable from the map's edge -- then fills them with the border's own
+       * colours diffused inward, or the solid colour the mode names, and softens the result by the
+       * blur. The plan floods the same classification: the label field stamps the border and the
+       * map's edge the background zero and every other texel its own coordinates, the flooding steps
+       * swallow the regions the edge reaches, the diffusion walks the border's colours inward one
+       * pass at a time, and the tail writes the fill out with the coverage the flooding named. The
+       * flooding is not a local kernel -- a region's label is fed by the whole map -- so the init
+       * and the steps reach the whole canvas on both axes and the region incrementality is off, the
+       * JFA's own policy; the diffusion reads its four neighbours only, one texel of reach. */
+      /* The schema packs the fill colour across three slots, so the blur and the iterations after
+       * it sit at the packed positions the constants above name; the scalars before it keep the
+       * enum's own index. */
+      const int source = effect_pass_param_int(params, PAINT_LAYER_FILL_AREA_SOURCE);
+      const float threshold = params[PAINT_LAYER_FILL_AREA_THRESHOLD];
+      const bool debug = params[PAINT_LAYER_FILL_AREA_DEBUG] != 0.0f;
+      const int uv_border = effect_pass_param_int(params, PAINT_LAYER_FILL_AREA_UV_BORDER);
+      const int color_mode = effect_pass_param_int(params, PAINT_LAYER_FILL_AREA_COLOR_MODE);
+      const int blur = effect_pass_param_int(params, FILL_AREA_PACKED_BLUR);
+      const int iterations = effect_pass_param_int(params, FILL_AREA_PACKED_ITERATIONS);
+      /* The parameterizations the flood cannot express are the CPU's, each refused with an empty
+       * plan the gather falls back on: the debug lays a grey ramp of the CPU's own region numbers,
+       * which the flooding's labels do not name; the largest-region classification asks a reduction
+       * over the regions' areas, outside this phase's walks (the edge-based one is the flood's to
+       * name, the map's edge stamped the background); and the source mode with no iteration has
+       * nothing to reach in with -- the CPU clears the layer, which no chain of these passes writes.
+       * The solid mode needs no diffusion, so it runs the flood straight into the tail. */
+      if (debug || uv_border != PAINT_LAYER_FILL_AREA_UV_BORDER_IGNORE ||
+          (color_mode == PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE && iterations <= 0))
+      {
+        break;
+      }
+      const int whole = std::max(width, height);
+      /* The label field's seeding: #params names the scalar the border is read at (the alpha, or
+       * the luminance the source names -- a mask item never dispatches here, the mask form refusing
+       * the GPU path by its kind) and the threshold the border crosses. The polarity is the CPU's
+       * own fixed one: a scalar at or over the threshold is border. */
+      add(ePaintLayerEffectPass::FloodInit, 0);
+      PaintLayerEffectPass &init = r_passes.last();
+      init.source = ePaintLayerEffectPassSource::Input;
+      init.aux = ePaintLayerEffectPassAux::None;
+      init.reach = whole;
+      init.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+      init.params.x = float(source);
+      init.params.y = threshold;
+      init.params.z = 0.0f;
+      init.params.w = 0.0f;
+      /* The flooding is the raster sweep pair the shader runs -- one pass walking the rows, one the
+       * columns, each a whole line to the thread that owns it -- because a jump flooding step
+       * strides past a wall thinner than its radius, and a wall is exactly what a region is. Every
+       * pair turns the wavefront once, so sixteen of them flood a background the edge reaches
+       * through sixteen turns; a more winding one stays enclosed, the GPU's own bound the CPU's
+       * serial walk does not have. The field is global either way -- the reaches stay whole-canvas
+       * -- and the mode rides in #params, the radius left empty. */
+      constexpr int FILL_AREA_SWEEP_PAIRS = 16;
+      for (int sweep = 0; sweep < FILL_AREA_SWEEP_PAIRS; sweep++) {
+        for (const float mode : {1.0f, 2.0f}) {
+          add(ePaintLayerEffectPass::FloodStep, 0);
+          PaintLayerEffectPass &flood = r_passes.last();
+          flood.source = ePaintLayerEffectPassSource::Previous;
+          flood.aux = ePaintLayerEffectPassAux::None;
+          flood.reach = whole;
+          flood.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+          flood.params.x = mode;
+          flood.params.y = 0.0f;
+          flood.params.z = 0.0f;
+          flood.params.w = 0.0f;
+        }
+      }
+      /* The diffusion, the source mode's alone: the first step reads the original, which is where
+       * the CPU seeds its walk -- the border texels' own (unpremultiplied) colours, the enclosed
+       * ones at zero -- and every step after it reads the pass before it, the CPU's ping-pong. The
+       * radius names the iteration; the label field rides the aux, so a step keeps its neighbours
+       * inside the region they belong to. */
+      if (color_mode == PAINT_LAYER_FILL_AREA_COLOR_MODE_SOURCE) {
+        for (int pass = 1; pass <= iterations; pass++) {
+          add(ePaintLayerEffectPass::DiffuseStep, pass);
+          PaintLayerEffectPass &diffuse = r_passes.last();
+          diffuse.source = (pass == 1) ? ePaintLayerEffectPassSource::Input :
+                                         ePaintLayerEffectPassSource::Previous;
+          diffuse.aux = ePaintLayerEffectPassAux::Field;
+          diffuse.reach = 1;
+          diffuse.axis_mask = PAINT_LAYER_EFFECT_AXIS_XY;
+        }
+      }
+      /* The tail writes the fill out ahead of the blur pair, the CPU's own order: the diffused
+       * colour (or the solid one in #params2) on the enclosed texels, everything else empty, so
+       * the border's own colours do not smear into the softened edge. The coverage it softens
+       * beside the colour is the tail's to compute from the field -- the box window sum of the
+       * enclosed indicator, the two axis passes composed -- with the blur riding in #radius; the
+       * alpha it writes then survives the pair, whose store carries the centre texel's alpha
+       * through and touches the colour only. */
+      add(ePaintLayerEffectPass::FillTail, blur);
+      PaintLayerEffectPass &tail = r_passes.last();
+      tail.source = ePaintLayerEffectPassSource::Previous;
+      tail.aux = ePaintLayerEffectPassAux::Field;
+      tail.reach = 0;
+      /* The mask is meaningless without a reach. */
+      tail.axis_mask = PAINT_LAYER_EFFECT_AXIS_NONE;
+      tail.params.x = float(color_mode);
+      tail.params.y = 0.0f;
+      tail.params.z = 0.0f;
+      tail.params.w = 0.0f;
+      tail.params2.x = params[FILL_AREA_PACKED_COLOR + 0];
+      tail.params2.y = params[FILL_AREA_PACKED_COLOR + 1];
+      tail.params2.z = params[FILL_AREA_PACKED_COLOR + 2];
+      tail.params2.w = 0.0f;
+      tail.alpha_from_kernel = true;
+      /* The blur the CPU lays over the finished fill: the colour, the tail's alpha riding along. */
+      if (blur > 0) {
+        add_axis_pair(ePaintLayerEffectPass::BlurH,
+                      ePaintLayerEffectPass::BlurV,
+                      effect_pass_clamp_radius(blur, width, height));
+      }
+      break;
+    }
     default:
-      /* Not a #PAINT_LAYER_KIND_GPU_COMPUTED kind: an empty plan. The caller refuses it first. */
+      /* Not a #PAINT_LAYER_KIND_GPU_COMPUTED kind, so an empty plan -- the cases above are every
+       * kind the registry flags. What is left refuses the GPU path first: the pointwise filters the
+       * preview's apply_filter branch lays instead of this pass chain, and the parameterizations the
+       * cases above refuse with their own empty plan (a picked Color Match source, the Fill Area's
+       * largest-region classification, its debug ramp and its iteration-less source mode). */
       break;
   }
   const int count = int(r_passes.size());
@@ -336,6 +934,26 @@ int BKE_paint_layers_effect_halo(eMaterialPaintLayerFilter filter,
 
 EffectReach BKE_paint_layers_effect_reach(eMaterialPaintLayerFilter filter, const float *params)
 {
+  /* The coverage culling reads this as what the CPU *kernel* depends on, not what a GPU pass chain
+   * reads: these kinds have a plan now, but their result at a texel is fed by the whole canvas (a
+   * distance field, a flood, a statistic) or by the canvas size (the block grid, the UV a slot is
+   * sampled at, the world scale), and a plan evaluated at the one-texel bound below would classify
+   * them as pointwise or local and let a stroke elsewhere skip their bake. */
+  switch (filter) {
+    case MA_PAINT_LAYER_FILTER_GLOW:
+    case MA_PAINT_LAYER_FILTER_BEVEL:
+    case MA_PAINT_LAYER_FILTER_COLOR_MATCH:
+    case MA_PAINT_LAYER_FILTER_DROP_SHADOW:
+    case MA_PAINT_LAYER_FILTER_MASK_OUTLINE:
+    case MA_PAINT_LAYER_FILTER_FILL_AREA:
+    case MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL:
+    case MA_PAINT_LAYER_FILTER_PIXELATE:
+    case MA_PAINT_LAYER_FILTER_BLUR_SLOPE:
+    case MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT:
+      return EffectReach::WholeMap;
+    default:
+      break;
+  }
   /* The plan's one-texel size bound only clamps a radius upwards to one, so it classifies every
    * kind without measuring a canvas. An empty plan is a kind the plan does not describe (a
    * whole-map pass such as a Color Match) and never counts as pointwise. */
@@ -628,6 +1246,13 @@ uint64_t BKE_paint_layers_effect_input_scalar_hash(
                               input_entry.anchor_point_reader,
                               input_entry.anchor_point_target,
                               input_entry.anchor_point_hash);
+  }
+  /* The slot map a Channel Split's kernel samples itself stands outside the input's maps: no map
+   * version of the described input carries its pixels, so its identity keys the entry -- assigning
+   * another image must serve a result computed from the new one, the way the CPU effect hash folds
+   * it (#paint_layer_effect_hash_mix_slot). The session uid is the fold both keys use. */
+  if (input_entry.slot_image != nullptr) {
+    hash = effect_hash_u64(hash, input_entry.slot_image->id.session_uid);
   }
   return hash;
 }

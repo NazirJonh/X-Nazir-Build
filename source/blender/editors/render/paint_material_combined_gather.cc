@@ -920,6 +920,27 @@ static_assert(int(ePaintLayerEffectPass::UnsharpTail) == 8, "COMBINED_PASS_UNSHA
 static_assert(int(ePaintLayerEffectPass::HighPassTail) == 9, "COMBINED_PASS_HIGH_PASS_TAIL");
 static_assert(int(ePaintLayerEffectPass::BlurDirectional) == 10, "COMBINED_PASS_BLUR_DIRECTIONAL");
 static_assert(int(ePaintLayerEffectPass::Fxaa) == 11, "COMBINED_PASS_FXAA");
+static_assert(int(ePaintLayerEffectPass::Choke) == 12, "COMBINED_PASS_CHOKE");
+static_assert(int(ePaintLayerEffectPass::ScreenTail) == 13, "COMBINED_PASS_SCREEN_TAIL");
+static_assert(int(ePaintLayerEffectPass::BlockAverage) == 14, "COMBINED_PASS_BLOCK_AVERAGE");
+static_assert(int(ePaintLayerEffectPass::HeightToNormal3x3) == 15,
+              "COMBINED_PASS_HEIGHT_TO_NORMAL_3X3");
+static_assert(int(ePaintLayerEffectPass::SlotFetch) == 16, "COMBINED_PASS_SLOT_FETCH");
+static_assert(int(ePaintLayerEffectPass::JfaInit) == 17, "COMBINED_PASS_JFA_INIT");
+static_assert(int(ePaintLayerEffectPass::JfaStep) == 18, "COMBINED_PASS_JFA_STEP");
+static_assert(int(ePaintLayerEffectPass::DistEval) == 19, "COMBINED_PASS_DIST_EVAL");
+static_assert(int(ePaintLayerEffectPass::Silhouette) == 20, "COMBINED_PASS_SILHOUETTE");
+static_assert(int(ePaintLayerEffectPass::OffsetTintTail) == 21, "COMBINED_PASS_OFFSET_TINT_TAIL");
+static_assert(int(ePaintLayerEffectPass::SlopeDriver) == 22, "COMBINED_PASS_SLOPE_DRIVER");
+static_assert(int(ePaintLayerEffectPass::SlopeWalk) == 23, "COMBINED_PASS_SLOPE_WALK");
+static_assert(int(ePaintLayerEffectPass::BandTintTail) == 24, "COMBINED_PASS_BAND_TINT_TAIL");
+static_assert(int(ePaintLayerEffectPass::ReduceStart) == 25, "COMBINED_PASS_REDUCE_START");
+static_assert(int(ePaintLayerEffectPass::ReduceStep) == 26, "COMBINED_PASS_REDUCE_STEP");
+static_assert(int(ePaintLayerEffectPass::MatchGrade) == 27, "COMBINED_PASS_MATCH_GRADE");
+static_assert(int(ePaintLayerEffectPass::FloodInit) == 28, "COMBINED_PASS_FLOOD_INIT");
+static_assert(int(ePaintLayerEffectPass::FloodStep) == 29, "COMBINED_PASS_FLOOD_STEP");
+static_assert(int(ePaintLayerEffectPass::DiffuseStep) == 30, "COMBINED_PASS_DIFFUSE_STEP");
+static_assert(int(ePaintLayerEffectPass::FillTail) == 31, "COMBINED_PASS_FILL_TAIL");
 
 /** What a capture job produces: a content pair, a mask rendered as content, or a mask slot. The
  * plan itself lives in BKE, so its ordering and dedup rules are testable without a GPU. */
@@ -1046,6 +1067,11 @@ void combined_preview_gpu_free()
   GPU_SHADER_FREE_SAFE(gpu_shaders.display);
   GPU_SHADER_FREE_SAFE(gpu_shaders.shade);
   gpu_shaders.created = false;
+  /* The verify accumulators are static, so their destructors would run at process exit, after the
+   * guarded allocator has shut down; release them here, while it is still alive. */
+  for (Vector<float> &channel : gpu_verify_channels) {
+    channel.clear_and_shrink();
+  }
   /* The projection surface map's textures, for the same reason as the effect cache below. */
   combined_projection_gpu_free();
   /* The GPU effect cache owns textures of its own, which outlive one frame; they have to go while

@@ -289,6 +289,63 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 }
 
 /* -------------------------------------------------------------------- */
+/** \name Texel Hash
+ *
+ * The grain every texel-noise family reads, ported from `paint_layer_texel_hash_uniform` and the
+ * `BLI_hash_int_2d` it calls: Jenkins' lookup3 `final` over the two texel coordinates. Every step is
+ * uint32 arithmetic with the same constants as the C++, so the sequence cannot drift between the CPU
+ * kernel, the bake and this pass; the shifts are never by zero, so no backend's undefined shift rule
+ * is reached. Deband and a Color Match's variation read the same family, which is why this is a
+ * section of its own rather than part of the noise below.
+ * \{ */
+
+/** `rot(x, k)` of `BLI_hash.h`. */
+uint texel_hash_rot(uint x, uint k)
+{
+  return (x << k) | (x >> (32u - k));
+}
+
+/** `BLI_hash_int_2d`: the `final` mix of the two coordinates and the fixed seed. */
+uint texel_hash_int_2d(uint kx, uint ky)
+{
+  uint a = 0xdeadbeefu + (2u << 2u) + 13u;
+  uint b = a;
+  uint c = a;
+  a += kx;
+  b += ky;
+  c ^= b;
+  c -= texel_hash_rot(b, 14u);
+  a ^= c;
+  a -= texel_hash_rot(c, 11u);
+  b ^= a;
+  b -= texel_hash_rot(a, 25u);
+  c ^= b;
+  c -= texel_hash_rot(b, 16u);
+  a ^= c;
+  a -= texel_hash_rot(c, 4u);
+  b ^= a;
+  b -= texel_hash_rot(a, 14u);
+  c ^= b;
+  c -= texel_hash_rot(b, 24u);
+  return c;
+}
+
+/**
+ * `paint_layer_texel_hash_uniform`: one uniform in [0, 1) of the texel hash family, the salt keeping
+ * the passes and the channels apart and the seed moving the pattern. The coordinates are those of the
+ * texture being grained, not a normalized position: the grain is a field over the canvas, so a bake
+ * at another resolution shows the same pattern resampled rather than a different one.
+ */
+float texel_hash_uniform(int2 texel, int seed, uint salt)
+{
+  const uint kx = uint(texel.x) + salt * 7919u + uint(seed) * 6151u;
+  const uint ky = uint(texel.y);
+  return float(texel_hash_int_2d(kx, ky)) / 4294967296.0f;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Filters
  *
  * The filters of an adjustment, a correction or a mask item (`composite_filter_color`), at full
@@ -309,6 +366,8 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_CURVES 12
 #define COMBINED_FILTER_COLOR_BALANCE 13
 #define COMBINED_FILTER_EXPOSURE 23
+#define COMBINED_FILTER_DEBAND 24
+#define COMBINED_FILTER_NORMAL_CONVERT 26
 #define COMBINED_FILTER_CHANNEL_MIXER 27
 #define COMBINED_FILTER_HISTOGRAM_SCAN 30
 #define COMBINED_FILTER_HISTOGRAM_SHIFT 31
@@ -316,6 +375,17 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 #define COMBINED_FILTER_CONTRAST_LUMINOSITY 38
 #define COMBINED_FILTER_HEIGHT_ADJUST 39
 #define COMBINED_FILTER_HSL_PERSPECTIVE 41
+
+/* The modes the Deband and the Normal Convert read in their first parameter, the values of
+ * `PaintLayerDebandMode` and `PaintLayerNormalConvertMode`. */
+#define COMBINED_DEBAND_DEBAND 0
+#define COMBINED_DEBAND_DITHER 1
+#define COMBINED_NORMAL_CONVERT_DX_TO_GL 0
+#define COMBINED_NORMAL_CONVERT_GL_TO_DX 1
+#define COMBINED_NORMAL_CONVERT_REBUILD_Z 2
+#define COMBINED_NORMAL_CONVERT_CLEAR_Z 3
+#define COMBINED_NORMAL_CONVERT_LINEAR_TO_SRGB 4
+#define COMBINED_NORMAL_CONVERT_SRGB_TO_LINEAR 5
 
 float levels_channel(float value, float4 p0, float4 p1)
 {
@@ -460,12 +530,54 @@ float4 apply_color_ramp(sampler2D lut_tx, float3 rgb, bool use_nearest)
 /** \} */
 
 /**
+ * The scalar `linearrgb_to_srgb` / `srgb_to_linearrgb` of `BLI_math_color`, ported verbatim (both
+ * branches) with the `effect_` prefix so they cannot collide with the display-encoding helpers of
+ * `gpu_shader_common_color_utils.glsl`. A High Pass takes its detail through them, and the Normal
+ * Convert's colour-space modes run them in `apply_filter`, so they stand above it: the shader and
+ * the CPU kernel must agree on the piecewise curve, including the low-value linear branch.
+ */
+float effect_linearrgb_to_srgb(float c)
+{
+  if (c < 0.0031308f) {
+    return (c < 0.0f) ? 0.0f : c * 12.92f;
+  }
+  return 1.055f * pow(c, 1.0f / 2.4f) - 0.055f;
+}
+
+float effect_srgb_to_linearrgb(float c)
+{
+  if (c < 0.04045f) {
+    return (c < 0.0f) ? 0.0f : c * (1.0f / 12.92f);
+  }
+  return pow((c + 0.055f) * (1.0f / 1.055f), 2.4f);
+}
+
+/** One channel of the Deband, the loop body of the CPU's `paint_layer_deband_apply`
+ * (`paint_layers_kind.cc`): the Dither mode rounds the value through the quantizer with the raw TPDF
+ * half a step in, the Deband mode adds the triangle widened by the CPU's
+ * #PAINT_LAYER_DEBAND_NOISE_SCALE (1.5). The clamp is the CPU's own. */
+float deband_channel_apply(float value, float u1, float u2, int mode, int levels, float step)
+{
+  if (mode == COMBINED_DEBAND_DITHER) {
+    return clamp(floor(value * float(levels) + (u1 - u2) + 0.5f) / float(levels), 0.0f, 1.0f);
+  }
+  return clamp(value + (u1 - u2) * step * 1.5f, 0.0f, 1.0f);
+}
+
+/**
  * One filter at full strength. `.xyz` is the filtered colour and `.w` the strength multiplier the
  * CPU's `composite_filter_color` returns: a Color Ramp's stop alpha when Affect Alpha is set, one
  * for every other filter and for a ramp that ignores it. The Color Balance reads its exponent
- * triple from `p2`; every other filter leaves it unused.
+ * triple from `p2`; every other filter leaves it unused. \a texel is the caller's own texel: the
+ * grain of a Deband keys on it, as the CPU passes `texel_xy` to the same call.
  */
-float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, float4 p2, sampler2D lut_tx)
+float4 apply_filter(int filter_kind,
+                    int2 texel,
+                    float3 rgb,
+                    float4 p0,
+                    float4 p1,
+                    float4 p2,
+                    sampler2D lut_tx)
 {
   float3 result = rgb;
   float strength = 1.0f;
@@ -676,67 +788,78 @@ float4 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1, float4 p2
                       clamp(mixed_z, 0.0f, 1.0f));
       break;
     }
+    case COMBINED_FILTER_DEBAND: {
+      /* The CPU's `paint_layer_deband_apply` (`paint_layers_kind.cc`): the addon's TPDF, two
+       * independent uniforms making a triangular density of the quantization step's own width, one
+       * pair per channel and texel. The uniforms come from the texel hash family above, keyed by
+       * the texel's own coordinates -- the grain is a field over the canvas, so a bake and this pass
+       * read the same one, which is why the texel travels with the call. `p0` is the schema order:
+       * `.x` the mode, `.y` the bit depth, `.z` the seed. The salt `channel * 2 + pass` keeps the
+       * two passes and the three channels apart, the CPU's `paint_layer_deband_noise`. */
+      const int mode = int(p0.x);
+      const int levels = (1 << int(p0.y)) - 1;
+      const float step = 1.0f / float(levels);
+      const int seed = int(p0.z);
+      const float u1_x = texel_hash_uniform(texel, seed, 1u);
+      const float u2_x = texel_hash_uniform(texel, seed, 2u);
+      const float u1_y = texel_hash_uniform(texel, seed, 3u);
+      const float u2_y = texel_hash_uniform(texel, seed, 4u);
+      const float u1_z = texel_hash_uniform(texel, seed, 5u);
+      const float u2_z = texel_hash_uniform(texel, seed, 6u);
+      /* Per component: a dynamic subscript of a vector is not an overload every backend has. */
+      result = float3(deband_channel_apply(rgb.x, u1_x, u2_x, mode, levels, step),
+                      deband_channel_apply(rgb.y, u1_y, u2_y, mode, levels, step),
+                      deband_channel_apply(rgb.z, u1_z, u2_z, mode, levels, step));
+      break;
+    }
+    case COMBINED_FILTER_NORMAL_CONVERT: {
+      /* The CPU's `paint_layer_normal_convert_apply` (`paint_layers_kind.cc`): the mode rides in
+       * `p0.x`, the Normalize switch in `p0.y`. The two encodings flip the green (the same conversion
+       * either way), Rebuild Z re-encodes the blue the unit length leaves, Clear Z drops it, and the
+       * two colour-space modes run the IEC 61966-2.1 broken line -- the same `BLI_math_color`
+       * scalars the High Pass tail reads. */
+      const int mode = int(p0.x);
+      if (mode == COMBINED_NORMAL_CONVERT_DX_TO_GL || mode == COMBINED_NORMAL_CONVERT_GL_TO_DX) {
+        result.y = 1.0f - rgb.y;
+      }
+      else if (mode == COMBINED_NORMAL_CONVERT_REBUILD_Z) {
+        /* The two encoded xy, decoded; the blue the unit length leaves, encoded again. */
+        const float vx = rgb.x * 2.0f - 1.0f;
+        const float vy = rgb.y * 2.0f - 1.0f;
+        const float z = sqrt(max(1.0f - vx * vx - vy * vy, 0.0f));
+        result.z = (z + 1.0f) * 0.5f;
+      }
+      else if (mode == COMBINED_NORMAL_CONVERT_CLEAR_Z) {
+        result.z = 0.0f;
+      }
+      else if (mode == COMBINED_NORMAL_CONVERT_LINEAR_TO_SRGB) {
+        result = float3(effect_linearrgb_to_srgb(rgb.x),
+                        effect_linearrgb_to_srgb(rgb.y),
+                        effect_linearrgb_to_srgb(rgb.z));
+      }
+      else if (mode == COMBINED_NORMAL_CONVERT_SRGB_TO_LINEAR) {
+        result = float3(effect_srgb_to_linearrgb(rgb.x),
+                        effect_srgb_to_linearrgb(rgb.y),
+                        effect_srgb_to_linearrgb(rgb.z));
+      }
+      /* The switch's default leaves the colour alone, and the Normalize switch runs whatever the
+       * mode wrote: the decoded vector re-laid on the unit sphere, a zero vector keeping its place
+       * (the CPU's floor keeps the division finite). */
+      if (int(p0.y) != 0) {
+        const float vx = result.x * 2.0f - 1.0f;
+        const float vy = result.y * 2.0f - 1.0f;
+        const float vz = result.z * 2.0f - 1.0f;
+        const float len = max(sqrt(vx * vx + vy * vy + vz * vz), 1e-10f);
+        result = float3((vx / len) * 0.5f + 0.5f,
+                        (vy / len) * 0.5f + 0.5f,
+                        (vz / len) * 0.5f + 0.5f);
+      }
+      break;
+    }
     default:
       break;
   }
   return float4(result, strength);
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Texel Hash
- *
- * The grain every texel-noise family reads, ported from `paint_layer_texel_hash_uniform` and the
- * `BLI_hash_int_2d` it calls: Jenkins' lookup3 `final` over the two texel coordinates. Every step is
- * uint32 arithmetic with the same constants as the C++, so the sequence cannot drift between the CPU
- * kernel, the bake and this pass; the shifts are never by zero, so no backend's undefined shift rule
- * is reached. Deband and a Color Match's variation read the same family, which is why this is a
- * section of its own rather than part of the noise below.
- * \{ */
-
-/** `rot(x, k)` of `BLI_hash.h`. */
-uint texel_hash_rot(uint x, uint k)
-{
-  return (x << k) | (x >> (32u - k));
-}
-
-/** `BLI_hash_int_2d`: the `final` mix of the two coordinates and the fixed seed. */
-uint texel_hash_int_2d(uint kx, uint ky)
-{
-  uint a = 0xdeadbeefu + (2u << 2u) + 13u;
-  uint b = a;
-  uint c = a;
-  a += kx;
-  b += ky;
-  c ^= b;
-  c -= texel_hash_rot(b, 14u);
-  a ^= c;
-  a -= texel_hash_rot(c, 11u);
-  b ^= a;
-  b -= texel_hash_rot(a, 25u);
-  c ^= b;
-  c -= texel_hash_rot(b, 16u);
-  a ^= c;
-  a -= texel_hash_rot(c, 4u);
-  b ^= a;
-  b -= texel_hash_rot(a, 14u);
-  c ^= b;
-  c -= texel_hash_rot(b, 24u);
-  return c;
-}
-
-/**
- * `paint_layer_texel_hash_uniform`: one uniform in [0, 1) of the texel hash family, the salt keeping
- * the passes and the channels apart and the seed moving the pattern. The coordinates are those of the
- * texture being grained, not a normalized position: the grain is a field over the canvas, so a bake
- * at another resolution shows the same pattern resampled rather than a different one.
- */
-float texel_hash_uniform(int2 texel, int seed, uint salt)
-{
-  const uint kx = uint(texel.x) + salt * 7919u + uint(seed) * 6151u;
-  const uint ky = uint(texel.y);
-  return float(texel_hash_int_2d(kx, ky)) / 4294967296.0f;
 }
 
 /** \} */
@@ -1603,6 +1726,7 @@ void mask_comp([[resource_table]] MaskResources &srt,
       /* A filter works on the factor so far as a grey. The Color Ramp's strength multiplier is
        * ignored, as the CPU's mask path ignores it: a grey coefficient has no stop alpha. */
       float grey = apply_filter(srt.filter_kind,
+                                texel,
                                 float3(m),
                                 srt.filter_params_0,
                                 srt.filter_params_1,
@@ -1865,6 +1989,7 @@ void layer_comp([[resource_table]] LayerResources &srt,
        * Color Ramp's stop alpha lowers the strength the way the CPU's adjustment path does. */
       top = dst;
       float4 filtered = apply_filter(srt.filter_kind,
+                                     texel,
                                      dst.xyz,
                                      srt.filter_params_0,
                                      srt.filter_params_1,
@@ -2098,6 +2223,7 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
   if (srt.filter_kind != COMBINED_FILTER_NONE) {
     float weight = clamp(srt.opacity, 0.0f, 1.0f);
     float4 filtered = apply_filter(srt.filter_kind,
+                                   texel,
                                    s.xyz,
                                    srt.filter_params_0,
                                    srt.filter_params_1,
@@ -2298,6 +2424,27 @@ void noise_apply(float3 &rgb, int2 texel, float4 params, float3 luma_coefficient
 }
 
 /**
+ * The smooth value noise the Blur Slope reads its driver from (`paint_layer_effect_value_noise`):
+ * the texel hash's lattice interpolated bilinearly about the smoothstep, so what it slopes is a
+ * slope a gradient can read. The seed rides the hash, so a different seed is a different pattern of
+ * the same kind; the salt is the same one the CPU's call passes.
+ */
+float slope_value_noise(const float x, const float y, const int seed)
+{
+  const int ix = int(floor(x));
+  const int iy = int(floor(y));
+  const float fx = x - float(ix);
+  const float fy = y - float(iy);
+  const float sx = fx * fx * (3.0f - 2.0f * fx);
+  const float sy = fy * fy * (3.0f - 2.0f * fy);
+  const float a = texel_hash_uniform(int2(ix, iy), seed, 48739u);
+  const float b = texel_hash_uniform(int2(ix + 1, iy), seed, 48739u);
+  const float c = texel_hash_uniform(int2(ix, iy + 1), seed, 48739u);
+  const float d = texel_hash_uniform(int2(ix + 1, iy + 1), seed, 48739u);
+  return (a * (1.0f - sx) + b * sx) * (1.0f - sy) + (c * (1.0f - sx) + d * sx) * sy;
+}
+
+/**
  * The pass kinds of the plan, the values of #PaintLayerEffectPass::kind in
  * `BKE_paint_layers_composite.hh`. The host runs one dispatch per pass and pushes its kind here; a
  * pointwise effect (a Noise) is one pass, a separable one (a Blur) is a pass per axis, a 3x3 kernel
@@ -2317,27 +2464,73 @@ void noise_apply(float3 &rgb, int2 texel, float4 params, float3 luma_coefficient
 #define COMBINED_PASS_HIGH_PASS_TAIL 9
 #define COMBINED_PASS_BLUR_DIRECTIONAL 10
 #define COMBINED_PASS_FXAA 11
+#define COMBINED_PASS_CHOKE 12
+#define COMBINED_PASS_SCREEN_TAIL 13
+#define COMBINED_PASS_BLOCK_AVERAGE 14
+#define COMBINED_PASS_HEIGHT_TO_NORMAL_3X3 15
+#define COMBINED_PASS_SLOT_FETCH 16
+#define COMBINED_PASS_JFA_INIT 17
+#define COMBINED_PASS_JFA_STEP 18
+#define COMBINED_PASS_DIST_EVAL 19
+#define COMBINED_PASS_SILHOUETTE 20
+#define COMBINED_PASS_OFFSET_TINT_TAIL 21
+#define COMBINED_PASS_SLOPE_DRIVER 22
+#define COMBINED_PASS_SLOPE_WALK 23
+#define COMBINED_PASS_BAND_TINT_TAIL 24
+#define COMBINED_PASS_REDUCE_START 25
+#define COMBINED_PASS_REDUCE_STEP 26
+#define COMBINED_PASS_MATCH_GRADE 27
+#define COMBINED_PASS_FLOOD_INIT 28
+#define COMBINED_PASS_FLOOD_STEP 29
+#define COMBINED_PASS_DIFFUSE_STEP 30
+#define COMBINED_PASS_FILL_TAIL 31
 
-/**
- * The scalar `linearrgb_to_srgb` / `srgb_to_linearrgb` of `BLI_math_color`, ported verbatim (both
- * branches) with the `effect_` prefix so they cannot collide with the display-encoding helpers of
- * `gpu_shader_common_color_utils.glsl`. A High Pass takes its detail through them, so the shader and
- * the CPU kernel must agree on the piecewise curve, including the low-value linear branch.
- */
-float effect_linearrgb_to_srgb(float c)
+/** `rgb_to_hsl` of `BLI_math_color`, ported verbatim, the hue branch order and the exact max/min
+ * comparisons included: the Color Match grades in HSL, so the shader and the CPU kernel must
+ * convert alike. The lightness is clamped above at one and left as it is below, and an achromatic
+ * colour reads zero hue and saturation. */
+float3 effect_rgb_to_hsl(float3 rgb)
 {
-  if (c < 0.0031308f) {
-    return (c < 0.0f) ? 0.0f : c * 12.92f;
+  const float cmax = max(rgb.x, max(rgb.y, rgb.z));
+  const float cmin = min(rgb.x, min(rgb.y, rgb.z));
+  float hue;
+  float sat;
+  const float light = min(1.0f, (cmax + cmin) / 2.0f);
+  if (cmax == cmin) {
+    hue = 0.0f;
+    sat = 0.0f;
   }
-  return 1.055f * pow(c, 1.0f / 2.4f) - 0.055f;
+  else {
+    const float d = cmax - cmin;
+    sat = (light > 0.5f) ? d / (2.0f - cmax - cmin) : d / (cmax + cmin);
+    if (cmax == rgb.x) {
+      hue = (rgb.y - rgb.z) / d + ((rgb.y < rgb.z) ? 6.0f : 0.0f);
+    }
+    else if (cmax == rgb.y) {
+      hue = (rgb.z - rgb.x) / d + 2.0f;
+    }
+    else {
+      hue = (rgb.x - rgb.y) / d + 4.0f;
+    }
+  }
+  return float3(hue / 6.0f, sat, light);
 }
 
-float effect_srgb_to_linearrgb(float c)
+/** `hsl_to_rgb` of `BLI_math_color`, ported verbatim: the same three triangle ramps the HSV
+ * conversion uses, scaled by the chroma the lightness and saturation make and centered on the
+ * lightness. */
+float3 effect_hsl_to_rgb(float3 hsl)
 {
-  if (c < 0.04045f) {
-    return (c < 0.0f) ? 0.0f : c * (1.0f / 12.92f);
-  }
-  return pow((c + 0.055f) * (1.0f / 1.055f), 2.4f);
+  float nr = abs(hsl.x * 6.0f - 3.0f) - 1.0f;
+  float ng = 2.0f - abs(hsl.x * 6.0f - 2.0f);
+  float nb = 2.0f - abs(hsl.x * 6.0f - 4.0f);
+  nr = clamp(nr, 0.0f, 1.0f);
+  ng = clamp(ng, 0.0f, 1.0f);
+  nb = clamp(nb, 0.0f, 1.0f);
+  const float chroma = (1.0f - abs(2.0f * hsl.z - 1.0f)) * hsl.y;
+  return float3((nr - 0.5f) * chroma + hsl.z,
+                (ng - 0.5f) * chroma + hsl.z,
+                (nb - 0.5f) * chroma + hsl.z);
 }
 
 /** One axis of a box pass over the RGB of the fetched line: window `[max(c-r,0), min(c+r,lim-1)]`,
@@ -2385,6 +2578,27 @@ float3 fetch_clamped(sampler2D tx, const int2 p, const int2 size)
 {
   const int2 c = int2(clamp(p.x, 0, size.x - 1), clamp(p.y, 0, size.y - 1));
   return texelFetch(tx, c, 0).xyz;
+}
+
+/** One texel's height of a Height row, the `height_at` lambda of the Height To Normal kernel: the
+ * red weighed by the alpha back to the neutral (#PAINT_HEIGHT_NEUTRAL, 0.5), so an uncovered texel
+ * reads as the flat ground and a stroke's edge does not read as a cliff. */
+float height_fetch(sampler2D tx, const int2 p, const int2 size)
+{
+  const int2 c = int2(clamp(p.x, 0, size.x - 1), clamp(p.y, 0, size.y - 1));
+  const float4 t = texelFetch(tx, c, 0);
+  return 0.5f + (t.x - 0.5f) * t.w;
+}
+
+/** A texel of the input read as zero past the canvas instead of clamped to its edge: the Drop
+ * Shadow tail's silhouette read (`paint_layer_effect_drop_shadow_apply`), where a clamped edge
+ * would smear the shape's border row across the whole shadow band. */
+float4 fetch_zero_outside(sampler2D tx, const int2 p, const int2 size)
+{
+  if (p.x < 0 || p.x >= size.x || p.y < 0 || p.y >= size.y) {
+    return float4(0.0f);
+  }
+  return texelFetch(tx, p, 0);
 }
 
 /** The Sobel gradient magnitude of one texel's taps, per channel: the two 3x3 gradients, normalized
@@ -2497,14 +2711,53 @@ float3 blur_directional(sampler2D tx,
   return center + (averaged - center) * clamp(amount, 0.0f, 1.0f);
 }
 
+/**
+ * One texel of a Channel Split: the slot image resampled to the canvas the way the CPU's
+ * `math::interpolate_bilinear_fl` reads it (`math_interp.cc`, the Extend wrap), written through
+ * `texelFetch` so no sampler's filtering can drift from the CPU. The taps are the floor of the
+ * coordinate and the next one, each clamped to the edge, the weights the fractional part; the four
+ * terms are summed in the CPU's own order.
+ */
+float4 slot_bilinear_fetch(sampler2D tx, const int2 size, const float su, const float sv)
+{
+  const float fu = floor(su);
+  const float fv = floor(sv);
+  const int x1 = clamp(int(fu), 0, size.x - 1);
+  const int x2 = clamp(int(floor(su + 1.0f)), 0, size.x - 1);
+  const int y1 = clamp(int(fv), 0, size.y - 1);
+  const int y2 = clamp(int(floor(sv + 1.0f)), 0, size.y - 1);
+  const float a = su - fu;
+  const float b = sv - fv;
+  const float a_b = a * b;
+  const float ma_b = (1.0f - a) * b;
+  const float a_mb = a * (1.0f - b);
+  const float ma_mb = (1.0f - a) * (1.0f - b);
+  const float4 t00 = texelFetch(tx, int2(x1, y1), 0);
+  const float4 t10 = texelFetch(tx, int2(x2, y1), 0);
+  const float4 t01 = texelFetch(tx, int2(x1, y2), 0);
+  const float4 t11 = texelFetch(tx, int2(x2, y2), 0);
+  return ma_mb * t00 + a_mb * t10 + ma_b * t01 + a_b * t11;
+}
+
 struct EffectResources {
   /** This pass's source: the effect input, a ping-pong buffer, the luminance buffer for a High Pass
    * tail, or the original for a Sharpen tail. */
   [[sampler(0)]] sampler2D input_tx;
-  /** A combine tail's blurred copy, bound only for #COMBINED_PASS_UNSHARP_TAIL / _HIGH_PASS_TAIL. */
+  /** A tail's second input: the blurred copy of #COMBINED_PASS_UNSHARP_TAIL / _HIGH_PASS_TAIL, the
+   * blurred choke grey of #COMBINED_PASS_SCREEN_TAIL, or the slot image #COMBINED_PASS_SLOT_FETCH
+   * resamples (that one at its own resolution, not the canvas's). */
   [[sampler(1)]] sampler2D aux_tx;
   /** This pass's destination: a scratch buffer, or the cache texture on the last pass. */
   [[image(0, write, SFLOAT_16_16_16_16)]] image2D result_img;
+  /** The float32 destination of the passes whose values a half float would round away: the Color
+   * Match's pyramid (the alpha-weighted sums of the whole canvas) and the Fill Area's label field
+   * (the labels are texel coordinates, which a half float holds exactly only to 2048). The host
+   * binds the pass's own pyramid level or field texture here and binds slot 0 beside it for every
+   * dispatch, unused or not; every pass but the four float32 ones writes #result_img. The flooding
+   * steps also read it back: their walk is sequential and each texel takes the label the texel
+   * before it has just been given, so the field is declared read-write like the accumulator images
+   * above. */
+  [[image(1, read_write, SFLOAT_32_32_32_32)]] image2D field_img;
   /** The canvas size: the window clamps to it on every pass, whatever the dispatch region is. */
   [[push_constant]] const int2 texture_size;
   /**
@@ -2527,6 +2780,15 @@ struct EffectResources {
   [[push_constant]] const int maximum;
   /** #COMBINED_PASS_UNSHARP_TAIL / _HIGH_PASS_TAIL: the Sharpen amount or the High Pass contrast. */
   [[push_constant]] const float aux0;
+  /** Extra per-pass scalars the plan built: the Glow tail's tint colour, the Height To Normal's
+   * green sign, whatever a pass kind needs beyond #radius / #maximum / #aux0. */
+  [[push_constant]] const float4 pass_params;
+  /** The second per-pass float4, for the tails that need a colour and a flag side by side with
+   * #pass_params (the Drop Shadow's tint and its under-mode). */
+  [[push_constant]] const float4 pass_params2;
+  /** Whether this pass writes the alpha its kernel computes instead of carrying the source's (the
+   * band tails of the effects whose result is a layer of their own). */
+  [[push_constant]] const int alpha_from_kernel;
   /** The Noise parameters in its kind's schema order, as the correction pass is given them. */
   [[push_constant]] const float4 filter_params_0;
   /** The working space's luminance weights, which `IMB_colormanagement_get_luminance` reads. */
@@ -2548,6 +2810,12 @@ void effect_comp([[resource_table]] EffectResources &srt,
   }
   const float4 source = texelFetch(srt.input_tx, texel, 0);
   float3 rgb = source.xyz;
+  /* The alpha the store keeps: the standard rule, kept or dropped to one. A pass that lays a layer
+   * of its own (the Channel Split, which the CPU writes with alpha one) overrides it in its case,
+   * and the tails that lay a layer write the alpha their kernel computed into `computed_alpha`,
+   * which the store keeps when the plan set #alpha_from_kernel for the pass. */
+  float pass_alpha = (srt.tracks_alpha != 0) ? source.w : 1.0f;
+  float computed_alpha = pass_alpha;
   switch (srt.pass_kind) {
     case COMBINED_PASS_NOISE:
       noise_apply(rgb, texel, srt.filter_params_0, srt.luma_coefficients.xyz);
@@ -2621,13 +2889,654 @@ void effect_comp([[resource_table]] EffectResources &srt,
       }
       break;
     }
+    case COMBINED_PASS_CHOKE: {
+      /* The choke step of the Glow, `paint_layer_effect_glow_apply` before its blur: the scene
+       * linear luminance clamped into [0, 1] -- the GPU Luminance pass does not clamp, so this pass
+       * does, as the CPU's does -- then reopened by the spread, everything below it reading zero and
+       * everything above one, the ramp between rescaled to the whole range. The blur and the screen
+       * are the passes that follow. */
+      const float luma = clamp(dot(source.xyz, srt.luma_coefficients.xyz), 0.0f, 1.0f);
+      const float choke_den = max(1.0f - srt.aux0, 1e-6f);
+      rgb = float3(clamp((luma - srt.aux0) / choke_den, 0.0f, 1.0f));
+      break;
+    }
+    case COMBINED_PASS_SCREEN_TAIL: {
+      /* The screen tail of the Glow, `paint_layer_effect_glow_apply` after its blur: the choked grey
+       * the blur built (its red channel, the one grey the CPU reads back) scaled by the opacity in
+       * `aux0`, screened under the tint in `pass_params.xyz` -- `c + glow * (1 - c)`, so a black
+       * texel lands on the colour and a lit one keeps its light. The source is the original the
+       * tail is given. */
+      const float m = texelFetch(srt.aux_tx, texel, 0).x * srt.aux0;
+      rgb = source.xyz + srt.pass_params.xyz * m * (1.0f - source.xyz);
+      break;
+    }
+    case COMBINED_PASS_BLOCK_AVERAGE: {
+      /* The Pixelate, `paint_layer_effect_pixelate_apply`: the block the texel falls into averaged
+       * from the clone the input holds, so the average is the one the block had, not the one a
+       * neighbour left. The colour is weighted by the alpha, so the black a transparent texel keeps
+       * at an island's edge never leaks into an opaque one; a block without coverage keeps the plain
+       * average. The block amount rides in `aux0` (blocks per side), the block size the canvas cut
+       * into that many, the last one of a side shorter at the canvas edge. Every texel sums its own
+       * block -- the CPU sums it once and writes the colour around, the same number either way --
+       * walking it row by row in the CPU's own order, so the float adds land the same. */
+      const int pixels = max(int(srt.aux0), 1);
+      const int block_w = max(srt.texture_size.x / pixels, 1);
+      const int block_h = max(srt.texture_size.y / pixels, 1);
+      if (block_w > 1 || block_h > 1) {
+        const int bx = (texel.x / block_w) * block_w;
+        const int by = (texel.y / block_h) * block_h;
+        const int bx_end = min(bx + block_w, srt.texture_size.x);
+        const int by_end = min(by + block_h, srt.texture_size.y);
+        float3 weighted = float3(0.0f);
+        float3 plain = float3(0.0f);
+        float alpha_sum = 0.0f;
+        for (int sy = by; sy < by_end; sy++) {
+          for (int sx = bx; sx < bx_end; sx++) {
+            const float4 p = texelFetch(srt.input_tx, int2(sx, sy), 0);
+            weighted += p.xyz * p.w;
+            plain += p.xyz;
+            alpha_sum += p.w;
+          }
+        }
+        const float count = float((bx_end - bx) * (by_end - by));
+        rgb = (alpha_sum > 1e-6f) ? weighted / alpha_sum : plain / count;
+      }
+      break;
+    }
+    case COMBINED_PASS_HEIGHT_TO_NORMAL_3X3: {
+      /* The Height To Normal, `paint_layer_effect_height_to_normal_apply`: the Sobel pair of the
+       * height the red holds, `dh_du` the slope rising along +U and `dh_dv` along +V (row y + 1 is
+       * the higher V), each scaled by `aux0` -- the strength, or the world-units slope the plan
+       * folds in. The normal leans against the slope; the DirectX encoding flips the green, and
+       * `pass_params.x` names the convention (+1 the OpenGL one, -1 the DirectX one), negated here
+       * to the CPU's own `green_sign`. The encode is `0.5 + 0.5 n`. */
+      const float h00 = height_fetch(srt.input_tx, texel + int2(-1, -1), srt.texture_size);
+      const float h01 = height_fetch(srt.input_tx, texel + int2(0, -1), srt.texture_size);
+      const float h02 = height_fetch(srt.input_tx, texel + int2(1, -1), srt.texture_size);
+      const float h10 = height_fetch(srt.input_tx, texel + int2(-1, 0), srt.texture_size);
+      const float h12 = height_fetch(srt.input_tx, texel + int2(1, 0), srt.texture_size);
+      const float h20 = height_fetch(srt.input_tx, texel + int2(-1, 1), srt.texture_size);
+      const float h21 = height_fetch(srt.input_tx, texel + int2(0, 1), srt.texture_size);
+      const float h22 = height_fetch(srt.input_tx, texel + int2(1, 1), srt.texture_size);
+      const float dh_du = ((h02 + 2.0f * h12 + h22) - (h00 + 2.0f * h10 + h20)) * 0.25f;
+      const float dh_dv = ((h20 + 2.0f * h21 + h22) - (h00 + 2.0f * h01 + h02)) * 0.25f;
+      const float nx = -dh_du * srt.aux0;
+      const float ny = -srt.pass_params.x * dh_dv * srt.aux0;
+      const float inv_len = 1.0f / sqrt(nx * nx + ny * ny + 1.0f);
+      rgb = float3(nx * inv_len * 0.5f + 0.5f, ny * inv_len * 0.5f + 0.5f, inv_len * 0.5f + 0.5f);
+      break;
+    }
+    case COMBINED_PASS_SLOT_FETCH: {
+      /* The Channel Split, `paint_layer_effect_channel_split_apply`: one channel of the slot image
+       * laid as a grey, resampled to the canvas the way the CPU's bilinear reads it (the slot rides
+       * in `aux_tx`, at its own resolution whatever the canvas's is). The channel number rides in
+       * `aux0`, 0 red to 3 alpha, clamped like the CPU's. An empty slot is the host's to skip: the
+       * CPU leaves the buffer unchanged while no image is assigned, and there is no texture to
+       * bind. */
+      const int2 map_size = textureSize(srt.aux_tx, 0);
+      const float su = ((float(texel.x) + 0.5f) / float(srt.texture_size.x)) * float(map_size.x) -
+                       0.5f;
+      const float sv = ((float(texel.y) + 0.5f) / float(srt.texture_size.y)) * float(map_size.y) -
+                       0.5f;
+      const int component = clamp(int(srt.aux0), 0, 3);
+      const float4 fetched = slot_bilinear_fetch(srt.aux_tx, map_size, su, sv);
+      const float value = (component == 0) ? fetched.x :
+                          ((component == 1) ? fetched.y :
+                           ((component == 2) ? fetched.z : fetched.w));
+      rgb = float3(value);
+      /* The split lays a layer of its own: the CPU writes alpha one when it lays a layer, and the
+       * GPU pass is only queued as one, so the store keeps one whatever the row carried -- not the
+       * standard rule this function's tail applies to the other kinds. */
+      pass_alpha = 1.0f;
+      break;
+    }
+    case COMBINED_PASS_JFA_INIT: {
+      /* The distance transform's seed field, the seeding of the Bevel
+       * (`paint_layer_effect_bevel_apply`, `interior >= 0.5 ? UNSEEN : 0` -- the seeds are the
+       * texels short of the border) and of the Mask Outline
+       * (`paint_layer_effect_mask_outline_apply`, the `inside` its threshold builds): the texels
+       * whose scalar sits on the seed side of the threshold stamp their own coordinates, the rest a
+       * far point the JFA steps refine from. `pass_params.x` names the scalar (0 the alpha, 1 the
+       * scene-linear luminance), `pass_params.y` is the threshold and `pass_params.z` the polarity
+       * (unset the scalars below it seed, set the ones at or over it do). The CPU chamfer-walks its
+       * field from here -- the flood is the GPU's own way to the same distances. */
+      const float scalar = (srt.pass_params.x == 0.0f) ? source.w :
+                                                         dot(source.xyz, srt.luma_coefficients.xyz);
+      /* The polarity: the seeds are one side of the threshold, and which side is the plan's to
+       * name -- the Bevel seeds the scalars short of the half, the Mask Outline seeds whichever
+       * side its position and Start From Black make the inside. `pass_params.z` set seeds the
+       * scalars at or over the threshold instead of below it. */
+      const bool is_seed = (srt.pass_params.z != 0.0f) ? (scalar >= srt.pass_params.y) :
+                                                         (scalar < srt.pass_params.y);
+      const float2 field = is_seed ? float2(texel) : float2(1e7f, 1e7f);
+      rgb = float3(field, 0.0f);
+      break;
+    }
+    case COMBINED_PASS_JFA_STEP: {
+      /* One Jump Flooding step: the field the previous pass left holds each texel's nearest seed so
+       * far, and every texel adopts the best candidate its ring of eight neighbours at ±`radius`
+       * reports -- its own first, replaced only by a strictly closer one. The radius halves every
+       * step the plan queues down to one, so the whole canvas floods in a logarithmic number of
+       * passes. A neighbour past the canvas clamps to the edge texel, which only repeats a
+       * candidate that texel offers anyway; an unseen candidate's far point never wins the length. */
+      float2 best = texelFetch(srt.input_tx, texel, 0).xy;
+      float best_dist = length(float2(texel) - best);
+      for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+          if (dx == 0 && dy == 0) {
+            continue;
+          }
+          const int2 at = int2(clamp(texel.x + dx * srt.radius, 0, srt.texture_size.x - 1),
+                               clamp(texel.y + dy * srt.radius, 0, srt.texture_size.y - 1));
+          const float2 candidate = texelFetch(srt.input_tx, at, 0).xy;
+          const float candidate_dist = length(float2(texel) - candidate);
+          if (candidate_dist < best_dist) {
+            best_dist = candidate_dist;
+            best = candidate;
+          }
+        }
+      }
+      rgb = float3(best, 0.0f);
+      break;
+    }
+    case COMBINED_PASS_DIST_EVAL: {
+      /* The distance field's read: the Euclidean distance to the seed the field names -- zero on a
+       * seed, the CPU's far value on a texel no seed reached. `pass_params.z` picks the reader, the
+       * Bevel's ramp (`paint_layer_effect_bevel_apply`) or the Mask Outline's band
+       * (`paint_layer_effect_mask_outline_apply`). The CPU chamfer-walks sides at 3 and diagonals
+       * at 4 and divides the distance by 3 toward texels; the flood reads Euclidean, so the reach
+       * the plan pushes in `pass_params.x` already folds that normalization in. */
+      const float2 seed = texelFetch(srt.input_tx, texel, 0).xy;
+      const float dist = (seed.x >= 1e6f) ? 1e6f : length(float2(texel) - seed);
+      if (int(srt.pass_params.z) == 0) {
+        /* The Bevel's ramp: the distance over the reach, clamped, as a grey. */
+        const float value = clamp(dist / srt.pass_params.x, 0.0f, 1.0f);
+        rgb = float3(value);
+      }
+      else {
+        /* The Outline's band: one less the distance over the reach, bent toward the smoothstep by
+         * `pass_params.y` -- the CPU's `1 - dist / 3 / reach` under the same folded reach. The seed
+         * side is the one the position leaves empty -- a texel whose seed is its own coordinates
+         * was stamped as a seed, and the CPU sets no band there -- so it reads zero whatever its
+         * distance. The band is the layer's own alpha: the blur carries it through and the tint
+         * tail writes it. */
+        const bool on_seed_side = all(equal(seed, float2(texel)));
+        float band = on_seed_side ? 0.0f : clamp(1.0f - dist / srt.pass_params.x, 0.0f, 1.0f);
+        /* Not `smooth`: that is a reserved interpolation qualifier in GLSL. */
+        const float hermite = band * band * (3.0f - 2.0f * band);
+        band += (hermite - band) * clamp(srt.pass_params.y, 0.0f, 1.0f);
+        rgb = float3(band);
+        computed_alpha = band;
+      }
+      break;
+    }
+    case COMBINED_PASS_SILHOUETTE: {
+      /* The Drop Shadow's silhouette (`paint_layer_effect_drop_shadow_apply`): the shape its source
+       * names, one grey the spread and the blur work on before the tail reads it. `pass_params.x`
+       * carries the source, the CPU's own order: 1 the scene-linear luminance clamped into [0, 1]
+       * (#PAINT_LAYER_DROP_SHADOW_SOURCE_LUMINANCE), 0 the alpha as it is, unclamped. */
+      const float shape = (srt.pass_params.x != 0.0f) ?
+                              clamp(dot(source.xyz, srt.luma_coefficients.xyz), 0.0f, 1.0f) :
+                              source.w;
+      rgb = float3(shape);
+      break;
+    }
+    case COMBINED_PASS_OFFSET_TINT_TAIL: {
+      /* The Drop Shadow's combine tail (`paint_layer_effect_drop_shadow_apply` after its blur): the
+       * blurred silhouette in `aux_tx` read at the offset the shadow is cast by -- the texel the
+       * CPU rounds the angle's direction and the distance to, `floor(dir * dist + 0.5)` half up,
+       * from the direction and the distance the plan pushes in `pass_params.xy` / `.z` -- so the
+       * read sits at `texel - offset` and the shadow sits displaced along the angle. A texel the
+       * offset reads from past the canvas has no silhouette to cast: zero, not the clamped edge,
+       * which would smear the border row across the whole band. An alpha source keeps the shadow
+       * off the content (`params2.w` set, the under-mode folded), the opacity in `pass_params.w`
+       * weighs it, and the tint in `params2.rgb` goes out premultiplied by the weight -- the layer
+       * of its own the effect leaves. */
+      const int2 offset = int2(floor(srt.pass_params.xy * srt.pass_params.z + 0.5f));
+      const float shadow = fetch_zero_outside(srt.aux_tx, texel - offset, srt.texture_size).x;
+      const float under = (srt.pass_params2.w != 0.0f) ? 1.0f - clamp(source.w, 0.0f, 1.0f) : 1.0f;
+      const float weight = shadow * srt.pass_params.w * under;
+      const float alpha = clamp(weight, 0.0f, 1.0f);
+      rgb = srt.pass_params2.xyz * alpha;
+      computed_alpha = alpha;
+      break;
+    }
+    case COMBINED_PASS_SLOPE_DRIVER: {
+      /* The Blur Slope's driver (`paint_layer_effect_slope_source_build`): one grey per texel whose
+       * gradient the walk follows. `aux0` carries the source mode, the CPU's own values: 1 the
+       * previous input's luminance (#PAINT_LAYER_SLOPE_SOURCE_PREVIOUS_INPUT, the plan's blur
+       * passes having softened it first), 0 the value noise
+       * (#PAINT_LAYER_SLOPE_SOURCE_NOISE). `pass_params` is the schema order: the position, the
+       * contrast, the seed and the tilling. */
+      float value;
+      const int seed = int(srt.pass_params.z + 0.5f);
+      if (int(srt.aux0) == 1) {
+        value = dot(source.xyz, srt.luma_coefficients.xyz) + srt.pass_params.x;
+      }
+      else {
+        /* The noise: the tiles the tilling names across the map, eight lattice cells to a tile, so
+         * the pattern the seed names has a slope worth following at any size. The seed rides the
+         * hash and offsets the lattice, exactly as the CPU's build does. */
+        const float tiles = max(srt.pass_params.w, 0.25f);
+        const float nx = (float(texel.x) / float(srt.texture_size.x) * tiles +
+                          float(seed % 7) * 0.113f) *
+                         8.0f;
+        const float ny = (float(texel.y) / float(srt.texture_size.y) * tiles +
+                          float(seed % 13) * 0.179f) *
+                         8.0f;
+        value = slope_value_noise(nx, ny, seed) + srt.pass_params.x;
+      }
+      /* The grade both modes take: the position shifted the midpoint, the contrast scaled it about
+       * the half. */
+      rgb = float3((value - 0.5f) * srt.pass_params.y + 0.5f);
+      break;
+    }
+    case COMBINED_PASS_SLOPE_WALK: {
+      /* The Blur Slope's walk (`paint_layer_effect_blur_slope_apply`): the driver in `input_tx`
+       * gives the gradient, the central difference of the neighbours clamped to the canvas, and the
+       * direction it names is walked for `radius` samples (the CPU's quality, clamped to 1..32)
+       * over the span in `pass_params.y`. The mode in `pass_params.x` says what the taps
+       * accumulate: the alpha-weighted average, the minimum that eats the edges away or the maximum
+       * that smears the white out (`PAINT_LAYER_BLUR_SLOPE_BLENDING_*`). The taps read the original
+       * in `aux_tx`, nearest and clamped, and the average weighs them by their alpha so the black
+       * under a transparent island never darkens a border. A flat slope, a zero span, a walk
+       * without coverage or a single sample keep the texel as it is -- the original's own, not the
+       * driver's. */
+      const float4 original = texelFetch(srt.aux_tx, texel, 0);
+      rgb = original.xyz;
+      const float intensity = srt.pass_params.y;
+      const int samples = srt.radius;
+      if (intensity > 0.0f && samples > 1) {
+        const int xl = max(texel.x - 1, 0);
+        const int xr = min(texel.x + 1, srt.texture_size.x - 1);
+        const int yu = max(texel.y - 1, 0);
+        const int yd = min(texel.y + 1, srt.texture_size.y - 1);
+        const float gx = (texelFetch(srt.input_tx, int2(xr, texel.y), 0).x -
+                          texelFetch(srt.input_tx, int2(xl, texel.y), 0).x) *
+                         0.5f;
+        const float gy = (texelFetch(srt.input_tx, int2(texel.x, yd), 0).x -
+                          texelFetch(srt.input_tx, int2(texel.x, yu), 0).x) *
+                         0.5f;
+        const float slope = sqrt(gx * gx + gy * gy);
+        if (slope >= 1e-4f) {
+          const float dir_x = gx / slope;
+          const float dir_y = gy / slope;
+          const int blending = int(srt.pass_params.x);
+          const bool take_min = (blending == 1); /* PAINT_LAYER_BLUR_SLOPE_BLENDING_MIN. */
+          const bool take_max = (blending == 2); /* PAINT_LAYER_BLUR_SLOPE_BLENDING_MAX. */
+          float3 result = float3(0.0f);
+          float weight_sum = 0.0f;
+          bool any = false;
+          for (int k = 0; k < samples; k++) {
+            const float t = (float(k) / float(samples - 1) - 0.5f) * intensity;
+            const int sx = clamp(int(floor(float(texel.x) + dir_x * t + 0.5f)),
+                                 0,
+                                 srt.texture_size.x - 1);
+            const int sy = clamp(int(floor(float(texel.y) + dir_y * t + 0.5f)),
+                                 0,
+                                 srt.texture_size.y - 1);
+            const float4 tap = texelFetch(srt.aux_tx, int2(sx, sy), 0);
+            const float alpha = tap.w;
+            if (alpha <= 0.0f) {
+              continue;
+            }
+            if (take_min || take_max) {
+              /* The first covered tap stands as it is, then the extremes narrow or widen it. */
+              result = (!any) ? tap.xyz : (take_min ? min(result, tap.xyz) : max(result, tap.xyz));
+              any = true;
+            }
+            else {
+              result += tap.xyz * alpha;
+              weight_sum += alpha;
+            }
+          }
+          if (take_min || take_max) {
+            if (any) {
+              rgb = result;
+            }
+          }
+          else if (weight_sum > 0.0f) {
+            const float inv = 1.0f / weight_sum;
+            rgb = result * inv;
+          }
+        }
+      }
+      break;
+    }
+    case COMBINED_PASS_BAND_TINT_TAIL: {
+      /* The Mask Outline's tint tail (`paint_layer_effect_mask_outline_apply` after its blur): the
+       * blurred band the previous passes left -- its red, the one grey the CPU reads back -- turned
+       * into the premultiplied colour, the band itself as the alpha, so the ring lays over the
+       * empty map around the islands and the islands themselves are untouched. The tint rides in
+       * `params2.rgb`; the CPU's forced white under an alpha source is the plan's to fold in. */
+      const float band = clamp(texelFetch(srt.input_tx, texel, 0).x, 0.0f, 1.0f);
+      rgb = srt.pass_params2.xyz * band;
+      computed_alpha = band;
+      break;
+    }
+    case COMBINED_PASS_REDUCE_START: {
+      /* The Color Match's average (`paint_layer_effect_color_average` of
+       * `paint_layers_effect_kernels.cc`) built as a sum pyramid: this level sums every 2x2 block
+       * of the input, the colour weighted by the alpha and the alpha summed beside it, so the
+       * levels above fold component-wise and the 1x1 texel ends at the totals the CPU's running
+       * sums end at. A texel without coverage adds nothing, which is the CPU's own `texel[3] > 0`
+       * skip -- a zero weight multiplies nothing and adds none. The sums accumulate in float32
+       * registers into a float32 pyramid, the known precision difference against the CPU's doubles:
+       * a canvas of unit colours stays far inside the float mantissa, and the grade reads a colour
+       * from the totals, not a checksum of them. The block of a texel at the pyramid's edge runs
+       * past the canvas and the taps past it add nothing -- each canvas texel is counted once, the
+       * way the CPU's loop counts it -- so an odd side folds a shortened block, and the host has to
+       * dispatch the level at the size that still covers the canvas, `(size + 1) >> 1` of the level
+       * above, not the floor shift that would drop its last texel. `radius` names the level this
+       * pass writes -- one here -- for the plan's bookkeeping. */
+      const int2 src_size = textureSize(srt.input_tx, 0);
+      const int2 block_at = texel * 2;
+      float3 sum_rgb = float3(0.0f);
+      float sum_alpha = 0.0f;
+      for (int dy = 0; dy < 2; dy++) {
+        for (int dx = 0; dx < 2; dx++) {
+          const int2 at = block_at + int2(dx, dy);
+          if (any(greaterThanEqual(at, src_size))) {
+            continue; /* Past the canvas: nothing to add, not the edge texel again. */
+          }
+          const float4 texel_read = texelFetch(srt.input_tx, at, 0);
+          sum_rgb += texel_read.xyz * texel_read.w;
+          sum_alpha += texel_read.w;
+        }
+      }
+      imageStore(srt.field_img, texel, float4(sum_rgb, sum_alpha));
+      return;
+    }
+    case COMBINED_PASS_REDUCE_STEP: {
+      /* One fold of the Color Match's pyramid: the four texels of the level above that tile this
+       * one's block summed component-wise, the colour and the weight together. No weighting happens
+       * here -- the first level already carries the alpha-weighted colour in its RGB, so the plain
+       * sums are the parent block's totals, the terms the CPU's reduction adds in its own order.
+       * The taps past the level's edge add nothing, the first level's own rule: an odd side of the
+       * level above folds a shortened block, each of its texels counted once.
+       * `radius` names the level this pass writes, for the plan's bookkeeping. */
+      const int2 src_size = textureSize(srt.input_tx, 0);
+      const int2 block_at = texel * 2;
+      float4 sum = float4(0.0f);
+      for (int dy = 0; dy < 2; dy++) {
+        for (int dx = 0; dx < 2; dx++) {
+          const int2 at = block_at + int2(dx, dy);
+          if (any(greaterThanEqual(at, src_size))) {
+            continue; /* Past the level: nothing to add, not the edge texel again. */
+          }
+          sum += texelFetch(srt.input_tx, at, 0);
+        }
+      }
+      imageStore(srt.field_img, texel, sum);
+      return;
+    }
+    case COMBINED_PASS_MATCH_GRADE: {
+      /* The Color Match's grade, `paint_layer_color_match_apply`: each HSL component of the texel
+       * moves by the target's difference from the source's, so a texel of the source's colour lands
+       * exactly on the target; the optional variation jitters the three from the texel hash (the
+       * CPU's salts 1, 2 and 3 with the seed zero, swung to [-1, 1]), the hue wrapped again, and
+       * the HSL goes back to RGB through the `BLI_math_color` pair this file ports above. The
+       * source is the picked colour in `pass_params2.rgb` when `pass_params2.w` is set -- the plan
+       * queues no reduction passes then, and this pass never reads the pyramid -- otherwise the
+       * alpha-weighted average the 1x1 pyramid texel carries, read at its only texel: the colour
+       * sums divided by the weight sum, zero when the weight is zero, the CPU's own test. The
+       * target rides in `pass_params.rgb` and the variation's three amounts in `pass_params2.xyz` --
+       * the first float4 the correction pass pushes carries the picked flag and the source colour,
+       * not the variation. Alpha is untouched. */
+      float3 source_color;
+      if (srt.pass_params2.w != 0.0f) {
+        source_color = srt.pass_params2.rgb;
+      }
+      else {
+        const float4 total = texelFetch(srt.aux_tx, int2(0), 0);
+        source_color = (total.w > 0.0f) ? total.xyz / total.w : float3(0.0f);
+      }
+      const float3 source_hsl = effect_rgb_to_hsl(source_color);
+      const float3 target_hsl = effect_rgb_to_hsl(srt.pass_params.rgb);
+      const float3 texel_hsl = effect_rgb_to_hsl(rgb);
+      float hue = texel_hsl.x + (target_hsl.x - source_hsl.x);
+      hue -= floor(hue);
+      float chroma = clamp(texel_hsl.y + (target_hsl.y - source_hsl.y), 0.0f, 1.0f);
+      float luma = clamp(texel_hsl.z + (target_hsl.z - source_hsl.z), 0.0f, 1.0f);
+      const float3 variation = srt.pass_params2.xyz;
+      if (any(greaterThan(variation, float3(0.0f)))) {
+        /* The hash of the texel keeps the jitter stable between evaluations, the salts keeping the
+         * three components independent of each other, exactly the CPU's own lambda. */
+        const float jitter_hue = texel_hash_uniform(texel, 0, 1u) * 2.0f - 1.0f;
+        const float jitter_chroma = texel_hash_uniform(texel, 0, 2u) * 2.0f - 1.0f;
+        const float jitter_luma = texel_hash_uniform(texel, 0, 3u) * 2.0f - 1.0f;
+        hue += jitter_hue * variation.x;
+        hue -= floor(hue);
+        chroma = clamp(chroma + jitter_chroma * variation.y, 0.0f, 1.0f);
+        luma = clamp(luma + jitter_luma * variation.z, 0.0f, 1.0f);
+      }
+      rgb = effect_hsl_to_rgb(float3(hue, chroma, luma));
+      break;
+    }
+    case COMBINED_PASS_FLOOD_INIT: {
+      /* The Fill Area's label field, the border and region walk of
+       * `paint_layer_effect_fill_area_apply` laid out for the flooding: the scalar the border is
+       * read at -- `pass_params.x` names it, 0 the alpha as it is, 1 the scene-linear luminance
+       * clamped into [0, 1] (a mask item always reads the luminance, its grey carrying no alpha of
+       * its own; the plan folds that in) -- is border at or over the threshold in `pass_params.y`,
+       * the CPU's own inclusive edge. A border texel stamps the background label and no region:
+       * the label zero with the flag in blue unset, a barrier the labels never cross or offer. A
+       * texel short of the border on the canvas edge stamps the background label with the flag
+       * set -- the seed the background swallows its region from, the CPU's uv-border IGNORE mode;
+       * the FILL mode's largest-region rule and the debug ramp stay on the CPU. Every other texel
+       * short of the border stamps its own coordinates, the candidate label its region's flooding
+       * narrows to. The labels are texel coordinates, exact in a half float only to 2048 -- the
+       * field the host binds here is float32, so a 4K map's labels are exact. The alpha is the
+       * store's standard one, carried for the ping-pong. */
+      const float scalar = (srt.pass_params.x == 0.0f) ? source.w :
+                                                         clamp(dot(source.xyz,
+                                                                   srt.luma_coefficients.xyz),
+                                                               0.0f,
+                                                               1.0f);
+      const bool border = scalar >= srt.pass_params.y;
+      const bool on_edge = (texel.x == 0 || texel.y == 0 ||
+                            texel.x == srt.texture_size.x - 1 ||
+                            texel.y == srt.texture_size.y - 1);
+      const float2 label = (border || on_edge) ? float2(0.0f) : float2(texel);
+      imageStore(srt.field_img, texel, float4(label, border ? 0.0f : 1.0f, pass_alpha));
+      return;
+    }
+    case COMBINED_PASS_FLOOD_STEP: {
+      /* The Fill Area's flooding, the GPU's way to the CPU's region walk: every texel short of the
+       * border ends at its region's smallest label, and the background label zero swallows exactly
+       * the regions the canvas edge reaches -- the CPU's own background test. The step is one
+       * raster sweep, the mode in `pass_params.x`: 1 walks the rows, 2 the columns. One thread per
+       * line (the host clips the dispatch to a texel-wide region) walks the line down and back,
+       * each texel taking the label of the free neighbour it has just passed, and the whole run of
+       * free texels a label has reached crosses in one go -- the GPU's substitute for the CPU's
+       * sequential region walk, which no window of ring candidates can replace: a jump past a wall
+       * thinner than its radius would swallow an enclosed hole the edge never reached, the ring
+       * the CPU kernel fills being exactly that hole. The walk adopts whole labels, compared
+       * lexicographically, from the four the CPU's regions are connected by -- a diagonal step
+       * would merge regions that only touch at a corner, which the CPU's walk keeps separate. The
+       * plan queues the two modes alternating a number of times; every pair turns the wavefront
+       * once, so a background the edge reaches through a few turns floods early, and the queue
+       * length, not this pass, is what bounds how winding it may be.
+       *
+       * The walk reads the label it has just written back through the field itself
+       * (#field_img being read-write), and the line's texels before the sweep through `input_tx`;
+       * a border texel keeps the label and the flag it came in with. The flag and the alpha carry
+       * through unchanged; the field is float32, so the coordinates are exact. */
+      const int2 field_size = textureSize(srt.input_tx, 0);
+      if (srt.pass_params.x == 1.0f) {
+        /* The rows: down the line, then back up it, the second walk reading the labels the first
+         * has written. */
+        const int y = texel.y;
+        float4 carried = texelFetch(srt.input_tx, int2(0, y), 0);
+        imageStore(srt.field_img, int2(0, y), carried);
+        for (int x = 1; x < field_size.x; x++) {
+          float4 own = texelFetch(srt.input_tx, int2(x, y), 0);
+          if (own.z != 0.0f && carried.z != 0.0f &&
+              (carried.x < own.x || (carried.x == own.x && carried.y < own.y)))
+          {
+            own.xy = carried.xy;
+          }
+          imageStore(srt.field_img, int2(x, y), own);
+          carried = own;
+        }
+        carried = imageLoad(srt.field_img, int2(field_size.x - 1, y));
+        for (int x = field_size.x - 2; x >= 0; x--) {
+          float4 own = imageLoad(srt.field_img, int2(x, y));
+          if (own.z != 0.0f && carried.z != 0.0f &&
+              (carried.x < own.x || (carried.x == own.x && carried.y < own.y)))
+          {
+            own.xy = carried.xy;
+          }
+          imageStore(srt.field_img, int2(x, y), own);
+          carried = own;
+        }
+        return;
+      }
+      /* The columns: the same walk across them, down and back up. */
+      const int x = texel.x;
+      float4 carried = texelFetch(srt.input_tx, int2(x, 0), 0);
+      imageStore(srt.field_img, int2(x, 0), carried);
+      for (int y = 1; y < field_size.y; y++) {
+        float4 own = texelFetch(srt.input_tx, int2(x, y), 0);
+        if (own.z != 0.0f && carried.z != 0.0f &&
+            (carried.x < own.x || (carried.x == own.x && carried.y < own.y)))
+        {
+          own.xy = carried.xy;
+        }
+        imageStore(srt.field_img, int2(x, y), own);
+        carried = own;
+      }
+      carried = imageLoad(srt.field_img, int2(x, field_size.y - 1));
+      for (int y = field_size.y - 2; y >= 0; y--) {
+        float4 own = imageLoad(srt.field_img, int2(x, y));
+        if (own.z != 0.0f && carried.z != 0.0f &&
+            (carried.x < own.x || (carried.x == own.x && carried.y < own.y)))
+        {
+          own.xy = carried.xy;
+        }
+        imageStore(srt.field_img, int2(x, y), own);
+        carried = own;
+      }
+      return;
+    }
+    case COMBINED_PASS_DIFFUSE_STEP: {
+      /* One pass of the Fill Area's diffusion (`paint_layer_effect_fill_area_apply`, the loop over
+       * the iterations): an enclosed texel walks toward the average of its four neighbours inside
+       * the map, the map's edge being no neighbour, and everything else stays as it is -- the
+       * border texels are the boundary condition the fill takes its colour from, and the
+       * background ones are never read, two texels side by side short of the border being one
+       * region, so an enclosed texel's neighbours are border or its own region only. The flood
+       * field in aux_tx names the three: the flag in blue unset is border, the background label
+       * zero with the flag set is background, the rest enclosed. The first step (`radius` one)
+       * reads the original, where the CPU's read side holds the border's straightened colours and
+       * zeros on the enclosed texels it zeroed at init -- a neighbour short of the border
+       * contributes nothing, a border neighbour its straightened colour, premultiplied divided
+       * back by an alpha in [0.01, 1) when the effect lays a layer (`pass_params.w`, the plan's
+       * as_layer). The later steps read the previous step, where the border passed its colour
+       * through and the enclosed hold the running average, so the plain four fetches are the CPU's
+       * own read. The average divides by the neighbours that exist, the CPU's own count. A border
+       * or a background texel keeps the colour it came in with: the border's is the boundary
+       * condition the later steps read, the background's is what a mask item's tail passes
+       * through. Alpha is the store's standard one; the coverage lives in the flood field, which
+       * the tail reads. */
+      const float4 field = texelFetch(srt.aux_tx, texel, 0);
+      const bool border = field.z == 0.0f;
+      const bool background = (!border && field.x == 0.0f && field.y == 0.0f);
+      if (border) {
+        if (srt.radius == 1 && srt.pass_params.w != 0.0f && source.w >= 0.01f && source.w < 1.0f) {
+          /* The CPU straightens the border's premultiplied colour once, at init; the later steps
+           * read the straightened value this step passes through. */
+          rgb = source.xyz / source.w;
+        }
+      }
+      else if (!background) {
+        const bool first = (srt.radius == 1);
+        float3 sum = float3(0.0f);
+        int samples = 0;
+        for (int dir = 0; dir < 4; dir++) {
+          const int2 offset = (dir == 0) ?
+                                  int2(1, 0) :
+                                  ((dir == 1) ? int2(-1, 0) :
+                                                ((dir == 2) ? int2(0, 1) : int2(0, -1)));
+          const int2 at = texel + offset;
+          if (any(lessThan(at, int2(0))) || any(greaterThanEqual(at, srt.texture_size))) {
+            continue; /* The map's edge is no neighbour. */
+          }
+          if (first) {
+            const float4 neighbour_field = texelFetch(srt.aux_tx, at, 0);
+            if (neighbour_field.z == 0.0f) {
+              /* A border neighbour: the straightened colour the CPU's read side holds. */
+              const float4 neighbour = texelFetch(srt.input_tx, at, 0);
+              float3 colour = neighbour.xyz;
+              if (srt.pass_params.w != 0.0f && neighbour.w >= 0.01f && neighbour.w < 1.0f) {
+                colour /= neighbour.w;
+              }
+              sum += colour;
+            }
+            /* A neighbour short of the border contributes nothing: the CPU zeroed the enclosed
+             * texels of its read side at init. */
+          }
+          else {
+            sum += texelFetch(srt.input_tx, at, 0).xyz;
+          }
+          samples++;
+        }
+        rgb = (samples > 0) ? sum / float(samples) : float3(0.0f);
+      }
+      break;
+    }
+    case COMBINED_PASS_FILL_TAIL: {
+      /* The Fill Area's write tail (`paint_layer_effect_fill_area_apply`'s write_result and the
+       * blur that follows it): an enclosed texel takes the fill -- the diffused colour the
+       * previous pass left, or the solid one in `pass_params2.rgb` when `pass_params.x` says so --
+       * and everything else is empty when the effect lays a layer (#alpha_from_kernel, the plan's
+       * as_layer): a hole between strokes has no coverage of its own, so a colour-only result would
+       * stay invisible on it. A mask item keeps what the texel held and leaves the alpha alone.
+       * The coverage is the enclosed indicator the flood field names, softened by the box blur of
+       * `radius` the CPU runs on a grey of its own -- folded here as the window sum of the
+       * indicator over the clamped window, which is what the CPU's two axis passes compose to, so
+       * the alpha this pass writes survives the blur pair that follows it: the pair carries the
+       * centre texel's alpha through and touches the colour only. The colour itself is blurred by
+       * that pair, the CPU's own order -- the non-enclosed texels are empty before it, so the
+       * fill's edge fades out without the border's own colours smearing in, which is why this tail
+       * runs ahead of the pair and not behind it. */
+      const float4 field = texelFetch(srt.aux_tx, texel, 0);
+      const bool enclosed = (field.z != 0.0f) && !(field.x == 0.0f && field.y == 0.0f);
+      if (enclosed) {
+        rgb = (srt.pass_params.x != 0.0f) ? srt.pass_params2.rgb : source.rgb;
+      }
+      else if (srt.alpha_from_kernel != 0) {
+        rgb = float3(0.0f);
+      }
+      if (srt.alpha_from_kernel != 0) {
+        const int2 field_size = textureSize(srt.aux_tx, 0);
+        const int lo_x = max(texel.x - srt.radius, 0);
+        const int hi_x = min(texel.x + srt.radius, field_size.x - 1);
+        const int lo_y = max(texel.y - srt.radius, 0);
+        const int hi_y = min(texel.y + srt.radius, field_size.y - 1);
+        float coverage = 0.0f;
+        for (int y = lo_y; y <= hi_y; y++) {
+          for (int x = lo_x; x <= hi_x; x++) {
+            const float4 neighbour = texelFetch(srt.aux_tx, int2(x, y), 0);
+            coverage += ((neighbour.z != 0.0f) && !(neighbour.x == 0.0f && neighbour.y == 0.0f)) ?
+                            1.0f :
+                            0.0f;
+          }
+        }
+        const float window = float((hi_x - lo_x + 1) * (hi_y - lo_y + 1));
+        computed_alpha = clamp(coverage / window, 0.0f, 1.0f);
+      }
+      break;
+    }
     default:
       /* An unknown kind leaves the texel as it came: the host only queues a kind the plan filled. */
       break;
   }
-  /* No kernel touches the alpha, and the buffer that holds the result carries the content alpha the
-   * row went in with -- kept or dropped to one, exactly as the CPU's buffer is written. */
-  const float alpha = (srt.tracks_alpha != 0) ? source.w : 1.0f;
+  /* No kernel touches the alpha unless it lays a layer of its own, and the buffer that holds the
+   * result carries the content alpha the row went in with -- kept or dropped to one, exactly as the
+   * CPU's buffer is written. A pass whose plan set #alpha_from_kernel keeps the alpha its kernel
+   * computed instead. */
+  const float alpha = (srt.alpha_from_kernel != 0) ? computed_alpha : pass_alpha;
   imageStore(srt.result_img, texel, float4(rgb, alpha));
 }
 

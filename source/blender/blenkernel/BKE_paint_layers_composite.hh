@@ -513,6 +513,69 @@ enum class ePaintLayerEffectPass : uint8_t {
   /** The single-pass luminance-driven edge blend of an FXAA: the nine lumas name the edge, the
    * gradient names the direction, and the pair of samples along it blend. */
   Fxaa,
+  /** The Glow's luminance choke: the spread clamps the luminance buffer to the glow band, a
+   * pointwise pass over a #Luminance result. */
+  Choke,
+  /** The Glow's screen tail: the blurred choke lights the original colour through the screen
+   * formula, reading the blurred band through its aux. */
+  ScreenTail,
+  /** The Pixelate block average: one pass, each texel averages the alpha-weighted block it
+   * belongs to out of the original; the amount -- the block count per side, the canvas cut into it
+   * per axis like the CPU's -- comes through `aux0`. */
+  BlockAverage,
+  /** The Height To Normal Sobel: one 3x3 pass over the height's red channel with the alpha weight
+   * to the neutral, encoded GL or DX; the world scale comes through `aux0` and the green
+   * convention (+1 the OpenGL encoding, -1 the DirectX one) through `params.x`. */
+  HeightToNormal3x3,
+  /** The Channel Split slot fetch: one pass, a bilinear sample of the slot map named by the aux
+   * at the texel's own UV, one channel taken as grey; the channel index comes through `aux0`. */
+  SlotFetch,
+  /** The distance transform's seed field: texels whose scalar sits below the threshold stamp their
+   * own coordinates, the rest stamp a far point; the JFA passes refine the field from here. */
+  JfaInit,
+  /** One Jump Flooding step: each texel keeps the nearest seed its `radius`-neighbourhood reports,
+   * the radius halving every pass until one. */
+  JfaStep,
+  /** The distance field's read: the Euclid distance to the seed field turns into the Bevel's ramp
+   * or the Mask Outline's band, per `params`; the band writes its own alpha. */
+  DistEval,
+  /** The Drop Shadow's silhouette: the source the effect names (its alpha or its luminance) as
+   * one grey, the spread and the blur working on it afterwards. */
+  Silhouette,
+  /** The Drop Shadow's combine tail: the blurred silhouette read at the shadow's offset -- past
+   * the canvas it reads zero, not the clamped edge -- tinted under the original colour, its own
+   * alpha written. */
+  OffsetTintTail,
+  /** The Blur Slope's driver: the luminance of the (blurred) input, or the value noise, re-graded
+   * by the position and contrast -- one grey whose gradient the walk follows. */
+  SlopeDriver,
+  /** The Blur Slope's walk: the gradient of the driver names the direction, the span names the
+   * reach, and the taps of the original blend by the mode (average, minimum, maximum). */
+  SlopeWalk,
+  /** The Mask Outline's tint tail: the blurred band turns into the premultiplied colour with the
+   * band as its own alpha. */
+  BandTintTail,
+  /** The Color Match reduction's first level: the alpha-weighted colour sum of every 2x2 block of
+   * the input, into a float32 pyramid level the steps halve down to one texel. */
+  ReduceStart,
+  /** One Color Match reduction step: the sum of the four texels the level above names, into the
+   * half-size level; the `radius` names which level this is. */
+  ReduceStep,
+  /** The Color Match's grade: the average the 1x1 pyramid texel carries (its aux) drives the
+   * pointwise hue / chroma / luma match of the original, the variation seeded by the texel hash. */
+  MatchGrade,
+  /** The Fill Area's label field: the border and the canvas edge stamp the background label zero,
+   * every other texel its own coordinates; the flooding steps refine it from here. */
+  FloodInit,
+  /** One Fill Area flooding step: each texel keeps the smallest label its `radius`-neighbourhood
+   * reports, the background label swallowing every region the edge reaches. */
+  FloodStep,
+  /** One Fill Area diffusion step: the average of the four neighbours inside the same region, one
+   * pass of the CPU's iterations; the `radius` names which one. */
+  DiffuseStep,
+  /** The Fill Area's write tail: the diffused colour goes out with the coverage the flooding
+   * named, the layer of its own the effect leaves. */
+  FillTail,
 };
 
 /** Which buffer a pass's `input_tx` reads. The gather binds the texture the role names. */
@@ -531,9 +594,15 @@ enum class ePaintLayerEffectPassAux : uint8_t {
   /** The blurred copy the plan built before this pass (a combine tail's). */
   Previous,
   /** The effect's rendered input canvas, the same texture #ePaintLayerEffectPassSource::Input
-   * names. No pass of the current kinds reads it, but the tail of a future reduction effect will,
-   * and the role keeps the gather from guessing. */
+   * names. The Blur Slope's walk reads it for its taps, and the tail of a future reduction effect
+   * (a Color Match's grade) will too. */
   Original,
+  /** The slot map a Channel Split reads: a texture the host binds for the pass, outside the
+   * effect's own ping-pong buffers. */
+  Slot,
+  /** The refined label field a Fill Area's diffusion reads: the float32 texture the flooding
+   * passes left, outside the ping-pong pair. */
+  Field,
 };
 
 /** Which axes a pass's window reaches along, its share of the halo and the region growth. */
@@ -567,6 +636,25 @@ struct PaintLayerEffectPass {
   /** #UnsharpTail / #HighPassTail: the Sharpen amount or the High Pass contrast, in the effect's
    * own units. */
   float aux0 = 0.0f;
+  /**
+   * Extra per-pass scalars the kernel reads as a float4: the Glow tail's tint colour, the Height
+   * To Normal's green convention, whatever a future pass kind needs beyond #radius / #maximum /
+   * #aux0. The host pushes it as the shader's `pass_params` unchanged.
+   */
+  float4 params = {0.0f, 0.0f, 0.0f, 0.0f};
+  /**
+   * The second per-pass float4, for the tails that need a colour and a flag side by side with
+   * #params (the Drop Shadow's offset and opacity there, its tint here). The host pushes it as the
+   * shader's `pass_params2` unchanged.
+   */
+  float4 params2 = {0.0f, 0.0f, 0.0f, 0.0f};
+  /**
+   * Whether this pass computes the alpha it writes instead of carrying the source's: the tails of
+   * the effects whose result is a layer of its own (the Mask Outline's band, the Drop Shadow's
+   * weight) name their alpha from the kernel, everything else keeps the standard rule. The host
+   * pushes it as the shader's `alpha_from_kernel` unchanged.
+   */
+  bool alpha_from_kernel = false;
   /** Its position in the plan, so the host can tell the last pass (which writes the cache). */
   int pass_index = 0;
   int pass_count = 0;
@@ -692,9 +780,11 @@ uint64_t BKE_paint_layers_effect_chain_hash(
  * adjustment filter and parameters, the filters, colours and opacities of the corrections below
  * the effect, and every gradient generator's payload and Anchor Point reader's slice hash in the
  * same description, and the input's transform steps (Mirror, Transform Mapping): a map version does not carry those, and a change to one alone would otherwise
- * serve a result computed from the old pixels. Together with the map versions it names everything a
- * re-render would read; it keys the GPU entry beyond the CPU hash. Pure: it reads the
- * description only, so it is testable without a GPU.
+ * serve a result computed from the old pixels. The slot map an effect's kernel samples itself (a
+ * Channel Split's, #PaintMaterialCompositeImageLayer::slot_image) joins by identity, its pixels
+ * being outside every map version the description carries too. Together with the map versions it
+ * names everything a re-render would read; it keys the GPU entry beyond the CPU hash. Pure: it
+ * reads the description only, so it is testable without a GPU.
  */
 uint64_t BKE_paint_layers_effect_input_scalar_hash(
     const PaintMaterialCompositeImageLayer &input_entry);

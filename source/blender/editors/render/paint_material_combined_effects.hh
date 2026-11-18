@@ -315,6 +315,35 @@ struct GpuEffectJob {
   gpu::Texture *result = nullptr;
   /** The input canvas, held from the pool only while a result is being computed. */
   gpu::Texture *input = nullptr;
+  /** The Channel Split's slot map the plan's slot fetch reads through its aux: the image's own GPU
+   * texture, acquired the way a row's map is and borrowed for this job's dispatches -- the image's
+   * cache owns and releases it, so the frame keeps no reference of its own. Null unless the plan
+   * names a #ePaintLayerEffectPassAux::Slot pass and the cache missed. */
+  gpu::Texture *slot_texture = nullptr;
+  /**
+   * The float32 halves the Color Match's reduction pyramid and the Fill Area's label field
+   * ping-pong through, canvas-sized (every pyramid level and every field fits into one), acquired
+   * only when the plan names the passes that use them and handed back to the pool when the job's
+   * dispatches end, like #input. Full float, not half: a pyramid level sums the canvas up -- a 4K
+   * one overflows a half float with -- and a field label carries coordinates the width of the
+   * canvas, past what a half float numbers exactly.
+   */
+  gpu::Texture *reduce_pair[2] = {nullptr, nullptr};
+  gpu::Texture *field_pair[2] = {nullptr, nullptr};
+  /**
+   * The label field the Fill Area's flooding ended on: what the plan's
+   * #ePaintLayerEffectPassAux::Field passes (the diffusion steps and the write tail) read as their
+   * aux. Written as the flooding commits and cleared with the pairs when the job's scope ends;
+   * null until the flooding runs.
+   */
+  gpu::Texture *field_texture = nullptr;
+  /**
+   * A one-texel float32 texture bound to the shader's `field_img` slot by every pass that does not
+   * write the field: the slot is declared for the whole effect shader, and a descriptor with
+   * nothing bound dereferences null in the Vulkan backend. Held from the pool for the job's
+   * dispatches only, like the pairs above.
+   */
+  gpu::Texture *field_placeholder = nullptr;
   /** The maps the input renders from: their versions decide when the result goes stale. */
   Vector<Image *> images;
   /** Texels that moved since the cached result; carried for the GPU pass's region re-render. */
@@ -351,6 +380,10 @@ struct EffectDispatchArgs {
   gpu::Texture *src;
   gpu::Texture *aux;
   gpu::Texture *dst;
+  /** The float32 texture a reduction or flooding pass writes through the shader's `field_img`
+   * slot, where the 16F `dst` declaration cannot follow; null for every other pass, whose kernel
+   * never names the slot. */
+  gpu::Texture *field_dst = nullptr;
   const rcti &rect;
 };
 

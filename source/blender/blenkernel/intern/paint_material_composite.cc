@@ -599,15 +599,16 @@ Span<int> BKE_paint_material_composite_passes()
    * Principled's own order, then the two roles that are not Principled inputs at all. Ambient
    * Occlusion is baked by the user rather than wired, and a mask belongs to the layer, not to the
    * shader.
-   *
-   * Height is deliberately absent: it has a descriptor and an identifier, but no part in the
-   * Combined preview's shading, and listing it would offer a pass the preview visibly ignores. */
+   * Height is listed although no shader socket takes it: it is the relief the layers lay (a Normal
+   * to Mask or a Height To Normal reads it), so the Image Editor has to show it. The Combined
+   * preview does not shade with it. */
   static const int passes[] = {
       PAINT_MATERIAL_CHANNEL_BASE_COLOR,
       PAINT_MATERIAL_CHANNEL_METALLIC,
       PAINT_MATERIAL_CHANNEL_ROUGHNESS,
       PAINT_MATERIAL_CHANNEL_SPECULAR,
       PAINT_MATERIAL_CHANNEL_NORMAL,
+      PAINT_MATERIAL_CHANNEL_HEIGHT,
       PAINT_MATERIAL_CHANNEL_AO,
       PAINT_MATERIAL_CHANNEL_ALPHA,
       PAINT_MATERIAL_CHANNEL_EMISSION,
@@ -638,6 +639,7 @@ Span<int> BKE_paint_material_display_passes()
       PAINT_MATERIAL_CHANNEL_ROUGHNESS,
       PAINT_MATERIAL_CHANNEL_SPECULAR,
       PAINT_MATERIAL_CHANNEL_NORMAL,
+      PAINT_MATERIAL_CHANNEL_HEIGHT,
       PAINT_MATERIAL_CHANNEL_AO,
       PAINT_MATERIAL_CHANNEL_ALPHA,
       PAINT_MATERIAL_CHANNEL_EMISSION,

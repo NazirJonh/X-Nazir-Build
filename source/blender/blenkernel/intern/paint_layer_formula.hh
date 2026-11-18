@@ -258,6 +258,31 @@ enum PaintLayerBlurDirectionalParam : int {
   PAINT_LAYER_BLUR_DIRECTIONAL_PARAM_NUM = 3,
 };
 
+/** The field the Normal to Mask kernel rebuilds from the normal, the value of its
+ * #PAINT_LAYER_NORMAL_TO_MASK_MODE parameter. */
+enum PaintLayerNormalToMaskMode : int {
+  /** The height the tangent normal's gradients integrate back into (a Poisson solve over the
+   * divergence of the normal's XY): the raised elements stand out as bright or dark regions. */
+  PAINT_LAYER_NORMAL_TO_MASK_HEIGHT = 0,
+  /** The magnitude of the normal's gradient (a Sobel over each channel summed): the borders of
+   * the elements light up, their insides stay dark. */
+  PAINT_LAYER_NORMAL_TO_MASK_EDGES = 1,
+  /** The slope the normal's blue channel carries, `1 - z`: flat areas read dark, tilted ones
+   * bright. */
+  PAINT_LAYER_NORMAL_TO_MASK_SLOPE = 2,
+};
+
+/** The positions of the Normal to Mask filter's parameters in its schema. */
+enum PaintLayerNormalToMaskParam : int {
+  /** The field the normal rebuilds into: #PaintLayerNormalToMaskMode. */
+  PAINT_LAYER_NORMAL_TO_MASK_MODE = 0,
+  /** The position the smoothstep centers on, in the field's normalized [0, 1]. */
+  PAINT_LAYER_NORMAL_TO_MASK_THRESHOLD = 1,
+  /** The ramp's width around the position: zero is a hard cut, one the full range. */
+  PAINT_LAYER_NORMAL_TO_MASK_SOFTNESS = 2,
+  PAINT_LAYER_NORMAL_TO_MASK_PARAM_NUM = 3,
+};
+
 /** The positions of the Sharpen filter's parameters in its schema. */
 enum PaintLayerSharpenParam : int {
   PAINT_LAYER_SHARPEN_RADIUS = 0,
@@ -496,6 +521,23 @@ inline float paint_layer_histogram_shift_apply(const float value, const float po
 {
   const float shifted = value + position;
   return shifted - std::floor(shifted);
+}
+
+/**
+ * The cut of the Normal to Mask kernel: the smoothstep ramp the Histogram Scan's own formula
+ * lays, centered on \a threshold and opened by \a softness the same way, so a zero softness is
+ * the hard cut the Threshold makes and the ramp's width grows with the softness. The one formula
+ * the CPU kernel and the preview session run, so the two cannot drift on where the mask cuts.
+ */
+inline float paint_layer_normal_to_mask_ramp_apply(const float value,
+                                                   const float threshold,
+                                                   const float softness)
+{
+  const float edge = std::clamp(softness, 0.0f, 1.0f) * 0.5f;
+  const float lo = threshold - edge;
+  const float span = std::max(edge * 2.0f, 1e-6f);
+  const float t = std::clamp((value - lo) / span, 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
 }
 
 /**

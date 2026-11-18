@@ -16,6 +16,8 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <limits>
+#include <memory>
 #include <utility>
 
 #include "MEM_guardedalloc.h"
@@ -194,6 +196,35 @@ class PaintLayersEffectTest : public PaintLayersGenerateTest {
         p[0] = value;
         p[1] = value;
         p[2] = value;
+        p[3] = 255;
+      }
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return image;
+  }
+
+  /** An opaque 8x8 Non-Color normal map split down the middle: the left half is the flat tangent
+   * normal (a blue map), the right half carries the encoded components given. The input a Normal
+   * to Mask reads. */
+  Image *add_normal_image(const char *name,
+                          const uchar right_r,
+                          const uchar right_g,
+                          const uchar right_b)
+  {
+    const int size = 8;
+    const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    Image *image = BKE_image_add_generated(
+        bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, color, false, true, false);
+    image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int y : IndexRange(size)) {
+      for (const int x : IndexRange(size)) {
+        uchar *p = pixels + (int64_t(y) * size + x) * 4;
+        p[0] = (x < size / 2) ? 128 : right_r;
+        p[1] = (x < size / 2) ? 128 : right_g;
+        p[2] = (x < size / 2) ? 255 : right_b;
         p[3] = 255;
       }
     }
@@ -782,6 +813,258 @@ TEST_F(PaintLayersEffectTest, a_blur_directional_sweeps_the_angles_at_the_map_ed
     }
   }
 }
+
+TEST_F(PaintLayersEffectTest, a_normal_to_mask_of_a_flat_normal_is_black)
+{
+  /* A flat normal carries no field: the Height has no divergence to integrate, the Edges no
+   * gradient, the Slope no tilt. Whatever the mode, the cut reads zero everywhere. */
+  MaterialPaintLayer *row = add_paint_layer("Row",
+                                            add_normal_image("Row", 128, 128, 255),
+                                            PAINT_MATERIAL_CHANNEL_NORMAL);
+  /* An empty base: a flat value with no alpha lays nothing of its own, so the Normal the effect
+   * reads sizes the row and the effect's grey is all that covers it. */
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  add_constant_channel(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, black);
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
+  for (const int mode :
+       {PAINT_LAYER_NORMAL_TO_MASK_HEIGHT,
+        PAINT_LAYER_NORMAL_TO_MASK_EDGES,
+        PAINT_LAYER_NORMAL_TO_MASK_SLOPE})
+  {
+    ASSERT_TRUE(paint_layer_kind_param_int_set(*effect, PAINT_LAYER_NORMAL_TO_MASK_MODE, mode));
+    Vector<float> pixels;
+    int width = 0;
+    int height = 0;
+    ASSERT_TRUE(render_channel(pixels, width, height)) << "mode " << mode;
+    ASSERT_EQ(pixels.size(), int64_t(width) * height * 4);
+    for (int64_t i = 0; i < pixels.size(); i += 4) {
+      EXPECT_NEAR(pixels[i], 0.0f, 2e-3f) << "mode " << mode << " texel " << i / 4;
+    }
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_normal_to_mask_slope_splits_the_tilted_half)
+{
+  /* The Slope field is the blue channel's tilt: the flat left half reads zero, the right one --
+   * whose normal points along the surface, `z = -1` -- reads one. The cut at the middle separates
+   * them without touching the seam. */
+  MaterialPaintLayer *row = add_paint_layer("Row",
+                                            add_normal_image("Row", 128, 128, 0),
+                                            PAINT_MATERIAL_CHANNEL_NORMAL);
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  add_constant_channel(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, black);
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect,
+                                             PAINT_LAYER_NORMAL_TO_MASK_MODE,
+                                             PAINT_LAYER_NORMAL_TO_MASK_SLOPE));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (const int y : IndexRange(height)) {
+    EXPECT_NEAR(linear_pixel(pixels, width, 1, y), 0.0f, 2e-3f)
+        << "the flat half has no tilt, texel row " << y;
+    EXPECT_NEAR(linear_pixel(pixels, width, 6, y), 1.0f, 2e-3f)
+        << "the tilted half reads the full slope, texel row " << y;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_normal_to_mask_edges_lights_the_seam)
+{
+  /* Two flat regions of different tilt: the normal's gradient lives at the seam alone, so the
+   * Edges field lights the seam column and leaves both interiors dark. */
+  MaterialPaintLayer *row = add_paint_layer("Row",
+                                            add_normal_image("Row", 255, 128, 128),
+                                            PAINT_MATERIAL_CHANNEL_NORMAL);
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  add_constant_channel(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, black);
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect,
+                                             PAINT_LAYER_NORMAL_TO_MASK_MODE,
+                                             PAINT_LAYER_NORMAL_TO_MASK_EDGES));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (const int y : IndexRange(height)) {
+    EXPECT_NEAR(linear_pixel(pixels, width, 1, y), 0.0f, 2e-3f)
+        << "the flat interior has no gradient, texel row " << y;
+    EXPECT_GT(linear_pixel(pixels, width, 4, y), 0.5f)
+        << "the seam carries the gradient, texel row " << y;
+  }
+}
+
+TEST_F(PaintLayersEffectTest, a_normal_to_mask_height_spans_the_tilt_step)
+{
+  /* The Height integrates the normal's gradients: a step from the flat tilt to the tilted one
+   * becomes a field that walks from zero to one across it, so the cut splits the halves the way
+   * the Slope does -- through the solve, not through the blue channel. */
+  MaterialPaintLayer *row = add_paint_layer("Row",
+                                            add_normal_image("Row", 255, 128, 128),
+                                            PAINT_MATERIAL_CHANNEL_NORMAL);
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  add_constant_channel(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, black);
+  MaterialPaintLayer *effect = add_effect(*row, MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*effect,
+                                             PAINT_LAYER_NORMAL_TO_MASK_MODE,
+                                             PAINT_LAYER_NORMAL_TO_MASK_HEIGHT));
+
+  Vector<float> pixels;
+  int width = 0;
+  int height = 0;
+  ASSERT_TRUE(render_channel(pixels, width, height));
+  for (const int y : IndexRange(height)) {
+    EXPECT_LT(linear_pixel(pixels, width, 1, y), 0.35f)
+        << "the flat side stays under the cut, texel row " << y;
+    EXPECT_GT(linear_pixel(pixels, width, 6, y), 0.65f)
+        << "the tilted side rises over it, texel row " << y;
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Normal to Mask field and cut
+ *
+ * The kernel is split into the solve (the field, one call per mode change) and the cut (the ramp,
+ * one call per repaint), and the preview session caches the first. These tests drive the two
+ * halves directly over hand-made buffers, the way the session does.
+ * \{ */
+
+/** A \a width x \a height float RGBA buffer whose Normal channel is the encoded map the kernel
+ * reads: flat blue on the left half, the encoded right half given. Alpha is opaque. */
+static std::shared_ptr<ImBuf> make_normal_slice(
+    const int width, const int height, const float right_r, const float right_g, const float right_b)
+{
+  ImBuf *ibuf = IMB_allocImBuf(width, height, ImBufFlags::FloatData);
+  if (ibuf == nullptr) {
+    return {};
+  }
+  float *pixels = ibuf->float_data_for_write();
+  for (const int y : IndexRange(height)) {
+    for (const int x : IndexRange(width)) {
+      const bool right_half = x >= width / 2;
+      float *texel = pixels + (int64_t(y) * width + x) * 4;
+      texel[0] = right_half ? right_r : 0.5f;
+      texel[1] = right_half ? right_g : 0.5f;
+      texel[2] = right_half ? right_b : 1.0f;
+      texel[3] = 1.0f;
+    }
+  }
+  return std::shared_ptr<ImBuf>(ibuf, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
+}
+
+TEST_F(PaintLayersEffectTest, a_normal_to_mask_field_ignores_the_cut)
+{
+  /* The solve answers to the mode alone: a threshold or a softness that moves may not move one
+   * value of the field, or the cached solve of a preview would drift from a re-solved one. */
+  std::shared_ptr<ImBuf> slice = make_normal_slice(8, 8, 0.5f, 0.5f, 0.0f);
+  ASSERT_NE(slice, nullptr);
+  PaintLayerNormalToMaskParams params;
+  params.mode = PAINT_LAYER_NORMAL_TO_MASK_SLOPE;
+  params.threshold = 0.2f;
+  params.softness = 0.05f;
+  Vector<float> field_a;
+  float lo_a = 0.0f;
+  float hi_a = 1.0f;
+  BKE_paint_layers_normal_to_mask_field_compute(*slice, params, field_a, lo_a, hi_a);
+  ASSERT_EQ(field_a.size(), int64_t(8) * 8);
+  params.threshold = 0.9f;
+  params.softness = 0.8f;
+  Vector<float> field_b;
+  float lo_b = 0.0f;
+  float hi_b = 1.0f;
+  BKE_paint_layers_normal_to_mask_field_compute(*slice, params, field_b, lo_b, hi_b);
+  ASSERT_EQ(field_b.size(), field_a.size());
+  for (const int64_t i : field_a.index_range()) {
+    EXPECT_FLOAT_EQ(field_b[i], field_a[i]) << "texel " << i;
+  }
+  EXPECT_FLOAT_EQ(lo_b, lo_a);
+  EXPECT_FLOAT_EQ(hi_b, hi_a);
+
+  /* The cut is what reads the two: the flat half stays dark, the tilted one lights, at the ramp
+   * the narrow softness lays. */
+  params.threshold = 0.2f;
+  params.softness = 0.05f;
+  ImBuf *cut = IMB_dupImBuf(slice.get());
+  ASSERT_NE(cut, nullptr);
+  BKE_paint_layers_normal_to_mask_cut_apply(*cut, field_a, lo_a, hi_a, params);
+  const float *px = cut->float_data();
+  ASSERT_NE(px, nullptr);
+  for (const int y : IndexRange(8)) {
+    EXPECT_NEAR(px[int64_t(y) * 8 * 4 + 1 * 4], 0.0f, 1e-3f)
+        << "the flat half cuts black, texel row " << y;
+    EXPECT_NEAR(px[int64_t(y) * 8 * 4 + 6 * 4], 1.0f, 1e-3f)
+        << "the tilted half cuts white, texel row " << y;
+    EXPECT_EQ(px[int64_t(y) * 8 * 4 + 3], 1.0f) << "the cut leaves the alpha alone";
+  }
+  IMB_freeImBuf(cut);
+}
+
+TEST_F(PaintLayersEffectTest, a_normal_to_mask_field_cuts_a_broken_normal_as_black)
+{
+  /* A NaN in the normal map stands out of every window and every cut: the field stays finite, the
+   * window lands on the finite values, and the broken texel's grey is black, not the NaN the raw
+   * arithmetic would write into the mask. */
+  std::shared_ptr<ImBuf> slice = make_normal_slice(8, 8, 0.5f, 0.5f, 0.0f);
+  ASSERT_NE(slice, nullptr);
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  slice->float_data_for_write()[(int64_t(3) * 8 + 3) * 4 + 2] = nan;
+  slice->float_data_for_write()[(int64_t(3) * 8 + 3) * 4 + 0] = nan;
+  PaintLayerNormalToMaskParams params;
+  params.mode = PAINT_LAYER_NORMAL_TO_MASK_SLOPE;
+  Vector<float> field;
+  float lo = 0.0f;
+  float hi = 1.0f;
+  BKE_paint_layers_normal_to_mask_field_compute(*slice, params, field, lo, hi);
+  ASSERT_EQ(field.size(), int64_t(8) * 8);
+  EXPECT_TRUE(std::isfinite(lo)) << "the window lands on the finite values";
+  EXPECT_TRUE(std::isfinite(hi)) << "the window lands on the finite values";
+  for (const int64_t i : field.index_range()) {
+    EXPECT_TRUE(std::isfinite(field[i])) << "texel " << i;
+  }
+  ImBuf *cut = IMB_dupImBuf(slice.get());
+  ASSERT_NE(cut, nullptr);
+  BKE_paint_layers_normal_to_mask_cut_apply(*cut, field, lo, hi, params);
+  const float *px = cut->float_data();
+  ASSERT_NE(px, nullptr);
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    EXPECT_TRUE(std::isfinite(px[i * 4])) << "texel " << i;
+    EXPECT_TRUE(std::isfinite(px[i * 4 + 1])) << "texel " << i;
+    EXPECT_TRUE(std::isfinite(px[i * 4 + 2])) << "texel " << i;
+  }
+  EXPECT_NEAR(px[(int64_t(3) * 8 + 3) * 4], 0.0f, 1e-3f)
+      << "the broken texel cuts as no signal";
+  IMB_freeImBuf(cut);
+}
+
+TEST_F(PaintLayersEffectTest, a_normal_to_mask_height_solves_odd_canvases)
+{
+  /* The pyramid coarsens only while both sides stay past its floor: a one-wide or one-high canvas
+   * and a small odd one solve whole, every texel finite, the clamped reads keeping the shape the
+   * size names. */
+  for (const int64_t size_wh[3][2] = {{1, 9}, {9, 1}, {3, 5}};
+       const auto &side : size_wh)
+  {
+    std::shared_ptr<ImBuf> slice = make_normal_slice(
+        int(side[0]), int(side[1]), 0.5f, 0.5f, 0.0f);
+    ASSERT_NE(slice, nullptr) << side[0] << "x" << side[1];
+    PaintLayerNormalToMaskParams params;
+    params.mode = PAINT_LAYER_NORMAL_TO_MASK_HEIGHT;
+    Vector<float> field;
+    float lo = 0.0f;
+    float hi = 1.0f;
+    BKE_paint_layers_normal_to_mask_field_compute(*slice, params, field, lo, hi);
+    ASSERT_EQ(field.size(), side[0] * side[1]) << side[0] << "x" << side[1];
+    EXPECT_TRUE(std::isfinite(lo)) << side[0] << "x" << side[1];
+    EXPECT_TRUE(std::isfinite(hi)) << side[0] << "x" << side[1];
+    for (const int64_t i : field.index_range()) {
+      EXPECT_TRUE(std::isfinite(field[i])) << side[0] << "x" << side[1] << " texel " << i;
+    }
+  }
+}
+
+/** \} */
 
 TEST_F(PaintLayersEffectTest, a_drop_shadow_falls_toward_the_angle_off_the_luminance)
 {
@@ -3312,14 +3595,26 @@ TEST_F(PaintLayersEffectTest, a_channel_split_kernel_lays_the_slot_channel_as_a_
   paint_layer_effect_kernel_apply(*input, *split, false, PAINT_TILE_NUMBER_BASE);
   const float *result = input->float_data();
   const auto texel = [&](const int x, const int y) { return result + (int64_t(y) * 8 + x) * 4; };
-  /* The red channel of the map, every texel the one value, the input's alpha left alone: the
-   * coverage the channel carries stays whatever the slot's own alpha does. */
+  /* The red channel of the map, every texel the one value. A content effect lays a layer of its
+   * own, so the map covers fully whatever alpha the input had. */
   for (const int y : IndexRange(8)) {
     for (const int x : IndexRange(8)) {
       EXPECT_NEAR(texel(x, y)[0], 25.0f / 255.0f, 5e-3f) << "red at " << x << "," << y;
       EXPECT_NEAR(texel(x, y)[1], texel(x, y)[0], 1e-6f) << "grey at " << x << "," << y;
-      EXPECT_NEAR(texel(x, y)[3], 0.5f, 1e-6f) << "alpha at " << x << "," << y;
+      EXPECT_NEAR(texel(x, y)[3], 1.0f, 1e-6f) << "alpha at " << x << "," << y;
     }
+  }
+  IMB_freeImBuf(input);
+
+  /* The mask form keeps the input's alpha: its grey carries none of its own. */
+  input = IMB_allocImBuf(8, 8, ImBufFlags::FloatData);
+  pixels = input->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    pixels[i * 4 + 3] = 0.5f;
+  }
+  paint_layer_effect_kernel_apply(*input, *split, true, PAINT_TILE_NUMBER_BASE);
+  for (const int64_t i : IndexRange(int64_t(8) * 8)) {
+    EXPECT_NEAR(input->float_data()[i * 4 + 3], 0.5f, 1e-6f) << "mask alpha, texel " << i;
   }
   IMB_freeImBuf(input);
 
@@ -4085,7 +4380,7 @@ TEST_F(PaintLayersEffectTest, every_gpu_computed_kind_builds_a_pass_plan)
    * nothing. */
   Set<int> gpu_computed_filters;
   for (int filter = int(MA_PAINT_LAYER_FILTER_INVERT);
-       filter <= int(MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT);
+       filter <= int(MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
        filter++)
   {
     const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);

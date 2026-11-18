@@ -151,6 +151,7 @@ set(SRC
   mesh/paint_image_2d_mask_coverage.cc
   mesh/paint_image_fill_faces.cc
   mesh/paint_image_mask_filters.cc
+  mesh/paint_image_normal_to_mask.cc
   mesh/paint_image_paint_mask_island.cc
   mesh/paint_image_uv_geom.cc
   mesh/paint_image_uv_symmetry.cc

@@ -24,6 +24,7 @@
 #include "RNA_prototypes.hh"
 
 #include "BLI_index_range.hh"
+#include "BLI_uuid.h"
 
 #include "DNA_material_types.h"
 
@@ -926,7 +927,9 @@ TEST_F(PaintLayersFilterKindsTest, height_to_normal_kind_is_a_cross_channel_effe
   EXPECT_TRUE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_NEEDS_BAKE));
   EXPECT_FALSE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_GPU_COMPUTED));
   EXPECT_TRUE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_NORMAL_SAFE));
-  EXPECT_TRUE(paint_layer_kind_has_flag(*to_normal, PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT));
+  EXPECT_TRUE(paint_layer_effect_reads_height(*to_normal));
+  EXPECT_EQ(paint_layer_effect_input_channel(*to_normal, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            PAINT_MATERIAL_CHANNEL_HEIGHT);
   /* The gradients default to the intensity's own scale; the flip to the OpenGL encoding. */
   EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*to_normal, PAINT_LAYER_HEIGHT_TO_NORMAL_STRENGTH),
                   1.0f);
@@ -1073,9 +1076,9 @@ TEST_F(PaintLayersFilterKindsTest, channel_split_kind_is_a_cpu_computed_effect_w
   EXPECT_TRUE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_ACTS_ON_BELOW));
   EXPECT_TRUE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_NEEDS_BAKE));
   EXPECT_FALSE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_GPU_COMPUTED));
-  /* The result is a grey of the slot's channel, not a layer with an alpha of its own: the input's
-   * coverage stays, and a mask's grey carries none of its own either. */
-  EXPECT_FALSE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_RESULT_HAS_ALPHA));
+  /* The result is a layer of its own: the slot's map covers fully, so the grey shows on a row that
+   * has no paint yet. A mask item keeps the input's alpha, as its grey carries none of its own. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*split, PAINT_LAYER_KIND_RESULT_HAS_ALPHA));
   /* The slot is the one map the kernel reads: the registry says so, and the slot answers null
    * while nothing is assigned. */
   const PaintLayerKindInfo *kind = paint_layer_kind_of(*split);
@@ -1169,6 +1172,123 @@ TEST_F(PaintLayersFilterKindsTest, normal_convert_kind_alone_carries_the_normal_
             PaintLayerKindParamType::Enum);
   EXPECT_EQ(paint_layer_kind_param_int_get(*convert, PAINT_LAYER_NORMAL_CONVERT_NORMALIZE), 1)
       << "the normalize starts on";
+}
+
+TEST_F(PaintLayersFilterKindsTest, normal_to_mask_kind_is_a_cpu_effect_that_reads_an_anchor_point)
+{
+  Material *ma = BKE_material_add(bmain, "RnaNormalToMaskParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *effect = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
+  ASSERT_NE(effect, nullptr);
+
+  /* A field solve the graph has no node for: the grey is computed and baked, and the combined
+   * preview falls back to the CPU the way a Bevel's does. The element reads the slice its Anchor
+   * Point names, and never writes a Normal: the grey goes to the colour channels alone. */
+  EXPECT_TRUE(paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_NEEDS_BAKE));
+  EXPECT_TRUE(paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_READS_ANCHOR_POINT));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_GPU_COMPUTED));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_NORMAL_SAFE));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_NO_GPU_BRANCH));
+
+  /* The field starts at the Height, the cut at the middle of the ramp, the softness at a narrow
+   * one. The mode is an enum of the three fields. */
+  EXPECT_EQ(paint_layer_kind_param_int_get(*effect, PAINT_LAYER_NORMAL_TO_MASK_MODE),
+            PAINT_LAYER_NORMAL_TO_MASK_HEIGHT);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*effect, PAINT_LAYER_NORMAL_TO_MASK_THRESHOLD), 0.5f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*effect, PAINT_LAYER_NORMAL_TO_MASK_SOFTNESS), 0.1f);
+  EXPECT_EQ(paint_layer_kind_param_type(*effect, PAINT_LAYER_NORMAL_TO_MASK_MODE),
+            PaintLayerKindParamType::Enum);
+
+  /* The RNA enum names the kind, and the collection lists exactly the schema's three parameters,
+   * labelled. */
+  PointerRNA effect_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, effect);
+  PropertyRNA *filter_prop = RNA_struct_find_property(&effect_ptr, "filter_type");
+  ASSERT_NE(filter_prop, nullptr);
+  const char *identifier = nullptr;
+  ASSERT_TRUE(RNA_property_enum_identifier(nullptr,
+                                           &effect_ptr,
+                                           filter_prop,
+                                           MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK,
+                                           &identifier));
+  EXPECT_STREQ(identifier, "NORMAL_TO_MASK");
+  PropertyRNA *params = RNA_struct_find_property(&effect_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&effect_ptr, params), 3);
+  const char *names[3] = {"mode", "threshold", "softness"};
+  const char *labels[3] = {"Mode", "Threshold", "Softness"};
+  for (const int i : IndexRange(3)) {
+    PointerRNA param_ptr;
+    ASSERT_TRUE(RNA_property_collection_lookup_string(&effect_ptr, params, names[i], &param_ptr))
+        << names[i];
+    PropertyRNA *label = RNA_struct_find_property(&param_ptr, "label");
+    ASSERT_NE(label, nullptr);
+    EXPECT_EQ(RNA_property_string_get(&param_ptr, label), labels[i]);
+  }
+}
+
+TEST_F(PaintLayersFilterKindsTest, normal_to_mask_kind_reads_a_slice_only_as_a_mask_item)
+{
+  Material *ma = BKE_material_add(bmain, "RnaNormalToMaskRolesMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK, "Normal to Mask");
+  ASSERT_NE(item, nullptr);
+
+  /* The element is an Anchor Point reader carrying no source yet: a source can be set on it, and
+   * it reads back. The same kind as a correction refuses one -- its input is the row's own Normal
+   * content there, and a reference set on it would be read by nothing. */
+  EXPECT_TRUE(BKE_paint_layers_reads_anchor_point(*item));
+  MaterialPaintLayer *marker = BKE_paint_layers_anchor_point_add(
+      *ma, row, PaintLayerAnchorPointList::Effects, nullptr, false, "Point", {});
+  ASSERT_NE(marker, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_anchor_point_source_set(*ma, item, marker->marker));
+  EXPECT_TRUE(BLI_uuid_equal(BKE_paint_layers_anchor_point_source_get(*item), marker->marker));
+
+  MaterialPaintLayer *correction = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
+  ASSERT_NE(correction, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_reads_anchor_point(*correction));
+  EXPECT_FALSE(BKE_paint_layers_anchor_point_source_set(*ma, correction, marker->marker))
+      << "a correction of the kind reads no slice; the setter refuses the reference";
+}
+
+TEST_F(PaintLayersFilterKindsTest, normal_to_mask_add_refuses_a_source_without_a_normal_cleanly)
+{
+  Material *ma = BKE_material_add(bmain, "NormalToMaskAddRollbackMat");
+  MaterialPaintLayer *source = BKE_paint_layers_add(*ma, "Src", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *target = BKE_paint_layers_add(*ma, "Target", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(source, nullptr);
+  ASSERT_NE(target, nullptr);
+
+  /* A source with no Normal lays a slice with nothing to convert: the add refuses before it
+   * mutates anything, so neither the target's mask nor the source's effects carries a piece a
+   * half-done wire would have left behind. */
+  EXPECT_EQ(BKE_paint_layers_normal_to_mask_add(*ma, target, source), nullptr);
+  EXPECT_EQ(source->effects.first, nullptr);
+  EXPECT_EQ(target->mask_stack.first, nullptr);
+
+  /* With the record the wire runs whole: the point in the source's effects, the item over the
+   * base mask the add made, the reference set on it. */
+  MaterialPaintLayerChannel *normal = BKE_paint_layers_channel_add(
+      *ma, source, PAINT_MATERIAL_CHANNEL_NORMAL);
+  ASSERT_NE(normal, nullptr);
+  /* A record with no map and no flat alpha lays nothing, so the row would not take part in the
+   * Normal channel: the flat value is what gives the source a Normal to convert. */
+  normal->value[3] = 1.0f;
+  MaterialPaintLayer *item = BKE_paint_layers_normal_to_mask_add(*ma, target, source);
+  ASSERT_NE(item, nullptr);
+  EXPECT_EQ(item->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ(item->kind_subtype, MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK);
+  EXPECT_NE(BKE_paint_layers_mask_base(*target), nullptr);
+  const MaterialPaintLayer *marker = static_cast<const MaterialPaintLayer *>(source->effects.first);
+  ASSERT_NE(marker, nullptr);
+  EXPECT_STREQ(marker->name, "Normal to Mask Point");
+  EXPECT_TRUE(BLI_uuid_equal(BKE_paint_layers_anchor_point_source_get(*item), marker->marker));
 }
 
 TEST_F(PaintLayersFilterKindsTest, rna_color_balance_reaches_the_payload)

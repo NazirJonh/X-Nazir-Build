@@ -1644,6 +1644,8 @@ void PAINT_OT_image_select_warp_undo_step(wmOperatorType *ot);
 /* paint_image_mask_filters.cc */
 void PAINT_OT_id_color_pick(wmOperatorType *ot);
 void PAINT_OT_uv_island_pick(wmOperatorType *ot);
+void PAINT_OT_normal_to_mask_preview(wmOperatorType *ot);
+void PAINT_OT_normal_to_mask_wire(wmOperatorType *ot);
 void PAINT_OT_mask_item_bake(wmOperatorType *ot);
 void PAINT_OT_mask_merge(wmOperatorType *ot);
 

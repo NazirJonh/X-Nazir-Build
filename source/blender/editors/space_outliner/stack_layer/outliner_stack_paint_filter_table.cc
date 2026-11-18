@@ -174,6 +174,9 @@ static PaintKindLook paint_filter_look(const int16_t filter)
     case MA_PAINT_LAYER_FILTER_MIRROR:
       /* No glyph of its own yet: the modifier's own mirror icon names the fold. */
       return {ICON_MOD_MIRROR, 0};
+    case MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK:
+      /* The mask modifier's icon names what the grey the normal rebuilds into is: a mask. */
+      return {ICON_MOD_MASK, 0};
   }
   return {ICON_ARROW_LEFTRIGHT, 0};
 }
@@ -423,6 +426,12 @@ static const PaintFilterAddKind paint_effect_add_kinds_table[] = {
      "channels the effect works in: an ORM map feeds Roughness from its green, AO from its red "
      "and Metallic from its blue, one effect each",
      MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT},
+    {"EFFECT_NORMAL_TO_MASK",
+     N_("Normal to Mask"),
+     "Turn the normal map of the referenced layer (an Anchor Point), or of the layer's own Normal "
+     "content, into a black-and-white mask: the normal rebuilds into a Height, an Edges or a Slope "
+     "field the threshold cuts",
+     MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK},
 };
 
 /**

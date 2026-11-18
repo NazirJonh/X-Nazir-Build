@@ -585,6 +585,12 @@ class OUTLINER_MT_context_menu(Menu):
             if (space.stack_layers_view == 'STACK' and
                     space.stack_source == 'PAINT_MATERIAL'):
                 layout.menu("OUTLINER_MT_stack_layer_mask_add", icon='MOD_MASK')
+                # A Normal to Mask turns a row's normal map into the active row's mask: the wiring
+                # sits beside the mask adds, and its poll lists it only for a row that carries a
+                # Normal record the mask can be built from.
+                if bpy.ops.paint.normal_to_mask_wire.poll():
+                    layout.operator(
+                        "paint.normal_to_mask_wire", text="Add Normal to Mask", icon='LINKED')
                 # The same contextual grouped menu the header draws: one line per thing, resolved
                 # to the active target. Keeping it here as well would be a second vocabulary.
                 layout.menu("OUTLINER_MT_stack_layer_effect_add",
@@ -599,6 +605,15 @@ class OUTLINER_MT_context_menu(Menu):
                     props = layout.operator(
                         "outliner.stack_layer_mask", text="Remove Mask", icon='X')
                     props.add = False
+                # The interactive pass over the active Normal to Mask mask item: the editors show
+                # its grey, a drag moves the threshold, a click erases the region under the cursor
+                # into a painted mask item over it.
+                if bpy.ops.paint.normal_to_mask_preview.poll():
+                    layout.operator(
+                        "paint.normal_to_mask_preview",
+                        text="Preview Normal to Mask",
+                        icon='EYEDROPPER',
+                    )
                 # Activating a row aims the brush at it; this is the way back to no target.
                 if bpy.ops.outliner.stack_layer_clear_target.poll():
                     layout.operator("outliner.stack_layer_clear_target", icon='RESTRICT_SELECT_ON')
@@ -648,13 +663,13 @@ class OUTLINER_MT_context_menu(Menu):
                     props = layout.operator(
                         "outliner.stack_layer_channel_map_encoding",
                         text="Roughness: Read as Glossiness",
-                        icon='MOD_INVERT',
+                        icon='ARROW_LEFTRIGHT',
                     )
                     props.channel = 'ROUGHNESS'
                     props.toggle = True
                     layout.menu(
                         "OUTLINER_MT_stack_layer_roughness_encoding",
-                        icon='MOD_INVERT',
+                        icon='ARROW_LEFTRIGHT',
                     )
                     layout.menu(
                         "OUTLINER_MT_stack_layer_specular_encoding",

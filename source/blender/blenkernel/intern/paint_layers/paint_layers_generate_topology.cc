@@ -442,6 +442,13 @@ static void topology_mask_hash_mix(uint64_t &hash,
     hash = topology_hash_mix(hash, MASK_CONTRAST_TOPOLOGY_VERSION);
     if (paint_layer_kind_reads_anchor_point(item)) {
       topology_hash_anchor_point_reader(hash, ma, item, wired_channels, 0x606, 0x607, true);
+      /* A Normal to Mask is a baked mask effect as well as a reader: its grey is the bake's, laid
+       * by a map read, and the presence of that bake is topology -- the fold the reader's continue
+       * skips past (see the baked-effect branch below). */
+      if (paint_layer_mask_item_bakes_effect(item)) {
+        hash = topology_hash_mix(hash,
+                                 paint_layer_mask_effect_bake_map(ma, item) != nullptr ? 1 : 0);
+      }
       continue;
     }
     /* A filter item is nodes of its own, and which filter decides them. */

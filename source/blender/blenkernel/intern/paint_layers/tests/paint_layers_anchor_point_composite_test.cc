@@ -2376,6 +2376,76 @@ TEST_F(PaintLayersAnchorPointCompositeTest, gpu_verify_compare_fails_on_nan)
   EXPECT_TRUE(diff.has_nan);
 }
 
+TEST_F(PaintLayersAnchorPointCompositeTest,
+       normal_to_mask_item_lays_the_kernel_grey_of_the_referenced_normal)
+{
+  /* The source's Normal channel: flat on the left, pointing along the surface on the right. The
+   * mask item of the owner reads the slice in the Normal channel -- the colour channels of the
+   * slice play no part -- and its Slope grey hides the owner's colour where the normal is flat
+   * and shows it where the normal is tilted. */
+  Image *normal = add_image("Source Normal", 8, 128, 128, 255, 255, true);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(normal, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int y : IndexRange(8)) {
+      for (const int x : IndexRange(8)) {
+        uchar *p = pixels + (int64_t(y) * 8 + x) * 4;
+        if (x >= 4) {
+          p[2] = 0;
+        }
+      }
+    }
+    BKE_image_release_ibuf(normal, ibuf, lock);
+  }
+  MaterialPaintLayer *source = add_layer_with_image(
+      "Source", normal, PAINT_MATERIAL_CHANNEL_NORMAL);
+  MaterialPaintLayer *point = add_point(*source);
+  ASSERT_NE(point, nullptr);
+
+  MaterialPaintLayer *owner = add_layer_with_image("Owner", add_image("Owner", 8, 0, 255, 0));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, owner, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_filter_add(
+      *ma, owner, MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK, "Normal to Mask");
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_anchor_point_source_set(*ma, item, point->marker));
+  ASSERT_TRUE(paint_layer_kind_param_int_set(*item,
+                                             PAINT_LAYER_NORMAL_TO_MASK_MODE,
+                                             PAINT_LAYER_NORMAL_TO_MASK_SLOPE));
+  /* Live first: the grey comes from the mask effect cache over the rendered slice. */
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *item, MA_PAINT_LAYER_BAKE_NEVER));
+
+  Vector<float> live;
+  int live_width = 0;
+  int live_height = 0;
+  ASSERT_TRUE(render_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, live, live_width, live_height));
+
+  float bottom[4];
+  BKE_paint_layers_channel_bottom_color(PAINT_MATERIAL_CHANNEL_BASE_COLOR, bottom);
+  const float *hidden = linear_pixel(live, live_width, 1, 1);
+  EXPECT_NEAR(hidden[1], bottom[1], 2.0f / 255.0f)
+      << "the flat half of the normal reads mask zero and the owner's green is hidden";
+  const float *shown = linear_pixel(live, live_width, 6, 1);
+  EXPECT_NEAR(shown[1], 1.0f, 2.0f / 255.0f)
+      << "the tilted half reads mask one and the owner's green is shown";
+
+  /* The baked pass: the item's grey is one map of its own, and the plan writes it like any mask
+   * effect's. The baked composite splits the same way. */
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *item, MA_PAINT_LAYER_BAKE_ALWAYS));
+  bake_plan();
+  ASSERT_NE(item->bake, nullptr);
+  ASSERT_NE(item->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+
+  Vector<float> baked;
+  int baked_width = 0;
+  int baked_height = 0;
+  ASSERT_TRUE(render_channel(
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR, baked, baked_width, baked_height));
+  EXPECT_NEAR(linear_pixel(baked, baked_width, 1, 1)[1], bottom[1], 2.0f / 255.0f);
+  EXPECT_NEAR(linear_pixel(baked, baked_width, 6, 1)[1], 1.0f, 2.0f / 255.0f);
+}
+
 /** \} */
 
 /** \} */

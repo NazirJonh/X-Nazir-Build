@@ -746,30 +746,62 @@ inline bool paint_layer_effect_is_filter(const MaterialPaintLayer &effect)
  * The channels a filter works in are the live records of its row, the same switches a layer has:
  * the record carries no map, only the choice. A tangent normal is not a colour a per-channel
  * function may touch, so Normal is left alone whatever the record says -- except by a filter that
- * reads the encoding as numbers (#PAINT_LAYER_KIND_NORMAL_SAFE, a Normal Convert). A filter that
- * reads the Height (#PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT, a Height To Normal) lays a normal, so it
- * filters the Normal alone: on any other channel it would write a normal into a colour. The one
- * rule for the generator, the CPU adapter and the topology hash.
+ * reads the encoding as numbers (#PAINT_LAYER_KIND_NORMAL_SAFE, a Normal Convert) or lays one (a
+ * Height To Normal), which filters the Normal alone: on any other channel it would write a normal
+ * into a colour. The one rule for the generator, the CPU adapter and the topology hash.
  */
 inline bool paint_layer_effect_filters(const Material &ma,
                                        const MaterialPaintLayer &effect,
                                        const int channel)
 {
-  return paint_layer_effect_is_filter(effect) && !paint_layer_channel_filtered(ma, channel) &&
-         (channel != PAINT_MATERIAL_CHANNEL_NORMAL ||
-          paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_NORMAL_SAFE)) &&
-         (channel == PAINT_MATERIAL_CHANNEL_NORMAL || !paint_layer_effect_reads_height(effect)) &&
-         paint_layer_channel_live(paint_layer_channel_find(effect, channel));
+  if (!(paint_layer_effect_is_filter(effect) && !paint_layer_channel_filtered(ma, channel) &&
+        (channel != PAINT_MATERIAL_CHANNEL_NORMAL ||
+         paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_NORMAL_SAFE)) &&
+        (channel == PAINT_MATERIAL_CHANNEL_NORMAL || !paint_layer_effect_reads_height(effect)) &&
+        paint_layer_channel_live(paint_layer_channel_find(effect, channel))))
+  {
+    return false;
+  }
+  /* A kind whose output stays colour-only consumes the channel it reads and never takes part in
+   * it (a Normal to Mask: the Normal's encoding is what it reads, the grey is what it lays, so the
+   * shared rule above already refuses the Normal channel too). Its input must exist for any
+   * channel to take part: the record of the channel it reads is the input's switch, the one the
+   * one-click add enables beside the output records. */
+  if (paint_layer_kind_writes_only_colour_channels(effect)) {
+    const int reads = paint_layer_effect_reads_channel(effect);
+    return channel != reads &&
+           paint_layer_channel_live(paint_layer_channel_find(effect,
+                                                             eMaterialPaintChannel(reads)));
+  }
+  return true;
 }
 
 /**
  * The channel whose content \a effect reads as its input when it works in \a channel: its own, or
- * the Height for a kind that reads it (#PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT). The one answer for
- * the input describe and the bake's canvas size, so neither can read a channel the other does not.
+ * the one its kind's registry entry names (#PaintLayerKindInfo::reads_channel, the Height for a
+ * Height To Normal, the Normal for a Normal to Mask). The one answer for the input describe and
+ * the bake's canvas size, so neither can read a channel the other does not.
  */
 inline int paint_layer_effect_input_channel(const MaterialPaintLayer &effect, const int channel)
 {
-  return paint_layer_effect_reads_height(effect) ? int(PAINT_MATERIAL_CHANNEL_HEIGHT) : channel;
+  const int reads = paint_layer_effect_reads_channel(effect);
+  if (reads >= 0) {
+    /* A cross-channel kind reads the row's content in its input channel whatever output channel
+     * it works on: its own record, or the slice an Anchor Point reader row lays from its source. */
+    return reads;
+  }
+  return channel;
+}
+
+/**
+ * The nearest texel of a \a src_side canvas for \a texel of a \a dst_side-wide one: each axis
+ * stretched independently, the read clamped into the source. The one resample a whole canvas
+ * takes when it lands whole somewhere else -- a slice into a mask effect's grey canvas, a grey
+ * into a bake map -- so the callers cannot disagree about the rounding.
+ */
+inline int paint_layer_nearest_resample_texel(const int texel, const int dst_side, const int src_side)
+{
+  return min_ii(int(int64_t(texel) * src_side / dst_side), src_side - 1);
 }
 
 /**
@@ -1150,6 +1182,20 @@ inline bool paint_layer_effects_lay(const Material &ma,
     {
       return true;
     }
+    /* The same for a kind whose input is another channel of the row (a Normal to Mask): its grey
+     * comes from the channel it reads, so it keeps the row alive in an output channel the row has
+     * no content in -- a Fill with only a Normal texture still gets a Height or an Ambient
+     * Occlusion out of it. The input has to exist, or the effect would read nothing. */
+    const int reads = paint_layer_effect_reads_channel(effect);
+    if (reads >= 0 && channel != reads && paint_layer_kind_writes_only_colour_channels(effect) &&
+        (kind->flags & PAINT_LAYER_KIND_RESULT_HAS_ALPHA) != 0 &&
+        (paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, reads)) ||
+         paint_layer_row_reads_source(ma, layer, reads) ||
+         paint_layer_row_reads_anchor_point(ma, layer, reads)) &&
+        paint_layer_effect_filters(ma, effect, channel))
+    {
+      return true;
+    }
   }
   return false;
 }
@@ -1274,6 +1320,17 @@ inline bool paint_layer_mask_item_lays(const MaterialPaintLayer &item)
  */
 inline bool paint_layer_mask_item_lays(const Material &ma, const MaterialPaintLayer &item)
 {
+  /* A CPU-computed kind that reads an Anchor Point (a Normal to Mask) lays a grey it computes
+   * from the slice, not the slice itself: its input is the input channel of the slice its Anchor
+   * Point references, and what it lays is what the kernel makes of it -- the answer the mask
+   * effect cache and the bake give. It carries the reader flag for the source picker and the
+   * slice subscriptions, so it stands ahead of the reader branch, which would otherwise hand it
+   * to #paint_layer_row_reads_anchor_point, the rule for elements that lay the raw slice. */
+  if (paint_layer_kind_reads_anchor_point(item) && paint_layer_mask_item_bakes_effect(item)) {
+    const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, item);
+    return ref.issue == PaintLayerAnchorPointIssue::None &&
+           ref.target == PaintLayerAnchorPointTarget::Content;
+  }
   if (paint_layer_kind_reads_anchor_point(item)) {
     return paint_layer_row_reads_anchor_point(
         ma, item, paint_layer_anchor_point_mask_read_channel(ma, item));
@@ -2103,6 +2160,18 @@ uint64_t paint_layer_mask_prefix_projection_hash(const Material &ma,
                                                  const MaterialPaintLayer &stop,
                                                  int tile_number,
                                                  PaintLayerSurfaceRef painted_object);
+
+/**
+ * Fingerprint of the projection \a row reads its \a channel map through, as \a painted_object sees
+ * it. Zero when \a row does not project. A grey computed from another row's slice (a Normal to
+ * Mask) is keyed by it, as one computed from a projected item of the mask is by
+ * #paint_layer_mask_prefix_projection_hash: the same slice reads another surface per object.
+ */
+uint64_t paint_layer_row_projection_hash(const Material &ma,
+                                         const MaterialPaintLayer &row,
+                                         int channel,
+                                         int tile_number,
+                                         PaintLayerSurfaceRef painted_object);
 
 /**
  * The UV step of the transform item \a item of a mask (#paint_layer_mask_item_is_transform), in the

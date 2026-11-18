@@ -2411,6 +2411,13 @@ bool paint_layers_bake_node_reads_surface(const Material &ma, const MaterialPain
     if (owner == nullptr) {
       return false;
     }
+    if (paint_layer_kind_reads_anchor_point(node)) {
+      /* The grey is computed from the slice of another row, not from the mask before the item: it
+       * reads the surface when that row projects (a Projection Box Fill), and the items before it
+       * play no part. */
+      const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, node);
+      return ref.source_row != nullptr && BKE_paint_layers_projection_applies(ma, *ref.source_row);
+    }
     for (const MaterialPaintLayer &item : owner->mask_stack) {
       if (&item == &node) {
         break;
@@ -3836,17 +3843,19 @@ bool bake_row_is_candidate(const Material &ma,
                            const MaterialPaintLayer &layer,
                            const int object_issue)
 {
-  if (paint_layer_kind_reads_anchor_point(layer)) {
-    /* A reader owns its slice's cache; a substitution of the row it reads is blocked separately. */
-    return paint_layer_anchor_point_reader_baked(ma, layer);
-  }
   if (paint_layer_mask_item_bakes_effect(layer)) {
     /* A CPU-computed mask effect owns the grey it lays: the cache is what the live graph reads,
      * like a reader's, so the mode is its only gate (the due check asks the rest). One that reads
-     * the surface needs the object itself, like a row does. */
+     * the surface needs the object itself, like a row does. The branch stands ahead of the
+     * reader's, because a Normal to Mask is both -- and what it owns is its own grey, not the
+     * slice a reader's bake would hold. */
     return BKE_paint_layers_bake_mode_get(layer) != MA_PAINT_LAYER_BAKE_NEVER &&
            (object_issue == PAINT_LAYERS_BAKE_OBJECTS_OK ||
             !paint_layers_bake_node_reads_surface(ma, layer));
+  }
+  if (paint_layer_kind_reads_anchor_point(layer)) {
+    /* A reader owns its slice's cache; a substitution of the row it reads is blocked separately. */
+    return paint_layer_anchor_point_reader_baked(ma, layer);
   }
   if (paint_layer_is_owned_effect(ma, layer)) {
     /* An effect that owns its result is baked like a mask effect: the cache is what the live graph

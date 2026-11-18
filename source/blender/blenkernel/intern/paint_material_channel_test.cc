@@ -434,7 +434,7 @@ TEST_F(PaintMaterialChannelTest, channel_pass_lists_carry_every_channel)
 {
   /* A channel the pass lists forget is one the user can never select or see; the lists are the
    * "8 new channels" copied by hand that R2 warned about. The exceptions are the ones the lists
-   * document: Custom has no pass anywhere, Height has no shading pass, and Combined leads the
+   * document: Custom has no pass anywhere, Combined leads the
    * display list. */
   const Span<int> view_passes = BKE_paint_layers_view_passes();
   const Span<int> composite_passes = BKE_paint_material_composite_passes();
@@ -446,7 +446,7 @@ TEST_F(PaintMaterialChannelTest, channel_pass_lists_carry_every_channel)
       EXPECT_TRUE(view_passes.contains(info.channel)) << "channel " << info.ui_name;
     }
     EXPECT_TRUE(preview_order.contains(info.channel)) << "channel " << info.ui_name;
-    if (!ELEM(info.channel, PAINT_MATERIAL_CHANNEL_CUSTOM, PAINT_MATERIAL_CHANNEL_HEIGHT)) {
+    if (info.channel != PAINT_MATERIAL_CHANNEL_CUSTOM) {
       EXPECT_TRUE(composite_passes.contains(info.channel)) << "channel " << info.ui_name;
       EXPECT_TRUE(display_passes.contains(info.channel)) << "channel " << info.ui_name;
     }
@@ -454,7 +454,7 @@ TEST_F(PaintMaterialChannelTest, channel_pass_lists_carry_every_channel)
   /* Every list carries each channel once: Combined plus the table plus the mask, with the two
    * exceptions above taken out of the shading and display lists. */
   EXPECT_EQ(view_passes.size(), PAINT_MATERIAL_CHANNEL_NUM + 1);
-  EXPECT_EQ(composite_passes.size(), PAINT_MATERIAL_CHANNEL_NUM - 1);
+  EXPECT_EQ(composite_passes.size(), PAINT_MATERIAL_CHANNEL_NUM);
   EXPECT_EQ(display_passes[0], PAINT_LAYER_PASS_COMBINED);
   EXPECT_EQ(preview_order.size(), PAINT_MATERIAL_CHANNEL_NUM);
 }

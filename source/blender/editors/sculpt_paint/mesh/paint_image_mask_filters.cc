@@ -11,6 +11,10 @@
  *   Viewport), click to add it to the map, Shift-click to remove it.
  * - Color ID pick: while it runs the Image Editor and the 3D Viewport show the ID Map flat, with the
  *   area the colours match lit and the rest dimmed; a click adds the colour under the cursor.
+ *
+ * The Normal to Mask session that was born beside them moved to its own file
+ * (`paint_image_normal_to_mask.cc`); the pieces the two files share live in
+ * `paint_image_mask_filters_intern.hh`.
  */
 
 #include <algorithm>
@@ -22,6 +26,8 @@
 #include <utility>
 
 #include "BLT_translation.hh"
+
+#include "MEM_guardedalloc.h"
 
 #include "BLI_array.hh"
 #include "BLI_function_ref.hh"
@@ -66,7 +72,9 @@
 #include "BKE_mesh_sample.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_target.hh"
+#include "BKE_paint_layers_tile.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
@@ -84,8 +92,10 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 
 #include "UI_interface_icons.hh"
+#include "UI_resources.hh"
 #include "UI_view2d.hh"
 
 #include "WM_api.hh"
@@ -102,6 +112,7 @@
 #include "../paint_intern.hh"
 #include "../selection/paint_face_selection_mask.hh"
 #include "../selection/paint_image_select_intern.hh"
+#include "paint_image_mask_filters_intern.hh"
 #include "paint_image_uv_geom.hh"
 
 namespace blender {
@@ -139,47 +150,15 @@ static Image *coverage_item_image(const MaterialPaintLayer &item)
   return BKE_paint_layers_map_coverage_image_get(item);
 }
 
-/** The Image Editor region under \a event, or null; \a r_sima is its space. */
-static ARegion *image_region_at(bContext *C, const wmEvent *event, SpaceImage **r_sima)
-{
-  bScreen *screen = CTX_wm_screen(C);
-  ScrArea *area = (screen != nullptr) ? BKE_screen_find_area_xy(screen, SPACE_IMAGE, event->xy) :
-                                        nullptr;
-  ARegion *region = (area != nullptr) ? BKE_area_find_region_xy(area, RGN_TYPE_WINDOW, event->xy) :
-                                        nullptr;
-  if (region == nullptr) {
-    return nullptr;
-  }
-  *r_sima = static_cast<SpaceImage *>(area->spacedata.first);
-  return region;
-}
-
-/** UV coordinates under the cursor of \a region. */
-static float2 region_event_uv(const ARegion &region, const wmEvent *event)
-{
-  float uv[2];
-  ui::view2d_region_to_view(&region.v2d,
-                            float(event->xy[0] - region.winrct.xmin),
-                            float(event->xy[1] - region.winrct.ymin),
-                            &uv[0],
-                            &uv[1]);
-  return float2(uv[0], uv[1]);
-}
-
-/** The 3D Viewport window region under \a event, or null. */
-static ARegion *view3d_region_at(bContext *C, const wmEvent *event)
-{
-  bScreen *screen = CTX_wm_screen(C);
-  ScrArea *area = (screen != nullptr) ? BKE_screen_find_area_xy(screen, SPACE_VIEW3D, event->xy) :
-                                        nullptr;
-  return (area != nullptr) ? BKE_area_find_region_xy(area, RGN_TYPE_WINDOW, event->xy) : nullptr;
-}
+/** The Image Editor region and UV under an event, the 3D Viewport's, the redraw and the display
+ * swap the pickers share live in #paint_image_mask_filters_intern.hh, beside this file and the
+ * Normal to Mask session it hosts. */
 
 /**
  * The UV map the paint canvas uses, as the island detection reads it; the mesh's own default
  * otherwise.
  */
-static std::string canvas_uv_name_get(const Scene &scene, Object &ob, const Mesh &mesh)
+std::string canvas_uv_name_get(const Scene &scene, Object &ob, const Mesh &mesh)
 {
   std::string uv_name;
   if (const std::optional<StringRef> canvas_uv = BKE_paint_canvas_uvmap_name_get(
@@ -193,115 +172,14 @@ static std::string canvas_uv_name_get(const Scene &scene, Object &ob, const Mesh
   return uv_name;
 }
 
-static void mask_filter_redraw_all(bContext *C)
-{
-  if (bScreen *screen = CTX_wm_screen(C)) {
-    for (ScrArea &area : screen->areabase) {
-      if (ELEM(area.spacetype, SPACE_IMAGE, SPACE_VIEW3D, SPACE_PROPERTIES)) {
-        ED_area_tag_redraw(&area);
-      }
-    }
-  }
-}
-
 /** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Map display swap
  *
- * While a picker runs the Image Editor shows the picker's image and every 3D Viewport is in flat
- * solid shading with textures (Workbench then draws the same image on the mesh, see
- * #ED_paint_mask_filter_preview_image_get). Everything is put back when the picker ends.
+ * The swap itself is shared (#paint_image_mask_filters_intern.hh); the Workbench hook that reads
+ * the picker's image is the only piece this file owns.
  * \{ */
-
-static bool image_is_alive(const Main &bmain, const Image *image);
-
-struct DisplaySwap {
-  struct ImageSlot {
-    SpaceImage *sima;
-    Image *image;
-  };
-  struct ShadingSlot {
-    View3D *v3d;
-    decltype(View3DShading::type) type;
-    decltype(View3DShading::light) light;
-    decltype(View3DShading::color_type) color_type;
-  };
-  Vector<ImageSlot> images;
-  Vector<ShadingSlot> shadings;
-};
-
-static void display_swap_apply(bContext *C, DisplaySwap &swap, Image *show, const bool flat_3d)
-{
-  bScreen *screen = CTX_wm_screen(C);
-  Main *bmain = CTX_data_main(C);
-  if (screen == nullptr) {
-    return;
-  }
-  for (ScrArea &area : screen->areabase) {
-    if (area.spacetype == SPACE_IMAGE && show != nullptr) {
-      SpaceImage *sima = static_cast<SpaceImage *>(area.spacedata.first);
-      swap.images.append({sima, sima->image});
-      ED_space_image_set(bmain, sima, show, false);
-    }
-    else if (area.spacetype == SPACE_VIEW3D && flat_3d) {
-      View3D *v3d = static_cast<View3D *>(area.spacedata.first);
-      swap.shadings.append({v3d, v3d->shading.type, v3d->shading.light, v3d->shading.color_type});
-      v3d->shading.type = OB_SOLID;
-      v3d->shading.light = V3D_LIGHTING_FLAT;
-      v3d->shading.color_type = V3D_SHADING_TEXTURE_COLOR;
-    }
-  }
-}
-
-/** Put back what #display_swap_apply changed, skipping spaces that closed in the meantime. */
-static void display_swap_restore(bContext *C, DisplaySwap &swap)
-{
-  bScreen *screen = CTX_wm_screen(C);
-  Main *bmain = CTX_data_main(C);
-  if (screen != nullptr) {
-    for (ScrArea &area : screen->areabase) {
-      if (area.spacetype == SPACE_IMAGE) {
-        for (const DisplaySwap::ImageSlot &slot : swap.images) {
-          if (slot.sima == area.spacedata.first) {
-            /* An image freed in the meantime (undo) is not put back. */
-            ED_space_image_set(
-                bmain, slot.sima, image_is_alive(*bmain, slot.image) ? slot.image : nullptr, false);
-          }
-        }
-      }
-      else if (area.spacetype == SPACE_VIEW3D) {
-        for (const DisplaySwap::ShadingSlot &slot : swap.shadings) {
-          if (slot.v3d == area.spacedata.first) {
-            slot.v3d->shading.type = slot.type;
-            slot.v3d->shading.light = slot.light;
-            slot.v3d->shading.color_type = slot.color_type;
-          }
-        }
-      }
-    }
-  }
-  swap.images.clear();
-  swap.shadings.clear();
-}
-
-/**
- * The image the running picker shows flat in the 3D Viewport; null when none runs. It is a global
- * because the Workbench engine reads it with no operator in reach, and only one modal picker runs at
- * a time. Never read it directly: #ED_paint_mask_filter_preview_image_get checks that it still
- * exists.
- */
-static Image *g_picker_image = nullptr;
-
-/**
- * Whether \a image still is a data-block of \a bmain. A picker's preview is created in main, so an
- * undo or a file load can free it under the session; the pointer is never trusted past this test.
- * It only scans while a picker runs, as a null \a image answers at once.
- */
-static bool image_is_alive(const Main &bmain, const Image *image)
-{
-  return image != nullptr && BLI_findindex(&bmain.images, image) != -1;
-}
 
 Image *ED_paint_mask_filter_preview_image_get(const Main &bmain)
 {
@@ -1777,7 +1655,7 @@ static void id_color_pick_end(bContext *C, wmOperator *op)
  * The original mesh is used, as the island picker does: the ID Map is laid out by the UVs the user
  * authored, and the mesh the viewport shows flat while picking is that same layout.
  */
-static bool view3d_event_uv(bContext *C, const wmEvent *event, float2 &r_uv)
+bool view3d_event_uv(bContext *C, const wmEvent *event, float2 &r_uv)
 {
   bScreen *screen = CTX_wm_screen(C);
   ScrArea *area = (screen != nullptr) ? BKE_screen_find_area_xy(screen, SPACE_VIEW3D, event->xy) :

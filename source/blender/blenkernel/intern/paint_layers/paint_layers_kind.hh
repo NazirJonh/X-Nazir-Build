@@ -315,14 +315,6 @@ enum PaintLayerKindFlag : uint32_t {
    * no part in it: a mask effect's buffer has no alpha to cast from or to lay.
    */
   PAINT_LAYER_KIND_RESULT_HAS_ALPHA = 1 << 15,
-  /**
-   * A cross-channel effect (a Height To Normal): it reads the Height the row lays, not the channel
-   * it hangs on. The effect input describe answers the Height content for it, so the kernel's
-   * input is the row's height, and the result lays into the channel the effect works on -- the
-   * Normal, the only one such an effect filters (#paint_layer_effect_filters). Past the sixteenth
-   * bit, which is why the flags are 32 bits wide.
-   */
-  PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT = 1 << 16,
 };
 
 struct PaintLayerKindInfo {
@@ -357,6 +349,24 @@ struct PaintLayerKindInfo {
    * nothing answers null whatever a stale pointer holds.
    */
   bool reads_image_slot = false;
+  /**
+   * The channel whose content the kind reads as its input, when that is not the channel it works
+   * in: a Height To Normal reads the Height, a Normal to Mask the Normal. -1 for a kind whose
+   * input is the channel it hangs on. The one field the input describe, the filters rule and the
+   * bake's canvas size ask, so a cross-channel kind is one registry entry rather than a branch per
+   * consumer.
+   */
+  int8_t reads_channel = -1;
+  /**
+   * The kind lays into the colour channels alone, never into the channel it reads (a Normal to
+   * Mask: its kernel consumes the normal's encoding and lays a grey). The record of the channel it
+   * reads is then the input's switch -- an ordinary channel record the user toggles, added beside
+   * the output ones -- rather than the row's content, so the filters rule and the add take their
+   * input's existence from that record being live. A kind whose output does include the channel it
+   * reads (a Height To Normal, which lays a Normal) keeps this off: its input is the row's content
+   * and answers for itself.
+   */
+  bool writes_only_colour_channels = false;
 };
 
 /* The shared filter parameter layouts live in `paint_layer_formula.hh`. */
@@ -1271,10 +1281,28 @@ inline bool paint_layer_kind_transforms_input(const MaterialPaintLayer &row)
   return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_TRANSFORMS_INPUT);
 }
 
+/** The channel \a row's kernel reads instead of the channel it hangs on, or -1 for one that reads
+ * the channel it works in. The registry's one answer, so the input describe, the filters rule, the
+ * bake and the anchor reading cannot name a cross-channel kind differently. */
+inline int paint_layer_effect_reads_channel(const MaterialPaintLayer &row)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+  return (info != nullptr) ? int(info->reads_channel) : -1;
+}
+
 /** Whether \a row reads the Height the stack lays, not the channel it hangs on. */
 inline bool paint_layer_effect_reads_height(const MaterialPaintLayer &row)
 {
-  return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT);
+  return paint_layer_effect_reads_channel(row) == PAINT_MATERIAL_CHANNEL_HEIGHT;
+}
+
+/** Whether \a row lays into the colour channels alone, never into the channel it reads (a Normal
+ * to Mask); its input is then a channel record of its own, the switch the kernel stands or falls
+ * by. */
+inline bool paint_layer_kind_writes_only_colour_channels(const MaterialPaintLayer &row)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+  return info != nullptr && info->writes_only_colour_channels;
 }
 
 /** Whether \a row's kind computes a result with an alpha of its own (a Drop Shadow). */

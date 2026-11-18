@@ -553,6 +553,14 @@ enum eMaterialPaintLayerFlag : int16_t {
    * Fill on top -- the safe direction for a stack the bit knows nothing about.
    */
   MA_PAINT_LAYER_CONVERSION_FILL = 1 << 6,
+  /**
+   * A reader that can take a whole layer (a Normal to Mask mask item) is in its Row source mode:
+   * the source it lists and keeps is a layer's result, not a point it was given. Which of the two
+   * kinds of source a reader names is a choice that has to outlive an empty source, so it is a
+   * bit of its own. Files written before the bit existed read it as zero: the Anchor mode they
+   * were saved in.
+   */
+  MA_PAINT_LAYER_ANCHOR_SOURCE_ROW = 1 << 7,
 };
 ENUM_OPERATORS(eMaterialPaintLayerFlag)
 
@@ -1218,6 +1226,18 @@ enum eMaterialPaintLayerFilter : int16_t {
    * extracted channel is the coverage.
    */
   MA_PAINT_LAYER_FILTER_CHANNEL_SPLIT = 44,
+  /**
+   * Turn the normal map of the layer the element references (an Anchor Point), or of the row's own
+   * Normal content, into a black-and-white mask (a Normal to Mask): the tangent normal is read as
+   * numbers, rebuilt into one of the field shapes the mode chooses (a Height the gradients
+   * integrate, an Edge ridge the Sobel magnitude of the normal lays, a Slope the blue channel
+   * ramps), and the threshold cuts it into the grey. A CPU-computed effect like the Blur: as a
+   * MASK ITEM the element is an Anchor Point reader itself, the mask effect cache computes its
+   * grey from the referenced slice and the row is baked for the live graph; as a correction it
+   * lays the grey into every enabled channel but the Normal, whose encoding it consumes and never
+   * writes.
+   */
+  MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK = 45,
 };
 
 /** #MaterialPaintLayerColorBalance::method */

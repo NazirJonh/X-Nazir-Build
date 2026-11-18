@@ -23,6 +23,7 @@
 #include "BLI_map.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_set.hh"
+#include "BLI_span.hh"
 #include "BLI_vector.hh"
 
 #include "DNA_color_types.h"
@@ -168,6 +169,72 @@ void BKE_paint_layers_mask_effect_cache_free_all();
 
 /** Drop the cached mask-effect greys of \a ma, keyed by its session UID like the slices are. */
 void BKE_paint_layers_mask_effect_cache_free_material(const Material &ma);
+
+/**
+ * The grey the CPU-computed mask effect \a effect lays on its owner row \a row, on \a tile_number:
+ * the mask effect cache's buffer, computed when no fresh one stands. A Normal to Mask item's grey
+ * is the kernel's output over the Normal channel of the slice its Anchor Point references; the
+ * item's own invert, blend and opacity are laid by the reader of the grey, not by it.
+ *
+ * \return null when \a effect is not a mask item of \a row, is no CPU-computed kind, or its input
+ * cannot be rendered (a Normal to Mask with an Anchor Point that does not resolve).
+ */
+std::shared_ptr<ImBuf> BKE_paint_layers_mask_effect_grey(const Material &ma,
+                                                         const MaterialPaintLayer &row,
+                                                         const MaterialPaintLayer &effect,
+                                                         const int tile_number,
+                                                         PaintLayerSurfaceRef painted_object =
+                                                             nullptr);
+
+/**
+ * The parameters of a Normal to Mask item, read through its kind schema: the mode validated into
+ * the range the kernel answers for (a file may carry anything), and the two numbers its ramp cuts
+ * with. The one read for the kernel, the effect hash and the preview session, so a typo the
+ * string getters would answer with a silent zero cannot reach any of them.
+ */
+struct PaintLayerNormalToMaskParams {
+  /**
+   * The field the normal rebuilds into: a `PaintLayerNormalToMaskMode` code (0 Height, 1 Edges,
+   * 2 Slope). The range is validated here, so no consumer re-checks it.
+   */
+  int mode = 0;
+  /** Where the ramp centers, in the field's normalized [0, 1]. */
+  float threshold = 0.5f;
+  /** How wide the ramp opens around the position; zero is a hard cut. */
+  float softness = 0.1f;
+};
+
+/**
+ * The parameters of the Normal to Mask item \a item into \a r_params. False for anything that is
+ * not the kind (an unknown or foreign kind reads no schema of this one).
+ */
+bool BKE_paint_layers_normal_to_mask_params_get(const MaterialPaintLayer &item,
+                                                PaintLayerNormalToMaskParams &r_params);
+
+/**
+ * The field the Normal to Mask \a params name, rebuilt from the encoded tangent normal \a slice
+ * carries (RGBA float, the encoding the Normal channel reads): one value per texel, plus the
+ * robust [0, 1] window the field maps into before its cut. The Height mode is a Poisson solve,
+ * so this is the half a preview caches: the cut is cheap, the solve is not. A slice whose float
+ * buffer is missing computes nothing and leaves \a r_field empty.
+ */
+void BKE_paint_layers_normal_to_mask_field_compute(const ImBuf &slice,
+                                                   const PaintLayerNormalToMaskParams &params,
+                                                   blender::Vector<float> &r_field,
+                                                   float &r_lo,
+                                                   float &r_hi);
+
+/**
+ * The cut of the Normal to Mask: the field \a field -- computed over \a buffer's own size, with
+ * the window \a lo, \a hi it was normalized by -- through the ramp \a params name, written over
+ * the RGB of \a buffer in place. Alpha is untouched. The grey is one formula with the kernel's
+ * (#paint_layer_normal_to_mask_ramp_apply), so a preview cannot drift from what the bake lays.
+ */
+void BKE_paint_layers_normal_to_mask_cut_apply(ImBuf &buffer,
+                                               const blender::Span<float> field,
+                                               const float lo,
+                                               const float hi,
+                                               const PaintLayerNormalToMaskParams &params);
 
 /**
  * Composite \a channel of \a ma into \a r_dst, which must be byte RGBA of the stack's dimensions.

@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 
 #include "BLI_index_range.hh"
@@ -28,6 +29,7 @@
 #include "DNA_material_types.h"
 
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_perf_debug.hh"
 
@@ -1835,6 +1837,533 @@ static void paint_layer_effect_channel_split_apply(ImBuf &buffer,
   IMB_freeImBuf(map);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Normal to Mask
+ * \{ */
+
+/** The sweeps the coarsest level of the Height solve runs: at most a 64x64 canvas, so the whole
+ * low-frequency half of the field costs less than one fine sweep of a 4K map. */
+constexpr int PAINT_LAYER_NORMAL_TO_MASK_COARSE_SWEEPS = 400;
+/** The sweeps every finer level of the Height solve runs over the stretched coarse solution. */
+constexpr int PAINT_LAYER_NORMAL_TO_MASK_LEVEL_SWEEPS = 24;
+/** The size the Height solve's pyramid stops coarsening at: both dimensions of the coarsest
+ * canvas stay at or under it. */
+constexpr int PAINT_LAYER_NORMAL_TO_MASK_COARSE_SIZE = 64;
+
+/** The decoded tangent normal at \a x, \a y: the encoding the Normal channel carries, read as
+ * numbers the way a Normal Convert reads them, each component clamped into [-1, 1] so an
+ * unnormalized or HDR-encoded map cannot push the field out of the range its cut expects. The
+ * read is clamped to the canvas edge, so a border texel repeats its edge neighbour the way a
+ * blur pass's window does. */
+static float3 paint_layer_effect_normal_at(const float *src,
+                                           const int width,
+                                           const int height,
+                                           const int x,
+                                           const int y)
+{
+  const float *texel = src + (int64_t(std::clamp(y, 0, height - 1)) * width +
+                              std::clamp(x, 0, width - 1)) *
+                                 4;
+  /* `std::clamp` hands a NaN through, and in the Height mode one broken texel would spread it over
+   * the whole Poisson solve. A component that is not a finite number reads as the flat normal's,
+   * so a broken texel cuts as no signal instead. */
+  const auto decode = [](const float value, const float flat) {
+    return std::isfinite(value) ? std::clamp(value * 2.0f - 1.0f, -1.0f, 1.0f) : flat;
+  };
+  return float3(decode(texel[0], 0.0f), decode(texel[1], 0.0f), decode(texel[2], 1.0f));
+}
+
+/** The divergence of the normal's XY, the right side of the Poisson equation the Height mode
+ * solves: how much the tangent normal's tilt spreads out of each texel, `d(nx)/dx + d(ny)/dy`
+ * by central differences clamped to the canvas edge.
+ *
+ * The sweeps reflect at the border (a zero slope), which alone would throw away the tilt the
+ * normal carries at the edge: the integration would bend the height into a bowl and a ramp would
+ * come out lower where it climbs. The border cells therefore also take the flux the edge normal
+ * pushes through the border -- the slope there is the normal, not zero -- which makes the system
+ * compatible (the divergence sums to nothing) and lets a ramp integrate as a ramp. */
+static void paint_layer_effect_normal_divergence(const float *src,
+                                                 const int width,
+                                                 const int height,
+                                                 const MutableSpan<float> r_div)
+{
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    for (const int y : range) {
+      for (const int x : IndexRange(width)) {
+        const float3 left = paint_layer_effect_normal_at(src, width, height, x - 1, y);
+        const float3 right = paint_layer_effect_normal_at(src, width, height, x + 1, y);
+        const float3 up = paint_layer_effect_normal_at(src, width, height, x, y - 1);
+        const float3 down = paint_layer_effect_normal_at(src, width, height, x, y + 1);
+        float divergence = (right.x - left.x) * 0.5f + (down.y - up.y) * 0.5f;
+        const float3 center = paint_layer_effect_normal_at(src, width, height, x, y);
+        if (x == 0) {
+          divergence += center.x;
+        }
+        if (x == width - 1) {
+          divergence -= center.x;
+        }
+        if (y == 0) {
+          divergence += center.y;
+        }
+        if (y == height - 1) {
+          divergence -= center.y;
+        }
+        r_div[int64_t(y) * width + x] = divergence;
+      }
+    }
+  });
+}
+
+/** One level of the Height solve's pyramid: the divergence averaged over 2x2 blocks, the halved
+ * canvas carrying the field's low frequencies the fine sweeps crawl towards. An odd tail row or
+ * column averages the texels it has, the clamped reads keeping every level the same shape its
+ * half-resolution canvas names. */
+static void paint_layer_effect_divergence_coarsen(const Span<float> fine,
+                                                  const int width,
+                                                  const int height,
+                                                  Vector<float> &r_coarse,
+                                                  int &r_coarse_width,
+                                                  int &r_coarse_height)
+{
+  r_coarse_width = std::max(width / 2, 1);
+  r_coarse_height = std::max(height / 2, 1);
+  r_coarse.reinitialize(int64_t(r_coarse_width) * r_coarse_height);
+  threading::parallel_for(IndexRange(r_coarse_height), 64, [&](const IndexRange range) {
+    for (const int y : range) {
+      for (const int x : IndexRange(r_coarse_width)) {
+        const int x0 = x * 2;
+        const int y0 = y * 2;
+        const int x1 = std::min(x0 + 1, width - 1);
+        const int y1 = std::min(y0 + 1, height - 1);
+        r_coarse[int64_t(y) * r_coarse_width + x] = 0.25f *
+                                                    (fine[int64_t(y0) * width + x0] +
+                                                     fine[int64_t(y0) * width + x1] +
+                                                     fine[int64_t(y1) * width + x0] +
+                                                     fine[int64_t(y1) * width + x1]);
+      }
+    }
+  });
+}
+
+/** One Jacobi relaxation sweep of the Height solve: every texel becomes the mean of its four
+ * neighbours minus a quarter of the divergence it carries. The reads run on \a current and the
+ * writes on \a next, so a sweep is a pure step the threads cannot race; the edge reads clamp,
+ * which makes the canvas a reflecting border and leaves the solve with no artificial dark frame
+ * a zero boundary would hang around the content. */
+static void paint_layer_effect_poisson_sweep(const float *current,
+                                             float *next,
+                                             const float *divergence,
+                                             const int width,
+                                             const int height)
+{
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    for (const int y : range) {
+      const float *row = current + int64_t(y) * width;
+      float *dst = next + int64_t(y) * width;
+      const float *above = current + int64_t(std::max(y - 1, 0)) * width;
+      const float *below = current + int64_t(std::min(y + 1, height - 1)) * width;
+      for (const int x : IndexRange(width)) {
+        const float l = row[std::max(x - 1, 0)];
+        const float r = row[std::min(x + 1, width - 1)];
+        dst[x] = (l + r + above[x] + below[x] - divergence[int64_t(y) * width + x]) * 0.25f;
+      }
+    }
+  });
+}
+
+/** The coarse solution bilinearly stretched over the finer level: the warm start the level's own
+ * sweeps refine. The fine texel's center maps to the coarse canvas at half rate, the reads
+ * clamped into it. */
+static void paint_layer_effect_poisson_prolong(const Span<float> coarse,
+                                               const int coarse_width,
+                                               const int coarse_height,
+                                               const MutableSpan<float> fine,
+                                               const int width,
+                                               const int height)
+{
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    for (const int y : range) {
+      const float fy = (float(y) + 0.5f) * 0.5f - 0.5f;
+      const int y0 = int(std::floor(fy));
+      const float ty = fy - float(y0);
+      const int cy0 = std::clamp(y0, 0, coarse_height - 1);
+      const int cy1 = std::clamp(y0 + 1, 0, coarse_height - 1);
+      for (const int x : IndexRange(width)) {
+        const float fx = (float(x) + 0.5f) * 0.5f - 0.5f;
+        const int x0 = int(std::floor(fx));
+        const float tx = fx - float(x0);
+        const int cx0 = std::clamp(x0, 0, coarse_width - 1);
+        const int cx1 = std::clamp(x0 + 1, 0, coarse_width - 1);
+        const float v00 = coarse[int64_t(cy0) * coarse_width + cx0];
+        const float v10 = coarse[int64_t(cy0) * coarse_width + cx1];
+        const float v01 = coarse[int64_t(cy1) * coarse_width + cx0];
+        const float v11 = coarse[int64_t(cy1) * coarse_width + cx1];
+        const float top = v00 + (v10 - v00) * tx;
+        const float bottom = v01 + (v11 - v01) * tx;
+        fine[int64_t(y) * width + x] = top + (bottom - top) * ty;
+      }
+    }
+  });
+}
+
+/** The [0, 1] window the field maps into before its cut: the 1st and the 99th percentile of the
+ * field's values, found over a histogram whose bins are exact integer counts, so neither the
+ * parallel extents above nor the scan order can move them. Non-finite values (a broken normal's
+ * NaN read through the differences) stand out of every window: they are skipped, and a field of
+ * nothing but them answers the degenerate window, so the cut reads black instead of converting
+ * the garbage into a bin the histogram cannot hold. A constant field (a flat normal carries no
+ * divergence to integrate) reports a degenerate window, which the kernel maps as zero; a peaked
+ * one where the percentiles collapse onto one bin falls back to the full extent, so a handful of
+ * features the percentiles under-read still spans the range the mask reads. */
+static void paint_layer_effect_field_window(const Span<float> field, float &r_lo, float &r_hi)
+{
+  constexpr int BINS = 4096;
+  struct FieldExtent {
+    float lo = std::numeric_limits<float>::infinity();
+    float hi = -std::numeric_limits<float>::infinity();
+  };
+  const FieldExtent extent = threading::parallel_reduce(
+      IndexRange(field.size()),
+      4096,
+      FieldExtent{},
+      [&](const IndexRange range, const FieldExtent &running) {
+        /* The running extent folds in: the reducer hands a chunk what the ones before it found,
+         * and an extent seeded with zero would pull a positive field's minimum down to it. */
+        FieldExtent run = running;
+        for (const int64_t i : range) {
+          if (!std::isfinite(field[i])) {
+            continue;
+          }
+          run.lo = std::min(run.lo, field[i]);
+          run.hi = std::max(run.hi, field[i]);
+        }
+        return run;
+      },
+      [](const FieldExtent &a, const FieldExtent &b) {
+        return FieldExtent{std::min(a.lo, b.lo), std::max(a.hi, b.hi)};
+      });
+  if (!(extent.hi >= extent.lo) || !std::isfinite(extent.lo)) {
+    /* No finite value at all (an empty field, or one of nothing but broken normals): the
+     * degenerate window, whatever the field holds, cuts as black. */
+    r_lo = 0.0f;
+    r_hi = 0.0f;
+    return;
+  }
+  if (!(extent.hi > extent.lo)) {
+    r_lo = extent.lo;
+    r_hi = extent.lo;
+    return;
+  }
+  Vector<int64_t> bins(BINS, 0);
+  const float scale = float(BINS) / (extent.hi - extent.lo);
+  for (const int64_t i : field.index_range()) {
+    if (!std::isfinite(field[i])) {
+      continue;
+    }
+    bins[std::clamp(int((field[i] - extent.lo) * scale), 0, BINS - 1)]++;
+  }
+  const int64_t total = field.size();
+  /* One percent of the field off either end stands out of the window: the two scans below both
+   * walk until they have counted past that share. */
+  const int64_t tail_target = total / 100;
+  int low_bin = 0;
+  int high_bin = BINS - 1;
+  int64_t seen = 0;
+  for (; low_bin < BINS - 1; low_bin++) {
+    seen += bins[low_bin];
+    if (seen > tail_target) {
+      break;
+    }
+  }
+  seen = 0;
+  for (; high_bin > 0; high_bin--) {
+    seen += bins[high_bin];
+    if (seen > tail_target) {
+      break;
+    }
+  }
+  r_lo = extent.lo + float(low_bin) / scale;
+  r_hi = extent.lo + float(high_bin) / scale;
+  if (!(r_hi > r_lo)) {
+    r_lo = extent.lo;
+    r_hi = extent.hi;
+  }
+}
+
+/** The Height field: the divergence of the normal's XY integrated back into a height. The solve
+ * is the mode's whole cost, which is why a preview caches the field instead of the kernel's
+ * result: the cut is cheap, the pyramid is not. */
+static void paint_layer_normal_to_mask_field_height(const float *src,
+                                                    const int width,
+                                                    const int height,
+                                                    Vector<float> &r_field)
+{
+  /* The divergence pyramid, coarsest solved first. Each finer level stretches the solution
+   * above it and refines it, so the whole hierarchy costs a handful of sweeps per level of a
+   * few thousand texels each and the fine canvas only answers for the detail. */
+  Vector<Vector<float>> pyramid;
+  Vector<int> widths;
+  Vector<int> heights;
+  pyramid.append(Vector<float>(int64_t(width) * height, 0.0f));
+  widths.append(width);
+  heights.append(height);
+  paint_layer_effect_normal_divergence(src, width, height, pyramid[0]);
+  while ((widths.last() > PAINT_LAYER_NORMAL_TO_MASK_COARSE_SIZE ||
+          heights.last() > PAINT_LAYER_NORMAL_TO_MASK_COARSE_SIZE) &&
+         widths.last() > 1 && heights.last() > 1)
+  {
+    Vector<float> coarse;
+    int coarse_width = 0;
+    int coarse_height = 0;
+    paint_layer_effect_divergence_coarsen(
+        pyramid.last(), widths.last(), heights.last(), coarse, coarse_width, coarse_height);
+    pyramid.append(std::move(coarse));
+    widths.append(coarse_width);
+    heights.append(coarse_height);
+  }
+  /* Two whole-canvas work buffers, sized once: the sweeps ping-pong between them and every level
+   * works on the span its own size names. A fresh `fine` and a scratch beside it per level would
+   * reallocate the canvas the pyramid walks down, and the peak of a 4K solve would hold the
+   * divergence pyramid plus two buffers per step instead of two buffers. */
+  Vector<float> solution(int64_t(width) * height, 0.0f);
+  Vector<float> scratch(int64_t(width) * height, 0.0f);
+  const Span<float> top_divergence(pyramid.last());
+  for (int sweep = 0; sweep < PAINT_LAYER_NORMAL_TO_MASK_COARSE_SWEEPS; sweep++) {
+    paint_layer_effect_poisson_sweep(solution.data(),
+                                     scratch.data(),
+                                     top_divergence.data(),
+                                     widths.last(),
+                                     heights.last());
+    std::swap(solution, scratch);
+  }
+  for (int level = pyramid.size() - 2; level >= 0; level--) {
+    const int level_width = widths[level];
+    const int level_height = heights[level];
+    /* The coarse solution stretches into the other buffer: the prolongation reads the texels a
+     * write into the same canvas would race with, so the two hold different levels of the solve. */
+    paint_layer_effect_poisson_prolong(
+        Span<float>(solution).take_front(int64_t(widths[level + 1]) * heights[level + 1]),
+        widths[level + 1],
+        heights[level + 1],
+        MutableSpan<float>(scratch).take_front(int64_t(level_width) * level_height),
+        level_width,
+        level_height);
+    std::swap(solution, scratch);
+    const Span<float> level_divergence(pyramid[level]);
+    for (int sweep = 0; sweep < PAINT_LAYER_NORMAL_TO_MASK_LEVEL_SWEEPS; sweep++) {
+      paint_layer_effect_poisson_sweep(solution.data(),
+                                       scratch.data(),
+                                       level_divergence.data(),
+                                       level_width,
+                                       level_height);
+      std::swap(solution, scratch);
+    }
+  }
+  /* The last sweep's swap leaves the fine result in `solution`, whose whole canvas is the level 0
+   * span the field is. */
+  r_field = std::move(solution);
+}
+
+/** The Edges field: the Sobel magnitude of the normal per channel, summed. The borders of the
+ * elements light up, their insides stay dark. */
+static void paint_layer_normal_to_mask_field_edges(const float *src,
+                                                   const int width,
+                                                   const int height,
+                                                   Vector<float> &r_field)
+{
+  r_field.reinitialize(int64_t(width) * height);
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    for (const int y : range) {
+      for (const int x : IndexRange(width)) {
+        float3 taps[3][3];
+        for (const int dy : IndexRange(-1, 3)) {
+          for (const int dx : IndexRange(-1, 3)) {
+            taps[dy + 1][dx + 1] = paint_layer_effect_normal_at(
+                src, width, height, x + dx, y + dy);
+          }
+        }
+        float sum = 0.0f;
+        for (const int c : IndexRange(3)) {
+          const float gx = (taps[2][0][c] + 2.0f * taps[2][1][c] + taps[2][2][c]) -
+                           (taps[0][0][c] + 2.0f * taps[0][1][c] + taps[0][2][c]);
+          const float gy = (taps[0][2][c] + 2.0f * taps[1][2][c] + taps[2][2][c]) -
+                           (taps[0][0][c] + 2.0f * taps[1][0][c] + taps[2][0][c]);
+          sum += std::sqrt(gx * gx + gy * gy);
+        }
+        r_field[int64_t(y) * width + x] = sum;
+      }
+    }
+  });
+}
+
+/** The Slope field: the blue channel's tilt, `1 - z`. Flat areas read dark, tilted ones bright. */
+static void paint_layer_normal_to_mask_field_slope(const float *src,
+                                                   const int width,
+                                                   const int height,
+                                                   Vector<float> &r_field)
+{
+  r_field.reinitialize(int64_t(width) * height);
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    for (const int y : range) {
+      for (const int x : IndexRange(width)) {
+        const float3 normal = paint_layer_effect_normal_at(src, width, height, x, y);
+        r_field[int64_t(y) * width + x] = std::clamp(1.0f - normal.z, 0.0f, 1.0f);
+      }
+    }
+  });
+}
+
+/** The compute of one field mode: the encoded normal in, the texel field out. */
+using PaintLayerNormalToMaskFieldFn = void (*)(const float *src,
+                                               const int width,
+                                               const int height,
+                                               Vector<float> &r_field);
+
+struct PaintLayerNormalToMaskFieldMode {
+  PaintLayerNormalToMaskMode mode;
+  PaintLayerNormalToMaskFieldFn compute;
+};
+
+/** The modes the field dispatches through: a fourth field is one function above and one row
+ * here, where a switch sat inside the kernel for every one of its consumers to read around. */
+constexpr PaintLayerNormalToMaskFieldMode PAINT_LAYER_NORMAL_TO_MASK_FIELD_MODES[] = {
+    {PAINT_LAYER_NORMAL_TO_MASK_HEIGHT, paint_layer_normal_to_mask_field_height},
+    {PAINT_LAYER_NORMAL_TO_MASK_EDGES, paint_layer_normal_to_mask_field_edges},
+    {PAINT_LAYER_NORMAL_TO_MASK_SLOPE, paint_layer_normal_to_mask_field_slope},
+};
+
+/**
+ * The field \a mode names, rebuilt from the encoded tangent normal in \a src: one value per
+ * texel of the \a width x \a height canvas into \a r_field. The mode a file may name anything is
+ * dispatched through the table, an unknown one standing in as the Height, the same answer the
+ * parameter read gives.
+ */
+static void paint_layer_normal_to_mask_field_compute(const float *src,
+                                                     const int width,
+                                                     const int height,
+                                                     const PaintLayerNormalToMaskMode mode,
+                                                     Vector<float> &r_field)
+{
+  r_field.reinitialize(int64_t(width) * height);
+  for (const PaintLayerNormalToMaskFieldMode &entry : PAINT_LAYER_NORMAL_TO_MASK_FIELD_MODES) {
+    if (entry.mode == mode) {
+      entry.compute(src, width, height, r_field);
+      return;
+    }
+  }
+  PAINT_LAYER_NORMAL_TO_MASK_FIELD_MODES[0].compute(src, width, height, r_field);
+}
+
+/**
+ * The Normal to Mask field of \a slice: the encoded tangent normal it carries rebuilt into the
+ * field \a params name, one value per texel into \a r_field, with the robust [0, 1] window the
+ * field maps into before its cut. The preview session calls this once per mode change and the
+ * cut on every repaint, so a threshold drag never reruns the solve.
+ */
+void BKE_paint_layers_normal_to_mask_field_compute(const ImBuf &slice,
+                                                   const PaintLayerNormalToMaskParams &params,
+                                                   Vector<float> &r_field,
+                                                   float &r_lo,
+                                                   float &r_hi)
+{
+  const float *src = slice.float_buffer.data;
+  if (src == nullptr) {
+    r_field.clear();
+    r_lo = 0.0f;
+    r_hi = 1.0f;
+    return;
+  }
+  paint_layer_normal_to_mask_field_compute(
+      src, slice.x, slice.y, PaintLayerNormalToMaskMode(params.mode), r_field);
+  paint_layer_effect_field_window(r_field, r_lo, r_hi);
+}
+
+/**
+ * The cut of the Normal to Mask: the field -- normalized by the window \a lo, \a hi its solve
+ * reported -- through the ramp \a threshold and \a softness lay, over the RGB of \a buffer in
+ * place. Alpha is untouched. A texel the field answers with a non-finite number (a broken
+ * normal's NaN read through the differences) cuts as no signal, black, instead of writing the
+ * NaN into the mask.
+ */
+static void paint_layer_normal_to_mask_cut(ImBuf &buffer,
+                                           const Span<float> field,
+                                           const float lo,
+                                           const float hi,
+                                           const float threshold,
+                                           const float softness,
+                                           const bool lays_layer = false)
+{
+  const int width = buffer.x;
+  /* The window never narrows below a floor: an 8-bit "flat" normal is not exactly flat (128 reads
+   * 0.0039), and its sliver of tilt would otherwise be stretched to the full range and cut as if
+   * it were a feature. A field whose whole extent sits under the floor cuts dark. */
+  constexpr float MIN_WINDOW_SPAN = 0.25f;
+  const float span = std::max(hi - lo, MIN_WINDOW_SPAN);
+  paint_layer_effect_map_rgb(buffer, [&](const int x, const int y, float *texel) {
+    const float raw = field[int64_t(y) * width + x];
+    const float value = std::isfinite(raw) ? std::clamp((raw - lo) / span, 0.0f, 1.0f) : 0.0f;
+    const float grey = paint_layer_normal_to_mask_ramp_apply(value, threshold, softness);
+    texel[0] = grey;
+    texel[1] = grey;
+    texel[2] = grey;
+    if (lays_layer) {
+      texel[3] = 1.0f;
+    }
+  });
+}
+
+/**
+ * The Normal to Mask cut over \a buffer, exposed for the preview session: the field computed
+ * over \a buffer's own size, cut with the parameters \a params name. The one formula the CPU
+ * kernel and the preview run (#paint_layer_normal_to_mask_ramp_apply), so a preview cannot
+ * drift from what the bake lays.
+ */
+void BKE_paint_layers_normal_to_mask_cut_apply(ImBuf &buffer,
+                                               const Span<float> field,
+                                               const float lo,
+                                               const float hi,
+                                               const PaintLayerNormalToMaskParams &params)
+{
+  paint_layer_normal_to_mask_cut(buffer, field, lo, hi, params.threshold, params.softness);
+}
+
+/**
+ * The Normal to Mask kernel over \a buffer in place: the tangent normal the RGB carries is read
+ * as numbers, rebuilt into the field \a params name, and cut into the grey the ramp lays. Alpha
+ * is untouched.
+ *
+ * Every field is normalized by its robust range (the 1st and the 99th percentiles), so outliers
+ * cannot stretch the range the cut reads, and a flat normal collapses onto a black mask in every
+ * mode. The polarity follows the normal's tilt, and the mask item's own invert flips it.
+ */
+static void paint_layer_effect_normal_to_mask(ImBuf &buffer,
+                                              const PaintLayerNormalToMaskParams &params,
+                                              const bool lays_layer)
+{
+  const int width = buffer.x;
+  const int height = buffer.y;
+  const float *src = buffer.float_buffer.data;
+  if (src == nullptr) {
+    return;
+  }
+  bke::paint_perf::ScopedTimer perf("effect.cpu.normal_to_mask");
+  perf.note("kind=%d mode=%d size=%dx%d",
+            int(MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK),
+            params.mode,
+            width,
+            height);
+  Vector<float> field;
+  paint_layer_normal_to_mask_field_compute(
+      src, width, height, PaintLayerNormalToMaskMode(params.mode), field);
+  float lo = 0.0f;
+  float hi = 1.0f;
+  paint_layer_effect_field_window(field, lo, hi);
+  paint_layer_normal_to_mask_cut(
+      buffer, field, lo, hi, params.threshold, params.softness, lays_layer);
+}
+
+/** \} */
+
 void paint_layer_effect_kernel_apply(ImBuf &buffer,
                                      const MaterialPaintLayer &effect,
                                      const bool for_mask,
@@ -1952,6 +2481,20 @@ void paint_layer_effect_kernel_apply(ImBuf &buffer,
     case MA_PAINT_LAYER_FILTER_COLOR_MATCH:
       paint_layer_effect_color_match_apply(buffer, effect);
       break;
+    case MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK: {
+      /* The normal rebuilt into the field the mode names and cut by the threshold's ramp: the
+       * typed read validates the mode into the range the kernel answers for, so a file that
+       * carries anything stands in as the Height. */
+      PaintLayerNormalToMaskParams params;
+      if (BKE_paint_layers_normal_to_mask_params_get(effect, params)) {
+        /* As a correction the grey is a layer of its own: it covers where the row laid nothing, so
+         * a channel the row has no content in still gets its result. A mask item carries no alpha
+         * of its own. */
+        paint_layer_effect_normal_to_mask(
+            buffer, params, !for_mask && paint_layer_kind_result_has_alpha(effect));
+      }
+      break;
+    }
     default:
       break;
   }

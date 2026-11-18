@@ -646,6 +646,14 @@ bool paint_layer_row_reads_anchor_point(const Material &ma,
   if (!paint_layer_kind_reads_anchor_point(reader)) {
     return false;
   }
+  /* A kind that reads one channel of the slice (a Normal to Mask) carries the flag for the source
+   * picker, the slice hash and the input subscriptions, but it never lays the slice it names:
+   * what it lays is the grey its kernel converts the slice into, and
+   * #paint_layer_mask_item_lays answers for that. Answering true here would lay the raw slice as
+   * content -- in the composite, in the bake plan and in the graph alike. */
+  if (paint_layer_effect_reads_channel(reader) >= 0) {
+    return false;
+  }
   const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
   if (ref.issue != PaintLayerAnchorPointIssue::None) {
     return false;
@@ -691,6 +699,14 @@ int paint_layer_anchor_point_mask_read_channel(const Material &ma,
       ref.target == PaintLayerAnchorPointTarget::Mask)
   {
     return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  }
+  /* A kind that reads one channel of the slice (a Normal to Mask the Normal) reads exactly that
+   * channel, and not the first channel its kind's coverage rule would pick. The source's own
+   * participation is what decides whether the reading works: a source with no Normal lays a
+   * slice with nothing to convert, and the composite leaves the item out, the way a CPU effect
+   * whose input cannot render is. */
+  if (const int reads = paint_layer_effect_reads_channel(reader); reads >= 0) {
+    return reads;
   }
   /* A mask reader reading a content slice takes its coverage, which exists in every channel the
    * source row takes part in. Base Color is only the fallback when none does. */
@@ -1110,6 +1126,14 @@ bool BKE_paint_layers_anchor_point_source_set(Material &ma,
                                               const bUUID &marker)
 {
   if (reader == nullptr || !paint_layer_kind_reads_anchor_point(*reader)) {
+    return false;
+  }
+  /* A kind that reads one channel of a slice (a Normal to Mask) reads it only as a MASK ITEM,
+   * whose grey the kernel converts it into: as a correction its input is the row's own content in
+   * that channel, and a reference set on one would be read by nothing. */
+  if (paint_layer_effect_reads_channel(*reader) >= 0 &&
+      reader->role != MA_PAINT_LAYER_ROLE_MASK_ITEM)
+  {
     return false;
   }
   /* Owned by the material: a row, a content correction or a mask item of it. */

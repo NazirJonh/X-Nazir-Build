@@ -2004,8 +2004,8 @@ TEST(paint_material_composite, pass_list_covers_every_shading_channel)
    * their own, like every other channel a user can paint. */
   EXPECT_TRUE(passes.contains(PAINT_MATERIAL_CHANNEL_SPECULAR));
   EXPECT_TRUE(passes.contains(PAINT_MATERIAL_CHANNEL_EMISSION));
-  /* Height has no part in phase 1 shading; listing it would offer a pass the preview ignores. */
-  EXPECT_FALSE(passes.contains(PAINT_MATERIAL_CHANNEL_HEIGHT));
+  /* Height is the relief the layers lay: it is inspectable on its own like any other channel. */
+  EXPECT_TRUE(passes.contains(PAINT_MATERIAL_CHANNEL_HEIGHT));
   /* Combined is a display mode, not a role: every consumer of this list indexes an array by the
    * value or looks it up in the channel descriptor table. */
   EXPECT_FALSE(passes.contains(PAINT_LAYER_PASS_COMBINED));

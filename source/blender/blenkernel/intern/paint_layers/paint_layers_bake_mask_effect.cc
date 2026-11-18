@@ -25,6 +25,7 @@
 
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_perf_debug.hh"
 
 #include "DNA_material_types.h"
@@ -38,6 +39,14 @@ namespace blender {
 
 uint64_t bake_mask_effect_input_hash(const Material &ma, const MaterialPaintLayer &layer)
 {
+  /* A kind whose grey reads an Anchor Point's slice (a Normal to Mask) reads the input channel of
+   * the slice its reference names, not the mask built up to it: the slice's own description hash
+   * is the input's, the same one the mask effect cache keys the grey by, so an edit above the
+   * marker invalidates the bake with the cache. */
+  if (paint_layer_kind_reads_anchor_point(layer)) {
+    return paint_layer_anchor_point_slice_hash(
+        ma, layer, paint_layer_effect_input_channel(layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  }
   /* The grey the item bakes reads the mask built up to it: which items stand before it and what
    * they render from is the input's description, the way a reader's slice hash is. */
   const MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, layer);
@@ -50,6 +59,12 @@ void BKE_paint_layers_mask_effect_input_images(const Material &ma,
                                                Vector<Image *> &r_images)
 {
   Vector<bUUID> visited;
+  /* An Anchor Point kind is the reader its grey reads through: the slice's own maps are the
+   * input's, and the mask below it plays no part in the grey. */
+  if (paint_layer_kind_reads_anchor_point(effect)) {
+    BKE_paint_layers_anchor_point_slice_images(ma, effect, r_images);
+    return;
+  }
   /* The grey the effect reads is the base mask and the items before it, laid live: the maps each
    * of them renders from are the input's maps, a nested reader among them bringing its own slice's.
    * The effect item itself reads nothing, so the walk stops before it. A kind that reads its own
@@ -108,6 +123,24 @@ int bake_mask_effect_size_for(const Material &ma, const MaterialPaintLayer &row)
   }
   int width = 0;
   int height = 0;
+  if (BKE_paint_layers_anchor_point_takes_row(row)) {
+    /* The grey of a kind that reads a slice is the slice's own canvas (see
+     * #mask_effect_dimensions): the owner's Base Color says nothing about it, and a mask over a row
+     * with a flat colour would bake the grey into one texel. */
+    PaintMaterialCompositeImageLayer entry;
+    const bool slice_ok = BKE_paint_layers_slice_describe(
+                              ma,
+                              row,
+                              paint_layer_effect_input_channel(row, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+                              entry,
+                              nullptr,
+                              /*dimensions_only=*/true,
+                              /*allow_empty_mask=*/false,
+                              PaintLayerTileContext{}) &&
+                          BKE_paint_material_composite_stack_dimensions(
+                              Span<PaintMaterialCompositeImageLayer>(&entry, 1), width, height);
+    return slice_ok ? width : 0;
+  }
   if (BKE_paint_layers_row_dimensions(
           ma, *owner, PAINT_MATERIAL_CHANNEL_BASE_COLOR, width, height) &&
       width > 0 && height > 0)
@@ -137,14 +170,14 @@ static void bake_mask_effect_grey_write(Image &image,
 {
   const int width = grey.x;
   const int height = grey.y;
-  const float *src = grey.float_buffer.data;
+  const float *src = grey.float_data();
   bake_write_image_rows(
       image, is_color, nullptr, tile_number,
       [&](const int y, const int map_width, float *r_row) {
-        const int src_y = min_ii(int(int64_t(y) * height / size), height - 1);
+        const int src_y = paint_layer_nearest_resample_texel(y, size, height);
         const float *src_row = src + int64_t(src_y) * width * 4;
         for (const int x : IndexRange(map_width)) {
-          const int src_x = min_ii(int(int64_t(x) * width / size), width - 1);
+          const int src_x = paint_layer_nearest_resample_texel(x, map_width, width);
           const float *texel = src_row + int64_t(src_x) * 4;
           r_row[x * 4 + 0] = texel[0];
           r_row[x * 4 + 1] = texel[1];
@@ -191,7 +224,7 @@ bool bake_mask_effect_row_write(Main &bmain,
   if (objects.is_empty()) {
     std::shared_ptr<ImBuf> grey = paint_layer_mask_effect_buffer_get(
         ma, *owner, layer, /*describe_only=*/false, nullptr, PAINT_TILE_NUMBER_BASE);
-    if (grey == nullptr || grey->float_buffer.data == nullptr) {
+    if (grey == nullptr || grey->float_data() == nullptr) {
       return false;
     }
     MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
@@ -229,7 +262,7 @@ bool bake_mask_effect_row_write(Main &bmain,
       const PaintLayerSurfaceRef painted_object(target.object);
       std::shared_ptr<ImBuf> grey = paint_layer_mask_effect_buffer_get(
           ma, *owner, layer, /*describe_only=*/false, nullptr, pair.uv_tile, painted_object);
-      if (grey == nullptr || grey->float_buffer.data == nullptr) {
+      if (grey == nullptr || grey->float_data() == nullptr) {
         return false;
       }
       Image *image = bake_service_image(bmain,
@@ -305,7 +338,7 @@ bool bake_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &effect
      * before the next channel's is made, so the peak holds one buffer and one map. */
     std::shared_ptr<ImBuf> result = paint_layer_owned_effect_result_compute(
         ma, *row, effect, channel, PAINT_TILE_NUMBER_BASE);
-    if (result == nullptr || result->float_buffer.data == nullptr) {
+    if (result == nullptr || result->float_data() == nullptr) {
       continue;
     }
     const int width = result->x;
@@ -331,14 +364,14 @@ bool bake_effect_row_write(Main &bmain, Material &ma, MaterialPaintLayer &effect
      * result is a layer (#PAINT_LAYER_KIND_RESULT_HAS_ALPHA), whose alpha is what it covers by and
      * is kept in the map. */
     const bool keeps_alpha = paint_layer_kind_result_has_alpha(effect);
-    const float *src = result->float_buffer.data;
+    const float *src = result->float_data();
     bake_write_image_rows(
         *image, info.is_color, nullptr, 0,
         [&](const int y, const int map_width, float *r_row) {
-          const int src_y = min_ii(int(int64_t(y) * height / size), height - 1);
+          const int src_y = paint_layer_nearest_resample_texel(y, size, height);
           const float *src_row = src + int64_t(src_y) * width * 4;
           for (const int x : IndexRange(map_width)) {
-            const int src_x = min_ii(int(int64_t(x) * width / size), width - 1);
+            const int src_x = paint_layer_nearest_resample_texel(x, map_width, width);
             const float *texel = src_row + int64_t(src_x) * 4;
             const float inv = texel[3] > 0.0f ? 1.0f / texel[3] : 1.0f;
             r_row[x * 4 + 0] = texel[0] * inv;

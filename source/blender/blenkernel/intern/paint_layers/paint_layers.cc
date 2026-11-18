@@ -11,6 +11,7 @@
  */
 
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_generator.hh"
 #include "BKE_paint_layers_gradient.hh"
@@ -597,6 +598,180 @@ MaterialPaintLayer *BKE_paint_layers_anchor_point_add(Material &ma,
   return item;
 }
 
+MaterialPaintLayer *BKE_paint_layers_normal_to_mask_add(Material &ma,
+                                                        MaterialPaintLayer *target_row,
+                                                        MaterialPaintLayer *source_row)
+{
+  if (target_row == nullptr || source_row == nullptr || !paint_layer_in_stack(ma, target_row) ||
+      !paint_layer_in_stack(ma, source_row))
+  {
+    return nullptr;
+  }
+  if (!paint_layer_row_participates(ma, *source_row, PAINT_MATERIAL_CHANNEL_NORMAL)) {
+    /* The kernel converts a tangent normal; a source with no Normal lays a slice with nothing to
+     * convert, and the item would be born laying nothing. */
+    return nullptr;
+  }
+  /* Whether the base mask below is this add's own: only one made here is rolled back. */
+  bool base_added = false;
+  if (BKE_paint_layers_mask_base(*target_row) == nullptr) {
+    /* A filter item hangs over a base mask; a white one changes no pixel until the item's grey
+     * lands over it. */
+    if (BKE_paint_layers_mask_add(ma, target_row, 1.0f) == nullptr) {
+      return nullptr;
+    }
+    /* This add made the base: a step after it failing takes the base back with it, so a failed
+     * wire leaves the stacks exactly as it found them. A base the row already had is the user's
+     * and is never touched by the rollback. */
+    base_added = true;
+  }
+  /* The reader's rank must sit after the point's: a mask item of \a target_row is always built
+   * after \a source_row's effects (the build order walks children, then a row, then its effects,
+   * then its mask), so the reference never reads forward. */
+  MaterialPaintLayer *marker = BKE_paint_layers_anchor_point_add(ma,
+                                                                 source_row,
+                                                                 PaintLayerAnchorPointList::Effects,
+                                                                 nullptr,
+                                                                 /*reader=*/false,
+                                                                 "Normal to Mask Point",
+                                                                 BLI_uuid_nil());
+  if (marker == nullptr) {
+    if (base_added) {
+      BKE_paint_layers_mask_remove(ma, target_row);
+    }
+    return nullptr;
+  }
+  MaterialPaintLayer *item = BKE_paint_layers_mask_filter_add(
+      ma, target_row, MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK, "Normal to Mask");
+  if (item == nullptr) {
+    BKE_paint_layers_correction_remove(ma, marker);
+    if (base_added) {
+      BKE_paint_layers_mask_remove(ma, target_row);
+    }
+    return nullptr;
+  }
+  if (!BKE_paint_layers_anchor_point_source_set(ma, item, marker->marker)) {
+    /* The rollback runs newest first, each removal releasing what it owns: the item, then the
+     * point it cannot name, then the base mask this add made. */
+    BKE_paint_layers_mask_item_remove(ma, item);
+    BKE_paint_layers_correction_remove(ma, marker);
+    if (base_added) {
+      BKE_paint_layers_mask_remove(ma, target_row);
+    }
+    return nullptr;
+  }
+  return item;
+}
+
+void BKE_paint_layers_anchor_point_row_sources(const Material &ma,
+                                               const MaterialPaintLayer &reader,
+                                               Vector<const MaterialPaintLayer *> &r_rows)
+{
+  /* Only a kind that reads one channel of the whole row (a Normal to Mask) takes a row, and only
+   * as a mask item: a correction reads the row it hangs on. */
+  if (!BKE_paint_layers_anchor_point_takes_row(reader)) {
+    return;
+  }
+  const MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, reader);
+  if (owner == nullptr) {
+    return;
+  }
+  const int reads = paint_layer_effect_reads_channel(reader);
+  /* The stack's own order is the build order, so a row listed before the owner is built before
+   * the reader and the point at the end of its effects never reads forward. */
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+        /* A Fill takes part in the channel with its flat value whatever it holds, so a row can be
+         * listed with no normal map in it. */
+        if (row.role == MA_PAINT_LAYER_ROLE_LAYER && !BKE_paint_layers_is_folder(row) &&
+            paint_layer_row_participates(ma, row, reads))
+        {
+          r_rows.append(&row);
+        }
+        /* The owner is listed and ends the walk: its own effects are built before its mask, so
+         * a mask reading the layer it sits on (a Fill with a Normal texture and a mask over it) is
+         * the usual use, while a layer after it would be read forward. */
+        return &row != owner;
+      });
+}
+
+bool BKE_paint_layers_anchor_point_takes_row(const MaterialPaintLayer &reader)
+{
+  return paint_layer_effect_reads_channel(reader) >= 0 && reader.role == MA_PAINT_LAYER_ROLE_MASK_ITEM;
+}
+
+bool BKE_paint_layers_anchor_point_row_mode_get(const MaterialPaintLayer &reader)
+{
+  return BKE_paint_layers_anchor_point_takes_row(reader) &&
+         (reader.flag & MA_PAINT_LAYER_ANCHOR_SOURCE_ROW) != 0;
+}
+
+void BKE_paint_layers_anchor_point_row_mode_set(Material &ma,
+                                                MaterialPaintLayer &reader,
+                                                const bool row_mode)
+{
+  if (!BKE_paint_layers_anchor_point_takes_row(reader) ||
+      BKE_paint_layers_anchor_point_row_mode_get(reader) == row_mode)
+  {
+    return;
+  }
+  /* The two modes list different sources, so the one kept would name something the new list does
+   * not offer: the pick starts over, as the empty source the reader had when it was added. */
+  BKE_paint_layers_anchor_point_source_set(ma, &reader, BLI_uuid_nil());
+  SET_FLAG_FROM_TEST(reader.flag, row_mode, MA_PAINT_LAYER_ANCHOR_SOURCE_ROW);
+  BKE_paint_layers_tag_edited(ma);
+}
+
+bool BKE_paint_layers_anchor_point_source_set_row(Material &ma,
+                                                  MaterialPaintLayer *reader,
+                                                  MaterialPaintLayer *source_row)
+{
+  if (reader == nullptr || source_row == nullptr) {
+    return false;
+  }
+  /* The reader is a mask item, which is no row of the stack: it is owned by the material when its
+   * marker finds it, as #BKE_paint_layers_anchor_point_source_set asks. */
+  if (BKE_paint_layers_find(ma, reader->marker) != reader || !paint_layer_in_stack(ma, source_row) ||
+      source_row->role != MA_PAINT_LAYER_ROLE_LAYER)
+  {
+    return false;
+  }
+  /* The whole result of a row is what an Anchor Point at the end of its effects publishes, so the
+   * mode needs no reference kind of its own: the point the row already ends with is reused (it
+   * may be the user's own), and one is added only when the row ends with something else. */
+  MaterialPaintLayer *marker = nullptr;
+  bool marker_added = false;
+  if (source_row->effects.last != nullptr) {
+    MaterialPaintLayer *last = static_cast<MaterialPaintLayer *>(source_row->effects.last);
+    if (paint_layer_kind_is_anchor_point_marker(*last)) {
+      marker = last;
+    }
+  }
+  if (marker == nullptr) {
+    marker = BKE_paint_layers_anchor_point_add(ma,
+                                               source_row,
+                                               PaintLayerAnchorPointList::Effects,
+                                               nullptr,
+                                               /*reader=*/false,
+                                               "Row Result",
+                                               BLI_uuid_nil());
+    if (marker == nullptr) {
+      return false;
+    }
+    marker_added = true;
+  }
+  /* A point this call made and no reader can use is taken back, so a refused pick leaves the
+   * source row's stack as it was. */
+  if (!paint_layer_anchor_point_source_valid(ma, *reader, marker->marker) ||
+      !BKE_paint_layers_anchor_point_source_set(ma, reader, marker->marker))
+  {
+    if (marker_added) {
+      BKE_paint_layers_correction_remove(ma, marker);
+    }
+    return false;
+  }
+  return true;
+}
 
 void BKE_paint_layers_default_channels_apply(Material &ma,
                                              MaterialPaintLayer &layer,
@@ -1455,6 +1630,16 @@ MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
       }
     }
   }
+  /* A kind whose output stays colour-only consumes the channel it reads: its own record is the
+   * input's switch, added beside the output ones, so the effect is born working rather than
+   * laying nothing until the user finds the hidden switch. A kind that lays the channel it reads
+   * (a Height To Normal) keeps its input in the row's content, which needs no record of the
+   * effect's own. */
+  if (const int reads = paint_layer_effect_reads_channel(*effect);
+      reads >= 0 && paint_layer_kind_writes_only_colour_channels(*effect))
+  {
+    BKE_paint_layers_channel_add(ma, effect, eMaterialPaintChannel(reads));
+  }
   BKE_paint_layers_tag_edited(ma);
   return effect;
 }
@@ -2051,6 +2236,51 @@ float BKE_paint_layers_mask_contrast_apply(const float coverage, const float con
     return coverage;
   }
   return clamp_f((coverage - 0.5f) * contrast + 0.5f, 0.0f, 1.0f);
+}
+
+float BKE_paint_layers_kind_param_get(const MaterialPaintLayer &item, const char *name)
+{
+  const int index = paint_layer_kind_param_index(item, name);
+  /* A name the schema does not carry is a caller's typo, not a value: it would answer a silent
+   * zero the parameter's real default could disagree with. */
+  BLI_assert_msg(index >= 0, "unknown kind parameter name");
+  return index >= 0 ? paint_layer_kind_param_get(item, index) : 0.0f;
+}
+
+bool BKE_paint_layers_normal_to_mask_params_get(const MaterialPaintLayer &item,
+                                                PaintLayerNormalToMaskParams &r_params)
+{
+  const PaintLayerKindInfo *kind = paint_layer_kind_of(item);
+  if (kind == nullptr ||
+      eMaterialPaintLayerFilter(item.kind_subtype) != MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK)
+  {
+    return false;
+  }
+  /* The schema bounds the mode, but a file may carry anything: an out-of-range one stands in as
+   * the Height, the one answer the kernel has past its three fields. */
+  const int mode_value = paint_layer_kind_param_int_get(item, PAINT_LAYER_NORMAL_TO_MASK_MODE);
+  r_params.mode = (mode_value >= PAINT_LAYER_NORMAL_TO_MASK_HEIGHT &&
+                   mode_value <= PAINT_LAYER_NORMAL_TO_MASK_SLOPE) ?
+                      mode_value :
+                      int(PAINT_LAYER_NORMAL_TO_MASK_HEIGHT);
+  r_params.threshold = paint_layer_kind_param_get(item, PAINT_LAYER_NORMAL_TO_MASK_THRESHOLD);
+  r_params.softness = paint_layer_kind_param_get(item, PAINT_LAYER_NORMAL_TO_MASK_SOFTNESS);
+  return true;
+}
+
+bool BKE_paint_layers_kind_param_set(Material &ma,
+                                     MaterialPaintLayer &item,
+                                     const char *name,
+                                     const float value)
+{
+  const int index = paint_layer_kind_param_index(item, name);
+  if (index < 0 || !paint_layer_kind_param_set(item, index, value)) {
+    return false;
+  }
+  /* Values only: the parameter rides the effect hash, so the effect cache and the bake re-key
+   * from it, and the generated graph of a CPU-computed kind reads its bake, not the value. */
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
 }
 
 bool BKE_paint_layers_is_map_coverage(const MaterialPaintLayer &item)

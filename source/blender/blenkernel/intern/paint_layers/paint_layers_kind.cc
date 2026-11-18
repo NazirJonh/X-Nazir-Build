@@ -469,6 +469,33 @@ static const PaintLayerKindParam channel_split_params[] = {
 };
 static_assert(std::size(channel_split_params) == PAINT_LAYER_CHANNEL_SPLIT_PARAM_NUM);
 
+static const PaintLayerKindEnumItem normal_to_mask_mode_items[] = {
+    {PAINT_LAYER_NORMAL_TO_MASK_HEIGHT, "HEIGHT", "Height"},
+    {PAINT_LAYER_NORMAL_TO_MASK_EDGES, "EDGES", "Edges"},
+    {PAINT_LAYER_NORMAL_TO_MASK_SLOPE, "SLOPE", "Slope"},
+};
+static_assert(int(std::size(normal_to_mask_mode_items)) - 1 == PAINT_LAYER_NORMAL_TO_MASK_SLOPE);
+
+static const PaintLayerKindParam normal_to_mask_params[] = {
+    /* The field the normal rebuilds into: the kernel is chosen when the effect is computed, so
+     * an edit of this is a shape edit and the caches rebuild, the way the Blur's shape is. */
+    {"mode",
+     "Mode",
+     float(PAINT_LAYER_NORMAL_TO_MASK_HEIGHT),
+     0.0f,
+     float(PAINT_LAYER_NORMAL_TO_MASK_SLOPE),
+     PaintLayerKindParamType::Enum,
+     normal_to_mask_mode_items,
+     int(std::size(normal_to_mask_mode_items))},
+    /* The position the cut centers on, in the field's normalized [0, 1]: the mask grows and
+     * shrinks by eating the dark side away. */
+    {"threshold", "Threshold", 0.5f, 0.0f, 1.0f},
+    /* The ramp's width around the position: zero is the hard cut the Threshold makes, one a ramp
+     * the whole range walks. */
+    {"softness", "Softness", 0.1f, 0.0f, 1.0f},
+};
+static_assert(std::size(normal_to_mask_params) == PAINT_LAYER_NORMAL_TO_MASK_PARAM_NUM);
+
 static const PaintLayerKindParam height_to_normal_params[] = {
     /* The gradients' multiplier: one reads as the Sobel's own scale, two doubles the slope. */
     {"strength", "Normal Intensity", 1.0f, 0.0f, 16.0f},
@@ -1191,10 +1218,38 @@ static const PaintLayerKindInfo kinds[] = {
      false,
      nullptr,
      true},
+    /* A Normal to Mask rebuilds one field (Height, Edges, Slope) from a tangent normal and cuts it
+     * into a grey by the threshold. The normal it reads is the one the element references: as a
+     * MASK ITEM the element is an Anchor Point reader itself (READS_ANCHOR_POINT, the source's
+     * Normal channel), and as an EFFECT the input is the row's own Normal content, which an
+     * Anchor Point reader row already lays from its source. The field solve (a Poisson
+     * integration the graph has no node for) is CPU-only: NEEDS_BAKE without GPU_COMPUTED, so the
+     * combined preview falls back to the CPU the way a Bevel or a Glow does. The kernel consumes
+     * the Normal's encoding and lays a grey, so it is not NORMAL_SAFE: it reads the Normal
+     * (READS_CHANNEL) and never takes part in it, and the grey it lays goes to the colour channels
+     * alone (WRITES_ONLY_COLOUR_CHANNELS, which makes the effect's own Normal record the input's
+     * switch). */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK,
+     "Normal to Mask",
+     PaintLayerKindCategory::Operator,
+     effect_or_mask_roles,
+     normal_to_mask_params,
+     int(std::size(normal_to_mask_params)),
+     uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
+              PAINT_LAYER_KIND_READS_ANCHOR_POINT | PAINT_LAYER_KIND_RESULT_HAS_ALPHA),
+     /* #PaintLayerKindInfo::map_paintable, no_stroke_reason, reads_image_slot. */
+     false,
+     nullptr,
+     false,
+     /* #PaintLayerKindInfo::reads_channel, writes_only_colour_channels. */
+     int8_t(PAINT_MATERIAL_CHANNEL_NORMAL),
+     true},
     /* The Height laid as a normal: the Sobel gradients of the row's Height, encoded as the
-     * tangent-space normal. The one cross-channel effect: it reads the Height
-     * (#PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT) and lays into the Normal channel, the only one it
-     * filters, which is why it is also #PAINT_LAYER_KIND_NORMAL_SAFE. A content correction only: a
+     * tangent-space normal. The one cross-channel effect that lays the channel it reads: it reads
+     * the Height (READS_CHANNEL) and lays into the Normal channel, the only one it filters, which
+     * is why it is also #PAINT_LAYER_KIND_NORMAL_SAFE. Its output is not colour-only, so its input
+     * stays the row's Height content rather than a switch of its own. A content correction only: a
      * mask item has no channel of its own to lay a normal into. */
     {MA_PAINT_LAYER_SOURCE_FILTER,
      MA_PAINT_LAYER_FILTER_HEIGHT_TO_NORMAL,
@@ -1204,7 +1259,14 @@ static const PaintLayerKindInfo kinds[] = {
      height_to_normal_params,
      int(std::size(height_to_normal_params)),
      uint32_t(PAINT_LAYER_KIND_ACTS_ON_BELOW | PAINT_LAYER_KIND_NEEDS_BAKE |
-              PAINT_LAYER_KIND_NORMAL_SAFE | PAINT_LAYER_KIND_READS_CHANNEL_HEIGHT)},
+              PAINT_LAYER_KIND_NORMAL_SAFE),
+     /* #PaintLayerKindInfo::map_paintable, no_stroke_reason, reads_image_slot. */
+     false,
+     nullptr,
+     false,
+     /* #PaintLayerKindInfo::reads_channel, writes_only_colour_channels. */
+     int8_t(PAINT_MATERIAL_CHANNEL_HEIGHT),
+     false},
     /* The Hermite interpolation between the edges: the Map Range node's own Smoothstep, the
      * smoother extraction the Histogram Scan's threshold opens into. */
     {MA_PAINT_LAYER_SOURCE_FILTER,

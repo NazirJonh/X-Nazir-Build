@@ -20,6 +20,7 @@
 
 #include "BLI_assert.h"
 #include "BLI_index_range.hh"
+#include "BLI_task.hh"
 #include "BLI_vector.hh"
 
 #include "DNA_material_types.h"
@@ -92,6 +93,30 @@ static bool mask_effect_dimensions(const Material &ma,
                                    int &r_height)
 {
   PaintMaterialCompositeImageLayer entry;
+  if (paint_layer_kind_reads_anchor_point(effect)) {
+    /* The grey of a kind that reads a slice (a Normal to Mask) is the slice's own canvas: the
+     * owner row's maps say nothing about it, and a mask over a row with no map in the colour
+     * channel would size it to one texel. */
+    int slice_width = 0;
+    int slice_height = 0;
+    if (BKE_paint_layers_slice_describe(
+            ma,
+            effect,
+            paint_layer_effect_input_channel(effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            entry,
+            nullptr,
+            /*dimensions_only=*/true,
+            /*allow_empty_mask=*/false,
+            PaintLayerTileContext{.painted_object = painted_object, .tile_number = tile_number}) &&
+        BKE_paint_material_composite_stack_dimensions(
+            Span<PaintMaterialCompositeImageLayer>(&entry, 1), slice_width, slice_height))
+    {
+      r_width = slice_width;
+      r_height = slice_height;
+      return true;
+    }
+    return false;
+  }
   if (!composite_image_layer_build(ma,
                                    row,
                                    PAINT_MATERIAL_CHANNEL_BASE_COLOR,
@@ -135,12 +160,35 @@ static EffectCacheKey mask_effect_key_get(const Material &ma,
                      PAINT_LAYER_EFFECT_CHANNEL_MASK,
                      tile_number,
                      paint_layer_effect_hash(effect, PAINT_LAYER_EFFECT_CHANNEL_MASK)};
-  key.gpu_extras.chain_hash = paint_layer_mask_prefix_hash(ma, row, effect);
-  /* The prefix hash above sees an item's mapping but not its projection frame or the surface the
-   * frame is read over, which the grey depends on. Zero for a mask with no projected item, so the
-   * key of every other mask is the one it always had. */
-  key.gpu_extras.input_scalar_hash = paint_layer_mask_prefix_projection_hash(
-      ma, row, effect, tile_number, painted_object);
+  if (paint_layer_kind_reads_anchor_point(effect)) {
+    /* A kind whose grey reads an Anchor Point's slice (a Normal to Mask) keys the entry by the
+     * slice's own description hash, not by the mask built up to it (the input images the
+     * staleness walk collects follow it, see #BKE_paint_layers_mask_effect_input_images), and the
+     * slice hash already folds the source's projection, so the prefix projection half stays
+     * zero. */
+    const int input_channel = paint_layer_effect_input_channel(effect,
+                                                               PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    key.gpu_extras.chain_hash = paint_layer_anchor_point_slice_hash(ma, effect, input_channel);
+    /* A projected source reads the surface of the object the grey is computed for: the slice hash
+     * holds the frame but not the surface, so one source projected over two objects would share an
+     * entry. Zero for a source that does not project. */
+    const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, effect);
+    key.gpu_extras.input_scalar_hash = (ref.source_row != nullptr) ?
+                                           paint_layer_row_projection_hash(ma,
+                                                                           *ref.source_row,
+                                                                           input_channel,
+                                                                           tile_number,
+                                                                           painted_object) :
+                                           0;
+  }
+  else {
+    key.gpu_extras.chain_hash = paint_layer_mask_prefix_hash(ma, row, effect);
+    /* The prefix hash above sees an item's mapping but not its projection frame or the surface the
+     * frame is read over, which the grey depends on. Zero for a mask with no projected item, so the
+     * key of every other mask is the one it always had. */
+    key.gpu_extras.input_scalar_hash = paint_layer_mask_prefix_projection_hash(
+        ma, row, effect, tile_number, painted_object);
+  }
   return key;
 }
 
@@ -246,6 +294,73 @@ static void mask_effect_transform_apply(ImBuf &buffer, const PaintMaterialCompos
   IMB_freeImBuf(moved);
 }
 
+/** Whether the mask item \a effect is a kind whose grey reads an Anchor Point's slice, and the
+ * reference resolves to a content slice: the grey's input is another layer's slice rather than
+ * the grey the mask has built up to the item. A broken reference answers false, and the item
+ * lays nothing -- the same answer a CPU effect whose input cannot render gives. */
+static bool mask_effect_reads_anchor_slice(const Material &ma, const MaterialPaintLayer &effect)
+{
+  if (!paint_layer_kind_reads_anchor_point(effect)) {
+    return false;
+  }
+  const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, effect);
+  return ref.issue == PaintLayerAnchorPointIssue::None &&
+         ref.target == PaintLayerAnchorPointTarget::Content;
+}
+
+/** Fill \a color, the item's canvas-sized grey buffer, with the input channel's color of the
+ * slice the Anchor Point item \a effect references: the kernel's whole input. The slice renders
+ * at the source row's own resolution, so the canvas samples it nearest when the two differ -- the
+ * same stretch a bake map takes its grey by (see #bake_mask_effect_row_write). */
+static bool mask_effect_anchor_slice_input(const Material &ma,
+                                           const MaterialPaintLayer &effect,
+                                           const int tile_number,
+                                           const PaintLayerSurfaceRef painted_object,
+                                           const int width,
+                                           const int height,
+                                           std::shared_ptr<ImBuf> &color)
+{
+  const int input_channel = paint_layer_effect_input_channel(effect,
+                                                             PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  std::shared_ptr<ImBuf> slice_color;
+  std::shared_ptr<ImBuf> slice_coverage;
+  if (!BKE_paint_layers_slice_render(ma,
+                                     effect,
+                                     eMaterialPaintChannel(input_channel),
+                                     &slice_color,
+                                     &slice_coverage,
+                                     nullptr,
+                                     /*dimensions_only=*/false,
+                                     PaintLayerTileContext{.painted_object = painted_object,
+                                                           .tile_number = tile_number}))
+  {
+    return false;
+  }
+  if (slice_color == nullptr || slice_color->float_data() == nullptr) {
+    return false;
+  }
+  const float *src = slice_color->float_data();
+  const int src_width = slice_color->x;
+  const int src_height = slice_color->y;
+  float *pixels = color->float_data_for_write();
+  threading::parallel_for(IndexRange(height), 64, [&](const IndexRange range) {
+    for (const int y : range) {
+      const int src_y = paint_layer_nearest_resample_texel(y, height, src_height);
+      const float *src_row = src + int64_t(src_y) * src_width * 4;
+      float *dst_row = pixels + int64_t(y) * width * 4;
+      for (const int x : IndexRange(width)) {
+        const int src_x = paint_layer_nearest_resample_texel(x, width, src_width);
+        const float *texel = src_row + int64_t(src_x) * 4;
+        dst_row[int64_t(x) * 4 + 0] = texel[0];
+        dst_row[int64_t(x) * 4 + 1] = texel[1];
+        dst_row[int64_t(x) * 4 + 2] = texel[2];
+        dst_row[int64_t(x) * 4 + 3] = 1.0f;
+      }
+    }
+  });
+  return true;
+}
+
 /** Render the input of \a effect -- the mask built up to it on \a tile_number -- and apply its
  * kernel. */
 static bool paint_layer_mask_effect_compute(const Material &ma,
@@ -268,21 +383,37 @@ static bool paint_layer_mask_effect_compute(const Material &ma,
   }
   {
     bke::paint_perf::ScopedTimer perf_input("mask_effect.cpu.input");
-    /* The same grey a slice before this item would show: the base and the items before it, laid by
-     * their own opacity, blend and invert, independent of the row's visibility -- the anchor
-     * slice's own policy. The buffer is already canvas grey, so the item samples in with no map.
-     * The tile is the one the grey is computed for: the stack's tiled maps are acquired on it. */
-    PaintLayersMaskSampler sampler(ma, row, &effect.marker, false, painted_object);
-    sampler.tile_acquire(tile_number, width, height);
-    float *pixels = color->float_data_for_write();
-    for (const int y : IndexRange(height)) {
-      for (const int x : IndexRange(width)) {
-        const float grey = sampler.sample(tile_number, x, y);
-        const int64_t index = int64_t(y) * width + x;
-        pixels[index * 4 + 0] = grey;
-        pixels[index * 4 + 1] = grey;
-        pixels[index * 4 + 2] = grey;
-        pixels[index * 4 + 3] = 1.0f;
+    if (paint_layer_kind_reads_anchor_point(effect)) {
+      /* An Anchor Point kind reads the input channel of the layer its reference names, not the
+       * grey the mask has built up to it: the slice is the kernel's whole input, and the coverage
+       * it would bring does not exist (a tangent normal tracks no content alpha). A reference that
+       * is broken or names a mask point has no content slice to convert, and the item lays nothing
+       * rather than running the kernel over the mask's own grey. */
+      if (!mask_effect_reads_anchor_slice(ma, effect) ||
+          !mask_effect_anchor_slice_input(
+              ma, effect, tile_number, painted_object, width, height, color))
+      {
+        return false;
+      }
+    }
+    else {
+      /* The same grey a slice before this item would show: the base and the items before it, laid
+       * by their own opacity, blend and invert, independent of the row's visibility -- the anchor
+       * slice's own policy. The buffer is already canvas grey, so the item samples in with no
+       * map. The tile is the one the grey is computed for: the stack's tiled maps are acquired on
+       * it. */
+      PaintLayersMaskSampler sampler(ma, row, &effect.marker, false, painted_object);
+      sampler.tile_acquire(tile_number, width, height);
+      float *pixels = color->float_data_for_write();
+      for (const int y : IndexRange(height)) {
+        for (const int x : IndexRange(width)) {
+          const float grey = sampler.sample(tile_number, x, y);
+          const int64_t index = int64_t(y) * width + x;
+          pixels[index * 4 + 0] = grey;
+          pixels[index * 4 + 1] = grey;
+          pixels[index * 4 + 2] = grey;
+          pixels[index * 4 + 3] = 1.0f;
+        }
       }
     }
     perf_input.note("kind=%d size=%dx%d", int(effect.kind_subtype), width, height);
@@ -385,6 +516,21 @@ void paint_layer_mask_effect_cache_drop(const Material &ma,
   std::lock_guard<std::mutex> lock(g_paint_mask_effect_cache_mutex);
   const auto no_release = [](MaskEffectCacheEntry &) {};
   g_paint_mask_effect_cache.drop_instance(key, no_release);
+}
+
+std::shared_ptr<ImBuf> BKE_paint_layers_mask_effect_grey(const Material &ma,
+                                                         const MaterialPaintLayer &row,
+                                                         const MaterialPaintLayer &effect,
+                                                         const int tile_number,
+                                                         const PaintLayerSurfaceRef painted_object)
+{
+  if (effect.role != MA_PAINT_LAYER_ROLE_MASK_ITEM ||
+      !paint_layer_mask_item_bakes_effect(effect))
+  {
+    return {};
+  }
+  return paint_layer_mask_effect_buffer_get(
+      ma, row, effect, /*describe_only=*/false, nullptr, tile_number, painted_object);
 }
 
 /** \} */

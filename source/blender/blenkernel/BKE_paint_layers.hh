@@ -776,6 +776,23 @@ bool BKE_paint_layers_mask_contrast_set(Material &ma, MaterialPaintLayer *item, 
 float BKE_paint_layers_mask_contrast_apply(float coverage, float contrast);
 
 /**
+ * The value of the kind parameter of \a item named \a name (a Float or an Enum, read as a float),
+ * or its schema default while unset. Null-named or unknown \a name reads as zero.
+ */
+float BKE_paint_layers_kind_param_get(const MaterialPaintLayer &item, const char *name);
+
+/**
+ * Store \a value into the kind parameter of \a item named \a name, clamped by its schema bounds.
+ * Value-only: the parameter rides the effect hash, so the caches re-key from it, and a
+ * CPU-computed kind's graph reads its bake rather than the value.
+ * \return false when \a item has no kind parameter of that name or the write was refused.
+ */
+bool BKE_paint_layers_kind_param_set(Material &ma,
+                                     MaterialPaintLayer &item,
+                                     const char *name,
+                                     float value);
+
+/**
  * Whether the map of the map-coverage operator \a item may be written: the UV Island capture does,
  * a Color ID item's map is an external ID Map and is reference only. False for any other item.
  */
@@ -1044,6 +1061,60 @@ MaterialPaintLayer *BKE_paint_layers_anchor_point_add(Material &ma,
                                                       bool reader,
                                                       const char *name,
                                                       const bUUID &source);
+
+/**
+ * Wire a Normal to Mask over another row's normal: the Anchor Point marker that publishes \a
+ * source_row's content (its Normal channel is the map the kernel converts), and the mask item on
+ * \a target_row that reads it, named "Normal to Mask", with the kind's schema defaults laid in. The
+ * one call the Add operator runs, so a hand-built stack and a wired one cannot disagree about the
+ * shape of the wiring.
+ *
+ * \return the new mask item, or null when either row is not part of \a ma, the target has no mask
+ * to hold the item, or the source takes no part in the Normal channel.
+ */
+MaterialPaintLayer *BKE_paint_layers_normal_to_mask_add(Material &ma,
+                                                        MaterialPaintLayer *target_row,
+                                                        MaterialPaintLayer *source_row);
+
+/**
+ * Whether \a reader can take a whole layer as its source (a Normal to Mask mask item), besides an
+ * Anchor Point. Such a reader has two source modes, #BKE_paint_layers_anchor_point_row_mode_get.
+ */
+bool BKE_paint_layers_anchor_point_takes_row(const MaterialPaintLayer &reader);
+
+/** Whether \a reader is in its Row source mode; false for a reader that takes no row. */
+bool BKE_paint_layers_anchor_point_row_mode_get(const MaterialPaintLayer &reader);
+
+/**
+ * Switch \a reader between the Anchor and the Row source mode. A change of mode clears the source
+ * the reader had, as the two modes do not list the same sources.
+ */
+void BKE_paint_layers_anchor_point_row_mode_set(Material &ma,
+                                                MaterialPaintLayer &reader,
+                                                bool row_mode);
+
+/**
+ * The layers \a reader may read as a whole ("Row" source), in stack order: the layers built before
+ * the row its mask item hangs on that take part in the channel the reader reads. Empty for a
+ * reader whose kind takes no row (everything but a Normal to Mask mask item).
+ */
+void BKE_paint_layers_anchor_point_row_sources(const Material &ma,
+                                               const MaterialPaintLayer &reader,
+                                               blender::Vector<const MaterialPaintLayer *> &r_rows);
+
+/**
+ * Point \a reader at the whole result of \a source_row (the "Row" source of a Normal to Mask): the
+ * Anchor Point that ends the row's effects publishes it, so the one already there is reused and a
+ * "Row Result" point is added when the row ends with anything else. The mask and opacity of the
+ * row are not part of the result: a normal map is read before them.
+ *
+ * \return false when either row is not part of \a ma, \a source_row is no layer, or the reference
+ * is not valid for \a reader (a loop, or a row built after it); a point this call added is then
+ * removed again.
+ */
+bool BKE_paint_layers_anchor_point_source_set_row(Material &ma,
+                                                  MaterialPaintLayer *reader,
+                                                  MaterialPaintLayer *source_row);
 
 /* -------------------------------------------------------------------- */
 /** \name Anchor Point

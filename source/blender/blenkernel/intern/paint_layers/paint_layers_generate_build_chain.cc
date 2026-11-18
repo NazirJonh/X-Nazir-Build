@@ -736,9 +736,11 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
     }
     NodeOutput item_grey;
     NodeOutput item_alpha;
-    if (from_anchor) {
+    if (from_anchor && !paint_layer_mask_item_bakes_effect(item)) {
       /* The slice a mask item reads: a mask point gives its scalar, a content point the coverage of
-       * its slice. */
+       * its slice. A baked mask effect that also reads an Anchor Point (a Normal to Mask) does not
+       * come here: its grey is the bake's, which the map read below lays, and the anchor branch
+       * would lay the raw slice's coverage instead. */
       item_grey = this->anchor_point_mask_item_emit(group, item);
       if (item_grey.socket == nullptr) {
         continue;
@@ -3951,7 +3953,12 @@ RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer &laye
   }
   if (channel == first_channel) {
     for (const MaterialPaintLayer &item : layer.mask_stack) {
-      if (!paint_layer_kind_reads_anchor_point(item) || !paint_layer_mask_item_lays(ma_, item)) {
+      if (!paint_layer_kind_reads_anchor_point(item) || paint_layer_mask_item_bakes_effect(item) ||
+          !paint_layer_mask_item_lays(ma_, item))
+      {
+        /* A baked mask effect that reads an Anchor Point (a Normal to Mask) takes no tap input: its
+         * grey is the bake's, laid by a map read, and a link into it would find no socket and fail
+         * the kept-group rebuild. */
         continue;
       }
       const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma_, item);

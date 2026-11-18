@@ -102,14 +102,13 @@ void paint_stack_mask_brush_tool_activate(bContext &C)
 {
   /* A mask is added to be painted: the Projection Frame tool that a Projection Box placement left
    * in the hand cannot do that. Any other tool stays, the user picked it. */
-  if (!projection::ED_paint_projection_frame_tool_is_active(&C)) {
-    return;
-  }
   Paint *paint = BKE_paint_get_active_from_context(&C);
   Brush *mask_brush = (paint != nullptr) ? paint->brush : nullptr;
   /* The brush bindings alone would leave the toolbar on the frame tool, as that tool accepts any
    * brush type: the toolbar is switched explicitly. */
-  projection::ED_paint_projection_frame_tool_leave_for_brush(&C);
+  if (!projection::ED_paint_projection_frame_tool_leave_for_brush(&C)) {
+    return;
+  }
   if (mask_brush != nullptr) {
     /* Switching the tool may restore that tool's last brush, so the Mask brush is put back. */
     WM_toolsystem_activate_brush_and_tool(&C, paint, mask_brush);

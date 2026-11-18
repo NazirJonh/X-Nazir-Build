@@ -335,6 +335,13 @@ static const EnumPropertyItem rna_enum_material_paint_layer_anchor_point_target_
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* The two kinds of source a reader that can take a whole layer (a Normal to Mask) lists. */
+static const EnumPropertyItem rna_enum_material_paint_layer_anchor_point_source_mode_items[] = {
+    {0, "ANCHOR", 0, "Anchor Point", "Read the slice an Anchor Point publishes"},
+    {1, "ROW", 0, "Row Result", "Read the result of a whole layer"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /* The pattern a generator row lays, the #eMaterialPaintLayerGenerator codes. The Gradient keeps
  * its line and ramp in its payload; every other kind reads the parameters of its kind schema, so
  * the list is what the row's Generator picker offers and what a script switches a row with. Kept
@@ -419,6 +426,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_kind_param_type_item
 #  include "DNA_screen_types.h"
 #  include "DNA_space_types.h"
 
+#  include <cstdio>
 #  include <fmt/format.h>
 #  include <mutex>
 #  include <optional>
@@ -2716,6 +2724,9 @@ static void rna_MaterialPaintLayer_anchor_point_source_set(PointerRNA *ptr, cons
 struct RNAAnchorPointTargetEntry {
   bUUID marker;
   std::string label;
+  /** Set for a "Row" entry: the layer whose whole result is read, through the point that ends its
+   * effects (added when the pick is made). Null for an entry that names a point. */
+  const MaterialPaintLayer *source_row = nullptr;
 };
 
 /** The points this reader may read, in the order the stack lists them. */
@@ -2726,8 +2737,12 @@ static void rna_anchor_point_targets_get(const Material &ma,
   if (!BKE_paint_layers_reads_anchor_point(reader)) {
     return;
   }
+  const bool row_mode = BKE_paint_layers_anchor_point_row_mode_get(reader);
   BKE_paint_layers_foreach(
       ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+        if (row_mode) {
+          return true;
+        }
         const auto consider = [&](const MaterialPaintLayer &candidate,
                                   const PaintLayerAnchorPointTarget target) {
           if (!BKE_paint_layers_is_anchor_point(candidate) ||
@@ -2752,6 +2767,18 @@ static void rna_anchor_point_targets_get(const Material &ma,
         }
         return true;
       });
+  /* The Row mode lists layers taken whole, with no point of their own to name: one that already
+   * ends with a point is reused when it is picked. */
+  if (row_mode) {
+    Vector<const MaterialPaintLayer *> rows;
+    BKE_paint_layers_anchor_point_row_sources(ma, reader, rows);
+    for (const MaterialPaintLayer *row : rows) {
+      RNAAnchorPointTargetEntry entry;
+      entry.source_row = row;
+      entry.label = fmt::format("Row: {}", row->name[0] != '\0' ? row->name : "Layer");
+      r_entries.append(std::move(entry));
+    }
+  }
 }
 
 /**
@@ -2811,12 +2838,46 @@ static int rna_MaterialPaintLayer_anchor_point_target_get(PointerRNA *ptr)
   }
   Vector<RNAAnchorPointTargetEntry> entries;
   rna_anchor_point_targets_get(*ma, *reader, entries);
+  if (BKE_paint_layers_anchor_point_row_mode_get(*reader)) {
+    /* A Row entry has no point of its own: the one kept is the row it ends. */
+    const MaterialPaintLayer *point = BKE_paint_layers_find(*ma, source);
+    const MaterialPaintLayer *owner = (point != nullptr) ?
+                                          BKE_paint_layers_correction_owner(*ma, *point) :
+                                          nullptr;
+    for (const int i : entries.index_range()) {
+      if (owner != nullptr && entries[i].source_row == owner) {
+        return i + 1;
+      }
+    }
+    return 0;
+  }
   for (const int i : entries.index_range()) {
     if (BLI_uuid_equal(entries[i].marker, source)) {
       return i + 1;
     }
   }
   return 0;
+}
+
+static int rna_MaterialPaintLayer_anchor_point_source_mode_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *reader = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_anchor_point_row_mode_get(*reader) ? 1 : 0;
+}
+
+static void rna_MaterialPaintLayer_anchor_point_source_mode_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *reader = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, reader);
+  if (ma != nullptr) {
+    BKE_paint_layers_anchor_point_row_mode_set(*ma, *reader, value == 1);
+  }
+}
+
+static bool rna_MaterialPaintLayer_anchor_point_takes_row_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_anchor_point_takes_row(
+      *static_cast<const MaterialPaintLayer *>(ptr->data));
 }
 
 static void rna_MaterialPaintLayer_anchor_point_target_set(PointerRNA *ptr, int value)
@@ -2835,7 +2896,13 @@ static void rna_MaterialPaintLayer_anchor_point_target_set(PointerRNA *ptr, int 
   if (value > entries.size()) {
     return;
   }
-  BKE_paint_layers_anchor_point_source_set(*ma, reader, entries[value - 1].marker);
+  const RNAAnchorPointTargetEntry &entry = entries[value - 1];
+  if (entry.source_row != nullptr) {
+    BKE_paint_layers_anchor_point_source_set_row(
+        *ma, reader, const_cast<MaterialPaintLayer *>(entry.source_row));
+    return;
+  }
+  BKE_paint_layers_anchor_point_source_set(*ma, reader, entry.marker);
 }
 
 static int rna_MaterialPaintLayer_anchor_point_reader_count_get(PointerRNA *ptr)
@@ -6013,6 +6080,13 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      "Channel Split",
      "Extract one channel of the assigned image and lay it as a grey in the channels the effect "
      "works in, or as the coverage of the mask it is an item of"},
+    {MA_PAINT_LAYER_FILTER_NORMAL_TO_MASK,
+     "NORMAL_TO_MASK",
+     0,
+     "Normal to Mask",
+     "Turn the normal map of the referenced layer (an Anchor Point), or of the row's own Normal "
+     "content, into a black-and-white mask: the normal rebuilds into a Height, an Edges or a Slope "
+     "field the threshold cuts"},
     {MA_PAINT_LAYER_FILTER_SHARPEN,
      "SHARPEN",
      0,
@@ -6992,6 +7066,23 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_ENUM_NO_CONTEXT);
   RNA_def_property_ui_text(prop, "Anchor Point", "Anchor Point whose slice this reader lays");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "anchor_point_source_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_anchor_point_source_mode_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_anchor_point_source_mode_get",
+                              "rna_MaterialPaintLayer_anchor_point_source_mode_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop, "Source Type", "Whether the reader lists Anchor Points or whole layers as its source");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "anchor_point_takes_row", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_MaterialPaintLayer_anchor_point_takes_row_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Takes Row", "Whether this reader can take the result of a whole layer as its source");
 
   prop = RNA_def_property(srna, "anchor_point_reader_count", PROP_INT, PROP_NONE);
   RNA_def_property_int_funcs(

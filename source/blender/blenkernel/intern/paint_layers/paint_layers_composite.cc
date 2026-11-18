@@ -719,6 +719,31 @@ static bool composite_row_source_describe(const Material &ma,
         out.empty_base_size = slot_width;
         break;
       }
+      /* A kind that reads another channel of the row (a Normal to Mask) is sized by that input:
+       * the canvas is the Normal the row lays, as the Height is a Height To Normal's. */
+      if (paint_layer_effect_reads_channel(effect) >= 0 &&
+          paint_layer_effect_filters(ma, effect, channel))
+      {
+        PaintMaterialCompositeImageLayer input;
+        int input_width = 0;
+        int input_height = 0;
+        if (BKE_paint_layers_effect_input_describe(
+                ma,
+                layer,
+                effect,
+                channel,
+                /*dimensions_only=*/true,
+                /*describe_only=*/false,
+                input,
+                PaintLayerTileContext{.painted_object = painted_object,
+                                      .tile_number = tile_number}) &&
+            BKE_paint_material_composite_stack_dimensions(
+                Span<PaintMaterialCompositeImageLayer>(&input, 1), input_width, input_height))
+        {
+          out.empty_base_size = input_width;
+          break;
+        }
+      }
     }
     return true;
   }
@@ -1129,7 +1154,18 @@ static void composite_mask_items_describe(
     if (stop_before != nullptr && BLI_uuid_equal(mask.marker, *stop_before)) {
       break;
     }
-    if (paint_layer_kind_reads_anchor_point(mask)) {
+    if (paint_layer_mask_item_bakes_effect(mask) &&
+        (paint_layer_effect_is_filter(mask) || paint_layer_kind_transforms_input(mask)))
+    {
+      /* A CPU-computed effect as a mask item: the grey comes from the mask effect cache, whatever
+       * else the item reads. The branch stands ahead of the Anchor Point one, because a Normal to
+       * Mask is both a reader (its grey's input is the slice it references, which the cache's
+       * compute renders) and a baked effect: the anchor branch would lay the slice's coverage, a
+       * grey the kernel never made. A plain reader is neither a filter nor a transform and falls
+       * through to it as before. */
+      composite_mask_item_filter(context, mask, r_items);
+    }
+    else if (paint_layer_kind_reads_anchor_point(mask)) {
       composite_mask_item_anchor_point(context, mask, r_items);
     }
     else if (paint_layer_kind_is_map_coverage(mask)) {
@@ -2837,6 +2873,14 @@ uint64_t paint_layer_effect_hash(const MaterialPaintLayer &effect, const int cha
   };
   mix_u32(uint32_t(effect.kind_subtype));
   mix_u32(uint32_t(channel));
+  /* A kind that reads an Anchor Point's input is the slice the element references (as a mask
+   * item) or the channel the row lays (as a correction, its reference unset): the reference
+   * belongs in the key, so a retarget cannot keep the grey the old target made. */
+  if (paint_layer_kind_reads_anchor_point(effect)) {
+    const uint64_t source_hash = UUID(effect.anchor_point_source).hash();
+    mix_u32(uint32_t(source_hash));
+    mix_u32(uint32_t(source_hash >> 32));
+  }
   float params[PAINT_MATERIAL_COMPOSITE_FILTER_PARAMS_NUM] = {};
   composite_filter_params(effect, params);
   for (const float param : params) {
@@ -3309,6 +3353,23 @@ uint64_t paint_layer_mask_prefix_projection_hash(const Material &ma,
     }
   }
   return hash;
+}
+
+uint64_t paint_layer_row_projection_hash(const Material &ma,
+                                         const MaterialPaintLayer &row,
+                                         const int channel,
+                                         const int tile_number,
+                                         PaintLayerSurfaceRef painted_object)
+{
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(row, channel);
+  PaintMaterialCompositeProjection projection;
+  composite_projection_describe(ma,
+                                row,
+                                tile_number,
+                                record != nullptr ? record->image : nullptr,
+                                painted_object,
+                                projection);
+  return projection.present ? composite_projection_hash(1, projection) : 0;
 }
 
 /** \} */

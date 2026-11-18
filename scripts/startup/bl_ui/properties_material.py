@@ -1953,7 +1953,12 @@ class LAYER_MATERIAL_PT_anchor_point(LayerMaterialButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         row = cls._shown_row(context)
-        return row is not None and row.source == 'ANCHOR_POINT'
+        if row is None:
+            return False
+        # A mask item of a kind that reads a slice (a Normal to Mask) picks its source here too,
+        # though it is a filter and not an Anchor Point element. As a correction it reads the row
+        # it hangs on, so it has nothing to pick.
+        return row.source == 'ANCHOR_POINT' or (row.is_anchor_point_reader and not row.is_correction)
 
     def draw(self, context):
         layout = self.layout
@@ -1963,7 +1968,11 @@ class LAYER_MATERIAL_PT_anchor_point(LayerMaterialButtonsPanel, Panel):
         if row is None:
             return
         if row.is_anchor_point_reader:
-            layout.prop(row, "anchor_point_target", text="Reads")
+            if row.anchor_point_takes_row:
+                # Each mode lists only its own sources: the points of the stack, or the layers
+                # taken whole.
+                layout.row().prop(row, "anchor_point_source_mode", expand=True)
+            layout.prop(row, "anchor_point_target", text="Source" if row.source != 'ANCHOR_POINT' else "Reads")
         else:
             layout.label(text="Read by: {:d}".format(row.anchor_point_reader_count), icon='LINKED')
 
